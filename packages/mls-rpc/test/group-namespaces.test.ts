@@ -3,6 +3,8 @@ import { describe, expect, test, vi } from 'vitest'
 
 import { memoryFaults } from '../src/memory-faults.js'
 import { createMemoryGroupPersistence } from '../src/memory-group-persistence.js'
+import { createGroupStateStores } from '../src/memory-group-state.js'
+import { createIncarnationStores } from '../src/memory-incarnation-stores.js'
 import { createMemoryTransaction } from '../src/memory-transaction.js'
 import { physicalRecordKey, sealRecord } from '../src/persistence-codec.js'
 import type {
@@ -69,6 +71,298 @@ for (const mode of ['real-mls', 'double'] as const) {
       await installSeed(groups, seed, 'seed')
       return { db, groups, seed }
     }
+
+    test('rejects overlapping state saves after one version advance', async () => {
+      const { groups, seed } = await setup()
+      await groups.transition(
+        await nextChange(groups, groupID, 'overlapping-state'),
+        async (stores) => {
+          const [, second] = await Promise.all([
+            stores.incarnation(1).state.save({ ...seed.state, version: 2 }),
+            stores
+              .incarnation(1)
+              .state.save({ ...seed.state, version: 3 })
+              .catch((error: unknown) => error),
+          ])
+          expect(second).toMatchObject({ name: 'GroupStateConflictError' })
+          expect(await stores.incarnation(1).state.load()).toEqual({ ...seed.state, version: 2 })
+        },
+      )
+      expect((await groups.loadState(key))?.version).toBe(2)
+      expect((await groups.load(groupID))?.revision).toBe(2)
+    })
+
+    test('rejects overlapping trust saves that discard a staged spent authenticator', async () => {
+      const { groups, seed } = await setup()
+      const firstTrust = {
+        ...seed.trust,
+        spentEpochAuthenticators: [
+          ...seed.trust.spentEpochAuthenticators,
+          new Uint8Array(32).fill(1),
+        ],
+      }
+      await groups.transition(
+        await nextChange(groups, groupID, 'overlapping-trust'),
+        async (stores) => {
+          const [, second] = await Promise.all([
+            stores.trust.save(firstTrust),
+            stores.trust
+              .save({
+                ...seed.trust,
+                spentEpochAuthenticators: [
+                  ...seed.trust.spentEpochAuthenticators,
+                  new Uint8Array(32).fill(2),
+                ],
+              })
+              .catch((error: unknown) => error),
+          ])
+          expect(second).toMatchObject({ name: 'GroupStateConflictError' })
+          expect(await stores.trust.load()).toEqual(firstTrust)
+        },
+      )
+      expect((await groups.loadTrust(groupID))?.spentEpochAuthenticators).toEqual(
+        expect.arrayContaining(firstTrust.spentEpochAuthenticators),
+      )
+    })
+
+    test.each([
+      { protocol: 'other-protocol' },
+      { prc: 'other-procedure' },
+      { data: new Uint8Array([9]) },
+    ])('rejects overlapping immutable outbox replacement %j', async (replacement) => {
+      const { groups } = await setup()
+      await groups.transition(
+        await nextChange(groups, groupID, 'overlapping-outbox'),
+        async (stores) => {
+          const [, second] = await Promise.all([
+            stores.incarnation(1).outbox.put([entry]),
+            stores
+              .incarnation(1)
+              .outbox.put([{ ...entry, ...replacement }])
+              .catch((error: unknown) => error),
+          ])
+          expect(second).toMatchObject({ name: 'OutboxReplacementError' })
+          expect(await stores.incarnation(1).outbox.list()).toEqual([entry])
+        },
+      )
+      expect(await groups.ports(key).outbox.list()).toEqual([entry])
+    })
+
+    test('rejects overlapping conflicting settlement puts and retains the first value', async () => {
+      const { groups } = await setup()
+      await groups.transition(
+        await nextChange(groups, groupID, 'overlapping-settlement'),
+        async (stores) => {
+          const [, second] = await Promise.all([
+            stores.incarnation(1).meta.putSettlement(7, obligation),
+            stores
+              .incarnation(1)
+              .meta.putSettlement(7, { ...obligation, attemptID: 'other-attempt' })
+              .catch((error: unknown) => error),
+          ])
+          expect(second).toMatchObject({ name: 'GroupStateConflictError' })
+          expect(await stores.incarnation(1).meta.loadSettlement(7)).toEqual(obligation)
+        },
+      )
+      expect(await groups.ports(key).outbox.loadSettlement(7)).toEqual(obligation)
+    })
+
+    test('rejects overlapping conflicting event puts and retains the first value', async () => {
+      const { groups } = await setup()
+      await groups.transition(
+        await nextChange(groups, groupID, 'overlapping-event'),
+        async (stores) => {
+          const [, second] = await Promise.all([
+            stores.incarnation(1).meta.putEvents([event]),
+            stores
+              .incarnation(1)
+              .meta.putEvents([{ ...event, entry: { ...entry, status: 'failed' } }])
+              .catch((error: unknown) => error),
+          ])
+          expect(second).toMatchObject({ name: 'GroupStateConflictError' })
+          expect(await stores.incarnation(1).meta.events()).toEqual([event])
+        },
+      )
+      expect(await groups.ports(key).outbox.events()).toEqual([event])
+    })
+
+    test('keeps overlapping identical puts idempotent across store instances', async () => {
+      const { groups } = await setup()
+      await groups.transition(
+        await nextChange(groups, groupID, 'overlapping-identical'),
+        async (stores) => {
+          await Promise.all([
+            stores.incarnation(1).outbox.put([entry]),
+            stores.incarnation(1).outbox.put([structuredClone(entry)]),
+            stores.incarnation(1).meta.putSettlement(7, obligation),
+            stores.incarnation(1).meta.putSettlement(7, { ...obligation }),
+            stores.incarnation(1).meta.putEvents([event]),
+            stores.incarnation(1).meta.putEvents([structuredClone(event)]),
+          ])
+          expect(await stores.incarnation(1).outbox.list()).toEqual([entry])
+          expect(await stores.incarnation(1).meta.loadSettlement(7)).toEqual(obligation)
+          expect(await stores.incarnation(1).meta.events()).toEqual([event])
+        },
+      )
+      expect((await groups.loadState(key))?.version).toBe(2)
+      expect((await groups.load(groupID))?.revision).toBe(2)
+    })
+
+    test('reads an anchor after its overlapping save across store instances', async () => {
+      const { groups } = await setup()
+      await groups.transition(
+        await nextChange(groups, groupID, 'overlapping-read'),
+        async (stores) => {
+          const [, loaded] = await Promise.all([
+            stores.incarnation(1).anchor.save(anchor),
+            stores.incarnation(1).anchor.load(),
+          ])
+          expect(loaded).toEqual(anchor)
+        },
+      )
+    })
+
+    test('retains both overlapping control updates across store instances', async () => {
+      const { groups } = await setup()
+      await groups.transition(
+        await nextChange(groups, groupID, 'overlapping-control'),
+        async (stores) => {
+          await Promise.all([
+            stores.incarnation(1).control.apply({ putOutcomes: [outcome] }, 'overlapping-control'),
+            stores.incarnation(1).control.apply({ putApplied: [applied] }, 'overlapping-control'),
+          ])
+          const snapshot = await stores.incarnation(1).control.load()
+          expect(snapshot.outcomes).toEqual([outcome])
+          expect(snapshot.applied).toEqual([applied])
+        },
+      )
+    })
+
+    test('fences an overlapping anchor write behind lifetime retirement', async () => {
+      const { groups } = await setup()
+      await groups.transition(
+        await nextChange(groups, groupID, 'overlapping-retirement'),
+        async (stores) => {
+          const life = await stores.lifetime.load()
+          if (life === null) throw new Error('Missing lifetime')
+          const [, second] = await Promise.all([
+            stores.lifetime.save({
+              ...life,
+              activeIncarnation: null,
+              revision: 2,
+              mutationID: 'overlapping-retirement',
+            }),
+            stores
+              .incarnation(1)
+              .anchor.save(anchor)
+              .catch((error: unknown) => error),
+          ])
+          expect(second).toMatchObject({ name: 'DisplacedGroupHandleError' })
+          expect(await stores.incarnation(1).anchor.load()).toBeNull()
+        },
+      )
+      expect((await groups.load(groupID))?.activeIncarnation).toBeNull()
+    })
+
+    test('serialises every store operation behind an unrelated namespace seal', async () => {
+      const { db, groups, seed } = await setup()
+      const entered = Promise.withResolvers<void>()
+      const released = Promise.withResolvers<void>()
+      let pause = true
+      const paused = createMemoryGroupPersistence({
+        db,
+        providerID: 'memory',
+        atRest: {
+          ...atRest,
+          async seal(bytes, aad) {
+            if (pause && new TextDecoder().decode(aad).includes('"anchor"')) {
+              pause = false
+              entered.resolve()
+              await released.promise
+            }
+            return await atRest.seal(bytes, aad)
+          },
+        },
+      })
+      await paused.transition(
+        await nextChange(groups, groupID, 'all-overlapping'),
+        async (stores) => {
+          const rows = stores.incarnation(1)
+          const first = rows.anchor.save(anchor)
+          await entered.promise
+          const alias = { ...stores.tx }
+          const other = createIncarnationStores({ tx: alias, key, atRest })
+          const states = createGroupStateStores({ tx: alias, groupID, atRest })
+          const completed: Array<number> = []
+          const queued = Promise.all(
+            [
+              stores.lifetime.load(),
+              stores.lifetime.save({
+                ...seed.lifetime,
+                revision: 2,
+                mutationID: 'all-overlapping',
+              }),
+              stores.trust.load(),
+              stores.trust.save(seed.trust),
+              rows.state.load(),
+              rows.state.save({ ...seed.state, version: 2 }),
+              rows.control.load(),
+              rows.control.apply({ putOutcomes: [outcome] }, 'all-overlapping'),
+              rows.anchor.load(),
+              rows.anchor.save(null),
+              rows.pending.list(),
+              rows.pending.put([pending]),
+              rows.pending.poison([
+                { frame: pending.frame, reason: 'decode-failed', keyConsumed: false },
+              ]),
+              rows.pending.listPoison(),
+              rows.pending.complete([pending.frame.id]),
+              rows.cursor.load(topicID),
+              rows.cursor.save(topicID, '10'),
+              rows.outbox.list(),
+              rows.outbox.put([entry]),
+              rows.outbox.remove([7]),
+              rows.outbox.clear(),
+              rows.meta.loadSettlement(7),
+              rows.meta.putSettlement(7, obligation),
+              rows.meta.putSettlement(7, null),
+              rows.meta.events(),
+              rows.meta.putEvents([event]),
+              rows.meta.ackEvent(event.id),
+              rows.clearTransport(),
+              other.anchor.load(),
+              states.lifetime.load(),
+              states.trust.load(),
+              states.state(1).load(),
+            ].map(async (operation, index) => {
+              const value = await operation
+              completed.push(index)
+              return value
+            }),
+          )
+          try {
+            await new Promise<void>((resolve) => setImmediate(resolve))
+            expect(completed).toEqual([])
+          } finally {
+            released.resolve()
+          }
+          const [, results] = await Promise.all([first, queued])
+          expect(completed).toEqual(Array.from({ length: 32 }, (_, index) => index))
+          expect(results[8]).toEqual(anchor)
+          expect(results[13]).toEqual([
+            { frame: pending.frame, reason: 'decode-failed', keyConsumed: false },
+          ])
+          expect(results[28]).toBeNull()
+          expect(await rows.pending.list()).toEqual([])
+          expect(await rows.pending.listPoison()).toEqual([])
+          expect(await rows.cursor.load(topicID)).toBeNull()
+          expect(await rows.outbox.list()).toEqual([])
+          expect((await rows.control.load()).outcomes).toEqual([outcome])
+        },
+      )
+      expect((await groups.loadState(key))?.version).toBe(2)
+      expect((await groups.load(groupID))?.revision).toBe(2)
+    })
 
     test('commits or rolls back every namespace and side effect together', async () => {
       const { db, groups } = await setup()

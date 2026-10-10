@@ -1,6 +1,6 @@
 import { applyChanges, type ControlSnapshot } from '@kumiai/rpc'
 
-import { createGroupStateStores } from './memory-group-state.js'
+import { createUnlockedGroupStateStores, lockMemoryOperation } from './memory-group-state.js'
 import {
   decodeStoredValue,
   encodeStoredValue,
@@ -171,14 +171,15 @@ function laneOrder(
   )
 }
 
-export function createIncarnationStores(params: {
+// Only callers already holding the transaction lock use these helpers.
+export function createUnlockedIncarnationStores(params: {
   tx: MemoryTransaction
   key: GroupKey
   atRest: AtRestCodec
 }): IncarnationStores {
   const { tx, atRest } = params
   const key = { ...params.key }
-  const stateStores = createGroupStateStores({ tx, groupID: key.groupID, atRest })
+  const stateStores = createUnlockedGroupStateStores({ tx, groupID: key.groupID, atRest })
   const table = <TValue>(namespace: string) =>
     memoryRecordTable<TValue>({ tx, key, namespace, atRest })
   const control = table<ControlRecord>('control')
@@ -409,5 +410,51 @@ export function createIncarnationStores(params: {
           },
         })
     },
+  }
+}
+
+export function createIncarnationStores(
+  params: Parameters<typeof createUnlockedIncarnationStores>[0],
+): IncarnationStores {
+  const stores = createUnlockedIncarnationStores(params)
+  const { tx } = params
+  return {
+    state: {
+      load: lockMemoryOperation(tx, stores.state.load),
+      save: lockMemoryOperation(tx, stores.state.save),
+    },
+    control: {
+      load: lockMemoryOperation(tx, stores.control.load),
+      apply: lockMemoryOperation(tx, stores.control.apply),
+    },
+    anchor: {
+      load: lockMemoryOperation(tx, stores.anchor.load),
+      save: lockMemoryOperation(tx, stores.anchor.save),
+    },
+    pending: {
+      list: lockMemoryOperation(tx, stores.pending.list),
+      put: lockMemoryOperation(tx, stores.pending.put),
+      poison: lockMemoryOperation(tx, stores.pending.poison),
+      listPoison: lockMemoryOperation(tx, stores.pending.listPoison),
+      complete: lockMemoryOperation(tx, stores.pending.complete),
+    },
+    cursor: {
+      load: lockMemoryOperation(tx, stores.cursor.load),
+      save: lockMemoryOperation(tx, stores.cursor.save),
+    },
+    outbox: {
+      list: lockMemoryOperation(tx, stores.outbox.list),
+      put: lockMemoryOperation(tx, stores.outbox.put),
+      remove: lockMemoryOperation(tx, stores.outbox.remove),
+      clear: lockMemoryOperation(tx, stores.outbox.clear),
+    },
+    meta: {
+      loadSettlement: lockMemoryOperation(tx, stores.meta.loadSettlement),
+      putSettlement: lockMemoryOperation(tx, stores.meta.putSettlement),
+      events: lockMemoryOperation(tx, stores.meta.events),
+      putEvents: lockMemoryOperation(tx, stores.meta.putEvents),
+      ackEvent: lockMemoryOperation(tx, stores.meta.ackEvent),
+    },
+    clearTransport: lockMemoryOperation(tx, stores.clearTransport),
   }
 }

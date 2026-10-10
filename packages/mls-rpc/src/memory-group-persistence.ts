@@ -3,11 +3,17 @@ import {
   createMemoryGroupPorts,
   UnchangedGroupResult,
 } from './memory-group-ports.js'
-import { createGroupStateStores } from './memory-group-state.js'
+import {
+  createGroupStateStores,
+  createUnlockedGroupStateStores,
+  lockMemoryOperation,
+  withMemoryTransactionLock,
+} from './memory-group-state.js'
 import {
   type ControlRecord,
   copyStoredValue,
   createIncarnationStores,
+  createUnlockedIncarnationStores,
   type GroupOwnerMarker,
   groupOwnerKey,
   memoryRecordTable,
@@ -185,8 +191,8 @@ export function createMemoryGroupPersistence(params: {
         scope(request.groupID),
         async (baseTx) => {
           const tx = boundTx(baseTx)
-          const raw = createGroupStateStores({ tx, groupID: request.groupID, atRest })
-          const previous = await raw.lifetime.load()
+          const raw = createUnlockedGroupStateStores({ tx, groupID: request.groupID, atRest })
+          const previous = await withMemoryTransactionLock(tx, raw.lifetime.load)
           const marker = owner(tx, request.groupID)
           let change: GroupTransition
           if ('key' in request) {
@@ -238,7 +244,7 @@ export function createMemoryGroupPersistence(params: {
             if (previousTrust === undefined) previousTrust = await raw.trust.load()
             return previousTrust
           }
-          const stores: GroupStores<MemoryTransaction> = {
+          const unlockedStores: GroupStores<MemoryTransaction> = {
             tx,
             lifetime: {
               load: () => raw.lifetime.load(),
@@ -294,7 +300,7 @@ export function createMemoryGroupPersistence(params: {
               async save(value) {
                 tx.rows.trust
                 const owned = copyStoredValue(value)
-                assertTrustTransition(await retainedTrust(), owned)
+                assertTrustTransition(proposedTrust ?? (await retainedTrust()), owned)
                 proposedTrust = owned
               },
             },
@@ -304,216 +310,238 @@ export function createMemoryGroupPersistence(params: {
                 key: { groupID: change.groupID, incarnation },
                 atRest,
               })
+              const state: ReturnType<typeof raw.state> = {
+                load: rows.state.load,
+                async save(value) {
+                  const owned = copyStoredValue(value)
+                  if (
+                    owned.groupID !== change.groupID ||
+                    owned.incarnation !== incarnation ||
+                    savedStates.has(incarnation)
+                  )
+                    throw new GroupStateConflictError('State identity or version conflict')
+                  const life = proposedLifetime ?? previous
+                  if (
+                    life?.activeIncarnation !== incarnation &&
+                    !(
+                      owned.deleted &&
+                      previous?.activeIncarnation === incarnation &&
+                      life?.activeIncarnation !== incarnation
+                    )
+                  )
+                    throw new DisplacedGroupHandleError('Inactive state writer')
+                  await retainedTrust()
+                  await raw.state(incarnation).save(owned)
+                  savedStates.set(incarnation, owned)
+                },
+              }
               return {
                 ...rows,
                 state: {
-                  load: rows.state.load,
-                  async save(value) {
-                    const owned = copyStoredValue(value)
-                    if (
-                      owned.groupID !== change.groupID ||
-                      owned.incarnation !== incarnation ||
-                      savedStates.has(incarnation)
-                    )
-                      throw new GroupStateConflictError('State identity or version conflict')
-                    const life = proposedLifetime ?? previous
-                    if (
-                      life?.activeIncarnation !== incarnation &&
-                      !(
-                        owned.deleted &&
-                        previous?.activeIncarnation === incarnation &&
-                        life?.activeIncarnation !== incarnation
-                      )
-                    )
-                      throw new DisplacedGroupHandleError('Inactive state writer')
-                    await retainedTrust()
-                    await rows.state.save(owned)
-                    savedStates.set(incarnation, owned)
-                  },
+                  load: state.load,
+                  save: lockMemoryOperation(tx, state.save),
                 },
               }
             },
           }
+          const stores: GroupStores<MemoryTransaction> = {
+            ...unlockedStores,
+            lifetime: {
+              load: lockMemoryOperation(tx, unlockedStores.lifetime.load),
+              save: lockMemoryOperation(tx, unlockedStores.lifetime.save),
+            },
+            trust: {
+              load: lockMemoryOperation(tx, unlockedStores.trust.load),
+              save: lockMemoryOperation(tx, unlockedStores.trust.save),
+            },
+          }
           result = await work(stores, change.mutationID)
-          const life =
-            proposedLifetime ??
-            (previous === null
-              ? undefined
-              : { ...previous, revision, mutationID: change.mutationID })
-          if (life === undefined)
-            throw new GroupStateConflictError('Initial transition requires a lifetime')
-          const installing =
-            previous === null ||
-            (life.activeIncarnation !== null &&
-              life.activeIncarnation !== previous.activeIncarnation)
-          if (installing) {
-            const candidate = savedStates.get(life.activeIncarnation as number)
-            const trust = proposedTrust
-            if (
-              candidate === undefined ||
-              candidate.deleted ||
-              trust === undefined ||
-              trust.installed.incarnation !== candidate.incarnation ||
-              trust.installed.epoch !== candidate.epoch ||
-              !sameStoredValue(trust.installed.authenticator, candidate.epochAuthenticator)
-            )
-              throw new GroupStateConflictError(
-                'Installation requires matching co-written state and trust',
-              )
-            if (previous !== null && (await retainedTrust()) === null)
-              throw new GroupStateConflictError('Existing lifetime requires retained trust')
-          }
-          for (const [incarnation, next] of savedStates) {
-            const oldBytes = before.state?.get(
-              physicalRecordKey({
-                groupID: change.groupID,
-                incarnation,
-                namespace: 'state',
-                recordID: 'current',
-              }),
-            )
-            const original =
-              oldBytes === undefined
-                ? null
-                : await memoryRecordTable<GroupStateRecord>({
-                    tx: { ...tx, rows: before },
-                    key: { groupID: change.groupID, incarnation },
-                    namespace: 'state',
-                    atRest,
-                  }).load('current')
-            if (
-              !next.deleted &&
-              (original === null || original.deleted || original.epoch !== next.epoch)
-            ) {
+          return await withMemoryTransactionLock(tx, async () => {
+            const life =
+              proposedLifetime ??
+              (previous === null
+                ? undefined
+                : { ...previous, revision, mutationID: change.mutationID })
+            if (life === undefined)
+              throw new GroupStateConflictError('Initial transition requires a lifetime')
+            const installing =
+              previous === null ||
+              (life.activeIncarnation !== null &&
+                life.activeIncarnation !== previous.activeIncarnation)
+            if (installing) {
+              const candidate = savedStates.get(life.activeIncarnation as number)
               const trust = proposedTrust
-              if (
-                trust === undefined ||
-                trust.installed.incarnation !== incarnation ||
-                trust.installed.epoch !== next.epoch ||
-                !sameStoredValue(trust.installed.authenticator, next.epochAuthenticator)
-              )
-                throw new GroupStateConflictError('Identity change requires matching trust')
-              assertStateTransition(original, next, await retainedTrust())
-              if (
-                !trust.spentEpochAuthenticators.some((value) =>
-                  sameStoredValue(value, next.epochAuthenticator),
-                )
-              )
-                trust.spentEpochAuthenticators.push(Uint8Array.from(next.epochAuthenticator))
-            }
-          }
-          if (
-            previous?.activeIncarnation !== null &&
-            previous?.activeIncarnation !== undefined &&
-            life.activeIncarnation !== previous.activeIncarnation
-          ) {
-            const source = await raw.state(previous.activeIncarnation).load()
-            if (source === null || !source.deleted) {
-              const tombstone: GroupStateRecord = {
-                groupID: change.groupID,
-                incarnation: previous.activeIncarnation,
-                version: (source?.version ?? 0) + 1,
-                deleted: true,
-              }
-              await raw.state(previous.activeIncarnation).save(tombstone)
-              savedStates.set(previous.activeIncarnation, tombstone)
-            }
-          }
-          if (life.activeIncarnation !== null && savedStates.get(life.activeIncarnation)?.deleted)
-            throw new GroupStateConflictError('Active incarnation cannot be deleted')
-          if (proposedTrust !== undefined) {
-            const retained = await retainedTrust()
-            if (
-              retained === null ||
-              !sameStoredValue(retained.installed, proposedTrust.installed)
-            ) {
-              const candidate = savedStates.get(proposedTrust.installed.incarnation)
               if (
                 candidate === undefined ||
                 candidate.deleted ||
-                candidate.epoch !== proposedTrust.installed.epoch ||
-                !sameStoredValue(
-                  candidate.epochAuthenticator,
-                  proposedTrust.installed.authenticator,
-                )
+                trust === undefined ||
+                trust.installed.incarnation !== candidate.incarnation ||
+                trust.installed.epoch !== candidate.epoch ||
+                !sameStoredValue(trust.installed.authenticator, candidate.epochAuthenticator)
               )
                 throw new GroupStateConflictError(
-                  'Installed trust requires matching co-written state',
+                  'Installation requires matching co-written state and trust',
                 )
+              if (previous !== null && (await retainedTrust()) === null)
+                throw new GroupStateConflictError('Existing lifetime requires retained trust')
             }
-            await raw.trust.save(proposedTrust)
-          }
-          const after = snapshot(tx)
-          const affected = changedIncarnations(before, after, change.groupID)
-          if (
-            life.activeIncarnation !== null &&
-            (!sameStoredValue(before.trust, after.trust) ||
-              (previous !== null && previous.restorePending !== life.restorePending))
-          ) {
-            const namespaces = affected.get(life.activeIncarnation) ?? new Set<string>()
-            namespaces.add('trust')
-            affected.set(life.activeIncarnation, namespaces)
-          }
-          for (const [incarnation, namespaces] of affected) {
-            if (savedStates.has(incarnation)) continue
-            let state: GroupStateRecord | null
-            try {
-              state = await raw.state(incarnation).load()
-            } catch (error) {
+            for (const [incarnation, next] of savedStates) {
+              const oldBytes = before.state?.get(
+                physicalRecordKey({
+                  groupID: change.groupID,
+                  incarnation,
+                  namespace: 'state',
+                  recordID: 'current',
+                }),
+              )
+              const original =
+                oldBytes === undefined
+                  ? null
+                  : await memoryRecordTable<GroupStateRecord>({
+                      tx: { ...tx, rows: before },
+                      key: { groupID: change.groupID, incarnation },
+                      namespace: 'state',
+                      atRest,
+                    }).load('current')
               if (
-                [...namespaces].every(
-                  (namespace) => namespace === 'control' || namespace === 'meta',
-                )
-              )
-                continue
-              throw error
-            }
-            if (state !== null && !state.deleted) {
-              const address = {
-                groupID: change.groupID,
-                incarnation,
-                namespace: 'state',
-                recordID: 'current',
-              }
-              // Metadata versioning does not reopen recovery trust or run candidate admission.
-              tx.rows.state?.set(
-                physicalRecordKey(address),
-                await sealRecord(atRest, address, { ...state, version: state.version + 1 }),
-              )
-            }
-          }
-          if (proposedLifetime === undefined) await raw.lifetime.save(life)
-          if (effects?.outbox !== undefined) {
-            for (const [incarnation, namespaces] of changedIncarnations(
-              before,
-              snapshot(tx),
-              change.groupID,
-            )) {
-              if (!namespaces.has('meta')) continue
-              const oldEvents = new Set(
-                (
-                  await createIncarnationStores({
-                    tx: { ...tx, rows: before },
-                    key: { groupID: change.groupID, incarnation },
-                    atRest,
-                  }).meta.events()
-                ).map((event) => event.id),
-              )
-              for (const event of await stores.incarnation(incarnation).meta.events()) {
+                !next.deleted &&
+                (original === null || original.deleted || original.epoch !== next.epoch)
+              ) {
+                const trust = proposedTrust
                 if (
-                  !oldEvents.has(event.id) &&
-                  (event.kind === 'accepted' ||
-                    event.kind === 'published' ||
-                    event.kind === 'failed')
+                  trust === undefined ||
+                  trust.installed.incarnation !== incarnation ||
+                  trust.installed.epoch !== next.epoch ||
+                  !sameStoredValue(trust.installed.authenticator, next.epochAuthenticator)
                 )
-                  await effects.outbox(tx, event)
+                  throw new GroupStateConflictError('Identity change requires matching trust')
+                assertStateTransition(original, next, await retainedTrust())
+                if (
+                  !trust.spentEpochAuthenticators.some((value) =>
+                    sameStoredValue(value, next.epochAuthenticator),
+                  )
+                )
+                  trust.spentEpochAuthenticators.push(Uint8Array.from(next.epochAuthenticator))
               }
             }
-          }
-          if (effects?.delete !== undefined)
-            for (const [incarnation, state] of savedStates)
-              if (state.deleted) await effects.delete(tx, { groupID: change.groupID, incarnation })
-          return result
+            if (
+              previous?.activeIncarnation !== null &&
+              previous?.activeIncarnation !== undefined &&
+              life.activeIncarnation !== previous.activeIncarnation
+            ) {
+              const source = await raw.state(previous.activeIncarnation).load()
+              if (source === null || !source.deleted) {
+                const tombstone: GroupStateRecord = {
+                  groupID: change.groupID,
+                  incarnation: previous.activeIncarnation,
+                  version: (source?.version ?? 0) + 1,
+                  deleted: true,
+                }
+                await raw.state(previous.activeIncarnation).save(tombstone)
+                savedStates.set(previous.activeIncarnation, tombstone)
+              }
+            }
+            if (life.activeIncarnation !== null && savedStates.get(life.activeIncarnation)?.deleted)
+              throw new GroupStateConflictError('Active incarnation cannot be deleted')
+            if (proposedTrust !== undefined) {
+              const retained = await retainedTrust()
+              if (
+                retained === null ||
+                !sameStoredValue(retained.installed, proposedTrust.installed)
+              ) {
+                const candidate = savedStates.get(proposedTrust.installed.incarnation)
+                if (
+                  candidate === undefined ||
+                  candidate.deleted ||
+                  candidate.epoch !== proposedTrust.installed.epoch ||
+                  !sameStoredValue(
+                    candidate.epochAuthenticator,
+                    proposedTrust.installed.authenticator,
+                  )
+                )
+                  throw new GroupStateConflictError(
+                    'Installed trust requires matching co-written state',
+                  )
+              }
+              await raw.trust.save(proposedTrust)
+            }
+            const after = snapshot(tx)
+            const affected = changedIncarnations(before, after, change.groupID)
+            if (
+              life.activeIncarnation !== null &&
+              (!sameStoredValue(before.trust, after.trust) ||
+                (previous !== null && previous.restorePending !== life.restorePending))
+            ) {
+              const namespaces = affected.get(life.activeIncarnation) ?? new Set<string>()
+              namespaces.add('trust')
+              affected.set(life.activeIncarnation, namespaces)
+            }
+            for (const [incarnation, namespaces] of affected) {
+              if (savedStates.has(incarnation)) continue
+              let state: GroupStateRecord | null
+              try {
+                state = await raw.state(incarnation).load()
+              } catch (error) {
+                if (
+                  [...namespaces].every(
+                    (namespace) => namespace === 'control' || namespace === 'meta',
+                  )
+                )
+                  continue
+                throw error
+              }
+              if (state !== null && !state.deleted) {
+                const address = {
+                  groupID: change.groupID,
+                  incarnation,
+                  namespace: 'state',
+                  recordID: 'current',
+                }
+                // Metadata versioning does not reopen recovery trust or run candidate admission.
+                tx.rows.state?.set(
+                  physicalRecordKey(address),
+                  await sealRecord(atRest, address, { ...state, version: state.version + 1 }),
+                )
+              }
+            }
+            if (proposedLifetime === undefined) await raw.lifetime.save(life)
+            if (effects?.outbox !== undefined) {
+              for (const [incarnation, namespaces] of changedIncarnations(
+                before,
+                snapshot(tx),
+                change.groupID,
+              )) {
+                if (!namespaces.has('meta')) continue
+                const oldEvents = new Set(
+                  (
+                    await createUnlockedIncarnationStores({
+                      tx: { ...tx, rows: before },
+                      key: { groupID: change.groupID, incarnation },
+                      atRest,
+                    }).meta.events()
+                  ).map((event) => event.id),
+                )
+                for (const event of await createUnlockedIncarnationStores({
+                  tx,
+                  key: { groupID: change.groupID, incarnation },
+                  atRest,
+                }).meta.events()) {
+                  if (
+                    !oldEvents.has(event.id) &&
+                    (event.kind === 'accepted' ||
+                      event.kind === 'published' ||
+                      event.kind === 'failed')
+                  )
+                    await effects.outbox(tx, event)
+                }
+              }
+            }
+            if (effects?.delete !== undefined)
+              for (const [incarnation, state] of savedStates)
+                if (state.deleted)
+                  await effects.delete(tx, { groupID: change.groupID, incarnation })
+            return result
+          })
         },
         {
           onUnknown(settlement) {
@@ -581,14 +609,18 @@ export function createMemoryGroupPersistence(params: {
       read(
         key.groupID,
         async (stores) =>
-          (
-            await memoryRecordTable<ControlRecord>({
-              tx: stores.tx,
-              key,
-              namespace: 'control',
-              atRest,
-            }).load('current')
-          )?.mutationID ?? null,
+          await withMemoryTransactionLock(
+            stores.tx,
+            async () =>
+              (
+                await memoryRecordTable<ControlRecord>({
+                  tx: stores.tx,
+                  key,
+                  namespace: 'control',
+                  atRest,
+                }).load('current')
+              )?.mutationID ?? null,
+          ),
       ),
   })
   return groups

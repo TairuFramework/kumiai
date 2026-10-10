@@ -1,4 +1,6 @@
 import {
+  decodeStoredValue,
+  encodeStoredValue,
   openRecord,
   physicalRecordKey,
   type StoredAddress,
@@ -19,27 +21,36 @@ export type GroupStateStores = Pick<GroupStores<MemoryTransaction>, 'tx' | 'life
   state(incarnation: number): IncarnationStores['state']
 }
 
-const rowLocks = new WeakMap<MemoryTransaction, Map<string, Promise<void>>>()
+// Provider-bound transaction copies share the same rows view.
+const transactionLocks = new WeakMap<MemoryTransaction['rows'], Promise<void>>()
 
-async function withRowLock<TValue>(
+export async function withMemoryTransactionLock<TValue>(
   tx: MemoryTransaction,
-  key: string,
   work: () => Promise<TValue>,
 ): Promise<TValue> {
-  let locks = rowLocks.get(tx)
-  if (locks === undefined) {
-    locks = new Map()
-    rowLocks.set(tx, locks)
-  }
-  const previous = locks.get(key) ?? Promise.resolve()
+  // Refuse expired callers before waiting for unfinished host work.
+  tx.rows.lifetime
+  const previous = transactionLocks.get(tx.rows)
   const { promise, resolve } = Promise.withResolvers<void>()
-  locks.set(key, promise)
-  await previous
+  transactionLocks.set(tx.rows, promise)
+  if (previous !== undefined) await previous
   try {
+    tx.rows.lifetime
     return await work()
   } finally {
-    if (locks.get(key) === promise) locks.delete(key)
+    if (transactionLocks.get(tx.rows) === promise) transactionLocks.delete(tx.rows)
     resolve()
+  }
+}
+
+export function lockMemoryOperation<TArgs extends Array<unknown>, TValue>(
+  tx: MemoryTransaction,
+  operation: (...args: TArgs) => Promise<TValue>,
+): (...args: TArgs) => Promise<TValue> {
+  return async (...args) => {
+    // Queued operations own their arguments before yielding to another caller.
+    const owned = decodeStoredValue(encodeStoredValue(args)) as TArgs
+    return await withMemoryTransactionLock(tx, () => operation(...owned))
   }
 }
 
@@ -63,7 +74,8 @@ function copyTrust(trust: GroupRecoveryTrust): GroupRecoveryTrust {
   }
 }
 
-export function createGroupStateStores(params: {
+// Internal helpers must not reacquire the transaction lock.
+export function createUnlockedGroupStateStores(params: {
   tx: MemoryTransaction
   groupID: string
   atRest: AtRestCodec
@@ -74,13 +86,6 @@ export function createGroupStateStores(params: {
     const address: StoredAddress = { groupID, incarnation, namespace, recordID: 'current' }
     const key = physicalRecordKey(address)
     return {
-      withLock<TValue>(work: () => Promise<TValue>): Promise<TValue> {
-        // Refuse expired callers before waiting for unfinished host work.
-        if (tx.rows[namespace] === undefined)
-          throw new GroupStateConflictError('Missing transaction namespace')
-        // Namespaces have separate physical maps but can share the same row key.
-        return withRowLock(tx, `${namespace}:${key}`, work)
-      },
       async load(): Promise<TValue | null> {
         const bytes = tx.rows[namespace]?.get(key)
         if (bytes === undefined) return null
@@ -111,15 +116,11 @@ export function createGroupStateStores(params: {
     return copyTrust(value)
   }
   const trust: GroupStateStores['trust'] = {
-    async load() {
-      return trustRow.withLock(loadTrust)
-    },
+    load: loadTrust,
     async save(value) {
-      return trustRow.withLock(async () => {
-        const previous = await loadTrust()
-        assertTrustTransition(previous, value)
-        await trustRow.save(copyTrust(value))
-      })
+      const previous = await loadTrust()
+      assertTrustTransition(previous, value)
+      await trustRow.save(copyTrust(value))
     },
   }
   return {
@@ -133,24 +134,45 @@ export function createGroupStateStores(params: {
       const row = slot<GroupStateRecord>('state', incarnation)
       return {
         async load() {
-          return row.withLock(async () => {
-            const value = await row.load()
-            if (value !== null && value.incarnation !== incarnation) {
-              throw new GroupStateConflictError('Stored incarnation mismatch')
-            }
-            return value
-          })
+          const value = await row.load()
+          if (value !== null && value.incarnation !== incarnation) {
+            throw new GroupStateConflictError('Stored incarnation mismatch')
+          }
+          return value
         },
         async save(value) {
           if (value.incarnation !== incarnation)
             throw new GroupStateConflictError('Row incarnation mismatch')
-          return row.withLock(async () => {
-            const previous = await row.load()
-            const retained = await trust.load()
-            assertStateTransition(previous, value, retained)
-            await row.save(value)
-          })
+          const previous = await row.load()
+          const retained = await loadTrust()
+          assertStateTransition(previous, value, retained)
+          await row.save(value)
         },
+      }
+    },
+  }
+}
+
+export function createGroupStateStores(
+  params: Parameters<typeof createUnlockedGroupStateStores>[0],
+): GroupStateStores {
+  const stores = createUnlockedGroupStateStores(params)
+  const { tx } = params
+  return {
+    tx,
+    lifetime: {
+      load: lockMemoryOperation(tx, stores.lifetime.load),
+      save: lockMemoryOperation(tx, stores.lifetime.save),
+    },
+    trust: {
+      load: lockMemoryOperation(tx, stores.trust.load),
+      save: lockMemoryOperation(tx, stores.trust.save),
+    },
+    state(incarnation) {
+      const state = stores.state(incarnation)
+      return {
+        load: lockMemoryOperation(tx, state.load),
+        save: lockMemoryOperation(tx, state.save),
       }
     },
   }
