@@ -57,6 +57,14 @@ test('device groups reuse the ownership queue already bound to the database', as
   const db = createMemoryTransaction({ rows: {} })
   const owners = createOwnerQueues()
   const groups = createMemoryGroupPersistence({ db, owners, atRest, providerID })
+  expect(() =>
+    createMemoryDevicePersistence({
+      db,
+      atRest,
+      providerID: 'foreign-provider',
+      ownerDID: 'did:example:owner',
+    }),
+  ).toThrow('provider mismatch')
   const device = createMemoryDevicePersistence({
     db,
     atRest,

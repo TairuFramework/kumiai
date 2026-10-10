@@ -95,10 +95,10 @@ export function createMemoryDevicePersistence(params: {
       tail: Promise.resolve(),
       owners: memoryGroupOwnerQueues(db) ?? createOwnerQueues(),
     }
-    bindings.set(db, binding)
   }
   const owners = binding.owners
   const coordinator = createMemoryGroupCoordinator({ db, owners, atRest, providerID, effects })
+  bindings.set(db, binding)
   const { groups } = coordinator
   const proofs = binding.proofs
   const ownership = binding
