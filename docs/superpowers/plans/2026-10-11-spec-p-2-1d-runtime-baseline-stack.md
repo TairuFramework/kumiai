@@ -37,7 +37,7 @@ The guard has two layers:
   - Evergreen browsers in a secure context.
   - Hermes with polyfills for Web Crypto and `TextEncoder`/`TextDecoder`. Hermes provides Web Streams natively.
   - Syntax lowering is the host bundler's job; this baseline covers runtime built-ins and host APIs only.
-- **Optional capabilities.** These may be referenced only behind `typeof X !== 'undefined'`, in a condition of `&&`, `if` or a ternary. The code must be correct when they are absent:
+- **Optional capabilities.** These may be referenced only behind a `typeof X` presence test (`!== 'undefined'`), or in the branch an absence test (`=== 'undefined'`) leaves for the present case. The test may be a condition of `&&`, `||`, `if` or a ternary. The code must be correct when they are absent:
   - `Float16Array`
   - `SharedArrayBuffer`
   - `Atomics`
@@ -87,7 +87,7 @@ The guard has two layers:
   - Anything else throws `TypeError('cloneData: unsupported value')`. That includes `Map`, `Set`, `Date`, class instances, functions and other typed arrays.
 
 - [ ] **Step 1: Tests** in `clone.test.ts`. Use the existing helpers: `joinBoundDevice` (`packages/mls/test/fixtures/device-harness.ts:68`), or `lifecycleGroup` plus `addMember` (`packages/mls/test/fixtures/lifecycle-ledger.ts:89`).
-  - **Secret tree:** in a two-member group, encrypt one application message first, so the sender's leaf secrets are expanded. Select `secretTree.leafNodes[leafIndex]` where `leafIndex = state.privatePath.leafIndex`, narrowing each access.
+  - **Secret tree:** in a two-member group, encrypt one application message first, so the sender's leaf secrets are expanded. Select `secretTree.leafNodes[state.privatePath.leafIndex * 2]`: ts-mls keys `leafNodes` by node index. Assert the entry exists, narrowing each access.
     - `expect(cloneData(tree)).toEqual(structuredClone(tree))`.
     - Zeroing the clone's selected `application.secret` leaves the original unchanged.
   - **Leaf node:** take the joined member's own node, `ratchetTree[privatePath.leafIndex * 2]`, narrowed to `nodeType === leaf`.
@@ -148,7 +148,7 @@ The guard has two layers:
 ### Task 3: Baseline guard, capability smoke, changeset, gate
 
 **Files:**
-- Create: `packages/mls-rpc/test/fixtures/runtime-optional.d.ts`, which declares the optional capabilities for the type layer, each as possibly `undefined`.
+- Create: `packages/mls-rpc/test/fixtures/runtime-optional.d.ts`, which declares only `Float16Array`, the optional capability missing from `lib.es2022`. `SharedArrayBuffer` and `Atomics` keep their standard declarations; the name layer enforces their guards.
 - Modify:
   - `packages/mls-rpc/test/runtime-neutral.test.ts`
   - `packages/mls-rpc/test/runtime-baseline.test.ts`
@@ -161,11 +161,13 @@ The guard has two layers:
   - Expect zero semantic diagnostics in files under that `src`.
   - Report each diagnostic as `file:line message`.
 - **Name layer (AST):**
-  - Forbids the Forbidden list, plus any reference to a `lib.dom.d.ts` global that is not on the host whitelist.
+  - Forbids the Forbidden list, plus any runtime value reference to a top-level `lib.dom.d.ts` global (a `declare var` or `declare function`) that is not on the host whitelist. References in type positions are erased and allowed, such as an annotation of `ReadableStreamDefaultController`.
   - Resolution is symbol-aware: use the program's type checker to resolve each identifier and property access. A local or shadowed binding never fires.
   - Covers computed access (`Promise['withResolvers']`, `globalThis['structuredClone']`), destructured statics (`const { withResolvers } = Promise`), `export … from 'node:…'`, dynamic `import('node:…')` and `require('node:…')`.
-  - Optional capabilities are allowed only under a `typeof` guard in a condition of `&&`, `if` or a ternary.
-- **Fixtures:** a `describe('guard fixtures')` block runs both layers over in-memory source strings. It covers each forbidden form (negative), each allowed form (positive: whitelisted host API, guarded optional capability, shadowed local named `structuredClone`, ES2022 `Array.prototype.at`), and an ES2023 `toSorted` (negative, via the type layer).
+  - Optional capabilities are allowed only under the presence or absence `typeof` tests defined in Global Constraints.
+- **Fixtures:** a `describe('guard fixtures')` block runs both layers over in-memory source strings. It covers:
+  - **Negative:** each forbidden form; `new ReadableStreamDefaultController()`, a non-whitelisted DOM value; `Float16Array` used without a guard; ES2023 `toSorted`, caught by the type layer.
+  - **Positive:** a whitelisted host API; a `ReadableStreamDefaultController` type annotation; guarded optional capabilities in both presence form and the absence-ternary form used in `memory-transaction.ts:138`; a shadowed local named `structuredClone`; ES2022 `Array.prototype.at`.
 - **Smoke test:**
   - Also delete `String.prototype.isWellFormed`, `String.prototype.toWellFormed`, `AbortSignal.prototype.throwIfAborted` and `Float16Array`, restoring all of them in `afterAll`.
   - Each path is its own `test`, uses real MLS, and asserts the specific domain result or error message:
