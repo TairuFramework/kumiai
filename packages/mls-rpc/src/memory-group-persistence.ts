@@ -113,6 +113,8 @@ export function createMemoryGroupPersistence(params: {
   effects?: TransactionalGroupEffects<MemoryTransaction>
 }): GroupPersistence<MemoryTransaction> {
   const { db, atRest, providerID, effects } = params
+  if (atRest == null || typeof atRest.seal !== 'function' || typeof atRest.open !== 'function')
+    throw new TypeError('Expected callable at-rest seal and open')
   let binding = bindings.get(db)
   if (binding === undefined) {
     binding = { providerID, proofs: new Map() }

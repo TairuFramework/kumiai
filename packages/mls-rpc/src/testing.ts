@@ -1,5 +1,7 @@
+export { createMemoryDevicePersistence } from './memory-device-persistence.js'
 export { type MemoryFaultController, memoryFaults } from './memory-faults.js'
 export { createMemoryGroupPersistence } from './memory-group-persistence.js'
 export { createMemoryGroupPorts } from './memory-group-ports.js'
 export { createIncarnationStores } from './memory-incarnation-stores.js'
+export { createMemoryPackageStores } from './memory-package-stores.js'
 export { createMemoryTransaction } from './memory-transaction.js'
