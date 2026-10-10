@@ -10,6 +10,7 @@ import { GroupStateConflictError } from './persistence-errors.js'
 import { assertStateTransition, assertTrustTransition } from './persistence-guards.js'
 import type {
   AtRestCodec,
+  GroupKey,
   GroupRecoveryTrust,
   GroupStateRecord,
   GroupStores,
@@ -17,11 +18,29 @@ import type {
   MemoryTransaction,
 } from './persistence-types.js'
 
+type StateMetadata = GroupKey & { version: number; deleted: boolean }
+
 export type GroupStateStores = Pick<GroupStores<MemoryTransaction>, 'tx' | 'lifetime' | 'trust'> & {
   state(incarnation: number): IncarnationStores['state']
+  stateMetadata(incarnation: number): {
+    load(): Promise<StateMetadata | null>
+    save(value: StateMetadata): Promise<void>
+  }
 }
 
 // Provider-bound transaction copies share the same rows view.
+const finalisingTransactions = new WeakSet<MemoryTransaction['rows']>()
+
+export function beginMemoryGroupFinalisation(tx: MemoryTransaction): void {
+  finalisingTransactions.add(tx.rows)
+}
+
+export function assertMemoryGroupMutable(tx: MemoryTransaction): void {
+  if (finalisingTransactions.has(tx.rows))
+    throw new GroupStateConflictError('Group domain writes expired at finalisation')
+}
+
+const bootstrapTrusts = new WeakMap<MemoryTransaction['rows'], Set<string>>()
 const transactionLocks = new WeakMap<MemoryTransaction['rows'], Promise<void>>()
 
 export async function withMemoryTransactionLock<TValue>(
@@ -79,12 +98,29 @@ export function createUnlockedGroupStateStores(params: {
   tx: MemoryTransaction
   groupID: string
   atRest: AtRestCodec
+  coordinatorWrites?: boolean
 }): GroupStateStores {
   const { tx, groupID, atRest } = params
   if (tx.groupID !== groupID) throw new GroupStateConflictError('Transaction group mismatch')
-  function slot<TValue extends { groupID: string }>(namespace: string, incarnation: number | null) {
-    const address: StoredAddress = { groupID, incarnation, namespace, recordID: 'current' }
+  function slot<TValue extends { groupID: string }>(
+    namespace: string,
+    incarnation: number | null,
+    recordID = 'current',
+  ) {
+    const address: StoredAddress = { groupID, incarnation, namespace, recordID }
     const key = physicalRecordKey(address)
+    async function prepare(value: TValue): Promise<Uint8Array> {
+      if (!params.coordinatorWrites) assertMemoryGroupMutable(tx)
+      if (tx.rows[namespace] === undefined)
+        throw new GroupStateConflictError('Missing transaction namespace')
+      if (value.groupID !== groupID) throw new GroupStateConflictError('Row group mismatch')
+      return await sealRecord(atRest, address, value)
+    }
+    function store(bytes: Uint8Array): void {
+      const rows = tx.rows[namespace]
+      if (rows === undefined) throw new GroupStateConflictError('Missing transaction namespace')
+      rows.set(key, bytes)
+    }
     return {
       async load(): Promise<TValue | null> {
         const bytes = tx.rows[namespace]?.get(key)
@@ -99,12 +135,10 @@ export function createUnlockedGroupStateStores(params: {
         }
         return value
       },
+      prepare,
+      store,
       async save(value: TValue): Promise<void> {
-        const rows = tx.rows[namespace]
-        if (rows === undefined) throw new GroupStateConflictError('Missing transaction namespace')
-        if (value.groupID !== groupID) throw new GroupStateConflictError('Row group mismatch')
-        const bytes = await sealRecord(atRest, address, value)
-        rows.set(key, bytes)
+        store(await prepare(value))
       },
     }
   }
@@ -118,13 +152,40 @@ export function createUnlockedGroupStateStores(params: {
   const trust: GroupStateStores['trust'] = {
     load: loadTrust,
     async save(value) {
+      if (!params.coordinatorWrites) assertMemoryGroupMutable(tx)
       const previous = await loadTrust()
       assertTrustTransition(previous, value)
       await trustRow.save(copyTrust(value))
+      if (previous === null) {
+        const groups = bootstrapTrusts.get(tx.rows) ?? new Set<string>()
+        groups.add(groupID)
+        bootstrapTrusts.set(tx.rows, groups)
+      }
     },
+  }
+  function stateMetadata(incarnation: number) {
+    const row = slot<StateMetadata>('meta', incarnation, JSON.stringify(['state-version']))
+    return {
+      async load() {
+        const value = await row.load()
+        if (
+          value !== null &&
+          (value.incarnation !== incarnation ||
+            !Number.isSafeInteger(value.version) ||
+            value.version < 1 ||
+            typeof value.deleted !== 'boolean')
+        )
+          throw new GroupStateConflictError('Unreadable state version metadata')
+        return value
+      },
+      save: row.save,
+      prepare: row.prepare,
+      store: row.store,
+    }
   }
   return {
     tx,
+    stateMetadata,
     lifetime: slot('lifetime', null),
     trust,
     state(incarnation) {
@@ -141,12 +202,49 @@ export function createUnlockedGroupStateStores(params: {
           return value
         },
         async save(value) {
+          if (!params.coordinatorWrites) assertMemoryGroupMutable(tx)
           if (value.incarnation !== incarnation)
             throw new GroupStateConflictError('Row incarnation mismatch')
-          const previous = await row.load()
-          const retained = await loadTrust()
-          assertStateTransition(previous, value, retained)
-          await row.save(value)
+          const metadata = stateMetadata(incarnation)
+          if (value.deleted) {
+            // Retirement needs administrative version/identity, never private ratchets.
+            const previous = await metadata.load()
+            if (
+              previous === null &&
+              tx.rows.state?.has(
+                physicalRecordKey({
+                  groupID,
+                  incarnation,
+                  namespace: 'state',
+                  recordID: 'current',
+                }),
+              )
+            )
+              throw new GroupStateConflictError('Missing state version metadata')
+            if (
+              !Number.isSafeInteger(value.version) ||
+              value.version !== (previous?.version ?? 0) + 1
+            )
+              throw new GroupStateConflictError('State version conflict')
+          } else {
+            const previous = await row.load()
+            const retained = await loadTrust()
+            assertStateTransition(
+              previous,
+              value,
+              retained,
+              bootstrapTrusts.get(tx.rows)?.has(groupID),
+            )
+          }
+          const stateBytes = await row.prepare(value)
+          const metadataBytes = await metadata.prepare({
+            groupID,
+            incarnation,
+            version: value.version,
+            deleted: value.deleted,
+          })
+          row.store(stateBytes)
+          metadata.store(metadataBytes)
         },
       }
     },
@@ -160,6 +258,13 @@ export function createGroupStateStores(
   const { tx } = params
   return {
     tx,
+    stateMetadata(incarnation) {
+      const metadata = stores.stateMetadata(incarnation)
+      return {
+        load: lockMemoryOperation(tx, metadata.load),
+        save: lockMemoryOperation(tx, metadata.save),
+      }
+    },
     lifetime: {
       load: lockMemoryOperation(tx, stores.lifetime.load),
       save: lockMemoryOperation(tx, stores.lifetime.save),

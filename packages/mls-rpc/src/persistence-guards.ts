@@ -106,6 +106,7 @@ export function assertStateTransition(
   previous: GroupStateRecord | null,
   next: GroupStateRecord,
   trust: GroupRecoveryTrust | null,
+  bootstrapTrust = false,
 ): void {
   requireCondition(
     validCounter(next.incarnation, 1) && validCounter(next.version, 1),
@@ -149,7 +150,7 @@ export function assertStateTransition(
     const before = readState(previous)
     if (before !== null && client !== null) assertReceiveProgress(before, client)
   }
-  // Only first creation can supply its already-spent matching trust snapshot.
+  // Only trust first proposed in this transaction can describe bootstrap installation.
   const firstCreation = previous === null && next.incarnation === 1
   if (trust === null) {
     requireCondition(firstCreation, 'Recovery trust required for identity change')
@@ -158,6 +159,7 @@ export function assertStateTransition(
   assertTrustTransition(null, trust)
   requireCondition(trust.groupID === next.groupID, 'Recovery trust group mismatch')
   const matchingFirstTrust =
+    bootstrapTrust &&
     firstCreation &&
     trust.installed.incarnation === next.incarnation &&
     trust.installed.epoch === next.epoch &&

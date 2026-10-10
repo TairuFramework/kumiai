@@ -381,7 +381,6 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
           { ...seed.state, version: seed.state.version + 1 },
           { ...seed.state, version: seed.state.version + 3 },
           { ...seed.state, version: seed.state.version + 2, senderHWM: 15 },
-          { ...seed.state, version: seed.state.version + 2, epoch: 2 },
         ]) {
           await expect(
             groups.transition(await storageChange(groups, groupID, 'bad-state'), async (stores) =>
@@ -400,6 +399,41 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
         await fixture.close()
       }
     })
+
+    test('F5 refuses an internally consistent unspent lower epoch with matching trust', async () => {
+      const fixture = await params.createFixture(groupID)
+      try {
+        const groups = fixture.ports.device.groups
+        const seed = await storageSeed(groups)
+        const lower = await params.lowerEpochCandidate(groupID)
+        expect(lower.state.epoch).toBeLessThan(seed.state.epoch)
+        expect(seed.trust.spentEpochAuthenticators).not.toContainEqual(
+          lower.state.epochAuthenticator,
+        )
+        const before = await fixture.inspectRows()
+        await expect(
+          groups.transition(
+            await storageChange(groups, groupID, 'epoch-regression'),
+            async (stores) => {
+              await stores
+                .incarnation(1)
+                .state.save({ ...lower.state, version: seed.state.version + 1 })
+              await stores.trust.save({
+                ...lower.trust,
+                genesisAnchor: seed.trust.genesisAnchor,
+                spentEpochAuthenticators: [
+                  ...seed.trust.spentEpochAuthenticators,
+                  ...lower.trust.spentEpochAuthenticators,
+                ],
+              })
+            },
+          ),
+        ).rejects.toMatchObject({ name: 'GroupStateConflictError', message: 'Epoch regressed' })
+        expect(await fixture.inspectRows()).toEqual(before)
+      } finally {
+        await fixture.close()
+      }
+    }, 5000)
 
     test.each(['state', 'trust'] as const)(
       'corrupt %s retains the other records and persists a safety event',
@@ -429,13 +463,29 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
           }
           expect(await restored.load(groupID)).toEqual(lifetimeBefore)
           const before = await fixture.inspectRows()
-          await expect(
-            restored.transition(
-              await storageChange(restored, groupID, 'install-corrupt'),
-              async (stores) => writeStorageInstall(stores, fresh, 'install-corrupt', 2),
-            ),
-          ).rejects.toThrow()
-          expect(await fixture.inspectRows()).toEqual(before)
+          const installation = restored.transition(
+            await storageChange(restored, groupID, 'install-corrupt'),
+            async (stores) => writeStorageInstall(stores, fresh, 'install-corrupt', 2),
+          )
+          if (namespace === 'state') {
+            await installation
+            expect(await restored.loadState(key)).toEqual({
+              ...key,
+              deleted: true,
+              version: seed.state.version + 1,
+            })
+            expect(await restored.loadState({ ...key, incarnation: 2 })).toEqual({
+              ...fresh.state,
+              incarnation: 2,
+              version: 1,
+            })
+            expect((await restored.loadTrust(groupID))?.genesisAnchor).toEqual(
+              seed.trust.genesisAnchor,
+            )
+          } else {
+            await expect(installation).rejects.toThrow()
+            expect(await fixture.inspectRows()).toEqual(before)
+          }
           await restored.transition(
             await storageChange(restored, groupID, 'safety'),
             async (stores) =>

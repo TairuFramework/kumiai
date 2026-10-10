@@ -520,6 +520,10 @@ export type StorageTestPorts<TTx extends ConformanceGroupTransaction> = {
 }
 export type StorageConformanceParams<TTx extends ConformanceGroupTransaction> = {
   label: string
+  lowerEpochCandidate(groupID: string): Promise<{
+    state: ConformanceGroupStateRecord & { deleted: false }
+    trust: ConformanceGroupRecoveryTrust
+  }>
   writeSideRow(tx: TTx, key: string, bytes: Uint8Array): Promise<void>
   createFixture(
     id: string,

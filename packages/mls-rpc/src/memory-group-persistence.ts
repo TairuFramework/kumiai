@@ -4,6 +4,8 @@ import {
   UnchangedGroupResult,
 } from './memory-group-ports.js'
 import {
+  assertMemoryGroupMutable,
+  beginMemoryGroupFinalisation,
   createGroupStateStores,
   createUnlockedGroupStateStores,
   lockMemoryOperation,
@@ -143,8 +145,10 @@ export function createMemoryGroupCoordinator(params: {
     groupID: string,
     work: (stores: GroupStores<MemoryTransaction>) => Promise<TValue>,
   ): Promise<TValue> {
-    await db.completionBarrier(scope(groupID))
-    return await db.transact(scope(groupID), (tx) => work(basicStores(tx, groupID)))
+    return await db.mutationGate.run(groupID, async () => {
+      await db.completionBarrier(scope(groupID))
+      return await db.transact(scope(groupID), (tx) => work(basicStores(tx, groupID)))
+    })
   }
   async function resolve(
     groupID: string,
@@ -197,7 +201,12 @@ export function createMemoryGroupCoordinator(params: {
         scope(request.groupID),
         async (baseTx) => {
           const tx = boundTx(baseTx)
-          const raw = createUnlockedGroupStateStores({ tx, groupID: request.groupID, atRest })
+          const raw = createUnlockedGroupStateStores({
+            tx,
+            groupID: request.groupID,
+            atRest,
+            coordinatorWrites: true,
+          })
           const previous = await withMemoryTransactionLock(tx, raw.lifetime.load)
           const marker = owner(tx, request.groupID)
           let change: GroupTransition
@@ -264,6 +273,7 @@ export function createMemoryGroupCoordinator(params: {
             lifetime: {
               load: () => raw.lifetime.load(),
               async save(value) {
+                assertMemoryGroupMutable(tx)
                 const next = copyStoredValue(value)
                 if (
                   next.groupID !== change.groupID ||
@@ -313,6 +323,7 @@ export function createMemoryGroupCoordinator(params: {
                   : copyStoredValue(proposedTrust)
               },
               async save(value) {
+                assertMemoryGroupMutable(tx)
                 tx.rows.trust
                 const owned = copyStoredValue(value)
                 assertTrustTransition(proposedTrust ?? (await retainedTrust()), owned)
@@ -328,6 +339,7 @@ export function createMemoryGroupCoordinator(params: {
               const state: ReturnType<typeof raw.state> = {
                 load: rows.state.load,
                 async save(value) {
+                  assertMemoryGroupMutable(tx)
                   const owned = copyStoredValue(value)
                   if (
                     owned.groupID !== change.groupID ||
@@ -371,6 +383,7 @@ export function createMemoryGroupCoordinator(params: {
             },
           }
           result = await work(stores, change.mutationID)
+          beginMemoryGroupFinalisation(tx)
           const { outboxEvents, deletedKeys } = await withMemoryTransactionLock(tx, async () => {
             const life =
               proposedLifetime ??
@@ -401,6 +414,8 @@ export function createMemoryGroupCoordinator(params: {
                 throw new GroupStateConflictError('Existing lifetime requires retained trust')
             }
             for (const [incarnation, next] of savedStates) {
+              // Tombstone counters were validated without opening private state.
+              if (next.deleted) continue
               const oldBytes = before.state?.get(
                 physicalRecordKey({
                   groupID: change.groupID,
@@ -444,7 +459,7 @@ export function createMemoryGroupCoordinator(params: {
               previous?.activeIncarnation !== undefined &&
               life.activeIncarnation !== previous.activeIncarnation
             ) {
-              const source = await raw.state(previous.activeIncarnation).load()
+              const source = await raw.stateMetadata(previous.activeIncarnation).load()
               if (source === null || !source.deleted) {
                 const tombstone: GroupStateRecord = {
                   groupID: change.groupID,
@@ -517,6 +532,12 @@ export function createMemoryGroupCoordinator(params: {
                   physicalRecordKey(address),
                   await sealRecord(atRest, address, { ...state, version: state.version + 1 }),
                 )
+                await raw.stateMetadata(incarnation).save({
+                  groupID: change.groupID,
+                  incarnation,
+                  version: state.version + 1,
+                  deleted: false,
+                })
               }
             }
             if (proposedLifetime === undefined) await raw.lifetime.save(life)
