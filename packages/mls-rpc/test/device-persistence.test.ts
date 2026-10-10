@@ -117,6 +117,104 @@ for (const mode of ['real-mls', 'double'] as const) {
       return { db, device, packageStores, ownerDID, ordinary, lastResort, cleanup, seed, identity }
     }
 
+    test('serializes overlapping cleanup put remove and list in call order', async () => {
+      const { db, device, cleanup, ownerDID } = await setup()
+      await device.transition(
+        { mutationID: 'cleanup-fifo', expectedRevision: 0, group: null },
+        async (stores) => {
+          const [, , rows] = await Promise.all([
+            stores.cleanup.put(cleanup),
+            stores.cleanup.remove(cleanup.id),
+            stores.cleanup.list(),
+          ])
+          expect(rows).toEqual([])
+        },
+      )
+      const rows = await device.transition(
+        { mutationID: 'read-cleanup', expectedRevision: 1, group: null },
+        (stores) => stores.cleanup.list(),
+      )
+      expect(rows).toEqual([])
+      expect(
+        db.snapshot()['device-cleanup']?.has(
+          physicalRecordKey({
+            groupID: ownerDID,
+            incarnation: null,
+            namespace: 'device-cleanup',
+            recordID: cleanup.id,
+          }),
+        ),
+      ).toBe(false)
+    }, 5000)
+
+    test('serializes package list after an overlapping put in the same transaction', async () => {
+      const { device, ordinary, ownerDID } = await setup()
+      await device.transition(
+        { mutationID: 'package-list-fifo', expectedRevision: 0, group: null },
+        async (stores) => {
+          const [, rows] = await Promise.all([
+            stores.ordinary(sourceID).put(ownerDID, ordinary),
+            stores.ordinary(sourceID).list(ownerDID),
+          ])
+          expect(rows).toEqual([ordinary])
+        },
+      )
+    }, 5000)
+
+    test('rejects a group-only mutation ID reused by a combined transition', async () => {
+      const { device, seed, db } = await setup()
+      await installSeed(device.groups, seed, 'shared-id')
+      const before = db.snapshot()
+      let called = false
+      await expect(
+        device.transition(
+          {
+            mutationID: 'shared-id',
+            expectedRevision: 0,
+            group: await nextChange(device.groups, groupID, 'shared-id'),
+          },
+          async () => {
+            called = true
+          },
+        ),
+      ).rejects.toThrow('Mutation ID already used')
+      expect(called).toBe(false)
+      expect(db.snapshot()).toEqual(before)
+      expect(await device.groups.resolve(groupID, 'shared-id')).toBe('committed')
+      expect(await device.resolve('shared-id')).toBe('rolled-back')
+    }, 5000)
+
+    test('rejects a combined mutation ID reused by a group-only transition and preserves device proof', async () => {
+      const { device, seed, db } = await setup()
+      await device.transition(
+        {
+          mutationID: 'shared-id',
+          expectedRevision: 0,
+          group: { groupID, mutationID: 'shared-id', expected: null },
+        },
+        async (stores) => {
+          if (stores.group === null) throw new Error('Missing group participant')
+          await stores.group.lifetime.save({ ...seed.lifetime, mutationID: 'shared-id' })
+          await stores.group.incarnation(1).state.save(seed.state)
+          await stores.group.trust.save(seed.trust)
+        },
+      )
+      const before = db.snapshot()
+      let called = false
+      await expect(
+        device.groups.transition(
+          await nextChange(device.groups, groupID, 'shared-id'),
+          async () => {
+            called = true
+          },
+        ),
+      ).rejects.toThrow('Mutation ID already used')
+      expect(called).toBe(false)
+      expect(db.snapshot()).toEqual(before)
+      expect(await device.resolve('shared-id')).toBe('committed')
+      expect(await device.groups.resolve(groupID, 'shared-id')).toBe('committed')
+    }, 5000)
+
     test('co-stores ordinary burn receipt group install cleanup and restore-work', async () => {
       const { db, device, packageStores, ownerDID, ordinary, lastResort, cleanup, seed } =
         await setup()

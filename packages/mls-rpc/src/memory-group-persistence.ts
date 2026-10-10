@@ -113,12 +113,12 @@ function changedIncarnations(
   return result
 }
 
-export function createMemoryGroupPersistence(params: {
+export function createMemoryGroupCoordinator(params: {
   db: MemoryDatabase
   atRest: AtRestCodec
   providerID: string
   effects?: TransactionalGroupEffects<MemoryTransaction>
-}): GroupPersistence<MemoryTransaction> {
+}) {
   const { db, atRest, providerID, effects } = params
   if (atRest == null || typeof atRest.seal !== 'function' || typeof atRest.open !== 'function')
     throw new TypeError('Expected callable at-rest seal and open')
@@ -183,12 +183,17 @@ export function createMemoryGroupPersistence(params: {
   async function transitionOwned<TValue>(
     request: GroupTransition | GroupOperation,
     work: (stores: GroupStores<MemoryTransaction>, mutationID: string) => Promise<TValue>,
+    participantTx?: MemoryTransaction,
   ): Promise<TValue> {
     let proof: Proof | undefined
     let id: string | undefined
     let result!: TValue
     try {
-      return await db.transact(
+      const transact: MemoryDatabase['transact'] =
+        participantTx === undefined
+          ? (scope, fn, options) => db.transact(scope, fn, options)
+          : async (_scope, fn) => await fn(participantTx)
+      return await transact(
         scope(request.groupID),
         async (baseTx) => {
           const tx = boundTx(baseTx)
@@ -231,6 +236,15 @@ export function createMemoryGroupPersistence(params: {
           if (prior !== undefined && prior.outcome !== 'rolled-back')
             throw new GroupStateConflictError('Mutation ID already used; resolve its proof')
           proofs.set(id, proof)
+          if (participantTx !== undefined) {
+            const retainedProof = proof
+            tx.onCommit(() => {
+              retainedProof.outcome = 'committed'
+            })
+            tx.onRollback(() => {
+              retainedProof.outcome = 'rolled-back'
+            })
+          }
           const revision = proof.revision
           const before = snapshot(tx)
           tx.rows['group-owner']?.set(groupOwnerKey(change.groupID), {
@@ -560,7 +574,7 @@ export function createMemoryGroupPersistence(params: {
         if (id !== undefined) proofs.delete(id)
         return error.value as TValue
       }
-      if (!(error instanceof StorageOutcomeUnknownError)) {
+      if (participantTx !== undefined || !(error instanceof StorageOutcomeUnknownError)) {
         if (proof !== undefined) proof.outcome = 'rolled-back'
         throw error
       }
@@ -569,7 +583,12 @@ export function createMemoryGroupPersistence(params: {
       if ((await resolve(request.groupID, mutationID)) === 'committed') return result
       throw error
     } finally {
-      if (proof !== undefined && proof.outcome === undefined && proof.settlement === undefined)
+      if (
+        participantTx === undefined &&
+        proof !== undefined &&
+        proof.outcome === undefined &&
+        proof.settlement === undefined
+      )
         proof.outcome = 'committed'
     }
   }
@@ -629,5 +648,23 @@ export function createMemoryGroupPersistence(params: {
           ),
       ),
   })
-  return groups
+  return {
+    groups,
+    transitionInTransaction<TValue>(
+      tx: MemoryTransaction,
+      change: GroupTransition,
+      work: (stores: GroupStores<MemoryTransaction>) => Promise<TValue>,
+    ): Promise<TValue> {
+      return transitionOwned(copyStoredValue(change), work, tx)
+    },
+  }
+}
+
+export function createMemoryGroupPersistence(params: {
+  db: MemoryDatabase
+  atRest: AtRestCodec
+  providerID: string
+  effects?: TransactionalGroupEffects<MemoryTransaction>
+}): GroupPersistence<MemoryTransaction> {
+  return createMemoryGroupCoordinator(params).groups
 }

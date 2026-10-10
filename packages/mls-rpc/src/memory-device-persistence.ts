@@ -1,4 +1,5 @@
-import { createMemoryGroupPersistence } from './memory-group-persistence.js'
+import { createMemoryGroupCoordinator } from './memory-group-persistence.js'
+import { lockMemoryOperation } from './memory-group-state.js'
 import {
   copyStoredValue,
   type GroupOwnerMarker,
@@ -79,7 +80,8 @@ export function createMemoryDevicePersistence(params: {
     throw new GroupStateConflictError('Persistence provider mismatch')
   if (binding !== undefined && binding.ownerDID !== ownerDID)
     throw new GroupStateConflictError('Persistence owner mismatch')
-  const groups = createMemoryGroupPersistence({ db, atRest, providerID, effects })
+  const coordinator = createMemoryGroupCoordinator({ db, atRest, providerID, effects })
+  const { groups } = coordinator
   if (binding === undefined) {
     binding = { providerID, ownerDID, proofs: new Map(), tail: Promise.resolve() }
     bindings.set(db, binding)
@@ -179,6 +181,34 @@ export function createMemoryDevicePersistence(params: {
     group: GroupStores<MemoryTransaction> | null,
   ): DeviceStores<MemoryTransaction> {
     const cleanup = table<HubCleanupRow>(tx, 'device-cleanup')
+    const rawCleanup: DeviceStores<MemoryTransaction>['cleanup'] = {
+      async list() {
+        const values: Array<HubCleanupRow> = []
+        for (const id of cleanup.ids()) {
+          const row = await cleanup.load(id)
+          if (row === null || row.ownerDID !== ownerDID || row.id !== id)
+            throw new GroupStateConflictError('Cleanup owner or ID mismatch')
+          values.push(row)
+        }
+        return values
+      },
+      async put(row) {
+        const owned = copyStoredValue(row)
+        cleanup.ids()
+        if (owned.ownerDID !== ownerDID) throw new GroupStateConflictError('Cleanup owner mismatch')
+        if (
+          typeof owned.sourceID !== 'string' ||
+          typeof owned.ref !== 'string' ||
+          typeof owned.id !== 'string' ||
+          !['ordinary', 'last-resort'].includes(owned.kind)
+        )
+          throw new GroupStateConflictError('Cleanup source or kind mismatch')
+        await cleanup.save(owned.id, owned)
+      },
+      async remove(id) {
+        cleanup.remove(id)
+      },
+    }
     return {
       tx,
       group,
@@ -187,33 +217,9 @@ export function createMemoryDevicePersistence(params: {
       lastResort: (sourceID) =>
         createTransactionPackageStores({ tx, atRest, providerID, ownerDID, sourceID }).lastResort,
       cleanup: {
-        async list() {
-          const values: Array<HubCleanupRow> = []
-          for (const id of cleanup.ids()) {
-            const row = await cleanup.load(id)
-            if (row === null || row.ownerDID !== ownerDID || row.id !== id)
-              throw new GroupStateConflictError('Cleanup owner or ID mismatch')
-            values.push(row)
-          }
-          return values
-        },
-        async put(row) {
-          const owned = copyStoredValue(row)
-          cleanup.ids()
-          if (owned.ownerDID !== ownerDID)
-            throw new GroupStateConflictError('Cleanup owner mismatch')
-          if (
-            typeof owned.sourceID !== 'string' ||
-            typeof owned.ref !== 'string' ||
-            typeof owned.id !== 'string' ||
-            !['ordinary', 'last-resort'].includes(owned.kind)
-          )
-            throw new GroupStateConflictError('Cleanup source or kind mismatch')
-          await cleanup.save(owned.id, owned)
-        },
-        async remove(id) {
-          cleanup.remove(id)
-        },
+        list: lockMemoryOperation(tx, rawCleanup.list),
+        put: lockMemoryOperation(tx, rawCleanup.put),
+        remove: lockMemoryOperation(tx, rawCleanup.remove),
       },
       restore: restore(tx),
     }
@@ -266,10 +272,12 @@ export function createMemoryDevicePersistence(params: {
     }
   }
   const groupResolve = groups.resolve
-  groups.resolve = (groupID, mutationID) =>
-    proofs.get(mutationID)?.group?.groupID === groupID
+  groups.resolve = (groupID, mutationID) => {
+    const proof = proofs.get(mutationID)
+    return proof?.group?.groupID === groupID && proof.outcome !== 'rolled-back'
       ? resolve(mutationID)
       : groupResolve(groupID, mutationID)
+  }
   const device: DevicePersistence<MemoryTransaction> = {
     providerID,
     ownerDID,
@@ -316,28 +324,8 @@ export function createMemoryDevicePersistence(params: {
               if (owned.group === null) result = await work(stores(tx, null))
               else {
                 // Reuse group validation within the owned transaction; no backend gate or transaction is nested.
-                const view: MemoryDatabase = {
-                  mutationGate: {
-                    run: async (_id, fn) => await fn(),
-                    holdUntil: () => {
-                      throw new Error('Unexpected bound gate hold')
-                    },
-                  },
-                  transact: async (_scope, fn) => await fn(tx),
-                  completionBarrier: async () => {
-                    throw new Error('Reentrant bound root read')
-                  },
-                  snapshot: () => {
-                    throw new Error('Reentrant bound root snapshot')
-                  },
-                }
-                const participant = createMemoryGroupPersistence({
-                  db: view,
-                  atRest,
-                  providerID,
-                  effects,
-                })
-                result = await participant.transition(
+                result = await coordinator.transitionInTransaction(
+                  tx,
                   owned.group,
                   async (group) => await work(stores(tx, group)),
                 )

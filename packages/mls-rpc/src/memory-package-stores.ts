@@ -5,6 +5,7 @@ import type {
   LastResortStore,
 } from '@kumiai/mls-hub'
 
+import { lockMemoryOperation, withMemoryTransactionLock } from './memory-group-state.js'
 import { copyStoredValue } from './memory-incarnation-stores.js'
 import { openRecord, physicalRecordKey, sealRecord } from './persistence-codec.js'
 import { GroupStateConflictError } from './persistence-errors.js'
@@ -12,7 +13,6 @@ import type {
   AtRestCodec,
   DevicePersistence,
   DeviceStores,
-  MemoryStoreRows,
   MemoryTransaction,
 } from './persistence-types.js'
 
@@ -20,29 +20,6 @@ type DeviceRead = <TValue>(
   work: (stores: DeviceStores<MemoryTransaction>) => Promise<TValue>,
 ) => Promise<TValue>
 const deviceReads = new WeakMap<DevicePersistence<MemoryTransaction>, DeviceRead>()
-const rowLocks = new WeakMap<MemoryStoreRows, Map<string, Promise<void>>>()
-
-async function withPackageLock<TValue>(
-  tx: MemoryTransaction,
-  key: string,
-  work: () => Promise<TValue>,
-): Promise<TValue> {
-  let locks = rowLocks.get(tx.rows)
-  if (locks === undefined) {
-    locks = new Map()
-    rowLocks.set(tx.rows, locks)
-  }
-  const previous = locks.get(key) ?? Promise.resolve()
-  const { promise, resolve } = Promise.withResolvers<void>()
-  locks.set(key, promise)
-  await previous
-  try {
-    return await work()
-  } finally {
-    if (locks.get(key) === promise) locks.delete(key)
-    resolve()
-  }
-}
 
 export function bindMemoryPackageReads(
   device: DevicePersistence<MemoryTransaction>,
@@ -77,7 +54,7 @@ export function memoryDeviceTable<TValue>(params: DeviceTableParams) {
   return {
     async withLock<TResult>(work: () => Promise<TResult>): Promise<TResult> {
       map()
-      return await withPackageLock(tx, JSON.stringify([ownerDID, namespace, 'current']), work)
+      return await withMemoryTransactionLock(tx, work)
     },
     async load(recordID: string): Promise<TValue | null> {
       const location = address(recordID)
@@ -186,11 +163,7 @@ export function createTransactionPackageStores(params: {
         for (const recordID of ids) {
           const locator: unknown = JSON.parse(recordID)
           if (!Array.isArray(locator) || locator[0] !== sourceID) continue
-          const row = await withPackageLock(
-            tx,
-            JSON.stringify([ownerDID, namespace, recordID]),
-            () => load(locator[1]),
-          )
+          const row = await load(locator[1])
           if (row?.record !== null && row?.record !== undefined) records.push(row.record)
         }
         return records
@@ -241,17 +214,12 @@ export function createTransactionPackageStores(params: {
       },
       receipt,
     }
-    const locked = <TValue>(ref: string, work: () => Promise<TValue>) =>
-      withPackageLock(tx, JSON.stringify([ownerDID, namespace, id(ref)]), work)
     return {
-      list: raw.list,
-      put: (owner: string, record: TRecord) => {
-        const owned = copyStoredValue(record)
-        return locked(owned.ref, () => raw.put(owner, owned))
-      },
-      delete: (owner: string, ref: string) => locked(ref, () => raw.delete(owner, ref)),
-      consume: (ref: string, groupID: string) => locked(ref, () => raw.consume(ref, groupID)),
-      receipt: (ref: string) => locked(ref, () => raw.receipt(ref)),
+      list: lockMemoryOperation(tx, raw.list),
+      put: lockMemoryOperation(tx, raw.put),
+      delete: lockMemoryOperation(tx, raw.delete),
+      consume: lockMemoryOperation(tx, raw.consume),
+      receipt: lockMemoryOperation(tx, raw.receipt),
     }
   }
   return {
