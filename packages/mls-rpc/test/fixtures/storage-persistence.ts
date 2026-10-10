@@ -105,8 +105,14 @@ export async function createStorageFixture(params: {
     completed: Promise<void>
     done(): void
   }>()
-  function ports(effects = params.effects) {
-    const device = createMemoryDevicePersistence({ db, atRest, providerID, ownerDID, effects })
+  function ports(effects = params.effects, database = db) {
+    const device = createMemoryDevicePersistence({
+      db: database,
+      atRest,
+      providerID,
+      ownerDID,
+      effects,
+    })
     return {
       device,
       packageStores: (sourceID: string) => createMemoryPackageStores({ device, sourceID }),
@@ -255,6 +261,16 @@ export async function createStorageFixture(params: {
   }
   const fixture: PersistenceFixture<StorageTestPorts<MemoryTransaction>> = {
     ports: ports(),
+    async reopenWithoutBarrier() {
+      active()
+      // Fresh application ownership must not wait on the old factory's gate.
+      const restarted = {
+        ...db,
+        mutationGate: createMemoryTransaction({ rows: {} }).mutationGate,
+      }
+      fixture.ports = ports(params.effects, restarted)
+      return fixture.ports
+    },
     async reopen() {
       active()
       // An absent owner's transaction is invisible in the committed snapshot.

@@ -233,6 +233,7 @@ type FixtureGroupStores<TPorts> = TPorts extends {
 export type PersistenceFixture<TPorts> = {
   ports: TPorts
   reopen(): Promise<TPorts>
+  reopenWithoutBarrier(): Promise<TPorts>
   failNext(point: 'after-first-write' | 'before-commit' | 'status-read'): void
   commitThenReject(): void
   rejectCommitPending(): PendingCommitFault

@@ -9,6 +9,7 @@ import {
   writeStorageInstall,
 } from './group-storage.js'
 import type {
+  ConformanceGroupLifetime,
   ConformanceGroupStores,
   ConformanceGroupTransaction,
   ConformancePersistenceFixture,
@@ -277,6 +278,8 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
                 },
               ),
             )
+            const installed = await within(groups.loadState({ ...key, incarnation: 2 }))
+            if (installed === null) throw new Error('Missing installed state')
             await within(
               groups.transition(
                 await within(storageChange(groups, groupID, 'account')),
@@ -290,6 +293,9 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
             )
             expect(await within(groups.ports({ ...key, incarnation: 2 }).anchor.load())).toEqual(
               anchor,
+            )
+            expect((await within(groups.loadState({ ...key, incarnation: 2 })))?.version).toBe(
+              installed.version + 1,
             )
           }
           expect(
@@ -310,17 +316,20 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
     describe('effect store calls/exceptions', () => {
       test('outbox effect can load supplied lifetime', async () => {
         let supplied!: ConformanceGroupStores<TTx>
+        let effectCalls = 0
+        let loaded: ConformanceGroupLifetime | null | undefined
         const fixture = await within(
           params.createFixture(groupID, {
             async outbox() {
-              expect(await within(supplied.lifetime.load())).toMatchObject({
-                mutationID: 'effect-load',
-              })
+              effectCalls++
+              loaded = await within(supplied.lifetime.load())
             },
           }),
         )
         try {
           const groups = fixture.ports.device.groups
+          const before = await within(groups.load(groupID))
+          if (before === null) throw new Error('Missing installed lifetime')
           await within(
             groups.transition(
               await within(storageChange(groups, groupID, 'effect-load')),
@@ -330,6 +339,12 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
               },
             ),
           )
+          expect(effectCalls).toBe(1)
+          expect(loaded).toEqual({
+            ...before,
+            revision: before.revision + 1,
+            mutationID: 'effect-load',
+          })
         } finally {
           await within(fixture.close())
         }
@@ -451,6 +466,13 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
           const { device } = fixture.ports
           const groups = device.groups
           const seed = await within(storageSeed(groups))
+          const beforeDevice = await within(device.load())
+          const outcome = {
+            id: 'queued-control',
+            opID: 'queued-control',
+            at: 1000,
+            kind: 'unknown' as const,
+          }
           const change = await within(storageChange(groups, groupID, 'committed-unknown'))
           const order: Array<string> = []
           const calls: Array<string> = []
@@ -468,6 +490,11 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
                     .incarnation(1)
                     .state.save({ ...seed.state, version: seed.state.version + 1, senderHWM: 32 }),
                 )
+                await within(
+                  stores
+                    .incarnation(1)
+                    .control.apply({ putOutcomes: [outcome] }, change.mutationID),
+                )
                 started.resolve()
               })
               .then((value) => {
@@ -478,20 +505,20 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
           )
           await within(started.promise)
           expect(calls).toEqual([])
-          const reads = [
-            groups.loadState(key),
-            groups.load(groupID),
-            groups.ports(key).control.load(),
-            device.load(),
-          ].map((read) =>
+          const observeRead = <TValue>(read: Promise<TValue>) =>
             observed(
               read.then((value) => {
                 expect(calls).toEqual(['commit'])
                 order.push('read')
                 return value
               }),
-            ),
-          )
+            )
+          const reads = {
+            state: observeRead(groups.loadState(key)),
+            lifetime: observeRead(groups.load(groupID)),
+            control: observeRead(groups.ports(key).control.load()),
+            device: observeRead(device.load()),
+          }
           const next = observed(
             groups.transition(
               {
@@ -503,7 +530,23 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
             ),
           )
           expect(await within(writer.result)).toMatchObject({ ok: true })
-          for (const read of reads) expect(await within(read.result)).toMatchObject({ ok: true })
+          expect(await within(reads.state.result)).toEqual({
+            ok: true,
+            value: { ...seed.state, version: seed.state.version + 1, senderHWM: 32 },
+          })
+          expect(await within(reads.lifetime.result)).toEqual({
+            ok: true,
+            value: {
+              ...seed.lifetime,
+              revision: seed.lifetime.revision + 1,
+              mutationID: change.mutationID,
+            },
+          })
+          expect(await within(reads.control.result)).toMatchObject({
+            ok: true,
+            value: { outcomes: expect.arrayContaining([outcome]) },
+          })
+          expect(await within(reads.device.result)).toEqual({ ok: true, value: beforeDevice })
           expect(await within(next.result)).toEqual({ ok: true, value: 'next' })
           expect(order[0]).toBe('hook')
           expect(calls).toEqual(['commit'])
@@ -519,6 +562,13 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
         const { device } = fixture.ports
         const groups = device.groups
         const seed = await within(storageSeed(groups))
+        const beforeDevice = await within(device.load())
+        const outcome = {
+          id: 'queued-control',
+          opID: 'queued-control',
+          at: 1000,
+          kind: 'unknown' as const,
+        }
         const change = await within(storageChange(groups, groupID, 'pending'))
         const otherChange = await within(storageChange(groups, 'group-B', 'independent'))
         const fault = fixture.rejectCommitPending()
@@ -532,16 +582,19 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
                   .incarnation(1)
                   .state.save({ ...seed.state, version: seed.state.version + 1, senderHWM: 32 }),
               )
+              await within(
+                stores.incarnation(1).control.apply({ putOutcomes: [outcome] }, change.mutationID),
+              )
             }),
           )
           await within(fault.rejected)
           await within(fault.barrierWaiting)
-          const reads = [
-            groups.loadState(key),
-            groups.load(groupID),
-            groups.ports(key).control.load(),
-            device.load(),
-          ].map((read) => observed<unknown>(read))
+          const reads = {
+            state: observed(groups.loadState(key)),
+            lifetime: observed(groups.load(groupID)),
+            control: observed(groups.ports(key).control.load()),
+            device: observed(device.load()),
+          }
           const next = observed(
             groups.transition(
               {
@@ -558,14 +611,30 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
             }),
           )
           await turn()
-          const early = reads.map((read) => read.settled())
+          const early = Object.values(reads).map((read) => read.settled())
           expect(calls).toEqual([])
           expect(writer.settled()).toBe(false)
           expect(next.settled()).toBe(false)
           await within(fault.finish('commit'))
           finished = true
           expect(await within(writer.result)).toMatchObject({ ok: true })
-          for (const read of reads) expect(await within(read.result)).toMatchObject({ ok: true })
+          expect(await within(reads.state.result)).toEqual({
+            ok: true,
+            value: { ...seed.state, version: seed.state.version + 1, senderHWM: 32 },
+          })
+          expect(await within(reads.lifetime.result)).toEqual({
+            ok: true,
+            value: {
+              ...seed.lifetime,
+              revision: seed.lifetime.revision + 1,
+              mutationID: change.mutationID,
+            },
+          })
+          expect(await within(reads.control.result)).toMatchObject({
+            ok: true,
+            value: { outcomes: expect.arrayContaining([outcome]) },
+          })
+          expect(await within(reads.device.result)).toEqual({ ok: true, value: beforeDevice })
           expect(await within(next.result)).toEqual({ ok: true, value: 'next' })
           expect(calls).toEqual(['commit'])
           expect(await within(groups.loadState(key))).toMatchObject({ senderHWM: 32 })
@@ -651,10 +720,10 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
                 scope === 'group'
                   ? device.groups.resolve(groupID, 'joined-proof')
                   : device.resolve('joined-proof')
-              const joined = observed(resolve())
+              const joined = [observed(resolve()), observed(resolve()), observed(resolve())]
               await turn()
               expect(calls).toEqual([])
-              expect(joined.settled()).toBe(false)
+              for (const resolver of joined) expect(resolver.settled()).toBe(false)
               await within(fault.finish(outcome))
               finished = true
               expect(await within(writer.result)).toEqual(
@@ -666,8 +735,14 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
                     },
               )
               const classified = outcome === 'commit' ? 'committed' : 'rolled-back'
-              expect(await within(joined.result)).toEqual({ ok: true, value: classified })
-              expect(await within(resolve())).toBe(classified)
+              for (const resolver of joined)
+                expect(await within(resolver.result)).toEqual({ ok: true, value: classified })
+              expect(calls).toEqual([outcome])
+              if (outcome === 'rollback')
+                await within(
+                  expect(resolve()).rejects.toMatchObject({ name: 'GroupStateUncertainError' }),
+                )
+              else expect(await within(resolve())).toBe('committed')
               expect(calls).toEqual([outcome])
             } finally {
               if (!finished) await within(fault.finish('rollback'))
@@ -940,9 +1015,9 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
           )
           await within(fault.rejected)
           await within(fault.barrierWaiting)
-          const firstRead = observed(
-            fixture.reopen().then((ports) => ports.device.groups.loadState(key)),
-          )
+          const reopened = await within(fixture.reopenWithoutBarrier())
+          expect(writer.settled()).toBe(false)
+          const firstRead = observed(reopened.device.groups.loadState(key))
           await turn()
           expect(firstRead.settled()).toBe(false)
           await within(fault.finish('commit'))
