@@ -9,7 +9,7 @@
 - `String.prototype.isWellFormed` in `@kumiai/broadcast` and `@kumiai/rpc`
 - `AbortSignal.prototype.throwIfAborted` in `@kumiai/rpc` (2 sites)
 
-Web Streams and the interval/timeout timers are not replaced, because the enkaku transport layer is built on streams. They join the host whitelist, and Hermes needs a streams polyfill.
+Web Streams and the interval/timeout timers are not replaced, because the enkaku transport layer is built on streams. They join the host whitelist; Hermes provides Web Streams natively, confirmed by the user on 2026-10-11.
 
 The guard has two layers:
 - **Type layer:** a type-check of the in-scope sources against `lib: ["es2022", "dom"]` rejects ES2023+ built-ins by symbol, such as `toSorted` and `findLast`.
@@ -35,7 +35,7 @@ The guard has two layers:
 - **Supported hosts:**
   - Node ≥ 20.
   - Evergreen browsers in a secure context.
-  - Hermes with polyfills for Web Crypto, `TextEncoder`/`TextDecoder` and Web Streams.
+  - Hermes with polyfills for Web Crypto and `TextEncoder`/`TextDecoder`. Hermes provides Web Streams natively.
   - Syntax lowering is the host bundler's job; this baseline covers runtime built-ins and host APIs only.
 - **Optional capabilities.** These may be referenced only behind `typeof X !== 'undefined'`, in a condition of `&&`, `if` or a ternary. The code must be correct when they are absent:
   - `Float16Array`
@@ -183,7 +183,7 @@ The guard has two layers:
   - Restore one `isWellFormed` in `rpc/src/topic.ts`; both must fail. Restore.
   - Add a temporary `[].toSorted()` in `rpc/src`; the type layer must fail. Remove it.
   - Rebuild after each change.
-- [ ] **Step 3: Changeset.** Append to the existing summary: "MLS, broadcast and rpc runtime code no longer needs structuredClone, String.isWellFormed or AbortSignal.throwIfAborted; Hermes hosts need Web Crypto, TextEncoder and Web Streams polyfills."
+- [ ] **Step 3: Changeset.** Append to the existing summary: "MLS, broadcast and rpc runtime code no longer needs structuredClone, String.isWellFormed or AbortSignal.throwIfAborted; Hermes hosts need Web Crypto and TextEncoder polyfills."
 - [ ] **Step 4: Gate.** Each must pass:
   - `rtk proxy pnpm turbo run build:js build:types`
   - `rtk proxy pnpm turbo run test:types`
