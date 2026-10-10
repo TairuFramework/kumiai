@@ -674,6 +674,9 @@ importers:
       '@kumiai/mls':
         specifier: workspace:^
         version: link:../mls
+      '@kumiai/mls-hub':
+        specifier: workspace:^
+        version: link:../mls-hub
       '@kumiai/rpc':
         specifier: workspace:^
         version: link:../rpc
