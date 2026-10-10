@@ -82,8 +82,169 @@ test.each(
   }
 })
 
-test('copies shared buffers throughout cyclic side rows and preserves view aliases', async () => {
+test.each(
+  [
+    { label: 'SharedArrayBuffer', create: () => new SharedArrayBuffer(8) },
+    {
+      label: 'WebAssembly.Memory',
+      create: () => new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true }),
+    },
+    { label: 'function', create: () => () => {} },
+    { label: 'symbol', create: () => Symbol('row') },
+    { label: 'class instance', create: () => new (class Row {})() },
+    { label: 'RegExp', create: () => /row/ },
+    { label: 'Error', create: () => new Error('row') },
+  ].flatMap(({ label, create }) =>
+    (['seed', 'write'] as const).flatMap((boundary) =>
+      (['state', 'effects'] as const).map((name) => ({ label, create, boundary, name })),
+    ),
+  ),
+)(
+  'rejects nested $label at the $boundary boundary in $name rows',
+  async ({ create, boundary, name }) => {
+    const rowKey = name === 'state' ? key : 'effect-A'
+    const value = { nested: { value: create() } }
+    const rows = { [name]: new Map([[rowKey, value]]) }
+    if (boundary === 'seed') {
+      expect(() => createMemoryTransaction({ rows })).toThrow(TypeError)
+      expect(rows[name]?.get(rowKey)).toBe(value)
+      return
+    }
+    const db = createMemoryTransaction({ rows: { [name]: new Map([[rowKey, sealedA]]) } })
+    const before = db.snapshot()
+    await expect(
+      db.transact(scope, async (tx) => {
+        namespace(tx.rows, name).set(rowKey, value)
+      }),
+    ).rejects.toThrow(TypeError)
+    expect(db.snapshot()).toEqual(before)
+    await db.transact(scope, async (tx) => {
+      const map = namespace(tx.rows, name)
+      expect(() => map.set(rowKey, value)).toThrow(TypeError)
+      expect(map.get(rowKey)).toEqual(sealedA)
+    })
+    expect(db.snapshot()).toEqual(before)
+  },
+)
+
+test.each([
+  { label: 'array', wrap: (value: unknown) => [value] },
+  { label: 'map key', wrap: (value: unknown) => new Map([[value, 'row']]) },
+  { label: 'map value', wrap: (value: unknown) => new Map([['row', value]]) },
+  { label: 'set', wrap: (value: unknown) => new Set([value]) },
+  {
+    label: 'null-prototype object',
+    wrap: (value: unknown) => Object.assign(Object.create(null), { value }),
+  },
+])('rejects unsupported storage nested in $label', async ({ wrap }) => {
+  for (const value of [
+    new SharedArrayBuffer(8),
+    new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true }),
+  ]) {
+    const nested = wrap(value)
+    expect(() =>
+      createMemoryTransaction({ rows: { effects: new Map([['effect-A', nested]]) } }),
+    ).toThrow(TypeError)
+    const db = createMemoryTransaction({ rows: { effects: new Map([['effect-A', sealedA]]) } })
+    const before = db.snapshot()
+    await expect(
+      db.transact(scope, async (tx) => {
+        namespace(tx.rows, 'effects').set('effect-A', nested)
+      }),
+    ).rejects.toThrow(TypeError)
+    expect(db.snapshot()).toEqual(before)
+  }
+})
+
+test('rejects raw shared storage even when its view was already copied', async () => {
   const buffer = new SharedArrayBuffer(8)
+  const value = { bytes: new Uint8Array(buffer), buffer }
+  expect(() =>
+    createMemoryTransaction({ rows: { effects: new Map([['effect-A', value]]) } }),
+  ).toThrow(TypeError)
+  const db = createMemoryTransaction({ rows: { effects: new Map([['effect-A', sealedA]]) } })
+  const before = db.snapshot()
+  await expect(
+    db.transact(scope, async (tx) => {
+      namespace(tx.rows, 'effects').set('effect-A', value)
+    }),
+  ).rejects.toThrow(TypeError)
+  expect(db.snapshot()).toEqual(before)
+})
+
+test('copies shared-backed Float16Array rows into independent buffers', async () => {
+  const input = new Float16Array(new SharedArrayBuffer(8), 2, 2)
+  input.set([97, 1])
+  const db = createMemoryTransaction({ rows: { effects: new Map([['effect-A', input]]) } })
+  await db.transact(scope, async (tx) => {
+    const rows = namespace(tx.rows, 'effects')
+    rows.set('effect-A', input)
+    input.fill(0)
+    const copy = rows.get('effect-A') as Float16Array
+    expect(copy).toBeInstanceOf(Float16Array)
+    expect(copy.buffer).toBeInstanceOf(ArrayBuffer)
+    expect(copy.byteOffset).toBe(2)
+    expect([...copy]).toEqual([97, 1])
+  })
+  expect([...(namespace(db.snapshot(), 'effects').get('effect-A') as Float16Array)]).toEqual([
+    97, 1,
+  ])
+})
+
+test('copies allowed scalar and plain-object values without losing null prototypes', async () => {
+  const value: { values: Array<unknown>; date: Date } = Object.assign(Object.create(null), {
+    values: [undefined, null, false, 42, 'row', 12n],
+    date: new Date('2026-10-10T00:00:00Z'),
+  })
+  const db = createMemoryTransaction({ rows: { effects: new Map([['effect-A', value]]) } })
+  value.date.setUTCFullYear(2000)
+  await db.transact(scope, async (tx) => {
+    const copy = namespace(tx.rows, 'effects').get('effect-A') as typeof value
+    expect(Object.getPrototypeOf(copy)).toBeNull()
+    expect(copy.values).toEqual([undefined, null, false, 42, 'row', 12n])
+    expect(copy.date.toISOString()).toBe('2026-10-10T00:00:00.000Z')
+    namespace(tx.rows, 'effects').set('effect-B', copy)
+    copy.date.setUTCFullYear(2001)
+  })
+  const snapshot = namespace(db.snapshot(), 'effects').get('effect-B') as typeof value
+  expect(Object.getPrototypeOf(snapshot)).toBeNull()
+  expect(snapshot.date.toISOString()).toBe('2026-10-10T00:00:00.000Z')
+})
+
+test('copies shared-backed view aliases in cyclic side rows without accepting raw buffers', async () => {
+  const buffer = new SharedArrayBuffer(8)
+  const bytes = new Uint8Array(buffer, 2, 2)
+  bytes.set(sealedA)
+  const value = {
+    bytes,
+    view: new DataView(buffer, 2, 2),
+    map: new Map([[bytes, bytes]]),
+    set: new Set([bytes]),
+    self: undefined as unknown,
+  }
+  value.self = value
+  const db = createMemoryTransaction({ rows: { effects: new Map([['effect-A', value]]) } })
+  await db.transact(scope, async (tx) => {
+    const rows = namespace(tx.rows, 'effects')
+    rows.set('effect-A', value)
+    bytes.fill(0)
+    const copy = rows.get('effect-A') as typeof value
+    expect(copy.bytes).toEqual(sealedA)
+    expect(copy.bytes.buffer).toBeInstanceOf(ArrayBuffer)
+    expect(copy.bytes.byteOffset).toBe(2)
+    expect(copy.view.buffer).toBe(copy.bytes.buffer)
+    expect(copy.view.getUint8(0)).toBe(97)
+    expect(copy.map.get(copy.bytes)).toBe(copy.bytes)
+    expect(copy.set.has(copy.bytes)).toBe(true)
+    expect(copy.self).toBe(copy)
+  })
+  expect((namespace(db.snapshot(), 'effects').get('effect-A') as typeof value).bytes).toEqual(
+    sealedA,
+  )
+})
+
+test('copies buffers throughout cyclic side rows and preserves view aliases', async () => {
+  const buffer = new ArrayBuffer(8)
   const bytes = new Uint8Array(buffer, 2, 2)
   bytes.set(sealedA)
   const value = {

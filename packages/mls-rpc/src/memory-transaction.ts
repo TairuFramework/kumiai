@@ -132,50 +132,89 @@ function overlaps(left: Scope, right: Scope): boolean {
 }
 
 function cloneValue<TValue>(value: TValue): TValue {
-  // structuredClone copies the graph but retains SharedArrayBuffer backing storage.
   const copies = new Map<object, object>()
-  function detach(value: unknown): unknown {
+  function copyBuffer(buffer: ArrayBufferLike): ArrayBuffer {
+    const existing = copies.get(buffer)
+    if (existing !== undefined) return existing as ArrayBuffer
+    const copy = new Uint8Array(buffer).slice().buffer
+    copies.set(buffer, copy)
+    return copy
+  }
+  function copy(value: unknown): unknown {
+    if (typeof value === 'function' || typeof value === 'symbol') {
+      throw new TypeError('Unsupported memory row value')
+    }
     if (typeof value !== 'object' || value === null) return value
+    // Shared storage is accepted only through views, never as an exposed row value.
+    if (value instanceof SharedArrayBuffer) throw new TypeError('Unsupported memory row value')
     const existing = copies.get(value)
     if (existing !== undefined) return existing
-    if (value instanceof SharedArrayBuffer) {
-      const buffer = new Uint8Array(value).slice().buffer
-      copies.set(value, buffer)
-      return buffer
-    }
     if (ArrayBuffer.isView(value)) {
-      if (!(value.buffer instanceof SharedArrayBuffer)) return value
-      const buffer = detach(value.buffer) as ArrayBuffer
-      const View = value.constructor as {
-        new (buffer: ArrayBuffer, byteOffset: number, length: number): ArrayBufferView
+      const buffer = copyBuffer(value.buffer)
+      if (value instanceof DataView) {
+        const view = new DataView(buffer, value.byteOffset, value.byteLength)
+        copies.set(value, view)
+        return view
       }
-      const view =
-        value instanceof DataView
-          ? new DataView(buffer, value.byteOffset, value.byteLength)
-          : new View(buffer, value.byteOffset, (value as unknown as { length: number }).length)
+      const View = [
+        Int8Array,
+        Uint8Array,
+        Uint8ClampedArray,
+        Int16Array,
+        Uint16Array,
+        Int32Array,
+        Uint32Array,
+        ...(typeof Float16Array === 'undefined' ? [] : [Float16Array]),
+        Float32Array,
+        Float64Array,
+        BigInt64Array,
+        BigUint64Array,
+      ].find((View) => value instanceof View)
+      if (View === undefined) throw new TypeError('Unsupported memory row view')
+      const view = new View(
+        buffer,
+        value.byteOffset,
+        (value as unknown as { length: number }).length,
+      )
       copies.set(value, view)
       return view
     }
-    copies.set(value, value)
-    if (value instanceof Map) {
-      const entries = [...value]
-      value.clear()
-      for (const [key, item] of entries) value.set(detach(key), detach(item))
-    } else if (value instanceof Set) {
-      const items = [...value]
-      value.clear()
-      for (const item of items) value.add(detach(item))
-    } else {
-      for (const key of Reflect.ownKeys(value)) {
-        const descriptor = Object.getOwnPropertyDescriptor(value, key)
-        if (descriptor !== undefined && 'value' in descriptor) {
-          Object.defineProperty(value, key, { ...descriptor, value: detach(descriptor.value) })
-        }
-      }
+    const prototype = Object.getPrototypeOf(value)
+    if (prototype === ArrayBuffer.prototype) return copyBuffer(value as ArrayBuffer)
+    if (prototype === Date.prototype) {
+      const date = new Date((value as Date).getTime())
+      copies.set(value, date)
+      return date
     }
-    return value
+    if (prototype === Map.prototype) {
+      const map = new Map<unknown, unknown>()
+      copies.set(value, map)
+      for (const [key, item] of value as Map<unknown, unknown>) map.set(copy(key), copy(item))
+      return map
+    }
+    if (prototype === Set.prototype) {
+      const set = new Set<unknown>()
+      copies.set(value, set)
+      for (const item of value as Set<unknown>) set.add(copy(item))
+      return set
+    }
+    if (prototype === Object.prototype || prototype === null || Array.isArray(value)) {
+      const object = Array.isArray(value) ? new Array(value.length) : Object.create(prototype)
+      copies.set(value, object)
+      for (const key of Reflect.ownKeys(value)) {
+        if (Array.isArray(value) && key === 'length') continue
+        Object.defineProperty(object, key, {
+          value: copy(Reflect.get(value, key)),
+          enumerable: Object.prototype.propertyIsEnumerable.call(value, key),
+          configurable: true,
+          writable: true,
+        })
+      }
+      return object
+    }
+    throw new TypeError('Unsupported memory row value')
   }
-  return detach(structuredClone(value)) as TValue
+  return copy(value) as TValue
 }
 
 function guardedMap(params: {
