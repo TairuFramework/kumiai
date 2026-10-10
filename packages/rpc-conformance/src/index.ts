@@ -50,6 +50,7 @@ export {
   type ControlStoreConformanceParams,
   testControlStoreConformance,
 } from './control-store.js'
+export { testDeviceStorageConformance } from './device-storage.js'
 export {
   type ConformanceCryptoGroup,
   type ConformanceCryptoMember,
@@ -68,6 +69,7 @@ export {
   type GroupMLSConformanceParams,
   testGroupMLSConformance,
 } from './group-mls.js'
+export { testGroupStorageConformance } from './group-storage.js'
 export { createMemoryAppOutbox, type MemoryAppOutbox } from './memory-app-outbox.js'
 export { createMemoryControlStore, type MemoryControlStore } from './memory-control-store.js'
 export {
@@ -78,3 +80,4 @@ export {
   type PendingCryptoFixture,
   testPendingGroupCryptoConformance,
 } from './pending-group-crypto.js'
+export * from './persistence-fixture.js'

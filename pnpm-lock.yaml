@@ -756,6 +756,10 @@ importers:
         version: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@26.6.4)(@vitest/ui@5.0.3)(vite@8.3.3(@types/node@26.6.4)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.15)(yaml@2.9.1))
 
   packages/rpc-conformance:
+    dependencies:
+      ts-mls:
+        specifier: 'catalog:'
+        version: 2.0.0-rc.13(@noble/ciphers@2.2.0)
     devDependencies:
       vitest:
         specifier: 'catalog:'
@@ -1839,6 +1843,10 @@ packages:
   '@napi-rs/nice@1.1.1':
     resolution: {integrity: sha512-xJIPs+bYuc9ASBl+cvGsKbGrJmS6fAKaSZCnT0lhahT5rhA2VVy9/EcIgd2JhtEuFOJNx7UHNn/qiTPTY4nrQw==}
     engines: {node: '>= 10'}
+
+  '@noble/ciphers@2.2.0':
+    resolution: {integrity: sha512-Z6pjIZ/8IJcCGzb2S/0Px5J81yij85xASuk1teLNeg75bfT07MV3a/O2Mtn1I2se43k3lkVEcFaR10N4cgQcZA==}
+    engines: {node: '>= 20.19.0'}
 
   '@noble/ciphers@2.4.0':
     resolution: {integrity: sha512-AnjFn0Jv92laAkvMrghlFZq4qQCIN/4DxFV/eooqtC2YTjB7kBeLMS2T9KJX4Dn+ZVXLOwK0lSgqDtx9gvxtiw==}
@@ -6114,6 +6122,8 @@ snapshots:
       '@napi-rs/nice-win32-x64-msvc': 1.1.1
     optional: true
 
+  '@noble/ciphers@2.2.0': {}
+
   '@noble/ciphers@2.4.0': {}
 
   '@noble/curves@2.4.0':
@@ -9092,6 +9102,11 @@ snapshots:
   totalist@3.0.1: {}
 
   ts-algebra@2.0.0: {}
+
+  ts-mls@2.0.0-rc.13(@noble/ciphers@2.2.0):
+    dependencies:
+      '@hpke/core': 1.9.0
+      '@noble/ciphers': 2.2.0
 
   ts-mls@2.0.0-rc.13(@noble/ciphers@2.4.0)(@noble/curves@2.4.0):
     dependencies:
