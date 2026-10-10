@@ -444,17 +444,29 @@ the entry's ownership and reads committed rows; root calls from `prepare` are re
 
 **Store operations (r18 decision).** One per-entry operation lock admits one store operation at a time for its whole read-modify-write,
 including codec I/O and, for async providers, backend statements, so no two operations interleave and none overwrites another's result.
-Operations never nest: a store implementation never invokes a public store method or another locked operation from inside an operation,
-only private unlocked helpers; host callbacks invoked inside an operation (codec seal/open) receive no store access, and any store call they
-make is caller misuse. Lawful use therefore cannot wait on itself through the lock. A phase change closes admission at once, so later
-public store calls refuse with `PersistencePhaseError`; operations admitted before it, including abandoned ones, run to completion before
-the phase changes, so phases never overlap and every admitted operation settles before `outcome`. Phase changes are coordinator actions,
-never reachable from host code. The entry records every fatal operation failure (a seal/open failure, or any failure after an operation
-changed rows) independently of the lock, including when the caller abandoned or caught it; such a transition is rollback-only and draining
-cannot clear that. A refused access that was never admitted and changed nothing does not poison it. Each operation, store and writer is
+Operations never nest: a store implementation, coordinator helper or read callback never invokes a public store method or another locked
+operation from inside an operation, only private unlocked helpers under the one reservation, and never holds a reservation around a
+callback allowed to invoke public stores (package-read callbacks call individually locked stores without an outer reservation). Host
+callbacks invoked inside an operation (codec seal/open) receive no store access, and any store call they make is caller misuse. Lawful use
+therefore cannot wait on itself through the lock. An allowed store call registers its operation synchronously before returning its promise,
+including while it waits for the lock; execution is serial. A phase change closes admission for the outgoing phase at once, freezes that
+phase's registered operations and drains all of them, including abandoned ones, using their captured bindings, so phases never overlap and
+every registered operation settles before `outcome`. Store wrappers stay attempt-bound and evaluate each new call against the current
+phase table: `effects` reopens public side writes and reads, and `finalise`/`account` admit only the private coordinator writer. Drainage
+has no wall-clock bound: progress assumes codec and backend calls settle, and operation callbacks must not depend on phase advancement,
+entry outcome, completion hooks or another operation queued behind their reservation. `maxBatchWorkMs` bounds staging, not codec/backend
+latency or drainage; elapsed time alone never proves completion or authorises ownership release. Phase changes are coordinator actions,
+never reachable from host code. The entry records every fatal operation failure (a seal failure, a failed required open, or any failure after an
+operation changed rows) independently of the lock, including when the caller abandoned or caught it; such a transition is rollback-only and
+draining cannot clear that. A private coordinator diagnostic may classify unreadable MLS state for authorised control/meta-only safety work
+without poisoning it; that never permits state use, payload release, publication or bypassing required trust validation, and unreadable
+records stay preserved. A refused access that was never admitted and changed nothing does not poison it. Each operation, store and writer is
 bound to its entry, provider transaction and attempt; cancellation, fail-stop or a retry attempt revokes the old bindings, rejects pending
 operation promises, discards late results, and lets backend rollback/completion proceed without waiting for a suspended host callback.
-Ownership releases only after a known completion, or stays retained for unknown-outcome proof.
+Work or effect rejection revokes outstanding operations before rollback/completion. A failed `Read` immediately revokes its attempt
+bindings, rejects pending operation promises and releases application ownership without awaiting host callbacks; it retains no proof or
+hook queue, and the provider independently completes or quarantines its backend transaction before connection reuse. `Transition` and
+`Combined` ownership releases only after a known completion, or stays retained for unknown-outcome proof.
 
 **Coordinator authority (r18 decision).** `finalise` and `account` read and write through a private coordinator writer created per entry
 and attempt, with its own private access path to the provider transaction, never passed to host code or the `ownershipContext` port;
@@ -1092,7 +1104,7 @@ Keep each meaningful existing case. Replace cases tied solely to removed mechani
 | | at-rest all namespaces | inspect every physical byte copy for plaintext/spans, anchor secrets and topicIDs. Same-codec reopen succeeds. Wrong group/incarnation/namespace/record AAD, mutations and swaps reject through adapters. |
 | | deletion/lifecycle | stopped/drained owner, unsettled-control refusal, atomic tombstone/effects, no late writes. Retired outcomes/Welcomes/events remain serviceable until ack/delivery. |
 | ownership-phases / 2,3 (r17 decision) | phase capabilities | Domain write in effects, account-time host access or after outcome refuses with PersistencePhaseError and changes nothing, through supplied stores, independently constructed stores and exposed transaction access alike. Side writes in effects commit with the transition. Mutation-check each refusal. |
-| | operation lock | Suspend an async store operation mid-write, start a second operation and finalisation: they run one at a time and validation sees both. Two concurrent updates of the same record (control outcomes) both persist. A rejected abandoned seal makes the transition roll back. A late operation from a revoked attempt writes nothing. Effect side write to another incarnation is accounted (version advances) or refused. |
+| | operation lock | Suspend an async store operation mid-write, start a second operation and finalisation: they run one at a time and validation sees both. Two concurrent updates of the same record (control outcomes) both persist. A rejected abandoned seal makes the transition roll back. A late operation from a revoked attempt writes nothing. An operation called behind a suspended one before closure still drains; stores supplied in work keep working in effects; private writer operations complete in account. A suspended abandoned open followed by Read failure releases at once and the next same-scope operation completes. Device loads (initial and existing), device transitions, package reads and Combined participation complete without `ownershipContext`. Corrupt-state and corrupt-trust safety events and control obligations still commit; failed required opens and seals roll back. Effect side write to another incarnation is accounted (version advances) or refused. |
 | | effect store calls/exceptions | Outbox effect then lifetime load, and delete effect then clearTransport, complete within bound. A throwing effect rolls back transition and effect rows. A throwing onCommit/onRollback hook is contained, other hooks run, outcome stands. |
 | | ambiguous transition fence | Unknown Transition, both before backend completion and after commit with proof delayed: every read path (group/facade/device/package) and same-group Transition wait until proof; independent group commits meanwhile. Zero hooks before proof, exactly one queue after unless proof fail-stops the factory. |
 | | ambiguous read releases | Fault on a root Read, both commit-then-reject and unfinished backend: read rejects; next same-group Read and Transition complete, on every read path. Providers with connections: the failed read transaction is completed and the next writer acquires the writer lock. |
