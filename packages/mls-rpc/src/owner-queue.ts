@@ -57,6 +57,11 @@ export type OwnerQueues = {
 const ownershipContext = new AsyncLocalStorage<OwnerEntry>()
 // Marks code already running inside an entry's sequencer, which must not wait on that sequencer.
 const sequencedContext = new AsyncLocalStorage<OwnerEntry>()
+const failureSignals = new WeakMap<OwnerEntry, AbortSignal>()
+
+export function ownerEntryFailureSignal(entry: OwnerEntry): AbortSignal | undefined {
+  return failureSignals.get(entry)
+}
 
 type Slot = { held: boolean; waiters: Array<() => void> }
 type Owned = {
@@ -344,6 +349,7 @@ export function createOwnerQueues(): OwnerQueues {
           return owned.proof
         },
       }
+      failureSignals.set(entry, stopped.signal)
       const owned: Owned = {
         entry,
         proof: null,

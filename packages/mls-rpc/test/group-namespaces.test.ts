@@ -6,7 +6,7 @@ import { createMemoryGroupPersistence } from '../src/memory-group-persistence.js
 import { createGroupStateStores } from '../src/memory-group-state.js'
 import { createIncarnationStores } from '../src/memory-incarnation-stores.js'
 import { createMemoryTransaction } from '../src/memory-transaction.js'
-import { createOwnerQueues, type OwnerQueues } from '../src/owner-queue.js'
+import { createOwnerQueues, type OwnerEntry, type OwnerQueues } from '../src/owner-queue.js'
 import { physicalRecordKey, sealRecord } from '../src/persistence-codec.js'
 import { GroupStateConflictError } from '../src/persistence-errors.js'
 import type {
@@ -576,6 +576,226 @@ for (const mode of ['real-mls', 'double'] as const) {
       expect((await groups.loadState(key))?.version).toBe(2)
       expect((await groups.load(groupID))?.revision).toBe(2)
     })
+
+    test('fail-stop disposes a pending backend outcome and ignores its later commit', async () => {
+      const { db, groups } = await setup()
+      const before = db.snapshot()
+      const hooks: Array<string> = []
+      const change = await nextChange(groups, groupID, 'disposed-outcome')
+      const fault = memoryFaults(db).rejectCommitPending()
+      const write = groups
+        .transition(change, async (stores) => {
+          stores.tx.onCommit(() => hooks.push('commit'))
+          stores.tx.onRollback(() => hooks.push('rollback'))
+          await stores.incarnation(1).anchor.save(anchor)
+        })
+        .catch((error: unknown) => error)
+      await fault.rejected
+      await fault.barrierWaiting
+      const conflict = new GroupStateConflictError('Foreign owner')
+      ownerQueues(db).failStop(conflict)
+      expect(await write).toBe(conflict)
+      let completed = false
+      const barrier = db.completionBarrier({ groupID, devicePackages: false }).then(() => {
+        completed = true
+      })
+      try {
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        expect(completed).toBe(true)
+        expect(db.snapshot()).toEqual(before)
+      } finally {
+        await fault.finish('commit')
+        await barrier
+      }
+      expect(db.snapshot()).toEqual(before)
+      expect(hooks).toEqual([])
+    })
+
+    test('fail-stop disposes suspended work before releasing the callback', async () => {
+      const { db, groups } = await setup()
+      const owners = ownerQueues(db)
+      const before = db.snapshot()
+      const reached = Promise.withResolvers<void>()
+      const resume = Promise.withResolvers<void>()
+      const finished = Promise.withResolvers<void>()
+      const hooks: Array<string> = []
+      const late: Array<unknown> = []
+      const write = groups
+        .transition(await nextChange(groups, groupID, 'suspended-work'), async (stores) => {
+          try {
+            stores.tx.onCommit(() => hooks.push('commit'))
+            stores.tx.onRollback(() => hooks.push('rollback'))
+            await stores.incarnation(1).anchor.save(anchor)
+            const alias = { ...stores.tx, rows: { ...stores.tx.rows } }
+            reached.resolve()
+            await resume.promise
+            late.push(
+              await stores
+                .incarnation(1)
+                .anchor.save(null)
+                .catch((error: unknown) => error),
+            )
+            try {
+              alias.rows.anchor?.set(JSON.stringify([groupID, 1, 'current']), new Uint8Array([1]))
+            } catch (error) {
+              late.push(error)
+            }
+            try {
+              alias.onRollback(() => hooks.push('late'))
+            } catch (error) {
+              late.push(error)
+            }
+            late.push(await groups.load(groupID).catch((error: unknown) => error))
+            throw new Error('Late callback rejection')
+          } finally {
+            finished.resolve()
+          }
+        })
+        .catch((error: unknown) => error)
+      await reached.promise
+      const queued = groups.loadState(key).catch((error: unknown) => error)
+      const conflict = new GroupStateConflictError('Foreign owner')
+      owners.failStop(conflict)
+      expect(await write).toBe(conflict)
+      expect(await queued).toBe(conflict)
+      const transact = vi.spyOn(db, 'transact')
+      let barrierFinished = false
+      const barrier = db.completionBarrier({ groupID, devicePackages: false }).then(() => {
+        barrierFinished = true
+      })
+      try {
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        expect(barrierFinished).toBe(true)
+        expect(db.snapshot()).toEqual(before)
+        expect(hooks).toEqual([])
+        // A clean backend transaction can acquire the same writer lock before host work resumes.
+        await db.transact({ groupID, devicePackages: false }, async (tx) => {
+          expect(tx.rows.anchor?.size).toBe(0)
+        })
+        expect(transact).toHaveBeenCalledTimes(1)
+      } finally {
+        resume.resolve()
+        await finished.promise
+        await barrier
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(late).toEqual([conflict, conflict, conflict, conflict])
+      expect(hooks).toEqual([])
+      expect(db.snapshot()).toEqual(before)
+      expect(transact).toHaveBeenCalledTimes(1)
+    })
+
+    test('drains a copied rows-container alias before outcome and queued reads', async () => {
+      const { db, groups } = await setup()
+      const owners = ownerQueues(db)
+      const reached = Promise.withResolvers<void>()
+      const resume = Promise.withResolvers<void>()
+      const returned = Promise.withResolvers<void>()
+      const codec = {
+        ...atRest,
+        async seal(bytes: Uint8Array, aad: Uint8Array) {
+          if (new TextDecoder().decode(aad).includes('"anchor"')) {
+            reached.resolve()
+            await resume.promise
+          }
+          return await atRest.seal(bytes, aad)
+        },
+      }
+      const paused = createMemoryGroupPersistence({
+        owners,
+        db,
+        atRest: codec,
+        providerID: 'memory',
+      })
+      const before = db.snapshot()
+      const order: Array<string> = []
+      let active: OwnerEntry | undefined
+      let operation!: Promise<void>
+      const write = paused
+        .transition(await nextChange(groups, groupID, 'copied-rows'), async (stores) => {
+          active = owners.current()
+          stores.tx.onCommit(() => order.push('commit'))
+          const alias = { ...stores.tx, rows: { ...stores.tx.rows } }
+          operation = createIncarnationStores({ tx: alias, key, atRest: codec })
+            .anchor.save(anchor)
+            .then(() => {
+              order.push('store')
+            })
+          void operation.catch(() => undefined)
+          await reached.promise
+          returned.resolve()
+          return 'saved'
+        })
+        .then((value) => {
+          order.push('writer')
+          return value
+        })
+      void write.catch(() => undefined)
+      await returned.promise
+      const read = groups.loadState(key).then((value) => {
+        order.push('read')
+        return value
+      })
+      try {
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        expect(active?.phase).toBe('work')
+        expect(order).toEqual([])
+        expect(db.snapshot()).toEqual(before)
+      } finally {
+        resume.resolve()
+        await Promise.allSettled([operation, write, read])
+      }
+      await expect(operation).resolves.toBeUndefined()
+      await expect(write).resolves.toBe('saved')
+      expect((await read)?.version).toBe(2)
+      expect(order).toEqual(['store', 'commit', 'writer', 'read'])
+      expect(await groups.ports(key).anchor.load()).toEqual(anchor)
+    })
+
+    test.each(['set', 'delete', 'clear'] as const)(
+      'refuses direct state-version metadata %s in effects before changing any row',
+      async (operation) => {
+        const { db, groups } = await setup()
+        const metadataKey = physicalRecordKey({
+          ...key,
+          namespace: 'meta',
+          recordID: JSON.stringify(['state-version']),
+        })
+        const effects = createMemoryGroupPersistence({
+          owners: ownerQueues(db),
+          db,
+          atRest,
+          providerID: 'memory',
+          effects: {
+            async outbox(tx) {
+              const metadata = tx.rows.meta
+              if (metadata === undefined) throw new Error('Missing metadata namespace')
+              const before = [...metadata]
+              expect(metadata.has(metadataKey)).toBe(true)
+              expect(() => {
+                if (operation === 'set') metadata.set(metadataKey, new Uint8Array([1]))
+                else if (operation === 'delete') metadata.delete(metadataKey)
+                else metadata.clear()
+              }).toThrow('Cannot write domain in effects')
+              expect([...metadata]).toEqual(before)
+            },
+          },
+        })
+        await effects.transition(
+          await nextChange(groups, groupID, `direct-metadata-${operation}`),
+          async (stores) => {
+            await stores.incarnation(1).meta.putEvents([event])
+            // Put a side row before the protected row to detect partial clear.
+            const metadata = stores.tx.rows.meta
+            if (metadata === undefined) throw new Error('Missing metadata namespace')
+            const version = metadata.get(metadataKey)
+            metadata.delete(metadataKey)
+            metadata.set(metadataKey, version)
+          },
+        )
+        expect((await groups.loadState(key))?.version).toBe(2)
+      },
+    )
 
     test('completes an outbox effect that loads transaction-bound lifetime', async () => {
       const { db, groups, seed } = await setup()

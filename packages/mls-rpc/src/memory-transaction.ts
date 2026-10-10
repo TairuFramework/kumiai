@@ -7,6 +7,8 @@ import {
   assertMemoryAccess,
   assertMemoryWrite,
   memoryTransactionEntry,
+  memoryTransactionFailureSignal,
+  registerMemoryTransactionRows,
 } from './memory-group-state.js'
 import { groupOwnerKey } from './memory-incarnation-stores.js'
 import { StorageOutcomeUnknownError } from './persistence-errors.js'
@@ -262,10 +264,9 @@ function guardedMap(params: {
       if (property === 'clear')
         return () => {
           assertActive()
-          for (const key of rows.keys()) {
-            write(key)
-            rows.delete(key)
-          }
+          // A protected row must refuse the entire clear before any side row disappears.
+          for (const key of rows.keys()) write(key)
+          rows.clear()
         }
       if (property === 'forEach')
         return (fn: (value: unknown, key: string, map: Map<string, unknown>) => void) => {
@@ -377,7 +378,10 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
           write(key) {
             assertMemoryWrite(
               tx,
-              ['lifetime', 'trust', 'state', 'group-owner', 'device-owner', 'device'].includes(name)
+              ['lifetime', 'trust', 'state', 'group-owner', 'device-owner', 'device'].includes(
+                name,
+              ) ||
+                (name === 'meta' && JSON.parse(key)[2] === JSON.stringify(['state-version']))
                 ? 'domain'
                 : 'side',
             )
@@ -412,6 +416,7 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
           throw new Error('Cannot replace transaction namespaces')
         },
       })
+      registerMemoryTransactionRows(rows, views)
       const tx: MemoryTransaction = {
         providerID: 'memory',
         groupID: scope.groupID,
@@ -465,8 +470,39 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
         }
       }
       let retained = false
+      let disposed = false
+      let released = false
+      let failureSignal: AbortSignal | undefined
+      let backendOwner: { scope: Scope; waiting(): void } | undefined
+      const failed = Promise.withResolvers<never>()
+      function releaseBackend(): void {
+        failureSignal?.removeEventListener('abort', dispose)
+        if (released) return
+        released = true
+        release()
+      }
+      function dispose(): void {
+        if (backendOutcome !== undefined) return
+        disposed = true
+        owner.active = false
+        commits.length = 0
+        rollbacks.length = 0
+        touched.clear()
+        backendOutcome = 'rolled-back'
+        if (backendOwner !== undefined) pending.delete(backendOwner)
+        releaseBackend()
+        failed.reject(failureSignal?.reason)
+      }
       try {
-        const value = await transactionContext.run(owner, () => fn(tx))
+        const work = transactionContext.run(owner, () => fn(tx))
+        failureSignal = memoryTransactionFailureSignal(rows)
+        failureSignal?.addEventListener('abort', dispose, { once: true })
+        if (failureSignal?.aborted) dispose()
+        // Factory failure completes the backend independently of suspended host code.
+        const value = await (failureSignal === undefined
+          ? work
+          : Promise.race([failed.promise, work]))
+        if (disposed) throw failureSignal?.reason
         owner.active = false
         if (writeFailure !== undefined) throw writeFailure
         if (faults.take('before-commit')) throw new Error('Injected before-commit failure')
@@ -476,16 +512,17 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
           if (fault === 'reject') {
             merge()
             backendOutcome = 'committed'
-            release()
+            releaseBackend()
           } else {
-            const backendOwner = { scope, waiting: fault.waiting }
+            backendOwner = { scope, waiting: fault.waiting }
             pending.add(backendOwner)
             for (const barrier of barriers) if (overlaps(scope, barrier)) backendOwner.waiting()
             fault.reject((outcome) => {
+              if (disposed) return
               if (outcome === 'commit') merge()
               backendOutcome = outcome === 'commit' ? 'committed' : 'rolled-back'
-              pending.delete(backendOwner)
-              release()
+              if (backendOwner !== undefined) pending.delete(backendOwner)
+              releaseBackend()
             })
           }
           try {
@@ -501,14 +538,14 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
         return value
       } catch (error) {
         owner.active = false
-        if (!retained) {
+        if (!retained && !disposed) {
           backendOutcome = 'rolled-back'
           settlement.settle('rolled-back')
         }
         throw error
       } finally {
         owner.active = false
-        if (!retained) release()
+        if (!retained) releaseBackend()
       }
     },
   }

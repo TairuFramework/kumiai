@@ -2,7 +2,12 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 
-import type { OwnerEntry, OwnerQueues, WriteTarget } from './owner-queue.js'
+import {
+  type OwnerEntry,
+  type OwnerQueues,
+  ownerEntryFailureSignal,
+  type WriteTarget,
+} from './owner-queue.js'
 import {
   decodeStoredValue,
   encodeStoredValue,
@@ -33,7 +38,8 @@ export type GroupStateStores = Pick<GroupStores<MemoryTransaction>, 'tx' | 'life
   }
 }
 
-// Aliases and independently constructed stores share their provider view's entry.
+// Guarded maps retain their provider identity when callers copy the rows container.
+const transactionIdentities = new WeakMap<object, MemoryTransaction['rows']>()
 const transactionEntries = new WeakMap<
   MemoryTransaction['rows'],
   { entry: OwnerEntry; owners: OwnerQueues }
@@ -43,20 +49,49 @@ const bootstrapTrusts = new WeakMap<MemoryTransaction['rows'], Set<string>>()
 // Unbound device and standalone provider stores retain sequencing until device migration.
 const transactionLocks = new WeakMap<MemoryTransaction['rows'], Promise<void>>()
 
+export function registerMemoryTransactionRows(
+  rows: MemoryTransaction['rows'],
+  maps: MemoryTransaction['rows'],
+): void {
+  transactionIdentities.set(rows, rows)
+  for (const map of Object.values(maps)) transactionIdentities.set(map, rows)
+}
+
+function transactionIdentity(rows: MemoryTransaction['rows']): MemoryTransaction['rows'] {
+  const identity = transactionIdentities.get(rows)
+  if (identity !== undefined) return identity
+  for (const map of Object.values(rows)) {
+    const identity = transactionIdentities.get(map)
+    if (identity !== undefined) return identity
+  }
+  return rows
+}
+
+function transactionBinding(rows: MemoryTransaction['rows']) {
+  return transactionEntries.get(transactionIdentity(rows))
+}
+
 export function bindMemoryOwner(
   tx: MemoryTransaction,
   entry: OwnerEntry,
   owners: OwnerQueues,
 ): void {
-  transactionEntries.set(tx.rows, { entry, owners })
+  transactionEntries.set(transactionIdentity(tx.rows), { entry, owners })
 }
 
 export function memoryTransactionEntry(rows: MemoryTransaction['rows']): OwnerEntry | undefined {
-  return transactionEntries.get(rows)?.entry
+  return transactionBinding(rows)?.entry
+}
+
+export function memoryTransactionFailureSignal(
+  rows: MemoryTransaction['rows'],
+): AbortSignal | undefined {
+  const entry = memoryTransactionEntry(rows)
+  return entry === undefined ? undefined : ownerEntryFailureSignal(entry)
 }
 
 export function assertMemoryAccess(rows: MemoryTransaction['rows']): void {
-  const binding = transactionEntries.get(rows)
+  const binding = transactionBinding(rows)
   if (binding === undefined) return
   if (binding.owners.failure !== null) throw binding.owners.failure
   if (!['work', 'finalise', 'effects', 'account'].includes(binding.entry.phase))
@@ -64,7 +99,7 @@ export function assertMemoryAccess(rows: MemoryTransaction['rows']): void {
 }
 
 export function assertMemoryWrite(tx: MemoryTransaction, target: WriteTarget): void {
-  const entry = transactionEntries.get(tx.rows)?.entry
+  const entry = memoryTransactionEntry(tx.rows)
   if (entry !== undefined)
     entry.assertWrite(coordinatorContext.getStore() === entry ? 'coordinator' : target)
 }
@@ -73,7 +108,7 @@ export async function sequenceMemoryTransaction<TValue>(
   tx: MemoryTransaction,
   work: () => Promise<TValue>,
 ): Promise<TValue> {
-  const entry = transactionEntries.get(tx.rows)?.entry
+  const entry = memoryTransactionEntry(tx.rows)
   if (entry !== undefined) {
     assertMemoryAccess(tx.rows)
     return await entry.sequence(work)
