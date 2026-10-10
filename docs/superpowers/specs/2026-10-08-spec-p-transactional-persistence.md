@@ -1,7 +1,7 @@
 # Spec P: transactional persistence — design
 
 Date: 2026-10-08
-Status: draft r17 (2026-10-10)
+Status: draft r18 (2026-10-10)
 Parent: [client host, messaging protocol and multi-device e2e](2026-10-08-client-messaging-e2e-design.md)
 Control baseline: [Spec P2a](2026-10-08-spec-p2a-crash-safe-control-design.md), superseded where amended here.
 
@@ -359,7 +359,7 @@ Seal failure rolls back the whole transition; open failure exposes no handle/pay
 Memory persists sealed bytes without a plaintext shadow map. Provider encryption alone cannot satisfy this contract.
 
 **Ambiguity.** Rejected COMMIT can still commit. Ownership, phases and proof sequencing follow D8. One mutationID/revision and coordinator own completion across all namespaces.
-Keep the group gate, sequence reservation and both hook queues until proof. Never release payload/state/callers on raw negative reads.
+Keep the group gate, started-operation set and both hook queues until proof. Never release payload/state/callers on raw negative reads.
 State-free P2a apply may throw canonical `StorageOutcomeUnknownError`; `lastMutation()` first performs the same completion barrier.
 Each transaction unconditionally upserts/updates retained `groupOwner(groupID)`. After uncertainty, a fresh root transaction takes
 that lock, then reads markers in subsequent statements. Postgres READ COMMITTED waits on the original owner-row writer.
@@ -440,17 +440,31 @@ the group waiter and releases the device slot; a group grant racing that cancell
 Refusals apply to every store or transaction access bound to the entry's provider transaction, however constructed, not only supplied wrappers.
 `prepare` holds the owner slot outside any provider transaction for crypto preparation and, per owner scope, the first entry of any kind
 after process start runs the completion barrier plus marker check before proceeding. Its reads use an entry-bound read capability that reuses
-the entry's ownership and reads committed rows; root calls from `prepare` are reentrant and refuse. One per-entry sequencer serialises the
-entry's store operations, including suspended asynchronous ones. `finalise` (validation, domain persistence, trust/spent/tombstone, version
-accounting) is one sequencer step completed before `effects` begins, so a host effect calling supplied stores never waits on finalisation.
-`account` is one sequencer step after effects: it validates effect side writes against their incarnation and advances the state/metadata
-versions they require (Interfaces, D6). Every started store operation is awaited before `outcome`.
+the entry's ownership and reads committed rows; root calls from `prepare` are reentrant and refuse.
+
+**Store operations (r18 decision).** Store operations are not mutually excluded and never queue behind one another. Each is two steps:
+an asynchronous *prepare* (seal/open and any other host callback), holding no write authority, then one synchronous *apply* that checks the
+current phase and capability, performs its whole read-modify-write on the provider transaction, and records its accounting. No host code
+and no `await` run inside an apply, so applies never interleave and nested or sibling operations compose without ordering deadlocks. An
+apply that finds its phase or capability expired writes nothing and rejects `PersistencePhaseError`. Each entry tracks its started
+operations; every phase change waits until that set is empty, including operations started while it waits, so phases never overlap and
+every started operation settles before `outcome`. Phase changes are coordinator actions, never reachable from host code. Providers whose
+transaction API is asynchronous (phase 3) keep the same contract by issuing an apply's statements back to back on the entry's connection
+with no host code between them.
+
+**Coordinator authority (r18 decision).** `finalise` and `account` write through a private coordinator writer created per entry and never
+passed to host code; possession of that object, not ambient context, is the authority. Its writes are synchronous applies. Every other
+access during `finalise` and `account`, including host accessors, effect getters, codec callbacks and stores constructed from the raw
+transaction, is refused. `finalise` (validation, domain persistence, trust/spent/tombstone, version accounting) completes before `effects`
+begins, so a host effect calling supplied stores never waits on finalisation. `account` runs after effects: it validates effect side
+writes against their incarnation and advances the state/metadata versions they require (Interfaces, D6). Host values `finalise` needs
+(for example the effects record) are read in `work` or before, never by invoking host code under coordinator authority.
 
 **Exceptions.** A transactional *effect* (awaited in `effects`) that throws rolls back the whole transition, including its rows. A completion
 *hook* (`onCommit`/`onRollback`, run in `settled`) that throws is contained; remaining hooks still run and the outcome stands.
 
 **Outcome and proof.** The provider reports `committed`, `rolledBack` or `unknown`. Known outcomes settle exactly one hook queue, then
-release. `unknown` keeps the entry at its queue head in `ambiguous`, retaining slots, sequence reservations, a settlement token and both
+release. `unknown` keeps the entry at its queue head in `ambiguous`, retaining slots, the started-operation set, a settlement token and both
 hook queues; no read or transition passes it. Proof: retry from 100 ms doubling to 15 s outside transactions; open a fresh root transaction,
 run the provider barrier on every owner the entry touched, then read markers in later statements (D7). Classification per touched owner:
 marker carries this entry's mutationID is `committed`; marker equals the exact `{mutationID, revision}` read before this entry's work (or is
@@ -459,7 +473,7 @@ Any other result is `conflicted`. Conflict proves another writer owns the databa
 fail-stops: no hook queue runs and both are dropped, no further transaction is opened, the caller and every queued or later entry on any
 scope reject with `GroupStateConflictError`, and recovery is a process restart where durable markers, events and obligations replay (D7). Fail-stop is atomic
 across every entry already active on any scope and every joined resolver: callers reject with `GroupStateConflictError`, hook queues and
-sequence reservations are dropped, entry capabilities expire, pending proofs and drains awaiting those entries end with the same error,
+started operations are dropped, entry capabilities expire, pending proofs and drains awaiting those entries end with the same error,
 and the provider rolls back or disposes already-open backend transactions through connection completion without opening new ones. Otherwise settle exactly one queue, containing hook exceptions, then release. After a known rollback an entry whose owner declares
 retry (D6 certification) re-runs `work` through `outcome` with a fresh provider transaction while keeping its slots. Retries back off like proof (100 ms doubling to 15 s); a D6 mismatch on retry
 returns `recorded: false` and ends the entry. Callers
@@ -473,9 +487,14 @@ which revalidates under the slot. If work was opened meanwhile it releases and d
 `GroupControlUnsettledError`. D7.s runtime owner-creation block is lifted whenever deletion returns without a committed
 tombstone (refusal, cancellation, rollback, unknown resolved as rollback or fail-stop); after a committed tombstone D2 readmission governs.
 
-**Reentrancy.** A root call from inside an active entry (prepare, work, finalise, effects, account, proof, hook) rejects promptly with
-`ReentrantOwnershipError`. Entry-bound capabilities are the only legal path inside an entry. Ordinary handlers and network I/O run outside
-every entry.
+**Reentrancy (r18 decision).** Core logic is runtime-neutral (Node, browsers, Hermes) and uses no runtime-specific async-context API.
+A root call from inside an active entry (prepare, work, finalise, effects, account, proof, hook) rejects promptly with
+`ReentrantOwnershipError` whenever it is detectable: always during the synchronous part of any entry callback, hook or proof step (the
+queue marks the active entry for that synchronous run), and also after `await` when the host supplies the optional
+`ownershipContext: { run<T>(entry, fn: () => T): T; get(): unknown }` port to the factory (for example a Node `AsyncLocalStorage` adapter or
+a TC39 `AsyncContext.Variable`). Without the port, a root call made after an `await` inside an entry is caller misuse: on the entry's own
+scope it queues behind that entry and never completes. Released entries are never reported as current. Entry-bound capabilities are the
+only legal path inside an entry. Ordinary handlers and network I/O run outside every entry.
 
 **Provider primitives.** Open transaction for work through account; report outcome; completion barrier; marker read after barrier; CAS by
 affected count. The barrier may create owner rows internally with the marker-neutral value `{mutationID: null, revision: 0}`, classified as absent;
@@ -1066,7 +1085,7 @@ Keep each meaningful existing case. Replace cases tied solely to removed mechani
 | | ambiguous transition fence | Unknown Transition, both before backend completion and after commit with proof delayed: every read path (group/facade/device/package) and same-group Transition wait until proof; independent group commits meanwhile. Zero hooks before proof, exactly one queue after unless proof fail-stops the factory. |
 | | ambiguous read releases | Fault on a root Read, both commit-then-reject and unfinished backend: read rejects; next same-group Read and Transition complete, on every read path. Providers with connections: the failed read transaction is completed and the next writer acquires the writer lock. |
 | | proof classification/join | committed and rolledBack settle once; external resolve (group and device APIs) joins pending proof; repeated settlement idempotent. Conflicting marker: no hook queue runs, factory fail-stops, caller and every queued or later entry on any scope reject GroupStateConflictError. With another scope already ambiguous or mid-work, that entry, its joined resolvers and any drain awaiting it also reject, its hooks never run and its open backend transaction is rolled back or disposed. Fallback resolve after a later mutation superseded M throws GroupStateUncertainError. Barrier-created owner row classifies as absent. Certification rollback retry keeps its slot; queued terminal work cannot pass it. Combined classifies both owners, including competing ordinary-package installation. |
-| | ordering/reentrancy/deletion | Combined holds device then waits group; cancelled wait withdraws its group waiter and releases device, and the group then progresses; group-holding entry refuses device slot. Root call from prepare/work/finalise/effects/account/proof/hook rejects ReentrantOwnershipError without waiting. Deletion with a running handler drains, then deletes; reads made by that handler succeed meanwhile; work opened during the drain causes a re-drain, three failures refuse GroupControlUnsettledError. After refusal the runtime owner can be created again. |
+| | ordering/reentrancy/deletion | Combined holds device then waits group; cancelled wait withdraws its group waiter and releases device, and the group then progresses; group-holding entry refuses device slot. Root call from prepare/work/finalise/effects/account/proof/hook rejects ReentrantOwnershipError without waiting, after `await` with the `ownershipContext` port and in the synchronous segment without it; suite runs both ways. Nested and sibling store operations, including one awaiting a sibling it started, complete; codec and accessor callbacks during finalise/account cannot write. Deletion with a running handler drains, then deletes; reads made by that handler succeed meanwhile; work opened during the drain causes a re-drain, three failures refuse GroupControlUnsettledError. After refusal the runtime owner can be created again. |
 | | restart before proof | First entry of any kind per owner scope after restart runs barrier and marker check; resolve fallback runs the barrier, never a raw negative read. |
 | | storage guard witnesses | Partial-loss spent reinstall at incarnation 1 refuses; unreadable source state with readable trust retires to a fresh incarnation, corrupt trust refuses; internally consistent lower-epoch state refuses with epoch regression. |
 | | real database integration | Per provider, the D8 provider-evidence cases (a)-(f) with fault milestones, second-connection visibility, hook-queue and connection-identity assertions. SQLite, PostgreSQL, Expo (or explicit blocked reason) in 3. |
@@ -1135,3 +1154,4 @@ ambiguity/external seams and automatic non-fork stranded resync remain.
 
 - r16 (r16 decision): first-valid own adoption/Welcome guard; atomic cross-group ordinary-package burn and device cleanup; retained handle-independent recovery trust; DevicePersistence/restore-work wiring; pre-open/mixed crypto results; concrete adapters, handler registration/completion, metadata/retention and conformance.
 - r17 (r17 decision): D8 single ownership model — per-device/per-group FIFO owner queues, typed entries (Transition, Combined, never-ambiguous Read), strict phases with phase-derived store capabilities, proof inside the retained entry with a conflicted outcome that fail-stops the factory, drain-before-slot deletion, post-effects account step, reentrancy refusal and per-provider primitives including absent-owner upsert barriers and quarantined-connection completion; ownership-phases conformance and real-database integration evidence for every provider. Replaces layered barrier/store-lock/gate/fence mechanisms after recurring deadlock, post-validation write and retained-read findings.
+- r18 (r18 decision): D8 runtime-neutral — store operations become async prepare plus synchronous apply tracked in a per-entry set drained at every phase change (replaces the per-entry sequencer after nested/sibling deadlocks and lost writes); coordinator authority is a private writer object, not ambient context (after codec and accessor callbacks inherited it); reentrancy detection needs no runtime async-context API, with an optional `ownershipContext` port for detection after `await`.
