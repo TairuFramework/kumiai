@@ -247,6 +247,11 @@ export type ConformanceGroupPersistencePorts<Position extends string = string> =
   cursor: ConformanceAppCursorStore
 }
 
+export type ConformanceOwnershipContextPort = {
+  run<T>(token: object, fn: () => T): T
+  get(): object | undefined
+}
+
 export type ConformanceAtRestCodec = {
   seal(plaintext: Uint8Array, aad: Uint8Array): Promise<Uint8Array>
   open(ciphertext: Uint8Array, aad: Uint8Array): Promise<Uint8Array>
@@ -363,6 +368,14 @@ type ConformanceFixtureGroupStores<TPorts> = TPorts extends {
   ? TStores
   : never
 
+type ConformanceFixtureDeviceStores<TPorts> = TPorts extends {
+  device: {
+    transition(change: never, work: (stores: infer TStores) => Promise<unknown>): Promise<unknown>
+  }
+}
+  ? TStores
+  : never
+
 export type ConformancePersistenceFixture<TPorts> = {
   ports: TPorts
   reopen(): Promise<TPorts>
@@ -371,6 +384,17 @@ export type ConformancePersistenceFixture<TPorts> = {
   commitThenReject(): void
   rejectCommitPending(): ConformancePendingCommitFault
   holdNextSeal(): { reached: Promise<void>; release(): void }
+  failNextSeal(error?: Error): void
+  holdNextOpen(): { started: Promise<void>; release(): void }
+  failNextOpen(error?: Error): void
+  probeCodec(fn: (phase: string) => Promise<void>): void
+  onPhase(
+    phase: 'prepare' | 'work' | 'effects' | 'finalise' | 'account' | 'proof' | 'hook',
+    fn: () => Promise<void> | void,
+  ): void
+  readWith<T>(fn: (stores: ConformanceFixtureDeviceStores<TPorts>) => Promise<T>): Promise<T>
+  combinedWith(signal: AbortSignal): Promise<void>
+  retryNextTransition(): void
   forceOwnerMarker(
     owner: { groupID: string } | { ownerDID: string },
     marker: { mutationID: string; revision: number },
@@ -533,6 +557,11 @@ export type StorageTestPorts<TTx extends ConformanceGroupTransaction> = {
     lastResort: ConformanceLastResortStore
   }
 }
+export type FixtureOptions<TTx extends ConformanceGroupTransaction> = {
+  effects?: ConformanceTransactionalGroupEffects<TTx>
+  ownershipContext?: ConformanceOwnershipContextPort
+}
+
 export type StorageConformanceParams<TTx extends ConformanceGroupTransaction> = {
   label: string
   lowerEpochCandidate(groupID: string): Promise<{
@@ -542,6 +571,6 @@ export type StorageConformanceParams<TTx extends ConformanceGroupTransaction> = 
   writeSideRow(tx: TTx, key: string, bytes: Uint8Array): Promise<void>
   createFixture(
     id: string,
-    effects?: ConformanceTransactionalGroupEffects<TTx>,
+    options?: FixtureOptions<TTx>,
   ): Promise<ConformancePersistenceFixture<StorageTestPorts<TTx>>>
 }

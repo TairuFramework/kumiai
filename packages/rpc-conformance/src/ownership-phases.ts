@@ -12,6 +12,7 @@ import type {
   ConformanceGroupLifetime,
   ConformanceGroupStores,
   ConformanceGroupTransaction,
+  ConformanceOwnershipContextPort,
   ConformancePersistenceFixture,
   ConformanceStorageAppOutboxEntry,
   StorageConformanceParams,
@@ -75,11 +76,12 @@ function hooks(tx: ConformanceGroupTransaction, calls: Array<string>): void {
   })
 }
 
-export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTransaction>(
-  params: StorageConformanceParams<TTx>,
+function runOwnershipPhasesConformance<TTx extends ConformanceGroupTransaction>(
+  params: OwnershipPhasesConformanceParams<TTx>,
 ): void {
   type Fixture = ConformancePersistenceFixture<StorageTestPorts<TTx>>
   describe(`Ownership phases conformance -- ${params.label}`, () => {
+    testOperationOwnership(params)
     describe('phase capabilities', () => {
       for (const access of ['supplied', 'constructed'] as const) {
         test.each(['state', 'trust', 'lifetime'] as const)(
@@ -90,30 +92,32 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
             const refusals: Array<unknown> = []
             fixture = await within(
               params.createFixture(groupID, {
-                async outbox(tx) {
-                  const stores =
-                    access === 'supplied' ? supplied : fixture.constructGroupStores(tx, key)
-                  const operation =
-                    domain === 'state'
-                      ? stores.incarnation(1).state.save({
-                          ...seed.state,
-                          version: seed.state.version + 2,
-                          senderHWM: 64,
-                        })
-                      : domain === 'trust'
-                        ? stores.trust.save({
-                            ...seed.trust,
-                            ledger: [...seed.trust.ledger, ...seed.trust.ledger],
+                effects: {
+                  async outbox(tx) {
+                    const stores =
+                      access === 'supplied' ? supplied : fixture.constructGroupStores(tx, key)
+                    const operation =
+                      domain === 'state'
+                        ? stores.incarnation(1).state.save({
+                            ...seed.state,
+                            version: seed.state.version + 2,
+                            senderHWM: 64,
                           })
-                        : stores.lifetime.save({
-                            ...seed.lifetime,
-                            revision: seed.lifetime.revision + 1,
-                            mutationID: 'phase',
-                            restorePending: true,
-                          })
-                  const refusal = await within(observed(operation).result)
-                  refusals.push(refusal)
-                  await within(params.writeSideRow(tx, 'phase-effect', utf8('effect')))
+                        : domain === 'trust'
+                          ? stores.trust.save({
+                              ...seed.trust,
+                              ledger: [...seed.trust.ledger, ...seed.trust.ledger],
+                            })
+                          : stores.lifetime.save({
+                              ...seed.lifetime,
+                              revision: seed.lifetime.revision + 1,
+                              mutationID: 'phase',
+                              restorePending: true,
+                            })
+                    const refusal = await within(observed(operation).result)
+                    refusals.push(refusal)
+                    await within(params.writeSideRow(tx, 'phase-effect', utf8('effect')))
+                  },
                 },
               }),
             )
@@ -169,7 +173,9 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
       test('effect side row commits with the transition', async () => {
         const fixture = await within(
           params.createFixture(groupID, {
-            outbox: (tx) => within(params.writeSideRow(tx, 'effect', utf8('effect'))),
+            effects: {
+              outbox: (tx) => within(params.writeSideRow(tx, 'effect', utf8('effect'))),
+            },
           }),
         )
         try {
@@ -258,8 +264,10 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
         let effectStores!: ConformanceGroupStores<TTx>
         const effectFixture = await within(
           params.createFixture(groupID, {
-            async outbox() {
-              await within(effectStores.incarnation(2).anchor.save(anchor))
+            effects: {
+              async outbox() {
+                await within(effectStores.incarnation(2).anchor.save(anchor))
+              },
             },
           }),
         )
@@ -320,9 +328,11 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
         let loaded: ConformanceGroupLifetime | null | undefined
         const fixture = await within(
           params.createFixture(groupID, {
-            async outbox() {
-              effectCalls++
-              loaded = await within(supplied.lifetime.load())
+            effects: {
+              async outbox() {
+                effectCalls++
+                loaded = await within(supplied.lifetime.load())
+              },
             },
           }),
         )
@@ -353,8 +363,10 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
         let supplied!: ConformanceGroupStores<TTx>
         const fixture = await within(
           params.createFixture(groupID, {
-            async delete(_tx, deletedKey) {
-              await within(supplied.incarnation(deletedKey.incarnation).clearTransport())
+            effects: {
+              async delete(_tx, deletedKey) {
+                await within(supplied.incarnation(deletedKey.incarnation).clearTransport())
+              },
             },
           }),
         )
@@ -393,9 +405,11 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
       test('throwing effect rolls back transition and side row', async () => {
         const fixture = await within(
           params.createFixture(groupID, {
-            async outbox(tx) {
-              await within(params.writeSideRow(tx, 'throw-effect', utf8('effect')))
-              throw new Error('effect failure')
+            effects: {
+              async outbox(tx) {
+                await within(params.writeSideRow(tx, 'throw-effect', utf8('effect')))
+                throw new Error('effect failure')
+              },
             },
           }),
         )
@@ -982,11 +996,13 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
             let invoke!: () => Promise<unknown>
             const fixture = await within(
               params.createFixture(groupID, {
-                async outbox() {
-                  if (phase === 'effects') {
-                    nested = observed(invoke())
-                    await within(nested.result)
-                  }
+                effects: {
+                  async outbox() {
+                    if (phase === 'effects') {
+                      nested = observed(invoke())
+                      await within(nested.result)
+                    }
+                  },
                 },
               }),
             )
@@ -1085,4 +1101,753 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
       })
     })
   })
+}
+
+function testOperationOwnership<TTx extends ConformanceGroupTransaction>(
+  params: OwnershipPhasesConformanceParams<TTx>,
+): void {
+  type Fixture = ConformancePersistenceFixture<StorageTestPorts<TTx>>
+  const outcome = (id: string) => ({ id, opID: id, at: 1000, kind: 'unknown' as const })
+  const refused = { ok: false, error: { name: 'PersistencePhaseError' } }
+
+  describe('operation ownership', () => {
+    test('concurrent same-record calls register before closure and both persist', async () => {
+      const fixture = await within(params.createFixture(groupID))
+      const groups = fixture.ports.device.groups
+      const change = await within(storageChange(groups, groupID, 'siblings'))
+      const before = await within(groups.loadState(key))
+      const latch = fixture.holdNextSeal()
+      const operations: Array<ReturnType<typeof observed<void>>> = []
+      try {
+        const writer = observed(
+          groups.transition(change, async (stores) => {
+            const control = stores.incarnation(1).control
+            operations.push(
+              observed(control.apply({ putOutcomes: [outcome('sibling-A')] }, 'siblings')),
+            )
+            await within(latch.reached)
+            operations.push(
+              observed(control.apply({ putOutcomes: [outcome('sibling-B')] }, 'siblings')),
+            )
+          }),
+        )
+        await within(latch.reached)
+        await operationReady(writer, () => (operations.length === 2 ? operations : undefined))
+        expect(writer.settled()).toBe(false)
+        expect(operations.every((op) => !op.settled())).toBe(true)
+        latch.release()
+        expect(await within(writer.result)).toEqual({ ok: true, value: undefined })
+        expect(await within(Promise.all(operations.map((op) => op.result)))).toEqual([
+          { ok: true, value: undefined },
+          { ok: true, value: undefined },
+        ])
+        const control = await within(groups.ports(key).control.load())
+        expect(control.outcomes).toEqual(
+          expect.arrayContaining([outcome('sibling-A'), outcome('sibling-B')]),
+        )
+        expect((await within(groups.load(groupID)))?.revision).toBe(
+          (change.expected?.revision ?? 0) + 1,
+        )
+        expect((await within(groups.loadState(key)))?.version).toBe((before?.version ?? 0) + 1)
+      } finally {
+        latch.release()
+        await within(fixture.close())
+      }
+    })
+
+    test('work drains before effects reopen stores supplied in work', async () => {
+      let supplied!: ConformanceGroupStores<TTx>
+      let workOperation!: ReturnType<typeof observed<void>>
+      const order: Array<string> = []
+      const fixture = await within(
+        params.createFixture(groupID, {
+          effects: {
+            async outbox() {
+              expect(workOperation.settled()).toBe(true)
+              order.push('effects')
+              await within(supplied.incarnation(1).cursor.save('reopened', '3'))
+            },
+          },
+        }),
+      )
+      const groups = fixture.ports.device.groups
+      let latch: ReturnType<Fixture['holdNextSeal']> | undefined
+      try {
+        const writer = observed(
+          groups.transition(
+            await within(storageChange(groups, groupID, 'reopen-stores')),
+            async (stores) => {
+              supplied = stores
+              await within(stores.incarnation(1).meta.putEvents([event]))
+              latch = fixture.holdNextSeal()
+              workOperation = observed(
+                stores
+                  .incarnation(1)
+                  .cursor.save('drained', '2')
+                  .then(() => {
+                    order.push('work')
+                  }),
+              )
+            },
+          ),
+        )
+        // Wait for the work callback to arm the codec latch.
+        latch = await operationReady(writer, () => latch)
+        await within(latch.reached)
+        expect(order).toEqual([])
+        latch.release()
+        expect(await within(writer.result)).toEqual({ ok: true, value: undefined })
+        expect(order).toEqual(['work', 'effects'])
+        expect(await within(groups.ports(key).cursor.load('drained'))).toBe('2')
+        expect(await within(groups.ports(key).cursor.load('reopened'))).toBe('3')
+      } finally {
+        latch?.release()
+        await within(fixture.close())
+      }
+    })
+
+    test.each(['abandoned seal', 'caught required open', 'caught partial write'] as const)(
+      '%s failure makes the transition rollback-only',
+      async (failure) => {
+        const fixture = await within(params.createFixture(groupID))
+        const groups = fixture.ports.device.groups
+        const change = await within(storageChange(groups, groupID, 'fatal-operation'))
+        const before = await within(fixture.inspectRows())
+        let operation!: ReturnType<typeof observed<unknown>>
+        try {
+          const writer = observed(
+            groups.transition(change, async (stores) => {
+              const rows = stores.incarnation(1)
+              if (failure === 'abandoned seal') {
+                fixture.failNextSeal()
+                operation = observed(rows.cursor.save('fatal', '4'))
+              } else if (failure === 'caught required open') {
+                fixture.failNextOpen()
+                operation = observed(rows.state.load())
+                expect((await within(operation.result)).ok).toBe(false)
+              } else {
+                operation = observed(
+                  rows.outbox.put([
+                    { ...entry, seq: 8 },
+                    { ...entry, seq: -1 },
+                  ]),
+                )
+                expect((await within(operation.result)).ok).toBe(false)
+              }
+            }),
+          )
+          expect((await within(writer.result)).ok).toBe(false)
+          expect((await within(operation.result)).ok).toBe(false)
+          expect(await within(fixture.inspectRows())).toEqual(before)
+          await within(groups.transition(change, async () => {}))
+        } finally {
+          await within(fixture.close())
+        }
+      },
+    )
+
+    test('caught non-mutating refusal after a successful write still commits', async () => {
+      let supplied!: ConformanceGroupStores<TTx>
+      let refusal: unknown
+      const fixture = await within(
+        params.createFixture(groupID, {
+          effects: {
+            async outbox() {
+              const life = await within(supplied.lifetime.load())
+              if (life === null) throw new Error('Missing lifetime')
+              refusal = await within(
+                observed(supplied.lifetime.save({ ...life, restorePending: true })).result,
+              )
+            },
+          },
+        }),
+      )
+      try {
+        const groups = fixture.ports.device.groups
+        await within(
+          groups.transition(
+            await within(storageChange(groups, groupID, 'nonfatal')),
+            async (stores) => {
+              supplied = stores
+              await within(stores.incarnation(1).cursor.save('successful', '3'))
+              await within(stores.incarnation(1).meta.putEvents([event]))
+            },
+          ),
+        )
+        expect(refusal).toMatchObject(refused)
+        expect(await within(groups.ports(key).cursor.load('successful'))).toBe('3')
+        expect(await within(groups.load(groupID))).toMatchObject({
+          mutationID: 'nonfatal',
+          restorePending: false,
+        })
+      } finally {
+        await within(fixture.close())
+      }
+    })
+
+    test('late calls from a rolled-back attempt cannot write in its retry', async () => {
+      const fixture = await within(params.createFixture(groupID))
+      try {
+        const groups = fixture.ports.device.groups
+        const change = await within(storageChange(groups, groupID, 'retry-attempt'))
+        fixture.retryNextTransition()
+        let previous: ConformanceGroupStores<TTx> | undefined
+        let late: unknown
+        let attempts = 0
+        await within(
+          groups.transition(change, async (stores) => {
+            attempts++
+            if (previous === undefined) previous = stores
+            else
+              late = await within(
+                observed(previous.incarnation(1).cursor.save('late-attempt', '9')).result,
+              )
+            await within(stores.incarnation(1).cursor.save('live-attempt', String(attempts)))
+          }),
+        )
+        expect(attempts).toBe(2)
+        expect(late).toMatchObject(refused)
+        expect(await within(groups.ports(key).cursor.load('late-attempt'))).toBeNull()
+        expect(await within(groups.ports(key).cursor.load('live-attempt'))).toBe('2')
+        expect((await within(groups.load(groupID)))?.revision).toBe(
+          (change.expected?.revision ?? 0) + 1,
+        )
+      } finally {
+        await within(fixture.close())
+      }
+    })
+
+    test.each(['work', 'effects'] as const)(
+      '%s rejection revokes suspended operations before rollback',
+      async (phase) => {
+        let operation!: ReturnType<typeof observed<void>>
+        let supplied!: ConformanceGroupStores<TTx>
+        let latch: ReturnType<Fixture['holdNextSeal']> | undefined
+        let fixture!: Fixture
+        const suspend = async () => {
+          latch = fixture.holdNextSeal()
+          operation = observed(supplied.incarnation(1).cursor.save('revoked', '5'))
+          await within(latch.reached)
+          throw new Error('host callback failed')
+        }
+        fixture = await within(
+          params.createFixture(groupID, {
+            effects: {
+              async outbox() {
+                if (phase === 'effects') await suspend()
+              },
+            },
+          }),
+        )
+        const groups = fixture.ports.device.groups
+        const change = await within(storageChange(groups, groupID, 'rejected-callback'))
+        const before = await within(fixture.inspectRows())
+        try {
+          const writer = observed(
+            groups.transition(change, async (stores) => {
+              supplied = stores
+              if (phase === 'work') await suspend()
+              else await within(stores.incarnation(1).meta.putEvents([event]))
+            }),
+          )
+          expect(await within(operationReady(writer, () => operation))).toBeDefined()
+          expect(await within(operation.result)).toMatchObject(refused)
+          expect((await within(writer.result)).ok).toBe(false)
+          await within(groups.transition(change, async () => {}))
+          const after = await within(fixture.inspectRows())
+          expect(after.cursor).toEqual(before.cursor)
+          expect(after.meta).toEqual(before.meta)
+          latch?.release()
+          await turn()
+          expect(await within(groups.ports(key).cursor.load('revoked'))).toBeNull()
+        } finally {
+          latch?.release()
+          await within(fixture.close())
+        }
+      },
+    )
+
+    test('failed Read revokes its open and releases before the codec resumes', async () => {
+      const fixture = await within(params.createFixture(groupID))
+      const latch = fixture.holdNextOpen()
+      let operation!: ReturnType<typeof observed<unknown>>
+      try {
+        const read = observed(
+          fixture.readWith(async (stores) => {
+            operation = observed(stores.ordinary('source-1').list(fixture.ports.device.ownerDID))
+            await within(latch.started)
+            throw new Error('read callback failed')
+          }),
+        )
+        await within(latch.started)
+        expect(await within(operation.result)).toMatchObject(refused)
+        expect(await within(read.result)).toMatchObject({
+          ok: false,
+          error: { message: 'read callback failed' },
+        })
+        expect(await within(fixture.ports.device.load())).toMatchObject({ revision: 1 })
+        await within(fixture.combinedWith(new AbortController().signal))
+      } finally {
+        latch.release()
+        await within(fixture.close())
+      }
+    })
+
+    test('effect getters are captured before finalise without coordinator authority', async () => {
+      let supplied!: ConformanceGroupStores<TTx>
+      const probes: Array<Promise<unknown>> = []
+      let reads = 0
+      const fixture = await within(
+        params.createFixture(groupID, {
+          effects: {
+            get outbox() {
+              if (supplied !== undefined) {
+                reads++
+                probes.push(observed(supplied.lifetime.load()).result)
+                probes.push(
+                  observed(supplied.incarnation(1).cursor.save('getter-write', '9')).result,
+                )
+              }
+              return async () => {}
+            },
+          },
+        }),
+      )
+      try {
+        const groups = fixture.ports.device.groups
+        await within(
+          groups.transition(
+            await within(storageChange(groups, groupID, 'effect-getter')),
+            async (stores) => {
+              supplied = stores
+              await within(stores.incarnation(1).meta.putEvents([event]))
+            },
+          ),
+        )
+        expect(reads).toBe(1)
+        expect(await within(Promise.all(probes))).toEqual([
+          expect.objectContaining(refused),
+          expect.objectContaining(refused),
+        ])
+        expect(await within(groups.ports(key).cursor.load('getter-write'))).toBeNull()
+      } finally {
+        await within(fixture.close())
+      }
+    })
+
+    test.each(['finalise', 'account'] as const)(
+      '%s host accessor and codec cannot read or write',
+      async (phase) => {
+        const fixture = await within(params.createFixture(groupID))
+        const groups = fixture.ports.device.groups
+        const change = await within(storageChange(groups, groupID, `privacy-${phase}`))
+        let supplied!: ConformanceGroupStores<TTx>
+        const results: Array<unknown> = []
+        try {
+          fixture.onPhase(phase, async () => {
+            const stores = fixture.constructGroupStores(supplied.tx, key)
+            const accessor = {
+              get value() {
+                return Promise.all([
+                  observed(stores.lifetime.load()).result,
+                  observed(stores.incarnation(1).cursor.save('accessor-write', '9')).result,
+                ])
+              },
+            }
+            results.push(...(await within(accessor.value)))
+            fixture.probeCodec(async (currentPhase) => {
+              expect(currentPhase).toBe(phase)
+              results.push(await within(observed(stores.lifetime.load()).result))
+              results.push(
+                await within(
+                  observed(stores.incarnation(1).cursor.save('codec-write', '9')).result,
+                ),
+              )
+            })
+          })
+          const withEffects = phase === 'account'
+          // Account needs a side change made by effects to exercise its codec path.
+          if (withEffects)
+            fixture.onPhase('effects', async () => {
+              await within(supplied.incarnation(1).cursor.save('effect-privacy', '3'))
+            })
+          await within(
+            groups.transition(change, async (stores) => {
+              supplied = stores
+            }),
+          )
+          expect(results).toHaveLength(4)
+          for (const result of results) expect(result).toMatchObject(refused)
+          expect(await within(groups.ports(key).cursor.load('accessor-write'))).toBeNull()
+          expect(await within(groups.ports(key).cursor.load('codec-write'))).toBeNull()
+        } finally {
+          await within(fixture.close())
+        }
+      },
+    )
+
+    test('a hook-scheduled root succeeds after its entry releases', async () => {
+      const fixture = await within(params.createFixture(groupID))
+      let scheduled!: Promise<unknown>
+      try {
+        const groups = fixture.ports.device.groups
+        await within(
+          groups.transition(
+            await within(storageChange(groups, groupID, 'released-hook')),
+            async (stores) => {
+              stores.tx.onCommit(() => {
+                scheduled = new Promise((resolve, reject) => {
+                  setTimeout(() => {
+                    groups.load(groupID).then(resolve, reject)
+                  }, 0)
+                })
+              })
+            },
+          ),
+        )
+        expect(await within(scheduled)).toMatchObject({ mutationID: 'released-hook' })
+      } finally {
+        await within(fixture.close())
+      }
+    })
+
+    test('independent concurrent roots stay unbound on different groups', async () => {
+      const fixture = await within(params.createFixture(groupID))
+      const latch = fixture.holdNextSeal()
+      try {
+        const groups = fixture.ports.device.groups
+        const changeA = await within(storageChange(groups, groupID, 'independent-A'))
+        const changeB = await within(storageChange(groups, 'group-B', 'independent-B'))
+        const first = observed(
+          groups.transition(changeA, async (stores) => {
+            await within(stores.incarnation(1).cursor.save('independent-A', '2'))
+          }),
+        )
+        await within(latch.reached)
+        await within(
+          groups.transition(changeB, async (stores) => {
+            await within(stores.incarnation(1).cursor.save('independent-B', '3'))
+          }),
+        )
+        expect(first.settled()).toBe(false)
+        latch.release()
+        expect(await within(first.result)).toEqual({ ok: true, value: undefined })
+        expect((await within(groups.load(groupID)))?.mutationID).toBe('independent-A')
+        expect((await within(groups.load('group-B')))?.mutationID).toBe('independent-B')
+      } finally {
+        latch.release()
+        await within(fixture.close())
+      }
+    })
+
+    for (const phase of [
+      'prepare',
+      'work',
+      'effects',
+      'finalise',
+      'account',
+      'proof',
+      'hook',
+    ] as const) {
+      for (const timing of params.ownershipContext === undefined
+        ? (['synchronous'] as const)
+        : (['synchronous', 'after await'] as const)) {
+        test(`${phase} root ${timing} rejects reentrancy`, async () => {
+          const port = params.ownershipContext?.()
+          const fixture = await within(params.createFixture(groupID, { ownershipContext: port }))
+          const groups = fixture.ports.device.groups
+          const change = await within(storageChange(groups, groupID, 'phase-reentrant'))
+          let nested!: ReturnType<typeof observed<unknown>>
+          let token: object | undefined
+          try {
+            fixture.onPhase(phase, async () => {
+              if (timing === 'after await') await Promise.resolve()
+              token = port?.get()
+              nested = observed(groups.load(groupID))
+              await within(nested.result)
+            })
+            if (phase === 'proof') fixture.commitThenReject()
+            await within(groups.transition(change, async () => {}))
+            expect(await within(nested.result)).toMatchObject({
+              ok: false,
+              error: { name: 'ReentrantOwnershipError' },
+            })
+            if (port !== undefined) {
+              expect(token).toBeDefined()
+              expect(Object.isFrozen(token)).toBe(true)
+              expect(Object.keys(token ?? {})).toEqual([])
+              expect(port.get()).toBeUndefined()
+            }
+          } finally {
+            await within(fixture.close())
+          }
+        })
+      }
+    }
+
+    if (params.ownershipContext !== undefined) {
+      test('ownership context restores nested bindings after a throwing callback', async () => {
+        const port = params.ownershipContext?.()
+        if (port === undefined) throw new Error('Missing ownership context')
+        const fixture = await within(params.createFixture(groupID, { ownershipContext: port }))
+        let bound: object | undefined
+        try {
+          const groups = fixture.ports.device.groups
+          const change = await within(storageChange(groups, groupID, 'throwing-context'))
+          fixture.onPhase('work', () => {
+            bound = port.get()
+            const nestedToken = Object.freeze({})
+            expect(() =>
+              port.run(nestedToken, () => {
+                throw new Error('nested binding')
+              }),
+            ).toThrow('nested binding')
+            expect(port.get()).toBe(bound)
+            throw new Error('callback failed')
+          })
+          expect(
+            await within(observed(groups.transition(change, async () => {})).result),
+          ).toMatchObject({ ok: false })
+          expect(bound).toBeDefined()
+          expect(port.get()).toBeUndefined()
+          await within(groups.transition(change, async () => {}))
+        } finally {
+          await within(fixture.close())
+        }
+      })
+    }
+
+    test('device loads, transitions, package reads and Combined complete without nesting', async () => {
+      const fixture = await within(params.createFixture('group-B'))
+      try {
+        const device = fixture.ports.device
+        const loaded = await within(device.load())
+        const reopened = await within(fixture.reopen())
+        expect(await within(reopened.device.load())).toEqual(loaded)
+        await within(
+          reopened.device.transition(
+            { mutationID: 'device-nonnested', expectedRevision: loaded.revision, group: null },
+            async (stores) => {
+              expect(await within(stores.restore.load())).not.toBeNull()
+            },
+          ),
+        )
+        expect(
+          await within(reopened.packageStores('source-1').ordinary.list(device.ownerDID)),
+        ).toHaveLength(1)
+        const change = await within(
+          storageChange(reopened.device.groups, 'group-B', 'combined-nonnested'),
+        )
+        await within(
+          reopened.device.transition(
+            {
+              mutationID: 'combined-nonnested',
+              expectedRevision: loaded.revision + 1,
+              group: change,
+            },
+            async (stores) => {
+              if (stores.group === null) throw new Error('Missing group participant')
+              await within(stores.group.incarnation(1).cursor.save('combined-nonnested', '3'))
+              await within(stores.cleanup.list())
+            },
+          ),
+        )
+        expect((await within(reopened.device.load())).revision).toBe(loaded.revision + 2)
+      } finally {
+        await within(fixture.close())
+      }
+    })
+
+    test('cancelling a Combined group wait releases both entries', async () => {
+      const fixture = await within(params.createFixture(groupID))
+      const groups = fixture.ports.device.groups
+      const change = await within(storageChange(groups, groupID, 'held-group'))
+      const latch = fixture.holdNextSeal()
+      const cancel = new AbortController()
+      try {
+        const writer = observed(
+          groups.transition(change, async (stores) => {
+            await within(stores.incarnation(1).cursor.save('held-group', '3'))
+          }),
+        )
+        await within(latch.reached)
+        const combined = observed(fixture.combinedWith(cancel.signal))
+        await turn()
+        expect(combined.settled()).toBe(false)
+        const reason = new Error('cancel combined')
+        cancel.abort(reason)
+        expect(await within(combined.result)).toEqual({ ok: false, error: reason })
+        expect(await within(fixture.ports.device.load())).toMatchObject({ revision: 1 })
+        latch.release()
+        expect((await within(writer.result)).ok).toBe(true)
+        await within(fixture.combinedWith(new AbortController().signal))
+      } finally {
+        cancel.abort()
+        latch.release()
+        await within(fixture.close())
+      }
+    })
+
+    test('fail-stop rejects active queued and draining operations with one conflict instance', async () => {
+      const fixture = await within(params.createFixture(groupID))
+      const groups = fixture.ports.device.groups
+      const changeA = await within(storageChange(groups, groupID, 'conflicted-owner'))
+      const changeB = await within(storageChange(groups, 'group-B', 'draining-owner'))
+      const before = await within(fixture.inspectRows())
+      const fault = fixture.rejectCommitPending()
+      let latch: ReturnType<Fixture['holdNextSeal']> | undefined
+      let finished = false
+      try {
+        const conflicted = observed(groups.transition(changeA, async () => {}))
+        await within(fault.rejected)
+        await within(fault.barrierWaiting)
+        latch = fixture.holdNextSeal()
+        const operations: Array<ReturnType<typeof observed<void>>> = []
+        const draining = observed(
+          groups.transition(changeB, async (stores) => {
+            operations.push(observed(stores.incarnation(1).cursor.save('active', '2')))
+            operations.push(observed(stores.incarnation(1).cursor.save('queued', '3')))
+          }),
+        )
+        await within(latch.reached)
+        expect(draining.settled()).toBe(false)
+        await within(
+          fixture.forceOwnerMarker({ groupID }, { mutationID: 'intruder', revision: 99 }),
+        )
+        await within(fault.finish('rollback'))
+        finished = true
+        const conflict = await within(conflicted.result)
+        expect(conflict).toMatchObject({ ok: false, error: { name: 'GroupStateConflictError' } })
+        if (conflict.ok) throw new Error('Expected conflict')
+        const results = await within(
+          Promise.all([draining.result, ...operations.map((op) => op.result)]),
+        )
+        for (const result of results) {
+          expect(result.ok).toBe(false)
+          if (result.ok) throw new Error('Expected conflict')
+          expect(result.error).toBe(conflict.error)
+        }
+        latch.release()
+        await turn()
+        const after = await within(fixture.inspectRows())
+        expect(after.cursor).toEqual(before.cursor)
+        expect(after.lifetime).toEqual(before.lifetime)
+      } finally {
+        latch?.release()
+        if (!finished) await within(fault.finish('rollback'))
+        await within(fixture.close())
+      }
+    })
+
+    test.each(['state', 'trust'] as const)(
+      'corrupt %s preserves safety events and control obligations',
+      async (namespace) => {
+        const fixture = await within(params.createFixture(groupID))
+        try {
+          const row = (await within(fixture.inspectRawBytes())).find(
+            (row) =>
+              row.namespace === namespace && row.groupID === groupID && row.recordID === 'current',
+          )
+          if (row === undefined) throw new Error('Missing safety row')
+          await within(
+            fixture.mutateStoredRecord(namespace, row.key, (bytes) => {
+              bytes[bytes.length - 1] = (bytes[bytes.length - 1] ?? 0) ^ 1
+              return bytes
+            }),
+          )
+          const corrupt = await within(fixture.inspectRawBytes())
+          const groups = fixture.ports.device.groups
+          await within(
+            groups.transition(
+              await within(storageChange(groups, groupID, 'safety-obligation')),
+              async (stores) => {
+                await within(
+                  stores
+                    .incarnation(1)
+                    .control.apply(
+                      { putOutcomes: [outcome('safety-outcome')] },
+                      'safety-obligation',
+                    ),
+                )
+                await within(
+                  stores.incarnation(1).meta.putEvents([
+                    {
+                      ...key,
+                      id: 'safety-event',
+                      kind: 'group:recovery-unavailable',
+                      reason: 'trust-unreadable',
+                    },
+                  ]),
+                )
+              },
+            ),
+          )
+          expect((await within(groups.ports(key).control.load())).outcomes).toContainEqual(
+            outcome('safety-outcome'),
+          )
+          let events: Array<unknown> = []
+          await within(
+            groups.transition(
+              await within(storageChange(groups, groupID, 'read-safety-event')),
+              async (stores) => {
+                events = await within(stores.incarnation(1).meta.events())
+              },
+            ),
+          )
+          expect(events).toContainEqual({
+            ...key,
+            id: 'safety-event',
+            kind: 'group:recovery-unavailable',
+            reason: 'trust-unreadable',
+          })
+          const after = await within(fixture.inspectRawBytes())
+          expect(
+            after.find((value) => value.namespace === namespace && value.key === row.key),
+          ).toEqual(corrupt.find((value) => value.namespace === namespace && value.key === row.key))
+        } finally {
+          await within(fixture.close())
+        }
+      },
+    )
+  })
+}
+
+async function operationReady<T>(
+  writer: ReturnType<typeof observed<unknown>>,
+  get: () => T | undefined,
+): Promise<T> {
+  return await within(
+    (async () => {
+      while (get() === undefined) {
+        if (writer.settled()) throw new Error('Callback did not start an operation')
+        await turn()
+      }
+      return get() as T
+    })(),
+  )
+}
+
+export type OwnershipPhasesConformanceParams<TTx extends ConformanceGroupTransaction> =
+  StorageConformanceParams<TTx> & {
+    ownershipContext?: () => ConformanceOwnershipContextPort
+  }
+
+export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTransaction>(
+  params: OwnershipPhasesConformanceParams<TTx>,
+): void {
+  for (const ownershipContext of [
+    undefined,
+    ...(params.ownershipContext === undefined ? [] : [params.ownershipContext]),
+  ]) {
+    runOwnershipPhasesConformance({
+      ...params,
+      label: `${params.label} -- ${ownershipContext === undefined ? 'without port' : 'with port'}`,
+      ownershipContext,
+      createFixture: (id, options) =>
+        params.createFixture(id, {
+          ...options,
+          ownershipContext: options?.ownershipContext ?? ownershipContext?.(),
+        }),
+    })
+  }
 }

@@ -31,6 +31,7 @@ import type {
   HubCleanupRow,
   MemoryDatabase,
   MemoryTransaction,
+  OwnershipContextPort,
   RestoreWork,
   TransactionalGroupEffects,
   TransactionHookSettlement,
@@ -80,6 +81,7 @@ export function createMemoryDevicePersistence(params: {
   providerID: string
   ownerDID: string
   effects?: TransactionalGroupEffects<MemoryTransaction>
+  ownershipContext?: OwnershipContextPort
 }): DevicePersistence<MemoryTransaction> {
   const { db, atRest, providerID, ownerDID, effects } = params
   if (atRest == null || typeof atRest.seal !== 'function' || typeof atRest.open !== 'function')
@@ -98,7 +100,14 @@ export function createMemoryDevicePersistence(params: {
     }
   }
   const owners = binding.owners
-  const coordinator = createMemoryGroupCoordinator({ db, owners, atRest, providerID, effects })
+  const coordinator = createMemoryGroupCoordinator({
+    db,
+    owners,
+    atRest,
+    providerID,
+    effects,
+    ownershipContext: params.ownershipContext,
+  })
   bindings.set(db, binding)
   const { groups } = coordinator
   const proofs = binding.proofs

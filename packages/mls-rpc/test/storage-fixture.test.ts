@@ -118,6 +118,7 @@ type ActualContracts = [
   Actual.IncarnationStores,
   Actual.GroupTransition,
   Actual.GroupPersistencePorts,
+  Actual.OwnershipContextPort,
   Actual.AtRestCodec,
   Actual.TransactionHookSettlement,
   Actual.OutcomeAwareTransactionOptions,
@@ -176,6 +177,7 @@ type MirrorContracts = [
   Mirror.ConformanceIncarnationStores<Rpc.LogPosition>,
   Mirror.ConformanceGroupTransition,
   Mirror.ConformanceGroupPersistencePorts<Rpc.LogPosition>,
+  Mirror.ConformanceOwnershipContextPort,
   Mirror.ConformanceAtRestCodec,
   Mirror.ConformanceTransactionHookSettlement,
   Mirror.ConformanceOutcomeAwareTransactionOptions,
@@ -577,3 +579,94 @@ for (const mode of ['real-mls', 'double'] as const) {
     },
   )
 }
+
+test('codec faults and probes fire once', async () => {
+  const fixture = await createStorageFixture({ id: 'group-A', mode: 'double' })
+  try {
+    const groups = fixture.ports.device.groups
+    const phases: Array<string> = []
+    fixture.probeCodec(async (phase) => {
+      phases.push(phase)
+    })
+    await groups.loadState({ groupID: 'group-A', incarnation: 1 })
+    await groups.loadState({ groupID: 'group-A', incarnation: 1 })
+    expect(phases).toEqual(['work'])
+    const openError = new Error('open failed')
+    fixture.failNextOpen(openError)
+    await expect(groups.loadState({ groupID: 'group-A', incarnation: 1 })).rejects.toThrow()
+    await expect(groups.loadState({ groupID: 'group-A', incarnation: 1 })).resolves.toMatchObject({
+      deleted: false,
+    })
+    const sealError = new Error('seal failed')
+    const change = await nextChange(groups, 'group-A', 'seal-fault')
+    fixture.failNextSeal(sealError)
+    await expect(
+      groups.transition(change, async (stores) => {
+        await stores
+          .incarnation(1)
+          .anchor.save({ anchor: { epoch: 3, secret: new Uint8Array(32).fill(97) } })
+      }),
+    ).rejects.toThrow()
+    await groups.transition(change, async (stores) => {
+      await stores
+        .incarnation(1)
+        .anchor.save({ anchor: { epoch: 3, secret: new Uint8Array(32).fill(97) } })
+    })
+  } finally {
+    await fixture.close()
+  }
+})
+
+test('held opens suspend once and phase callbacks are one-shot', async () => {
+  const fixture = await createStorageFixture({ id: 'group-A', mode: 'double' })
+  const latch = fixture.holdNextOpen()
+  try {
+    const groups = fixture.ports.device.groups
+    let done = false
+    const read = groups.loadState({ groupID: 'group-A', incarnation: 1 }).then(() => {
+      done = true
+    })
+    await latch.started
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    expect(done).toBe(false)
+    latch.release()
+    await read
+    const phases: Array<string> = []
+    for (const phase of ['prepare', 'work', 'finalise', 'effects', 'account', 'hook'] as const) {
+      fixture.onPhase(phase, () => {
+        phases.push(phase)
+      })
+    }
+    await groups.transition(await nextChange(groups, 'group-A', 'phase-probe'), async () => {})
+    await groups.transition(await nextChange(groups, 'group-A', 'next-probe'), async () => {})
+    expect(phases).toEqual(['prepare', 'work', 'finalise', 'effects', 'account', 'hook'])
+    expect(await fixture.readWith(async (stores) => stores.restore.load())).toMatchObject({
+      id: 'restore-1',
+    })
+    await fixture.combinedWith(new AbortController().signal)
+  } finally {
+    latch.release()
+    await fixture.close()
+  }
+})
+
+test('forced rollback retries work under the retained owner entry', async () => {
+  const fixture = await createStorageFixture({ id: 'group-A', mode: 'double' })
+  try {
+    const groups = fixture.ports.device.groups
+    const change = await nextChange(groups, 'group-A', 'retry-probe')
+    fixture.retryNextTransition()
+    let attempts = 0
+    await groups.transition(change, async (stores) => {
+      attempts++
+      await stores.incarnation(1).cursor.save('retry-topic', String(attempts))
+    })
+    expect(attempts).toBe(2)
+    expect((await groups.load('group-A'))?.mutationID).toBe('retry-probe')
+    expect(
+      await groups.ports({ groupID: 'group-A', incarnation: 1 }).cursor.load('retry-topic'),
+    ).toBe('2')
+  } finally {
+    await fixture.close()
+  }
+})

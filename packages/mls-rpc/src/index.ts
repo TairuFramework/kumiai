@@ -94,6 +94,7 @@ export type {
   MemoryStoreRows,
   MemoryTransaction,
   OutcomeAwareTransactionOptions,
+  OwnershipContextPort,
   PackageUse,
   PendingAppFrame,
   PendingCommitFault,

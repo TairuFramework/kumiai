@@ -2,6 +2,7 @@ import { decodeClientState, encodeClientState } from '@kumiai/mls'
 import { testOwnershipPhasesConformance } from '@kumiai/rpc-conformance'
 
 import type { MemoryTransaction } from '../src/persistence-types.js'
+import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import { createStorageFixture, writeSideRow } from './fixtures/storage-persistence.js'
 import { makeStorageSeed } from './fixtures/storage-seed.js'
 
@@ -18,9 +19,12 @@ for (const mode of ['real-mls', 'double'] as const) {
       candidate.state.state = encodeClientState(client)
       return candidate
     },
+    ownershipContext: createAsyncLocalOwnershipContext,
     writeSideRow,
-    createFixture: (id: string, effects?: Parameters<typeof createStorageFixture>[0]['effects']) =>
-      createStorageFixture({ id, mode, effects }),
+    createFixture: (
+      id: string,
+      options?: Pick<Parameters<typeof createStorageFixture>[0], 'effects' | 'ownershipContext'>,
+    ) => createStorageFixture({ id, mode, ...options }),
   }
   testOwnershipPhasesConformance<MemoryTransaction>(params)
 }

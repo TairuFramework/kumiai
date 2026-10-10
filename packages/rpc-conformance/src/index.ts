@@ -77,7 +77,10 @@ export {
 } from './group-storage.js'
 export { createMemoryAppOutbox, type MemoryAppOutbox } from './memory-app-outbox.js'
 export { createMemoryControlStore, type MemoryControlStore } from './memory-control-store.js'
-export { testOwnershipPhasesConformance } from './ownership-phases.js'
+export {
+  type OwnershipPhasesConformanceParams,
+  testOwnershipPhasesConformance,
+} from './ownership-phases.js'
 export {
   type ConformanceAppFrameRef,
   type ConformancePendingAppFrame,

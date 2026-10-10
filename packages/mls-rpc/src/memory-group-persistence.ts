@@ -44,6 +44,7 @@ import type {
   MemoryDatabase,
   MemoryStoreRows,
   MemoryTransaction,
+  OwnershipContextPort,
   TransactionalGroupEffects,
   TransactionHookSettlement,
 } from './persistence-types.js'
@@ -129,6 +130,7 @@ export function createMemoryGroupCoordinator(params: {
   atRest: AtRestCodec
   providerID: string
   effects?: TransactionalGroupEffects<MemoryTransaction>
+  ownershipContext?: OwnershipContextPort
 }) {
   const { db, owners, atRest, providerID, effects } = params
   if (atRest == null || typeof atRest.seal !== 'function' || typeof atRest.open !== 'function')
@@ -847,6 +849,7 @@ export function createMemoryGroupPersistence(params: {
   atRest: AtRestCodec
   providerID: string
   effects?: TransactionalGroupEffects<MemoryTransaction>
+  ownershipContext?: OwnershipContextPort
 }): GroupPersistence<MemoryTransaction> {
   return createMemoryGroupCoordinator(params).groups
 }

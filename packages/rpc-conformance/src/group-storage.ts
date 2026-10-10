@@ -455,9 +455,11 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
     test('co-commits transactional event effects and contains effect failures', async () => {
       let shouldFail = false
       const fixture = await params.createFixture(groupID, {
-        async outbox(tx, event) {
-          await params.writeSideRow(tx, 'event-effect', utf8(event.id))
-          if (shouldFail) throw new Error('effect failure')
+        effects: {
+          async outbox(tx, event) {
+            await params.writeSideRow(tx, 'event-effect', utf8(event.id))
+            if (shouldFail) throw new Error('effect failure')
+          },
         },
       })
       try {

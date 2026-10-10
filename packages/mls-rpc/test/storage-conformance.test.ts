@@ -19,8 +19,10 @@ for (const mode of ['real-mls', 'double'] as const) {
       return candidate
     },
     writeSideRow,
-    createFixture: (id: string, effects?: Parameters<typeof createStorageFixture>[0]['effects']) =>
-      createStorageFixture({ id, mode, effects }),
+    createFixture: (
+      id: string,
+      options?: Pick<Parameters<typeof createStorageFixture>[0], 'effects' | 'ownershipContext'>,
+    ) => createStorageFixture({ id, mode, ...options }),
   }
   testGroupStorageConformance<MemoryTransaction>(params)
   testDeviceStorageConformance<MemoryTransaction>(params)

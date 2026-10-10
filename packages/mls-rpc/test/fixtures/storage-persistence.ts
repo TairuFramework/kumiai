@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { randomIdentity } from '@kokuin/token'
 import {
   createKeyPackageBundle,
@@ -9,11 +10,17 @@ import type { KeyPackageRecord } from '@kumiai/mls-hub'
 import type { StorageTestPorts } from '@kumiai/rpc-conformance'
 import { vi } from 'vitest'
 
+import { memoryGroupOwnerQueues } from '../../src/memory-group-persistence.js'
 import { createGroupStateStores } from '../../src/memory-group-state.js'
 import { groupOwnerKey } from '../../src/memory-incarnation-stores.js'
+import * as packageReads from '../../src/memory-package-stores.js'
+import type { OwnerEntry } from '../../src/owner-queue.js'
+import { ownerEntryFailureSignal } from '../../src/owner-queue.js'
 import { physicalRecordKey } from '../../src/persistence-codec.js'
 import type {
+  DeviceStores,
   MemoryTransaction,
+  OwnershipContextPort,
   PendingCommitFault,
   PersistenceFixture,
   RawStoredRecord,
@@ -78,23 +85,56 @@ export async function createStorageFixture(params: {
   id: string
   mode: 'real-mls' | 'double'
   effects?: TransactionalGroupEffects<MemoryTransaction>
+  ownershipContext?: OwnershipContextPort
 }): Promise<PersistenceFixture<StorageTestPorts<MemoryTransaction>>> {
   const identity = randomIdentity()
   const ownerDID = identity.id
   const providerID = 'storage-provider'
   const codec = createDeterministicAtRestCodec({ key: new Uint8Array(32).fill(98) })
-  let sealLatch: { reached(): void; wait: Promise<void>; release(): void } | undefined
-  const atRest = {
-    open: codec.open,
-    async seal(bytes: Uint8Array, aad: Uint8Array) {
-      const latch = sealLatch
+  type Phase = Parameters<PersistenceFixture<StorageTestPorts<MemoryTransaction>>['onPhase']>[0]
+  type Latch = { reached(): void; wait: Promise<void>; release(): void }
+  const context = new AsyncLocalStorage<OwnerEntry>()
+  let sealLatch: Latch | undefined
+  let openLatch: Latch | undefined
+  let sealFailure: Error | undefined
+  let openFailure: Error | undefined
+  let codecProbe: ((phase: string) => Promise<void>) | undefined
+  let retry = false
+  const phaseCallbacks = new Map<Phase, () => Promise<void> | void>()
+  const held = new Set<Latch>()
+  function clearInstrumentation(): void {
+    sealLatch = undefined
+    openLatch = undefined
+    sealFailure = undefined
+    openFailure = undefined
+    codecProbe = undefined
+    phaseCallbacks.clear()
+  }
+  async function codecCall(kind: 'seal' | 'open', bytes: Uint8Array, aad: Uint8Array) {
+    const probe = codecProbe
+    codecProbe = undefined
+    if (probe !== undefined) await probe(context.getStore()?.phase ?? 'released')
+    const latch = kind === 'seal' ? sealLatch : openLatch
+    const error = kind === 'seal' ? sealFailure : openFailure
+    if (kind === 'seal') {
       sealLatch = undefined
-      if (latch !== undefined) {
-        latch.reached()
-        await latch.wait
-      }
-      return await codec.seal(bytes, aad)
-    },
+      sealFailure = undefined
+    } else {
+      openLatch = undefined
+      openFailure = undefined
+    }
+    if (latch !== undefined) {
+      held.add(latch)
+      latch.reached()
+      await latch.wait
+      held.delete(latch)
+    }
+    if (error !== undefined) throw error
+    return await codec[kind](bytes, aad)
+  }
+  const atRest = {
+    open: (bytes: Uint8Array, aad: Uint8Array) => codecCall('open', bytes, aad),
+    seal: (bytes: Uint8Array, aad: Uint8Array) => codecCall('seal', bytes, aad),
   }
   let db = createMemoryTransaction({ rows: { [sideNamespace]: new Map() } })
   let closed = false
@@ -105,20 +145,134 @@ export async function createStorageFixture(params: {
     completed: Promise<void>
     done(): void
   }>()
+  let readDevice!: <T>(fn: (stores: DeviceStores<MemoryTransaction>) => Promise<T>) => Promise<T>
+  const instrumented = new WeakSet<object>()
+  function instrumentOwners(database: typeof db): void {
+    const owners = memoryGroupOwnerQueues(database)
+    if (owners === undefined || instrumented.has(owners)) return
+    instrumented.add(owners)
+    const run = owners.run
+    owners.run = (kind, scopes, body, options) => {
+      const callbacks =
+        kind === 'read' ? new Map<Phase, () => Promise<void> | void>() : new Map(phaseCallbacks)
+      const retrying = kind !== 'read' && retry
+      if (kind !== 'read') {
+        phaseCallbacks.clear()
+        retry = false
+      }
+      return run(
+        kind,
+        scopes,
+        async (entry) => {
+          const instrumentedEntry = entry as OwnerEntry & {
+            callback?<T>(fn: () => T): T
+            attempt?(): { signal: AbortSignal }
+          }
+          let attemptSignal: AbortSignal | undefined
+          const invoke = (phase: Phase) => {
+            const fn = callbacks.get(phase)
+            callbacks.delete(phase)
+            if (fn === undefined) return
+            if (instrumentedEntry.callback !== undefined) return instrumentedEntry.callback(fn)
+            return fn()
+          }
+          const enter = entry.enter
+          const retain = entry.retain
+          const settle = entry.settle
+          let first = retrying
+          let restarting = false
+          entry.enter = async (phase) => {
+            if (restarting && phase === 'prepare') return
+            if (restarting && phase === 'work') restarting = false
+            await enter(phase)
+            const nextSignal = instrumentedEntry.attempt?.().signal
+            if (nextSignal !== attemptSignal) {
+              attemptSignal?.removeEventListener('abort', clear)
+              attemptSignal = nextSignal
+              attemptSignal?.addEventListener('abort', clear, { once: true })
+            }
+            if (callbacks.has(phase as Phase)) await invoke(phase as Phase)
+          }
+          entry.retain = (proof) =>
+            retain(async () => {
+              await invoke('proof')
+              return await proof()
+            })
+          entry.settle = (outcome) => {
+            if (first && outcome === 'rolled-back') return
+            settle(outcome)
+          }
+          const signal = ownerEntryFailureSignal(entry)
+          const clear = () => {
+            callbacks.clear()
+            clearInstrumentation()
+          }
+          signal?.addEventListener('abort', clear, { once: true })
+          try {
+            return await context.run(entry, async () => {
+              if (callbacks.has('hook'))
+                entry.onCommit(() => {
+                  void invoke('hook')
+                })
+              if (first) memoryFaults(database).failNext('before-commit')
+              try {
+                return await body(entry)
+              } catch (error) {
+                clearInstrumentation()
+                callbacks.clear()
+                if (!first) throw error
+                first = false
+                if (
+                  !(error instanceof Error) ||
+                  error.message !== 'Injected before-commit failure'
+                ) {
+                  settle('rolled-back')
+                  throw error
+                }
+                restarting = true
+                return await body(entry)
+              }
+            })
+          } finally {
+            callbacks.clear()
+            signal?.removeEventListener('abort', clear)
+            attemptSignal?.removeEventListener('abort', clear)
+          }
+        },
+        options,
+      )
+    }
+  }
   function ports(effects = params.effects, database = db) {
-    const device = createMemoryDevicePersistence({
-      db: database,
-      atRest,
-      providerID,
-      ownerDID,
-      effects,
-    })
+    // Capture the registered public Read callback without adding a production test API.
+    const bind = packageReads.bindMemoryPackageReads
+    const capture = vi
+      .spyOn(packageReads, 'bindMemoryPackageReads')
+      .mockImplementation((device, read) => {
+        readDevice = read
+        bind(device, read)
+      })
+    let device: ReturnType<typeof createMemoryDevicePersistence>
+    try {
+      device = createMemoryDevicePersistence({
+        db: database,
+        atRest,
+        providerID,
+        ownerDID,
+        effects,
+        ownershipContext: params.ownershipContext,
+      })
+    } finally {
+      capture.mockRestore()
+    }
+    instrumentOwners(database)
     return {
       device,
       packageStores: (sourceID: string) => createMemoryPackageStores({ device, sourceID }),
     }
   }
   const initial = ports({})
+  await initial.device.load()
   const seed = await makeStorageSeed({ id: params.id, incarnation: 1, epoch: 3, mode: params.mode })
   await installSeed(initial.device.groups, seed, 'seed')
   if (params.id !== 'group-B') {
@@ -318,6 +472,54 @@ export async function createStorageFixture(params: {
       sealLatch = { reached: reached.resolve, wait: release.promise, release: release.resolve }
       return { reached: reached.promise, release: release.resolve }
     },
+    failNextSeal(error = new Error('Injected seal failure')) {
+      active()
+      sealFailure = error
+    },
+    holdNextOpen() {
+      active()
+      if (openLatch !== undefined) throw new Error('Open already held')
+      const started = Promise.withResolvers<void>()
+      const released = Promise.withResolvers<void>()
+      openLatch = { reached: started.resolve, wait: released.promise, release: released.resolve }
+      return { started: started.promise, release: released.resolve }
+    },
+    failNextOpen(error = new Error('Injected open failure')) {
+      active()
+      openFailure = error
+    },
+    probeCodec(fn) {
+      active()
+      codecProbe = fn
+    },
+    onPhase(phase, fn) {
+      active()
+      phaseCallbacks.set(phase, fn)
+    },
+    readWith(fn) {
+      active()
+      return readDevice(fn)
+    },
+    combinedWith(signal) {
+      active()
+      const owners = memoryGroupOwnerQueues(db)
+      if (owners === undefined) throw new Error('Missing fixture owners')
+      return owners.run(
+        'combined',
+        { ownerDID, groupID: params.id },
+        async (entry) => {
+          await entry.enter('prepare')
+          await entry.enter('work')
+          await entry.enter('outcome')
+          entry.settle('committed')
+        },
+        { signal },
+      )
+    },
+    retryNextTransition() {
+      active()
+      retry = true
+    },
     async forceOwnerMarker(owner, marker) {
       active()
       const namespace = 'groupID' in owner ? 'group-owner' : 'device-owner'
@@ -418,7 +620,10 @@ export async function createStorageFixture(params: {
     async close() {
       if (closed) return
       sealLatch?.release()
-      sealLatch = undefined
+      openLatch?.release()
+      clearInstrumentation()
+      for (const latch of held) latch.release()
+      held.clear()
       for (const owner of pending) {
         if (owner.rejected) await owner.fault.finish('rollback')
         owner.done()

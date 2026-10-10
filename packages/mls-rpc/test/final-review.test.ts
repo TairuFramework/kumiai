@@ -551,7 +551,7 @@ for (const mode of ['real-mls', 'double'] as const) {
 
     test('refuses spent incarnation-one reinstall after partial loss retaining trust', async () => {
       await assertPartialLossSpentRefused({
-        createFixture: (id) => createStorageFixture({ id, mode }),
+        createFixture: (id, options) => createStorageFixture({ id, mode, ...options }),
       })
     }, 5000)
   })
