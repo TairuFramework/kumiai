@@ -27,10 +27,10 @@ The guard has two layers:
 - **Built-ins: ES2022.** No ES2023+ built-in may be used unless it is listed as an optional capability.
 - **Host whitelist.** This amends 2.1c by adding Web Streams and the interval/timeout timers.
   - `WeakMap`, `WeakSet`
-  - `AbortController`/`AbortSignal`: constructor, `abort`, `aborted`, `reason`, `addEventListener`, `removeEventListener`
+  - `AbortController`: constructor, `signal`, `abort`. `AbortSignal`: `aborted`, `reason`, `addEventListener`, `removeEventListener`. No other members.
   - `queueMicrotask`, `setTimeout`, `clearTimeout`, `setInterval`, `clearInterval`
   - `TextEncoder`, `TextDecoder`
-  - Web Crypto: `crypto.getRandomValues`, `crypto.subtle`, `crypto.randomUUID`
+  - Web Crypto: `crypto.getRandomValues`, `crypto.subtle` (any `SubtleCrypto` method), `crypto.randomUUID`. No other `crypto` members.
   - Web Streams: `ReadableStream`, `WritableStream`, `CountQueuingStrategy`
 - **Supported hosts:**
   - Node ≥ 20.
@@ -162,14 +162,16 @@ The guard has two layers:
   - Report each diagnostic as `file:line message`.
 - **Name layer (AST):**
   - Forbids the Forbidden list, plus any runtime value reference to a top-level `lib.dom.d.ts` global (a `declare var` or `declare function`) that is not on the host whitelist. References in type positions are erased and allowed, such as an annotation of `ReadableStreamDefaultController`.
+  - Member rule: for `AbortController`, `AbortSignal` and `Crypto`, a runtime property access resolving to a `lib.dom.d.ts` member outside the whitelist above is forbidden, for example `signal.onabort` or `AbortSignal.any`. Web Streams members are unrestricted.
   - Resolution is symbol-aware: use the program's type checker to resolve each identifier and property access. A local or shadowed binding never fires.
   - Covers computed access (`Promise['withResolvers']`, `globalThis['structuredClone']`), destructured statics (`const { withResolvers } = Promise`), `export … from 'node:…'`, dynamic `import('node:…')` and `require('node:…')`.
   - Optional capabilities are allowed only under the presence or absence `typeof` tests defined in Global Constraints.
 - **Fixtures:** a `describe('guard fixtures')` block runs both layers over in-memory source strings. It covers:
-  - **Negative:** each forbidden form; `new ReadableStreamDefaultController()`, a non-whitelisted DOM value; `Float16Array` used without a guard; ES2023 `toSorted`, caught by the type layer.
-  - **Positive:** a whitelisted host API; a `ReadableStreamDefaultController` type annotation; guarded optional capabilities in both presence form and the absence-ternary form used in `memory-transaction.ts:138`; a shadowed local named `structuredClone`; ES2022 `Array.prototype.at`.
+  - **Negative:** each forbidden form; `signal.onabort = () => {}`; `controller.signal.throwIfAborted()`; `new ReadableStreamDefaultController()`, a non-whitelisted DOM value; `Float16Array` used without a guard; ES2023 `toSorted`, caught by the type layer.
+  - **Positive:** a whitelisted host API; `new AbortController().signal.addEventListener('abort', f)`; a `ReadableStreamDefaultController` type annotation; guarded optional capabilities in both presence form and the absence-ternary form used in `memory-transaction.ts:138`; a shadowed local named `structuredClone`; ES2022 `Array.prototype.at`.
 - **Smoke test:**
-  - Also delete `String.prototype.isWellFormed`, `String.prototype.toWellFormed`, `AbortSignal.prototype.throwIfAborted` and `Float16Array`, restoring all of them in `afterAll`.
+  - Move every capability removal into a shared `beforeAll`: the existing ones plus `String.prototype.isWellFormed`, `String.prototype.toWellFormed`, `AbortSignal.prototype.throwIfAborted` and `Float16Array`. Restore them all in `afterAll`.
+  - A shared helper asserts every removal holds at the start of each test, so a path run alone or in a different order still runs restricted.
   - Each path is its own `test`, uses real MLS, and asserts the specific domain result or error message:
     1. `renewLeaf` on a bound device.
     2. A two-member group with an earlier retained epoch runs `carryReceiveProgress`.
