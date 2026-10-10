@@ -377,11 +377,28 @@ test('missing retained trust refuses installation while a safety event can still
         ]),
     )
     expect((await reopened.device.groups.load('group-A'))?.mutationID).toBe('safety')
+    const safetyPorts = await fixture.reopen()
+    await safetyPorts.device.groups.transition(
+      await nextChange(safetyPorts.device.groups, 'group-A', 'read-safety'),
+      async (stores) => {
+        expect(
+          (await stores.incarnation(1).meta.events()).find(
+            (event) => event.id === 'safety-missing',
+          ),
+        ).toEqual({
+          groupID: 'group-A',
+          incarnation: 1,
+          id: 'safety-missing',
+          kind: 'group:recovery-unavailable',
+          reason: 'trust-unreadable',
+        })
+      },
+    )
   } finally {
     await fixture.close()
     await donor.close()
   }
-})
+}, 5000)
 
 async function nextChange(
   groups: Pick<Mirror.ConformanceGroupPersistence<Actual.MemoryTransaction>, 'load'>,

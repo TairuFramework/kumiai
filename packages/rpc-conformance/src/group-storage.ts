@@ -170,6 +170,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
           const change = await storageChange(groups, groupID, 'rollback')
           const before = await fixture.inspectRows()
           const hooks: Array<string> = []
+          let reachedWrites = false
           if (point !== 'callback') fixture.failNext(point)
           await expect(
             groups.transition(change, async (stores) => {
@@ -227,12 +228,19 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
                   lastAttempt: null,
                 },
               ])
-              await rows.meta.putSettlement(7, null)
+              await rows.meta.putSettlement(8, {
+                sequenceID: '11',
+                attemptID: 'publish-2',
+                topicID,
+                outcome: 'published',
+              })
               await rows.meta.ackEvent('event-1')
               await params.writeSideRow(stores.tx, 'effect-1', utf8('effect'))
+              reachedWrites = true
               if (point === 'callback') throw new Error('callback failure')
             }),
-          ).rejects.toThrow()
+          ).rejects.toThrow(point === 'callback' ? 'callback failure' : `Injected ${point} failure`)
+          expect(reachedWrites).toBe(point === 'callback' || point === 'before-commit')
           expect(await fixture.inspectRows()).toEqual(before)
           expect(hooks).toEqual(
             point === 'callback' || point === 'before-commit' ? ['rollback'] : [],
@@ -243,7 +251,58 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
           await fixture.close()
         }
       },
+      5000,
     )
+
+    test('serialises overlapping methods across group store instances without lost writes', async () => {
+      const fixture = await params.createFixture(groupID)
+      try {
+        const groups = fixture.ports.device.groups
+        const seed = await storageSeed(groups)
+        const before = await groups.ports(key).control.load()
+        const outcomes = [
+          { id: 'overlap-1', opID: null, at: 1001, kind: 'unknown' as const },
+          { id: 'overlap-2', opID: null, at: 1002, kind: 'unknown' as const },
+        ] as const
+        const hooks: Array<string> = []
+        let calls = 0
+        await groups.transition(await storageChange(groups, groupID, 'overlap'), async (stores) => {
+          calls++
+          stores.tx.onCommit(() => {
+            hooks.push('commit')
+          })
+          stores.tx.onRollback(() => {
+            hooks.push('rollback')
+          })
+          const [, , snapshot] = await Promise.all([
+            stores.incarnation(1).control.apply({ putOutcomes: [outcomes[0]] }, 'overlap'),
+            stores.incarnation(1).control.apply({ putOutcomes: [outcomes[1]] }, 'overlap'),
+            stores.incarnation(1).control.load(),
+          ])
+          expect(snapshot.outcomes).toEqual([...before.outcomes, ...outcomes])
+        })
+        expect(await groups.resolve(groupID, 'overlap')).toBe('committed')
+        expect(await groups.resolve(groupID, 'overlap')).toBe('committed')
+        expect(calls).toBe(1)
+        expect(hooks).toEqual(['commit'])
+        const reopened = await fixture.reopen()
+        expect(await reopened.device.groups.load(groupID)).toEqual({
+          ...seed.lifetime,
+          revision: seed.lifetime.revision + 1,
+          mutationID: 'overlap',
+        })
+        expect(await reopened.device.groups.loadState(key)).toEqual({
+          ...seed.state,
+          version: seed.state.version + 1,
+        })
+        expect((await reopened.device.groups.ports(key).control.load()).outcomes).toEqual([
+          ...before.outcomes,
+          ...outcomes,
+        ])
+      } finally {
+        await fixture.close()
+      }
+    }, 5000)
 
     test('co-commits transactional event effects and contains effect failures', async () => {
       let shouldFail = false
@@ -308,11 +367,16 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
           senderHWM: 32,
         })
         const before = await fixture.inspectRows()
+        let staleCalls = 0
         await expect(
           groups.transition({ ...change, mutationID: 'stale' }, async () => {
-            throw new Error('CAS callback must not run')
+            staleCalls++
           }),
-        ).rejects.toThrow()
+        ).rejects.toMatchObject({
+          name: 'GroupStateConflictError',
+          message: 'Group lifetime conflict',
+        })
+        expect(staleCalls).toBe(0)
         for (const candidate of [
           { ...seed.state, version: seed.state.version + 1 },
           { ...seed.state, version: seed.state.version + 3 },
@@ -337,8 +401,9 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
       }
     })
 
-    test('corrupt state retains trust but corrupt trust refuses installation', async () => {
-      for (const namespace of ['state', 'trust'] as const) {
+    test.each(['state', 'trust'] as const)(
+      'corrupt %s retains the other records and persists a safety event',
+      async (namespace) => {
         const fixture = await params.createFixture(groupID)
         const donor = await params.createFixture(groupID)
         try {
@@ -384,12 +449,29 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
               ]),
           )
           expect((await restored.load(groupID))?.mutationID).toBe('safety')
+          const safetyPorts = await fixture.reopen()
+          await safetyPorts.device.groups.transition(
+            await storageChange(safetyPorts.device.groups, groupID, 'read-safety'),
+            async (stores) => {
+              expect(
+                (await stores.incarnation(1).meta.events()).find(
+                  (event) => event.id === 'safety-1',
+                ),
+              ).toEqual({
+                ...key,
+                id: 'safety-1',
+                kind: 'group:recovery-unavailable',
+                reason: 'trust-unreadable',
+              })
+            },
+          )
         } finally {
           await fixture.close()
           await donor.close()
         }
-      }
-    })
+      },
+      5000,
+    )
 
     test('null state retains recovery metadata and installation requires co-written trust', async () => {
       const fixture = await params.createFixture(groupID)
@@ -438,7 +520,8 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
       const fixture = await params.createFixture(groupID)
       const donor = await params.createFixture(groupID)
       try {
-        const groups = fixture.ports.device.groups
+        const { device } = await fixture.reopen()
+        const groups = device.groups
         const fresh = await storageSeed(donor.ports.device.groups)
         await groups.transition(await storageChange(groups, groupID, 'switch'), async (stores) =>
           writeStorageInstall(stores, fresh, 'switch', 2),
@@ -471,7 +554,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
         await fixture.close()
         await donor.close()
       }
-    })
+    }, 5000)
 
     for (const stage of ['absent', 'progress', 'tombstone'] as const) {
       test.each(['commit', 'rollback'] as const)(
@@ -542,9 +625,13 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
               return value
             })
             // An unrelated group progresses while the completion owner remains held.
+            const independentSeed = await storageSeed(groups, 'group-B')
             await groups.transition(
               await storageChange(groups, 'group-B', 'independent'),
-              async (stores) => params.writeSideRow(stores.tx, 'effect-B', utf8('independent')),
+              async (stores) => {
+                await stores.incarnation(1).cursor.save(topicID, '20')
+                await params.writeSideRow(stores.tx, 'effect-B', utf8('independent'))
+              },
             )
             expect(readDone).toBe(false)
             fixture.failNext('status-read')
@@ -578,13 +665,31 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
                 ),
               ).rejects.toThrow()
             }
-            await fixture.reopen()
+            const reopened = await fixture.reopen()
+            expect(await reopened.device.groups.load('group-B')).toEqual({
+              ...independentSeed.lifetime,
+              revision: independentSeed.lifetime.revision + 1,
+              mutationID: 'independent',
+            })
+            expect(
+              await reopened.device.groups.loadState({ groupID: 'group-B', incarnation: 1 }),
+            ).toEqual({
+              ...independentSeed.state,
+              version: independentSeed.state.version + 1,
+            })
+            expect(
+              await reopened.device.groups
+                .ports({ groupID: 'group-B', incarnation: 1 })
+                .cursor.load(topicID),
+            ).toBe('20')
+            expect(await fixture.inspectSideRow('effect-B')).toEqual(utf8('independent'))
             await scanSealed(fixture)
           } finally {
             await fixture.close()
             await donor.close()
           }
         },
+        5000,
       )
 
       test.each(['before-commit', 'status-read'] as const)(

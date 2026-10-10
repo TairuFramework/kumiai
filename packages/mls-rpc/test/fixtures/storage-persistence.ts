@@ -119,8 +119,8 @@ export async function createStorageFixture(params: {
       )
       await rows.anchor.save({ anchor: { epoch: 3, secret: new Uint8Array(32).fill(97) } })
       for (const [id, position] of [
-        ['frame-1', '2'],
         ['frame-2', '10'],
+        ['frame-1', '2'],
       ]) {
         if (id === undefined || position === undefined) throw new Error('Missing frame address')
         const frame = {
