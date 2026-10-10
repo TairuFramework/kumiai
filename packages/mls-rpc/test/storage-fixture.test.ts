@@ -617,6 +617,56 @@ test('codec faults and probes fire once', async () => {
   }
 })
 
+test('a suspended codec probe keeps the hold and failure on the first concurrent call', async () => {
+  const fixture = await createStorageFixture({ id: 'group-A', mode: 'double' })
+  const probeStarted = Promise.withResolvers<void>()
+  const probeReleased = Promise.withResolvers<void>()
+  const latch = fixture.holdNextOpen()
+  const calls: Array<Promise<unknown>> = []
+  try {
+    const groups = fixture.ports.device.groups
+    fixture.failNextOpen(new Error('first open failed'))
+    fixture.probeCodec(async () => {
+      probeStarted.resolve()
+      await probeReleased.promise
+    })
+    let firstSettled = false
+    const first = groups.loadState({ groupID: 'group-A', incarnation: 1 }).then(
+      (value) => ({ ok: true, value }),
+      (error: unknown) => ({ ok: false, error }),
+    )
+    calls.push(first)
+    void first.then(() => {
+      firstSettled = true
+    })
+    await probeStarted.promise
+    const second = groups.loadState({ groupID: 'group-B', incarnation: 1 }).then(
+      (value) => ({ ok: true, value }),
+      (error: unknown) => ({ ok: false, error }),
+    )
+    calls.push(second)
+    expect(
+      await Promise.race([second, latch.started.then(() => 'second call held')]),
+    ).toMatchObject({
+      ok: true,
+      value: { deleted: false },
+    })
+    probeReleased.resolve()
+    await latch.started
+    expect(firstSettled).toBe(false)
+    latch.release()
+    expect(await first).toMatchObject({ ok: false })
+    await expect(groups.loadState({ groupID: 'group-A', incarnation: 1 })).resolves.toMatchObject({
+      deleted: false,
+    })
+  } finally {
+    probeReleased.resolve()
+    latch.release()
+    await Promise.all(calls)
+    await fixture.close()
+  }
+})
+
 test('held opens suspend once and phase callbacks are one-shot', async () => {
   const fixture = await createStorageFixture({ id: 'group-A', mode: 'double' })
   const latch = fixture.holdNextOpen()
@@ -646,6 +696,25 @@ test('held opens suspend once and phase callbacks are one-shot', async () => {
     await fixture.combinedWith(new AbortController().signal)
   } finally {
     latch.release()
+    await fixture.close()
+  }
+})
+
+test('a rejecting phase hook is observed after the transition commits', async () => {
+  const fixture = await createStorageFixture({ id: 'group-A', mode: 'double' })
+  try {
+    const groups = fixture.ports.device.groups
+    const failure = new Error('hook failed')
+    fixture.onPhase('hook', async () => {
+      await Promise.resolve()
+      throw failure
+    })
+    await expect(
+      groups.transition(await nextChange(groups, 'group-A', 'hook-fault'), async () => {}),
+    ).rejects.toBe(failure)
+    expect((await groups.load('group-A'))?.mutationID).toBe('hook-fault')
+    await groups.transition(await nextChange(groups, 'group-A', 'after-hook-fault'), async () => {})
+  } finally {
     await fixture.close()
   }
 })

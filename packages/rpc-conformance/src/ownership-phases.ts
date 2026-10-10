@@ -1444,7 +1444,7 @@ function testOperationOwnership<TTx extends ConformanceGroupTransaction>(
         let supplied!: ConformanceGroupStores<TTx>
         const results: Array<unknown> = []
         try {
-          fixture.onPhase(phase, async () => {
+          fixture.onPhase(phase, () => {
             const stores = fixture.constructGroupStores(supplied.tx, key)
             const accessor = {
               get value() {
@@ -1454,9 +1454,9 @@ function testOperationOwnership<TTx extends ConformanceGroupTransaction>(
                 ])
               },
             }
-            results.push(...(await within(accessor.value)))
             fixture.probeCodec(async (currentPhase) => {
               expect(currentPhase).toBe(phase)
+              results.push(...(await within(accessor.value)))
               results.push(await within(observed(stores.lifetime.load()).result))
               results.push(
                 await within(
@@ -1557,7 +1557,7 @@ function testOperationOwnership<TTx extends ConformanceGroupTransaction>(
           const fixture = await within(params.createFixture(groupID, { ownershipContext: port }))
           const groups = fixture.ports.device.groups
           const change = await within(storageChange(groups, groupID, 'phase-reentrant'))
-          let nested!: ReturnType<typeof observed<unknown>>
+          let nested: ReturnType<typeof observed<unknown>> | undefined
           let token: object | undefined
           try {
             fixture.onPhase(phase, async () => {
@@ -1567,7 +1567,11 @@ function testOperationOwnership<TTx extends ConformanceGroupTransaction>(
               await within(nested.result)
             })
             if (phase === 'proof') fixture.commitThenReject()
-            await within(groups.transition(change, async () => {}))
+            const transition = await within(
+              observed(groups.transition(change, async () => {})).result,
+            )
+            expect(transition).toEqual({ ok: true, value: undefined })
+            if (nested === undefined) throw new Error('Missing nested root call')
             expect(await within(nested.result)).toMatchObject({
               ok: false,
               error: { name: 'ReentrantOwnershipError' },
@@ -1586,31 +1590,35 @@ function testOperationOwnership<TTx extends ConformanceGroupTransaction>(
     }
 
     if (params.ownershipContext !== undefined) {
-      test('ownership context restores nested bindings after a throwing callback', async () => {
+      test('ownership context restores the caller after a throwing provider callback', async () => {
         const port = params.ownershipContext?.()
         if (port === undefined) throw new Error('Missing ownership context')
         const fixture = await within(params.createFixture(groupID, { ownershipContext: port }))
         let bound: object | undefined
+        let nextBound: object | undefined
+        const failure = new Error('callback failed')
         try {
           const groups = fixture.ports.device.groups
           const change = await within(storageChange(groups, groupID, 'throwing-context'))
           fixture.onPhase('work', () => {
             bound = port.get()
-            const nestedToken = Object.freeze({})
-            expect(() =>
-              port.run(nestedToken, () => {
-                throw new Error('nested binding')
-              }),
-            ).toThrow('nested binding')
-            expect(port.get()).toBe(bound)
-            throw new Error('callback failed')
+            throw failure
           })
-          expect(
-            await within(observed(groups.transition(change, async () => {})).result),
-          ).toMatchObject({ ok: false })
-          expect(bound).toBeDefined()
+          expect(await within(observed(groups.transition(change, async () => {})).result)).toEqual({
+            ok: false,
+            error: failure,
+          })
           expect(port.get()).toBeUndefined()
+          expect(await within(groups.load(groupID))).toMatchObject({ groupID })
+          fixture.onPhase('work', () => {
+            nextBound = port.get()
+          })
           await within(groups.transition(change, async () => {}))
+          expect(bound).toBeDefined()
+          expect(Object.isFrozen(bound)).toBe(true)
+          expect(nextBound).toBeDefined()
+          expect(nextBound).not.toBe(bound)
+          expect(port.get()).toBeUndefined()
         } finally {
           await within(fixture.close())
         }

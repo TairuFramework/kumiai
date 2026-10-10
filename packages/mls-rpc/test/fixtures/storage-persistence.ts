@@ -113,7 +113,6 @@ export async function createStorageFixture(params: {
   async function codecCall(kind: 'seal' | 'open', bytes: Uint8Array, aad: Uint8Array) {
     const probe = codecProbe
     codecProbe = undefined
-    if (probe !== undefined) await probe(context.getStore()?.phase ?? 'released')
     const latch = kind === 'seal' ? sealLatch : openLatch
     const error = kind === 'seal' ? sealFailure : openFailure
     if (kind === 'seal') {
@@ -123,6 +122,7 @@ export async function createStorageFixture(params: {
       openLatch = undefined
       openFailure = undefined
     }
+    if (probe !== undefined) await probe(context.getStore()?.phase ?? 'released')
     if (latch !== undefined) {
       held.add(latch)
       latch.reached()
@@ -160,6 +160,7 @@ export async function createStorageFixture(params: {
         phaseCallbacks.clear()
         retry = false
       }
+      let hookResult: Promise<{ error: unknown } | undefined> = Promise.resolve(undefined)
       return run(
         kind,
         scopes,
@@ -212,7 +213,13 @@ export async function createStorageFixture(params: {
             return await context.run(entry, async () => {
               if (callbacks.has('hook'))
                 entry.onCommit(() => {
-                  void invoke('hook')
+                  hookResult = (async () => {
+                    try {
+                      await invoke('hook')
+                    } catch (error) {
+                      return { error }
+                    }
+                  })()
                 })
               if (first) memoryFaults(database).failNext('before-commit')
               try {
@@ -240,7 +247,11 @@ export async function createStorageFixture(params: {
           }
         },
         options,
-      )
+      ).then(async (value) => {
+        const hook = await hookResult
+        if (hook !== undefined) throw hook.error
+        return value
+      })
     }
   }
   function ports(effects = params.effects, database = db) {
