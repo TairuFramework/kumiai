@@ -28,6 +28,103 @@ const otherKey = JSON.stringify(['group-B', 1, 'current'])
 const sealedA = new Uint8Array([97, 1])
 const sealedB = new Uint8Array([98, 2])
 
+test.each(
+  (['seed', 'snapshot', 'transaction-read', 'rollback', 'transaction-write'] as const).flatMap(
+    (boundary) => (['state', 'effects'] as const).map((name) => [boundary, name] as const),
+  ),
+)('isolates shared bytes at the %s boundary in %s rows', async (boundary, name) => {
+  const bytes = new Uint8Array(new SharedArrayBuffer(4), 1, 2)
+  bytes.set(sealedA)
+  const rowKey = name === 'state' ? key : 'effect-A'
+  const wrap = (bytes: Uint8Array): unknown => (name === 'state' ? bytes : { nested: { bytes } })
+  const unwrap = (value: unknown): Uint8Array =>
+    name === 'state'
+      ? (value as Uint8Array)
+      : (value as { nested: { bytes: Uint8Array } }).nested.bytes
+  const db = createMemoryTransaction({ rows: { [name]: new Map([[rowKey, wrap(bytes)]]) } })
+  const snapshotBytes = () => unwrap(namespace(db.snapshot(), name).get(rowKey))
+
+  if (boundary === 'seed') {
+    bytes[0] = 42
+    expect(snapshotBytes()[0]).toBe(97)
+  } else if (boundary === 'snapshot') {
+    const snapshot = snapshotBytes()
+    snapshot[0] = 43
+    expect(snapshotBytes()[0]).toBe(97)
+    expect(snapshot.buffer).toBeInstanceOf(ArrayBuffer)
+  } else if (boundary === 'transaction-read') {
+    await db.transact(scope, async (tx) => {
+      const rows = namespace(tx.rows, name)
+      const read = unwrap(rows.get(rowKey))
+      read[0] = 23
+      expect(unwrap(rows.get(rowKey))[0]).toBe(97)
+      expect(read.buffer).toBeInstanceOf(ArrayBuffer)
+    })
+    expect(snapshotBytes()[0]).toBe(97)
+  } else if (boundary === 'rollback') {
+    await expect(
+      db.transact(scope, async (tx) => {
+        unwrap(namespace(tx.rows, name).get(rowKey))[0] = 23
+        throw new Error('rollback shared read')
+      }),
+    ).rejects.toThrow('rollback shared read')
+    expect(snapshotBytes()[0]).toBe(97)
+  } else {
+    bytes[0] = 98
+    await db.transact(scope, async (tx) => {
+      const rows = namespace(tx.rows, name)
+      rows.set(rowKey, wrap(bytes))
+      bytes[0] = 44
+      expect(unwrap(rows.get(rowKey))[0]).toBe(98)
+    })
+    bytes[0] = 45
+    expect(snapshotBytes()[0]).toBe(98)
+  }
+})
+
+test('copies shared buffers throughout cyclic side rows and preserves view aliases', async () => {
+  const buffer = new SharedArrayBuffer(8)
+  const bytes = new Uint8Array(buffer, 2, 2)
+  bytes.set(sealedA)
+  const value = {
+    buffer,
+    bytes,
+    view: new DataView(buffer, 2, 2),
+    words: new Uint16Array(buffer, 2, 1),
+    map: new Map([[buffer, bytes]]),
+    set: new Set([buffer]),
+    self: undefined as unknown,
+  }
+  value.self = value
+  const db = createMemoryTransaction({ rows: { effects: new Map([['effect-A', value]]) } })
+  await db.transact(scope, async (tx) => {
+    const rows = namespace(tx.rows, 'effects')
+    rows.set('effect-A', value)
+    bytes.fill(0)
+    const copy = rows.get('effect-A') as typeof value
+    expect(copy.buffer).toBeInstanceOf(ArrayBuffer)
+    expect(copy.bytes).toEqual(sealedA)
+    expect(copy.bytes.byteOffset).toBe(2)
+    expect(copy.view.byteLength).toBe(2)
+    expect(copy.view.getUint8(0)).toBe(97)
+    expect(copy.words).toBeInstanceOf(Uint16Array)
+    expect(copy.words.length).toBe(1)
+    expect(copy.bytes.buffer).toBe(copy.buffer)
+    expect(copy.view.buffer).toBe(copy.buffer)
+    expect(copy.words.buffer).toBe(copy.buffer)
+    expect(copy.map.get(copy.buffer)).toBe(copy.bytes)
+    expect(copy.set.has(copy.buffer)).toBe(true)
+    expect(copy.self).toBe(copy)
+    copy.view.setUint8(0, 42)
+    expect((rows.get('effect-A') as typeof value).bytes).toEqual(sealedA)
+  })
+  const snapshot = namespace(db.snapshot(), 'effects').get('effect-A') as typeof value
+  snapshot.bytes.fill(0)
+  expect((namespace(db.snapshot(), 'effects').get('effect-A') as typeof value).bytes).toEqual(
+    sealedA,
+  )
+})
+
 test.each(['synchronous', 'asynchronous'] as const)(
   'isolates groups and rejects nested root work without losing a concurrent commit (%s)',
   async (mode) => {
@@ -345,16 +442,22 @@ test.each(['commit', 'rollback'] as const)(
       )
     })
     const barrier = db.completionBarrier(scope)
-    await fault.barrierWaiting
-    await db.transact(otherScope, async (tx) => {
-      namespace(tx.rows, 'state').set(otherKey, sealedB)
-    })
-    expect(queuedEntered).toBe(false)
-    expect(namespace(db.snapshot(), 'state').get(key)).toBeUndefined()
-    await fault.finish(outcome)
-    await Promise.all([barrier, queued])
-    settlement.settle(outcome === 'commit' ? 'committed' : 'rolled-back')
-    expect(namespace(db.snapshot(), 'state').get(otherKey)).toEqual(sealedB)
+    const completion = Promise.allSettled([queued, barrier])
+    try {
+      await fault.barrierWaiting
+      await db.transact(otherScope, async (tx) => {
+        namespace(tx.rows, 'state').set(otherKey, sealedB)
+      })
+      expect(queuedEntered).toBe(false)
+      expect(namespace(db.snapshot(), 'state').get(key)).toBeUndefined()
+      await fault.finish(outcome)
+      await Promise.all([barrier, queued])
+      expect(namespace(db.snapshot(), 'state').get(otherKey)).toEqual(sealedB)
+    } finally {
+      await fault.finish(outcome)
+      await completion
+      settlement.settle(outcome === 'commit' ? 'committed' : 'rolled-back')
+    }
   },
 )
 

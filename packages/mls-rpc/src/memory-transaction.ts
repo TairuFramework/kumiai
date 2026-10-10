@@ -131,6 +131,53 @@ function overlaps(left: Scope, right: Scope): boolean {
   )
 }
 
+function cloneValue<TValue>(value: TValue): TValue {
+  // structuredClone copies the graph but retains SharedArrayBuffer backing storage.
+  const copies = new Map<object, object>()
+  function detach(value: unknown): unknown {
+    if (typeof value !== 'object' || value === null) return value
+    const existing = copies.get(value)
+    if (existing !== undefined) return existing
+    if (value instanceof SharedArrayBuffer) {
+      const buffer = new Uint8Array(value).slice().buffer
+      copies.set(value, buffer)
+      return buffer
+    }
+    if (ArrayBuffer.isView(value)) {
+      if (!(value.buffer instanceof SharedArrayBuffer)) return value
+      const buffer = detach(value.buffer) as ArrayBuffer
+      const View = value.constructor as {
+        new (buffer: ArrayBuffer, byteOffset: number, length: number): ArrayBufferView
+      }
+      const view =
+        value instanceof DataView
+          ? new DataView(buffer, value.byteOffset, value.byteLength)
+          : new View(buffer, value.byteOffset, (value as unknown as { length: number }).length)
+      copies.set(value, view)
+      return view
+    }
+    copies.set(value, value)
+    if (value instanceof Map) {
+      const entries = [...value]
+      value.clear()
+      for (const [key, item] of entries) value.set(detach(key), detach(item))
+    } else if (value instanceof Set) {
+      const items = [...value]
+      value.clear()
+      for (const item of items) value.add(detach(item))
+    } else {
+      for (const key of Reflect.ownKeys(value)) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, key)
+        if (descriptor !== undefined && 'value' in descriptor) {
+          Object.defineProperty(value, key, { ...descriptor, value: detach(descriptor.value) })
+        }
+      }
+    }
+    return value
+  }
+  return detach(structuredClone(value)) as TValue
+}
+
 function guardedMap(params: {
   rows: Map<string, unknown>
   assertActive(): void
@@ -157,8 +204,8 @@ function guardedMap(params: {
             mode === 'keys'
               ? key
               : mode === 'values'
-                ? structuredClone(value)
-                : [key, structuredClone(value)],
+                ? cloneValue(value)
+                : [key, cloneValue(value)],
         }
       },
       [Symbol.iterator]() {
@@ -178,13 +225,13 @@ function guardedMap(params: {
           assertActive()
           checkKey(key)
           read()
-          return property === 'get' ? structuredClone(rows.get(key)) : rows.has(key)
+          return property === 'get' ? cloneValue(rows.get(key)) : rows.has(key)
         }
       if (property === 'set')
         return (key: string, value: unknown) => {
           assertActive()
           checkKey(key)
-          rows.set(key, structuredClone(value))
+          rows.set(key, cloneValue(value))
           write(key)
           return view
         }
@@ -210,7 +257,7 @@ function guardedMap(params: {
           read()
           for (const [key, value] of rows) {
             assertActive()
-            fn(structuredClone(value), key, view)
+            fn(cloneValue(value), key, view)
           }
         }
       if (
@@ -241,7 +288,7 @@ function guardedMap(params: {
 }
 
 export function createMemoryTransaction(params: { rows: MemoryStoreRows }): MemoryDatabase {
-  const committed = structuredClone(params.rows)
+  const committed = cloneValue(params.rows)
   const acquireGroup = groupQueue()
   const acquireDevice = queue()
   const pending = new Set<{ scope: Scope; waiting(): void }>()
@@ -258,7 +305,7 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
   const db: MemoryDatabase = {
     mutationGate,
     snapshot() {
-      return structuredClone(committed)
+      return cloneValue(committed)
     },
     async completionBarrier(requestedScope) {
       assertRoot()
@@ -300,7 +347,7 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
         if (deviceNamespaces.has(name) && !scope.devicePackages) continue
         const rows = new Map<string, unknown>()
         for (const [key, value] of committed[name] ?? []) {
-          if (belongs(name, key, scope)) rows.set(key, structuredClone(value))
+          if (belongs(name, key, scope)) rows.set(key, cloneValue(value))
         }
         views[name] = guardedMap({
           rows,
@@ -381,7 +428,7 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
           const target = committed[name] ?? new Map<string, unknown>()
           committed[name] = target
           for (const key of keys) {
-            if (rows.has(key)) target.set(key, structuredClone(rows.get(key)))
+            if (rows.has(key)) target.set(key, cloneValue(rows.get(key)))
             else target.delete(key)
           }
         }
