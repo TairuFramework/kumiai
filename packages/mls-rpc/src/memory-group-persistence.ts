@@ -27,6 +27,7 @@ import {
 } from './persistence-errors.js'
 import { assertStateTransition, assertTrustTransition } from './persistence-guards.js'
 import type {
+  AppStatusEvent,
   AtRestCodec,
   GroupKey,
   GroupLifetime,
@@ -356,7 +357,7 @@ export function createMemoryGroupPersistence(params: {
             },
           }
           result = await work(stores, change.mutationID)
-          return await withMemoryTransactionLock(tx, async () => {
+          const { outboxEvents, deletedKeys } = await withMemoryTransactionLock(tx, async () => {
             const life =
               proposedLifetime ??
               (previous === null
@@ -505,6 +506,7 @@ export function createMemoryGroupPersistence(params: {
               }
             }
             if (proposedLifetime === undefined) await raw.lifetime.save(life)
+            const outboxEvents: Array<AppStatusEvent> = []
             if (effects?.outbox !== undefined) {
               for (const [incarnation, namespaces] of changedIncarnations(
                 before,
@@ -532,16 +534,20 @@ export function createMemoryGroupPersistence(params: {
                       event.kind === 'published' ||
                       event.kind === 'failed')
                   )
-                    await effects.outbox(tx, event)
+                    outboxEvents.push(event)
                 }
               }
             }
+            const deletedKeys: Array<GroupKey> = []
             if (effects?.delete !== undefined)
               for (const [incarnation, state] of savedStates)
-                if (state.deleted)
-                  await effects.delete(tx, { groupID: change.groupID, incarnation })
-            return result
+                if (state.deleted) deletedKeys.push({ groupID: change.groupID, incarnation })
+            return { outboxEvents, deletedKeys }
           })
+          // Hooks may call locked stores. Keep transaction ownership without holding the store lock.
+          for (const event of outboxEvents) await effects?.outbox?.(tx, event)
+          for (const key of deletedKeys) await effects?.delete?.(tx, key)
+          return result
         },
         {
           onUnknown(settlement) {

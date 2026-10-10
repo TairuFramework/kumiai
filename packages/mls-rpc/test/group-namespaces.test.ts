@@ -364,6 +364,87 @@ for (const mode of ['real-mls', 'double'] as const) {
       expect((await groups.load(groupID))?.revision).toBe(2)
     })
 
+    test('completes an outbox effect that loads transaction-bound lifetime', async () => {
+      const { db, groups, seed } = await setup()
+      const observed: Array<typeof seed.lifetime | null> = []
+      const committed: Array<string> = []
+      const effects = createMemoryGroupPersistence({
+        db,
+        atRest,
+        providerID: 'memory',
+        effects: {
+          async outbox(tx, status) {
+            observed.push(await createGroupStateStores({ tx, groupID, atRest }).lifetime.load())
+            tx.onCommit(() => committed.push(status.id))
+          },
+        },
+      })
+      await expect(
+        effects.transition(await nextChange(groups, groupID, 'outbox-effect'), async (stores) => {
+          const rows = stores.incarnation(1)
+          await rows.outbox.put([entry])
+          await rows.meta.putEvents([event])
+          return 'outbox-result'
+        }),
+      ).resolves.toBe('outbox-result')
+      expect(observed).toEqual([{ ...seed.lifetime, revision: 2, mutationID: 'outbox-effect' }])
+      expect(committed).toEqual([event.id])
+      expect(await groups.ports(key).outbox.list()).toEqual([entry])
+      expect((await groups.loadState(key))?.version).toBe(2)
+      await groups.ports(key).anchor.save(anchor)
+      expect(await groups.ports(key).anchor.load()).toEqual(anchor)
+    }, 2000)
+
+    test('completes a delete effect that clears transaction-bound transport', async () => {
+      const { db, groups, seed } = await setup()
+      await groups.transition(
+        await nextChange(groups, groupID, 'prepare-delete'),
+        async (stores) => {
+          const rows = stores.incarnation(1)
+          await rows.anchor.save(anchor)
+          await rows.pending.put([pending])
+          await rows.cursor.save(topicID, '10')
+          await rows.outbox.put([entry])
+          await rows.control.apply({ putOutcomes: [outcome] }, 'prepare-delete')
+        },
+      )
+      const committed: Array<typeof key> = []
+      const effects = createMemoryGroupPersistence({
+        db,
+        atRest,
+        providerID: 'memory',
+        effects: {
+          async delete(tx, deletedKey) {
+            await createIncarnationStores({ tx, key: deletedKey, atRest }).clearTransport()
+            tx.onCommit(() => committed.push(deletedKey))
+          },
+        },
+      })
+      await expect(
+        effects.transition(await nextChange(groups, groupID, 'delete-effect'), async (stores) => {
+          const life = await stores.lifetime.load()
+          if (life === null) throw new Error('Missing lifetime')
+          await stores.lifetime.save({
+            ...life,
+            activeIncarnation: null,
+            revision: life.revision + 1,
+            mutationID: 'delete-effect',
+          })
+          return 'delete-result'
+        }),
+      ).resolves.toBe('delete-result')
+      expect(committed).toEqual([key])
+      const ports = groups.ports(key)
+      expect(await ports.anchor.load()).toBeNull()
+      expect(await ports.cursor.load(topicID)).toBeNull()
+      expect(await ports.outbox.list()).toEqual([])
+      expect((await ports.control.load()).outcomes).toEqual([outcome])
+      expect(db.snapshot().pending?.size).toBe(0)
+      expect(await groups.loadTrust(groupID)).toEqual(seed.trust)
+      expect(await groups.loadState(key)).toMatchObject({ deleted: true, version: 3 })
+      expect(await groups.load(groupID)).toMatchObject({ activeIncarnation: null, revision: 3 })
+    }, 2000)
+
     test('commits or rolls back every namespace and side effect together', async () => {
       const { db, groups } = await setup()
       const effectsHooks: Array<string> = []
