@@ -7,11 +7,13 @@ import type {
 
 import {
   assertMemoryWrite,
-  sequenceMemoryOperation,
-  withoutMemoryCoordinator,
+  memoryOpen,
+  memoryOperation,
+  memoryRequired,
+  memorySeal,
 } from './memory-group-state.js'
 import { copyStoredValue } from './memory-incarnation-stores.js'
-import { openRecord, physicalRecordKey, sealRecord } from './persistence-codec.js'
+import { physicalRecordKey } from './persistence-codec.js'
 import { GroupStateConflictError } from './persistence-errors.js'
 import type {
   AtRestCodec,
@@ -56,27 +58,30 @@ export function memoryDeviceTable<TValue>(params: DeviceTableParams) {
     return rows
   }
   return {
-    async load(recordID: string): Promise<TValue | null> {
-      const location = address(recordID)
-      const key = physicalRecordKey(location)
-      const bytes = map().get(key)
-      if (bytes === undefined) return null
-      if (!(bytes instanceof Uint8Array)) throw new GroupStateConflictError('Unreadable device row')
-      const stored = await withoutMemoryCoordinator(() => openRecord(atRest, location, bytes))
-      map().has(key)
-      if (
-        stored === null ||
-        typeof stored !== 'object' ||
-        !('providerID' in stored) ||
-        stored.providerID !== providerID ||
-        !('ownerDID' in stored) ||
-        stored.ownerDID !== ownerDID ||
-        !('value' in stored) ||
-        stored.value === null ||
-        typeof stored.value !== 'object'
-      )
-        throw new GroupStateConflictError('Stored device owner or provider mismatch')
-      return stored.value as TValue
+    load(recordID: string): Promise<TValue | null> {
+      return memoryRequired(tx, async () => {
+        const location = address(recordID)
+        const key = physicalRecordKey(location)
+        const bytes = map().get(key)
+        if (bytes === undefined) return null
+        if (!(bytes instanceof Uint8Array))
+          throw new GroupStateConflictError('Unreadable device row')
+        const stored = await memoryOpen(tx, atRest, location, bytes)
+        map().has(key)
+        if (
+          stored === null ||
+          typeof stored !== 'object' ||
+          !('providerID' in stored) ||
+          stored.providerID !== providerID ||
+          !('ownerDID' in stored) ||
+          stored.ownerDID !== ownerDID ||
+          !('value' in stored) ||
+          stored.value === null ||
+          typeof stored.value !== 'object'
+        )
+          throw new GroupStateConflictError('Stored device owner or provider mismatch')
+        return stored.value as TValue
+      })
     },
     async save(recordID: string, value: TValue): Promise<void> {
       assertMemoryWrite(tx, namespace === 'device' ? 'domain' : 'side')
@@ -84,9 +89,7 @@ export function memoryDeviceTable<TValue>(params: DeviceTableParams) {
       const location = address(recordID)
       rows.set(
         physicalRecordKey(location),
-        await withoutMemoryCoordinator(() =>
-          sealRecord(atRest, location, { providerID, ownerDID, value }),
-        ),
+        await memorySeal(tx, atRest, location, { providerID, ownerDID, value }),
       )
     },
     remove(recordID: string): void {
@@ -219,11 +222,11 @@ export function createTransactionPackageStores(params: {
       receipt,
     }
     return {
-      list: sequenceMemoryOperation(tx, raw.list),
-      put: sequenceMemoryOperation(tx, raw.put),
-      delete: sequenceMemoryOperation(tx, raw.delete),
-      consume: sequenceMemoryOperation(tx, raw.consume),
-      receipt: sequenceMemoryOperation(tx, raw.receipt),
+      list: memoryOperation(tx, raw.list),
+      put: memoryOperation(tx, raw.put),
+      delete: memoryOperation(tx, raw.delete),
+      consume: memoryOperation(tx, raw.consume),
+      receipt: memoryOperation(tx, raw.receipt),
     }
   }
   return {

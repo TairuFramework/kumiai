@@ -792,14 +792,20 @@ for (const mode of ['real-mls', 'double'] as const) {
         },
       )
       if (retained === undefined) throw new Error('Missing stores')
-      await expect(retained.ordinary(sourceID).list(ownerDID)).rejects.toThrow('expired')
-      await expect(retained.lastResort(sourceID).consume(ordinary.ref, groupID)).rejects.toThrow(
-        'expired',
-      )
-      await expect(retained.lastResort(sourceID).receipt(ordinary.ref)).rejects.toThrow('expired')
-      await expect(retained.cleanup.list()).rejects.toThrow('expired')
-      await expect(retained.restore.load()).rejects.toThrow('expired')
-      await expect(retained.restore.save(null)).rejects.toThrow('expired')
+      await expect(retained.ordinary(sourceID).list(ownerDID)).rejects.toMatchObject({
+        name: 'PersistencePhaseError',
+      })
+      await expect(
+        retained.lastResort(sourceID).consume(ordinary.ref, groupID),
+      ).rejects.toMatchObject({ name: 'PersistencePhaseError' })
+      await expect(retained.lastResort(sourceID).receipt(ordinary.ref)).rejects.toMatchObject({
+        name: 'PersistencePhaseError',
+      })
+      await expect(retained.cleanup.list()).rejects.toMatchObject({ name: 'PersistencePhaseError' })
+      await expect(retained.restore.load()).rejects.toMatchObject({ name: 'PersistencePhaseError' })
+      await expect(retained.restore.save(null)).rejects.toMatchObject({
+        name: 'PersistencePhaseError',
+      })
     })
 
     test('serializes same-ref writers inside one transaction so a receipt cannot regain private material', async () => {

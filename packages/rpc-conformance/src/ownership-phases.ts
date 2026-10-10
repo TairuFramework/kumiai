@@ -1425,10 +1425,7 @@ function testOperationOwnership<TTx extends ConformanceGroupTransaction>(
           ),
         )
         expect(reads).toBe(1)
-        expect(await within(Promise.all(probes))).toEqual([
-          expect.objectContaining(refused),
-          expect.objectContaining(refused),
-        ])
+        expect(await within(Promise.all(probes))).toMatchObject([refused, refused])
         expect(await within(groups.ports(key).cursor.load('getter-write'))).toBeNull()
       } finally {
         await within(fixture.close())

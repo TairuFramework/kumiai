@@ -1,13 +1,4 @@
-/// <reference types="node" />
-
-import { AsyncLocalStorage } from 'node:async_hooks'
-
-import {
-  type OwnerEntry,
-  type OwnerQueues,
-  ownerEntryFailureSignal,
-  type WriteTarget,
-} from './owner-queue.js'
+import type { OwnerAttempt, OwnerEntry, OwnerQueues, WriteTarget } from './owner-queue.js'
 import {
   decodeStoredValue,
   encodeStoredValue,
@@ -38,25 +29,28 @@ export type GroupStateStores = Pick<GroupStores<MemoryTransaction>, 'tx' | 'life
   }
 }
 
-// Guarded maps retain their provider identity when callers copy the rows container.
+// Guarded maps preserve bindings across copied transaction containers.
 const transactionIdentities = new WeakMap<object, MemoryTransaction['rows']>()
-const transactionEntries = new WeakMap<
-  MemoryTransaction['rows'],
-  { entry: OwnerEntry; owners: OwnerQueues }
->()
-const coordinatorContext = new AsyncLocalStorage<OwnerEntry>()
-const bootstrapTrusts = new WeakMap<MemoryTransaction['rows'], Set<string>>()
-
-export function withoutMemoryCoordinator<TValue>(callback: () => TValue): TValue {
-  return coordinatorContext.exit(callback)
+type TransactionBinding = {
+  entry: OwnerEntry
+  owners: OwnerQueues
+  attempt: OwnerAttempt
+  changes: number
+  writer: CoordinatorWriter
 }
+const transactionEntries = new WeakMap<MemoryTransaction['rows'], TransactionBinding>()
+const coordinatorRows = new WeakSet<object>()
+const rowFactories = new WeakMap<object, (assertLive: () => void) => MemoryTransaction['rows']>()
+const bootstrapTrusts = new WeakMap<MemoryTransaction['rows'], Set<string>>()
 
 export function registerMemoryTransactionRows(
   rows: MemoryTransaction['rows'],
   maps: MemoryTransaction['rows'],
+  coordinator: (assertLive: () => void) => MemoryTransaction['rows'],
 ): void {
   transactionIdentities.set(rows, rows)
   for (const map of Object.values(maps)) transactionIdentities.set(map, rows)
+  rowFactories.set(rows, coordinator)
 }
 
 function transactionIdentity(rows: MemoryTransaction['rows']): MemoryTransaction['rows'] {
@@ -73,12 +67,65 @@ function transactionBinding(rows: MemoryTransaction['rows']) {
   return transactionEntries.get(transactionIdentity(rows))
 }
 
+type CoordinatorWriterParams = { tx: MemoryTransaction; entry: OwnerEntry; attempt: OwnerAttempt }
+
+class CoordinatorWriter {
+  #entry: OwnerEntry
+  #attempt: OwnerAttempt
+  #token: ReturnType<OwnerEntry['coordinator']>
+  #tx: MemoryTransaction
+  #active = false
+
+  constructor(params: CoordinatorWriterParams) {
+    const { tx, entry, attempt } = params
+    this.#entry = entry
+    this.#attempt = attempt
+    this.#token = entry.coordinator(attempt)
+    const factory = rowFactories.get(transactionIdentity(tx.rows))
+    if (factory === undefined) throw new GroupStateConflictError('Missing private transaction view')
+    const rows = factory(() => {
+      attempt.assertLive()
+      if (!this.#active || !['finalise', 'account'].includes(entry.phase))
+        throw new PersistencePhaseError('Coordinator writer expired')
+    })
+    transactionIdentities.set(rows, transactionIdentity(tx.rows))
+    coordinatorRows.add(rows)
+    this.#tx = { ...tx, rows }
+  }
+
+  run<TValue>(work: (tx: MemoryTransaction) => Promise<TValue>): Promise<TValue> {
+    return this.#entry.coordinate(this.#token, async () => {
+      this.#attempt.assertLive()
+      this.#active = true
+      try {
+        return await work(this.#tx)
+      } finally {
+        this.#active = false
+      }
+    })
+  }
+}
+
 export function bindMemoryOwner(
   tx: MemoryTransaction,
   entry: OwnerEntry,
   owners: OwnerQueues,
 ): void {
-  transactionEntries.set(transactionIdentity(tx.rows), { entry, owners })
+  const identity = transactionIdentity(tx.rows)
+  const previous = transactionEntries.get(identity)
+  if (previous !== undefined) {
+    if (previous.entry !== entry || previous.attempt !== entry.attempt())
+      throw new GroupStateConflictError('Transaction ownership mismatch')
+    return
+  }
+  const attempt = entry.attempt()
+  transactionEntries.set(identity, {
+    entry,
+    owners,
+    attempt,
+    changes: 0,
+    writer: new CoordinatorWriter({ tx, entry, attempt }),
+  })
 }
 
 export function memoryTransactionEntry(rows: MemoryTransaction['rows']): OwnerEntry | undefined {
@@ -88,61 +135,108 @@ export function memoryTransactionEntry(rows: MemoryTransaction['rows']): OwnerEn
 export function memoryTransactionFailureSignal(
   rows: MemoryTransaction['rows'],
 ): AbortSignal | undefined {
-  const entry = memoryTransactionEntry(rows)
-  return entry === undefined ? undefined : ownerEntryFailureSignal(entry)
+  return transactionBinding(rows)?.attempt.signal
+}
+
+export function bindMemorySnapshot(
+  source: MemoryTransaction['rows'],
+  snapshot: MemoryTransaction['rows'],
+): void {
+  transactionIdentities.set(snapshot, transactionIdentity(source))
+}
+
+export function memoryTransactionChanged(rows: MemoryTransaction['rows']): void {
+  const binding = transactionBinding(rows)
+  if (binding !== undefined) binding.changes++
 }
 
 export function assertMemoryAccess(rows: MemoryTransaction['rows']): void {
   const binding = transactionBinding(rows)
   if (binding === undefined) return
   if (binding.owners.failure !== null) throw binding.owners.failure
-  if (!['work', 'finalise', 'effects', 'account'].includes(binding.entry.phase))
+  binding.attempt.assertLive()
+  const phases = coordinatorRows.has(rows) ? ['finalise', 'account'] : ['work', 'effects']
+  if (!phases.includes(binding.entry.phase))
     throw new PersistencePhaseError('Transaction capability expired')
 }
 
 export function assertMemoryWrite(tx: MemoryTransaction, target: WriteTarget): void {
+  assertMemoryAccess(tx.rows)
   const entry = memoryTransactionEntry(tx.rows)
-  if (entry !== undefined)
-    entry.assertWrite(coordinatorContext.getStore() === entry ? 'coordinator' : target)
+  if (entry !== undefined) entry.assertWrite(coordinatorRows.has(tx.rows) ? 'coordinator' : target)
 }
 
-async function sequenceMemoryTransaction<TValue>(
+export function memoryCallback<TValue>(tx: MemoryTransaction, work: () => TValue): TValue {
+  const entry = memoryTransactionEntry(tx.rows)
+  return entry === undefined ? work() : entry.callback(work)
+}
+
+export async function memoryRequired<TValue>(
   tx: MemoryTransaction,
   work: () => Promise<TValue>,
+  required = true,
 ): Promise<TValue> {
-  const entry = memoryTransactionEntry(tx.rows)
-  if (entry !== undefined) {
-    assertMemoryAccess(tx.rows)
-    return await entry.sequence(work)
+  try {
+    return await work()
+  } catch (error) {
+    if (required) transactionBinding(tx.rows)?.entry.fail(error)
+    throw error
   }
-  // Unbound provider primitives have no application ownership to sequence.
-  tx.rows.lifetime
-  return await work()
 }
 
-export function sequenceMemoryOperation<TArgs extends Array<unknown>, TValue>(
+export function memorySeal(
+  tx: MemoryTransaction,
+  atRest: AtRestCodec,
+  address: StoredAddress,
+  value: unknown,
+): Promise<Uint8Array> {
+  return memoryRequired(tx, () => memoryCallback(tx, () => sealRecord(atRest, address, value)))
+}
+
+export function memoryOpen(
+  tx: MemoryTransaction,
+  atRest: AtRestCodec,
+  address: StoredAddress,
+  bytes: Uint8Array,
+): Promise<unknown> {
+  return memoryCallback(tx, () => openRecord(atRest, address, bytes))
+}
+
+export function memoryOperation<TArgs extends Array<unknown>, TValue>(
   tx: MemoryTransaction,
   operation: (...args: TArgs) => Promise<TValue>,
   target?: WriteTarget,
 ): (...args: TArgs) => Promise<TValue> {
-  return async (...args) => {
-    // Queued operations own their arguments before yielding to another caller.
-    const owned = decodeStoredValue(encodeStoredValue(args)) as TArgs
-    return await sequenceMemoryTransaction(tx, () => {
-      if (target !== undefined) assertMemoryWrite(tx, target)
-      return operation(...owned)
-    })
+  const binding = transactionBinding(tx.rows)
+  return (...args) => {
+    try {
+      const owned = decodeStoredValue(encodeStoredValue(args)) as TArgs
+      const run = async () => {
+        const changes = binding?.changes
+        try {
+          if (target !== undefined) assertMemoryWrite(tx, target)
+          return await operation(...owned)
+        } catch (error) {
+          if (binding !== undefined && binding.changes !== changes) binding.entry.fail(error)
+          throw error
+        }
+      }
+      if (binding !== undefined) return binding.entry.operation(binding.attempt, run)
+      assertMemoryAccess(tx.rows)
+      return run()
+    } catch (error) {
+      return Promise.reject(error)
+    }
   }
 }
 
-export function sequenceMemoryCoordinator<TValue>(
-  entry: OwnerEntry,
-  work: () => Promise<TValue>,
+export function coordinateMemoryTransaction<TValue>(
+  tx: MemoryTransaction,
+  work: (writerTx: MemoryTransaction) => Promise<TValue>,
 ): Promise<TValue> {
-  return entry.sequence(() => {
-    entry.assertWrite('coordinator')
-    return coordinatorContext.run(entry, work)
-  })
+  const binding = transactionBinding(tx.rows)
+  if (binding === undefined) throw new GroupStateConflictError('Missing transaction ownership')
+  return binding.writer.run((writerTx) => work({ ...tx, rows: writerTx.rows }))
 }
 
 function compareBytes(left: Uint8Array, right: Uint8Array): number {
@@ -165,11 +259,12 @@ function copyTrust(trust: GroupRecoveryTrust): GroupRecoveryTrust {
   }
 }
 
-// Internal helpers run inside the entry sequencer.
+// Internal helpers share one operation reservation.
 export function createUnlockedGroupStateStores(params: {
   tx: MemoryTransaction
   groupID: string
   atRest: AtRestCodec
+  requiredOpen?: boolean
 }): GroupStateStores {
   const { tx, groupID, atRest } = params
   if (tx.groupID !== groupID) throw new GroupStateConflictError('Transaction group mismatch')
@@ -185,7 +280,7 @@ export function createUnlockedGroupStateStores(params: {
       if (tx.rows[namespace] === undefined)
         throw new GroupStateConflictError('Missing transaction namespace')
       if (value.groupID !== groupID) throw new GroupStateConflictError('Row group mismatch')
-      return await withoutMemoryCoordinator(() => sealRecord(atRest, address, value))
+      return await memorySeal(tx, atRest, address, value)
     }
     function store(bytes: Uint8Array): void {
       const rows = tx.rows[namespace]
@@ -193,20 +288,24 @@ export function createUnlockedGroupStateStores(params: {
       rows.set(key, bytes)
     }
     return {
-      async load(): Promise<TValue | null> {
-        const bytes = tx.rows[namespace]?.get(key)
-        if (bytes === undefined) return null
-        if (!(bytes instanceof Uint8Array))
-          throw new GroupStateConflictError('Unreadable sealed row')
-        const value = (await withoutMemoryCoordinator(() =>
-          openRecord(atRest, address, bytes),
-        )) as TValue
-        // Touch the bound view again after host code yields.
-        tx.rows[namespace]?.has(key)
-        if (value === null || typeof value !== 'object' || value.groupID !== groupID) {
-          throw new GroupStateConflictError('Stored row group mismatch')
-        }
-        return value
+      load(): Promise<TValue | null> {
+        return memoryRequired(
+          tx,
+          async () => {
+            const bytes = tx.rows[namespace]?.get(key)
+            if (bytes === undefined) return null
+            if (!(bytes instanceof Uint8Array))
+              throw new GroupStateConflictError('Unreadable sealed row')
+            const value = (await memoryOpen(tx, atRest, address, bytes)) as TValue
+            // Touch the bound view again after host code yields.
+            tx.rows[namespace]?.has(key)
+            if (value === null || typeof value !== 'object' || value.groupID !== groupID) {
+              throw new GroupStateConflictError('Stored row group mismatch')
+            }
+            return value
+          },
+          params.requiredOpen,
+        )
       },
       prepare,
       store,
@@ -334,23 +433,23 @@ export function createGroupStateStores(
     stateMetadata(incarnation) {
       const metadata = stores.stateMetadata(incarnation)
       return {
-        load: sequenceMemoryOperation(tx, metadata.load),
-        save: sequenceMemoryOperation(tx, metadata.save, 'domain'),
+        load: memoryOperation(tx, metadata.load),
+        save: memoryOperation(tx, metadata.save, 'domain'),
       }
     },
     lifetime: {
-      load: sequenceMemoryOperation(tx, stores.lifetime.load),
-      save: sequenceMemoryOperation(tx, stores.lifetime.save, 'domain'),
+      load: memoryOperation(tx, stores.lifetime.load),
+      save: memoryOperation(tx, stores.lifetime.save, 'domain'),
     },
     trust: {
-      load: sequenceMemoryOperation(tx, stores.trust.load),
-      save: sequenceMemoryOperation(tx, stores.trust.save, 'domain'),
+      load: memoryOperation(tx, stores.trust.load),
+      save: memoryOperation(tx, stores.trust.save, 'domain'),
     },
     state(incarnation) {
       const state = stores.state(incarnation)
       return {
-        load: sequenceMemoryOperation(tx, state.load),
-        save: sequenceMemoryOperation(tx, state.save, 'domain'),
+        load: memoryOperation(tx, state.load),
+        save: memoryOperation(tx, state.save, 'domain'),
       }
     },
   }

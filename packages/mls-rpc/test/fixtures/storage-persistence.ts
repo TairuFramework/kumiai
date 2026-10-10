@@ -1,4 +1,3 @@
-import { AsyncLocalStorage } from 'node:async_hooks'
 import { randomIdentity } from '@kokuin/token'
 import {
   createKeyPackageBundle,
@@ -14,7 +13,6 @@ import { memoryGroupOwnerQueues } from '../../src/memory-group-persistence.js'
 import { createGroupStateStores } from '../../src/memory-group-state.js'
 import { groupOwnerKey } from '../../src/memory-incarnation-stores.js'
 import * as packageReads from '../../src/memory-package-stores.js'
-import type { OwnerEntry } from '../../src/owner-queue.js'
 import { ownerEntryFailureSignal } from '../../src/owner-queue.js'
 import { physicalRecordKey } from '../../src/persistence-codec.js'
 import type {
@@ -93,7 +91,6 @@ export async function createStorageFixture(params: {
   const codec = createDeterministicAtRestCodec({ key: new Uint8Array(32).fill(98) })
   type Phase = Parameters<PersistenceFixture<StorageTestPorts<MemoryTransaction>>['onPhase']>[0]
   type Latch = { reached(): void; wait: Promise<void>; release(): void }
-  const context = new AsyncLocalStorage<OwnerEntry>()
   let sealLatch: Latch | undefined
   let openLatch: Latch | undefined
   let sealFailure: Error | undefined
@@ -122,7 +119,7 @@ export async function createStorageFixture(params: {
       openLatch = undefined
       openFailure = undefined
     }
-    if (probe !== undefined) await probe(context.getStore()?.phase ?? 'released')
+    if (probe !== undefined) await probe(memoryGroupOwnerQueues(db)?.current()?.phase ?? 'released')
     if (latch !== undefined) {
       held.add(latch)
       latch.reached()
@@ -165,17 +162,12 @@ export async function createStorageFixture(params: {
         kind,
         scopes,
         async (entry) => {
-          const instrumentedEntry = entry as OwnerEntry & {
-            callback?<T>(fn: () => T): T
-            attempt?(): { signal: AbortSignal }
-          }
           let attemptSignal: AbortSignal | undefined
           const invoke = (phase: Phase) => {
             const fn = callbacks.get(phase)
             callbacks.delete(phase)
             if (fn === undefined) return
-            if (instrumentedEntry.callback !== undefined) return instrumentedEntry.callback(fn)
-            return fn()
+            return entry.callback(fn)
           }
           const enter = entry.enter
           const retain = entry.retain
@@ -186,7 +178,7 @@ export async function createStorageFixture(params: {
             if (restarting && phase === 'prepare') return
             if (restarting && phase === 'work') restarting = false
             await enter(phase)
-            const nextSignal = instrumentedEntry.attempt?.().signal
+            const nextSignal = entry.attempt().signal
             if (nextSignal !== attemptSignal) {
               attemptSignal?.removeEventListener('abort', clear)
               attemptSignal = nextSignal
@@ -210,7 +202,7 @@ export async function createStorageFixture(params: {
           }
           signal?.addEventListener('abort', clear, { once: true })
           try {
-            return await context.run(entry, async () => {
+            return await entry.callback(async () => {
               if (callbacks.has('hook'))
                 entry.onCommit(() => {
                   hookResult = (async () => {

@@ -1,27 +1,25 @@
-/// <reference types="node" />
-
-import { AsyncLocalStorage } from 'node:async_hooks'
-
 import { registerMemoryFaults } from './memory-faults.js'
 import {
   assertMemoryAccess,
   assertMemoryWrite,
+  memoryTransactionChanged,
   memoryTransactionEntry,
   memoryTransactionFailureSignal,
   registerMemoryTransactionRows,
 } from './memory-group-state.js'
 import { groupOwnerKey } from './memory-incarnation-stores.js'
-import { StorageOutcomeUnknownError } from './persistence-errors.js'
+import { PersistencePhaseError, StorageOutcomeUnknownError } from './persistence-errors.js'
 import type {
   MemoryDatabase,
   MemoryStoreRows,
   MemoryTransaction,
   TransactionHookSettlement,
 } from './persistence-types.js'
+import { deferred } from './runtime.js'
 
 type Scope = { groupID: string | null; devicePackages: boolean }
 type Owner = { active: boolean }
-const transactionContext = new AsyncLocalStorage<Owner>()
+let invoking = false
 
 const groupNamespaces = new Set([
   'lifetime',
@@ -46,20 +44,12 @@ const deviceNamespaces = new Set([
   'device-restore',
 ])
 
-function deferred(): { promise: Promise<void>; resolve(): void } {
-  let resolve!: () => void
-  const promise = new Promise<void>((done) => {
-    resolve = done
-  })
-  return { promise, resolve }
-}
-
 // Each tail belongs to one owner; releasing it cannot unlock a later owner.
 function queue() {
   let tail = Promise.resolve()
   return async (): Promise<() => void> => {
     const previous = tail
-    const next = deferred()
+    const next = deferred<void>()
     tail = next.promise
     await previous
     return next.resolve
@@ -79,7 +69,7 @@ function groupQueue() {
 }
 
 function assertRoot(): void {
-  if (transactionContext.getStore() !== undefined) throw new Error('reentrant root work')
+  if (invoking) throw new Error('reentrant root work')
 }
 
 function belongs(namespace: string, key: string, scope: Scope): boolean {
@@ -125,7 +115,8 @@ function cloneValue<TValue>(value: TValue): TValue {
     }
     if (typeof value !== 'object' || value === null) return value
     // Shared storage is accepted only through views, never as an exposed row value.
-    if (value instanceof SharedArrayBuffer) throw new TypeError('Unsupported memory row value')
+    if (typeof SharedArrayBuffer !== 'undefined' && value instanceof SharedArrayBuffer)
+      throw new TypeError('Unsupported memory row value')
     const existing = copies.get(value)
     if (existing !== undefined) return existing
     if (ArrayBuffer.isView(value)) {
@@ -201,9 +192,10 @@ function guardedMap(params: {
   assertActive(): void
   accepts(key: string): boolean
   write(key: string): void
+  changed(): void
   read(): void
 }): Map<string, unknown> {
-  const { rows, assertActive, accepts, write, read } = params
+  const { rows, assertActive, accepts, write, changed, read } = params
   let view: Map<string, unknown>
   function checkKey(key: string): void {
     if (!accepts(key)) throw new Error('Row outside transaction scope')
@@ -252,6 +244,7 @@ function guardedMap(params: {
           const owned = cloneValue(value)
           write(key)
           rows.set(key, owned)
+          changed()
           return view
         }
       if (property === 'delete')
@@ -259,14 +252,19 @@ function guardedMap(params: {
           assertActive()
           checkKey(key)
           write(key)
-          return rows.delete(key)
+          const removed = rows.delete(key)
+          if (removed) changed()
+          return removed
         }
       if (property === 'clear')
         return () => {
           assertActive()
           // A protected row must refuse the entire clear before any side row disappears.
           for (const key of rows.keys()) write(key)
-          rows.clear()
+          if (rows.size !== 0) {
+            rows.clear()
+            changed()
+          }
         }
       if (property === 'forEach')
         return (fn: (value: unknown, key: string, map: Map<string, unknown>) => void) => {
@@ -360,10 +358,10 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
       let writeFailure: Error | undefined
       const assertActive = () => {
         assertMemoryAccess(rows)
-        if (!owner.active || transactionContext.getStore() !== owner)
-          throw new Error('expired transaction view')
+        if (!owner.active) throw new Error('expired transaction view')
       }
       const views: MemoryStoreRows = {}
+      const privateMaps: Array<[string, Parameters<typeof guardedMap>[0]]> = []
       for (const name of names) {
         if (groupNamespaces.has(name) && scope.groupID === null) continue
         if (deviceNamespaces.has(name) && !scope.devicePackages) continue
@@ -371,7 +369,7 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
         for (const [key, value] of committed[name] ?? []) {
           if (belongs(name, key, scope)) rows.set(key, cloneValue(value))
         }
-        views[name] = guardedMap({
+        const mapParams: Parameters<typeof guardedMap>[0] = {
           rows,
           assertActive,
           accepts: (key) => belongs(name, key, scope),
@@ -391,6 +389,9 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
               touched.set(name, changed)
             }
             changed.keys.add(key)
+          },
+          changed() {
+            memoryTransactionChanged(tx.rows)
             if (faults.take('after-first-write')) {
               writeFailure = new Error('Injected after-first-write failure')
               throw writeFailure
@@ -399,7 +400,9 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
           read() {
             if (faults.take('status-read')) throw new Error('Injected status-read failure')
           },
-        })
+        }
+        views[name] = guardedMap(mapParams)
+        privateMaps.push([name, mapParams])
       }
       const rows = new Proxy(views, {
         get(target, property) {
@@ -416,7 +419,35 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
           throw new Error('Cannot replace transaction namespaces')
         },
       })
-      registerMemoryTransactionRows(rows, views)
+      registerMemoryTransactionRows(rows, views, (assertLive) => {
+        const check = () => {
+          assertLive()
+          if (!owner.active) throw new Error('expired transaction view')
+        }
+        const maps: MemoryStoreRows = {}
+        for (const [name, params] of privateMaps) {
+          maps[name] = guardedMap({
+            ...params,
+            assertActive: check,
+            write(key) {
+              check()
+              // Only the private view bypasses public phase admission.
+              let changed = touched.get(name)
+              if (changed === undefined) {
+                changed = { rows: params.rows, keys: new Set() }
+                touched.set(name, changed)
+              }
+              changed.keys.add(key)
+            },
+          })
+        }
+        return new Proxy(maps, {
+          get(target, property) {
+            check()
+            return Reflect.get(target, property)
+          },
+        })
+      })
       const tx: MemoryTransaction = {
         providerID: 'memory',
         groupID: scope.groupID,
@@ -444,15 +475,13 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
             return
           }
           outcome = next
-          transactionContext.run(owner, () => {
-            for (const hook of next === 'committed' ? commits : rollbacks) {
-              try {
-                hook()
-              } catch {
-                /* A failed hook must not skip remaining hooks. */
-              }
+          for (const hook of next === 'committed' ? commits : rollbacks) {
+            try {
+              hook()
+            } catch {
+              /* A failed hook must not skip remaining hooks. */
             }
-          })
+          }
           commits.length = 0
           rollbacks.length = 0
         },
@@ -472,12 +501,14 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
       let released = false
       let failureSignal: AbortSignal | undefined
       let backendOwner: { scope: Scope; waiting(): void } | undefined
-      const failed = Promise.withResolvers<never>()
+      const failed = deferred<never>()
+      const completed = deferred<void>()
       function releaseBackend(): void {
         failureSignal?.removeEventListener('abort', dispose)
         if (released) return
         released = true
         release()
+        completed.resolve()
       }
       function dispose(): void {
         if (backendOutcome !== undefined) return
@@ -489,10 +520,18 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
         backendOutcome = 'rolled-back'
         if (backendOwner !== undefined) pending.delete(backendOwner)
         releaseBackend()
-        failed.reject(failureSignal?.reason)
+        const reason = failureSignal?.reason
+        failed.reject(reason instanceof PersistencePhaseError ? (reason.cause ?? reason) : reason)
       }
       try {
-        const work = transactionContext.run(owner, () => fn(tx))
+        let work: ReturnType<typeof fn>
+        invoking = true
+        try {
+          work = fn(tx)
+        } finally {
+          invoking = false
+        }
+        memoryTransactionEntry(rows)?.trackBackend(completed.promise)
         failureSignal = memoryTransactionFailureSignal(rows)
         failureSignal?.addEventListener('abort', dispose, { once: true })
         if (failureSignal?.aborted) dispose()
@@ -500,7 +539,10 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
         const value = await (failureSignal === undefined
           ? work
           : Promise.race([failed.promise, work]))
-        if (disposed) throw failureSignal?.reason
+        if (disposed) {
+          const reason = failureSignal?.reason
+          throw reason instanceof PersistencePhaseError ? (reason.cause ?? reason) : reason
+        }
         owner.active = false
         if (writeFailure !== undefined) throw writeFailure
         if (faults.take('before-commit')) throw new Error('Injected before-commit failure')
@@ -544,6 +586,7 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
       } finally {
         owner.active = false
         if (!retained) releaseBackend()
+        if (disposed) await memoryTransactionEntry(rows)?.backendSettled()
       }
     },
   }

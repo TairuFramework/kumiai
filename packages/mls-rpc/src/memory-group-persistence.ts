@@ -5,11 +5,13 @@ import {
 } from './memory-group-ports.js'
 import {
   bindMemoryOwner,
+  bindMemorySnapshot,
+  coordinateMemoryTransaction,
   createGroupStateStores,
   createUnlockedGroupStateStores,
-  sequenceMemoryCoordinator,
-  sequenceMemoryOperation,
-  withoutMemoryCoordinator,
+  memoryOperation,
+  memorySeal,
+  memoryTransactionEntry,
 } from './memory-group-state.js'
 import {
   type ControlRecord,
@@ -22,11 +24,12 @@ import {
   sameStoredValue,
 } from './memory-incarnation-stores.js'
 import type { OwnerEntry, OwnerQueues } from './owner-queue.js'
-import { physicalRecordKey, sealRecord } from './persistence-codec.js'
+import { physicalRecordKey } from './persistence-codec.js'
 import {
   DisplacedGroupHandleError,
   GroupStateConflictError,
   GroupStateUncertainError,
+  PersistencePhaseError,
   ReentrantOwnershipError,
   StorageOutcomeUnknownError,
 } from './persistence-errors.js'
@@ -89,9 +92,11 @@ function owner(tx: MemoryTransaction, groupID: string): GroupOwnerMarker | null 
 }
 
 function snapshot(tx: MemoryTransaction): MemoryStoreRows {
-  return Object.fromEntries(
+  const rows = Object.fromEntries(
     Object.entries(tx.rows).map(([namespace, rows]) => [namespace, new Map(rows)]),
   )
+  bindMemorySnapshot(tx.rows, rows)
+  return rows
 }
 
 function changedIncarnations(
@@ -143,6 +148,7 @@ export function createMemoryGroupCoordinator(params: {
     throw new GroupStateConflictError('Persistence provider mismatch')
   if (binding.owners !== owners)
     throw new GroupStateConflictError('Persistence ownership queue mismatch')
+  owners.bindOwnershipContext(params.ownershipContext)
   const proofs = binding.proofs
   const boundTx = (tx: MemoryTransaction, entry?: OwnerEntry): MemoryTransaction => {
     if (entry !== undefined) bindMemoryOwner(tx, entry, owners)
@@ -186,13 +192,21 @@ export function createMemoryGroupCoordinator(params: {
     await prepare(entry, groupID)
     return await db.transact(scope(groupID), async (baseTx) => {
       const tx = boundTx(baseTx, entry)
+      const attempt = entry.attempt()
       try {
-        return await work(basicStores(tx, groupID))
-      } finally {
+        const result = await entry.callback(() => work(basicStores(tx, groupID)))
         await entry.enter('outcome')
+        return result
+      } catch (error) {
+        attempt.revoke(
+          owners.failure ?? new PersistencePhaseError('Read attempt rejected', { cause: error }),
+        )
+        entry.release()
+        throw error
       }
     })
   }
+
   function read<TValue>(
     groupID: string,
     work: (stores: GroupStores<MemoryTransaction>) => Promise<TValue>,
@@ -276,13 +290,14 @@ export function createMemoryGroupCoordinator(params: {
         scope(request.groupID),
         async (baseTx) => {
           const tx = boundTx(baseTx, entry)
+          const attempt = entry.attempt()
           try {
             const raw = createUnlockedGroupStateStores({
               tx,
               groupID: request.groupID,
               atRest,
             })
-            const previous = await entry.sequence(raw.lifetime.load)
+            const previous = await memoryOperation(tx, raw.lifetime.load)()
             const marker = owner(tx, request.groupID)
             let change: GroupTransition
             if ('key' in request) {
@@ -291,7 +306,7 @@ export function createMemoryGroupCoordinator(params: {
                 (request.active && previous.activeIncarnation !== request.key.incarnation)
               )
                 throw new DisplacedGroupHandleError('Inactive group incarnation')
-              await request.check?.(basicStores(baseTx, request.groupID))
+              await entry.callback(() => request.check?.(basicStores(baseTx, request.groupID)))
               change = {
                 groupID: request.groupID,
                 mutationID: request.mutationID,
@@ -339,8 +354,13 @@ export function createMemoryGroupCoordinator(params: {
             let proposedTrust: GroupRecoveryTrust | undefined
             const savedStates = new Map<number, GroupStateRecord>()
             let previousTrust: GroupRecoveryTrust | null | undefined
-            async function retainedTrust() {
-              if (previousTrust === undefined) previousTrust = await raw.trust.load()
+            async function retainedTrust(readTx = tx) {
+              if (previousTrust === undefined)
+                previousTrust = await createUnlockedGroupStateStores({
+                  tx: readTx,
+                  groupID: request.groupID,
+                  atRest,
+                }).trust.load()
               return previousTrust
             }
             const unlockedStores: GroupStores<MemoryTransaction> = {
@@ -438,7 +458,7 @@ export function createMemoryGroupCoordinator(params: {
                   ...rows,
                   state: {
                     load: state.load,
-                    save: sequenceMemoryOperation(tx, state.save, 'domain'),
+                    save: memoryOperation(tx, state.save, 'domain'),
                   },
                 }
               },
@@ -446,19 +466,28 @@ export function createMemoryGroupCoordinator(params: {
             const stores: GroupStores<MemoryTransaction> = {
               ...unlockedStores,
               lifetime: {
-                load: sequenceMemoryOperation(tx, unlockedStores.lifetime.load),
-                save: sequenceMemoryOperation(tx, unlockedStores.lifetime.save, 'domain'),
+                load: memoryOperation(tx, unlockedStores.lifetime.load),
+                save: memoryOperation(tx, unlockedStores.lifetime.save, 'domain'),
               },
               trust: {
-                load: sequenceMemoryOperation(tx, unlockedStores.trust.load),
-                save: sequenceMemoryOperation(tx, unlockedStores.trust.save, 'domain'),
+                load: memoryOperation(tx, unlockedStores.trust.load),
+                save: memoryOperation(tx, unlockedStores.trust.save, 'domain'),
               },
             }
-            result = await work(stores, change.mutationID)
-            await entry.enter('finalise')
-            const { outboxEvents, deletedKeys } = await sequenceMemoryCoordinator(
-              entry,
-              async () => {
+            result = await entry.callback(() => work(stores, change.mutationID))
+            const finalising = entry.enter('finalise')
+            // Freeze public admission before invoking host accessors.
+            const capturedEffects = entry.callback(() => ({
+              outbox: effects?.outbox?.bind(effects),
+              delete: effects?.delete?.bind(effects),
+            }))
+            await finalising
+            if (entry.rollbackOnly)
+              throw new GroupStateConflictError('Transaction is rollback-only')
+            const { outboxEvents, deletedKeys, beforeEffects } = await coordinateMemoryTransaction(
+              tx,
+              async (tx) => {
+                const raw = createUnlockedGroupStateStores({ tx, groupID: request.groupID, atRest })
                 const life =
                   proposedLifetime ??
                   (previous === null
@@ -484,7 +513,7 @@ export function createMemoryGroupCoordinator(params: {
                     throw new GroupStateConflictError(
                       'Installation requires matching co-written state and trust',
                     )
-                  if (previous !== null && (await retainedTrust()) === null)
+                  if (previous !== null && (await retainedTrust(tx)) === null)
                     throw new GroupStateConflictError('Existing lifetime requires retained trust')
                 }
                 for (const [incarnation, next] of savedStates) {
@@ -519,7 +548,7 @@ export function createMemoryGroupCoordinator(params: {
                       !sameStoredValue(trust.installed.authenticator, next.epochAuthenticator)
                     )
                       throw new GroupStateConflictError('Identity change requires matching trust')
-                    assertStateTransition(original, next, await retainedTrust())
+                    assertStateTransition(original, next, await retainedTrust(tx))
                     if (
                       !trust.spentEpochAuthenticators.some((value) =>
                         sameStoredValue(value, next.epochAuthenticator),
@@ -551,7 +580,7 @@ export function createMemoryGroupCoordinator(params: {
                 )
                   throw new GroupStateConflictError('Active incarnation cannot be deleted')
                 if (proposedTrust !== undefined) {
-                  const retained = await retainedTrust()
+                  const retained = await retainedTrust(tx)
                   if (
                     retained === null ||
                     !sameStoredValue(retained.installed, proposedTrust.installed)
@@ -587,7 +616,16 @@ export function createMemoryGroupCoordinator(params: {
                   if (savedStates.has(incarnation)) continue
                   let state: GroupStateRecord | null
                   try {
-                    state = await raw.state(incarnation).load()
+                    state = await createUnlockedGroupStateStores({
+                      tx,
+                      groupID: change.groupID,
+                      atRest,
+                      requiredOpen: ![...namespaces].every(
+                        (name) => name === 'control' || name === 'meta',
+                      ),
+                    })
+                      .state(incarnation)
+                      .load()
                   } catch (error) {
                     if (
                       [...namespaces].every(
@@ -607,9 +645,10 @@ export function createMemoryGroupCoordinator(params: {
                     // Metadata versioning does not reopen recovery trust or run candidate admission.
                     tx.rows.state?.set(
                       physicalRecordKey(address),
-                      await withoutMemoryCoordinator(() =>
-                        sealRecord(atRest, address, { ...state, version: state.version + 1 }),
-                      ),
+                      await memorySeal(tx, atRest, address, {
+                        ...state,
+                        version: state.version + 1,
+                      }),
                     )
                     await raw.stateMetadata(incarnation).save({
                       groupID: change.groupID,
@@ -621,7 +660,7 @@ export function createMemoryGroupCoordinator(params: {
                 }
                 if (proposedLifetime === undefined) await raw.lifetime.save(life)
                 const outboxEvents: Array<AppStatusEvent> = []
-                if (effects?.outbox !== undefined) {
+                if (capturedEffects.outbox !== undefined) {
                   for (const [incarnation, namespaces] of changedIncarnations(
                     before,
                     snapshot(tx),
@@ -653,18 +692,20 @@ export function createMemoryGroupCoordinator(params: {
                   }
                 }
                 const deletedKeys: Array<GroupKey> = []
-                if (effects?.delete !== undefined)
+                if (capturedEffects.delete !== undefined)
                   for (const [incarnation, state] of savedStates)
                     if (state.deleted) deletedKeys.push({ groupID: change.groupID, incarnation })
-                return { outboxEvents, deletedKeys }
+                return { outboxEvents, deletedKeys, beforeEffects: snapshot(tx) }
               },
             )
-            const beforeEffects = snapshot(tx)
             await entry.enter('effects')
-            for (const event of outboxEvents) await effects?.outbox?.(tx, event)
-            for (const key of deletedKeys) await effects?.delete?.(tx, key)
+            for (const event of outboxEvents)
+              await entry.callback(() => capturedEffects.outbox?.(tx, event))
+            for (const key of deletedKeys)
+              await entry.callback(() => capturedEffects.delete?.(tx, key))
             await entry.enter('account')
-            await sequenceMemoryCoordinator(entry, async () => {
+            await coordinateMemoryTransaction(tx, async (tx) => {
+              const raw = createUnlockedGroupStateStores({ tx, groupID: request.groupID, atRest })
               const affected = changedIncarnations(beforeEffects, snapshot(tx), change.groupID)
               const life = await raw.lifetime.load()
               for (const [incarnation, namespaces] of affected) {
@@ -683,7 +724,16 @@ export function createMemoryGroupCoordinator(params: {
                   continue
                 let state: GroupStateRecord | null
                 try {
-                  state = await raw.state(incarnation).load()
+                  state = await createUnlockedGroupStateStores({
+                    tx,
+                    groupID: change.groupID,
+                    atRest,
+                    requiredOpen: ![...namespaces].every(
+                      (name) => name === 'control' || name === 'meta',
+                    ),
+                  })
+                    .state(incarnation)
+                    .load()
                 } catch (error) {
                   if ([...namespaces].every((name) => name === 'control' || name === 'meta'))
                     continue
@@ -698,16 +748,22 @@ export function createMemoryGroupCoordinator(params: {
                 }
                 tx.rows.state?.set(
                   physicalRecordKey(address),
-                  await withoutMemoryCoordinator(() =>
-                    sealRecord(atRest, address, { ...state, version: state.version + 1 }),
-                  ),
+                  await memorySeal(tx, atRest, address, { ...state, version: state.version + 1 }),
                 )
                 await raw
                   .stateMetadata(incarnation)
                   .save({ ...metadata, version: state.version + 1 })
               }
             })
+            if (entry.rollbackOnly)
+              throw new GroupStateConflictError('Transaction is rollback-only')
             return result
+          } catch (error) {
+            attempt.revoke(
+              owners.failure ??
+                new PersistencePhaseError('Transition attempt rejected', { cause: error }),
+            )
+            throw error
           } finally {
             if (participantTx === undefined && owners.failure === null) await entry.enter('outcome')
           }
@@ -815,7 +871,7 @@ export function createMemoryGroupCoordinator(params: {
       read(
         key.groupID,
         async (stores) =>
-          await sequenceMemoryOperation(
+          await memoryOperation(
             stores.tx,
             async () =>
               (
@@ -836,7 +892,7 @@ export function createMemoryGroupCoordinator(params: {
       change: GroupTransition,
       work: (stores: GroupStores<MemoryTransaction>) => Promise<TValue>,
     ): Promise<TValue> {
-      const entry = owners.current()
+      const entry = memoryTransactionEntry(tx.rows)
       if (entry === undefined) throw new GroupStateConflictError('Missing group ownership entry')
       return transitionOwned(copyStoredValue(change), work, entry, tx)
     },
@@ -851,5 +907,6 @@ export function createMemoryGroupPersistence(params: {
   effects?: TransactionalGroupEffects<MemoryTransaction>
   ownershipContext?: OwnershipContextPort
 }): GroupPersistence<MemoryTransaction> {
+  params.owners.bindOwnershipContext(params.ownershipContext)
   return createMemoryGroupCoordinator(params).groups
 }

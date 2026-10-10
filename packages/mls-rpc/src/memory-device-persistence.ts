@@ -1,8 +1,8 @@
 import { createMemoryGroupCoordinator, memoryGroupOwnerQueues } from './memory-group-persistence.js'
 import {
   bindMemoryOwner,
-  sequenceMemoryCoordinator,
-  sequenceMemoryOperation,
+  coordinateMemoryTransaction,
+  memoryOperation,
 } from './memory-group-state.js'
 import {
   copyStoredValue,
@@ -20,6 +20,7 @@ import { physicalRecordKey } from './persistence-codec.js'
 import {
   GroupStateConflictError,
   GroupStateUncertainError,
+  PersistencePhaseError,
   StorageOutcomeUnknownError,
 } from './persistence-errors.js'
 import type {
@@ -100,6 +101,7 @@ export function createMemoryDevicePersistence(params: {
     }
   }
   const owners = binding.owners
+  owners.bindOwnershipContext(params.ownershipContext)
   const coordinator = createMemoryGroupCoordinator({
     db,
     owners,
@@ -153,9 +155,18 @@ export function createMemoryDevicePersistence(params: {
       return await db.transact(scope(null), async (baseTx) => {
         const tx = boundTx(baseTx, entry)
         try {
-          return await entry.sequence(() => work(tx))
-        } finally {
-          if (owners.failure === null) await entry.enter('outcome')
+          const result = await entry.callback(() => work(tx))
+          await entry.enter('outcome')
+          return result
+        } catch (error) {
+          entry
+            .attempt()
+            .revoke(
+              owners.failure ??
+                new PersistencePhaseError('Read attempt rejected', { cause: error }),
+            )
+          entry.release()
+          throw error
         }
       })
     })
@@ -163,7 +174,7 @@ export function createMemoryDevicePersistence(params: {
   function table<TValue>(tx: MemoryTransaction, namespace: string) {
     return memoryDeviceTable<TValue>({ tx, atRest, providerID, ownerDID, namespace })
   }
-  function restore(tx: MemoryTransaction): DeviceStores<MemoryTransaction>['restore'] {
+  function unlockedRestore(tx: MemoryTransaction): DeviceStores<MemoryTransaction>['restore'] {
     const rows = table<RestoreWork>(tx, 'device-restore')
     const raw = {
       async load() {
@@ -197,23 +208,20 @@ export function createMemoryDevicePersistence(params: {
         for (const id of ids) if (id !== owned?.id) rows.remove(id)
       },
     }
-    return {
-      load: sequenceMemoryOperation(tx, raw.load),
-      save: sequenceMemoryOperation(tx, raw.save, 'side'),
-    }
+    return raw
   }
   async function load(tx: MemoryTransaction): Promise<DeviceRecord> {
     const value = await table<Omit<DeviceRecord, 'restoreWork'>>(tx, 'device').load('current')
     const owner = marker(tx, 'device-owner', ownerKey)
     if (value === null) {
       if (owner !== null) throw new GroupStateConflictError('Missing device revision record')
-      return { revision: 0, mutationID: 'initial', restoreWork: await restore(tx).load() }
+      return { revision: 0, mutationID: 'initial', restoreWork: await unlockedRestore(tx).load() }
     }
     if (!sameMarker(value, owner)) throw new GroupStateConflictError('Device ownership conflict')
     return {
       revision: value.revision,
       mutationID: value.mutationID,
-      restoreWork: await restore(tx).load(),
+      restoreWork: await unlockedRestore(tx).load(),
     }
   }
   function stores(
@@ -257,11 +265,14 @@ export function createMemoryDevicePersistence(params: {
       lastResort: (sourceID) =>
         createTransactionPackageStores({ tx, atRest, providerID, ownerDID, sourceID }).lastResort,
       cleanup: {
-        list: sequenceMemoryOperation(tx, rawCleanup.list),
-        put: sequenceMemoryOperation(tx, rawCleanup.put),
-        remove: sequenceMemoryOperation(tx, rawCleanup.remove),
+        list: memoryOperation(tx, rawCleanup.list),
+        put: memoryOperation(tx, rawCleanup.put),
+        remove: memoryOperation(tx, rawCleanup.remove),
       },
-      restore: restore(tx),
+      restore: {
+        load: memoryOperation(tx, unlockedRestore(tx).load),
+        save: memoryOperation(tx, unlockedRestore(tx).save, 'side'),
+      },
     }
   }
   async function prove(mutationID: string, proof: Proof): Promise<'committed' | 'rolled-back'> {
@@ -326,7 +337,7 @@ export function createMemoryDevicePersistence(params: {
     providerID,
     ownerDID,
     groups,
-    load: () => read(load),
+    load: () => read((tx) => memoryOperation(tx, () => load(tx))()),
     transition(change, work) {
       const owned = copyStoredValue(change)
       return owners.run(
@@ -344,7 +355,7 @@ export function createMemoryDevicePersistence(params: {
               async (baseTx) => {
                 const tx = boundTx(baseTx, entry)
                 try {
-                  const before = await entry.sequence(() => load(tx))
+                  const before = await memoryOperation(tx, () => load(tx))()
                   if (before.revision !== owned.expectedRevision)
                     throw new GroupStateConflictError('Device revision conflict')
                   const prior = proofs.get(owned.mutationID)
@@ -363,7 +374,7 @@ export function createMemoryDevicePersistence(params: {
                   }
                   proofs.set(owned.mutationID, proof)
                   if (owned.group === null) {
-                    result = await work(stores(tx, null))
+                    result = await entry.callback(() => work(stores(tx, null)))
                     await entry.enter('finalise')
                     await entry.enter('effects')
                     await entry.enter('account')
@@ -375,14 +386,24 @@ export function createMemoryDevicePersistence(params: {
                     )
                   }
                   const nextDevice = proof.nextDevice
-                  await sequenceMemoryCoordinator(entry, async () => {
+                  await coordinateMemoryTransaction(tx, async (tx) => {
                     tx.rows['device-owner']?.set(ownerKey, nextDevice)
                     await table<Omit<DeviceRecord, 'restoreWork'>>(tx, 'device').save(
                       'current',
                       nextDevice,
                     )
                   })
+                  if (entry.rollbackOnly)
+                    throw new GroupStateConflictError('Transaction is rollback-only')
                   return result
+                } catch (error) {
+                  entry
+                    .attempt()
+                    .revoke(
+                      owners.failure ??
+                        new PersistencePhaseError('Transition attempt rejected', { cause: error }),
+                    )
+                  throw error
                 } finally {
                   if (owners.failure === null) await entry.enter('outcome')
                 }

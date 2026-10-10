@@ -2,15 +2,15 @@ import { applyChanges, type ControlSnapshot } from '@kumiai/rpc'
 
 import {
   createUnlockedGroupStateStores,
-  sequenceMemoryOperation,
-  withoutMemoryCoordinator,
+  memoryOpen,
+  memoryOperation,
+  memoryRequired,
+  memorySeal,
 } from './memory-group-state.js'
 import {
   decodeStoredValue,
   encodeStoredValue,
-  openRecord,
   physicalRecordKey,
-  sealRecord,
   topicLocator,
 } from './persistence-codec.js'
 import {
@@ -75,19 +75,22 @@ export function memoryRecordTable<TValue>(params: {
     return rows
   }
   const table = {
-    async load(recordID: string): Promise<TValue | null> {
-      const location = address(recordID)
-      const id = physicalRecordKey(location)
-      const bytes = map().get(id)
-      if (bytes === undefined) return null
-      if (!(bytes instanceof Uint8Array)) throw new GroupStateConflictError('Unreadable sealed row')
-      const value = await withoutMemoryCoordinator(() => openRecord(atRest, location, bytes))
-      map().has(id)
-      return value as TValue
+    load(recordID: string): Promise<TValue | null> {
+      return memoryRequired(tx, async () => {
+        const location = address(recordID)
+        const id = physicalRecordKey(location)
+        const bytes = map().get(id)
+        if (bytes === undefined) return null
+        if (!(bytes instanceof Uint8Array))
+          throw new GroupStateConflictError('Unreadable sealed row')
+        const value = await memoryOpen(tx, atRest, location, bytes)
+        map().has(id)
+        return value as TValue
+      })
     },
     async save(recordID: string, value: TValue): Promise<void> {
       const location = address(recordID)
-      const bytes = await withoutMemoryCoordinator(() => sealRecord(atRest, location, value))
+      const bytes = await memorySeal(tx, atRest, location, value)
       map().set(physicalRecordKey(location), bytes)
     },
     remove(recordID: string): boolean {
@@ -424,41 +427,41 @@ export function createIncarnationStores(
   const { tx } = params
   return {
     state: {
-      load: sequenceMemoryOperation(tx, stores.state.load),
-      save: sequenceMemoryOperation(tx, stores.state.save, 'domain'),
+      load: memoryOperation(tx, stores.state.load),
+      save: memoryOperation(tx, stores.state.save, 'domain'),
     },
     control: {
-      load: sequenceMemoryOperation(tx, stores.control.load),
-      apply: sequenceMemoryOperation(tx, stores.control.apply, 'side'),
+      load: memoryOperation(tx, stores.control.load),
+      apply: memoryOperation(tx, stores.control.apply, 'side'),
     },
     anchor: {
-      load: sequenceMemoryOperation(tx, stores.anchor.load),
-      save: sequenceMemoryOperation(tx, stores.anchor.save, 'side'),
+      load: memoryOperation(tx, stores.anchor.load),
+      save: memoryOperation(tx, stores.anchor.save, 'side'),
     },
     pending: {
-      list: sequenceMemoryOperation(tx, stores.pending.list),
-      put: sequenceMemoryOperation(tx, stores.pending.put, 'side'),
-      poison: sequenceMemoryOperation(tx, stores.pending.poison, 'side'),
-      listPoison: sequenceMemoryOperation(tx, stores.pending.listPoison),
-      complete: sequenceMemoryOperation(tx, stores.pending.complete, 'side'),
+      list: memoryOperation(tx, stores.pending.list),
+      put: memoryOperation(tx, stores.pending.put, 'side'),
+      poison: memoryOperation(tx, stores.pending.poison, 'side'),
+      listPoison: memoryOperation(tx, stores.pending.listPoison),
+      complete: memoryOperation(tx, stores.pending.complete, 'side'),
     },
     cursor: {
-      load: sequenceMemoryOperation(tx, stores.cursor.load),
-      save: sequenceMemoryOperation(tx, stores.cursor.save, 'side'),
+      load: memoryOperation(tx, stores.cursor.load),
+      save: memoryOperation(tx, stores.cursor.save, 'side'),
     },
     outbox: {
-      list: sequenceMemoryOperation(tx, stores.outbox.list),
-      put: sequenceMemoryOperation(tx, stores.outbox.put, 'side'),
-      remove: sequenceMemoryOperation(tx, stores.outbox.remove, 'side'),
-      clear: sequenceMemoryOperation(tx, stores.outbox.clear, 'side'),
+      list: memoryOperation(tx, stores.outbox.list),
+      put: memoryOperation(tx, stores.outbox.put, 'side'),
+      remove: memoryOperation(tx, stores.outbox.remove, 'side'),
+      clear: memoryOperation(tx, stores.outbox.clear, 'side'),
     },
     meta: {
-      loadSettlement: sequenceMemoryOperation(tx, stores.meta.loadSettlement),
-      putSettlement: sequenceMemoryOperation(tx, stores.meta.putSettlement, 'side'),
-      events: sequenceMemoryOperation(tx, stores.meta.events),
-      putEvents: sequenceMemoryOperation(tx, stores.meta.putEvents, 'side'),
-      ackEvent: sequenceMemoryOperation(tx, stores.meta.ackEvent, 'side'),
+      loadSettlement: memoryOperation(tx, stores.meta.loadSettlement),
+      putSettlement: memoryOperation(tx, stores.meta.putSettlement, 'side'),
+      events: memoryOperation(tx, stores.meta.events),
+      putEvents: memoryOperation(tx, stores.meta.putEvents, 'side'),
+      ackEvent: memoryOperation(tx, stores.meta.ackEvent, 'side'),
     },
-    clearTransport: sequenceMemoryOperation(tx, stores.clearTransport, 'side'),
+    clearTransport: memoryOperation(tx, stores.clearTransport, 'side'),
   }
 }

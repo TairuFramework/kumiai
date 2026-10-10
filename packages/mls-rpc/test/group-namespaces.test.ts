@@ -1276,7 +1276,9 @@ for (const mode of ['real-mls', 'double'] as const) {
         expired = stores
       })
       if (expired === undefined) throw new Error('Missing stores')
-      await expect(expired.incarnation(1).pending.list()).rejects.toThrow('expired')
+      await expect(expired.incarnation(1).pending.list()).rejects.toMatchObject({
+        name: 'PersistencePhaseError',
+      })
     })
 
     test('requires matching co-written trust and rejects a reused authenticator', async () => {
@@ -1565,8 +1567,10 @@ for (const mode of ['real-mls', 'double'] as const) {
       )
       expect((await groups.loadState(key))?.version).toBe(2)
       if (expired === undefined) throw new Error('Missing stores')
-      await expect(expired.trust.load()).rejects.toThrow('expired')
-      await expect(expired.trust.save(seed.trust)).rejects.toThrow('expired')
+      await expect(expired.trust.load()).rejects.toMatchObject({ name: 'PersistencePhaseError' })
+      await expect(expired.trust.save(seed.trust)).rejects.toMatchObject({
+        name: 'PersistencePhaseError',
+      })
     })
 
     test.each(['commit', 'rollback'] as const)(

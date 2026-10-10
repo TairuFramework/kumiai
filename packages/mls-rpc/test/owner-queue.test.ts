@@ -180,7 +180,7 @@ describe('runtime-neutral owner operations', { timeout: 2000 }, () => {
     ])
   })
 
-  test('public, coordinator and legacy reservations share serial order', async () => {
+  test('public and coordinator reservations share serial order', async () => {
     const queues = createOwnerQueues()
     const order: Array<string> = []
     await queues.run('transition', group, async (entry) => {
@@ -190,8 +190,8 @@ describe('runtime-neutral owner operations', { timeout: 2000 }, () => {
           await Promise.resolve()
           order.push('public')
         }),
-        entry.sequence(async () => {
-          order.push('legacy')
+        entry.operation(entry.attempt(), async () => {
+          order.push('second-public')
         }),
       ])
       await entry.enter('finalise')
@@ -201,14 +201,14 @@ describe('runtime-neutral owner operations', { timeout: 2000 }, () => {
           await Promise.resolve()
           order.push('coordinator')
         }),
-        entry.sequence(async () => {
-          order.push('legacy-finalise')
+        entry.coordinate(token, async () => {
+          order.push('second-coordinator')
         }),
       ])
       await entry.enter('outcome')
       entry.settle('committed')
     })
-    expect(order).toEqual(['public', 'legacy', 'coordinator', 'legacy-finalise'])
+    expect(order).toEqual(['public', 'second-public', 'coordinator', 'second-coordinator'])
   })
 
   test.each(phases)(
@@ -520,12 +520,12 @@ describe('runtime-neutral owner operations', { timeout: 2000 }, () => {
     },
   )
 
-  test('legacy body and sequence retain asynchronous ownership during migration', async () => {
-    const queues = createOwnerQueues()
+  test('the port retains asynchronous ownership in operation callbacks', async () => {
+    const queues = createOwnerQueues({ ownershipContext: contextPort() })
     await queues.run('read', group, async (entry) => {
       await entry.enter('work')
       expect(queues.current()).toBe(entry)
-      await entry.sequence(async () => {
+      await entry.operation(entry.attempt(), async () => {
         await Promise.resolve()
         expect(queues.current()).toBe(entry)
       })
@@ -978,12 +978,16 @@ describe('owner queues', { timeout: 2000 }, () => {
     const owner = queues.run('transition', group, async (entry) => {
       captured = entry
       await advance(entry, phase)
-      const first = entry.sequence(async () => {
+      const reserve = <T>(work: () => Promise<T>) =>
+        phase === 'finalise'
+          ? entry.coordinate(entry.coordinator(entry.attempt()), work)
+          : entry.operation(entry.attempt(), work)
+      const first = reserve(async () => {
         order.push(`first-start:${entry.phase}`)
         await suspended.promise
         order.push(`first-end:${entry.phase}`)
       })
-      const second = entry.sequence(async () => {
+      const second = reserve(async () => {
         order.push(`second:${entry.phase}`)
       })
       const boundary = entry.enter(next).then(() => order.push(`entered:${entry.phase}`))
@@ -1008,7 +1012,7 @@ describe('owner queues', { timeout: 2000 }, () => {
     ])
   })
 
-  test('the sequencer serialises suspended work and outcome drains after caller rejection', async () => {
+  test('the operation lock serialises suspended work and outcome drains after caller rejection', async () => {
     const queues = createOwnerQueues()
     const suspended = deferred<void>()
     const operationStarted = deferred<void>()
@@ -1018,13 +1022,13 @@ describe('owner queues', { timeout: 2000 }, () => {
     let closing!: Promise<void>
     const owner = queues.run('transition', group, async (entry) => {
       await advance(entry, 'work')
-      void entry.sequence(async () => {
+      void entry.operation(entry.attempt(), async () => {
         order.push('first-start')
         operationStarted.resolve()
         await suspended.promise
         order.push('first-end')
       })
-      void entry.sequence(async () => {
+      void entry.operation(entry.attempt(), async () => {
         order.push('second')
       })
       await operationStarted.promise
@@ -1057,7 +1061,7 @@ describe('owner queues', { timeout: 2000 }, () => {
     const owner = queues.run('transition', group, async (entry) => {
       await advance(entry, 'work')
       entry.onRollback(() => order.push('rollback'))
-      void entry.sequence(async () => {
+      void entry.operation(entry.attempt(), async () => {
         order.push('work-start')
         await suspended.promise
         order.push('work-end')
@@ -1079,39 +1083,38 @@ describe('owner queues', { timeout: 2000 }, () => {
     expect(order).toEqual(['work-start', 'work-end', 'rollback', 'read'])
   })
 
-  test('a rejected operation does not strand later sequence reservations or outcome', async () => {
+  test('a rejected operation does not strand later operation reservations or outcome', async () => {
     const queues = createOwnerQueues()
     const failure = new Error('operation failed')
     await queues.run('transition', group, async (entry) => {
       await advance(entry, 'work')
-      const failed = entry.sequence(async () => {
+      const failed = entry.operation(entry.attempt(), async () => {
         throw failure
       })
-      const later = entry.sequence(async () => 7)
+      const later = entry.operation(entry.attempt(), async () => 7)
       await expect(failed).rejects.toBe(failure)
       await expect(later).resolves.toBe(7)
       await entry.enter('outcome')
-      await expect(entry.sequence(async () => undefined)).rejects.toBeInstanceOf(
+      await expect(entry.operation(entry.attempt(), async () => undefined)).rejects.toBeInstanceOf(
         PersistencePhaseError,
       )
       entry.settle('rolled-back')
     })
   })
 
-  test('a phase change inside a sequenced operation rejects instead of waiting on itself', async () => {
+  test('a phase change refuses new operations while draining the registered set', async () => {
     const queues = createOwnerQueues()
-    const order: Array<string> = []
-    const queued = read(queues, 'queued-read', order)
     await queues.run('transition', group, async (entry) => {
       await advance(entry, 'work')
-      await expect(entry.sequence(() => entry.enter('finalise'))).rejects.toBeInstanceOf(
+      const operation = entry.operation(entry.attempt(), async () => {})
+      const boundary = entry.enter('finalise')
+      await expect(entry.operation(entry.attempt(), async () => {})).rejects.toBeInstanceOf(
         PersistencePhaseError,
       )
-      expect(entry.phase).toBe('work')
+      await Promise.all([operation, boundary])
       await entry.enter('outcome')
       entry.settle('committed')
     })
-    await expect(queued).resolves.toBe('queued-read')
   })
 
   test.each([
@@ -1430,11 +1433,11 @@ describe('owner queues', { timeout: 2000 }, () => {
     let reserved!: Promise<void>
     const owner = queues.run('transition', group, async (entry) => {
       await advance(entry, 'work')
-      first = entry.sequence(async () => {
+      first = entry.operation(entry.attempt(), async () => {
         entered.resolve()
         await suspended.promise
       })
-      reserved = entry.sequence(async () => {
+      reserved = entry.operation(entry.attempt(), async () => {
         order.push('reserved')
       })
       await bodyFinish.promise

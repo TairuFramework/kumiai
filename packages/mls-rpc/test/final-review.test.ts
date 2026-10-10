@@ -49,27 +49,23 @@ for (const mode of ['real-mls', 'double'] as const) {
       return { db, groups, seed }
     }
 
-    test('nested sibling control writes both persist', async () => {
-      const { db, groups } = await setup()
-      const mutationID = 'nested-control'
+    test('host sibling control writes both persist', async () => {
+      const { groups } = await setup()
+      const mutationID = 'sibling-control'
       const outcomes: Array<Outcome> = [
         { id: 'operation-1', opID: 'operation-1', at: 1000, kind: 'unknown' },
         { id: 'operation-2', opID: 'operation-2', at: 1001, kind: 'unknown' },
       ]
       await groups.transition(await nextChange(groups, groupID, mutationID), async (stores) => {
-        const entry = ownerQueues(db).current()
-        if (entry === undefined) throw new Error('Missing owner entry')
-        await entry.sequence(async () => {
-          const control = stores.incarnation(1).control
-          await Promise.all(
-            outcomes.map((outcome) => control.apply({ putOutcomes: [outcome] }, mutationID)),
-          )
-        })
+        const control = stores.incarnation(1).control
+        await Promise.all(
+          outcomes.map((outcome) => control.apply({ putOutcomes: [outcome] }, mutationID)),
+        )
       })
       expect((await groups.ports(key).control.load()).outcomes).toEqual(outcomes)
     })
 
-    test('a suspended nested child holds outcome, hooks, caller and queued reads', async () => {
+    test('a suspended operation holds outcome, hooks, caller and queued reads', async () => {
       const { db, groups } = await setup()
       const owners = ownerQueues(db)
       const reached = Promise.withResolvers<void>()
@@ -105,18 +101,16 @@ for (const mode of ['real-mls', 'double'] as const) {
           stores.tx.onCommit(() => {
             order.push('hook')
           })
-          await entry.sequence(async () => {
-            child = stores
-              .incarnation(1)
-              .control.apply({ putOutcomes: [outcome] }, mutationID)
-              .then(
-                () => {
-                  order.push('child')
-                },
-                (error: unknown) => error,
-              )
-            await reached.promise
-          })
+          child = stores
+            .incarnation(1)
+            .control.apply({ putOutcomes: [outcome] }, mutationID)
+            .then(
+              () => {
+                order.push('child')
+              },
+              (error: unknown) => error,
+            )
+          await reached.promise
         })
         .then(() => {
           order.push('caller')
@@ -261,10 +255,14 @@ for (const mode of ['real-mls', 'double'] as const) {
       await expect(supplied.lifetime.load()).rejects.toMatchObject({
         name: 'PersistencePhaseError',
       })
-      await expect(captured.sequence(async () => undefined)).rejects.toMatchObject({
+      await expect(
+        captured.operation(captured.attempt(), async () => undefined),
+      ).rejects.toMatchObject({
         name: 'PersistencePhaseError',
       })
-      expect(() => supplied.tx.rows.lifetime).toThrow('expired')
+      expect(() => supplied.tx.rows.lifetime).toThrow(
+        expect.objectContaining({ name: 'PersistencePhaseError' }),
+      )
     })
 
     test.each(['state', 'trust', 'lifetime'] as const)(
@@ -456,15 +454,17 @@ for (const mode of ['real-mls', 'double'] as const) {
         atRest: codec,
         providerID: 'memory',
       })
-      await guarded.transition(
-        await nextChange(groups, groupID, 'caught-metadata-failure'),
-        async (stores) => {
-          await expect(
-            stores.incarnation(1).state.save({ ...seed.state, version: 2, senderHWM: 32 }),
-          ).rejects.toThrow('metadata seal failed')
-          expect(await stores.incarnation(1).state.load()).toEqual(seed.state)
-        },
-      )
+      await expect(
+        guarded.transition(
+          await nextChange(groups, groupID, 'caught-metadata-failure'),
+          async (stores) => {
+            await expect(
+              stores.incarnation(1).state.save({ ...seed.state, version: 2, senderHWM: 32 }),
+            ).rejects.toThrow('metadata seal failed')
+            expect(await stores.incarnation(1).state.load()).toEqual(seed.state)
+          },
+        ),
+      ).rejects.toThrow('rollback-only')
       expect(await groups.loadState(key)).toEqual(seed.state)
     }, 5000)
 

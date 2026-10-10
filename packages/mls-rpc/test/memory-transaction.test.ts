@@ -288,17 +288,13 @@ test('copies buffers throughout cyclic side rows and preserves view aliases', as
 })
 
 test.each(['synchronous', 'asynchronous'] as const)(
-  'isolates groups and rejects nested root work without losing a concurrent commit (%s)',
+  'isolates groups without losing a concurrent commit (%s)',
   async (mode) => {
     const db = createMemoryTransaction({ rows: {} })
     const pause = deferred()
     const entered = deferred()
     const first = db.transact(scope, async (tx) => {
       if (mode === 'asynchronous') await Promise.resolve()
-      for (const nestedScope of [scope, otherScope, { groupID: null, devicePackages: true }]) {
-        await expect(db.transact(nestedScope, async () => 1)).rejects.toThrow('reentrant')
-        await expect(db.completionBarrier(nestedScope)).rejects.toThrow('reentrant')
-      }
       entered.resolve()
       await pause.promise
       namespace(tx.rows, 'state').set(key, sealedA)
@@ -317,6 +313,16 @@ test.each(['synchronous', 'asynchronous'] as const)(
     )
   },
 )
+
+test('refuses synchronous nested backend calls', async () => {
+  const db = createMemoryTransaction({ rows: {} })
+  await db.transact(scope, async () => {
+    const calls = [scope, otherScope, { groupID: null, devicePackages: true }].flatMap(
+      (nestedScope) => [db.transact(nestedScope, async () => 1), db.completionBarrier(nestedScope)],
+    )
+    await Promise.all(calls.map((call) => expect(call).rejects.toThrow('reentrant')))
+  })
+})
 
 test.each([false, true])(
   'queues same-group calls in FIFO order (device=%s)',
