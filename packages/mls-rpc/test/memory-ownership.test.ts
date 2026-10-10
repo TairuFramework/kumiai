@@ -206,7 +206,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         }
       })
 
-      test('a caught phase refusal inside required work does not poison the transition', async () => {
+      test('a caught phase refusal before a required open does not poison the transition', async () => {
         const fixture = await createStorageFixture(options())
         try {
           const groups = fixture.ports.device.groups
@@ -218,14 +218,43 @@ for (const mode of ['real-mls', 'double'] as const) {
               const entry = memoryTransactionEntry(stores.tx.rows)
               if (entry === undefined) throw new Error('Missing transaction entry')
               refusal = await observed(
-                memoryRequired(stores.tx, async () => entry.assertWrite('coordinator')),
+                memoryRequired(stores.tx, async () => {
+                  entry.assertWrite('coordinator')
+                  return await stores.trust.load()
+                }),
               )
+              expect(entry.rollbackOnly).toBe(false)
               await stores.incarnation(1).cursor.save('after-refusal', '5')
             },
           )
           expect(refusal).toBeInstanceOf(PersistencePhaseError)
           expect((await groups.load(groupID))?.revision).toBe((before?.revision ?? 0) + 1)
           expect(await groups.ports(key).cursor.load('after-refusal')).toBe('5')
+        } finally {
+          await fixture.close()
+        }
+      })
+
+      test('a caught codec phase error during a required open makes the transition rollback-only', async () => {
+        const fixture = await createStorageFixture(options())
+        const openError = new PersistencePhaseError('codec open failed')
+        try {
+          const groups = fixture.ports.device.groups
+          const before = await fixture.inspectRows()
+          let caught: unknown
+          await expect(
+            groups.transition(
+              await nextChange(groups, groupID, 'caught-open-phase-error'),
+              async (stores) => {
+                fixture.failNextOpen(openError)
+                caught = await observed(stores.trust.load())
+                await stores.incarnation(1).cursor.save('after-open-failure', '7')
+              },
+            ),
+          ).rejects.toThrow(new GroupStateConflictError('Transaction is rollback-only'))
+          expect(caught).toBe(openError)
+          expect(await groups.ports(key).cursor.load('after-open-failure')).toBeNull()
+          expect(await fixture.inspectRows()).toEqual(before)
         } finally {
           await fixture.close()
         }

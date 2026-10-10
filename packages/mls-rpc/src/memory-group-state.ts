@@ -36,6 +36,7 @@ type TransactionBinding = {
   owners: OwnerQueues
   attempt: OwnerAttempt
   changes: number
+  opensStarted: number
   writer: CoordinatorWriter
 }
 const transactionEntries = new WeakMap<MemoryTransaction['rows'], TransactionBinding>()
@@ -124,6 +125,7 @@ export function bindMemoryOwner(
     owners,
     attempt,
     changes: 0,
+    opensStarted: 0,
     writer: new CoordinatorWriter({ tx, entry, attempt }),
   })
 }
@@ -176,11 +178,17 @@ export async function memoryRequired<TValue>(
   work: () => Promise<TValue>,
   required = true,
 ): Promise<TValue> {
+  const binding = transactionBinding(tx.rows)
+  const changes = binding?.changes
+  const opensStarted = binding?.opensStarted
   try {
     return await work()
   } catch (error) {
-    if (required && !(error instanceof PersistencePhaseError))
-      transactionBinding(tx.rows)?.entry.fail(error)
+    if (
+      binding !== undefined &&
+      (binding.changes !== changes || (required && binding.opensStarted !== opensStarted))
+    )
+      binding.entry.fail(error)
     throw error
   }
 }
@@ -205,7 +213,20 @@ export function memoryOpen(
   address: StoredAddress,
   bytes: Uint8Array,
 ): Promise<unknown> {
-  return memoryCallback(tx, () => openRecord(atRest, address, bytes))
+  const binding = transactionBinding(tx.rows)
+  return memoryCallback(tx, () => {
+    return openRecord(
+      {
+        open(ciphertext, aad) {
+          if (binding !== undefined) binding.opensStarted++
+          return atRest.open(ciphertext, aad)
+        },
+        seal: (plaintext, aad) => atRest.seal(plaintext, aad),
+      },
+      address,
+      bytes,
+    )
+  })
 }
 
 export function memoryOperation<TArgs extends Array<unknown>, TValue>(
