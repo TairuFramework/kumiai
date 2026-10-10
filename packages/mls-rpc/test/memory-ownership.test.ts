@@ -6,9 +6,11 @@ import {
   createMemoryGroupCoordinator,
   createMemoryGroupPersistence,
 } from '../src/memory-group-persistence.js'
-import { memoryTransactionEntry } from '../src/memory-group-state.js'
+import { memoryRequired, memoryTransactionEntry } from '../src/memory-group-state.js'
+import { memoryRecordTable } from '../src/memory-incarnation-stores.js'
 import { createMemoryTransaction } from '../src/memory-transaction.js'
 import { createOwnerQueues } from '../src/owner-queue.js'
+import { GroupStateConflictError, PersistencePhaseError } from '../src/persistence-errors.js'
 import type { MemoryTransaction } from '../src/persistence-types.js'
 import { deferred } from '../src/runtime.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
@@ -78,7 +80,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         ownershipContext: withPort ? createAsyncLocalOwnershipContext() : undefined,
       })
 
-      test('effect callables are captured once while finalise admission is closing', async () => {
+      test('effect callables are captured once before finalise', async () => {
         const phases: Array<string> = []
         const counts = { outbox: 0, delete: 0 }
         let entry: ReturnType<typeof memoryTransactionEntry>
@@ -113,6 +115,145 @@ for (const mode of ['real-mls', 'double'] as const) {
         }
         expect(counts).toEqual({ outbox: 1, delete: 1 })
         expect(phases).toEqual(['work', 'work'])
+      })
+
+      test('a throwing effect getter preserves its error and releases the next transition', async () => {
+        const hostError = new Error('effect getter failed')
+        let failCapture = true
+        const fixture = await createStorageFixture({
+          ...options(),
+          effects: {
+            get outbox() {
+              if (failCapture) throw hostError
+              return undefined
+            },
+          },
+        })
+        try {
+          const groups = fixture.ports.device.groups
+          const before = await groups.load(groupID)
+          let outcomeError: unknown
+          const result = await within(
+            observed(
+              groups.transition(
+                await nextChange(groups, groupID, 'getter-error'),
+                async (stores) => {
+                  const entry = memoryTransactionEntry(stores.tx.rows)
+                  if (entry === undefined) throw new Error('Missing transaction entry')
+                  const enter = entry.enter
+                  entry.enter = async (phase) => {
+                    try {
+                      await enter(phase)
+                    } catch (error) {
+                      if (phase === 'outcome') outcomeError = error
+                      throw error
+                    }
+                  }
+                },
+              ),
+            ),
+          )
+          failCapture = false
+          await within(
+            groups.transition(await nextChange(groups, groupID, 'after-getter'), async () => {}),
+          )
+          expect(result).toBe(hostError)
+          // Backend release can expire cleanup, but capture must not leave a phase change in flight.
+          expect(outcomeError).not.toEqual(
+            expect.objectContaining({ message: 'Phase is already changing' }),
+          )
+          expect((await groups.load(groupID))?.revision).toBe((before?.revision ?? 0) + 1)
+        } finally {
+          await fixture.close()
+        }
+      })
+
+      test('a throwing effect getter with fail-stop reports the conflict without an unhandled rejection', async () => {
+        const hostError = new Error('effect getter failed')
+        const conflict = new GroupStateConflictError('factory stopped during effect capture')
+        const unhandled: Array<unknown> = []
+        const onUnhandled = (error: unknown) => unhandled.push(error)
+        const db = createMemoryTransaction({ rows: {} })
+        const owners = createOwnerQueues()
+        const groups = createMemoryGroupPersistence({
+          db,
+          owners,
+          atRest: createDeterministicAtRestCodec({ key: new Uint8Array(32).fill(97) }),
+          providerID: 'memory',
+          ownershipContext: options().ownershipContext,
+          effects: {
+            get outbox(): undefined {
+              owners.failStop(conflict)
+              throw hostError
+            },
+          },
+        })
+        process.on('unhandledRejection', onUnhandled)
+        try {
+          const result = await within(
+            observed(
+              groups.transition(
+                { groupID, mutationID: 'getter-fail-stop', expected: null },
+                async () => {},
+              ),
+            ),
+          )
+          await turn()
+          expect(result).toBe(conflict)
+          expect(unhandled).toEqual([])
+        } finally {
+          process.off('unhandledRejection', onUnhandled)
+        }
+      })
+
+      test('a caught phase refusal inside required work does not poison the transition', async () => {
+        const fixture = await createStorageFixture(options())
+        try {
+          const groups = fixture.ports.device.groups
+          const before = await groups.load(groupID)
+          let refusal: unknown
+          await groups.transition(
+            await nextChange(groups, groupID, 'caught-phase-refusal'),
+            async (stores) => {
+              const entry = memoryTransactionEntry(stores.tx.rows)
+              if (entry === undefined) throw new Error('Missing transaction entry')
+              refusal = await observed(
+                memoryRequired(stores.tx, async () => entry.assertWrite('coordinator')),
+              )
+              await stores.incarnation(1).cursor.save('after-refusal', '5')
+            },
+          )
+          expect(refusal).toBeInstanceOf(PersistencePhaseError)
+          expect((await groups.load(groupID))?.revision).toBe((before?.revision ?? 0) + 1)
+          expect(await groups.ports(key).cursor.load('after-refusal')).toBe('5')
+        } finally {
+          await fixture.close()
+        }
+      })
+
+      test('a caught load failure before opening a row does not poison the transition', async () => {
+        const fixture = await createStorageFixture(options())
+        try {
+          const groups = fixture.ports.device.groups
+          let refusal: unknown
+          await groups.transition(
+            await nextChange(groups, groupID, 'missing-namespace'),
+            async (stores) => {
+              const table = memoryRecordTable({
+                tx: stores.tx,
+                key,
+                namespace: 'missing-namespace',
+                atRest: createDeterministicAtRestCodec({ key: new Uint8Array(32).fill(97) }),
+              })
+              refusal = await observed(table.load('current'))
+              await stores.incarnation(1).cursor.save('after-load-refusal', '6')
+            },
+          )
+          expect(refusal).toBeInstanceOf(GroupStateConflictError)
+          expect(await groups.ports(key).cursor.load('after-load-refusal')).toBe('6')
+        } finally {
+          await fixture.close()
+        }
       })
 
       test('a codec seal can resume from unrelated code without retaining coordinator access', async () => {

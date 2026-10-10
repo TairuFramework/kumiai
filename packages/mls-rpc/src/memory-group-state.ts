@@ -179,18 +179,24 @@ export async function memoryRequired<TValue>(
   try {
     return await work()
   } catch (error) {
-    if (required) transactionBinding(tx.rows)?.entry.fail(error)
+    if (required && !(error instanceof PersistencePhaseError))
+      transactionBinding(tx.rows)?.entry.fail(error)
     throw error
   }
 }
 
-export function memorySeal(
+export async function memorySeal(
   tx: MemoryTransaction,
   atRest: AtRestCodec,
   address: StoredAddress,
   value: unknown,
 ): Promise<Uint8Array> {
-  return memoryRequired(tx, () => memoryCallback(tx, () => sealRecord(atRest, address, value)))
+  try {
+    return await memoryCallback(tx, () => sealRecord(atRest, address, value))
+  } catch (error) {
+    transactionBinding(tx.rows)?.entry.fail(error)
+    throw error
+  }
 }
 
 export function memoryOpen(
@@ -288,17 +294,15 @@ export function createUnlockedGroupStateStores(params: {
       rows.set(key, bytes)
     }
     return {
-      load(): Promise<TValue | null> {
-        return memoryRequired(
+      async load(): Promise<TValue | null> {
+        const bytes = tx.rows[namespace]?.get(key)
+        if (bytes === undefined) return null
+        const value = await memoryRequired(
           tx,
           async () => {
-            const bytes = tx.rows[namespace]?.get(key)
-            if (bytes === undefined) return null
             if (!(bytes instanceof Uint8Array))
               throw new GroupStateConflictError('Unreadable sealed row')
             const value = (await memoryOpen(tx, atRest, address, bytes)) as TValue
-            // Touch the bound view again after host code yields.
-            tx.rows[namespace]?.has(key)
             if (value === null || typeof value !== 'object' || value.groupID !== groupID) {
               throw new GroupStateConflictError('Stored row group mismatch')
             }
@@ -306,6 +310,9 @@ export function createUnlockedGroupStateStores(params: {
           },
           params.requiredOpen,
         )
+        // Touch the bound view again after host code yields.
+        tx.rows[namespace]?.has(key)
+        return value
       },
       prepare,
       store,

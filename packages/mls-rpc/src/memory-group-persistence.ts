@@ -99,6 +99,23 @@ function snapshot(tx: MemoryTransaction): MemoryStoreRows {
   return rows
 }
 
+async function loadAffectedState(
+  tx: MemoryTransaction,
+  key: GroupKey,
+  atRest: AtRestCodec,
+  namespaces: Set<string>,
+): Promise<GroupStateRecord | null> {
+  const requiredOpen = ![...namespaces].every((name) => name === 'control' || name === 'meta')
+  try {
+    return await createUnlockedGroupStateStores({ tx, groupID: key.groupID, atRest, requiredOpen })
+      .state(key.incarnation)
+      .load()
+  } catch (error) {
+    if (requiredOpen) throw error
+    return null
+  }
+}
+
 function changedIncarnations(
   before: MemoryStoreRows,
   after: MemoryStoreRows,
@@ -475,13 +492,12 @@ export function createMemoryGroupCoordinator(params: {
               },
             }
             result = await entry.callback(() => work(stores, change.mutationID))
-            const finalising = entry.enter('finalise')
-            // Freeze public admission before invoking host accessors.
+            // Host accessors can throw, so capture before starting a phase change.
             const capturedEffects = entry.callback(() => ({
               outbox: effects?.outbox?.bind(effects),
               delete: effects?.delete?.bind(effects),
             }))
-            await finalising
+            await entry.enter('finalise')
             if (entry.rollbackOnly)
               throw new GroupStateConflictError('Transaction is rollback-only')
             const { outboxEvents, deletedKeys, beforeEffects } = await coordinateMemoryTransaction(
@@ -614,27 +630,12 @@ export function createMemoryGroupCoordinator(params: {
                 }
                 for (const [incarnation, namespaces] of affected) {
                   if (savedStates.has(incarnation)) continue
-                  let state: GroupStateRecord | null
-                  try {
-                    state = await createUnlockedGroupStateStores({
-                      tx,
-                      groupID: change.groupID,
-                      atRest,
-                      requiredOpen: ![...namespaces].every(
-                        (name) => name === 'control' || name === 'meta',
-                      ),
-                    })
-                      .state(incarnation)
-                      .load()
-                  } catch (error) {
-                    if (
-                      [...namespaces].every(
-                        (namespace) => namespace === 'control' || namespace === 'meta',
-                      )
-                    )
-                      continue
-                    throw error
-                  }
+                  const state = await loadAffectedState(
+                    tx,
+                    { groupID: change.groupID, incarnation },
+                    atRest,
+                    namespaces,
+                  )
                   if (state !== null && !state.deleted) {
                     const address = {
                       groupID: change.groupID,
@@ -722,23 +723,12 @@ export function createMemoryGroupCoordinator(params: {
                   .load()
                 if (metadata === null || metadata.deleted || metadata.version !== original?.version)
                   continue
-                let state: GroupStateRecord | null
-                try {
-                  state = await createUnlockedGroupStateStores({
-                    tx,
-                    groupID: change.groupID,
-                    atRest,
-                    requiredOpen: ![...namespaces].every(
-                      (name) => name === 'control' || name === 'meta',
-                    ),
-                  })
-                    .state(incarnation)
-                    .load()
-                } catch (error) {
-                  if ([...namespaces].every((name) => name === 'control' || name === 'meta'))
-                    continue
-                  throw error
-                }
+                const state = await loadAffectedState(
+                  tx,
+                  { groupID: change.groupID, incarnation },
+                  atRest,
+                  namespaces,
+                )
                 if (state === null || state.deleted) continue
                 const address = {
                   groupID: change.groupID,

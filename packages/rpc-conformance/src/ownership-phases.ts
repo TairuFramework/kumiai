@@ -1393,7 +1393,7 @@ function testOperationOwnership<TTx extends ConformanceGroupTransaction>(
       }
     })
 
-    test('effect getters are captured before finalise without coordinator authority', async () => {
+    test('effect getters are captured before finalise drains their work-store operations', async () => {
       let supplied!: ConformanceGroupStores<TTx>
       const probes: Array<Promise<unknown>> = []
       let reads = 0
@@ -1425,8 +1425,11 @@ function testOperationOwnership<TTx extends ConformanceGroupTransaction>(
           ),
         )
         expect(reads).toBe(1)
-        expect(await within(Promise.all(probes))).toMatchObject([refused, refused])
-        expect(await within(groups.ports(key).cursor.load('getter-write'))).toBeNull()
+        expect(await within(Promise.all(probes))).toMatchObject([
+          { ok: true, value: { groupID } },
+          { ok: true, value: undefined },
+        ])
+        expect(await within(groups.ports(key).cursor.load('getter-write'))).toBe('9')
       } finally {
         await within(fixture.close())
       }

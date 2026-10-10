@@ -75,18 +75,18 @@ export function memoryRecordTable<TValue>(params: {
     return rows
   }
   const table = {
-    load(recordID: string): Promise<TValue | null> {
-      return memoryRequired(tx, async () => {
-        const location = address(recordID)
-        const id = physicalRecordKey(location)
-        const bytes = map().get(id)
-        if (bytes === undefined) return null
+    async load(recordID: string): Promise<TValue | null> {
+      const location = address(recordID)
+      const id = physicalRecordKey(location)
+      const bytes = map().get(id)
+      if (bytes === undefined) return null
+      const value = await memoryRequired(tx, async () => {
         if (!(bytes instanceof Uint8Array))
           throw new GroupStateConflictError('Unreadable sealed row')
-        const value = await memoryOpen(tx, atRest, location, bytes)
-        map().has(id)
-        return value as TValue
+        return (await memoryOpen(tx, atRest, location, bytes)) as TValue
       })
+      map().has(id)
+      return value
     },
     async save(recordID: string, value: TValue): Promise<void> {
       const location = address(recordID)

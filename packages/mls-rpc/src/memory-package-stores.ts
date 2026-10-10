@@ -58,16 +58,15 @@ export function memoryDeviceTable<TValue>(params: DeviceTableParams) {
     return rows
   }
   return {
-    load(recordID: string): Promise<TValue | null> {
-      return memoryRequired(tx, async () => {
-        const location = address(recordID)
-        const key = physicalRecordKey(location)
-        const bytes = map().get(key)
-        if (bytes === undefined) return null
+    async load(recordID: string): Promise<TValue | null> {
+      const location = address(recordID)
+      const key = physicalRecordKey(location)
+      const bytes = map().get(key)
+      if (bytes === undefined) return null
+      const value = await memoryRequired(tx, async () => {
         if (!(bytes instanceof Uint8Array))
           throw new GroupStateConflictError('Unreadable device row')
         const stored = await memoryOpen(tx, atRest, location, bytes)
-        map().has(key)
         if (
           stored === null ||
           typeof stored !== 'object' ||
@@ -82,6 +81,8 @@ export function memoryDeviceTable<TValue>(params: DeviceTableParams) {
           throw new GroupStateConflictError('Stored device owner or provider mismatch')
         return stored.value as TValue
       })
+      map().has(key)
+      return value
     },
     async save(recordID: string, value: TValue): Promise<void> {
       assertMemoryWrite(tx, namespace === 'device' ? 'domain' : 'side')
