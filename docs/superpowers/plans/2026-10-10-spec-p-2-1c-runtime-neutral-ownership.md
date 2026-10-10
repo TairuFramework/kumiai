@@ -62,7 +62,7 @@ Plans 2.1 and 2.1b Global Constraints apply unchanged, except where r18 replaces
 - **Port type.** `type OwnershipContextPort = { run<T>(token: object, fn: () => T): T; get(): object | undefined }`.
   - `createMemoryDevicePersistence`, `createMemoryGroupPersistence` and `createMemoryGroupCoordinator` all accept `ownershipContext?: OwnershipContextPort`.
   - Core passes an opaque, frozen token that has no methods.
-  - The owner queues are bound to a `MemoryDatabase` on first use. A later factory call on the same database that supplies a different port object throws `TypeError('ownershipContext differs from the port bound to this database')`. Omitting the port, or passing the same object, reuses the binding.
+  - The owner queues are bound to a `MemoryDatabase` on first use. Every factory calls `owners.bindOwnershipContext(port)` on the queue it receives or reuses. A different port object from the one already bound throws `TypeError('ownershipContext differs from the port bound to this database')`. Omitting the port, or passing the same object, reuses the binding.
 - **No nesting.** Spec: "Operations never nest". No store method, coordinator helper or read callback calls a public store method or another locked operation while it holds a reservation.
 - **Registration.** Spec: "An allowed store call registers its operation synchronously before returning its promise." A phase change freezes and drains only the outgoing phase's operations.
 - **Fatal failures.** A failure is fatal when one of the following happens, and stays rollback-only even if it is abandoned or caught:
@@ -183,7 +183,8 @@ Plans 2.1 and 2.1b Global Constraints apply unchanged, except where r18 replaces
 **Interfaces:**
 - **Produces:**
   - `export type OwnershipContextPort` (re-exported from `persistence-types.ts`)
-  - `createOwnerQueues(options?: { ownershipContext?: OwnershipContextPort }): OwnerQueues`
+  - `createOwnerQueues(options?: { ownershipContext?: OwnershipContextPort }): OwnerQueues`, which calls `bindOwnershipContext`.
+  - `OwnerQueues.bindOwnershipContext(port: OwnershipContextPort | undefined): void`: `undefined` is a no-op; the first port binds; the same object again is a no-op; a different object throws the `TypeError` from Global Constraints. Binding after an entry exists is allowed only while no entry is active.
 - **`OwnerAttempt`:**
   - Type: `{ readonly id: number; readonly revoked: boolean; readonly signal: AbortSignal; revoke(reason: unknown): void; assertLive(): void }`.
   - `revoke` aborts `signal` with `reason` and rejects every pending operation of that attempt with `reason`. The reason is either `PersistencePhaseError` or, under fail-stop, the factory's `GroupStateConflictError`.
@@ -216,6 +217,8 @@ Plans 2.1 and 2.1b Global Constraints apply unchanged, except where r18 replaces
   - **Reentrancy:** the sync marker detects it from every phase and hook without a port; the port detects it after an `await`; unrelated callers stay unbound; the port binding is restored after a throw.
   - **Release:** a released entry is never `current`; an `anySignal` listener count returns to zero after success, rejection and cancellation.
   - **Helpers:** unit cases for `deferred`.
+  - **Port binding:** `bindOwnershipContext` no-op, first bind, same-object rebind, different-object `TypeError`.
+  - **Existing tests:** migrate every existing assertion that expects async `current()` without a port (e.g. `owner-queue.test.ts:210`) to port mode; the no-port variant asserts only the synchronous marker.
 - [ ] **Step 2: Run red, implement, run green.** Use `rtk proxy pnpm --filter @kumiai/mls-rpc run test:unit test/owner-queue.test.ts` and `rtk proxy pnpm turbo run build:js build:types test:types`. Mutation-check registration, the per-phase freeze, coordinator admission, the fatal-failure record, revocation, the sync marker and listener disposal.
 - [ ] **Step 3: Commit** `feat(mls-rpc): add runtime-neutral operation lock and coordinator route to the owner queue`.
 
@@ -236,7 +239,8 @@ Plans 2.1 and 2.1b Global Constraints apply unchanged, except where r18 replaces
 **Interfaces:**
 - **Consumes:** the Task 2 queue and the Task 1 factory parameters.
 - **Produces the provider switch.** Both providers stop calling `sequence` in this commit.
-- **Port threading.** The three factories thread `ownershipContext` into the database-bound `createOwnerQueues`, following the binding rule in Global Constraints.
+- **Port threading.** The three factories call `owners.bindOwnershipContext(ownershipContext)` on their supplied or reused queue, following the binding rule in Global Constraints. Shared queue identity is kept.
+- **Test migration.** Every non-nested `sequence` call in tests (`owner-queue.test.ts`, `final-review.test.ts` and others) moves to `operation` or `coordinate`. The final-review nesting cases are retargeted to the flattened providers. After this task only Task 4's nested-`sequence` cases reference `sequence`.
 - **Transaction binding.**
   - Group and device stores bind to their entry through a private `WeakMap` keyed by the guarded row maps; no `AsyncLocalStorage` in provider files.
   - The provider transaction's disposal listens to `attempt.signal`.
@@ -252,7 +256,7 @@ Plans 2.1 and 2.1b Global Constraints apply unchanged, except where r18 replaces
 
 - [ ] **Step 1: Write the red cases:**
   - the Review Focus cases;
-  - the final-review probes: an effect getter writing `restorePending` during finalise is refused; a codec reading constructed lifetime stores during account is refused; two host sibling `control.apply` both persist;
+  - the final-review probes: effect getters run before `finalise` and are never reread in `finalise`/`account` (counted calls); a deliberate host accessor writing `restorePending` during finalise is refused; a codec reading constructed lifetime stores during account is refused; two host sibling `control.apply` both persist;
   - the factory binding-rule `TypeError`;
   - suspended-operation rejection on work/effect failure for both group and device transitions;
   - reopen with the port after fail-stop.
@@ -273,7 +277,7 @@ Plans 2.1 and 2.1b Global Constraints apply unchanged, except where r18 replaces
 **Files:**
 - Modify:
   - `packages/mls-rpc/src/owner-queue.ts`: remove `sequence`, `sequencedContext`, the nested-inline logic, and every `node:`/ALS use.
-  - `packages/mls-rpc/test/owner-queue.test.ts`: retarget the nested-`sequence` cases to "nesting is not offered".
+  - `packages/mls-rpc/test/owner-queue.test.ts`: retarget the remaining nested-`sequence` cases to "nesting is not offered". `grep -rn '\.sequence(' packages/mls-rpc` returns nothing afterwards.
 
 **Interfaces:**
 - **Produces:** `OwnerEntry` without `sequence`; no ALS anywhere in `packages/mls-rpc/src`.
