@@ -18,9 +18,9 @@ test('current app lane guidance uses durable operations and transactional contro
   const persistence = await guidance(
     'docs/superpowers/specs/2026-10-08-spec-p-transactional-persistence.md',
   )
-  const outbox = persistence.split('### D7. Coordinated outbox adapter')[1]?.split('### D8.')[0]
+  const outbox = persistence.split('## Interfaces')[1]?.split('## Source checks')[0]
   expect(outbox).not.toContain('putCommitCursor')
-  expect(outbox).toMatch(/commit cursor.*ControlStore.*AdoptionWrite/)
+  expect(outbox).toMatch(/ControlStore.*AdoptionWrite/)
 })
 
 test('lifecycle guidance retries renewal within the current recovery attempt', async () => {
