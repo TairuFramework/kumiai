@@ -9,6 +9,7 @@ import {
   createUnlockedGroupStateStores,
   sequenceMemoryCoordinator,
   sequenceMemoryOperation,
+  withoutMemoryCoordinator,
 } from './memory-group-state.js'
 import {
   type ControlRecord,
@@ -604,7 +605,9 @@ export function createMemoryGroupCoordinator(params: {
                     // Metadata versioning does not reopen recovery trust or run candidate admission.
                     tx.rows.state?.set(
                       physicalRecordKey(address),
-                      await sealRecord(atRest, address, { ...state, version: state.version + 1 }),
+                      await withoutMemoryCoordinator(() =>
+                        sealRecord(atRest, address, { ...state, version: state.version + 1 }),
+                      ),
                     )
                     await raw.stateMetadata(incarnation).save({
                       groupID: change.groupID,
@@ -693,7 +696,9 @@ export function createMemoryGroupCoordinator(params: {
                 }
                 tx.rows.state?.set(
                   physicalRecordKey(address),
-                  await sealRecord(atRest, address, { ...state, version: state.version + 1 }),
+                  await withoutMemoryCoordinator(() =>
+                    sealRecord(atRest, address, { ...state, version: state.version + 1 }),
+                  ),
                 )
                 await raw
                   .stateMetadata(incarnation)

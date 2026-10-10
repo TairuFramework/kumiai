@@ -47,6 +47,10 @@ const transactionEntries = new WeakMap<
 const coordinatorContext = new AsyncLocalStorage<OwnerEntry>()
 const bootstrapTrusts = new WeakMap<MemoryTransaction['rows'], Set<string>>()
 
+export function withoutMemoryCoordinator<TValue>(callback: () => TValue): TValue {
+  return coordinatorContext.exit(callback)
+}
+
 export function registerMemoryTransactionRows(
   rows: MemoryTransaction['rows'],
   maps: MemoryTransaction['rows'],
@@ -181,7 +185,7 @@ export function createUnlockedGroupStateStores(params: {
       if (tx.rows[namespace] === undefined)
         throw new GroupStateConflictError('Missing transaction namespace')
       if (value.groupID !== groupID) throw new GroupStateConflictError('Row group mismatch')
-      return await sealRecord(atRest, address, value)
+      return await withoutMemoryCoordinator(() => sealRecord(atRest, address, value))
     }
     function store(bytes: Uint8Array): void {
       const rows = tx.rows[namespace]
@@ -194,7 +198,9 @@ export function createUnlockedGroupStateStores(params: {
         if (bytes === undefined) return null
         if (!(bytes instanceof Uint8Array))
           throw new GroupStateConflictError('Unreadable sealed row')
-        const value = (await openRecord(atRest, address, bytes)) as TValue
+        const value = (await withoutMemoryCoordinator(() =>
+          openRecord(atRest, address, bytes),
+        )) as TValue
         // Touch the bound view again after host code yields.
         tx.rows[namespace]?.has(key)
         if (value === null || typeof value !== 'object' || value.groupID !== groupID) {

@@ -55,8 +55,9 @@ export type OwnerQueues = {
 }
 
 const ownershipContext = new AsyncLocalStorage<OwnerEntry>()
-// Marks code already running inside an entry's sequencer, which must not wait on that sequencer.
-const sequencedContext = new AsyncLocalStorage<OwnerEntry>()
+type SequencedOperation = { entry: OwnerEntry; tail: Promise<void>; active: boolean }
+// Each operation owns a child queue, so composition never waits on its own ancestor.
+const sequencedContext = new AsyncLocalStorage<SequencedOperation>()
 const failureSignals = new WeakMap<OwnerEntry, AbortSignal>()
 
 export function ownerEntryFailureSignal(entry: OwnerEntry): AbortSignal | undefined {
@@ -139,7 +140,8 @@ export function createOwnerQueues(): OwnerQueues {
       return failure
     },
     current() {
-      return ownershipContext.getStore()
+      const entry = ownershipContext.getStore()
+      return entry?.phase === 'released' ? undefined : entry
     },
     started(key) {
       return started.has(key)
@@ -172,7 +174,7 @@ export function createOwnerQueues(): OwnerQueues {
     },
     async run(kind, requestedScopes, body, options) {
       assertRunning()
-      if (ownershipContext.getStore() !== undefined) {
+      if (queues.current() !== undefined) {
         throw new ReentrantOwnershipError('Root persistence call inside an owner entry')
       }
       // Keep cancellation per entry so the factory cannot retain completed callers through a promise.
@@ -233,7 +235,8 @@ export function createOwnerQueues(): OwnerQueues {
         },
         async enter(next) {
           assertLive()
-          if (sequencedContext.getStore() === entry) {
+          const context = sequencedContext.getStore()
+          if (context?.entry === entry && context.active) {
             throw new PersistencePhaseError('Cannot change phase inside a sequenced operation')
           }
           if (closing !== null) throw new PersistencePhaseError('Phase is already changing')
@@ -256,23 +259,42 @@ export function createOwnerQueues(): OwnerQueues {
           await Promise.race([closing, failed])
         },
         sequence(operation) {
+          const context = sequencedContext.getStore()
+          const parent = context?.entry === entry && context.active ? context : undefined
           try {
             assertLive()
-            if (closing !== null || !['work', 'finalise', 'effects', 'account'].includes(phase)) {
+            if (
+              (closing !== null && parent === undefined) ||
+              !['work', 'finalise', 'effects', 'account'].includes(phase)
+            ) {
               throw new PersistencePhaseError('Store sequencing expired')
             }
           } catch (error) {
             return Promise.reject(error)
           }
-          if (sequencedContext.getStore() === entry) return Promise.race([operation(), failed])
-          const result = tail.then(() => {
+          const result = (parent?.tail ?? tail).then(async () => {
             assertLive()
-            return ownershipContext.run(entry, () => sequencedContext.run(entry, operation))
+            const current: SequencedOperation = { entry, tail: Promise.resolve(), active: true }
+            try {
+              return await ownershipContext.run(entry, () =>
+                sequencedContext.run(current, operation),
+              )
+            } finally {
+              // Abandoned children still own the phase, including descendants started while draining.
+              for (;;) {
+                const children = current.tail
+                await children
+                if (children === current.tail) break
+              }
+              current.active = false
+            }
           })
-          tail = result.then(
+          const drained = result.then(
             () => undefined,
             () => undefined,
           )
+          if (parent === undefined) tail = drained
+          else parent.tail = drained
           return Promise.race([result, failed])
         },
         assertWrite(target) {

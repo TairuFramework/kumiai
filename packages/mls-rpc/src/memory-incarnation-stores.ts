@@ -1,6 +1,10 @@
 import { applyChanges, type ControlSnapshot } from '@kumiai/rpc'
 
-import { createUnlockedGroupStateStores, sequenceMemoryOperation } from './memory-group-state.js'
+import {
+  createUnlockedGroupStateStores,
+  sequenceMemoryOperation,
+  withoutMemoryCoordinator,
+} from './memory-group-state.js'
 import {
   decodeStoredValue,
   encodeStoredValue,
@@ -77,13 +81,13 @@ export function memoryRecordTable<TValue>(params: {
       const bytes = map().get(id)
       if (bytes === undefined) return null
       if (!(bytes instanceof Uint8Array)) throw new GroupStateConflictError('Unreadable sealed row')
-      const value = await openRecord(atRest, location, bytes)
+      const value = await withoutMemoryCoordinator(() => openRecord(atRest, location, bytes))
       map().has(id)
       return value as TValue
     },
     async save(recordID: string, value: TValue): Promise<void> {
       const location = address(recordID)
-      const bytes = await sealRecord(atRest, location, value)
+      const bytes = await withoutMemoryCoordinator(() => sealRecord(atRest, location, value))
       map().set(physicalRecordKey(location), bytes)
     },
     remove(recordID: string): boolean {

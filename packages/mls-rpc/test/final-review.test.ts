@@ -1,13 +1,21 @@
+import type { Outcome } from '@kumiai/rpc'
 import { assertPartialLossSpentRefused } from '@kumiai/rpc-conformance'
 import { describe, expect, test } from 'vitest'
 
+import { createMemoryDevicePersistence } from '../src/memory-device-persistence.js'
 import { memoryFaults } from '../src/memory-faults.js'
 import { createMemoryGroupPersistence } from '../src/memory-group-persistence.js'
 import { createGroupStateStores } from '../src/memory-group-state.js'
 import { createMemoryTransaction } from '../src/memory-transaction.js'
 import { createOwnerQueues, type OwnerQueues } from '../src/owner-queue.js'
 import { physicalRecordKey } from '../src/persistence-codec.js'
-import type { GroupStores, MemoryDatabase, MemoryTransaction } from '../src/persistence-types.js'
+import type {
+  DeviceStores,
+  GroupLifetime,
+  GroupStores,
+  MemoryDatabase,
+  MemoryTransaction,
+} from '../src/persistence-types.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
 import { createStorageFixture } from './fixtures/storage-persistence.js'
 import { installSeed, makeStorageSeed, nextChange } from './fixtures/storage-seed.js'
@@ -40,6 +48,224 @@ for (const mode of ['real-mls', 'double'] as const) {
       await installSeed(groups, seed, 'seed')
       return { db, groups, seed }
     }
+
+    test('nested sibling control writes both persist', async () => {
+      const { db, groups } = await setup()
+      const mutationID = 'nested-control'
+      const outcomes: Array<Outcome> = [
+        { id: 'operation-1', opID: 'operation-1', at: 1000, kind: 'unknown' },
+        { id: 'operation-2', opID: 'operation-2', at: 1001, kind: 'unknown' },
+      ]
+      await groups.transition(await nextChange(groups, groupID, mutationID), async (stores) => {
+        const entry = ownerQueues(db).current()
+        if (entry === undefined) throw new Error('Missing owner entry')
+        await entry.sequence(async () => {
+          const control = stores.incarnation(1).control
+          await Promise.all(
+            outcomes.map((outcome) => control.apply({ putOutcomes: [outcome] }, mutationID)),
+          )
+        })
+      })
+      expect((await groups.ports(key).control.load()).outcomes).toEqual(outcomes)
+    })
+
+    test('a suspended nested child holds outcome, hooks, caller and queued reads', async () => {
+      const { db, groups } = await setup()
+      const owners = ownerQueues(db)
+      const reached = Promise.withResolvers<void>()
+      const resume = Promise.withResolvers<void>()
+      let sealingHeld = false
+      const outcome: Outcome = { id: 'operation-1', opID: 'operation-1', at: 1000, kind: 'unknown' }
+      const guarded = createMemoryGroupPersistence({
+        owners,
+        db,
+        providerID: 'memory',
+        atRest: {
+          ...atRest,
+          async seal(bytes, aad) {
+            if (!sealingHeld && JSON.parse(new TextDecoder().decode(aad))[3] === 'control') {
+              sealingHeld = true
+              reached.resolve()
+              await resume.promise
+            }
+            return atRest.seal(bytes, aad)
+          },
+        },
+      })
+      const order: Array<string> = []
+      let child!: Promise<unknown>
+      let entry!: NonNullable<ReturnType<OwnerQueues['current']>>
+      const mutationID = 'nested-suspended'
+      const change = await nextChange(groups, groupID, mutationID)
+      const transition = guarded
+        .transition(change, async (stores) => {
+          const current = owners.current()
+          if (current === undefined) throw new Error('Missing owner entry')
+          entry = current
+          stores.tx.onCommit(() => {
+            order.push('hook')
+          })
+          await entry.sequence(async () => {
+            child = stores
+              .incarnation(1)
+              .control.apply({ putOutcomes: [outcome] }, mutationID)
+              .then(
+                () => {
+                  order.push('child')
+                },
+                (error: unknown) => error,
+              )
+            await reached.promise
+          })
+        })
+        .then(() => {
+          order.push('caller')
+        })
+      await reached.promise
+      const reading = groups
+        .ports(key)
+        .control.load()
+        .then((value) => {
+          order.push('read')
+          return value
+        })
+      let heldPhase: string
+      let heldOrder: Array<string>
+      try {
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        heldPhase = entry.phase
+        heldOrder = [...order]
+      } finally {
+        resume.resolve()
+        await Promise.all([transition, reading, child])
+      }
+      expect(heldPhase).toBe('work')
+      expect(heldOrder).toEqual([])
+      expect(await child).toBeUndefined()
+      expect((await reading).outcomes).toEqual([outcome])
+      expect(order).toEqual(['child', 'hook', 'caller', 'read'])
+    })
+
+    test.each(
+      (['seal', 'open'] as const).flatMap((callback) =>
+        (['constructed lifetime', 'supplied cleanup'] as const).map((access) => ({
+          callback,
+          access,
+        })),
+      ),
+    )(
+      'account codec $callback refuses host writes through $access',
+      async ({ callback, access }) => {
+        const { db, groups } = await setup()
+        const owners = ownerQueues(db)
+        const ownerDID = 'did:example:owner'
+        let supplied!: DeviceStores<MemoryTransaction>
+        let attempted = false
+        const results: Array<unknown> = []
+        async function hostWrite(aad: Uint8Array) {
+          const namespace = JSON.parse(new TextDecoder().decode(aad))[3]
+          if (
+            attempted ||
+            owners.current()?.phase !== 'account' ||
+            namespace !== (callback === 'seal' ? 'device' : 'lifetime')
+          )
+            return
+          attempted = true
+          await Promise.resolve()
+          const attempt = async () => {
+            if (access === 'constructed lifetime') {
+              const rows = createGroupStateStores({ tx: { ...supplied.tx }, groupID, atRest })
+              const life = await rows.lifetime.load()
+              if (life === null) throw new Error('Missing lifetime')
+              await rows.lifetime.save({ ...life, restorePending: true })
+            } else {
+              await supplied.cleanup.put({
+                id: 'cleanup-1',
+                ownerDID,
+                sourceID: 'source-1',
+                ref: 'package-ref-1',
+                kind: 'ordinary',
+                groupID,
+                notAfter: 10000,
+              })
+            }
+          }
+          results.push(await attempt().catch((error: unknown) => error))
+        }
+        const device = createMemoryDevicePersistence({
+          db,
+          providerID: 'memory',
+          ownerDID,
+          atRest: {
+            async seal(bytes, aad) {
+              if (callback === 'seal') await hostWrite(aad)
+              return atRest.seal(bytes, aad)
+            },
+            async open(bytes, aad) {
+              if (callback === 'open') await hostWrite(aad)
+              return atRest.open(bytes, aad)
+            },
+          },
+        })
+        const mutationID = `codec-${callback}-${access}`
+        await device.transition(
+          {
+            mutationID,
+            expectedRevision: 0,
+            group: await nextChange(groups, groupID, mutationID),
+          },
+          async (stores) => {
+            supplied = stores
+          },
+        )
+        expect(attempted).toBe(true)
+        expect(results).toEqual([expect.objectContaining({ name: 'PersistencePhaseError' })])
+        expect((await groups.load(groupID))?.restorePending).toBe(false)
+        expect(
+          await device.transition(
+            {
+              mutationID: 'inspect-cleanup',
+              expectedRevision: 1,
+              group: null,
+            },
+            async (stores) => stores.cleanup.list(),
+          ),
+        ).toEqual([])
+      },
+    )
+
+    test('a hook scheduled root read succeeds after release while transaction capabilities stay expired', async () => {
+      const { db, groups } = await setup()
+      const owners = ownerQueues(db)
+      const background = Promise.withResolvers<GroupLifetime | null>()
+      let supplied!: GroupStores<MemoryTransaction>
+      let context: ReturnType<OwnerQueues['current']>
+      let captured!: NonNullable<ReturnType<OwnerQueues['current']>>
+      const read = background.promise.catch((error: unknown) => error)
+      const change = await nextChange(groups, groupID, 'hook-background-read')
+      await groups.transition(change, async (stores) => {
+        supplied = stores
+        const current = owners.current()
+        if (current === undefined) throw new Error('Missing owner entry')
+        captured = current
+        stores.tx.onCommit(() => {
+          setImmediate(() => {
+            context = owners.current()
+            void groups.load(groupID).then(background.resolve, background.reject)
+          })
+        })
+      })
+      expect(captured.phase).toBe('released')
+      expect(await read).toMatchObject({ groupID, mutationID: 'hook-background-read', revision: 2 })
+      expect(context).toBeUndefined()
+      await expect(supplied.lifetime.load()).rejects.toMatchObject({
+        name: 'PersistencePhaseError',
+      })
+      await expect(captured.sequence(async () => undefined)).rejects.toMatchObject({
+        name: 'PersistencePhaseError',
+      })
+      expect(() => supplied.tx.rows.lifetime).toThrow('expired')
+    })
 
     test.each(['state', 'trust', 'lifetime'] as const)(
       'F2 refuses hook %s writes through supplied and independently constructed stores',

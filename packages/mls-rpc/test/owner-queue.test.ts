@@ -462,6 +462,61 @@ describe('owner queues', { timeout: 2000 }, () => {
     await expect(queued).resolves.toBe('queued-read')
   })
 
+  test.each([
+    ['work', 'finalise'],
+    ['finalise', 'effects'],
+    ['effects', 'account'],
+    ['account', 'outcome'],
+  ] as const)('started nested descendants drain before %s enters %s', async (phase, next) => {
+    const queues = createOwnerQueues()
+    const reached = deferred<void>()
+    const resume = deferred<void>()
+    const order: Array<string> = []
+    let captured!: OwnerEntry
+    let child!: Promise<void>
+    const owner = queues.run('transition', group, async (entry) => {
+      captured = entry
+      await advance(entry, phase)
+      const parent = entry.sequence(async () => {
+        child = entry.sequence(async () => {
+          reached.resolve()
+          await resume.promise
+          order.push(`child:${entry.phase}`)
+        })
+        await reached.promise
+      })
+      await reached.promise
+      const boundary = entry.enter(next).then(() => {
+        order.push(`entered:${entry.phase}`)
+      })
+      await Promise.all([parent, boundary])
+      if (next !== 'outcome') await entry.enter('outcome')
+      entry.settle('committed')
+    })
+    await reached.promise
+    await flush()
+    const heldPhase = captured.phase
+    const heldOrder = [...order]
+    resume.resolve()
+    await Promise.all([owner, child])
+    expect(heldPhase).toBe(phase)
+    expect(heldOrder).toEqual([])
+    expect(order).toEqual([`child:${phase}`, `entered:${next}`])
+  })
+
+  test('a phase drain permits an already reserved operation to compose nested work', async () => {
+    const queues = createOwnerQueues()
+    await queues.run('transition', group, async (entry) => {
+      await advance(entry, 'work')
+      const parent = entry.sequence(() => entry.sequence(async () => 7))
+      const boundary = entry.enter('finalise')
+      await expect(parent).resolves.toBe(7)
+      await boundary
+      await entry.enter('outcome')
+      entry.settle('committed')
+    })
+  })
+
   test('a nested sequenced operation runs inline within its parent', async () => {
     const queues = createOwnerQueues()
     const order: Array<string> = []

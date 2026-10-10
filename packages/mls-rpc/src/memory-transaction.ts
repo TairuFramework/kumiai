@@ -436,7 +436,6 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
       }
       let backendOutcome: 'committed' | 'rolled-back' | undefined
       let outcome: 'committed' | 'rolled-back' | undefined
-      const settled = deferred()
       const settlement: TransactionHookSettlement = {
         settle(next) {
           if (backendOutcome !== next) throw new Error('Backend ownership conflict')
@@ -456,7 +455,6 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
           })
           commits.length = 0
           rollbacks.length = 0
-          settled.resolve()
         },
       }
       const merge = () => {

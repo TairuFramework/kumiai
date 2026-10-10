@@ -5,7 +5,11 @@ import type {
   LastResortStore,
 } from '@kumiai/mls-hub'
 
-import { assertMemoryWrite, sequenceMemoryOperation } from './memory-group-state.js'
+import {
+  assertMemoryWrite,
+  sequenceMemoryOperation,
+  withoutMemoryCoordinator,
+} from './memory-group-state.js'
 import { copyStoredValue } from './memory-incarnation-stores.js'
 import { openRecord, physicalRecordKey, sealRecord } from './persistence-codec.js'
 import { GroupStateConflictError } from './persistence-errors.js'
@@ -58,7 +62,7 @@ export function memoryDeviceTable<TValue>(params: DeviceTableParams) {
       const bytes = map().get(key)
       if (bytes === undefined) return null
       if (!(bytes instanceof Uint8Array)) throw new GroupStateConflictError('Unreadable device row')
-      const stored = await openRecord(atRest, location, bytes)
+      const stored = await withoutMemoryCoordinator(() => openRecord(atRest, location, bytes))
       map().has(key)
       if (
         stored === null ||
@@ -80,7 +84,9 @@ export function memoryDeviceTable<TValue>(params: DeviceTableParams) {
       const location = address(recordID)
       rows.set(
         physicalRecordKey(location),
-        await sealRecord(atRest, location, { providerID, ownerDID, value }),
+        await withoutMemoryCoordinator(() =>
+          sealRecord(atRest, location, { providerID, ownerDID, value }),
+        ),
       )
     },
     remove(recordID: string): void {
