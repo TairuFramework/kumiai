@@ -1,21 +1,33 @@
-import { confirmationTag, encodeClientState } from '@kumiai/mls'
+import { confirmationTag, decodeClientState, encodeClientState } from '@kumiai/mls'
 import type { AdoptionWrite, AdoptionWriteFactory } from '@kumiai/rpc'
+import { defaultProposalTypes } from 'ts-mls'
 import { expect, expectTypeOf, test } from 'vitest'
 
 import { simpleHandleAccess } from '../src/access.js'
 import { createGroupMLS } from '../src/mls.js'
 import type { RecoveryCandidate } from '../src/recovery.js'
-import { createRealGroup } from './fixtures/real-group.js'
+import {
+  decodeRecoveryCandidate,
+  encodeRecoveryCandidate,
+  type RecoverySnapshot,
+} from '../src/recovery-codec.js'
+import { buildRealCommit, createRealGroup } from './fixtures/real-group.js'
 import {
   createTransactionalAccess,
   createTransactionalStore,
 } from './fixtures/transactional-access.js'
 
-async function setup() {
-  const group = await createRealGroup(2, 'candidate-codec')
-  const member = group.members[0]
-  const responder = group.members[1]
+async function setup(differentTree = false) {
+  const group = await createRealGroup(differentTree ? 3 : 2, 'candidate-codec')
+  const member = group.members[differentTree ? 1 : 0]
+  const responder = group.members[differentTree ? 2 : 1]
   if (member == null || responder == null) throw new Error('Missing member')
+  if (differentTree) {
+    // A vacant earlier leaf makes recovery move the requester to another position.
+    const commit = await buildRealCommit(group, { removes: 0 })
+    await member.handle.processMessage(commit)
+    await responder.handle.processMessage(commit)
+  }
   const writes: Array<AdoptionWrite | undefined> = []
   let adoptions = 0
   const access = simpleHandleAccess({
@@ -61,6 +73,68 @@ async function setup() {
     adoptions: () => adoptions,
   }
 }
+
+test.each(['empty', 'mixed'] as const)(
+  'round trips a complete sourceState with a different tree and zero one absent senders (%s)',
+  async (proposals) => {
+    const s = await setup(true)
+    const candidate = s.pending as RecoveryCandidate
+    const key = await candidate.confirmationKey('position-1', 'digest-1')
+    // Commit leaves carry signing-only fields that the MLS wire codec omits.
+    const sourceState = decodeClientState(
+      encodeClientState({ ...candidate.group.state, ratchetTree: candidate.sourceTree }),
+    )
+    if (sourceState == null) throw new Error('Invalid source state fixture')
+    const proposal = { proposalType: defaultProposalTypes.remove, remove: { removed: 0 } }
+    const snapshot: RecoverySnapshot = {
+      state: {
+        ...candidate.group.state,
+        unappliedProposals:
+          proposals === 'empty'
+            ? {}
+            : {
+                'AA==': { proposal, senderLeafIndex: 0 },
+                'AQ==': { proposal, senderLeafIndex: 1 },
+                'Ag==': { proposal, senderLeafIndex: undefined },
+              },
+      },
+      sourceTree: sourceState.ratchetTree,
+      groupInfo: candidate.groupInfo,
+      knownRegistry: candidate.knownRegistry,
+      replyLedger: candidate.replyLedger,
+      signer: candidate.signer,
+      commit: candidate.commit,
+      epoch: candidate.epoch,
+      requestID: 'candidate-request',
+      boundCommit: {
+        position: 'position-1',
+        commitDigest: 'digest-1',
+        tag: confirmationTag(key, 'candidate-request'),
+      },
+    }
+    expect(snapshot.sourceTree).not.toEqual(snapshot.state.ratchetTree)
+    const bytes = encodeRecoveryCandidate(snapshot, s.requestKey)
+    expect(bytes[0]).toBe(2)
+    const after = decodeRecoveryCandidate(bytes, s.requestKey)
+    expect(encodeClientState(after.state)).toEqual(encodeClientState(snapshot.state))
+    expect(after.sourceTree).toEqual(snapshot.sourceTree)
+    expect(after.sourceTree).not.toEqual(snapshot.state.ratchetTree)
+    expect(after.boundCommit).toEqual(snapshot.boundCommit)
+    expect(after.knownRegistry).toEqual(snapshot.knownRegistry)
+    expect(after.replyLedger).toEqual(snapshot.replyLedger)
+    expect(after.groupInfo).toEqual(snapshot.groupInfo)
+    expect(after.commit).toEqual(snapshot.commit)
+    expect(after.signer).toBe(snapshot.signer)
+    expect(after.requestID).toBe(snapshot.requestID)
+    expect(Object.values(after.state.unappliedProposals).map((p) => p.senderLeafIndex)).toEqual(
+      proposals === 'empty' ? [] : [0, 1, undefined],
+    )
+    expect(() =>
+      decodeRecoveryCandidate(new Uint8Array([1, ...bytes.subarray(1)]), s.requestKey),
+    ).toThrow('Unsupported recovery candidate version 1')
+    expect(() => decodeRecoveryCandidate(bytes, new Uint8Array(32))).toThrow()
+  },
+)
 
 test('candidate restores exact state and source tree with its bound verdict judgement', async () => {
   const s = await setup()

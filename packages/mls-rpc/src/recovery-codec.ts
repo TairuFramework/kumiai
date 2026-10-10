@@ -7,7 +7,7 @@ import {
   encodeDeviceRegistry,
 } from '@kumiai/mls'
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js'
-import { base64ToBytes, bytesToBase64, encode, groupStateEncoder } from 'ts-mls'
+import { base64ToBytes, bytesToBase64 } from 'ts-mls'
 
 import type { BoundRecoveryCommit } from './recovery.js'
 
@@ -24,18 +24,15 @@ export type RecoverySnapshot = {
   boundCommit?: BoundRecoveryCommit
 }
 
-const AAD = new TextEncoder().encode('kumiai/recovery-candidate/v1')
-const VERSION = 1
+const AAD = new TextEncoder().encode('kumiai/recovery-candidate/v2')
+const VERSION = 2
 const NONCE_BYTES = 24
 
 export function encodeRecoveryCandidate(
   snapshot: RecoverySnapshot,
   requestKey: Uint8Array,
 ): Uint8Array {
-  // ts-mls does not export its tree codec. Its public-state prefix uses that exact codec.
-  const privateState = encode(groupStateEncoder, snapshot.state)
   const sourceState = encodeClientState({ ...snapshot.state, ratchetTree: snapshot.sourceTree })
-  const sourceTree = sourceState.subarray(0, sourceState.length - privateState.length)
   const body = new TextEncoder().encode(
     JSON.stringify({
       epoch: snapshot.epoch,
@@ -44,7 +41,7 @@ export function encodeRecoveryCandidate(
       signer: snapshot.signer,
       boundCommit: snapshot.boundCommit,
       state: bytesToBase64(encodeClientState(snapshot.state)),
-      sourceTree: bytesToBase64(sourceTree),
+      sourceState: bytesToBase64(sourceState),
       groupInfo: bytesToBase64(snapshot.groupInfo),
       knownRegistry: bytesToBase64(encodeDeviceRegistry(snapshot.knownRegistry)),
       commit: bytesToBase64(snapshot.commit),
@@ -68,7 +65,7 @@ export function decodeRecoveryCandidate(
   const body = xchacha20poly1305(requestKey, bytes.subarray(1, 1 + NONCE_BYTES), AAD).decrypt(
     bytes.subarray(1 + NONCE_BYTES),
   )
-  const value: unknown = JSON.parse(new TextDecoder().decode(body))
+  const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body))
   if (
     !isObject(value) ||
     !Number.isSafeInteger(value.epoch) ||
@@ -84,12 +81,7 @@ export function decodeRecoveryCandidate(
   const state = decodeClientState(readBytes(value.state))
   if (state == null || Number(state.groupContext.epoch) !== value.epoch)
     throw new Error('Invalid recovery state')
-  const treeBytes = readBytes(value.sourceTree)
-  const privateState = encode(groupStateEncoder, state)
-  const sourceState = new Uint8Array(treeBytes.length + privateState.length)
-  sourceState.set(treeBytes)
-  sourceState.set(privateState, treeBytes.length)
-  const source = decodeClientState(sourceState)
+  const source = decodeClientState(readBytes(value.sourceState))
   if (source == null) throw new Error('Invalid recovery source tree')
   return {
     state,
