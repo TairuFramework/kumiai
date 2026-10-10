@@ -46,6 +46,7 @@
   },
   "devDependencies": {
     "@kumiai/rpc-conformance": "workspace:^",
+    "typescript": "catalog:",
     "vitest": "catalog:"
   },
   "publishConfig": {
