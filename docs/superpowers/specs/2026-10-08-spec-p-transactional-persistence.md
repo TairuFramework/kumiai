@@ -429,9 +429,9 @@ the group waiter and releases the device slot; a group grant racing that cancell
 | queued | none | refuse | refuse | refuse |
 | prepare | none | refuse | refuse | entry-bound reads of own scopes |
 | work | open | allowed | allowed | allowed |
-| finalise | open | coordinator only | coordinator only | allowed |
+| finalise | open | coordinator only | coordinator only | coordinator only |
 | effects | open | refuse with `PersistencePhaseError` | allowed | allowed |
-| account | open | coordinator only | coordinator only | allowed |
+| account | open | coordinator only | coordinator only | coordinator only |
 | outcome | closing | every supplied store and entry capability expires | | |
 | ambiguous/proof | fresh proof tx only | refuse | refuse | refuse |
 | settled | none | refuse | refuse | refuse |
@@ -442,23 +442,30 @@ Refusals apply to every store or transaction access bound to the entry's provide
 after process start runs the completion barrier plus marker check before proceeding. Its reads use an entry-bound read capability that reuses
 the entry's ownership and reads committed rows; root calls from `prepare` are reentrant and refuse.
 
-**Store operations (r18 decision).** Store operations are not mutually excluded and never queue behind one another. Each is two steps:
-an asynchronous *prepare* (seal/open and any other host callback), holding no write authority, then one synchronous *apply* that checks the
-current phase and capability, performs its whole read-modify-write on the provider transaction, and records its accounting. No host code
-and no `await` run inside an apply, so applies never interleave and nested or sibling operations compose without ordering deadlocks. An
-apply that finds its phase or capability expired writes nothing and rejects `PersistencePhaseError`. Each entry tracks its started
-operations; every phase change waits until that set is empty, including operations started while it waits, so phases never overlap and
-every started operation settles before `outcome`. Phase changes are coordinator actions, never reachable from host code. Providers whose
-transaction API is asynchronous (phase 3) keep the same contract by issuing an apply's statements back to back on the entry's connection
-with no host code between them.
+**Store operations (r18 decision).** One per-entry operation lock admits one store operation at a time for its whole read-modify-write,
+including codec I/O and, for async providers, backend statements, so no two operations interleave and none overwrites another's result.
+Operations never nest: a store implementation never invokes a public store method or another locked operation from inside an operation,
+only private unlocked helpers; host callbacks invoked inside an operation (codec seal/open) receive no store access, and any store call they
+make is caller misuse. Lawful use therefore cannot wait on itself through the lock. A phase change closes admission at once, so later
+public store calls refuse with `PersistencePhaseError`; operations admitted before it, including abandoned ones, run to completion before
+the phase changes, so phases never overlap and every admitted operation settles before `outcome`. Phase changes are coordinator actions,
+never reachable from host code. The entry records every fatal operation failure (a seal/open failure, or any failure after an operation
+changed rows) independently of the lock, including when the caller abandoned or caught it; such a transition is rollback-only and draining
+cannot clear that. A refused access that was never admitted and changed nothing does not poison it. Each operation, store and writer is
+bound to its entry, provider transaction and attempt; cancellation, fail-stop or a retry attempt revokes the old bindings, rejects pending
+operation promises, discards late results, and lets backend rollback/completion proceed without waiting for a suspended host callback.
+Ownership releases only after a known completion, or stays retained for unknown-outcome proof.
 
-**Coordinator authority (r18 decision).** `finalise` and `account` write through a private coordinator writer created per entry and never
-passed to host code; possession of that object, not ambient context, is the authority. Its writes are synchronous applies. Every other
-access during `finalise` and `account`, including host accessors, effect getters, codec callbacks and stores constructed from the raw
-transaction, is refused. `finalise` (validation, domain persistence, trust/spent/tombstone, version accounting) completes before `effects`
+**Coordinator authority (r18 decision).** `finalise` and `account` read and write through a private coordinator writer created per entry
+and attempt, with its own private access path to the provider transaction, never passed to host code or the `ownershipContext` port;
+possession of that object, not ambient context, is the authority. Public and copied transaction views never inherit it. Every other access
+during `finalise` and `account`, including host accessors, effect getters, codec callbacks and stores constructed from the raw transaction,
+is refused. Codec calls made by the writer run as host code without that authority. `finalise` (validation, domain persistence, trust/spent/tombstone, version accounting) completes before `effects`
 begins, so a host effect calling supplied stores never waits on finalisation. `account` runs after effects: it validates effect side
-writes against their incarnation and advances the state/metadata versions they require (Interfaces, D6). Host values `finalise` needs
-(for example the effects record) are read in `work` or before, never by invoking host code under coordinator authority.
+writes against their incarnation and advances the state/metadata versions they require (Interfaces, D6). Host-controlled values `finalise`
+and `effects` need (the effects record's callable fields and any getter results) are captured before `finalise`, never read by invoking
+host code under coordinator authority. Capability validation, transaction participation, scope ordering, prepare reads, proof execution
+and joining, Combined participation, hook settlement and fail-stop use explicit entry and transaction bindings, never ambient context.
 
 **Exceptions.** A transactional *effect* (awaited in `effects`) that throws rolls back the whole transition, including its rows. A completion
 *hook* (`onCommit`/`onRollback`, run in `settled`) that throws is contained; remaining hooks still run and the outcome stands.
@@ -487,14 +494,18 @@ which revalidates under the slot. If work was opened meanwhile it releases and d
 `GroupControlUnsettledError`. D7.s runtime owner-creation block is lifted whenever deletion returns without a committed
 tombstone (refusal, cancellation, rollback, unknown resolved as rollback or fail-stop); after a committed tombstone D2 readmission governs.
 
-**Reentrancy (r18 decision).** Core logic is runtime-neutral (Node, browsers, Hermes) and uses no runtime-specific async-context API.
-A root call from inside an active entry (prepare, work, finalise, effects, account, proof, hook) rejects promptly with
-`ReentrantOwnershipError` whenever it is detectable: always during the synchronous part of any entry callback, hook or proof step (the
-queue marks the active entry for that synchronous run), and also after `await` when the host supplies the optional
-`ownershipContext: { run<T>(entry, fn: () => T): T; get(): unknown }` port to the factory (for example a Node `AsyncLocalStorage` adapter or
-a TC39 `AsyncContext.Variable`). Without the port, a root call made after an `await` inside an entry is caller misuse: on the entry's own
-scope it queues behind that entry and never completes. Released entries are never reported as current. Entry-bound capabilities are the
-only legal path inside an entry. Ordinary handlers and network I/O run outside every entry.
+**Reentrancy (r18 decision).** Core logic is runtime-neutral (Node, browsers, Hermes) and uses no runtime-specific async-context API;
+`ownershipContext` only diagnoses public root reentrancy. A root call from inside an active entry (prepare, work, finalise, effects,
+account, proof, hook) is caller misuse and rejects promptly with `ReentrantOwnershipError` whenever detectable: always during the
+synchronous run of any entry callback, host accessor, codec call, hook or proof step (the queue sets a synchronous marker for that run and
+restores it in `finally`), and also after `await` when the host supplies the optional factory port
+`ownershipContext?: OwnershipContextPort`, `type OwnershipContextPort = { run<T>(token: object, fn: () => T): T; get(): object | undefined }`
+(for example a Node `AsyncLocalStorage` adapter or a TC39 `AsyncContext.Variable`). The port must propagate the token through async
+continuations and restore nested bindings, including after exceptions. Core passes an opaque token with no methods or capabilities,
+recognises tokens only by private identity, and ignores released ones; released entries are never reported as current and independent
+callers stay unbound. Without the port a root call after yielding may be undetectable: awaiting it may deadlock through same-scope or
+cross-scope dependencies, and an unawaited one may run after release. This limits diagnostics only, never lawful entry-bound operations.
+Entry-bound capabilities are the only legal path inside an entry. Ordinary handlers and network I/O run outside every entry.
 
 **Provider primitives.** Open transaction for work through account; report outcome; completion barrier; marker read after barrier; CAS by
 affected count. The barrier may create owner rows internally with the marker-neutral value `{mutationID: null, revision: 0}`, classified as absent;
@@ -589,12 +600,12 @@ export type AtRestCodec = { seal(plaintext: Uint8Array, aad: Uint8Array): Promis
 export type TransactionHookSettlement = { settle(outcome: 'committed' | 'rolled-back'): void }
 export type OutcomeAwareTransactionOptions = { onUnknown(settlement: TransactionHookSettlement): void }
 export type GroupBatchOptions = { maxBatchFrames?: number; maxBatchDelayMs?: number; maxBatchWorkMs?: number }
-export type GroupMutationGate = { run<TValue>(groupID: string, work: () => Promise<TValue>): Promise<TValue>; holdUntil(groupID: string, completion: Promise<void>): void }
+export type OwnershipContextPort = { run<T>(token: object, fn: () => T): T; get(): object | undefined }
 ```
 
-Transition-bound methods never transact/acquire the gate; the coordinator owns validation/sealing/hooks and completion proof.
+Transition-bound methods never transact or join an owner queue; the coordinator owns validation/sealing/hooks and completion proof.
 Expected null means absent lifetime, never a tombstone. Lifetime revision advances per transition; state version per state/metadata change.
-Enforce incarnation/epoch/authenticator/spent rules independently of CAS. Stores are group-bound and expire with the callback.
+Enforce incarnation/epoch/authenticator/spent rules independently of CAS. Stores are group-bound and expire with their phase/attempt binding; operations admitted before expiry still complete unless revoked.
 
 ### Device persistence and retained trust (r16 decision)
 
@@ -909,7 +920,6 @@ Re-export canonical rpc StorageOutcomeUnknownError and GroupControlUnsettledErro
 export type MemoryStoreRows = Record<string, Map<string, unknown>>
 export type MemoryTransaction = GroupTransaction & { rows: MemoryStoreRows }
 export type MemoryDatabase = {
-  mutationGate: GroupMutationGate
   transact<TValue>(scope: { groupID: string | null; devicePackages: boolean }, fn: (tx: MemoryTransaction) => Promise<TValue>,
     options?: OutcomeAwareTransactionOptions): Promise<TValue>
   completionBarrier(scope: { groupID: string | null; devicePackages: boolean }): Promise<void>
@@ -918,11 +928,13 @@ export type MemoryDatabase = {
 export function createMemoryTransaction(params: { rows: MemoryStoreRows }): MemoryDatabase
 export function createMemoryDevicePersistence(params: {
   db: MemoryDatabase; atRest: AtRestCodec; providerID: string; ownerDID: string; effects?: TransactionalGroupEffects<MemoryTransaction>
+  ownershipContext?: OwnershipContextPort
 }): DevicePersistence<MemoryTransaction>
 // Phase 3. GroupProviderTransaction forwards this root callback's StoreProvider.
 export type GroupProviderTransaction = StoreProvider & GroupTransaction
 export function createDevicePersistence(params: {
   db: HozonDB; atRest: AtRestCodec; providerID: string; ownerDID: string; effects?: TransactionalGroupEffects<GroupProviderTransaction>
+  ownershipContext?: OwnershipContextPort
 }): DevicePersistence<GroupProviderTransaction>
 export type BufferedEpochInspection = { inspectEpoch(ciphertext: Uint8Array): bigint | undefined; currentEpoch(): number | null; onEpochChanged(listener: () => void): () => void }
 export function createBufferedPeerHubView(params: {
@@ -1080,15 +1092,15 @@ Keep each meaningful existing case. Replace cases tied solely to removed mechani
 | | at-rest all namespaces | inspect every physical byte copy for plaintext/spans, anchor secrets and topicIDs. Same-codec reopen succeeds. Wrong group/incarnation/namespace/record AAD, mutations and swaps reject through adapters. |
 | | deletion/lifecycle | stopped/drained owner, unsettled-control refusal, atomic tombstone/effects, no late writes. Retired outcomes/Welcomes/events remain serviceable until ack/delivery. |
 | ownership-phases / 2,3 (r17 decision) | phase capabilities | Domain write in effects, account-time host access or after outcome refuses with PersistencePhaseError and changes nothing, through supplied stores, independently constructed stores and exposed transaction access alike. Side writes in effects commit with the transition. Mutation-check each refusal. |
-| | sequencing | Suspend an async store operation mid-write, start a second operation and finalisation: they run in sequence and validation sees both. Effect side write to another incarnation is accounted (version advances) or refused. |
+| | operation lock | Suspend an async store operation mid-write, start a second operation and finalisation: they run one at a time and validation sees both. Two concurrent updates of the same record (control outcomes) both persist. A rejected abandoned seal makes the transition roll back. A late operation from a revoked attempt writes nothing. Effect side write to another incarnation is accounted (version advances) or refused. |
 | | effect store calls/exceptions | Outbox effect then lifetime load, and delete effect then clearTransport, complete within bound. A throwing effect rolls back transition and effect rows. A throwing onCommit/onRollback hook is contained, other hooks run, outcome stands. |
 | | ambiguous transition fence | Unknown Transition, both before backend completion and after commit with proof delayed: every read path (group/facade/device/package) and same-group Transition wait until proof; independent group commits meanwhile. Zero hooks before proof, exactly one queue after unless proof fail-stops the factory. |
 | | ambiguous read releases | Fault on a root Read, both commit-then-reject and unfinished backend: read rejects; next same-group Read and Transition complete, on every read path. Providers with connections: the failed read transaction is completed and the next writer acquires the writer lock. |
 | | proof classification/join | committed and rolledBack settle once; external resolve (group and device APIs) joins pending proof; repeated settlement idempotent. Conflicting marker: no hook queue runs, factory fail-stops, caller and every queued or later entry on any scope reject GroupStateConflictError. With another scope already ambiguous or mid-work, that entry, its joined resolvers and any drain awaiting it also reject, its hooks never run and its open backend transaction is rolled back or disposed. Fallback resolve after a later mutation superseded M throws GroupStateUncertainError. Barrier-created owner row classifies as absent. Certification rollback retry keeps its slot; queued terminal work cannot pass it. Combined classifies both owners, including competing ordinary-package installation. |
-| | ordering/reentrancy/deletion | Combined holds device then waits group; cancelled wait withdraws its group waiter and releases device, and the group then progresses; group-holding entry refuses device slot. Root call from prepare/work/finalise/effects/account/proof/hook rejects ReentrantOwnershipError without waiting, after `await` with the `ownershipContext` port and in the synchronous segment without it; suite runs both ways. Nested and sibling store operations, including one awaiting a sibling it started, complete; codec and accessor callbacks during finalise/account cannot write. Deletion with a running handler drains, then deletes; reads made by that handler succeed meanwhile; work opened during the drain causes a re-drain, three failures refuse GroupControlUnsettledError. After refusal the runtime owner can be created again. |
+| | ordering/reentrancy/deletion | Combined holds device then waits group; cancelled wait withdraws its group waiter and releases device, and the group then progresses; group-holding entry refuses device slot. Root call from prepare/work/finalise/effects/account/proof/hook rejects ReentrantOwnershipError without waiting, after `await` with the `ownershipContext` port and in the synchronous segment without it; suite runs both ways. Concurrent unrelated callers stay unbound; nested port bindings restore after a throwing callback; hook-scheduled roots after release succeed. Codec, effect-getter and accessor callbacks during finalise/account cannot read or write. Deletion with a running handler drains, then deletes; reads made by that handler succeed meanwhile; work opened during the drain causes a re-drain, three failures refuse GroupControlUnsettledError. After refusal the runtime owner can be created again. |
 | | restart before proof | First entry of any kind per owner scope after restart runs barrier and marker check; resolve fallback runs the barrier, never a raw negative read. |
 | | storage guard witnesses | Partial-loss spent reinstall at incarnation 1 refuses; unreadable source state with readable trust retires to a fresh incarnation, corrupt trust refuses; internally consistent lower-epoch state refuses with epoch regression. |
-| | real database integration | Per provider, the D8 provider-evidence cases (a)-(f) with fault milestones, second-connection visibility, hook-queue and connection-identity assertions. SQLite, PostgreSQL, Expo (or explicit blocked reason) in 3. |
+| | real database integration | Per provider, the D8 provider-evidence cases (a)-(g) with fault milestones, second-connection visibility, hook-queue and connection-identity assertions. SQLite, PostgreSQL, Expo (or explicit blocked reason) in 3. |
 | control / 2,3 | noncanonical own replay (r16 decision) | Competitor wins CAS at E, own exact payload later appears under another publishID. Complete prefix yields lost/superseded, winner state/cursor, no own adoption/Welcome. Match across missing coverage holds/unknown. |
 | | commit-once poison head | refused/poison frame changes head without epoch move. Retry has identical payload/ID/handshake generation. Real receiver processes the poison prefix then applies the saved commit and matches candidate authenticator. Extra pending proposal is omitted, missing referenced proposal refuses. |
 | | commit-once restart | reconstruct after built-save/mismatch and after remote acceptance. Saved bytes/candidate survive. Refresh expectedHead only. No same-epoch build after deadline/outcome ack or from a second queued intent. |
@@ -1154,4 +1166,4 @@ ambiguity/external seams and automatic non-fork stranded resync remain.
 
 - r16 (r16 decision): first-valid own adoption/Welcome guard; atomic cross-group ordinary-package burn and device cleanup; retained handle-independent recovery trust; DevicePersistence/restore-work wiring; pre-open/mixed crypto results; concrete adapters, handler registration/completion, metadata/retention and conformance.
 - r17 (r17 decision): D8 single ownership model — per-device/per-group FIFO owner queues, typed entries (Transition, Combined, never-ambiguous Read), strict phases with phase-derived store capabilities, proof inside the retained entry with a conflicted outcome that fail-stops the factory, drain-before-slot deletion, post-effects account step, reentrancy refusal and per-provider primitives including absent-owner upsert barriers and quarantined-connection completion; ownership-phases conformance and real-database integration evidence for every provider. Replaces layered barrier/store-lock/gate/fence mechanisms after recurring deadlock, post-validation write and retained-read findings.
-- r18 (r18 decision): D8 runtime-neutral — store operations become async prepare plus synchronous apply tracked in a per-entry set drained at every phase change (replaces the per-entry sequencer after nested/sibling deadlocks and lost writes); coordinator authority is a private writer object, not ambient context (after codec and accessor callbacks inherited it); reentrancy detection needs no runtime async-context API, with an optional `ownershipContext` port for detection after `await`.
+- r18 (r18 decision): D8 runtime-neutral — per-entry operation lock over each operation's whole read-modify-write with nesting forbidden by construction (replaces inline nested sequencing after sibling deadlocks and lost writes); fatal operation failures make the transition rollback-only; operations bound to entry, transaction and attempt; coordinator authority is a private writer object, not ambient context (after codec and accessor callbacks inherited it); internal bindings explicit; reentrancy detection needs no runtime async-context API, with an optional opaque-token `ownershipContext` port for detection after `await`. Retires `GroupMutationGate`.
