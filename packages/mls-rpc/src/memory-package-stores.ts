@@ -5,7 +5,7 @@ import type {
   LastResortStore,
 } from '@kumiai/mls-hub'
 
-import { sequenceMemoryOperation, sequenceMemoryTransaction } from './memory-group-state.js'
+import { assertMemoryWrite, sequenceMemoryOperation } from './memory-group-state.js'
 import { copyStoredValue } from './memory-incarnation-stores.js'
 import { openRecord, physicalRecordKey, sealRecord } from './persistence-codec.js'
 import { GroupStateConflictError } from './persistence-errors.js'
@@ -52,10 +52,6 @@ export function memoryDeviceTable<TValue>(params: DeviceTableParams) {
     return rows
   }
   return {
-    async withLock<TResult>(work: () => Promise<TResult>): Promise<TResult> {
-      map()
-      return await sequenceMemoryTransaction(tx, work)
-    },
     async load(recordID: string): Promise<TValue | null> {
       const location = address(recordID)
       const key = physicalRecordKey(location)
@@ -79,6 +75,7 @@ export function memoryDeviceTable<TValue>(params: DeviceTableParams) {
       return stored.value as TValue
     },
     async save(recordID: string, value: TValue): Promise<void> {
+      assertMemoryWrite(tx, namespace === 'device' ? 'domain' : 'side')
       const rows = map()
       const location = address(recordID)
       rows.set(
@@ -87,6 +84,7 @@ export function memoryDeviceTable<TValue>(params: DeviceTableParams) {
       )
     },
     remove(recordID: string): void {
+      assertMemoryWrite(tx, namespace === 'device' ? 'domain' : 'side')
       map().delete(physicalRecordKey(address(recordID)))
     },
     ids(): Array<string> {

@@ -2,12 +2,21 @@ import { type ClientState, decodeClientState, encodeClientState } from '@kumiai/
 import { describe, expect, test } from 'vitest'
 
 import { createMemoryGroupPersistence } from '../src/memory-group-persistence.js'
-import { createGroupStateStores, type GroupStateStores } from '../src/memory-group-state.js'
+import {
+  bindMemoryOwner,
+  createGroupStateStores,
+  type GroupStateStores,
+} from '../src/memory-group-state.js'
 import { createMemoryTransaction } from '../src/memory-transaction.js'
 import { createOwnerQueues } from '../src/owner-queue.js'
 import { GroupStateConflictError } from '../src/persistence-errors.js'
 import { assertStateTransition, assertTrustTransition } from '../src/persistence-guards.js'
-import type { AtRestCodec, GroupStateRecord } from '../src/persistence-types.js'
+import type {
+  AtRestCodec,
+  GroupStateRecord,
+  MemoryDatabase,
+  MemoryTransaction,
+} from '../src/persistence-types.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
 import { createRealGroup } from './fixtures/real-group.js'
 import { installSeed, makeStorageSeed, nextChange } from './fixtures/storage-seed.js'
@@ -15,6 +24,27 @@ import { installSeed, makeStorageSeed, nextChange } from './fixtures/storage-see
 const groupID = 'group-A'
 const scope = { groupID, devicePackages: false }
 const codec = createDeterministicAtRestCodec({ key: new Uint8Array(32).fill(97) })
+
+async function transactOwned<TValue>(
+  db: MemoryDatabase,
+  work: (tx: MemoryTransaction) => Promise<TValue>,
+): Promise<TValue> {
+  const owners = createOwnerQueues()
+  return await owners.run('transition', { groupID, ownerDID: null }, async (entry) => {
+    await entry.enter('prepare')
+    await entry.enter('work')
+    const result = await db.transact(scope, async (tx) => {
+      bindMemoryOwner(tx, entry, owners)
+      try {
+        return await work(tx)
+      } finally {
+        await entry.enter('outcome')
+      }
+    })
+    entry.settle('committed')
+    return result
+  })
+}
 
 function decoded(record: GroupStateRecord & { deleted: false }): ClientState {
   if (record.state === null) throw new Error('Expected seed bytes')
@@ -508,7 +538,7 @@ for (const mode of ['real-mls', 'double'] as const) {
     test('serialises overlapping state saves across store instances without losing the ceiling', async () => {
       const value = await seed()
       const db = createMemoryTransaction({ rows: {} })
-      await db.transact(scope, async (tx) => {
+      await transactOwned(db, async (tx) => {
         const initial = createGroupStateStores({ tx, groupID, atRest: codec })
         await initial.state(1).save(value.state)
         await initial.trust.save(value.trust)
@@ -547,7 +577,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         ],
       }
       const db = createMemoryTransaction({ rows: {} })
-      await db.transact(scope, async (tx) => {
+      await transactOwned(db, async (tx) => {
         const initial = createGroupStateStores({ tx, groupID, atRest: codec })
         await initial.trust.save(value.trust)
         const pause = pausedSeal()

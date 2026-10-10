@@ -46,8 +46,6 @@ const transactionEntries = new WeakMap<
 >()
 const coordinatorContext = new AsyncLocalStorage<OwnerEntry>()
 const bootstrapTrusts = new WeakMap<MemoryTransaction['rows'], Set<string>>()
-// Unbound device and standalone provider stores retain sequencing until device migration.
-const transactionLocks = new WeakMap<MemoryTransaction['rows'], Promise<void>>()
 
 export function registerMemoryTransactionRows(
   rows: MemoryTransaction['rows'],
@@ -104,7 +102,7 @@ export function assertMemoryWrite(tx: MemoryTransaction, target: WriteTarget): v
     entry.assertWrite(coordinatorContext.getStore() === entry ? 'coordinator' : target)
 }
 
-export async function sequenceMemoryTransaction<TValue>(
+async function sequenceMemoryTransaction<TValue>(
   tx: MemoryTransaction,
   work: () => Promise<TValue>,
 ): Promise<TValue> {
@@ -113,19 +111,9 @@ export async function sequenceMemoryTransaction<TValue>(
     assertMemoryAccess(tx.rows)
     return await entry.sequence(work)
   }
-  // Standalone provider views expire before waiting for unfinished host work.
+  // Unbound provider primitives have no application ownership to sequence.
   tx.rows.lifetime
-  const previous = transactionLocks.get(tx.rows)
-  const { promise, resolve } = Promise.withResolvers<void>()
-  transactionLocks.set(tx.rows, promise)
-  if (previous !== undefined) await previous
-  try {
-    tx.rows.lifetime
-    return await work()
-  } finally {
-    if (transactionLocks.get(tx.rows) === promise) transactionLocks.delete(tx.rows)
-    resolve()
-  }
+  return await work()
 }
 
 export function sequenceMemoryOperation<TArgs extends Array<unknown>, TValue>(

@@ -479,24 +479,35 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
           const started = Promise.withResolvers<void>()
           fixture.commitThenReject()
           const writer = observed(
-            groups
-              .transition(change, async (stores) => {
-                hooks(stores.tx, calls)
-                stores.tx.onCommit(() => {
-                  order.push('hook')
-                })
-                await within(
-                  stores
-                    .incarnation(1)
-                    .state.save({ ...seed.state, version: seed.state.version + 1, senderHWM: 32 }),
-                )
-                await within(
-                  stores
-                    .incarnation(1)
-                    .control.apply({ putOutcomes: [outcome] }, change.mutationID),
-                )
-                started.resolve()
-              })
+            device
+              .transition(
+                {
+                  mutationID: change.mutationID,
+                  expectedRevision: beforeDevice.revision,
+                  group: change,
+                },
+                async (deviceStores) => {
+                  const stores = deviceStores.group
+                  if (stores === null) throw new Error('Missing combined group participant')
+                  hooks(stores.tx, calls)
+                  stores.tx.onCommit(() => {
+                    order.push('hook')
+                  })
+                  await within(
+                    stores.incarnation(1).state.save({
+                      ...seed.state,
+                      version: seed.state.version + 1,
+                      senderHWM: 32,
+                    }),
+                  )
+                  await within(
+                    stores
+                      .incarnation(1)
+                      .control.apply({ putOutcomes: [outcome] }, change.mutationID),
+                  )
+                  started.resolve()
+                },
+              )
               .then((value) => {
                 expect(calls).toEqual(['commit'])
                 order.push('caller')
@@ -546,7 +557,14 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
             ok: true,
             value: { outcomes: expect.arrayContaining([outcome]) },
           })
-          expect(await within(reads.device.result)).toEqual({ ok: true, value: beforeDevice })
+          expect(await within(reads.device.result)).toEqual({
+            ok: true,
+            value: {
+              ...beforeDevice,
+              revision: beforeDevice.revision + 1,
+              mutationID: change.mutationID,
+            },
+          })
           expect(await within(next.result)).toEqual({ ok: true, value: 'next' })
           expect(order[0]).toBe('hook')
           expect(calls).toEqual(['commit'])
@@ -575,17 +593,28 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
         try {
           const calls: Array<string> = []
           const writer = observed(
-            groups.transition(change, async (stores) => {
-              hooks(stores.tx, calls)
-              await within(
-                stores
-                  .incarnation(1)
-                  .state.save({ ...seed.state, version: seed.state.version + 1, senderHWM: 32 }),
-              )
-              await within(
-                stores.incarnation(1).control.apply({ putOutcomes: [outcome] }, change.mutationID),
-              )
-            }),
+            device.transition(
+              {
+                mutationID: change.mutationID,
+                expectedRevision: beforeDevice.revision,
+                group: change,
+              },
+              async (deviceStores) => {
+                const stores = deviceStores.group
+                if (stores === null) throw new Error('Missing combined group participant')
+                hooks(stores.tx, calls)
+                await within(
+                  stores
+                    .incarnation(1)
+                    .state.save({ ...seed.state, version: seed.state.version + 1, senderHWM: 32 }),
+                )
+                await within(
+                  stores
+                    .incarnation(1)
+                    .control.apply({ putOutcomes: [outcome] }, change.mutationID),
+                )
+              },
+            ),
           )
           await within(fault.rejected)
           await within(fault.barrierWaiting)
@@ -634,7 +663,14 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
             ok: true,
             value: { outcomes: expect.arrayContaining([outcome]) },
           })
-          expect(await within(reads.device.result)).toEqual({ ok: true, value: beforeDevice })
+          expect(await within(reads.device.result)).toEqual({
+            ok: true,
+            value: {
+              ...beforeDevice,
+              revision: beforeDevice.revision + 1,
+              mutationID: change.mutationID,
+            },
+          })
           expect(await within(next.result)).toEqual({ ok: true, value: 'next' })
           expect(calls).toEqual(['commit'])
           expect(await within(groups.loadState(key))).toMatchObject({ senderHWM: 32 })

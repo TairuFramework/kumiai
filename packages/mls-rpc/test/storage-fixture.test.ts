@@ -455,6 +455,8 @@ test.each(['commit', 'rollback'] as const)(
         providerID: 'fresh-provider',
         atRest: createDeterministicAtRestCodec({ key: new Uint8Array(32).fill(98) }),
       })
+      expect((await device.load()).revision).toBe(0)
+      expect(await device.groups.load('group-A')).toBeNull()
       const fault = memoryFaults(db).rejectCommitPending()
       const hooks: Array<string> = []
       let done = false
@@ -499,7 +501,13 @@ test.each(['commit', 'rollback'] as const)(
       await fault.barrierWaiting
       expect(done).toBe(false)
       expect(hooks).toEqual([])
-      expect(db.snapshot()).toEqual({ 'host-side': new Map() })
+      expect(db.snapshot()).toEqual({
+        'host-side': new Map(),
+        'group-owner': new Map([
+          [JSON.stringify(['group-A', null, 'current']), { mutationID: null, revision: 0 }],
+        ]),
+      })
+      const resolution = device.resolve('first-install')
       await fault.finish(finish)
       expect(await operation).toEqual(
         finish === 'commit'
@@ -508,9 +516,12 @@ test.each(['commit', 'rollback'] as const)(
       )
       expect(hooks).toEqual([finish === 'commit' ? 'commit' : 'rollback'])
       expect((await device.load()).revision).toBe(finish === 'commit' ? 1 : 0)
-      expect(await device.resolve('first-install')).toBe(
-        finish === 'commit' ? 'committed' : 'rolled-back',
-      )
+      expect(await resolution).toBe(finish === 'commit' ? 'committed' : 'rolled-back')
+      if (finish === 'commit') expect(await device.resolve('first-install')).toBe('committed')
+      else
+        await expect(device.resolve('first-install')).rejects.toMatchObject({
+          name: 'GroupStateUncertainError',
+        })
       expect(hooks).toHaveLength(1)
     } finally {
       await donor.close()

@@ -1,5 +1,9 @@
 import { createMemoryGroupCoordinator, memoryGroupOwnerQueues } from './memory-group-persistence.js'
-import { sequenceMemoryCoordinator, sequenceMemoryOperation } from './memory-group-state.js'
+import {
+  bindMemoryOwner,
+  sequenceMemoryCoordinator,
+  sequenceMemoryOperation,
+} from './memory-group-state.js'
 import {
   copyStoredValue,
   type GroupOwnerMarker,
@@ -11,9 +15,13 @@ import {
   createTransactionPackageStores,
   memoryDeviceTable,
 } from './memory-package-stores.js'
-import { createOwnerQueues, type OwnerQueues } from './owner-queue.js'
+import { createOwnerQueues, type OwnerEntry, type OwnerQueues } from './owner-queue.js'
 import { physicalRecordKey } from './persistence-codec.js'
-import { GroupStateConflictError, StorageOutcomeUnknownError } from './persistence-errors.js'
+import {
+  GroupStateConflictError,
+  GroupStateUncertainError,
+  StorageOutcomeUnknownError,
+} from './persistence-errors.js'
 import type {
   AtRestCodec,
   DevicePersistence,
@@ -31,16 +39,14 @@ import type {
 type Proof = {
   previousDevice: GroupOwnerMarker | null
   nextDevice: GroupOwnerMarker
-  group: { groupID: string; previous: GroupOwnerMarker | null; next: GroupOwnerMarker } | null
+  group: { groupID: string; previous: GroupOwnerMarker | null } | null
   settlement?: TransactionHookSettlement
-  complete?(): void
   outcome?: 'committed' | 'rolled-back'
 }
 type Binding = {
   providerID: string
   ownerDID: string
   proofs: Map<string, Proof>
-  tail: Promise<void>
   owners: OwnerQueues
 }
 const bindings = new WeakMap<MemoryDatabase, Binding>()
@@ -48,11 +54,7 @@ const scope = (groupID: string | null) => ({ groupID, devicePackages: true })
 
 function marker(tx: MemoryTransaction, namespace: string, key: string): GroupOwnerMarker | null {
   const value = tx.rows[namespace]?.get(key)
-  if (
-    value === undefined ||
-    (namespace === 'group-owner' && sameStoredValue(value, { mutationID: null, revision: 0 }))
-  )
-    return null
+  if (value === undefined || sameStoredValue(value, { mutationID: null, revision: 0 })) return null
   if (
     value === null ||
     typeof value !== 'object' ||
@@ -92,7 +94,6 @@ export function createMemoryDevicePersistence(params: {
       providerID,
       ownerDID,
       proofs: new Map(),
-      tail: Promise.resolve(),
       owners: memoryGroupOwnerQueues(db) ?? createOwnerQueues(),
     }
   }
@@ -101,36 +102,55 @@ export function createMemoryDevicePersistence(params: {
   bindings.set(db, binding)
   const { groups } = coordinator
   const proofs = binding.proofs
-  const ownership = binding
-  async function withDeviceOwner<TValue>(
-    work: (hold: (completion: Promise<void>) => void) => Promise<TValue>,
-  ): Promise<TValue> {
-    // This also rejects root calls made from inside a transaction, before waiting on our owner.
-    await db.completionBarrier(scope(null))
-    const previous = ownership.tail
-    const { promise, resolve } = Promise.withResolvers<void>()
-    ownership.tail = promise
-    await previous
-    const holds: Array<Promise<void>> = []
-    try {
-      return await work((completion) => {
-        holds.push(completion)
-      })
-    } finally {
-      if (holds.length === 0) resolve()
-      else
-        void Promise.allSettled(holds).then(() => {
-          resolve()
-        })
-    }
-  }
   const ownerKey = physicalRecordKey({
     groupID: ownerDID,
     incarnation: null,
     namespace: 'device-owner',
     recordID: 'current',
   })
-  const boundTx = (tx: MemoryTransaction): MemoryTransaction => ({ ...tx, providerID })
+  const boundTx = (tx: MemoryTransaction, entry: OwnerEntry): MemoryTransaction => {
+    bindMemoryOwner(tx, entry, owners)
+    return {
+      ...tx,
+      providerID,
+      onCommit: (hook) => entry.onCommit(hook),
+      onRollback: (hook) => entry.onRollback(hook),
+    }
+  }
+  async function prepare(entry: OwnerEntry): Promise<void> {
+    await entry.enter('prepare')
+    const keys = [JSON.stringify(['device', ownerDID])]
+    if (entry.scopes.groupID !== null) keys.push(JSON.stringify(['group', entry.scopes.groupID]))
+    if (keys.some((key) => !owners.started(key))) {
+      await db.completionBarrier(scope(entry.scopes.groupID))
+      if (owners.failure !== null) throw owners.failure
+      try {
+        await db.transact(scope(entry.scopes.groupID), async (tx) => {
+          marker(tx, 'device-owner', ownerKey)
+          if (entry.scopes.groupID !== null)
+            marker(tx, 'group-owner', groupOwnerKey(entry.scopes.groupID))
+        })
+      } catch (error) {
+        if (error instanceof GroupStateConflictError) owners.failStop(error)
+        throw error
+      }
+      for (const key of keys) owners.markStarted(key)
+    }
+    await entry.enter('work')
+  }
+  function read<TValue>(work: (tx: MemoryTransaction) => Promise<TValue>): Promise<TValue> {
+    return owners.run('read', { ownerDID, groupID: null }, async (entry) => {
+      await prepare(entry)
+      return await db.transact(scope(null), async (baseTx) => {
+        const tx = boundTx(baseTx, entry)
+        try {
+          return await entry.sequence(() => work(tx))
+        } finally {
+          if (owners.failure === null) await entry.enter('outcome')
+        }
+      })
+    })
+  }
   function table<TValue>(tx: MemoryTransaction, namespace: string) {
     return memoryDeviceTable<TValue>({ tx, atRest, providerID, ownerDID, namespace })
   }
@@ -169,11 +189,8 @@ export function createMemoryDevicePersistence(params: {
       },
     }
     return {
-      load: () => rows.withLock(raw.load),
-      save: (work) => {
-        const owned = copyStoredValue(work)
-        return rows.withLock(() => raw.save(owned))
-      },
+      load: sequenceMemoryOperation(tx, raw.load),
+      save: sequenceMemoryOperation(tx, raw.save, 'side'),
     }
   }
   async function load(tx: MemoryTransaction): Promise<DeviceRecord> {
@@ -238,182 +255,167 @@ export function createMemoryDevicePersistence(params: {
       restore: restore(tx),
     }
   }
-  async function resolve(mutationID: string): Promise<'committed' | 'rolled-back'> {
-    const proof = proofs.get(mutationID)
-    const requestedScope = scope(proof?.group?.groupID ?? null)
-    let delay = 100
-    for (;;) {
-      let owners: { deviceOwner: GroupOwnerMarker | null; groupOwner: GroupOwnerMarker | null }
-      try {
-        // Absence proves rollback only after the barrier and against both retained owners.
-        await db.completionBarrier(requestedScope)
-        owners = await db.transact(requestedScope, async (tx) => {
-          return {
-            deviceOwner: marker(tx, 'device-owner', ownerKey),
-            groupOwner:
-              proof?.group == null
-                ? null
-                : marker(tx, 'group-owner', groupOwnerKey(proof.group.groupID)),
-          }
-        })
-      } catch (error) {
-        if (error instanceof GroupStateConflictError) throw error
-        await new Promise<void>((done) => {
-          setTimeout(done, delay)
-        })
-        delay = Math.min(delay * 2, 15000)
-        continue
-      }
-      const { deviceOwner, groupOwner } = owners
-      const committed =
-        proof === undefined
-          ? deviceOwner?.mutationID === mutationID
-          : sameMarker(deviceOwner, proof.nextDevice) &&
-            (proof.group === null || sameMarker(groupOwner, proof.group.next))
-      const rolledBack =
-        proof !== undefined &&
-        sameMarker(deviceOwner, proof.previousDevice) &&
-        (proof.group === null || sameMarker(groupOwner, proof.group.previous))
-      const outcome = committed ? 'committed' : rolledBack ? 'rolled-back' : undefined
-      if (outcome === undefined || (proof?.outcome !== undefined && outcome !== proof.outcome))
-        throw new GroupStateConflictError('Device or group ownership conflict')
-      proof?.settlement?.settle(outcome)
-      if (proof !== undefined) {
-        proof.outcome = outcome
-        proof.complete?.()
-      }
-      return outcome
+  async function prove(mutationID: string, proof: Proof): Promise<'committed' | 'rolled-back'> {
+    if (owners.failure !== null) throw owners.failure
+    const requestedScope = scope(proof.group?.groupID ?? null)
+    await db.completionBarrier(requestedScope)
+    if (owners.failure !== null) throw owners.failure
+    let markers: { device: GroupOwnerMarker | null; group: GroupOwnerMarker | null }
+    try {
+      markers = await db.transact(requestedScope, async (tx) => ({
+        device: marker(tx, 'device-owner', ownerKey),
+        group:
+          proof.group === null
+            ? null
+            : marker(tx, 'group-owner', groupOwnerKey(proof.group.groupID)),
+      }))
+    } catch (error) {
+      if (error instanceof GroupStateConflictError) owners.failStop(error)
+      throw error
     }
+    // Every touched owner must agree; a single matching marker cannot prove a combined entry.
+    const committed =
+      markers.device?.mutationID === mutationID &&
+      (proof.group === null || markers.group?.mutationID === mutationID)
+    const rolledBack =
+      sameMarker(markers.device, proof.previousDevice) &&
+      (proof.group === null || sameMarker(markers.group, proof.group.previous))
+    const outcome = committed ? 'committed' : rolledBack ? 'rolled-back' : undefined
+    if (outcome === undefined) {
+      const error = new GroupStateConflictError('Device or group ownership conflict')
+      owners.failStop(error)
+      throw error
+    }
+    proof.settlement?.settle(outcome)
+    proof.outcome = outcome
+    return outcome
   }
-  const groupResolve = groups.resolve
-  groups.resolve = (groupID, mutationID) => {
-    const proof = proofs.get(mutationID)
-    return proof?.group?.groupID === groupID && proof.outcome !== 'rolled-back'
-      ? resolve(mutationID)
-      : groupResolve(groupID, mutationID)
+  async function resolve(mutationID: string): Promise<'committed' | 'rolled-back'> {
+    if (owners.current() !== undefined)
+      return await owners.run('read', { ownerDID, groupID: null }, async () => 'committed' as const)
+    if (owners.failure !== null) throw owners.failure
+    const pending = owners.joinProof({ ownerDID }, mutationID)
+    if (pending !== null) return await pending
+    return await owners.run('read', { ownerDID, groupID: null }, async (entry) => {
+      await entry.enter('prepare')
+      await db.completionBarrier(scope(null))
+      if (owners.failure !== null) throw owners.failure
+      let current: GroupOwnerMarker | null
+      try {
+        current = await db.transact(scope(null), async (tx) => marker(tx, 'device-owner', ownerKey))
+      } catch (error) {
+        if (error instanceof GroupStateConflictError) owners.failStop(error)
+        throw error
+      }
+      owners.markStarted(JSON.stringify(['device', ownerDID]))
+      await entry.enter('outcome')
+      if (current?.mutationID === mutationID) return 'committed' as const
+      throw new GroupStateUncertainError('Device mutation is superseded or unclassifiable')
+    })
   }
   const device: DevicePersistence<MemoryTransaction> = {
     providerID,
     ownerDID,
     groups,
-    async load() {
-      return await withDeviceOwner(
-        async () => await db.transact(scope(null), (tx) => load(boundTx(tx))),
-      )
-    },
+    load: () => read(load),
     transition(change, work) {
       const owned = copyStoredValue(change)
-      if (owned.group !== null && owned.group.mutationID !== owned.mutationID)
-        return Promise.reject(new GroupStateConflictError('Participant mutation ID mismatch'))
-      async function run(hold: (completion: Promise<void>) => void) {
-        let proof: Proof | undefined
-        let result!: Awaited<ReturnType<typeof work>>
-        try {
-          return await db.transact(
-            scope(owned.group?.groupID ?? null),
-            async (baseTx) => {
-              const tx = boundTx(baseTx)
-              const entry = owners.current()
-              try {
-                const before = await load(tx)
-                if (before.revision !== owned.expectedRevision)
-                  throw new GroupStateConflictError('Device revision conflict')
-                const prior = proofs.get(owned.mutationID)
-                if (prior !== undefined && prior.outcome !== 'rolled-back')
-                  throw new GroupStateConflictError('Mutation ID already used; resolve its proof')
-                proof = {
-                  previousDevice: marker(tx, 'device-owner', ownerKey),
-                  nextDevice: { revision: before.revision + 1, mutationID: owned.mutationID },
-                  group:
-                    owned.group === null
-                      ? null
-                      : {
-                          groupID: owned.group.groupID,
-                          previous: marker(tx, 'group-owner', groupOwnerKey(owned.group.groupID)),
-                          next: {
-                            revision: (owned.group.expected?.revision ?? 0) + 1,
-                            mutationID: owned.mutationID,
-                          },
-                        },
-                }
-                proofs.set(owned.mutationID, proof)
-                if (owned.group === null) result = await work(stores(tx, null))
-                else {
-                  // Reuse group validation within the owned transaction; no backend gate or transaction is nested.
-                  result = await coordinator.transitionInTransaction(
-                    tx,
-                    owned.group,
-                    async (group) => await work(stores(tx, group)),
-                  )
-                }
-                const nextDevice = proof.nextDevice
-                const account = async () => {
-                  tx.rows['device-owner']?.set(ownerKey, nextDevice)
-                  await table<Omit<DeviceRecord, 'restoreWork'>>(tx, 'device').save(
-                    'current',
-                    nextDevice,
-                  )
-                }
-                if (entry === undefined) await account()
-                else await sequenceMemoryCoordinator(entry, account)
-                return result
-              } finally {
-                if (entry !== undefined && owners.failure === null) await entry.enter('outcome')
-              }
-            },
-            {
-              onUnknown(settlement) {
-                if (proof !== undefined) {
-                  proof.settlement = settlement
-                  const { promise, resolve } = Promise.withResolvers<void>()
-                  proof.complete = resolve
-                  hold(promise)
-                }
-              },
-            },
-          )
-        } catch (error) {
-          if (!(error instanceof StorageOutcomeUnknownError)) {
-            if (proof !== undefined) proof.outcome = 'rolled-back'
-            throw error
-          }
-          if (proof !== undefined && (await resolve(owned.mutationID)) === 'committed')
-            return result
-          throw error
-        } finally {
-          if (proof !== undefined && proof.outcome === undefined && proof.settlement === undefined)
-            proof.outcome = 'committed'
-        }
-      }
-      return withDeviceOwner((hold) =>
-        owned.group === null
-          ? run(hold)
-          : owners.run(
-              'transition',
-              { groupID: owned.group.groupID, ownerDID: null },
-              async (entry) => {
-                await entry.enter('prepare')
-                await entry.enter('work')
+      return owners.run(
+        owned.group === null ? 'transition' : 'combined',
+        { ownerDID, groupID: owned.group?.groupID ?? null },
+        async (entry) => {
+          if (owned.group !== null && owned.group.mutationID !== owned.mutationID)
+            throw new GroupStateConflictError('Participant mutation ID mismatch')
+          await prepare(entry)
+          let proof: Proof | undefined
+          let result!: Awaited<ReturnType<typeof work>>
+          try {
+            return await db.transact(
+              scope(owned.group?.groupID ?? null),
+              async (baseTx) => {
+                const tx = boundTx(baseTx, entry)
                 try {
-                  const result = await run(hold)
-                  entry.settle('committed')
+                  const before = await entry.sequence(() => load(tx))
+                  if (before.revision !== owned.expectedRevision)
+                    throw new GroupStateConflictError('Device revision conflict')
+                  const prior = proofs.get(owned.mutationID)
+                  if (prior !== undefined && prior.outcome !== 'rolled-back')
+                    throw new GroupStateConflictError('Mutation ID already used; resolve its proof')
+                  proof = {
+                    previousDevice: marker(tx, 'device-owner', ownerKey),
+                    nextDevice: { revision: before.revision + 1, mutationID: owned.mutationID },
+                    group:
+                      owned.group === null
+                        ? null
+                        : {
+                            groupID: owned.group.groupID,
+                            previous: marker(tx, 'group-owner', groupOwnerKey(owned.group.groupID)),
+                          },
+                  }
+                  proofs.set(owned.mutationID, proof)
+                  if (owned.group === null) {
+                    result = await work(stores(tx, null))
+                    await entry.enter('finalise')
+                    await entry.enter('effects')
+                    await entry.enter('account')
+                  } else {
+                    result = await coordinator.transitionInTransaction(
+                      tx,
+                      owned.group,
+                      async (group) => await work(stores(tx, group)),
+                    )
+                  }
+                  const nextDevice = proof.nextDevice
+                  await sequenceMemoryCoordinator(entry, async () => {
+                    tx.rows['device-owner']?.set(ownerKey, nextDevice)
+                    await table<Omit<DeviceRecord, 'restoreWork'>>(tx, 'device').save(
+                      'current',
+                      nextDevice,
+                    )
+                  })
                   return result
-                } catch (error) {
-                  if (owners.failure === null && entry.phase === 'outcome')
-                    entry.settle('rolled-back')
-                  throw error
+                } finally {
+                  if (owners.failure === null) await entry.enter('outcome')
                 }
               },
-              { mutationID: owned.mutationID },
-            ),
+              {
+                onUnknown(settlement) {
+                  if (proof !== undefined) {
+                    proof.settlement = settlement
+                    const retainedProof = proof
+                    void entry.retain(() => prove(owned.mutationID, retainedProof))
+                  }
+                },
+              },
+            )
+          } catch (error) {
+            if (!(error instanceof StorageOutcomeUnknownError)) {
+              if (proof !== undefined) proof.outcome = 'rolled-back'
+              throw error
+            }
+            const pending = owners.joinProof({ ownerDID }, owned.mutationID)
+            if (pending !== null && (await pending) === 'committed') return result
+            throw error
+          } finally {
+            if (
+              proof !== undefined &&
+              proof.outcome === undefined &&
+              proof.settlement === undefined
+            )
+              proof.outcome = 'committed'
+            if (
+              proof?.settlement === undefined &&
+              owners.failure === null &&
+              entry.phase === 'outcome'
+            )
+              entry.settle(proof?.outcome ?? 'rolled-back')
+          }
+        },
+        { mutationID: owned.mutationID },
       )
     },
     resolve,
   }
-  bindMemoryPackageReads(device, async (work) => {
-    return await withDeviceOwner(
-      async () => await db.transact(scope(null), (tx) => work(stores(boundTx(tx), null))),
-    )
-  })
+  bindMemoryPackageReads(device, (work) => read((tx) => work(stores(tx, null))))
   return device
 }

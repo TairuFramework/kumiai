@@ -375,6 +375,7 @@ export function testDeviceStorageConformance<TTx extends ConformanceGroupTransac
         const donor = await params.createFixture(groupID)
         try {
           const { device } = fixture.ports
+          await device.groups.load(groupID)
           const ordinary = (
             await fixture.ports.packageStores(sourceID).ordinary.list(device.ownerDID)
           )[0]
@@ -441,6 +442,7 @@ export function testDeviceStorageConformance<TTx extends ConformanceGroupTransac
         const donor = await params.createFixture(groupID)
         try {
           const { device } = fixture.ports
+          await device.groups.load(groupID)
           const pool = fixture.ports.packageStores(sourceID).ordinary
           const ordinary = (await pool.list(device.ownerDID))[0]
           if (ordinary === undefined) throw new Error('Missing package')
@@ -521,6 +523,7 @@ export function testDeviceStorageConformance<TTx extends ConformanceGroupTransac
           )
           expect(receiptDone).toBe(false)
           expect(hooks).toEqual([])
+          const deviceResolution = device.resolve('late-join')
           const groupResolution = device.groups.resolve(groupID, 'late-join')
           fixture.failNext('status-read')
           await fault.finish(finish)
@@ -535,9 +538,12 @@ export function testDeviceStorageConformance<TTx extends ConformanceGroupTransac
               ? ['device-commit', 'group-commit']
               : ['device-rollback', 'group-rollback'],
           )
-          expect(await device.resolve('late-join')).toBe(
-            finish === 'commit' ? 'committed' : 'rolled-back',
-          )
+          expect(await deviceResolution).toBe(finish === 'commit' ? 'committed' : 'rolled-back')
+          if (finish === 'commit') expect(await device.resolve('late-join')).toBe('committed')
+          else
+            await expect(device.resolve('late-join')).rejects.toMatchObject({
+              name: 'GroupStateUncertainError',
+            })
           expect(await groupResolution).toBe(finish === 'commit' ? 'committed' : 'rolled-back')
           expect(hooks).toHaveLength(2)
           expect(await fixture.inspectSideRow('effect-1')).toEqual(
@@ -579,6 +585,7 @@ export function testDeviceStorageConformance<TTx extends ConformanceGroupTransac
       const donor = await params.createFixture(groupID)
       try {
         const { device } = fixture.ports
+        await device.groups.load(groupID)
         const seed = await storageSeed(donor.ports.device.groups)
         const ordinary = (
           await fixture.ports.packageStores(sourceID).ordinary.list(device.ownerDID)
@@ -624,8 +631,8 @@ export function testDeviceStorageConformance<TTx extends ConformanceGroupTransac
     test('retries status-read barriers on the fixture clock without rerunning device work', async () => {
       const fixture = await params.createFixture(groupID)
       try {
-        const { device } = fixture.ports
-        const revision = (await device.load()).revision
+        const revision = (await fixture.ports.device.load()).revision
+        const { device } = await fixture.reopen()
         fixture.setTime(1000)
         fixture.failNext('status-read')
         let calls = 0

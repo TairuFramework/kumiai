@@ -8,6 +8,7 @@ import {
 import type { KeyPackageRecord, LastResortRecord } from '@kumiai/mls-hub'
 import { describe, expect, test, vi } from 'vitest'
 
+import { memoryGroupOwnerQueues } from '../src/memory-group-persistence.js'
 import { createOwnerQueues, type OwnerQueues } from '../src/owner-queue.js'
 import { physicalRecordKey, sealRecord } from '../src/persistence-codec.js'
 import type {
@@ -26,6 +27,7 @@ import {
   memoryFaults,
 } from '../src/testing.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
+import { createStorageFixture } from './fixtures/storage-persistence.js'
 import {
   installSeed,
   makeStorageSeed,
@@ -51,6 +53,20 @@ const restoreWork: RestoreWork = {
   id: 'restore-1',
   stage: 'invalidate',
   remainingGroups: [groupID],
+}
+
+async function within<TValue>(promise: Promise<TValue>): Promise<TValue> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('timed out')), 2000)
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 test('device groups reuse the ownership queue already bound to the database', async () => {
@@ -165,9 +181,156 @@ for (const mode of ['real-mls', 'double'] as const) {
       const db = createMemoryTransaction({ rows: {} })
       const device = createMemoryDevicePersistence({ db, atRest, providerID, ownerDID })
       const packageStores = createMemoryPackageStores({ device, sourceID })
+      await device.load()
+      await device.groups.load(groupID)
       const seed = await makeStorageSeed({ id: groupID, incarnation: 1, epoch: 3, mode })
       return { db, device, packageStores, ownerDID, ordinary, lastResort, cleanup, seed, identity }
     }
+
+    test('combined entries wait for device before group without deadlocking behind ambiguous group work', async () => {
+      const { db, device, ownerDID, seed } = await setup()
+      const owners = memoryGroupOwnerQueues(db)
+      if (owners === undefined) throw new Error('Missing database owners')
+      await installSeed(device.groups, seed, 'seed')
+      await installSeed(
+        device.groups,
+        await makeStorageSeed({ id: 'group-B', incarnation: 1, epoch: 3, mode }),
+        'seed-B',
+      )
+      const changeA = await nextChange(device.groups, groupID, 'ambiguous-A')
+      const changeB = await nextChange(device.groups, 'group-B', 'independent-B')
+      const calls: Array<string> = []
+      const fault = memoryFaults(db).rejectCommitPending()
+      let finished = false
+      const ambiguous = device.groups.transition(changeA, async () => 'ambiguous-A')
+      const observedAmbiguous = ambiguous.catch((error: unknown) => error)
+      const pending: Array<Promise<unknown>> = [observedAmbiguous]
+      try {
+        await within(fault.rejected)
+        await within(fault.barrierWaiting)
+        const first = device.transition(
+          {
+            mutationID: 'combined-A',
+            expectedRevision: 0,
+            group: {
+              ...changeA,
+              mutationID: 'combined-A',
+              expected: { revision: 2, activeIncarnation: 1 },
+            },
+          },
+          async (stores) => {
+            stores.tx.onCommit(() => calls.push('combined-A'))
+            return 'combined-A'
+          },
+        )
+        const observedFirst = first.catch((error: unknown) => error)
+        pending.push(observedFirst)
+        const deviceRead = owners.run('read', { ownerDID, groupID: null }, async () => {
+          calls.push('device-read')
+        })
+        pending.push(deviceRead.catch((error: unknown) => error))
+        const second = device.transition(
+          {
+            mutationID: 'combined-B',
+            expectedRevision: 1,
+            group: {
+              ...changeB,
+              mutationID: 'combined-B',
+              expected: { revision: 2, activeIncarnation: 1 },
+            },
+          },
+          async (stores) => {
+            stores.tx.onCommit(() => calls.push('combined-B'))
+            return 'combined-B'
+          },
+        )
+        const observedSecond = second.catch((error: unknown) => error)
+        pending.push(observedSecond)
+        await within(
+          device.groups.transition(changeB, async (stores) => {
+            stores.tx.onCommit(() => calls.push('independent-B'))
+          }),
+        )
+        expect(calls).toEqual(['independent-B'])
+        await within(fault.finish('commit'))
+        finished = true
+        expect(await within(observedAmbiguous)).toBe('ambiguous-A')
+        expect(await within(observedFirst)).toBe('combined-A')
+        await within(deviceRead)
+        expect(await within(observedSecond)).toBe('combined-B')
+        expect(calls).toEqual(['independent-B', 'combined-A', 'device-read', 'combined-B'])
+        expect(await within(device.load())).toMatchObject({ revision: 2, mutationID: 'combined-B' })
+      } finally {
+        if (!finished) await within(fault.finish('rollback'))
+        await within(Promise.all(pending))
+      }
+    })
+
+    test('reopen recovers device reads group reads and transitions after factory fail-stop', async () => {
+      const fixture = await createStorageFixture({ id: groupID, mode })
+      const { device } = fixture.ports
+      const beforeDevice = await device.load()
+      const beforeGroup = await device.groups.load(groupID)
+      const beforeState = await device.groups.loadState({ groupID, incarnation: 1 })
+      if (beforeGroup === null) throw new Error('Missing lifetime')
+      const change = {
+        groupID,
+        mutationID: 'conflict',
+        expected: {
+          revision: beforeGroup.revision,
+          activeIncarnation: beforeGroup.activeIncarnation,
+        },
+      }
+      const fault = fixture.rejectCommitPending()
+      let finished = false
+      const calls: Array<string> = []
+      const writer = device.groups
+        .transition(change, async (stores) => {
+          stores.tx.onCommit(() => calls.push('commit'))
+          stores.tx.onRollback(() => calls.push('rollback'))
+        })
+        .catch((error: unknown) => error)
+      try {
+        await within(fault.rejected)
+        await within(fault.barrierWaiting)
+        await fixture.forceOwnerMarker({ groupID }, { mutationID: 'intruder', revision: 99 })
+        await within(fault.finish('rollback'))
+        finished = true
+        expect(await within(writer)).toMatchObject({ name: 'GroupStateConflictError' })
+        // Restore the externally corrupted marker to the durable lifetime before restarting.
+        await fixture.forceOwnerMarker(
+          { groupID },
+          { mutationID: beforeGroup.mutationID, revision: beforeGroup.revision },
+        )
+        await expect(within(device.load())).rejects.toMatchObject({
+          name: 'GroupStateConflictError',
+        })
+        await expect(
+          within(device.groups.loadState({ groupID, incarnation: 1 })),
+        ).rejects.toMatchObject({ name: 'GroupStateConflictError' })
+        const reopened = await within(fixture.reopen())
+        expect(await within(reopened.device.load())).toEqual(beforeDevice)
+        expect(await within(reopened.device.groups.loadState({ groupID, incarnation: 1 }))).toEqual(
+          beforeState,
+        )
+        expect(
+          await within(
+            reopened.device.groups.transition(
+              { ...change, mutationID: 'after-restart' },
+              async () => 'recovered',
+            ),
+          ),
+        ).toBe('recovered')
+        expect((await within(reopened.device.groups.load(groupID)))?.mutationID).toBe(
+          'after-restart',
+        )
+        expect(calls).toEqual([])
+      } finally {
+        if (!finished) await within(fault.finish('rollback'))
+        await within(writer)
+        await within(fixture.close())
+      }
+    })
 
     test('serializes overlapping cleanup put remove and list in call order', async () => {
       const { db, device, cleanup, ownerDID } = await setup()
@@ -233,7 +396,9 @@ for (const mode of ['real-mls', 'double'] as const) {
       expect(called).toBe(false)
       expect(db.snapshot()).toEqual(before)
       expect(await device.groups.resolve(groupID, 'shared-id')).toBe('committed')
-      expect(await device.resolve('shared-id')).toBe('rolled-back')
+      await expect(device.resolve('shared-id')).rejects.toMatchObject({
+        name: 'GroupStateUncertainError',
+      })
     }, 5000)
 
     test('rejects a combined mutation ID reused by a group-only transition and preserves device proof', async () => {
@@ -621,7 +786,9 @@ for (const mode of ['real-mls', 'double'] as const) {
         async (stores) => {
           retained = stores
           await stores.ordinary(sourceID).put(ownerDID, ordinary)
-          await expect(packageStores.ordinary.list(ownerDID)).rejects.toThrow('reentrant')
+          await expect(packageStores.ordinary.list(ownerDID)).rejects.toMatchObject({
+            name: 'ReentrantOwnershipError',
+          })
         },
       )
       if (retained === undefined) throw new Error('Missing stores')
@@ -756,6 +923,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const device = createMemoryDevicePersistence({ db, atRest, providerID, ownerDID })
       const packages = createMemoryPackageStores({ device, sourceID })
       const before = await device.load()
+      await device.groups.load(groupID)
       memoryFaults(backend).commitThenReject()
       const write = device.transition(
         {
@@ -788,7 +956,9 @@ for (const mode of ['real-mls', 'double'] as const) {
 
     test('serializes restore saves in one transaction and refuses unowned absence as rollback proof', async () => {
       const { device } = await setup()
-      await expect(device.resolve('unowned')).rejects.toThrow('ownership conflict')
+      await expect(device.resolve('unowned')).rejects.toMatchObject({
+        name: 'GroupStateUncertainError',
+      })
       await device.transition(
         { mutationID: 'concurrent-restore', expectedRevision: 0, group: null },
         async (stores) => {
@@ -871,6 +1041,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
       const device = createMemoryDevicePersistence({ db, atRest, providerID, ownerDID })
       const before = await device.load()
+      await device.groups.load(groupID)
       let callbacks = 0
       const hooks: Array<string> = []
       const timer = vi.spyOn(globalThis, 'setTimeout')
@@ -936,6 +1107,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         }
         const device = createMemoryDevicePersistence({ db, atRest, providerID, ownerDID })
         const before = await device.load()
+        await device.groups.load(groupID)
         const hooks: Array<string> = []
         memoryFaults(backend).commitThenReject()
         await expect(
