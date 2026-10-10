@@ -404,59 +404,90 @@ Automatic origin `/info` integration remains blocked; phase-2 HTTP smoke injects
 
 ### D8. Ownership queue and phases (r17 decision)
 
-One model owns all concurrency. It supersedes layered barrier/store-lock/gate/finalisation-fence mechanisms; D2, D3, D7 rules on
-ownership, gates, ambiguity and callback restrictions are expressed through it. Providers implement only the D8 primitives.
+One model owns all persistence concurrency. It supersedes layered barrier/store-lock/gate/finalisation-fence mechanisms; D2, D3, D7
+rules on ownership, gates, ambiguity and callback restrictions are expressed through it. Providers implement only the D8 primitives.
 
 **Scopes.** One FIFO, non-reentrant owner queue per `deviceOwner(ownerDID)` and per `groupOwner(groupID)`, keyed by ID and surviving
 incarnation switch/deletion; stale handles reject. Independent groups never share a queue. Backend writer limits never become a global
-application mutex. Queues are application structures in `mls-rpc`, identical for every provider. "Group gate" and "owner gate" elsewhere in this spec mean the group owner slot.
+application mutex. Queues are application structures in `mls-rpc`, identical for every provider. "Group gate" and "owner gate" elsewhere
+in this spec mean the group owner slot. The D3 scheduler selects work before queue admission, so lane priority and round-robin bounds hold
+under FIFO slots.
 
-**Entries.** Every root operation is one entry. `Transition` (group save/transition/delete, or device-only package/cleanup/restore work)
-and `Combined` (Welcome/combined device+group transition) may become ambiguous. `Read` (root `loadState`, `load`, `lastMutation`, facade
-reads) never becomes ambiguous and retains nothing: any failure, including an unknown backend outcome, rejects that read and releases at
-once. Marker proof is not an entry; it runs inside the retained entry it resolves. `Combined` acquires its device slot then its group slot
-atomically; an entry holding a group slot never acquires a device slot and refuses instead of waiting.
+**Entries.** Every root persistence operation is one entry; warmed ephemeral registry seal/receive (D3) is not and opens no transaction.
+`Transition` (group save/transition/delete, or device-only package/cleanup/restore work) and `Combined` (Welcome/combined device+group
+transition) may become ambiguous. `Read` (root `loadState`, `load`, `lastMutation`, facade, device and package reads) never becomes
+ambiguous and retains nothing: any failure, including an unknown backend outcome on its read transaction, rejects that read and releases
+at once. A `Read` still queues behind every earlier unsettled entry, including one whose rows committed but whose hooks have not settled.
+Marker proof is not an entry; it runs inside the retained entry it resolves. `Combined` joins the device queue; at its head it holds the
+device slot and waits for the group slot (device rows already serialise across groups). Cancellation or rejection while waiting releases
+the device slot. An entry holding a group slot never acquires a device slot and refuses instead of waiting.
 
 **Phases.** An entry moves strictly through, never overlapping:
 
 | Phase | Provider tx | Domain writes (state, trust, lifetime, incarnation, ownership, spent) | Side writes (control, anchor, pending, cursor, outbox/meta, events, package/receipt/cleanup/restore, host effect rows) | Reads |
 |---|---|---|---|---|
 | queued | none | refuse | refuse | refuse |
-| prepare | none | refuse | refuse | root reads of own scope |
+| prepare | none | refuse | refuse | entry-bound reads of own scopes |
 | work | open | allowed | allowed | allowed |
 | finalise | open | coordinator only | coordinator only | allowed |
 | effects | open | refuse with `PersistencePhaseError` | allowed | allowed |
-| outcome | closing | every supplied store expires | | |
+| account | open | coordinator only | coordinator only | allowed |
+| outcome | closing | every supplied store and entry capability expires | | |
 | ambiguous/proof | fresh proof tx only | refuse | refuse | refuse |
 | settled | none | refuse | refuse | refuse |
 | released | none | | | |
 
-`prepare` holds the owner slot outside any provider transaction: crypto preparation, deletion drains (D7), and, for the first entry after
-process start, the completion barrier plus marker check. One per-entry sequencer serialises the entry's store operations. `finalise`
-(validation, version accounting, trust/spent/tombstone persistence) is a single sequencer step completed before `effects` begins, so a host
-effect calling supplied stores never waits on finalisation. Every started store operation is awaited before `outcome`.
+Refusals apply to every store or transaction access bound to the entry's provider transaction, however constructed, not only supplied wrappers.
+`prepare` holds the owner slot outside any provider transaction for crypto preparation and, per owner scope, the first entry of any kind
+after process start runs the completion barrier plus marker check before proceeding. Its reads use an entry-bound read capability that reuses
+the entry's ownership and reads committed rows; root calls from `prepare` are reentrant and refuse. One per-entry sequencer serialises the
+entry's store operations, including suspended asynchronous ones. `finalise` (validation, domain persistence, trust/spent/tombstone, version
+accounting) is one sequencer step completed before `effects` begins, so a host effect calling supplied stores never waits on finalisation.
+`account` is one sequencer step after effects: it validates effect side writes against their incarnation and advances the state/metadata
+versions they require (Interfaces, D6). Every started store operation is awaited before `outcome`.
+
+**Exceptions.** A transactional *effect* (awaited in `effects`) that throws rolls back the whole transition, including its rows. A completion
+*hook* (`onCommit`/`onRollback`, run in `settled`) that throws is contained; remaining hooks still run and the outcome stands.
 
 **Outcome and proof.** The provider reports `committed`, `rolledBack` or `unknown`. Known outcomes settle exactly one hook queue, then
 release. `unknown` keeps the entry at its queue head in `ambiguous`, retaining slots, sequence reservations, a settlement token and both
 hook queues; no read or transition passes it. Proof: retry from 100 ms doubling to 15 s outside transactions; open a fresh root transaction,
-take the retained ownership lock, read markers in later statements (D7). Matching mutation is `committed`; exact previous revision is
-`rolledBack`; anything else is ownership conflict. Settle exactly one queue, containing hook exceptions, then release. Callers receive the
-saved result, rethrown `StorageOutcomeUnknownError`, or the conflict. External `resolve(groupID, mutationID)` joins a matching pending proof
-rather than queueing; otherwise it answers from durable markers. `Combined` ambiguity retains both slots and both scopes' queues; one proof
-under one mutationID settles both.
+run the provider barrier on every owner the entry touched, then read markers in later statements (D7). Classification per touched owner:
+marker carries this entry's mutationID is `committed`; marker equals the exact `{mutationID, revision}` read before this entry's work (or is
+absent when the owner was absent) is `rolledBack`. `Combined` is `committed` only if both owners say so, `rolledBack` only if both do.
+Any other result is `conflicted`: neither hook queue runs; the group (each touched group for `Combined`) durably halts (D1) with an
+ownership-conflict event in a new transaction, both queues are discarded with that event recording the mutationID, the caller receives
+`GroupStateConflictError`, and the entry releases. Otherwise settle exactly one queue, containing hook exceptions, then release. Callers
+receive the saved result or rethrown `StorageOutcomeUnknownError`. External `resolve(groupID|ownerDID, mutationID)` joins a matching pending
+proof rather than queueing; with none pending it runs as a `Read` that performs the barrier before reading markers and never answers from a
+raw negative read.
 
-**Reentrancy.** A root call from inside an active entry (work, effects, proof, hook) rejects promptly with `ReentrantOwnershipError`.
-Supplied transaction stores are the only legal path inside an entry. Ordinary handlers and network I/O run outside every entry.
+**Deletion.** Deletion first sets the owner's admission block (new entries except completion of already-opened work refuse), then drains
+handlers, completion transactions, submitted network work, finalisers and ambiguity resolvers outside the slot (D7), then enqueues its
+`Transition`, which revalidates under the slot before tombstoning.
 
-**Provider primitives.** Open transaction for work through effects; report outcome; completion barrier; marker read after barrier; CAS by
-affected count. Memory: private view over committed sealed snapshot, merge/discard, fault injection, backend completion barrier. SQLite and
-Expo: `BEGIN IMMEDIATE`; COMMIT error is unknown and quarantines the connection; barrier is a clean connection plus first-write writer lock.
-PostgreSQL: owner-row `SELECT … FOR UPDATE`; READ COMMITTED owner-row lock waits on the original writer. All: plain `UPDATE` affected counts.
+**Reentrancy.** A root call from inside an active entry (prepare, work, finalise, effects, account, proof, hook) rejects promptly with
+`ReentrantOwnershipError`. Entry-bound capabilities are the only legal path inside an entry. Ordinary handlers and network I/O run outside
+every entry.
+
+**Provider primitives.** Open transaction for work through account; report outcome; completion barrier; marker read after barrier; CAS by
+affected count. The barrier may write owner rows internally; that is distinct from entry stores and not a phase violation.
+Memory: private view over committed sealed snapshot, merge/discard, fault injection, backend completion barrier.
+SQLite and Expo: `BEGIN IMMEDIATE`; a COMMIT error is `unknown` and quarantines the connection. Before proof, the quarantined connection is
+completed: retry COMMIT to a result, or prove ROLLBACK, or close it (closing rolls back an open transaction). Only then does the barrier take
+a clean connection's first-write writer lock. PostgreSQL: the barrier upserts each touched owner row (`INSERT … ON CONFLICT DO NOTHING`,
+which waits on an uncommitted original insert) then `SELECT … FOR UPDATE`; READ COMMITTED marker reads follow in later statements.
+All: plain `UPDATE` affected counts.
 
 **Provider evidence.** Every provider (memory in phase 2; SQLite, PostgreSQL and Expo in phase 3, or Expo's explicit blocked reason) passes
-the ownership-phases conformance suite and real-database integration tests: two connections/processes contending one group, independent
-groups progressing, injected late COMMIT/ROLLBACK proved through the barrier, crash/restart before proof, quarantine of an uncertain
-connection, and Combined device+group ambiguity. Memory alone cannot satisfy a database provider's row.
+the ownership-phases conformance suite and its real-database integration row. D2's single live process still holds; extra connections or
+processes in these tests contend the backend only. Each integration case injects a named fault milestone and asserts what blocks, what is
+visible to a second connection, and which hook queue runs, with connection identity recorded: (a) group A ambiguous after COMMIT sent,
+group B commits meanwhile on another connection (SQLite: B may wait only for the active writer, never for A's unsettled entry); (b) late
+COMMIT and late ROLLBACK each proved through the barrier, including an initially absent group and device owner; (c) crash/restart before
+proof, first entry per owner runs barrier and marker check; (d) uncertain connection quarantined and completed before proof; (e) Combined
+device+group ambiguity settles both scopes once; (f) conflicting marker halts the group with no hooks. Memory alone cannot satisfy a
+database provider's row.
 
 ## Interfaces
 
@@ -1016,14 +1047,16 @@ Keep each meaningful existing case. Replace cases tied solely to removed mechani
 | | late completion/barrier | insert/open/Welcome/switch/delete and control-only/anchor/cursor/outbox transitions reject before backend completion. Initially absent owner covered. Late commit/rollback settles all rows before lifecycle handoff. |
 | | at-rest all namespaces | inspect every physical byte copy for plaintext/spans, anchor secrets and topicIDs. Same-codec reopen succeeds. Wrong group/incarnation/namespace/record AAD, mutations and swaps reject through adapters. |
 | | deletion/lifecycle | stopped/drained owner, unsettled-control refusal, atomic tombstone/effects, no late writes. Retired outcomes/Welcomes/events remain serviceable until ack/delivery. |
-| ownership-phases / 2,3 (r17 decision) | phase capabilities | Domain write in effects or after outcome refuses with PersistencePhaseError and changes nothing; side writes in effects commit with the transition. Mutation-check each refusal. |
-| | effect store calls | Outbox effect then lifetime load, and delete effect then clearTransport, complete within bound. Hook exceptions roll back the transition with hook rows. |
-| | ambiguous transition fence | Unknown Transition blocks same-group Read and Transition until proof; independent group commits meanwhile. Zero hooks before proof, exactly one queue after. |
-| | ambiguous read releases | Fault on a root Read rejects it; next same-group Read and Transition complete. |
-| | proof classification/join | committed, rolledBack and conflict each settle once; external resolve joins pending proof; repeated settlement idempotent, contradiction errors; throwing hook skips no other hook. |
-| | ordering/reentrancy | Combined takes device then group; group-holding entry refusing device slot; root call from work/effects/proof/hook rejects ReentrantOwnershipError without waiting. |
-| | restart before proof | First Transition after restart runs barrier and marker check in prepare before work. |
-| | real database integration | Per provider: two connections/processes, independent groups, injected late COMMIT/ROLLBACK, crash before proof, connection quarantine, Combined ambiguity. SQLite, PostgreSQL, Expo (or explicit blocked reason) in 3. |
+| ownership-phases / 2,3 (r17 decision) | phase capabilities | Domain write in effects, account-time host access or after outcome refuses with PersistencePhaseError and changes nothing, through supplied stores, independently constructed stores and exposed transaction access alike. Side writes in effects commit with the transition. Mutation-check each refusal. |
+| | sequencing | Suspend an async store operation mid-write, start a second operation and finalisation: they run in sequence and validation sees both. Effect side write to another incarnation is accounted (version advances) or refused. |
+| | effect store calls/exceptions | Outbox effect then lifetime load, and delete effect then clearTransport, complete within bound. A throwing effect rolls back transition and effect rows. A throwing onCommit/onRollback hook is contained, other hooks run, outcome stands. |
+| | ambiguous transition fence | Unknown Transition, both before backend completion and after commit with proof delayed: every read path (group/facade/device/package) and same-group Transition wait until proof; independent group commits meanwhile. Zero hooks before proof, exactly one queue after. |
+| | ambiguous read releases | Fault on a root Read, both commit-then-reject and unfinished backend: read rejects; next same-group Read and Transition complete, on every read path. |
+| | proof classification/join | committed and rolledBack settle once; external resolve (group and device APIs) joins pending proof; repeated settlement idempotent. Conflicting marker: no hook queue runs, group durably halts with event, caller gets GroupStateConflictError. Combined classifies both owners, including competing ordinary-package installation. |
+| | ordering/reentrancy/deletion | Combined holds device then waits group; cancelled wait releases device; group-holding entry refuses device slot. Root call from prepare/work/finalise/effects/account/proof/hook rejects ReentrantOwnershipError without waiting. Deletion with a running handler drains, then deletes; no deadlock. |
+| | restart before proof | First entry of any kind per owner scope after restart runs barrier and marker check; resolve fallback runs the barrier, never a raw negative read. |
+| | storage guard witnesses | Partial-loss spent reinstall at incarnation 1 refuses; unreadable source state with readable trust retires to a fresh incarnation, corrupt trust refuses; internally consistent lower-epoch state refuses with epoch regression. |
+| | real database integration | Per provider, the D8 provider-evidence cases (a)-(f) with fault milestones, second-connection visibility, hook-queue and connection-identity assertions. SQLite, PostgreSQL, Expo (or explicit blocked reason) in 3. |
 | control / 2,3 | noncanonical own replay (r16 decision) | Competitor wins CAS at E, own exact payload later appears under another publishID. Complete prefix yields lost/superseded, winner state/cursor, no own adoption/Welcome. Match across missing coverage holds/unknown. |
 | | commit-once poison head | refused/poison frame changes head without epoch move. Retry has identical payload/ID/handshake generation. Real receiver processes the poison prefix then applies the saved commit and matches candidate authenticator. Extra pending proposal is omitted, missing referenced proposal refuses. |
 | | commit-once restart | reconstruct after built-save/mismatch and after remote acceptance. Saved bytes/candidate survive. Refresh expectedHead only. No same-epoch build after deadline/outcome ack or from a second queued intent. |
@@ -1088,4 +1121,4 @@ ambiguity/external seams and automatic non-fork stranded resync remain.
 
 
 - r16 (r16 decision): first-valid own adoption/Welcome guard; atomic cross-group ordinary-package burn and device cleanup; retained handle-independent recovery trust; DevicePersistence/restore-work wiring; pre-open/mixed crypto results; concrete adapters, handler registration/completion, metadata/retention and conformance.
-- r17 (r17 decision): D8 single ownership model — per-device/per-group FIFO owner queues, typed entries (Transition, Combined, never-ambiguous Read), strict phases with phase-derived store capabilities, proof inside the retained entry, reentrancy refusal and per-provider primitives; ownership-phases conformance and real-database integration evidence for every provider. Replaces layered barrier/store-lock/gate/fence mechanisms after recurring deadlock, post-validation write and retained-read findings.
+- r17 (r17 decision): D8 single ownership model — per-device/per-group FIFO owner queues, typed entries (Transition, Combined, never-ambiguous Read), strict phases with phase-derived store capabilities, proof inside the retained entry with a conflicted outcome that durably halts, drain-before-slot deletion, post-effects account step, reentrancy refusal and per-provider primitives including absent-owner upsert barriers and quarantined-connection completion; ownership-phases conformance and real-database integration evidence for every provider. Replaces layered barrier/store-lock/gate/fence mechanisms after recurring deadlock, post-validation write and retained-read findings.
