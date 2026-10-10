@@ -41,11 +41,22 @@ function readState(record: GroupStateRecord & { deleted: false }): ClientState |
 
 type SecretTree = ClientState['secretTree']
 
+function isDescendant(node: number, ancestor: number): boolean {
+  // MLS in-order node indices span 2^level - 1 positions on either side of a parent.
+  let radius = 1
+  for (let index = ancestor; index % 2 === 1; index = Math.floor(index / 2)) radius *= 2
+  return node !== ancestor && Math.abs(node - ancestor) < radius
+}
+
 function assertTreeProgress(previous: SecretTree, next: SecretTree): void {
   requireCondition(next.leafWidth === previous.leafWidth, 'Secret tree width changed')
+  const expanded = Object.keys(previous.intermediateNodes)
+    .filter((key) => !Object.hasOwn(next.intermediateNodes, key))
+    .map(Number)
   for (const key of Object.keys(next.intermediateNodes)) {
     requireCondition(
-      Object.hasOwn(previous.intermediateNodes, key),
+      Object.hasOwn(previous.intermediateNodes, key) ||
+        expanded.some((ancestor) => isDescendant(Number(key), ancestor)),
       'Consumed tree secret resurrected',
     )
   }
@@ -119,14 +130,18 @@ export function assertStateTransition(
   const client = readState(next)
   if (sameIncarnation) {
     requireCondition(!previous.deleted, 'Deleted incarnation resurrected')
+    requireCondition(
+      previous.state !== null || next.state === null,
+      'Lost private state requires a new incarnation',
+    )
     requireCondition(next.epoch >= previous.epoch, 'Epoch regressed')
-    requireCondition(next.senderHWM >= previous.senderHWM, 'Sender high-water mark regressed')
     requireCondition(!previous.terminal || next.terminal, 'Terminal incarnation resurrected')
     if (next.epoch === previous.epoch) {
       requireCondition(
         sameBytes(next.epochAuthenticator, previous.epochAuthenticator),
         'Same-epoch authenticator changed',
       )
+      requireCondition(next.senderHWM >= previous.senderHWM, 'Sender high-water mark regressed')
       const before = readState(previous)
       if (before !== null && client !== null) assertReceiveProgress(before, client)
       return

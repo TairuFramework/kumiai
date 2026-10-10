@@ -5,8 +5,9 @@ import { createGroupStateStores, type GroupStateStores } from '../src/memory-gro
 import { createMemoryTransaction } from '../src/memory-transaction.js'
 import { GroupStateConflictError } from '../src/persistence-errors.js'
 import { assertStateTransition, assertTrustTransition } from '../src/persistence-guards.js'
-import type { GroupStateRecord } from '../src/persistence-types.js'
+import type { AtRestCodec, GroupStateRecord } from '../src/persistence-types.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
+import { createRealGroup } from './fixtures/real-group.js'
 import { makeStorageSeed } from './fixtures/storage-seed.js'
 
 const groupID = 'group-A'
@@ -19,6 +20,85 @@ function decoded(record: GroupStateRecord & { deleted: false }): ClientState {
   if (state === undefined) throw new Error('Expected valid seed')
   return state
 }
+
+function pausedSeal(): { atRest: AtRestCodec; entered: Promise<void>; release(): void } {
+  const entered = Promise.withResolvers<void>()
+  const resume = Promise.withResolvers<void>()
+  let paused = false
+  return {
+    entered: entered.promise,
+    release: () => resume.resolve(),
+    atRest: {
+      ...codec,
+      async seal(bytes, aad) {
+        if (!paused) {
+          paused = true
+          entered.resolve()
+          await resume.promise
+        }
+        return codec.seal(bytes, aad)
+      },
+    },
+  }
+}
+
+test.each([1, 3])('allows genuine secret-tree expansion with %i other members', async (size) => {
+  const real = await createRealGroup(size, groupID)
+  const handle = real.committer.handle
+  const previous: GroupStateRecord & { deleted: false } = {
+    groupID,
+    incarnation: 1,
+    version: 1,
+    deleted: false,
+    terminal: false,
+    epoch: Number(handle.epoch),
+    epochAuthenticator: handle.state.keySchedule.epochAuthenticator.slice(),
+    state: encodeClientState(handle.state),
+    credential: handle.credential,
+    ledger: handle.ledgerTokens,
+    senderHWM: 16,
+  }
+  const before = decoded(previous)
+  expect(Object.keys(before.secretTree.intermediateNodes)).toEqual([size === 1 ? '1' : '3'])
+  await handle.encrypt(new TextEncoder().encode('advance the application ratchet'))
+  const next = { ...previous, version: 2, state: encodeClientState(handle.state) }
+  const after = decoded(next)
+  expect(Object.keys(after.secretTree.intermediateNodes)).toEqual(size === 1 ? ['2'] : ['2', '5'])
+  expect(after.secretTree.leafNodes[0]?.application.generation).toBe(1)
+  expect(() => assertStateTransition(previous, next, null)).not.toThrow()
+  const db = createMemoryTransaction({ rows: {} })
+  await db.transact(scope, async (tx) => {
+    const stores = createGroupStateStores({ tx, groupID, atRest: codec })
+    await stores.state(1).save(previous)
+    await stores.state(1).save(next)
+    expect(await stores.state(1).load()).toEqual(next)
+    const restored = decoded(next)
+    Object.assign(restored.secretTree.intermediateNodes, before.secretTree.intermediateNodes)
+    await expect(
+      stores.state(1).save({ ...next, version: 3, state: encodeClientState(restored) }),
+    ).rejects.toThrow(GroupStateConflictError)
+  })
+  const retainedAncestor = decoded(next)
+  Object.assign(retainedAncestor.secretTree.intermediateNodes, before.secretTree.intermediateNodes)
+  expect(() =>
+    assertStateTransition(previous, { ...next, state: encodeClientState(retainedAncestor) }, null),
+  ).toThrow(GroupStateConflictError)
+  const historical = (client: ClientState) => {
+    const current = decoded(next)
+    current.groupContext.epoch = BigInt(previous.epoch + 1)
+    current.historicalReceiverData.set(BigInt(previous.epoch), {
+      groupContext: client.groupContext,
+      resumptionPsk: client.keySchedule.resumptionPsk,
+      ratchetTree: client.ratchetTree,
+      senderDataSecret: client.keySchedule.senderDataSecret,
+      secretTree: client.secretTree,
+    })
+    return { ...next, epoch: previous.epoch + 1, state: encodeClientState(current) }
+  }
+  expect(() =>
+    assertStateTransition(historical(before), { ...historical(after), version: 3 }, null),
+  ).not.toThrow()
+})
 
 for (const mode of ['real-mls', 'double'] as const) {
   describe(mode, () => {
@@ -63,6 +143,35 @@ for (const mode of ['real-mls', 'double'] as const) {
       for (const rows of Object.values(db.snapshot())) {
         for (const bytes of rows.values()) expect(bytes).toBeInstanceOf(Uint8Array)
       }
+    })
+
+    test('resets the sender ceiling on a new epoch while refusing same-identity regression', async () => {
+      const value = await seed()
+      const previous = { ...value.state, senderHWM: 32 }
+      const client = decoded(previous)
+      client.groupContext.epoch = 4n
+      client.keySchedule.epochAuthenticator = crypto.getRandomValues(new Uint8Array(32))
+      const next = {
+        ...previous,
+        version: 2,
+        epoch: 4,
+        epochAuthenticator: client.keySchedule.epochAuthenticator,
+        state: encodeClientState(client),
+        senderHWM: 16,
+      }
+      expect(() => assertStateTransition(previous, next, value.trust)).not.toThrow()
+      const db = createMemoryTransaction({ rows: {} })
+      await db.transact(scope, async (tx) => {
+        const stores = createGroupStateStores({ tx, groupID, atRest: codec })
+        await stores.state(1).save(previous)
+        await stores.trust.save(value.trust)
+        await expect(
+          stores.state(1).save({ ...previous, version: 2, senderHWM: 16 }),
+        ).rejects.toThrow(GroupStateConflictError)
+        await stores.state(1).save(next)
+        expect(await stores.state(1).load()).toEqual(next)
+        expect(await stores.trust.load()).toEqual(value.trust)
+      })
     })
 
     test('retains trust above tombstones and refuses absent or unreadable trust', async () => {
@@ -117,6 +226,49 @@ for (const mode of ['real-mls', 'double'] as const) {
         await expect(stores.trust.load()).rejects.toThrow('trust unreadable')
         await expect(stores.trust.save(value.trust)).rejects.toThrow('trust unreadable')
       })
+    })
+
+    test('refuses private-state restoration after null state in the same incarnation', async () => {
+      const value = await seed()
+      const client = decoded(value.state)
+      const chain = () => ({
+        secret: new Uint8Array(32).fill(97),
+        generation: 5,
+        unusedGenerations: {},
+      })
+      client.secretTree.leafNodes[0] = { handshake: chain(), application: chain() }
+      delete client.secretTree.intermediateNodes[0]
+      const progressed = { ...value.state, state: encodeClientState(client) }
+      const lost = { ...progressed, version: 2, state: null }
+      const db = createMemoryTransaction({ rows: {} })
+      await db.transact(scope, async (tx) => {
+        const stores = createGroupStateStores({ tx, groupID, atRest: codec })
+        await stores.state(1).save(progressed)
+        await stores.trust.save(value.trust)
+        await stores.state(1).save(lost)
+        await expect(stores.state(1).save({ ...value.state, version: 3 })).rejects.toThrow(
+          GroupStateConflictError,
+        )
+        expect(await stores.state(1).load()).toEqual(lost)
+        expect(await stores.trust.load()).toEqual(value.trust)
+        await stores.state(1).save({ ...lost, version: 3 })
+      })
+      const fresh = decoded(value.state)
+      fresh.groupContext.epoch = 4n
+      fresh.keySchedule.epochAuthenticator = crypto.getRandomValues(new Uint8Array(32))
+      const recovered = {
+        ...value.state,
+        version: 3,
+        epoch: 4,
+        epochAuthenticator: fresh.keySchedule.epochAuthenticator,
+        state: encodeClientState(fresh),
+      }
+      expect(() => assertStateTransition(lost, recovered, value.trust)).toThrow(
+        GroupStateConflictError,
+      )
+      expect(() =>
+        assertStateTransition(lost, { ...recovered, incarnation: 2, version: 1 }, value.trust),
+      ).not.toThrow()
     })
 
     test('refuses spent A3 in a different incarnation by byte value', async () => {
@@ -350,6 +502,127 @@ for (const mode of ['real-mls', 'double'] as const) {
         GroupStateConflictError,
       )
     })
+
+    test('serialises overlapping state saves across store instances without losing the ceiling', async () => {
+      const value = await seed()
+      const db = createMemoryTransaction({ rows: {} })
+      await db.transact(scope, async (tx) => {
+        const initial = createGroupStateStores({ tx, groupID, atRest: codec })
+        await initial.state(1).save(value.state)
+        await initial.trust.save(value.trust)
+        const pause = pausedSeal()
+        const firstStores = createGroupStateStores({ tx, groupID, atRest: pause.atRest })
+        const secondStores = createGroupStateStores({ tx, groupID, atRest: pause.atRest })
+        const accepted = { ...value.state, version: 2, senderHWM: 64 }
+        const first = firstStores.state(1).save(accepted)
+        await pause.entered
+        const second = secondStores
+          .state(1)
+          .save({ ...value.state, version: 2, senderHWM: 32 })
+          .catch((error: unknown) => error)
+        pause.release()
+        await first
+        expect(await second).toBeInstanceOf(GroupStateConflictError)
+        expect(await secondStores.state(1).load()).toEqual(accepted)
+        await secondStores.state(1).save({ ...accepted, version: 3 })
+      })
+      await db.transact(scope, async (tx) => {
+        const stores = createGroupStateStores({ tx, groupID, atRest: codec })
+        expect(await stores.state(1).load()).toEqual({ ...value.state, version: 3, senderHWM: 64 })
+      })
+    })
+
+    test('serialises overlapping trust saves across store instances without losing spent identities', async () => {
+      const value = await seed()
+      const firstAuthenticator = new Uint8Array([1])
+      const secondAuthenticator = new Uint8Array([2])
+      const both = {
+        ...value.trust,
+        spentEpochAuthenticators: [
+          ...value.trust.spentEpochAuthenticators,
+          firstAuthenticator,
+          secondAuthenticator,
+        ],
+      }
+      const db = createMemoryTransaction({ rows: {} })
+      await db.transact(scope, async (tx) => {
+        const initial = createGroupStateStores({ tx, groupID, atRest: codec })
+        await initial.trust.save(value.trust)
+        const pause = pausedSeal()
+        const firstStores = createGroupStateStores({ tx, groupID, atRest: pause.atRest })
+        const secondStores = createGroupStateStores({ tx, groupID, atRest: pause.atRest })
+        const first = firstStores.trust.save({
+          ...value.trust,
+          spentEpochAuthenticators: [...value.trust.spentEpochAuthenticators, firstAuthenticator],
+        })
+        await pause.entered
+        const second = secondStores.trust
+          .save({
+            ...value.trust,
+            spentEpochAuthenticators: [
+              ...value.trust.spentEpochAuthenticators,
+              secondAuthenticator,
+            ],
+          })
+          .catch((error: unknown) => error)
+        pause.release()
+        await first
+        expect(await second).toBeInstanceOf(GroupStateConflictError)
+        expect((await secondStores.trust.load())?.spentEpochAuthenticators).toEqual(
+          expect.arrayContaining([...value.trust.spentEpochAuthenticators, firstAuthenticator]),
+        )
+        await secondStores.trust.save(both)
+      })
+      await db.transact(scope, async (tx) => {
+        const stores = createGroupStateStores({ tx, groupID, atRest: codec })
+        expect((await stores.trust.load())?.spentEpochAuthenticators).toHaveLength(3)
+        expect((await stores.trust.load())?.spentEpochAuthenticators).toEqual(
+          expect.arrayContaining(both.spentEpochAuthenticators),
+        )
+      })
+    })
+
+    test.each(['state', 'trust'] as const)(
+      'refuses expired %s access before waiting for an unfinished seal',
+      async (namespace) => {
+        const value = await seed()
+        const db = createMemoryTransaction({ rows: {} })
+        const pause = pausedSeal()
+        let escaped: GroupStateStores | undefined
+        let pending: Promise<unknown> | undefined
+        await db.transact(scope, async (tx) => {
+          const initial = createGroupStateStores({ tx, groupID, atRest: codec })
+          await initial.state(1).save(value.state)
+          await initial.trust.save(value.trust)
+          const stores = createGroupStateStores({ tx, groupID, atRest: pause.atRest })
+          escaped = stores
+          pending = (
+            namespace === 'state'
+              ? stores.state(1).save({ ...value.state, version: 2 })
+              : stores.trust.save(value.trust)
+          ).catch((error: unknown) => error)
+          await pause.entered
+        })
+        if (escaped === undefined || pending === undefined) throw new Error('Expected stores')
+        try {
+          const row = namespace === 'state' ? escaped.state(1) : escaped.trust
+          const result = await Promise.race([
+            row.load().catch((error: unknown) => error),
+            new Promise<null>((resolve) => setImmediate(() => resolve(null))),
+          ])
+          expect(result).toBeInstanceOf(Error)
+          expect(result).toHaveProperty('message', 'expired transaction view')
+        } finally {
+          pause.release()
+          expect(await pending).toHaveProperty('message', 'expired transaction view')
+        }
+        await db.transact(scope, async (tx) => {
+          const stores = createGroupStateStores({ tx, groupID, atRest: codec })
+          expect(await stores.state(1).load()).toEqual(value.state)
+          expect(await stores.trust.load()).toEqual(value.trust)
+        })
+      },
+    )
 
     test('rolls back state and trust when sealing a later row fails', async () => {
       const value = await seed()
