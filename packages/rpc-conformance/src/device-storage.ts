@@ -721,11 +721,11 @@ export function testDeviceStorageConformance<TTx extends ConformanceGroupTransac
           },
           async (stores) => {
             escaped = stores
+            await expect(current.load()).rejects.toThrow()
             await stores.restore.save(null)
             expect(await stores.restore.load()).toBeNull()
             await stores.cleanup.remove('cleanup-1')
             expect(await stores.cleanup.list()).toEqual([])
-            await expect(current.load()).rejects.toThrow()
           },
         )
         if (escaped === undefined) throw new Error('Missing stores')
@@ -736,6 +736,27 @@ export function testDeviceStorageConformance<TTx extends ConformanceGroupTransac
         await scanSealed(fixture)
       } finally {
         await fixture.close()
+      }
+
+      const ownershipContext = params.ownershipContext?.()
+      if (ownershipContext !== undefined) {
+        const fixture = await params.createFixture(groupID, { ownershipContext })
+        try {
+          const { device } = fixture.ports
+          await device.transition(
+            {
+              mutationID: 'after-await-root-reentrancy',
+              expectedRevision: (await device.load()).revision,
+              group: null,
+            },
+            async (stores) => {
+              await stores.restore.save(null)
+              await expect(device.load()).rejects.toThrow()
+            },
+          )
+        } finally {
+          await fixture.close()
+        }
       }
     })
   })

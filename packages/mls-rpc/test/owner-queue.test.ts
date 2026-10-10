@@ -1,4 +1,3 @@
-import { AsyncLocalStorage } from 'node:async_hooks'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import type {
@@ -16,10 +15,10 @@ import {
   PersistencePhaseError,
   ReentrantOwnershipError,
 } from '../src/persistence-errors.js'
+import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 
 function contextPort(): OwnershipContextPort {
-  const context = new AsyncLocalStorage<object>()
-  return { run: (token, fn) => context.run(token, fn), get: () => context.getStore() }
+  return createAsyncLocalOwnershipContext()
 }
 
 const group = { ownerDID: null, groupID: 'group-A' }
@@ -1117,84 +1116,13 @@ describe('owner queues', { timeout: 2000 }, () => {
     })
   })
 
-  test.each([
-    ['work', 'finalise'],
-    ['finalise', 'effects'],
-    ['effects', 'account'],
-    ['account', 'outcome'],
-  ] as const)('started nested descendants drain before %s enters %s', async (phase, next) => {
-    const queues = createOwnerQueues()
-    const reached = deferred<void>()
-    const resume = deferred<void>()
-    const order: Array<string> = []
-    let captured!: OwnerEntry
-    let child!: Promise<void>
-    const owner = queues.run('transition', group, async (entry) => {
-      captured = entry
-      await advance(entry, phase)
-      const parent = entry.sequence(async () => {
-        child = entry.sequence(async () => {
-          reached.resolve()
-          await resume.promise
-          order.push(`child:${entry.phase}`)
-        })
-        await reached.promise
-      })
-      await reached.promise
-      const boundary = entry.enter(next).then(() => {
-        order.push(`entered:${entry.phase}`)
-      })
-      await Promise.all([parent, boundary])
-      if (next !== 'outcome') await entry.enter('outcome')
-      entry.settle('committed')
-    })
-    await reached.promise
-    await flush()
-    const heldPhase = captured.phase
-    const heldOrder = [...order]
-    resume.resolve()
-    await Promise.all([owner, child])
-    expect(heldPhase).toBe(phase)
-    expect(heldOrder).toEqual([])
-    expect(order).toEqual([`child:${phase}`, `entered:${next}`])
-  })
-
-  test('a phase drain permits an already reserved operation to compose nested work', async () => {
+  test('nesting is not offered by owner entries', async () => {
     const queues = createOwnerQueues()
     await queues.run('transition', group, async (entry) => {
-      await advance(entry, 'work')
-      const parent = entry.sequence(() => entry.sequence(async () => 7))
-      const boundary = entry.enter('finalise')
-      await expect(parent).resolves.toBe(7)
-      await boundary
-      await entry.enter('outcome')
+      expect('sequence' in entry).toBe(false)
+      await advance(entry, 'outcome')
       entry.settle('committed')
     })
-  })
-
-  test('a nested sequenced operation runs inline within its parent', async () => {
-    const queues = createOwnerQueues()
-    const order: Array<string> = []
-    await queues.run('transition', group, async (entry) => {
-      await advance(entry, 'work')
-      const outer = entry.sequence(async () => {
-        order.push('outer-start')
-        const inner = await entry.sequence(async () => {
-          order.push('inner')
-          return 2
-        })
-        order.push('outer-end')
-        return inner + 1
-      })
-      const later = entry.sequence(async () => {
-        order.push('later')
-      })
-      await expect(outer).resolves.toBe(3)
-      await later
-      await entry.enter('outcome')
-      entry.settle('committed')
-    })
-    expect(order).toEqual(['outer-start', 'inner', 'outer-end', 'later'])
   })
 
   test.each(['committed', 'rolled-back'] as const)(
@@ -1380,7 +1308,7 @@ describe('owner queues', { timeout: 2000 }, () => {
     expect(hooks).toEqual([])
   })
 
-  test('fail-stop cancels proof backoff and drops pending sequencer reservations', async () => {
+  test('fail-stop cancels proof backoff', async () => {
     vi.useFakeTimers()
     const queues = createOwnerQueues()
     const entered = deferred<void>()

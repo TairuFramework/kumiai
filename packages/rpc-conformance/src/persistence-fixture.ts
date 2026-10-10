@@ -564,6 +564,7 @@ export type FixtureOptions<TTx extends ConformanceGroupTransaction> = {
 
 export type StorageConformanceParams<TTx extends ConformanceGroupTransaction> = {
   label: string
+  ownershipContext?: () => ConformanceOwnershipContextPort
   lowerEpochCandidate(groupID: string): Promise<{
     state: ConformanceGroupStateRecord & { deleted: false }
     trust: ConformanceGroupRecoveryTrust

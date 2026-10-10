@@ -17,6 +17,7 @@ import type {
   HubCleanupRow,
   MemoryDatabase,
   MemoryTransaction,
+  OwnershipContextPort,
   RestoreWork,
 } from '../src/persistence-types.js'
 import {
@@ -27,6 +28,7 @@ import {
   memoryFaults,
 } from '../src/testing.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
+import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import { createStorageFixture } from './fixtures/storage-persistence.js'
 import {
   installSeed,
@@ -157,7 +159,7 @@ async function install(
 
 for (const mode of ['real-mls', 'double'] as const) {
   describe(mode, () => {
-    async function setup() {
+    async function setup(ownershipContext?: OwnershipContextPort) {
       const identity = randomIdentity()
       const ownerDID = identity.id
       const bundle = await createKeyPackageBundle(identity)
@@ -179,7 +181,13 @@ for (const mode of ['real-mls', 'double'] as const) {
         notAfter: ordinary.notAfter,
       }
       const db = createMemoryTransaction({ rows: {} })
-      const device = createMemoryDevicePersistence({ db, atRest, providerID, ownerDID })
+      const device = createMemoryDevicePersistence({
+        db,
+        atRest,
+        providerID,
+        ownerDID,
+        ownershipContext,
+      })
       const packageStores = createMemoryPackageStores({ device, sourceID })
       await device.load()
       await device.groups.load(groupID)
@@ -779,7 +787,19 @@ for (const mode of ['real-mls', 'double'] as const) {
     })
 
     test('expires every transaction-bound package cleanup and restore method and rejects root reentrancy', async () => {
-      const { device, packageStores, ownerDID, ordinary } = await setup()
+      const synchronous = await setup()
+      await synchronous.device.transition(
+        { mutationID: 'capture-sync', expectedRevision: 0, group: null },
+        async () => {
+          await expect(
+            synchronous.packageStores.ordinary.list(synchronous.ownerDID),
+          ).rejects.toMatchObject({ name: 'ReentrantOwnershipError' })
+        },
+      )
+
+      const { device, packageStores, ownerDID, ordinary } = await setup(
+        createAsyncLocalOwnershipContext(),
+      )
       let retained: DeviceStores<MemoryTransaction> | undefined
       await device.transition(
         { mutationID: 'capture', expectedRevision: 0, group: null },

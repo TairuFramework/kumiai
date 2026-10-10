@@ -7,6 +7,7 @@ import type {
   TransactionHookSettlement,
 } from '../src/persistence-types.js'
 import { createMemoryTransaction, memoryFaults } from '../src/testing.js'
+import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 
 function deferred(): { promise: Promise<void>; resolve(): void } {
   let resolve!: () => void
@@ -686,7 +687,21 @@ test('keeps owner slots until hook settlement after backend completion', async (
 })
 
 test('rejects nested roots and retains the slot through entry proof', async () => {
-  const owners = createOwnerQueues()
+  const synchronousOwners = createOwnerQueues()
+  await synchronousOwners.run(
+    'transition',
+    { groupID: 'group-A', ownerDID: null },
+    async (entry) => {
+      await expect(
+        synchronousOwners.run('read', { groupID: 'group-B', ownerDID: null }, async () => {}),
+      ).rejects.toMatchObject({ name: 'ReentrantOwnershipError' })
+      await entry.enter('prepare')
+      await entry.enter('outcome')
+      entry.settle('rolled-back')
+    },
+  )
+
+  const owners = createOwnerQueues({ ownershipContext: createAsyncLocalOwnershipContext() })
   const held = deferred()
   await owners.run(
     'transition',

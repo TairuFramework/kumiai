@@ -1,7 +1,3 @@
-/// <reference types="node" />
-
-import { AsyncLocalStorage } from 'node:async_hooks'
-
 import {
   GroupStateConflictError,
   PersistencePhaseError,
@@ -43,7 +39,6 @@ export type OwnerEntry = {
   readonly phase: EntryPhase
   readonly mutationID: string | null
   enter(phase: EntryPhase): Promise<void>
-  sequence<T>(operation: () => Promise<T>): Promise<T>
   attempt(): OwnerAttempt
   operation<T>(attempt: OwnerAttempt, run: (attempt: OwnerAttempt) => Promise<T>): Promise<T>
   coordinator(attempt: OwnerAttempt): CoordinatorToken
@@ -79,10 +74,6 @@ export type OwnerQueues = {
   readonly failure: GroupStateConflictError | null
 }
 
-const ownershipContext = new AsyncLocalStorage<OwnerEntry>()
-type SequencedOperation = { entry: OwnerEntry; tail: Promise<void>; active: boolean }
-// Each operation owns a child queue, so composition never waits on its own ancestor.
-const sequencedContext = new AsyncLocalStorage<SequencedOperation>()
 const failureSignals = new WeakMap<OwnerEntry, AbortSignal>()
 
 export function ownerEntryFailureSignal(entry: OwnerEntry): AbortSignal | undefined {
@@ -176,8 +167,6 @@ export function createOwnerQueues(options?: {
         const token = port?.get()
         if (token !== undefined) entry = contextEntries.get(token)
       }
-      // Task 4 removes the ALS fallback after legacy providers migrate.
-      entry ??= sequencedContext.getStore()?.entry ?? ownershipContext.getStore()
       return entry?.phase === 'released' ? undefined : entry
     },
     bindOwnershipContext(next) {
@@ -413,10 +402,6 @@ export function createOwnerQueues(options?: {
         release,
         async enter(next) {
           assertLive()
-          const context = sequencedContext.getStore()
-          if (context?.entry === entry && context.active) {
-            throw new PersistencePhaseError('Cannot change phase inside a sequenced operation')
-          }
           if (closing !== null) throw new PersistencePhaseError('Phase is already changing')
           const allowed =
             (phase === 'queued' && (next === 'prepare' || (kind === 'read' && next === 'work'))) ||
@@ -440,45 +425,6 @@ export function createOwnerQueues(options?: {
             closing = null
           })
           await Promise.race([closing, failed])
-        },
-        sequence(operation) {
-          const context = sequencedContext.getStore()
-          const parent = context?.entry === entry && context.active ? context : undefined
-          try {
-            assertLive()
-            if (
-              (closing !== null && parent === undefined) ||
-              !['work', 'finalise', 'effects', 'account'].includes(phase)
-            ) {
-              throw new PersistencePhaseError('Store sequencing expired')
-            }
-          } catch (error) {
-            return Promise.reject(error)
-          }
-          const result = (parent?.tail ?? tail).then(async () => {
-            assertLive()
-            const current: SequencedOperation = { entry, tail: Promise.resolve(), active: true }
-            try {
-              return await ownershipContext.run(entry, () =>
-                sequencedContext.run(current, () => entry.callback(operation)),
-              )
-            } finally {
-              // Abandoned children still own the phase, including descendants started while draining.
-              for (;;) {
-                const children = current.tail
-                await children
-                if (children === current.tail) break
-              }
-              current.active = false
-            }
-          })
-          const drained = result.then(
-            () => undefined,
-            () => undefined,
-          )
-          if (parent === undefined) tail = drained
-          else parent.tail = drained
-          return Promise.race([result, failed])
         },
         assertWrite(target) {
           assertLive()
@@ -603,7 +549,7 @@ export function createOwnerQueues(options?: {
           throw error
         }
         try {
-          const value = await ownershipContext.run(entry, () => entry.callback(() => body(entry)))
+          const value = await entry.callback(() => body(entry))
           if (kind !== 'read' && phase !== 'settled' && owned.proof === null) {
             throw new PersistencePhaseError('Owner body finished without settlement')
           }
