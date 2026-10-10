@@ -446,6 +446,47 @@ describe('owner queues', { timeout: 2000 }, () => {
     })
   })
 
+  test('a phase change inside a sequenced operation rejects instead of waiting on itself', async () => {
+    const queues = createOwnerQueues()
+    const order: Array<string> = []
+    const queued = read(queues, 'queued-read', order)
+    await queues.run('transition', group, async (entry) => {
+      await advance(entry, 'work')
+      await expect(entry.sequence(() => entry.enter('finalise'))).rejects.toBeInstanceOf(
+        PersistencePhaseError,
+      )
+      expect(entry.phase).toBe('work')
+      await entry.enter('outcome')
+      entry.settle('committed')
+    })
+    await expect(queued).resolves.toBe('queued-read')
+  })
+
+  test('a nested sequenced operation runs inline within its parent', async () => {
+    const queues = createOwnerQueues()
+    const order: Array<string> = []
+    await queues.run('transition', group, async (entry) => {
+      await advance(entry, 'work')
+      const outer = entry.sequence(async () => {
+        order.push('outer-start')
+        const inner = await entry.sequence(async () => {
+          order.push('inner')
+          return 2
+        })
+        order.push('outer-end')
+        return inner + 1
+      })
+      const later = entry.sequence(async () => {
+        order.push('later')
+      })
+      await expect(outer).resolves.toBe(3)
+      await later
+      await entry.enter('outcome')
+      entry.settle('committed')
+    })
+    expect(order).toEqual(['outer-start', 'inner', 'outer-end', 'later'])
+  })
+
   test.each(['committed', 'rolled-back'] as const)(
     'settle contains hooks and is idempotent for %s',
     async (outcome) => {

@@ -55,6 +55,8 @@ export type OwnerQueues = {
 }
 
 const ownershipContext = new AsyncLocalStorage<OwnerEntry>()
+// Marks code already running inside an entry's sequencer, which must not wait on that sequencer.
+const sequencedContext = new AsyncLocalStorage<OwnerEntry>()
 
 type Slot = { held: boolean; waiters: Array<() => void> }
 type Owned = {
@@ -226,6 +228,9 @@ export function createOwnerQueues(): OwnerQueues {
         },
         async enter(next) {
           assertLive()
+          if (sequencedContext.getStore() === entry) {
+            throw new PersistencePhaseError('Cannot change phase inside a sequenced operation')
+          }
           if (closing !== null) throw new PersistencePhaseError('Phase is already changing')
           const allowed =
             (phase === 'queued' && (next === 'prepare' || (kind === 'read' && next === 'work'))) ||
@@ -254,9 +259,10 @@ export function createOwnerQueues(): OwnerQueues {
           } catch (error) {
             return Promise.reject(error)
           }
+          if (sequencedContext.getStore() === entry) return Promise.race([operation(), failed])
           const result = tail.then(() => {
             assertLive()
-            return ownershipContext.run(entry, operation)
+            return ownershipContext.run(entry, () => sequencedContext.run(entry, operation))
           })
           tail = result.then(
             () => undefined,
