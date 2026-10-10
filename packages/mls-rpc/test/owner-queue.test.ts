@@ -229,14 +229,13 @@ describe('owner queues', { timeout: 2000 }, () => {
   test('root calls reject inside proof and completion hooks', async () => {
     const queues = createOwnerQueues()
     const hookRejections: Array<Promise<unknown>> = []
+    const hookEntries: Array<OwnerEntry | undefined> = []
+    let captured!: OwnerEntry
     await queues.run('transition', group, async (entry) => {
+      captured = entry
       entry.onCommit(() => {
-        expect(queues.current()).toBe(entry)
-        hookRejections.push(
-          expect(queues.run('read', group, async () => undefined)).rejects.toBeInstanceOf(
-            ReentrantOwnershipError,
-          ),
-        )
+        hookEntries.push(queues.current())
+        hookRejections.push(queues.run('read', group, async () => undefined))
       })
       await advance(entry, 'outcome')
       await entry.retain(async () => {
@@ -247,7 +246,9 @@ describe('owner queues', { timeout: 2000 }, () => {
         return 'committed'
       })
     })
-    await Promise.all(hookRejections)
+    expect(hookEntries).toEqual([captured])
+    expect(hookRejections).toHaveLength(1)
+    await expect(hookRejections[0]).rejects.toBeInstanceOf(ReentrantOwnershipError)
   })
 
   test('phase order refuses skips and reversals, while reads may skip prepare', async () => {
@@ -313,6 +314,48 @@ describe('owner queues', { timeout: 2000 }, () => {
     if (phase === 'released') check(captured)
   })
 
+  test.each([
+    ['work', 'finalise'],
+    ['finalise', 'effects'],
+  ] as const)('%s operations drain before entering %s', async (phase, next) => {
+    const queues = createOwnerQueues()
+    const suspended = deferred<void>()
+    const boundaryStarted = deferred<void>()
+    const order: Array<string> = []
+    let captured!: OwnerEntry
+    const owner = queues.run('transition', group, async (entry) => {
+      captured = entry
+      await advance(entry, phase)
+      const first = entry.sequence(async () => {
+        order.push(`first-start:${entry.phase}`)
+        await suspended.promise
+        order.push(`first-end:${entry.phase}`)
+      })
+      const second = entry.sequence(async () => {
+        order.push(`second:${entry.phase}`)
+      })
+      const boundary = entry.enter(next).then(() => order.push(`entered:${entry.phase}`))
+      boundaryStarted.resolve()
+      await Promise.all([first, second, boundary])
+      await entry.enter('outcome')
+      entry.settle('committed')
+    })
+    await boundaryStarted.promise
+    await flush()
+    const suspendedPhase = captured.phase
+    const suspendedOrder = [...order]
+    suspended.resolve()
+    await owner
+    expect(suspendedPhase).toBe(phase)
+    expect(suspendedOrder).toEqual([`first-start:${phase}`])
+    expect(order).toEqual([
+      `first-start:${phase}`,
+      `first-end:${phase}`,
+      `second:${phase}`,
+      `entered:${next}`,
+    ])
+  })
+
   test('the sequencer serialises suspended work and outcome drains after caller rejection', async () => {
     const queues = createOwnerQueues()
     const suspended = deferred<void>()
@@ -350,6 +393,38 @@ describe('owner queues', { timeout: 2000 }, () => {
     await closing
     await next
     expect(order).toEqual(['first-start', 'first-end', 'second', 'outcome', 'read'])
+  })
+
+  test('caller rejection during a phase change drains work and settles rollback before release', async () => {
+    const queues = createOwnerQueues()
+    const suspended = deferred<void>()
+    const boundaryStarted = deferred<void>()
+    const callerError = new Error('caller abandoned finalisation')
+    const order: Array<string> = []
+    let boundary!: Promise<void>
+    const owner = queues.run('transition', group, async (entry) => {
+      await advance(entry, 'work')
+      entry.onRollback(() => order.push('rollback'))
+      void entry.sequence(async () => {
+        order.push('work-start')
+        await suspended.promise
+        order.push('work-end')
+      })
+      boundary = entry.enter('finalise')
+      boundaryStarted.resolve()
+      throw callerError
+    })
+    const rejected = expect(owner).rejects.toBe(callerError)
+    await boundaryStarted.promise
+    await rejected
+    const next = read(queues, 'read', order)
+    await flush()
+    const suspendedOrder = [...order]
+    suspended.resolve()
+    await boundary
+    await next
+    expect(suspendedOrder).toEqual(['work-start'])
+    expect(order).toEqual(['work-start', 'work-end', 'rollback', 'read'])
   })
 
   test('a rejected operation does not strand later sequence reservations or outcome', async () => {

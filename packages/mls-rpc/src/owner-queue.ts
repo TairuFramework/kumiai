@@ -226,7 +226,7 @@ export function createOwnerQueues(): OwnerQueues {
         },
         async enter(next) {
           assertLive()
-          if (closing !== null) throw new PersistencePhaseError('Outcome is already closing')
+          if (closing !== null) throw new PersistencePhaseError('Phase is already changing')
           const allowed =
             (phase === 'queued' && (next === 'prepare' || (kind === 'read' && next === 'work'))) ||
             (phase === 'prepare' && next === 'work') ||
@@ -237,15 +237,13 @@ export function createOwnerQueues(): OwnerQueues {
               next === 'outcome') ||
             (phase === 'outcome' && kind !== 'read' && (next === 'work' || next === 'ambiguous'))
           if (!allowed) throw new PersistencePhaseError(`Cannot enter ${next} from ${phase}`)
-          if (next === 'outcome') {
-            // Stop new reservations immediately, but let started operations finish in their phase.
-            closing = tail.then(() => {
-              assertLive()
-              phase = 'outcome'
-              closing = null
-            })
-            await Promise.race([closing, failed])
-          } else phase = next
+          // Stop new reservations immediately, but let started operations finish in their phase.
+          closing = tail.then(() => {
+            assertLive()
+            phase = next
+            closing = null
+          })
+          await Promise.race([closing, failed])
         },
         sequence(operation) {
           try {
@@ -363,7 +361,7 @@ export function createOwnerQueues(): OwnerQueues {
         if (phase !== 'settled') {
           if (phase === 'queued') await entry.enter('prepare')
           if (closing !== null) await closing
-          else if (phase !== 'outcome') await entry.enter('outcome')
+          if (entry.phase !== 'settled' && entry.phase !== 'outcome') await entry.enter('outcome')
           if (entry.phase !== 'settled') entry.settle('rolled-back')
         }
         releaseSettled()
