@@ -3,9 +3,14 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 
 import { registerMemoryFaults } from './memory-faults.js'
+import {
+  assertMemoryAccess,
+  assertMemoryWrite,
+  memoryTransactionEntry,
+} from './memory-group-state.js'
+import { groupOwnerKey } from './memory-incarnation-stores.js'
 import { StorageOutcomeUnknownError } from './persistence-errors.js'
 import type {
-  GroupMutationGate,
   MemoryDatabase,
   MemoryStoreRows,
   MemoryTransaction,
@@ -14,9 +19,7 @@ import type {
 
 type Scope = { groupID: string | null; devicePackages: boolean }
 type Owner = { active: boolean }
-type GateOwner = { groupID: string; holds: Array<Promise<void>>; active: boolean }
 const transactionContext = new AsyncLocalStorage<Owner>()
-const gateContext = new AsyncLocalStorage<GateOwner>()
 
 const groupNamespaces = new Set([
   'lifetime',
@@ -75,32 +78,6 @@ function groupQueue() {
 
 function assertRoot(): void {
   if (transactionContext.getStore() !== undefined) throw new Error('reentrant root work')
-}
-
-function createMutationGate(): GroupMutationGate {
-  const acquire = groupQueue()
-  return {
-    async run(groupID, work) {
-      assertRoot()
-      if (gateContext.getStore() !== undefined) throw new Error('reentrant group gate')
-      const release = await acquire(groupID)
-      const owner: GateOwner = { groupID, holds: [], active: true }
-      try {
-        return await gateContext.run(owner, work)
-      } finally {
-        owner.active = false
-        // Caller rejection can precede proof; the queue keeps ownership independently.
-        void Promise.allSettled(owner.holds).then(release)
-      }
-    },
-    holdUntil(groupID, completion) {
-      const owner = gateContext.getStore()
-      if (owner === undefined || !owner.active || owner.groupID !== groupID) {
-        throw new Error('Group gate ownership conflict')
-      }
-      owner.holds.push(completion)
-    },
-  }
 }
 
 function belongs(namespace: string, key: string, scope: Scope): boolean {
@@ -270,24 +247,24 @@ function guardedMap(params: {
         return (key: string, value: unknown) => {
           assertActive()
           checkKey(key)
-          rows.set(key, cloneValue(value))
+          const owned = cloneValue(value)
           write(key)
+          rows.set(key, owned)
           return view
         }
       if (property === 'delete')
         return (key: string) => {
           assertActive()
           checkKey(key)
-          const deleted = rows.delete(key)
           write(key)
-          return deleted
+          return rows.delete(key)
         }
       if (property === 'clear')
         return () => {
           assertActive()
           for (const key of rows.keys()) {
-            rows.delete(key)
             write(key)
+            rows.delete(key)
           }
         }
       if (property === 'forEach')
@@ -332,7 +309,6 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
   const acquireDevice = queue()
   const pending = new Set<{ scope: Scope; waiting(): void }>()
   const barriers = new Set<Scope>()
-  const mutationGate = createMutationGate()
   async function acquire(scope: Scope): Promise<() => void> {
     const releases: Array<() => void> = []
     if (scope.devicePackages) releases.push(await acquireDevice())
@@ -342,7 +318,6 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
     }
   }
   const db: MemoryDatabase = {
-    mutationGate,
     snapshot() {
       return cloneValue(committed)
     },
@@ -356,6 +331,12 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
         const release = await acquire(scope)
         barriers.delete(scope)
         const failed = faults.take('status-read')
+        if (!failed && scope.groupID !== null) {
+          const rows = committed['group-owner'] ?? new Map<string, unknown>()
+          committed['group-owner'] = rows
+          const key = groupOwnerKey(scope.groupID)
+          if (!rows.has(key)) rows.set(key, { mutationID: null, revision: 0 })
+        }
         release()
         if (!failed) return
         await new Promise<void>((resolve) => {
@@ -377,6 +358,7 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
       if (scope.devicePackages) for (const name of deviceNamespaces) names.add(name)
       let writeFailure: Error | undefined
       const assertActive = () => {
+        assertMemoryAccess(rows)
         if (!owner.active || transactionContext.getStore() !== owner)
           throw new Error('expired transaction view')
       }
@@ -393,6 +375,12 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
           assertActive,
           accepts: (key) => belongs(name, key, scope),
           write(key) {
+            assertMemoryWrite(
+              tx,
+              ['lifetime', 'trust', 'state', 'group-owner', 'device-owner', 'device'].includes(name)
+                ? 'domain'
+                : 'side',
+            )
             let changed = touched.get(name)
             if (changed === undefined) {
               changed = { rows, keys: new Set() }
@@ -430,11 +418,15 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
         rows,
         onCommit(hook) {
           assertActive()
-          commits.push(hook)
+          const entry = memoryTransactionEntry(rows)
+          if (entry === undefined) commits.push(hook)
+          else entry.onCommit(hook)
         },
         onRollback(hook) {
           assertActive()
-          rollbacks.push(hook)
+          const entry = memoryTransactionEntry(rows)
+          if (entry === undefined) rollbacks.push(hook)
+          else entry.onRollback(hook)
         },
       }
       let backendOutcome: 'committed' | 'rolled-back' | undefined
@@ -495,10 +487,6 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
               pending.delete(backendOwner)
               release()
             })
-          }
-          const gateOwner = gateContext.getStore()
-          if (scope.groupID !== null && gateOwner?.active && gateOwner.groupID === scope.groupID) {
-            mutationGate.holdUntil(scope.groupID, settled.promise)
           }
           try {
             options?.onUnknown(settlement)

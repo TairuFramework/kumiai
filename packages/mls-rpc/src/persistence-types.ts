@@ -140,17 +140,11 @@ export type OutcomeAwareTransactionOptions = {
   onUnknown(settlement: TransactionHookSettlement): void
 }
 
-export type GroupMutationGate = {
-  run<TValue>(groupID: string, work: () => Promise<TValue>): Promise<TValue>
-  holdUntil(groupID: string, completion: Promise<void>): void
-}
-
 export type MemoryStoreRows = Record<string, Map<string, unknown>>
 
 export type MemoryTransaction = GroupTransaction & { rows: MemoryStoreRows }
 
 export type MemoryDatabase = {
-  mutationGate: GroupMutationGate
   transact<TValue>(
     scope: { groupID: string | null; devicePackages: boolean },
     fn: (tx: MemoryTransaction) => Promise<TValue>,

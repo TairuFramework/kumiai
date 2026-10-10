@@ -1,14 +1,16 @@
 import { type ClientState, decodeClientState, encodeClientState } from '@kumiai/mls'
 import { describe, expect, test } from 'vitest'
 
+import { createMemoryGroupPersistence } from '../src/memory-group-persistence.js'
 import { createGroupStateStores, type GroupStateStores } from '../src/memory-group-state.js'
 import { createMemoryTransaction } from '../src/memory-transaction.js'
+import { createOwnerQueues } from '../src/owner-queue.js'
 import { GroupStateConflictError } from '../src/persistence-errors.js'
 import { assertStateTransition, assertTrustTransition } from '../src/persistence-guards.js'
 import type { AtRestCodec, GroupStateRecord } from '../src/persistence-types.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
 import { createRealGroup } from './fixtures/real-group.js'
-import { makeStorageSeed } from './fixtures/storage-seed.js'
+import { installSeed, makeStorageSeed, nextChange } from './fixtures/storage-seed.js'
 
 const groupID = 'group-A'
 const scope = { groupID, devicePackages: false }
@@ -583,44 +585,67 @@ for (const mode of ['real-mls', 'double'] as const) {
     })
 
     test.each(['state', 'trust'] as const)(
-      'refuses expired %s access before waiting for an unfinished seal',
+      'drains unfinished %s work and refuses access while the entry changes phase',
       async (namespace) => {
         const value = await seed()
         const db = createMemoryTransaction({ rows: {} })
+        const owners = createOwnerQueues()
+        const groups = createMemoryGroupPersistence({
+          db,
+          owners,
+          atRest: codec,
+          providerID: 'memory',
+        })
+        await installSeed(groups, value, 'seed')
         const pause = pausedSeal()
+        const paused = createMemoryGroupPersistence({
+          db,
+          owners,
+          atRest: pause.atRest,
+          providerID: 'memory',
+        })
+        const change = await nextChange(groups, groupID, 'suspended')
         let escaped: GroupStateStores | undefined
         let pending: Promise<unknown> | undefined
-        await db.transact(scope, async (tx) => {
-          const initial = createGroupStateStores({ tx, groupID, atRest: codec })
-          await initial.state(1).save(value.state)
-          await initial.trust.save(value.trust)
-          const stores = createGroupStateStores({ tx, groupID, atRest: pause.atRest })
-          escaped = stores
-          pending = (
-            namespace === 'state'
-              ? stores.state(1).save({ ...value.state, version: 2 })
-              : stores.trust.save(value.trust)
-          ).catch((error: unknown) => error)
-          await pause.entered
-        })
+        let returned = false
+        const transition = paused
+          .transition(change, async (stores) => {
+            escaped = createGroupStateStores({
+              tx: { ...stores.tx },
+              groupID,
+              atRest: pause.atRest,
+            })
+            pending = (
+              namespace === 'state'
+                ? stores.incarnation(1).state.save({ ...value.state, version: 2 })
+                : escaped.trust.save(value.trust)
+            ).catch((error: unknown) => error)
+            await pause.entered
+          })
+          .then(() => {
+            returned = true
+          })
+        await pause.entered
+        await new Promise<void>((resolve) => setImmediate(resolve))
         if (escaped === undefined || pending === undefined) throw new Error('Expected stores')
         try {
+          expect(returned).toBe(false)
           const row = namespace === 'state' ? escaped.state(1) : escaped.trust
           const result = await Promise.race([
             row.load().catch((error: unknown) => error),
             new Promise<null>((resolve) => setImmediate(() => resolve(null))),
           ])
-          expect(result).toBeInstanceOf(Error)
-          expect(result).toHaveProperty('message', 'expired transaction view')
+          expect(result).toMatchObject({ name: 'PersistencePhaseError' })
         } finally {
           pause.release()
-          expect(await pending).toHaveProperty('message', 'expired transaction view')
+          expect(await pending).toBeUndefined()
+          await transition
         }
-        await db.transact(scope, async (tx) => {
-          const stores = createGroupStateStores({ tx, groupID, atRest: codec })
-          expect(await stores.state(1).load()).toEqual(value.state)
-          expect(await stores.trust.load()).toEqual(value.trust)
+        await expect(escaped.lifetime.load()).rejects.toMatchObject({
+          name: 'PersistencePhaseError',
         })
+        expect((await groups.loadState(value.key))?.version).toBe(namespace === 'state' ? 2 : 1)
+        expect(await groups.loadTrust(groupID)).toEqual(value.trust)
       },
     )
 

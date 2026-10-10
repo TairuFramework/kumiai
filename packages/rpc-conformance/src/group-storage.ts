@@ -233,11 +233,11 @@ export async function assertPartialLossSpentRefused<TTx extends ConformanceGroup
       }
     }
     const { device } = await fixture.reopen()
+    const change = await storageChange(device.groups, groupID, 'reinstall')
     const before = await fixture.inspectRows()
     await expect(
-      device.groups.transition(
-        await storageChange(device.groups, groupID, 'reinstall'),
-        async (stores) => writeStorageInstall(stores, seed, 'reinstall'),
+      device.groups.transition(change, async (stores) =>
+        writeStorageInstall(stores, seed, 'reinstall'),
       ),
     ).rejects.toMatchObject({
       name: 'GroupStateConflictError',
@@ -721,6 +721,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
               },
             )
             expect(readDone).toBe(false)
+            const resolution = groups.resolve(groupID, 'late')
             fixture.failNext('status-read')
             await fault.finish(finish)
             const result = await operation
@@ -732,9 +733,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
             expect(hooks).toEqual(
               finish === 'commit' ? ['commit', 'commit-after'] : ['rollback', 'rollback-after'],
             )
-            expect(await groups.resolve(groupID, 'late')).toBe(
-              finish === 'commit' ? 'committed' : 'rolled-back',
-            )
+            expect(await resolution).toBe(finish === 'commit' ? 'committed' : 'rolled-back')
             expect(hooks).toHaveLength(2)
             expect((await read)?.mutationID ?? null).toBe(
               finish === 'commit' ? 'late' : stage === 'absent' ? null : 'seed-records',

@@ -80,7 +80,6 @@ export type {
   GroupForkEvidence,
   GroupKey,
   GroupLifetime,
-  GroupMutationGate,
   GroupPersistence,
   GroupPersistencePorts,
   GroupRecoveryTrust,

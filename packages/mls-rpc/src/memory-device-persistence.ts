@@ -1,15 +1,17 @@
-import { createMemoryGroupCoordinator } from './memory-group-persistence.js'
-import { lockMemoryOperation } from './memory-group-state.js'
+import { createMemoryGroupCoordinator, memoryGroupOwnerQueues } from './memory-group-persistence.js'
+import { sequenceMemoryCoordinator, sequenceMemoryOperation } from './memory-group-state.js'
 import {
   copyStoredValue,
   type GroupOwnerMarker,
   groupOwnerKey,
+  sameStoredValue,
 } from './memory-incarnation-stores.js'
 import {
   bindMemoryPackageReads,
   createTransactionPackageStores,
   memoryDeviceTable,
 } from './memory-package-stores.js'
+import { createOwnerQueues, type OwnerQueues } from './owner-queue.js'
 import { physicalRecordKey } from './persistence-codec.js'
 import { GroupStateConflictError, StorageOutcomeUnknownError } from './persistence-errors.js'
 import type {
@@ -39,13 +41,18 @@ type Binding = {
   ownerDID: string
   proofs: Map<string, Proof>
   tail: Promise<void>
+  owners: OwnerQueues
 }
 const bindings = new WeakMap<MemoryDatabase, Binding>()
 const scope = (groupID: string | null) => ({ groupID, devicePackages: true })
 
 function marker(tx: MemoryTransaction, namespace: string, key: string): GroupOwnerMarker | null {
   const value = tx.rows[namespace]?.get(key)
-  if (value === undefined) return null
+  if (
+    value === undefined ||
+    (namespace === 'group-owner' && sameStoredValue(value, { mutationID: null, revision: 0 }))
+  )
+    return null
   if (
     value === null ||
     typeof value !== 'object' ||
@@ -80,12 +87,19 @@ export function createMemoryDevicePersistence(params: {
     throw new GroupStateConflictError('Persistence provider mismatch')
   if (binding !== undefined && binding.ownerDID !== ownerDID)
     throw new GroupStateConflictError('Persistence owner mismatch')
-  const coordinator = createMemoryGroupCoordinator({ db, atRest, providerID, effects })
-  const { groups } = coordinator
   if (binding === undefined) {
-    binding = { providerID, ownerDID, proofs: new Map(), tail: Promise.resolve() }
+    binding = {
+      providerID,
+      ownerDID,
+      proofs: new Map(),
+      tail: Promise.resolve(),
+      owners: memoryGroupOwnerQueues(db) ?? createOwnerQueues(),
+    }
     bindings.set(db, binding)
   }
+  const owners = binding.owners
+  const coordinator = createMemoryGroupCoordinator({ db, owners, atRest, providerID, effects })
+  const { groups } = coordinator
   const proofs = binding.proofs
   const ownership = binding
   async function withDeviceOwner<TValue>(
@@ -217,9 +231,9 @@ export function createMemoryDevicePersistence(params: {
       lastResort: (sourceID) =>
         createTransactionPackageStores({ tx, atRest, providerID, ownerDID, sourceID }).lastResort,
       cleanup: {
-        list: lockMemoryOperation(tx, rawCleanup.list),
-        put: lockMemoryOperation(tx, rawCleanup.put),
-        remove: lockMemoryOperation(tx, rawCleanup.remove),
+        list: sequenceMemoryOperation(tx, rawCleanup.list),
+        put: sequenceMemoryOperation(tx, rawCleanup.put),
+        remove: sequenceMemoryOperation(tx, rawCleanup.remove),
       },
       restore: restore(tx),
     }
@@ -299,43 +313,53 @@ export function createMemoryDevicePersistence(params: {
             scope(owned.group?.groupID ?? null),
             async (baseTx) => {
               const tx = boundTx(baseTx)
-              const before = await load(tx)
-              if (before.revision !== owned.expectedRevision)
-                throw new GroupStateConflictError('Device revision conflict')
-              const prior = proofs.get(owned.mutationID)
-              if (prior !== undefined && prior.outcome !== 'rolled-back')
-                throw new GroupStateConflictError('Mutation ID already used; resolve its proof')
-              proof = {
-                previousDevice: marker(tx, 'device-owner', ownerKey),
-                nextDevice: { revision: before.revision + 1, mutationID: owned.mutationID },
-                group:
-                  owned.group === null
-                    ? null
-                    : {
-                        groupID: owned.group.groupID,
-                        previous: marker(tx, 'group-owner', groupOwnerKey(owned.group.groupID)),
-                        next: {
-                          revision: (owned.group.expected?.revision ?? 0) + 1,
-                          mutationID: owned.mutationID,
+              const entry = owners.current()
+              try {
+                const before = await load(tx)
+                if (before.revision !== owned.expectedRevision)
+                  throw new GroupStateConflictError('Device revision conflict')
+                const prior = proofs.get(owned.mutationID)
+                if (prior !== undefined && prior.outcome !== 'rolled-back')
+                  throw new GroupStateConflictError('Mutation ID already used; resolve its proof')
+                proof = {
+                  previousDevice: marker(tx, 'device-owner', ownerKey),
+                  nextDevice: { revision: before.revision + 1, mutationID: owned.mutationID },
+                  group:
+                    owned.group === null
+                      ? null
+                      : {
+                          groupID: owned.group.groupID,
+                          previous: marker(tx, 'group-owner', groupOwnerKey(owned.group.groupID)),
+                          next: {
+                            revision: (owned.group.expected?.revision ?? 0) + 1,
+                            mutationID: owned.mutationID,
+                          },
                         },
-                      },
+                }
+                proofs.set(owned.mutationID, proof)
+                if (owned.group === null) result = await work(stores(tx, null))
+                else {
+                  // Reuse group validation within the owned transaction; no backend gate or transaction is nested.
+                  result = await coordinator.transitionInTransaction(
+                    tx,
+                    owned.group,
+                    async (group) => await work(stores(tx, group)),
+                  )
+                }
+                const nextDevice = proof.nextDevice
+                const account = async () => {
+                  tx.rows['device-owner']?.set(ownerKey, nextDevice)
+                  await table<Omit<DeviceRecord, 'restoreWork'>>(tx, 'device').save(
+                    'current',
+                    nextDevice,
+                  )
+                }
+                if (entry === undefined) await account()
+                else await sequenceMemoryCoordinator(entry, account)
+                return result
+              } finally {
+                if (entry !== undefined && owners.failure === null) await entry.enter('outcome')
               }
-              proofs.set(owned.mutationID, proof)
-              if (owned.group === null) result = await work(stores(tx, null))
-              else {
-                // Reuse group validation within the owned transaction; no backend gate or transaction is nested.
-                result = await coordinator.transitionInTransaction(
-                  tx,
-                  owned.group,
-                  async (group) => await work(stores(tx, group)),
-                )
-              }
-              tx.rows['device-owner']?.set(ownerKey, proof.nextDevice)
-              await table<Omit<DeviceRecord, 'restoreWork'>>(tx, 'device').save(
-                'current',
-                proof.nextDevice,
-              )
-              return result
             },
             {
               onUnknown(settlement) {
@@ -364,7 +388,24 @@ export function createMemoryDevicePersistence(params: {
       return withDeviceOwner((hold) =>
         owned.group === null
           ? run(hold)
-          : db.mutationGate.run(owned.group.groupID, () => run(hold)),
+          : owners.run(
+              'transition',
+              { groupID: owned.group.groupID, ownerDID: null },
+              async (entry) => {
+                await entry.enter('prepare')
+                await entry.enter('work')
+                try {
+                  const result = await run(hold)
+                  entry.settle('committed')
+                  return result
+                } catch (error) {
+                  if (owners.failure === null && entry.phase === 'outcome')
+                    entry.settle('rolled-back')
+                  throw error
+                }
+              },
+              { mutationID: owned.mutationID },
+            ),
       )
     },
     resolve,

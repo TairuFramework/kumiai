@@ -1,6 +1,6 @@
 import { applyChanges, type ControlSnapshot } from '@kumiai/rpc'
 
-import { createUnlockedGroupStateStores, lockMemoryOperation } from './memory-group-state.js'
+import { createUnlockedGroupStateStores, sequenceMemoryOperation } from './memory-group-state.js'
 import {
   decodeStoredValue,
   encodeStoredValue,
@@ -420,41 +420,41 @@ export function createIncarnationStores(
   const { tx } = params
   return {
     state: {
-      load: lockMemoryOperation(tx, stores.state.load),
-      save: lockMemoryOperation(tx, stores.state.save),
+      load: sequenceMemoryOperation(tx, stores.state.load),
+      save: sequenceMemoryOperation(tx, stores.state.save, 'domain'),
     },
     control: {
-      load: lockMemoryOperation(tx, stores.control.load),
-      apply: lockMemoryOperation(tx, stores.control.apply),
+      load: sequenceMemoryOperation(tx, stores.control.load),
+      apply: sequenceMemoryOperation(tx, stores.control.apply, 'side'),
     },
     anchor: {
-      load: lockMemoryOperation(tx, stores.anchor.load),
-      save: lockMemoryOperation(tx, stores.anchor.save),
+      load: sequenceMemoryOperation(tx, stores.anchor.load),
+      save: sequenceMemoryOperation(tx, stores.anchor.save, 'side'),
     },
     pending: {
-      list: lockMemoryOperation(tx, stores.pending.list),
-      put: lockMemoryOperation(tx, stores.pending.put),
-      poison: lockMemoryOperation(tx, stores.pending.poison),
-      listPoison: lockMemoryOperation(tx, stores.pending.listPoison),
-      complete: lockMemoryOperation(tx, stores.pending.complete),
+      list: sequenceMemoryOperation(tx, stores.pending.list),
+      put: sequenceMemoryOperation(tx, stores.pending.put, 'side'),
+      poison: sequenceMemoryOperation(tx, stores.pending.poison, 'side'),
+      listPoison: sequenceMemoryOperation(tx, stores.pending.listPoison),
+      complete: sequenceMemoryOperation(tx, stores.pending.complete, 'side'),
     },
     cursor: {
-      load: lockMemoryOperation(tx, stores.cursor.load),
-      save: lockMemoryOperation(tx, stores.cursor.save),
+      load: sequenceMemoryOperation(tx, stores.cursor.load),
+      save: sequenceMemoryOperation(tx, stores.cursor.save, 'side'),
     },
     outbox: {
-      list: lockMemoryOperation(tx, stores.outbox.list),
-      put: lockMemoryOperation(tx, stores.outbox.put),
-      remove: lockMemoryOperation(tx, stores.outbox.remove),
-      clear: lockMemoryOperation(tx, stores.outbox.clear),
+      list: sequenceMemoryOperation(tx, stores.outbox.list),
+      put: sequenceMemoryOperation(tx, stores.outbox.put, 'side'),
+      remove: sequenceMemoryOperation(tx, stores.outbox.remove, 'side'),
+      clear: sequenceMemoryOperation(tx, stores.outbox.clear, 'side'),
     },
     meta: {
-      loadSettlement: lockMemoryOperation(tx, stores.meta.loadSettlement),
-      putSettlement: lockMemoryOperation(tx, stores.meta.putSettlement),
-      events: lockMemoryOperation(tx, stores.meta.events),
-      putEvents: lockMemoryOperation(tx, stores.meta.putEvents),
-      ackEvent: lockMemoryOperation(tx, stores.meta.ackEvent),
+      loadSettlement: sequenceMemoryOperation(tx, stores.meta.loadSettlement),
+      putSettlement: sequenceMemoryOperation(tx, stores.meta.putSettlement, 'side'),
+      events: sequenceMemoryOperation(tx, stores.meta.events),
+      putEvents: sequenceMemoryOperation(tx, stores.meta.putEvents, 'side'),
+      ackEvent: sequenceMemoryOperation(tx, stores.meta.ackEvent, 'side'),
     },
-    clearTransport: lockMemoryOperation(tx, stores.clearTransport),
+    clearTransport: sequenceMemoryOperation(tx, stores.clearTransport, 'side'),
   }
 }

@@ -263,11 +263,8 @@ export async function createStorageFixture(params: {
     ports: ports(),
     async reopenWithoutBarrier() {
       active()
-      // Fresh application ownership must not wait on the old factory's gate.
-      const restarted = {
-        ...db,
-        mutationGate: createMemoryTransaction({ rows: {} }).mutationGate,
-      }
+      // A database wrapper creates fresh application queues over the same pending backend.
+      const restarted = { ...db }
       fixture.ports = ports(params.effects, restarted)
       return fixture.ports
     },

@@ -5,11 +5,22 @@ import { memoryFaults } from '../src/memory-faults.js'
 import { createMemoryGroupPersistence } from '../src/memory-group-persistence.js'
 import { createGroupStateStores } from '../src/memory-group-state.js'
 import { createMemoryTransaction } from '../src/memory-transaction.js'
+import { createOwnerQueues, type OwnerQueues } from '../src/owner-queue.js'
 import { physicalRecordKey } from '../src/persistence-codec.js'
 import type { GroupStores, MemoryDatabase, MemoryTransaction } from '../src/persistence-types.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
 import { createStorageFixture } from './fixtures/storage-persistence.js'
 import { installSeed, makeStorageSeed, nextChange } from './fixtures/storage-seed.js'
+
+const queues = new WeakMap<object, OwnerQueues>()
+function ownerQueues(db: object): OwnerQueues {
+  let owners = queues.get(db)
+  if (owners === undefined) {
+    owners = createOwnerQueues()
+    queues.set(db, owners)
+  }
+  return owners
+}
 
 const groupID = 'group-A'
 const key = { groupID, incarnation: 1 }
@@ -19,7 +30,12 @@ for (const mode of ['real-mls', 'double'] as const) {
   describe(`final review -- ${mode}`, () => {
     async function setup() {
       const db = createMemoryTransaction({ rows: {} })
-      const groups = createMemoryGroupPersistence({ db, atRest, providerID: 'memory' })
+      const groups = createMemoryGroupPersistence({
+        owners: ownerQueues(db),
+        db,
+        atRest,
+        providerID: 'memory',
+      })
       const seed = await makeStorageSeed({ id: groupID, incarnation: 1, epoch: 3, mode })
       await installSeed(groups, seed, 'seed')
       return { db, groups, seed }
@@ -35,6 +51,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           const before = db.snapshot()
           const mutationID = `hook-${domain}-${access}`
           const guarded = createMemoryGroupPersistence({
+            owners: ownerQueues(db),
             db,
             atRest,
             providerID: 'memory',
@@ -91,8 +108,8 @@ for (const mode of ['real-mls', 'double'] as const) {
               ])
             }),
           ).rejects.toMatchObject({
-            name: 'GroupStateConflictError',
-            message: 'Group domain writes expired at finalisation',
+            name: 'PersistencePhaseError',
+            message: 'Cannot write domain in effects',
           })
           expect(db.snapshot()).toEqual(before)
         }
@@ -107,6 +124,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       fresh.trust.genesisAnchor = seed.trust.genesisAnchor
       fresh.trust.spentEpochAuthenticators.push(...seed.trust.spentEpochAuthenticators)
       const guarded = createMemoryGroupPersistence({
+        owners: ownerQueues(db),
         db,
         atRest,
         providerID: 'memory',
@@ -130,8 +148,8 @@ for (const mode of ['real-mls', 'double'] as const) {
           await stores.trust.save(fresh.trust)
         }),
       ).rejects.toMatchObject({
-        name: 'GroupStateConflictError',
-        message: 'Group domain writes expired at finalisation',
+        name: 'PersistencePhaseError',
+        message: 'Cannot write domain in effects',
       })
       expect(db.snapshot()).toEqual(before)
     }, 5000)
@@ -150,6 +168,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         rows.state?.set(address, new Uint8Array(ciphertext.length))
         const restored = createMemoryTransaction({ rows })
         const recovered = createMemoryGroupPersistence({
+          owners: createOwnerQueues(),
           db: restored,
           atRest,
           providerID: 'memory',
@@ -205,7 +224,12 @@ for (const mode of ['real-mls', 'double'] as const) {
           return await atRest.seal(bytes, aad)
         },
       }
-      const guarded = createMemoryGroupPersistence({ db, atRest: codec, providerID: 'memory' })
+      const guarded = createMemoryGroupPersistence({
+        owners: ownerQueues(db),
+        db,
+        atRest: codec,
+        providerID: 'memory',
+      })
       await guarded.transition(
         await nextChange(groups, groupID, 'caught-metadata-failure'),
         async (stores) => {
@@ -240,7 +264,12 @@ for (const mode of ['real-mls', 'double'] as const) {
           })
         },
       }
-      const groups = createMemoryGroupPersistence({ db, atRest, providerID: 'memory' })
+      const groups = createMemoryGroupPersistence({
+        owners: ownerQueues(db),
+        db,
+        atRest,
+        providerID: 'memory',
+      })
       const change = await nextChange(groups, groupID, 'proof-fence')
       memoryFaults(backend).commitThenReject()
       const order: Array<string> = []
@@ -255,16 +284,21 @@ for (const mode of ['real-mls', 'double'] as const) {
           order.push('writer')
         })
       await waiting.promise
-      const other = createMemoryGroupPersistence({ db, atRest, providerID: 'memory' })
+      const other = createMemoryGroupPersistence({
+        owners: ownerQueues(db),
+        db,
+        atRest,
+        providerID: 'memory',
+      })
       const reads = [
         groups.loadState(key),
         groups.load(groupID),
         other.loadTrust(groupID),
         other.ports(key).anchor.load(),
         other.ports(key).cursor.load('topic-secret'),
-      ].map((read) =>
+      ].map((read, index) =>
         read.then((value) => {
-          order.push('read')
+          order.push(`read-${index}`)
           expect(order).toContain('hook')
           return value
         }),
@@ -286,6 +320,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       expect(values).toBeInstanceOf(Array)
       expect((values as Array<unknown>)[0]).toMatchObject({ version: 2 })
       expect(order.slice(0, 2)).toEqual(['hook', 'writer'])
+      expect(order.slice(2)).toEqual(['read-0', 'read-1', 'read-2', 'read-3', 'read-4'])
     }, 5000)
 
     test('refuses spent incarnation-one reinstall after partial loss retaining trust', async () => {

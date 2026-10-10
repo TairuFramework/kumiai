@@ -121,7 +121,6 @@ type ActualContracts = [
   Actual.AtRestCodec,
   Actual.TransactionHookSettlement,
   Actual.OutcomeAwareTransactionOptions,
-  Actual.GroupMutationGate,
   Actual.MemoryStoreRows,
   Actual.MemoryTransaction,
   Actual.MemoryDatabase,
@@ -180,7 +179,6 @@ type MirrorContracts = [
   Mirror.ConformanceAtRestCodec,
   Mirror.ConformanceTransactionHookSettlement,
   Mirror.ConformanceOutcomeAwareTransactionOptions,
-  Mirror.ConformanceGroupMutationGate,
   Mirror.ConformanceMemoryStoreRows,
   Mirror.ConformanceMemoryTransaction,
   Mirror.ConformanceMemoryDatabase,
@@ -526,10 +524,11 @@ for (const mode of ['real-mls', 'double'] as const) {
     async (finish) => {
       const fixture = await createStorageFixture({ id: 'group-B', mode })
       const donor = await createStorageFixture({ id: 'group-A', mode })
+      const groups = fixture.ports.device.groups
+      await groups.load('group-A')
       const fault = fixture.rejectCommitPending()
       try {
         const seed = await storageSeed(donor.ports.device.groups)
-        const groups = fixture.ports.device.groups
         const install = groups
           .transition(
             { groupID: 'group-A', mutationID: 'pending-reopen', expected: null },

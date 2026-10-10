@@ -6,7 +6,9 @@ import { createMemoryGroupPersistence } from '../src/memory-group-persistence.js
 import { createGroupStateStores } from '../src/memory-group-state.js'
 import { createIncarnationStores } from '../src/memory-incarnation-stores.js'
 import { createMemoryTransaction } from '../src/memory-transaction.js'
+import { createOwnerQueues, type OwnerQueues } from '../src/owner-queue.js'
 import { physicalRecordKey, sealRecord } from '../src/persistence-codec.js'
+import { GroupStateConflictError } from '../src/persistence-errors.js'
 import type {
   AppOutboxEntry,
   AppSettlementObligation,
@@ -16,6 +18,16 @@ import type {
 } from '../src/persistence-types.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
 import { installSeed, makeStorageSeed, nextChange } from './fixtures/storage-seed.js'
+
+const queues = new WeakMap<object, OwnerQueues>()
+function ownerQueues(db: object): OwnerQueues {
+  let owners = queues.get(db)
+  if (owners === undefined) {
+    owners = createOwnerQueues()
+    queues.set(db, owners)
+  }
+  return owners
+}
 
 const groupID = 'group-A'
 const topicID = 'topic-secret'
@@ -62,11 +74,211 @@ const applied: AppliedCommit = {
   removed: false,
 }
 
+test('first entry barriers exactly once per group scope, including reads', async () => {
+  const db = createMemoryTransaction({ rows: {} })
+  const owners = createOwnerQueues()
+  const groups = createMemoryGroupPersistence({ owners, db, atRest, providerID: 'memory' })
+  const barrier = vi.spyOn(db, 'completionBarrier')
+  expect(await groups.load(groupID)).toBeNull()
+  expect(await groups.loadState(key)).toBeNull()
+  expect(await groups.load('group-B')).toBeNull()
+  expect(await groups.loadTrust('group-B')).toBeNull()
+  expect(barrier.mock.calls.map(([scope]) => scope)).toEqual([
+    { groupID, devicePackages: false },
+    { groupID: 'group-B', devicePackages: false },
+  ])
+})
+
+test('empty list refuses root reentrancy before reading the snapshot', async () => {
+  const db = createMemoryTransaction({ rows: {} })
+  const owners = createOwnerQueues()
+  const groups = createMemoryGroupPersistence({ owners, db, atRest, providerID: 'memory' })
+  const snapshot = vi.spyOn(db, 'snapshot')
+  await owners.run('read', { groupID, ownerDID: null }, async () => {
+    await expect(groups.list()).rejects.toMatchObject({ name: 'ReentrantOwnershipError' })
+  })
+  expect(snapshot).not.toHaveBeenCalled()
+})
+
+test('empty list refuses after factory fail-stop before reading the snapshot', async () => {
+  const db = createMemoryTransaction({ rows: {} })
+  const owners = createOwnerQueues()
+  const groups = createMemoryGroupPersistence({ owners, db, atRest, providerID: 'memory' })
+  const snapshot = vi.spyOn(db, 'snapshot')
+  const conflict = new GroupStateConflictError('Foreign owner')
+  owners.failStop(conflict)
+  await expect(groups.list()).rejects.toBe(conflict)
+  expect(snapshot).not.toHaveBeenCalled()
+})
+
+test('fallback resolution fail-stops the factory on an unreadable ownership marker', async () => {
+  const db = createMemoryTransaction({ rows: {} })
+  const owners = createOwnerQueues()
+  const groups = createMemoryGroupPersistence({ owners, db, atRest, providerID: 'memory' })
+  await groups.load(groupID)
+  memoryFaults(db).forceCommittedRow('group-owner', JSON.stringify([groupID, null, 'current']), {
+    mutationID: 'foreign',
+    revision: -1,
+  })
+  await expect(groups.resolve(groupID, 'unknown')).rejects.toMatchObject({
+    name: 'GroupStateConflictError',
+  })
+  expect(owners.failure).toMatchObject({ name: 'GroupStateConflictError' })
+  const transact = vi.spyOn(db, 'transact')
+  await expect(groups.load('group-B')).rejects.toBe(owners.failure)
+  expect(transact).not.toHaveBeenCalled()
+})
+
+test.each(['load', 'resolve'] as const)(
+  'fail-stop during %s preparation opens no marker transaction',
+  async (operation) => {
+    const backend = createMemoryTransaction({ rows: {} })
+    const reached = Promise.withResolvers<void>()
+    const resume = Promise.withResolvers<void>()
+    const db: MemoryDatabase = {
+      ...backend,
+      async completionBarrier(scope) {
+        await backend.completionBarrier(scope)
+        reached.resolve()
+        await resume.promise
+      },
+    }
+    const owners = createOwnerQueues()
+    const groups = createMemoryGroupPersistence({ owners, db, atRest, providerID: 'memory' })
+    const transact = vi.spyOn(db, 'transact')
+    const reading = (
+      operation === 'load' ? groups.load(groupID) : groups.resolve(groupID, 'M')
+    ).catch((error: unknown) => error)
+    await reached.promise
+    const conflict = new GroupStateConflictError('Foreign owner')
+    owners.failStop(conflict)
+    expect(await reading).toBe(conflict)
+    resume.resolve()
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(transact).not.toHaveBeenCalled()
+  },
+)
+
+test('list queues one read per committed group sequentially behind pending proof', async () => {
+  const db = createMemoryTransaction({ rows: {} })
+  const owners = createOwnerQueues()
+  const groups = createMemoryGroupPersistence({ owners, db, atRest, providerID: 'memory' })
+  const seed = await makeStorageSeed({ id: groupID, incarnation: 1, epoch: 3, mode: 'double' })
+  const other = await makeStorageSeed({ id: 'group-B', incarnation: 1, epoch: 3, mode: 'double' })
+  await installSeed(groups, seed, 'seed-A')
+  await installSeed(groups, other, 'seed-B')
+  expect(await groups.load('group-C')).toBeNull()
+  const change = await nextChange(groups, groupID, 'pending-list')
+  const fault = memoryFaults(db).rejectCommitPending()
+  const write = groups.transition(change, async () => {})
+  await fault.rejected
+  await fault.barrierWaiting
+  const run = vi.spyOn(owners, 'run')
+  let returned = false
+  const listing = groups.list().then((values) => {
+    returned = true
+    return values
+  })
+  try {
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(returned).toBe(false)
+    expect(run.mock.calls.map(([kind, scopes]) => [kind, scopes.groupID])).toEqual([
+      ['read', groupID],
+    ])
+    expect((await groups.load('group-B'))?.mutationID).toBe('seed-B')
+  } finally {
+    await fault.finish('commit')
+    await write
+  }
+  expect((await listing).map((value) => [value.groupID, value.mutationID])).toEqual([
+    [groupID, 'pending-list'],
+    ['group-B', 'seed-B'],
+  ])
+  expect(run.mock.calls.map(([kind, scopes]) => [kind, scopes.groupID])).toEqual([
+    ['read', groupID],
+    ['read', 'group-B'],
+    ['read', 'group-B'],
+  ])
+})
+
+test('a retrying transition keeps its group slot across two provider transactions', async () => {
+  const db = createMemoryTransaction({ rows: {} })
+  const owners = createOwnerQueues()
+  const groups = createMemoryGroupPersistence({ owners, db, atRest, providerID: 'memory' })
+  const rolledBack = Promise.withResolvers<void>()
+  const retry = Promise.withResolvers<void>()
+  const write = owners.run('transition', { groupID, ownerDID: null }, async (entry) => {
+    await entry.enter('prepare')
+    await entry.enter('work')
+    memoryFaults(db).failNext('before-commit')
+    await expect(db.transact({ groupID, devicePackages: false }, async () => {})).rejects.toThrow(
+      'before-commit',
+    )
+    await entry.enter('outcome')
+    rolledBack.resolve()
+    await retry.promise
+    await entry.enter('work')
+    await db.transact({ groupID, devicePackages: false }, async () => {})
+    await entry.enter('outcome')
+    entry.settle('committed')
+  })
+  await rolledBack.promise
+  let loaded = false
+  const read = groups.loadState(key).then((value) => {
+    loaded = true
+    return value
+  })
+  try {
+    await new Promise<void>((done) => setTimeout(done, 0))
+    expect(loaded).toBe(false)
+  } finally {
+    retry.resolve()
+    await write
+    await read
+  }
+})
+
+test('barrier creates a neutral owner marker and proves initially absent rollback', async () => {
+  const db = createMemoryTransaction({ rows: {} })
+  const owners = createOwnerQueues()
+  const groups = createMemoryGroupPersistence({ owners, db, atRest, providerID: 'memory' })
+  expect(await groups.load(groupID)).toBeNull()
+  const ownerKey = physicalRecordKey({
+    groupID,
+    incarnation: null,
+    namespace: 'group-owner',
+    recordID: 'current',
+  })
+  expect(db.snapshot()['group-owner']?.get(ownerKey)).toEqual({ mutationID: null, revision: 0 })
+  const seed = await makeStorageSeed({ id: groupID, incarnation: 1, epoch: 3, mode: 'double' })
+  const change = await nextChange(groups, groupID, 'absent-rollback')
+  const fault = memoryFaults(db).rejectCommitPending()
+  const write = groups
+    .transition(change, async (stores) => {
+      await stores.lifetime.save({ ...seed.lifetime, mutationID: change.mutationID })
+      await stores.incarnation(1).state.save(seed.state)
+      await stores.trust.save(seed.trust)
+    })
+    .catch((error: unknown) => error)
+  await fault.rejected
+  await fault.barrierWaiting
+  const proof = groups.resolve(groupID, 'absent-rollback')
+  await fault.finish('rollback')
+  expect(await proof).toBe('rolled-back')
+  expect(await write).toMatchObject({ name: 'StorageOutcomeUnknownError' })
+  expect(await groups.load(groupID)).toBeNull()
+})
+
 for (const mode of ['real-mls', 'double'] as const) {
   describe(mode, () => {
     async function setup() {
       const db = createMemoryTransaction({ rows: { 'host-status': new Map() } })
-      const groups = createMemoryGroupPersistence({ db, atRest, providerID: 'memory' })
+      const groups = createMemoryGroupPersistence({
+        owners: ownerQueues(db),
+        db,
+        atRest,
+        providerID: 'memory',
+      })
       const seed = await makeStorageSeed({ id: groupID, incarnation: 1, epoch: 3, mode })
       await installSeed(groups, seed, 'seed')
       return { db, groups, seed }
@@ -270,6 +482,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const released = Promise.withResolvers<void>()
       let pause = true
       const paused = createMemoryGroupPersistence({
+        owners: ownerQueues(db),
         db,
         providerID: 'memory',
         atRest: {
@@ -369,6 +582,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const observed: Array<typeof seed.lifetime | null> = []
       const committed: Array<string> = []
       const effects = createMemoryGroupPersistence({
+        owners: ownerQueues(db),
         db,
         atRest,
         providerID: 'memory',
@@ -410,6 +624,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       )
       const committed: Array<typeof key> = []
       const effects = createMemoryGroupPersistence({
+        owners: ownerQueues(db),
         db,
         atRest,
         providerID: 'memory',
@@ -449,6 +664,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const { db, groups } = await setup()
       const effectsHooks: Array<string> = []
       const effects = createMemoryGroupPersistence({
+        owners: ownerQueues(db),
         db,
         atRest,
         providerID: 'memory',
@@ -508,6 +724,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
       expect(db.snapshot()['host-status']?.size).toBe(1)
       const reopened = createMemoryGroupPersistence({
+        owners: createOwnerQueues(),
         db: createMemoryTransaction({ rows: db.snapshot() }),
         atRest,
         providerID: 'memory',
@@ -621,6 +838,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const { db, groups, seed } = await setup()
       const before = db.snapshot()
       const failing = createMemoryGroupPersistence({
+        owners: ownerQueues(db),
         db,
         providerID: 'memory',
         atRest: {
@@ -654,6 +872,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const { db, seed } = await setup()
       const statuses: Array<string> = []
       const withEffects = createMemoryGroupPersistence({
+        owners: ownerQueues(db),
         db,
         atRest,
         providerID: 'memory',
@@ -873,7 +1092,12 @@ for (const mode of ['real-mls', 'double'] as const) {
       ).rejects.toThrow('already spent')
       expect(db.snapshot()).toEqual(before)
       expect(() =>
-        createMemoryGroupPersistence({ db, atRest, providerID: 'other-provider' }),
+        createMemoryGroupPersistence({
+          owners: ownerQueues(db),
+          db,
+          atRest,
+          providerID: 'other-provider',
+        }),
       ).toThrow('provider mismatch')
     })
 
@@ -1027,7 +1251,12 @@ for (const mode of ['real-mls', 'double'] as const) {
         new Uint8Array([0]),
       )
       const broken = createMemoryTransaction({ rows })
-      const groups = createMemoryGroupPersistence({ db: broken, atRest, providerID: 'memory' })
+      const groups = createMemoryGroupPersistence({
+        owners: createOwnerQueues(),
+        db: broken,
+        atRest,
+        providerID: 'memory',
+      })
       await groups.ports(key).control.apply({ putOutcomes: [outcome] }, 'safety-control')
       const change = await nextChange(groups, groupID, 'safety-event')
       const halt: PersistenceEvent = {
@@ -1083,6 +1312,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const absentTrust = db.snapshot()
       absentTrust.trust?.clear()
       const missing = createMemoryGroupPersistence({
+        owners: createOwnerQueues(),
         db: createMemoryTransaction({ rows: absentTrust }),
         atRest,
         providerID: 'memory',
@@ -1091,6 +1321,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const absentState = db.snapshot()
       absentState.state?.clear()
       const missingState = createMemoryGroupPersistence({
+        owners: createOwnerQueues(),
         db: createMemoryTransaction({ rows: absentState }),
         atRest,
         providerID: 'memory',
@@ -1157,7 +1388,12 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect(returned).toBe(false)
         expect(hooks).toEqual([])
         const competing = groups.ports(key).cursor.save(topicID, '20')
-        const other = createMemoryGroupPersistence({ db, atRest, providerID: 'memory' })
+        const other = createMemoryGroupPersistence({
+          owners: ownerQueues(db),
+          db,
+          atRest,
+          providerID: 'memory',
+        })
         expect(await other.load('group-B')).toBeNull()
         await fault.finish(finish)
         if (finish === 'commit') {
@@ -1206,7 +1442,12 @@ test('retries completion-barrier and proof-read failures outside storage without
       })
     },
   }
-  const groups = createMemoryGroupPersistence({ db, atRest, providerID: 'memory' })
+  const groups = createMemoryGroupPersistence({
+    owners: ownerQueues(db),
+    db,
+    atRest,
+    providerID: 'memory',
+  })
   const seed = await makeStorageSeed({ id: groupID, incarnation: 1, epoch: 3, mode: 'double' })
   await installSeed(groups, seed, 'seed')
   const change = await nextChange(groups, groupID, 'retry-proof')

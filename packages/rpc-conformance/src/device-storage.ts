@@ -521,6 +521,7 @@ export function testDeviceStorageConformance<TTx extends ConformanceGroupTransac
           )
           expect(receiptDone).toBe(false)
           expect(hooks).toEqual([])
+          const groupResolution = device.groups.resolve(groupID, 'late-join')
           fixture.failNext('status-read')
           await fault.finish(finish)
           expect(await operation).toEqual(
@@ -537,9 +538,7 @@ export function testDeviceStorageConformance<TTx extends ConformanceGroupTransac
           expect(await device.resolve('late-join')).toBe(
             finish === 'commit' ? 'committed' : 'rolled-back',
           )
-          expect(await device.groups.resolve(groupID, 'late-join')).toBe(
-            finish === 'commit' ? 'committed' : 'rolled-back',
-          )
+          expect(await groupResolution).toBe(finish === 'commit' ? 'committed' : 'rolled-back')
           expect(hooks).toHaveLength(2)
           expect(await fixture.inspectSideRow('effect-1')).toEqual(
             finish === 'commit' ? utf8('late effect') : null,

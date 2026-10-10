@@ -260,11 +260,6 @@ export type ConformanceOutcomeAwareTransactionOptions = {
   onUnknown(settlement: ConformanceTransactionHookSettlement): void
 }
 
-export type ConformanceGroupMutationGate = {
-  run<TValue>(groupID: string, work: () => Promise<TValue>): Promise<TValue>
-  holdUntil(groupID: string, completion: Promise<void>): void
-}
-
 export type ConformanceMemoryStoreRows = Record<string, Map<string, unknown>>
 
 export type ConformanceMemoryTransaction = ConformanceGroupTransaction & {
@@ -272,7 +267,6 @@ export type ConformanceMemoryTransaction = ConformanceGroupTransaction & {
 }
 
 export type ConformanceMemoryDatabase = {
-  mutationGate: ConformanceGroupMutationGate
   transact<TValue>(
     scope: { groupID: string | null; devicePackages: boolean },
     fn: (tx: ConformanceMemoryTransaction) => Promise<TValue>,

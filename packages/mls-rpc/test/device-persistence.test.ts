@@ -8,6 +8,7 @@ import {
 import type { KeyPackageRecord, LastResortRecord } from '@kumiai/mls-hub'
 import { describe, expect, test, vi } from 'vitest'
 
+import { createOwnerQueues, type OwnerQueues } from '../src/owner-queue.js'
 import { physicalRecordKey, sealRecord } from '../src/persistence-codec.js'
 import type {
   DevicePersistence,
@@ -32,6 +33,16 @@ import {
   type StorageSeed,
 } from './fixtures/storage-seed.js'
 
+const queues = new WeakMap<object, OwnerQueues>()
+function ownerQueues(db: object): OwnerQueues {
+  let owners = queues.get(db)
+  if (owners === undefined) {
+    owners = createOwnerQueues()
+    queues.set(db, owners)
+  }
+  return owners
+}
+
 const groupID = 'group-A'
 const sourceID = 'source-1'
 const providerID = 'storage-provider'
@@ -41,6 +52,39 @@ const restoreWork: RestoreWork = {
   stage: 'invalidate',
   remainingGroups: [groupID],
 }
+
+test('device groups reuse the ownership queue already bound to the database', async () => {
+  const db = createMemoryTransaction({ rows: {} })
+  const owners = createOwnerQueues()
+  const groups = createMemoryGroupPersistence({ db, owners, atRest, providerID })
+  const device = createMemoryDevicePersistence({
+    db,
+    atRest,
+    providerID,
+    ownerDID: 'did:example:owner',
+  })
+  const held = Promise.withResolvers<void>()
+  const entered = Promise.withResolvers<void>()
+  const owner = owners.run('read', { groupID, ownerDID: null }, async () => {
+    entered.resolve()
+    await held.promise
+  })
+  await entered.promise
+  let returned = false
+  const reading = device.groups.load(groupID).then((value) => {
+    returned = true
+    return value
+  })
+  try {
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(returned).toBe(false)
+  } finally {
+    held.resolve()
+    await owner
+  }
+  expect(await reading).toBeNull()
+  expect(await groups.load(groupID)).toBeNull()
+})
 
 function packageKey(ownerDID: string, ref: string, source = sourceID): string {
   return physicalRecordKey({
@@ -468,7 +512,12 @@ for (const mode of ['real-mls', 'double'] as const) {
         createMemoryDevicePersistence({ db, atRest, providerID: 'foreign-provider', ownerDID }),
       ).toThrow('provider')
       expect(() =>
-        createMemoryGroupPersistence({ db, atRest, providerID: 'foreign-provider' }),
+        createMemoryGroupPersistence({
+          owners: ownerQueues(db),
+          db,
+          atRest,
+          providerID: 'foreign-provider',
+        }),
       ).toThrow('provider')
       await expect(
         device.transition(

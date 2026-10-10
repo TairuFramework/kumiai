@@ -5,7 +5,7 @@ import type {
   LastResortStore,
 } from '@kumiai/mls-hub'
 
-import { lockMemoryOperation, withMemoryTransactionLock } from './memory-group-state.js'
+import { sequenceMemoryOperation, sequenceMemoryTransaction } from './memory-group-state.js'
 import { copyStoredValue } from './memory-incarnation-stores.js'
 import { openRecord, physicalRecordKey, sealRecord } from './persistence-codec.js'
 import { GroupStateConflictError } from './persistence-errors.js'
@@ -54,7 +54,7 @@ export function memoryDeviceTable<TValue>(params: DeviceTableParams) {
   return {
     async withLock<TResult>(work: () => Promise<TResult>): Promise<TResult> {
       map()
-      return await withMemoryTransactionLock(tx, work)
+      return await sequenceMemoryTransaction(tx, work)
     },
     async load(recordID: string): Promise<TValue | null> {
       const location = address(recordID)
@@ -215,11 +215,11 @@ export function createTransactionPackageStores(params: {
       receipt,
     }
     return {
-      list: lockMemoryOperation(tx, raw.list),
-      put: lockMemoryOperation(tx, raw.put),
-      delete: lockMemoryOperation(tx, raw.delete),
-      consume: lockMemoryOperation(tx, raw.consume),
-      receipt: lockMemoryOperation(tx, raw.receipt),
+      list: sequenceMemoryOperation(tx, raw.list),
+      put: sequenceMemoryOperation(tx, raw.put),
+      delete: sequenceMemoryOperation(tx, raw.delete),
+      consume: sequenceMemoryOperation(tx, raw.consume),
+      receipt: sequenceMemoryOperation(tx, raw.receipt),
     }
   }
   return {

@@ -1,3 +1,8 @@
+/// <reference types="node" />
+
+import { AsyncLocalStorage } from 'node:async_hooks'
+
+import type { OwnerEntry, OwnerQueues, WriteTarget } from './owner-queue.js'
 import {
   decodeStoredValue,
   encodeStoredValue,
@@ -6,7 +11,7 @@ import {
   type StoredAddress,
   sealRecord,
 } from './persistence-codec.js'
-import { GroupStateConflictError } from './persistence-errors.js'
+import { GroupStateConflictError, PersistencePhaseError } from './persistence-errors.js'
 import { assertStateTransition, assertTrustTransition } from './persistence-guards.js'
 import type {
   AtRestCodec,
@@ -28,26 +33,52 @@ export type GroupStateStores = Pick<GroupStores<MemoryTransaction>, 'tx' | 'life
   }
 }
 
-// Provider-bound transaction copies share the same rows view.
-const finalisingTransactions = new WeakSet<MemoryTransaction['rows']>()
-
-export function beginMemoryGroupFinalisation(tx: MemoryTransaction): void {
-  finalisingTransactions.add(tx.rows)
-}
-
-export function assertMemoryGroupMutable(tx: MemoryTransaction): void {
-  if (finalisingTransactions.has(tx.rows))
-    throw new GroupStateConflictError('Group domain writes expired at finalisation')
-}
-
+// Aliases and independently constructed stores share their provider view's entry.
+const transactionEntries = new WeakMap<
+  MemoryTransaction['rows'],
+  { entry: OwnerEntry; owners: OwnerQueues }
+>()
+const coordinatorContext = new AsyncLocalStorage<OwnerEntry>()
 const bootstrapTrusts = new WeakMap<MemoryTransaction['rows'], Set<string>>()
+// Unbound device and standalone provider stores retain sequencing until device migration.
 const transactionLocks = new WeakMap<MemoryTransaction['rows'], Promise<void>>()
 
-export async function withMemoryTransactionLock<TValue>(
+export function bindMemoryOwner(
+  tx: MemoryTransaction,
+  entry: OwnerEntry,
+  owners: OwnerQueues,
+): void {
+  transactionEntries.set(tx.rows, { entry, owners })
+}
+
+export function memoryTransactionEntry(rows: MemoryTransaction['rows']): OwnerEntry | undefined {
+  return transactionEntries.get(rows)?.entry
+}
+
+export function assertMemoryAccess(rows: MemoryTransaction['rows']): void {
+  const binding = transactionEntries.get(rows)
+  if (binding === undefined) return
+  if (binding.owners.failure !== null) throw binding.owners.failure
+  if (!['work', 'finalise', 'effects', 'account'].includes(binding.entry.phase))
+    throw new PersistencePhaseError('Transaction capability expired')
+}
+
+export function assertMemoryWrite(tx: MemoryTransaction, target: WriteTarget): void {
+  const entry = transactionEntries.get(tx.rows)?.entry
+  if (entry !== undefined)
+    entry.assertWrite(coordinatorContext.getStore() === entry ? 'coordinator' : target)
+}
+
+export async function sequenceMemoryTransaction<TValue>(
   tx: MemoryTransaction,
   work: () => Promise<TValue>,
 ): Promise<TValue> {
-  // Refuse expired callers before waiting for unfinished host work.
+  const entry = transactionEntries.get(tx.rows)?.entry
+  if (entry !== undefined) {
+    assertMemoryAccess(tx.rows)
+    return await entry.sequence(work)
+  }
+  // Standalone provider views expire before waiting for unfinished host work.
   tx.rows.lifetime
   const previous = transactionLocks.get(tx.rows)
   const { promise, resolve } = Promise.withResolvers<void>()
@@ -62,15 +93,29 @@ export async function withMemoryTransactionLock<TValue>(
   }
 }
 
-export function lockMemoryOperation<TArgs extends Array<unknown>, TValue>(
+export function sequenceMemoryOperation<TArgs extends Array<unknown>, TValue>(
   tx: MemoryTransaction,
   operation: (...args: TArgs) => Promise<TValue>,
+  target?: WriteTarget,
 ): (...args: TArgs) => Promise<TValue> {
   return async (...args) => {
     // Queued operations own their arguments before yielding to another caller.
     const owned = decodeStoredValue(encodeStoredValue(args)) as TArgs
-    return await withMemoryTransactionLock(tx, () => operation(...owned))
+    return await sequenceMemoryTransaction(tx, () => {
+      if (target !== undefined) assertMemoryWrite(tx, target)
+      return operation(...owned)
+    })
   }
+}
+
+export function sequenceMemoryCoordinator<TValue>(
+  entry: OwnerEntry,
+  work: () => Promise<TValue>,
+): Promise<TValue> {
+  return entry.sequence(() => {
+    entry.assertWrite('coordinator')
+    return coordinatorContext.run(entry, work)
+  })
 }
 
 function compareBytes(left: Uint8Array, right: Uint8Array): number {
@@ -93,12 +138,11 @@ function copyTrust(trust: GroupRecoveryTrust): GroupRecoveryTrust {
   }
 }
 
-// Internal helpers must not reacquire the transaction lock.
+// Internal helpers run inside the entry sequencer.
 export function createUnlockedGroupStateStores(params: {
   tx: MemoryTransaction
   groupID: string
   atRest: AtRestCodec
-  coordinatorWrites?: boolean
 }): GroupStateStores {
   const { tx, groupID, atRest } = params
   if (tx.groupID !== groupID) throw new GroupStateConflictError('Transaction group mismatch')
@@ -110,7 +154,7 @@ export function createUnlockedGroupStateStores(params: {
     const address: StoredAddress = { groupID, incarnation, namespace, recordID }
     const key = physicalRecordKey(address)
     async function prepare(value: TValue): Promise<Uint8Array> {
-      if (!params.coordinatorWrites) assertMemoryGroupMutable(tx)
+      assertMemoryWrite(tx, 'domain')
       if (tx.rows[namespace] === undefined)
         throw new GroupStateConflictError('Missing transaction namespace')
       if (value.groupID !== groupID) throw new GroupStateConflictError('Row group mismatch')
@@ -152,7 +196,7 @@ export function createUnlockedGroupStateStores(params: {
   const trust: GroupStateStores['trust'] = {
     load: loadTrust,
     async save(value) {
-      if (!params.coordinatorWrites) assertMemoryGroupMutable(tx)
+      assertMemoryWrite(tx, 'domain')
       const previous = await loadTrust()
       assertTrustTransition(previous, value)
       await trustRow.save(copyTrust(value))
@@ -202,7 +246,7 @@ export function createUnlockedGroupStateStores(params: {
           return value
         },
         async save(value) {
-          if (!params.coordinatorWrites) assertMemoryGroupMutable(tx)
+          assertMemoryWrite(tx, 'domain')
           if (value.incarnation !== incarnation)
             throw new GroupStateConflictError('Row incarnation mismatch')
           const metadata = stateMetadata(incarnation)
@@ -261,23 +305,23 @@ export function createGroupStateStores(
     stateMetadata(incarnation) {
       const metadata = stores.stateMetadata(incarnation)
       return {
-        load: lockMemoryOperation(tx, metadata.load),
-        save: lockMemoryOperation(tx, metadata.save),
+        load: sequenceMemoryOperation(tx, metadata.load),
+        save: sequenceMemoryOperation(tx, metadata.save, 'domain'),
       }
     },
     lifetime: {
-      load: lockMemoryOperation(tx, stores.lifetime.load),
-      save: lockMemoryOperation(tx, stores.lifetime.save),
+      load: sequenceMemoryOperation(tx, stores.lifetime.load),
+      save: sequenceMemoryOperation(tx, stores.lifetime.save, 'domain'),
     },
     trust: {
-      load: lockMemoryOperation(tx, stores.trust.load),
-      save: lockMemoryOperation(tx, stores.trust.save),
+      load: sequenceMemoryOperation(tx, stores.trust.load),
+      save: sequenceMemoryOperation(tx, stores.trust.save, 'domain'),
     },
     state(incarnation) {
       const state = stores.state(incarnation)
       return {
-        load: lockMemoryOperation(tx, state.load),
-        save: lockMemoryOperation(tx, state.save),
+        load: sequenceMemoryOperation(tx, state.load),
+        save: sequenceMemoryOperation(tx, state.save, 'domain'),
       }
     },
   }

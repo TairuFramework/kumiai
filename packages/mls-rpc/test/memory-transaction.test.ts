@@ -1,5 +1,6 @@
 import { expect, test, vi } from 'vitest'
 
+import { createOwnerQueues } from '../src/owner-queue.js'
 import type {
   MemoryStoreRows,
   MemoryTransaction,
@@ -622,58 +623,86 @@ test.each(['commit', 'rollback'] as const)(
   },
 )
 
-test('keeps coordinator gates until hook settlement after backend completion', async () => {
+test('keeps owner slots until hook settlement after backend completion', async () => {
   const db = createMemoryTransaction({ rows: {} })
+  const owners = createOwnerQueues()
   const fault = memoryFaults(db).rejectCommitPending()
   const hooks: Array<string> = []
+  const proven = deferred()
   let settlement!: TransactionHookSettlement
   await expect(
-    db.mutationGate.run('group-A', () =>
-      db.transact(
-        scope,
-        async (tx) => {
-          tx.onCommit(() => {
-            hooks.push('commit')
-          })
-          namespace(tx.rows, 'state').set(key, sealedA)
-        },
-        {
-          onUnknown(value) {
-            settlement = value
+    owners.run(
+      'transition',
+      { groupID: 'group-A', ownerDID: null },
+      async (entry) => {
+        await entry.enter('prepare')
+        await entry.enter('work')
+        entry.onCommit(() => {
+          hooks.push('commit')
+        })
+        await db.transact(
+          scope,
+          async (tx) => {
+            namespace(tx.rows, 'state').set(key, sealedA)
+            await entry.enter('outcome')
           },
-        },
-      ),
+          {
+            onUnknown(value) {
+              settlement = value
+              void entry.retain(async () => {
+                await db.completionBarrier(scope)
+                await proven.promise
+                return 'committed'
+              })
+            },
+          },
+        )
+      },
+      { mutationID: 'retained' },
     ),
   ).rejects.toMatchObject({ name: 'StorageOutcomeUnknownError' })
   let entered = false
-  const queued = db.mutationGate.run('group-A', async () => {
+  const queued = owners.run('read', { groupID: 'group-A', ownerDID: null }, async () => {
     entered = true
     expect(hooks).toEqual(['commit'])
   })
   const barrier = db.completionBarrier(scope)
   await fault.barrierWaiting
-  await db.mutationGate.run('group-B', async () => {})
+  await owners.run('read', { groupID: 'group-B', ownerDID: null }, async () => {})
   expect(entered).toBe(false)
   await fault.finish('commit')
   await barrier
   expect(entered).toBe(false)
   settlement.settle('committed')
+  proven.resolve()
   await queued
   expect(entered).toBe(true)
 })
 
-test('rejects nested gates and retains explicit completion holds', async () => {
-  const db = createMemoryTransaction({ rows: {} })
+test('rejects nested roots and retains the slot through entry proof', async () => {
+  const owners = createOwnerQueues()
   const held = deferred()
-  await db.mutationGate.run('group-A', async () => {
-    await expect(db.mutationGate.run('group-B', async () => {})).rejects.toThrow('reentrant')
-    db.mutationGate.holdUntil('group-A', held.promise)
-  })
+  await owners.run(
+    'transition',
+    { groupID: 'group-A', ownerDID: null },
+    async (entry) => {
+      await entry.enter('prepare')
+      await expect(
+        owners.run('read', { groupID: 'group-B', ownerDID: null }, async () => {}),
+      ).rejects.toMatchObject({ name: 'ReentrantOwnershipError' })
+      await entry.enter('outcome')
+      void entry.retain(async () => {
+        await held.promise
+        return 'committed'
+      })
+    },
+    { mutationID: 'held' },
+  )
   let entered = false
-  const queued = db.mutationGate.run('group-A', async () => {
+  const queued = owners.run('read', { groupID: 'group-A', ownerDID: null }, async () => {
     entered = true
   })
-  await db.mutationGate.run('group-B', async () => {})
+  await owners.run('read', { groupID: 'group-B', ownerDID: null }, async () => {})
   expect(entered).toBe(false)
   held.resolve()
   await queued
@@ -760,10 +789,11 @@ test('retries barrier faults outside transactions with capped backoff while B pr
   try {
     const db = createMemoryTransaction({ rows: {} })
     const faults = memoryFaults(db)
+    const owners = createOwnerQueues()
     const fault = faults.rejectCommitPending()
     let settlement!: TransactionHookSettlement
     await expect(
-      db.mutationGate.run('group-A', () =>
+      owners.run('read', { groupID: 'group-A', ownerDID: null }, () =>
         db.transact(scope, async () => {}, {
           onUnknown(value) {
             settlement = value
