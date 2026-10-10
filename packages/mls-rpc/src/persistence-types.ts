@@ -9,6 +9,11 @@ import type {
   ControlStore,
 } from '@kumiai/rpc'
 
+export type OwnershipContextPort = {
+  run<T>(token: object, fn: () => T): T
+  get(): object | undefined
+}
+
 export type GroupKey = { groupID: string; incarnation: number }
 
 export type EpochIdentity = GroupKey & { epoch: number; authenticator: Uint8Array }
@@ -127,11 +132,6 @@ export type GroupPersistencePorts = {
   outbox: AppOutbox
   anchor: AnchorStore
   cursor: AppCursorStore
-}
-
-export type OwnershipContextPort = {
-  run<T>(token: object, fn: () => T): T
-  get(): object | undefined
 }
 
 export type AtRestCodec = {

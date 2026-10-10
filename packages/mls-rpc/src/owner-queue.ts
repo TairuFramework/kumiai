@@ -7,6 +7,20 @@ import {
   PersistencePhaseError,
   ReentrantOwnershipError,
 } from './persistence-errors.js'
+import type { OwnershipContextPort } from './persistence-types.js'
+import { anySignal, deferred } from './runtime.js'
+
+export type { OwnershipContextPort } from './persistence-types.js'
+
+export type OwnerAttempt = {
+  readonly id: number
+  readonly revoked: boolean
+  readonly signal: AbortSignal
+  revoke(reason: unknown): void
+  assertLive(): void
+}
+declare const coordinatorBrand: unique symbol
+export type CoordinatorToken = { readonly [coordinatorBrand]: true }
 
 export type EntryKind = 'transition' | 'combined' | 'read'
 export type EntryPhase =
@@ -30,6 +44,16 @@ export type OwnerEntry = {
   readonly mutationID: string | null
   enter(phase: EntryPhase): Promise<void>
   sequence<T>(operation: () => Promise<T>): Promise<T>
+  attempt(): OwnerAttempt
+  operation<T>(attempt: OwnerAttempt, run: (attempt: OwnerAttempt) => Promise<T>): Promise<T>
+  coordinator(attempt: OwnerAttempt): CoordinatorToken
+  coordinate<T>(token: CoordinatorToken, run: (attempt: OwnerAttempt) => Promise<T>): Promise<T>
+  fail(error: unknown): void
+  readonly rollbackOnly: boolean
+  callback<T>(fn: () => T): T
+  trackBackend(promise: Promise<unknown>): void
+  backendSettled(): Promise<void>
+  release(): void
   assertWrite(target: WriteTarget): void
   onCommit(fn: () => void): void
   onRollback(fn: () => void): void
@@ -44,6 +68,7 @@ export type OwnerQueues = {
     options?: { mutationID?: string; signal?: AbortSignal },
   ): Promise<T>
   current(): OwnerEntry | undefined
+  bindOwnershipContext(port: OwnershipContextPort | undefined): void
   joinProof(
     owner: { groupID: string } | { ownerDID: string },
     mutationID: string,
@@ -67,6 +92,7 @@ export function ownerEntryFailureSignal(entry: OwnerEntry): AbortSignal | undefi
 type Slot = { held: boolean; waiters: Array<() => void> }
 type Owned = {
   entry: OwnerEntry
+  active: boolean
   proof: Promise<ProofOutcome> | null
   drop(error: GroupStateConflictError): void
 }
@@ -75,12 +101,17 @@ function scopeKey(kind: 'device' | 'group', id: string): string {
   return JSON.stringify([kind, id])
 }
 
-export function createOwnerQueues(): OwnerQueues {
+export function createOwnerQueues(options?: {
+  ownershipContext?: OwnershipContextPort
+}): OwnerQueues {
   const slots = new Map<string, Slot>()
   const entries = new Set<Owned>()
   const started = new Set<string>()
   const stopped = new AbortController()
   let failure: GroupStateConflictError | null = null
+  let port: OwnershipContextPort | undefined
+  let marker: OwnerEntry | undefined
+  const contextEntries = new WeakMap<object, OwnerEntry>()
   function assertRunning(): void {
     if (failure !== null) throw failure
   }
@@ -140,8 +171,22 @@ export function createOwnerQueues(): OwnerQueues {
       return failure
     },
     current() {
-      const entry = ownershipContext.getStore()
+      let entry = marker
+      if (entry === undefined) {
+        const token = port?.get()
+        if (token !== undefined) entry = contextEntries.get(token)
+      }
+      // Task 4 removes the ALS fallback after legacy providers migrate.
+      entry ??= sequencedContext.getStore()?.entry ?? ownershipContext.getStore()
       return entry?.phase === 'released' ? undefined : entry
+    },
+    bindOwnershipContext(next) {
+      if (next === undefined || next === port) return
+      if (port !== undefined)
+        throw new TypeError('ownershipContext differs from the port bound to this database')
+      if ([...entries].some((owned) => owned.active))
+        throw new TypeError('Cannot bind ownershipContext while an owner entry is active')
+      port = next
     },
     started(key) {
       return started.has(key)
@@ -183,10 +228,10 @@ export function createOwnerQueues(): OwnerQueues {
         rejectFailure = reject
       })
       const scopes = Object.freeze({ ...requestedScopes })
-      const signal =
-        options?.signal === undefined
-          ? stopped.signal
-          : AbortSignal.any([stopped.signal, options.signal])
+      const binding = anySignal(
+        options?.signal === undefined ? [stopped.signal] : [stopped.signal, options.signal],
+      )
+      const signal = binding.signal
       const releases: Array<() => void> = []
       let phase: EntryPhase = 'queued'
       let outcome: ProofOutcome | null = null
@@ -195,10 +240,47 @@ export function createOwnerQueues(): OwnerQueues {
       let bodyFinished = false
       const commits: Array<() => void> = []
       const rollbacks: Array<() => void> = []
+      const token = Object.freeze({})
+      const coordinators = new WeakSet<object>()
+      const coordinatorAttempts = new WeakMap<object, OwnerAttempt>()
+      const backends = new Set<Promise<void>>()
+      let fatal = false
+      let attemptID = 0
+
+      function newAttempt() {
+        const controller = new AbortController()
+        const cancelled = deferred<never>()
+        void cancelled.promise.catch(() => undefined)
+        const attempt: OwnerAttempt = Object.freeze({
+          id: ++attemptID,
+          get revoked() {
+            return controller.signal.aborted
+          },
+          signal: controller.signal,
+          revoke(reason: unknown) {
+            if (controller.signal.aborted) return
+            controller.abort(reason)
+            cancelled.reject(reason)
+          },
+          assertLive() {
+            if (controller.signal.aborted) throw controller.signal.reason
+          },
+        })
+        return { attempt, cancelled: cancelled.promise }
+      }
+      let currentAttempt = newAttempt()
+      const cancelAttempt = () =>
+        currentAttempt.attempt.revoke(
+          failure ?? new PersistencePhaseError('Owner attempt cancelled', { cause: signal.reason }),
+        )
+      signal.addEventListener('abort', cancelAttempt)
 
       function release(): void {
         if (phase === 'released') return
         phase = 'released'
+        currentAttempt.attempt.revoke(failure ?? new PersistencePhaseError('Owner entry released'))
+        signal.removeEventListener('abort', cancelAttempt)
+        binding.dispose()
         entries.delete(owned)
         for (const unlock of releases.reverse()) unlock()
         releases.length = 0
@@ -226,6 +308,37 @@ export function createOwnerQueues(): OwnerQueues {
         hooks.push(hook)
       }
 
+      function reserve<T>(
+        attempt: OwnerAttempt,
+        run: (attempt: OwnerAttempt) => Promise<T>,
+      ): Promise<T> {
+        const cancelled = currentAttempt.cancelled
+        const result = tail
+          .then(() => {
+            assertLive()
+            attempt.assertLive()
+            return entry.callback(() => run(attempt))
+          })
+          .then((value) => {
+            attempt.assertLive()
+            return value
+          })
+        const pending = Promise.race([result, cancelled, failed])
+        // Registration owns its drain even while the reservation waits for the lock.
+        tail = pending.then(
+          () => undefined,
+          () => undefined,
+        )
+        return pending
+      }
+
+      function assertAttempt(attempt: OwnerAttempt): void {
+        assertLive()
+        if (attempt !== currentAttempt.attempt || attempt.revoked)
+          throw new PersistencePhaseError('Owner attempt expired')
+        if (closing !== null) throw new PersistencePhaseError('Phase is already changing')
+      }
+
       const entry: OwnerEntry = {
         kind,
         scopes,
@@ -233,6 +346,71 @@ export function createOwnerQueues(): OwnerQueues {
         get phase() {
           return phase
         },
+        attempt() {
+          return currentAttempt.attempt
+        },
+        operation(attempt, run) {
+          try {
+            assertAttempt(attempt)
+            if (!['prepare', 'work', 'effects'].includes(phase))
+              throw new PersistencePhaseError(`Cannot operate in ${phase}`)
+          } catch (error) {
+            return Promise.reject(error)
+          }
+          return reserve(attempt, run)
+        },
+        coordinator(attempt) {
+          assertLive()
+          if (attempt !== currentAttempt.attempt || attempt.revoked)
+            throw new PersistencePhaseError('Owner attempt expired')
+          const token = Object.freeze({}) as CoordinatorToken
+          coordinators.add(token)
+          coordinatorAttempts.set(token, attempt)
+          return token
+        },
+        coordinate(token, run) {
+          let attempt: OwnerAttempt
+          try {
+            assertLive()
+            const bound = coordinatorAttempts.get(token)
+            if (!coordinators.has(token) || bound === undefined)
+              throw new PersistencePhaseError('Invalid coordinator token')
+            assertAttempt(bound)
+            if (phase !== 'finalise' && phase !== 'account')
+              throw new PersistencePhaseError(`Cannot coordinate in ${phase}`)
+            attempt = bound
+          } catch (error) {
+            return Promise.reject(error)
+          }
+          return reserve(attempt, run)
+        },
+        fail(_error) {
+          fatal = true
+        },
+        get rollbackOnly() {
+          return fatal
+        },
+        callback(fn) {
+          const previous = marker
+          marker = entry
+          try {
+            return port === undefined ? fn() : port.run(token, fn)
+          } finally {
+            marker = previous
+          }
+        },
+        trackBackend(promise) {
+          const settled = promise.then(
+            () => undefined,
+            () => undefined,
+          )
+          backends.add(settled)
+          void settled.then(() => backends.delete(settled))
+        },
+        async backendSettled() {
+          while (backends.size !== 0) await Promise.all(backends)
+        },
+        release,
         async enter(next) {
           assertLive()
           const context = sequencedContext.getStore()
@@ -253,6 +431,11 @@ export function createOwnerQueues(): OwnerQueues {
           // Stop new reservations immediately, but let started operations finish in their phase.
           closing = tail.then(() => {
             assertLive()
+            if (phase === 'outcome' && next === 'work') {
+              currentAttempt.attempt.revoke(new PersistencePhaseError('Owner attempt retried'))
+              currentAttempt = newAttempt()
+              fatal = false
+            }
             phase = next
             closing = null
           })
@@ -277,7 +460,7 @@ export function createOwnerQueues(): OwnerQueues {
             const current: SequencedOperation = { entry, tail: Promise.resolve(), active: true }
             try {
               return await ownershipContext.run(entry, () =>
-                sequencedContext.run(current, operation),
+                sequencedContext.run(current, () => entry.callback(operation)),
               )
             } finally {
               // Abandoned children still own the phase, including descendants started while draining.
@@ -329,7 +512,7 @@ export function createOwnerQueues(): OwnerQueues {
           const hooks = (next === 'committed' ? commits : rollbacks).slice()
           commits.length = 0
           rollbacks.length = 0
-          ownershipContext.run(entry, () => {
+          entry.callback(() => {
             for (const hook of hooks) {
               if (failure !== null) break
               try {
@@ -354,7 +537,7 @@ export function createOwnerQueues(): OwnerQueues {
               assertRunning()
               let proven: ProofOutcome
               try {
-                proven = await ownershipContext.run(entry, proof)
+                proven = await entry.callback(proof)
               } catch {
                 assertRunning()
                 await delay(milliseconds)
@@ -371,16 +554,18 @@ export function createOwnerQueues(): OwnerQueues {
           return owned.proof
         },
       }
+      contextEntries.set(token, entry)
       failureSignals.set(entry, stopped.signal)
       const owned: Owned = {
         entry,
+        active: false,
         proof: null,
         drop(error) {
           commits.length = 0
           rollbacks.length = 0
           // Backend completion owns already-started work; no new reservation may run.
-          phase = 'released'
-          entries.delete(owned)
+          currentAttempt.attempt.revoke(error)
+          release()
           rejectFailure(error)
         },
       }
@@ -412,12 +597,13 @@ export function createOwnerQueues(): OwnerQueues {
             if (signal.aborted) throw signal.reason
           }
           assertRunning()
+          owned.active = true
         } catch (error) {
           release()
           throw error
         }
         try {
-          const value = await ownershipContext.run(entry, () => body(entry))
+          const value = await ownershipContext.run(entry, () => entry.callback(() => body(entry)))
           if (kind !== 'read' && phase !== 'settled' && owned.proof === null) {
             throw new PersistencePhaseError('Owner body finished without settlement')
           }
@@ -432,5 +618,6 @@ export function createOwnerQueues(): OwnerQueues {
       return Promise.race([execute(), failed])
     },
   }
+  queues.bindOwnershipContext(options?.ownershipContext)
   return queues
 }

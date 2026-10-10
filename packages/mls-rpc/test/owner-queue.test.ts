@@ -1,12 +1,26 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
-import type { EntryPhase, OwnerEntry, OwnerQueues, ProofOutcome } from '../src/owner-queue.js'
+import type {
+  CoordinatorToken,
+  EntryPhase,
+  OwnerAttempt,
+  OwnerEntry,
+  OwnerQueues,
+  OwnershipContextPort,
+  ProofOutcome,
+} from '../src/owner-queue.js'
 import { createOwnerQueues } from '../src/owner-queue.js'
 import {
   GroupStateConflictError,
   PersistencePhaseError,
   ReentrantOwnershipError,
 } from '../src/persistence-errors.js'
+
+function contextPort(): OwnershipContextPort {
+  const context = new AsyncLocalStorage<object>()
+  return { run: (token, fn) => context.run(token, fn), get: () => context.getStore() }
+}
 
 const group = { ownerDID: null, groupID: 'group-A' }
 const device = { ownerDID: 'device-A', groupID: null }
@@ -59,6 +73,644 @@ function read(queues: OwnerQueues, label: string, order: Array<string>, groupID 
 }
 
 afterEach(() => vi.useRealTimers())
+
+describe('runtime helpers', () => {
+  test('deferred resolves with the supplied value', async () => {
+    const { deferred } = await import('../src/runtime.js')
+    const pending = deferred<number>()
+    pending.resolve(7)
+    pending.reject(new Error('ignored'))
+    await expect(pending.promise).resolves.toBe(7)
+  })
+
+  test('deferred rejects with the supplied reason', async () => {
+    const { deferred } = await import('../src/runtime.js')
+    const pending = deferred<number>()
+    const reason = new Error('rejected')
+    const rejected = expect(pending.promise).rejects.toBe(reason)
+    pending.reject(reason)
+    pending.resolve(7)
+    await rejected
+  })
+
+  test.each(['dispose', 'abort', 'already-aborted', 'empty'] as const)(
+    'anySignal removes all listeners on %s',
+    async (mode) => {
+      const { anySignal } = await import('../src/runtime.js')
+      const first = new AbortController()
+      const second = new AbortController()
+      const reason = new Error('aborted')
+      if (mode === 'already-aborted') second.abort(reason)
+      const listeners = [first.signal, second.signal].map(listenerCount)
+      const binding = anySignal(mode === 'empty' ? [] : [first.signal, second.signal])
+      if (mode === 'abort') second.abort(reason)
+      if (mode === 'dispose') binding.dispose()
+      if (mode === 'abort' || mode === 'already-aborted') {
+        expect(binding.signal.aborted).toBe(true)
+        expect(binding.signal.reason).toBe(reason)
+      } else expect(binding.signal.aborted).toBe(false)
+      expect(listeners.map((count) => count())).toEqual([0, 0])
+      binding.dispose()
+      first.abort(new Error('later'))
+      if (mode === 'dispose') expect(binding.signal.aborted).toBe(false)
+      if (mode === 'abort') expect(binding.signal.reason).toBe(reason)
+    },
+  )
+})
+
+function listenerCount(signal: AbortSignal): () => number {
+  const listeners = new Set<EventListenerOrEventListenerObject>()
+  const add = signal.addEventListener.bind(signal)
+  const remove = signal.removeEventListener.bind(signal)
+  vi.spyOn(signal, 'addEventListener').mockImplementation((type, listener, options) => {
+    if (type === 'abort' && listener !== null) listeners.add(listener)
+    add(type, listener, options)
+  })
+  vi.spyOn(signal, 'removeEventListener').mockImplementation((type, listener, options) => {
+    if (type === 'abort' && listener !== null) listeners.delete(listener)
+    remove(type, listener, options)
+  })
+  return () => listeners.size
+}
+
+describe('runtime-neutral owner operations', { timeout: 2000 }, () => {
+  test('registration freezes queued work before the lock and effects reopens admission', async () => {
+    const queues = createOwnerQueues()
+    const suspended = deferred<void>()
+    const started = deferred<void>()
+    const order: Array<string> = []
+    let captured!: OwnerEntry
+    const owner = queues.run('transition', group, async (entry) => {
+      captured = entry
+      await advance(entry, 'work')
+      const attempt = entry.attempt()
+      const first = entry.operation(attempt, async (live) => {
+        order.push(`first-start:${entry.phase}`)
+        started.resolve()
+        await suspended.promise
+        live.assertLive()
+        order.push(`first-end:${entry.phase}`)
+      })
+      const second = entry.operation(attempt, async () => order.push(`second:${entry.phase}`))
+      const boundary = entry.enter('finalise').then(() => order.push(`entered:${entry.phase}`))
+      await expect(entry.operation(attempt, async () => order.push('late'))).rejects.toBeInstanceOf(
+        PersistencePhaseError,
+      )
+      await Promise.all([first, second, boundary])
+      await expect(entry.operation(attempt, async () => undefined)).rejects.toBeInstanceOf(
+        PersistencePhaseError,
+      )
+      await entry.enter('effects')
+      await entry.operation(attempt, async () => order.push(`effect:${entry.phase}`))
+      await entry.enter('outcome')
+      entry.settle('committed')
+    })
+    await started.promise
+    await flush()
+    expect(captured.phase).toBe('work')
+    expect(order).toEqual(['first-start:work'])
+    suspended.resolve()
+    await owner
+    expect(order).toEqual([
+      'first-start:work',
+      'first-end:work',
+      'second:work',
+      'entered:finalise',
+      'effect:effects',
+    ])
+  })
+
+  test('public, coordinator and legacy reservations share serial order', async () => {
+    const queues = createOwnerQueues()
+    const order: Array<string> = []
+    await queues.run('transition', group, async (entry) => {
+      await advance(entry, 'work')
+      await Promise.all([
+        entry.operation(entry.attempt(), async () => {
+          await Promise.resolve()
+          order.push('public')
+        }),
+        entry.sequence(async () => {
+          order.push('legacy')
+        }),
+      ])
+      await entry.enter('finalise')
+      const token = entry.coordinator(entry.attempt())
+      await Promise.all([
+        entry.coordinate(token, async () => {
+          await Promise.resolve()
+          order.push('coordinator')
+        }),
+        entry.sequence(async () => {
+          order.push('legacy-finalise')
+        }),
+      ])
+      await entry.enter('outcome')
+      entry.settle('committed')
+    })
+    expect(order).toEqual(['public', 'legacy', 'coordinator', 'legacy-finalise'])
+  })
+
+  test.each(phases)(
+    'coordinator and public admission in %s follows the phase matrix',
+    async (phase) => {
+      const queues = createOwnerQueues()
+      let token!: CoordinatorToken
+      let attempt!: OwnerAttempt
+      let captured!: OwnerEntry
+      const check = async (entry: OwnerEntry) => {
+        const operation = vi.fn(async () => 7)
+        const coordinated = entry.coordinate(token, operation)
+        if (phase === 'finalise' || phase === 'account') await expect(coordinated).resolves.toBe(7)
+        else await expect(coordinated).rejects.toBeInstanceOf(PersistencePhaseError)
+        const publicResult = entry.operation(attempt, operation)
+        if (['prepare', 'work', 'effects'].includes(phase))
+          await expect(publicResult).resolves.toBe(7)
+        else await expect(publicResult).rejects.toBeInstanceOf(PersistencePhaseError)
+        await expect(
+          entry.coordinate(Object.freeze({}) as CoordinatorToken, operation),
+        ).rejects.toBeInstanceOf(PersistencePhaseError)
+      }
+      await queues.run('transition', group, async (entry) => {
+        captured = entry
+        attempt = entry.attempt()
+        token = entry.coordinator(attempt)
+        expect(Object.isFrozen(token)).toBe(true)
+        expect(Object.keys(token)).toEqual([])
+        if (phase === 'queued') await check(entry)
+        else if (phase === 'ambiguous') {
+          await advance(entry, 'outcome')
+          await entry.retain(async () => {
+            await check(entry)
+            return 'committed'
+          })
+          return
+        } else if (phase !== 'settled' && phase !== 'released') {
+          await advance(entry, phase)
+          await check(entry)
+        }
+        if (entry.phase === 'queued') await advance(entry, 'outcome')
+        else if (entry.phase !== 'outcome') await entry.enter('outcome')
+        entry.settle('committed')
+        if (phase === 'settled') await check(entry)
+      })
+      if (phase === 'released') await check(captured)
+    },
+  )
+
+  test('coordinator rejects foreign-entry and expired-attempt tokens', async () => {
+    const queues = createOwnerQueues()
+    let foreign!: CoordinatorToken
+    await queues.run('transition', group, async (entry) => {
+      foreign = entry.coordinator(entry.attempt())
+      await finish(entry)
+    })
+    await queues.run('transition', group, async (entry) => {
+      await advance(entry, 'finalise')
+      const old = entry.attempt()
+      const expired = entry.coordinator(old)
+      await expect(entry.coordinate(foreign, async () => 1)).rejects.toBeInstanceOf(
+        PersistencePhaseError,
+      )
+      await entry.enter('outcome')
+      await entry.enter('work')
+      expect(old.revoked).toBe(true)
+      expect(entry.attempt().id).toBeGreaterThan(old.id)
+      expect(entry.attempt()).not.toBe(old)
+      await expect(entry.operation(old, async () => 1)).rejects.toBeInstanceOf(
+        PersistencePhaseError,
+      )
+      await entry.enter('finalise')
+      await expect(entry.coordinate(expired, async () => 1)).rejects.toBeInstanceOf(
+        PersistencePhaseError,
+      )
+      await expect(
+        entry.coordinate(entry.coordinator(entry.attempt()), async () => 7),
+      ).resolves.toBe(7)
+      await entry.enter('outcome')
+      entry.settle('committed')
+    })
+  })
+
+  test.each(['abandoned', 'caught'] as const)(
+    'fatal failure remains rollback-only when %s',
+    async (mode) => {
+      const queues = createOwnerQueues()
+      const reason = new Error('seal failed')
+      await queues.run('transition', group, async (entry) => {
+        await advance(entry, 'work')
+        expect(entry.rollbackOnly).toBe(false)
+        await expect(
+          entry.operation(entry.attempt(), async () => {
+            throw new Error('no rows changed')
+          }),
+        ).rejects.toThrow('no rows changed')
+        expect(entry.rollbackOnly).toBe(false)
+        const failing = entry.operation(entry.attempt(), async () => {
+          entry.fail(reason)
+          throw reason
+        })
+        if (mode === 'caught') await expect(failing).rejects.toBe(reason)
+        else void failing.catch(() => undefined)
+        await entry.enter('finalise')
+        expect(entry.rollbackOnly).toBe(true)
+        await entry.enter('outcome')
+        expect(entry.rollbackOnly).toBe(true)
+        entry.settle('rolled-back')
+        expect(entry.rollbackOnly).toBe(true)
+      })
+    },
+  )
+
+  test('revocation rejects active and queued operations and drains while late writes are discarded', async () => {
+    const queues = createOwnerQueues()
+    const suspended = deferred<void>()
+    const started = deferred<void>()
+    const late = deferred<void>()
+    const writes: Array<string> = []
+    let captured!: OwnerEntry
+    let attempt!: OwnerAttempt
+    let active!: Promise<void>
+    let queued!: Promise<void>
+    const owner = queues.run('transition', group, async (entry) => {
+      captured = entry
+      await advance(entry, 'work')
+      attempt = entry.attempt()
+      active = entry.operation(attempt, async (live) => {
+        started.resolve()
+        try {
+          await suspended.promise
+          live.assertLive()
+          writes.push('late')
+        } finally {
+          late.resolve()
+        }
+      })
+      queued = entry.operation(attempt, async () => {
+        writes.push('queued')
+      })
+      await started.promise
+      await entry.enter('outcome')
+      entry.settle('rolled-back')
+    })
+    await started.promise
+    const reason = new PersistencePhaseError('read failed')
+    const rejected = [active, queued].map((p) => expect(p).rejects.toBe(reason))
+    attempt.revoke(reason)
+    expect(attempt.revoked).toBe(true)
+    expect(attempt.signal.aborted).toBe(true)
+    expect(attempt.signal.reason).toBe(reason)
+    expect(() => attempt.assertLive()).toThrow(reason)
+    await Promise.all(rejected)
+    await owner
+    await expect(captured.operation(attempt, async () => 1)).rejects.toBeInstanceOf(
+      PersistencePhaseError,
+    )
+    suspended.resolve()
+    await late.promise
+    expect(writes).toEqual([])
+  })
+
+  test('a failed read releases its slot before suspended callbacks or tracked backend completion', async () => {
+    const queues = createOwnerQueues()
+    const suspended = deferred<void>()
+    const backend = deferred<void>()
+    const started = deferred<void>()
+    const late = deferred<void>()
+    const writes: Array<string> = []
+    let captured!: OwnerEntry
+    const reason = new PersistencePhaseError('read failed')
+    await expect(
+      queues.run('read', group, async (entry) => {
+        captured = entry
+        await entry.enter('work')
+        entry.trackBackend(backend.promise)
+        const operation = entry.operation(entry.attempt(), async (live) => {
+          started.resolve()
+          try {
+            await suspended.promise
+            live.assertLive()
+            writes.push('late')
+          } finally {
+            late.resolve()
+          }
+        })
+        void operation.catch(() => undefined)
+        await started.promise
+        entry.attempt().revoke(reason)
+        entry.release()
+        throw reason
+      }),
+    ).rejects.toBe(reason)
+    await expect(read(queues, 'next', writes)).resolves.toBe('next')
+    let backendDone = false
+    const completion = captured.backendSettled().then(() => {
+      backendDone = true
+    })
+    await flush()
+    expect(backendDone).toBe(false)
+    backend.resolve()
+    await completion
+    expect(backendDone).toBe(true)
+    suspended.resolve()
+    await late.promise
+    expect(writes).toEqual(['next'])
+  })
+
+  test('fail-stop rejects active operations, queued operations and drains with one conflict', async () => {
+    const queues = createOwnerQueues()
+    const started = deferred<void>()
+    const suspended = deferred<void>()
+    const backend = deferred<void>()
+    const writes: Array<string> = []
+    let active!: Promise<void>
+    let queued!: Promise<void>
+    let drain!: Promise<void>
+    let captured!: OwnerEntry
+    const owner = queues.run('transition', group, async (entry) => {
+      captured = entry
+      await advance(entry, 'work')
+      entry.trackBackend(backend.promise)
+      active = entry.operation(entry.attempt(), async (live) => {
+        started.resolve()
+        await suspended.promise
+        live.assertLive()
+        writes.push('late')
+      })
+      queued = entry.operation(entry.attempt(), async () => {
+        writes.push('queued')
+      })
+      drain = entry.enter('finalise')
+      await drain
+    })
+    await started.promise
+    const reason = new GroupStateConflictError('conflict')
+    const rejected = [owner, active, queued, drain].map((p) => expect(p).rejects.toBe(reason))
+    queues.failStop(reason)
+    await Promise.all(rejected)
+    expect(captured.attempt().signal.reason).toBe(reason)
+    let completed = false
+    const completion = captured.backendSettled().then(() => {
+      completed = true
+    })
+    await flush()
+    expect(completed).toBe(false)
+    backend.reject(new Error('rollback completed with rejection'))
+    await completion
+    suspended.resolve()
+    await flush()
+    expect(writes).toEqual([])
+  })
+
+  test.each([
+    'prepare',
+    'work',
+    'finalise',
+    'effects',
+    'account',
+    'outcome',
+    'ambiguous',
+    'settled',
+  ] as const)(
+    'the synchronous callback marker diagnoses roots in %s without a port',
+    async (phase) => {
+      const queues = createOwnerQueues()
+      const entered = deferred<void>()
+      const suspended = deferred<void>()
+      const proof = deferred<ProofOutcome>()
+      let captured!: OwnerEntry
+      let hook!: Promise<unknown>
+      const owner = queues.run('transition', group, async (entry) => {
+        captured = entry
+        entry.onCommit(() => {
+          expect(queues.current()).toBe(entry)
+          hook = queues.run('read', device, async () => undefined)
+        })
+        await advance(entry, phase === 'ambiguous' || phase === 'settled' ? 'outcome' : phase)
+        entered.resolve()
+        await suspended.promise
+        if (entry.phase !== 'settled') {
+          if (entry.phase !== 'outcome') await entry.enter('outcome')
+          entry.settle('committed')
+        }
+      })
+      await entered.promise
+      let retained: Promise<ProofOutcome> | undefined
+      if (phase === 'ambiguous') retained = captured.retain(() => proof.promise)
+      if (phase === 'settled') captured.settle('committed')
+      expect(captured.phase).toBe(phase)
+      expect(queues.current()).toBeUndefined()
+      const rejected = captured.callback(() => {
+        expect(queues.current()).toBe(captured)
+        return queues.run('read', device, async () => undefined)
+      })
+      expect(queues.current()).toBeUndefined()
+      await expect(rejected).rejects.toBeInstanceOf(ReentrantOwnershipError)
+      expect(() =>
+        captured.callback(() => {
+          throw new Error('host callback')
+        }),
+      ).toThrow('host callback')
+      expect(queues.current()).toBeUndefined()
+      proof.resolve('committed')
+      await retained
+      suspended.resolve()
+      await owner
+      await expect(hook).rejects.toBeInstanceOf(ReentrantOwnershipError)
+    },
+  )
+
+  test('legacy body and sequence retain asynchronous ownership during migration', async () => {
+    const queues = createOwnerQueues()
+    await queues.run('read', group, async (entry) => {
+      await entry.enter('work')
+      expect(queues.current()).toBe(entry)
+      await entry.sequence(async () => {
+        await Promise.resolve()
+        expect(queues.current()).toBe(entry)
+      })
+    })
+  })
+
+  test('synchronous markers restore after a throwing callback from an unrelated caller', async () => {
+    const queues = createOwnerQueues()
+    const entered = deferred<void>()
+    const suspended = deferred<void>()
+    let captured!: OwnerEntry
+    const owner = queues.run('read', group, async (entry) => {
+      captured = entry
+      entered.resolve()
+      await suspended.promise
+    })
+    await entered.promise
+    expect(queues.current()).toBeUndefined()
+    expect(() =>
+      captured.callback(() => {
+        expect(queues.current()).toBe(captured)
+        throw new Error('host callback')
+      }),
+    ).toThrow('host callback')
+    expect(queues.current()).toBeUndefined()
+    await expect(read(queues, 'independent', [], 'group-B')).resolves.toBe('independent')
+    suspended.resolve()
+    await owner
+  })
+
+  test('port tokens are opaque and nested bindings restore after throwing callbacks', async () => {
+    const port = contextPort()
+    const queues = createOwnerQueues({ ownershipContext: port })
+    const external = Object.freeze({})
+    await port.run(external, async () => {
+      await queues.run('read', group, async (entry) => {
+        const token = port.get()
+        expect(token).toBeDefined()
+        expect(token).not.toBe(external)
+        expect(token).not.toBe(entry)
+        expect(Object.isFrozen(token)).toBe(true)
+        expect(Object.keys(token ?? {})).toEqual([])
+        await Promise.resolve()
+        expect(queues.current()).toBe(entry)
+        expect(() =>
+          port.run(external, () =>
+            entry.callback(() => {
+              expect(port.get()).toBe(token)
+              throw new Error('accessor failed')
+            }),
+          ),
+        ).toThrow('accessor failed')
+        expect(port.get()).toBe(token)
+      })
+      expect(port.get()).toBe(external)
+      expect(queues.current()).toBeUndefined()
+    })
+  })
+
+  test('the synchronous marker takes precedence over the context port', async () => {
+    const port = contextPort()
+    const queues = createOwnerQueues({ ownershipContext: port })
+    await queues.run('read', group, async (entry) => {
+      const get = vi.spyOn(port, 'get').mockImplementation(() => {
+        throw new Error('port diagnostics unavailable')
+      })
+      try {
+        expect(entry.callback(() => queues.current())).toBe(entry)
+        expect(get).not.toHaveBeenCalled()
+      } finally {
+        get.mockRestore()
+      }
+    })
+  })
+
+  test('the port preserves callback ownership after await without legacy context', async () => {
+    const queues = createOwnerQueues({ ownershipContext: contextPort() })
+    const entered = deferred<void>()
+    const suspended = deferred<void>()
+    let captured!: OwnerEntry
+    const owner = queues.run('read', group, async (entry) => {
+      captured = entry
+      entered.resolve()
+      await suspended.promise
+    })
+    await entered.promise
+    expect(queues.current()).toBeUndefined()
+    await captured.callback(async () => {
+      await Promise.resolve()
+      expect(queues.current()).toBe(captured)
+      await expect(queues.run('read', device, async () => undefined)).rejects.toBeInstanceOf(
+        ReentrantOwnershipError,
+      )
+    })
+    expect(queues.current()).toBeUndefined()
+    suspended.resolve()
+    await owner
+  })
+
+  test.each([false, true])(
+    'unrelated callers and released tokens stay unbound (port: %s)',
+    async (withPort) => {
+      const queues = createOwnerQueues(withPort ? { ownershipContext: contextPort() } : undefined)
+      const entered = deferred<void>()
+      const suspended = deferred<void>()
+      let continuation!: Promise<void>
+      const owner = queues.run('read', group, async (entry) => {
+        continuation = entry.callback(async () => {
+          await suspended.promise
+          expect(queues.current()).toBeUndefined()
+        })
+        entry.release()
+        expect(entry.callback(() => queues.current())).toBeUndefined()
+        entered.resolve()
+        await suspended.promise
+      })
+      await entered.promise
+      expect(queues.current()).toBeUndefined()
+      await expect(read(queues, 'same-scope', [])).resolves.toBe('same-scope')
+      await expect(read(queues, 'independent', [], 'group-B')).resolves.toBe('independent')
+      suspended.resolve()
+      await Promise.all([owner, continuation])
+    },
+  )
+
+  test.each(['success', 'rejection', 'cancellation'] as const)(
+    'entry signal listeners are disposed after %s',
+    async (mode) => {
+      const queues = createOwnerQueues()
+      const controller = new AbortController()
+      const count = listenerCount(controller.signal)
+      const held = deferred<void>()
+      const entered = deferred<void>()
+      let first: Promise<unknown> | undefined
+      if (mode === 'cancellation') {
+        first = queues.run('read', group, async () => {
+          entered.resolve()
+          await held.promise
+        })
+        await entered.promise
+      }
+      const reason = new Error('cancelled or rejected')
+      const run = queues.run(
+        'read',
+        group,
+        async () => {
+          expect(count()).toBe(1)
+          if (mode === 'rejection') throw reason
+        },
+        { signal: controller.signal },
+      )
+      if (mode === 'cancellation') {
+        await flush()
+        expect(count()).toBe(1)
+        const rejected = expect(run).rejects.toBe(reason)
+        controller.abort(reason)
+        await rejected
+      } else if (mode === 'rejection') await expect(run).rejects.toBe(reason)
+      else await run
+      expect(count()).toBe(0)
+      held.resolve()
+      await first
+    },
+  )
+
+  test('ownership context binding is stable and first binding waits for idle entries', async () => {
+    const queues = createOwnerQueues()
+    const port = contextPort()
+    queues.bindOwnershipContext(undefined)
+    await queues.run('read', group, async () => {
+      expect(() => queues.bindOwnershipContext(port)).toThrow(TypeError)
+    })
+    queues.bindOwnershipContext(port)
+    queues.bindOwnershipContext(port)
+    queues.bindOwnershipContext(undefined)
+    expect(() => queues.bindOwnershipContext(contextPort())).toThrow(
+      new TypeError('ownershipContext differs from the port bound to this database'),
+    )
+    await queues.run('read', group, async (entry) => {
+      queues.bindOwnershipContext(port)
+      await Promise.resolve()
+      expect(queues.current()).toBe(entry)
+    })
+  })
+})
 
 describe('owner queues', { timeout: 2000 }, () => {
   test('groups admit FIFO while another group proceeds independently', async () => {
@@ -195,7 +847,7 @@ describe('owner queues', { timeout: 2000 }, () => {
   )
 
   test('a group holder requesting a device rejects before waiting', async () => {
-    const queues = createOwnerQueues()
+    const queues = createOwnerQueues({ ownershipContext: contextPort() })
     await queues.run('transition', group, async (entry) => {
       await entry.enter('prepare')
       await expect(queues.run('transition', device, async () => undefined)).rejects.toBeInstanceOf(
@@ -210,7 +862,7 @@ describe('owner queues', { timeout: 2000 }, () => {
   test.each(['prepare', 'work', 'finalise', 'effects', 'account'] as const)(
     'root calls reject from %s and current follows asynchronous continuations',
     async (phase) => {
-      const queues = createOwnerQueues()
+      const queues = createOwnerQueues({ ownershipContext: contextPort() })
       expect(queues.current()).toBeUndefined()
       await queues.run('transition', group, async (entry) => {
         await advance(entry, phase)
