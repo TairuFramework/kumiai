@@ -69,9 +69,15 @@ export {
   type GroupMLSConformanceParams,
   testGroupMLSConformance,
 } from './group-mls.js'
-export { testGroupStorageConformance } from './group-storage.js'
+export {
+  assertCorruptStorageRecovery,
+  assertLowerEpochRefused,
+  assertPartialLossSpentRefused,
+  testGroupStorageConformance,
+} from './group-storage.js'
 export { createMemoryAppOutbox, type MemoryAppOutbox } from './memory-app-outbox.js'
 export { createMemoryControlStore, type MemoryControlStore } from './memory-control-store.js'
+export { testOwnershipPhasesConformance } from './ownership-phases.js'
 export {
   type ConformanceAppFrameRef,
   type ConformancePendingAppFrame,

@@ -103,6 +103,154 @@ export async function writeStorageInstall<TTx extends ConformanceGroupTransactio
   })
 }
 
+export async function assertLowerEpochRefused<TTx extends ConformanceGroupTransaction>(
+  params: StorageConformanceParams<TTx>,
+): Promise<void> {
+  const fixture = await params.createFixture(groupID)
+  try {
+    const groups = fixture.ports.device.groups
+    const seed = await storageSeed(groups)
+    const lower = await params.lowerEpochCandidate(groupID)
+    expect(lower.state.epoch).toBeLessThan(seed.state.epoch)
+    expect(seed.trust.spentEpochAuthenticators).not.toContainEqual(lower.state.epochAuthenticator)
+    const before = await fixture.inspectRows()
+    await expect(
+      groups.transition(
+        await storageChange(groups, groupID, 'epoch-regression'),
+        async (stores) => {
+          await stores
+            .incarnation(1)
+            .state.save({ ...lower.state, version: seed.state.version + 1 })
+          await stores.trust.save({
+            ...lower.trust,
+            genesisAnchor: seed.trust.genesisAnchor,
+            spentEpochAuthenticators: [
+              ...seed.trust.spentEpochAuthenticators,
+              ...lower.trust.spentEpochAuthenticators,
+            ],
+          })
+        },
+      ),
+    ).rejects.toMatchObject({ name: 'GroupStateConflictError', message: 'Epoch regressed' })
+    expect(await fixture.inspectRows()).toEqual(before)
+  } finally {
+    await fixture.close()
+  }
+}
+
+export async function assertCorruptStorageRecovery<TTx extends ConformanceGroupTransaction>(
+  params: Pick<StorageConformanceParams<TTx>, 'createFixture'>,
+  namespace: 'state' | 'trust',
+): Promise<void> {
+  const fixture = await params.createFixture(groupID)
+  const donor = await params.createFixture(groupID)
+  try {
+    const groups = fixture.ports.device.groups
+    const seed = await storageSeed(groups)
+    const fresh = await storageSeed(donor.ports.device.groups)
+    const lifetimeBefore = await groups.load(groupID)
+    const row = (await fixture.inspectRawBytes()).find((row) => row.namespace === namespace)
+    if (row === undefined) throw new Error('Missing ciphertext')
+    await fixture.mutateStoredRecord(namespace, row.key, (bytes) => new Uint8Array(bytes.length))
+    const reopened = await fixture.reopen()
+    const restored = reopened.device.groups
+    if (namespace === 'state') {
+      await expect(restored.loadState(key)).rejects.toThrow()
+      expect(await restored.loadTrust(groupID)).toEqual(seed.trust)
+    } else {
+      await expect(restored.loadTrust(groupID)).rejects.toThrow()
+      expect(await restored.loadState(key)).toEqual(seed.state)
+    }
+    expect(await restored.load(groupID)).toEqual(lifetimeBefore)
+    const before = await fixture.inspectRows()
+    const installation = restored.transition(
+      await storageChange(restored, groupID, 'install-corrupt'),
+      async (stores) => writeStorageInstall(stores, fresh, 'install-corrupt', 2),
+    )
+    if (namespace === 'state') {
+      await installation
+      expect(await restored.loadState(key)).toEqual({
+        ...key,
+        deleted: true,
+        version: seed.state.version + 1,
+      })
+      expect(await restored.loadState({ ...key, incarnation: 2 })).toEqual({
+        ...fresh.state,
+        incarnation: 2,
+        version: 1,
+      })
+      expect((await restored.loadTrust(groupID))?.genesisAnchor).toEqual(seed.trust.genesisAnchor)
+    } else {
+      await expect(installation).rejects.toThrow()
+      expect(await fixture.inspectRows()).toEqual(before)
+    }
+    await restored.transition(await storageChange(restored, groupID, 'safety'), async (stores) =>
+      stores.incarnation(1).meta.putEvents([
+        {
+          ...key,
+          id: 'safety-1',
+          kind: 'group:recovery-unavailable',
+          reason: 'trust-unreadable',
+        },
+      ]),
+    )
+    expect((await restored.load(groupID))?.mutationID).toBe('safety')
+    const safetyPorts = await fixture.reopen()
+    await safetyPorts.device.groups.transition(
+      await storageChange(safetyPorts.device.groups, groupID, 'read-safety'),
+      async (stores) => {
+        expect(
+          (await stores.incarnation(1).meta.events()).find((event) => event.id === 'safety-1'),
+        ).toEqual({
+          ...key,
+          id: 'safety-1',
+          kind: 'group:recovery-unavailable',
+          reason: 'trust-unreadable',
+        })
+      },
+    )
+  } finally {
+    await fixture.close()
+    await donor.close()
+  }
+}
+
+export async function assertPartialLossSpentRefused<TTx extends ConformanceGroupTransaction>(
+  params: Pick<StorageConformanceParams<TTx>, 'createFixture'>,
+): Promise<void> {
+  const fixture = await params.createFixture(groupID)
+  try {
+    const seed = await storageSeed(fixture.ports.device.groups)
+    for (const [namespace, values] of Object.entries(await fixture.inspectRows())) {
+      if (namespace === 'trust') continue
+      for (const address of values.keys()) {
+        const [storedID, incarnation] = JSON.parse(address) as [string, number | null]
+        if (
+          storedID === groupID &&
+          (incarnation !== null || namespace === 'lifetime' || namespace === 'group-owner')
+        )
+          await fixture.deleteCommittedRow(namespace, address)
+      }
+    }
+    const { device } = await fixture.reopen()
+    const before = await fixture.inspectRows()
+    await expect(
+      device.groups.transition(
+        await storageChange(device.groups, groupID, 'reinstall'),
+        async (stores) => writeStorageInstall(stores, seed, 'reinstall'),
+      ),
+    ).rejects.toMatchObject({
+      name: 'GroupStateConflictError',
+      message: 'Epoch authenticator already spent',
+    })
+    expect(await fixture.inspectRows()).toEqual(before)
+    expect(await device.groups.loadTrust(groupID)).toEqual(seed.trust)
+    expect(await device.groups.loadState(key)).toBeNull()
+  } finally {
+    await fixture.close()
+  }
+}
+
 export function testGroupStorageConformance<TTx extends ConformanceGroupTransaction>(
   params: StorageConformanceParams<TTx>,
 ): void {
@@ -400,125 +548,14 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
       }
     })
 
-    test('F5 refuses an internally consistent unspent lower epoch with matching trust', async () => {
-      const fixture = await params.createFixture(groupID)
-      try {
-        const groups = fixture.ports.device.groups
-        const seed = await storageSeed(groups)
-        const lower = await params.lowerEpochCandidate(groupID)
-        expect(lower.state.epoch).toBeLessThan(seed.state.epoch)
-        expect(seed.trust.spentEpochAuthenticators).not.toContainEqual(
-          lower.state.epochAuthenticator,
-        )
-        const before = await fixture.inspectRows()
-        await expect(
-          groups.transition(
-            await storageChange(groups, groupID, 'epoch-regression'),
-            async (stores) => {
-              await stores
-                .incarnation(1)
-                .state.save({ ...lower.state, version: seed.state.version + 1 })
-              await stores.trust.save({
-                ...lower.trust,
-                genesisAnchor: seed.trust.genesisAnchor,
-                spentEpochAuthenticators: [
-                  ...seed.trust.spentEpochAuthenticators,
-                  ...lower.trust.spentEpochAuthenticators,
-                ],
-              })
-            },
-          ),
-        ).rejects.toMatchObject({ name: 'GroupStateConflictError', message: 'Epoch regressed' })
-        expect(await fixture.inspectRows()).toEqual(before)
-      } finally {
-        await fixture.close()
-      }
+    test('refuses an internally consistent unspent lower epoch with matching trust', async () => {
+      await assertLowerEpochRefused(params)
     }, 5000)
 
     test.each(['state', 'trust'] as const)(
       'corrupt %s retains the other records and persists a safety event',
       async (namespace) => {
-        const fixture = await params.createFixture(groupID)
-        const donor = await params.createFixture(groupID)
-        try {
-          const groups = fixture.ports.device.groups
-          const seed = await storageSeed(groups)
-          const fresh = await storageSeed(donor.ports.device.groups)
-          const lifetimeBefore = await groups.load(groupID)
-          const row = (await fixture.inspectRawBytes()).find((row) => row.namespace === namespace)
-          if (row === undefined) throw new Error('Missing ciphertext')
-          await fixture.mutateStoredRecord(
-            namespace,
-            row.key,
-            (bytes) => new Uint8Array(bytes.length),
-          )
-          const reopened = await fixture.reopen()
-          const restored = reopened.device.groups
-          if (namespace === 'state') {
-            await expect(restored.loadState(key)).rejects.toThrow()
-            expect(await restored.loadTrust(groupID)).toEqual(seed.trust)
-          } else {
-            await expect(restored.loadTrust(groupID)).rejects.toThrow()
-            expect(await restored.loadState(key)).toEqual(seed.state)
-          }
-          expect(await restored.load(groupID)).toEqual(lifetimeBefore)
-          const before = await fixture.inspectRows()
-          const installation = restored.transition(
-            await storageChange(restored, groupID, 'install-corrupt'),
-            async (stores) => writeStorageInstall(stores, fresh, 'install-corrupt', 2),
-          )
-          if (namespace === 'state') {
-            await installation
-            expect(await restored.loadState(key)).toEqual({
-              ...key,
-              deleted: true,
-              version: seed.state.version + 1,
-            })
-            expect(await restored.loadState({ ...key, incarnation: 2 })).toEqual({
-              ...fresh.state,
-              incarnation: 2,
-              version: 1,
-            })
-            expect((await restored.loadTrust(groupID))?.genesisAnchor).toEqual(
-              seed.trust.genesisAnchor,
-            )
-          } else {
-            await expect(installation).rejects.toThrow()
-            expect(await fixture.inspectRows()).toEqual(before)
-          }
-          await restored.transition(
-            await storageChange(restored, groupID, 'safety'),
-            async (stores) =>
-              stores.incarnation(1).meta.putEvents([
-                {
-                  ...key,
-                  id: 'safety-1',
-                  kind: 'group:recovery-unavailable',
-                  reason: 'trust-unreadable',
-                },
-              ]),
-          )
-          expect((await restored.load(groupID))?.mutationID).toBe('safety')
-          const safetyPorts = await fixture.reopen()
-          await safetyPorts.device.groups.transition(
-            await storageChange(safetyPorts.device.groups, groupID, 'read-safety'),
-            async (stores) => {
-              expect(
-                (await stores.incarnation(1).meta.events()).find(
-                  (event) => event.id === 'safety-1',
-                ),
-              ).toEqual({
-                ...key,
-                id: 'safety-1',
-                kind: 'group:recovery-unavailable',
-                reason: 'trust-unreadable',
-              })
-            },
-          )
-        } finally {
-          await fixture.close()
-          await donor.close()
-        }
+        await assertCorruptStorageRecovery(params, namespace)
       },
       5000,
     )

@@ -9,6 +9,9 @@ import type { KeyPackageRecord } from '@kumiai/mls-hub'
 import type { StorageTestPorts } from '@kumiai/rpc-conformance'
 import { vi } from 'vitest'
 
+import { createGroupStateStores } from '../../src/memory-group-state.js'
+import { groupOwnerKey } from '../../src/memory-incarnation-stores.js'
+import { physicalRecordKey } from '../../src/persistence-codec.js'
 import type {
   MemoryTransaction,
   PendingCommitFault,
@@ -17,6 +20,7 @@ import type {
   TransactionalGroupEffects,
 } from '../../src/persistence-types.js'
 import {
+  createIncarnationStores,
   createMemoryDevicePersistence,
   createMemoryPackageStores,
   createMemoryTransaction,
@@ -78,7 +82,20 @@ export async function createStorageFixture(params: {
   const identity = randomIdentity()
   const ownerDID = identity.id
   const providerID = 'storage-provider'
-  const atRest = createDeterministicAtRestCodec({ key: new Uint8Array(32).fill(98) })
+  const codec = createDeterministicAtRestCodec({ key: new Uint8Array(32).fill(98) })
+  let sealLatch: { reached(): void; wait: Promise<void>; release(): void } | undefined
+  const atRest = {
+    open: codec.open,
+    async seal(bytes: Uint8Array, aad: Uint8Array) {
+      const latch = sealLatch
+      sealLatch = undefined
+      if (latch !== undefined) {
+        latch.reached()
+        await latch.wait
+      }
+      return await codec.seal(bytes, aad)
+    },
+  }
   let db = createMemoryTransaction({ rows: { [sideNamespace]: new Map() } })
   let closed = false
   let fakeTime = false
@@ -280,6 +297,43 @@ export async function createStorageFixture(params: {
         },
       }
     },
+    holdNextSeal() {
+      active()
+      if (sealLatch !== undefined) throw new Error('Seal already held')
+      const reached = Promise.withResolvers<void>()
+      const release = Promise.withResolvers<void>()
+      sealLatch = { reached: reached.resolve, wait: release.promise, release: release.resolve }
+      return { reached: reached.promise, release: release.resolve }
+    },
+    async forceOwnerMarker(owner, marker) {
+      active()
+      const namespace = 'groupID' in owner ? 'group-owner' : 'device-owner'
+      const key =
+        'groupID' in owner
+          ? groupOwnerKey(owner.groupID)
+          : physicalRecordKey({
+              groupID: owner.ownerDID,
+              incarnation: null,
+              namespace,
+              recordID: 'current',
+            })
+      memoryFaults(db).forceCommittedRow(namespace, key, marker)
+    },
+    async deleteCommittedRow(namespace, key) {
+      active()
+      memoryFaults(db).forceCommittedRow(namespace, key, undefined)
+    },
+    constructGroupStores(tx, key) {
+      active()
+      const { lifetime, trust } = createGroupStateStores({ tx, groupID: key.groupID, atRest })
+      return {
+        tx,
+        lifetime,
+        trust,
+        incarnation: (incarnation) =>
+          createIncarnationStores({ tx, key: { groupID: key.groupID, incarnation }, atRest }),
+      }
+    },
     async inspectRows() {
       active()
       return db.snapshot()
@@ -350,6 +404,8 @@ export async function createStorageFixture(params: {
     },
     async close() {
       if (closed) return
+      sealLatch?.release()
+      sealLatch = undefined
       for (const owner of pending) {
         if (owner.rejected) await owner.fault.finish('rollback')
         owner.done()

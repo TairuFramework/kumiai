@@ -359,12 +359,32 @@ export type ConformancePendingCommitFault = {
   finish(outcome: 'commit' | 'rollback'): Promise<void>
 }
 
+type ConformanceFixtureGroupStores<TPorts> = TPorts extends {
+  device: {
+    groups: {
+      transition(change: never, work: (stores: infer TStores) => Promise<unknown>): Promise<unknown>
+    }
+  }
+}
+  ? TStores
+  : never
+
 export type ConformancePersistenceFixture<TPorts> = {
   ports: TPorts
   reopen(): Promise<TPorts>
   failNext(point: 'after-first-write' | 'before-commit' | 'status-read'): void
   commitThenReject(): void
   rejectCommitPending(): ConformancePendingCommitFault
+  holdNextSeal(): { reached: Promise<void>; release(): void }
+  forceOwnerMarker(
+    owner: { groupID: string } | { ownerDID: string },
+    marker: { mutationID: string; revision: number },
+  ): Promise<void>
+  deleteCommittedRow(namespace: string, key: string): Promise<void>
+  constructGroupStores(
+    tx: ConformanceFixtureGroupStores<TPorts> extends { tx: infer TTx } ? TTx : never,
+    key: ConformanceGroupKey,
+  ): ConformanceFixtureGroupStores<TPorts>
   inspectRows(): Promise<ConformanceMemoryStoreRows>
   inspectRawBytes(): Promise<Array<ConformanceRawStoredRecord>>
   inspectSideRow(key: string): Promise<Uint8Array | null>

@@ -524,6 +524,11 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
       }
     },
   }
-  const faults = registerMemoryFaults(db)
+  const faults = registerMemoryFaults(db, (namespace, key, value) => {
+    const rows = committed[namespace] ?? new Map<string, unknown>()
+    committed[namespace] = rows
+    if (value === undefined) rows.delete(key)
+    else rows.set(key, cloneValue(value))
+  })
   return db
 }

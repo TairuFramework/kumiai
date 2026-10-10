@@ -1,3 +1,4 @@
+import { assertPartialLossSpentRefused } from '@kumiai/rpc-conformance'
 import { describe, expect, test } from 'vitest'
 
 import { memoryFaults } from '../src/memory-faults.js'
@@ -7,6 +8,7 @@ import { createMemoryTransaction } from '../src/memory-transaction.js'
 import { physicalRecordKey } from '../src/persistence-codec.js'
 import type { GroupStores, MemoryDatabase, MemoryTransaction } from '../src/persistence-types.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
+import { createStorageFixture } from './fixtures/storage-persistence.js'
 import { installSeed, makeStorageSeed, nextChange } from './fixtures/storage-seed.js'
 
 const groupID = 'group-A'
@@ -286,30 +288,10 @@ for (const mode of ['real-mls', 'double'] as const) {
       expect(order.slice(0, 2)).toEqual(['hook', 'writer'])
     }, 5000)
 
-    test('F1 refuses spent incarnation-one reinstall after partial loss retaining trust', async () => {
-      const { db, seed } = await setup()
-      const rows = db.snapshot()
-      for (const [namespace, values] of Object.entries(rows)) {
-        if (namespace === 'trust') continue
-        for (const address of values.keys()) {
-          const [storedID, incarnation] = JSON.parse(address) as [string, number | null]
-          if (
-            storedID === groupID &&
-            (incarnation !== null || namespace === 'lifetime' || namespace === 'group-owner')
-          )
-            values.delete(address)
-        }
-      }
-      const restored = createMemoryTransaction({ rows })
-      const groups = createMemoryGroupPersistence({ db: restored, atRest, providerID: 'memory' })
-      const before = restored.snapshot()
-      await expect(installSeed(groups, seed, 'reinstall')).rejects.toMatchObject({
-        name: 'GroupStateConflictError',
-        message: 'Epoch authenticator already spent',
+    test('refuses spent incarnation-one reinstall after partial loss retaining trust', async () => {
+      await assertPartialLossSpentRefused({
+        createFixture: (id) => createStorageFixture({ id, mode }),
       })
-      expect(restored.snapshot()).toEqual(before)
-      expect(await groups.loadTrust(groupID)).toEqual(seed.trust)
-      expect(await groups.loadState(key)).toBeNull()
     }, 5000)
   })
 }

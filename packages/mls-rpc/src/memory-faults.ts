@@ -1,6 +1,7 @@
 import type { MemoryDatabase, PendingCommitFault } from './persistence-types.js'
 
 export type MemoryFaultController = {
+  forceCommittedRow(namespace: string, key: string, value: unknown | undefined): void
   failNext(point: 'after-first-write' | 'before-commit' | 'status-read'): void
   commitThenReject(): void
   rejectCommitPending(): PendingCommitFault
@@ -21,10 +22,14 @@ export type MemoryFaultState = {
 
 const states = new WeakMap<MemoryDatabase, MemoryFaultController>()
 
-export function registerMemoryFaults(db: MemoryDatabase): MemoryFaultState {
+export function registerMemoryFaults(
+  db: MemoryDatabase,
+  forceCommittedRow: MemoryFaultController['forceCommittedRow'],
+): MemoryFaultState {
   const points = new Set<FaultPoint>()
   const commits: Array<'reject' | PendingFault> = []
   states.set(db, {
+    forceCommittedRow,
     failNext(point) {
       points.add(point)
     },

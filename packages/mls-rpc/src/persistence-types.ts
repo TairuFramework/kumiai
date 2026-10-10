@@ -220,12 +220,32 @@ export type PendingCommitFault = {
   finish(outcome: 'commit' | 'rollback'): Promise<void>
 }
 
+type FixtureGroupStores<TPorts> = TPorts extends {
+  device: {
+    groups: {
+      transition(change: never, work: (stores: infer TStores) => Promise<unknown>): Promise<unknown>
+    }
+  }
+}
+  ? TStores
+  : never
+
 export type PersistenceFixture<TPorts> = {
   ports: TPorts
   reopen(): Promise<TPorts>
   failNext(point: 'after-first-write' | 'before-commit' | 'status-read'): void
   commitThenReject(): void
   rejectCommitPending(): PendingCommitFault
+  holdNextSeal(): { reached: Promise<void>; release(): void }
+  forceOwnerMarker(
+    owner: { groupID: string } | { ownerDID: string },
+    marker: { mutationID: string; revision: number },
+  ): Promise<void>
+  deleteCommittedRow(namespace: string, key: string): Promise<void>
+  constructGroupStores(
+    tx: FixtureGroupStores<TPorts> extends { tx: infer TTx } ? TTx : never,
+    key: GroupKey,
+  ): FixtureGroupStores<TPorts>
   inspectRows(): Promise<MemoryStoreRows>
   inspectRawBytes(): Promise<Array<RawStoredRecord>>
   inspectSideRow(key: string): Promise<Uint8Array | null>
