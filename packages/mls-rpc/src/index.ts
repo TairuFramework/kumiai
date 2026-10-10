@@ -37,6 +37,15 @@ export {
   type LedgerEntrySlot,
   RECOVERY_LABEL,
 } from './mls.js'
+export type {
+  EntryKind,
+  EntryPhase,
+  OwnerEntry,
+  OwnerQueues,
+  OwnerScopes,
+  ProofOutcome,
+  WriteTarget,
+} from './owner-queue.js'
 export {
   DisplacedGroupHandleError,
   GroupControlUnsettledError,
@@ -45,6 +54,8 @@ export {
   InvalidAppEntryError,
   NonRootProviderError,
   OutboxReplacementError,
+  PersistencePhaseError,
+  ReentrantOwnershipError,
   StorageOutcomeUnknownError,
 } from './persistence-errors.js'
 export type {

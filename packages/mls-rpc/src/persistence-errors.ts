@@ -23,3 +23,11 @@ export class InvalidAppEntryError extends Error {
 export class NonRootProviderError extends Error {
   override name = 'NonRootProviderError'
 }
+
+export class PersistencePhaseError extends Error {
+  override name = 'PersistencePhaseError'
+}
+
+export class ReentrantOwnershipError extends Error {
+  override name = 'ReentrantOwnershipError'
+}
