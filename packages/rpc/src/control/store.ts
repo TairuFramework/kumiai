@@ -15,9 +15,20 @@ function putRows<Row, Key>(
   return [...result.values()]
 }
 
+function cloneControlValue<TValue>(value: TValue): TValue {
+  if (value instanceof Uint8Array) return Uint8Array.from(value) as TValue
+  if (Array.isArray(value)) return value.map(cloneControlValue) as TValue
+  if (value !== null && typeof value === 'object') {
+    const copy: Record<string, unknown> = {}
+    for (const [key, child] of Object.entries(value)) copy[key] = cloneControlValue(child)
+    return copy as TValue
+  }
+  return value
+}
+
 /** Deletes precede puts so a replacement at the fork epoch survives settlement. */
 export function applyChanges(snapshot: ControlSnapshot, changes: ControlChanges): ControlSnapshot {
-  return structuredClone({
+  return cloneControlValue({
     operations: putRows(
       snapshot.operations.filter((row) => !changes.deleteOperations?.includes(row.id)),
       changes.putOperations,

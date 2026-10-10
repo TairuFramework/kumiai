@@ -34,12 +34,26 @@ function upsertRows<Row, Key>(
   }
 }
 
+function cloneValue<TValue>(value: TValue): TValue {
+  if (value instanceof Uint8Array) return Uint8Array.from(value) as TValue
+  if (Array.isArray(value)) return value.map(cloneValue) as TValue
+  if (value !== null && typeof value === 'object') {
+    if (value instanceof Map) {
+      return new Map([...value].map(([key, item]) => [cloneValue(key), cloneValue(item)])) as TValue
+    }
+    const copy: Record<string, unknown> = {}
+    for (const [key, child] of Object.entries(value)) copy[key] = cloneValue(child)
+    return copy as TValue
+  }
+  return value
+}
+
 /** Mutates the transaction's private copy, independently of the RPC reducer. */
 function mutateControl<Position extends string>(
   snapshot: ConformanceControlSnapshot<Position>,
   changes: ConformanceControlChanges<Position>,
 ): void {
-  const owned = structuredClone(changes)
+  const owned = cloneValue(changes)
   removeRows(snapshot.operations, (row) => owned.deleteOperations?.includes(row.id) === true)
   removeRows(snapshot.outcomes, (row) => owned.deleteOutcomes?.includes(row.id) === true)
   removeRows(snapshot.welcomes, (row) => owned.deleteWelcomes?.includes(row.opID) === true)
@@ -103,17 +117,17 @@ export function createMemoryControlStore<
     }
   }
   return {
-    load: async () => structuredClone(record.control),
+    load: async () => cloneValue(record.control),
     lastMutation: async () => record.mutationID,
     apply: async (changes, mutationID) => {
-      const next = structuredClone(record)
+      const next = cloneValue(record)
       mutateControl(next.control, changes)
       next.mutationID = mutationID
       finish(next, 'apply')
     },
     loadState: async () => record.state?.slice() ?? null,
     saveState: async (state, write) => {
-      const next = structuredClone(record)
+      const next = cloneValue(record)
       next.state = state.slice()
       if (write != null) {
         mutateControl(next.control, write.changes)
@@ -125,10 +139,10 @@ export function createMemoryControlStore<
       finish(next, 'save')
     },
     anchor: {
-      load: async () => structuredClone(record.anchor),
+      load: async () => cloneValue(record.anchor),
       save: async (slot) => {
-        const next = structuredClone(record)
-        next.anchor = structuredClone(slot)
+        const next = cloneValue(record)
+        next.anchor = cloneValue(slot)
         record = next
       },
     },

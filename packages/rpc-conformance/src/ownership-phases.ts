@@ -19,6 +19,14 @@ import type {
   StorageTestPorts,
 } from './persistence-fixture.js'
 
+function localDeferred<TValue>(): { promise: Promise<TValue>; resolve(value: TValue): void } {
+  let resolve!: (value: TValue) => void
+  const promise = new Promise<TValue>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
+
 const groupID = 'group-A'
 const key = { groupID, incarnation: 1 }
 const utf8 = (value: string) => new TextEncoder().encode(value)
@@ -490,7 +498,7 @@ function runOwnershipPhasesConformance<TTx extends ConformanceGroupTransaction>(
           const change = await within(storageChange(groups, groupID, 'committed-unknown'))
           const order: Array<string> = []
           const calls: Array<string> = []
-          const started = Promise.withResolvers<void>()
+          const started = localDeferred<void>()
           fixture.commitThenReject()
           const writer = observed(
             device
