@@ -3,10 +3,13 @@ import {
   type AppliedCommit,
   asLogPosition,
   type ControlSlot,
+  type Operation,
   type Outcome,
 } from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
+import { createPersistenceBuildSaver } from '../src/control-build.js'
+import { encodeControlJournal } from '../src/control-journal.js'
 import { memoryFaults } from '../src/memory-faults.js'
 import { createMemoryGroupPersistence } from '../src/memory-group-persistence.js'
 import { createGroupStateStores } from '../src/memory-group-state.js'
@@ -307,12 +310,56 @@ for (const mode of ['real-mls', 'double'] as const) {
         journal: new Uint8Array([7, 8, 9]),
         welcome: { bytes: new Uint8Array([10, 11]), recipients: ['did:example:recipient'] },
       }
-      const expected = structuredClone(slot)
       const control = groups.ports(key).control
       const leakedKey = control.key
       leakedKey.incarnation = 2
       expect(control.key).toEqual(key)
-      await control.apply({ commitOnce: slot, putOutcomes: [outcome] }, 'retain-build')
+      const intent: Operation & { stage: 'intent' } = {
+        id: slot.opID,
+        kind: 'invite',
+        revokes: false,
+        body: new Uint8Array(),
+        seq: 1,
+        enqueuedAt: 1,
+        deadline: 30_001,
+        stage: 'intent',
+      }
+      await control.apply(
+        { putOperations: [intent], cursor: { position: slot.searchFrom, epoch: slot.epoch } },
+        'intent',
+      )
+      const source = {
+        key,
+        identity: seed.trust.installed,
+        stateVersion: (await groups.loadState(key))!.version,
+      }
+      slot.journal = encodeControlJournal({
+        version: 1,
+        source,
+        checkpoint: slot.searchFrom,
+        sourceState: seed.state.state!,
+        sourceCredential: seed.trust.credential,
+        sourceLedger: seed.state.ledger,
+        candidate: slot.journal,
+      })
+      const expected = structuredClone(slot)
+      expect(
+        await createPersistenceBuildSaver({ persistence: groups, key })(
+          intent,
+          slot,
+          source,
+          'retain-build',
+        ),
+      ).toBe('saved')
+      const before = db.snapshot()
+      await expect(control.apply({ commitOnce: null }, 'same-epoch-clear')).rejects.toThrow(
+        'provider-verified',
+      )
+      await expect(
+        control.apply({ commitOnce: { ...slot, payload: new Uint8Array([99]) } }, 'replace'),
+      ).rejects.toThrow('provider-verified')
+      expect(db.snapshot()).toEqual(before)
+      await control.apply({ putOutcomes: [outcome] }, 'outcome')
       slot.payload.fill(0)
       slot.welcome?.recipients.push('did:example:other')
       await control.apply({ deleteOperations: [slot.opID], deleteOutcomes: [outcome.id] }, 'ack')
@@ -339,6 +386,11 @@ for (const mode of ['real-mls', 'double'] as const) {
       expect(stored).toEqual(
         await sealRecord(atRest, address, { snapshot: await control.load(), mutationID: 'ack' }),
       )
+      await reopened.transition(
+        await nextChange(reopened, groupID, 'clear-with-retained-build'),
+        async (stores) => stores.incarnation(1).clearTransport(),
+      )
+      expect((await reopened.ports(key).control.load()).commitOnce).toEqual(expected)
     })
 
     test('rejects overlapping state saves after one version advance', async () => {

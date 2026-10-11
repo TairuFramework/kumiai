@@ -1,5 +1,6 @@
-import { applyChanges, type ControlSnapshot } from '@kumiai/rpc'
+import { applyChanges, type CommitOnceWriteContext, type ControlSnapshot } from '@kumiai/rpc'
 
+import { controlBuildContext } from './control-build.js'
 import {
   createUnlockedGroupStateStores,
   memoryOpen,
@@ -282,12 +283,36 @@ export function createUnlockedIncarnationStores(params: {
         const owedOnly = Object.keys(owned).every(
           (name) => name === 'deleteOutcomes' || name === 'deleteWelcomes',
         )
-        if (!owedOnly) await active()
+        if (
+          owned.commitOnceAcceptance != null &&
+          !sameStoredValue(owned.commitOnceAcceptance.source.key, key)
+        )
+          throw new GroupStateConflictError('Acceptance key mismatch')
+        const previous = (await control.load('current'))?.snapshot ?? emptyControl()
+        let context: CommitOnceWriteContext | null = controlBuildContext(tx)
+        if (owned.commitOnce !== undefined && context === null) {
+          const life = await stateStores.lifetime.load()
+          const state = await stateStores.state(key.incarnation).load()
+          const source =
+            state === null || state.deleted
+              ? null
+              : { ...key, epoch: state.epoch, authenticator: state.epochAuthenticator }
+          if (owned.commitOnce === null && previous.commitOnce !== null) {
+            const trust = await stateStores.trust.load()
+            const retired = life !== null && life.activeIncarnation !== key.incarnation
+            const before = retired
+              ? {
+                  ...key,
+                  epoch: previous.commitOnce.epoch,
+                  authenticator: previous.commitOnce.authenticatorBefore,
+                }
+              : trust?.installed
+            if (before !== undefined) context = { kind: 'adoption', before, after: source, retired }
+          } else if (source !== null) context = { kind: 'head', source }
+        }
+        if (!owedOnly && !(context?.kind === 'adoption' && context.retired)) await active()
         await control.save('current', {
-          snapshot: applyChanges(
-            (await control.load('current'))?.snapshot ?? emptyControl(),
-            owned,
-          ),
+          snapshot: applyChanges(previous, owned, context),
           mutationID,
         })
       },
@@ -413,6 +438,8 @@ export function createUnlockedIncarnationStores(params: {
           mutationID: previous.mutationID,
           snapshot: {
             ...emptyControl(),
+            commitOnce: previous.snapshot.commitOnce,
+            commitOnceAcceptance: previous.snapshot.commitOnceAcceptance,
             outcomes: previous.snapshot.outcomes,
             welcomes: previous.snapshot.welcomes,
             cursor:

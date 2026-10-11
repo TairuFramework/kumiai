@@ -68,7 +68,8 @@ test.each(['build', 'receipt', 'Welcome'] as const)(
       await expect(
         commitInvite(f.group, bundle.publicPackage, invite).then(() => undefined),
       ).rejects.toMatchObject({
-        reason: 'missing-holder-evidence',
+        name: 'CommitRejectedError',
+        cause: { reason: 'missing-holder-evidence' },
       })
     } else if (path === 'receipt') {
       const forged = await rawAdd(f.group, f.device, f.binding)
@@ -171,7 +172,8 @@ test('deniedHolderGrantRefused', async () => {
   const bundle = await rawBundle(group, f.device, f.evidenced)
   const { invite } = await createInvite({ group, identity: f.identity, recipientDID: f.device.id })
   await expect(commitInvite(group, bundle.publicPackage, invite)).rejects.toMatchObject({
-    reason: 'denied-id',
+    name: 'CommitRejectedError',
+    cause: { reason: 'denied-id' },
   })
 })
 
@@ -301,7 +303,10 @@ test.each(
     })
     await expect(
       commitInvite(f.group, bundle.publicPackage, invite).then(() => undefined),
-    ).rejects.toMatchObject({ reason: 'holder-evidence-mismatch' })
+    ).rejects.toMatchObject({
+      name: 'CommitRejectedError',
+      cause: { reason: 'holder-evidence-mismatch' },
+    })
   } else if (path === 'Add receipt') {
     const forged = await rawAdd(f.group, f.device, binding)
     const processing = f.group.processMessage(forged.message)

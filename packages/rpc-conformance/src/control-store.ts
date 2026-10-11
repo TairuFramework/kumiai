@@ -220,8 +220,40 @@ export type ConformanceControlCommitCursor<Position extends string = string> = {
   fork?: ConformanceForkEvidence<Position>
 }
 
+export type ConformanceSaveControlBuild<Position extends string = string> = (
+  intent: ConformanceOperation<Position> & { stage: 'intent' },
+  built: ConformanceControlSlot<Position>,
+  expected: ConformanceAdoptionExpected,
+  mutationID: string,
+) => Promise<'saved' | 'moved' | 'occupied'>
+
+export function encodeControlFixtureState(identity: ConformanceEpochIdentity): Uint8Array {
+  return new TextEncoder().encode(
+    JSON.stringify({ ...identity, authenticator: Array.from(identity.authenticator) }),
+  )
+}
+export function decodeControlFixtureState(bytes: Uint8Array): ConformanceEpochIdentity | null {
+  try {
+    const value = JSON.parse(new TextDecoder().decode(bytes)) as ConformanceEpochIdentity & {
+      authenticator: Array<number>
+    }
+    if (
+      typeof value.groupID !== 'string' ||
+      !Number.isSafeInteger(value.incarnation) ||
+      !Number.isSafeInteger(value.epoch) ||
+      !Array.isArray(value.authenticator)
+    )
+      return null
+    return { ...value, authenticator: Uint8Array.from(value.authenticator) }
+  } catch {
+    return null
+  }
+}
+
 export type ConformanceControlHost = {
   control: ConformanceControlStore
+  saveBuilt: ConformanceSaveControlBuild
+  loadVersion(): Promise<number>
   saveState(state: Uint8Array, write?: ConformanceAdoptionWrite): Promise<void>
   loadState(): Promise<Uint8Array | null>
   anchor: ConformanceAnchorStore
@@ -313,8 +345,277 @@ function records(): ConformanceControlChanges {
   }
 }
 
+async function prepareSlot(host: ConformanceControlHost) {
+  const original = records().putOperations?.[0]
+  if (original == null || original.stage !== 'accepted') throw new Error('Missing build fixture')
+  const intent: ConformanceOperation & { stage: 'intent' } = { ...original, stage: 'intent' }
+  const slot: ConformanceControlSlot = { ...original.built, opID: original.id }
+  const identity = {
+    ...host.control.key,
+    epoch: slot.epoch,
+    authenticator: slot.authenticatorBefore.slice(),
+  }
+  await host.saveState(encodeControlFixtureState(identity))
+  await host.control.apply(
+    { putOperations: [intent], cursor: { position: slot.searchFrom, epoch: slot.epoch } },
+    'intent',
+  )
+  const source = { key: host.control.key, identity, stateVersion: await host.loadVersion() }
+  expect(await host.saveBuilt(intent, slot, source, 'saved')).toBe('saved')
+  return { intent, slot, source }
+}
+
 export function testControlStoreConformance(params: ControlStoreConformanceParams): void {
   describe('ControlStore conformance', () => {
+    test('slot changes require provider-verified context: arbitrary apply cannot create a slot', async () => {
+      const host = await params.open()
+      const op = records().putOperations?.[0]
+      if (op == null || op.stage !== 'accepted') throw new Error('missing build')
+      const before = await host.control.load()
+      const marker = await host.control.lastMutation()
+      await expect(
+        host.control.apply({ commitOnce: { ...op.built, opID: op.id } }, 'unverified'),
+      ).rejects.toThrow()
+      expect(await host.control.load()).toEqual(before)
+      expect(await host.control.lastMutation()).toBe(marker)
+    })
+    test.each([
+      'owner',
+      'epoch',
+      'authenticator',
+      'incarnation',
+      'payload',
+      'payloadDigest',
+      'digest',
+      'publishID',
+      'searchFrom',
+      'bodies',
+      'journal',
+      'welcome',
+      'null',
+    ] as const)(
+      'slot changes require provider-verified context: %s is immutable',
+      async (field) => {
+        const host = await params.open()
+        const { slot } = await prepareSlot(host)
+        const next = { ...slot }
+        switch (field) {
+          case 'owner':
+            next.opID = 'other'
+            break
+          case 'epoch':
+            next.epoch++
+            break
+          case 'authenticator':
+            next.authenticatorBefore = new Uint8Array([99])
+            break
+          case 'incarnation':
+            next.incarnation++
+            break
+          case 'payload':
+            next.payload = new Uint8Array([99])
+            break
+          case 'payloadDigest':
+            next.payloadDigest = 'other'
+            break
+          case 'digest':
+            next.digest = 'other'
+            break
+          case 'publishID':
+            next.publishID = 'other'
+            break
+          case 'searchFrom':
+            next.searchFrom = 'other'
+            break
+          case 'bodies':
+            next.bodies = ['other']
+            break
+          case 'journal':
+            next.journal = new Uint8Array([99])
+            break
+          case 'welcome':
+            next.welcome = { bytes: new Uint8Array([99]), recipients: ['other'] }
+            break
+        }
+        const before = await host.control.load()
+        const marker = await host.control.lastMutation()
+        await expect(
+          host.control.apply(
+            { commitOnce: field === 'null' ? null : next, deleteOperations: [slot.opID] },
+            'unverified',
+          ),
+        ).rejects.toThrow()
+        expect(await (await params.reopen()).control.load()).toEqual(before)
+        expect(await host.control.lastMutation()).toBe(marker)
+      },
+    )
+    test('slot changes require provider-verified context: head refresh and unchanged slot preserve bytes', async () => {
+      const host = await params.open()
+      const { slot } = await prepareSlot(host)
+      await host.control.apply({ commitOnce: { ...slot, expectedHead: 'new-head' } }, 'head')
+      const refreshed = (await host.control.load()).commitOnce
+      expect(refreshed).toEqual({ ...slot, expectedHead: 'new-head' })
+      await host.control.apply({ commitOnce: refreshed }, 'unchanged')
+      expect((await host.control.load()).commitOnce).toEqual(refreshed)
+    })
+    test('slot changes require provider-verified context: same-epoch save and lower source cannot replace current slot', async () => {
+      const host = await params.open()
+      const { slot, source } = await prepareSlot(host)
+      const intent: ConformanceOperation & { stage: 'intent' } = {
+        id: 'next',
+        kind: 'rotation',
+        revokes: false,
+        body: new Uint8Array(),
+        seq: 2,
+        enqueuedAt: 10,
+        deadline: 30_010,
+        stage: 'intent',
+      }
+      await host.control.apply({ deleteOperations: [slot.opID], putOperations: [intent] }, 'queue')
+      const before = await host.control.load()
+      const marker = await host.control.lastMutation()
+      expect(
+        await host.saveBuilt(
+          intent,
+          { ...slot, opID: intent.id },
+          { ...source, stateVersion: await host.loadVersion() },
+          'same',
+        ),
+      ).toBe('occupied')
+      expect(
+        await host.saveBuilt(
+          intent,
+          { ...slot, opID: intent.id, epoch: slot.epoch - 1 },
+          { ...source, identity: { ...source.identity, epoch: slot.epoch - 1 } },
+          'lower',
+        ),
+      ).toBe('moved')
+      expect(await host.control.load()).toEqual(before)
+      expect(await host.control.lastMutation()).toBe(marker)
+    })
+    test('slot changes require provider-verified context: later epoch build replaces retained slot', async () => {
+      const host = await params.open()
+      const { slot, source } = await prepareSlot(host)
+      await host.control.apply(
+        {
+          commitOnceAcceptance: {
+            source,
+            from: slot.searchFrom,
+            position: 'accepted',
+            payloadDigest: slot.payloadDigest,
+          },
+        },
+        'accepted',
+      )
+      const identity = {
+        ...source.identity,
+        epoch: slot.epoch + 1,
+        authenticator: new Uint8Array([43]),
+      }
+      await host.saveState(encodeControlFixtureState(identity))
+      const intent: ConformanceOperation & { stage: 'intent' } = {
+        id: 'next',
+        kind: 'rotation',
+        revokes: false,
+        body: new Uint8Array(),
+        seq: 2,
+        enqueuedAt: 10,
+        deadline: 30_010,
+        stage: 'intent',
+      }
+      await host.control.apply(
+        {
+          deleteOperations: [slot.opID],
+          putOperations: [intent],
+          cursor: { position: 'new', epoch: identity.epoch },
+        },
+        'queue',
+      )
+      const next = {
+        ...slot,
+        opID: intent.id,
+        epoch: identity.epoch,
+        authenticatorBefore: identity.authenticator,
+        searchFrom: 'new',
+        expectedHead: 'new',
+      }
+      expect(
+        await host.saveBuilt(
+          intent,
+          next,
+          { ...source, identity, stateVersion: await host.loadVersion() },
+          'new-build',
+        ),
+      ).toBe('saved')
+      expect((await host.control.load()).commitOnce).toEqual(next)
+      expect((await host.control.load()).commitOnceAcceptance).toBeNull()
+    })
+    test.each(['digest', 'key', 'checkpoint'] as const)(
+      'slot changes require provider-verified context: acceptance must bind the occupied slot: %s',
+      async (field) => {
+        const host = await params.open()
+        const { slot, source } = await prepareSlot(host)
+        const before = await host.control.load()
+        const marker = await host.control.lastMutation()
+        const proof = {
+          source,
+          from: slot.searchFrom,
+          position: 'accepted',
+          payloadDigest: slot.payloadDigest,
+        }
+        if (field === 'digest') proof.payloadDigest = 'wrong'
+        if (field === 'checkpoint') proof.from = 'wrong'
+        if (field === 'key')
+          proof.source = {
+            ...source,
+            key: { ...source.key, groupID: 'wrong' },
+            identity: { ...source.identity, groupID: 'wrong' },
+          }
+        await expect(host.control.apply({ commitOnceAcceptance: proof }, 'proof')).rejects.toThrow()
+        expect(await host.control.load()).toEqual(before)
+        expect(await host.control.lastMutation()).toBe(marker)
+      },
+    )
+    test('slot changes require provider-verified context: advancing adoption clears acceptance and retirement releases the slot', async () => {
+      const host = await params.open()
+      const { slot, source } = await prepareSlot(host)
+      await host.control.apply(
+        {
+          commitOnceAcceptance: {
+            source,
+            from: slot.searchFrom,
+            position: 'accepted',
+            payloadDigest: slot.payloadDigest,
+          },
+        },
+        'accepted',
+      )
+      const before = await host.control.load()
+      const marker = await host.control.lastMutation()
+      await expect(
+        host.saveState(encodeControlFixtureState(source.identity), {
+          changes: { commitOnce: null, commitOnceAcceptance: null },
+          mutationID: 'same-epoch',
+        }),
+      ).rejects.toThrow()
+      expect(await host.control.load()).toEqual(before)
+      expect(await host.control.lastMutation()).toBe(marker)
+      await host.saveState(
+        encodeControlFixtureState({
+          ...source.identity,
+          incarnation: 2,
+          epoch: 0,
+          authenticator: new Uint8Array([45]),
+        }),
+        {
+          expected: source,
+          changes: { commitOnce: null, commitOnceAcceptance: null },
+          mutationID: 'retired',
+        },
+      )
+      expect((await host.control.load()).commitOnce).toBeNull()
+      expect((await host.control.load()).commitOnceAcceptance).toBeNull()
+    })
     test('retained slot and acceptance round-trip defensively and survive rollback', async () => {
       const host = await params.open()
       const original = records().putOperations?.[0]
@@ -322,11 +623,10 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       const slot: ConformanceControlSlot = { ...original.built, opID: original.id }
       const acceptance: ConformanceFirstValidCommit = {
         source: {
-          key: { groupID: 'group-A', incarnation: 1 },
+          key: host.control.key,
           stateVersion: 1,
           identity: {
-            groupID: 'group-A',
-            incarnation: 1,
+            ...host.control.key,
             epoch: slot.epoch,
             authenticator: slot.authenticatorBefore.slice(),
           },
@@ -360,7 +660,20 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
                 },
         },
       }
-      await host.control.apply({ commitOnce: slot, commitOnceAcceptance: acceptance }, 'slot')
+      await host.saveState(encodeControlFixtureState(acceptance.source.identity!))
+      await host.control.apply(
+        {
+          putOperations: [{ ...original, stage: 'intent' }],
+          cursor: { position: slot.searchFrom, epoch: slot.epoch },
+        },
+        'intent',
+      )
+      acceptance.source.stateVersion = await host.loadVersion()
+      expectedAcceptance.source.stateVersion = acceptance.source.stateVersion
+      expect(
+        await host.saveBuilt({ ...original, stage: 'intent' }, slot, acceptance.source, 'slot'),
+      ).toBe('saved')
+      await host.control.apply({ commitOnceAcceptance: acceptance }, 'acceptance')
       slot.journal.fill(0)
       acceptance.source.identity?.authenticator.fill(0)
       await host.control.apply(
@@ -385,9 +698,25 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
         },
         mutationID: 'advance',
       }
-      await expect(reopened.saveState(new Uint8Array([2]), write)).rejects.toThrow()
+      await expect(
+        reopened.saveState(
+          encodeControlFixtureState({
+            ...expectedAcceptance.source.identity!,
+            epoch: slot.epoch + 1,
+            authenticator: new Uint8Array([42]),
+          }),
+          write,
+        ),
+      ).rejects.toThrow()
       expect((await (await params.reopen()).control.load()).commitOnce).toEqual(expectedSlot)
-      await reopened.saveState(new Uint8Array([2]), write)
+      await reopened.saveState(
+        encodeControlFixtureState({
+          ...expectedAcceptance.source.identity!,
+          epoch: slot.epoch + 1,
+          authenticator: new Uint8Array([42]),
+        }),
+        write,
+      )
       const cleared = await (await params.reopen()).control.load()
       expect(cleared.commitOnce).toBeNull()
       expect(cleared.commitOnceAcceptance).toBeNull()

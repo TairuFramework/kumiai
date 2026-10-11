@@ -35,10 +35,18 @@ export {
   isUnsupportedCommitFrameVersion,
   UnsupportedCommitFrameVersionError,
 } from './commit-frame.js'
+export type {
+  ControlBuildPort,
+  FrameControlBuild,
+  PrepareControlResult,
+  SaveControlBuild,
+} from './control/build.js'
 export type { HostBuilt, OperationDeps } from './control/operations.js'
 export {
   applyChanges,
   applyResolved,
+  assertCommitOnceChange,
+  type CommitOnceWriteContext,
   controlSettled,
   pruneWindow,
   readmissionChanges,

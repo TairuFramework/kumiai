@@ -1,8 +1,20 @@
-import { commitLedgerEntries, encodeClientState, signLedgerEntry } from '@kumiai/mls'
-import { type AppFrameRef, AppFrameStorageError } from '@kumiai/rpc'
+import {
+  commitKeyRotation,
+  commitLedgerEntries,
+  encodeClientState,
+  signLedgerEntry,
+} from '@kumiai/mls'
+import {
+  type AppFrameRef,
+  AppFrameStorageError,
+  digestAppliedCommit,
+  type Operation,
+} from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
 import type { ControlReadScope, HandleAccess } from '../src/access.js'
+import { createControlBuildPort } from '../src/control-build.js'
+import { decodeControlJournal } from '../src/control-journal.js'
 import { createGroupCrypto } from '../src/crypto.js'
 import { createGroupMLS } from '../src/mls.js'
 import {
@@ -439,3 +451,85 @@ test('a bootstrap whose host callback throws after the write still publishes the
   expect(host.live().ledgerTokens).toEqual(tokens)
   expect(await mls.isLedgerComplete()).toBe(true)
 })
+
+test('transactional build uses committed open state before delayed publication', async () => {
+  const { store, host, seal } = await setup('control-open')
+  const intent: Operation & { stage: 'intent' } = {
+    id: 'rotation',
+    kind: 'rotation',
+    revokes: false,
+    body: new Uint8Array(),
+    seq: 1,
+    enqueuedAt: 1,
+    deadline: 30_001,
+    stage: 'intent',
+  }
+  await store.control.apply(
+    { putOperations: [intent], cursor: { position: null, epoch: Number(host.live().epoch) } },
+    'intent',
+  )
+  const sealed = await seal('hello')
+  const committed = deferred()
+  const release = deferred()
+  const crypto = createGroupCrypto({
+    access: host.access,
+    pending: {
+      ...host.pending,
+      persistOpened: async (state, record) => {
+        await host.pending.persistOpened(state, record)
+        committed.resolve()
+        await release.promise
+      },
+    },
+  })
+  const opening = crypto.unwrap(sealed, { expectedAAD: aad, frame: frameRef('control-open') })
+  await committed.promise
+  const row = store.snapshot()
+  const port = createControlBuildPort({
+    access: host.access,
+    control: store.control,
+    saveBuilt: store.saveBuilt,
+    now: () => 10,
+    newID: () => cryptoRandomID(),
+    build: async (_op, group) => {
+      const rotated = await commitKeyRotation(group)
+      return {
+        commit: rotated.commitMessage,
+        epoch: Number(group.epoch),
+        incarnation: 1,
+        authenticatorBefore: group.state.keySchedule.epochAuthenticator.slice(),
+        digest: digestAppliedCommit(rotated.commitMessage),
+        bodies: [],
+        journal: encodeClientState(rotated.newGroup.state),
+        welcome: null,
+      }
+    },
+  })
+  try {
+    expect(
+      (
+        await port.prepareBuild(intent, async (built, seal) => ({
+          payload: (await seal(built.commit)).sealed,
+          publishID: 'rotation',
+          expectedHead: null,
+        }))
+      ).kind,
+    ).toBe('saved')
+    const journal = decodeControlJournal(store.snapshot().control.commitOnce!.journal)
+    expect(journal.sourceState).toEqual(row.state)
+    expect(journal.source.stateVersion).toBe(row.revision)
+    await host.access.readControl(async ({ handle }) => {
+      await expect(handle.decrypt(sealed, { expectedAAD: aad })).rejects.toThrow(
+        'Desired gen in the past',
+      )
+    })
+  } finally {
+    release.resolve()
+  }
+  await opening
+  expect(store.snapshot().state).toEqual(row.state)
+})
+
+function cryptoRandomID(): string {
+  return globalThis.crypto.randomUUID()
+}

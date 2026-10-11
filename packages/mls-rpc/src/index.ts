@@ -22,6 +22,16 @@
 export { type HandleAccess, type SimpleHandleAccessParams, simpleHandleAccess } from './access.js'
 export { type ApplyCommitParams, type ApplyCommitResult, applyCommit } from './apply-commit.js'
 export {
+  createControlBuildPort,
+  createPersistenceBuildSaver,
+  type SaveControlBuild,
+} from './control-build.js'
+export {
+  type ControlJournal,
+  decodeControlJournal,
+  encodeControlJournal,
+} from './control-journal.js'
+export {
   createGroupCrypto,
   deriveEntryKey,
   ENTRY_SEAL_LABEL,
@@ -108,6 +118,7 @@ export type {
   TransactionHookSettlement,
 } from './persistence-types.js'
 export {
+  buildRevokeProofOnHandle,
   buildRevokeProofOperation,
   type PublishRevokeProofParams,
   type PublishRevokeResult,

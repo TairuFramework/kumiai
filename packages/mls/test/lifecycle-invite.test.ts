@@ -159,7 +159,8 @@ test('Add refuses floating and malformed bindings and expired author capability'
   const { group, bob, invite } = await admission()
   const floating = await rawAdd(group, bob)
   await expect(commitInvite(group, floating.bundle.publicPackage, invite)).rejects.toMatchObject({
-    reason: 'floating-refused',
+    name: 'CommitRejectedError',
+    cause: { reason: 'floating-refused' },
   })
   const malformed = await rawAdd(group, bob, {
     ...(await timedBinding({ identity: bob, iat: 100, exp: 200 })),

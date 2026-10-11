@@ -33,7 +33,11 @@ import { createMemoryAnchorStore, type MemoryAnchorStore } from './anchor.js'
 import { createMemoryAppCursorStore, type MemoryAppCursorStore } from './app-cursor.js'
 import { createFakeCrypto, type FakeCrypto } from './fake-crypto.js'
 import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
-import { createMemoryGroupMLS, type MemoryGroupMLS } from './memory-group-mls.js'
+import {
+  createMemoryGroupMLS,
+  decodeMemoryGroupIdentity,
+  type MemoryGroupMLS,
+} from './memory-group-mls.js'
 import { createMemoryAppOutbox } from './outbox.js'
 
 /**
@@ -124,7 +128,12 @@ export function makeMLSPeer(
 ): TestPeer {
   const epoch = options.epoch ?? 1
   const restartOf = options.restartOf
-  const database = options.database ?? restartOf?.database ?? createMemoryHostDatabase()
+  const database =
+    options.database ??
+    restartOf?.database ??
+    createMemoryHostDatabase({
+      readIdentity: (state, key) => decodeMemoryGroupIdentity(state, key, recoverySecret),
+    })
   const crypto =
     options.crypto ?? restartOf?.crypto.restart() ?? createFakeCrypto({ epoch, localDID })
   const mls =
@@ -331,6 +340,7 @@ export function memoryOperationHost(mls: MemoryGroupMLS) {
   return {
     welcomes,
     control: mls.control(),
+    saveBuilt: mls.saveBuilt,
     build: (op: Operation) => buildMemoryOperation(mls, op),
     deliverWelcome: async (obligation: WelcomeObligation) => {
       welcomes.push(structuredClone(obligation))

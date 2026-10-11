@@ -1,14 +1,21 @@
 import type { ConformanceAnchorSlot, ConformanceAnchorStore } from './anchor-store.js'
 import type {
+  ConformanceAdoptionExpected,
   ConformanceAdoptionWrite,
   ConformanceControlChanges,
+  ConformanceControlSlot,
   ConformanceControlSnapshot,
   ConformanceControlStore,
+  ConformanceEpochIdentity,
   ConformanceGroupKey,
+  ConformanceSaveControlBuild,
 } from './control-store.js'
+import { decodeControlFixtureState } from './control-store.js'
 
 export type MemoryControlStore<Position extends string = string> =
   ConformanceControlStore<Position> & {
+    saveBuilt: ConformanceSaveControlBuild<Position>
+    loadVersion(): Promise<number>
     anchor: ConformanceAnchorStore
     saveState(state: Uint8Array, write?: ConformanceAdoptionWrite<Position>): Promise<void>
     loadState(): Promise<Uint8Array | null>
@@ -49,12 +56,128 @@ function cloneValue<TValue>(value: TValue): TValue {
   return value
 }
 
+type Context =
+  | {
+      kind: 'build'
+      source: ConformanceAdoptionExpected
+      queueHeadID: string
+      checkpoint: string | null
+    }
+  | {
+      kind: 'adoption'
+      before: ConformanceEpochIdentity
+      after: ConformanceEpochIdentity | null
+      retired: boolean
+    }
+  | { kind: 'head'; source: ConformanceEpochIdentity }
+
+function equal(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true
+  if (left instanceof Uint8Array && right instanceof Uint8Array)
+    return left.length === right.length && left.every((value, index) => value === right[index])
+  if (Array.isArray(left) && Array.isArray(right))
+    return left.length === right.length && left.every((value, index) => equal(value, right[index]))
+  if (left === null || right === null || typeof left !== 'object' || typeof right !== 'object')
+    return false
+  return (
+    Object.keys(left).length === Object.keys(right).length &&
+    Object.entries(left).every(
+      ([key, value]) => Object.hasOwn(right, key) && equal(value, Reflect.get(right, key)),
+    )
+  )
+}
+function matches(slot: ConformanceControlSlot, identity: ConformanceEpochIdentity): boolean {
+  return (
+    slot.epoch === identity.epoch &&
+    slot.incarnation === identity.incarnation &&
+    equal(slot.authenticatorBefore, identity.authenticator)
+  )
+}
+function guard(
+  previous: ConformanceControlSlot | null,
+  next: ConformanceControlSlot | null,
+  context: Context | null,
+): void {
+  if (equal(previous, next)) return
+  switch (context?.kind) {
+    case 'build': {
+      const source = context.source.identity
+      if (
+        next !== null &&
+        source !== null &&
+        equal(context.source.key, { groupID: source.groupID, incarnation: source.incarnation }) &&
+        matches(next, source) &&
+        next.opID === context.queueHeadID &&
+        next.searchFrom === context.checkpoint &&
+        (previous === null ||
+          previous.incarnation < source.incarnation ||
+          (previous.incarnation === source.incarnation && previous.epoch < source.epoch))
+      )
+        return
+      break
+    }
+    case 'head': {
+      if (previous === null || next === null || !matches(previous, context.source)) break
+      const { expectedHead: _a, ...a } = previous
+      const { expectedHead: _b, ...b } = next
+      if (equal(a, b)) return
+      break
+    }
+    case 'adoption':
+      if (
+        previous !== null &&
+        next === null &&
+        matches(previous, context.before) &&
+        (context.retired ||
+          (context.after !== null &&
+            context.after.groupID === context.before.groupID &&
+            context.after.incarnation === context.before.incarnation &&
+            context.after.epoch > context.before.epoch))
+      )
+        return
+  }
+  throw new Error('Unverified commit-once change')
+}
+
 /** Mutates the transaction's private copy, independently of the RPC reducer. */
 function mutateControl<Position extends string>(
   snapshot: ConformanceControlSnapshot<Position>,
   changes: ConformanceControlChanges<Position>,
+  context: Context | null = null,
 ): void {
   const owned = cloneValue(changes)
+  const slot = owned.commitOnce === undefined ? snapshot.commitOnce : owned.commitOnce
+  guard(snapshot.commitOnce, slot, context)
+  const proof = owned.commitOnceAcceptance
+  if (proof !== undefined && !equal(proof, snapshot.commitOnceAcceptance)) {
+    if (proof === null) {
+      if (
+        snapshot.commitOnce !== null &&
+        slot !== null &&
+        (context?.kind !== 'build' || equal(snapshot.commitOnce, slot))
+      )
+        throw new Error('Retained acceptance')
+    } else if (
+      slot === null ||
+      proof.source.identity === null ||
+      !matches(slot, proof.source.identity) ||
+      !equal(proof.source.key, {
+        groupID: proof.source.identity.groupID,
+        incarnation: proof.source.identity.incarnation,
+      }) ||
+      proof.from !== slot.searchFrom ||
+      proof.payloadDigest !== slot.payloadDigest
+    )
+      throw new Error('Unbound acceptance')
+  }
+  if (
+    !equal(snapshot.commitOnce, slot) &&
+    slot !== null &&
+    context?.kind === 'build' &&
+    snapshot.commitOnceAcceptance !== null &&
+    owned.commitOnceAcceptance !== null
+  )
+    throw new Error('Prior acceptance remains')
   removeRows(snapshot.operations, (row) => owned.deleteOperations?.includes(row.id) === true)
   removeRows(snapshot.outcomes, (row) => owned.deleteOutcomes?.includes(row.id) === true)
   removeRows(snapshot.welcomes, (row) => owned.deleteWelcomes?.includes(row.opID) === true)
@@ -89,11 +212,13 @@ export function createMemoryControlStore<Position extends string = string>(
   const fixedKey = { ...key }
   let record: {
     state: Uint8Array | null
+    version: number
     anchor: ConformanceAnchorSlot | null
     control: ConformanceControlSnapshot<Position>
     mutationID: string | null
   } = {
     state: null,
+    version: 0,
     anchor: null,
     mutationID: null,
     control: {
@@ -131,16 +256,77 @@ export function createMemoryControlStore<Position extends string = string>(
     lastMutation: async () => record.mutationID,
     apply: async (changes, mutationID) => {
       const next = cloneValue(record)
-      mutateControl(next.control, changes)
+      const source = next.state === null ? null : decodeControlFixtureState(next.state)
+      if (
+        changes.commitOnceAcceptance != null &&
+        !equal(changes.commitOnceAcceptance.source.key, fixedKey)
+      )
+        throw new Error('Proof key mismatch')
+      mutateControl(next.control, changes, source === null ? null : { kind: 'head', source })
       next.mutationID = mutationID
       finish(next, 'apply')
+    },
+    loadVersion: async () => record.version,
+    saveBuilt: async (intent, built, expected, mutationID) => {
+      const next = cloneValue(record)
+      const identity = next.state === null ? null : decodeControlFixtureState(next.state)
+      if (
+        !equal(expected.key, fixedKey) ||
+        !equal(identity, expected.identity) ||
+        next.version !== expected.stateVersion ||
+        !equal(next.control.operations[0], intent) ||
+        built.searchFrom !== (next.control.cursor?.position ?? null) ||
+        (next.control.cursor !== null &&
+          (next.control.cursor.epoch !== identity?.epoch ||
+            next.control.cursor.stranded ||
+            next.control.cursor.fork))
+      )
+        return 'moved'
+      const previous = next.control.commitOnce
+      if (
+        previous !== null &&
+        previous.incarnation === fixedKey.incarnation &&
+        previous.epoch >= (identity?.epoch ?? 0)
+      )
+        return 'occupied'
+      mutateControl(next.control, { putOperations: [{ ...intent, stage: 'built', built }] })
+      mutateControl(
+        next.control,
+        { commitOnce: built, commitOnceAcceptance: null },
+        {
+          kind: 'build',
+          source: expected,
+          queueHeadID: intent.id,
+          checkpoint: next.control.cursor?.position ?? null,
+        },
+      )
+      next.mutationID = mutationID
+      finish(next, 'apply')
+      return 'saved'
     },
     loadState: async () => record.state?.slice() ?? null,
     saveState: async (state, write) => {
       const next = cloneValue(record)
+      const before = next.state === null ? null : decodeControlFixtureState(next.state)
+      const after = decodeControlFixtureState(state)
       next.state = state.slice()
+      next.version++
       if (write != null) {
-        mutateControl(next.control, write.changes)
+        mutateControl(
+          next.control,
+          write.changes,
+          before === null
+            ? null
+            : {
+                kind: 'adoption',
+                before,
+                after,
+                retired:
+                  after !== null &&
+                  after.groupID === before.groupID &&
+                  after.incarnation > before.incarnation,
+              },
+        )
         next.mutationID = write.mutationID
         if (write.anchorLanded != null && next.anchor?.pending?.advance === write.anchorLanded) {
           next.anchor.pending.landed = true

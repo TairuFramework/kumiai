@@ -27,6 +27,7 @@ import {
   deriveGroup,
   type GroupHandle,
 } from '../src/group-handle.js'
+import { removeMember } from '../src/group-membership.js'
 import { HISTORY_HORIZON, historySize } from '../src/history.js'
 import { ledgerEntryDigest, signLedgerEntry, verifyLedgerEntry } from '../src/ledger.js'
 import {
@@ -879,7 +880,10 @@ describe('consensus history and composition', () => {
         keyPackage: bundle.bundle.publicPackage,
         capability,
       }),
-    ).rejects.toMatchObject({ reason: 'controller-mismatch' })
+    ).rejects.toMatchObject({
+      name: 'CommitRejectedError',
+      cause: { reason: 'controller-mismatch' },
+    })
   })
 
   test('a lifecycle commit cannot change extensions under an accepting policy', async () => {
@@ -1155,4 +1159,16 @@ test('two revoke proofs cannot share a commit', async () => {
   await expect(
     commitWithEntries({ group, extraProposals: [], enacted: tokens, requireAdmin: false }),
   ).rejects.toMatchObject({ reason: 'effects-mismatch' })
+})
+
+test('remove builder wraps lifecycle refusal and preserves its cause', async () => {
+  const setup = await threeMembers()
+  const before = structuredClone(setup.bob.state)
+  await expect(
+    removeMember(setup.bob, setup.survivor.state.privatePath.leafIndex),
+  ).rejects.toMatchObject({
+    name: 'CommitRejectedError',
+    cause: { message: 'Unauthorised Remove' },
+  })
+  expect(setup.bob.state).toEqual(before)
 })

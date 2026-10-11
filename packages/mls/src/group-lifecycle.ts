@@ -144,6 +144,7 @@ async function buildResult(params: BuildResultParams): Promise<DeviceWriteResult
   const result = await commitWithEntries({
     group,
     extraProposals: proposals,
+    pendingProposals: {},
     enacted: tokens,
     requireAdmin: false,
     commitState,

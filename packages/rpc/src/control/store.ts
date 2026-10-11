@@ -1,10 +1,19 @@
 import { getAbortReason, throwIfAborted } from '../abort.js'
+import type { LogPosition } from '../cursor.js'
 import {
   ControlWriteNotCommittedError,
   PeerDisposedError,
   StorageOutcomeUnknownError,
 } from '../errors.js'
-import type { ControlChanges, ControlSnapshot, ControlStore, Outcome } from './types.js'
+import type {
+  AdoptionExpected,
+  ControlChanges,
+  ControlSlot,
+  ControlSnapshot,
+  ControlStore,
+  EpochIdentity,
+  Outcome,
+} from './types.js'
 
 function putRows<Row, Key>(
   rows: Array<Row>,
@@ -27,8 +36,127 @@ function cloneControlValue<TValue>(value: TValue): TValue {
   return value
 }
 
+export type CommitOnceWriteContext =
+  | { kind: 'build'; source: AdoptionExpected; queueHeadID: string; checkpoint: LogPosition | null }
+  | { kind: 'adoption'; before: EpochIdentity; after: EpochIdentity | null; retired: boolean }
+  | { kind: 'head'; source: EpochIdentity }
+
+function sameValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true
+  if (left instanceof Uint8Array && right instanceof Uint8Array)
+    return left.length === right.length && left.every((byte, index) => byte === right[index])
+  if (Array.isArray(left) && Array.isArray(right))
+    return (
+      left.length === right.length && left.every((value, index) => sameValue(value, right[index]))
+    )
+  if (left === null || right === null || typeof left !== 'object' || typeof right !== 'object')
+    return false
+  const entries = Object.entries(left)
+  return (
+    entries.length === Object.keys(right).length &&
+    entries.every(
+      ([key, value]) => Object.hasOwn(right, key) && sameValue(value, Reflect.get(right, key)),
+    )
+  )
+}
+
+function slotSource(slot: ControlSlot, source: EpochIdentity): boolean {
+  return (
+    slot.incarnation === source.incarnation &&
+    slot.epoch === source.epoch &&
+    sameValue(slot.authenticatorBefore, source.authenticator)
+  )
+}
+
+export function assertCommitOnceChange(
+  previous: ControlSlot | null,
+  next: ControlSlot | null,
+  context: CommitOnceWriteContext | null,
+): void {
+  if (sameValue(previous, next)) return
+  if (context?.kind === 'build' && next !== null) {
+    const identity = context.source.identity
+    if (
+      identity !== null &&
+      sameValue(context.source.key, {
+        groupID: identity.groupID,
+        incarnation: identity.incarnation,
+      }) &&
+      slotSource(next, identity) &&
+      next.opID === context.queueHeadID &&
+      next.searchFrom === context.checkpoint &&
+      (previous === null ||
+        previous.incarnation < identity.incarnation ||
+        (previous.incarnation === identity.incarnation && previous.epoch < identity.epoch))
+    )
+      return
+  }
+  if (
+    context?.kind === 'adoption' &&
+    previous !== null &&
+    next === null &&
+    slotSource(previous, context.before) &&
+    (context.retired ||
+      (context.after !== null &&
+        context.after.groupID === context.before.groupID &&
+        context.after.incarnation === context.before.incarnation &&
+        context.after.epoch > context.before.epoch))
+  )
+    return
+  if (
+    context?.kind === 'head' &&
+    previous !== null &&
+    next !== null &&
+    slotSource(previous, context.source)
+  ) {
+    const { expectedHead: _before, ...immutableBefore } = previous
+    const { expectedHead: _after, ...immutableAfter } = next
+    if (sameValue(immutableBefore, immutableAfter)) return
+  }
+  throw new Error('Commit-once slot change requires provider-verified context')
+}
+
 /** Deletes precede puts so a replacement at the fork epoch survives settlement. */
-export function applyChanges(snapshot: ControlSnapshot, changes: ControlChanges): ControlSnapshot {
+export function applyChanges(
+  snapshot: ControlSnapshot,
+  changes: ControlChanges,
+  context: CommitOnceWriteContext | null = null,
+): ControlSnapshot {
+  const nextSlot = changes.commitOnce === undefined ? snapshot.commitOnce : changes.commitOnce
+  assertCommitOnceChange(snapshot.commitOnce, nextSlot, context)
+  const acceptance = changes.commitOnceAcceptance
+  if (acceptance !== undefined && !sameValue(acceptance, snapshot.commitOnceAcceptance)) {
+    if (acceptance === null) {
+      if (
+        snapshot.commitOnce !== null &&
+        nextSlot !== null &&
+        (context?.kind !== 'build' || sameValue(snapshot.commitOnce, nextSlot))
+      )
+        throw new Error('Cannot clear retained acceptance')
+    } else {
+      const identity = acceptance.source.identity
+      if (
+        nextSlot === null ||
+        identity === null ||
+        !slotSource(nextSlot, identity) ||
+        !sameValue(acceptance.source.key, {
+          groupID: identity.groupID,
+          incarnation: identity.incarnation,
+        }) ||
+        acceptance.from !== nextSlot.searchFrom ||
+        acceptance.payloadDigest !== nextSlot.payloadDigest
+      )
+        throw new Error('Acceptance does not bind the occupied slot')
+    }
+  }
+  if (
+    !sameValue(snapshot.commitOnce, nextSlot) &&
+    nextSlot !== null &&
+    context?.kind === 'build' &&
+    snapshot.commitOnceAcceptance !== null &&
+    changes.commitOnceAcceptance !== null
+  )
+    throw new Error('Replacement must clear prior acceptance')
   return cloneControlValue({
     commitOnce: changes.commitOnce === undefined ? snapshot.commitOnce : changes.commitOnce,
     commitOnceAcceptance:

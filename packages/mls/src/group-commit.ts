@@ -397,7 +397,12 @@ export async function commitLedgerEntries(
     if (tokens.length === 0) {
       throw new Error('commitLedgerEntries: no ledger entries to commit')
     }
-    const result = await commitWithEntries({ group, extraProposals: [], enacted: tokens })
+    const result = await commitWithEntries({
+      group,
+      extraProposals: [],
+      pendingProposals: {},
+      enacted: tokens,
+    })
     const newGroup = deriveGroup(group, result.newState)
     await newGroup.applyLedgerEntries(tokens)
     return {
@@ -509,6 +514,7 @@ export async function commitInvite(
     const result = await commitWithEntries({
       group,
       extraProposals: [addProposal],
+      pendingProposals: {},
       enacted,
       ratchetTreeExtension: true,
     })

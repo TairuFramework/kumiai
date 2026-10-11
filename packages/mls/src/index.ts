@@ -148,6 +148,7 @@ export {
   renewLeaf,
   revokeWithProof,
 } from './group-lifecycle.js'
+export { type CommitKeyRotationResult, commitKeyRotation } from './group-rotation.js'
 export {
   assertHeadMatches,
   buildLedgerHeadExtension,

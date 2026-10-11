@@ -19,7 +19,9 @@ import {
   signLedgerEntry,
 } from '@kumiai/mls'
 import {
+  buildRevokeProofOnHandle,
   buildRevokeProofOperation,
+  createControlBuildPort,
   createGroupCrypto,
   createGroupMLS,
   type GroupMLSParams,
@@ -34,7 +36,9 @@ import type {
   AnchorStore,
   AppCursorStore,
   AppOutbox,
+  ControlBuildPort,
   ControlStore,
+  GroupKey,
   GroupMLS,
   GroupPeer,
   GroupProtocolDefinition,
@@ -134,9 +138,23 @@ export type StateStore = {
   saved: () => Promise<{ state: Uint8Array; ledger: Array<string> } | null>
 }
 
-export function createMemoryStateStore(): StateStore {
-  const database = createMemoryHostDatabase()
-  const control = database.control('state', { groupID: 'state', incarnation: 1 })
+export function createMemoryStateStore(
+  key: GroupKey = { groupID: 'state', incarnation: 1 },
+): StateStore {
+  const database = createMemoryHostDatabase({
+    readIdentity: (blob, key) => {
+      const journal = JSON.parse(new TextDecoder().decode(blob)) as { state: Array<number> }
+      const state = decodeClientState(Uint8Array.from(journal.state))
+      if (state == null) throw new Error('Invalid stored MLS state')
+      return {
+        groupID: new TextDecoder().decode(state.groupContext.groupId),
+        incarnation: key.incarnation,
+        epoch: Number(state.groupContext.epoch),
+        authenticator: state.keySchedule.epochAuthenticator.slice(),
+      }
+    },
+  })
+  const control = database.control('state', key)
   return {
     database,
     control,
@@ -185,7 +203,8 @@ export type Member = {
   appOutbox: AppOutbox
   appCursorStore: ReturnType<typeof createMemoryAppCursorStore>
   control: ControlStore
-  build: (op: Operation) => Promise<HostBuilt>
+  build: (op: Operation, group?: GroupHandle) => Promise<HostBuilt>
+  prepareBuild: ControlBuildPort['prepareBuild']
   builders: Map<string, (op: Operation) => Promise<HostBuilt>>
   signers: Map<string, OwnIdentity>
   deliveries: Map<string, (welcome: Uint8Array) => void>
@@ -225,7 +244,8 @@ export function makeMember(params: MakeMemberParams): Member {
   let handle = params.group
   const hostHooks: Member['hostHooks'] = {}
   const appCursorStore = restartOf?.appCursorStore ?? createMemoryAppCursorStore()
-  const stateStore = restartOf?.stateStore ?? createMemoryStateStore()
+  const stateStore =
+    restartOf?.stateStore ?? createMemoryStateStore({ groupID: handle.groupID, incarnation: 1 })
   const anchorStore =
     restartOf?.anchorStore ?? createMemoryAnchorStore(stateStore.database.anchorStore('state'))
   const pendingStore =
@@ -272,7 +292,7 @@ export function makeMember(params: MakeMemberParams): Member {
   const builders = restartOf?.builders ?? new Map<string, (op: Operation) => Promise<HostBuilt>>()
   const signers = restartOf?.signers ?? new Map([[identity.id, identity]])
   const deliveries = new Map<string, (welcome: Uint8Array) => void>()
-  const build = async (op: Operation): Promise<HostBuilt> => {
+  const build = async (op: Operation, supplied?: GroupHandle): Promise<HostBuilt> => {
     const custom = builders.get(op.id)
     if (custom != null) return custom(op)
     const body = decodeOperationBody(op.body) as {
@@ -287,7 +307,7 @@ export function makeMember(params: MakeMemberParams): Member {
     let committed: { commitMessage: Uint8Array; newGroup: GroupHandle }
     let bodies: Array<string> = []
     let welcome: HostBuilt['welcome'] = null
-    const current = handle
+    const current = supplied ?? handle
     if (body.type === 'invite' && body.material != null) {
       const result = await commitInvite(
         current,
@@ -319,11 +339,10 @@ export function makeMember(params: MakeMemberParams): Member {
       ]
       committed = await commitLedgerEntries(current, bodies)
     } else if (body.type === 'revoke-proof') {
-      return buildRevokeProofOperation({
-        mls,
-        op,
-        options: { serializeJournal: hostHooks.serializeJournal ?? encodeJournal },
-      })
+      const options = { serializeJournal: hostHooks.serializeJournal ?? encodeJournal }
+      return supplied === undefined
+        ? buildRevokeProofOperation({ mls, op, options })
+        : buildRevokeProofOnHandle({ group: supplied, incarnation: 1, op, options })
     } else {
       bodies = body.tokens ?? []
       committed = await commitLedgerEntries(current, bodies)
@@ -339,6 +358,15 @@ export function makeMember(params: MakeMemberParams): Member {
       digest: digestAppliedCommit(committed.commitMessage),
     }
   }
+  const buildPort = createControlBuildPort({
+    access,
+    control,
+    build,
+    saveBuilt: (intent, built, expected, mutationID) =>
+      stateStore.database.saveBuilt('state', control.key, intent, built, expected, mutationID),
+    now: () => Date.now(),
+    newID: () => globalThis.crypto.randomUUID(),
+  })
   const connection = hub.connect(identity)
   const appOutbox = restartOf?.appOutbox ?? createMemoryAppOutbox()
   const peer = createGroupPeer<Protocols>({
@@ -382,6 +410,7 @@ export function makeMember(params: MakeMemberParams): Member {
     appOutbox,
     control,
     build,
+    prepareBuild: buildPort.prepareBuild,
     builders,
     deliveries,
     signers,
@@ -556,7 +585,7 @@ const operationStores = new WeakMap<HandleAccess, StateStore>()
 export function createDurableHandleAccess(
   params: Pick<Parameters<typeof simpleHandleAccess>[0], 'handle' | 'adopt'>,
 ): HandleAccess {
-  const store = createMemoryStateStore()
+  const store = createMemoryStateStore({ groupID: params.handle().groupID, incarnation: 1 })
   const access = simpleHandleAccess({
     ...params,
     persist: store.save,

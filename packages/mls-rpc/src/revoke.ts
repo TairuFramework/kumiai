@@ -40,27 +40,42 @@ export async function buildRevokeProofOperation(params: {
 }): Promise<HostBuilt> {
   const access = groupHandleAccess.get(params.mls)
   if (access == null) throw new Error('Proof operations require an adapter-created GroupMLS')
+  return access.readControl(({ handle, source }) =>
+    buildRevokeProofOnHandle({
+      group: handle,
+      incarnation: source.key.incarnation,
+      op: params.op,
+      options: params.options,
+    }),
+  )
+}
+
+export async function buildRevokeProofOnHandle(params: {
+  group: GroupHandle
+  incarnation: number
+  op: Operation
+  options: RevokeJournalOptions
+}): Promise<HostBuilt> {
   const body = JSON.parse(new TextDecoder().decode(params.op.body)) as {
     type: string
     input: RevokeWithProofParams
   }
   if (body.type !== 'revoke-proof') throw new OperationRejectedError('Not a proof operation')
-  return access.readControl(async ({ handle: group, source }) => {
-    const priorTokens = new Set(group.ledgerTokens)
-    const result = await revokeWithProof(group, body.input)
-    if (result.status !== 'built') throw new OperationRejectedError(JSON.stringify(result))
-    const { newGroup, commitMessage } = result.result
-    return {
-      commit: commitMessage,
-      bodies: newGroup.ledgerTokens.filter((token) => !priorTokens.has(token)),
-      journal: await params.options.serializeJournal(newGroup),
-      welcome: null,
-      epoch: Number(group.epoch),
-      authenticatorBefore: group.state.keySchedule.epochAuthenticator.slice(),
-      incarnation: source.key.incarnation,
-      digest: digestAppliedCommit(commitMessage),
-    }
-  })
+  const { group, incarnation } = params
+  const priorTokens = new Set(group.ledgerTokens)
+  const result = await revokeWithProof(group, body.input)
+  if (result.status !== 'built') throw new OperationRejectedError(JSON.stringify(result))
+  const { newGroup, commitMessage } = result.result
+  return {
+    commit: commitMessage,
+    bodies: newGroup.ledgerTokens.filter((token) => !priorTokens.has(token)),
+    journal: await params.options.serializeJournal(newGroup),
+    welcome: null,
+    epoch: Number(group.epoch),
+    authenticatorBefore: group.state.keySchedule.epochAuthenticator.slice(),
+    incarnation,
+    digest: digestAppliedCommit(commitMessage),
+  }
 }
 
 export async function publishRevokeProof<Protocols extends Record<string, GroupProtocolDefinition>>(

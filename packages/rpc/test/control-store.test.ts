@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'vitest'
 
 import {
+  decodeControlFixtureState,
+  encodeControlFixtureState,
+} from '../../rpc-conformance/src/control-store.js'
+import {
   createMemoryControlStore,
   type MemoryControlStore,
 } from '../../rpc-conformance/src/memory-control-store.js'
@@ -76,7 +80,9 @@ const rejoin: RejoinRecord = {
 
 describe('control changes', () => {
   test('slot survives operation deletion outcome acknowledgement and reopen', async () => {
-    const db = createMemoryHostDatabase()
+    const db = createMemoryHostDatabase({
+      readIdentity: (state) => decodeControlFixtureState(state),
+    })
     const store = db.control('group-A', { groupID: 'group-A', incarnation: 1 })
     const slot: ControlSlot = {
       opID: 'owner',
@@ -94,7 +100,22 @@ describe('control changes', () => {
       welcome: { bytes: new Uint8Array([4]), recipients: ['bob'] },
     }
     const expected = structuredClone(slot)
-    await store.apply({ commitOnce: slot, putOperations: [operation('owner', 1)] }, 'build')
+    const intent: Operation & { stage: 'intent' } = { ...operation('owner', 1), stage: 'intent' }
+    const key = { groupID: 'group-A', incarnation: 1 }
+    const identity = { ...key, epoch: slot.epoch, authenticator: slot.authenticatorBefore }
+    await db.saveState('group-A', encodeControlFixtureState(identity))
+    await store.apply(
+      { putOperations: [intent], cursor: { position: slot.searchFrom, epoch: slot.epoch } },
+      'intent',
+    )
+    await db.saveBuilt(
+      'group-A',
+      key,
+      intent,
+      slot,
+      { key, identity, stateVersion: await db.loadVersion('group-A') },
+      'build',
+    )
     slot.payload.fill(0)
     slot.journal.fill(0)
     slot.welcome?.recipients.push('mallory')

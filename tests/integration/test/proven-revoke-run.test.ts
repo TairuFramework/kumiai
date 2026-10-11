@@ -12,10 +12,14 @@ import {
 } from '@kumiai/mls'
 import * as adapter from '@kumiai/mls-rpc'
 import { createLedgerEntrySlot } from '@kumiai/mls-rpc'
-import { type AdoptionWrite, commitTopic, PeerDisposedError } from '@kumiai/rpc'
+import { type AdoptionWrite, asLogPosition, commitTopic, PeerDisposedError } from '@kumiai/rpc'
 import { testControlStoreConformance } from '@kumiai/rpc-conformance'
 import { afterEach, expect, test, vi } from 'vitest'
 
+import {
+  type ConformanceSaveControlBuild,
+  decodeControlFixtureState,
+} from '../../../packages/rpc-conformance/src/control-store.js'
 import { encodeJournal, type Member, makeMember } from './app-lane-e2e.js'
 import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
 import { createWireHub } from './log-hub-over-wire.js'
@@ -292,6 +296,20 @@ test('a winning duplicate proof returns already revoked after the race', async (
 let controlDatabase: MemoryHostDatabase
 const controlHost = () => ({
   control: controlDatabase.control('state', { groupID: 'state', incarnation: 1 }),
+  loadVersion: () => controlDatabase.loadVersion('state'),
+  saveBuilt: ((intent, built, expected, mutationID) =>
+    controlDatabase.saveBuilt(
+      'state',
+      { groupID: 'state', incarnation: 1 },
+      intent,
+      {
+        ...built,
+        searchFrom: built.searchFrom === null ? null : asLogPosition(built.searchFrom),
+        expectedHead: built.expectedHead === null ? null : asLogPosition(built.expectedHead),
+      },
+      expected,
+      mutationID,
+    )) satisfies ConformanceSaveControlBuild,
   anchor: controlDatabase.anchorStore('state'),
   saveState: (state: Uint8Array, write?: AdoptionWrite) =>
     controlDatabase.saveState('state', state, write),
@@ -299,7 +317,9 @@ const controlHost = () => ({
 })
 testControlStoreConformance({
   open: async () => {
-    controlDatabase = createMemoryHostDatabase()
+    controlDatabase = createMemoryHostDatabase({
+      readIdentity: (state) => decodeControlFixtureState(state),
+    })
     return controlHost()
   },
   reopen: async () => controlHost(),

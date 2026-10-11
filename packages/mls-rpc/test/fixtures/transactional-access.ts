@@ -9,11 +9,16 @@ import {
   type AdoptionWrite,
   type AnchorSlot,
   applyChanges,
+  type CommitOnceWriteContext,
   type ControlSnapshot,
+  type ControlStore,
   type PendingAppFrame,
 } from '@kumiai/rpc'
 
 import type { ControlRead, HandleAccess } from '../../src/access.js'
+import type { SaveControlBuild } from '../../src/control-build.js'
+import { decodeControlJournal } from '../../src/control-journal.js'
+import { sameStoredValue } from '../../src/memory-incarnation-stores.js'
 import type { RealMember } from './real-group.js'
 
 export class RevisionConflictError extends Error {
@@ -38,6 +43,8 @@ export type StoredRow = {
  * serialised, which orders an earlier save ahead of a later open.
  */
 export type TransactionalStore = {
+  control: ControlStore
+  saveBuilt: SaveControlBuild
   snapshot(): StoredRow
   save(
     expected: number,
@@ -90,7 +97,92 @@ export function createTransactionalStore(
 function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): TransactionalStore {
   let row = initial
   let tail: Promise<void> = Promise.resolve()
+  const identityOf = (state: Uint8Array) => {
+    const decoded = decodeClientState(state)
+    if (decoded == null) throw new Error('Invalid stored state')
+    return {
+      groupID: new TextDecoder().decode(decoded.groupContext.groupId),
+      incarnation: 1,
+      epoch: Number(decoded.groupContext.epoch),
+      authenticator: decoded.keySchedule.epochAuthenticator.slice(),
+    }
+  }
+  const key = { groupID: identityOf(initial.state).groupID, incarnation: 1 }
+  const queue = <TValue>(work: () => Promise<TValue>): Promise<TValue> => {
+    const saving = tail.then(work)
+    tail = saving.then(
+      () => {},
+      () => {},
+    )
+    return saving
+  }
   const store: TransactionalStore = {
+    control: {
+      get key() {
+        return { ...key }
+      },
+      load: async () => {
+        await tail
+        return structuredClone(row.control)
+      },
+      lastMutation: async () => {
+        await tail
+        return row.mutationID
+      },
+      apply: (changes, mutationID) => {
+        const owned = structuredClone(changes)
+        return queue(async () => {
+          await store.beforeWrite?.()
+          const source = identityOf(row.state)
+          row = {
+            ...row,
+            revision: row.revision + 1,
+            control: applyChanges(row.control, owned, { kind: 'head', source }),
+            mutationID,
+          }
+        })
+      },
+    },
+    saveBuilt: (intent, built, expected, mutationID) => {
+      const owned = structuredClone({ intent, built, expected })
+      return queue(async () => {
+        await store.beforeWrite?.()
+        const journal = decodeControlJournal(owned.built.journal)
+        const identity = identityOf(row.state)
+        if (
+          !sameStoredValue(owned.expected.key, key) ||
+          !sameStoredValue(owned.expected.identity, identity) ||
+          row.revision !== owned.expected.stateVersion ||
+          !sameStoredValue(row.control.operations[0], owned.intent) ||
+          journal.checkpoint !== owned.built.searchFrom ||
+          owned.built.searchFrom !== (row.control.cursor?.position ?? null) ||
+          (row.control.cursor !== null &&
+            (row.control.cursor.epoch !== identity.epoch ||
+              row.control.cursor.stranded ||
+              row.control.cursor.fork))
+        )
+          return 'moved'
+        if (row.control.commitOnce !== null && row.control.commitOnce.epoch >= identity.epoch)
+          return 'occupied'
+        const context: CommitOnceWriteContext = {
+          kind: 'build',
+          source: owned.expected,
+          queueHeadID: owned.intent.id,
+          checkpoint: journal.checkpoint,
+        }
+        const control = applyChanges(
+          row.control,
+          {
+            putOperations: [{ ...owned.intent, stage: 'built', built: owned.built }],
+            commitOnce: owned.built,
+            commitOnceAcceptance: null,
+          },
+          context,
+        )
+        row = { ...row, revision: row.revision + 1, control, mutationID }
+        return 'saved'
+      })
+    },
     snapshot: () => row,
     records,
     settled: () => tail,
@@ -112,7 +204,15 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
           state: state.slice(),
           ledger,
           revision: expected + 1,
-          control: write == null ? row.control : applyChanges(row.control, write.changes),
+          control:
+            write == null
+              ? row.control
+              : applyChanges(row.control, write.changes, {
+                  kind: 'adoption',
+                  before: identityOf(row.state),
+                  after: identityOf(state),
+                  retired: false,
+                }),
           mutationID: write?.mutationID ?? row.mutationID,
           anchorSlot: structuredClone(row.anchorSlot),
         }

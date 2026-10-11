@@ -48,6 +48,7 @@ export async function registerDevice(
     const result = await commitWithEntries({
       group,
       extraProposals: [],
+      pendingProposals: {},
       enacted: [token],
       requireAdmin: false,
     })
@@ -80,6 +81,7 @@ export async function labelDevice(
     const result = await commitWithEntries({
       group,
       extraProposals: [],
+      pendingProposals: {},
       enacted: [token],
       requireAdmin: false,
     })
@@ -135,6 +137,7 @@ export async function addDevice(
     const result = await commitWithEntries({
       group,
       extraProposals: [addProposal],
+      pendingProposals: {},
       enacted: [token],
       ratchetTreeExtension: true,
       requireAdmin: false,
@@ -181,6 +184,7 @@ export async function revokeDevice(
     const result = await commitWithEntries({
       group,
       extraProposals: proposals,
+      pendingProposals: {},
       enacted: [token],
       requireAdmin: false,
     })
@@ -215,6 +219,7 @@ export async function announceControllerBeacon(
     const result = await commitWithEntries({
       group,
       extraProposals: [],
+      pendingProposals: {},
       enacted: [token],
       requireAdmin: false,
     })

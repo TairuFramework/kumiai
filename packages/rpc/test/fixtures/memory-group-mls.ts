@@ -6,7 +6,13 @@ import { concatBytes } from '@noble/hashes/utils.js'
 import { fromB64U, fromUTF, toB64U, toUTF } from '@sozai/codec'
 
 import type { AnchorStore } from '../../src/anchor.js'
-import type { AdoptionWrite, ControlStore } from '../../src/control/types.js'
+import type { SaveControlBuild } from '../../src/control/build.js'
+import type {
+  AdoptionWrite,
+  ControlStore,
+  EpochIdentity,
+  GroupKey,
+} from '../../src/control/types.js'
 import type {
   CommitContext,
   CommitHeader,
@@ -20,6 +26,7 @@ import { ControlWriteNotCommittedError } from '../../src/errors.js'
 import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
 
 export type MemoryGroupMLS = GroupMLS & {
+  saveBuilt: SaveControlBuild
   control: () => ControlStore
   anchorStore: () => AnchorStore
   serializeState: () => Uint8Array
@@ -493,7 +500,11 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
    */
   const groupID = options.groupID ?? 'memory-group'
   const storageID = options.storageID ?? groupID
-  const hostDB = options.hostDB ?? createMemoryHostDatabase()
+  const hostDB =
+    options.hostDB ??
+    createMemoryHostDatabase({
+      readIdentity: (state, key) => decodeMemoryGroupIdentity(state, key, recoverySecret),
+    })
   const confirmationKeyAt = (at: number, position: string, digest: string): Uint8Array =>
     sha256(concatBytes(recoverySecret, fromUTF(JSON.stringify([groupID, at, position, digest]))))
   const tagFor = (key: Uint8Array, requestID: string): string =>
@@ -835,6 +846,17 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   }
 
   return {
+    saveBuilt: (intent, built, expected, mutationID) =>
+      serialise(() =>
+        hostDB.saveBuilt(
+          storageID,
+          { groupID, incarnation: 1 },
+          intent,
+          built,
+          expected,
+          mutationID,
+        ),
+      ),
     control: () => hostDB.control(storageID, { groupID, incarnation: 1 }),
     anchorStore: () => hostDB.anchorStore(storageID),
     serializeState,
@@ -1267,4 +1289,36 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       return recoverySecret
     },
   }
+}
+
+export function decodeMemoryGroupIdentity(
+  state: Uint8Array,
+  key: GroupKey,
+  recoverySecret: Uint8Array,
+): EpochIdentity {
+  const value = JSON.parse(toUTF(state)) as {
+    epoch: number
+    slots: Array<[number, string]>
+    ledgerHead: string
+    recoveryAuthenticator?: string
+    epochIdentity?: string
+  }
+  const encoded = value.recoveryAuthenticator ?? value.epochIdentity
+  const authenticator =
+    encoded === undefined
+      ? sha256(
+          concatBytes(
+            recoverySecret,
+            fromUTF(key.groupID),
+            fromUTF(
+              JSON.stringify({
+                epoch: value.epoch,
+                slots: value.slots,
+                ledgerHead: value.ledgerHead,
+              }),
+            ),
+          ),
+        )
+      : fromB64U(encoded)
+  return { ...key, epoch: value.epoch, authenticator }
 }

@@ -39,7 +39,12 @@ export async function removeMember(
     }
 
     const enacted = ledgerEntries ?? []
-    const result = await commitWithEntries({ group, extraProposals: [removeProposal], enacted })
+    const result = await commitWithEntries({
+      group,
+      extraProposals: [removeProposal],
+      pendingProposals: {},
+      enacted,
+    })
 
     const newGroup = deriveGroup(group, result.newState)
     await newGroup.applyLedgerEntries(enacted)
