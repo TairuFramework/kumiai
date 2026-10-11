@@ -614,11 +614,11 @@ export function newIdentity(): OwnIdentity {
 
 const operationStores = new WeakMap<HandleAccess, StateStore>()
 
-export function createDurableHandleAccess(
+export async function createDurableHandleAccess(
   params: Pick<Parameters<typeof simpleHandleAccess>[0], 'handle' | 'adopt'>,
-): HandleAccess {
+): Promise<HandleAccess> {
   const store = createMemoryStateStore({ groupID: params.handle().groupID, incarnation: 1 })
-  void store.save(params.handle())
+  await store.save(params.handle())
   const access = simpleHandleAccess({
     ...params,
     persist: store.save,

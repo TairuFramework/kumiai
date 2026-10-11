@@ -67,6 +67,7 @@ export {
   assertCommitOnceChange,
   type CommitOnceWriteContext,
   ControlStoreInvariantError,
+  controlAdoptionAllowed,
   controlSettled,
   pruneWindow,
   readmissionChanges,

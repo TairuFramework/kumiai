@@ -80,7 +80,7 @@ export type ControlChanges = {
 }
 /** Control changes committed with an adoption's state save (D5). */
 export type AdoptionWrite = {
-  expected?: AdoptionExpected
+  expected?: AdoptionExpected & { acceptance?: FirstValidCommit; journal?: Uint8Array }
   changes: ControlChanges
   mutationID: string
   /** The `advance` of the pending anchor rotation this adoption lands, marked in the same transaction. */

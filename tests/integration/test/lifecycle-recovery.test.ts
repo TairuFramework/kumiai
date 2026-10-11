@@ -116,14 +116,14 @@ async function setup(
       options: { resolveLedgerEntries: slot.resolve },
     })
   ).group
-  const access = createDurableHandleAccess({
+  const access = await createDurableHandleAccess({
     handle: () => bobGroup,
     adopt: (next) => {
       bobGroup = next
     },
   })
   const mls = createGroupMLS({ access, identity: bob, entrySlot: slot, recoveryBinding: host })
-  const aliceAccess = createDurableHandleAccess({
+  const aliceAccess = await createDurableHandleAccess({
     handle: () => aliceGroup,
     adopt: (next) => {
       aliceGroup = next
@@ -611,7 +611,7 @@ test('standard group preparation never calls the lifecycle binding host', async 
   const group = (await createGroup(identity, 'standard-recovery')).group
   const host = vi.fn(async () => null)
   const mls = createGroupMLS({
-    access: createDurableHandleAccess({ handle: () => group, adopt: () => {} }),
+    access: await createDurableHandleAccess({ handle: () => group, adopt: () => {} }),
     identity,
     entrySlot: createLedgerEntrySlot(),
     recoveryBinding: host,
@@ -724,7 +724,7 @@ test('a lifecycle GroupInfo reply requires a requester leaf in the responder tre
     })
   ).group
   const mls = createGroupMLS({
-    access: createDurableHandleAccess({ handle: () => group, adopt: () => {} }),
+    access: await createDurableHandleAccess({ handle: () => group, adopt: () => {} }),
     identity: outsider,
     entrySlot: createLedgerEntrySlot(),
   })
@@ -832,7 +832,7 @@ async function ineligibleReply(s: Setup, kind: 'leafless' | 'revoked' | 'issuer'
   return createGroupMLS({
     identity,
     entrySlot: createLedgerEntrySlot(),
-    access: createDurableHandleAccess({
+    access: await createDurableHandleAccess({
       handle: () => handle,
       adopt: () => {
         throw new Error('Unexpected adoption')

@@ -138,13 +138,13 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
     ).group
   }
   const initial = bobGroup
-  const aliceAccess = createDurableHandleAccess({
+  const aliceAccess = await createDurableHandleAccess({
     handle: () => aliceGroup,
     adopt: (next) => {
       aliceGroup = next
     },
   })
-  const bobAccess = createDurableHandleAccess({
+  const bobAccess = await createDurableHandleAccess({
     handle: () => bobGroup,
     adopt: (next) => {
       bobGroup = next
@@ -210,7 +210,7 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
   const carolAccess =
     carolGroup == null
       ? undefined
-      : createDurableHandleAccess({
+      : await createDurableHandleAccess({
           handle: () => {
             if (carolGroup == null) throw new Error('No carol')
             return carolGroup
@@ -387,7 +387,7 @@ test('stale GroupInfo is superseded and retried without adopting the stale candi
   const s = await setup({ deadlineMs: 10_000 })
   const source = s.aliceGroup()
   const stalePort = createGroupMLS({
-    access: createDurableHandleAccess({ handle: () => source, adopt: () => {} }),
+    access: await createDurableHandleAccess({ handle: () => source, adopt: () => {} }),
     identity: s.aliceID,
     entrySlot: createLedgerEntrySlot(),
   })

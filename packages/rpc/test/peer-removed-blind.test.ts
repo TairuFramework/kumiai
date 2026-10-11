@@ -79,7 +79,7 @@ function makeRoomPeer(
     protocols: { room },
     handlers: { room: handlers } as never,
   })
-  return { peer, crypto, mls, anchorStore, appCursorStore }
+  return { peer, crypto, mls, control: mls.control(), anchorStore, appCursorStore }
 }
 
 describe('the rotation puts the group on a topic only the post-removal epoch secret names', () => {
@@ -133,6 +133,8 @@ describe('the rotation puts the group on a topic only the post-removal epoch sec
     // Carol's handle never advanced: the commit that removes a member excludes it from its own
     // path, so there is nothing in it for her to derive epoch 2 from. She is left at 1, holding
     // her stale view of a group that has moved.
+    expect((await carol.mls.readEvidence()).terminal).toBe(true)
+    expect((await carol.control.load()).applied).toMatchObject([{ epoch: 1, removed: true }])
     expect(carol.mls.epoch()).toBe(1)
     expect(carol.peer.anchorEpoch()).toBe(1)
 

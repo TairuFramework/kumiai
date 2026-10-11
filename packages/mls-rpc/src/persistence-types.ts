@@ -1,6 +1,7 @@
 import type { ClientState, ControllerBinding, DeviceRegistry, MemberCredential } from '@kumiai/mls'
 import type { BundleSource, KeyPackagePoolStore, LastResortStore } from '@kumiai/mls-hub'
 import type {
+  AdoptionWrite,
   AnchorSlot,
   AnchorStore,
   AppCursorStore,
@@ -69,7 +70,7 @@ export type IncarnationStores = {
   state: {
     load(): Promise<GroupStateRecord | null>
     loadInitialIdentity(): Promise<EpochIdentity | null>
-    save(record: GroupStateRecord): Promise<void>
+    save(record: GroupStateRecord, expected?: AdoptionWrite['expected']): Promise<void>
   }
   control: {
     load(): Promise<ControlSnapshot>

@@ -67,6 +67,8 @@ describe('a member removed by a commit it applies keeps its anchor', () => {
 
     // His handle could not follow the commit, so his epoch is where it was and his roster is what
     // the commit left him: the tree applied, his own leaf gone.
+    expect((await restarted.mls.readEvidence()).terminal).toBe(true)
+    expect((await restarted.control.load()).applied).toMatchObject([{ epoch: 1, removed: true }])
     expect(restarted.crypto.epoch()).toBe(1)
     expect((await restarted.mls.rosterEntries()).map((e) => e.did)).toEqual(['alice'])
 

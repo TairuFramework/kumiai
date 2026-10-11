@@ -13,6 +13,7 @@ import {
   type ControlEvidenceSnapshot,
   type ControlSnapshot,
   type ControlStore,
+  controlAdoptionAllowed,
   controlBuildRef,
   type PendingAppFrame,
 } from '@kumiai/rpc'
@@ -222,8 +223,29 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
     },
     save: (expected, state, ledger, record, write) => {
       const saving = tail.then(async () => {
+        await store.beforeWrite?.()
+        if (row.revision !== expected) throw new RevisionConflictError(expected, row.revision)
         // One transaction: the state row and the pending row together. A duplicate frame ID keeps
         // its first record; the key is still consumed once, by this state.
+        if (
+          write !== undefined &&
+          row.control.controlHold !== null &&
+          row.control.controlHold.reason !== 'acceptance-unknown'
+        )
+          throw new RevisionConflictError(expected, row.revision)
+        if (
+          write?.expected !== undefined &&
+          !controlAdoptionAllowed(
+            row.control,
+            {
+              key: store.control.key,
+              identity: identityOf(row.state),
+              stateVersion: row.revision,
+            },
+            write.expected,
+          )
+        )
+          throw new RevisionConflictError(write.expected.stateVersion, row.revision)
         const next: StoredRow = {
           state: state.slice(),
           initialState: row.initialState.slice(),
@@ -246,8 +268,6 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
         ) {
           next.anchorSlot.pending.landed = true
         }
-        await store.beforeWrite?.()
-        if (row.revision !== expected) throw new RevisionConflictError(expected, row.revision)
         row = next
         if (record != null && !store.records.has(record.frame.id)) {
           store.records.set(record.frame.id, record)

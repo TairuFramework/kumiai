@@ -10,11 +10,14 @@ import {
   HANDSHAKE_VERSION,
 } from '../src/handshake.js'
 import { commitTopic } from '../src/topic.js'
+import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
+import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import {
   buildInviteCommit,
   buildLedgerCommit,
+  buildRejoinRecord,
   makeMLSPeer,
   seedBuiltOperation,
   type TestPeer,
@@ -53,6 +56,17 @@ test('failed hold persistence keeps the runtime barrier across later control ref
   await expect(
     bob.peer.protocol('chat').dispatch('chat/changed', { data: {} }),
   ).rejects.toMatchObject({ name: 'RecoveryRequiredError' })
+  const built = await buildRejoinRecord(bob)
+  const confirmed = {
+    ...built,
+    stage: 'confirmed' as const,
+    position: asLogPosition('001'),
+    verdict: new Uint8Array([1]),
+  }
+  await control.apply({ putRejoin: confirmed }, 'confirmed-runtime-held')
+  await bob.peer.replay()
+  expect(bob.mls.epoch()).toBe(1)
+  expect((await control.load()).rejoin).toEqual(confirmed)
 })
 
 test('uncommitted Welcome delivery refuses a strong hold detected during adoption', async () => {
@@ -81,7 +95,7 @@ test('uncommitted Welcome delivery refuses a strong hold detected during adoptio
   expect(bob.welcomes).toEqual([])
 })
 
-test.each(['advancement', 'retirement', 'disposal'] as const)(
+test.each(['advancement', 'retirement', 'disposal', 'hard-hold'] as const)(
   'slot retries coalesce reconnect hints and cancel on %s',
   async (stop) => {
     vi.useFakeTimers()
@@ -103,13 +117,33 @@ test.each(['advancement', 'retirement', 'disposal'] as const)(
     if (stop === 'disposal') {
       await bob.peer.dispose()
       await bob.peer.drained()
+    } else if (stop === 'hard-hold') {
+      await bob.control.apply(
+        { controlHold: { reason: 'unsupported-version', position: null } },
+        'hard-hold',
+      )
+      await bob.peer.ack('refresh-hold')
     } else {
-      bob.mls.adopt(bob.mls.buildCommit([], stop === 'retirement' ? { removes: ['bob'] } : {}))
+      if (stop === 'retirement') bob.mls.evict('bob')
+      else bob.mls.adopt(bob.mls.buildCommit([]))
       await bob.database.saveState('bob', bob.mls.serializeState())
       // Ack refreshes coherent evidence without a commit delivery.
       await bob.peer.ack('already-absent')
     }
+    const timeouts = vi.spyOn(globalThis, 'setTimeout')
+    timeouts.mockClear()
     await vi.advanceTimersByTimeAsync(60_000)
+    if (stop === 'hard-hold' || stop === 'retirement')
+      expect(
+        timeouts.mock.calls.filter(
+          ([, delay]) =>
+            delay === 15_000 ||
+            delay === 1_000 ||
+            delay === 2_000 ||
+            delay === 4_000 ||
+            delay === 8_000,
+        ),
+      ).toEqual([])
     expect(restore).toHaveBeenCalledTimes(1)
     expect((await bob.control.load()).operations).toEqual([])
     expect(hub.published.filter((row) => row.topicID === commitTopic(secret))).toEqual([])
@@ -232,7 +266,19 @@ test.each(
       }
       return publish(params)
     })
-    const bob = member(hub, { operationTimeoutMs: 1_000 })
+    const received: Array<unknown> = []
+    const bob = member(hub, {
+      operationTimeoutMs: 1_000,
+      members: ['alice', 'bob'],
+      handlers: {
+        'chat/changed': (event: unknown) => {
+          received.push(event)
+        },
+      },
+    })
+    const alice = makeMLSPeer(hub, 'alice', secret, { members: ['alice', 'bob'] })
+    peers.push(alice)
+    await alice.peer.replay()
     const restore = bob.validation.restoreValidation.bind(bob.validation)
     const attempts: Array<number> = []
     vi.spyOn(bob.validation, 'restoreValidation').mockImplementation(async (built) => {
@@ -310,6 +356,9 @@ test.each(
       })
       expect(bob.mls.epoch()).toBe(slot.epoch + 1)
       expect(bob.welcomes).toEqual([request.id])
+      await vi.waitFor(() => expect(alice.mls.epoch()).toBe(slot.epoch + 1))
+      await alice.peer.protocol('chat').dispatch('chat/changed', { data: { afterOrphan: true } })
+      await vi.waitFor(() => expect(received).toHaveLength(1))
       expect(builds).toBe(1)
       expect(handoffs).toBe(publications)
       const calls = attempts.length
@@ -335,8 +384,8 @@ afterEach(async () => {
   await Promise.all(peers.map(({ peer }) => peer.dispose()))
   await Promise.all(peers.splice(0).map(({ peer }) => peer.drained()))
   vi.clearAllTimers()
-  vi.useRealTimers()
   vi.restoreAllMocks()
+  vi.useRealTimers()
 })
 
 test('a publish success with different retained bytes cannot install or settle the operation', async () => {
@@ -629,7 +678,7 @@ test.each(['expiry', 'terminal', 'divergence'] as const)(
       }
       release()
       if (move !== 'expiry') {
-        await new Promise((resolve) => setTimeout(resolve, 20))
+        await bob.peer.ack('drain-finished')
         expect(handoffs).toBe(0)
         now = 2_000
         await bob.peer.replay()
@@ -727,4 +776,124 @@ test('growing head yields bounded search and deadline settlement without starvin
   expect(builds).toBe(1)
   expect(handoffs).toBe(0)
   expect(growing).toBe(true)
+})
+
+test('a competitor delivered between runner attempts clears the slot and permits one fresh build', async () => {
+  vi.useFakeTimers()
+  const hub = new FakeHub()
+  const publish = hub.publish.bind(hub)
+  let attempts = 0
+  vi.spyOn(hub, 'publish').mockImplementation(async (params) => {
+    if (
+      params.topicID === commitTopic(secret) &&
+      params.senderDID === 'bob' &&
+      bob.mls.epoch() === 1
+    ) {
+      attempts++
+      throw new HeadMismatchError('competitor changed the head')
+    }
+    return publish(params)
+  })
+  const bob = member(hub)
+  await bob.peer.replay()
+  const builds: Array<number> = []
+  const request = buildLedgerCommit(bob, ['revalidated'], {
+    revokes: true,
+    onBuild: () => {
+      builds.push(bob.mls.epoch())
+    },
+  })
+  await bob.peer.enqueue(request)
+  await vi.waitFor(() => expect(attempts).toBeGreaterThan(0))
+  expect((await bob.control.load()).operations[0]?.stage).toBe('built')
+  await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+  await vi.waitFor(() => expect(bob.mls.epoch()).toBe(2))
+  expect((await bob.control.load()).commitOnce).toBeNull()
+  await vi.advanceTimersByTimeAsync(1_000)
+  await vi.waitFor(async () => expect((await bob.peer.outcomes())[0]?.kind).toBe('landed'))
+  expect(builds).toEqual([1, 2])
+  expect((await bob.control.load()).operations).toEqual([])
+  await expect(
+    bob.peer.protocol('chat').dispatch('chat/changed', { data: {} }),
+  ).resolves.toBeUndefined()
+})
+
+test('a committed acknowledgement tolerates transient evidence failure and unchanged refreshes avoid evidence reads', async () => {
+  const hub = new FakeHub()
+  const mls = createMemoryGroupMLS({ localDID: 'bob', recoverySecret: secret, epoch: 1 })
+  const read = mls.readEvidence
+  let fail = false
+  let reads = 0
+  mls.readEvidence = async () => {
+    reads++
+    if (fail) throw new Error('transient evidence failure')
+    return read()
+  }
+  const bob = member(hub, { mls })
+  await bob.peer.replay()
+  const op = await seedBuiltOperation(bob, buildLedgerCommit(bob, []))
+  await bob.control.apply(
+    {
+      deleteOperations: [op.id],
+      putOutcomes: [{ id: 'ack-me', opID: op.id, kind: 'unknown', at: 0 }],
+    },
+    'orphan',
+  )
+  fail = true
+  await expect(bob.peer.ack('ack-me')).resolves.toBeUndefined()
+  expect((await bob.control.load()).outcomes).toEqual([])
+  fail = false
+  await bob.peer.ack('refresh-evidence')
+  const before = reads
+  await bob.peer.ack('unchanged-1')
+  await bob.peer.ack('unchanged-2')
+  expect(reads).toBe(before)
+})
+
+test('a hard hold preserves cursor fork evidence and keeps the first hard reason', async () => {
+  const hub = new FakeHub()
+  const bob = member(hub)
+  await bob.peer.replay()
+  const fork = { conflictEpoch: 1, sharedPosition: null, frameDigest: 'retained-fork' }
+  await bob.control.apply({ cursor: { position: null, epoch: 1, fork } }, 'fork-before-hold')
+  const frame = encodeHandshakeFrame(HANDSHAKE_KIND.commit, new Uint8Array([1]))
+  frame[HANDSHAKE_MAGIC.length] = HANDSHAKE_VERSION + 1
+  await hub.publish({
+    senderDID: 'alice',
+    topicID: commitTopic(secret),
+    payload: frame,
+    retain: 'log',
+  })
+  await vi.waitFor(async () =>
+    expect((await bob.control.load()).controlHold?.reason).toBe('unsupported-version'),
+  )
+  expect((await bob.control.load()).cursor?.fork).toEqual(fork)
+  await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
+  await bob.peer.replay()
+  expect((await bob.control.load()).controlHold?.reason).toBe('unsupported-version')
+  expect((await bob.control.load()).cursor?.fork).toEqual(fork)
+})
+
+test('pre-adoption Welcome delivery reuses the proof just checked in its settlement pass', async () => {
+  vi.useFakeTimers()
+  const hub = new FakeHub()
+  let reads = 0
+  let readsAtAdoption = 0
+  const bob = member(hub, {
+    adopt: async () => {
+      readsAtAdoption = reads
+      return 'moved'
+    },
+  })
+  await bob.peer.replay()
+  const restore = bob.validation.restoreValidation.bind(bob.validation)
+  vi.spyOn(bob.validation, 'restoreValidation').mockImplementation(async (built) => {
+    reads++
+    return restore(built)
+  })
+  const request = buildInviteCommit(bob, 'invitee')
+  await bob.peer.enqueue(request)
+  await vi.waitFor(() => expect(bob.welcomes).toEqual([request.id]))
+  expect(readsAtAdoption).toBeGreaterThan(0)
+  expect(reads).toBe(readsAtAdoption)
 })

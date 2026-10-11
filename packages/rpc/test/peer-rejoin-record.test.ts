@@ -790,3 +790,124 @@ test.each(['binding', 'lapse', 'floor'] as const)(
     expect(commits(hub).filter((row) => row.senderDID === 'bob')).toHaveLength(2)
   },
 )
+
+test('confirmed rejoin replay retains its record under a freshly persisted strong hold', async () => {
+  const { bob } = await setup()
+  const built = await buildRejoinRecord(bob)
+  const record: RejoinRecord = {
+    ...built,
+    stage: 'confirmed',
+    position: asLogPosition('001'),
+    verdict: new Uint8Array([1]),
+  }
+  await bob.control.apply(
+    {
+      putRejoin: record,
+      controlHold: { reason: 'unsupported-version', position: asLogPosition('002') },
+    },
+    'confirmed-held',
+  )
+  await bob.peer.ack('refresh')
+  await bob.peer.replay()
+  expect(bob.mls.epoch()).toBe(1)
+  expect((await bob.control.load()).rejoin).toEqual(record)
+})
+
+test.each(['acceptance-unknown', 'unsupported-version', 'fork-evidence'] as const)(
+  'an ordinary ahead gap heals only through a weak control hold: %s',
+  async (reason) => {
+    const hub = new FakeHub()
+    const alice = member(hub, 'alice', { epoch: 3 })
+    const bob = member(hub, 'bob')
+    await alice.peer.replay()
+    await bob.peer.replay()
+    await bob.control.apply({ controlHold: { reason, position: null } }, 'hold')
+    await bob.peer.ack('refresh')
+    await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 2 })
+    if (reason === 'acceptance-unknown') {
+      await vi.waitFor(() => expect(bob.mls.epoch()).toBeGreaterThan(1))
+      await vi.waitFor(async () => expect((await bob.control.load()).strand).toBeNull())
+      expect((await bob.control.load()).cursor?.stranded).toBeUndefined()
+      expect((await bob.control.load()).controlHold).toBeNull()
+    } else {
+      await bob.peer.resync()
+      expect(bob.mls.epoch()).toBe(1)
+      expect((await bob.control.load()).controlHold?.reason).toBe(reason)
+    }
+  },
+)
+
+test.each(['acceptance-unknown', 'unsupported-version'] as const)(
+  'an ordinary gap retry resumes under %s without a new delivery',
+  async (reason) => {
+    vi.useFakeTimers()
+    const hub = new FakeHub()
+    const events: Array<RecoveryEvent> = []
+    const bob = member(hub, 'bob', {
+      onRecovery: (event) => {
+        events.push(event)
+      },
+    })
+    try {
+      await bob.peer.replay()
+      await bob.control.apply(
+        { controlHold: { reason: 'acceptance-unknown', position: null } },
+        'weak-hold',
+      )
+      await bob.peer.ack('refresh')
+      await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 2 })
+      await vi.waitFor(() => expect(events.some((event) => event.phase === 'failed')).toBe(true))
+      expect(bob.mls.epoch()).toBe(1)
+      if (reason === 'unsupported-version') {
+        await bob.control.apply(
+          { controlHold: { reason, position: asLogPosition('held') } },
+          'hard-hold',
+        )
+        await bob.peer.ack('refresh-hard-hold')
+      }
+      const alice = member(hub, 'alice', { epoch: 3 })
+      await alice.peer.replay()
+      await vi.advanceTimersByTimeAsync(1_000)
+      if (reason === 'acceptance-unknown') {
+        await vi.waitFor(() => expect(bob.mls.epoch()).toBeGreaterThan(1))
+        await vi.waitFor(async () => expect((await bob.control.load()).strand).toBeNull())
+      } else {
+        expect(bob.mls.epoch()).toBe(1)
+        expect((await bob.control.load()).controlHold?.reason).toBe(reason)
+      }
+    } finally {
+      await Promise.all(peers.map(({ peer }) => peer.dispose()))
+      await Promise.all(peers.map(({ peer }) => peer.drained()))
+      vi.useRealTimers()
+    }
+  },
+)
+
+test('a hold committed during confirmed source scan preserves the rejoin even if the scan has a gap', async () => {
+  const { hub, bob } = await setup()
+  const built = await buildRejoinRecord(bob)
+  const record: RejoinRecord = {
+    ...built,
+    stage: 'confirmed',
+    position: asLogPosition('001'),
+    verdict: new Uint8Array([1]),
+  }
+  await bob.control.apply({ putRejoin: record }, 'confirmed')
+  const fetch = hub.fetchTopic.bind(hub)
+  let held = false
+  vi.spyOn(hub, 'fetchTopic').mockImplementation(async (params) => {
+    if (!held && params.topicID === commitTopic(secret) && params.subscriberDID === 'bob') {
+      held = true
+      await bob.control.apply(
+        { controlHold: { reason: 'unsupported-version', position: asLogPosition('held') } },
+        'hold-during-scan',
+      )
+      return { messages: [], head: record.position ?? null, oldest: null, gap: true }
+    }
+    return fetch(params)
+  })
+  await bob.peer.replay()
+  expect(held).toBe(true)
+  expect(bob.mls.epoch()).toBe(1)
+  expect((await bob.control.load()).rejoin).toEqual(record)
+})

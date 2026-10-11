@@ -206,6 +206,7 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
    */
   onAppWindowPruned?: (event: AppWindowPruned) => void | Promise<void>
   onStrand?: (observation: StrandObservation) => void | Promise<void>
+  onControlPublishError?: (notice: { opID: string; error: unknown }) => void | Promise<void>
   onOutcome?: (outcome: Outcome) => void | Promise<void>
   onRecovery?: (event: RecoveryEvent) => void | Promise<void>
   onAppDeliveryStalled?: (event: AppDeliveryStalled) => void | Promise<void>

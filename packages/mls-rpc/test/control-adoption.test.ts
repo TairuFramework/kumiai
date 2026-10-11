@@ -1,11 +1,5 @@
 import { commitKeyRotation, decodeClientState, encodeClientState, restoreGroup } from '@kumiai/mls'
-import {
-  type AdoptionWrite,
-  asLogPosition,
-  type ControlSlot,
-  type FirstValidCommit,
-  type Operation,
-} from '@kumiai/rpc'
+import { type AdoptionWrite, asLogPosition, type ControlSlot, type Operation } from '@kumiai/rpc'
 import { expect, test } from 'vitest'
 
 import { simpleHandleAccess } from '../src/access.js'
@@ -17,6 +11,7 @@ import { createMemoryTransaction } from '../src/memory-transaction.js'
 import { createGroupMLS } from '../src/mls.js'
 import { createOwnerQueues } from '../src/owner-queue.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
+import { controlAdoptionFixture } from './fixtures/control-adoption.js'
 import { createRealGroup } from './fixtures/real-group.js'
 import { installSeed, makeStorageSeed, nextChange } from './fixtures/storage-seed.js'
 import {
@@ -24,108 +19,8 @@ import {
   createTransactionalStore,
 } from './fixtures/transactional-access.js'
 
-async function fixture() {
-  const group = await createRealGroup(1, 'control-adoption')
-  const member = group.members[0]
-  if (member === undefined) throw new Error('missing member')
-  const store = createTransactionalStore(member.handle, {
-    anchor: { epoch: Number(member.handle.epoch), secret: new Uint8Array(32).fill(9) },
-    pending: {
-      epochBefore: Number(member.handle.epoch),
-      epochAfter: Number(member.handle.epoch) + 1,
-      rosterBefore: [member.identity.id],
-      forced: false,
-      advance: 'rotation-commit',
-    },
-  })
-  const host = await createTransactionalAccess(member, store)
-  const original = (await store.readEvidence()).source
-  const rotation = await commitKeyRotation(member.handle)
-  const intent: Operation & { stage: 'intent' } = {
-    id: 'rotation',
-    kind: 'rotation',
-    revokes: false,
-    body: new Uint8Array(),
-    seq: 1,
-    enqueuedAt: 0,
-    deadline: 30_000,
-    stage: 'intent',
-  }
-  await store.control.apply({ putOperations: [intent] }, 'enqueue')
-  const source = (await store.readEvidence()).source
-  const position = asLogPosition('000001')
-  const slot: ControlSlot = {
-    opID: intent.id,
-    incarnation: 1,
-    epoch: Number(member.handle.epoch),
-    authenticatorBefore: member.handle.state.keySchedule.epochAuthenticator.slice(),
-    searchFrom: null,
-    expectedHead: null,
-    publishID: 'rotation-publish',
-    payload: new Uint8Array([1, 2, 3]),
-    payloadDigest: 'exact-full-payload',
-    digest: 'rotation-commit',
-    bodies: [],
-    welcome: null,
-    journal: encodeControlJournal({
-      version: 1,
-      source: original,
-      checkpoint: null,
-      sourceState: encodeClientState(member.handle.state),
-      sourceCredential: member.handle.credential,
-      sourceLedger: member.handle.ledgerTokens,
-      candidate: encodeClientState(rotation.newGroup.state),
-    }),
-  }
-  expect(await store.saveBuilt(intent, slot, source, 'build')).toBe('saved')
-  const proof: FirstValidCommit = {
-    source: (await store.readEvidence()).source,
-    from: null,
-    position,
-    payloadDigest: slot.payloadDigest,
-  }
-  await store.control.apply({ commitOnceAcceptance: proof }, 'accept')
-  const write: AdoptionWrite = {
-    mutationID: 'landed',
-    anchorLanded: 'rotation-commit',
-    changes: {
-      deleteOperations: [intent.id],
-      commitOnce: null,
-      putApplied: [
-        {
-          epoch: slot.epoch,
-          digest: slot.digest,
-          payloadDigest: slot.payloadDigest,
-          sequenceID: position,
-          opID: intent.id,
-          removed: false,
-        },
-      ],
-      cursor: { position, epoch: slot.epoch + 1 },
-      putOutcomes: [{ id: 'landed-fact', opID: intent.id, at: 100, kind: 'landed', position }],
-    },
-  }
-  const restoreCandidate = async (bytes: Uint8Array) => {
-    const state = decodeClientState(bytes)
-    if (state === undefined) throw new Error('invalid candidate')
-    return restoreGroup({
-      state,
-      credential: member.handle.credential,
-      ledgerEntries: member.handle.ledgerTokens,
-      options: { resolveLedgerEntries: member.slot.resolve },
-    })
-  }
-  const port = createControlAdoptionPort({
-    access: host.access,
-    control: store.control,
-    restoreCandidate,
-  })
-  const expected = async () => ({ ...(await store.readEvidence()).source, acceptance: proof })
-  return { store, host, slot, proof, write, port, expected, rotation }
-}
-
 test('stale adoption version leaves state and control unchanged', async () => {
-  const f = await fixture()
+  const f = await controlAdoptionFixture()
   const expected = await f.expected()
   f.store.bump()
   const before = structuredClone(f.store.snapshot())
@@ -138,7 +33,7 @@ test('stale adoption version leaves state and control unchanged', async () => {
 })
 
 test('adoption rollback leaves state control and anchor unchanged', async () => {
-  const f = await fixture()
+  const f = await controlAdoptionFixture()
   const before = structuredClone(f.store.snapshot())
   const live = f.host.live()
   f.store.beforeWrite = () => {
@@ -157,7 +52,7 @@ test('adoption rollback leaves state control and anchor unchanged', async () => 
 })
 
 test('no-op requires committed payload evidence', async () => {
-  const f = await fixture()
+  const f = await controlAdoptionFixture()
   await f.host.access.replace(f.rotation.newGroup)
   const before = structuredClone(f.store.snapshot())
   expect(await f.port.adopt(f.slot.journal, await f.expected(), f.write)).toBe('moved')
@@ -165,7 +60,7 @@ test('no-op requires committed payload evidence', async () => {
 })
 
 test('committed adoption replay does not recreate acknowledged landed facts', async () => {
-  const f = await fixture()
+  const f = await controlAdoptionFixture()
   expect(await f.port.adopt(f.slot.journal, await f.expected(), f.write)).toBe('installed')
   await f.store.control.apply({ deleteOutcomes: ['landed-fact'] }, 'ack')
   const before = structuredClone(f.store.snapshot())
@@ -192,7 +87,7 @@ test('own authorship requires the content signature rather than sender data alon
 })
 
 test('a durable control hold refuses installation with an otherwise current proof', async () => {
-  const f = await fixture()
+  const f = await controlAdoptionFixture()
   await f.store.control.apply(
     { controlHold: { reason: 'unsupported-version', position: f.proof.position } },
     'hold',
@@ -256,6 +151,8 @@ test('2.1 adoption rolls back and co-commits trust spent anchor and opaque side 
   if (seed.state.state === null) throw new Error('Missing seed state')
   let current = await restoreCandidate(seed.state.state)
   let rollback = true
+  let holdDuringPersist = false
+  let holdInsideTransaction = false
   const access = simpleHandleAccess({
     handle: () => current,
     adopt: (next) => {
@@ -265,13 +162,20 @@ test('2.1 adoption rolls back and co-commits trust spent anchor and opaque side 
     stateVersion: async () => (await groups.loadState(seed.key))?.version ?? 0,
     persist: async (next, write) => {
       if (write === undefined) throw new Error('Missing adoption write')
+      if (holdDuringPersist)
+        await groups
+          .ports(seed.key)
+          .control.apply(
+            { controlHold: { reason: 'unsupported-version', position: asLogPosition('held') } },
+            'hold-in-persist',
+          )
       await groups.transition(
         await nextChange(groups, seed.key.groupID, write.mutationID),
         async (stores) => {
           const rows = stores.incarnation(1)
           const state = await rows.state.load()
           if (state === null || state.deleted || state.version !== write.expected?.stateVersion)
-            throw new Error('Stale state')
+            throw Object.assign(new Error('Stale state'), { name: 'ControlAdoptionMovedError' })
           const trust = await stores.trust.load()
           if (trust === null) throw new Error('Missing trust')
           await stores.trust.save({
@@ -286,14 +190,27 @@ test('2.1 adoption rolls back and co-commits trust spent anchor and opaque side 
             credential: next.credential,
             ledger: next.ledgerTokens,
           })
-          await rows.state.save({
-            ...state,
-            version: state.version + 1,
-            epoch: Number(next.epoch),
-            epochAuthenticator: next.state.keySchedule.epochAuthenticator,
-            state: encodeClientState(next.state),
-            ledger: next.ledgerTokens,
-          })
+          if (holdInsideTransaction)
+            await rows.control.apply(
+              {
+                controlHold: {
+                  reason: 'unsupported-version',
+                  position: asLogPosition('held-in-tx'),
+                },
+              },
+              write.mutationID,
+            )
+          await rows.state.save(
+            {
+              ...state,
+              version: state.version + 1,
+              epoch: Number(next.epoch),
+              epochAuthenticator: next.state.keySchedule.epochAuthenticator,
+              state: encodeClientState(next.state),
+              ledger: next.ledgerTokens,
+            },
+            write.expected,
+          )
           await rows.control.apply(write.changes, write.mutationID)
           const anchor = await rows.anchor.load()
           if (anchor?.pending !== undefined && anchor.pending.advance === write.anchorLanded)
@@ -385,6 +302,21 @@ test('2.1 adoption rolls back and co-commits trust spent anchor and opaque side 
     },
   }
   const expected = { ...(await groups.readEvidence(seed.key)).source, acceptance: proof }
+  holdDuringPersist = true
+  rollback = false
+  expect(await port.adopt(slot.journal, expected, write)).toBe('moved')
+  expect(current.epoch).toBe(0n)
+  expect(await groups.loadState(seed.key)).toMatchObject({ deleted: false, epoch: 0 })
+  expect((await groups.loadState(seed.key))?.version).toBeGreaterThan(expected.stateVersion)
+  await control.apply({ controlHold: null }, 'clear-probe-hold')
+  holdDuringPersist = false
+  Object.assign(expected, (await groups.readEvidence(seed.key)).source)
+  holdInsideTransaction = true
+  expect(await port.adopt(slot.journal, expected, write)).toBe('moved')
+  expect(current.epoch).toBe(0n)
+  expect((await control.load()).controlHold).toBeNull()
+  holdInsideTransaction = false
+  rollback = true
   const before = db.snapshot()
   await expect(port.adopt(slot.journal, expected, write)).rejects.toThrow('coupled rollback')
   expect(db.snapshot()).toEqual(before)
@@ -461,4 +393,19 @@ test('a hold committed after preparation prevents the 2.1 build save', async () 
   const save = createPersistenceBuildSaver({ persistence: groups, key: seed.key })
   expect(await save(intent, slot, source, 'stale-preparation')).toBe('moved')
   expect((await control.load()).commitOnce).toBeNull()
+})
+
+test('transactional save rechecks the hold after its write gate before publishing state', async () => {
+  const f = await controlAdoptionFixture()
+  const before = f.host.live().epoch
+  f.store.beforeWrite = () => {
+    f.store.snapshot().control.controlHold = {
+      reason: 'unsupported-version',
+      position: f.proof.position,
+    }
+  }
+  expect(await f.port.adopt(f.slot.journal, await f.expected(), f.write)).toBe('moved')
+  expect(f.host.live().epoch).toBe(before)
+  expect(f.store.snapshot().control.applied).toEqual([])
+  expect(f.store.snapshot().control.controlHold?.reason).toBe('unsupported-version')
 })

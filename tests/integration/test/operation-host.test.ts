@@ -19,6 +19,20 @@ import {
   operationRequest,
 } from './app-lane-e2e.js'
 
+test('durable access creation propagates an initial save failure', async () => {
+  const member = (await createGroup(randomIdentity(), 'initial-save-failure')).group
+  const failure = new Error('Initial state cannot be saved')
+  const handle = new Proxy(member, {
+    get(target, property) {
+      if (property === 'state') throw failure
+      return Reflect.get(target, property)
+    },
+  })
+  await expect(createDurableHandleAccess({ handle: () => handle, adopt: () => {} })).rejects.toBe(
+    failure,
+  )
+})
+
 test('restart reads the state co-committed with a landed outcome after an after-save crash', async () => {
   const identity = randomIdentity()
   const current = (await createGroup(identity, 'adoption-crash-restart')).group
@@ -59,7 +73,7 @@ test('restart reads the state co-committed with a landed outcome after an after-
 test('standalone operation adoption co-commits the anchor landed mark with control', async () => {
   const identity = randomIdentity()
   let current = (await createGroup(identity, 'standalone-operation-host')).group
-  const access = createDurableHandleAccess({
+  const access = await createDurableHandleAccess({
     handle: () => current,
     adopt: (next) => {
       current = next

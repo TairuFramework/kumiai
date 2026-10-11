@@ -28,7 +28,7 @@ export function createControlAdoptionPort(params: {
       try {
         await params.access.replace(
           candidate,
-          () => ({ ...write, expected }),
+          () => ({ ...write, expected: { ...expected, journal: bytes } }),
           async (current, source) => {
             if (
               !sameStoredValue(source, {

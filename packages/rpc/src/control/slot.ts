@@ -21,6 +21,7 @@ export function controlBuildRef(built: BuiltCommit): ControlBuildRef {
 
 export type ControlSlotDeps = {
   control: ControlStore
+  signal?: AbortSignal
   search: ControlSearchPort
   adoption: ControlAdoptionPort
   readEvidence(): Promise<ControlEvidenceSnapshot>
@@ -51,7 +52,7 @@ export async function settleControlSlot(
     const row = evidence.applied.find((row) => row.epoch === operation.built.epoch)
     await applyResolved(
       deps.control,
-      row === undefined
+      row === undefined || row.payloadDigest === operation.built.payloadDigest
         ? {
             controlHold: { reason: 'acceptance-unknown', position: null },
           }
@@ -75,13 +76,21 @@ export async function settleControlSlot(
             },
           },
       deps.newID(),
+      undefined,
+      deps.signal,
     )
     return 'unknown'
   }
   const applied = evidence.applied.find((row) => row.epoch === slot.epoch)
   if (applied?.payloadDigest === slot.payloadDigest && applied.digest === slot.digest) {
     if (snapshot.operations.some((op) => op.id === slot.opID))
-      await applyResolved(deps.control, { deleteOperations: [slot.opID] }, deps.newID())
+      await applyResolved(
+        deps.control,
+        { deleteOperations: [slot.opID] },
+        deps.newID(),
+        undefined,
+        deps.signal,
+      )
     return 'landed'
   }
   const identity = evidence.source.identity
@@ -118,6 +127,8 @@ export async function settleControlSlot(
         },
       },
       deps.newID(),
+      undefined,
+      deps.signal,
     )
     return 'unknown'
   }
@@ -131,12 +142,20 @@ export async function settleControlSlot(
         deps.control,
         { deleteOperations: [slot.opID], putOutcomes: [outcome] },
         deps.newID(),
+        undefined,
+        deps.signal,
       )
       deps.emit(outcome)
     }
     return 'superseded'
   }
   const proof = found.proof
+  // A retained acceptance plus no obligation records a completed delivery.
+  const prior = snapshot.commitOnceAcceptance
+  const sameAcceptance =
+    prior?.position === proof.position &&
+    prior.payloadDigest === proof.payloadDigest &&
+    prior.from === proof.from
   const accepted =
     operation === undefined
       ? []
@@ -154,7 +173,7 @@ export async function settleControlSlot(
     {
       commitOnceAcceptance: proof,
       putOperations: accepted,
-      ...(slot.welcome === null
+      ...(slot.welcome === null || sameAcceptance
         ? {}
         : {
             putWelcomes: [
@@ -167,6 +186,8 @@ export async function settleControlSlot(
           }),
     },
     deps.newID(),
+    undefined,
+    deps.signal,
   )
   const expected = (await deps.readEvidence()).source
   const outcome: Outcome = {
@@ -188,7 +209,7 @@ export async function settleControlSlot(
         commitOnce: null,
         deleteOperations: [slot.opID],
         putOutcomes: [outcome],
-        ...(slot.welcome === null
+        ...(slot.welcome === null || !current.welcomes.some((row) => row.opID === slot.opID)
           ? {}
           : {
               putWelcomes: [
@@ -211,6 +232,7 @@ export async function settleControlSlot(
           },
         ],
         cursor: { position: proof.position, epoch: slot.epoch + 1 },
+        strand: null,
       },
     },
   )
@@ -226,6 +248,8 @@ export async function settleControlSlot(
           },
         },
         deps.newID(),
+        undefined,
+        deps.signal,
       )
     return 'unknown'
   }

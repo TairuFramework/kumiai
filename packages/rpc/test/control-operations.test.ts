@@ -459,3 +459,48 @@ test('settlement emits only after the outcome is durably committed', async () =>
   expect(await stepOperation(h.deps, op)).toBeNull()
   expect(h.emitted).toEqual((await h.store.load()).outcomes)
 })
+
+test.each(['hold', 'terminal'] as const)(
+  'expiry during an intent %s read settles lost',
+  async (during) => {
+    const h = await setup()
+    const op = await h.enqueue()
+    if (during === 'hold') {
+      const load = h.deps.control.load
+      h.deps.control.load = async () => {
+        h.tick(op.deadline)
+        return { ...(await load()), controlHold: { reason: 'acceptance-unknown', position: null } }
+      }
+    } else {
+      const read = h.deps.readEvidence
+      h.deps.readEvidence = async () => {
+        h.tick(op.deadline)
+        return { ...(await read()), terminal: true }
+      }
+    }
+    expect(await stepOperation(h.deps, op)).toBeNull()
+    expect(h.emitted).toMatchObject([{ kind: 'lost' }])
+    expect(h.deps.prepareBuild).not.toHaveBeenCalled()
+  },
+)
+
+test.each(['RecoveryRequiredError', 'AuthorizationDeniedError', 'Error'])(
+  'a %s publication failure produces a diagnostic and retains its build',
+  async (name) => {
+    const h = await setup()
+    const op = await h.built()
+    const error = Object.assign(new Error('publication refused'), { name })
+    const seen: Array<unknown> = []
+    Object.assign(h.deps, {
+      publishFailed: (id: string, failure: unknown) => {
+        seen.push({ id, failure })
+      },
+    })
+    h.deps.publish = async () => {
+      throw error
+    }
+    expect(await stepOperation(h.deps, op)).toEqual(op)
+    expect(seen).toEqual([{ id: op.id, failure: error }])
+    expect((await h.store.load()).operations).toEqual([op])
+  },
+)

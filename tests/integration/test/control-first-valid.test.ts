@@ -29,7 +29,7 @@ test.each(['unknown', 'lost', 'abandon'] as const)(
     const identity = randomIdentity()
     const invitee = randomIdentity()
     let current = (await createGroup(identity, `first-valid-${prior}`)).group
-    const access = createDurableHandleAccess({
+    const access = await createDurableHandleAccess({
       handle: () => current,
       adopt: (next) => {
         current = next

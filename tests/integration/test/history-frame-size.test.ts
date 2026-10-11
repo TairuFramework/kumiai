@@ -71,7 +71,7 @@ test('a final frame one byte above the hub cap settles rejected before publishin
   const hub = createWireHub()
   const identity = randomIdentity()
   let group = (await createGroup(identity, 'frame-cap-side-effects')).group
-  const access = createDurableHandleAccess({
+  const access = await createDurableHandleAccess({
     handle: () => group,
     adopt: (next) => {
       group = next

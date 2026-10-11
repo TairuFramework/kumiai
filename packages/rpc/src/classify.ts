@@ -10,13 +10,13 @@ import type { CommitHeader } from './crypto.js'
  *
  * | Frame | Cursor |
  * |---|---|
- * | A wire version this build cannot read at all | advance; heal — the group moved on to a format this build does not have |
+ * | A wire version this build cannot read at all | preserve cursor; persist an unsupported-version hold |
  * | Not a commit at all (no header) | advance (poison — never retry, never heal); settled first, before any epoch question |
  * | Framed at an epoch AHEAD of this peer's | advance; heal — the group moved on without it |
  * | Below this peer's epoch, with no record — or a record naming THIS SAME commit | advance, no fork check, no unwrap attempt |
  * | Below this peer's epoch, with a record naming a DIFFERENT commit | advance; the fork trigger |
  * | At this peer's current epoch, with no authenticated committer | advance (poison — never retry, never heal) |
- * | At this peer's current epoch, committed by THIS peer | do not advance; heal |
+ * | At this peer's current epoch, committed by THIS peer | settle a matching retained slot or preserve cursor and hold unexplained own evidence |
  * | At this peer's current epoch, committed by another — handed to the port | applied: advance and record this epoch -> the applied commit (digest and position) for the fork check; refused by policy or entries unresolvable: advance (poison — never retry, never heal) |
  *
  * Seven rows are decided here, reading bytes and decrypting nothing; only the last — a frame at
@@ -142,7 +142,7 @@ export type CommitDisposition =
  * Passed to {@link classifyCommit} in the header's place, because there IS no header — the bytes
  * behind the version byte are a format this build has never seen, and reading them would be
  * guessing. It is not a `null` header: `null` means "readable bytes that are not a commit", which
- * is poison. This means "the group is speaking a language I do not have", which is `ahead`.
+ * is poison. This means "the group is speaking a language I do not have", which requires an `unsupported-version` hold.
  */
 export const UNKNOWN_FRAME_VERSION = 'unknown-frame-version'
 
@@ -219,7 +219,7 @@ export type ClassifyCommitParams = {
   sequenceID: string
   /**
    * {@link digestAppliedCommit} over this frame's commit bytes, or `null` where they were never
-   * extracted — which today is only the {@link UNKNOWN_FRAME_VERSION} calls, settled at `ahead`
+   * extracted — which today is only the {@link UNKNOWN_FRAME_VERSION} calls, settled at `unsupported-version`
    * before it is read.
    */
   commitDigest: string | null
@@ -237,10 +237,7 @@ export function classifyCommit({
   commitDigest,
   state,
 }: ClassifyCommitParams): CommitDisposition {
-  // Settled above every other row, including the headerless one: bytes in an unknown format
-  // can't be asked whether they're a commit. `ahead`, not `poison` — see UNKNOWN_FRAME_VERSION's
-  // doc for why poison is uniquely dangerous here (no "next frame" to heal off of after a
-  // version bump) and the `ahead` row's doc for why the resulting forgeability is accepted.
+  // Unknown semantics preserve the cursor and require a durable hold before any recovery.
   if (header === UNKNOWN_FRAME_VERSION) return { row: 'unsupported-version' }
 
   // Bytes that are not a commit can't be asked the epoch questions below, so settle next.
@@ -269,7 +266,7 @@ export function classifyCommit({
     // above, and judged the same way, for the same reason — a frame whose commit bytes were
     // never extracted cannot be told apart from the one this peer already enacted, so it must
     // not be told apart from it. Unreachable today (the only null-digest calls pass
-    // UNKNOWN_FRAME_VERSION, settled at `ahead` above); kept unconditional, rather than falling
+    // UNKNOWN_FRAME_VERSION, settled at `unsupported-version` above); kept unconditional, rather than falling
     // through to a position comparison, so a direct caller reaching this some other way still
     // gets the safe direction: it can MISS a fork on absent evidence, but can never INVENT one.
     if (commitDigest == null) return { row: 'history' }

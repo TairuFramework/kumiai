@@ -1,3 +1,5 @@
+import { controlAdoptionAllowed } from '@kumiai/rpc'
+
 import {
   bindMemoryGroupPorts,
   createMemoryGroupPorts,
@@ -487,7 +489,7 @@ export function createMemoryGroupCoordinator(params: {
                 const state: ReturnType<typeof raw.state> = {
                   loadInitialIdentity: rows.state.loadInitialIdentity,
                   load: rows.state.load,
-                  async save(value) {
+                  async save(value, expected) {
                     const owned = copyStoredValue(value)
                     if (
                       owned.groupID !== change.groupID ||
@@ -505,6 +507,44 @@ export function createMemoryGroupCoordinator(params: {
                       )
                     )
                       throw new DisplacedGroupHandleError('Inactive state writer')
+                    // Retirement relies on source metadata even when the private state is unreadable.
+                    if (!owned.deleted) {
+                      const prior = await raw.state(incarnation).load()
+                      const snapshot = await createUnlockedIncarnationStores({
+                        tx,
+                        key: { groupID: change.groupID, incarnation },
+                        atRest,
+                      }).control.load()
+                      const source = {
+                        key: { groupID: change.groupID, incarnation },
+                        stateVersion: prior?.version ?? 0,
+                        identity:
+                          prior === null || prior.deleted
+                            ? null
+                            : {
+                                groupID: change.groupID,
+                                incarnation,
+                                epoch: prior.epoch,
+                                authenticator: prior.epochAuthenticator,
+                              },
+                      }
+                      if (
+                        (expected !== undefined &&
+                          !controlAdoptionAllowed(snapshot, source, expected)) ||
+                        (prior !== null &&
+                          !prior.deleted &&
+                          !owned.deleted &&
+                          (prior.terminal !== owned.terminal ||
+                            prior.epoch !== owned.epoch ||
+                            !sameStoredValue(prior.epochAuthenticator, owned.epochAuthenticator)) &&
+                          snapshot.controlHold !== null &&
+                          snapshot.controlHold.reason !== 'acceptance-unknown')
+                      ) {
+                        const error = new Error('Adoption source or control proof moved')
+                        error.name = 'ControlAdoptionMovedError'
+                        throw error
+                      }
+                    }
                     await retainedTrust()
                     await raw.state(incarnation).save(owned)
                     savedStates.set(incarnation, owned)

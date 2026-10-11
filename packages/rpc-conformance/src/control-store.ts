@@ -103,7 +103,10 @@ export type ConformanceControlChanges<Position extends string = string> = {
 }
 /** Control changes committed with an adoption's state save (D5). */
 export type ConformanceAdoptionWrite<Position extends string = string> = {
-  expected?: ConformanceAdoptionExpected
+  expected?: ConformanceAdoptionExpected & {
+    acceptance?: ConformanceFirstValidCommit<Position>
+    journal?: Uint8Array
+  }
   changes: ConformanceControlChanges<Position>
   mutationID: string
   /** The `advance` of the pending anchor rotation this adoption lands, marked in the same transaction. */

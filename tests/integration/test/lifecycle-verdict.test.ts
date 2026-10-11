@@ -74,7 +74,7 @@ async function setup(
   const responder = createGroupMLS({
     identity: bob,
     entrySlot: createLedgerEntrySlot(),
-    access: createDurableHandleAccess({
+    access: await createDurableHandleAccess({
       handle: () => responderGroup,
       adopt: () => {
         throw new Error('Unexpected adoption')
@@ -84,7 +84,7 @@ async function setup(
   const mls = createGroupMLS({
     identity,
     entrySlot: createLedgerEntrySlot(),
-    access: createDurableHandleAccess({
+    access: await createDurableHandleAccess({
       handle: () => group,
       adopt: (next: GroupHandle) => {
         group = next
@@ -298,7 +298,7 @@ test('a lifecycle GroupInfo signer revoked in the known ledger is refused', asyn
   const removed = await revokeWithProof(s.group(), { subject: s.bob.id, log: [inception, rev] })
   if (removed.status !== 'built') throw new Error('Expected proof commit')
   // Keep the responder's old tree while installing the accepted proof on the requester.
-  const access = createDurableHandleAccess({
+  const access = await createDurableHandleAccess({
     handle: () => removed.result.newGroup,
     adopt: () => {
       throw new Error('Unexpected adoption')
@@ -422,7 +422,7 @@ test('caller rejection and a replacement without a prior leaf propagate policy a
   const mls = createGroupMLS({
     identity: s.identity,
     entrySlot: createLedgerEntrySlot(),
-    access: createDurableHandleAccess({
+    access: await createDurableHandleAccess({
       handle: () => rejector,
       adopt: () => {
         throw new Error('Unexpected adoption')

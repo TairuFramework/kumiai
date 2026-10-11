@@ -76,6 +76,7 @@ export type RejoinDeps = {
   confirm(record: RejoinRecord): Promise<ConfirmationOutcome>
   runSerial<T>(fn: () => Promise<T>): Promise<T>
   scan(record: RejoinRecord): Promise<SourceScan>
+  canAdopt?(): Promise<boolean>
   adopt(record: RejoinRecord, write: AdoptionWriteFactory): Promise<void>
   bootstrapLedger(): Promise<boolean>
   getLedger(): Promise<Array<string>>
@@ -153,7 +154,17 @@ export async function stepRejoin(
     })
   }
   if (record.stage === 'confirmed') {
-    const checked = sourceRecheck(await deps.scan(record), record)
+    const held = async () => {
+      const hold = (await deps.control.load()).controlHold
+      return (
+        (hold !== null && hold.reason !== 'acceptance-unknown') ||
+        (deps.canAdopt !== undefined && !(await deps.canAdopt()))
+      )
+    }
+    if (await held()) return record
+    const scan = await deps.scan(record)
+    if (await held()) return record
+    const checked = sourceRecheck(scan, record)
     if (checked.kind === 'fail') return await discard('invalidated', checked.blockingPosition)
     const position = record.position
     if (position == null) throw new Error('Confirmed rejoin has no position')
@@ -178,6 +189,7 @@ export async function stepRejoin(
             putApplied: [row],
           }
         : forkSettlement(snapshot, record.conflictEpoch, row)
+    if (await held()) return record
     const mutationID = deps.newID()
     await deps.adopt(record, (staged) => ({
       mutationID,
@@ -186,6 +198,7 @@ export async function stepRejoin(
         ...pruneWindow(snapshot, row.epoch),
         ...settlement,
         putRejoin: next,
+        ...(snapshot.controlHold?.reason === 'acceptance-unknown' ? { controlHold: null } : {}),
         cursor: { position, epoch: staged.epochAfter, stranded: true },
         putResponses: [
           {
@@ -210,6 +223,7 @@ export async function stepRejoin(
     deps.control,
     {
       deleteRejoin: true,
+      strand: null,
       ...(tokens.length === 0 ? {} : { putOutcomes: [outcome] }),
       cursor: {
         position: snapshot.cursor?.position ?? record.position ?? null,

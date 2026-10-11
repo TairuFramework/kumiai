@@ -3,6 +3,7 @@ import { controlBuildRef } from '../../src/control/slot.js'
 import {
   applyChanges,
   type CommitOnceWriteContext,
+  controlAdoptionAllowed,
   controlSettled,
   readmissionChanges,
 } from '../../src/control/store.js'
@@ -267,12 +268,22 @@ export function createMemoryHostDatabase(
           next.state === null || key === null ? null : readIdentity(groupID, next.state, key)
         const expected = ownedWrite?.expected
         if (
-          expected !== undefined &&
-          (JSON.stringify(expected.key) !== JSON.stringify(keys.get(groupID)) ||
-            expected.stateVersion !== next.version ||
-            JSON.stringify(expected.identity) !== JSON.stringify(before))
+          ownedWrite !== undefined &&
+          next.control.controlHold !== null &&
+          next.control.controlHold.reason !== 'acceptance-unknown'
         ) {
-          const error = new Error('Adoption source moved')
+          throw Object.assign(new Error('Adoption is held'), { name: 'ControlAdoptionMovedError' })
+        }
+        if (
+          expected !== undefined &&
+          (key === null ||
+            !controlAdoptionAllowed(
+              next.control,
+              { key, identity: before, stateVersion: next.version },
+              expected,
+            ))
+        ) {
+          const error = new Error('Adoption source or control proof moved')
           error.name = 'ControlAdoptionMovedError'
           throw error
         }

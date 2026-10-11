@@ -21,7 +21,7 @@ test('real MLS publishes paired snapshots only after an awaited adoption callbac
   const created = await createGroup(identity, 'admission-integration')
   let handle: GroupHandle = created.group
   const epochBefore = Number(handle.epoch)
-  const access = createDurableHandleAccess({
+  const access = await createDurableHandleAccess({
     handle: () => handle,
     adopt: async (next) => {
       handle = next
@@ -58,7 +58,7 @@ test('accepted adoption entries seal at the matching admission epoch once the de
   })
   let handle = (await createGroup(identity, 'admission-dispatch-integration')).group
   const epochBefore = Number(handle.epoch)
-  const access = createDurableHandleAccess({
+  const access = await createDurableHandleAccess({
     handle: () => handle,
     adopt: async (next) => {
       handle = next

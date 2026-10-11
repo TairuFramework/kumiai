@@ -411,3 +411,24 @@ describe('commit strand observations', () => {
     await bob.peer.dispose()
   })
 })
+
+test('a later ordinary strand replaces the previous durable reason at the same epoch', async () => {
+  const hub = new FakeHub()
+  const rs = secret(0xb9)
+  const bob = makeMLSPeer(hub, 'bob', rs, { members, recovery })
+  try {
+    await bob.peer.replay()
+    await publishCommit({ hub, senderDID: 'zoe', recoverySecret: rs, epoch: 3 })
+    await vi.waitFor(async () => expect((await bob.control.load()).strand?.reason).toBe('ahead'))
+    bob.mls.readCommitHeader = async () => {
+      throw Object.assign(new Error('missing key'), { name: 'CommitValidationUnavailableError' })
+    }
+    await publishCommit({ hub, senderDID: 'carol', recoverySecret: rs, epoch: 1 })
+    await vi.waitFor(async () =>
+      expect((await bob.control.load()).strand?.reason).toBe('unprocessable-gap'),
+    )
+  } finally {
+    await bob.peer.dispose()
+    await bob.peer.drained()
+  }
+})

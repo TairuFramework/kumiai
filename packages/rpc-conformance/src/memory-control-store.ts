@@ -339,6 +339,33 @@ export function createMemoryControlStore<Position extends string = string>(
       const after = decodeControlFixtureState(state)
       if (next.state === null) next.initialIdentity = cloneValue(after)
       next.state = state.slice()
+      if (
+        write !== undefined &&
+        next.control.controlHold !== null &&
+        next.control.controlHold.reason !== 'acceptance-unknown'
+      )
+        throw Object.assign(new Error('Adoption is held'), { name: 'ControlAdoptionMovedError' })
+      const expected = write?.expected
+      const proof = expected?.acceptance
+      const retained = next.control.commitOnce
+      if (
+        expected !== undefined &&
+        ((next.control.controlHold !== null &&
+          next.control.controlHold.reason !== 'acceptance-unknown') ||
+          !equal(expected.key, key) ||
+          !equal(expected.identity, before) ||
+          expected.stateVersion !== next.version ||
+          (proof !== undefined &&
+            (retained === null ||
+              retained.payloadDigest !== proof.payloadDigest ||
+              retained.searchFrom !== proof.from ||
+              !equal(retained.journal, expected.journal) ||
+              !equal(next.control.commitOnceAcceptance, proof))))
+      ) {
+        const error = new Error('Adoption source or acceptance moved')
+        error.name = 'ControlAdoptionMovedError'
+        throw error
+      }
       next.version++
       if (write != null) {
         mutateControl(

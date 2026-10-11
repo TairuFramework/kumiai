@@ -4,6 +4,7 @@ import { encodeControlFixtureState } from '../../rpc-conformance/src/control-sto
 import { createMemoryControlStore } from '../../rpc-conformance/src/memory-control-store.js'
 import { type ControlSlotDeps, settleControlSlot } from '../src/control/slot.js'
 import type { ControlSlot, FirstValidCommit, Operation } from '../src/control/types.js'
+import { deliverObligations } from '../src/control/welcome.js'
 import { asLogPosition, type LogPosition } from '../src/cursor.js'
 
 async function fixture() {
@@ -165,4 +166,77 @@ test('control holds survive restart and copy fork evidence defensively', async (
   expect((await f.store.load()).controlHold?.evidence).toMatchObject({
     remote: new Uint8Array([8]),
   })
+})
+
+test('one pre-adoption Welcome is delivered across moved retries and eventual installation', async () => {
+  const f = await fixture()
+  f.deps.search.searchLog = async () => ({ kind: 'first-valid', proof: f.proof })
+  const install = f.deps.adoption.adopt
+  f.deps.adoption.adopt = async () => 'moved'
+  const deliveries: Array<string> = []
+  const deliver = async () =>
+    deliverObligations(
+      {
+        control: f.store,
+        canDeliver: async () => true,
+        deliverWelcome: async (row) => {
+          deliveries.push(row.opID)
+        },
+      },
+      await f.store.load(),
+    )
+  for (let retry = 0; retry < 4; retry++) {
+    expect(await settleControlSlot(f.deps)).toBe('unknown')
+    await deliver()
+  }
+  expect(deliveries).toEqual([f.op.id])
+  f.deps.adoption.adopt = install
+  expect(await settleControlSlot(f.deps)).toBe('landed')
+  await deliver()
+  expect(deliveries).toEqual([f.op.id])
+  expect((await f.store.load()).welcomes).toEqual([])
+})
+
+test.each([true, false])(
+  'an op slot mismatch labels divergence only for differing digests: %s',
+  async (sameDigest) => {
+    const f = await fixture()
+    const operation = (await f.store.load()).operations[0]
+    if (operation === undefined || operation.stage === 'intent') throw new Error('missing build')
+    await f.store.apply(
+      {
+        putOperations: [
+          { ...operation, built: { ...operation.built, publishID: 'different-publish' } },
+        ],
+        putApplied: [
+          {
+            epoch: f.slot.epoch,
+            digest: f.slot.digest,
+            payloadDigest: sameDigest ? f.slot.payloadDigest : 'different-payload',
+            sequenceID: f.proof.position,
+            opID: null,
+            removed: false,
+          },
+        ],
+      },
+      'mismatch',
+    )
+    expect(await settleControlSlot(f.deps)).toBe('unknown')
+    expect((await f.store.load()).controlHold?.reason).toBe(
+      sameDigest ? 'acceptance-unknown' : 'fork-evidence',
+    )
+  },
+)
+
+test('ambiguous slot acceptance writes obey their abort signal', async () => {
+  const f = await fixture()
+  f.deps.search.searchLog = async () => ({ kind: 'first-valid', proof: f.proof })
+  const abort = new AbortController()
+  const reason = new Error('disposed during acceptance')
+  abort.abort(reason)
+  f.store.commitThenRejectNext('apply')
+  Object.assign(f.deps, { signal: abort.signal })
+  await expect(settleControlSlot(f.deps)).rejects.toBe(reason)
+  expect((await f.store.load()).commitOnceAcceptance).toEqual(f.proof)
+  expect((await f.store.load()).applied).toEqual([])
 })

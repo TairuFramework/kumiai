@@ -94,14 +94,14 @@ async function setup(
       options: { resolveLedgerEntries: slot.resolve },
     })
   ).group
-  const access = createDurableHandleAccess({
+  const access = await createDurableHandleAccess({
     handle: () => bobGroup,
     adopt: (next) => {
       bobGroup = next
     },
   })
   const mls = createGroupMLS({ access, identity: bob, entrySlot: slot, recoveryBinding: host })
-  const aliceAccess = createDurableHandleAccess({
+  const aliceAccess = await createDurableHandleAccess({
     handle: () => aliceGroup,
     adopt: (next) => {
       aliceGroup = next

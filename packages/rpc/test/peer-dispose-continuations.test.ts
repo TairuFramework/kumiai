@@ -94,7 +94,11 @@ describe('work resumed after disposal', () => {
       await expect(replay).rejects.toBeInstanceOf(PeerDisposedError)
       expect(readResumed).toBe(true)
       expect(bob.mls.epoch()).toBe(1)
-      expect((await bob.control.load()).operations[0]?.stage).toBe('accepted')
+      const saved = await bob.control.load()
+      expect(saved.operations[0]?.stage).toBe('accepted')
+      expect(saved.commitOnceAcceptance?.payloadDigest).toBe(saved.commitOnce?.payloadDigest)
+      expect(saved.applied).toEqual([])
+      expect(bob.welcomes).toEqual([])
       expect(
         hub.published.filter((message) => message.topicID === commitTopic(recoverySecret)),
       ).toEqual([])

@@ -9,6 +9,7 @@ import { expect, test, vi } from 'vitest'
 
 import { simpleHandleAccess } from '../src/access.js'
 import { createGroupMLS } from '../src/mls.js'
+import { controlAdoptionFixture } from './fixtures/control-adoption.js'
 import { buildRealCommit, createRealGroup, testHandleAccess } from './fixtures/real-group.js'
 import {
   createTransactionalAccess,
@@ -212,20 +213,24 @@ test('refused commits never run the adoption factory or persist', async () => {
   expect(host.saves).toEqual([])
 })
 
-test('replacement saves its staged write before publishing the new handle', async () => {
-  const host = await fixture('adoption-write-replace')
-  const previous = host.member.handle
-  await buildRealCommit(host.group)
-  const next = host.group.committer.handle
-  const write: AdoptionWrite = { mutationID: crypto.randomUUID(), changes: {} }
-  await host.access.replace(next, (summary) => {
-    expect(host.member.handle).toBe(previous)
-    expect(summary).toMatchObject({ epochAfter: Number(next.epoch), removed: false })
-    expect(summary.epochAuthenticator).toEqual(next.state.keySchedule.epochAuthenticator)
-    return write
+test('guarded replacement saves the retained acceptance and staged write before publishing the new handle', async () => {
+  const host = await controlAdoptionFixture()
+  const previous = host.host.live()
+  const beforeEpoch = previous.epoch
+  const prepared = await host.expected()
+  host.store.beforeWrite = () => {
+    expect(host.host.live()).toBe(previous)
+    expect(host.store.snapshot().control.applied).toEqual([])
+  }
+  expect(await host.port.adopt(host.slot.journal, prepared, host.write)).toBe('installed')
+  expect(host.host.live()).not.toBe(previous)
+  expect(host.host.live().epoch).toBe(beforeEpoch + 1n)
+  expect(host.store.snapshot().control.applied[0]).toMatchObject({
+    payloadDigest: host.proof.payloadDigest,
+    sequenceID: host.proof.position,
   })
-  expect(host.saves[0]?.write).toEqual(write)
-  expect(host.member.handle).toBe(next)
+  expect(host.store.snapshot().mutationID).toBe(host.write.mutationID)
+  expect(host.store.snapshot().anchorSlot?.pending?.landed).toBe(true)
 })
 
 test.each(['mutate', 'replace'] as const)(

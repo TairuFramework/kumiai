@@ -188,7 +188,7 @@ test.each([false, true])(
   },
 )
 
-test('fresh startup with a lost anchor secret holds unexplained acceptance before automatic recovery', async () => {
+test('fresh startup with a lost anchor secret retains unexplained acceptance while ordinary recovery runs', async () => {
   const state = await setup({ deadlineMs: 10_000, adminBob: true })
   const { alice, bob, carolID, received, events } = state
   const original = bob.anchorStore.stored()
@@ -281,7 +281,7 @@ test('fresh startup with a lost anchor secret holds unexplained acceptance befor
   expect(held.commitOnce).toEqual(retained)
   expect(held.operations[0]?.id).toBe(deferred.id)
   expect(held.outcomes).toEqual([])
-  expect(events).toEqual([])
+  expect(events).toContainEqual(expect.objectContaining({ phase: 'started', trigger: 'automatic' }))
   expect(Number(restarted.handle().epoch)).toBe(epochBefore + 2)
   expect(restarted.peer.anchorEpoch()).toBe(original.epoch)
   expect(await restarted.mls.getLedger()).not.toContain(deferredBody)
@@ -290,7 +290,7 @@ test('fresh startup with a lost anchor secret holds unexplained acceptance befor
   await again.peer.replay()
   expect((await again.control.load()).controlHold).toEqual(held.controlHold)
   expect((await again.control.load()).commitOnce).toEqual(retained)
-  expect(events).toEqual([])
+  expect(events).toContainEqual(expect.objectContaining({ phase: 'started', trigger: 'automatic' }))
 })
 
 testAnchorStoreConformance({

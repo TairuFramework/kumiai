@@ -7,6 +7,7 @@ import {
 } from '../errors.js'
 import type {
   AdoptionExpected,
+  AdoptionWrite,
   ControlChanges,
   ControlSlot,
   ControlSnapshot,
@@ -63,6 +64,31 @@ function sameValue(left: unknown, right: unknown): boolean {
     entries.every(
       ([key, value]) => Object.hasOwn(right, key) && sameValue(value, Reflect.get(right, key)),
     )
+  )
+}
+
+/** Recheck the retained proof in the transaction that installs its candidate. */
+export function controlAdoptionAllowed(
+  snapshot: ControlSnapshot,
+  source: AdoptionExpected,
+  expected: NonNullable<AdoptionWrite['expected']>,
+): boolean {
+  if (
+    (snapshot.controlHold !== null && snapshot.controlHold.reason !== 'acceptance-unknown') ||
+    !sameValue(source.key, expected.key) ||
+    !sameValue(source.identity, expected.identity) ||
+    source.stateVersion !== expected.stateVersion
+  )
+    return false
+  const proof = expected.acceptance
+  if (proof === undefined) return true
+  const slot = snapshot.commitOnce
+  return (
+    slot !== null &&
+    slot.payloadDigest === proof.payloadDigest &&
+    slot.searchFrom === proof.from &&
+    sameValue(slot.journal, expected.journal) &&
+    sameValue(snapshot.commitOnceAcceptance, proof)
   )
 }
 
@@ -246,6 +272,7 @@ export function readmissionChanges(snapshot: ControlSnapshot): ControlChanges {
     deleteAppliedFrom: 0,
     deleteResponsesBelow: newestResponseEpoch + 1,
     cursor: null,
+    strand: null,
   }
 }
 

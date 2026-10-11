@@ -2,6 +2,7 @@ import type { LeafNodeExtension } from 'ts-mls'
 
 import type { ConformanceAnchorSlot, ConformanceAnchorStore } from './anchor-store.js'
 import type {
+  ConformanceAdoptionWrite,
   ConformanceControlChanges,
   ConformanceControlSnapshot,
   ConformanceControlStore,
@@ -165,7 +166,10 @@ export type ConformanceIncarnationStores<Position extends string = string> = {
   state: {
     load(): Promise<ConformanceGroupStateRecord | null>
     loadInitialIdentity(): Promise<ConformanceEpochIdentity | null>
-    save(record: ConformanceGroupStateRecord): Promise<void>
+    save(
+      record: ConformanceGroupStateRecord,
+      expected?: ConformanceAdoptionWrite<never>['expected'],
+    ): Promise<void>
   }
   control: {
     load(): Promise<ConformanceControlSnapshot<Position>>

@@ -963,8 +963,12 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         )
           return 'moved'
         try {
-          await hostDB.saveState(storageID, state, { ...write, expected })
+          await hostDB.saveState(storageID, state, {
+            ...write,
+            expected: { ...expected, journal: blob },
+          })
         } catch (error) {
+          if (error instanceof Error && error.name === 'ControlAdoptionMovedError') return 'moved'
           if (
             !(error instanceof Error) ||
             error.name !== 'StorageOutcomeUnknownError' ||
