@@ -16,6 +16,7 @@ import {
 } from 'ts-mls'
 
 import { readCapability } from './capability.js'
+import { cloneData } from './clone.js'
 import { type ControllerBinding, parseMLSCredentialIdentity } from './credential.js'
 import { LeafBindingError, RevokeProofError, type RevokeProofReason } from './errors.js'
 import { commitWithEntries } from './group-commit.js'
@@ -170,7 +171,7 @@ export async function renewLeaf(
     const original = tree[index]
     if (original?.nodeType !== nodeTypes.leaf || !('identity' in original.leaf.credential))
       throw new LeafBindingError('identity-change')
-    const own = structuredClone(original)
+    const own = cloneData(original)
     if (!('identity' in own.leaf.credential)) throw new LeafBindingError('identity-change')
     const parsed = parseMLSCredentialIdentity(own.leaf.credential.identity)
     own.leaf.credential.identity = new TextEncoder().encode(

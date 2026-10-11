@@ -26,6 +26,7 @@ import {
 
 import { type GroupAnchor, readGroupAnchor } from './anchor.js'
 import { verifyLeafCredential } from './authentication.js'
+import { cloneData } from './clone.js'
 import { encodeClientState } from './codec.js'
 import {
   didFromCredential,
@@ -926,7 +927,7 @@ export class GroupHandle {
 
       const history = new Map(candidate.#state.historicalReceiverData)
       // Independent buffers survive subsequent ratchets zeroing consumed secrets on the live handle.
-      history.set(epoch, { ...retained, secretTree: structuredClone(this.#state.secretTree) })
+      history.set(epoch, { ...retained, secretTree: cloneData(this.#state.secretTree) })
       for (const [earlierEpoch, target] of history) {
         if (earlierEpoch >= epoch) continue
         const receiver = this.#state.historicalReceiverData.get(earlierEpoch)
@@ -936,7 +937,7 @@ export class GroupHandle {
         } else {
           history.set(earlierEpoch, {
             ...target,
-            secretTree: structuredClone(receiver.secretTree),
+            secretTree: cloneData(receiver.secretTree),
           })
         }
       }
