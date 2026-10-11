@@ -140,13 +140,19 @@ function nameViolations(program: ts.Program, file: ts.SourceFile): Array<string>
     })
   }
   function unwrap(expression: ts.Expression): ts.Expression {
-    return ts.isParenthesizedExpression(expression) ||
+    if (ts.isParenthesizedExpression(expression) || ts.isNonNullExpression(expression))
+      return unwrap(expression.expression)
+    if (
       ts.isAsExpression(expression) ||
       ts.isTypeAssertionExpression(expression) ||
-      ts.isNonNullExpression(expression) ||
       ts.isSatisfiesExpression(expression)
-      ? unwrap(expression.expression)
-      : expression
+    ) {
+      // satisfies preserves the expression type, including an inner cast to any.
+      const asserted = checker.getTypeAtLocation(expression)
+      if ((asserted.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0)
+        return unwrap(expression.expression)
+    }
+    return expression
   }
   function receiverType(expression: ts.Expression): ts.Type {
     return checker.getNonNullableType(checker.getTypeAtLocation(unwrap(expression)))
@@ -786,6 +792,14 @@ const positiveFixtures = [
   [
     'local controller subclass member',
     'class Controller extends AbortController { dispose() {} }; new Controller().dispose()',
+  ],
+  [
+    'cast controller subclass member',
+    'class Controller extends AbortController { dispose() {} }; const controller: AbortController = new Controller(); (controller as Controller).dispose()',
+  ],
+  [
+    'cast controller intersection member',
+    'class Controller extends AbortController { dispose() {} }; const controller: AbortController = new Controller(); (controller as AbortController & { dispose(): void }).dispose()',
   ],
   [
     'local inherited controller subclass member',
