@@ -41,7 +41,7 @@ describe('peer host drain', { concurrent: false }, () => {
       let disposed = false
       let hostCallsAfterDispose = 0
       const database = createMemoryHostDatabase()
-      const control = database.control('alice')
+      const control = database.control('alice', { groupID: 'memory-group', incarnation: 1 })
       const apply = control.apply
       control.apply = async (changes, id) => {
         if (disposed) hostCallsAfterDispose++
@@ -370,7 +370,7 @@ describe('peer host drain', { concurrent: false }, () => {
     const pause = gate()
     const hub = new FakeHub()
     const database = createMemoryHostDatabase()
-    const control = database.control('alice')
+    const control = database.control('alice', { groupID: 'memory-group', incarnation: 1 })
     const apply = control.apply
     let entered = false
     control.apply = async (changes, id) => {
@@ -409,7 +409,7 @@ describe('peer host drain', { concurrent: false }, () => {
     const hub = new FakeHub()
     const secret = new Uint8Array(32).fill(0x76)
     const database = createMemoryHostDatabase()
-    const control = database.control('alice')
+    const control = database.control('alice', { groupID: 'memory-group', incarnation: 1 })
     const apply = control.apply
     let entered = false
     control.apply = async (changes, id) => {

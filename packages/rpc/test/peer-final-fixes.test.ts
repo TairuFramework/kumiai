@@ -39,7 +39,7 @@ test('a mismatched durable commit cursor is discarded before the first fetch', a
   controlRecoveryClock()
   const hub = new FakeHub()
   const database = createMemoryHostDatabase()
-  const store = database.control('bob')
+  const store = database.control('bob', { groupID: 'memory-group', incarnation: 1 })
   await store.apply(
     { cursor: { position: asLogPosition('stale-position'), epoch: 8 } },
     'stale-cursor',
@@ -59,7 +59,7 @@ test('a restart at the same epoch rediscovers a strand the durable cursor never 
   controlRecoveryClock()
   const hub = new FakeHub()
   const database = createMemoryHostDatabase()
-  const store = database.control('bob')
+  const store = database.control('bob', { groupID: 'memory-group', incarnation: 1 })
   const recovery = { timeoutMs: 50, deadlineMs: 100, getDelayMs: () => 60_000 }
   const strands: Array<StrandObservation> = []
   const bob = member(hub, {
@@ -119,7 +119,7 @@ test('a losing fork strand survives a restart through the durable cursor', async
   })
   hub.hideFrom('bob', winner.sequenceID)
   const database = createMemoryHostDatabase()
-  const store = database.control('bob')
+  const store = database.control('bob', { groupID: 'memory-group', incarnation: 1 })
   const strands: Array<StrandObservation> = []
   const bob = member(hub, {
     database,
@@ -174,7 +174,7 @@ test('a rejoin that lands on the stranded epoch number clears the strand', async
   await carol.peer.resync()
   // Bob stranded on a losing branch one epoch past the group: the rejoin lands on epoch 3 again.
   const database = createMemoryHostDatabase()
-  const store = database.control('bob')
+  const store = database.control('bob', { groupID: 'memory-group', incarnation: 1 })
   await store.apply({ cursor: { position: null, epoch: 3, stranded: true } }, 'stranded-cursor')
   const events: Array<RecoveryEvent> = []
   const bob = member(hub, {

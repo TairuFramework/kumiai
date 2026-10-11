@@ -2,7 +2,7 @@ import { commitLedgerEntries, encodeClientState, signLedgerEntry } from '@kumiai
 import { type AppFrameRef, AppFrameStorageError } from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
-import type { HandleAccess } from '../src/access.js'
+import type { ControlReadScope, HandleAccess } from '../src/access.js'
 import { createGroupCrypto } from '../src/crypto.js'
 import { createGroupMLS } from '../src/mls.js'
 import {
@@ -55,6 +55,29 @@ async function setup(name: string) {
   return { group, store, host, crypto, seal }
 }
 
+test.each([
+  ['simple', 'returned'],
+  ['simple', 'rejected'],
+  ['transactional', 'returned'],
+  ['transactional', 'rejected'],
+] as const)('%s readControl refresh expires after its callback %s', async (kind, outcome) => {
+  const { group, host } = await setup(`control-refresh-${kind}-${outcome}`)
+  const access =
+    kind === 'transactional'
+      ? host.access
+      : testHandleAccess({ handle: () => group.committer.handle, adopt: () => {} })
+  let scope!: ControlReadScope
+  const callbackError = new Error('callback failed')
+  const reading = access.readControl(async (owned) => {
+    scope = owned
+    expect((await owned.refresh()).source).toEqual(owned.source)
+    if (outcome === 'rejected') throw callbackError
+  })
+  if (outcome === 'rejected') await expect(reading).rejects.toBe(callbackError)
+  else await reading
+  await expect(scope.refresh()).rejects.toThrow('Control read scope has ended')
+})
+
 describe('transactional access: atomic durable open', () => {
   test('transactional readControl uses committed receive state before open publication', async () => {
     const { store, host, seal } = await setup('group-A')
@@ -90,7 +113,9 @@ describe('transactional access: atomic durable open', () => {
             stateVersion: () => row.revision,
           }),
         })
-        await expect(reader.unwrap(sealed, { expectedAAD: aad })).rejects.toThrow()
+        await expect(reader.unwrap(sealed, { expectedAAD: aad })).rejects.toThrow(
+          'Desired gen in the past',
+        )
         const refreshed = await scope.refresh()
         expect(encodeClientState(refreshed.handle.state)).toEqual(row.state)
         expect(refreshed.source.stateVersion).toBe(row.revision)

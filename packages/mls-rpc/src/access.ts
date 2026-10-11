@@ -93,7 +93,18 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
     epoch: () => publishedAdmission.epoch,
     admission: () => publishedAdmission,
     readControl: (fn) =>
-      serialise(async () => await fn({ ...(await readControl()), refresh: readControl })),
+      serialise(async () => {
+        let active = true
+        const refresh = async (): Promise<ControlRead> => {
+          if (!active) throw new Error('Control read scope has ended')
+          return await readControl()
+        }
+        try {
+          return await fn({ ...(await readControl()), refresh })
+        } finally {
+          active = false
+        }
+      }),
     read: (fn) => serialise(async () => await fn(params.handle())),
     mutate: (fn, adoption) =>
       serialise(async () => {

@@ -26,7 +26,7 @@ async function close(member: TestPeer) {
 
 test('the revoke hold derives from unsettled operations, not retained outcomes', async () => {
   const database = createMemoryHostDatabase()
-  const control = database.control('alice')
+  const control = database.control('alice', { groupID: 'memory-group', incarnation: 1 })
   const ordinary = {
     id: crypto.randomUUID(),
     kind: 'ledger' as const,
@@ -100,7 +100,7 @@ test('a failed revoke enqueue releases the hold when no intent was persisted', a
 test('a delayed empty snapshot cannot release a newer revoke hold', async () => {
   const hub = new FakeHub()
   const database = createMemoryHostDatabase()
-  const control = database.control('alice')
+  const control = database.control('alice', { groupID: 'memory-group', incarnation: 1 })
   const load = control.load.bind(control)
   const snapshotPause = gate()
   const buildPause = gate()

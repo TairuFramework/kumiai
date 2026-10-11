@@ -18,6 +18,8 @@ import type {
   Outcome,
 } from './types.js'
 
+const DEFAULT_OPERATION_TIMEOUT_MS = 30_000
+
 export function revokeHeld(snapshot: ControlSnapshot): boolean {
   return snapshot.operations.some((op) => op.revokes)
 }
@@ -67,7 +69,7 @@ export async function enqueueOperation(
     ...request,
     seq: Math.max(0, ...snapshot.operations.map((row) => row.seq)) + 1,
     enqueuedAt,
-    deadline: enqueuedAt + (deps.operationTimeoutMs ?? 30_000),
+    deadline: enqueuedAt + (deps.operationTimeoutMs ?? DEFAULT_OPERATION_TIMEOUT_MS),
     stage: 'intent',
   }
   await applyResolved(deps.control, { putOperations: [op] }, deps.newID(), undefined, deps.signal)
@@ -187,7 +189,10 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
       const found = await deps.searchLog(op.built.expectedHead, op.built.payloadDigest)
       if (found === 'gap') return await settle(deps, op, { ...base, kind: 'unknown' })
       if (found === 'absent') {
-        if (deps.now() >= op.enqueuedAt + (deps.operationTimeoutMs ?? 30_000)) {
+        if (
+          deps.now() >=
+          op.enqueuedAt + (deps.operationTimeoutMs ?? DEFAULT_OPERATION_TIMEOUT_MS)
+        ) {
           return await settle(deps, op, { ...base, kind: 'lost' })
         }
         const { built: _built, ...intent } = op

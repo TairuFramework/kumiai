@@ -1,6 +1,11 @@
 import type { AnchorSlot, AnchorStore } from '../../src/anchor.js'
 import { applyChanges, controlSettled, readmissionChanges } from '../../src/control/store.js'
-import type { AdoptionWrite, ControlSnapshot, ControlStore } from '../../src/control/types.js'
+import type {
+  AdoptionWrite,
+  ControlSnapshot,
+  ControlStore,
+  GroupKey,
+} from '../../src/control/types.js'
 import { GroupControlUnsettledError, StorageOutcomeUnknownError } from '../../src/errors.js'
 
 type GroupRecord = {
@@ -17,7 +22,7 @@ type WritePoint = 'apply' | 'save' | 'anchor' | 'seed'
 type FailurePoint = 'mid-apply' | 'mid-save' | 'mid-anchor' | 'mid-seed'
 
 export type MemoryHostDatabase = {
-  control(groupID: string): ControlStore
+  control(storageID: string, key: GroupKey): ControlStore
   anchorStore(groupID: string): AnchorStore
   saveState(groupID: string, state: Uint8Array, write?: AdoptionWrite): Promise<void>
   seed(groupID: string, state: Uint8Array, options?: SeedOptions): Promise<void>
@@ -82,20 +87,23 @@ export function createMemoryHostDatabase(): MemoryHostDatabase {
     await runSeam(`after-${point}`)
   }
   return {
-    control: (groupID) => ({
-      get key() {
-        return { groupID, incarnation: 1 }
-      },
-      load: async () => structuredClone(read(groupID).control),
-      lastMutation: async () => read(groupID).mutationID,
-      apply: async (changes, mutationID) => {
-        const ownedChanges = structuredClone(changes)
-        await transact(groupID, 'apply', (next) => {
-          next.control = applyChanges(next.control, ownedChanges)
-          next.mutationID = mutationID
-        })
-      },
-    }),
+    control: (storageID, key) => {
+      const fixedKey = { ...key }
+      return {
+        get key() {
+          return { ...fixedKey }
+        },
+        load: async () => structuredClone(read(storageID).control),
+        lastMutation: async () => read(storageID).mutationID,
+        apply: async (changes, mutationID) => {
+          const ownedChanges = structuredClone(changes)
+          await transact(storageID, 'apply', (next) => {
+            next.control = applyChanges(next.control, ownedChanges)
+            next.mutationID = mutationID
+          })
+        },
+      }
+    },
     anchorStore: (groupID) => ({
       load: async () => structuredClone(read(groupID).anchorSlot),
       save: async (slot) => {

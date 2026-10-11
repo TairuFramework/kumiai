@@ -30,7 +30,7 @@ describe('memory control store', () => {
 describe('memory host database', () => {
   let db: MemoryHostDatabase
   const host = () => ({
-    control: db.control('group-A'),
+    control: db.control('group-A', { groupID: 'group-A', incarnation: 1 }),
     anchor: db.anchorStore('group-A'),
     saveState: (state: Uint8Array, write?: AdoptionWrite) => db.saveState('group-A', state, write),
     loadState: () => db.loadState('group-A'),

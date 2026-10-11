@@ -87,6 +87,7 @@ async function chainedRecovery() {
       identity: bob,
       access: testHandleAccess({
         handle: () => member,
+        stateVersion: () => store.snapshot().revision,
         adopt: (next) => {
           member = next
         },
@@ -122,6 +123,7 @@ async function chainedRecovery() {
     },
     requester,
     responder,
+    store,
     source: () => source,
   }
 }
@@ -172,6 +174,27 @@ test('recoveryWithValidChainedBindingKeepsEvidence', async () => {
   const requester = fixture.requester()
   await expect(requester.prepareRecovery()).resolves.toBe('ready')
   await acceptRecovery(fixture, requester)
+})
+
+test('recovery source version survives a durable save and requester reconstruction', async () => {
+  const fixture = await chainedRecovery()
+  const requester = fixture.requester()
+  const before = await requester.readRecoverySource()
+  await acceptRecovery(fixture, requester)
+  const row = fixture.store.snapshot()
+  expect(row.revision).toBeGreaterThan(before.stateVersion)
+  const saved = await requester.readRecoverySource()
+  expect(saved.stateVersion).toBe(row.revision)
+  const state = decodeClientState(row.state)
+  if (state == null) throw new Error('Invalid persisted MLS state')
+  fixture.reload(
+    await restoreGroup({
+      state,
+      credential: fixture.member().credential,
+      ledgerEntries: row.ledger,
+    }),
+  )
+  expect(await fixture.requester().readRecoverySource()).toEqual(saved)
 })
 
 test('evidenceRefreshMakesNewBindingID', async () => {

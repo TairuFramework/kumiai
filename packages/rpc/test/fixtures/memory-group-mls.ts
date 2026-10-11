@@ -814,7 +814,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             if (
               !(error instanceof Error) ||
               error.name !== 'StorageOutcomeUnknownError' ||
-              (await hostDB.control(storageID).lastMutation()) !== write.mutationID
+              (await hostDB.control(storageID, { groupID, incarnation: 1 }).lastMutation()) !==
+                write.mutationID
             )
               throw error
           }
@@ -834,7 +835,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   }
 
   return {
-    control: () => hostDB.control(storageID),
+    control: () => hostDB.control(storageID, { groupID, incarnation: 1 }),
     anchorStore: () => hostDB.anchorStore(storageID),
     serializeState,
     restoreState,
@@ -855,7 +856,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
           if (
             !(error instanceof Error) ||
             error.name !== 'StorageOutcomeUnknownError' ||
-            (await hostDB.control(storageID).lastMutation()) !== write.mutationID
+            (await hostDB.control(storageID, { groupID, incarnation: 1 }).lastMutation()) !==
+              write.mutationID
           )
             throw error
         }
@@ -1069,7 +1071,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             !(error instanceof Error) ||
             error.name !== 'StorageOutcomeUnknownError' ||
             write == null ||
-            (await hostDB.control(storageID).lastMutation()) !== write.mutationID
+            (await hostDB.control(storageID, { groupID, incarnation: 1 }).lastMutation()) !==
+              write.mutationID
           )
             throw error
           const committed = await hostDB.loadState(storageID)

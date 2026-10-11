@@ -16,6 +16,7 @@ test('reopens sealed real MLS pending zero sender and recovery candidate without
     const stored = await reopened.device.groups.loadState(key)
     expect(stored?.deleted).toBe(false)
     if (stored == null || stored.deleted || stored.state == null) throw new Error('missing state')
+    expect((await realPort.readRecoverySource()).stateVersion).toBe(stored.version)
     expect(stored.state[0]).toBe(2)
     expect(decodeClientState(stored.state)?.unappliedProposals[zeroRef]?.senderLeafIndex).toBe(0)
     const rejoin = (await reopened.device.groups.ports(key).control.load()).rejoin

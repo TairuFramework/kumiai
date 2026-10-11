@@ -375,8 +375,10 @@ test('ambiguous recovery save reads back committed state without another write',
   expect(await requester.isLedgerComplete()).toBe(false)
   expect(requester.leaves()).toEqual(['alice', 'bob', 'carol'])
   expect(saves).toBe(1)
-  expect(await hostDB.control(groupID).lastMutation()).toBe('ambiguous-adoption')
-  expect((await hostDB.control(groupID).load()).outcomes).toEqual([
+  expect(await hostDB.control(groupID, { groupID, incarnation: 1 }).lastMutation()).toBe(
+    'ambiguous-adoption',
+  )
+  expect((await hostDB.control(groupID, { groupID, incarnation: 1 }).load()).outcomes).toEqual([
     { id: 'rejoin-result', kind: 'reenact', opID: null, at: 123, tokens: ['before'] },
   ])
   const restarted = createMemoryGroupMLS({

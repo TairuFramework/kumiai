@@ -338,7 +338,10 @@ describe('dispose against a commit delivery queued behind a lane operation', {
     })
     let gateArmed = false
     const alice = makeMLSPeer(recorder.hub, 'alice', rs, { epoch: 1, members })
-    const real = createMemoryHostDatabase().control('bob')
+    const real = createMemoryHostDatabase().control('bob', {
+      groupID: 'memory-group',
+      incarnation: 1,
+    })
     const control = {
       ...real,
       load: async () => {

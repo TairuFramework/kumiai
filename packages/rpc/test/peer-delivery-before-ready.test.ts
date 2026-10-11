@@ -164,7 +164,10 @@ describe('commit delivery during initialization', () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0xa4)
     const mls = createMemoryGroupMLS({ recoverySecret, epoch: 1, localDID: 'bob' })
-    const control = createMemoryHostDatabase().control('bob')
+    const control = createMemoryHostDatabase().control('bob', {
+      groupID: 'memory-group',
+      incarnation: 1,
+    })
     let releaseRead = (): void => {}
     const readGate = new Promise<void>((resolve) => {
       releaseRead = resolve
@@ -282,7 +285,10 @@ describe('commit delivery during initialization', () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0xa7)
     const mls = createMemoryGroupMLS({ recoverySecret, epoch: 1, localDID: 'bob' })
-    const control = createMemoryHostDatabase().control('bob')
+    const control = createMemoryHostDatabase().control('bob', {
+      groupID: 'memory-group',
+      incarnation: 1,
+    })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { mls, control })
     let releaseRead = (): void => {}
     const readGate = new Promise<void>((resolve) => {

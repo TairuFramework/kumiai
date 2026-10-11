@@ -69,8 +69,13 @@ describe('real MLS durable host save ordering', () => {
     const sender = createGroupCrypto({
       access: testHandleAccess({ handle: () => group.committer.handle, adopt: () => {} }),
     })
+    const receiverAccess = testHandleAccess({
+      handle: () => receiver.handle,
+      adopt: () => {},
+      stateVersion: () => savedVersion,
+    })
     const receiverPort = createGroupCrypto({
-      access: testHandleAccess({ handle: () => receiver.handle, adopt: () => {} }),
+      access: receiverAccess,
       pending,
     })
     const aad = utf8.encode('topic')
@@ -96,6 +101,9 @@ describe('real MLS durable host save ordering', () => {
     })
     expect(order).toEqual(['earlier', 'opened'])
     expect(savedVersion).toBe(2)
+    expect((await receiverAccess.readControl(async (scope) => scope.source)).stateVersion).toBe(
+      savedVersion,
+    )
     expect(savedState).toEqual(encodeClientState(receiver.handle.state))
     expect(await pending.list()).toHaveLength(1)
 

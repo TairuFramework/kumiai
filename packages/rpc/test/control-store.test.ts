@@ -77,7 +77,7 @@ const rejoin: RejoinRecord = {
 describe('control changes', () => {
   test('slot survives operation deletion outcome acknowledgement and reopen', async () => {
     const db = createMemoryHostDatabase()
-    const store = db.control('group-A')
+    const store = db.control('group-A', { groupID: 'group-A', incarnation: 1 })
     const slot: ControlSlot = {
       opID: 'owner',
       incarnation: 1,
@@ -106,7 +106,7 @@ describe('control changes', () => {
       'settle',
     )
     await store.apply({ deleteOutcomes: ['owner'] }, 'ack')
-    const reopened = db.control('group-A')
+    const reopened = db.control('group-A', { groupID: 'group-A', incarnation: 1 })
     const loaded = await reopened.load()
     expect(loaded.operations).toEqual([])
     expect(loaded.outcomes).toEqual([])
@@ -329,7 +329,7 @@ describe('resolved writes', () => {
   })
   test('commit then reject resolves through the committed mutation', async () => {
     const db = createMemoryHostDatabase()
-    const store = db.control('group')
+    const store = db.control('group', { groupID: 'group', incarnation: 1 })
     db.commitThenRejectNext('apply')
     await applyResolved(store, { putOperations: [operation('open', 1)] }, 'mutation')
     expect((await store.load()).operations).toEqual([operation('open', 1)])
@@ -394,16 +394,22 @@ describe('memory host database', () => {
     const db = createMemoryHostDatabase()
     await db.saveState('other', new Uint8Array([9]))
     await db.saveState('group', new Uint8Array([1]))
-    await db.control('group').apply({ putOperations: [operation('open', 1)] }, 'open')
+    await db
+      .control('group', { groupID: 'group', incarnation: 1 })
+      .apply({ putOperations: [operation('open', 1)] }, 'open')
     await expect(db.delete('group')).rejects.toBeInstanceOf(GroupControlUnsettledError)
     expect(await db.loadState('group')).toEqual(new Uint8Array([1]))
     await db
-      .control('group')
+      .control('group', { groupID: 'group', incarnation: 1 })
       .apply({ deleteOperations: ['open'], putApplied: [applied(1)] }, 'settled')
     await db.delete('group')
     expect(await db.loadState('group')).toBeNull()
-    expect(await db.control('group').lastMutation()).toBeNull()
-    expect((await db.control('group').load()).applied).toEqual([])
+    expect(
+      await db.control('group', { groupID: 'group', incarnation: 1 }).lastMutation(),
+    ).toBeNull()
+    expect(
+      (await db.control('group', { groupID: 'group', incarnation: 1 }).load()).applied,
+    ).toEqual([])
     expect(await db.loadState('other')).toEqual(new Uint8Array([9]))
   })
 
@@ -438,8 +444,12 @@ describe('memory host database', () => {
       }),
     ).rejects.toBeInstanceOf(StorageOutcomeUnknownError)
     expect(await db.loadState('group')).toEqual(new Uint8Array([2]))
-    expect((await db.control('group').load()).applied).toEqual([applied(1)])
-    expect(await db.control('group').lastMutation()).toBe('save')
+    expect(
+      (await db.control('group', { groupID: 'group', incarnation: 1 }).load()).applied,
+    ).toEqual([applied(1)])
+    expect(await db.control('group', { groupID: 'group', incarnation: 1 }).lastMutation()).toBe(
+      'save',
+    )
   })
 
   test('after-commit seams see durable state and run once', async () => {

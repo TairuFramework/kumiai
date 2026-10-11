@@ -149,7 +149,7 @@ test('a failed replacement leaves the state, control and anchor together on the 
   const db = createMemoryHostDatabase()
   const before = unsettled()
   await db.saveState('bob', new Uint8Array([1]))
-  await db.control('bob').apply(
+  await db.control('bob', { groupID: 'memory-group', incarnation: 1 }).apply(
     {
       putOperations: before.operations,
       putRejoin: before.rejoin ?? undefined,
@@ -171,7 +171,9 @@ test('a failed replacement leaves the state, control and anchor together on the 
     }),
   ).rejects.toThrow('Injected transaction failure')
   expect(await db.loadState('bob')).toEqual(new Uint8Array([1]))
-  expect(await db.control('bob').load()).toEqual(before)
+  expect(await db.control('bob', { groupID: 'memory-group', incarnation: 1 }).load()).toEqual(
+    before,
+  )
   expect(await db.anchorStore('bob').load()).toEqual(slot)
 })
 
@@ -260,13 +262,19 @@ test('a delayed Welcome replacement rejects a stale version without resetting ne
   const currentVersion = await db.loadVersion('bob')
   const slot = { anchor: { epoch: 5, secret: new Uint8Array([5]) } }
   await db.anchorStore('bob').save(slot)
-  await db.control('bob').apply({ putOperations: unsettled().operations }, 'new-control')
-  const control = await db.control('bob').load()
+  await db
+    .control('bob', { groupID: 'memory-group', incarnation: 1 })
+    .apply({ putOperations: unsettled().operations }, 'new-control')
+  const control = await db.control('bob', { groupID: 'memory-group', incarnation: 1 }).load()
   release()
   await rejected
   expect(await db.loadState('bob')).toEqual(newer)
   expect(await db.loadVersion('bob')).toBe(currentVersion)
-  expect(await db.control('bob').load()).toEqual(control)
-  expect(await db.control('bob').lastMutation()).toBe('new-control')
+  expect(await db.control('bob', { groupID: 'memory-group', incarnation: 1 }).load()).toEqual(
+    control,
+  )
+  expect(await db.control('bob', { groupID: 'memory-group', incarnation: 1 }).lastMutation()).toBe(
+    'new-control',
+  )
   expect(await db.anchorStore('bob').load()).toEqual(slot)
 })

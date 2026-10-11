@@ -190,6 +190,7 @@ export async function createCodecReopenFixture(id: string): Promise<{
       identity: member.identity,
       access: testHandleAccess({
         handle: () => handle,
+        stateVersion: () => stored.version,
         adopt: (next) => {
           handle = next
         },

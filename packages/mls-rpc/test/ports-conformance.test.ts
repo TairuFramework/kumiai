@@ -13,6 +13,7 @@ import {
   testPendingGroupCryptoConformance,
 } from '@kumiai/rpc-conformance'
 import { nodeTypes } from 'ts-mls'
+import { expect } from 'vitest'
 
 import { createGroupCrypto } from '../src/crypto.js'
 import { createGroupMLS } from '../src/mls.js'
@@ -105,6 +106,7 @@ testPendingGroupCryptoConformance({
     let persistCalls = 0
     const store = {
       state: encodeClientState(member.handle.state),
+      revision: 0,
       records: new Map<string, PendingAppFrame>(),
       fail: false,
     }
@@ -113,6 +115,7 @@ testPendingGroupCryptoConformance({
         persistCalls++
         if (store.fail) throw new Error('database unavailable')
         store.state = state.slice()
+        store.revision += 1
         store.records.set(record.frame.id, record)
       },
       list: async () => [...store.records.values()],
@@ -123,6 +126,7 @@ testPendingGroupCryptoConformance({
     const receiver = createGroupCrypto({
       access: testHandleAccess({
         handle: () => member.handle,
+        stateVersion: () => store.revision,
         adopt: (next) => {
           member.handle = next
         },
@@ -138,10 +142,15 @@ testPendingGroupCryptoConformance({
         ledgerEntries: member.handle.ledgerTokens,
         options: { resolveLedgerEntries: member.slot.resolve },
       })
-      return createGroupCrypto({
-        access: testHandleAccess({ handle: () => handle, adopt: () => {} }),
-        pending,
+      const access = testHandleAccess({
+        handle: () => handle,
+        adopt: () => {},
+        stateVersion: () => store.revision,
       })
+      expect((await access.readControl(async (scope) => scope.source)).stateVersion).toBe(
+        store.revision,
+      )
+      return createGroupCrypto({ access, pending })
     }
     return {
       senderDID: group.committer.identity.id,
@@ -160,6 +169,7 @@ testPendingGroupCryptoConformance({
       },
       saveHandle: async () => {
         store.state = encodeClientState(member.handle.state)
+        store.revision += 1
       },
       liveContextOwned: () => member.handle === originalHandle,
       liveState: () => encodeClientState(member.handle.state),

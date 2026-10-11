@@ -62,6 +62,26 @@ test('enqueue persists the selected absolute deadline', async () => {
   expect(defaulted.deadline).toBe(30_000)
 })
 
+test('default timeout expires a retry at the persisted deadline boundary', async () => {
+  const host = setup()
+  host.deps.operationTimeoutMs = undefined
+  host.tick(100)
+  host.mismatch()
+  const built = await host.built()
+  expect(built.deadline).toBe(30_100)
+  host.tick(30_099)
+  const retry = await stepOperation(host.deps, built)
+  expect(retry?.stage).toBe('intent')
+  if (retry == null) throw new Error('Expected retry before deadline')
+  const rebuilt = await stepOperation(host.deps, retry)
+  if (rebuilt == null) throw new Error('Expected rebuilt operation')
+  host.tick(30_100)
+  expect(await stepOperation(host.deps, rebuilt)).toBeNull()
+  expect((await host.store.load()).outcomes).toMatchObject([
+    { kind: 'lost', opID: request.id, at: 30_100 },
+  ])
+})
+
 function setup() {
   const store = createMemoryControlStore<LogPosition>({ groupID: 'group-A', incarnation: 1 })
   const writes: Array<ControlChanges> = []

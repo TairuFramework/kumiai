@@ -218,7 +218,18 @@ export async function createTransactionalAccess(
   }
   const access: HandleAccess = {
     readControl: (fn) =>
-      locked(async () => await fn({ ...(await readControl()), refresh: readControl })),
+      locked(async () => {
+        let active = true
+        const refresh = async (): Promise<ControlRead> => {
+          if (!active) throw new Error('Control read scope has ended')
+          return await readControl()
+        }
+        try {
+          return await fn({ ...(await readControl()), refresh })
+        } finally {
+          active = false
+        }
+      }),
     epoch: () => publishedAdmission.epoch,
     admission: () => publishedAdmission,
     read: (fn) => locked(async () => await fn(live)),

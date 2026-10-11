@@ -125,8 +125,6 @@ export function makeMLSPeer(
   const epoch = options.epoch ?? 1
   const restartOf = options.restartOf
   const database = options.database ?? restartOf?.database ?? createMemoryHostDatabase()
-  const control =
-    options.control ?? (options.mls != null ? options.mls.control() : database.control(localDID))
   const crypto =
     options.crypto ?? restartOf?.crypto.restart() ?? createFakeCrypto({ epoch, localDID })
   const mls =
@@ -142,6 +140,7 @@ export function makeMLSPeer(
       ...(options.acceptsCommitter != null ? { acceptsCommitter: options.acceptsCommitter } : {}),
       onAdvance: (e) => crypto.setEpoch(e),
     })
+  const control = options.control ?? mls.control()
   const initialState = restartOf?.initialState ?? mls.serializeState()
   const restore =
     restartOf == null

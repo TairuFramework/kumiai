@@ -20,6 +20,32 @@ afterEach(async () => {
   vi.restoreAllMocks()
 })
 
+test.each(['ordinary', 'restarted'] as const)(
+  '%s peer binds its control store to the MLS source key rather than its storage alias',
+  async (kind) => {
+    const hub = new FakeHub()
+    const original = makeMLSPeer(hub, 'alice', secret)
+    peers.push(original)
+    await original.peer.replay()
+    let member = original
+    if (kind === 'restarted') {
+      await original.database.saveState('alice', original.mls.serializeState())
+      await original.peer.dispose()
+      await original.peer.drained()
+      member = makeMLSPeer(hub, 'alice', secret, { restartOf: original })
+      peers.push(member)
+      await member.peer.replay()
+    }
+    const source = await member.mls.readRecoverySource()
+    expect(source.key).toEqual({ groupID: 'memory-group', incarnation: 1 })
+    expect(member.control.key).toEqual(source.key)
+    expect(member.mls.control().key).toEqual(source.key)
+    const leaked = member.control.key
+    leaked.groupID = 'storage-alias'
+    expect(member.control.key).toEqual(source.key)
+  },
+)
+
 test.each(['ambiguous', 'uncommitted'] as const)(
   'startup retries an %s landed anchor save without releasing sends early',
   async (failure) => {
@@ -87,7 +113,7 @@ test.each(['ambiguous', 'uncommitted'] as const)(
 test('the FIFO writer leaves successors as intents while an accepted head has a built rejoin', async () => {
   const hub = new FakeHub()
   const database = createMemoryHostDatabase()
-  const control = database.control('bob')
+  const control = database.control('bob', { groupID: 'memory-group', incarnation: 1 })
   const snapshots: Array<ControlSnapshot> = []
   const options = {
     members: ['alice', 'bob'],
@@ -260,7 +286,7 @@ test.each(['backoff', 'read'] as const)(
   async (pause) => {
     const hub = new FakeHub()
     const database = createMemoryHostDatabase()
-    const control = database.control('bob')
+    const control = database.control('bob', { groupID: 'memory-group', incarnation: 1 })
     let reads = 0
     let release!: () => void
     const paused = new Promise<never>((_resolve, reject) => {

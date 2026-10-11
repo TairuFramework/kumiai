@@ -333,8 +333,11 @@ for (const mode of ['real-mls', 'double'] as const) {
       expect(
         (await reopened.ports({ ...key, incarnation: 2 }).control.load()).commitOnce,
       ).toBeNull()
-      expect(JSON.stringify([...(db.snapshot().control?.values() ?? [])])).not.toContain(
-        'private-control-payload',
+      const address = { ...key, namespace: 'control', recordID: 'current' }
+      const stored = db.snapshot().control?.get(physicalRecordKey(address))
+      expect(stored).toBeInstanceOf(Uint8Array)
+      expect(stored).toEqual(
+        await sealRecord(atRest, address, { snapshot: await control.load(), mutationID: 'ack' }),
       )
     })
 

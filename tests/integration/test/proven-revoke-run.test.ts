@@ -291,7 +291,7 @@ test('a winning duplicate proof returns already revoked after the race', async (
 
 let controlDatabase: MemoryHostDatabase
 const controlHost = () => ({
-  control: controlDatabase.control('state'),
+  control: controlDatabase.control('state', { groupID: 'state', incarnation: 1 }),
   anchor: controlDatabase.anchorStore('state'),
   saveState: (state: Uint8Array, write?: AdoptionWrite) =>
     controlDatabase.saveState('state', state, write),

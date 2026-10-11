@@ -136,7 +136,7 @@ export type StateStore = {
 
 export function createMemoryStateStore(): StateStore {
   const database = createMemoryHostDatabase()
-  const control = database.control('state')
+  const control = database.control('state', { groupID: 'state', incarnation: 1 })
   return {
     database,
     control,

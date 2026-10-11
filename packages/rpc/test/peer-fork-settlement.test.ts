@@ -206,7 +206,10 @@ describe('fork settlement', () => {
     async (provider) => {
       const database = createMemoryHostDatabase()
       const double = createMemoryControlStore<LogPosition>({ groupID: 'group-A', incarnation: 1 })
-      const store = provider === 'host' ? database.control('group') : double
+      const store =
+        provider === 'host'
+          ? database.control('group', { groupID: 'group', incarnation: 1 })
+          : double
       await store.apply(
         {
           putOperations: [operation('accepted', 1, 'accepted')],
@@ -226,7 +229,10 @@ describe('fork settlement', () => {
       if (provider === 'host') database.commitThenRejectNext('apply')
       else double.commitThenRejectNext('apply')
       await applyResolved(store, changes, 'settled')
-      const reopened = provider === 'host' ? database.control('group') : double
+      const reopened =
+        provider === 'host'
+          ? database.control('group', { groupID: 'group', incarnation: 1 })
+          : double
       expect(await reopened.lastMutation()).toBe('settled')
       expect(await reopened.load()).toMatchObject({
         operations: [],

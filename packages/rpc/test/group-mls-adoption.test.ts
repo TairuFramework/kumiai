@@ -41,7 +41,7 @@ test.each([false, true])(
     expect(bob.authenticator()).not.toEqual(ownAuthenticator)
     expect(bob.serializeState()).toEqual(current)
     expect(await hostDB.loadState(groupID)).toEqual(current)
-    expect(await hostDB.control(groupID).lastMutation()).toBeNull()
+    expect(await hostDB.control(groupID, { groupID, incarnation: 1 }).lastMutation()).toBeNull()
   },
 )
 
@@ -109,8 +109,10 @@ test.each([false, true])(
     const state = await hostDB.loadState(groupID)
     if (state == null) throw new Error('state was not saved')
     expect(JSON.parse(toUTF(state))).toMatchObject({ epoch: epochAfter })
-    expect(await hostDB.control(groupID).lastMutation()).toBe(mutationID)
-    expect((await hostDB.control(groupID).load()).cursor).toEqual({
+    expect(await hostDB.control(groupID, { groupID, incarnation: 1 }).lastMutation()).toBe(
+      mutationID,
+    )
+    expect((await hostDB.control(groupID, { groupID, incarnation: 1 }).load()).cursor).toEqual({
       position: '1',
       epoch: epochAfter,
     })
@@ -148,8 +150,8 @@ test.each([false, true])(
     expect(reader.commits()).toBe(0)
     expect(await reader.getLedger()).toEqual([])
     expect(await hostDB.loadState(groupID)).toBeNull()
-    expect(await hostDB.control(groupID).lastMutation()).toBeNull()
-    expect((await hostDB.control(groupID).load()).cursor).toBeNull()
+    expect(await hostDB.control(groupID, { groupID, incarnation: 1 }).lastMutation()).toBeNull()
+    expect((await hostDB.control(groupID, { groupID, incarnation: 1 }).load()).cursor).toBeNull()
     // Resolved bodies must roll back too: retry still needs the frame's resolver.
     await expect(reader.processCommit(commit, {})).rejects.toThrow(/missing ledger entries/)
     await expect(reader.processCommit(commit, context)).resolves.toMatchObject({ applied: true })

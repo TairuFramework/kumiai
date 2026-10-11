@@ -109,7 +109,9 @@ test('a last-resort Welcome replaces held state three epochs ahead and repeats a
         cursor: { position: oldPosition, epoch },
       },
     })
-    expect((await db.control(held.groupID).load()).applied).toEqual([oldApplied])
+    expect(
+      (await db.control(held.groupID, { groupID: held.groupID, incarnation: 1 }).load()).applied,
+    ).toEqual([oldApplied])
     await source.consume(ref, held.groupID)
     const repeated = await openWelcome([source], firstWelcome)
     if (!('joined' in repeated)) throw new Error('Last-resort repeat must reach epoch admission')
@@ -139,7 +141,7 @@ test('a last-resort Welcome replaces held state three epochs ahead and repeats a
     expect(joined.groupID).toBe(held.groupID)
     expect(Number(joined.epoch)).toBe(epoch + 3)
     expect(judgeWelcomeAdmission({ epoch, deleted: false }, Number(joined.epoch))).toBe('replace')
-    await db.control(held.groupID).apply(
+    await db.control(held.groupID, { groupID: held.groupID, incarnation: 1 }).apply(
       {
         putOperations: [
           {
@@ -178,7 +180,9 @@ test('a last-resort Welcome replaces held state three epochs ahead and repeats a
     })
     expect(Number(restored.epoch)).toBe(epoch + 3)
     expect(restored.findMemberLeafIndex(hub.identity.id)).toBeDefined()
-    const control = await db.control(joined.groupID).load()
+    const control = await db
+      .control(joined.groupID, { groupID: joined.groupID, incarnation: 1 })
+      .load()
     expect(control.operations).toEqual([])
     expect(control.applied).toEqual([])
     expect(control.responses).toEqual([])
