@@ -1,3 +1,4 @@
+import { throwIfAborted } from '../abort.js'
 import {
   ControlWriteNotCommittedError,
   PeerDisposedError,
@@ -120,12 +121,12 @@ export async function applyResolved(
   }
   let delay = 100
   for (;;) {
-    signal?.throwIfAborted()
+    throwIfAborted(signal)
     let last: string | null
     try {
       last = await abortable(store.lastMutation(), signal)
     } catch (error) {
-      signal?.throwIfAborted()
+      throwIfAborted(signal)
       if (
         error instanceof PeerDisposedError ||
         (error instanceof Error && error.name === 'PeerDisposedError')

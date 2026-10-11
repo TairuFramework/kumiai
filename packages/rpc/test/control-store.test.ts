@@ -183,6 +183,48 @@ describe('control changes', () => {
 })
 
 describe('resolved writes', () => {
+  test('an already-aborted signal rejects an ambiguous write with its identical reason', async () => {
+    const controller = new AbortController()
+    const reason = new Error('cancelled before read-back')
+    controller.abort(reason)
+    Object.defineProperty(controller.signal, 'throwIfAborted', { value: undefined })
+    const store: ControlStore = {
+      load: async () => empty(),
+      apply: async () => {
+        throw new StorageOutcomeUnknownError()
+      },
+      lastMutation: async () => 'mutation',
+    }
+    await expect(applyResolved(store, {}, 'mutation', undefined, controller.signal)).rejects.toBe(
+      reason,
+    )
+  })
+
+  test('abort during pending read-back rejects an ambiguous write with its identical reason', async () => {
+    const controller = new AbortController()
+    const reason = new Error('cancelled during read-back')
+    Object.defineProperty(controller.signal, 'throwIfAborted', { value: undefined })
+    let readStarted!: () => void
+    const reading = new Promise<void>((resolve) => {
+      readStarted = resolve
+    })
+    const store: ControlStore = {
+      load: async () => empty(),
+      apply: async () => {
+        throw new StorageOutcomeUnknownError()
+      },
+      lastMutation: () => {
+        readStarted()
+        return new Promise<string | null>(() => {})
+      },
+    }
+    const result = applyResolved(store, {}, 'mutation', undefined, controller.signal)
+    const rejected = expect(result).rejects.toBe(reason)
+    await Promise.race([reading, result.catch(() => {})])
+    controller.abort(reason)
+    await rejected
+  })
+
   test('the structural memory double resolves ambiguity through the RPC ControlStore port', async () => {
     const store: ControlStore & Pick<MemoryControlStore, 'commitThenRejectNext'> =
       createMemoryControlStore()

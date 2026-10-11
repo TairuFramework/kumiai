@@ -2,6 +2,8 @@ import { hkdf } from '@noble/hashes/hkdf.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { fromUTF, toB64U } from '@sozai/codec'
 
+import { isWellFormedUTF16 } from './well-formed.js'
+
 const TOPIC_INFO_PREFIX = 'kumiai/topic/v1'
 const SEP = '\0'
 const TOPIC_ID_BYTES = 32
@@ -18,7 +20,7 @@ function assertComponent(value: string, name: string): void {
   if (value.includes('\0')) {
     throw new Error(`deriveTopicID: ${name} must not contain a NUL byte`)
   }
-  if (!value.isWellFormed()) {
+  if (!isWellFormedUTF16(value)) {
     throw new Error(`deriveTopicID: ${name} must be well-formed UTF-16 (no lone surrogates)`)
   }
 }

@@ -2,6 +2,8 @@ import { deriveTopicID } from '@kumiai/broadcast'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { fromUTF, toB64U } from '@sozai/codec'
 
+import { isWellFormedUTF16 } from './well-formed.js'
+
 /**
  * The label the app-lane anchor is exported under — the one `GroupCrypto.exportSecret` call in
  * this package, made once per anchor capture (`captureAnchor` in `peer.ts`, on init and every
@@ -93,7 +95,7 @@ export function rendezvousTopic(recoverySecret: Uint8Array): string {
  * nothing-up-my-sleeve.
  */
 export function discoveryTopic(memberDID: string): string {
-  if (!memberDID.isWellFormed()) {
+  if (!isWellFormedUTF16(memberDID)) {
     throw new Error('discoveryTopic: memberDID must be well-formed UTF-16 (no lone surrogates)')
   }
   return toB64U(sha256(fromUTF(`${DISCOVERY_PREFIX}${SEP}${memberDID}`)))
