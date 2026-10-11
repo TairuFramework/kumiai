@@ -6,9 +6,13 @@ import type { AppWindowPruned } from '../../src/app-cursor.js'
 import type { AppDeliveryResumed, AppDeliveryStalled } from '../../src/app-lane.js'
 import type { AppOutbox } from '../../src/app-outbox.js'
 import { digestAppliedCommit } from '../../src/classify.js'
-import { encodeCommitFrame } from '../../src/commit-frame.js'
+import { decodeCommitFrame, encodeCommitFrame } from '../../src/commit-frame.js'
+import type { FrameControlBuild } from '../../src/control/build.js'
 import type { HostBuilt, OperationDeps } from '../../src/control/operations.js'
+import type { ControlValidationPort } from '../../src/control/search.js'
+import { controlBuildRef } from '../../src/control/slot.js'
 import type {
+  ControlSlot,
   ControlStore,
   Operation,
   OperationRequest,
@@ -18,9 +22,9 @@ import type {
 } from '../../src/control/types.js'
 import { asLogPosition } from '../../src/cursor.js'
 import { OperationRejectedError } from '../../src/errors.js'
-import { encodeHandshakeFrame, HANDSHAKE_KIND } from '../../src/handshake.js'
+import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../../src/handshake.js'
 import type { SubscribeFailure } from '../../src/hub-mux.js'
-import { encodeLedgerEntries } from '../../src/ledger-entries.js'
+import { createLedgerEntryResolver, encodeLedgerEntries } from '../../src/ledger-entries.js'
 import type { AppOutboxCleared } from '../../src/log-delivery.js'
 import {
   createGroupPeerWithControlWalk,
@@ -35,7 +39,10 @@ import { createFakeCrypto, type FakeCrypto } from './fake-crypto.js'
 import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
 import {
   createMemoryGroupMLS,
+  decodeMemoryCommit,
+  decodeMemoryControlJournal,
   decodeMemoryGroupIdentity,
+  encodeMemoryControlJournal,
   type MemoryGroupMLS,
 } from './memory-group-mls.js'
 import { createMemoryAppOutbox } from './outbox.js'
@@ -55,6 +62,7 @@ export const chat = {
 export type Protocols = { chat: typeof chat }
 
 export type TestPeer = {
+  validation: ControlValidationPort
   controlWalk: ReturnType<typeof createGroupPeerWithControlWalk<Protocols>>['controlWalk']
   peer: GroupPeer<Protocols>
   crypto: FakeCrypto
@@ -132,6 +140,7 @@ export function makeMLSPeer(
   const database =
     options.database ??
     restartOf?.database ??
+    options.mls?.database() ??
     createMemoryHostDatabase({
       readIdentity: (state, key) => decodeMemoryGroupIdentity(state, key, recoverySecret),
     })
@@ -154,7 +163,7 @@ export function makeMLSPeer(
   const initialState = restartOf?.initialState ?? mls.serializeState()
   const restore =
     restartOf == null
-      ? Promise.resolve()
+      ? mls.persistInitialState()
       : database.loadState(localDID).then((state) => {
           mls.restoreState(state ?? initialState)
           crypto.setEpoch(mls.epoch())
@@ -191,12 +200,13 @@ export function makeMLSPeer(
     options.appCursorStore ?? restartOf?.appCursorStore ?? createMemoryAppCursorStore()
   const appOutbox = options.appOutbox ?? restartOf?.appOutbox ?? createMemoryAppOutbox()
   const welcomes = options.welcomes ?? restartOf?.welcomes ?? []
+  const ports = memoryControlPorts(mls, crypto, options.build ?? buildOperation, recoverySecret)
   const { peer, controlWalk } = createGroupPeerWithControlWalk<Protocols>({
     hub,
     crypto,
     mls,
     control,
-    build: options.build ?? buildOperation,
+    ...ports,
     deliverWelcome:
       options.deliverWelcome ??
       (async (row) => {
@@ -237,6 +247,7 @@ export function makeMLSPeer(
     ...(options.recovery != null ? { recovery: options.recovery } : {}),
   })
   return {
+    validation: ports.validation,
     controlWalk,
     peer,
     crypto,
@@ -337,9 +348,173 @@ export async function buildMemoryOperation(mls: MemoryGroupMLS, op: Operation): 
   }
 }
 
+export function memoryControlPorts(
+  mls: MemoryGroupMLS,
+  crypto: FakeCrypto,
+  build: (op: Operation) => Promise<HostBuilt>,
+  recoverySecret?: Uint8Array,
+) {
+  const control = mls.control()
+  const validation: ControlValidationPort = {
+    restoreValidation: async (built) => {
+      let journal: ReturnType<typeof decodeMemoryControlJournal>
+      try {
+        journal = decodeMemoryControlJournal(built.journal)
+      } catch {
+        return null
+      }
+      const identity = journal.source.identity
+      if (
+        identity === null ||
+        identity.epoch !== built.epoch ||
+        identity.incarnation !== built.incarnation ||
+        toB64U(identity.authenticator) !== toB64U(built.authenticatorBefore) ||
+        toB64U(sha256(built.payload)) !== built.payloadDigest
+      )
+        return null
+      const retainedSecret = recoverySecret ?? (await mls.exportRecoverySecret())
+      const retainedCrypto = crypto.restart()
+      retainedCrypto.setEpoch(identity.epoch)
+      const source = () => {
+        const handle = createMemoryGroupMLS({
+          groupID: identity.groupID,
+          recoverySecret: retainedSecret,
+          acceptsCommitter: mls.acceptsCommitter,
+        })
+        handle.restoreState(journal.sourceState)
+        return handle
+      }
+      const check = async (payload: Uint8Array) => {
+        const commit = decodeCommitFrame(decodeHandshakeFrame(payload).payload)
+        const parsed = decodeMemoryCommit(commit.commit)
+        const handle = source()
+        const result = await handle.processCommit(commit.commit, {
+          resolveLedgerEntries: createLedgerEntryResolver(
+            commit.sealedEntries,
+            retainedCrypto.openEntries,
+          ),
+        })
+        return { parsed, handle, result }
+      }
+      return {
+        source: journal.source,
+        readCommitHeader: (commit) => source().readCommitHeader(commit),
+        validateFrame: async (frame) => {
+          const commit = decodeCommitFrame(decodeHandshakeFrame(frame.payload).payload).commit
+          const parsed = decodeMemoryCommit(commit)
+          if (parsed === null) return { kind: 'invalid', reason: 'malformed' }
+          if (parsed.missingProposal) return { kind: 'unavailable', reason: 'missing-proposal' }
+          if (
+            parsed.invalidContent ||
+            (parsed.signerDID ?? parsed.committerDID) !== parsed.committerDID
+          )
+            return { kind: 'invalid', reason: 'authentication' }
+          try {
+            const checked = await check(frame.payload)
+            if (!checked.result.applied) return { kind: 'invalid', reason: 'policy' }
+            return {
+              kind: 'valid',
+              header: {
+                epoch: parsed.epoch,
+                committerDID: parsed.committerDID,
+                ...(parsed.external ? { external: true } : {}),
+              },
+              own: !parsed.external && parsed.committerDID === mls.credentialDID(),
+              advanced: checked.result.advanced,
+              removed: false,
+            }
+          } catch {
+            return { kind: 'unavailable', reason: 'resolver' }
+          }
+        },
+        verifyOwn: async (value) => {
+          if (value.payloadDigest !== built.payloadDigest) return false
+          const checked = await check(value.payload)
+          const candidate = decodeMemoryGroupIdentity(
+            journal.candidate,
+            journal.source.key,
+            retainedSecret,
+          )
+          return (
+            checked.parsed?.external !== true &&
+            checked.parsed?.committerDID === mls.credentialDID() &&
+            checked.result.applied &&
+            candidate?.epoch === identity.epoch + 1 &&
+            toB64U(candidate.authenticator) === toB64U(checked.handle.authenticator())
+          )
+        },
+      }
+    },
+  }
+  return {
+    validation,
+    readEvidence: mls.readEvidence,
+    prepareBuild: async (op: Operation, frame: FrameControlBuild) => {
+      await mls.persistInitialState()
+      const snapshot = await control.load()
+      if (op.stage !== 'intent' || snapshot.operations[0]?.id !== op.id)
+        return { kind: 'moved' as const, operation: op }
+      if (Date.now() >= op.deadline) return { kind: 'expired' as const, operation: op }
+      const source = await mls.readRecoverySource()
+      if (snapshot.controlHold !== null || snapshot.commitOnce?.epoch === source.epoch)
+        return { kind: 'occupied' as const, operation: op }
+      const sourceState = mls.serializeState()
+      const retainedCrypto = crypto.restart()
+      retainedCrypto.setEpoch(source.epoch)
+      try {
+        const host = await build(op)
+        const sameSource = async () => {
+          const current = await mls.readRecoverySource()
+          return (
+            current.key.groupID === source.key.groupID &&
+            current.key.incarnation === source.key.incarnation &&
+            current.epoch === source.epoch &&
+            toB64U(current.authenticator) === toB64U(source.authenticator)
+          )
+        }
+        if (
+          host.epoch !== source.epoch ||
+          host.incarnation !== source.key.incarnation ||
+          toB64U(host.authenticatorBefore) !== toB64U(source.authenticator) ||
+          !(await sameSource())
+        )
+          return { kind: 'moved' as const, operation: op }
+        const framed = await frame(host, retainedCrypto.sealEntries)
+        if (Date.now() >= op.deadline) return { kind: 'expired' as const, operation: op }
+        if (!(await sameSource())) return { kind: 'moved' as const, operation: op }
+        const slot: ControlSlot = {
+          ...host,
+          ...framed,
+          opID: op.id,
+          searchFrom: snapshot.cursor?.position ?? null,
+          payloadDigest: toB64U(sha256(framed.payload)),
+          journal: encodeMemoryControlJournal({ source, sourceState, candidate: host.journal }),
+        }
+        const result = await mls.saveBuilt(op, slot, source, globalThis.crypto.randomUUID())
+        return {
+          kind: result,
+          operation:
+            result === 'saved'
+              ? { ...op, stage: 'built' as const, built: controlBuildRef(slot) }
+              : op,
+        }
+      } catch (error) {
+        if (
+          error instanceof OperationRejectedError ||
+          (error instanceof Error && error.name === 'FrameTooLargeError')
+        )
+          return { kind: 'rejected' as const, operation: op, reason: error.message }
+        throw error
+      }
+    },
+  }
+}
+
 export function memoryOperationHost(mls: MemoryGroupMLS) {
   const welcomes: Array<WelcomeObligation> = []
-  return {
+  const crypto = createFakeCrypto({ epoch: mls.epoch() })
+  const host = {
+    ...memoryControlPorts(mls, crypto, (op): Promise<HostBuilt> => host.build(op)),
     welcomes,
     control: mls.control(),
     saveBuilt: mls.saveBuilt,
@@ -347,12 +522,9 @@ export function memoryOperationHost(mls: MemoryGroupMLS) {
     deliverWelcome: async (obligation: WelcomeObligation) => {
       welcomes.push(structuredClone(obligation))
     },
-    adopt: (
-      blob: Uint8Array,
-      expected: Parameters<OperationDeps['adopt']>[1],
-      write: Parameters<OperationDeps['adopt']>[2],
-    ) => mls.adoptOperation(blob, expected, write),
+    adopt: mls.adoptOperation,
   }
+  return host
 }
 export function intent(request: OperationRequest): Operation {
   return {
@@ -369,27 +541,43 @@ export async function seedBuiltOperation(
   request: OperationRequest,
   acceptedAs?: string,
 ) {
+  await member.mls.persistInitialState()
   const op = intent(request)
-  const built = await member.buildOperation(op)
-  const sealed = await member.crypto.sealEntries(encodeLedgerEntries(built.bodies))
-  const payload = encodeHandshakeFrame(
-    HANDSHAKE_KIND.commit,
-    encodeCommitFrame(built.commit, sealed.sealed),
-  )
-  const saved = {
-    ...built,
-    payload,
-    payloadDigest: toB64U(sha256(payload)),
-    publishID: crypto.randomUUID(),
-    expectedHead: null,
-    searchFrom: null,
+  await member.control.apply({ putOperations: [op] }, crypto.randomUUID())
+  const ports = memoryControlPorts(member.mls, member.crypto, member.buildOperation)
+  const result = await ports.prepareBuild(op, async (host, seal) => {
+    const sealed = await seal(encodeLedgerEntries(host.bodies))
+    const payload = encodeHandshakeFrame(
+      HANDSHAKE_KIND.commit,
+      encodeCommitFrame(host.commit, sealed.sealed),
+    )
+    return { payload, publishID: crypto.randomUUID(), expectedHead: member.controlWalk.head() }
+  })
+  if (result.kind !== 'saved') throw new Error(`Build was ${result.kind}`)
+  const slot = (await member.control.load()).commitOnce
+  if (slot === null) throw new Error('missing slot')
+  const proof = {
+    source: (await member.mls.readEvidence()).source,
+    from: slot.searchFrom,
+    position: asLogPosition(acceptedAs ?? '000000000001'),
+    payloadDigest: slot.payloadDigest,
   }
   const row: Operation =
-    acceptedAs == null
-      ? { ...op, stage: 'built', built: saved }
-      : { ...op, stage: 'accepted', built: saved, acceptedAs: asLogPosition(acceptedAs) }
-  await member.control.apply({ putOperations: [row] }, crypto.randomUUID())
-  return row
+    acceptedAs === undefined
+      ? result.operation
+      : {
+          ...result.operation,
+          stage: 'accepted',
+          built: controlBuildRef(slot),
+          acceptedAs: proof.position,
+          acceptance: proof,
+        }
+  if (acceptedAs !== undefined)
+    await member.control.apply(
+      { putOperations: [row], commitOnceAcceptance: proof },
+      crypto.randomUUID(),
+    )
+  return Object.defineProperty(row, 'slot', { value: slot }) as Operation & { slot: ControlSlot }
 }
 
 export async function buildRejoinRecord(member: TestPeer): Promise<RejoinRecord> {

@@ -45,7 +45,7 @@ describe('peer host drain', { concurrent: false }, () => {
       const apply = control.apply
       control.apply = async (changes, id) => {
         if (disposed) hostCallsAfterDispose++
-        if (path === 'apply' && changes.putOperations?.[0]?.stage === 'built') {
+        if (path === 'apply' && changes.putOperations?.[0]?.stage === 'intent') {
           entered = true
           await pause.promise
         }

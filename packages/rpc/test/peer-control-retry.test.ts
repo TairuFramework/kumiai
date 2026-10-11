@@ -4,7 +4,7 @@ import { digestAppliedCommit } from '../src/classify.js'
 import type { ControlSnapshot } from '../src/control/types.js'
 import { PeerDisposedError } from '../src/errors.js'
 import { FrameTooLargeError } from '../src/frame-size.js'
-import { APP_TOPIC_LABEL, commitTopic } from '../src/topic.js'
+import { APP_TOPIC_LABEL, commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
@@ -110,7 +110,7 @@ test.each(['ambiguous', 'uncommitted'] as const)(
   },
 )
 
-test('the FIFO writer leaves successors as intents while an accepted head has a built rejoin', async () => {
+test('the FIFO writer leaves successors as intents while guarded adoption has moved', async () => {
   const hub = new FakeHub()
   const database = createMemoryHostDatabase()
   const control = database.control('bob', { groupID: 'memory-group', incarnation: 1 })
@@ -140,37 +140,39 @@ test('the FIFO writer leaves successors as intents while an accepted head has a 
   const first = buildLedgerCommit(seed, ['first'])
   const second = buildLedgerCommit(seed, ['second'])
   await Promise.all([seed.peer.enqueue(first), seed.peer.enqueue(second)])
-  await vi.waitFor(async () => expect((await control.load()).rejoin?.stage).toBe('built'), {
-    timeout: 5000,
-  })
-  await seed.peer.dispose()
-  await seed.peer.drained()
-  expect(snapshots.some((snapshot) => snapshot.operations[0]?.stage === 'built')).toBe(true)
-  expect(
-    snapshots.every((snapshot) =>
-      snapshot.operations.slice(1).every((op) => op.stage === 'intent'),
-    ),
-  ).toBe(true)
+  await vi.waitFor(async () =>
+    expect((await control.load()).controlHold?.reason).toBe('acceptance-unknown'),
+  )
   expect(await control.load()).toMatchObject({
     operations: [
       { id: first.id, stage: 'accepted' },
       { id: second.id, stage: 'intent' },
     ],
-    rejoin: { stage: 'built' },
+    rejoin: null,
+    controlHold: { reason: 'acceptance-unknown' },
   })
+  expect(
+    snapshots.every((snapshot) =>
+      snapshot.operations.slice(1).every((op) => op.stage === 'intent'),
+    ),
+  ).toBe(true)
+  const held = await control.load()
+  expect(held.controlHold?.position).toBe(held.commitOnceAcceptance?.position)
+  expect(
+    hub.published.filter(
+      (message) => message.topicID === rendezvousTopic(secret) && message.senderDID === 'bob',
+    ),
+  ).toEqual([])
+  await seed.peer.dispose()
+  await seed.peer.drained()
   const again = makeMLSPeer(hub, 'bob', secret, { ...options, restartOf: seed })
   peers.push(again)
-  await vi.waitFor(
-    async () => {
-      expect((await again.control.load()).operations).toEqual([])
-      expect(await again.peer.outcomes()).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ opID: first.id, kind: 'unknown' }),
-          expect.objectContaining({ opID: second.id, kind: 'landed' }),
-        ]),
-      )
-    },
-    { timeout: 5000 },
+  await vi.waitFor(async () => expect((await again.control.load()).operations).toEqual([]))
+  expect(await again.peer.outcomes()).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ opID: first.id, kind: 'landed' }),
+      expect.objectContaining({ opID: second.id, kind: 'landed' }),
+    ]),
   )
 })
 
@@ -178,7 +180,7 @@ test.each(['build', 'frame'] as const)(
   'an oversized %s rejects durably before restart and releases the FIFO and revoke hold',
   async (phase) => {
     const hub = new FakeHub()
-    const seed = makeMLSPeer(hub, 'bob', secret, { operationTimeoutMs: 0 })
+    const seed = makeMLSPeer(hub, 'bob', secret, { operationTimeoutMs: 30_000 })
     peers.push(seed)
     await seed.peer.replay()
     vi.useFakeTimers()

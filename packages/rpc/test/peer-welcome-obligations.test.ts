@@ -9,16 +9,19 @@ const obligation: WelcomeObligation = {
   opID: crypto.randomUUID(),
   welcome: new Uint8Array([1, 2, 3]),
   recipients: ['bob'],
+  committed: true,
 }
 
 describe('durable Welcome obligations', () => {
-  test('delivers the stored artifact before adoption and deletes only after acceptance', async () => {
+  test('delivers the committed artifact and deletes only after transport acceptance', async () => {
     const hub = new FakeHub()
     const seen: Array<WelcomeObligation> = []
     const member = makeMLSPeer(hub, 'alice', secret, {
       deliverWelcome: async (row) => {
-        expect(member.mls.epoch()).toBe(1)
-        expect((await member.control.load()).operations[0]?.stage).toBe('accepted')
+        expect(member.mls.epoch()).toBe(2)
+        expect((await member.control.load()).operations).toEqual([])
+        expect((await member.control.load()).applied[0]?.opID).toBe(row.opID)
+        expect(row.committed).toBe(true)
         expect((await member.control.load()).welcomes).toEqual([row])
         seen.push(structuredClone(row))
       },

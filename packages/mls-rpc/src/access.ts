@@ -29,7 +29,7 @@ export type HandleAccess = {
   replace(
     next: GroupHandle,
     adoption?: AdoptionWriteFactory,
-    prepare?: (current: GroupHandle) => Promise<boolean>,
+    prepare?: (current: GroupHandle, source: AdoptionExpected) => Promise<boolean>,
   ): Promise<void>
   open<TValue>(
     fn: (handle: GroupHandle, persistOpened: PersistOpened) => Promise<TValue>,
@@ -124,7 +124,8 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
       }),
     replace: (next, adoption, prepare) =>
       serialise(async () => {
-        if (prepare != null && !(await prepare(params.handle()))) return
+        const current = await readControl()
+        if (prepare != null && !(await prepare(current.handle, current.source))) return
         if (adoption != null && params.persist == null) {
           throw new ControlWriteNotCommittedError('adoption requires a persist callback')
         }

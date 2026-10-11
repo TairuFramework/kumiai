@@ -18,7 +18,7 @@ async function waitFor(check: () => Promise<boolean>): Promise<void> {
 }
 
 describe('durable peer operations', () => {
-  test('an accepted operation on a departed branch lets recovery run and settles unknown', async () => {
+  test('an accepted operation on a departed branch holds acceptance and blocks automatic recovery', async () => {
     const hub = new FakeHub()
     const database = createMemoryHostDatabase()
     const seed = makeMLSPeer(hub, 'bob', secret, { database, members: ['alice', 'bob'] })
@@ -37,6 +37,7 @@ describe('durable peer operations', () => {
     await seed.peer.dispose()
     await seed.peer.drained()
     seed.mls.adopt(seed.mls.buildCommit(['other-local-branch']))
+    await database.saveState('bob', seed.mls.serializeState())
     const options = {
       members: ['alice', 'bob'],
       recovery: { timeoutMs: 200, deadlineMs: 1000, getDelayMs: () => 0 },
@@ -51,13 +52,24 @@ describe('durable peer operations', () => {
     })
     try {
       await bob.peer.replay()
-      expect((await bob.peer.recover()).advanced).toBe(true)
-      expect((await bob.control.load()).operations).toEqual([])
-      expect(await bob.peer.outcomes()).toEqual([
-        expect.objectContaining({ opID: request.id, kind: 'unknown' }),
-        expect.objectContaining({ opID: null, kind: 'reenact', tokens: ['other-local-branch'] }),
-      ])
-      expect(bob.mls.epoch()).toBe(4)
+      const held = await bob.control.load()
+      expect(held.controlHold).toMatchObject({ reason: 'acceptance-unknown' })
+      expect(held.operations).toMatchObject([{ id: request.id, stage: 'accepted' }])
+      expect(held.commitOnce?.opID).toBe(request.id)
+      expect(held.outcomes).toEqual([])
+      expect(bob.mls.epoch()).toBe(2)
+      expect(
+        hub.published.filter(
+          (frame) => frame.topicID === rendezvousTopic(secret) && frame.senderDID === 'bob',
+        ),
+      ).toEqual([])
+      await bob.peer.dispose()
+      await bob.peer.drained()
+      const again = makeMLSPeer(hub, 'bob', secret, { restartOf: bob })
+      await again.peer.replay()
+      expect((await again.control.load()).controlHold).toEqual(held.controlHold)
+      expect((await again.control.load()).commitOnce).toEqual(held.commitOnce)
+      await again.peer.dispose()
     } finally {
       await Promise.all([bob.peer.dispose(), alice.peer.dispose()])
       await Promise.all([bob.peer.drained(), alice.peer.drained()])
@@ -67,6 +79,7 @@ describe('durable peer operations', () => {
     'restart after %s was written resumes the operation once',
     async (stage) => {
       const hub = new FakeHub()
+      const published = vi.spyOn(hub, 'publish')
       const database = createMemoryHostDatabase()
       const seed = makeMLSPeer(hub, 'alice', secret, { database })
       await seed.peer.resync()
@@ -83,11 +96,22 @@ describe('durable peer operations', () => {
       await waitFor(async () => (await seed.control.load()).operations[0]?.stage === stage)
       await seed.peer.dispose()
       await seed.peer.drained()
-      const persisted = (await seed.control.load()).operations[0]
+      const persistedSnapshot = await seed.control.load()
+      const persisted = persistedSnapshot.operations[0]
       const restarted = makeMLSPeer(hub, 'alice', secret, { restartOf: seed })
       await waitFor(async () => (await restarted.peer.outcomes()).length === 1)
       expect(await restarted.peer.outcomes()).toEqual([
-        expect.objectContaining({ id: request.id, kind: 'landed' }),
+        expect.objectContaining({
+          opID: request.id,
+          kind: 'landed',
+          id: JSON.stringify([
+            'control:landed',
+            request.id,
+            published.mock.calls.find(([frame]) => frame.topicID === commitTopic(secret))?.[0]
+              .publishID,
+            hub.head(commitTopic(secret)),
+          ]),
+        }),
       ])
       expect(restarted.mls.epoch()).toBe(2)
       expect((await restarted.control.load()).operations).toEqual([])
@@ -95,9 +119,11 @@ describe('durable peer operations', () => {
       const frames = hub.published.filter((row) => row.topicID === commitTopic(secret))
       expect(frames).toHaveLength(1)
       if (persisted?.stage !== 'intent')
-        expect(frames[0]?.payload).toEqual(persisted?.built.payload)
+        expect(frames[0]?.payload).toEqual(persistedSnapshot.commitOnce?.payload)
       expect(hub.published.filter((row) => row.topicID === rendezvousTopic(secret))).toEqual([])
-      await restarted.peer.ack(request.id)
+      const landed = (await restarted.peer.outcomes())[0]
+      if (landed === undefined) throw new Error('Missing landed outcome')
+      await restarted.peer.ack(landed.id)
       expect(await restarted.peer.outcomes()).toEqual([])
       await restarted.peer.dispose()
     },
@@ -155,13 +181,14 @@ describe('durable peer operations', () => {
     await seed.peer.dispose()
     await seed.peer.drained()
     expect((await seed.anchorStore.load())?.pending).toMatchObject({ landed: true })
-    const mutation = await seed.control.lastMutation()
+    const settled = await seed.control.load()
     const restarted = makeMLSPeer(hub, 'alice', secret, { restartOf: seed })
     await restarted.peer.resync()
     expect(restarted.mls.epoch()).toBe(2)
     expect((await restarted.control.load()).applied).toHaveLength(1)
     expect((await restarted.control.load()).operations).toEqual([])
-    expect(await restarted.control.lastMutation()).toBe(mutation)
+    expect((await restarted.control.load()).applied).toEqual(settled.applied)
+    expect((await restarted.control.load()).outcomes).toEqual(settled.outcomes)
     await restarted.peer.dispose()
   })
 
@@ -170,6 +197,7 @@ describe('durable peer operations', () => {
     const database = createMemoryHostDatabase()
     const seed = makeMLSPeer(hub, 'alice', secret, { database })
     await seed.peer.resync()
+    const initialState = await seed.database.loadState('alice')
     database.failNext('mid-save')
     const request = buildInviteCommit(seed, 'dave')
     await seed.peer.enqueue(request)
@@ -180,7 +208,7 @@ describe('durable peer operations', () => {
     expect(seed.mls.epoch()).toBe(1)
     expect((await seed.control.load()).applied).toEqual([])
     expect((await seed.control.load()).outcomes).toEqual([])
-    expect(await seed.database.loadState('alice')).toBeNull()
+    expect(await seed.database.loadState('alice')).toEqual(initialState)
     expect((await seed.anchorStore.load())?.pending?.landed).toBeUndefined()
     const restarted = makeMLSPeer(hub, 'alice', secret, { restartOf: seed })
     await waitFor(async () => (await restarted.peer.outcomes()).length === 1)
@@ -192,7 +220,9 @@ describe('durable peer operations', () => {
   test('restart preserves the enqueue deadline and discovers an old acceptance', async () => {
     const hub = new FakeHub()
     const database = createMemoryHostDatabase()
-    const seed = makeMLSPeer(hub, 'alice', secret, { database, operationTimeoutMs: 0 })
+    let now = 1_000
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
+    const seed = makeMLSPeer(hub, 'alice', secret, { database, operationTimeoutMs: 1_000 })
     await seed.peer.resync()
     database.seam('after-apply', () => {
       database.seam('after-apply', () => {
@@ -204,20 +234,29 @@ describe('durable peer operations', () => {
     await waitFor(async () => (await seed.control.load()).operations[0]?.stage === 'built')
     await seed.peer.dispose()
     await seed.peer.drained()
-    const op = (await seed.control.load()).operations[0]
+    const savedControl = await seed.control.load()
+    const op = savedControl.operations[0]
+    const slot = savedControl.commitOnce
+    if (slot === null) throw new Error('Missing slot')
     if (op?.stage !== 'built') throw new Error('Missing built operation')
     await hub.publish({
       senderDID: 'alice',
       topicID: commitTopic(secret),
       retain: 'log',
-      payload: op.built.payload,
+      payload: slot.payload,
       publishID: op.built.publishID,
-      expectedHead: op.built.expectedHead,
+      expectedHead: slot.expectedHead,
     })
-    const restarted = makeMLSPeer(hub, 'alice', secret, { restartOf: seed, operationTimeoutMs: 0 })
+    expect(op.deadline).toBe(2_000)
+    now = 2_001
+    const restarted = makeMLSPeer(hub, 'alice', secret, {
+      restartOf: seed,
+      operationTimeoutMs: 30_000,
+    })
     await waitFor(async () => (await restarted.peer.outcomes()).length === 1)
     expect(await restarted.peer.outcomes()).toEqual([expect.objectContaining({ kind: 'landed' })])
     await restarted.peer.dispose()
+    clock.mockRestore()
   })
 
   test('restart loses an absent operation past its original positive deadline', async () => {
@@ -309,7 +348,8 @@ describe('durable peer operations', () => {
       onOutcome: async (outcome) => {
         expect(await member.peer.outcomes()).toContainEqual(outcome)
         await member.peer.ack(outcome.id)
-        seen.push(outcome.id)
+        if (outcome.opID == null) throw new Error('Missing operation owner')
+        seen.push(outcome.opID)
         if (seen.length === 1) await member.peer.enqueue(followup)
       },
     })

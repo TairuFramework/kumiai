@@ -5,6 +5,7 @@ import {
   type ControlStore,
   ControlStoreInvariantError,
   ControlWriteNotCommittedError,
+  controlBuildRef,
   type HostBuilt,
   type Operation,
   OperationRejectedError,
@@ -134,7 +135,7 @@ export function createPersistenceBuildSaver<TTx extends GroupTransaction>(params
           })
           try {
             await rows.control.apply(
-              { putOperations: [{ ...intent, stage: 'built', built }] },
+              { putOperations: [{ ...intent, stage: 'built', built: controlBuildRef(built) }] },
               mutationID,
             )
             await rows.control.apply({ commitOnce: built, commitOnceAcceptance: null }, mutationID)
@@ -207,6 +208,11 @@ export function createControlBuildPort(params: {
         )
           return { kind: 'moved', operation: saved ?? op }
         if (params.now() >= saved.deadline) return { kind: 'expired', operation: saved }
+        if (
+          snapshot.controlHold !== null ||
+          scope.handle.state.groupActiveState.kind === 'removedFromGroup'
+        )
+          return { kind: 'occupied', operation: saved }
         const original = scope.source
         const identity = original.identity
         if (identity === null) return { kind: 'moved', operation: saved }
@@ -295,7 +301,10 @@ export function createControlBuildPort(params: {
             continue
           }
           if (result === 'saved')
-            return { kind: 'saved', operation: { ...saved, stage: 'built', built } }
+            return {
+              kind: 'saved',
+              operation: { ...saved, stage: 'built', built: controlBuildRef(built) },
+            }
           if (result === 'occupied') return { kind: 'occupied', operation: saved }
           const fresh = await scope.refresh()
           const current = await params.control.load()

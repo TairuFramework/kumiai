@@ -7,6 +7,7 @@ export async function deliverObligations(
   deps: {
     signal?: AbortSignal
     control: ControlStore
+    canDeliver(obligation: WelcomeObligation): Promise<boolean>
     deliverWelcome(obligation: WelcomeObligation): Promise<void>
   },
   snapshot: ControlSnapshot,
@@ -14,6 +15,7 @@ export async function deliverObligations(
   const failures: Array<unknown> = []
   for (const obligation of snapshot.welcomes) {
     try {
+      if (!(await deps.canDeliver(obligation))) continue
       await deps.deliverWelcome(obligation)
       await applyResolved(
         deps.control,

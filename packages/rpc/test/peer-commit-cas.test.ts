@@ -1,7 +1,8 @@
 import { HeadMismatchError } from '@kumiai/hub-protocol'
 import { fromUTF } from '@sozai/codec'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
+import { asLogPosition } from '../src/cursor.js'
 import { OperationOutcomeError } from '../src/errors.js'
 import { createGroupPeer } from '../src/peer.js'
 import { commitTopic } from '../src/topic.js'
@@ -36,7 +37,7 @@ describe('operation compare and set', () => {
     await member.peer.dispose()
   })
 
-  test('a losing build is discarded and rebuilt after pulling the winner', async () => {
+  test('complete absence permits a fresh build after following the winner', async () => {
     const hub = new FakeHub()
     const publish = hub.publish.bind(hub)
     let race = true
@@ -62,6 +63,7 @@ describe('operation compare and set', () => {
   })
 
   test('reconstructed head mismatch errors use the same search and retry rule', async () => {
+    vi.useFakeTimers()
     const hub = new FakeHub()
     const publish = hub.publish.bind(hub)
     let attempts = 0
@@ -73,12 +75,21 @@ describe('operation compare and set', () => {
       }
       return publish(params)
     }
-    const member = makeMLSPeer(hub, 'alice', secret)
+    const member = makeMLSPeer(hub, 'alice', secret, { operationTimeoutMs: 60_000 })
     const framedAt: Array<number> = []
-    await member.peer.commit(buildLedgerCommit(member, [], { framedAt }))
-    expect(framedAt).toHaveLength(6)
-    expect((await member.control.load()).operations).toEqual([])
-    await member.peer.dispose()
+    try {
+      const committing = member.peer.commit(buildLedgerCommit(member, [], { framedAt }))
+      await vi.waitFor(() => expect(attempts).toBeGreaterThan(0))
+      await vi.advanceTimersByTimeAsync(31_000)
+      await committing
+      expect(attempts).toBe(6)
+      expect(framedAt).toHaveLength(1)
+      expect((await member.control.load()).operations).toEqual([])
+    } finally {
+      await member.peer.dispose()
+      await member.peer.drained()
+      vi.useRealTimers()
+    }
   })
 
   test('a deadline loss is a durable outcome, carried by the commit error', async () => {
@@ -115,7 +126,7 @@ describe('operation compare and set', () => {
 
   test('a mailbox frame does not change the commit head', async () => {
     const hub = new FakeHub()
-    const member = makeMLSPeer(hub, 'alice', secret, { operationTimeoutMs: 0 })
+    const member = makeMLSPeer(hub, 'alice', secret, { operationTimeoutMs: 30_000 })
     await member.peer.resync()
     await hub.publish({
       topicID: commitTopic(secret),
@@ -130,11 +141,25 @@ describe('operation compare and set', () => {
 
   test('a swept log still uses its retained head as the publish condition', async () => {
     const hub = new FakeHub()
-    await publishCommit({ hub, senderDID: 'zoe', recoverySecret: secret, epoch: 1 })
+    const installed = await publishCommit({
+      hub,
+      senderDID: 'zoe',
+      recoverySecret: secret,
+      epoch: 1,
+    })
     hub.trim(commitTopic(secret), '999999999999')
-    const member = makeMLSPeer(hub, 'alice', secret, { epoch: 2, operationTimeoutMs: 0 })
+    const member = makeMLSPeer(hub, 'alice', secret, { epoch: 2, operationTimeoutMs: 30_000 })
+    await member.peer.replay()
+    await member.control.apply(
+      { cursor: { position: asLogPosition(installed.sequenceID), epoch: 2 } },
+      crypto.randomUUID(),
+    )
+    const publish = vi.spyOn(hub, 'publish')
     await member.peer.commit(buildLedgerCommit(member, []))
     expect(member.mls.epoch()).toBe(3)
+    expect(
+      publish.mock.calls.find(([frame]) => frame.topicID === commitTopic(secret))?.[0].expectedHead,
+    ).toBe(installed.sequenceID)
     await member.peer.dispose()
   })
 

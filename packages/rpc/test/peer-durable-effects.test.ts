@@ -49,7 +49,7 @@ test.each([false, true])(
       recoverySecret: secret,
       epoch: 1,
     })
-    await vi.waitFor(async () => expect(await bob.database.loadState('bob')).not.toBeNull())
+    await vi.waitFor(async () => expect((await bob.control.load()).applied).toHaveLength(1))
     await bob.peer.dispose()
     await bob.peer.drained()
     const snapshot = await bob.control.load()
@@ -119,7 +119,7 @@ test('an adopted external response survives restart and answers confirmation', a
     epoch: 1,
     external: true,
   })
-  await vi.waitFor(async () => expect(await bob.database.loadState('bob')).not.toBeNull())
+  await vi.waitFor(async () => expect((await bob.control.load()).applied).toHaveLength(1))
   await bob.peer.dispose()
   await bob.peer.drained()
   const digest = publishedCommitDigest(hub, result.sequenceID)
@@ -231,7 +231,7 @@ test('self-removal committed before its effect is terminal on restart', async ()
     epoch: 1,
     removes: ['bob'],
   })
-  await vi.waitFor(async () => expect(await bob.database.loadState('bob')).not.toBeNull())
+  await vi.waitFor(async () => expect((await bob.control.load()).applied).toHaveLength(1))
   await bob.peer.dispose()
   await bob.peer.drained()
   expect((await bob.control.load()).applied).toEqual([
@@ -323,7 +323,7 @@ test.each(['capture', 'keep', 'ambiguous'] as const)(
 
 test('host deletion is refused until abandon and outcome acknowledgement', async () => {
   const hub = new FakeHub()
-  const bob = member(hub)
+  const bob = member(hub, { deliverWelcome: async () => {} })
   await bob.peer.replay()
   const request = buildLedgerCommit(bob, [])
   const rejoin = await buildRejoinRecord(bob)
@@ -339,13 +339,19 @@ test('host deletion is refused until abandon and outcome acknowledgement', async
           stage: 'intent',
         },
       ],
-      putWelcomes: [{ opID: request.id, welcome: new Uint8Array([1]), recipients: ['carol'] }],
+      putWelcomes: [
+        { opID: request.id, welcome: new Uint8Array([1]), recipients: ['carol'], committed: true },
+      ],
     },
     'unsettled',
   )
   await expect(bob.database.delete('bob')).rejects.toBeInstanceOf(GroupControlUnsettledError)
   await bob.peer.abandon()
-  expect(await bob.control.load()).toMatchObject({ operations: [], welcomes: [], rejoin: null })
+  expect(await bob.control.load()).toMatchObject({
+    operations: [],
+    welcomes: [{ opID: request.id, committed: true }],
+    rejoin: null,
+  })
   const outcomes = await bob.peer.outcomes()
   expect(outcomes).toEqual([
     expect.objectContaining({ opID: request.id, kind: 'unknown' }),
@@ -353,6 +359,11 @@ test('host deletion is refused until abandon and outcome acknowledgement', async
   ])
   await expect(bob.database.delete('bob')).rejects.toBeInstanceOf(GroupControlUnsettledError)
   for (const outcome of outcomes) await bob.peer.ack(outcome.id)
+  await bob.peer.dispose()
+  await bob.peer.drained()
+  const again = member(hub, { restartOf: bob, deliverWelcome: async () => {} })
+  await again.peer.replay()
+  await expect.poll(async () => (await bob.control.load()).welcomes).toEqual([])
   await bob.database.delete('bob')
   expect(await bob.database.loadState('bob')).toBeNull()
 })
@@ -379,28 +390,16 @@ test('incoming adoption co-settles a matching accepted operation and reports it 
   if (op.stage !== 'accepted') throw new Error('Missing accepted operation')
   await seed.peer.dispose()
   await seed.peer.drained()
-  const result = await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
-  const message = hub.published.find((row) => row.sequenceID === result.sequenceID)
-  if (message == null) throw new Error('Missing publication')
-  await seed.control.apply(
-    {
-      putOperations: [
-        {
-          ...op,
-          acceptedAs: asLogPosition(result.sequenceID),
-          built: {
-            ...op.built,
-            payload: message.payload,
-            payloadDigest: toB64U(sha256(message.payload)),
-            digest: publishedCommitDigest(hub, result.sequenceID),
-          },
-        },
-      ],
-    },
-    'matching-acceptance',
-  )
+  const result = await hub.publish({
+    senderDID: 'alice',
+    topicID: commitTopic(secret),
+    payload: op.slot.payload,
+    publishID: op.slot.publishID,
+    expectedHead: op.slot.expectedHead,
+    retain: 'log',
+  })
   const notice = vi.fn()
-  const again = member(hub, { restartOf: seed, adopt: async () => 'moved', onOutcome: notice })
+  const again = member(hub, { restartOf: seed, onOutcome: notice })
   await again.peer.replay()
   expect(await again.control.load()).toMatchObject({
     operations: [],
@@ -471,7 +470,9 @@ test.each([false, true])(
     await bob.control.apply(
       {
         putRejoin: rejoin,
-        putWelcomes: [{ opID: rejoin.id, welcome: rejoin.payload, recipients: ['carol'] }],
+        putWelcomes: [
+          { opID: rejoin.id, welcome: rejoin.payload, recipients: ['carol'], committed: true },
+        ],
         putApplied: [
           {
             epoch: 1,
@@ -485,6 +486,8 @@ test.each([false, true])(
       },
       'terminal-rejoin',
     )
+    bob.mls.adopt(bob.mls.buildCommit([], { removes: ['bob'] }))
+    await bob.database.saveState('bob', bob.mls.serializeState())
     const settledBeforeDelivery = vi.fn()
     const subscribe = vi.spyOn(hub, 'subscribe')
     const again = member(hub, {
@@ -516,34 +519,39 @@ test.each([false, true])(
   },
 )
 
-test('a moved accepted operation matches incoming adoption by payload digest', async () => {
+test('a moved accepted own slot rechecks proof and lands on restart', async () => {
   const hub = new FakeHub()
   const bob = member(hub, { adopt: async () => 'moved' })
   await bob.peer.replay()
-  const result = await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
-  await vi.waitFor(() => expect(bob.mls.epoch()).toBe(2))
   const request = buildLedgerCommit(bob, [])
-  const op = await seedBuiltOperation(bob, request, result.sequenceID)
-  if (op.stage !== 'accepted') throw new Error('Missing acceptance')
-  const row = (await bob.control.load()).applied[0]
-  if (row == null) throw new Error('Missing incoming adoption')
-  await bob.control.apply(
-    {
-      putOperations: [
-        {
-          ...op,
-          built: { ...op.built, epoch: 1, digest: row.digest, payloadDigest: row.payloadDigest },
-        },
-      ],
-    },
-    'moved',
+  const op = await seedBuiltOperation(bob, request)
+  const result = await hub.publish({
+    senderDID: 'alice',
+    topicID: commitTopic(secret),
+    payload: op.slot.payload,
+    publishID: op.slot.publishID,
+    expectedHead: op.slot.expectedHead,
+    retain: 'log',
+  })
+  await vi.waitFor(async () =>
+    expect((await bob.control.load()).operations[0]?.stage).toBe('accepted'),
   )
-  await bob.peer.replay()
-  expect(await bob.peer.outcomes()).toEqual([
+  await bob.peer.dispose()
+  await bob.peer.drained()
+  const again = member(hub, { restartOf: bob })
+  await again.peer.replay()
+  expect(await again.peer.outcomes()).toEqual([
     expect.objectContaining({ opID: request.id, kind: 'landed' }),
   ])
-  expect((await bob.control.load()).applied).toEqual([row])
-  expect((await bob.control.load()).cursor?.position).toBe(asLogPosition(result.sequenceID))
+  expect((await again.control.load()).applied).toEqual([
+    expect.objectContaining({
+      epoch: 1,
+      payloadDigest: op.slot.payloadDigest,
+      sequenceID: result.sequenceID,
+      opID: request.id,
+    }),
+  ])
+  expect((await again.control.load()).cursor?.position).toBe(asLogPosition(result.sequenceID))
 })
 
 test('a moved acceptance with rewrapped payload stays accepted and strands the peer', async () => {
@@ -558,18 +566,43 @@ test('a moved acceptance with rewrapped payload stays accepted and strands the p
   const row = snapshot.applied[0]
   if (row == null) throw new Error('Missing incoming adoption')
   expect(op.built.payloadDigest).not.toBe(row.payloadDigest)
-  const accepted = { ...op, built: { ...op.built, epoch: 1, digest: row.digest } }
+  const accepted = { ...op, built: { ...op.built, epoch: 1 } }
   await bob.control.apply({ putOperations: [accepted] }, 'rewrapped-acceptance')
   await bob.peer.replay()
   expect(await bob.control.load()).toMatchObject({
     operations: [accepted],
     outcomes: [],
     applied: snapshot.applied,
-    cursor: {
-      ...snapshot.cursor,
-      stranded: true,
-      fork: { conflictEpoch: 1, sharedPosition: null, frameDigest: row.digest },
+    controlHold: {
+      reason: 'fork-evidence',
+      position: row.sequenceID,
+      evidence: {
+        kind: 'digest-divergence',
+        epoch: 1,
+        position: row.sequenceID,
+        localDigest: row.payloadDigest,
+        remoteDigest: accepted.built.payloadDigest,
+      },
     },
+    strand: { reason: 'lost-state' },
+    cursor: { ...snapshot.cursor, stranded: true },
   })
   await bob.peer.enqueue(buildLedgerCommit(bob, []))
+  const held = await bob.control.load()
+  const recoveryRequests = () =>
+    hub.published.filter(
+      (message) => message.topicID === rendezvousTopic(secret) && message.senderDID === 'bob',
+    )
+  expect(recoveryRequests()).toEqual([])
+  await bob.peer.dispose()
+  await bob.peer.drained()
+  hub.trim(commitTopic(secret), '999999999999')
+  const again = member(hub, { restartOf: bob })
+  await again.peer.replay()
+  const restarted = await again.control.load()
+  expect(restarted.controlHold).toEqual(held.controlHold)
+  expect(restarted.strand).toEqual(held.strand)
+  expect(restarted.cursor).toEqual(held.cursor)
+  expect(restarted.commitOnce).toEqual(held.commitOnce)
+  expect(recoveryRequests()).toEqual([])
 })

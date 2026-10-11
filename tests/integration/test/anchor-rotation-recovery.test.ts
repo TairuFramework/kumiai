@@ -1,22 +1,14 @@
 import { randomIdentity } from '@kokuin/token'
-import {
-  commitInvite,
-  commitLedgerEntries,
-  decodeClientState,
-  restoreGroup,
-  signLedgerEntry,
-} from '@kumiai/mls'
+import { commitInvite, decodeClientState, restoreGroup, signLedgerEntry } from '@kumiai/mls'
 import { createLedgerEntrySlot } from '@kumiai/mls-rpc'
 import {
   APP_TOPIC_LABEL,
   commitTopic,
-  decodeHandshakeFrame,
   digestAppliedCommit,
   encodeCommitFrame,
   encodeHandshakeFrame,
   encodeLedgerEntries,
   HANDSHAKE_KIND,
-  OperationRejectedError,
   protocolTopic,
   type RecoveryEvent,
 } from '@kumiai/rpc'
@@ -30,7 +22,6 @@ import {
   createFoundingGroup,
   createMemoryAnchorStore,
   customOperation,
-  encodeJournal,
   joinFromWelcome,
   type Member,
   makeMember,
@@ -197,9 +188,9 @@ test.each([false, true])(
   },
 )
 
-test('fresh startup with a lost anchor secret settles the saved build before confirmed recovery', async () => {
+test('fresh startup with a lost anchor secret holds unexplained acceptance before automatic recovery', async () => {
   const state = await setup({ deadlineMs: 10_000, adminBob: true })
-  const { alice, bob, carolID, received, events, hub } = state
+  const { alice, bob, carolID, received, events } = state
   const original = bob.anchorStore.stored()
   if (original == null) throw new Error('Missing anchor')
   const rosterBefore = bob
@@ -213,14 +204,25 @@ test('fresh startup with a lost anchor secret settles the saved build before con
     subject: bob.identity.id,
     value: 'deferred',
   })
-  const abandoned = await commitLedgerEntries(bob.handle(), [deferredBody])
+  await bob.peer.dispose()
+  await bob.peer.drained()
   const deferred = operationRequest('ledger', { tokens: [deferredBody] })
-  const sealed = await bob.crypto.sealEntries(encodeLedgerEntries([deferredBody]))
-  const deferredPayload = encodeHandshakeFrame(
-    HANDSHAKE_KIND.commit,
-    encodeCommitFrame(abandoned.commitMessage, sealed.sealed),
-  )
-  const authenticatorBefore = bob.handle().state.keySchedule.epochAuthenticator.slice()
+  const intent = operationIntent(deferred)
+  await bob.control.apply({ putOperations: [intent] }, crypto.randomUUID())
+  const prepared = await bob.prepareBuild(intent, async (built, seal) => {
+    const sealed = await seal(encodeLedgerEntries(built.bodies))
+    return {
+      payload: encodeHandshakeFrame(
+        HANDSHAKE_KIND.commit,
+        encodeCommitFrame(built.commit, sealed.sealed),
+      ),
+      publishID: crypto.randomUUID(),
+      expectedHead: (await bob.control.load()).cursor?.position ?? null,
+    }
+  })
+  expect(prepared.kind).toBe('saved')
+  const retained = (await bob.control.load()).commitOnce
+  if (retained === null) throw new Error('Missing guarded slot')
   let removedCommit: Uint8Array = new Uint8Array()
   const build = buildRemoveCommit(alice, carolID.id)
   await alice.peer.commit(
@@ -230,10 +232,9 @@ test('fresh startup with a lost anchor secret settles the saved build before con
       return pending
     }),
   )
-  await bob.peer.resync()
-  await bob.peer.dispose()
-  await bob.peer.drained()
-  // A host advances outside the peer after the rotation record was persisted.
+  await bob.handle().processMessage(removedCommit)
+  await bob.adopt(bob.handle())
+  // Both advances happened outside peer settlement; the saved source has no applied evidence.
   const next = await alice.build(
     operationIntent(buildLedgerCommit(alice, alice.identity, bob.identity.id, 'member')),
   )
@@ -264,34 +265,6 @@ test('fresh startup with a lost anchor secret settles the saved build before con
       landed: true,
     },
   })
-  await bob.control.apply(
-    {
-      putOperations: [
-        {
-          ...deferred,
-          seq: 1,
-          enqueuedAt: Date.now(),
-          deadline: Date.now() + 30_000,
-          stage: 'built',
-          built: {
-            publishID: crypto.randomUUID(),
-            expectedHead: null,
-            searchFrom: null,
-            epoch: epochBefore,
-            authenticatorBefore,
-            incarnation: 1,
-            payload: deferredPayload,
-            payloadDigest: digestAppliedCommit(deferredPayload),
-            digest: digestAppliedCommit(abandoned.commitMessage),
-            bodies: [deferredBody],
-            journal: encodeJournal(abandoned.newGroup),
-            welcome: null,
-          },
-        },
-      ],
-    },
-    crypto.randomUUID(),
-  )
   await bob.appOutbox.put({
     seq: 0,
     protocol: 'chat',
@@ -299,61 +272,25 @@ test('fresh startup with a lost anchor secret settles the saved build before con
     data: encodeEventFrame('chat/posted', { text: 'held' }),
     lastAttempt: null,
   })
-  let release = () => {}
-  const wait = new Promise<void>((resolve) => {
-    release = resolve
-  })
-  const connect = hub.connect.bind(hub)
-  const published: Array<string> = []
-  hub.connect = (identity) => {
-    const connection = connect(identity)
-    const publish = connection.publish.bind(connection)
-    connection.publish = async (value) => {
-      if (identity.id === bob.identity.id) {
-        try {
-          if (decodeHandshakeFrame(value.payload).kind === HANDSHAKE_KIND.recoveryRequest)
-            await wait
-        } catch {}
-        if (value.retain === 'log') published.push(value.topicID)
-      }
-      return publish(value)
-    }
-    return connection
-  }
   const restarted = await state.restart()
-  let readyResolvedBeforeRecovery = false
-  await restarted.peer.protocol('chat').to(alice.identity.id)
-  readyResolvedBeforeRecovery = !events.some((event) => event.phase === 'succeeded')
-  expect(readyResolvedBeforeRecovery).toBe(true)
-  const buildForbidden = async () => {
-    throw new OperationRejectedError('build gated until recovery')
-  }
-  const gated = customOperation(restarted, buildForbidden)
-  await restarted.peer.enqueue(gated)
-  expect(restarted.peer.anchorEpoch()).toBe(original.epoch)
-  expect(published).toEqual([])
-  expect(Number(restarted.handle().epoch)).toBe(epochBefore + 2)
-  expect((await restarted.control.load()).operations[0]?.id).toBe(deferred.id)
-  release()
+  await restarted.peer.replay()
   await expect
-    .poll(() => events.some((event) => event.phase === 'succeeded'), { timeout: 10_000 })
-    .toBe(true)
-  expect(events.find((event) => event.phase === 'started')?.trigger).toBe('automatic')
-  expect(topic(restarted)).toBe(topic(alice))
-  await expect.poll(() => received, { timeout: 10_000 }).toContainEqual({ text: 'held' })
-  expect(restarted.peer.anchorEpoch()).toBe(Number(restarted.handle().epoch))
-  expect((await restarted.anchorStore.load())?.pending).toBeUndefined()
-  expect((await restarted.peer.replay()).reenact ?? []).not.toContain(deferredBody)
-  // The saved publish is absent. D3 retains its intent; the recovered member cannot rebuild an admin commit.
-  expect((await restarted.control.load()).operations).toEqual([
-    expect.objectContaining({ id: deferred.id, stage: 'intent', body: deferred.body }),
-    expect.objectContaining({ id: gated.id, stage: 'intent', body: gated.body }),
-  ])
+    .poll(async () => (await restarted.control.load()).controlHold)
+    .toMatchObject({ reason: 'acceptance-unknown', position: null })
+  const held = await restarted.control.load()
+  expect(held.commitOnce).toEqual(retained)
+  expect(held.operations[0]?.id).toBe(deferred.id)
+  expect(held.outcomes).toEqual([])
+  expect(events).toEqual([])
+  expect(Number(restarted.handle().epoch)).toBe(epochBefore + 2)
+  expect(restarted.peer.anchorEpoch()).toBe(original.epoch)
   expect(await restarted.mls.getLedger()).not.toContain(deferredBody)
-  expect(await restarted.peer.outcomes()).not.toContainEqual(
-    expect.objectContaining({ opID: deferred.id, kind: 'unknown' }),
-  )
-  expect(events.filter((event) => event.phase === 'succeeded')).toHaveLength(1)
+  expect(received).toEqual([])
+  const again = await state.restart(restarted)
+  await again.peer.replay()
+  expect((await again.control.load()).controlHold).toEqual(held.controlHold)
+  expect((await again.control.load()).commitOnce).toEqual(retained)
+  expect(events).toEqual([])
 })
 
 testAnchorStoreConformance({
@@ -484,6 +421,15 @@ test.each([false, true])(
         credential: alice.handle().credential,
         ledgerEntries: decoded.ledger,
       }),
+    )
+    await alice.control.apply(
+      {
+        cursor: {
+          position: (await alice.control.load()).cursor?.position ?? null,
+          epoch: Number(nextState.groupContext.epoch),
+        },
+      },
+      crypto.randomUUID(),
     )
     bob.entrySlot.install(async () => next.bodies)
     await bob.handle().processMessage(next.commit)

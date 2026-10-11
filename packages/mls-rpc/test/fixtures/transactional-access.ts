@@ -13,6 +13,7 @@ import {
   type ControlEvidenceSnapshot,
   type ControlSnapshot,
   type ControlStore,
+  controlBuildRef,
   type PendingAppFrame,
 } from '@kumiai/rpc'
 
@@ -85,6 +86,8 @@ export function createTransactionalStore(
       control: {
         commitOnce: null,
         commitOnceAcceptance: null,
+        controlHold: null,
+        strand: null,
         operations: [],
         rejoin: null,
         outcomes: [],
@@ -192,7 +195,9 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
         const control = applyChanges(
           row.control,
           {
-            putOperations: [{ ...owned.intent, stage: 'built', built: owned.built }],
+            putOperations: [
+              { ...owned.intent, stage: 'built', built: controlBuildRef(owned.built) },
+            ],
             commitOnce: owned.built,
             commitOnceAcceptance: null,
           },
@@ -389,7 +394,18 @@ export async function createTransactionalAccess(
       locked(async () => {
         await store.settled()
         const row = store.snapshot()
-        if (prepare != null && !(await prepare(await restore(row)))) return
+        const current = await restore(row)
+        const key = { groupID: current.groupID, incarnation: 1 }
+        const source = {
+          key,
+          stateVersion: row.revision,
+          identity: {
+            ...key,
+            epoch: Number(current.epoch),
+            authenticator: current.state.keySchedule.epochAuthenticator.slice(),
+          },
+        }
+        if (prepare != null && !(await prepare(current, source))) return
         const write = adoption?.({
           incarnation: 1,
           epochAfter: Number(next.epoch),

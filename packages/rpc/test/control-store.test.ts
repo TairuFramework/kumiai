@@ -28,6 +28,8 @@ import { createMemoryHostDatabase } from './fixtures/host-db.js'
 const empty = (): ControlSnapshot => ({
   commitOnce: null,
   commitOnceAcceptance: null,
+  controlHold: null,
+  strand: null,
   operations: [],
   rejoin: null,
   outcomes: [],

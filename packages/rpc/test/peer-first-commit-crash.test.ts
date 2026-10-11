@@ -27,9 +27,34 @@ describe('a group of one survives its first commit crash', () => {
         .toBe('accepted')
       await seed.peer.dispose()
       await seed.peer.drained()
+      const saved = await seed.control.load()
       if (trim) hub.trim(commitTopic(secret), '999999999999')
       const restarted = makeMLSPeer(hub, 'alice', secret, { restartOf: seed })
       await restarted.peer.resync()
+      if (trim) {
+        expect(restarted.mls.epoch()).toBe(1)
+        expect((await restarted.control.load()).controlHold).toMatchObject({
+          reason: 'acceptance-unknown',
+          position: null,
+        })
+        expect((await restarted.control.load()).commitOnce).toEqual(saved.commitOnce)
+        expect((await restarted.control.load()).welcomes).toEqual(saved.welcomes)
+        expect(restarted.welcomes).toEqual([])
+        expect(hub.published.filter((row) => row.topicID === rendezvousTopic(secret))).toEqual([])
+        await restarted.peer.dispose()
+        await restarted.peer.drained()
+        const held = await restarted.control.load()
+        const again = makeMLSPeer(hub, 'alice', secret, { restartOf: restarted })
+        await again.peer.replay()
+        expect((await again.control.load()).controlHold).toEqual(held.controlHold)
+        expect((await again.control.load()).cursor).toEqual(held.cursor)
+        expect((await again.control.load()).commitOnceAcceptance).toEqual(held.commitOnceAcceptance)
+        expect((await again.control.load()).commitOnce).toEqual(saved.commitOnce)
+        expect(again.welcomes).toEqual([])
+        expect(hub.published.filter((row) => row.topicID === rendezvousTopic(secret))).toEqual([])
+        await again.peer.dispose()
+        return
+      }
       expect(restarted.mls.epoch()).toBe(2)
       expect((await restarted.control.load()).operations).toEqual([])
       expect((await restarted.control.load()).welcomes).toEqual([])

@@ -305,7 +305,17 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
     },
 
     async readCommitHeader(commit: Uint8Array): Promise<CommitHeader | null> {
-      const header = await access.read((group) => group.readCommitHeader(commit))
+      const header = await access.read(async (group) => {
+        const header = await group.readCommitHeader(commit)
+        if (
+          header?.external !== true &&
+          header?.committerDID !== undefined &&
+          normalizeDID(header.committerDID) === normalizeDID(identity.id) &&
+          !(await group.verifyCommitSignature(commit))
+        )
+          return { epoch: header.epoch }
+        return header
+      })
       if (header == null) return null
       return {
         epoch: Number(header.epoch),

@@ -4,6 +4,7 @@ import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { RecoveryEvent } from '../src/peer.js'
 import { commitTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
+import { assertDurableControlHold } from './fixtures/control-hold.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { encodeMemoryCommit, memoryEntryID } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
@@ -66,7 +67,7 @@ type Arm = (hub: FakeHub, rs: Uint8Array, withResponder: boolean) => Promise<Arm
  * frame that is his own commit, so the cursor stops on it and he heals.
  */
 const armOwnUnmerged: Arm = async (hub, rs, withResponder) => {
-  await publishCommit({ hub, senderDID: 'bob', recoverySecret: rs, epoch: 1 })
+  const occurrence = await publishCommit({ hub, senderDID: 'bob', recoverySecret: rs, epoch: 1 })
   let responder: TestPeer | undefined
   if (withResponder) {
     // Carol applies Bob's commit and carries the group forward — a live member that can answer
@@ -83,7 +84,14 @@ const armOwnUnmerged: Arm = async (hub, rs, withResponder) => {
       events.push(event)
     },
   })
-  await waitForHeal({ bob, hub, events, withResponder })
+  await vi.waitFor(async () =>
+    expect((await bob.control.load()).controlHold).toMatchObject({
+      reason: 'fork-evidence',
+      position: occurrence.sequenceID,
+      evidence: { kind: 'unexplained-own-commit' },
+    }),
+  )
+  expect(events).toEqual([])
   return { bob, responder, staleEpoch: 1 }
 }
 
@@ -207,10 +215,7 @@ describe('heal strand', { concurrent: false }, () => {
         const rs = new Uint8Array(32).fill(0x61)
         const { bob, staleEpoch } = await trigger.arm(hub, rs, false)
 
-        // The heal has already run and found nobody. Its only evidence it is off the group's line
-        // is now this in-memory strand — the frame that raised it is behind the cursor, and
-        // `commitLogHead` is the live tip. A peer that forgot it would race the compare-and-set at
-        // a stale epoch and WIN, landing a commit on a branch of one.
+        // Neither a durable hold nor an unresolved ordinary strand permits a new build.
         const headBefore = hub.head(commitTopic(rs))
         const framesBefore = commitFrames(hub, rs)
 
@@ -222,17 +227,33 @@ describe('heal strand', { concurrent: false }, () => {
         expect(bob.mls.epoch()).toBe(staleEpoch)
         expect((await bob.control.load()).operations[0]?.stage).toBe('intent')
 
+        if (trigger.arm === armOwnUnmerged)
+          await assertDurableControlHold(bob, hub, rs, 'bob', {
+            reason: 'fork-evidence',
+            evidence: { kind: 'unexplained-own-commit' },
+          })
         await bob.peer.dispose()
       })
 
-      test(`${trigger.name}: a responder answers — the peer heals, then commits`, async () => {
+      test(`${trigger.name}: a responder answers — ${trigger.arm === armOwnUnmerged ? 'the durable hold still blocks control' : 'the peer heals, then commits'}`, async () => {
         const hub = new FakeHub()
         const rs = new Uint8Array(32).fill(0x62)
         const { bob, responder, staleEpoch } = await trigger.arm(hub, rs, true)
 
-        // A responder lets recovery clear the strand before the operation builds.
         expect(responder).toBeDefined()
         const carol = responder as TestPeer
+        if (trigger.arm === armOwnUnmerged) {
+          expect(bob.mls.epoch()).toBe(staleEpoch)
+          expect(carol.mls.epoch()).toBe(2)
+          await bob.peer.enqueue(buildLedgerCommit(bob, ['role:zoe=admin']))
+          expect((await bob.control.load()).operations[0]?.stage).toBe('intent')
+          await assertDurableControlHold(bob, hub, rs, 'bob', {
+            reason: 'fork-evidence',
+            evidence: { kind: 'unexplained-own-commit' },
+          })
+          await carol.peer.dispose()
+          return
+        }
         expect(bob.mls.epoch()).toBeGreaterThan(staleEpoch)
         expect(bob.mls.epoch()).toBe(carol.mls.epoch())
 

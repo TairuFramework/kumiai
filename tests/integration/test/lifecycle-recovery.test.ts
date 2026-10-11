@@ -185,7 +185,7 @@ function recoveryPeer(params: {
     crypto: createGroupCrypto({ access }),
     mls,
     localDID: identity.id,
-    ...createOperationHost(access),
+    ...createOperationHost(access, identity),
     appCursorStore: createMemoryAppCursorStore(),
     protocols: { chat },
     handlers: {

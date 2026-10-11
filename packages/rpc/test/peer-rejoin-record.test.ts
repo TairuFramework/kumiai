@@ -5,8 +5,9 @@ import type { RejoinRecord } from '../src/control/types.js'
 import { asLogPosition } from '../src/cursor.js'
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { RecoveryEvent } from '../src/peer-types.js'
-import { commitTopic } from '../src/topic.js'
-import { publishCommit } from './fixtures/commits.js'
+import { commitTopic, rendezvousTopic } from '../src/topic.js'
+import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
+import { assertDurableControlHold } from './fixtures/control-hold.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
@@ -56,6 +57,33 @@ function crashAt(bob: TestPeer, stage: RejoinRecord['stage']) {
       void bob.peer.dispose()
     })
 }
+
+test('a hold committed while loading a saved rejoin prevents external handoff', async () => {
+  const { hub, bob } = await setup()
+  const record = await buildRejoinRecord(bob)
+  await bob.control.apply({ putRejoin: record }, 'saved-external')
+  await bob.peer.ack('absent')
+  const load = bob.control.load.bind(bob.control)
+  let held = false
+  vi.spyOn(bob.control, 'load').mockImplementation(async () => {
+    const snapshot = await load()
+    if (!held) {
+      held = true
+      await bob.control.apply(
+        {
+          controlHold: { reason: 'unsupported-version', position: asLogPosition('001') },
+          strand: { reason: 'unsupported-version' },
+        },
+        'hold-during-recheck',
+      )
+    }
+    return snapshot
+  })
+  await bob.peer.recover().catch(() => {})
+  expect(held).toBe(true)
+  expect(commits(hub)).toEqual([])
+  expect((await bob.control.load()).controlHold?.reason).toBe('unsupported-version')
+})
 
 test.each(['built', 'published', 'confirmed', 'adopted'] as const)(
   'restart resumes a %s rejoin without another external commit',
@@ -532,7 +560,7 @@ test('a built operation settles before the rejoin built record is saved', async 
   expect(settled).toBe(true)
 })
 
-test('anchor recovery still settles a saved build before writing the rejoin record', async () => {
+test('anchor recovery holds missing acceptance evidence before writing a rejoin record', async () => {
   const hub = new FakeHub()
   const alice = member(hub, 'alice', { epoch: 2 })
   const bob = member(hub, 'bob')
@@ -564,12 +592,25 @@ test('anchor recovery still settles a saved build before writing the rejoin reco
     return apply(changes, id)
   })
   const again = member(hub, 'bob', { restartOf: bob, control: bob.control })
-  expect((await again.peer.recover()).advanced).toBe(true)
-  expect(stage).toBe('accepted')
-  expect((await again.control.load()).operations).toEqual([])
-  expect((await again.control.load()).outcomes).toContainEqual(
-    expect.objectContaining({ opID: op.id, kind: 'unknown' }),
-  )
+  await again.peer.replay()
+  const held = await again.control.load()
+  expect(held.controlHold).toMatchObject({ reason: 'acceptance-unknown' })
+  expect(held.commitOnce?.opID).toBe(op.id)
+  expect(held.operations[0]?.id).toBe(op.id)
+  expect(held.outcomes).toEqual([])
+  expect(held.rejoin).toBeNull()
+  expect(stage).toBeUndefined()
+  expect(
+    hub.published.filter(
+      (message) => message.topicID === rendezvousTopic(secret) && message.senderDID === 'bob',
+    ),
+  ).toEqual([])
+  await again.peer.dispose()
+  await again.peer.drained()
+  const restarted = member(hub, 'bob', { restartOf: again })
+  await restarted.peer.replay()
+  expect((await restarted.control.load()).controlHold).toEqual(held.controlHold)
+  expect((await restarted.control.load()).commitOnce).toEqual(held.commitOnce)
 })
 
 test('anchor-gated recovery re-checks an unwalked source commit on every fresh candidate', async () => {
@@ -636,7 +677,7 @@ test('anchor-gated recovery re-checks an unwalked source commit on every fresh c
   expect((await again.control.load()).rejoin).toBeNull()
 })
 
-test('a classified own-unmerged strand permits recovery after walking the retained suffix', async () => {
+test('a classified own-unmerged strand persists evidence without a recovery bypass', async () => {
   const { hub, alice, bob } = await setup()
   await bob.peer.dispose()
   await bob.peer.drained()
@@ -653,13 +694,18 @@ test('a classified own-unmerged strand permits recovery after walking the retain
     return apply(changes, id)
   })
   const again = member(hub, 'bob', { restartOf: bob, control: bob.control })
-  await expect.poll(() => again.mls.epoch()).toBe(3)
-  await expect.poll(async () => (await again.control.load()).rejoin).toBeNull()
-  expect(built).toHaveLength(1)
-  expect(built[0]?.expectedHead).toBe(tip)
+  await assertDurableControlHold(again, hub, secret, 'bob', {
+    reason: 'fork-evidence',
+    position: examined,
+    evidence: {
+      kind: 'unexplained-own-commit',
+      epoch: 1,
+      digest: publishedCommitDigest(hub, examined),
+    },
+  })
+  expect(again.mls.epoch()).toBe(1)
+  expect(built).toEqual([])
   expect(examined < tip).toBe(true)
-  expect(built[0]?.source.head).toBe(tip)
-  expect(built[0]?.source.epoch).toBe(2)
 })
 
 test.each([false, true])(

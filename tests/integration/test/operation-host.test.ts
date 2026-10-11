@@ -1,10 +1,23 @@
 import { randomIdentity } from '@kokuin/token'
 import { commitLedgerEntries, createGroup, decodeClientState, signLedgerEntry } from '@kumiai/mls'
-import { simpleHandleAccess } from '@kumiai/mls-rpc'
-import { asLogPosition } from '@kumiai/rpc'
+import {
+  asLogPosition,
+  digestAppliedCommit,
+  encodeCommitFrame,
+  encodeHandshakeFrame,
+  encodeLedgerEntries,
+  HANDSHAKE_KIND,
+} from '@kumiai/rpc'
 import { expect, test } from 'vitest'
 
-import { createMemoryStateStore, createOperationHost, encodeJournal } from './app-lane-e2e.js'
+import {
+  createDurableHandleAccess,
+  createMemoryStateStore,
+  createOperationHost,
+  encodeJournal,
+  operationIntent,
+  operationRequest,
+} from './app-lane-e2e.js'
 
 test('restart reads the state co-committed with a landed outcome after an after-save crash', async () => {
   const identity = randomIdentity()
@@ -17,7 +30,8 @@ test('restart reads the state co-committed with a landed outcome after an after-
     subject: identity.id,
     value: 'crash-safe',
   })
-  const next = (await commitLedgerEntries(current, [token])).newGroup
+  const committed = await commitLedgerEntries(current, [token])
+  const next = committed.newGroup
   const outcome = {
     id: 'landed-op',
     opID: 'landed-op',
@@ -45,27 +59,53 @@ test('restart reads the state co-committed with a landed outcome after an after-
 test('standalone operation adoption co-commits the anchor landed mark with control', async () => {
   const identity = randomIdentity()
   let current = (await createGroup(identity, 'standalone-operation-host')).group
-  const access = simpleHandleAccess({
-    stateVersion: () => 0,
+  const access = createDurableHandleAccess({
     handle: () => current,
     adopt: (next) => {
       current = next
     },
   })
-  const host = createOperationHost(access)
+  const host = createOperationHost(access, identity)
   const token = await signLedgerEntry(identity, {
     groupID: current.groupID,
     type: 'note',
     subject: identity.id,
     value: 'atomic',
   })
-  const next = (await commitLedgerEntries(current, [token])).newGroup
+  const committed = await commitLedgerEntries(current, [token])
+  const next = committed.newGroup
   const epochBefore = Number(current.epoch)
-  const expected = {
+  const op = operationIntent(operationRequest('ledger', {}))
+  host.builders.set(op.id, async () => ({
+    commit: committed.commitMessage,
+    journal: encodeJournal(next),
+    bodies: [token],
+    welcome: null,
     epoch: epochBefore,
     authenticatorBefore: current.state.keySchedule.epochAuthenticator.slice(),
     incarnation: 1,
+    digest: digestAppliedCommit(committed.commitMessage),
+  }))
+  await host.control.apply({ putOperations: [op] }, 'intent')
+  const prepared = await host.prepareBuild(op, async (built, seal) => ({
+    payload: encodeHandshakeFrame(
+      HANDSHAKE_KIND.commit,
+      encodeCommitFrame(built.commit, (await seal(encodeLedgerEntries(built.bodies))).sealed),
+    ),
+    publishID: 'own-publish',
+    expectedHead: null,
+  }))
+  expect(prepared.kind).toBe('saved')
+  const slot = (await host.control.load()).commitOnce
+  if (slot === null) throw new Error('Missing saved build')
+  const proof = {
+    source: (await host.readEvidence()).source,
+    from: slot.searchFrom,
+    position: asLogPosition('001'),
+    payloadDigest: slot.payloadDigest,
   }
+  await host.control.apply({ commitOnceAcceptance: proof }, 'accepted')
+  const expected = { ...(await host.readEvidence()).source, acceptance: proof }
   await host.anchorStore.save({
     anchor: { epoch: epochBefore, secret: new Uint8Array(32).fill(1) },
     pending: {
@@ -77,7 +117,7 @@ test('standalone operation adoption co-commits the anchor landed mark with contr
     },
   })
   await expect(
-    host.adopt(encodeJournal(next), expected, {
+    host.adopt(slot.journal, expected, {
       mutationID: 'adoption-mutation',
       anchorLanded: 'own-commit',
       changes: { putOutcomes: [{ id: 'own-op', opID: 'own-op', kind: 'unknown', at: 1 }] },

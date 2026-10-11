@@ -1,5 +1,6 @@
 import type { RecoveryRefusalReason } from '../crypto.js'
 import type { LogPosition } from '../cursor.js'
+import type { ControlHold } from './search.js'
 
 export type GroupKey = { groupID: string; incarnation: number }
 export type EpochIdentity = GroupKey & { epoch: number; authenticator: Uint8Array }
@@ -36,6 +37,10 @@ export type HostBuilt = Pick<
 export type ControlSnapshot = {
   commitOnce: ControlSlot | null
   commitOnceAcceptance: FirstValidCommit | null
+  controlHold: ControlHold | null
+  strand: {
+    reason: 'retention-gap' | 'unprocessable-gap' | 'lost-state' | 'ahead' | 'unsupported-version'
+  } | null
   operations: Array<Operation> // FIFO by `seq`
   rejoin: RejoinRecord | null
   outcomes: Array<Outcome>
@@ -56,6 +61,8 @@ export type ForkEvidence = {
 export type ControlChanges = {
   commitOnce?: ControlSlot | null
   commitOnceAcceptance?: FirstValidCommit | null
+  controlHold?: ControlHold | null
+  strand?: ControlSnapshot['strand']
   putOperations?: Array<Operation>
   deleteOperations?: Array<string>
   putRejoin?: RejoinRecord
@@ -79,6 +86,13 @@ export type AdoptionWrite = {
   /** The `advance` of the pending anchor rotation this adoption lands, marked in the same transaction. */
   anchorLanded?: string
 }
+export type ControlAdoptionPort = {
+  adopt(
+    journal: Uint8Array,
+    expected: AdoptionExpected & { acceptance: FirstValidCommit },
+    write: AdoptionWrite,
+  ): Promise<'installed' | 'noop' | 'moved'>
+}
 export type ControlStore = {
   key: GroupKey
   load(): Promise<ControlSnapshot>
@@ -100,8 +114,13 @@ export type OperationRequest = {
 /** The operation deadline is `enqueuedAt + operationTimeoutMs`, so a restart keeps it. */
 export type Operation = OperationRequest & { seq: number; enqueuedAt: number; deadline: number } & (
     | { stage: 'intent' }
-    | { stage: 'built'; built: BuiltCommit }
-    | { stage: 'accepted'; built: BuiltCommit; acceptedAs: LogPosition }
+    | { stage: 'built'; built: ControlBuildRef }
+    | {
+        stage: 'accepted'
+        built: ControlBuildRef
+        acceptedAs: LogPosition
+        acceptance: FirstValidCommit
+      }
   )
 export type BuiltCommit = {
   incarnation: number
@@ -168,7 +187,12 @@ export type RejoinRecord = {
   refusal?: RecoveryRefusal
 }
 export type RecoveryRefusal = RecoveryRefusalReason
-export type WelcomeObligation = { opID: string; welcome: Uint8Array; recipients: Array<string> }
+export type WelcomeObligation = {
+  opID: string
+  welcome: Uint8Array
+  recipients: Array<string>
+  committed?: true
+}
 export type AppliedCommit = {
   epoch: number
   digest: string

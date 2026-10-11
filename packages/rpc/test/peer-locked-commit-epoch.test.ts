@@ -10,6 +10,7 @@ import {
 import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
 import { commitTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
+import { assertDurableControlHold } from './fixtures/control-hold.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
@@ -65,23 +66,31 @@ async function runCase(kind: Case, offset: number) {
   })
   await vi.waitFor(() => expect(fetch).toHaveBeenCalled())
   await bob.peer.replay()
-  if (kind === 'future' || kind === 'own' || kind.startsWith('unknown')) {
+  if (kind === 'future') {
     await vi.waitFor(() => expect(recoveries.some((event) => event.phase === 'failed')).toBe(true))
   }
   const fetchesBeforeWake = fetch.mock.calls.length
   await hub.publish({ senderDID: 'zoe', topicID, payload: new Uint8Array([0]) })
-  await vi.waitFor(() => expect(fetch.mock.calls.length).toBeGreaterThan(fetchesBeforeWake))
+  const held = kind === 'own' || kind.startsWith('unknown')
+  if (!held)
+    await vi.waitFor(() => expect(fetch.mock.calls.length).toBeGreaterThan(fetchesBeforeWake))
   const cursor =
     fetch.mock.calls.filter(([request]) => request.topicID === topicID).at(-1)?.[0].after ?? null
   const result = {
     epoch: bob.mls.epoch(),
     commits: bob.mls.commits(),
     ...(kind === 'applicable' ? { anchorEpoch: bob.peer.anchorEpoch() } : {}),
-    cursor,
+    cursor: held ? ((await bob.control.load()).cursor?.position ?? null) : cursor,
+    hold: (await bob.control.load()).controlHold,
     strandKinds: observations.map((observation) => observation.kind),
     repairStarted: recoveries.some((event) => event.phase === 'started'),
     repairFailed: recoveries.some((event) => event.phase === 'failed'),
   }
+  if (held)
+    await assertDurableControlHold(bob, hub, secret, 'bob', {
+      reason: kind === 'own' ? 'fork-evidence' : 'unsupported-version',
+      position: sequenceID,
+    })
   await bob.peer.dispose()
   return { result, sequenceID }
 }

@@ -208,6 +208,8 @@ function mutateControl<Position extends string>(
   if (owned.putRejoin !== undefined) snapshot.rejoin = owned.putRejoin
   if (owned.commitOnce !== undefined) snapshot.commitOnce = owned.commitOnce
   snapshot.commitOnceAcceptance = proof
+  if (owned.controlHold !== undefined) snapshot.controlHold = owned.controlHold
+  if (owned.strand !== undefined) snapshot.strand = owned.strand
   if (owned.cursor !== undefined) snapshot.cursor = owned.cursor
   snapshot.operations.sort((a, b) => a.seq - b.seq)
   snapshot.applied.sort((a, b) => a.epoch - b.epoch)
@@ -233,6 +235,8 @@ export function createMemoryControlStore<Position extends string = string>(
     control: {
       commitOnce: null,
       commitOnceAcceptance: null,
+      controlHold: null,
+      strand: null,
       operations: [],
       rejoin: null,
       outcomes: [],
@@ -280,6 +284,7 @@ export function createMemoryControlStore<Position extends string = string>(
       const next = cloneValue(record)
       const identity = next.state === null ? null : decodeControlFixtureState(next.state)
       if (
+        next.control.controlHold !== null ||
         !equal(expected.key, fixedKey) ||
         !equal(identity, expected.identity) ||
         next.version !== expected.stateVersion ||
@@ -299,7 +304,20 @@ export function createMemoryControlStore<Position extends string = string>(
         previous.epoch >= (identity?.epoch ?? 0)
       )
         return 'occupied'
-      mutateControl(next.control, { putOperations: [{ ...intent, stage: 'built', built }] })
+      mutateControl(next.control, {
+        putOperations: [
+          {
+            ...intent,
+            stage: 'built',
+            built: {
+              incarnation: built.incarnation,
+              epoch: built.epoch,
+              publishID: built.publishID,
+              payloadDigest: built.payloadDigest,
+            },
+          },
+        ],
+      })
       mutateControl(
         next.control,
         { commitOnce: built, commitOnceAcceptance: null },

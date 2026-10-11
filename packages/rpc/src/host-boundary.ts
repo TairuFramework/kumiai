@@ -1,6 +1,7 @@
 import type { GatherOptions } from '@kumiai/broadcast'
 
 import type { AnchorStore } from './anchor.js'
+import type { ControlValidation, ControlValidationPort } from './control/search.js'
 import type { GroupCrypto, GroupMLS, PendingAppFrames, PendingRecovery } from './crypto.js'
 import { PeerDisposedError } from './errors.js'
 import type { GroupPeerMLSParams, GroupPeerParams } from './peer-types.js'
@@ -89,7 +90,9 @@ export const peerHostFields = {
   crypto: 'crypto',
   mls: 'mls',
   control: 'port',
-  build: 'callback',
+  prepareBuild: 'callback',
+  validation: 'port',
+  readEvidence: 'callback',
   adopt: 'callback',
   deliverWelcome: 'callback',
   operationTimeoutMs: 'data',
@@ -119,6 +122,17 @@ export const anchorStoreHostMembers = {
   load: 'host',
   save: 'host',
 } as const satisfies HostMembers<AnchorStore>
+
+export const validationHostMembers = {
+  source: 'data',
+  readCommitHeader: 'host',
+  validateFrame: 'host',
+  verifyOwn: 'host',
+} as const satisfies HostMembers<ControlValidation>
+
+export const validationPortHostMembers = {
+  restoreValidation: 'host',
+} as const satisfies HostMembers<ControlValidationPort>
 
 export const gatherHostMembers = {
   quorum: 'data',
@@ -291,6 +305,22 @@ export function wrapPeerHost<TParams extends object>(
             ? undefined
             : selectHostMembers(boundary, crypto.pending, pendingFrameHostMembers),
       })
+    } else if (key === 'validation') {
+      const port = selectHostMembers(
+        boundary,
+        value as ControlValidationPort,
+        validationPortHostMembers,
+      )
+      selected = {
+        restoreValidation: async (
+          ...args: Parameters<ControlValidationPort['restoreValidation']>
+        ) => {
+          const validation = await port.restoreValidation(...args)
+          return validation === null
+            ? null
+            : selectHostMembers(boundary, validation, validationHostMembers)
+        },
+      }
     } else if (key === 'anchorStore')
       selected = selectHostMembers(boundary, value as AnchorStore, anchorStoreHostMembers)
     else if (kind === 'mls')

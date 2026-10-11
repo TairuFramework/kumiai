@@ -1339,9 +1339,11 @@ async function expectPolicyPoison(
     crypto: createGroupCrypto({ access }),
     mls: live,
     control: store.control,
-    build: async () => {
+    prepareBuild: async () => {
       throw new Error('No pending operation')
     },
+    validation: f.port,
+    readEvidence: store.readEvidence,
     adopt: async () => 'moved',
     deliverWelcome: async () => {},
     anchorStore: createMemoryAnchorStore(),

@@ -1,118 +1,125 @@
-import { createHash } from 'node:crypto'
-import { HeadMismatchError } from '@kumiai/hub-protocol'
-import { describe, expect, test, vi } from 'vitest'
+import { expect, test, vi } from 'vitest'
 
+import { encodeControlFixtureState } from '../../rpc-conformance/src/control-store.js'
 import { createMemoryControlStore } from '../../rpc-conformance/src/memory-control-store.js'
 import {
   enqueueOperation,
-  type HostBuilt,
   landedChanges,
   type OperationDeps,
   stepOperation,
 } from '../src/control/operations.js'
+import { controlBuildRef } from '../src/control/slot.js'
 import type {
-  AppliedCommit,
   ControlChanges,
+  ControlSlot,
+  FirstValidCommit,
+  HostBuilt,
+  Operation,
   OperationRequest,
   Outcome,
 } from '../src/control/types.js'
 import { asLogPosition, type LogPosition } from '../src/cursor.js'
-import { OperationRejectedError } from '../src/errors.js'
 
 const request: OperationRequest = {
-  id: '0123456789abcdef0123456789abcdef',
+  id: 'invite',
   kind: 'invite',
   revokes: false,
   body: new Uint8Array([7]),
 }
-const hostBuilt: HostBuilt = {
-  commit: new Uint8Array([1]),
-  bodies: ['signed-body'],
-  journal: new Uint8Array([2]),
-  welcome: { bytes: new Uint8Array([9]), recipients: ['bob'] },
-  epoch: 4,
-  authenticatorBefore: new Uint8Array([3]),
-  incarnation: 1,
-  digest: 'commit-digest',
-}
+const key = { groupID: 'group-A', incarnation: 1 }
 const head = asLogPosition('004')
 const position = asLogPosition('005')
 const payload = new TextEncoder().encode('abc')
-// Independently known SHA-256 of "abc", encoded as base64url.
 const payloadDigest = 'ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0'
 const publishID = 'fedcba9876543210fedcba9876543210'
-const applied: AppliedCommit = {
-  epoch: 4,
-  digest: 'commit-digest',
-  payloadDigest,
-  sequenceID: position,
-  opID: request.id,
-  removed: false,
-}
 
-test('enqueue persists the selected absolute deadline', async () => {
-  const host = setup()
-  host.tick(0)
-  host.deps.operationTimeoutMs = 1_000
-  const selected = await enqueueOperation(host.deps, request)
-  expect(selected.deadline).toBe(1_000)
-  expect((await host.store.load()).operations[0]?.deadline).toBe(1_000)
-  host.deps.operationTimeoutMs = undefined
-  const defaulted = await enqueueOperation(host.deps, { ...request, id: 'default' })
-  expect(defaulted.deadline).toBe(30_000)
-})
-
-test('default timeout expires a retry at the persisted deadline boundary', async () => {
-  const host = setup()
-  host.deps.operationTimeoutMs = undefined
-  host.tick(100)
-  host.mismatch()
-  const built = await host.built()
-  expect(built.deadline).toBe(30_100)
-  host.tick(30_099)
-  const retry = await stepOperation(host.deps, built)
-  expect(retry?.stage).toBe('intent')
-  if (retry == null) throw new Error('Expected retry before deadline')
-  const rebuilt = await stepOperation(host.deps, retry)
-  if (rebuilt == null) throw new Error('Expected rebuilt operation')
-  host.tick(30_100)
-  expect(await stepOperation(host.deps, rebuilt)).toBeNull()
-  expect((await host.store.load()).outcomes).toMatchObject([
-    { kind: 'lost', opID: request.id, at: 30_100 },
-  ])
-})
-
-function setup() {
-  const store = createMemoryControlStore<LogPosition>({ groupID: 'group-A', incarnation: 1 })
+async function setup() {
+  const store = createMemoryControlStore<LogPosition>(key)
+  let identity = { ...key, epoch: 4, authenticator: new Uint8Array([3]) }
+  await store.saveState(encodeControlFixtureState(identity))
+  await store.apply({ cursor: { position: head, epoch: 4 } }, 'checkpoint')
   const writes: Array<ControlChanges> = []
   const emitted: Array<Outcome> = []
   let clock = 100
   let serial = 0
+  let published: LogPosition | null = null
+  const hostBuilt: HostBuilt = {
+    commit: new Uint8Array([1]),
+    bodies: ['signed-body'],
+    journal: new Uint8Array([2]),
+    welcome: { bytes: new Uint8Array([9]), recipients: ['bob'] },
+    epoch: 4,
+    authenticatorBefore: new Uint8Array([3]),
+    incarnation: 1,
+    digest: 'commit-digest',
+  }
+  const readEvidence = async () => {
+    const snapshot = await store.load()
+    return {
+      source: { key, identity, stateVersion: await store.loadVersion() },
+      applied: snapshot.applied,
+      cursor: snapshot.cursor,
+      terminal: false,
+    }
+  }
+  const proof = async (slot: ControlSlot): Promise<FirstValidCommit> => ({
+    source: (await readEvidence()).source,
+    from: slot.searchFrom,
+    position,
+    payloadDigest: slot.payloadDigest,
+  })
   const deps: OperationDeps = {
     control: {
-      key: store.key,
+      key,
       load: store.load,
       lastMutation: store.lastMutation,
-      apply: async (changes, mutationID) => {
-        await store.apply(changes, mutationID)
+      apply: async (changes, id) => {
+        await store.apply(changes, id)
         writes.push(structuredClone(changes))
       },
     },
-    build: vi.fn(async () => structuredClone(hostBuilt)),
+    prepareBuild: vi.fn<OperationDeps['prepareBuild']>(async (op, frame) => {
+      if (op.stage !== 'intent') return { kind: 'moved', operation: op }
+      const framed = await frame(hostBuilt, async (bytes) => ({
+        sealed: bytes,
+        epoch: hostBuilt.epoch,
+      }))
+      const evidence = await readEvidence()
+      const slot: ControlSlot = {
+        ...hostBuilt,
+        ...framed,
+        opID: op.id,
+        searchFrom: evidence.cursor?.position ?? null,
+        payloadDigest,
+      }
+      const kind = await store.saveBuilt(op, slot, evidence.source, deps.newID())
+      return {
+        kind,
+        operation: kind === 'saved' ? { ...op, stage: 'built', built: controlBuildRef(slot) } : op,
+      }
+    }),
     frame: vi.fn(async () => ({ payload, publishID, expectedHead: head })),
-    publish: vi.fn(async () => ({ sequenceID: position })),
-    searchLog: vi.fn(async (_from, _digest, position) => {
-      return position == null ? ('absent' as const) : { found: position }
+    publish: vi.fn(async () => {
+      published = position
+      return { sequenceID: position }
     }),
-    adopt: vi.fn(async (_journal, _expected, write) => {
-      await store.saveState(new Uint8Array([5]), write)
-      return 'installed' as const
+    searchLog: vi.fn<OperationDeps['searchLog']>(async (built) =>
+      published === null
+        ? { kind: 'absent' }
+        : { kind: 'first-valid', proof: await proof({ ...built, opID: request.id }) },
+    ),
+    adopt: vi.fn<OperationDeps['adopt']>(async (_journal, expected, write) => {
+      expect(expected.stateVersion).toBe(await store.loadVersion())
+      identity = { ...identity, epoch: identity.epoch + 1, authenticator: new Uint8Array([5]) }
+      await store.saveState(encodeControlFixtureState(identity), write)
+      return 'installed'
     }),
-    appliedAt: (epoch) => (epoch === 4 ? applied : undefined),
+    readEvidence,
+    readHead: vi.fn(async () => head),
     pullToHead: vi.fn(async () => {}),
     now: () => clock,
     operationTimeoutMs: 1_000,
-    newID: () => (++serial).toString(16).padStart(32, '0'),
+    newID: () => String(++serial),
     emit: (outcome) => emitted.push(outcome),
   }
   const enqueue = () => enqueueOperation(deps, request)
@@ -121,365 +128,334 @@ function setup() {
     if (op?.stage !== 'built') throw new Error('expected built operation')
     return op
   }
-  const accepted = async () => {
-    const op = await stepOperation(deps, await built())
-    if (op?.stage !== 'accepted') throw new Error('expected accepted operation')
-    return op
-  }
-  const mismatch = () => {
-    deps.publish = async () => {
-      // Remote hubs reconstruct the error by name.
-      const error = new Error('head changed')
-      error.name = 'HeadMismatchError'
-      throw error
-    }
-  }
   return {
-    deps,
     store,
-    writes,
+    deps,
     emitted,
+    writes,
     enqueue,
     built,
-    accepted,
-    mismatch,
-    tick: (at: number) => {
-      clock = at
+    proof,
+    mismatch: () => {
+      deps.publish = vi.fn(async () => {
+        throw Object.assign(new Error('head changed'), { name: 'HeadMismatchError' })
+      })
+    },
+    tick: (now: number) => {
+      clock = now
+    },
+    found: () => {
+      published = position
+    },
+    move: async (epoch: number, authenticator = new Uint8Array([6])) => {
+      identity = { ...identity, epoch, authenticator }
+      await store.saveState(encodeControlFixtureState(identity))
     },
   }
 }
 
-describe('durable operations', () => {
-  test('enqueue persists FIFO intents before returning, including the revoke hold', async () => {
-    const h = setup()
-    const first = await h.enqueue()
-    h.store.commitThenRejectNext('apply')
-    const second = await enqueueOperation(h.deps, {
-      ...request,
-      id: 'abcdef0123456789abcdef0123456789',
-      kind: 'remove',
-      revokes: true,
-    })
-    expect(first).toEqual({ ...request, stage: 'intent', seq: 1, enqueuedAt: 100, deadline: 1_100 })
-    expect(second.seq).toBe(2)
-    expect((await h.store.load()).operations).toEqual([first, second])
-  })
+test('enqueue persists the selected absolute deadline', async () => {
+  const h = await setup()
+  h.tick(0)
+  expect((await h.enqueue()).deadline).toBe(1_000)
+  h.deps.operationTimeoutMs = undefined
+  expect((await enqueueOperation(h.deps, { ...request, id: 'default' })).deadline).toBe(30_000)
+})
 
-  test('intent, built, accepted and landed each commit one durable transition', async () => {
-    const h = setup()
-    const op = await h.built()
-    expect(op.built).toEqual({
-      publishID,
-      expectedHead: head,
-      searchFrom: head,
-      epoch: 4,
-      authenticatorBefore: new Uint8Array([3]),
-      incarnation: 1,
-      payload,
-      payloadDigest,
-      digest: 'commit-digest',
-      bodies: ['signed-body'],
-      journal: new Uint8Array([2]),
-      welcome: { bytes: new Uint8Array([9]), recipients: ['bob'] },
-    })
-    expect(h.deps.pullToHead).toHaveBeenCalledOnce()
-    expect(h.deps.publish).not.toHaveBeenCalled()
-    expect((await h.store.load()).welcomes).toEqual([])
-    const accepted = await stepOperation(h.deps, op)
-    expect(accepted).toEqual({ ...op, stage: 'accepted', acceptedAs: position })
-    expect(h.writes.at(-1)).toEqual({
-      putOperations: [accepted],
-      putWelcomes: [{ opID: request.id, welcome: new Uint8Array([9]), recipients: ['bob'] }],
-    })
-    if (accepted?.stage !== 'accepted') throw new Error('expected accepted operation')
-    h.tick(200)
-    expect(await stepOperation(h.deps, accepted)).toBeNull()
-    const snapshot = await h.store.load()
-    expect(snapshot.operations).toEqual([])
-    expect(snapshot.outcomes).toMatchObject([
-      { opID: request.id, at: 200, kind: 'landed', position },
-    ])
-    expect(snapshot.applied).toEqual([applied])
-    expect(snapshot.cursor).toEqual({ position, epoch: 5 })
-    expect(snapshot.welcomes).toHaveLength(1)
-    expect(await h.store.loadState()).toEqual(new Uint8Array([5]))
-    expect(h.deps.adopt).toHaveBeenCalledWith(
-      new Uint8Array([2]),
-      {
-        epoch: 4,
-        authenticatorBefore: new Uint8Array([3]),
-        incarnation: 1,
-      },
-      expect.objectContaining({
-        changes: expect.objectContaining({ deleteOperations: [request.id] }),
-      }),
-    )
-    expect(h.writes).toHaveLength(3)
-    expect(h.emitted).toEqual(snapshot.outcomes)
-  })
-
-  test.each(['not authorised', 'holder evidence refused'])(
-    'build refusal settles as rejected: %s',
-    async (reason) => {
-      const h = setup()
-      h.deps.build = async () => {
-        throw new OperationRejectedError(reason)
-      }
-      expect(await stepOperation(h.deps, await h.enqueue())).toBeNull()
-      const snapshot = await h.store.load()
-      expect(snapshot.operations).toEqual([])
-      expect(snapshot.outcomes).toMatchObject([{ kind: 'rejected', reason, opID: request.id }])
-      expect(h.writes).toHaveLength(2)
-      expect(h.writes[1]).toMatchObject({
-        deleteOperations: [request.id],
-        putOutcomes: snapshot.outcomes,
-      })
-      expect(h.emitted).toEqual(snapshot.outcomes)
-      expect(h.deps.frame).not.toHaveBeenCalled()
-    },
-  )
-
-  test('transient build errors keep the intent and do not emit rejection', async () => {
-    const h = setup()
-    const op = await h.enqueue()
-    const error = new Error('state unavailable')
-    h.deps.build = async () => {
-      throw error
-    }
-    await expect(stepOperation(h.deps, op)).rejects.toBe(error)
-    expect((await h.store.load()).operations).toEqual([op])
-    expect(h.emitted).toEqual([])
-  })
-
-  test('head mismatch discovers the exact framed payload and accepts at its found position', async () => {
-    const h = setup()
+test.each([30_000, 100])(
+  'deadline survives reconstruction with changed configuration %s',
+  async (timeout) => {
+    const h = await setup()
+    h.tick(0)
     const op = await h.built()
     h.mismatch()
-    const found = asLogPosition('006')
-    h.deps.searchLog = vi.fn(async () => ({ found }))
-    const next = await stepOperation(h.deps, op)
-    expect(next).toEqual({ ...op, stage: 'accepted', acceptedAs: found })
-    expect(h.deps.searchLog).toHaveBeenCalledWith(head, payloadDigest)
-    expect((await h.store.load()).welcomes).toHaveLength(1)
-  })
-
-  test('proven absence retries from the original intent and pulls only on the next step', async () => {
-    const h = setup()
-    const op = await h.built()
-    h.mismatch()
-    const next = await stepOperation(h.deps, op)
-    expect(next).toEqual({ ...request, stage: 'intent', seq: 1, enqueuedAt: 100, deadline: 1_100 })
-    expect(h.deps.pullToHead).toHaveBeenCalledTimes(1)
+    const restarted = { ...h.deps, operationTimeoutMs: timeout }
+    h.tick(999)
+    expect((await stepOperation(restarted, op))?.deadline).toBe(1_000)
     expect((await h.store.load()).outcomes).toEqual([])
-    if (next == null) throw new Error('expected retry')
-    await stepOperation(h.deps, next)
-    expect(h.deps.pullToHead).toHaveBeenCalledTimes(2)
-  })
-
-  test('a deadline based on persisted enqueue time survives rebuilding and a restart', async () => {
-    const h = setup()
-    h.mismatch()
-    const first = await h.built()
-    h.tick(500)
-    const intent = await stepOperation(h.deps, first)
-    if (intent == null) throw new Error('expected intent')
-    await stepOperation(h.deps, intent)
-    const restored = (await h.store.load()).operations[0]
-    if (restored == null) throw new Error('expected persisted operation')
-    h.tick(1_101)
-    const restarted = { ...h.deps, now: () => 1_101 }
-    expect(await stepOperation(restarted, restored)).toBeNull()
-    expect((await h.store.load()).outcomes).toMatchObject([
-      { kind: 'lost', opID: request.id, at: 1_101 },
-    ])
+    h.tick(1_000)
+    expect(await stepOperation(restarted, op)).toBeNull()
+    expect((await h.store.load()).outcomes).toMatchObject([{ kind: 'lost', at: 1_000 }])
+    h.tick(1_001)
     expect((await h.store.load()).operations).toEqual([])
-    expect(h.emitted).toHaveLength(1)
+    expect(h.deps.publish).toHaveBeenCalledOnce()
+    expect((await h.store.load()).commitOnce).not.toBeNull()
+  },
+)
+
+test('default timeout expires at the persisted deadline boundary', async () => {
+  const h = await setup()
+  h.deps.operationTimeoutMs = undefined
+  const op = await h.built()
+  expect(op.deadline).toBe(30_100)
+  h.mismatch()
+  h.tick(30_099)
+  expect((await stepOperation(h.deps, op))?.stage).toBe('built')
+  h.tick(30_100)
+  expect(await stepOperation(h.deps, op)).toBeNull()
+  expect((await h.store.load()).outcomes).toMatchObject([{ kind: 'lost', at: 30_100 }])
+})
+
+test('never-built expired intents lose without building', async () => {
+  const h = await setup()
+  const op = await h.enqueue()
+  h.tick(op.deadline)
+  expect(await stepOperation(h.deps, op)).toBeNull()
+  expect(h.deps.prepareBuild).not.toHaveBeenCalled()
+  expect(h.emitted).toMatchObject([{ kind: 'lost' }])
+})
+
+test('enqueue persists FIFO intents and resolves ambiguous committed writes', async () => {
+  const h = await setup()
+  const first = await h.enqueue()
+  h.store.commitThenRejectNext('apply')
+  const second = await enqueueOperation(h.deps, {
+    ...request,
+    id: 'remove',
+    kind: 'remove',
+    revokes: true,
   })
+  expect(first).toEqual({ ...request, seq: 1, enqueuedAt: 100, deadline: 1_100, stage: 'intent' })
+  expect(second.seq).toBe(2)
+  expect((await h.store.load()).operations).toEqual([first, second])
+})
 
-  test('retention gaps settle unknown, even after the deadline', async () => {
-    const h = setup()
-    const op = await h.built()
-    h.mismatch()
-    h.deps.searchLog = async () => 'gap'
-    h.tick(10_000)
-    expect(await stepOperation(h.deps, op)).toBeNull()
-    expect((await h.store.load()).outcomes).toMatchObject([{ kind: 'unknown', opID: request.id }])
-    expect(h.emitted).toHaveLength(1)
-  })
-
-  test('other publish errors keep built, including after the deadline', async () => {
-    const h = setup()
-    const op = await h.built()
-    h.deps.publish = async () => {
-      throw new Error('network unavailable')
-    }
-    h.tick(10_000)
-    expect(await stepOperation(h.deps, op)).toEqual(op)
-    expect((await h.store.load()).operations).toEqual([op])
-    expect(h.writes).toHaveLength(2)
-    expect(h.emitted).toEqual([])
-  })
-
-  test('built replay republishes the same bytes and ID after the host moves epoch', async () => {
-    const h = setup()
-    await h.built()
-    const op = (await h.store.load()).operations[0]
-    if (op == null) throw new Error('expected persisted operation')
-    const moved = { ...h.deps, build: vi.fn(async () => ({ ...hostBuilt, epoch: 99 })) }
-    const next = await stepOperation(moved, op)
-    expect(next?.stage).toBe('accepted')
-    expect(h.deps.publish).toHaveBeenCalledWith(payload, publishID, head)
-    expect(moved.build).not.toHaveBeenCalled()
-    expect(h.deps.frame).toHaveBeenCalledOnce()
-  })
-
-  test('re-wrapped bodies with the same MLS digest cannot establish acceptance', async () => {
-    const h = setup()
-    const op = await h.built()
-    h.deps.publish = async () => {
-      throw new HeadMismatchError()
-    }
-    const rewrapped = new TextEncoder().encode('abc-corrupted-bodies')
-    const rewrappedDigest = createHash('sha256').update(rewrapped).digest('base64url')
-    // The MLS commit is unchanged, but its frame bytes no longer match.
-    h.deps.searchLog = async (_from, digest) => {
-      if (digest === 'commit-digest' || digest === rewrappedDigest) return { found: position }
-      expect(digest).toBe(payloadDigest)
-      return 'absent'
-    }
-    expect((await stepOperation(h.deps, op))?.stage).toBe('intent')
-    expect((await h.store.load()).welcomes).toEqual([])
-    expect(h.emitted).toEqual([])
-  })
-
-  test.each([true, false])(
-    'moved adoption consults the framed epoch and leaves branch evidence alone (match=%s)',
-    async (match) => {
-      const h = setup()
-      const op = await h.accepted()
-      const laterCursor = { position: asLogPosition('010'), epoch: 10, stranded: true as const }
-      const row = { ...applied, digest: match ? 'commit-digest' : 'other-commit', opID: null }
-      await h.store.apply({ putApplied: [row], cursor: laterCursor }, 'incoming')
-      h.deps.adopt = async () => 'moved'
-      h.deps.pullToHead = vi.fn(async () => {})
-      h.deps.appliedAt = vi.fn((epoch) => (epoch === 4 ? row : undefined))
-      expect(await stepOperation(h.deps, op)).toEqual(match ? null : op)
-      const snapshot = await h.store.load()
-      expect(snapshot.applied).toEqual([row])
-      expect(snapshot.cursor).toEqual(laterCursor)
-      expect(h.deps.appliedAt).toHaveBeenCalledWith(4)
-      expect(h.deps.pullToHead).toHaveBeenCalledOnce()
-      expect(snapshot.operations).toHaveLength(match ? 0 : 1)
-      expect(snapshot.outcomes).toMatchObject(match ? [{ kind: 'landed', position }] : [])
-      expect(h.emitted).toHaveLength(match ? 1 : 0)
-    },
-  )
-
-  test('moved adoption without an applied witness remains accepted', async () => {
-    const h = setup()
-    const op = await h.accepted()
-    h.deps.adopt = async () => 'moved'
-    h.deps.appliedAt = () => undefined
-    expect(await stepOperation(h.deps, op)).toEqual(op)
-    expect((await h.store.load()).operations).toEqual([op])
-    expect((await h.store.load()).cursor).toBeNull()
-    expect(h.emitted).toEqual([])
-  })
-
-  test('noop adoption repairs missing control changes without writing host state', async () => {
-    const h = setup()
-    const op = await h.accepted()
-    h.deps.adopt = async () => 'noop'
-    expect(await stepOperation(h.deps, op)).toBeNull()
-    const snapshot = await h.store.load()
-    expect(snapshot.operations).toEqual([])
-    expect(snapshot.outcomes).toMatchObject([{ kind: 'landed', position, opID: request.id }])
-    expect(snapshot.applied).toEqual([applied])
-    expect(snapshot.cursor).toEqual({ position, epoch: 5 })
-    expect(await h.store.loadState()).toBeNull()
-    expect(h.emitted).toEqual(snapshot.outcomes)
-  })
-
-  test('noop repair preserves an existing outcome, applied row and later cursor', async () => {
-    const h = setup()
-    const op = await h.accepted()
-    const outcome: Outcome = {
-      id: 'prior-outcome',
+test('saved build references its slot and certified landing co-commits durable effects', async () => {
+  const h = await setup()
+  const op = await h.built()
+  expect(op.built).toEqual({ incarnation: 1, epoch: 4, publishID, payloadDigest })
+  expect(h.deps.pullToHead).toHaveBeenCalledOnce()
+  expect(h.deps.publish).not.toHaveBeenCalled()
+  expect((await h.store.load()).welcomes).toEqual([])
+  h.tick(200)
+  expect(await stepOperation(h.deps, op)).toBeNull()
+  const snapshot = await h.store.load()
+  expect(snapshot.operations).toEqual([])
+  expect(snapshot.commitOnce).toBeNull()
+  expect(snapshot.commitOnceAcceptance).toBeNull()
+  const applied = {
+    epoch: 4,
+    digest: 'commit-digest',
+    payloadDigest,
+    sequenceID: position,
+    opID: request.id,
+    removed: false,
+  }
+  expect(snapshot.applied).toEqual([applied])
+  expect(snapshot.cursor).toEqual({ position, epoch: 5 })
+  expect(snapshot.outcomes).toEqual([
+    {
+      id: JSON.stringify(['control:landed', request.id, publishID, position]),
       opID: request.id,
-      at: 150,
       kind: 'landed',
       position,
-    }
-    const row = { ...applied, opID: null }
-    const laterCursor = { position: asLogPosition('010'), epoch: 10 }
-    await h.store.apply({ putOutcomes: [outcome], putApplied: [row], cursor: laterCursor }, 'prior')
-    h.deps.adopt = async () => 'noop'
-    expect(await stepOperation(h.deps, op)).toBeNull()
-    const snapshot = await h.store.load()
-    expect(snapshot.outcomes).toEqual([outcome])
-    expect(snapshot.applied).toEqual([row])
-    expect(snapshot.cursor).toEqual(laterCursor)
-    expect(snapshot.operations).toEqual([])
-    expect(h.emitted).toEqual([])
-  })
-
-  test.each(['installed', 'noop'] as const)(
-    'landing prunes applied and response windows in the same transaction (%s)',
-    async (adoption) => {
-      const h = setup()
-      h.deps.build = async () => ({ ...hostBuilt, epoch: 64, welcome: null })
-      const op = await h.accepted()
-      await h.store.apply(
-        {
-          putApplied: Array.from({ length: 64 }, (_, epoch) => ({ ...applied, epoch })),
-          putResponses: [
-            { epoch: 0, position: asLogPosition('old'), digest: 'old', kind: 'refused' },
-            { epoch: 1, position: asLogPosition('boundary'), digest: 'boundary', kind: 'refused' },
-          ],
-        },
-        'seed-window',
-      )
-      if (adoption === 'noop') h.deps.adopt = async () => 'noop'
-      expect(await stepOperation(h.deps, op)).toBeNull()
-      const snapshot = await h.store.load()
-      expect(snapshot.applied.map((row) => row.epoch)).toEqual(
-        Array.from({ length: 64 }, (_, index) => index + 1),
-      )
-      expect(snapshot.applied.at(-1)).toMatchObject({ epoch: 64, opID: request.id })
-      expect(snapshot.responses.map((row) => row.position)).toEqual(['boundary'])
-      expect(snapshot.operations).toEqual([])
-      expect(snapshot.welcomes).toEqual([])
+      at: 200,
     },
+  ])
+  expect(snapshot.welcomes).toEqual([
+    { opID: request.id, welcome: new Uint8Array([9]), recipients: ['bob'], committed: true },
+  ])
+  expect(h.deps.adopt).toHaveBeenCalledWith(
+    new Uint8Array([2]),
+    expect.objectContaining({
+      key,
+      stateVersion: 1,
+      identity: expect.objectContaining({ epoch: 4 }),
+      acceptance: expect.objectContaining({ from: head, position, payloadDigest }),
+    }),
+    expect.objectContaining({
+      changes: expect.objectContaining({ deleteOperations: [request.id] }),
+    }),
   )
+  expect(h.emitted).toEqual(snapshot.outcomes)
+  expect(landedChanges(op, position, applied)).toMatchObject({
+    deleteOperations: [request.id],
+    putApplied: [applied],
+    cursor: { position, epoch: 5 },
+  })
+  expect(landedChanges(op, position, { ...applied, removed: true }).cursor).toEqual({
+    position,
+    epoch: 5,
+    stranded: true,
+  })
+})
 
-  test('settlement emits only after the outcome is durably committed', async () => {
-    const h = setup()
-    const op = await h.built()
-    h.mismatch()
-    h.deps.searchLog = async () => 'gap'
-    h.store.failNext('mid-apply')
-    await expect(stepOperation(h.deps, op)).rejects.toThrow('Injected transaction failure')
-    expect(h.emitted).toEqual([])
-    expect((await h.store.load()).operations).toEqual([op])
-    h.store.commitThenRejectNext('apply')
-    expect(await stepOperation(h.deps, op)).toBeNull()
+test.each(['not authorised', 'holder evidence refused'])(
+  'explicit rejection settles durably: %s',
+  async (reason) => {
+    const h = await setup()
+    h.deps.prepareBuild = async (operation) => ({ kind: 'rejected', operation, reason })
+    expect(await stepOperation(h.deps, await h.enqueue())).toBeNull()
+    expect((await h.store.load()).operations).toEqual([])
+    expect((await h.store.load()).outcomes).toMatchObject([{ kind: 'rejected', reason }])
     expect(h.emitted).toEqual((await h.store.load()).outcomes)
-  })
+    expect(h.deps.frame).not.toHaveBeenCalled()
+  },
+)
 
-  test('landed changes bind the framed epoch row and next-epoch cursor in one write', async () => {
-    const h = setup()
-    const op = await h.accepted()
-    const changes = landedChanges(op, position, applied)
-    expect(changes).toMatchObject({
-      deleteOperations: [request.id],
-      putOutcomes: [{ kind: 'landed', opID: request.id, position }],
-      putApplied: [applied],
-      cursor: { position, epoch: 5 },
-    })
-    expect(landedChanges(op, position, { ...applied, removed: true }).cursor).toEqual({
-      position,
-      epoch: 5,
-      stranded: true,
-    })
+test.each(['occupied', 'moved'] as const)(
+  'preparation %s keeps the intent without an outcome',
+  async (kind) => {
+    const h = await setup()
+    const op = await h.enqueue()
+    h.deps.prepareBuild = async (operation) => ({ kind, operation })
+    expect(await stepOperation(h.deps, op)).toEqual(op)
+    expect((await h.store.load()).operations).toEqual([op])
+    expect(h.emitted).toEqual([])
+  },
+)
+
+test('transient preparation failure keeps the intent', async () => {
+  const h = await setup()
+  const op = await h.enqueue()
+  const error = new Error('state unavailable')
+  h.deps.prepareBuild = async () => {
+    throw error
+  }
+  await expect(stepOperation(h.deps, op)).rejects.toBe(error)
+  expect((await h.store.load()).operations).toEqual([op])
+  expect(h.emitted).toEqual([])
+})
+
+test('complete head-only absence refreshes CAS without rebuilding', async () => {
+  const h = await setup()
+  const op = await h.built()
+  const slot = (await h.store.load()).commitOnce
+  h.mismatch()
+  const nextHead = asLogPosition('006')
+  h.deps.readHead = async () => nextHead
+  for (let attempt = 0; attempt < 6; attempt++) expect(await stepOperation(h.deps, op)).toEqual(op)
+  expect((await h.store.load()).commitOnce).toEqual({ ...slot, expectedHead: nextHead })
+  expect(h.deps.prepareBuild).toHaveBeenCalledOnce()
+  expect(h.deps.frame).toHaveBeenCalledOnce()
+  expect(h.deps.searchLog).toHaveBeenCalledTimes(12)
+  expect(h.deps.publish).toHaveBeenCalledTimes(6)
+  expect(h.deps.publish).toHaveBeenLastCalledWith(payload, publishID, nextHead)
+})
+
+test('proposal and version changes after built-save retain identical bytes', async () => {
+  const h = await setup()
+  const op = await h.built()
+  const slot = (await h.store.load()).commitOnce
+  h.mismatch()
+  await h.store.saveState(
+    encodeControlFixtureState({ ...key, epoch: 4, authenticator: new Uint8Array([3]) }),
+  )
+  expect(await stepOperation(h.deps, op)).toEqual(op)
+  expect((await h.store.load()).commitOnce).toEqual(slot)
+  expect(h.deps.frame).toHaveBeenCalledOnce()
+  expect(h.deps.prepareBuild).toHaveBeenCalledOnce()
+  expect(h.deps.publish).toHaveBeenCalledWith(payload, publishID, head)
+})
+
+test('gap holds before deadline and settles unknown at deadline', async () => {
+  const h = await setup()
+  const op = await h.built()
+  const slot = (await h.store.load()).commitOnce
+  h.deps.searchLog = async () => ({ kind: 'unknown' })
+  expect(await stepOperation(h.deps, op)).toEqual(op)
+  h.tick(op.deadline)
+  expect(await stepOperation(h.deps, op)).toBeNull()
+  expect((await h.store.load()).outcomes).toMatchObject([{ kind: 'unknown' }])
+  await h.store.apply({ deleteOutcomes: [request.id] }, 'ack')
+  expect((await h.store.load()).commitOnce).toEqual(slot)
+  expect(h.deps.publish).not.toHaveBeenCalled()
+})
+
+test('transport failure retries before expiry and never hands off after expiry', async () => {
+  const h = await setup()
+  const op = await h.built()
+  h.deps.publish = vi.fn(async () => {
+    throw new Error('Offline')
   })
+  expect(await stepOperation(h.deps, op)).toEqual(op)
+  h.tick(op.deadline)
+  expect(await stepOperation(h.deps, op)).toBeNull()
+  expect(h.deps.publish).toHaveBeenCalledOnce()
+  expect((await h.store.load()).outcomes).toMatchObject([{ kind: 'lost' }])
+})
+
+test('already handed-off acceptance can land after expiry without another handoff', async () => {
+  const h = await setup()
+  const op = await h.built()
+  h.deps.publish = vi.fn(async () => {
+    h.tick(op.deadline + 1)
+    h.found()
+    return { sequenceID: position }
+  })
+  expect(await stepOperation(h.deps, op)).toBeNull()
+  expect(h.deps.publish).toHaveBeenCalledOnce()
+  expect(h.emitted).toMatchObject([{ kind: 'landed' }])
+})
+
+test('epoch advance rebuilds only after complete absence and intent revalidation', async () => {
+  const h = await setup()
+  const op = await h.built()
+  await h.move(5)
+  h.deps.searchLog = async () => ({ kind: 'unknown' })
+  expect(await stepOperation(h.deps, op)).toEqual(op)
+  h.deps.searchLog = async () => ({ kind: 'absent' })
+  const intent = await stepOperation(h.deps, op)
+  expect(intent).toEqual({ ...request, seq: 1, enqueuedAt: 100, deadline: 1_100, stage: 'intent' })
+  expect(h.deps.prepareBuild).toHaveBeenCalledOnce()
+  if (intent === null) throw new Error('expected intent')
+  h.deps.prepareBuild = vi.fn<OperationDeps['prepareBuild']>(async (operation) => ({
+    kind: 'rejected',
+    operation,
+    reason: 'already satisfied',
+  }))
+  expect(await stepOperation(h.deps, intent)).toBeNull()
+  expect(h.emitted).toMatchObject([{ kind: 'rejected', reason: 'already satisfied' }])
+  expect(h.deps.publish).not.toHaveBeenCalled()
+})
+
+test('same-epoch divergence never republishes', async () => {
+  const h = await setup()
+  const op = await h.built()
+  await h.move(4)
+  h.mismatch()
+  expect(await stepOperation(h.deps, op)).toEqual(op)
+  expect(h.deps.publish).not.toHaveBeenCalled()
+  expect((await h.store.load()).controlHold).toMatchObject({ reason: 'fork-evidence' })
+})
+
+test('accepted replay rechecks proof before adopt or Welcome release', async () => {
+  const h = await setup()
+  const op = await h.built()
+  const slot = (await h.store.load()).commitOnce
+  if (slot === null) throw new Error('expected slot')
+  const acceptance = await h.proof(slot)
+  const accepted: Operation = { ...op, stage: 'accepted', acceptedAs: position, acceptance }
+  await h.store.apply({ putOperations: [accepted], commitOnceAcceptance: acceptance }, 'accepted')
+  h.deps.searchLog = async () => ({ kind: 'unknown' })
+  expect(await stepOperation(h.deps, accepted)).toEqual(accepted)
+  expect(h.deps.adopt).not.toHaveBeenCalled()
+  expect(h.deps.publish).not.toHaveBeenCalled()
+})
+
+test('moved adoption retains accepted work without synthesising branch evidence', async () => {
+  const h = await setup()
+  const op = await h.built()
+  h.found()
+  h.deps.adopt = async () => 'moved'
+  expect(await stepOperation(h.deps, op)).toEqual(op)
+  const snapshot = await h.store.load()
+  expect(snapshot.operations).toMatchObject([{ stage: 'accepted', acceptedAs: position }])
+  expect(snapshot.applied).toEqual([])
+  expect(snapshot.cursor).toEqual({ position: head, epoch: 4 })
+  expect(snapshot.outcomes).toEqual([])
+})
+
+test('settlement emits only after the outcome is durably committed', async () => {
+  const h = await setup()
+  const op = await h.built()
+  h.deps.searchLog = async () => ({ kind: 'unknown' })
+  h.tick(op.deadline)
+  h.store.failNext('mid-apply')
+  await expect(stepOperation(h.deps, op)).rejects.toThrow('Injected transaction failure')
+  expect(h.emitted).toEqual([])
+  expect((await h.store.load()).operations).toEqual([op])
+  h.store.commitThenRejectNext('apply')
+  expect(await stepOperation(h.deps, op)).toBeNull()
+  expect(h.emitted).toEqual((await h.store.load()).outcomes)
 })

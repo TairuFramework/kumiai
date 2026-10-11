@@ -1,11 +1,6 @@
 import { randomIdentity } from '@kokuin/token'
 import { commitLedgerEntries, createGroup, signLedgerEntry } from '@kumiai/mls'
-import {
-  createGroupCrypto,
-  createGroupMLS,
-  createLedgerEntrySlot,
-  simpleHandleAccess,
-} from '@kumiai/mls-rpc'
+import { createGroupCrypto, createGroupMLS, createLedgerEntrySlot } from '@kumiai/mls-rpc'
 import {
   assertFrameFits,
   commitTopic,
@@ -17,6 +12,7 @@ import { expect, test, vi } from 'vitest'
 
 import {
   chat,
+  createDurableHandleAccess,
   createMemoryAppCursorStore,
   createMemoryAppOutbox,
   createOperationHost,
@@ -75,8 +71,7 @@ test('a final frame one byte above the hub cap settles rejected before publishin
   const hub = createWireHub()
   const identity = randomIdentity()
   let group = (await createGroup(identity, 'frame-cap-side-effects')).group
-  const access = simpleHandleAccess({
-    stateVersion: () => 0,
+  const access = createDurableHandleAccess({
     handle: () => group,
     adopt: (next) => {
       group = next
@@ -86,7 +81,7 @@ test('a final frame one byte above the hub cap settles rejected before publishin
   const mls = createGroupMLS({ access, identity, entrySlot: createLedgerEntrySlot() })
   const connection = hub.connect(identity)
   const publish = vi.spyOn(connection, 'publish')
-  const host = createOperationHost(access)
+  const host = createOperationHost(access, identity)
   const put = vi.spyOn(host.control, 'apply')
   const peer = createGroupPeer<Protocols>({
     appOutbox: createMemoryAppOutbox(),
@@ -96,6 +91,15 @@ test('a final frame one byte above the hub cap settles rejected before publishin
     mls,
     localDID: identity.id,
     ...host,
+    prepareBuild: (op, frame) =>
+      host.prepareBuild(op, (built, seal) =>
+        frame(built, async (bytes) => {
+          const result = await seal(bytes)
+          const sealed = new Uint8Array(786433 - built.commit.length - 9)
+          sealed.set(result.sealed)
+          return { ...result, sealed }
+        }),
+      ),
     appCursorStore: createMemoryAppCursorStore(),
     protocols: { chat },
     handlers: {
@@ -111,10 +115,6 @@ test('a final frame one byte above the hub cap settles rejected before publishin
       value: 'cap',
     })
     const built = await commitLedgerEntries(group, [token])
-    vi.spyOn(crypto, 'sealEntries').mockResolvedValue({
-      sealed: new Uint8Array(786433 - built.commitMessage.length - 9),
-      epoch: Number(group.epoch),
-    })
     const before = publish.mock.calls.length
     const request = operationRequest('ledger', { tokens: [token] })
     host.builders.set(request.id, async () => ({

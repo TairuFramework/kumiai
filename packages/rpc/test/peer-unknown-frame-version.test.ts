@@ -9,6 +9,8 @@ import {
 } from '../src/handshake.js'
 import { decodeRecoveryRequest, encodeRecoveryReply } from '../src/recovery.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
+import { publishCommit } from './fixtures/commits.js'
+import { assertDurableControlHold } from './fixtures/control-hold.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
@@ -77,102 +79,54 @@ function bobsRecoveryRequest(
   return decodeRecoveryRequest(frame.payload)
 }
 
-/**
- * A frame whose handshake version this build does not know is the one unreadable frame that
- * means something: on the COMMIT topic it is evidence the group moved to a format this build
- * cannot read. It must take the `ahead` path — step over, heal, strand.
- *
- * Filing it as poison is the failure this suite exists to catch, and it is silent. After a
- * version bump EVERY frame is unreadable, so there is never a "next frame" to heal from: the
- * peer steps over the group's entire future, drains to the end of the log, records the live
- * tip, and reports itself fully reconciled at an epoch nobody else is at. No error, no heal,
- * and no restart that fixes it.
- */
 describe('a frame whose handshake version this build does not know', () => {
-  test('an unknown future kind on the commit topic requests a heal', async () => {
-    const hub = new FakeHub()
-    const rs = new Uint8Array(32).fill(0x75)
-    const frame = futureVersionFrame()
-    frame[HANDSHAKE_MAGIC.length + 1] = 0xee
-    await hub.publish({ senderDID: 'zoe', topicID: commitTopic(rs), payload: frame, retain: 'log' })
-
-    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-    await vi.waitFor(() => expect(healsBy(hub, rs, 'bob')).toHaveLength(1))
-    await bob.peer.dispose()
-  })
-
-  test('on the commit topic: the peer heals, and its epoch moves', async () => {
-    const hub = new FakeHub()
-    const rs = new Uint8Array(32).fill(0x71)
-
-    const { sequenceID } = await publishFutureFrame(hub, rs)
-    // Carol runs the build that WROTE that frame, so it says nothing to her and she stays on
-    // the group's line — the live member able to answer Bob's rendezvous. Modelled by keeping
-    // the frame out of her log, since a fixture cannot run two builds at once.
-    hub.hideFrom('carol', sequenceID)
-    const carol = makeMLSPeer(hub, 'carol', rs, { epoch: 1, members, recovery })
-    await carol.peer.replay()
-    expect(carol.mls.epoch()).toBe(1)
-
-    // Bob runs today's build and meets it.
-    vi.useFakeTimers()
-    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-    try {
-      await vi.waitFor(() => {
-        expect(healsBy(hub, rs, 'bob')).toHaveLength(1)
-        expect(bob.mls.epoch()).toBeGreaterThan(1)
-        expect(bob.mls.epoch()).toBe(carol.mls.epoch())
+  test.each([false, true])(
+    'unsupported outer version persists a hold (unknown kind: %s)',
+    async (unknownKind) => {
+      const hub = new FakeHub()
+      const rs = new Uint8Array(32).fill(0x75)
+      const frame = futureVersionFrame()
+      if (unknownKind) frame[HANDSHAKE_MAGIC.length + 1] = 0xee
+      const { sequenceID } = await hub.publish({
+        senderDID: 'zoe',
+        topicID: commitTopic(rs),
+        payload: frame,
+        retain: 'log',
       })
-    } finally {
-      vi.useRealTimers()
-    }
+      const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
+      await assertDurableControlHold(bob, hub, rs, 'bob', {
+        reason: 'unsupported-version',
+        position: sequenceID,
+      })
+    },
+  )
 
-    // The assertion is the heal ACTUALLY happening — a rendezvous Bob asked for, and an epoch
-    // that moved — not the absence of an error. A peer that files the frame as poison throws
-    // nothing at all.
-    expect(healsBy(hub, rs, 'bob')).toHaveLength(1)
-    expect(bob.mls.epoch()).toBeGreaterThan(1)
-    // And he landed on the group's line, not a branch of his own: his rejoin is an external
-    // commit like any other, so it takes Carol with him.
-    expect(bob.mls.epoch()).toBe(carol.mls.epoch())
-
-    await bob.peer.dispose()
-    await carol.peer.dispose()
-  })
-
-  test('the cursor does not step over it as poison: the peer is stranded, not reconciled', async () => {
+  test('the cursor does not step over an unsupported frame and private control stays pending', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x72)
-
-    await publishFutureFrame(hub, rs)
+    const { sequenceID } = await publishFutureFrame(hub, rs)
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-    // Short of the 250ms deadline, so the heal may still be retrying — nobody is there to answer
-    // it either way. Bob's only evidence he is off the group's line is the in-memory strand: the
-    // frame that raised it is behind his cursor and the live tip is recorded, exactly as on the
-    // `ahead` path.
-    await vi.waitFor(() => expect(healsBy(hub, rs, 'bob')).toHaveLength(1))
-
+    await vi.waitFor(async () =>
+      expect((await bob.control.load()).controlHold?.reason).toBe('unsupported-version'),
+    )
     const headBefore = hub.head(commitTopic(rs))
     const framesBefore = commitFrames(hub, rs)
-
-    // THIS is the poison failure made observable. A peer that stepped over the frame and called
-    // itself reconciled would commit happily here, win the compare-and-set at a dead epoch, and
-    // land a commit on a branch of one.
     await bob.peer.enqueue(buildLedgerCommit(bob, ['role:zoe=admin']))
-
     expect(commitFrames(hub, rs)).toBe(framesBefore)
     expect(hub.head(commitTopic(rs))).toBe(headBefore)
     expect(bob.mls.epoch()).toBe(1)
     expect((await bob.control.load()).operations[0]?.stage).toBe('intent')
-
-    await bob.peer.dispose()
+    await assertDurableControlHold(bob, hub, rs, 'bob', {
+      reason: 'unsupported-version',
+      position: sequenceID,
+    })
   })
 
   test('on the rendezvous topic: a well-formed reply is dropped, not routed to the heal', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x74)
 
-    await publishFutureFrame(hub, rs)
+    await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 3 })
     // The forged reply must arrive while the request is live; the clock advances only after it.
     vi.useFakeTimers()
     const bob = makeMLSPeer(hub, 'bob', rs, {

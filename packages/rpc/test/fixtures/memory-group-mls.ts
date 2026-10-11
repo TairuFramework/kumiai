@@ -9,7 +9,9 @@ import type { AnchorStore } from '../../src/anchor.js'
 import type { SaveControlBuild } from '../../src/control/build.js'
 import type { ControlEvidenceSnapshot } from '../../src/control/search.js'
 import type {
+  AdoptionExpected,
   AdoptionWrite,
+  ControlAdoptionPort,
   ControlStore,
   EpochIdentity,
   GroupKey,
@@ -27,6 +29,10 @@ import { ControlWriteNotCommittedError } from '../../src/errors.js'
 import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
 
 export type MemoryGroupMLS = GroupMLS & {
+  database(): MemoryHostDatabase
+  persistInitialState(): Promise<void>
+  acceptsCommitter(did: string): boolean
+  credentialDID(): string | undefined
   readEvidence(): Promise<ControlEvidenceSnapshot>
   saveBuilt: SaveControlBuild
   control: () => ControlStore
@@ -36,7 +42,7 @@ export type MemoryGroupMLS = GroupMLS & {
   authenticator: () => Uint8Array
   adoptOperation: (
     blob: Uint8Array,
-    expected: { epoch: number; authenticatorBefore: Uint8Array; incarnation: number },
+    expected: Parameters<ControlAdoptionPort['adopt']>[1],
     write: AdoptionWrite,
   ) => Promise<'installed' | 'noop' | 'moved'>
   epoch: () => number
@@ -89,6 +95,48 @@ export type MemoryGroupMLS = GroupMLS & {
    * adopted it. Deliberately unjournalled, so the orphan is repaired by re-recovery.
    */
   failNextRecoveryAdopt: () => void
+}
+
+export type MemoryControlJournal = {
+  source: AdoptionExpected
+  sourceState: Uint8Array
+  candidate: Uint8Array
+}
+export function encodeMemoryControlJournal(value: MemoryControlJournal): Uint8Array {
+  return fromUTF(
+    JSON.stringify({
+      source: {
+        ...value.source,
+        identity:
+          value.source.identity === null
+            ? null
+            : {
+                ...value.source.identity,
+                authenticator: toB64U(value.source.identity.authenticator),
+              },
+      },
+      sourceState: toB64U(value.sourceState),
+      candidate: toB64U(value.candidate),
+    }),
+  )
+}
+export function decodeMemoryControlJournal(blob: Uint8Array): MemoryControlJournal {
+  const value = JSON.parse(toUTF(blob)) as {
+    source: AdoptionExpected & { identity: EpochIdentity & { authenticator: string } }
+    sourceState: string
+    candidate: string
+  }
+  return {
+    source: {
+      ...value.source,
+      identity: {
+        ...value.source.identity,
+        authenticator: fromB64U(value.source.identity.authenticator),
+      },
+    },
+    sourceState: fromB64U(value.sourceState),
+    candidate: fromB64U(value.candidate),
+  }
 }
 
 export type MemoryRecoveryBinding = {
@@ -509,6 +557,9 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     createMemoryHostDatabase({
       readIdentity: (state, key) => decodeMemoryGroupIdentity(state, key, recoverySecret),
     })
+  hostDB.bindIdentity(storageID, (state, key) =>
+    decodeMemoryGroupIdentity(state, key, recoverySecret),
+  )
   const confirmationKeyAt = (at: number, position: string, digest: string): Uint8Array =>
     sha256(concatBytes(recoverySecret, fromUTF(JSON.stringify([groupID, at, position, digest]))))
   const tagFor = (key: Uint8Array, requestID: string): string =>
@@ -664,6 +715,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         ledger,
         ledgerHead,
         bodies: [...bodies],
+        terminal: localDID !== undefined && ![...slots.values()].includes(localDID),
         recoveryAuthenticator,
         epochIdentity,
       }),
@@ -850,6 +902,14 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   }
 
   return {
+    database: () => hostDB,
+    persistInitialState: () =>
+      serialise(async () => {
+        if ((await hostDB.loadState(storageID)) === null)
+          await hostDB.seed(storageID, serializeState())
+      }),
+    acceptsCommitter,
+    credentialDID: () => localDID,
     saveBuilt: (intent, built, expected, mutationID) =>
       serialise(() =>
         hostDB.saveBuilt(
@@ -868,16 +928,42 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     authenticator,
     adoptOperation: (blob, expected, write) =>
       serialise(async () => {
-        const candidate = JSON.parse(toUTF(blob)) as { epoch: number }
-        if (candidate.epoch === epoch && toB64U(blob) === toB64U(serializeState())) return 'noop'
+        const journal = decodeMemoryControlJournal(blob)
+        const state = journal.candidate
+        const candidate = JSON.parse(toUTF(state)) as { epoch: number }
+        const snapshot = await hostDB.snapshot(storageID)
+        const identity = { groupID, incarnation: 1, epoch, authenticator: authenticator() }
+        const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
         if (
-          expected.epoch !== epoch ||
-          expected.incarnation !== 1 ||
-          toB64U(expected.authenticatorBefore) !== toB64U(authenticator())
+          (snapshot.control.controlHold !== null &&
+            snapshot.control.controlHold.reason !== 'acceptance-unknown') ||
+          !same(journal.source.key, expected.key) ||
+          !same(expected.acceptance.source.key, expected.key) ||
+          !same(expected.key, { groupID, incarnation: 1 }) ||
+          !same(expected.identity, identity) ||
+          expected.stateVersion !== snapshot.version ||
+          !same(expected.acceptance.source.identity, journal.source.identity)
+        )
+          return 'moved'
+        if (candidate.epoch === epoch && toB64U(state) === toB64U(serializeState())) {
+          const row = snapshot.control.applied.find(
+            (row) => row.epoch === journal.source.identity?.epoch,
+          )
+          return row?.payloadDigest === expected.acceptance.payloadDigest &&
+            row.sequenceID === expected.acceptance.position
+            ? 'noop'
+            : 'moved'
+        }
+        if (
+          !same(journal.source.identity, identity) ||
+          snapshot.control.commitOnce?.payloadDigest !== expected.acceptance.payloadDigest ||
+          !same(snapshot.control.commitOnce.journal, blob) ||
+          snapshot.control.commitOnce.searchFrom !== expected.acceptance.from ||
+          !same(snapshot.control.commitOnceAcceptance, expected.acceptance)
         )
           return 'moved'
         try {
-          await hostDB.saveState(storageID, blob, write)
+          await hostDB.saveState(storageID, state, { ...write, expected })
         } catch (error) {
           if (
             !(error instanceof Error) ||
@@ -887,7 +973,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
           )
             throw error
         }
-        restoreState(blob)
+        restoreState(state)
         return 'installed'
       }),
     epoch: () => epoch,
@@ -946,12 +1032,12 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         const state =
           snapshot.state === null
             ? null
-            : (JSON.parse(toUTF(snapshot.state)) as { slots: Array<[number, string]> })
+            : (JSON.parse(toUTF(snapshot.state)) as { terminal: boolean })
         return {
           source: { key, stateVersion: snapshot.version, identity },
           applied: snapshot.control.applied,
           cursor: snapshot.control.cursor,
-          terminal: state !== null && !state.slots.some(([, did]) => did === localDID),
+          terminal: state?.terminal === true,
         }
       }),
     readRecoverySource: () =>
@@ -1005,7 +1091,10 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       }
       // At this member's epoch sender identity is checkable separately from commit content.
       // The double uses mismatched identities to model a forged sender claim.
-      if ((parsed.signerDID ?? parsed.committerDID) !== parsed.committerDID) {
+      if (
+        (parsed.signerDID ?? parsed.committerDID) !== parsed.committerDID ||
+        (parsed.committerDID === localDID && parsed.invalidContent === true)
+      ) {
         return { epoch: parsed.epoch, ...(isExternal ? { external: true } : {}) }
       }
       return {
@@ -1110,6 +1199,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             ledger: nextLedger,
             ledgerHead: nextHead,
             bodies: [...nextBodies],
+            terminal: removed,
             epochIdentity: nextIdentity,
           }),
         )

@@ -19,8 +19,11 @@
  * @module mls-rpc
  */
 
+export type { ControlAdoptionPort } from '@kumiai/rpc'
+
 export { type HandleAccess, type SimpleHandleAccessParams, simpleHandleAccess } from './access.js'
 export { type ApplyCommitParams, type ApplyCommitResult, applyCommit } from './apply-commit.js'
+export { createControlAdoptionPort } from './control-adoption.js'
 export {
   createControlBuildPort,
   createPersistenceBuildSaver,

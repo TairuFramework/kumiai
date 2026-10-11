@@ -19,14 +19,10 @@ import type { AnchorStore } from './anchor.js'
 import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 import type { AppDeliveryResumed, AppDeliveryStalled } from './app-lane.js'
 import type { AppOutbox } from './app-outbox.js'
-import type { HostBuilt, OperationDeps } from './control/operations.js'
-import type {
-  ControlStore,
-  Operation,
-  OperationRequest,
-  Outcome,
-  WelcomeObligation,
-} from './control/types.js'
+import type { ControlBuildPort } from './control/build.js'
+import type { OperationDeps } from './control/operations.js'
+import type { ControlEvidenceSnapshot, ControlValidationPort } from './control/search.js'
+import type { ControlStore, OperationRequest, Outcome, WelcomeObligation } from './control/types.js'
 import type {
   GroupCrypto,
   GroupMLS,
@@ -86,7 +82,9 @@ export type GroupPeerMLSParams = {
   onAppOutboxCleared?: (event: AppOutboxCleared) => void | Promise<void>
   control: ControlStore
   /** Build against the current handle without adopting. */
-  build: (op: Operation) => Promise<HostBuilt>
+  prepareBuild: ControlBuildPort['prepareBuild']
+  validation: ControlValidationPort
+  readEvidence(): Promise<ControlEvidenceSnapshot>
   /** Compare and adopt the candidate together with its control write. */
   adopt: OperationDeps['adopt']
   /** Resolves once the transport durably accepts the complete invitation artifact. */
@@ -241,7 +239,9 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
       appOutbox?: undefined
       appOutboxLimit?: undefined
       control?: undefined
-      build?: undefined
+      prepareBuild?: undefined
+      validation?: undefined
+      readEvidence?: undefined
       adopt?: undefined
       deliverWelcome?: undefined
       operationTimeoutMs?: undefined

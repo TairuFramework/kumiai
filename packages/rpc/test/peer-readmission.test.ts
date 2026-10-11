@@ -1,5 +1,6 @@
 import { afterEach, expect, test, vi } from 'vitest'
 
+import { controlBuildRef } from '../src/control/slot.js'
 import { applyChanges, readmissionChanges } from '../src/control/store.js'
 import type { ControlSnapshot } from '../src/control/types.js'
 import { asLogPosition } from '../src/cursor.js'
@@ -40,16 +41,33 @@ function unsettled(): ControlSnapshot {
   return {
     commitOnce: null,
     commitOnceAcceptance: null,
+    controlHold: null,
+    strand: null,
     operations: [
       { ...operation, id: 'intent', seq: 1, stage: 'intent' },
-      { ...operation, id: 'built', seq: 2, stage: 'built', built },
+      { ...operation, id: 'built', seq: 2, stage: 'built', built: controlBuildRef(built) },
       {
         ...operation,
         id: 'accepted',
         seq: 3,
         stage: 'accepted',
-        built,
+        built: controlBuildRef(built),
         acceptedAs: asLogPosition('002'),
+        acceptance: {
+          source: {
+            key: { groupID: 'group-A', incarnation: 1 },
+            stateVersion: 1,
+            identity: {
+              groupID: 'group-A',
+              incarnation: 1,
+              epoch: 1,
+              authenticator: new Uint8Array([1]),
+            },
+          },
+          from: null,
+          position: asLogPosition('002'),
+          payloadDigest: built.payloadDigest,
+        },
       },
     ],
     rejoin: {
@@ -77,7 +95,9 @@ function unsettled(): ControlSnapshot {
       verdict: new Uint8Array([9]),
     },
     outcomes: [{ id: 'settled', opID: 'settled', at: 50, kind: 'lost' }],
-    welcomes: [{ opID: 'accepted', welcome: new Uint8Array([10]), recipients: ['carol'] }],
+    welcomes: [
+      { opID: 'accepted', welcome: new Uint8Array([10]), recipients: ['carol'], committed: true },
+    ],
     applied: [
       {
         epoch: 1,

@@ -1215,7 +1215,10 @@ describe('recovery ordering', { concurrent: false }, () => {
       let seals = 0
       vi.spyOn(bob.crypto, 'wrap').mockImplementation(async (...args) => {
         if (++seals === 2 && during === 'seal') {
-          await bob.peer.commit(buildLedgerCommit(bob, []))
+          if (coverage === 'uncovered') {
+            await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: base })
+            await bob.peer.resync()
+          } else await bob.peer.commit(buildLedgerCommit(bob, []))
           await flush()
         }
         const payload = await wrap(...args)
@@ -1234,7 +1237,10 @@ describe('recovery ordering', { concurrent: false }, () => {
           const result = await publish(params)
           if (!injected && params.senderDID === 'bob' && params.topicID === appTopic) {
             injected = true
-            await alice.peer.commit(buildLedgerCommit(alice, []))
+            if (coverage === 'uncovered') {
+              await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: base })
+              await alice.peer.resync()
+            } else await alice.peer.commit(buildLedgerCommit(alice, []))
           }
           return result
         })

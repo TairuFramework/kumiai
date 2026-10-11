@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test } from 'vitest'
 import { createMemoryControlStore } from '../../rpc-conformance/src/memory-control-store.js'
 import { classifyCommit } from '../src/classify.js'
 import { appliedRows, forkEvidence, forkSettlement } from '../src/control/forks.js'
+import { controlBuildRef } from '../src/control/slot.js'
 import { applyChanges, applyResolved } from '../src/control/store.js'
 import type { AppliedCommit, ControlSnapshot, Operation, Outcome } from '../src/control/types.js'
 import { asLogPosition, type LogPosition } from '../src/cursor.js'
@@ -21,6 +22,8 @@ import {
 const empty = (): ControlSnapshot => ({
   commitOnce: null,
   commitOnceAcceptance: null,
+  controlHold: null,
+  strand: null,
   operations: [],
   rejoin: null,
   outcomes: [],
@@ -63,8 +66,28 @@ function operation(id: string, seq: number, stage: Operation['stage']): Operatio
     welcome: null,
   }
   return stage === 'built'
-    ? { ...base, stage, built }
-    : { ...base, stage, built, acceptedAs: asLogPosition(String(seq).padStart(12, '0')) }
+    ? { ...base, stage, built: controlBuildRef(built) }
+    : {
+        ...base,
+        stage,
+        built: controlBuildRef(built),
+        acceptedAs: asLogPosition(String(seq).padStart(12, '0')),
+        acceptance: {
+          source: {
+            key: { groupID: 'group-A', incarnation: 1 },
+            stateVersion: 1,
+            identity: {
+              groupID: 'group-A',
+              incarnation: 1,
+              epoch: 1,
+              authenticator: new Uint8Array([1]),
+            },
+          },
+          from: null,
+          position: asLogPosition(String(seq).padStart(12, '0')),
+          payloadDigest: built.payloadDigest,
+        },
+      }
 }
 const landed = (opID: string, epoch: number): Outcome => ({
   id: opID,
@@ -116,7 +139,7 @@ describe('fork settlement', () => {
       classifyCommit({
         header: { epoch: 2 },
         sequenceID: own.acceptedAs,
-        commitDigest: own.built.digest,
+        commitDigest: 'commit-winning-invite',
         state: { localDID: 'bob', epoch: 3, appliedByEpoch: appliedRows(snapshot) },
       }),
     ).toMatchObject({ row: 'fork', branch: 'losing' })
@@ -402,12 +425,7 @@ describe('durable fork evidence', () => {
         await runner.peer.replay()
       } else {
         await runner.peer.enqueue(buildLedgerCommit(runner, []))
-        await expect
-          .poll(
-            () =>
-              hub.published.filter((message) => message.topicID === rendezvousTopic(secret)).length,
-          )
-          .toBeGreaterThan(0)
+        await runner.peer.replay()
       }
       expect(await runner.control.load()).toMatchObject({
         operations: [
@@ -416,19 +434,46 @@ describe('durable fork evidence', () => {
         ],
         outcomes: [],
         applied: snapshot.applied,
+        controlHold: {
+          reason: 'fork-evidence',
+          position: row.sequenceID,
+          evidence: {
+            kind: 'digest-divergence',
+            epoch: 1,
+            position: row.sequenceID,
+            localDigest: row.payloadDigest,
+            remoteDigest: accepted.built.payloadDigest,
+          },
+        },
+        strand: { reason: 'lost-state' },
         cursor: {
           ...snapshot.cursor,
           stranded: true,
-          fork: {
-            conflictEpoch: 1,
-            sharedPosition: null,
-            frameDigest: row.digest,
-          },
         },
       })
       expect(
         hub.published.filter((message) => message.topicID === commitTopic(secret)),
       ).toHaveLength(1)
+      const held = await runner.control.load()
+      expect(
+        hub.published.filter(
+          (message) => message.topicID === rendezvousTopic(secret) && message.senderDID === 'bob',
+        ),
+      ).toEqual([])
+      await runner.peer.dispose()
+      await runner.peer.drained()
+      hub.trim(commitTopic(secret), '999999999999')
+      const again = member(hub, { restartOf: runner })
+      await again.peer.replay()
+      expect((await again.control.load()).controlHold).toEqual(held.controlHold)
+      expect((await again.control.load()).commitOnce).toEqual(held.commitOnce)
+      expect((await again.control.load()).cursor).toEqual(held.cursor)
+      expect((await again.control.load()).strand).toEqual(held.strand)
+      expect(
+        hub.published.filter(
+          (message) => message.topicID === rendezvousTopic(secret) && message.senderDID === 'bob',
+        ),
+      ).toEqual([])
     },
   )
 

@@ -5,9 +5,11 @@ import { encodeCommitFrame } from '../src/commit-frame.js'
 import { encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { createHubMux } from '../src/hub-mux.js'
 import { assertFrameFits, FrameTooLargeError } from '../src/index.js'
+import { encodeLedgerEntries } from '../src/ledger-entries.js'
 import { encodeRecoveryReply } from '../src/recovery.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { buildLedgerCommit, intent, makeMLSPeer } from './fixtures/peer.js'
+import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 
 test('measures final base64 at the hub boundary', () => {
   const rows = [786431, 786432, 786433].map((rawBytes) => {
@@ -34,11 +36,20 @@ test('frameCapBeforeSideEffects', async () => {
     const member = makeMLSPeer(hub, 'did:key:alice', new Uint8Array(32).fill(31))
     try {
       await member.peer.replay()
-      const request = buildLedgerCommit(member, [])
-      const pending = await member.buildOperation(intent(request))
-      member.crypto.sealEntries = async () => ({
-        sealed: new Uint8Array(rawFrameBytes - pending.commit.length - 9),
-        epoch: member.mls.epoch(),
+      const request = buildLedgerCommit(member, [], {
+        transform: async (built) => {
+          const sealed = await member.crypto
+            .restart()
+            .sealEntries(encodeLedgerEntries(built.bodies))
+          const data = JSON.parse(new TextDecoder().decode(built.commit)) as Record<string, unknown>
+          const empty = new TextEncoder().encode(JSON.stringify({ ...data, padding: '' }))
+          const padding = 'x'.repeat(rawFrameBytes - empty.length - sealed.sealed.length - 9)
+          const commit = new TextEncoder().encode(JSON.stringify({ ...data, padding }))
+          const candidate = createMemoryGroupMLS({ recoverySecret: new Uint8Array(32).fill(31) })
+          candidate.restoreState(member.mls.serializeState())
+          await candidate.processCommit(commit, {})
+          return { ...built, commit, journal: candidate.serializeState() }
+        },
       })
       const before = hub.published.length
       const error = await member.peer.commit(request).then(

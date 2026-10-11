@@ -213,13 +213,14 @@ describe('delayed ledger bootstrap', () => {
       }
       return save(anchor)
     })
-    // Her own unmerged commit establishes the strand gate without stranding the responder.
+    bob.mls.adopt(bob.mls.buildCommit([]))
+    await bob.database.saveState('bob', bob.mls.serializeState())
     await publishCommit({
       hub: state.hub,
       senderDID: 'alice',
-      committerDID: 'alice',
+      committerDID: 'carol',
       recoverySecret: state.rs,
-      epoch: alice.mls.epoch(),
+      epoch: alice.mls.epoch() + 1,
     })
     await vi.waitFor(() => expect(events.some((event) => event.phase === 'failed')).toBe(true))
     expect(events[1]).toMatchObject({ phase: 'failed', reason: 'error', error })

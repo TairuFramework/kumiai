@@ -55,7 +55,8 @@ describe('operation replay', () => {
     const request = buildLedgerCommit(seed, ['role=admin'])
     await seed.peer.enqueue(request).catch(() => {})
     await expect.poll(async () => (await seed.control.load()).operations[0]?.stage).toBe('built')
-    const built = (await seed.control.load()).operations[0]
+    const builtSnapshot = await seed.control.load()
+    const built = builtSnapshot.operations[0]
     await seed.peer.dispose()
     await seed.peer.drained()
     fail = false
@@ -63,7 +64,7 @@ describe('operation replay', () => {
     await expect.poll(async () => (await restarted.peer.outcomes()).length).toBe(1)
     if (built?.stage !== 'built') throw new Error('Expected saved build')
     expect(hub.published.find((row) => row.topicID === commitTopic(secret))?.payload).toEqual(
-      built.built.payload,
+      builtSnapshot.commitOnce?.payload,
     )
     await restarted.peer.dispose()
   })

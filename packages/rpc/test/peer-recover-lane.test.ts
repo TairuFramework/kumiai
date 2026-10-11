@@ -16,6 +16,7 @@ import {
 import { decodeRecoveryReply, encodeRecoveryReply, encodeRecoveryRequest } from '../src/recovery.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
+import { assertDurableControlHold } from './fixtures/control-hold.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
@@ -90,14 +91,17 @@ describe('a heal re-enacts by ledger membership', { concurrent: false }, () => {
     const database = createMemoryHostDatabase()
     const dead = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, database, recovery })
     await dead.peer.resync()
-    database.seam('after-apply', () => {
-      database.seam('after-apply', () => {
-        database.seam('before-apply', () => {
-          void dead.peer.dispose()
-          throw new Error('the process died')
-        })
-      })
-    })
+    const publish = hub.publish.bind(hub)
+    let crashed = false
+    hub.publish = async (params) => {
+      const result = await publish(params)
+      if (params.topicID === commitTopic(rs) && params.senderDID === 'alice' && !crashed) {
+        crashed = true
+        void dead.peer.dispose()
+        throw new Error('the process died after hub acceptance')
+      }
+      return result
+    }
     await bob.peer.resync()
 
     // Admin A commits `circle x -> Foo`. The hub ACCEPTS it — that is what defines this path —
@@ -491,9 +495,9 @@ describe('the lane is never re-entered', { concurrent: false }, () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x55)
 
-    // The operation runner releases the mutex before recovery handles the own-unmerged frame.
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 1 })
-    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
+    // The operation runner releases the mutex before ordinary gap recovery.
+    await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 2 })
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 3, members, recovery })
     await bob.peer.resync()
 
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery })
@@ -523,13 +527,37 @@ describe('the lane is never re-entered', { concurrent: false }, () => {
 })
 
 describe("a crash in recover()'s own acceptance window", { concurrent: false }, () => {
-  test('converges by re-recovery, and the group holds exactly one leaf for the peer', async () => {
+  test('unexplained own bytes hold before recovery can create an external attempt', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x56)
+    const own = await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 1 })
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
+    await bob.peer.resync()
+    const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery })
+    await assertDurableControlHold(alice, hub, rs, 'alice', {
+      reason: 'fork-evidence',
+      position: own.sequenceID,
+      evidence: {
+        kind: 'unexplained-own-commit',
+        digest: publishedCommitDigest(hub, own.sequenceID),
+      },
+    })
+    expect(alice.mls.epoch()).toBe(1)
+    expect(bob.mls.leaves().filter((did) => did === 'alice')).toHaveLength(1)
+    expect(rejoins(hub, rs)).toHaveLength(1)
+    expect(recoveryRequests(hub, rs)).toEqual([])
+    await bob.peer.dispose()
+  })
+})
+
+describe("a crash in recover()'s own acceptance window", { concurrent: false }, () => {
+  test('an ordinary gap preserves external acceptance recovery and one leaf on restart', async () => {
     controlRecoveryClock(5)
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x56)
 
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 1 })
-    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
+    await publishCommit({ hub, senderDID: 'zoe', recoverySecret: rs, epoch: 2 })
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 3, members, recovery })
     await bob.peer.resync()
 
     const aliceCrypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
@@ -550,7 +578,10 @@ describe("a crash in recover()'s own acceptance window", { concurrent: false }, 
       members,
       recovery,
       onRecovery: (event) => {
-        if (event.phase === 'failed') died = true
+        if (event.phase === 'failed') {
+          died = true
+          void dead.peer.dispose()
+        }
       },
     })
     await drainUntil(

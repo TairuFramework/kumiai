@@ -10,6 +10,7 @@ import {
 import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
 import { commitTopic } from '../src/topic.js'
 import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
+import { assertDurableControlHold } from './fixtures/control-hold.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import {
   createMemoryGroupMLS,
@@ -109,6 +110,7 @@ describe('commit strand observations', () => {
         localEpoch: 1,
       })
       expect(bob.mls.epoch()).toBe(1)
+      expect((await bob.control.load()).strand).toEqual({ reason: 'unprocessable-gap' })
       expect((await bob.control.load()).cursor?.position ?? null).toBeNull()
       await bob.peer.dispose()
     },
@@ -201,24 +203,25 @@ describe('commit strand observations', () => {
       kind: 'own-unmerged',
       confidence: 'authenticated',
     })
-    await vi.waitFor(() =>
-      expect(recoveries.filter((event) => event.phase === 'failed')).toHaveLength(1),
-    )
-    for (const expected of [2, 3]) {
+    for (let wake = 0; wake < 2; wake++) {
       await hub.publish({
         senderDID: 'zoe',
         topicID: commitTopic(rs),
         payload: new Uint8Array([0]),
       })
-      await vi.waitFor(() =>
-        expect(recoveries.filter((event) => event.phase === 'failed')).toHaveLength(expected),
-      )
+      await bob.peer.replay()
     }
+    expect(recoveries).toEqual([])
     expect(observations).toHaveLength(1)
+    await assertDurableControlHold(bob, hub, rs, 'bob', {
+      reason: 'fork-evidence',
+      position: sequenceID,
+      evidence: { kind: 'unexplained-own-commit', digest: publishedCommitDigest(hub, sequenceID) },
+    })
     await bob.peer.dispose()
   })
 
-  test('tampered commit content with valid own sender data remains authenticated and heals', async () => {
+  test('tampered own content without a valid content signature is skipped without recovery', async () => {
     const hub = new FakeHub()
     const rs = secret(0x9a)
     const original = decodeMemoryCommit(encodeMemoryCommit(1, 'bob'))
@@ -251,24 +254,13 @@ describe('commit strand observations', () => {
           recoveries.push(event)
         },
       })
-      await vi.waitFor(() => expect(observations).toHaveLength(1))
-      expect(observations[0]).toEqual({
-        groupID: commitTopic(rs),
-        position: sequenceID,
-        commitDigest: publishedCommitDigest(hub, sequenceID),
-        localEpoch: 1,
-        claimedEpoch: 1,
-        kind: 'own-unmerged',
-        confidence: 'authenticated',
-      })
-      await vi.waitFor(() =>
-        expect(recoveries.some((event) => event.phase === 'started')).toBe(true),
+      await vi.waitFor(async () =>
+        expect((await bob.control.load()).cursor?.position).toBe(sequenceID),
       )
-      await vi.waitFor(() =>
-        expect(
-          recoveries.some((event) => event.phase === 'failed' && event.reason === 'no-responder'),
-        ).toBe(true),
-      )
+      expect(observations).toEqual([])
+      expect(recoveries).toEqual([])
+      expect((await bob.control.load()).controlHold).toBeNull()
+      expect(bob.mls.epoch()).toBe(1)
       await bob.peer.dispose()
     } finally {
       now.mockRestore()

@@ -176,6 +176,8 @@ export function applyChanges(
   return cloneControlValue({
     commitOnce: changes.commitOnce === undefined ? snapshot.commitOnce : changes.commitOnce,
     commitOnceAcceptance: acceptance,
+    controlHold: changes.controlHold === undefined ? snapshot.controlHold : changes.controlHold,
+    strand: changes.strand === undefined ? snapshot.strand : changes.strand,
     operations: putRows(
       snapshot.operations.filter((row) => !changes.deleteOperations?.includes(row.id)),
       changes.putOperations,

@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest'
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
+import { assertDurableControlHold } from './fixtures/control-hold.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { encodeMemoryCommit, memoryEntryID } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
@@ -49,96 +50,56 @@ const fastRecovery = { timeoutMs: 100, getDelayMs: () => 5, deadlineMs: 300 }
 const members = ['alice', 'bob', 'carol']
 
 describe('a peer that meets its own un-merged commit', { concurrent: false }, () => {
-  test('heals, and its epoch advances — with no journal to repair it', async () => {
-    controlRecoveryClock(5)
+  test('persists unexplained own evidence with no journal to repair it', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x41)
-
-    // Alice's commit, framed at epoch 1. The hub accepted it and the group advanced on it —
-    // and her process died before she adopted it, taking the pending state with it. Her
-    // journal is gone too: this is the peer the journal cannot repair.
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 1 })
-
+    const occurrence = await publishCommit({
+      hub,
+      senderDID: 'alice',
+      recoverySecret: rs,
+      epoch: 1,
+    })
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: fastRecovery })
-    await waitFor(() => bob.mls.epoch() === 2, "bob applies alice's orphaned commit")
-    expect(bob.mls.epoch()).toBe(2)
-
-    // Alice comes back at the epoch she died at, holding an empty journal, and reads the log.
+    await waitFor(() => bob.mls.epoch() === 2, 'Bob applies the orphaned commit')
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery: fastRecovery })
-    await waitFor(
-      () => alice.mls.epoch() === 3 && bob.mls.epoch() === 3,
-      'alice heals and the group advances to epoch 3',
-    )
-
-    // She healed, by rejoining: the external commit is a commit like any other, so it lands on
-    // the log and takes the whole group to the next epoch with her. The assertion is her
-    // EPOCH, not the absence of an error — a peer missing this row files its own commit as
-    // poison, walks cheerfully to the end of the log, and reports itself fully reconciled,
-    // stuck at epoch 1 forever with a clean bill of health.
-    expect(alice.mls.epoch()).toBe(3)
-    expect(bob.mls.epoch()).toBe(3)
-    expect(heals(hub, rs)).toHaveLength(1)
-
-    // And the port was never even asked about that frame. The un-merged own-commit row is
-    // settled BEFORE the frame is handed over, which is what stops the answer — "I could not
-    // apply this" — deciding the classification.
+    await assertDurableControlHold(alice, hub, rs, 'alice', {
+      reason: 'fork-evidence',
+      position: occurrence.sequenceID,
+      evidence: { kind: 'unexplained-own-commit', epoch: 1, position: occurrence.sequenceID },
+    })
+    expect(alice.mls.epoch()).toBe(1)
+    expect(bob.mls.epoch()).toBe(2)
+    expect(heals(hub, rs)).toEqual([])
     expect(alice.mls.seen()).toBe(0)
     expect(alice.mls.commits()).toBe(0)
-
-    await alice.peer.dispose()
     await bob.peer.dispose()
   })
 
-  test('applies none of the commits it jumped over, and heals only once', async () => {
-    controlRecoveryClock(5)
+  test('an unexplained own hold prevents walking later commits', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x42)
-
-    // Alice's orphaned commit at epoch 1...
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 1 })
+    const occurrence = await publishCommit({
+      hub,
+      senderDID: 'alice',
+      recoverySecret: rs,
+      epoch: 1,
+    })
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: fastRecovery })
-    await waitFor(() => bob.mls.epoch() === 2, "bob applies alice's orphaned commit")
-    // ...and the group commits again on top of it, at epoch 2.
+    await waitFor(() => bob.mls.epoch() === 2, 'Bob applies the orphaned commit')
     const token = 'signed-token: bob enacted this while alice was dead'
     await bob.peer.commit(buildLedgerCommit(bob, [token]))
-    await waitFor(() => bob.mls.epoch() === 3, "bob's own commit lands at epoch 3")
     expect(bob.mls.epoch()).toBe(3)
-
-    // Alice restarts at epoch 1 and heals to the group's epoch. The rejoin moves her epoch; it
-    // does not move her cursor over the frames she skipped, and at the epoch she lands on they
-    // are history.
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery: fastRecovery })
-    // Wait on the ledger refold too, not just the epoch: bootstrap repopulates the ledger a beat
-    // after the heal advances the epoch, and this test asserts both.
-    await waitFor(
-      () => alice.mls.epoch() === 4 && bob.mls.epoch() === 4 && alice.mls.ledgerIDs().length === 1,
-      'alice heals to epoch 4 and refolds the ledger',
-    )
-
-    expect(alice.mls.epoch()).toBe(4)
-    expect(bob.mls.epoch()).toBe(4)
-    // She applied NEITHER of the frames she jumped over. At the epoch she landed on they are
-    // frames from epochs she holds no record for — history — so the cursor walks them and the
-    // port is never asked. A peer that re-applied them would advance twice on commits the
-    // group counted once.
+    await assertDurableControlHold(alice, hub, rs, 'alice', {
+      reason: 'fork-evidence',
+      position: occurrence.sequenceID,
+      evidence: { kind: 'unexplained-own-commit', epoch: 1, position: occurrence.sequenceID },
+    })
+    expect(alice.mls.epoch()).toBe(1)
     expect(alice.mls.seen()).toBe(0)
     expect(alice.mls.commits()).toBe(0)
-    // She did not APPLY bob's commit — and she holds what it enacted anyway. The rejoined
-    // handle came back with an empty ledger, and bootstrap refolded the group's whole ledger
-    // into it, head-verified.
-    expect(alice.mls.ledgerIDs()).toEqual([memoryEntryID(token)])
-    // And she does not heal again on the way past her own commit: authorship matches, but
-    // the epoch no longer does.
-    expect(heals(hub, rs)).toHaveLength(1)
-
-    // Her lane is live at the epoch she landed on: the next commit reaches her and applies.
-    await publishCommit({ hub, senderDID: 'zoe', recoverySecret: rs, epoch: 4 })
-    await waitFor(() => alice.mls.epoch() === 5, "zoe's commit reaches alice and applies")
-    expect(alice.mls.seen()).toBe(1)
-    expect(alice.mls.commits()).toBe(1)
-    expect(alice.mls.epoch()).toBe(5)
-
-    await alice.peer.dispose()
+    expect(alice.mls.ledgerIDs()).toEqual([])
+    expect(heals(hub, rs)).toEqual([])
     await bob.peer.dispose()
   })
 })

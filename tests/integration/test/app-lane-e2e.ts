@@ -21,7 +21,9 @@ import {
 import {
   buildRevokeProofOnHandle,
   buildRevokeProofOperation,
+  createControlAdoptionPort,
   createControlBuildPort,
+  createControlValidationPort,
   createGroupCrypto,
   createGroupMLS,
   type GroupMLSParams,
@@ -37,6 +39,7 @@ import type {
   AppCursorStore,
   AppOutbox,
   ControlBuildPort,
+  ControlEvidenceSnapshot,
   ControlStore,
   GroupKey,
   GroupMLS,
@@ -135,6 +138,7 @@ export type StateStore = {
   control: ControlStore
   save: (handle: GroupHandle, write?: AdoptionWrite) => Promise<void>
   saveOpened: (state: Uint8Array, ledger: Array<string>) => Promise<void>
+  readEvidence(): Promise<ControlEvidenceSnapshot>
   saved: () => Promise<{ state: Uint8Array; ledger: Array<string> } | null>
 }
 
@@ -169,6 +173,28 @@ export function createMemoryStateStore(
           (await control.lastMutation()) !== write.mutationID
         )
           throw error
+      }
+    },
+    readEvidence: async () => {
+      const row = await database.snapshot('state')
+      const saved = row.state === null ? null : decodeStoredState(row.state)
+      const state = saved === null ? null : decodeClientState(saved.state)
+      return {
+        source: {
+          key: control.key,
+          stateVersion: row.version,
+          identity:
+            state == null
+              ? null
+              : {
+                  ...control.key,
+                  epoch: Number(state.groupContext.epoch),
+                  authenticator: state.keySchedule.epochAuthenticator.slice(),
+                },
+        },
+        applied: row.control.applied,
+        cursor: row.control.cursor,
+        terminal: state?.groupActiveState.kind === 'removedFromGroup',
       }
     },
     saveOpened: (state, ledger) => database.saveState('state', encodeStoredState(state, ledger)),
@@ -367,6 +393,13 @@ export function makeMember(params: MakeMemberParams): Member {
     now: () => Date.now(),
     newID: () => globalThis.crypto.randomUUID(),
   })
+  const restoreCandidate = candidateRestorer(access, { resolveLedgerEntries: entrySlot.resolve })
+  const adoption = createControlAdoptionPort({ access, control, restoreCandidate })
+  const validation = createControlValidationPort({
+    identity,
+    options: { resolveLedgerEntries: entrySlot.resolve },
+    restoreCandidate,
+  })
   const connection = hub.connect(identity)
   const appOutbox = restartOf?.appOutbox ?? createMemoryAppOutbox()
   const peer = createGroupPeer<Protocols>({
@@ -377,17 +410,16 @@ export function makeMember(params: MakeMemberParams): Member {
     crypto,
     mls,
     control,
-    build,
+    prepareBuild: buildPort.prepareBuild,
+    validation,
+    readEvidence: stateStore.readEvidence,
     anchorStore,
     appCursorStore,
     appOutbox,
     localDID: identity.id,
     protocols: { chat },
     handlers: { chat: params.handlers ?? {} } as never,
-    adopt: (blob, expected, write) =>
-      adoptOperationCandidate(access, blob, expected, write, undefined, {
-        resolveLedgerEntries: entrySlot.resolve,
-      }),
+    adopt: adoption.adopt,
     deliverWelcome:
       params.deliverWelcome ??
       (async (obligation) => {
@@ -586,6 +618,7 @@ export function createDurableHandleAccess(
   params: Pick<Parameters<typeof simpleHandleAccess>[0], 'handle' | 'adopt'>,
 ): HandleAccess {
   const store = createMemoryStateStore({ groupID: params.handle().groupID, incarnation: 1 })
+  void store.save(params.handle())
   const access = simpleHandleAccess({
     ...params,
     persist: store.save,
@@ -595,76 +628,60 @@ export function createDurableHandleAccess(
   return access
 }
 
-export function createOperationHost(access: HandleAccess) {
+export function createOperationHost(access: HandleAccess, identity: OwnIdentity) {
   const welcomes: Array<WelcomeObligation> = []
-  const store = operationStores.get(access) ?? createMemoryStateStore()
+  const store = operationStores.get(access)
+  if (store === undefined) throw new Error('Operation host requires durable handle access')
   const builders = new Map<string, () => Promise<HostBuilt>>()
+  const build = async (op: Operation) => {
+    const builder = builders.get(op.id)
+    if (builder === undefined) throw new OperationRejectedError('No host builder')
+    return builder()
+  }
+  const restoreCandidate = candidateRestorer(access)
+  const control = store.control
+  const buildPort = createControlBuildPort({
+    access,
+    control,
+    build,
+    saveBuilt: (intent, built, expected, mutationID) =>
+      store.database.saveBuilt('state', control.key, intent, built, expected, mutationID),
+    now: Date.now,
+    newID: () => crypto.randomUUID(),
+  })
   return {
     builders,
     welcomes,
-    control: store.control,
+    control,
+    build,
+    prepareBuild: buildPort.prepareBuild,
+    validation: createControlValidationPort({ identity, options: {}, restoreCandidate }),
+    readEvidence: store.readEvidence,
     deliverWelcome: async (obligation: WelcomeObligation) => {
       welcomes.push(structuredClone(obligation))
     },
-    build: async (op: Operation) => {
-      const build = builders.get(op.id)
-      if (build == null) throw new OperationRejectedError('No host builder')
-      return build()
-    },
     anchorStore: createMemoryAnchorStore(store.database.anchorStore('state')),
-    adopt: (blob: Uint8Array, expected: ExpectedOperationState, write: AdoptionWrite) =>
-      adoptOperationCandidate(access, blob, expected, write, store.save),
+    adopt: createControlAdoptionPort({ access, control, restoreCandidate }).adopt,
   }
 }
 
-type ExpectedOperationState = {
-  epoch: number
-  authenticatorBefore: Uint8Array
-  incarnation: number
-}
-
-async function adoptOperationCandidate(
-  access: HandleAccess,
-  blob: Uint8Array,
-  expected: ExpectedOperationState,
-  write: AdoptionWrite,
-  persist?: StateStore['save'],
-  options?: Parameters<typeof restoreGroup>[0]['options'],
-): Promise<'installed' | 'noop' | 'moved'> {
-  const journal = JSON.parse(new TextDecoder().decode(blob)) as {
+function decodeStoredState(blob: Uint8Array): { state: Uint8Array; ledger: Array<string> } {
+  const saved = JSON.parse(new TextDecoder().decode(blob)) as {
     state: Array<number>
     ledger: Array<string>
   }
-  const state = decodeClientState(new Uint8Array(journal.state))
-  if (state == null) throw new Error('Invalid candidate state')
-  const credential = await access.read((handle) => handle.credential)
-  const candidate = await restoreGroup({
-    state,
-    credential,
-    ledgerEntries: journal.ledger,
-    options,
-  })
-  const equal = (a: Uint8Array, b: Uint8Array) =>
-    a.length === b.length && a.every((byte, i) => byte === b[i])
-  let result: 'installed' | 'noop' | 'moved' = 'moved'
-  await access.replace(candidate, persist == null ? () => write : undefined, async (current) => {
-    if (
-      state.groupContext.epoch === current.epoch &&
-      equal(state.keySchedule.epochAuthenticator, current.state.keySchedule.epochAuthenticator)
-    ) {
-      result = 'noop'
-      return false
-    }
-    if (
-      Number(current.epoch) !== expected.epoch ||
-      expected.incarnation !== 1 ||
-      !equal(current.state.keySchedule.epochAuthenticator, expected.authenticatorBefore)
-    )
-      return false
-    await current.carryReceiveProgress(candidate)
-    await persist?.(candidate, write)
-    result = 'installed'
-    return true
-  })
-  return result
+  return { state: Uint8Array.from(saved.state), ledger: saved.ledger }
+}
+
+function candidateRestorer(
+  access: HandleAccess,
+  options: Parameters<typeof restoreGroup>[0]['options'] = {},
+) {
+  return async (candidate: Uint8Array) => {
+    const saved = decodeStoredState(candidate)
+    const state = decodeClientState(saved.state)
+    if (state == null) throw new Error('Invalid candidate state')
+    const credential = await access.read((handle) => handle.credential)
+    return restoreGroup({ state, credential, ledgerEntries: saved.ledger, options })
+  }
 }

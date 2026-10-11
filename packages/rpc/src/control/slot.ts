@@ -1,0 +1,234 @@
+import { asLogPosition } from '../cursor.js'
+import type { ControlEvidenceSnapshot, ControlLogFrame } from './search.js'
+import { applyResolved, pruneWindow } from './store.js'
+import type {
+  BuiltCommit,
+  ControlAdoptionPort,
+  ControlBuildRef,
+  ControlSearchPort,
+  ControlStore,
+  Outcome,
+} from './types.js'
+
+export function controlBuildRef(built: BuiltCommit): ControlBuildRef {
+  return {
+    incarnation: built.incarnation,
+    epoch: built.epoch,
+    publishID: built.publishID,
+    payloadDigest: built.payloadDigest,
+  }
+}
+
+export type ControlSlotDeps = {
+  control: ControlStore
+  search: ControlSearchPort
+  adoption: ControlAdoptionPort
+  readEvidence(): Promise<ControlEvidenceSnapshot>
+  now(): number
+  newID(): string
+  emit(outcome: Outcome): void
+}
+
+export async function settleControlSlot(
+  deps: ControlSlotDeps,
+  occurrence?: ControlLogFrame,
+): Promise<'landed' | 'superseded' | 'absent' | 'unknown' | 'empty'> {
+  const snapshot = await deps.control.load()
+  const slot = snapshot.commitOnce
+  if (slot === null) return 'empty'
+  if (snapshot.controlHold !== null && snapshot.controlHold.reason !== 'acceptance-unknown')
+    return 'unknown'
+  const evidence = await deps.readEvidence()
+  const operation = snapshot.operations.find((op) => op.id === slot.opID)
+  if (
+    operation !== undefined &&
+    operation.stage !== 'intent' &&
+    (operation.built.incarnation !== slot.incarnation ||
+      operation.built.epoch !== slot.epoch ||
+      operation.built.publishID !== slot.publishID ||
+      operation.built.payloadDigest !== slot.payloadDigest)
+  ) {
+    const row = evidence.applied.find((row) => row.epoch === operation.built.epoch)
+    await applyResolved(
+      deps.control,
+      row === undefined
+        ? {
+            controlHold: { reason: 'acceptance-unknown', position: null },
+          }
+        : {
+            controlHold: {
+              reason: 'fork-evidence',
+              position: asLogPosition(row.sequenceID),
+              evidence: {
+                kind: 'digest-divergence',
+                epoch: row.epoch,
+                position: row.sequenceID,
+                localDigest: row.payloadDigest,
+                remoteDigest: operation.built.payloadDigest,
+              },
+            },
+            strand: { reason: 'lost-state' },
+            cursor: {
+              position: snapshot.cursor?.position ?? null,
+              epoch: evidence.source.identity?.epoch ?? slot.epoch,
+              stranded: true,
+            },
+          },
+      deps.newID(),
+    )
+    return 'unknown'
+  }
+  const applied = evidence.applied.find((row) => row.epoch === slot.epoch)
+  if (applied?.payloadDigest === slot.payloadDigest && applied.digest === slot.digest) {
+    if (snapshot.operations.some((op) => op.id === slot.opID))
+      await applyResolved(deps.control, { deleteOperations: [slot.opID] }, deps.newID())
+    return 'landed'
+  }
+  const identity = evidence.source.identity
+  if (
+    evidence.terminal ||
+    identity === null ||
+    evidence.source.key.groupID !== deps.control.key.groupID ||
+    evidence.source.key.incarnation !== slot.incarnation
+  )
+    return 'unknown'
+  if (
+    identity.epoch === slot.epoch &&
+    (identity.authenticator.length !== slot.authenticatorBefore.length ||
+      identity.authenticator.some((byte, index) => byte !== slot.authenticatorBefore[index]))
+  ) {
+    await applyResolved(
+      deps.control,
+      {
+        controlHold: {
+          reason: 'fork-evidence',
+          position: evidence.cursor?.position ?? null,
+          evidence: {
+            kind: 'epoch-authenticator',
+            epoch: slot.epoch,
+            local: slot.authenticatorBefore,
+            remote: identity.authenticator,
+          },
+        },
+        strand: { reason: 'lost-state' },
+        cursor: {
+          position: snapshot.cursor?.position ?? null,
+          epoch: identity.epoch,
+          stranded: true,
+        },
+      },
+      deps.newID(),
+    )
+    return 'unknown'
+  }
+  const found = await deps.search.searchLog(slot, occurrence?.position)
+  if (found.kind === 'unknown' || found.kind === 'absent') return found.kind
+  if (found.kind === 'superseded') {
+    const current = await deps.control.load()
+    if (current.operations.some((op) => op.id === slot.opID)) {
+      const outcome: Outcome = { id: slot.opID, opID: slot.opID, at: deps.now(), kind: 'lost' }
+      await applyResolved(
+        deps.control,
+        { deleteOperations: [slot.opID], putOutcomes: [outcome] },
+        deps.newID(),
+      )
+      deps.emit(outcome)
+    }
+    return 'superseded'
+  }
+  const proof = found.proof
+  const accepted =
+    operation === undefined
+      ? []
+      : [
+          {
+            ...operation,
+            stage: 'accepted' as const,
+            built: controlBuildRef(slot),
+            acceptedAs: proof.position,
+            acceptance: proof,
+          },
+        ]
+  await applyResolved(
+    deps.control,
+    {
+      commitOnceAcceptance: proof,
+      putOperations: accepted,
+      ...(slot.welcome === null
+        ? {}
+        : {
+            putWelcomes: [
+              {
+                opID: slot.opID,
+                welcome: slot.welcome.bytes,
+                recipients: slot.welcome.recipients,
+              },
+            ],
+          }),
+    },
+    deps.newID(),
+  )
+  const expected = (await deps.readEvidence()).source
+  const outcome: Outcome = {
+    id: JSON.stringify(['control:landed', slot.opID, slot.publishID, proof.position]),
+    opID: slot.opID,
+    at: deps.now(),
+    kind: 'landed',
+    position: proof.position,
+  }
+  const current = await deps.control.load()
+  const result = await deps.adoption.adopt(
+    slot.journal,
+    { ...expected, acceptance: proof },
+    {
+      mutationID: deps.newID(),
+      changes: {
+        ...pruneWindow(current, slot.epoch),
+        ...(current.controlHold?.reason === 'acceptance-unknown' ? { controlHold: null } : {}),
+        commitOnce: null,
+        deleteOperations: [slot.opID],
+        putOutcomes: [outcome],
+        ...(slot.welcome === null
+          ? {}
+          : {
+              putWelcomes: [
+                {
+                  opID: slot.opID,
+                  welcome: slot.welcome.bytes,
+                  recipients: slot.welcome.recipients,
+                  committed: true,
+                },
+              ],
+            }),
+        putApplied: [
+          {
+            epoch: slot.epoch,
+            digest: slot.digest,
+            payloadDigest: slot.payloadDigest,
+            sequenceID: proof.position,
+            opID: slot.opID,
+            removed: false,
+          },
+        ],
+        cursor: { position: proof.position, epoch: slot.epoch + 1 },
+      },
+    },
+  )
+  if (result === 'moved') {
+    const held = (await deps.control.load()).controlHold
+    if (held === null || held.reason === 'acceptance-unknown')
+      await applyResolved(
+        deps.control,
+        {
+          controlHold: {
+            reason: 'acceptance-unknown',
+            position: proof.position,
+          },
+        },
+        deps.newID(),
+      )
+    return 'unknown'
+  }
+  if (result === 'installed') deps.emit(outcome)
+  return 'landed'
+}

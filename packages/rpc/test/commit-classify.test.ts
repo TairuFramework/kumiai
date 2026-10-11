@@ -242,10 +242,8 @@ describe('the cursor table', () => {
     })
   })
 
-  test("this peer's own commit, at the epoch it is still at, heals", () => {
-    // The crash-window victim: the hub took its commit, the group advanced on it, and the
-    // pending state died with the process. MLS merges a pending commit rather than
-    // processing one, so this frame can never be applied by the member that wrote it.
+  test("this peer's own source-epoch commit requires slot settlement or evidence hold", () => {
+    // Own commits require retained construction rather than normal receive processing.
     expect(
       classifyCommit({
         header: { epoch: 5, committerDID: 'bob' },
@@ -264,11 +262,8 @@ describe('the cursor table', () => {
     ).toEqual({ row: 'poison' })
   })
 
-  test('a frame in a wire version this build cannot read is AHEAD, and not poison', () => {
-    // The distinction the two assertions make together: `null` is "readable bytes that are not a
-    // commit" and is poison; this is "the group is speaking a language I do not have" and is
-    // proof it moved without this peer. Filing it as poison is the silent killer — after a
-    // version bump every frame lands here, so there is no readable next frame to heal from.
+  test('a frame in a wire version this build cannot read requires an unsupported-version hold', () => {
+    // Unsupported semantics must hold before cursor advancement.
     expect(
       classifyCommit({
         header: UNKNOWN_FRAME_VERSION,
@@ -276,7 +271,7 @@ describe('the cursor table', () => {
         commitDigest: null,
         state: bob(),
       }),
-    ).toEqual({ row: 'ahead' })
+    ).toEqual({ row: 'unsupported-version' })
     expect(
       classifyCommit({
         header: UNKNOWN_FRAME_VERSION,
@@ -287,7 +282,7 @@ describe('the cursor table', () => {
     ).not.toEqual({ row: 'poison' })
   })
 
-  test('it is ahead whatever this peer’s epoch is: no epoch was readable to compare', () => {
+  test('unsupported-version does not depend on the local epoch', () => {
     // Every other row turns on an epoch read out of the frame. There is none here, so the row
     // cannot be conditioned on one — and must not be, or a peer at a high epoch would file the
     // frame as poison exactly when it is furthest from the group.
@@ -300,7 +295,7 @@ describe('the cursor table', () => {
           state: bob({ epoch }),
         }),
       ).toEqual({
-        row: 'ahead',
+        row: 'unsupported-version',
       })
     }
   })

@@ -155,7 +155,7 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
     identity: aliceID,
     entrySlot: createLedgerEntrySlot(),
   })
-  const aliceHost = createOperationHost(aliceAccess)
+  const aliceHost = createOperationHost(aliceAccess, aliceID)
   const bobMLS = createGroupMLS({ access: bobAccess, identity: bobID, entrySlot: bobSlot })
   const aliceConnection = hub.connect(aliceID)
   const bobConnection = hub.connect(bobID)
@@ -176,7 +176,7 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
     mls: typeof aliceMLS,
     connection: typeof aliceConnection,
   ) {
-    const operationHost = access === aliceAccess ? aliceHost : createOperationHost(access)
+    const operationHost = access === aliceAccess ? aliceHost : createOperationHost(access, identity)
     return createGroupPeer<Protocols>({
       appOutbox: createMemoryAppOutbox(),
       appOutboxLimit: 128,

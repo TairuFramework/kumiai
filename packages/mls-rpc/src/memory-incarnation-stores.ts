@@ -155,6 +155,8 @@ export type ControlRecord = { snapshot: ControlSnapshot; mutationID: string }
 const emptyControl = (): ControlSnapshot => ({
   commitOnce: null,
   commitOnceAcceptance: null,
+  controlHold: null,
+  strand: null,
   operations: [],
   rejoin: null,
   outcomes: [],
@@ -438,12 +440,16 @@ export function createUnlockedIncarnationStores(params: {
             ...emptyControl(),
             commitOnce: previous.snapshot.commitOnce,
             commitOnceAcceptance: previous.snapshot.commitOnceAcceptance,
+            controlHold: previous.snapshot.controlHold,
+            strand: previous.snapshot.strand,
             outcomes: previous.snapshot.outcomes,
             welcomes: previous.snapshot.welcomes,
             cursor:
-              previous.snapshot.cursor?.fork === undefined
-                ? null
-                : { ...previous.snapshot.cursor, position: null },
+              previous.snapshot.controlHold !== null
+                ? previous.snapshot.cursor
+                : previous.snapshot.cursor?.fork === undefined
+                  ? null
+                  : { ...previous.snapshot.cursor, position: null },
           },
         })
     },

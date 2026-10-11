@@ -1,18 +1,15 @@
-import { sha256 } from '@noble/hashes/sha2.js'
-import { toB64U } from '@sozai/codec'
-
-import { isHeadMismatch } from '../commit.js'
 import { asLogPosition, type LogPosition } from '../cursor.js'
-import { OperationRejectedError } from '../errors.js'
-import { FrameTooLargeError } from '../frame-size.js'
-import { applyResolved, pruneWindow } from './store.js'
+import type { FrameControlBuild, PrepareControlResult } from './build.js'
+import type { ControlEvidenceSnapshot } from './search.js'
+import { settleControlSlot } from './slot.js'
+import { applyResolved } from './store.js'
 import type {
-  AdoptionWrite,
   AppliedCommit,
+  ControlAdoptionPort,
   ControlChanges,
+  ControlSearchPort,
   ControlSnapshot,
   ControlStore,
-  HostBuilt,
   Operation,
   OperationRequest,
   Outcome,
@@ -23,35 +20,22 @@ const DEFAULT_OPERATION_TIMEOUT_MS = 30_000
 export function revokeHeld(snapshot: ControlSnapshot): boolean {
   return snapshot.operations.some((op) => op.revokes)
 }
-
 export type { HostBuilt } from './types.js'
-
-/** Both a fresh acceptance and a deduplicated publish name the original log position. */
 export type PublishOutcome = { sequenceID: string }
-
 export type OperationDeps = {
   control: ControlStore
   signal?: AbortSignal
-  build(op: Operation): Promise<HostBuilt>
-  adopt(
-    journal: Uint8Array,
-    expected: { epoch: number; authenticatorBefore: Uint8Array; incarnation: number },
-    write: AdoptionWrite,
-  ): Promise<'installed' | 'noop' | 'moved'>
-  frame(
-    built: HostBuilt,
-  ): Promise<{ payload: Uint8Array; publishID: string; expectedHead: LogPosition | null }>
+  prepareBuild(op: Operation, frame: FrameControlBuild): Promise<PrepareControlResult>
+  adopt: ControlAdoptionPort['adopt']
+  frame: FrameControlBuild
+  searchLog: ControlSearchPort['searchLog']
+  readEvidence(): Promise<ControlEvidenceSnapshot>
+  readHead(): Promise<LogPosition | null>
   publish(
     payload: Uint8Array,
     publishID: string,
     expectedHead: LogPosition | null,
   ): Promise<PublishOutcome>
-  searchLog(
-    from: LogPosition | null,
-    payloadDigest: string,
-    position?: LogPosition,
-  ): Promise<{ found: LogPosition } | 'absent' | 'gap'>
-  appliedAt(epoch: number): Pick<AppliedCommit, 'digest' | 'payloadDigest'> | undefined
   pullToHead(): Promise<void>
   now(): number
   operationTimeoutMs?: number
@@ -60,7 +44,7 @@ export type OperationDeps = {
 }
 
 export async function enqueueOperation(
-  deps: OperationDeps,
+  deps: Pick<OperationDeps, 'control' | 'now' | 'operationTimeoutMs' | 'newID' | 'signal'>,
   request: OperationRequest,
 ): Promise<Operation> {
   const snapshot = await deps.control.load()
@@ -106,66 +90,65 @@ async function settle(deps: OperationDeps, op: Operation, outcome: Outcome): Pro
   return null
 }
 
-async function accept(
-  deps: OperationDeps,
-  op: Operation & { stage: 'built' },
-  position: LogPosition,
-): Promise<Operation> {
-  const next: Operation = { ...op, stage: 'accepted', acceptedAs: position }
-  const welcome = op.built.welcome
-  await applyResolved(
-    deps.control,
-    {
-      putOperations: [next],
-      ...(welcome == null
-        ? {}
-        : {
-            putWelcomes: [{ opID: op.id, welcome: welcome.bytes, recipients: welcome.recipients }],
-          }),
-    },
-    deps.newID(),
-    undefined,
-    deps.signal,
-  )
-  return next
-}
-
 export async function stepOperation(deps: OperationDeps, op: Operation): Promise<Operation | null> {
-  const base = { id: op.id, opID: op.id, at: deps.now() }
+  const finish = (kind: 'lost' | 'unknown') =>
+    settle(deps, op, { id: op.id, opID: op.id, at: deps.now(), kind })
+  const expired = () => deps.now() >= op.deadline
   if (op.stage === 'intent') {
+    if (expired()) return finish('lost')
     await deps.pullToHead()
-    let built: HostBuilt
-    let framed: Awaited<ReturnType<OperationDeps['frame']>>
-    try {
-      built = await deps.build(op)
-      framed = await deps.frame(built)
-    } catch (error) {
-      if (
-        !(error instanceof OperationRejectedError) &&
-        !(error instanceof FrameTooLargeError) &&
-        !(
-          error instanceof Error &&
-          ['OperationRejectedError', 'FrameTooLargeError'].includes(error.name)
-        )
-      )
-        throw error
-      return await settle(deps, op, { ...base, kind: 'rejected', reason: error.message })
-    }
+    if (expired()) return finish('lost')
+    const snapshot = await deps.control.load()
+    if (snapshot.controlHold !== null) return expired() ? finish('unknown') : op
+    if ((await deps.readEvidence()).terminal) return expired() ? finish('unknown') : op
+    if (expired()) return finish('lost')
+    const result = await deps.prepareBuild(op, deps.frame)
+    if (result.kind === 'rejected')
+      return settle(deps, op, {
+        id: op.id,
+        opID: op.id,
+        at: deps.now(),
+        kind: 'rejected',
+        reason: result.reason,
+      })
+    if (result.kind === 'expired') return finish('lost')
+    return result.kind === 'saved' ? result.operation : op
+  }
+  const discover = () =>
+    settleControlSlot({
+      control: deps.control,
+      search: { searchLog: deps.searchLog },
+      adoption: { adopt: deps.adopt },
+      readEvidence: deps.readEvidence,
+      now: deps.now,
+      newID: deps.newID,
+      emit: deps.emit,
+    })
+  const retained = (await deps.control.load()).commitOnce
+  const advanceAbsent = async (): Promise<Operation | null> => {
+    const evidence = await deps.readEvidence()
+    const identity = evidence.source.identity
+    if (
+      retained === null ||
+      retained.publishID !== op.built.publishID ||
+      retained.payloadDigest !== op.built.payloadDigest ||
+      evidence.terminal ||
+      identity === null ||
+      evidence.source.key.groupID !== deps.control.key.groupID ||
+      identity.incarnation !== retained.incarnation ||
+      identity.epoch <= retained.epoch
+    )
+      return expired() ? finish('unknown') : op
+    if (expired()) return finish('lost')
     const next: Operation = {
-      ...op,
-      stage: 'built',
-      built: {
-        ...framed,
-        payloadDigest: toB64U(sha256(framed.payload)),
-        epoch: built.epoch,
-        authenticatorBefore: built.authenticatorBefore,
-        incarnation: built.incarnation,
-        searchFrom: framed.expectedHead,
-        digest: built.digest,
-        bodies: built.bodies,
-        journal: built.journal,
-        welcome: built.welcome,
-      },
+      id: op.id,
+      kind: op.kind,
+      revokes: op.revokes,
+      body: op.body,
+      seq: op.seq,
+      enqueuedAt: op.enqueuedAt,
+      deadline: op.deadline,
+      stage: 'intent',
     }
     await applyResolved(
       deps.control,
@@ -176,113 +159,77 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
     )
     return next
   }
-
-  if (op.stage === 'built') {
-    let position: LogPosition
-    try {
-      const result = await deps.publish(op.built.payload, op.built.publishID, op.built.expectedHead)
-      position = asLogPosition(result.sequenceID)
-      const verified = await deps.searchLog(op.built.expectedHead, op.built.payloadDigest, position)
-      if (typeof verified !== 'object' || verified.found !== position) return op
-    } catch (error) {
-      if (!isHeadMismatch(error)) return op
-      const found = await deps.searchLog(op.built.expectedHead, op.built.payloadDigest)
-      if (found === 'gap') return await settle(deps, op, { ...base, kind: 'unknown' })
-      if (found === 'absent') {
-        if (
-          deps.now() >=
-          op.enqueuedAt + (deps.operationTimeoutMs ?? DEFAULT_OPERATION_TIMEOUT_MS)
-        ) {
-          return await settle(deps, op, { ...base, kind: 'lost' })
-        }
-        const { built: _built, ...intent } = op
-        const next: Operation = { ...intent, stage: 'intent' }
-        await applyResolved(
-          deps.control,
-          { putOperations: [next] },
-          deps.newID(),
-          undefined,
-          deps.signal,
-        )
-        return next
-      }
-      position = found.found
-    }
-    return await accept(deps, op, position)
-  }
-
-  const applied: AppliedCommit = {
-    epoch: op.built.epoch,
-    digest: op.built.digest,
-    payloadDigest: op.built.payloadDigest,
-    sequenceID: op.acceptedAs,
-    opID: op.id,
-    removed: false,
-  }
-  const outcome: Outcome = { ...base, kind: 'landed', position: op.acceptedAs }
+  let result = await discover()
+  if (result === 'landed' || result === 'superseded') return null
+  if (result === 'unknown') return expired() ? finish('unknown') : op
   const snapshot = await deps.control.load()
-  const pruning = pruneWindow(snapshot, applied.epoch)
-  const changes = landedChanges(op, op.acceptedAs, applied)
-  const write: AdoptionWrite = {
-    mutationID: deps.newID(),
-    changes: {
-      ...pruning,
-      ...changes,
-      putApplied: [...(pruning.putApplied ?? []), applied],
-      putOutcomes: [outcome],
-    },
-  }
-  const result = await deps.adopt(
-    op.built.journal,
-    {
-      epoch: op.built.epoch,
-      authenticatorBefore: op.built.authenticatorBefore,
-      incarnation: op.built.incarnation,
-    },
-    write,
-  )
-  if (result === 'installed') {
-    deps.emit(outcome)
-    return null
-  }
-  if (result === 'moved') {
-    await deps.pullToHead()
-    const applied = deps.appliedAt(op.built.epoch)
-    if (applied?.digest !== op.built.digest || applied.payloadDigest !== op.built.payloadDigest)
-      return op
-    const settled = await deps.control.load()
-    if (
-      !settled.operations.some((row) => row.id === op.id) &&
-      settled.outcomes.some((row) => row.opID === op.id && row.kind === 'landed')
-    )
+  const slot = snapshot.commitOnce
+  if (slot === null || slot.publishID !== op.built.publishID) {
+    const evidence = await deps.readEvidence()
+    const row = evidence.applied.find((row) => row.epoch === op.built.epoch)
+    if (row?.payloadDigest === op.built.payloadDigest) {
+      await applyResolved(
+        deps.control,
+        { deleteOperations: [op.id] },
+        deps.newID(),
+        undefined,
+        deps.signal,
+      )
       return null
-    // Acceptance never moves this device's applied rows or cursor.
-    return await settle(deps, op, outcome)
+    }
+    if (result === 'absent') return advanceAbsent()
+    return expired() ? finish('unknown') : op
   }
-
-  const current = await deps.control.load()
-  const newestEpoch = Math.max(
-    applied.epoch,
-    (current.cursor?.epoch ?? 0) - 1,
-    ...current.applied.map((row) => row.epoch),
-  )
-  const missing: ControlChanges = pruneWindow(current, newestEpoch)
-  if (current.operations.some((row) => row.id === op.id)) missing.deleteOperations = [op.id]
-  if (!current.outcomes.some((row) => row.opID === op.id && row.kind === 'landed')) {
-    missing.putOutcomes = [outcome]
-  }
+  const evidence = await deps.readEvidence()
+  const identity = evidence.source.identity
   if (
-    applied.epoch >= newestEpoch - 63 &&
-    !current.applied.some((row) => row.epoch === applied.epoch)
-  ) {
-    missing.putApplied = [...(missing.putApplied ?? []), applied]
+    evidence.terminal ||
+    identity === null ||
+    evidence.source.key.incarnation !== slot.incarnation
+  )
+    return expired() ? finish('unknown') : op
+  if (identity.epoch > slot.epoch) {
+    if (expired()) return finish('lost')
+    const next: Operation = {
+      id: op.id,
+      kind: op.kind,
+      revokes: op.revokes,
+      body: op.body,
+      seq: op.seq,
+      enqueuedAt: op.enqueuedAt,
+      deadline: op.deadline,
+      stage: 'intent',
+    }
+    await applyResolved(
+      deps.control,
+      { putOperations: [next] },
+      deps.newID(),
+      undefined,
+      deps.signal,
+    )
+    return next
   }
-  if (current.cursor?.position == null || current.cursor.position < op.acceptedAs) {
-    missing.cursor = changes.cursor
+  if (snapshot.controlHold?.reason === 'acceptance-unknown')
+    await applyResolved(deps.control, { controlHold: null }, deps.newID(), undefined, deps.signal)
+  if (expired()) return finish('lost')
+  const expectedHead = await deps.readHead()
+  if (expired()) return finish('lost')
+  const refreshed = { ...slot, expectedHead }
+  await applyResolved(deps.control, { commitOnce: refreshed }, deps.newID(), undefined, deps.signal)
+  if (expired()) return finish('lost')
+  try {
+    const published = await deps.publish(
+      refreshed.payload,
+      refreshed.publishID,
+      refreshed.expectedHead,
+    )
+    asLogPosition(published.sequenceID)
+  } catch {
+    // A failed handoff may have committed. Discovery owns acceptance either way.
   }
-  if (Object.keys(missing).length !== 0) {
-    await applyResolved(deps.control, missing, deps.newID(), undefined, deps.signal)
-    if (missing.putOutcomes != null) deps.emit(outcome)
-  }
-  return null
+  result = await discover()
+  if (result === 'landed' || result === 'superseded') return null
+  if (result === 'absent' && (await deps.control.load()).commitOnce === null) return advanceAbsent()
+  if (expired()) return finish(result === 'absent' ? 'lost' : 'unknown')
+  return op
 }

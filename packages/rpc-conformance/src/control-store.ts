@@ -47,6 +47,23 @@ export type ConformanceHostBuilt<Position extends string = string> = Pick<
 export type ConformanceControlSnapshot<Position extends string = string> = {
   commitOnce: ConformanceControlSlot<Position> | null
   commitOnceAcceptance: ConformanceFirstValidCommit<Position> | null
+  controlHold: {
+    reason: 'acceptance-unknown' | 'unsupported-version' | 'fork-evidence'
+    position: Position | null
+    evidence?:
+      | {
+          kind: 'digest-divergence'
+          epoch: number
+          position: string
+          localDigest: string
+          remoteDigest: string
+        }
+      | { kind: 'epoch-authenticator'; epoch: number; local: Uint8Array; remote: Uint8Array }
+      | { kind: 'unexplained-own-commit'; epoch: number; position: string; digest: string }
+  } | null
+  strand: {
+    reason: 'retention-gap' | 'unprocessable-gap' | 'lost-state' | 'ahead' | 'unsupported-version'
+  } | null
   operations: Array<ConformanceOperation<Position>> // FIFO by `seq`
   rejoin: ConformanceRejoinRecord<Position> | null
   outcomes: Array<ConformanceOutcome<Position>>
@@ -67,6 +84,8 @@ export type ConformanceForkEvidence<Position extends string = string> = {
 export type ConformanceControlChanges<Position extends string = string> = {
   commitOnce?: ConformanceControlSlot<Position> | null
   commitOnceAcceptance?: ConformanceFirstValidCommit<Position> | null
+  controlHold?: ConformanceControlSnapshot<Position>['controlHold']
+  strand?: ConformanceControlSnapshot<Position>['strand']
   putOperations?: Array<ConformanceOperation<Position>>
   deleteOperations?: Array<string>
   putRejoin?: ConformanceRejoinRecord<Position>
@@ -115,8 +134,13 @@ export type ConformanceOperation<Position extends string = string> = Conformance
   deadline: number
 } & (
     | { stage: 'intent' }
-    | { stage: 'built'; built: ConformanceBuiltCommit<Position> }
-    | { stage: 'accepted'; built: ConformanceBuiltCommit<Position>; acceptedAs: Position }
+    | { stage: 'built'; built: ConformanceControlBuildRef<Position> }
+    | {
+        stage: 'accepted'
+        built: ConformanceControlBuildRef<Position>
+        acceptedAs: Position
+        acceptance: ConformanceFirstValidCommit<Position>
+      }
   )
 export type ConformanceBuiltCommit<Position extends string = string> = {
   incarnation: number
@@ -196,6 +220,7 @@ export type ConformanceWelcomeObligation = {
   opID: string
   welcome: Uint8Array
   recipients: Array<string>
+  committed?: true
 }
 export type ConformanceAppliedCommit = {
   epoch: number
@@ -266,6 +291,23 @@ export type ControlStoreConformanceParams = {
   commitThenReject(): void
 }
 
+function fixtureBuilt(): ConformanceBuiltCommit {
+  return {
+    publishID: 'publish',
+    expectedHead: null,
+    epoch: 4,
+    authenticatorBefore: new Uint8Array([2]),
+    incarnation: 1,
+    searchFrom: null,
+    payload: new Uint8Array([3]),
+    payloadDigest: 'payload-digest',
+    digest: 'commit-digest',
+    bodies: ['token'],
+    journal: new Uint8Array([4]),
+    welcome: { bytes: new Uint8Array([5]), recipients: ['bob'] },
+  }
+}
+
 function records(): ConformanceControlChanges {
   return {
     putOperations: [
@@ -279,20 +321,22 @@ function records(): ConformanceControlChanges {
         deadline: 30_100,
         stage: 'accepted',
         acceptedAs: '001',
-        built: {
-          publishID: 'publish',
-          expectedHead: null,
-          epoch: 4,
-          authenticatorBefore: new Uint8Array([2]),
-          incarnation: 1,
-          searchFrom: null,
-          payload: new Uint8Array([3]),
+        acceptance: {
+          source: {
+            key: { groupID: 'group-A', incarnation: 1 },
+            stateVersion: 1,
+            identity: {
+              groupID: 'group-A',
+              incarnation: 1,
+              epoch: 4,
+              authenticator: new Uint8Array([2]),
+            },
+          },
+          from: null,
+          position: '001',
           payloadDigest: 'payload-digest',
-          digest: 'commit-digest',
-          bodies: ['token'],
-          journal: new Uint8Array([4]),
-          welcome: { bytes: new Uint8Array([5]), recipients: ['bob'] },
         },
+        built: { incarnation: 1, epoch: 4, publishID: 'publish', payloadDigest: 'payload-digest' },
       },
     ],
     putRejoin: {
@@ -349,7 +393,7 @@ async function prepareSlot(host: ConformanceControlHost) {
   const original = records().putOperations?.[0]
   if (original == null || original.stage !== 'accepted') throw new Error('Missing build fixture')
   const intent: ConformanceOperation & { stage: 'intent' } = { ...original, stage: 'intent' }
-  const slot: ConformanceControlSlot = { ...original.built, opID: original.id }
+  const slot: ConformanceControlSlot = { ...fixtureBuilt(), opID: original.id }
   const identity = {
     ...host.control.key,
     epoch: slot.epoch,
@@ -374,7 +418,7 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       const before = await host.control.load()
       const marker = await host.control.lastMutation()
       await expect(
-        host.control.apply({ commitOnce: { ...op.built, opID: op.id } }, 'unverified'),
+        host.control.apply({ commitOnce: { ...fixtureBuilt(), opID: op.id } }, 'unverified'),
       ).rejects.toThrow()
       expect(await host.control.load()).toEqual(before)
       expect(await host.control.lastMutation()).toBe(marker)
@@ -760,7 +804,7 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       const host = await params.open()
       const original = records().putOperations?.[0]
       if (original == null || original.stage !== 'accepted') throw new Error('missing build')
-      const slot: ConformanceControlSlot = { ...original.built, opID: original.id }
+      const slot: ConformanceControlSlot = { ...fixtureBuilt(), opID: original.id }
       const acceptance: ConformanceFirstValidCommit = {
         source: {
           key: host.control.key,
@@ -909,6 +953,8 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       expect(await reopened.control.load()).toEqual({
         commitOnce: null,
         commitOnceAcceptance: null,
+        controlHold: null,
+        strand: null,
         operations: changes.putOperations,
         rejoin: changes.putRejoin,
         outcomes: changes.putOutcomes,

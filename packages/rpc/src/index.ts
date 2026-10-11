@@ -60,6 +60,7 @@ export {
   type GroupForkEvidence,
   isCertifiedControlLoser,
 } from './control/search.js'
+export { type ControlSlotDeps, controlBuildRef, settleControlSlot } from './control/slot.js'
 export {
   applyChanges,
   applyResolved,
@@ -78,6 +79,7 @@ export type {
   BuiltCommit,
   CommitCursor,
   CommitSearchResult,
+  ControlAdoptionPort,
   ControlBuildRef,
   ControlChanges,
   ControlSearchPort,

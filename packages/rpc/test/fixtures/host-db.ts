@@ -1,4 +1,5 @@
 import type { AnchorSlot, AnchorStore } from '../../src/anchor.js'
+import { controlBuildRef } from '../../src/control/slot.js'
 import {
   applyChanges,
   type CommitOnceWriteContext,
@@ -32,6 +33,10 @@ type WritePoint = 'apply' | 'save' | 'anchor' | 'seed'
 type FailurePoint = 'mid-apply' | 'mid-save' | 'mid-anchor' | 'mid-seed'
 
 export type MemoryHostDatabase = {
+  bindIdentity(
+    storageID: string,
+    reader: (state: Uint8Array, key: GroupKey) => EpochIdentity | null,
+  ): void
   control(storageID: string, key: GroupKey): ControlStore
   saveBuilt(
     storageID: string,
@@ -65,6 +70,8 @@ function emptyRecord(): GroupRecord {
     control: {
       commitOnce: null,
       commitOnceAcceptance: null,
+      controlHold: null,
+      strand: null,
       operations: [],
       rejoin: null,
       outcomes: [],
@@ -80,6 +87,9 @@ export function createMemoryHostDatabase(
   options: { readIdentity?: (state: Uint8Array, key: GroupKey) => EpochIdentity | null } = {},
 ): MemoryHostDatabase {
   let version = 0
+  const readers = new Map<string, (state: Uint8Array, key: GroupKey) => EpochIdentity | null>()
+  const readIdentity = (storageID: string, state: Uint8Array, key: GroupKey) =>
+    (readers.get(storageID) ?? options.readIdentity)?.(state, key) ?? null
   const groups = new Map<string, GroupRecord>()
   const keys = new Map<string, GroupKey>()
   const seams = new Map<string, () => void | Promise<void>>()
@@ -112,6 +122,9 @@ export function createMemoryHostDatabase(
     await runSeam(`after-${point}`)
   }
   return {
+    bindIdentity: (storageID, reader) => {
+      readers.set(storageID, reader)
+    },
     control: (storageID, key) => {
       const fixedKey = { ...key }
       keys.set(storageID, fixedKey)
@@ -132,7 +145,7 @@ export function createMemoryHostDatabase(
             )
               throw new Error('Acceptance key mismatch')
             const source =
-              next.state === null ? null : (options.readIdentity?.(next.state, fixedKey) ?? null)
+              next.state === null ? null : readIdentity(storageID, next.state, fixedKey)
             next.control = applyChanges(
               next.control,
               ownedChanges,
@@ -148,18 +161,18 @@ export function createMemoryHostDatabase(
       const unchanged = new Error('Unchanged build')
       try {
         await transact(storageID, 'apply', (next) => {
-          const source =
-            next.state === null ? null : (options.readIdentity?.(next.state, key) ?? null)
+          const source = next.state === null ? null : readIdentity(storageID, next.state, key)
           const identity = expected.identity
           const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
           if (
+            next.control.controlHold !== null ||
             !same(key, expected.key) ||
             identity === null ||
             !same(source, identity) ||
             next.version !== expected.stateVersion ||
             (next.control.cursor === null &&
               (next.initialState === null ||
-                !same(options.readIdentity?.(next.initialState, key) ?? null, identity))) ||
+                !same(readIdentity(storageID, next.initialState, key), identity))) ||
             next.control.operations[0]?.id !== intent.id ||
             !same(next.control.operations[0], intent) ||
             built.searchFrom !== (next.control.cursor?.position ?? null) ||
@@ -185,7 +198,7 @@ export function createMemoryHostDatabase(
             checkpoint: next.control.cursor?.position ?? null,
           }
           next.control = applyChanges(next.control, {
-            putOperations: [{ ...intent, stage: 'built', built }],
+            putOperations: [{ ...intent, stage: 'built', built: controlBuildRef(built) }],
           })
           next.control = applyChanges(
             next.control,
@@ -251,10 +264,19 @@ export function createMemoryHostDatabase(
           keys.get(groupID) ??
           (slot == null ? null : { groupID, incarnation: slot.incarnation })
         const before =
-          next.state === null || key === null
-            ? null
-            : (options.readIdentity?.(next.state, key) ?? null)
-        const after = key === null ? null : (options.readIdentity?.(ownedState, key) ?? null)
+          next.state === null || key === null ? null : readIdentity(groupID, next.state, key)
+        const expected = ownedWrite?.expected
+        if (
+          expected !== undefined &&
+          (JSON.stringify(expected.key) !== JSON.stringify(keys.get(groupID)) ||
+            expected.stateVersion !== next.version ||
+            JSON.stringify(expected.identity) !== JSON.stringify(before))
+        ) {
+          const error = new Error('Adoption source moved')
+          error.name = 'ControlAdoptionMovedError'
+          throw error
+        }
+        const after = key === null ? null : readIdentity(groupID, ownedState, key)
         if (next.state === null) next.initialState = ownedState.slice()
         next.state = ownedState
         if (ownedWrite != null) {

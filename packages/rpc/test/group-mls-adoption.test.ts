@@ -1,10 +1,14 @@
 import { toUTF } from '@sozai/codec'
 import { expect, test } from 'vitest'
 
-import type { StagedAdoption } from '../src/control/types.js'
+import type { ControlSlot, Operation, StagedAdoption } from '../src/control/types.js'
 import { asLogPosition } from '../src/cursor.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
-import { createMemoryGroupMLS, memoryEntryID } from './fixtures/memory-group-mls.js'
+import {
+  createMemoryGroupMLS,
+  encodeMemoryControlJournal,
+  memoryEntryID,
+} from './fixtures/memory-group-mls.js'
 
 test.each([false, true])(
   'competing rotation prevents own candidate settlement (restart %s)',
@@ -14,18 +18,18 @@ test.each([false, true])(
     const options = { groupID, members: ['alice', 'bob'] }
     const alice = createMemoryGroupMLS({ ...options, localDID: 'alice' })
     let bob = createMemoryGroupMLS({ ...options, hostDB, localDID: 'bob' })
+    await bob.persistInitialState()
+    await bob.persistInitialState()
     const source = await bob.readRecoverySource()
-    const expected = {
-      epoch: source.epoch,
-      authenticatorBefore: source.authenticator,
-      incarnation: source.key.incarnation,
-    }
+
     const before = bob.serializeState()
     const ownCommit = bob.buildCommit()
     bob.adopt(ownCommit)
     const candidate = bob.serializeState()
     const ownAuthenticator = bob.authenticator()
     bob.restoreState(before)
+    const prepared = await saveCandidate(bob, source, before, candidate)
+    const priorMutation = await bob.control().lastMutation()
     const otherCommit = alice.buildCommit()
     expect(ownCommit).not.toEqual(otherCommit)
     await bob.processCommit(otherCommit, {})
@@ -37,11 +41,19 @@ test.each([false, true])(
     }
     const current = bob.serializeState()
     const write = { mutationID: 'wrong-branch', changes: { deleteOperations: ['rotation'] } }
-    expect(await bob.adoptOperation(candidate, expected, write)).toBe('moved')
+    expect(
+      await bob.adoptOperation(
+        prepared.slot.journal,
+        { ...(await bob.readEvidence()).source, acceptance: prepared.proof },
+        write,
+      ),
+    ).toBe('moved')
     expect(bob.authenticator()).not.toEqual(ownAuthenticator)
     expect(bob.serializeState()).toEqual(current)
     expect(await hostDB.loadState(groupID)).toEqual(current)
-    expect(await hostDB.control(groupID, { groupID, incarnation: 1 }).lastMutation()).toBeNull()
+    expect(await hostDB.control(groupID, { groupID, incarnation: 1 }).lastMutation()).toBe(
+      priorMutation,
+    )
   },
 )
 
@@ -50,25 +62,51 @@ test('own rotation identity survives installation and idempotent replay after re
   const hostDB = createMemoryHostDatabase()
   const options = { groupID, hostDB, localDID: 'bob', members: ['alice', 'bob'] }
   const bob = createMemoryGroupMLS(options)
+  await bob.persistInitialState()
   const source = await bob.readRecoverySource()
-  const expected = {
-    epoch: source.epoch,
-    authenticatorBefore: source.authenticator,
-    incarnation: source.key.incarnation,
-  }
+
   const before = bob.serializeState()
   bob.adopt(bob.buildCommit())
   const candidate = bob.serializeState()
   const authenticator = bob.authenticator()
   bob.restoreState(before)
-  const write = { mutationID: 'own-branch', changes: {} }
-  expect(await bob.adoptOperation(candidate, expected, write)).toBe('installed')
+  const prepared = await saveCandidate(bob, source, before, candidate)
+  const write = {
+    mutationID: 'own-branch',
+    changes: {
+      commitOnce: null,
+      deleteOperations: ['rotation'],
+      putApplied: [
+        {
+          epoch: source.epoch,
+          digest: 'own',
+          payloadDigest: 'payload',
+          sequenceID: '001',
+          opID: 'rotation',
+          removed: false,
+        },
+      ],
+    },
+  }
+  expect(
+    await bob.adoptOperation(
+      prepared.slot.journal,
+      { ...(await bob.readEvidence()).source, acceptance: prepared.proof },
+      write,
+    ),
+  ).toBe('installed')
   const saved = await hostDB.loadState(groupID)
   if (saved == null) throw new Error('missing saved state')
   const restored = createMemoryGroupMLS(options)
   restored.restoreState(saved)
   expect(restored.authenticator()).toEqual(authenticator)
-  expect(await restored.adoptOperation(candidate, expected, write)).toBe('noop')
+  expect(
+    await restored.adoptOperation(
+      prepared.slot.journal,
+      { ...(await restored.readEvidence()).source, acceptance: prepared.proof },
+      write,
+    ),
+  ).toBe('noop')
 })
 
 test.each([false, true])(
@@ -157,3 +195,46 @@ test.each([false, true])(
     await expect(reader.processCommit(commit, context)).resolves.toMatchObject({ applied: true })
   },
 )
+
+async function saveCandidate(
+  bob: ReturnType<typeof createMemoryGroupMLS>,
+  source: Awaited<ReturnType<typeof bob.readRecoverySource>>,
+  before: Uint8Array,
+  candidate: Uint8Array,
+) {
+  const op: Operation & { stage: 'intent' } = {
+    id: 'rotation',
+    kind: 'rotation',
+    revokes: false,
+    body: new Uint8Array(),
+    seq: 1,
+    enqueuedAt: 0,
+    deadline: 30_000,
+    stage: 'intent',
+  }
+  await bob.control().apply({ putOperations: [op] }, 'enqueue')
+  const slot: ControlSlot = {
+    opID: op.id,
+    incarnation: 1,
+    epoch: source.epoch,
+    authenticatorBefore: source.authenticator,
+    searchFrom: null,
+    expectedHead: null,
+    publishID: 'own',
+    payload: new Uint8Array([1]),
+    payloadDigest: 'payload',
+    digest: 'own',
+    bodies: [],
+    welcome: null,
+    journal: encodeMemoryControlJournal({ source, sourceState: before, candidate }),
+  }
+  expect(await bob.saveBuilt(op, slot, source, 'built')).toBe('saved')
+  const proof = {
+    source,
+    from: null,
+    position: asLogPosition('001'),
+    payloadDigest: slot.payloadDigest,
+  }
+  await bob.control().apply({ commitOnceAcceptance: proof }, 'accepted')
+  return { slot, proof }
+}

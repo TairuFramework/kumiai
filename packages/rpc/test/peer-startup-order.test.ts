@@ -37,9 +37,9 @@ test.each([false, true])(
     await hub.publish({
       senderDID: 'alice',
       topicID: commitTopic(secret),
-      payload: op.built.payload,
+      payload: op.slot.payload,
       publishID: op.built.publishID,
-      expectedHead: op.built.expectedHead,
+      expectedHead: op.slot.expectedHead,
       retain: 'log',
     })
     if (forget) hub.forgetPublishRecords()
@@ -189,6 +189,8 @@ test('terminal startup serves outcomes without anchor export or control subscrip
     },
     'removed',
   )
+  seed.mls.adopt(seed.mls.buildCommit([], { removes: ['bob'] }))
+  await seed.database.saveState('bob', seed.mls.serializeState())
   const subscribe = vi.spyOn(hub, 'subscribe')
   const again = makeMLSPeer(hub, 'bob', secret, { restartOf: seed })
   peers.push(again)

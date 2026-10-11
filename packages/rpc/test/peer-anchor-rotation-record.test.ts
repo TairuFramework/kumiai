@@ -380,14 +380,17 @@ describe('recovery ordering', { concurrent: false }, () => {
     expect(bob.mls.epoch()).toBe(1)
     expect((await bob.anchorStore.load())?.pending).toMatchObject({ epochBefore: 1, epochAfter: 2 })
     await bob.peer.dispose()
-    const op = (await bob.control.load()).operations[0]
+    const savedControl = await bob.control.load()
+    const op = savedControl.operations[0]
+    const slot = savedControl.commitOnce
+    if (slot === null) throw new Error('Missing slot')
     if (op?.stage !== 'accepted') throw new Error('Missing accepted operation')
     await bob.database.saveState('bob', pending.journal, {
       mutationID: 'committed-replacement',
-      anchorLanded: op.built.digest,
+      anchorLanded: slot.digest,
       changes: landedChanges(op, op.acceptedAs, {
         epoch: op.built.epoch,
-        digest: op.built.digest,
+        digest: slot.digest,
         payloadDigest: op.built.payloadDigest,
         sequenceID: op.acceptedAs,
         opID: op.id,

@@ -1,16 +1,12 @@
 import { randomIdentity } from '@kokuin/token'
 import { commitLedgerEntries, createGroup, type GroupHandle, signLedgerEntry } from '@kumiai/mls'
-import {
-  createGroupCrypto,
-  createGroupMLS,
-  createLedgerEntrySlot,
-  simpleHandleAccess,
-} from '@kumiai/mls-rpc'
+import { createGroupCrypto, createGroupMLS, createLedgerEntrySlot } from '@kumiai/mls-rpc'
 import { createGroupPeer, digestAppliedCommit } from '@kumiai/rpc'
 import { expect, test, vi } from 'vitest'
 
 import {
   chat,
+  createDurableHandleAccess,
   createMemoryAppCursorStore,
   createMemoryAppOutbox,
   createOperationHost,
@@ -25,8 +21,7 @@ test('real MLS publishes paired snapshots only after an awaited adoption callbac
   const created = await createGroup(identity, 'admission-integration')
   let handle: GroupHandle = created.group
   const epochBefore = Number(handle.epoch)
-  const access = simpleHandleAccess({
-    stateVersion: () => 0,
+  const access = createDurableHandleAccess({
     handle: () => handle,
     adopt: async (next) => {
       handle = next
@@ -63,8 +58,7 @@ test('accepted adoption entries seal at the matching admission epoch once the de
   })
   let handle = (await createGroup(identity, 'admission-dispatch-integration')).group
   const epochBefore = Number(handle.epoch)
-  const access = simpleHandleAccess({
-    stateVersion: () => 0,
+  const access = createDurableHandleAccess({
     handle: () => handle,
     adopt: async (next) => {
       handle = next
@@ -93,7 +87,7 @@ test('accepted adoption entries seal at the matching admission epoch once the de
     seals.push(admission.epoch)
     return sealed
   })
-  const host = createOperationHost(access)
+  const host = createOperationHost(access, identity)
   const peer = createGroupPeer<Protocols>({
     hub: hub.connect(identity),
     crypto,

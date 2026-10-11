@@ -3,9 +3,9 @@ import { describe, expect, test } from 'vitest'
 import { COMMIT_FRAME_VERSION, encodeCommitFrame } from '../src/commit-frame.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
+import { assertDurableControlHold } from './fixtures/control-hold.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
-import { controlRecoveryClock, drainUntil } from './fixtures/recovery-clock.js'
 
 const flush = (ms = 40) => new Promise((r) => setTimeout(r, ms))
 
@@ -74,60 +74,34 @@ const commitFrames = (hub: FakeHub, rs: Uint8Array): number =>
 describe('a frame whose commit-frame version this build does not know', {
   concurrent: false,
 }, () => {
-  test('on the commit topic: the peer heals, and its epoch moves', async () => {
-    controlRecoveryClock(5)
+  test('unsupported inner version persists a hold across reconstruction', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x81)
-
     const { sequenceID } = await publish(hub, rs, futureCommitFrame())
-    // Carol runs the build that WROTE that frame, so it says nothing to her and she stays on the
-    // group's line — the live member able to answer Bob's rendezvous. Modelled by keeping the
-    // frame out of her log, since a fixture cannot run two builds at once.
-    hub.hideFrom('carol', sequenceID)
-    const carol = makeMLSPeer(hub, 'carol', rs, { epoch: 1, members, recovery })
-    await carol.peer.resync()
-    expect(carol.mls.epoch()).toBe(1)
-
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-    await drainUntil(() => bob.mls.epoch() > 1, 'Bob epoch advance')
-    await bob.peer.resync()
-    await carol.peer.resync()
-
-    // The heal ACTUALLY happening — a rendezvous Bob asked for, and an epoch that moved. A peer
-    // that drops the frame as malformed throws nothing at all, which is why the assertion cannot
-    // be the absence of an error.
-    expect(healsBy(hub, rs, 'bob')).toHaveLength(1)
-    expect(bob.mls.epoch()).toBeGreaterThan(1)
-    expect(bob.mls.epoch()).toBe(carol.mls.epoch())
-
-    await bob.peer.dispose()
-    await carol.peer.dispose()
+    await assertDurableControlHold(bob, hub, rs, 'bob', {
+      reason: 'unsupported-version',
+      position: sequenceID,
+    })
   })
 
-  test('the cursor does not step over it as malformed: the peer is stranded, not reconciled', async () => {
+  test('the cursor preserves its position and private control stays pending', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x82)
-
-    await publish(hub, rs, futureCommitFrame())
+    const { sequenceID } = await publish(hub, rs, futureCommitFrame())
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-    // Short of the 250ms deadline, so the heal may still be retrying — nobody is there to answer
-    // it either way. Bob's only evidence he is off the group's line is the in-memory strand.
     await flush(220)
-
     const headBefore = hub.head(commitTopic(rs))
     const framesBefore = commitFrames(hub, rs)
-
-    // THIS is the silent failure made observable. A peer that stepped over the frame and called
-    // itself reconciled would commit happily here, win the compare-and-set at a dead epoch, and
-    // land a commit on a branch of one.
     await bob.peer.enqueue(buildLedgerCommit(bob, ['role:zoe=admin']))
-
     expect(commitFrames(hub, rs)).toBe(framesBefore)
     expect(hub.head(commitTopic(rs))).toBe(headBefore)
     expect(bob.mls.epoch()).toBe(1)
     expect((await bob.control.load()).operations[0]?.stage).toBe('intent')
-
-    await bob.peer.dispose()
+    await assertDurableControlHold(bob, hub, rs, 'bob', {
+      reason: 'unsupported-version',
+      position: sequenceID,
+    })
   })
 
   test('bytes that are not a commit frame at all are still dropped, not healed from', async () => {

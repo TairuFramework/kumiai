@@ -352,3 +352,43 @@ describe('host invocation boundary', () => {
     await drain
   })
 })
+
+test('validation host methods drain and refuse after dispose', async () => {
+  const boundary = createHostBoundary()
+  const pause = gate()
+  const source = {
+    key: { groupID: 'group', incarnation: 1 },
+    stateVersion: 1,
+    identity: { groupID: 'group', incarnation: 1, epoch: 1, authenticator: new Uint8Array([1]) },
+  }
+  const validation = {
+    source,
+    readCommitHeader: async () => null,
+    verifyOwn: async () => false,
+    validateFrame: async () => {
+      await pause.promise
+      return { kind: 'unavailable' as const, reason: 'missing-key' as const }
+    },
+  }
+  const selected = wrapPeerHost(boundary, {
+    validation: { restoreValidation: async () => validation },
+  })
+  const restored = await selected.validation.restoreValidation()
+  const validating = restored.validateFrame()
+  boundary.close()
+  let drained = false
+  const drainage = boundary.drained(Promise.resolve()).then(() => {
+    drained = true
+  })
+  await Promise.resolve()
+  expect(drained).toBe(false)
+  expect(restored.source).toBe(source)
+  pause.release()
+  await validating
+  await drainage
+  expect(drained).toBe(true)
+  await expect(selected.validation.restoreValidation()).rejects.toBeInstanceOf(PeerDisposedError)
+  expect(() => restored.readCommitHeader()).toThrow(PeerDisposedError)
+  expect(() => restored.validateFrame()).toThrow(PeerDisposedError)
+  expect(() => restored.verifyOwn()).toThrow(PeerDisposedError)
+})

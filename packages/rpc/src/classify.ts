@@ -66,6 +66,7 @@ export type CommitDisposition =
    * the frame is stepped over before the heal fires and is never re-read.
    */
   | { row: 'ahead' }
+  | { row: 'unsupported-version' }
   /**
    * A frame from an epoch BELOW this peer's with no applied-commit record: pre-join,
    * pre-rejoin, or re-seeded history. Advance, no fork check, no unwrap. Neither fork nor
@@ -240,7 +241,7 @@ export function classifyCommit({
   // can't be asked whether they're a commit. `ahead`, not `poison` — see UNKNOWN_FRAME_VERSION's
   // doc for why poison is uniquely dangerous here (no "next frame" to heal off of after a
   // version bump) and the `ahead` row's doc for why the resulting forgeability is accepted.
-  if (header === UNKNOWN_FRAME_VERSION) return { row: 'ahead' }
+  if (header === UNKNOWN_FRAME_VERSION) return { row: 'unsupported-version' }
 
   // Bytes that are not a commit can't be asked the epoch questions below, so settle next.
   if (header == null) return { row: 'poison' }
