@@ -1,23 +1,335 @@
-import { commitKeyRotation, decodeClientState, encodeClientState, restoreGroup } from '@kumiai/mls'
-import { type AdoptionWrite, asLogPosition, type ControlSlot, type Operation } from '@kumiai/rpc'
-import { expect, test } from 'vitest'
+import {
+  commitKeyRotation,
+  commitSelfRemovals,
+  decodeClientState,
+  encodeClientState,
+  restoreGroup,
+} from '@kumiai/mls'
+import {
+  type AdoptionWrite,
+  asLogPosition,
+  CONTROL_SEARCH_BUDGET,
+  type ControlSlot,
+  createControlSearch,
+  decodeCommitFrame,
+  decodeHandshakeFrame,
+  digestAppliedCommit,
+  encodeCommitFrame,
+  encodeHandshakeFrame,
+  encodeLedgerEntries,
+  HANDSHAKE_KIND,
+  type Operation,
+  settleControlSlot,
+} from '@kumiai/rpc'
+import { expect, test, vi } from 'vitest'
 
 import { simpleHandleAccess } from '../src/access.js'
 import { createControlAdoptionPort } from '../src/control-adoption.js'
 import { createControlBuildPort, createPersistenceBuildSaver } from '../src/control-build.js'
-import { encodeControlJournal } from '../src/control-journal.js'
+import { decodeControlJournal, encodeControlJournal } from '../src/control-journal.js'
+import { createControlValidationPort } from '../src/control-validation.js'
 import { createMemoryGroupPersistence } from '../src/memory-group-persistence.js'
 import { createMemoryTransaction } from '../src/memory-transaction.js'
 import { createGroupMLS } from '../src/mls.js'
 import { createOwnerQueues } from '../src/owner-queue.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
 import { controlAdoptionFixture } from './fixtures/control-adoption.js'
-import { createRealGroup } from './fixtures/real-group.js'
+import { buildRealCommit, createRealGroup } from './fixtures/real-group.js'
 import { installSeed, makeStorageSeed, nextChange } from './fixtures/storage-seed.js'
 import {
   createTransactionalAccess,
   createTransactionalStore,
 } from './fixtures/transactional-access.js'
+
+async function retainedRotation(size = 1) {
+  const group = await createRealGroup(size, 'retained-rotation')
+  const member = group.members[0]
+  if (member === undefined) throw new Error('Missing member')
+  const store = createTransactionalStore(member.handle)
+  const host = await createTransactionalAccess(member, store)
+  const builds = vi.fn(async (_op: Operation, handle: typeof member.handle) => {
+    const rotation = await commitKeyRotation(handle)
+    return {
+      commit: rotation.commitMessage,
+      digest: digestAppliedCommit(rotation.commitMessage),
+      bodies: [],
+      welcome: null,
+      epoch: Number(handle.epoch),
+      incarnation: 1,
+      authenticatorBefore: handle.state.keySchedule.epochAuthenticator.slice(),
+      journal: encodeClientState(rotation.newGroup.state),
+    }
+  })
+  const intent: Operation & { stage: 'intent' } = {
+    id: 'rotation',
+    kind: 'rotation',
+    revokes: false,
+    body: new Uint8Array(),
+    seq: 1,
+    enqueuedAt: Date.now(),
+    deadline: Date.now() + 30_000,
+    stage: 'intent',
+  }
+  const prepare = createControlBuildPort({
+    access: host.access,
+    control: store.control,
+    build: builds,
+    saveBuilt: store.saveBuilt,
+    now: Date.now,
+    newID: () => crypto.randomUUID(),
+  })
+  const build = async () => {
+    await store.control.apply({ putOperations: [intent] }, 'enqueue')
+    expect(
+      (
+        await prepare.prepareBuild(intent, async (built, seal) => ({
+          payload: encodeHandshakeFrame(
+            HANDSHAKE_KIND.commit,
+            encodeCommitFrame(built.commit, (await seal(encodeLedgerEntries(built.bodies))).sealed),
+          ),
+          publishID: 'rotation-publish',
+          expectedHead: null,
+        }))
+      ).kind,
+    ).toBe('saved')
+    const slot = (await store.control.load()).commitOnce
+    if (slot === null) throw new Error('Missing slot')
+    return slot
+  }
+  const restoreCandidate = async (bytes: Uint8Array) => {
+    const state = decodeClientState(bytes)
+    if (state === undefined) throw new Error('Invalid candidate')
+    return restoreGroup({
+      state,
+      credential: member.handle.credential,
+      ledgerEntries: store.snapshot().ledger,
+      options: { resolveLedgerEntries: member.slot.resolve },
+    })
+  }
+  const accept = async (target: typeof store, slot: ControlSlot) => {
+    const proof = {
+      source: (await target.readEvidence()).source,
+      from: slot.searchFrom,
+      position: asLogPosition('000001'),
+      payloadDigest: slot.payloadDigest,
+    }
+    await target.control.apply({ commitOnceAcceptance: proof }, 'accept')
+    const write: AdoptionWrite = {
+      mutationID: 'landed',
+      changes: {
+        deleteOperations: [intent.id],
+        commitOnce: null,
+        putApplied: [
+          {
+            epoch: slot.epoch,
+            digest: slot.digest,
+            payloadDigest: slot.payloadDigest,
+            sequenceID: proof.position,
+            opID: intent.id,
+            removed: false,
+          },
+        ],
+        cursor: { position: proof.position, epoch: slot.epoch + 1 },
+      },
+    }
+    return { proof, write }
+  }
+  return { group, member, store, host, builds, build, restoreCandidate, accept }
+}
+
+test.each(['generation', 'source-message', 'retained-history', 'eviction'] as const)(
+  'accepted restart carries current progress without resurrecting history (%s)',
+  async (check) => {
+    const f = await retainedRotation()
+    const copySender = async () => {
+      const sender = f.group.committer.handle
+      const state = decodeClientState(encodeClientState(sender.state))
+      if (state === undefined) throw new Error('Invalid sender')
+      return restoreGroup({
+        state,
+        credential: sender.credential,
+        ledgerEntries: sender.ledgerTokens,
+      })
+    }
+    const evictedSender = await copySender()
+    await f.host.access.mutate(async (handle) =>
+      handle.processMessage(await buildRealCommit(f.group)),
+    )
+    const olderSender = await copySender()
+    await f.host.access.mutate(async (handle) =>
+      handle.processMessage(await buildRealCommit(f.group)),
+    )
+    // A null cursor is only valid at the retained installation identity.
+    await f.store.control.apply({ cursor: { position: asLogPosition('000000'), epoch: 3 } }, 'walk')
+    const slot = await f.build()
+    const candidate = await f.restoreCandidate(decodeControlJournal(slot.journal).candidate)
+    const nextTree = structuredClone(candidate.state.secretTree)
+    const originalCandidateAuthenticator = candidate.state.keySchedule.epochAuthenticator.slice()
+    const sourceEpoch = BigInt(slot.epoch)
+    const ownLeaf = f.host.live().state.privatePath.leafIndex * 2
+    const generationAtBuild =
+      candidate.state.historicalReceiverData.get(sourceEpoch)?.secretTree.leafNodes[ownLeaf]
+        ?.application.generation ?? 0
+    const message = await f.group.committer.handle.encrypt(new TextEncoder().encode('source'))
+    const olderMessage = await olderSender.encrypt(new TextEncoder().encode('older'))
+    const evictedMessage = await evictedSender.encrypt(new TextEncoder().encode('evicted'))
+    await f.host.access.mutate(async (handle) => {
+      await handle.decrypt(message)
+      await handle.decrypt(olderMessage)
+      await handle.encrypt(new TextEncoder().encode('one'))
+      await handle.encrypt(new TextEncoder().encode('two'))
+      handle.state.historicalReceiverData.delete(1n)
+    })
+    const currentOwnGenerationAtSourceEpoch =
+      f.host.live().state.secretTree.leafNodes[ownLeaf]?.application.generation
+    const { proof, write } = await f.accept(f.store, slot)
+    const storedProofVersion = proof.source.stateVersion
+    const store = await f.store.fork()
+    const restarted = await createTransactionalAccess(f.member, store)
+    const restoredCandidate = await f.restoreCandidate(decodeControlJournal(slot.journal).candidate)
+    expect(restoredCandidate.state.keySchedule.epochAuthenticator).toEqual(
+      originalCandidateAuthenticator,
+    )
+    const port = createControlAdoptionPort({
+      access: restarted.access,
+      control: store.control,
+      restoreCandidate: f.restoreCandidate,
+    })
+    f.builds.mockClear()
+    const source = (await store.readEvidence()).source
+    expect(source.stateVersion).toBeGreaterThan(storedProofVersion)
+    expect(await port.adopt(slot.journal, { ...source, acceptance: proof }, write)).toBe(
+      'installed',
+    )
+    const adopted = restarted.live()
+    const adoptedOwnGenerationAtSourceEpoch =
+      adopted.state.historicalReceiverData.get(sourceEpoch)?.secretTree.leafNodes[ownLeaf]
+        ?.application.generation
+    if (check === 'generation') {
+      expect(adoptedOwnGenerationAtSourceEpoch).toBe(currentOwnGenerationAtSourceEpoch)
+      expect(adoptedOwnGenerationAtSourceEpoch).toBeGreaterThan(generationAtBuild)
+    }
+    if (check === 'eviction') {
+      expect(adopted.state.historicalReceiverData.has(1n)).toBe(false)
+      await expect(adopted.decrypt(evictedMessage)).rejects.toThrow()
+    }
+    if (check === 'retained-history') {
+      expect(adopted.state.historicalReceiverData.has(2n)).toBe(true)
+      await expect(adopted.decrypt(olderMessage)).rejects.toThrow()
+    }
+    expect(adopted.state.keySchedule.epochAuthenticator).toEqual(originalCandidateAuthenticator)
+    expect(adopted.state.secretTree).toEqual(nextTree)
+    if (check === 'source-message') await expect(adopted.decrypt(message)).rejects.toThrow()
+    expect(f.builds.mock.calls.length).toBe(0)
+  },
+)
+
+test('extra proposal is omitted cleared and requires reproposal', async () => {
+  const f = await retainedRotation(2)
+  const slot = await f.build()
+  const proposer = f.group.members[1]
+  if (proposer === undefined) throw new Error('Missing proposer')
+  const proposal = await proposer.handle.proposeSelfRemoval()
+  await f.host.access.mutate(async (handle) => handle.processMessage(proposal.frame))
+  expect(Object.keys(f.host.live().state.unappliedProposals)).toHaveLength(1)
+  const { proof, write } = await f.accept(f.store, slot)
+  const port = createControlAdoptionPort({
+    access: f.host.access,
+    control: f.store.control,
+    restoreCandidate: f.restoreCandidate,
+  })
+  expect(
+    await port.adopt(
+      slot.journal,
+      { ...(await f.store.readEvidence()).source, acceptance: proof },
+      write,
+    ),
+  ).toBe('installed')
+  const adopted = f.host.live()
+  const targetDID = proposer.identity.id
+  expect(adopted.listMembers().map((member) => member.id)).toContain(targetDID)
+  expect(adopted.state.unappliedProposals).toEqual({})
+  const omitted = await commitKeyRotation(adopted)
+  expect(omitted.newGroup.listMembers().map((member) => member.id)).toContain(targetDID)
+  await proposer.handle.processMessage(
+    decodeCommitFrame(decodeHandshakeFrame(slot.payload).payload).commit,
+  )
+  await proposer.handle.processMessage(omitted.commitMessage)
+  await f.host.access.replace(omitted.newGroup)
+  const later = f.host.live()
+  const reproposed = await proposer.handle.proposeSelfRemoval()
+  await later.processMessage(reproposed.frame)
+  expect(Object.keys(later.state.unappliedProposals)).toHaveLength(1)
+  const enacted = await commitSelfRemovals(later)
+  expect(enacted).not.toBeNull()
+  expect(enacted?.newGroup.listMembers().map((member) => member.id)).not.toContain(targetDID)
+  expect(enacted?.newGroup.state.unappliedProposals).toEqual({})
+})
+
+test('acceptance persistence refreshes adoption expectations without rewriting historical proof', async () => {
+  const f = await retainedRotation()
+  const slot = await f.build()
+  const position = asLogPosition('000001')
+  const beforeAcceptance = (await f.store.readEvidence()).source
+  const search = createControlSearch({
+    budget: CONTROL_SEARCH_BUDGET,
+    validation: createControlValidationPort({
+      identity: f.member.identity,
+      options: {},
+      restoreCandidate: f.restoreCandidate,
+    }),
+    readEvidence: f.store.readEvidence,
+    fetch: async (after) => ({
+      head: position,
+      oldest: position,
+      gap: false,
+      messages:
+        after === position
+          ? []
+          : [
+              {
+                topicID: 'control',
+                sequenceID: position,
+                senderDID: f.member.identity.id,
+                payload: slot.payload,
+              },
+            ],
+    }),
+    followWinner: async () => {
+      throw new Error('Unexpected competitor')
+    },
+    reconcileAbsent: async () => true,
+    hold: async (controlHold) => f.store.control.apply({ controlHold }, crypto.randomUUID()),
+  })
+  const port = createControlAdoptionPort({
+    access: f.host.access,
+    control: f.store.control,
+    restoreCandidate: f.restoreCandidate,
+  })
+  expect(
+    await settleControlSlot({
+      control: f.store.control,
+      search,
+      readEvidence: f.store.readEvidence,
+      adoption: {
+        adopt: async (journal, expected, write) => {
+          expect(expected.acceptance.source).toEqual(beforeAcceptance)
+          expect(expected.stateVersion).toBeGreaterThan(expected.acceptance.source.stateVersion)
+          expect(expected.stateVersion).toBe((await f.store.readEvidence()).source.stateVersion)
+          return port.adopt(journal, expected, write)
+        },
+      },
+      now: Date.now,
+      newID: () => crypto.randomUUID(),
+      emit: () => {},
+    }),
+  ).toBe('landed')
+  expect(f.host.live().epoch).toBe(BigInt(slot.epoch + 1))
+  expect((await f.store.control.load()).commitOnce).toBeNull()
+  expect((await f.store.control.load()).outcomes).toEqual([
+    expect.objectContaining({ kind: 'landed', opID: slot.opID, position }),
+  ])
+})
 
 test('stale adoption version leaves state and control unchanged', async () => {
   const f = await controlAdoptionFixture()

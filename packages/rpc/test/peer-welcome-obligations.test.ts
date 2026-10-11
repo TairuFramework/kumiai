@@ -1,8 +1,11 @@
 import { describe, expect, test, vi } from 'vitest'
 
 import type { WelcomeObligation } from '../src/control/types.js'
+import { asLogPosition } from '../src/cursor.js'
+import { commitTopic } from '../src/topic.js'
+import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { buildInviteCommit, makeMLSPeer } from './fixtures/peer.js'
+import { buildInviteCommit, makeMLSPeer, seedBuiltOperation } from './fixtures/peer.js'
 
 const secret = new Uint8Array(32).fill(0x48)
 const obligation: WelcomeObligation = {
@@ -13,6 +16,131 @@ const obligation: WelcomeObligation = {
 }
 
 describe('durable Welcome obligations', () => {
+  test.each(['superseded', 'gap', 'unavailable'] as const)(
+    'Welcome is never released for a %s accepted stage after restart',
+    async (condition) => {
+      const hub = new FakeHub()
+      const member = makeMLSPeer(hub, 'alice', secret)
+      await member.peer.resync()
+      const op = await seedBuiltOperation(member, buildInviteCommit(member, 'bob'))
+      if (op.stage !== 'built') throw new Error('Missing built invite')
+      await member.peer.dispose()
+      await member.peer.drained()
+      if (condition === 'superseded')
+        await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 1 })
+      else
+        await hub.publish({
+          senderDID: 'carol',
+          topicID: commitTopic(secret),
+          payload: new Uint8Array([0]),
+          retain: 'log',
+        })
+      const occurrence = await hub.publish({
+        senderDID: 'alice',
+        topicID: commitTopic(secret),
+        payload: op.slot.payload,
+        publishID: op.slot.publishID,
+        expectedHead: hub.head(commitTopic(secret)),
+        retain: 'log',
+      })
+      if (condition === 'gap') hub.trim(commitTopic(secret), occurrence.sequenceID)
+      const source = await member.mls.readRecoverySource()
+      const welcome = op.slot.welcome
+      if (welcome === null) throw new Error('Missing saved Welcome')
+      const acceptance = {
+        source: { key: source.key, identity: source.identity, stateVersion: source.stateVersion },
+        from: op.slot.searchFrom,
+        position: asLogPosition(occurrence.sequenceID),
+        payloadDigest: op.slot.payloadDigest,
+      }
+      await member.control.apply(
+        {
+          commitOnceAcceptance: acceptance,
+          putOperations: [
+            { ...op, stage: 'accepted', acceptedAs: acceptance.position, acceptance },
+          ],
+          putWelcomes: [
+            {
+              opID: op.id,
+              welcome: welcome.bytes,
+              recipients: welcome.recipients,
+            },
+          ],
+        },
+        'retained-acceptance',
+      )
+      const restarted = makeMLSPeer(hub, 'alice', secret, { restartOf: member })
+      const restore =
+        condition === 'unavailable'
+          ? vi.spyOn(restarted.validation, 'restoreValidation').mockResolvedValue(null)
+          : undefined
+      try {
+        await restarted.peer.replay()
+        expect(restarted.welcomes).toEqual([])
+        const snapshot = await restarted.control.load()
+        expect(snapshot.applied.some((row) => row.payloadDigest === op.slot.payloadDigest)).toBe(
+          false,
+        )
+        if (condition === 'superseded') {
+          expect(snapshot.outcomes).toEqual([
+            expect.objectContaining({ opID: op.id, kind: 'lost' }),
+          ])
+          expect(restarted.mls.epoch()).toBe(2)
+        } else {
+          expect(snapshot.commitOnce).toEqual(op.slot)
+          expect(snapshot.controlHold?.reason).toBe('acceptance-unknown')
+          expect(snapshot.welcomes).toHaveLength(1)
+        }
+      } finally {
+        restore?.mockRestore()
+        await restarted.peer.dispose()
+        await restarted.peer.drained()
+      }
+    },
+  )
+
+  test('Welcome remains owed after landed outcome acknowledgement', async () => {
+    const hub = new FakeHub()
+    let attempts = 0
+    let accept: () => void = () => {}
+    const transport = new Promise<void>((resolve) => {
+      accept = resolve
+    })
+    const member = makeMLSPeer(hub, 'alice', secret, {
+      deliverWelcome: async (row) => {
+        attempts++
+        if (attempts === 1) throw new Error('Transport unavailable')
+        await transport
+        member.welcomes.push(row.opID)
+      },
+    })
+    try {
+      const request = buildInviteCommit(member, 'bob')
+      await member.peer.commit(request)
+      const outcome = (await member.peer.outcomes()).find((row) => row.opID === request.id)
+      if (outcome === undefined) throw new Error('Missing landed outcome')
+      expect(outcome.kind).toBe('landed')
+      await member.peer.ack(outcome.id)
+      await member.control.apply({ deleteAppliedBelow: Number.MAX_SAFE_INTEGER }, 'prune-applied')
+      expect(await member.peer.outcomes()).toEqual([])
+      expect((await member.control.load()).operations).toEqual([])
+      expect((await member.control.load()).applied).toEqual([])
+      expect((await member.control.load()).welcomes).toEqual([
+        expect.objectContaining({ opID: request.id, committed: true }),
+      ])
+      await vi.waitFor(() => expect(attempts).toBe(2), { timeout: 3000 })
+      expect((await member.control.load()).welcomes).toHaveLength(1)
+      expect(member.welcomes).toEqual([])
+      accept()
+      await vi.waitFor(async () => expect((await member.control.load()).welcomes).toEqual([]))
+      expect(member.welcomes).toEqual([request.id])
+    } finally {
+      accept()
+      await member.peer.dispose()
+      await member.peer.drained()
+    }
+  })
+
   test('delivers the committed artifact and deletes only after transport acceptance', async () => {
     const hub = new FakeHub()
     const seen: Array<WelcomeObligation> = []
