@@ -5,6 +5,14 @@ import * as ts from 'typescript'
 import { beforeAll, describe, expect, test } from 'vitest'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
+const workspacePaths = Object.fromEntries(
+  readdirSync(join(root, 'packages'), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .flatMap(({ name }) => [
+      [`@kumiai/${name}`, [join(root, 'packages', name, 'src/index.ts')]],
+      [`@kumiai/${name}/*`, [join(root, 'packages', name, 'src/*.ts')]],
+    ]),
+)
 const sourceRoots = [
   'mls-rpc',
   'mls',
@@ -412,6 +420,8 @@ function baselineProgram(directory: string, snippets = new Map<string, string>()
   const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, dirname(configPath))
   const options = {
     ...parsed.options,
+    paths: workspacePaths,
+    rootDir: join(root, 'packages'),
     lib: ['lib.es2022.d.ts', 'lib.dom.d.ts'],
     types: [],
     skipLibCheck: true,
@@ -926,6 +936,17 @@ describe('runtime-neutral source baseline', () => {
     }
     return program
   }
+  test.each(sourceRoots)(
+    'resolves workspace imports from source for %s',
+    (directory) => {
+      const builtFiles = programFor(directory)
+        .getSourceFiles()
+        .map((file) => file.fileName)
+        .filter((path) => path.startsWith(`${join(root, 'packages')}/`) && path.includes('/lib/'))
+      expect(builtFiles).toEqual([])
+    },
+    60_000,
+  )
   test.each(sourceRoots)(
     'type-checks %s against ES2022 and whitelisted hosts',
     (directory) => {
