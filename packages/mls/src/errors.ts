@@ -117,6 +117,13 @@ export type CommitValidationUnavailableReason =
   | 'resolver'
   | 'unrecognised'
 
+/** Verifiers/resolvers mark network or backend failures at their source, never policy refusals. */
+export type TransientVerificationError = Error & { transient: true }
+
+export function isTransientVerificationError(error: unknown): error is TransientVerificationError {
+  return error instanceof Error && 'transient' in error && error.transient === true
+}
+
 // Pinned ts-mls rc.13 and kokuin/noble diagnostics. Unknown dependency failures stay unavailable.
 const DEPENDENCY_REASONS: Record<
   string,
@@ -131,6 +138,10 @@ const DEPENDENCY_REASONS: Record<
   'invalid ghash tag': 'authentication',
   'invalid poly1305 tag': 'authentication',
   'Invalid signature': 'authentication',
+  'Invalid capability encoding': 'policy',
+  'Invalid signed capability': 'policy',
+  'Token expired': 'policy',
+  'Unsupported signature algorithm': 'policy',
   'Could not validate epoch': 'policy',
   'Invalid proposals': 'policy',
   'Update path is required': 'policy',
@@ -151,6 +162,7 @@ export function commitValidationReason(
   error: unknown,
 ): CommitValidationUnavailableReason | 'authentication' | 'policy' | 'credential' | undefined {
   if (!(error instanceof Error)) return undefined
+  if (isTransientVerificationError(error)) return 'unrecognised'
   if (error instanceof CommitValidationUnavailableError) return error.reason
   return Object.hasOwn(DEPENDENCY_REASONS, error.message)
     ? DEPENDENCY_REASONS[error.message]
@@ -158,16 +170,14 @@ export function commitValidationReason(
 }
 
 export function isConclusiveCommitError(error: unknown): boolean {
-  if (error instanceof LeafBindingError) {
-    const seen = new Set<unknown>()
-    let cause: unknown = error
-    while (cause instanceof LeafBindingError && !seen.has(cause)) {
-      seen.add(cause)
-      if (cause.cause === undefined) return true
-      cause = cause.cause
-    }
-    return cause instanceof LeafBindingError ? false : isConclusiveCommitError(cause)
+  const seen = new Set<unknown>()
+  let cause: unknown = error
+  while (cause instanceof Error && !seen.has(cause)) {
+    if (isTransientVerificationError(cause)) return false
+    seen.add(cause)
+    cause = cause.cause
   }
+  if (error instanceof LeafBindingError) return true
   const reason = commitValidationReason(error)
   return (
     error instanceof CodecError ||

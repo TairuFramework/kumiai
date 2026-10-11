@@ -96,7 +96,15 @@ export async function applyCommit(params: ApplyCommitParams): Promise<ApplyCommi
   }
   if (header?.committerDID === undefined || readMessageEpoch(commit) !== before) return refused()
   const committerDID = header.committerDID
-  if (committerDID != null && normalizeDID(committerDID) === normalizeDID(ownDID)) {
+  // An external replacement of this identity cannot use this leaf's old private keys. This is
+  // a policy refusal, not evidence that our member leaf authored the frame.
+  if (header.external === true && normalizeDID(committerDID) === normalizeDID(ownDID))
+    return refused(committerDID, 'policy')
+  if (
+    header.external !== true &&
+    committerDID != null &&
+    normalizeDID(committerDID) === normalizeDID(ownDID)
+  ) {
     return refused(committerDID)
   }
 

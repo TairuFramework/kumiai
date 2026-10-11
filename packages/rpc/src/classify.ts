@@ -284,7 +284,8 @@ export function classifyCommit({
   if (header.committerDID == null) return { row: 'poison' }
 
   // Discriminate by authorship, NOT applicability — see `own-unmerged`'s doc.
-  if (header.committerDID === state.localDID) return { row: 'own-unmerged' }
+  if (header.external !== true && header.committerDID === state.localDID)
+    return { row: 'own-unmerged' }
 
   return { row: 'apply' }
 }

@@ -1412,7 +1412,7 @@ export class GroupHandle {
     }
   }
 
-  /** Authenticate content on disposable state, without adopting or running host policy. */
+  /** Authenticate our member leaf on disposable state, without adopting or running host policy. */
   async verifyCommitSignature(commit: Uint8Array): Promise<boolean> {
     return mutexFor(this).run(async () => {
       let authenticated = false
@@ -1424,9 +1424,34 @@ export class GroupHandle {
             message.wireformat !== wireformats.mls_public_message)
         )
           return false
+        if (readMessageEpoch(commit) !== this.epoch) return false
+        const ownIndex = this.#state.privatePath.leafIndex
+        const ownLeaf = leafAt(this.#state.ratchetTree, ownIndex)
+        if (ownLeaf === undefined) return false
+        if (message.wireformat === wireformats.mls_public_message) {
+          const { content } = message.publicMessage
+          if (
+            content.contentType !== contentTypes.commit ||
+            content.sender.senderType !== senderTypes.member ||
+            content.sender.leafIndex !== ownIndex
+          )
+            return false
+        } else {
+          const frame = readPrivateFrame(message, contentTypes.commit)
+          if (
+            frame === undefined ||
+            (await readSenderLeafIndex(
+              this.#context,
+              this.#state.keySchedule.senderDataSecret,
+              frame,
+            )) !== ownIndex
+          )
+            return false
+        }
         const state = decodeClientState(encodeClientState(this.#state))
         if (state === undefined)
           throw new CommitValidationUnavailableError('Signature state unavailable')
+        let signatureChecked = false
         const result = await mlsProcessMessage({
           state,
           message,
@@ -1436,9 +1461,12 @@ export class GroupHandle {
               ...this.#context.cipherSuite,
               signature: {
                 ...this.#context.cipherSuite.signature,
-                verify: async (...args) => {
-                  const valid = await this.#context.cipherSuite.signature.verify(...args)
-                  authenticated ||= valid
+                verify: async (publicKey, ...args) => {
+                  const valid = await this.#context.cipherSuite.signature.verify(publicKey, ...args)
+                  if (!signatureChecked) {
+                    signatureChecked = true
+                    authenticated = bytesEqual(publicKey, ownLeaf.signaturePublicKey) && valid
+                  }
                   return valid
                 },
               },

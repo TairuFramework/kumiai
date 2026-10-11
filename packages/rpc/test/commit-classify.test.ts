@@ -26,6 +26,17 @@ function bob(overrides: Partial<CommitClassifierState> = {}): CommitClassifierSt
 }
 
 describe('the cursor table', () => {
+  test('an external commit naming this peer is handed to the port without claiming own authorship', () => {
+    expect(
+      classifyCommit({
+        header: { epoch: 5, committerDID: 'bob', external: true },
+        sequenceID: 's9',
+        commitDigest: digestAppliedCommit(otherCommit),
+        state: bob(),
+      }),
+    ).toEqual({ row: 'apply' })
+  })
+
   test('a frame at this peer’s epoch, from another member, is handed to the port', () => {
     expect(
       classifyCommit({

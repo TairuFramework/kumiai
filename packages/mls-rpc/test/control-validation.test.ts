@@ -26,17 +26,23 @@ import {
 import {
   type AdoptionExpected,
   type AdoptionWrite,
+  type AnchorStore,
+  type AppCursorStore,
+  type AppOutbox,
   asLogPosition,
   type BuiltCommit,
   type CertifiedControlRange,
   type ControlLogFrame,
   type ControlSearchWork,
   type ControlValidationPort,
+  commitTopic,
   createControlSearch,
+  createGroupPeer,
   digestAppliedCommit,
   encodeCommitFrame,
   encodeHandshakeFrame,
   encodeLedgerEntries,
+  type GroupPeerParams,
   HANDSHAKE_KIND,
   type LogPosition,
   type Operation,
@@ -46,6 +52,7 @@ import { toB64U } from '@sozai/codec'
 import {
   bytesToBase64,
   createCommit,
+  createGroupInfoWithExternalPubAndRatchetTree,
   createProposal,
   decode,
   defaultProposalTypes,
@@ -54,6 +61,8 @@ import {
   mlsMessageDecoder,
   mlsMessageEncoder,
   nodeTypes,
+  protocolVersions,
+  joinGroupExternal as rawJoinGroupExternal,
   senderTypes,
   ValidationError,
   wireformats,
@@ -62,7 +71,7 @@ import { expect, test, vi } from 'vitest'
 
 import { decodeControlJournal, encodeControlJournal } from '../src/control-journal.js'
 import { createControlValidationPort } from '../src/control-validation.js'
-import { deriveEntryKey, sealEntries } from '../src/crypto.js'
+import { createGroupCrypto, deriveEntryKey, sealEntries } from '../src/crypto.js'
 import { createMemoryGroupPersistence } from '../src/memory-group-persistence.js'
 import { createMemoryTransaction } from '../src/memory-transaction.js'
 import { createGroupMLS, createLedgerEntrySlot } from '../src/mls.js'
@@ -72,9 +81,9 @@ import { buildRealCommit, createRealGroup, testHandleAccess } from './fixtures/r
 import { installSeed, makeStorageSeed } from './fixtures/storage-seed.js'
 import { createTransactionalStore } from './fixtures/transactional-access.js'
 
-const verifierFault = vi.hoisted(() => ({
+const verifierFault = vi.hoisted((): { token: string; error: Error } => ({
   token: '',
-  error: new Error('transient credential verifier'),
+  error: Object.assign(new Error('transient credential verifier'), { transient: true as const }),
 }))
 vi.mock('@kokuin/token', async (importOriginal) => {
   const actual = await importOriginal<typeof TokenModule>()
@@ -1143,6 +1152,275 @@ test.each(['blank', 'unknown'] as const)(
     const searched = await searchReal(f, commit)
     expect(searched.result).toMatchObject({ kind: 'first-valid' })
     expect(searched.hold).not.toHaveBeenCalled()
+  },
+)
+
+test.each([
+  { postSignatureFailure: false, resync: false },
+  { postSignatureFailure: true, resync: false },
+  { postSignatureFailure: false, resync: true },
+])(
+  'a self-signed external commit copying our DID is policy poison without a fork hold: $postSignatureFailure/$resync',
+  async ({ postSignatureFailure, resync }) => {
+    const postSignature = vi.fn(async () => {
+      throw new ValidationError('Invalid proposals')
+    })
+    const f = await fixture(
+      postSignatureFailure
+        ? {
+            cryptoProvider: {
+              getCiphersuiteImpl: async (id) => {
+                const suite = await nobleCryptoProvider.getCiphersuiteImpl(id)
+                return {
+                  ...suite,
+                  hpke: { ...suite.hpke, importSecret: postSignature },
+                }
+              },
+            },
+          }
+        : {},
+    )
+    const author = f.group.committer.handle
+    const attacker = resync ? f.member.identity : randomIdentity()
+    const bundle = await generateKeyPackageWithKey({
+      credential: {
+        credentialType: 1,
+        identity: new TextEncoder().encode(JSON.stringify({ id: f.member.identity.id })),
+      },
+      signatureKeyPair: { signKey: attacker.privateKey, publicKey: attacker.publicKey },
+      cipherSuite: author.context.cipherSuite,
+      capabilities:
+        author.state.ratchetTree[0]?.nodeType === nodeTypes.leaf
+          ? author.state.ratchetTree[0].leaf.capabilities
+          : undefined,
+    })
+    const result = await rawJoinGroupExternal({
+      context: { ...author.context, authService: { validateCredential: async () => true } },
+      groupInfo: await createGroupInfoWithExternalPubAndRatchetTree(
+        author.state,
+        [],
+        author.context.cipherSuite,
+      ),
+      keyPackage: bundle.publicPackage,
+      privateKeys: bundle.privatePackage,
+      resync,
+    })
+    const commit = encode(mlsMessageEncoder, {
+      version: protocolVersions.mls10,
+      wireformat: wireformats.mls_public_message,
+      publicMessage: result.publicMessage,
+    })
+    const validation = await f.port.restoreValidation(f.built)
+    expect(await validation?.readCommitHeader(commit)).toMatchObject({
+      committerDID: f.member.identity.id,
+      external: true,
+    })
+    if (postSignatureFailure) expect(postSignature).toHaveBeenCalled()
+    expect.soft(await validation?.validateFrame(f.frame(commit), f.built)).toEqual({
+      kind: 'invalid',
+      reason: 'policy',
+    })
+    expect.soft(await f.member.handle.verifyCommitSignature(commit)).toBe(false)
+    const searched = await searchReal(f, commit)
+    expect.soft(searched.result).toMatchObject({
+      kind: 'first-valid',
+      proof: { position: asLogPosition('000102') },
+    })
+    expect.soft(searched.hold).not.toHaveBeenCalled()
+    expect(searched.followWinner).not.toHaveBeenCalled()
+    expect(searched.persisted).not.toHaveBeenCalled()
+    await expectPolicyPoison(f, commit, true)
+  },
+)
+
+test.each([false, true])(
+  'own signature verification rejects a different member (public: %s)',
+  async (publicFrame) => {
+    const f = await fixture()
+    const result = await createCommit({
+      context: f.group.committer.handle.context,
+      state: f.group.committer.handle.state,
+      wireAsPublicMessage: publicFrame,
+      authenticatedData: encodeControlEnvelope({ v: 1 }),
+    })
+    const commit = encode(mlsMessageEncoder, result.commit)
+    expect(await f.member.handle.verifyCommitSignature(commit)).toBe(false)
+    expect(await f.group.committer.handle.verifyCommitSignature(commit)).toBe(true)
+  },
+)
+
+async function credentialAdd(
+  f: Awaited<ReturnType<typeof fixture>>,
+  identity: ReturnType<typeof randomIdentity>,
+  credentialIdentity: Uint8Array,
+) {
+  const author = f.group.committer.handle
+  const bundle = await generateKeyPackageWithKey({
+    credential: { credentialType: 1, identity: credentialIdentity },
+    signatureKeyPair: { signKey: identity.privateKey, publicKey: identity.publicKey },
+    cipherSuite: author.context.cipherSuite,
+    capabilities:
+      author.state.ratchetTree[0]?.nodeType === nodeTypes.leaf
+        ? author.state.ratchetTree[0].leaf.capabilities
+        : undefined,
+  })
+  const result = await createCommit({
+    context: { ...author.context, authService: { validateCredential: async () => true } },
+    state: author.state,
+    wireAsPublicMessage: true,
+    authenticatedData: encodeControlEnvelope({ v: 1 }),
+    extraProposals: [
+      { proposalType: defaultProposalTypes.add, add: { keyPackage: bundle.publicPackage } },
+    ],
+  })
+  return encode(mlsMessageEncoder, result.commit)
+}
+
+async function expectPolicyPoison(
+  f: Awaited<ReturnType<typeof fixture>>,
+  commit: Uint8Array,
+  external = false,
+) {
+  const validation = await f.port.restoreValidation(f.built)
+  expect(await validation?.readCommitHeader(commit)).toMatchObject({
+    committerDID: external ? f.member.identity.id : f.group.committer.identity.id,
+  })
+  expect.soft(await validation?.validateFrame(f.frame(commit), f.built)).toEqual({
+    kind: 'invalid',
+    reason: 'policy',
+  })
+  const persisted = vi.fn(async () => {})
+  const access = testHandleAccess({
+    handle: () => f.member.handle,
+    adopt: (next) => {
+      f.member.handle = next
+    },
+    persist: persisted,
+  })
+  const live = createGroupMLS({
+    access,
+    identity: f.member.identity,
+    entrySlot: f.member.slot,
+  })
+  expect.soft(await live.processCommit(commit, {})).toEqual({
+    applied: false,
+    advanced: false,
+    epochBefore: f.built.epoch,
+    epochAfter: f.built.epoch,
+    refusal: external ? 'policy' : 'binding',
+  })
+  expect(encodeClientState(f.member.handle.state)).toEqual(f.state)
+  expect(persisted).not.toHaveBeenCalled()
+  const loadFixture = (name: string) =>
+    import(new URL(`../../rpc/test/fixtures/${name}.ts`, import.meta.url).href)
+  const { FakeHub } = (await loadFixture('fake-hub')) as {
+    FakeHub: new () => GroupPeerParams<Record<string, never>>['hub']
+  }
+  const { createMemoryAnchorStore } = (await loadFixture('anchor')) as {
+    createMemoryAnchorStore(): AnchorStore
+  }
+  const { createMemoryAppCursorStore } = (await loadFixture('app-cursor')) as {
+    createMemoryAppCursorStore(): AppCursorStore
+  }
+  const { createMemoryAppOutbox } = (await loadFixture('outbox')) as {
+    createMemoryAppOutbox(): AppOutbox
+  }
+  const hub = new FakeHub()
+  const poison = await hub.publish({
+    senderDID: f.group.committer.identity.id,
+    topicID: commitTopic(await live.exportRecoverySecret()),
+    payload: f.frame(commit).payload,
+    retain: 'log',
+  })
+  const store = createTransactionalStore(f.member.handle)
+  const onStrand = vi.fn()
+  const peer = createGroupPeer({
+    hub,
+    crypto: createGroupCrypto({ access }),
+    mls: live,
+    control: store.control,
+    build: async () => {
+      throw new Error('No pending operation')
+    },
+    adopt: async () => 'moved',
+    deliverWelcome: async () => {},
+    anchorStore: createMemoryAnchorStore(),
+    appCursorStore: createMemoryAppCursorStore(),
+    appOutbox: createMemoryAppOutbox(),
+    appOutboxLimit: 16,
+    localDID: f.member.identity.id,
+    protocols: {},
+    handlers: {},
+    onStrand,
+  })
+  try {
+    await vi.waitFor(async () => {
+      const cursor = (await store.control.load()).cursor
+      expect(onStrand.mock.calls.length > 0 || cursor?.position === poison.sequenceID).toBe(true)
+    })
+    expect((await store.control.load()).cursor).toMatchObject({ position: poison.sequenceID })
+    expect((await store.control.load()).cursor?.stranded).toBeUndefined()
+    expect(onStrand).not.toHaveBeenCalled()
+    expect(await live.readEpoch()).toBe(f.built.epoch)
+    expect(persisted).not.toHaveBeenCalled()
+  } finally {
+    await peer.dispose()
+  }
+  const searched = await searchReal(f, commit)
+  expect.soft(searched.result).toMatchObject({
+    kind: 'first-valid',
+    proof: { position: asLogPosition('000102') },
+  })
+  expect(searched.hold).not.toHaveBeenCalled()
+  expect(searched.persisted).not.toHaveBeenCalled()
+}
+
+test.each(['malformed-capability', 'Token expired', 'Unsupported signature algorithm'] as const)(
+  'deterministic credential rejection is policy poison in validation and the ordinary port: %s',
+  async (kind) => {
+    const f = await fixture()
+    const newcomer = randomIdentity()
+    const helpers = (await import(
+      new URL('../../mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
+    )) as {
+      timedBinding(params: {
+        identity: typeof newcomer
+        iat: number
+        exp: number
+      }): Promise<ControllerBinding>
+    }
+    const now = Math.floor(Date.now() / 1000)
+    const binding = await helpers.timedBinding({
+      identity: newcomer,
+      iat: now - 10,
+      exp: now + 500,
+    })
+    if (kind === 'malformed-capability') binding.capability = 'malformed'
+    const commit = await credentialAdd(
+      f,
+      newcomer,
+      new TextEncoder().encode(JSON.stringify({ id: newcomer.id, controller: binding })),
+    )
+    const previousError = verifierFault.error
+    if (kind !== 'malformed-capability') {
+      verifierFault.token = binding.capability
+      verifierFault.error = new Error(kind)
+    }
+    try {
+      await expectPolicyPoison(f, commit)
+    } finally {
+      verifierFault.token = ''
+      verifierFault.error = previousError
+    }
+  },
+)
+
+test.each(['not JSON', '{"v":2,"id":"did:key:invalid"}', '{"id":42}'])(
+  'credential parse rejection is policy poison in validation and the ordinary port: %s',
+  async (identity) => {
+    const f = await fixture()
+    const commit = await credentialAdd(f, randomIdentity(), new TextEncoder().encode(identity))
+    await expectPolicyPoison(f, commit)
   },
 )
 

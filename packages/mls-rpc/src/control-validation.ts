@@ -8,6 +8,7 @@ import {
   type GroupHandle,
   type GroupOptions,
   isConclusiveCommitError,
+  isTransientVerificationError,
   LeafBindingError,
   MissingLedgerEntriesError,
   restoreGroup,
@@ -46,6 +47,8 @@ function diagnostic(error: unknown): Exclude<ControlFrameValidation, { kind: 'va
   const seen = new Set<unknown>()
   while (current instanceof Error && !seen.has(current)) {
     seen.add(current)
+    if (isTransientVerificationError(current))
+      return { kind: 'unavailable', reason: 'unrecognised' }
     if (current instanceof CommitValidationUnavailableError)
       return { kind: 'unavailable', reason: current.reason }
     if (current instanceof LeafBindingError)
@@ -163,9 +166,11 @@ export function createControlValidationPort(params: {
             const header = readHeader ?? (await source.readCommitHeader(commit))
             if (
               header?.epoch !== BigInt(identity.epoch) ||
+              header.external === true ||
               header.committerDID === undefined ||
               normalizeDID(header.committerDID) !== normalizeDID(params.identity.id) ||
-              normalizeDID(journal.sourceCredential.id) !== normalizeDID(params.identity.id)
+              normalizeDID(journal.sourceCredential.id) !== normalizeDID(params.identity.id) ||
+              !(await source.verifyCommitSignature(commit))
             )
               return false
             const candidate = await params.restoreCandidate(journal.candidate.slice())
@@ -242,8 +247,17 @@ export function createControlValidationPort(params: {
             return { kind: 'invalid', reason: 'malformed' }
           if (header.committerDID === undefined)
             return { kind: 'invalid', reason: 'authentication' }
-          const own = normalizeDID(header.committerDID) === normalizeDID(params.identity.id)
-          if (own) {
+          // External replacement of the retained local identity needs new private keys. It is
+          // deterministic policy refusal here, and says nothing about own member authorship.
+          if (
+            header.external === true &&
+            normalizeDID(header.committerDID) === normalizeDID(params.identity.id)
+          )
+            return { kind: 'invalid', reason: 'policy' }
+          const claimsOwn =
+            header.external !== true &&
+            normalizeDID(header.committerDID) === normalizeDID(params.identity.id)
+          if (claimsOwn) {
             if (!sameBytes(frame.payload, value.payload)) {
               try {
                 if (!(await working.verifyCommitSignature(commit)))

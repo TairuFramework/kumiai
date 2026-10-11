@@ -289,15 +289,15 @@ export async function verifyLeafCredential(
   signaturePublicKey: Uint8Array,
   deps: DIDAuthenticationDependencies = {},
 ): Promise<void> {
-  if (credential.credentialType !== defaultCredentialTypes.basic) {
-    throw new Error('Unsupported MLS credential type')
-  }
-  const parsed = parseMLSCredentialIdentity((credential as { identity: Uint8Array }).identity)
-  if (!matchesLeafKey(parsed, signaturePublicKey)) throw new LeafBindingError('identity-change')
-  const denySet = deps.deviceDenySet?.() ?? EMPTY_DENY
-  if (isDenied(denySet, parsed.id)) throw new LeafBindingError('denied-id')
-  if (parsed.controller == null) return
   try {
+    if (credential.credentialType !== defaultCredentialTypes.basic) {
+      throw new Error('Unsupported MLS credential type')
+    }
+    const parsed = parseMLSCredentialIdentity((credential as { identity: Uint8Array }).identity)
+    if (!matchesLeafKey(parsed, signaturePublicKey)) throw new LeafBindingError('identity-change')
+    const denySet = deps.deviceDenySet?.() ?? EMPTY_DENY
+    if (isDenied(denySet, parsed.id)) throw new LeafBindingError('denied-id')
+    if (parsed.controller == null) return
     // The holder grant below is still verified against the full deny set.
     const leafDenySet =
       deps.mayKeepDeniedIssuer?.(credential, signaturePublicKey) &&

@@ -76,12 +76,14 @@ export {
   DeviceRegistryCodecError,
   type DeviceRegistryCodecErrorParams,
   isConclusiveCommitError,
+  isTransientVerificationError,
   LeafBindingError,
   type LeafBindingReason,
   LeafLapsedError,
   type LeafLapsedReason,
   RevokeProofError,
   type RevokeProofReason,
+  type TransientVerificationError,
 } from './errors.js'
 export {
   type FoldDrop,
