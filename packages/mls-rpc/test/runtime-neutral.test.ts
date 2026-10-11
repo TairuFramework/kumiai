@@ -2,7 +2,7 @@ import { readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as ts from 'typescript'
-import { describe, expect, test } from 'vitest'
+import { beforeAll, describe, expect, test } from 'vitest'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
 const sourceRoots = [
@@ -76,9 +76,18 @@ function isDOMDeclaration(node: ts.Node): boolean {
   return node.getSourceFile().fileName.endsWith('/lib.dom.d.ts')
 }
 
+function isRuntimeHeritage(node: ts.Node): node is ts.ExpressionWithTypeArguments {
+  return (
+    ts.isExpressionWithTypeArguments(node) &&
+    ts.isHeritageClause(node.parent) &&
+    node.parent.token === ts.SyntaxKind.ExtendsKeyword &&
+    (ts.isClassDeclaration(node.parent.parent) || ts.isClassExpression(node.parent.parent))
+  )
+}
+
 function isTypePosition(node: ts.Node): boolean {
-  for (let parent = node.parent; parent !== undefined; parent = parent.parent) {
-    if (ts.isTypeNode(parent)) return true
+  for (let current: ts.Node | undefined = node; current !== undefined; current = current.parent) {
+    if (ts.isTypeNode(current) && !isRuntimeHeritage(current)) return true
   }
   return false
 }
@@ -93,6 +102,10 @@ function isReferenceIdentifier(node: ts.Identifier): boolean {
     (ts.isVariableDeclaration(parent) && parent.name === node) ||
     (ts.isParameter(parent) && parent.name === node) ||
     (ts.isBindingElement(parent) && (parent.name === node || parent.propertyName === node)) ||
+    ((ts.isLabeledStatement(parent) ||
+      ts.isBreakStatement(parent) ||
+      ts.isContinueStatement(parent)) &&
+      parent.label === node) ||
     ts.isImportClause(parent) ||
     ts.isImportSpecifier(parent) ||
     ts.isExportSpecifier(parent)
@@ -121,12 +134,35 @@ function nameViolations(program: ts.Program, file: ts.SourceFile): Array<string>
           declaration.getSourceFile().fileName === optionalDeclarations) &&
         ((ts.isVariableDeclaration(declaration) &&
           ts.isSourceFile(declaration.parent.parent.parent)) ||
-          (ts.isFunctionDeclaration(declaration) && ts.isSourceFile(declaration.parent)))
+          ((ts.isFunctionDeclaration(declaration) || ts.isModuleDeclaration(declaration)) &&
+            ts.isSourceFile(declaration.parent)))
       )
     })
   }
   function unwrap(expression: ts.Expression): ts.Expression {
-    return ts.isParenthesizedExpression(expression) ? unwrap(expression.expression) : expression
+    return ts.isParenthesizedExpression(expression) ||
+      ts.isAsExpression(expression) ||
+      ts.isTypeAssertionExpression(expression) ||
+      ts.isNonNullExpression(expression) ||
+      ts.isSatisfiesExpression(expression)
+      ? unwrap(expression.expression)
+      : expression
+  }
+  function receiverType(expression: ts.Expression): ts.Type {
+    return checker.getNonNullableType(checker.getTypeAtLocation(unwrap(expression)))
+  }
+  function expressionSymbol(expression: ts.Expression): ts.Symbol | undefined {
+    const inner = unwrap(expression)
+    if (ts.isPropertyAccessExpression(inner))
+      return receiverType(inner.expression).getProperty(inner.name.text)
+    if (ts.isElementAccessExpression(inner)) {
+      const names = propertyNames(inner.argumentExpression)
+      const name = names[0]
+      return names.length === 1 && name !== undefined
+        ? receiverType(inner.expression).getProperty(name)
+        : undefined
+    }
+    return symbolAt(inner)
   }
   function guard(condition: ts.Expression, symbol: ts.Symbol): boolean | undefined {
     const expression = unwrap(condition)
@@ -150,7 +186,7 @@ function nameViolations(program: ts.Program, file: ts.SourceFile): Array<string>
       !ts.isTypeOfExpression(typeOf) ||
       !ts.isStringLiteral(value) ||
       value.text !== 'undefined' ||
-      symbolAt(unwrap(typeOf.expression)) !== symbol
+      expressionSymbol(typeOf.expression) !== symbol
     )
       return undefined
     if (expression.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken) return true
@@ -163,7 +199,7 @@ function nameViolations(program: ts.Program, file: ts.SourceFile): Array<string>
       parent !== undefined;
       child = parent, parent = parent.parent
     ) {
-      if (ts.isTypeOfExpression(parent) && parent.expression === child) return true
+      if (ts.isTypeOfExpression(parent) && unwrap(parent.expression) === node) return true
       if (ts.isBinaryExpression(parent) && parent.right === child) {
         const present = guard(parent.left, symbol)
         if (
@@ -200,17 +236,45 @@ function nameViolations(program: ts.Program, file: ts.SourceFile): Array<string>
     } else if (symbol?.declarations?.some(isDOMDeclaration) && !hostGlobals.has(name))
       report(node, `forbidden host global ${name}`)
   }
-  function propertyName(node: ts.Node): string | undefined {
-    if (ts.isComputedPropertyName(node)) return propertyName(node.expression)
+  function propertyNames(node: ts.Node): Array<string> {
+    if (ts.isComputedPropertyName(node)) return propertyNames(node.expression)
     if (
       ts.isStringLiteralLike(node) ||
       (ts.isIdentifier(node) &&
         !ts.isElementAccessExpression(node.parent) &&
         !ts.isComputedPropertyName(node.parent))
     )
-      return node.text
+      return [node.text]
     const type = checker.getTypeAtLocation(node)
-    return type.isStringLiteral() ? type.value : undefined
+    return (type.isUnion() ? type.types : [type]).flatMap((part) => {
+      return part.isStringLiteral() ? [part.value] : []
+    })
+  }
+  function bindingType(pattern: ts.ObjectBindingPattern): ts.Type {
+    const binding = pattern.parent
+    return ts.isVariableDeclaration(binding) && binding.initializer !== undefined
+      ? receiverType(binding.initializer)
+      : checker.getTypeAtLocation(pattern)
+  }
+  function collectHostOwners(type: ts.Type, owners: Set<string>, seen: Set<ts.Type>): void {
+    if (seen.has(type)) return
+    seen.add(type)
+    const owner = type.getSymbol()
+    if (owner !== undefined && (owner.declarations ?? []).some(isLibraryDeclaration)) {
+      if (hostMembers.has(owner.getName())) owners.add(owner.getName())
+    }
+    if (type.isUnionOrIntersection()) {
+      for (const part of type.types) collectHostOwners(part, owners, seen)
+    }
+    for (const base of type.getBaseTypes() ?? []) collectHostOwners(base, owners, seen)
+    for (const declaration of owner?.declarations ?? []) {
+      if (
+        ts.isBindingElement(declaration) &&
+        declaration.dotDotDotToken !== undefined &&
+        ts.isObjectBindingPattern(declaration.parent)
+      )
+        collectHostOwners(bindingType(declaration.parent), owners, seen)
+    }
   }
   function member(node: ts.Node, type: ts.Type, name: string, symbol?: ts.Symbol): void {
     const owner = type.getSymbol()
@@ -224,22 +288,48 @@ function nameViolations(program: ts.Program, file: ts.SourceFile): Array<string>
     if (ownerName !== undefined && (builtin || stringLike)) {
       if (forbiddenMembers.get(ownerName)?.has(name))
         report(node, `forbidden global property ${ownerName}.${name}`)
-      const allowed = hostMembers.get(ownerName)
-      if (allowed !== undefined && !allowed.has(name))
-        report(node, `forbidden host member ${ownerName}.${name}`)
     }
+    const hostOwners = new Set<string>()
+    if (symbol === undefined || (symbol.declarations ?? []).some(isLibraryDeclaration))
+      collectHostOwners(type, hostOwners, new Set())
     for (const declaration of symbol?.declarations ?? []) {
       if (!isDOMDeclaration(declaration)) continue
       let parent = declaration.parent
       while (parent !== undefined && !ts.isSourceFile(parent)) {
         if (ts.isInterfaceDeclaration(parent) || ts.isVariableDeclaration(parent)) {
           const ownerName = ts.isIdentifier(parent.name) ? parent.name.text : undefined
-          const allowed = ownerName === undefined ? undefined : hostMembers.get(ownerName)
-          if (allowed !== undefined && !allowed.has(name))
-            report(node, `forbidden host member ${ownerName}.${name}`)
+          if (ownerName !== undefined && hostMembers.has(ownerName)) hostOwners.add(ownerName)
           break
         }
         parent = parent.parent
+      }
+    }
+    for (const ownerName of hostOwners) {
+      if (!hostMembers.get(ownerName)?.has(name))
+        report(node, `forbidden host member ${ownerName}.${name}`)
+    }
+  }
+  function assignmentMembers(expression: ts.Expression, type: ts.Type): void {
+    const pattern = unwrap(expression)
+    if (
+      ts.isBinaryExpression(pattern) &&
+      pattern.operatorToken.kind === ts.SyntaxKind.EqualsToken
+    ) {
+      assignmentMembers(pattern.left, type)
+      return
+    }
+    if (!ts.isObjectLiteralExpression(pattern)) return
+    for (const property of pattern.properties) {
+      if (!ts.isPropertyAssignment(property) && !ts.isShorthandPropertyAssignment(property))
+        continue
+      for (const name of propertyNames(property.name)) {
+        const symbol = type.getProperty(name)
+        member(property, type, name, symbol)
+        if (ts.isPropertyAssignment(property) && symbol !== undefined)
+          assignmentMembers(
+            property.initializer,
+            checker.getTypeOfSymbolAtLocation(symbol, property),
+          )
       }
     }
   }
@@ -263,27 +353,37 @@ function nameViolations(program: ts.Program, file: ts.SourceFile): Array<string>
       report(node, 'forbidden using declaration')
     if (ts.isIdentifier(node) && isReferenceIdentifier(node))
       globalReference(node, symbolAt(node), node.text)
-    if (ts.isPropertyAccessExpression(node))
-      member(
-        node,
-        checker.getNonNullableType(checker.getTypeAtLocation(node.expression)),
-        node.name.text,
-        symbolAt(node.name),
-      )
+    if (isRuntimeHeritage(node)) {
+      const type = receiverType(node.expression)
+      const prototype = type.getProperty('prototype')
+      if (prototype !== undefined) {
+        const instance = checker.getTypeOfSymbolAtLocation(prototype, node.expression)
+        if (instance.getSymbol()?.getName() === 'AbortSignal')
+          member(node.expression, instance, 'constructor')
+      }
+    }
+    if (ts.isPropertyAccessExpression(node)) {
+      const type = receiverType(node.expression)
+      member(node, type, node.name.text, type.getProperty(node.name.text))
+    }
     if (ts.isElementAccessExpression(node)) {
-      const name = propertyName(node.argumentExpression)
-      if (name !== undefined) {
-        const type = checker.getNonNullableType(checker.getTypeAtLocation(node.expression))
+      const type = receiverType(node.expression)
+      for (const name of propertyNames(node.argumentExpression)) {
         member(node, type, name, type.getProperty(name))
       }
     }
-    if (ts.isBindingElement(node) && ts.isObjectBindingPattern(node.parent)) {
-      const name = propertyName(node.propertyName ?? node.name)
-      if (name !== undefined) {
-        const type = checker.getTypeAtLocation(node.parent)
+    if (
+      ts.isBindingElement(node) &&
+      ts.isObjectBindingPattern(node.parent) &&
+      node.dotDotDotToken === undefined
+    ) {
+      const type = bindingType(node.parent)
+      for (const name of propertyNames(node.propertyName ?? node.name)) {
         member(node, type, name, type.getProperty(name))
       }
     }
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken)
+      assignmentMembers(node.left, receiverType(node.right))
     ts.forEachChild(node, visit)
   }
   visit(file)
@@ -334,6 +434,211 @@ function typeViolations(program: ts.Program, file: ts.SourceFile): Array<string>
 }
 
 const negativeFixtures = [
+  ['typeof optional call', 'typeof Atomics.load(new Int32Array(1), 0)', 'name', 'typeof guard'],
+  ['typeof optional member', 'typeof Atomics.load', 'name', 'typeof guard'],
+  ['typeof optional construction', 'typeof new Float16Array(1)', 'name', 'typeof guard'],
+  ['typeof computed optional member', "typeof globalThis['Atomics'].load", 'name', 'typeof guard'],
+  ['class DOM heritage', 'class HostError extends DOMException {}', 'name', 'DOMException'],
+  [
+    'class expression DOM heritage',
+    'const HostError = class extends DOMException {}',
+    'name',
+    'DOMException',
+  ],
+  [
+    'class stream controller heritage',
+    'class Controller extends ReadableStreamDefaultController {}',
+    'name',
+    'ReadableStreamDefaultController',
+  ],
+  ['class signal heritage', 'class Signal extends AbortSignal {}', 'name', 'AbortSignal'],
+  [
+    'class expression signal heritage',
+    'const Signal = class extends AbortSignal {}',
+    'name',
+    'AbortSignal',
+  ],
+  [
+    'class computed DOM heritage',
+    "class HostError extends globalThis['DOMException'] {}",
+    'name',
+    'DOMException',
+  ],
+  [
+    'union signal keys',
+    "const key: 'onabort' | 'dispatchEvent' = Math.random() > 0.5 ? 'onabort' : 'dispatchEvent'; new AbortController().signal[key]",
+    'name',
+    'onabort',
+  ],
+  [
+    'mixed union signal keys',
+    "const key: 'aborted' | 'onabort' = Math.random() > 0.5 ? 'aborted' : 'onabort'; new AbortController().signal[key]",
+    'name',
+    'onabort',
+  ],
+  [
+    'union global keys',
+    "const key: 'structuredClone' | 'queueMicrotask' = Math.random() > 0.5 ? 'structuredClone' : 'queueMicrotask'; globalThis[key]",
+    'name',
+    'structuredClone',
+  ],
+  [
+    'assignment signal alias',
+    'let x; ({ onabort: x } = new AbortController().signal)',
+    'name',
+    'onabort',
+  ],
+  [
+    'assignment signal shorthand',
+    'let onabort; ({ onabort } = new AbortController().signal)',
+    'name',
+    'onabort',
+  ],
+  [
+    'assignment computed signal key',
+    "const key = 'onabort'; let x; ({ [key]: x } = new AbortController().signal)",
+    'name',
+    'onabort',
+  ],
+  [
+    'assignment union signal keys',
+    "const key: 'aborted' | 'onabort' = Math.random() > 0.5 ? 'aborted' : 'onabort'; let x; ({ [key]: x } = new AbortController().signal)",
+    'name',
+    'onabort',
+  ],
+  [
+    'assignment Promise static',
+    'let resolve; ({ withResolvers: resolve } = Promise)',
+    'name',
+    'withResolvers',
+  ],
+  [
+    'assignment global alias',
+    'let clone; ({ structuredClone: clone } = globalThis)',
+    'name',
+    'structuredClone',
+  ],
+  [
+    'assignment nested signal member',
+    'let x; ({ signal: { onabort: x } } = new AbortController())',
+    'name',
+    'onabort',
+  ],
+  [
+    'rest binding later forbidden access',
+    'const { ...rest } = new AbortController().signal; rest.onabort',
+    'name',
+    'AbortSignal.onabort',
+  ],
+  ['cast global clone', '(globalThis as any).structuredClone({})', 'name', 'structuredClone'],
+  ['cast global process', '(globalThis as any).process', 'name', 'process'],
+  ['cast Promise static', '(Promise as any).withResolvers()', 'name', 'withResolvers'],
+  [
+    'cast optional signal call',
+    'const signal = new AbortController().signal; (signal as any).throwIfAborted?.()',
+    'name',
+    'throwIfAborted',
+  ],
+  [
+    'type assertion global clone',
+    '(<any>globalThis).structuredClone({})',
+    'name',
+    'structuredClone',
+  ],
+  ['type assertion Promise static', '(<any>Promise).withResolvers()', 'name', 'withResolvers'],
+  [
+    'parenthesised cast Promise static',
+    '(((Promise as any))).withResolvers()',
+    'name',
+    'withResolvers',
+  ],
+  [
+    'non-null cast signal member',
+    'const signal = new AbortController().signal; (signal as any)!.throwIfAborted()',
+    'name',
+    'throwIfAborted',
+  ],
+  [
+    'satisfies cast Promise static',
+    '(Promise as any satisfies object).withResolvers()',
+    'name',
+    'withResolvers',
+  ],
+  [
+    'cast computed global clone',
+    "(globalThis as any)['structuredClone']({})",
+    'name',
+    'structuredClone',
+  ],
+  [
+    'cast destructured Promise static',
+    'const { withResolvers: resolve } = Promise as any',
+    'name',
+    'withResolvers',
+  ],
+  [
+    'cast assignment signal member',
+    'const signal = new AbortController().signal; let x; ({ onabort: x } = signal as any)',
+    'name',
+    'onabort',
+  ],
+  ['DOM WebAssembly namespace', 'WebAssembly.validate(new Uint8Array())', 'name', 'WebAssembly'],
+  ['DOM CSS namespace', "CSS.supports('display', 'grid')", 'name', 'CSS'],
+  ['computed DOM namespace', "globalThis['CSS'].supports('display', 'grid')", 'name', 'CSS'],
+  [
+    'destructured DOM namespace',
+    'const { WebAssembly: wasm } = globalThis; wasm.validate(new Uint8Array())',
+    'name',
+    'WebAssembly',
+  ],
+  [
+    'inherited signal member',
+    "const signal = new AbortController().signal; signal.dispatchEvent(new Event('abort'))",
+    'name',
+    'AbortSignal.dispatchEvent',
+  ],
+  [
+    'inherited signal union member',
+    "const key: 'dispatchEvent' | 'aborted' = Math.random() > 0.5 ? 'dispatchEvent' : 'aborted'; new AbortController().signal[key]",
+    'name',
+    'AbortSignal.dispatchEvent',
+  ],
+  [
+    'cast inherited signal member',
+    'const signal = new AbortController().signal; (signal as any).dispatchEvent',
+    'name',
+    'AbortSignal.dispatchEvent',
+  ],
+  [
+    'inherited signal method receiver',
+    'const signal = new AbortController().signal; signal.addEventListener("abort", function () { this.dispatchEvent })',
+    'name',
+    'AbortSignal.dispatchEvent',
+  ],
+  [
+    'rest inherited signal member',
+    'const { ...rest } = new AbortController().signal; rest.dispatchEvent',
+    'name',
+    'AbortSignal.dispatchEvent',
+  ],
+  [
+    'interface inherited signal member',
+    'interface Signal extends AbortSignal {}; declare const signal: Signal; signal.dispatchEvent',
+    'name',
+    'AbortSignal.dispatchEvent',
+  ],
+  [
+    'intersection inherited signal member',
+    'declare const signal: AbortSignal & { extra: number }; signal.dispatchEvent',
+    'name',
+    'AbortSignal.dispatchEvent',
+  ],
+  [
+    'union inherited signal member',
+    'declare const signal: AbortSignal | EventTarget; signal.dispatchEvent',
+    'name',
+    'AbortSignal.dispatchEvent',
+  ],
   ['structuredClone', 'structuredClone({})', 'name', 'forbidden'],
   ['AsyncLocalStorage', 'new AsyncLocalStorage()', 'name', 'forbidden'],
   ['setImmediate', 'setImmediate(() => {})', 'name', 'forbidden'],
@@ -435,6 +740,57 @@ const negativeFixtures = [
 ] as const
 
 const positiveFixtures = [
+  ['object rest binding', 'const { ...rest } = new AbortController().signal; void rest'],
+  ['object rest assignment', 'let rest; ({ ...rest } = new AbortController().signal)'],
+  ['process label', 'process: for (;;) { break process }'],
+  ['process continue label', 'process: for (;;) { continue process }'],
+  [
+    'permitted union signal keys',
+    "const key: 'aborted' | 'reason' = Math.random() > 0.5 ? 'aborted' : 'reason'; new AbortController().signal[key]",
+  ],
+  [
+    'permitted assignment union keys',
+    "const key: 'aborted' | 'reason' = Math.random() > 0.5 ? 'aborted' : 'reason'; let x; ({ [key]: x } = new AbortController().signal)",
+  ],
+  ['DOM interface heritage', 'interface Controller extends ReadableStreamDefaultController {}'],
+  [
+    'DOM class implements',
+    'class Controller implements ReadableStreamDefaultController { desiredSize = null; close() {}; enqueue() {}; error() {} }',
+  ],
+  [
+    'DOM heritage type arguments',
+    'class Base<T> {}; class Controller extends Base<ReadableStreamDefaultController> {}',
+  ],
+  [
+    'parenthesised optional inspection',
+    "typeof ((Float16Array)) !== 'undefined' && new Float16Array(1)",
+  ],
+  [
+    'computed optional inspection',
+    "typeof globalThis['Float16Array'] !== 'undefined' && new globalThis['Float16Array'](1)",
+  ],
+  ['shadowed DOM namespace', 'const CSS = { supports: () => true }; CSS.supports()'],
+  ['erased DOM namespace', 'type Wasm = typeof WebAssembly; type CSSNamespace = typeof CSS'],
+  [
+    'cast local forbidden member',
+    'const signal = { throwIfAborted: () => {} }; (signal as any).throwIfAborted()',
+  ],
+  [
+    'cast permitted signal member',
+    'const signal = new AbortController().signal; (signal as any).aborted',
+  ],
+  [
+    'local inherited event member',
+    'class Target { dispatchEvent() {} }; class Signal extends Target {}; new Signal().dispatchEvent()',
+  ],
+  [
+    'local controller subclass member',
+    'class Controller extends AbortController { dispose() {} }; new Controller().dispose()',
+  ],
+  [
+    'local inherited controller subclass member',
+    'class Controller extends AbortController { dispatchEvent() {} }; class Client extends Controller {}; new Client().dispatchEvent()',
+  ],
   [
     'whitelisted hosts',
     'new WeakMap(); new WeakSet(); queueMicrotask(() => {}); clearTimeout(setTimeout(() => {}, 0)); clearInterval(setInterval(() => {}, 0)); new TextEncoder(); new TextDecoder(); crypto.getRandomValues(new Uint8Array(1)); crypto.subtle.digest("SHA-256", new Uint8Array(1)); crypto.randomUUID(); new ReadableStream(); new WritableStream(); new CountQueuingStrategy({ highWaterMark: 1 })',
@@ -520,19 +876,30 @@ describe('guard fixtures', () => {
       `${source}; export {}`,
     ]),
   )
-  const program = baselineProgram(join(root, 'packages/mls-rpc/src'), snippets)
+  let program: ts.Program
+  beforeAll(() => {
+    program = baselineProgram(join(root, 'packages/mls-rpc/src'), snippets)
+  }, 60_000)
   function check(name: string) {
     const path = join(root, 'packages/mls-rpc/test/fixtures', `${name.replaceAll(' ', '-')}.ts`)
     const file = program.getSourceFile(path)
     if (file === undefined) throw new Error(`Missing fixture ${name}`)
     return { name: nameViolations(program, file), type: typeViolations(program, file) }
   }
-  test.each(negativeFixtures)('rejects %s', (name, _source, layer, message) => {
-    expect(check(name)[layer].join('\n')).toContain(message)
-  })
-  test.each(positiveFixtures)('allows %s', (name) => {
-    expect(check(name)).toEqual({ name: [], type: [] })
-  })
+  test.each(negativeFixtures)(
+    'rejects %s',
+    (name, _source, layer, message) => {
+      expect(check(name)[layer].join('\n')).toContain(message)
+    },
+    60_000,
+  )
+  test.each(positiveFixtures)(
+    'allows %s',
+    (name) => {
+      expect(check(name)).toEqual({ name: [], type: [] })
+    },
+    60_000,
+  )
 })
 
 describe('runtime-neutral source baseline', () => {
@@ -545,15 +912,19 @@ describe('runtime-neutral source baseline', () => {
     }
     return program
   }
-  test.each(sourceRoots)('type-checks %s against ES2022 and whitelisted hosts', (directory) => {
-    const program = programFor(directory)
-    const failures = sourceFiles(directory).flatMap((path) => {
-      const file = program.getSourceFile(path)
-      if (file === undefined) throw new Error(`Missing source ${path}`)
-      return typeViolations(program, file)
-    })
-    expect(failures).toEqual([])
-  })
+  test.each(sourceRoots)(
+    'type-checks %s against ES2022 and whitelisted hosts',
+    (directory) => {
+      const program = programFor(directory)
+      const failures = sourceFiles(directory).flatMap((path) => {
+        const file = program.getSourceFile(path)
+        if (file === undefined) throw new Error(`Missing source ${path}`)
+        return typeViolations(program, file)
+      })
+      expect(failures).toEqual([])
+    },
+    60_000,
+  )
 
   test('ignores comments, strings and identifiers named node', () => {
     expect(
@@ -562,7 +933,7 @@ describe('runtime-neutral source baseline', () => {
         "const node = 'node:fs structuredClone process'; // Buffer\n/* setImmediate */",
       ),
     ).toEqual([])
-  })
+  }, 60_000)
 
   test('matches static, dynamic and require node module imports', () => {
     expect(
@@ -571,7 +942,7 @@ describe('runtime-neutral source baseline', () => {
         "import value from 'node:fs'; import('node:fs'); require('node:fs')",
       ),
     ).toHaveLength(3)
-  })
+  }, 60_000)
 
   test('has no Node imports or forbidden global references', () => {
     const failures = sourceRoots.flatMap((directory) => {
@@ -583,5 +954,5 @@ describe('runtime-neutral source baseline', () => {
       })
     })
     expect(failures).toEqual([])
-  }, 30_000)
+  }, 60_000)
 })
