@@ -225,6 +225,49 @@ describe('resolved writes', () => {
     await rejected
   })
 
+  test.each([undefined, new Error('cancelled during retry delay'), { cancelled: true }, null])(
+    'abort during retry delay rejects an ambiguous write with the expected reason %j',
+    async (reason) => {
+      const controller = new AbortController()
+      Object.defineProperty(controller.signal, 'throwIfAborted', { value: undefined })
+      if (reason === undefined) {
+        Object.defineProperty(controller.signal, 'reason', { value: undefined })
+      }
+      let sleepStarted!: () => void
+      const sleeping = new Promise<void>((resolve) => {
+        sleepStarted = resolve
+      })
+      const store: ControlStore = {
+        load: async () => empty(),
+        apply: async () => {
+          throw new StorageOutcomeUnknownError()
+        },
+        lastMutation: async () => {
+          throw new Error('read unavailable')
+        },
+      }
+      const result = applyResolved(
+        store,
+        {},
+        'mutation',
+        () => {
+          sleepStarted()
+          return new Promise<void>(() => {})
+        },
+        controller.signal,
+      )
+      const rejected =
+        reason === undefined
+          ? expect(result).rejects.toThrowError(
+              Object.assign(new Error('This operation was aborted'), { name: 'AbortError' }),
+            )
+          : expect(result).rejects.toBe(reason)
+      await Promise.race([sleeping, result.catch(() => {})])
+      controller.abort(reason)
+      await rejected
+    },
+  )
+
   test('the structural memory double resolves ambiguity through the RPC ControlStore port', async () => {
     const store: ControlStore & Pick<MemoryControlStore, 'commitThenRejectNext'> =
       createMemoryControlStore()

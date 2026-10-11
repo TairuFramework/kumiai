@@ -1,4 +1,4 @@
-import { throwIfAborted } from '../abort.js'
+import { getAbortReason, throwIfAborted } from '../abort.js'
 import {
   ControlWriteNotCommittedError,
   PeerDisposedError,
@@ -156,7 +156,7 @@ async function abortable<TValue>(promise: Promise<TValue>, signal?: AbortSignal)
   if (signal == null) return await promise
   let onAbort!: () => void
   const aborted = new Promise<never>((_resolve, reject) => {
-    onAbort = () => reject(signal.reason)
+    onAbort = () => reject(getAbortReason(signal))
     signal.addEventListener('abort', onAbort, { once: true })
     if (signal.aborted) onAbort()
   })
