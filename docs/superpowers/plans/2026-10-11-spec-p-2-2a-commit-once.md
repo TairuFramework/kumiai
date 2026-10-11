@@ -47,11 +47,11 @@ Starting point: `feat/spec-p-phase-2`, `510dd59`. Source citations remain valid 
 
 ## Review Focus
 
-- A version-only move preserves prepared bytes. An identity, checkpoint or queue move discards them unpublished. Task 2 tests both paths.
-- Retention below the saved checkpoint permits acceptance. A gap after it blocks acceptance. Task 3 tests trimmed and incomplete suffixes.
-- Public member commits and unavailable authentication must never hide an earlier winner. Task 3 tests both with later own replays.
-- A revoke drain crosses the absolute deadline. Task 4's `expiry during submission drain prevents handoff` asserts zero handoffs.
-- An acknowledged unknown slot later lands first-valid. Task 4's late-landing test asserts adoption, a new landed fact and Welcome delivery.
+- Source/version coherence across preparation, committed receive progress and adoption.
+- Checkpoint-bound coverage and three-way validation across public/private/external frames.
+- Finite search work and lane fairness under a continuously growing head.
+- Deadline settlement with late acceptance discovery and no further publication handoffs.
+- Retained-slot retry ownership after ack/abandon, independent of operation rows or new deliveries.
 
 ## Phase-2.2 ownership
 
@@ -192,27 +192,11 @@ readControl<TValue>(fn: (scope: ControlReadScope) => Promise<TValue>): Promise<T
 
 - [ ] **Step 1: Write slot and source tests.** Use existing typed fixtures, with key `{groupID: 'group-A', incarnation: 1}`.
 
-`slot survives operation deletion outcome acknowledgement and reopen`:
-
-```ts
-expect(afterAck.commitOnce).toEqual(savedSlot)
-expect(afterAck.operations).toEqual([])
-expect(afterAck.outcomes).toEqual([])
-expect(reopened.commitOnce).toEqual(savedSlot)
-expect(afterCallerMutation.commitOnce).toEqual(savedSlot)
-```
+`slot survives operation deletion outcome acknowledgement and reopen` asserts the saved slot survives empty operation/outcome lists, reconstruction and caller mutation.
 
 `enqueue persists the selected absolute deadline` asserts deadline 1_000 for enqueue time 0 and timeout 1_000, plus default 30_000.
 
-`readControl returns the host version and a defensive single-incarnation identity`:
-
-```ts
-expect(source.key).toEqual({ groupID: 'group-A', incarnation: 1 })
-expect(source.stateVersion).toBe(await hostDB.loadVersion('group-A'))
-expect(source.identity?.authenticator).toEqual(authenticator)
-expect(source).not.toHaveProperty('lineage')
-expect(staged.incarnation).toBe(1)
-```
+`readControl returns the host version and a defensive single-incarnation identity` asserts the fixture key/authenticator, hostDB.loadVersion('group-A'), staged incarnation 1 and absence of lineage.
 
 Add `transactional readControl uses committed receive state before open publication` in transactional-access.test.ts.
 Suspend an open after its storage commit but before publishing its handle. Invoke readControl during that suspension.
@@ -482,12 +466,17 @@ type ControlHold = {
   reason: 'acceptance-unknown' | 'unsupported-version' | 'fork-evidence'
   position: LogPosition | null; evidence?: GroupForkEvidence
 }
+type ControlSearchBudget = { maxPasses: number; maxFetches: number; maxFrames: number }
+type ControlSearchWork = { takeFetch(): boolean; takeFrame(): boolean }
 type ControlSearchDeps = {
+  budget: ControlSearchBudget
   fetch(after: LogPosition | null): Promise<HubFetchTopicResult>
   validation: ControlValidationPort
   readEvidence(): Promise<ControlEvidenceSnapshot>
-  followWinner(frame: ControlLogFrame, range: CertifiedControlRange): Promise<FollowWinnerResult>
-  reconcileAbsent(head: LogPosition | null, range: CertifiedControlRange | null): Promise<boolean>
+  followWinner(frame: ControlLogFrame, range: CertifiedControlRange,
+    work: ControlSearchWork): Promise<FollowWinnerResult>
+  reconcileAbsent(head: LogPosition | null, range: CertifiedControlRange | null,
+    work: ControlSearchWork): Promise<boolean>
   hold(value: ControlHold): Promise<void>
 }
 function createControlSearch(deps: ControlSearchDeps): ControlSearchPort
@@ -501,6 +490,14 @@ function createControlValidationPort(params: {
 `readEvidence` reads state identity/version, terminal and control in one committed host/provider snapshot for the fixed key.
 Host-db and transactional-access expose atomic row snapshots. Provider-backed readers use one persistence read.
 It never combines a published old handle with newer storage metadata.
+
+Production search uses `{maxPasses: 2, maxFetches: 16, maxFrames: 256}` per searchLog invocation; tests may inject smaller positive limits.
+Search creates fresh counters shared with followWinner/reconcileAbsent. takeFetch/takeFrame reserve one unit before each fetch/frame visit and return false at exhaustion.
+Validation and live reconciliation each count their frame visits; callbacks return unavailable/false if they cannot complete within the remaining work.
+No callback starts an unbudgeted pull-to-head loop. ControlSearchPort.searchLog's Task 1 signature stays unchanged.
+The search factory retains an ephemeral continuation for a budget-exhausted slot: validated-through position, captured head, earliest winner and pending bounded reconciliation.
+Resume that work on later invocations with fresh counters and a coherent evidence recheck, bound to the same key/source identity, checkpoint and full payload digest.
+Version-only movement preserves it; conflicting evidence or a different slot invalidates it. Never skip an unvalidated frame. Reconstruction refetches from searchFrom.
 
 Retain `GroupMLS.readCommitHeader(): Promise<CommitHeader | null>`, but propagate typed unavailable errors.
 Add `validation?: 'unavailable'` to ProcessCommitResult, requiring false applied/advanced and equal epochs.
@@ -548,6 +545,12 @@ Assert unknown and no Welcome in both directions. The second direction must neve
 Candidate authenticator equality without that row yields unknown. A conflicting committed branch yields evidence hold.
 `certification excludes only listed loser bytes` asserts unrelated position/digest divergence outside the certified range still reaches the fork classifier.
 
+`head advances every pass and search returns unknown within its work budget` supplies valid, complete pages of conclusive non-commit/poison frames with a newer head on every pass.
+Assert unknown after at most 2 passes, 16 fetches and 256 frame visits, including follow/reconcile work; no adoption or Welcome.
+Also exhaust fetch/frame limits within a single pass. No exhaustion path guesses absence or immediately restarts search.
+`budget yields preserve discovery through a prefix larger than one invocation` places the first-valid own occurrence beyond 256 frames.
+Assert repeated scheduled invocations make validation/reconciliation progress and eventually prove it, including after expiry; restart discards the continuation and revalidates the prefix.
+
 - [ ] **Step 2: Run red checks.**
 
 ```sh
@@ -588,12 +591,16 @@ Task 3 leaves ordinary unsupported-version and unexplained-own policy activation
 This algorithm fixes decisions that signatures alone cannot determine:
 
 ```text
-1. Restore the saved journal, verify checkpoint == searchFrom and source binding.
+1. Allocate fresh invocation pass/fetch/frame counters. Reserve work before every fetch
+   and frame visit, including follow/reconcile callbacks. Exhaustion returns unknown;
+   it never bypasses unvisited prefix rows or starts another in-lane invocation.
+   Restore the saved journal, verify checkpoint == searchFrom and source binding.
    Read coherent current evidence. Retirement never follows a new owner. Same-epoch
    authenticator divergence holds. An advanced live branch requires matching committed
    applied evidence at the source epoch; a conflicting row is evidence, not rollback permission.
-2. Start fetch at immutable searchFrom. The durable saved source proves everything through
-   that checkpoint. Validate only (searchFrom, captured head]. Never restart at null or at
+2. Start a new discovery at immutable searchFrom; a budget continuation resumes after its
+   already validated prefix following the evidence recheck. The durable saved source proves
+   everything through that checkpoint. Validate only (searchFrom, captured head]. Never restart at null or at
    refreshed expectedHead. Check every page's gap/head/order before interpreting its rows.
 3. Decode supported frames and use the diagnostic epoch probe in order. Conclusive
    malformed/non-commit rows are invalid skips.
@@ -614,13 +621,18 @@ This algorithm fixes decisions that signatures alone cannot determine:
    and occurrence evidence, never current candidate authenticator equality alone.
 7. A completely covered range with no exact own occurrence can yield absent only after
    following its winner and bounded reconciliation through the captured head. Disagreement
-   or incomplete coverage yields unknown. A growing head requires another bounded pass.
+   or incomplete coverage yields unknown. If a newer head is reported, another pass is
+   allowed only within the same invocation budget; exhaustion returns unknown.
+   No invocation waits indefinitely for a stable global head.
 ```
 
 Search may follow a proven competitor even if later own-occurrence coverage becomes uncertain. Its returned acceptance remains unknown in that case.
 `CertifiedControlRange` travels into followWinner and reconcileAbsent. The peer's bounded walk checks exact key/source/position/payload entries before suppressing fork classification.
-Keep a range only for that bounded pass. Refetch and revalidate after restart; no unbounded history exception or cached proof survives reconstruction.
+Keep a range only for that bounded pass; a continuation carries validated entries still awaiting reconciliation, from which the next pass constructs its exact range.
+Refetch and revalidate after restart; no unbounded history exception or cached proof survives reconstruction.
 The follow/reconcile callbacks reuse the already-owned peer lane. They do not reacquire runSerial or recursively run operation settlement.
+Unknown due to exhaustion returns control to the caller, which checks the persisted deadline and yields the lane.
+Task 4 schedules further discovery with timers outside the lane; expiry stops handoffs, not retained-slot discovery.
 Unsupported/unexplained-own walker holds and slot settlement are activated together in Task 4.
 Extract legacy external occurrence search before replacing private-control search; do not fabricate BuiltCommit fields for RejoinRecord.
 
@@ -647,7 +659,7 @@ Expected: one green search component commit.
 - Retain/Test: `tests/integration/test/operation-host.test.ts`, `tests/integration/test/welcome-after-crash.test.ts`.
 
 **Interfaces:**
-- Consumes: Tasks 1-3 build/search/evidence contracts. HandleAccess.replace and existing AdoptionWrite.
+- Consumes: Tasks 1-3 build/search/evidence contracts, including ControlSearchBudget/ControlSearchWork on follow/reconcile callbacks. HandleAccess.replace and existing AdoptionWrite.
 - Produces operation base `{seq: number; enqueuedAt: number; deadline: number}`, with `built: ControlBuildRef` on built/accepted stages.
 - Accepted operations require `{stage: 'accepted'; acceptedAs: LogPosition; acceptance: FirstValidCommit}`.
 - Produces:
@@ -668,12 +680,18 @@ type ControlSlotDeps = {
 }
 function settleControlSlot(deps: ControlSlotDeps,
   occurrence?: ControlLogFrame): Promise<'landed' | 'superseded' | 'absent' | 'unknown' | 'empty'>
+// Peer-local retry owner in rpc/src/peer.ts:
+function hasUnresolvedControlSlot(snapshot: ControlSnapshot, evidence: ControlEvidenceSnapshot): boolean
+function scheduleControlSlotRetry(delay?: number): void
+function cancelControlSlotRetry(): void
 ```
 
 `settleControlSlot` searches/adopts but **never publishes or rebuilds**. Operation steps reuse it and resolve their reference to the slot.
 `OperationDeps` uses prepareBuild's explicit result, ControlSearchPort.searchLog and ControlAdoptionPort.adopt.
 It adds coherent readEvidence and readHead. Keep publish/pullToHead/clock/emit and stepOperation's Operation-or-null return.
 Only the runner returns null after a proven settlement, never because preparation returned occupied/moved/expired/rejected.
+The slot retry predicate depends on retained slot/evidence, never hasOperations, outcome rows or operation deadlines.
+It remains true after unknown/absence until committed settlement, proven advancement or retirement; disposal cancels the owner.
 `GroupPeerMLSParams` replaces build with required prepareBuild and validation. The adopt callback uses ControlAdoptionPort.adopt's signature.
 
 Persist `ControlSnapshot.controlHold: ControlHold | null` and optional `ControlChanges.controlHold`.
@@ -694,6 +712,12 @@ Assert identical payload/ID/journal/handshake generation and searchFrom, with ex
 `gap holds before deadline and settles unknown at deadline` retains the slot through ack and restart.
 `transport failure retries before expiry and never hands off after expiry` checks backoff and deadline-clamped wakeups.
 `epoch advance rebuilds only after complete absence and intent revalidation` checks fresh source-chain bytes and target rejection when already satisfied.
+
+`growing head yields bounded search and deadline settlement without starving the lane` uses valid fetch replies that advance the head on every pass.
+Advance the clock through the stored deadline during search, with another lane action already queued.
+Assert search returns unknown within Task 3's invocation budget, the operation settles unknown at the deadline, and the queued action completes before another discovery attempt.
+Assert zero new handoffs and a retained slot; timer retries continue after expiry without waiting for the publisher to stop.
+Then land the exact saved bytes first-valid while traffic continues: later bounded discovery adopts and owes the Welcome with one build and no new handoff.
 
 `expiry during submission drain prevents handoff` blocks settleLogSubmissions until the stored deadline and asserts zero mux/hub publish calls.
 `accepted replay rechecks proof before adopt` makes prefix unavailable and asserts zero adoption/Welcome delivery.
@@ -718,20 +742,18 @@ Resolve an already handed-off CAS late. Assert own walking occurs only after ado
 `rejection abandon and generic deletion retain the slot` exercises each route, acknowledges outcomes, reconstructs and tries a new operation ID.
 Assert no second same-epoch build. `committed Welcome survives abandon` fails delivery, abandons, reconstructs and asserts the obligation remains owed.
 
+`orphan slot retries recovered input without new delivery or host call` expires/acknowledges the operation, leaving empty operation/outcome lists and a retained slot.
+Its exact payload is first-valid; the startup or acknowledged-wakeup attempt returns normal unknown because retained restoration/header crypto/body resolution is temporarily unavailable.
+Restore that input without a log append, delivery, external host invocation or restart. Advance only retry timers.
+Assert adoption, exactly one stable landed fact, saved Welcome delivery, one build and zero additional publications; the ordinary walker proceeds only after adoption.
+Parameterise the unavailable input and prior unknown/lost/abandon; check retries at 1_000, 2_000, 4_000, 8_000 and capped 15_000 ms.
+`slot retries arm on reconnect and cancel on settlement advancement retirement or disposal` checks coalesced immediate wakeups, one active timer/attempt and no later calls after cancellation.
+
 `unsupported versions and control fork evidence persist before recovery` covers both version layers, unexplained own bytes without a slot and same-epoch divergence.
 Remove the triggering frame before restart. Assert saved reason/evidence, unchanged cursor, retained slot, no automatic recovery publication and held sends/control.
 `ordinary unavailable validation strands as an unprocessable gap` asserts ordinary strand/observation behaviour, rather than a search-only hold.
 
-`stale adoption version retries proof without rebuilding`, `adoption rollback leaves state control and anchor unchanged`, and `no-op requires committed payload evidence`:
-
-```ts
-expect(staleResult).toBe('moved')
-expect(afterStale).toEqual(beforeStale)
-expect(afterRollback).toEqual(beforeRollback)
-expect(landedRows).toHaveLength(1)
-expect(appliedRows).toHaveLength(1)
-expect(buildCalls).toBe(1)
-```
+`stale adoption version retries proof without rebuilding`, `adoption rollback leaves state control and anchor unchanged`, and `no-op requires committed payload evidence` assert moved leaves state unchanged, rollback restores state/control/anchor and coupled writes, and committed-evidence no-op leaves one landed row, one applied row and one build.
 
 `terminal state governs removal despite historical applied ordering` seeds misleading applied rows in the fixed incarnation.
 Assert terminal controls publication/removal, and old sorted removed rows do not mark an active state terminal.
@@ -800,7 +822,19 @@ Superseded follows the validated winner without owing the own Welcome. Unknown/a
 Driver return values describe observed acceptance only. Returning absent does not settle or recreate an expired/acked operation.
 The driver services retained acceptance even after expiry settlement or abandon. It cannot resurrect an intent or make a new handoff.
 
+Own retained-slot retry scheduling in peer.ts with hasUnresolvedControlSlot, independent of hasOperations and crypto.pending.
+Arm at startup after the initial settlement attempt; refreshControl records unresolved retained work, including after ack/abandon, for its outer caller to arm outside the lane.
+Normal unknown/absence and transient exceptions rearm at 1_000 ms, doubling to 15_000 ms; slot retries are never clamped to an expired operation deadline.
+Network reconnect and commit wakeups request an immediate attempt and reset backoff to 1_000 ms, coalescing any pending timer or running attempt.
+Keep at most one slot timer/attempt. Timer registration/rearming occurs outside runSerial; each attempt enters the lane once for bounded settleControlSlot work.
+After unknown, leave the lane before scheduling another attempt. Operation/walker callers share settlement ownership without nested lane entry.
+Cancel on committed settlement (including the co-written Welcome obligation), proven source-epoch advancement, incarnation retirement or disposal.
+A retained same-epoch anti-rebuild slot alone does not restart retries after proven settlement; failed evidence reads never count as cancellation proof.
+The retry owner only searches/adopts and services authorised Welcome work; it never publishes a control payload, prepares a build or resurrects an operation.
+
 Unknown keeps work before expiry, then settles unknown. Complete absence at expiry settles lost. Neither route nor ack/abandon clears the slot.
+An unknown search result ends the current operation pass: check expiry, settle unknown if expired, then return from the lane.
+Before expiry schedule the next operation attempt outside the lane with the existing deadline-clamped backoff; do not consume the operation-step ceiling in an immediate search loop.
 An accepted proof that becomes unavailable retains its obligation without delivery. Already committed obligations survive abandon and outcome ack.
 Once ordering trust fails, outcomes assert only local observations; fork-touched work never claims branch-wide absence or automatic reenactment.
 
@@ -829,6 +863,8 @@ Wrap both the input port and its returned ControlValidation through the existing
 Rebuild, run repository-wide test:types, then Step 2's full rpc, mls-rpc and integration suites.
 Expected: PASS at the activation boundary, including real adoption and Welcome tests.
 Drop the walker slot lookup and expect the acked late-landing test to fail. Restore it.
+Remove search budgets or run exhaustion retries inside the lane and expect the growing-head deadline/fairness test to fail. Restore them.
+Gate slot retry on hasOperations or skip rearming after normal unknown and expect the no-new-delivery/no-host-call test to fail. Restore it.
 Remove the post-drain deadline guard or restart controlHold gate and expect the relevant tests to fail. Restore and rerun full suites.
 
 - [ ] **Step 7: Commit runner activation during implementation.**
@@ -1083,19 +1119,3 @@ git commit -m "chore(control): record commit-once release intent and regression 
 ```
 
 Expected: intent committed after required checks. Gate fixes rerun their owning task's paired checks.
-
-## Self-review
-
-Spec coverage: D4 save/slot/checkpoint rules map to Tasks 1-2. Task 3 owns validation/evidence; Task 4 owns deadline/adoption/late settlement.
-Proposal/progress/receiver parity maps to Task 5. Task 6 names commit-once rows and crash seams, with deferred portions explicitly assigned.
-D1 ordinary recoverable gaps retain strand behaviour; 2.2d delivers automatic resync. Task 4 persists unsupported/control-evidence holds without claiming complete D1 safety.
-No gap remains in the 2.2a scope. Full row 1120, terminal draining and settlement finalisation remain incomplete until their stated owners land.
-
-Step scan: every implementation step has named files, signatures or explicit predicates. Tests specify names/assertions; verification names commands and expected results.
-Tasks are independently reviewable. Guarded adoption precedes activation. Future implementation commits use each task's exact Files list.
-Type consistency: BuiltCommit/HostBuilt/FirstValidCommit preserve spec shapes. Slot owner is an explicit internal extension; operation references avoid duplicate private snapshots.
-Preparation results are explicit. Owned refresh, evidence snapshots, winner-follow results and certified ranges have defined consumers.
-Review Focus: all five conditions map to named tests in Tasks 2-4. Real isolation, late landing and changed restart configuration have decisive assertions.
-Proportion: seven tasks. Bodies appear only for the search algorithm; other blocks define contracts or assertions.
-
-Revision changes only this plan and its finding disposition. No implementation, builds, tests, mutations, release actions or commits run during revision.
