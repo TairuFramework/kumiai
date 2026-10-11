@@ -515,7 +515,9 @@ test('transactional build uses committed open state before delayed publication',
         }))
       ).kind,
     ).toBe('saved')
-    const journal = decodeControlJournal(store.snapshot().control.commitOnce!.journal)
+    const slot = store.snapshot().control.commitOnce
+    if (slot === null) throw new Error('Missing retained build')
+    const journal = decodeControlJournal(slot.journal)
     expect(journal.sourceState).toEqual(row.state)
     expect(journal.source.stateVersion).toBe(row.revision)
     await host.access.readControl(async ({ handle }) => {

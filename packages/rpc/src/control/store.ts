@@ -15,6 +15,10 @@ import type {
   Outcome,
 } from './types.js'
 
+export class ControlStoreInvariantError extends Error {
+  override name = 'ControlStoreInvariantError'
+}
+
 function putRows<Row, Key>(
   rows: Array<Row>,
   puts: Array<Row> | undefined,
@@ -113,7 +117,7 @@ export function assertCommitOnceChange(
     const { expectedHead: _after, ...immutableAfter } = next
     if (sameValue(immutableBefore, immutableAfter)) return
   }
-  throw new Error('Commit-once slot change requires provider-verified context')
+  throw new ControlStoreInvariantError('Commit-once slot change requires provider-verified context')
 }
 
 /** Deletes precede puts so a replacement at the fork epoch survives settlement. */
@@ -124,30 +128,34 @@ export function applyChanges(
 ): ControlSnapshot {
   const nextSlot = changes.commitOnce === undefined ? snapshot.commitOnce : changes.commitOnce
   assertCommitOnceChange(snapshot.commitOnce, nextSlot, context)
-  const acceptance = changes.commitOnceAcceptance
-  if (acceptance !== undefined && !sameValue(acceptance, snapshot.commitOnceAcceptance)) {
-    if (acceptance === null) {
-      if (
-        snapshot.commitOnce !== null &&
-        nextSlot !== null &&
-        (context?.kind !== 'build' || sameValue(snapshot.commitOnce, nextSlot))
-      )
-        throw new Error('Cannot clear retained acceptance')
-    } else {
-      const identity = acceptance.source.identity
-      if (
-        nextSlot === null ||
-        identity === null ||
-        !slotSource(nextSlot, identity) ||
-        !sameValue(acceptance.source.key, {
-          groupID: identity.groupID,
-          incarnation: identity.incarnation,
-        }) ||
-        acceptance.from !== nextSlot.searchFrom ||
-        acceptance.payloadDigest !== nextSlot.payloadDigest
-      )
-        throw new Error('Acceptance does not bind the occupied slot')
-    }
+  const acceptance =
+    changes.commitOnceAcceptance === undefined
+      ? changes.commitOnce === null
+        ? null
+        : snapshot.commitOnceAcceptance
+      : changes.commitOnceAcceptance
+  if (
+    acceptance === null &&
+    snapshot.commitOnceAcceptance !== null &&
+    snapshot.commitOnce !== null &&
+    nextSlot !== null &&
+    (context?.kind !== 'build' || sameValue(snapshot.commitOnce, nextSlot))
+  )
+    throw new ControlStoreInvariantError('Cannot clear retained acceptance')
+  if (acceptance !== null) {
+    const identity = acceptance.source.identity
+    if (
+      nextSlot === null ||
+      identity === null ||
+      !slotSource(nextSlot, identity) ||
+      !sameValue(acceptance.source.key, {
+        groupID: identity.groupID,
+        incarnation: identity.incarnation,
+      }) ||
+      acceptance.from !== nextSlot.searchFrom ||
+      acceptance.payloadDigest !== nextSlot.payloadDigest
+    )
+      throw new ControlStoreInvariantError('Acceptance does not bind the occupied slot')
   }
   if (
     !sameValue(snapshot.commitOnce, nextSlot) &&
@@ -156,13 +164,10 @@ export function applyChanges(
     snapshot.commitOnceAcceptance !== null &&
     changes.commitOnceAcceptance !== null
   )
-    throw new Error('Replacement must clear prior acceptance')
+    throw new ControlStoreInvariantError('Replacement must clear prior acceptance')
   return cloneControlValue({
     commitOnce: changes.commitOnce === undefined ? snapshot.commitOnce : changes.commitOnce,
-    commitOnceAcceptance:
-      changes.commitOnceAcceptance === undefined
-        ? snapshot.commitOnceAcceptance
-        : changes.commitOnceAcceptance,
+    commitOnceAcceptance: acceptance,
     operations: putRows(
       snapshot.operations.filter((row) => !changes.deleteOperations?.includes(row.id)),
       changes.putOperations,

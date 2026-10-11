@@ -1,14 +1,14 @@
 import { encodeClientState, type GroupHandle } from '@kumiai/mls'
 import {
-  type AdoptionExpected,
-  type CommitOnceWriteContext,
   type ControlBuildPort,
   type ControlSlot,
   type ControlStore,
+  ControlStoreInvariantError,
   ControlWriteNotCommittedError,
   type HostBuilt,
   type Operation,
   OperationRejectedError,
+  type SaveControlBuild,
   StorageOutcomeUnknownError,
 } from '@kumiai/rpc'
 import { sha256 } from '@noble/hashes/sha2.js'
@@ -17,26 +17,43 @@ import type { Runtime } from '@sozai/runtime'
 
 import type { HandleAccess } from './access.js'
 import { decodeControlJournal, encodeControlJournal } from './control-journal.js'
+import { controlBuildContexts } from './control-write-context.js'
 import { deriveEntryKey, sealEntries } from './crypto.js'
 import { sameStoredValue } from './memory-incarnation-stores.js'
-import { GroupStateConflictError } from './persistence-errors.js'
+import {
+  DisplacedGroupHandleError,
+  GroupStateConflictError,
+  PersistencePhaseError,
+  ReentrantOwnershipError,
+} from './persistence-errors.js'
 import type { GroupKey, GroupPersistence, GroupTransaction } from './persistence-types.js'
 
-export type SaveControlBuild = (
-  intent: Operation & { stage: 'intent' },
-  built: ControlSlot,
-  expected: AdoptionExpected,
-  mutationID: string,
-) => Promise<'saved' | 'moved' | 'occupied'>
-
-// Authority stays with the owned transaction, never in caller changes.
-const builds = new WeakMap<object, CommitOnceWriteContext>()
-export function controlBuildContext(tx: GroupTransaction): CommitOnceWriteContext | null {
-  return builds.get(tx) ?? null
-}
+export type { SaveControlBuild } from '@kumiai/rpc'
 
 class PreparationMoved extends Error {}
 class SlotOccupied extends Error {}
+
+function fatalPersistenceFailure(error: unknown): boolean {
+  return (
+    error instanceof GroupStateConflictError ||
+    error instanceof DisplacedGroupHandleError ||
+    error instanceof ReentrantOwnershipError ||
+    error instanceof PersistencePhaseError ||
+    (error instanceof Error &&
+      [
+        'GroupStateConflictError',
+        'DisplacedGroupHandleError',
+        'ReentrantOwnershipError',
+        'PersistencePhaseError',
+      ].includes(error.name))
+  )
+}
+function unknownStorageOutcome(error: unknown): boolean {
+  return (
+    error instanceof StorageOutcomeUnknownError ||
+    (error instanceof Error && error.name === 'StorageOutcomeUnknownError')
+  )
+}
 
 export function createPersistenceBuildSaver<TTx extends GroupTransaction>(params: {
   persistence: GroupPersistence<TTx>
@@ -109,7 +126,7 @@ export function createPersistenceBuildSaver<TTx extends GroupTransaction>(params
             snapshot.commitOnce.epoch >= identity.epoch
           )
             throw new SlotOccupied()
-          builds.set(stores.tx, {
+          controlBuildContexts.set(stores.tx, {
             kind: 'build',
             source: expected,
             queueHeadID: intent.id,
@@ -122,7 +139,7 @@ export function createPersistenceBuildSaver<TTx extends GroupTransaction>(params
             )
             await rows.control.apply({ commitOnce: built, commitOnceAcceptance: null }, mutationID)
           } finally {
-            builds.delete(stores.tx)
+            controlBuildContexts.delete(stores.tx)
           }
           return 'saved' as const
         },
@@ -130,28 +147,31 @@ export function createPersistenceBuildSaver<TTx extends GroupTransaction>(params
     } catch (error) {
       if (error instanceof PreparationMoved) return 'moved'
       if (error instanceof SlotOccupied) return 'occupied'
+      if (fatalPersistenceFailure(error)) throw error
+      if (!entered) throw error
       if (
-        error instanceof GroupStateConflictError ||
-        (error instanceof Error &&
-          [
-            'GroupStateConflictError',
-            'DisplacedGroupHandleError',
-            'ReentrantOwnershipError',
-            'PersistencePhaseError',
-          ].includes(error.name))
+        error instanceof ControlStoreInvariantError ||
+        error instanceof TypeError ||
+        error instanceof RangeError ||
+        (error instanceof Error && error.name === 'ControlStoreInvariantError')
       )
         throw error
-      if (!entered) throw error
       if (outcome === 'committed') return 'saved'
-      if (outcome === 'rolled-back' || !(error instanceof StorageOutcomeUnknownError))
+      if (outcome === 'rolled-back')
         throw new ControlWriteNotCommittedError('Prepared build save rolled back', { cause: error })
+      if (!unknownStorageOutcome(error)) throw error
       let delay = 100
       for (;;) {
         let resolution: 'committed' | 'rolled-back'
         try {
           resolution = await persistence.resolve(key.groupID, mutationID)
         } catch (failure) {
-          if (failure instanceof GroupStateConflictError) throw failure
+          if (
+            fatalPersistenceFailure(failure) ||
+            failure instanceof TypeError ||
+            failure instanceof RangeError
+          )
+            throw failure
           await new Promise<void>((resolve) => setTimeout(resolve, delay))
           delay = Math.min(delay * 2, 15_000)
           continue
@@ -255,10 +275,13 @@ export function createControlBuildPort(params: {
           throw error
         }
         let expected = original
+        let attempts = 0
+        let delay = 100
         for (;;) {
           if (params.now() >= saved.deadline) return { kind: 'expired', operation: saved }
           let result: Awaited<ReturnType<SaveControlBuild>>
           try {
+            attempts++
             result = await params.saveBuilt(saved, built, expected, params.newID())
           } catch (error) {
             if (
@@ -266,6 +289,9 @@ export function createControlBuildPort(params: {
               !(error instanceof Error && error.name === 'ControlWriteNotCommittedError')
             )
               throw error
+            if (attempts >= 8) throw error
+            await new Promise<void>((resolve) => setTimeout(resolve, delay))
+            delay = Math.min(delay * 2, 15_000)
             continue
           }
           if (result === 'saved')
@@ -285,7 +311,10 @@ export function createControlBuildPort(params: {
             !sameStoredValue(current.operations[0], saved)
           )
             return { kind: 'moved', operation: saved }
+          if (attempts >= 8) return { kind: 'moved', operation: saved }
           expected = fresh.source
+          await new Promise<void>((resolve) => setTimeout(resolve, delay))
+          delay = Math.min(delay * 2, 15_000)
         }
       }),
   }

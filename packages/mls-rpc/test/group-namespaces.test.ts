@@ -328,16 +328,18 @@ for (const mode of ['real-mls', 'double'] as const) {
         { putOperations: [intent], cursor: { position: slot.searchFrom, epoch: slot.epoch } },
         'intent',
       )
+      const storedState = await groups.loadState(key)
+      if (storedState === null || seed.state.state === null) throw new Error('Missing source state')
       const source = {
         key,
         identity: seed.trust.installed,
-        stateVersion: (await groups.loadState(key))!.version,
+        stateVersion: storedState.version,
       }
       slot.journal = encodeControlJournal({
         version: 1,
         source,
         checkpoint: slot.searchFrom,
-        sourceState: seed.state.state!,
+        sourceState: seed.state.state,
         sourceCredential: seed.trust.credential,
         sourceLedger: seed.state.ledger,
         candidate: slot.journal,

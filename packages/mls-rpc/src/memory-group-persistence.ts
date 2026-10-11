@@ -445,6 +445,40 @@ export function createMemoryGroupCoordinator(params: {
                   tx,
                   key: { groupID: change.groupID, incarnation },
                   atRest,
+                  async adoptionContext() {
+                    if (previous?.activeIncarnation !== incarnation) return null
+                    const retired =
+                      proposedLifetime !== undefined &&
+                      proposedLifetime.activeIncarnation !== incarnation
+                    const after = savedStates.get(incarnation)
+                    if (!retired && (after === undefined || after.deleted)) return null
+                    const prior = await memoryRecordTable<GroupStateRecord>({
+                      tx: { ...tx, rows: before },
+                      key: { groupID: change.groupID, incarnation },
+                      namespace: 'state',
+                      atRest,
+                    }).load('current')
+                    if (prior === null || prior.deleted) return null
+                    return {
+                      kind: 'adoption',
+                      before: {
+                        groupID: change.groupID,
+                        incarnation,
+                        epoch: prior.epoch,
+                        authenticator: prior.epochAuthenticator,
+                      },
+                      after:
+                        after === undefined || after.deleted
+                          ? null
+                          : {
+                              groupID: change.groupID,
+                              incarnation,
+                              epoch: after.epoch,
+                              authenticator: after.epochAuthenticator,
+                            },
+                      retired,
+                    }
+                  },
                 })
                 const state: ReturnType<typeof raw.state> = {
                   load: rows.state.load,

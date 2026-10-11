@@ -616,6 +616,100 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       expect((await host.control.load()).commitOnce).toBeNull()
       expect((await host.control.load()).commitOnceAcceptance).toBeNull()
     })
+    test.each(['omitted', 'unchanged'] as const)(
+      'authorised slot clear validates resulting acceptance: %s',
+      async (mode) => {
+        const host = await params.open()
+        const { slot, source } = await prepareSlot(host)
+        const acceptance = {
+          source,
+          from: slot.searchFrom,
+          position: 'accepted',
+          payloadDigest: slot.payloadDigest,
+        }
+        await host.control.apply({ commitOnceAcceptance: acceptance }, 'acceptance')
+        const before = await host.control.load()
+        const state = await host.loadState()
+        const marker = await host.control.lastMutation()
+        const advancing = encodeControlFixtureState({
+          ...source.identity,
+          epoch: slot.epoch + 1,
+          authenticator: new Uint8Array([44]),
+        })
+        const write: ConformanceAdoptionWrite = {
+          changes:
+            mode === 'omitted'
+              ? { commitOnce: null }
+              : { commitOnce: null, commitOnceAcceptance: acceptance },
+          mutationID: 'clear',
+        }
+        if (mode === 'unchanged') {
+          await expect(host.saveState(advancing, write)).rejects.toThrow()
+          expect(await (await params.reopen()).control.load()).toEqual(before)
+          expect(await host.loadState()).toEqual(state)
+          expect(await host.control.lastMutation()).toBe(marker)
+        } else {
+          await host.saveState(advancing, write)
+          const cleared = await (await params.reopen()).control.load()
+          expect(cleared.commitOnce).toBeNull()
+          expect(cleared.commitOnceAcceptance).toBeNull()
+        }
+      },
+    )
+    test.each([false, true])(
+      'absent build cursor requires retained initial identity: later=%s',
+      async (later) => {
+        const host = await params.open()
+        const { intent, slot, source } = await prepareSlot(host)
+        const identity = {
+          ...source.identity,
+          epoch: slot.epoch + (later ? 1 : 0),
+          authenticator: later ? new Uint8Array([46]) : slot.authenticatorBefore,
+        }
+        if (later) {
+          await host.saveState(encodeControlFixtureState(identity), {
+            changes: { commitOnce: null },
+            mutationID: 'advance',
+          })
+          await host.control.apply({ putOperations: [intent], cursor: null }, 'intent-null')
+          const built = {
+            ...slot,
+            epoch: identity.epoch,
+            authenticatorBefore: identity.authenticator,
+          }
+          const before = await host.control.load()
+          const marker = await host.control.lastMutation()
+          expect(
+            await host.saveBuilt(
+              intent,
+              built,
+              { ...source, identity, stateVersion: await host.loadVersion() },
+              'null-build',
+            ),
+          ).toBe('moved')
+          expect(await (await params.reopen()).control.load()).toEqual(before)
+          expect(await host.control.lastMutation()).toBe(marker)
+        } else {
+          // A fresh host has no slot and no cursor, but has an independently retained installation.
+          const fresh = await params.open()
+          await fresh.saveState(encodeControlFixtureState(identity))
+          await fresh.control.apply({ putOperations: [intent] }, 'initial-intent')
+          expect(
+            await fresh.saveBuilt(
+              intent,
+              slot,
+              {
+                key: fresh.control.key,
+                identity: { ...identity, ...fresh.control.key },
+                stateVersion: await fresh.loadVersion(),
+              },
+              'initial-null',
+            ),
+          ).toBe('saved')
+          expect((await fresh.control.load()).cursor).toBeNull()
+        }
+      },
+    )
     test('retained slot and acceptance round-trip defensively and survive rollback', async () => {
       const host = await params.open()
       const original = records().putOperations?.[0]
@@ -660,7 +754,10 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
                 },
         },
       }
-      await host.saveState(encodeControlFixtureState(acceptance.source.identity!))
+      if (acceptance.source.identity === null || expectedAcceptance.source.identity === null)
+        throw new Error('Missing acceptance identity')
+      const expectedIdentity = expectedAcceptance.source.identity
+      await host.saveState(encodeControlFixtureState(acceptance.source.identity))
       await host.control.apply(
         {
           putOperations: [{ ...original, stage: 'intent' }],
@@ -701,7 +798,7 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       await expect(
         reopened.saveState(
           encodeControlFixtureState({
-            ...expectedAcceptance.source.identity!,
+            ...expectedIdentity,
             epoch: slot.epoch + 1,
             authenticator: new Uint8Array([42]),
           }),
@@ -711,7 +808,7 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       expect((await (await params.reopen()).control.load()).commitOnce).toEqual(expectedSlot)
       await reopened.saveState(
         encodeControlFixtureState({
-          ...expectedAcceptance.source.identity!,
+          ...expectedIdentity,
           epoch: slot.epoch + 1,
           authenticator: new Uint8Array([42]),
         }),

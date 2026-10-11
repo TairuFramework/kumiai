@@ -148,17 +148,23 @@ function mutateControl<Position extends string>(
   const owned = cloneValue(changes)
   const slot = owned.commitOnce === undefined ? snapshot.commitOnce : owned.commitOnce
   guard(snapshot.commitOnce, slot, context)
-  const proof = owned.commitOnceAcceptance
-  if (proof !== undefined && !equal(proof, snapshot.commitOnceAcceptance)) {
-    if (proof === null) {
-      if (
-        snapshot.commitOnce !== null &&
-        slot !== null &&
-        (context?.kind !== 'build' || equal(snapshot.commitOnce, slot))
-      )
-        throw new Error('Retained acceptance')
-    } else if (
-      slot === null ||
+  const proof =
+    owned.commitOnceAcceptance === undefined
+      ? owned.commitOnce === null
+        ? null
+        : snapshot.commitOnceAcceptance
+      : owned.commitOnceAcceptance
+  if (
+    proof === null &&
+    snapshot.commitOnceAcceptance !== null &&
+    snapshot.commitOnce !== null &&
+    slot !== null &&
+    (context?.kind !== 'build' || equal(snapshot.commitOnce, slot))
+  )
+    throw new Error('Retained acceptance')
+  if (
+    proof !== null &&
+    (slot === null ||
       proof.source.identity === null ||
       !matches(slot, proof.source.identity) ||
       !equal(proof.source.key, {
@@ -166,10 +172,9 @@ function mutateControl<Position extends string>(
         incarnation: proof.source.identity.incarnation,
       }) ||
       proof.from !== slot.searchFrom ||
-      proof.payloadDigest !== slot.payloadDigest
-    )
-      throw new Error('Unbound acceptance')
-  }
+      proof.payloadDigest !== slot.payloadDigest)
+  )
+    throw new Error('Unbound acceptance')
   if (
     !equal(snapshot.commitOnce, slot) &&
     slot !== null &&
@@ -199,8 +204,7 @@ function mutateControl<Position extends string>(
   upsertRows(snapshot.responses, owned.putResponses, (row) => row.position)
   if (owned.putRejoin !== undefined) snapshot.rejoin = owned.putRejoin
   if (owned.commitOnce !== undefined) snapshot.commitOnce = owned.commitOnce
-  if (owned.commitOnceAcceptance !== undefined)
-    snapshot.commitOnceAcceptance = owned.commitOnceAcceptance
+  snapshot.commitOnceAcceptance = proof
   if (owned.cursor !== undefined) snapshot.cursor = owned.cursor
   snapshot.operations.sort((a, b) => a.seq - b.seq)
   snapshot.applied.sort((a, b) => a.epoch - b.epoch)
@@ -212,12 +216,14 @@ export function createMemoryControlStore<Position extends string = string>(
   const fixedKey = { ...key }
   let record: {
     state: Uint8Array | null
+    initialIdentity: ConformanceEpochIdentity | null
     version: number
     anchor: ConformanceAnchorSlot | null
     control: ConformanceControlSnapshot<Position>
     mutationID: string | null
   } = {
     state: null,
+    initialIdentity: null,
     version: 0,
     anchor: null,
     mutationID: null,
@@ -274,6 +280,7 @@ export function createMemoryControlStore<Position extends string = string>(
         !equal(expected.key, fixedKey) ||
         !equal(identity, expected.identity) ||
         next.version !== expected.stateVersion ||
+        (next.control.cursor === null && !equal(next.initialIdentity, identity)) ||
         !equal(next.control.operations[0], intent) ||
         built.searchFrom !== (next.control.cursor?.position ?? null) ||
         (next.control.cursor !== null &&
@@ -309,6 +316,7 @@ export function createMemoryControlStore<Position extends string = string>(
       const next = cloneValue(record)
       const before = next.state === null ? null : decodeControlFixtureState(next.state)
       const after = decodeControlFixtureState(state)
+      if (next.state === null) next.initialIdentity = cloneValue(after)
       next.state = state.slice()
       next.version++
       if (write != null) {

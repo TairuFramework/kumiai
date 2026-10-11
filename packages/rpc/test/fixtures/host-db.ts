@@ -20,6 +20,7 @@ import { GroupControlUnsettledError, StorageOutcomeUnknownError } from '../../sr
 type GroupRecord = {
   version: number
   state: Uint8Array | null
+  initialState: Uint8Array | null
   anchorSlot: AnchorSlot | null
   control: ControlSnapshot
   mutationID: string | null
@@ -55,6 +56,7 @@ function emptyRecord(): GroupRecord {
   return {
     version: 0,
     state: null,
+    initialState: null,
     anchorSlot: null,
     mutationID: null,
     control: {
@@ -152,6 +154,9 @@ export function createMemoryHostDatabase(
             identity === null ||
             !same(source, identity) ||
             next.version !== expected.stateVersion ||
+            (next.control.cursor === null &&
+              (next.initialState === null ||
+                !same(options.readIdentity?.(next.initialState, key) ?? null, identity))) ||
             next.control.operations[0]?.id !== intent.id ||
             !same(next.control.operations[0], intent) ||
             built.searchFrom !== (next.control.cursor?.position ?? null) ||
@@ -217,6 +222,7 @@ export function createMemoryHostDatabase(
         if (replace && next.version !== expectedVersion)
           throw new Error('Group state version is stale')
         if (next.state != null && !replace) throw new Error('Group state already exists')
+        next.initialState = ownedState.slice()
         next.state = ownedState
         if (replace) {
           next.control = applyChanges(next.control, readmissionChanges(next.control))
@@ -238,6 +244,7 @@ export function createMemoryHostDatabase(
             ? null
             : (options.readIdentity?.(next.state, key) ?? null)
         const after = key === null ? null : (options.readIdentity?.(ownedState, key) ?? null)
+        if (next.state === null) next.initialState = ownedState.slice()
         next.state = ownedState
         if (ownedWrite != null) {
           next.control = applyChanges(

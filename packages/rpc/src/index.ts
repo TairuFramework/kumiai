@@ -47,6 +47,7 @@ export {
   applyResolved,
   assertCommitOnceChange,
   type CommitOnceWriteContext,
+  ControlStoreInvariantError,
   controlSettled,
   pruneWindow,
   readmissionChanges,

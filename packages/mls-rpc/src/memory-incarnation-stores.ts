@@ -1,6 +1,6 @@
 import { applyChanges, type CommitOnceWriteContext, type ControlSnapshot } from '@kumiai/rpc'
 
-import { controlBuildContext } from './control-build.js'
+import { controlBuildContexts } from './control-write-context.js'
 import {
   createUnlockedGroupStateStores,
   memoryOpen,
@@ -189,6 +189,7 @@ export function createUnlockedIncarnationStores(params: {
   tx: MemoryTransaction
   key: GroupKey
   atRest: AtRestCodec
+  adoptionContext?: () => Promise<CommitOnceWriteContext | null>
 }): IncarnationStores {
   const { tx, atRest } = params
   const key = { ...params.key }
@@ -289,28 +290,22 @@ export function createUnlockedIncarnationStores(params: {
         )
           throw new GroupStateConflictError('Acceptance key mismatch')
         const previous = (await control.load('current'))?.snapshot ?? emptyControl()
-        let context: CommitOnceWriteContext | null = controlBuildContext(tx)
-        if (owned.commitOnce !== undefined && context === null) {
-          const life = await stateStores.lifetime.load()
+        let context: CommitOnceWriteContext | null = controlBuildContexts.get(tx) ?? null
+        if (owned.commitOnce === null && context === null)
+          context = (await params.adoptionContext?.()) ?? null
+        if (owned.commitOnce != null && context === null) {
           const state = await stateStores.state(key.incarnation).load()
-          const source =
-            state === null || state.deleted
-              ? null
-              : { ...key, epoch: state.epoch, authenticator: state.epochAuthenticator }
-          if (owned.commitOnce === null && previous.commitOnce !== null) {
-            const trust = await stateStores.trust.load()
-            const retired = life !== null && life.activeIncarnation !== key.incarnation
-            const before = retired
-              ? {
-                  ...key,
-                  epoch: previous.commitOnce.epoch,
-                  authenticator: previous.commitOnce.authenticatorBefore,
-                }
-              : trust?.installed
-            if (before !== undefined) context = { kind: 'adoption', before, after: source, retired }
-          } else if (source !== null) context = { kind: 'head', source }
+          if (state !== null && !state.deleted)
+            context = {
+              kind: 'head',
+              source: { ...key, epoch: state.epoch, authenticator: state.epochAuthenticator },
+            }
         }
-        if (!owedOnly && !(context?.kind === 'adoption' && context.retired)) await active()
+        const slotOnly = Object.keys(owned).every(
+          (name) => name === 'commitOnce' || name === 'commitOnceAcceptance',
+        )
+        if (!owedOnly && !(slotOnly && context?.kind === 'adoption' && context.retired))
+          await active()
         await control.save('current', {
           snapshot: applyChanges(previous, owned, context),
           mutationID,

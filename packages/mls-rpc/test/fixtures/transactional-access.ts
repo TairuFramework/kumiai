@@ -30,6 +30,7 @@ export class RevisionConflictError extends Error {
 
 export type StoredRow = {
   state: Uint8Array
+  initialState: Uint8Array
   ledger: Array<string>
   revision: number
   control: ControlSnapshot
@@ -74,6 +75,7 @@ export function createTransactionalStore(
   return storeOver(
     {
       state: encodeClientState(handle.state),
+      initialState: encodeClientState(handle.state),
       ledger: handle.ledgerTokens,
       revision: 0,
       mutationID: null,
@@ -153,6 +155,8 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
           !sameStoredValue(owned.expected.key, key) ||
           !sameStoredValue(owned.expected.identity, identity) ||
           row.revision !== owned.expected.stateVersion ||
+          (row.control.cursor === null &&
+            !sameStoredValue(identityOf(row.initialState), identity)) ||
           !sameStoredValue(row.control.operations[0], owned.intent) ||
           journal.checkpoint !== owned.built.searchFrom ||
           owned.built.searchFrom !== (row.control.cursor?.position ?? null) ||
@@ -202,6 +206,7 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
         // its first record; the key is still consumed once, by this state.
         const next: StoredRow = {
           state: state.slice(),
+          initialState: row.initialState.slice(),
           ledger,
           revision: expected + 1,
           control:
