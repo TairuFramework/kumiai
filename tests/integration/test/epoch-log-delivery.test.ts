@@ -184,7 +184,7 @@ test.each([
             welcome: null,
             epoch: Number(alice.handle().epoch),
             authenticatorBefore: alice.handle().state.keySchedule.epochAuthenticator.slice(),
-            lineage: 0,
+            incarnation: 1,
             digest: digestAppliedCommit(result.commitMessage),
             journal: encodeJournal(result.newGroup),
           }

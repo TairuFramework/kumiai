@@ -2,9 +2,8 @@ import { decodeClientState, encodeClientState, restoreGroup } from '@kumiai/mls'
 import type { PendingAppFrame } from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
-import { simpleHandleAccess } from '../src/access.js'
 import { createGroupCrypto } from '../src/crypto.js'
-import { createRealGroup } from './fixtures/real-group.js'
+import { createRealGroup, testHandleAccess } from './fixtures/real-group.js'
 
 const utf8 = new TextEncoder()
 
@@ -68,10 +67,10 @@ describe('real MLS durable host save ordering', () => {
       },
     }
     const sender = createGroupCrypto({
-      access: simpleHandleAccess({ handle: () => group.committer.handle, adopt: () => {} }),
+      access: testHandleAccess({ handle: () => group.committer.handle, adopt: () => {} }),
     })
     const receiverPort = createGroupCrypto({
-      access: simpleHandleAccess({ handle: () => receiver.handle, adopt: () => {} }),
+      access: testHandleAccess({ handle: () => receiver.handle, adopt: () => {} }),
       pending,
     })
     const aad = utf8.encode('topic')

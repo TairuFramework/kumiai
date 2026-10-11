@@ -155,6 +155,11 @@ export function makeMLSPeer(
     await restore
     return readEpoch()
   }
+  const readRecoverySource = mls.readRecoverySource.bind(mls)
+  mls.readRecoverySource = async () => {
+    await restore
+    return readRecoverySource()
+  }
   const exportSecret = crypto.exportSecret.bind(crypto)
   crypto.exportSecret = async (label) => {
     await restore
@@ -313,7 +318,7 @@ export async function buildMemoryOperation(mls: MemoryGroupMLS, op: Operation): 
     journal,
     epoch,
     authenticatorBefore,
-    lineage: 0,
+    incarnation: 1,
     digest: digestAppliedCommit(commit),
     welcome:
       op.kind === 'invite' && body.target != null
@@ -339,7 +344,13 @@ export function memoryOperationHost(mls: MemoryGroupMLS) {
   }
 }
 export function intent(request: OperationRequest): Operation {
-  return { ...request, seq: 1, enqueuedAt: Date.now(), stage: 'intent' }
+  return {
+    ...request,
+    seq: 1,
+    enqueuedAt: Date.now(),
+    deadline: Date.now() + 30_000,
+    stage: 'intent',
+  }
 }
 
 export async function seedBuiltOperation(
@@ -360,6 +371,7 @@ export async function seedBuiltOperation(
     payloadDigest: toB64U(sha256(payload)),
     publishID: crypto.randomUUID(),
     expectedHead: null,
+    searchFrom: null,
   }
   const row: Operation =
     acceptedAs == null
@@ -397,7 +409,7 @@ export async function buildRejoinRecord(member: TestPeer): Promise<RejoinRecord>
     source: {
       epoch: member.mls.epoch(),
       authenticator: member.mls.authenticator(),
-      lineage: 0,
+      key: (await member.mls.readRecoverySource()).key,
       head: null,
     },
     digest: digestAppliedCommit(pending.commit),

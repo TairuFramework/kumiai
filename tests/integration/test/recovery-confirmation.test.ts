@@ -411,7 +411,7 @@ test('stale GroupInfo is superseded and retried without adopting the stale candi
       welcome: null,
       epoch: Number(source.epoch),
       authenticatorBefore: source.state.keySchedule.epochAuthenticator.slice(),
-      lineage: 0,
+      incarnation: 1,
       digest: digestAppliedCommit(rotated.commitMessage),
       journal: encodeJournal(rotated.newGroup),
     }

@@ -27,7 +27,7 @@ export type MemoryGroupMLS = GroupMLS & {
   authenticator: () => Uint8Array
   adoptOperation: (
     blob: Uint8Array,
-    expected: { epoch: number; authenticatorBefore: Uint8Array; lineage: number },
+    expected: { epoch: number; authenticatorBefore: Uint8Array; incarnation: number },
     write: AdoptionWrite,
   ) => Promise<'installed' | 'noop' | 'moved'>
   epoch: () => number
@@ -793,6 +793,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             slotAdd(localDID, nextSlots)
           }
           const write = factory({
+            incarnation: 1,
             epochAfter: info.epoch + 1,
             removed: false,
             epochAuthenticator: authenticator,
@@ -844,7 +845,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         if (candidate.epoch === epoch && toB64U(blob) === toB64U(serializeState())) return 'noop'
         if (
           expected.epoch !== epoch ||
-          expected.lineage !== 0 ||
+          expected.incarnation !== 1 ||
           toB64U(expected.authenticatorBefore) !== toB64U(authenticator())
         )
           return 'moved'
@@ -907,7 +908,16 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       slotRemoveDID(did)
     },
     readRecoverySource: () =>
-      serialise(async () => ({ epoch, authenticator: authenticator(), lineage: 0 })),
+      serialise(async () => {
+        const key = { groupID, incarnation: 1 }
+        return {
+          key,
+          stateVersion: await hostDB.loadVersion(storageID),
+          identity: { ...key, epoch, authenticator: authenticator() },
+          epoch,
+          authenticator: authenticator(),
+        }
+      }),
     readEpoch: () => serialise(async () => epoch),
     prepareRecovery: prepare,
     async verifyRecoveryRequest(request) {
@@ -1047,6 +1057,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
           }),
         )
         const write = context.adoption?.({
+          incarnation: 1,
           epochAfter,
           removed,
           epochAuthenticator: fromB64U(nextIdentity),

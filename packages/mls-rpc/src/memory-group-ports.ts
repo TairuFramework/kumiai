@@ -67,6 +67,9 @@ export function createMemoryGroupPorts(params: {
       return { ...key }
     },
     control: {
+      get key() {
+        return { ...key }
+      },
       load: () => access.read(key, (stores) => stores.incarnation(key.incarnation).control.load()),
       async apply(changes, mutationID) {
         const owned = copyStoredValue(changes)

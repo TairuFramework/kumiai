@@ -4,6 +4,7 @@ import type {
   ConformanceControlChanges,
   ConformanceControlSnapshot,
   ConformanceControlStore,
+  ConformanceGroupKey,
 } from './control-store.js'
 
 export type MemoryControlStore<Position extends string = string> =
@@ -74,14 +75,18 @@ function mutateControl<Position extends string>(
   upsertRows(snapshot.applied, owned.putApplied, (row) => row.epoch)
   upsertRows(snapshot.responses, owned.putResponses, (row) => row.position)
   if (owned.putRejoin !== undefined) snapshot.rejoin = owned.putRejoin
+  if (owned.commitOnce !== undefined) snapshot.commitOnce = owned.commitOnce
+  if (owned.commitOnceAcceptance !== undefined)
+    snapshot.commitOnceAcceptance = owned.commitOnceAcceptance
   if (owned.cursor !== undefined) snapshot.cursor = owned.cursor
   snapshot.operations.sort((a, b) => a.seq - b.seq)
   snapshot.applied.sort((a, b) => a.epoch - b.epoch)
 }
 
-export function createMemoryControlStore<
-  Position extends string = string,
->(): MemoryControlStore<Position> {
+export function createMemoryControlStore<Position extends string = string>(
+  key: ConformanceGroupKey,
+): MemoryControlStore<Position> {
+  const fixedKey = { ...key }
   let record: {
     state: Uint8Array | null
     anchor: ConformanceAnchorSlot | null
@@ -92,6 +97,8 @@ export function createMemoryControlStore<
     anchor: null,
     mutationID: null,
     control: {
+      commitOnce: null,
+      commitOnceAcceptance: null,
       operations: [],
       rejoin: null,
       outcomes: [],
@@ -117,6 +124,9 @@ export function createMemoryControlStore<
     }
   }
   return {
+    get key() {
+      return { ...fixedKey }
+    },
     load: async () => cloneValue(record.control),
     lastMutation: async () => record.mutationID,
     apply: async (changes, mutationID) => {

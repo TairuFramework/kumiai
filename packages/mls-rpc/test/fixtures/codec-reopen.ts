@@ -17,7 +17,6 @@ import {
 import type { StorageTestPorts } from '@kumiai/rpc-conformance'
 import { defaultProposalTypes } from 'ts-mls'
 
-import { simpleHandleAccess } from '../../src/access.js'
 import { createGroupCrypto } from '../../src/crypto.js'
 import { createGroupMLS, createLedgerEntrySlot } from '../../src/mls.js'
 import type {
@@ -26,7 +25,7 @@ import type {
   PersistenceFixture,
 } from '../../src/persistence-types.js'
 import type { RecoveryCandidate } from '../../src/recovery.js'
-import { buildRealCommit, createRealGroup } from './real-group.js'
+import { buildRealCommit, createRealGroup, testHandleAccess } from './real-group.js'
 import { createStorageFixture } from './storage-persistence.js'
 
 export async function createCodecReopenFixture(id: string): Promise<{
@@ -48,7 +47,7 @@ export async function createCodecReopenFixture(id: string): Promise<{
   const repeatedToken = member.handle.ledgerTokens[0]
   if (repeatedToken == null) throw new Error('Missing ledger token')
   await member.handle.applyLedgerEntries([repeatedToken])
-  const access = simpleHandleAccess({
+  const access = testHandleAccess({
     handle: () => member.handle,
     adopt: (next) => {
       member.handle = next
@@ -57,7 +56,7 @@ export async function createCodecReopenFixture(id: string): Promise<{
   const requester = createGroupMLS({ identity: member.identity, access, entrySlot: member.slot })
   const remote = createGroupMLS({
     identity: responder.identity,
-    access: simpleHandleAccess({
+    access: testHandleAccess({
       handle: () => responder.handle,
       adopt: (next) => {
         responder.handle = next
@@ -189,7 +188,7 @@ export async function createCodecReopenFixture(id: string): Promise<{
     })
     const realPort = createGroupMLS({
       identity: member.identity,
-      access: simpleHandleAccess({
+      access: testHandleAccess({
         handle: () => handle,
         adopt: (next) => {
           handle = next

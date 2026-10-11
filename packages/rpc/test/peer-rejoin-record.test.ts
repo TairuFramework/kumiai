@@ -325,7 +325,7 @@ test.each([
   }
 })
 
-test.each(['gap', 'epoch', 'authenticator', 'lineage'] as const)(
+test.each(['gap', 'epoch', 'authenticator', 'incarnation', 'groupID'] as const)(
   'source re-check rejects changed %s',
   async (changed) => {
     const { bob } = await setup()
@@ -334,7 +334,9 @@ test.each(['gap', 'epoch', 'authenticator', 'lineage'] as const)(
     if (changed === 'gap') scan.gap = true
     else if (changed === 'authenticator')
       scan.current.authenticator[0] = (scan.current.authenticator[0] ?? 0) ^ 1
-    else scan.current[changed] += 1
+    else if (changed === 'incarnation') scan.current.key.incarnation += 1
+    else if (changed === 'groupID') scan.current.key.groupID = 'other-group'
+    else scan.current.epoch += 1
     expect(sourceRecheck(scan, record)).toEqual({ kind: 'fail', blockingPosition: null })
   },
 )

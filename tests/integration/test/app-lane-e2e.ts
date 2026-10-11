@@ -242,6 +242,7 @@ export function makeMember(params: MakeMemberParams): Member {
 
   const access = simpleHandleAccess({
     handle: getHandle,
+    stateVersion: () => stateStore.database.loadVersion('state'),
     adopt: adoptHandle,
     persist: (next, write) => stateStore.save(next, write),
   })
@@ -334,7 +335,7 @@ export function makeMember(params: MakeMemberParams): Member {
       welcome,
       epoch: Number(current.epoch),
       authenticatorBefore: current.state.keySchedule.epochAuthenticator.slice(),
-      lineage: 0,
+      incarnation: 1,
       digest: digestAppliedCommit(committed.commitMessage),
     }
   }
@@ -518,7 +519,13 @@ export function customOperation(
   return request
 }
 export function operationIntent(request: OperationRequest): Operation {
-  return { ...request, seq: 1, enqueuedAt: Date.now(), stage: 'intent' }
+  return {
+    ...request,
+    seq: 1,
+    enqueuedAt: Date.now(),
+    deadline: Date.now() + 30_000,
+    stage: 'intent',
+  }
 }
 
 export async function joinFromWelcome(params: {
@@ -550,7 +557,11 @@ export function createDurableHandleAccess(
   params: Pick<Parameters<typeof simpleHandleAccess>[0], 'handle' | 'adopt'>,
 ): HandleAccess {
   const store = createMemoryStateStore()
-  const access = simpleHandleAccess({ ...params, persist: store.save })
+  const access = simpleHandleAccess({
+    ...params,
+    persist: store.save,
+    stateVersion: () => store.database.loadVersion('state'),
+  })
   operationStores.set(access, store)
   return access
 }
@@ -580,7 +591,7 @@ export function createOperationHost(access: HandleAccess) {
 type ExpectedOperationState = {
   epoch: number
   authenticatorBefore: Uint8Array
-  lineage: number
+  incarnation: number
 }
 
 async function adoptOperationCandidate(
@@ -617,7 +628,7 @@ async function adoptOperationCandidate(
     }
     if (
       Number(current.epoch) !== expected.epoch ||
-      expected.lineage !== 0 ||
+      expected.incarnation !== 1 ||
       !equal(current.state.keySchedule.epochAuthenticator, expected.authenticatorBefore)
     )
       return false

@@ -1,16 +1,15 @@
 import { MissingLedgerEntriesError, readCommitEntryIDs } from '@kumiai/mls'
 import { expect, test, vi } from 'vitest'
 
-import { simpleHandleAccess } from '../src/access.js'
 import { createGroupCrypto } from '../src/crypto.js'
 import { createGroupMLS } from '../src/mls.js'
-import { buildRealCommit, createRealGroup } from './fixtures/real-group.js'
+import { buildRealCommit, createRealGroup, testHandleAccess } from './fixtures/real-group.js'
 
 test('a commit resolves entries through access.read without re-entering mutate', async () => {
   const group = await createRealGroup(1, 'pre-resolve-real-commit')
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
-  const access = simpleHandleAccess({
+  const access = testHandleAccess({
     handle: () => member.handle,
     adopt: (next) => {
       member.handle = next
@@ -39,7 +38,7 @@ test('an empty entry list skips the resolver', async () => {
   const group = await createRealGroup(2, 'pre-resolve-empty')
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
-  const access = simpleHandleAccess({ handle: () => member.handle, adopt: () => {} })
+  const access = testHandleAccess({ handle: () => member.handle, adopt: () => {} })
   const mls = createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
   const commit = await buildRealCommit(group, { removes: 1 })
   expect(readCommitEntryIDs(commit)).toEqual([])
@@ -55,7 +54,7 @@ test('an epoch move during pre-resolution reports the new epoch without applying
   const group = await createRealGroup(1, 'pre-resolve-epoch-move')
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
-  const access = simpleHandleAccess({
+  const access = testHandleAccess({
     handle: () => member.handle,
     adopt: (next) => {
       member.handle = next
@@ -81,7 +80,7 @@ test('wrong-epoch and non-Commit frames never open entry bodies', async () => {
   const group = await createRealGroup(1, 'pre-resolve-wrong-epoch')
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
-  const access = simpleHandleAccess({
+  const access = testHandleAccess({
     handle: () => member.handle,
     adopt: (next) => {
       member.handle = next
@@ -111,7 +110,7 @@ test('resolver faults and missing bodies retain their error boundary', async () 
   const group = await createRealGroup(1, 'pre-resolve-errors')
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
-  const access = simpleHandleAccess({ handle: () => member.handle, adopt: () => {} })
+  const access = testHandleAccess({ handle: () => member.handle, adopt: () => {} })
   const mls = createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
   const commit = await buildRealCommit(group)
   const fault = new Error('blob open failed')

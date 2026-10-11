@@ -42,7 +42,8 @@ export function sourceRecheck(scan: SourceScan, record: RejoinRecord): SourceRec
   if (
     gap ||
     current.epoch !== source.epoch ||
-    current.lineage !== source.lineage ||
+    current.key.groupID !== source.key.groupID ||
+    current.key.incarnation !== source.key.incarnation ||
     current.authenticator.length !== source.authenticator.length ||
     !current.authenticator.every((byte, i) => byte === source.authenticator[i])
   )

@@ -1,15 +1,21 @@
 import type { GroupHandle } from '@kumiai/mls'
 import {
+  type AdoptionExpected,
   type AdoptionWrite,
   type AdoptionWriteFactory,
   ControlWriteNotCommittedError,
+  type GroupKey,
   type PendingAppFrame,
   type SendAdmission,
 } from '@kumiai/rpc'
 
 type PersistOpened = (stagedState: Uint8Array, record: PendingAppFrame) => Promise<void>
 
+export type ControlRead = { handle: GroupHandle; source: AdoptionExpected }
+export type ControlReadScope = ControlRead & { refresh(): Promise<ControlRead> }
+
 export type HandleAccess = {
+  readControl<TValue>(fn: (scope: ControlReadScope) => Promise<TValue>): Promise<TValue>
   /** Published with admission after mutation/open and after replacement adoption resolves. */
   epoch(): number
   /** Lock-free snapshot. During adoption it describes the epoch being left. */
@@ -32,12 +38,15 @@ export type HandleAccess = {
 }
 
 export type SimpleHandleAccessParams = {
+  key?: GroupKey
+  stateVersion: () => number | Promise<number>
   handle: () => GroupHandle
   adopt: (next: GroupHandle) => void | Promise<void>
   persist?: (handle: GroupHandle, write?: AdoptionWrite) => void | Promise<void>
 }
 
 export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAccess {
+  const key = { ...(params.key ?? { groupID: params.handle().groupID, incarnation: 1 }) }
   let publishedAdmission = params.handle().sendAdmission()
   let tail: Promise<void> = Promise.resolve()
   const serialise = async <TValue>(fn: () => Promise<TValue>): Promise<TValue> => {
@@ -53,8 +62,24 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
       release()
     }
   }
+  const readControl = async (): Promise<ControlRead> => {
+    const handle = params.handle()
+    return {
+      handle,
+      source: {
+        key: { ...key },
+        stateVersion: await params.stateVersion(),
+        identity: {
+          ...key,
+          epoch: Number(handle.epoch),
+          authenticator: handle.state.keySchedule.epochAuthenticator.slice(),
+        },
+      },
+    }
+  }
   const save = async (handle: GroupHandle, adoption?: AdoptionWriteFactory): Promise<void> => {
     const write = adoption?.({
+      incarnation: key.incarnation,
       epochAfter: Number(handle.epoch),
       removed: !handle
         .listMembers()
@@ -67,6 +92,8 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
   return {
     epoch: () => publishedAdmission.epoch,
     admission: () => publishedAdmission,
+    readControl: (fn) =>
+      serialise(async () => await fn({ ...(await readControl()), refresh: readControl })),
     read: (fn) => serialise(async () => await fn(params.handle())),
     mutate: (fn, adoption) =>
       serialise(async () => {

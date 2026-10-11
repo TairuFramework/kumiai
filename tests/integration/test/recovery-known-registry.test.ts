@@ -71,6 +71,7 @@ async function setup(
     identity: bob,
     entrySlot: createLedgerEntrySlot(),
     access: simpleHandleAccess({
+      stateVersion: () => 0,
       handle: () => responderGroup,
       adopt: () => {
         throw new Error('Unexpected adoption')
@@ -81,6 +82,7 @@ async function setup(
     identity,
     entrySlot: createLedgerEntrySlot(),
     access: simpleHandleAccess({
+      stateVersion: () => 0,
       handle: () => group,
       adopt: (next: GroupHandle) => {
         group = next
@@ -124,6 +126,7 @@ test('the adapter judge retains own-ledger revocations when the reply offers a s
     identity: mallory,
     entrySlot: createLedgerEntrySlot(),
     access: simpleHandleAccess({
+      stateVersion: () => 0,
       handle: () => malloryGroup,
       adopt: () => {
         throw new Error('Unexpected adoption')

@@ -30,6 +30,11 @@ function cloneControlValue<TValue>(value: TValue): TValue {
 /** Deletes precede puts so a replacement at the fork epoch survives settlement. */
 export function applyChanges(snapshot: ControlSnapshot, changes: ControlChanges): ControlSnapshot {
   return cloneControlValue({
+    commitOnce: changes.commitOnce === undefined ? snapshot.commitOnce : changes.commitOnce,
+    commitOnceAcceptance:
+      changes.commitOnceAcceptance === undefined
+        ? snapshot.commitOnceAcceptance
+        : changes.commitOnceAcceptance,
     operations: putRows(
       snapshot.operations.filter((row) => !changes.deleteOperations?.includes(row.id)),
       changes.putOperations,

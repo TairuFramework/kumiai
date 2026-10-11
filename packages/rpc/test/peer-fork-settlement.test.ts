@@ -19,6 +19,8 @@ import {
 } from './fixtures/peer.js'
 
 const empty = (): ControlSnapshot => ({
+  commitOnce: null,
+  commitOnceAcceptance: null,
   operations: [],
   rejoin: null,
   outcomes: [],
@@ -43,14 +45,16 @@ function operation(id: string, seq: number, stage: Operation['stage']): Operatio
     revokes: false,
     body: new Uint8Array([1]),
     enqueuedAt: 100,
+    deadline: 30_100,
   }
   if (stage === 'intent') return { ...base, stage }
   const built = {
     epoch: 1,
     authenticatorBefore: new Uint8Array([1]),
-    lineage: 0,
+    incarnation: 1,
     publishID: `publish-${id}`,
     expectedHead: null,
+    searchFrom: null,
     payload: new Uint8Array([2]),
     payloadDigest: `payload-${id}`,
     digest: `commit-${id}`,
@@ -201,7 +205,7 @@ describe('fork settlement', () => {
     'settlement is atomic and survives an ambiguous %s write',
     async (provider) => {
       const database = createMemoryHostDatabase()
-      const double = createMemoryControlStore<LogPosition>()
+      const double = createMemoryControlStore<LogPosition>({ groupID: 'group-A', incarnation: 1 })
       const store = provider === 'host' ? database.control('group') : double
       await store.apply(
         {

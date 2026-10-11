@@ -3,7 +3,6 @@ import type { AdoptionWrite, AdoptionWriteFactory } from '@kumiai/rpc'
 import { defaultProposalTypes } from 'ts-mls'
 import { expect, expectTypeOf, test } from 'vitest'
 
-import { simpleHandleAccess } from '../src/access.js'
 import { createGroupMLS } from '../src/mls.js'
 import type { RecoveryCandidate } from '../src/recovery.js'
 import {
@@ -11,7 +10,7 @@ import {
   encodeRecoveryCandidate,
   type RecoverySnapshot,
 } from '../src/recovery-codec.js'
-import { buildRealCommit, createRealGroup } from './fixtures/real-group.js'
+import { buildRealCommit, createRealGroup, testHandleAccess } from './fixtures/real-group.js'
 import {
   createTransactionalAccess,
   createTransactionalStore,
@@ -30,7 +29,7 @@ async function setup(differentTree = false) {
   }
   const writes: Array<AdoptionWrite | undefined> = []
   let adoptions = 0
-  const access = simpleHandleAccess({
+  const access = testHandleAccess({
     handle: () => member.handle,
     adopt: (next) => {
       adoptions += 1
@@ -44,7 +43,7 @@ async function setup(differentTree = false) {
     createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
   const port = requester()
   const remote = createGroupMLS({
-    access: simpleHandleAccess({
+    access: testHandleAccess({
       handle: () => responder.handle,
       adopt: (next) => {
         responder.handle = next
@@ -205,7 +204,7 @@ test('only the explicit request key opens replies or restores a candidate, witho
 test('acceptance refuses a host without persistence and can retry after a failed save', async () => {
   const s = await setup()
   let shouldFail = true
-  const access = simpleHandleAccess({
+  const access = testHandleAccess({
     handle: () => s.member.handle,
     adopt: (next) => {
       s.member.handle = next
@@ -218,7 +217,7 @@ test('acceptance refuses a host without persistence and can retry after a failed
   const pending = await port.restoreRecovery(s.pending.serialize(), s.requestKey)
   const write = () => ({ mutationID: 'retry-save', changes: { deleteRejoin: true as const } })
   const noPersist = createGroupMLS({
-    access: simpleHandleAccess({
+    access: testHandleAccess({
       handle: () => s.member.handle,
       adopt: (next) => {
         s.member.handle = next

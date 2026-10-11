@@ -23,9 +23,13 @@ import {
   wireformats,
 } from 'ts-mls'
 
-import { type HandleAccess, simpleHandleAccess } from '../../src/access.js'
+import {
+  type HandleAccess,
+  type SimpleHandleAccessParams,
+  simpleHandleAccess,
+} from '../../src/access.js'
 import { createGroupMLS, createLedgerEntrySlot, type LedgerEntrySlot } from '../../src/mls.js'
-import { createTransactionalStore } from './transactional-access.js'
+import { createTransactionalStore, type TransactionalStore } from './transactional-access.js'
 
 export type RealMember = {
   identity: OwnIdentity
@@ -93,7 +97,7 @@ export async function createRealBoundRecovery(
   })
   const responder = createGroupMLS({
     identity: alice,
-    access: simpleHandleAccess({
+    access: testHandleAccess({
       handle: () => source,
       adopt: (next) => {
         source = next
@@ -312,10 +316,11 @@ export async function sealRealRecoveryVerdict(
 
 export function persistedTestAccess(
   params: Pick<Parameters<typeof simpleHandleAccess>[0], 'handle' | 'adopt'>,
+  store: TransactionalStore = createTransactionalStore(params.handle()),
 ): HandleAccess {
-  const store = createTransactionalStore(params.handle())
   return simpleHandleAccess({
     ...params,
+    stateVersion: () => store.snapshot().revision,
     persist: (handle, write) =>
       store.save(
         store.snapshot().revision,
@@ -324,5 +329,24 @@ export function persistedTestAccess(
         undefined,
         write,
       ),
+  })
+}
+
+export function testHandleAccess(
+  params: Omit<SimpleHandleAccessParams, 'stateVersion'> & {
+    stateVersion?: SimpleHandleAccessParams['stateVersion']
+  },
+): HandleAccess {
+  let version = 0
+  return simpleHandleAccess({
+    ...params,
+    stateVersion: params.stateVersion ?? (() => version),
+    persist:
+      params.persist == null
+        ? undefined
+        : async (handle, write) => {
+            await params.persist?.(handle, write)
+            version += 1
+          },
   })
 }

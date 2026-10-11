@@ -2,7 +2,51 @@ import { describe, expect, test } from 'vitest'
 
 import type { ConformanceAnchorStore } from './anchor-store.js'
 
+export type ConformanceGroupKey = { groupID: string; incarnation: number }
+export type ConformanceEpochIdentity = ConformanceGroupKey & {
+  epoch: number
+  authenticator: Uint8Array
+}
+export type ConformanceAdoptionExpected = {
+  key: ConformanceGroupKey
+  stateVersion: number
+  identity: ConformanceEpochIdentity | null
+}
+export type ConformanceControlSource = ConformanceAdoptionExpected & {
+  epoch: number
+  authenticator: Uint8Array
+}
+export type ConformanceFirstValidCommit<Position extends string = string> = {
+  source: ConformanceAdoptionExpected
+  from: Position | null
+  position: Position
+  payloadDigest: string
+}
+export type ConformanceCommitSearchResult<Position extends string = string> =
+  | { kind: 'first-valid'; proof: ConformanceFirstValidCommit<Position> }
+  | { kind: 'superseded'; winner: Position }
+  | { kind: 'absent' }
+  | { kind: 'unknown' }
+export type ConformanceControlSearchPort<Position extends string = string> = {
+  searchLog(
+    built: ConformanceBuiltCommit<Position>,
+    position?: Position,
+  ): Promise<ConformanceCommitSearchResult<Position>>
+}
+export type ConformanceControlSlot<Position extends string = string> =
+  ConformanceBuiltCommit<Position> & { opID: string }
+export type ConformanceControlBuildRef<Position extends string = string> = Pick<
+  ConformanceBuiltCommit<Position>,
+  'incarnation' | 'epoch' | 'publishID' | 'payloadDigest'
+>
+export type ConformanceHostBuilt<Position extends string = string> = Pick<
+  ConformanceBuiltCommit<Position>,
+  'incarnation' | 'epoch' | 'authenticatorBefore' | 'digest' | 'bodies' | 'journal' | 'welcome'
+> & { commit: Uint8Array }
+
 export type ConformanceControlSnapshot<Position extends string = string> = {
+  commitOnce: ConformanceControlSlot<Position> | null
+  commitOnceAcceptance: ConformanceFirstValidCommit<Position> | null
   operations: Array<ConformanceOperation<Position>> // FIFO by `seq`
   rejoin: ConformanceRejoinRecord<Position> | null
   outcomes: Array<ConformanceOutcome<Position>>
@@ -21,6 +65,8 @@ export type ConformanceForkEvidence<Position extends string = string> = {
   frameDigest: string
 }
 export type ConformanceControlChanges<Position extends string = string> = {
+  commitOnce?: ConformanceControlSlot<Position> | null
+  commitOnceAcceptance?: ConformanceFirstValidCommit<Position> | null
   putOperations?: Array<ConformanceOperation<Position>>
   deleteOperations?: Array<string>
   putRejoin?: ConformanceRejoinRecord<Position>
@@ -38,12 +84,14 @@ export type ConformanceControlChanges<Position extends string = string> = {
 }
 /** Control changes committed with an adoption's state save (D5). */
 export type ConformanceAdoptionWrite<Position extends string = string> = {
+  expected?: ConformanceAdoptionExpected
   changes: ConformanceControlChanges<Position>
   mutationID: string
   /** The `advance` of the pending anchor rotation this adoption lands, marked in the same transaction. */
   anchorLanded?: string
 }
 export type ConformanceControlStore<Position extends string = string> = {
+  key: ConformanceGroupKey
   load(): Promise<ConformanceControlSnapshot<Position>>
   /** All or nothing. On an ambiguous commit, rejects with `StorageOutcomeUnknownError`. */
   apply(changes: ConformanceControlChanges<Position>, mutationID: string): Promise<void>
@@ -64,18 +112,20 @@ export type ConformanceOperationRequest = {
 export type ConformanceOperation<Position extends string = string> = ConformanceOperationRequest & {
   seq: number
   enqueuedAt: number
+  deadline: number
 } & (
     | { stage: 'intent' }
     | { stage: 'built'; built: ConformanceBuiltCommit<Position> }
     | { stage: 'accepted'; built: ConformanceBuiltCommit<Position>; acceptedAs: Position }
   )
 export type ConformanceBuiltCommit<Position extends string = string> = {
+  incarnation: number
+  searchFrom: Position | null
   publishID: string
   expectedHead: Position | null
   /** Identity of the state the commit was built from. */
   epoch: number
   authenticatorBefore: Uint8Array
-  lineage: number
   /** The exact framed hub payload, with bodies sealed once. Replay publishes these bytes. */
   payload: Uint8Array
   /** SHA-256 of `payload`: acceptance discovery matches this. */
@@ -124,7 +174,12 @@ export type ConformanceRejoinRecord<Position extends string = string> = {
    */
   candidate: Uint8Array
   /** Identity of the state the rejoin replaces; re-checked before adoption. */
-  source: { epoch: number; authenticator: Uint8Array; lineage: number; head: Position | null }
+  source: {
+    key: ConformanceGroupKey
+    epoch: number
+    authenticator: Uint8Array
+    head: Position | null
+  }
   digest: string
   epochAfter: number
   /** Ledger tokens held before the rejoin, for `reenact`. */
@@ -189,6 +244,7 @@ function records(): ConformanceControlChanges {
         body: new Uint8Array([1]),
         seq: 1,
         enqueuedAt: 100,
+        deadline: 30_100,
         stage: 'accepted',
         acceptedAs: '001',
         built: {
@@ -196,7 +252,8 @@ function records(): ConformanceControlChanges {
           expectedHead: null,
           epoch: 4,
           authenticatorBefore: new Uint8Array([2]),
-          lineage: 0,
+          incarnation: 1,
+          searchFrom: null,
           payload: new Uint8Array([3]),
           payloadDigest: 'payload-digest',
           digest: 'commit-digest',
@@ -217,7 +274,12 @@ function records(): ConformanceControlChanges {
       request: new Uint8Array([7]),
       requestKey: new Uint8Array([0, 255, 128, 1]),
       candidate: new Uint8Array([255, 0, 127, 2]),
-      source: { epoch: 4, authenticator: new Uint8Array([8]), lineage: 0, head: null },
+      source: {
+        epoch: 4,
+        authenticator: new Uint8Array([8]),
+        key: { groupID: 'group-A', incarnation: 1 },
+        head: null,
+      },
       digest: 'rejoin-digest',
       epochAfter: 5,
       ledgerBefore: ['token'],
@@ -253,6 +315,83 @@ function records(): ConformanceControlChanges {
 
 export function testControlStoreConformance(params: ControlStoreConformanceParams): void {
   describe('ControlStore conformance', () => {
+    test('retained slot and acceptance round-trip defensively and survive rollback', async () => {
+      const host = await params.open()
+      const original = records().putOperations?.[0]
+      if (original == null || original.stage !== 'accepted') throw new Error('missing build')
+      const slot: ConformanceControlSlot = { ...original.built, opID: original.id }
+      const acceptance: ConformanceFirstValidCommit = {
+        source: {
+          key: { groupID: 'group-A', incarnation: 1 },
+          stateVersion: 1,
+          identity: {
+            groupID: 'group-A',
+            incarnation: 1,
+            epoch: slot.epoch,
+            authenticator: slot.authenticatorBefore.slice(),
+          },
+        },
+        from: slot.searchFrom,
+        position: '001',
+        payloadDigest: slot.payloadDigest,
+      }
+      const expectedSlot: ConformanceControlSlot = {
+        ...slot,
+        authenticatorBefore: slot.authenticatorBefore.slice(),
+        payload: slot.payload.slice(),
+        bodies: [...slot.bodies],
+        journal: slot.journal.slice(),
+        welcome:
+          slot.welcome == null
+            ? null
+            : { bytes: slot.welcome.bytes.slice(), recipients: [...slot.welcome.recipients] },
+      }
+      const expectedAcceptance: ConformanceFirstValidCommit = {
+        ...acceptance,
+        source: {
+          ...acceptance.source,
+          key: { ...acceptance.source.key },
+          identity:
+            acceptance.source.identity == null
+              ? null
+              : {
+                  ...acceptance.source.identity,
+                  authenticator: acceptance.source.identity.authenticator.slice(),
+                },
+        },
+      }
+      await host.control.apply({ commitOnce: slot, commitOnceAcceptance: acceptance }, 'slot')
+      slot.journal.fill(0)
+      acceptance.source.identity?.authenticator.fill(0)
+      await host.control.apply(
+        { deleteOperations: [slot.opID], deleteOutcomes: ['outcome'] },
+        'ack',
+      )
+      const reopened = await params.reopen()
+      const loaded = await reopened.control.load()
+      expect(loaded.commitOnce).toEqual(expectedSlot)
+      expect(loaded.commitOnceAcceptance).toEqual(expectedAcceptance)
+      loaded.commitOnce?.welcome?.bytes.fill(0)
+      if (loaded.commitOnceAcceptance != null) loaded.commitOnceAcceptance.source.key.incarnation++
+      expect((await reopened.control.load()).commitOnce).toEqual(expectedSlot)
+      expect((await reopened.control.load()).commitOnceAcceptance).toEqual(expectedAcceptance)
+      params.injectFailure('mid-save')
+      const write: ConformanceAdoptionWrite = {
+        expected: expectedAcceptance.source,
+        changes: {
+          commitOnce: null,
+          commitOnceAcceptance: null,
+          cursor: { position: '001', epoch: slot.epoch + 1 },
+        },
+        mutationID: 'advance',
+      }
+      await expect(reopened.saveState(new Uint8Array([2]), write)).rejects.toThrow()
+      expect((await (await params.reopen()).control.load()).commitOnce).toEqual(expectedSlot)
+      await reopened.saveState(new Uint8Array([2]), write)
+      const cleared = await (await params.reopen()).control.load()
+      expect(cleared.commitOnce).toBeNull()
+      expect(cleared.commitOnceAcceptance).toBeNull()
+    })
     test('an initial strand persists without inventing a processed log position', async () => {
       const host = await params.open()
       const cursor: ConformanceControlCommitCursor = {
@@ -296,6 +435,8 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       await host.control.apply(changes, 'durable')
       const reopened = await params.reopen()
       expect(await reopened.control.load()).toEqual({
+        commitOnce: null,
+        commitOnceAcceptance: null,
         operations: changes.putOperations,
         rejoin: changes.putRejoin,
         outcomes: changes.putOutcomes,

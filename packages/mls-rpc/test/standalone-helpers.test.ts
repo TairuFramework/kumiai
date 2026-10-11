@@ -3,7 +3,6 @@ import type { Runtime } from '@sozai/runtime'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import type { HandleAccess } from '../src/access.js'
-import { simpleHandleAccess } from '../src/access.js'
 import {
   createGroupCrypto,
   deriveEntryKey,
@@ -13,7 +12,7 @@ import {
   RECOVERY_LABEL,
   sealEntries,
 } from '../src/index.js'
-import { createRealGroup } from './fixtures/real-group.js'
+import { createRealGroup, testHandleAccess } from './fixtures/real-group.js'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -47,7 +46,7 @@ test('standalone entry helpers preserve the factory blob format in both directio
     exportSecret: async () => Uint8Array.from(key),
   } as unknown as import('@kumiai/mls').GroupHandle
   const crypto = createGroupCrypto({
-    access: simpleHandleAccess({ handle: () => handle, adopt: () => {} }),
+    access: testHandleAccess({ handle: () => handle, adopt: () => {} }),
     runtime,
   })
   expect((await crypto.sealEntries(entries)).sealed).toEqual(oldSealed)
@@ -78,7 +77,7 @@ test('factory seals after releasing access and wipes the derived key on a seal e
       return key
     },
   } as unknown as import('@kumiai/mls').GroupHandle
-  const base = simpleHandleAccess({ handle: () => handle, adopt: () => {} })
+  const base = testHandleAccess({ handle: () => handle, adopt: () => {} })
   const access: HandleAccess = {
     ...base,
     read: async (fn) => {

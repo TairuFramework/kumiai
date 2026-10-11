@@ -16,9 +16,9 @@ import {
 } from '@kumiai/mls'
 import { expect, test, vi } from 'vitest'
 
-import { simpleHandleAccess } from '../src/access.js'
 import { createGroupMLS, createLedgerEntrySlot } from '../src/mls.js'
 import type { RecoveryBinding, RecoveryBindingRequest } from '../src/recovery.js'
+import { testHandleAccess } from './fixtures/real-group.js'
 import { createTransactionalStore } from './fixtures/transactional-access.js'
 
 async function chainedRecovery() {
@@ -85,7 +85,7 @@ async function chainedRecovery() {
   const requester = (recoveryBinding?: RecoveryBinding) =>
     createGroupMLS({
       identity: bob,
-      access: simpleHandleAccess({
+      access: testHandleAccess({
         handle: () => member,
         adopt: (next) => {
           member = next
@@ -104,7 +104,7 @@ async function chainedRecovery() {
     })
   const responder = createGroupMLS({
     identity: alice,
-    access: simpleHandleAccess({
+    access: testHandleAccess({
       handle: () => source,
       adopt: (next) => {
         source = next

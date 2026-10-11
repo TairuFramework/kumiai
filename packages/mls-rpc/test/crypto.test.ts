@@ -12,8 +12,8 @@ import {
 } from '@kumiai/mls'
 import { describe, expect, test } from 'vitest'
 
-import { simpleHandleAccess } from '../src/access.js'
 import { createGroupCrypto, ENTRY_SEAL_LABEL } from '../src/crypto.js'
+import { testHandleAccess } from './fixtures/real-group.js'
 
 const utf8 = new TextEncoder()
 
@@ -91,7 +91,7 @@ async function addMember(params: {
 /** A crypto over a handle slot, so a test can swap the handle the way a peer does. */
 function cryptoOver(initial: GroupHandle) {
   let handle = initial
-  const access = simpleHandleAccess({
+  const access = testHandleAccess({
     handle: () => handle,
     adopt: (next) => {
       handle = next
@@ -108,7 +108,7 @@ describe('createGroupCrypto', () => {
   test('wipes each exported ledger key after seal and open, including failed open', async () => {
     const keys: Array<Uint8Array> = []
     const crypto = createGroupCrypto({
-      access: simpleHandleAccess({
+      access: testHandleAccess({
         handle: () =>
           ({
             epoch: 0n,
@@ -193,7 +193,7 @@ describe('createGroupCrypto', () => {
     // actually uses, not with the default constant.
     const customLabel = 'kumiai/mls-rpc-test/custom-entry-label'
     const customCrypto = createGroupCrypto({
-      access: simpleHandleAccess({ handle: () => aliceGroup, adopt: () => {} }),
+      access: testHandleAccess({ handle: () => aliceGroup, adopt: () => {} }),
       entryLabel: customLabel,
     })
     expect(() => customCrypto.exportSecret(customLabel)).toThrow(
@@ -292,7 +292,7 @@ describe('createGroupCrypto', () => {
       },
     })
     const crypto = createGroupCrypto({
-      access: simpleHandleAccess({ handle: () => senderlessHandle, adopt: () => {} }),
+      access: testHandleAccess({ handle: () => senderlessHandle, adopt: () => {} }),
     })
     await expect(crypto.unwrap(new Uint8Array([0]))).rejects.toThrow(
       'unwrap: opened frame has no authenticated sender',

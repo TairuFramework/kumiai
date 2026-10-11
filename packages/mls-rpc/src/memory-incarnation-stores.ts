@@ -152,6 +152,8 @@ export function statusEventID(
 export type ControlRecord = { snapshot: ControlSnapshot; mutationID: string }
 
 const emptyControl = (): ControlSnapshot => ({
+  commitOnce: null,
+  commitOnceAcceptance: null,
   operations: [],
   rejoin: null,
   outcomes: [],

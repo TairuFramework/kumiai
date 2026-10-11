@@ -32,7 +32,7 @@ const hostBuilt: HostBuilt = {
   welcome: { bytes: new Uint8Array([9]), recipients: ['bob'] },
   epoch: 4,
   authenticatorBefore: new Uint8Array([3]),
-  lineage: 2,
+  incarnation: 1,
   digest: 'commit-digest',
 }
 const head = asLogPosition('004')
@@ -50,14 +50,27 @@ const applied: AppliedCommit = {
   removed: false,
 }
 
+test('enqueue persists the selected absolute deadline', async () => {
+  const host = setup()
+  host.tick(0)
+  host.deps.operationTimeoutMs = 1_000
+  const selected = await enqueueOperation(host.deps, request)
+  expect(selected.deadline).toBe(1_000)
+  expect((await host.store.load()).operations[0]?.deadline).toBe(1_000)
+  host.deps.operationTimeoutMs = undefined
+  const defaulted = await enqueueOperation(host.deps, { ...request, id: 'default' })
+  expect(defaulted.deadline).toBe(30_000)
+})
+
 function setup() {
-  const store = createMemoryControlStore<LogPosition>()
+  const store = createMemoryControlStore<LogPosition>({ groupID: 'group-A', incarnation: 1 })
   const writes: Array<ControlChanges> = []
   const emitted: Array<Outcome> = []
   let clock = 100
   let serial = 0
   const deps: OperationDeps = {
     control: {
+      key: store.key,
       load: store.load,
       lastMutation: store.lastMutation,
       apply: async (changes, mutationID) => {
@@ -127,7 +140,7 @@ describe('durable operations', () => {
       kind: 'remove',
       revokes: true,
     })
-    expect(first).toEqual({ ...request, stage: 'intent', seq: 1, enqueuedAt: 100 })
+    expect(first).toEqual({ ...request, stage: 'intent', seq: 1, enqueuedAt: 100, deadline: 1_100 })
     expect(second.seq).toBe(2)
     expect((await h.store.load()).operations).toEqual([first, second])
   })
@@ -138,9 +151,10 @@ describe('durable operations', () => {
     expect(op.built).toEqual({
       publishID,
       expectedHead: head,
+      searchFrom: head,
       epoch: 4,
       authenticatorBefore: new Uint8Array([3]),
-      lineage: 2,
+      incarnation: 1,
       payload,
       payloadDigest,
       digest: 'commit-digest',
@@ -174,7 +188,7 @@ describe('durable operations', () => {
       {
         epoch: 4,
         authenticatorBefore: new Uint8Array([3]),
-        lineage: 2,
+        incarnation: 1,
       },
       expect.objectContaining({
         changes: expect.objectContaining({ deleteOperations: [request.id] }),
@@ -234,7 +248,7 @@ describe('durable operations', () => {
     const op = await h.built()
     h.mismatch()
     const next = await stepOperation(h.deps, op)
-    expect(next).toEqual({ ...request, stage: 'intent', seq: 1, enqueuedAt: 100 })
+    expect(next).toEqual({ ...request, stage: 'intent', seq: 1, enqueuedAt: 100, deadline: 1_100 })
     expect(h.deps.pullToHead).toHaveBeenCalledTimes(1)
     expect((await h.store.load()).outcomes).toEqual([])
     if (next == null) throw new Error('expected retry')

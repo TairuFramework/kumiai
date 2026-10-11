@@ -46,6 +46,7 @@ test('standalone operation adoption co-commits the anchor landed mark with contr
   const identity = randomIdentity()
   let current = (await createGroup(identity, 'standalone-operation-host')).group
   const access = simpleHandleAccess({
+    stateVersion: () => 0,
     handle: () => current,
     adopt: (next) => {
       current = next
@@ -63,7 +64,7 @@ test('standalone operation adoption co-commits the anchor landed mark with contr
   const expected = {
     epoch: epochBefore,
     authenticatorBefore: current.state.keySchedule.epochAuthenticator.slice(),
-    lineage: 0,
+    incarnation: 1,
   }
   await host.anchorStore.save({
     anchor: { epoch: epochBefore, secret: new Uint8Array(32).fill(1) },

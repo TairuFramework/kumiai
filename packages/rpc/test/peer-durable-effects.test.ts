@@ -240,7 +240,17 @@ test('self-removal committed before its effect is terminal on restart', async ()
   expect((await bob.anchorStore.load())?.pending?.landed).toBeUndefined()
   const request = buildLedgerCommit(bob, [])
   await bob.control.apply(
-    { putOperations: [{ ...request, stage: 'intent', seq: 1, enqueuedAt: Date.now() }] },
+    {
+      putOperations: [
+        {
+          ...request,
+          stage: 'intent',
+          seq: 1,
+          enqueuedAt: Date.now(),
+          deadline: Date.now() + 30_000,
+        },
+      ],
+    },
     'post-removal-intent',
   )
   const cleared = vi.fn()
@@ -320,7 +330,15 @@ test('host deletion is refused until abandon and outcome acknowledgement', async
   await bob.control.apply(
     {
       putRejoin: rejoin,
-      putOperations: [{ ...request, seq: 1, enqueuedAt: Date.now(), stage: 'intent' }],
+      putOperations: [
+        {
+          ...request,
+          seq: 1,
+          enqueuedAt: Date.now(),
+          deadline: Date.now() + 30_000,
+          stage: 'intent',
+        },
+      ],
       putWelcomes: [{ opID: request.id, welcome: new Uint8Array([1]), recipients: ['carol'] }],
     },
     'unsettled',

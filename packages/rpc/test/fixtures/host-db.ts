@@ -36,6 +36,8 @@ function emptyRecord(): GroupRecord {
     anchorSlot: null,
     mutationID: null,
     control: {
+      commitOnce: null,
+      commitOnceAcceptance: null,
       operations: [],
       rejoin: null,
       outcomes: [],
@@ -81,6 +83,9 @@ export function createMemoryHostDatabase(): MemoryHostDatabase {
   }
   return {
     control: (groupID) => ({
+      get key() {
+        return { groupID, incarnation: 1 }
+      },
       load: async () => structuredClone(read(groupID).control),
       lastMutation: async () => read(groupID).mutationID,
       apply: async (changes, mutationID) => {

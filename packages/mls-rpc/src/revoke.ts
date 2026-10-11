@@ -45,7 +45,7 @@ export async function buildRevokeProofOperation(params: {
     input: RevokeWithProofParams
   }
   if (body.type !== 'revoke-proof') throw new OperationRejectedError('Not a proof operation')
-  return access.read(async (group) => {
+  return access.readControl(async ({ handle: group, source }) => {
     const priorTokens = new Set(group.ledgerTokens)
     const result = await revokeWithProof(group, body.input)
     if (result.status !== 'built') throw new OperationRejectedError(JSON.stringify(result))
@@ -57,7 +57,7 @@ export async function buildRevokeProofOperation(params: {
       welcome: null,
       epoch: Number(group.epoch),
       authenticatorBefore: group.state.keySchedule.epochAuthenticator.slice(),
-      lineage: 0,
+      incarnation: source.key.incarnation,
       digest: digestAppliedCommit(commitMessage),
     }
   })

@@ -13,9 +13,10 @@
  *
  * @module rpc-conformance/group-mls
  */
+
 import { describe, expect, test } from 'vitest'
 
-import type { ConformanceAdoptionWrite } from './control-store.js'
+import type { ConformanceAdoptionWrite, ConformanceControlSource } from './control-store.js'
 
 /** The `CommitHeader` of `@kumiai/rpc`, re-declared structurally. */
 export type ConformanceCommitHeader = {
@@ -28,6 +29,7 @@ export type ConformanceCommitHeader = {
 export type ConformanceCommitContext = {
   /** Suite writes omit positions so host-specific position brands remain assignable. */
   adoption?: (staged: {
+    incarnation: number
     epochAfter: number
     removed: boolean
     epochAuthenticator: Uint8Array
@@ -122,7 +124,7 @@ export type ConformanceGroupMLS = {
   ) => Promise<ConformanceOpenedRecoveryVerdict | null>
   sendAdmission: () => ConformanceSendAdmission
   readEpoch: () => Promise<number>
-  readRecoverySource: () => Promise<{ epoch: number; authenticator: Uint8Array; lineage: number }>
+  readRecoverySource: () => Promise<ConformanceControlSource>
   rosterEntries: () => Promise<Array<ConformanceRosterEntry>>
   readCommitHeader: (commit: Uint8Array) => Promise<ConformanceCommitHeader | null>
   processCommit: (
@@ -297,7 +299,8 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         const bobSource = await bob.mls.readRecoverySource()
         expect(aliceSource.epoch).toBe(bobSource.epoch)
         expect(aliceSource.authenticator).not.toEqual(bobSource.authenticator)
-        expect(await carol.mls.readRecoverySource()).toEqual(bobSource)
+        const carolSource = await carol.mls.readRecoverySource()
+        expect(carolSource).toEqual({ ...bobSource, stateVersion: carolSource.stateVersion })
         expect(stagedAuthenticators).toEqual([
           aliceSource.authenticator,
           bobSource.authenticator,
@@ -311,7 +314,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         const source = await member.mls.readRecoverySource()
         expect(source.epoch).toBe(await member.mls.readEpoch())
         expect(source.authenticator.length).toBeGreaterThan(0)
-        expect(source.lineage).toBeGreaterThanOrEqual(0)
+        expect(source.key.incarnation).toBeGreaterThanOrEqual(1)
+        expect(source.stateVersion).toBeGreaterThanOrEqual(0)
+        expect(source).not.toHaveProperty('lineage')
         const original = source.authenticator.slice()
         source.authenticator.fill(0)
         expect((await member.mls.readRecoverySource()).authenticator).toEqual(original)
@@ -327,13 +332,16 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         const member = memberAt(group.members, 0)
         let calls = 0
         const before = await member.mls.readEpoch()
+        const sourceKey = (await member.mls.readRecoverySource()).key
         const commit = await group.buildCommit()
         const adoption = (staged: {
+          incarnation: number
           epochAfter: number
           removed: boolean
           epochAuthenticator: Uint8Array
         }) => {
           calls++
+          expect(staged.incarnation).toBe(sourceKey.incarnation)
           expect(staged.epochAfter).toBe(before + 1)
           expect(staged.removed).toBe(false)
           expect(staged.epochAuthenticator.length).toBeGreaterThan(0)
@@ -899,8 +907,11 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const roster = await member.mls.rosterEntries()
           const ledger = await member.mls.getLedger()
           await member.mls.bootstrapLedger(ledger)
+          const after = await member.mls.readRecoverySource()
+          expect(after).toEqual({ ...before, stateVersion: after.stateVersion })
+          expect(after.stateVersion).toBeGreaterThan(before.stateVersion)
           const restarted = await group.restartMember(0)
-          expect(await restarted.mls.readRecoverySource()).toEqual(before)
+          expect(await restarted.mls.readRecoverySource()).toEqual(after)
           expect(await restarted.mls.rosterEntries()).toEqual(roster)
           expect(await restarted.mls.getLedger()).toEqual(ledger)
         })

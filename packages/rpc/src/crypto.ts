@@ -1,4 +1,4 @@
-import type { AdoptionWriteFactory } from './control/types.js'
+import type { AdoptionWriteFactory, ControlSource } from './control/types.js'
 
 /**
  * Consumer-supplied MLS crypto port: epoch number, epoch-bound domain-separated exported secrets
@@ -424,7 +424,7 @@ export type GroupMLS = {
   /** Read the current handle epoch under the host's handle lock. */
   readEpoch(): Promise<number>
   /** Read the source identity under the host handle lock. */
-  readRecoverySource(): Promise<{ epoch: number; authenticator: Uint8Array; lineage: number }>
+  readRecoverySource(): Promise<ControlSource>
   /**
    * The leaves this handle's ratchet tree currently holds, one {@link RosterEntry} per leaf, in
    * ascending `leafIndex` order. Purely local: reads no secret, advances nothing.

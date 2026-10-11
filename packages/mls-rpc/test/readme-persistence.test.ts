@@ -42,6 +42,7 @@ test.each(examples)(
         member.handle = next
       },
       persist,
+      stateVersion: () => stored.snapshot().revision,
     })
     const mls = createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
     const write = { mutationID: 'documented-adoption', changes: { deleteRejoin: true as const } }

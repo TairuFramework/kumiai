@@ -149,6 +149,7 @@ test('a last-resort Welcome replaces held state three epochs ahead and repeats a
             body: new Uint8Array([1]),
             seq: 1,
             enqueuedAt: Date.now(),
+            deadline: Date.now() + 30_000,
             stage: 'intent',
           },
         ],

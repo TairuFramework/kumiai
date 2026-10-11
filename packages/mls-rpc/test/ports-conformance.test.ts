@@ -14,7 +14,6 @@ import {
 } from '@kumiai/rpc-conformance'
 import { nodeTypes } from 'ts-mls'
 
-import { simpleHandleAccess } from '../src/access.js'
 import { createGroupCrypto } from '../src/crypto.js'
 import { createGroupMLS } from '../src/mls.js'
 import {
@@ -25,6 +24,7 @@ import {
   createRealGroup,
   persistedTestAccess,
   sealRealRecoveryVerdict,
+  testHandleAccess,
 } from './fixtures/real-group.js'
 import { createTransactionalStore } from './fixtures/transactional-access.js'
 
@@ -60,7 +60,7 @@ testGroupCryptoConformance({
     let hintOffset = 0
     const accesses = group.members.map((member) =>
       (() => {
-        const base = simpleHandleAccess({
+        const base = testHandleAccess({
           handle: () => member.handle,
           adopt: (next) => {
             member.handle = next
@@ -121,7 +121,7 @@ testPendingGroupCryptoConformance({
       },
     }
     const receiver = createGroupCrypto({
-      access: simpleHandleAccess({
+      access: testHandleAccess({
         handle: () => member.handle,
         adopt: (next) => {
           member.handle = next
@@ -139,14 +139,14 @@ testPendingGroupCryptoConformance({
         options: { resolveLedgerEntries: member.slot.resolve },
       })
       return createGroupCrypto({
-        access: simpleHandleAccess({ handle: () => handle, adopt: () => {} }),
+        access: testHandleAccess({ handle: () => handle, adopt: () => {} }),
         pending,
       })
     }
     return {
       senderDID: group.committer.identity.id,
       sender: createGroupCrypto({
-        access: simpleHandleAccess({
+        access: testHandleAccess({
           handle: () => group.committer.handle,
           adopt: (next) => {
             group.committer.handle = next
@@ -218,12 +218,15 @@ testGroupMLSConformance({
           mls: createGroupMLS({
             identity: member.identity,
             entrySlot: member.slot,
-            access: persistedTestAccess({
-              handle: () => handle,
-              adopt: (next) => {
-                handle = next
+            access: persistedTestAccess(
+              {
+                handle: () => handle,
+                adopt: (next) => {
+                  handle = next
+                },
               },
-            }),
+              store,
+            ),
           }),
         }
       },
@@ -276,7 +279,8 @@ testGroupMLSConformance({
           access: (() => {
             const store = stores[index]
             if (store == null) throw new Error('missing store')
-            const base = simpleHandleAccess({
+            const base = testHandleAccess({
+              stateVersion: () => store.snapshot().revision,
               handle: () => member.handle,
               adopt: (next) => {
                 member.handle = next

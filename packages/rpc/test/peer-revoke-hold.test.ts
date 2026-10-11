@@ -34,6 +34,7 @@ test('the revoke hold derives from unsettled operations, not retained outcomes',
     body: new Uint8Array([1]),
     seq: 1,
     enqueuedAt: Date.now(),
+    deadline: Date.now() + 30_000,
     stage: 'intent' as const,
   }
   const revoke = { ...ordinary, id: crypto.randomUUID(), seq: 2, revokes: true }

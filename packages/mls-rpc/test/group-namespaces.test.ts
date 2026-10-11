@@ -1,4 +1,10 @@
-import { type AnchorSlot, type AppliedCommit, asLogPosition, type Outcome } from '@kumiai/rpc'
+import {
+  type AnchorSlot,
+  type AppliedCommit,
+  asLogPosition,
+  type ControlSlot,
+  type Outcome,
+} from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
 import { memoryFaults } from '../src/memory-faults.js'
@@ -283,6 +289,54 @@ for (const mode of ['real-mls', 'double'] as const) {
       await installSeed(groups, seed, 'seed')
       return { db, groups, seed }
     }
+
+    test('retains the sealed control slot across acknowledgement and reconstruction in its namespace', async () => {
+      const { db, groups, seed } = await setup()
+      const slot: ControlSlot = {
+        opID: 'operation-1',
+        incarnation: 1,
+        epoch: 3,
+        authenticatorBefore: seed.state.epochAuthenticator.slice(),
+        publishID: 'publish-1',
+        searchFrom: asLogPosition('2'),
+        expectedHead: asLogPosition('2'),
+        payload: new TextEncoder().encode('private-control-payload'),
+        payloadDigest: 'payload-3',
+        digest: 'digest-3',
+        bodies: ['private-body'],
+        journal: new Uint8Array([7, 8, 9]),
+        welcome: { bytes: new Uint8Array([10, 11]), recipients: ['did:example:recipient'] },
+      }
+      const expected = structuredClone(slot)
+      const control = groups.ports(key).control
+      const leakedKey = control.key
+      leakedKey.incarnation = 2
+      expect(control.key).toEqual(key)
+      await control.apply({ commitOnce: slot, putOutcomes: [outcome] }, 'retain-build')
+      slot.payload.fill(0)
+      slot.welcome?.recipients.push('did:example:other')
+      await control.apply({ deleteOperations: [slot.opID], deleteOutcomes: [outcome.id] }, 'ack')
+      const reopened = createMemoryGroupPersistence({
+        owners: ownerQueues(db),
+        db,
+        atRest,
+        providerID: 'memory',
+      })
+      const snapshot = await reopened.ports(key).control.load()
+      expect(snapshot.operations).toEqual([])
+      expect(snapshot.outcomes).toEqual([])
+      expect(snapshot.commitOnce).toEqual(expected)
+      expect(snapshot.commitOnceAcceptance).toBeNull()
+      snapshot.commitOnce?.journal.fill(0)
+      snapshot.commitOnce?.welcome?.bytes.fill(0)
+      expect((await reopened.ports(key).control.load()).commitOnce).toEqual(expected)
+      expect(
+        (await reopened.ports({ ...key, incarnation: 2 }).control.load()).commitOnce,
+      ).toBeNull()
+      expect(JSON.stringify([...(db.snapshot().control?.values() ?? [])])).not.toContain(
+        'private-control-payload',
+      )
+    })
 
     test('rejects overlapping state saves after one version advance', async () => {
       const { groups, seed } = await setup()

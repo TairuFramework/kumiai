@@ -18,7 +18,7 @@ test.each([false, true])(
     const expected = {
       epoch: source.epoch,
       authenticatorBefore: source.authenticator,
-      lineage: source.lineage,
+      incarnation: source.key.incarnation,
     }
     const before = bob.serializeState()
     const ownCommit = bob.buildCommit()
@@ -54,7 +54,7 @@ test('own rotation identity survives installation and idempotent replay after re
   const expected = {
     epoch: source.epoch,
     authenticatorBefore: source.authenticator,
-    lineage: source.lineage,
+    incarnation: source.key.incarnation,
   }
   const before = bob.serializeState()
   bob.adopt(bob.buildCommit())

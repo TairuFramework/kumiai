@@ -76,6 +76,7 @@ test('a final frame one byte above the hub cap settles rejected before publishin
   const identity = randomIdentity()
   let group = (await createGroup(identity, 'frame-cap-side-effects')).group
   const access = simpleHandleAccess({
+    stateVersion: () => 0,
     handle: () => group,
     adopt: (next) => {
       group = next
@@ -123,7 +124,7 @@ test('a final frame one byte above the hub cap settles rejected before publishin
       welcome: null,
       epoch: Number(group.epoch),
       authenticatorBefore: group.state.keySchedule.epochAuthenticator.slice(),
-      lineage: 0,
+      incarnation: 1,
       digest: digestAppliedCommit(built.commitMessage),
     }))
     await expect(peer.commit(request)).rejects.toMatchObject({

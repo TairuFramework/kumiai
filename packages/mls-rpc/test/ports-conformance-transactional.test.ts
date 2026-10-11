@@ -8,7 +8,6 @@ import {
 import { nodeTypes } from 'ts-mls'
 
 import type { HandleAccess } from '../src/access.js'
-import { simpleHandleAccess } from '../src/access.js'
 import { createGroupCrypto } from '../src/crypto.js'
 import { createGroupMLS } from '../src/mls.js'
 import {
@@ -18,6 +17,7 @@ import {
   createRealBoundRecovery,
   createRealGroup,
   sealRealRecoveryVerdict,
+  testHandleAccess,
 } from './fixtures/real-group.js'
 import {
   createTransactionalAccess,
@@ -95,7 +95,7 @@ testPendingGroupCryptoConformance({
     return {
       senderDID: group.committer.identity.id,
       sender: createGroupCrypto({
-        access: simpleHandleAccess({
+        access: testHandleAccess({
           handle: () => group.committer.handle,
           adopt: (next) => {
             group.committer.handle = next

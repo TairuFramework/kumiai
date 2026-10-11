@@ -1,7 +1,41 @@
 import type { RecoveryRefusalReason } from '../crypto.js'
 import type { LogPosition } from '../cursor.js'
 
+export type GroupKey = { groupID: string; incarnation: number }
+export type EpochIdentity = GroupKey & { epoch: number; authenticator: Uint8Array }
+export type AdoptionExpected = {
+  key: GroupKey
+  stateVersion: number
+  identity: EpochIdentity | null
+}
+export type ControlSource = AdoptionExpected & { epoch: number; authenticator: Uint8Array }
+export type FirstValidCommit = {
+  source: AdoptionExpected
+  from: LogPosition | null
+  position: LogPosition
+  payloadDigest: string
+}
+export type CommitSearchResult =
+  | { kind: 'first-valid'; proof: FirstValidCommit }
+  | { kind: 'superseded'; winner: LogPosition }
+  | { kind: 'absent' }
+  | { kind: 'unknown' }
+export type ControlSearchPort = {
+  searchLog(built: BuiltCommit, position?: LogPosition): Promise<CommitSearchResult>
+}
+export type ControlSlot = BuiltCommit & { opID: string }
+export type ControlBuildRef = Pick<
+  BuiltCommit,
+  'incarnation' | 'epoch' | 'publishID' | 'payloadDigest'
+>
+export type HostBuilt = Pick<
+  BuiltCommit,
+  'incarnation' | 'epoch' | 'authenticatorBefore' | 'digest' | 'bodies' | 'journal' | 'welcome'
+> & { commit: Uint8Array }
+
 export type ControlSnapshot = {
+  commitOnce: ControlSlot | null
+  commitOnceAcceptance: FirstValidCommit | null
   operations: Array<Operation> // FIFO by `seq`
   rejoin: RejoinRecord | null
   outcomes: Array<Outcome>
@@ -20,6 +54,8 @@ export type ForkEvidence = {
   frameDigest: string
 }
 export type ControlChanges = {
+  commitOnce?: ControlSlot | null
+  commitOnceAcceptance?: FirstValidCommit | null
   putOperations?: Array<Operation>
   deleteOperations?: Array<string>
   putRejoin?: RejoinRecord
@@ -37,12 +73,14 @@ export type ControlChanges = {
 }
 /** Control changes committed with an adoption's state save (D5). */
 export type AdoptionWrite = {
+  expected?: AdoptionExpected
   changes: ControlChanges
   mutationID: string
   /** The `advance` of the pending anchor rotation this adoption lands, marked in the same transaction. */
   anchorLanded?: string
 }
 export type ControlStore = {
+  key: GroupKey
   load(): Promise<ControlSnapshot>
   /** All or nothing. On an ambiguous commit, rejects with `StorageOutcomeUnknownError`. */
   apply(changes: ControlChanges, mutationID: string): Promise<void>
@@ -60,18 +98,19 @@ export type OperationRequest = {
   body: Uint8Array
 }
 /** The operation deadline is `enqueuedAt + operationTimeoutMs`, so a restart keeps it. */
-export type Operation = OperationRequest & { seq: number; enqueuedAt: number } & (
+export type Operation = OperationRequest & { seq: number; enqueuedAt: number; deadline: number } & (
     | { stage: 'intent' }
     | { stage: 'built'; built: BuiltCommit }
     | { stage: 'accepted'; built: BuiltCommit; acceptedAs: LogPosition }
   )
 export type BuiltCommit = {
+  incarnation: number
+  searchFrom: LogPosition | null
   publishID: string
   expectedHead: LogPosition | null
   /** Identity of the state the commit was built from. */
   epoch: number
   authenticatorBefore: Uint8Array
-  lineage: number
   /** The exact framed hub payload, with bodies sealed once. Replay publishes these bytes. */
   payload: Uint8Array
   /** SHA-256 of `payload`: acceptance discovery matches this. */
@@ -116,7 +155,7 @@ export type RejoinRecord = {
    */
   candidate: Uint8Array
   /** Identity of the state the rejoin replaces; re-checked before adoption. */
-  source: { epoch: number; authenticator: Uint8Array; lineage: number; head: LogPosition | null }
+  source: { key: GroupKey; epoch: number; authenticator: Uint8Array; head: LogPosition | null }
   digest: string
   epochAfter: number
   /** Ledger tokens held before the rejoin, for `reenact`. */
@@ -154,6 +193,7 @@ export type CommitCursor = {
 }
 
 export type StagedAdoption = {
+  incarnation: number
   epochAfter: number
   removed: boolean
   epochAuthenticator: Uint8Array

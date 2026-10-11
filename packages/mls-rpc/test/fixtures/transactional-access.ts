@@ -13,7 +13,7 @@ import {
   type PendingAppFrame,
 } from '@kumiai/rpc'
 
-import type { HandleAccess } from '../../src/access.js'
+import type { ControlRead, HandleAccess } from '../../src/access.js'
 import type { RealMember } from './real-group.js'
 
 export class RevisionConflictError extends Error {
@@ -72,6 +72,8 @@ export function createTransactionalStore(
       mutationID: null,
       anchorSlot: structuredClone(anchorSlot),
       control: {
+        commitOnce: null,
+        commitOnceAcceptance: null,
         operations: [],
         rejoin: null,
         outcomes: [],
@@ -195,7 +197,28 @@ export async function createTransactionalAccess(
   let openTail: Promise<void> = Promise.resolve()
   let openRevision = -1
 
+  const readControl = async (): Promise<ControlRead> => {
+    // Wait for storage writes, never the open publication that needs this gate.
+    await store.settled()
+    const row = store.snapshot()
+    const handle = await restore(row)
+    const key = { groupID: handle.groupID, incarnation: 1 }
+    return {
+      handle,
+      source: {
+        key,
+        stateVersion: row.revision,
+        identity: {
+          ...key,
+          epoch: Number(handle.epoch),
+          authenticator: handle.state.keySchedule.epochAuthenticator.slice(),
+        },
+      },
+    }
+  }
   const access: HandleAccess = {
+    readControl: (fn) =>
+      locked(async () => await fn({ ...(await readControl()), refresh: readControl })),
     epoch: () => publishedAdmission.epoch,
     admission: () => publishedAdmission,
     read: (fn) => locked(async () => await fn(live)),
@@ -206,6 +229,7 @@ export async function createTransactionalAccess(
         const working = await restore(row)
         const save = async (current: GroupHandle) => {
           const write = adoption?.({
+            incarnation: 1,
             epochAfter: Number(current.epoch),
             removed: !current
               .listMembers()
@@ -237,6 +261,7 @@ export async function createTransactionalAccess(
         const row = store.snapshot()
         if (prepare != null && !(await prepare(await restore(row)))) return
         const write = adoption?.({
+          incarnation: 1,
           epochAfter: Number(next.epoch),
           removed: !next
             .listMembers()

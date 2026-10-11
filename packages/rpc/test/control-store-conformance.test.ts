@@ -18,7 +18,7 @@ describe('memory control store', () => {
   })
   testControlStoreConformance({
     open: async () => {
-      store = createMemoryControlStore()
+      store = createMemoryControlStore({ groupID: 'group-A', incarnation: 1 })
       return host()
     },
     reopen: async () => host(),
@@ -30,10 +30,10 @@ describe('memory control store', () => {
 describe('memory host database', () => {
   let db: MemoryHostDatabase
   const host = () => ({
-    control: db.control('group'),
-    anchor: db.anchorStore('group'),
-    saveState: (state: Uint8Array, write?: AdoptionWrite) => db.saveState('group', state, write),
-    loadState: () => db.loadState('group'),
+    control: db.control('group-A'),
+    anchor: db.anchorStore('group-A'),
+    saveState: (state: Uint8Array, write?: AdoptionWrite) => db.saveState('group-A', state, write),
+    loadState: () => db.loadState('group-A'),
   })
   testControlStoreConformance({
     open: async () => {

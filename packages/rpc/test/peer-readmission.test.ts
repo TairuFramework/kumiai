@@ -19,9 +19,10 @@ function unsettled(): ControlSnapshot {
   const built = {
     publishID: 'invite-publish',
     expectedHead: null,
+    searchFrom: null,
     epoch: 1,
     authenticatorBefore: new Uint8Array([1]),
-    lineage: 0,
+    incarnation: 1,
     payload: new Uint8Array([2]),
     payloadDigest: 'invite-payload',
     digest: 'invite-commit',
@@ -34,8 +35,11 @@ function unsettled(): ControlSnapshot {
     revokes: true,
     body: new Uint8Array([4]),
     enqueuedAt: 100,
+    deadline: 30_100,
   }
   return {
+    commitOnce: null,
+    commitOnceAcceptance: null,
     operations: [
       { ...operation, id: 'intent', seq: 1, stage: 'intent' },
       { ...operation, id: 'built', seq: 2, stage: 'built', built },
@@ -59,7 +63,12 @@ function unsettled(): ControlSnapshot {
       request: new Uint8Array([6]),
       requestKey: new Uint8Array([7]),
       candidate: new Uint8Array([8]),
-      source: { epoch: 1, authenticator: new Uint8Array([1]), lineage: 0, head: null },
+      source: {
+        epoch: 1,
+        authenticator: new Uint8Array([1]),
+        key: { groupID: 'group-A', incarnation: 1 },
+        head: null,
+      },
       digest: 'rejoin-commit',
       epochAfter: 2,
       ledgerBefore: ['ledger-token'],

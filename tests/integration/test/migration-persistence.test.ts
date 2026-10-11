@@ -37,7 +37,8 @@ test('the migration example co-commits adoption bookkeeping and rolls back with 
     adopt: () => {},
     // The old callback is assignable but drops the adoption write.
     persist: (current: typeof handle) => store.save(current),
-    store,
+    store: { ...store, loadVersion: () => store.database.loadVersion('state') },
+    groupID: handle.groupID,
     identity,
     entrySlot: createLedgerEntrySlot(),
     pending: undefined,

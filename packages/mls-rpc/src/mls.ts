@@ -283,10 +283,10 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       return await access.read((group) => recovery.prepare(group))
     },
     async readRecoverySource() {
-      return await access.read((group) => ({
-        epoch: Number(group.epoch),
-        authenticator: group.state.keySchedule.epochAuthenticator.slice(),
-        lineage: 0,
+      return await access.readControl(async ({ handle, source }) => ({
+        ...source,
+        epoch: Number(handle.epoch),
+        authenticator: handle.state.keySchedule.epochAuthenticator.slice(),
       }))
     },
     async readEpoch(): Promise<number> {

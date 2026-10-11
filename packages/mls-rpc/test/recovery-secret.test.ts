@@ -2,15 +2,14 @@ import type { GroupHandle } from '@kumiai/mls'
 import { commitTopic, rendezvousTopic } from '@kumiai/rpc'
 import { expect, test, vi } from 'vitest'
 
-import { simpleHandleAccess } from '../src/access.js'
 import { createGroupMLS, deriveRecoverySecret } from '../src/mls.js'
-import { createRealGroup } from './fixtures/real-group.js'
+import { createRealGroup, testHandleAccess } from './fixtures/real-group.js'
 
 async function port(name: string, recoverySecret?: (handle: GroupHandle) => Promise<Uint8Array>) {
   const group = await createRealGroup(1, name)
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
-  const access = simpleHandleAccess({
+  const access = testHandleAccess({
     handle: () => member.handle,
     adopt: (next) => {
       member.handle = next

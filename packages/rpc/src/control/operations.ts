@@ -12,6 +12,7 @@ import type {
   ControlChanges,
   ControlSnapshot,
   ControlStore,
+  HostBuilt,
   Operation,
   OperationRequest,
   Outcome,
@@ -21,16 +22,7 @@ export function revokeHeld(snapshot: ControlSnapshot): boolean {
   return snapshot.operations.some((op) => op.revokes)
 }
 
-export type HostBuilt = {
-  commit: Uint8Array
-  bodies: Array<string>
-  journal: Uint8Array
-  welcome: { bytes: Uint8Array; recipients: Array<string> } | null
-  epoch: number
-  authenticatorBefore: Uint8Array
-  lineage: number
-  digest: string
-}
+export type { HostBuilt } from './types.js'
 
 /** Both a fresh acceptance and a deduplicated publish name the original log position. */
 export type PublishOutcome = { sequenceID: string }
@@ -41,7 +33,7 @@ export type OperationDeps = {
   build(op: Operation): Promise<HostBuilt>
   adopt(
     journal: Uint8Array,
-    expected: { epoch: number; authenticatorBefore: Uint8Array; lineage: number },
+    expected: { epoch: number; authenticatorBefore: Uint8Array; incarnation: number },
     write: AdoptionWrite,
   ): Promise<'installed' | 'noop' | 'moved'>
   frame(
@@ -60,7 +52,7 @@ export type OperationDeps = {
   appliedAt(epoch: number): Pick<AppliedCommit, 'digest' | 'payloadDigest'> | undefined
   pullToHead(): Promise<void>
   now(): number
-  operationTimeoutMs: number
+  operationTimeoutMs?: number
   newID(): string
   emit(outcome: Outcome): void
 }
@@ -70,10 +62,12 @@ export async function enqueueOperation(
   request: OperationRequest,
 ): Promise<Operation> {
   const snapshot = await deps.control.load()
+  const enqueuedAt = deps.now()
   const op: Operation = {
     ...request,
     seq: Math.max(0, ...snapshot.operations.map((row) => row.seq)) + 1,
-    enqueuedAt: deps.now(),
+    enqueuedAt,
+    deadline: enqueuedAt + (deps.operationTimeoutMs ?? 30_000),
     stage: 'intent',
   }
   await applyResolved(deps.control, { putOperations: [op] }, deps.newID(), undefined, deps.signal)
@@ -163,7 +157,8 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
         payloadDigest: toB64U(sha256(framed.payload)),
         epoch: built.epoch,
         authenticatorBefore: built.authenticatorBefore,
-        lineage: built.lineage,
+        incarnation: built.incarnation,
+        searchFrom: framed.expectedHead,
         digest: built.digest,
         bodies: built.bodies,
         journal: built.journal,
@@ -192,7 +187,7 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
       const found = await deps.searchLog(op.built.expectedHead, op.built.payloadDigest)
       if (found === 'gap') return await settle(deps, op, { ...base, kind: 'unknown' })
       if (found === 'absent') {
-        if (deps.now() >= op.enqueuedAt + deps.operationTimeoutMs) {
+        if (deps.now() >= op.enqueuedAt + (deps.operationTimeoutMs ?? 30_000)) {
           return await settle(deps, op, { ...base, kind: 'lost' })
         }
         const { built: _built, ...intent } = op
@@ -237,7 +232,7 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
     {
       epoch: op.built.epoch,
       authenticatorBefore: op.built.authenticatorBefore,
-      lineage: op.built.lineage,
+      incarnation: op.built.incarnation,
     },
     write,
   )

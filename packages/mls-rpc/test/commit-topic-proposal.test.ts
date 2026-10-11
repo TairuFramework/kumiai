@@ -1,9 +1,8 @@
 import { createUpdateProposal, encode, mlsMessageEncoder } from 'ts-mls'
 import { expect, test, vi } from 'vitest'
 
-import { simpleHandleAccess } from '../src/access.js'
 import { createGroupMLS } from '../src/mls.js'
-import { buildRealCommit, createRealGroup } from './fixtures/real-group.js'
+import { buildRealCommit, createRealGroup, testHandleAccess } from './fixtures/real-group.js'
 
 test('a Proposal on the commit topic cannot enter the next Commit', async () => {
   const group = await createRealGroup(2, 'commit-topic-proposal')
@@ -19,7 +18,7 @@ test('a Proposal on the commit topic cannot enter the next Commit', async () => 
   const adopt = vi.fn()
   const persist = vi.fn()
   const port = createGroupMLS({
-    access: simpleHandleAccess({ handle: () => group.committer.handle, adopt, persist }),
+    access: testHandleAccess({ handle: () => group.committer.handle, adopt, persist }),
     identity: group.committer.identity,
     entrySlot: group.committer.slot,
   })
@@ -47,7 +46,7 @@ test('garbage and application messages on the commit topic leave the handle unto
   const adopt = vi.fn()
   const persist = vi.fn()
   const port = createGroupMLS({
-    access: simpleHandleAccess({ handle: () => member.handle, adopt, persist }),
+    access: testHandleAccess({ handle: () => member.handle, adopt, persist }),
     identity: member.identity,
     entrySlot: member.slot,
   })

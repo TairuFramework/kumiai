@@ -7,6 +7,8 @@ import type {
   ControlChanges,
   ControlSnapshot,
   ControlStore,
+  EpochIdentity,
+  GroupKey,
 } from '@kumiai/rpc'
 
 export type OwnershipContextPort = {
@@ -14,9 +16,7 @@ export type OwnershipContextPort = {
   get(): object | undefined
 }
 
-export type GroupKey = { groupID: string; incarnation: number }
-
-export type EpochIdentity = GroupKey & { epoch: number; authenticator: Uint8Array }
+export type { EpochIdentity, GroupKey } from '@kumiai/rpc'
 
 export type PackageUse = { sourceID: string; ref: string; kind: 'ordinary' | 'last-resort' }
 

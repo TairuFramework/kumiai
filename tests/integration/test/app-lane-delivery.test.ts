@@ -290,7 +290,11 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     const recovery = await (async () => {
       const { createGroupMLS, simpleHandleAccess } = await import('@kumiai/mls-rpc')
       return await createGroupMLS({
-        access: simpleHandleAccess({ handle: () => bob.handle(), adopt: () => {} }),
+        access: simpleHandleAccess({
+          stateVersion: () => 0,
+          handle: () => bob.handle(),
+          adopt: () => {},
+        }),
         identity: bobID,
         entrySlot: bobSlot,
       }).exportRecoverySecret()

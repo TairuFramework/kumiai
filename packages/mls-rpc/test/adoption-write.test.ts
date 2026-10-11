@@ -9,7 +9,7 @@ import { expect, test, vi } from 'vitest'
 
 import { simpleHandleAccess } from '../src/access.js'
 import { createGroupMLS } from '../src/mls.js'
-import { buildRealCommit, createRealGroup } from './fixtures/real-group.js'
+import { buildRealCommit, createRealGroup, testHandleAccess } from './fixtures/real-group.js'
 import {
   createTransactionalAccess,
   createTransactionalStore,
@@ -21,7 +21,7 @@ async function fixture(id: string) {
   if (member == null) throw new Error('missing member')
   const saves: Array<{ state: Uint8Array; write: AdoptionWrite | undefined }> = []
   let failSave = false
-  const access = simpleHandleAccess({
+  const access = testHandleAccess({
     handle: () => member.handle,
     adopt: (next) => {
       member.handle = next
@@ -42,6 +42,63 @@ async function fixture(id: string) {
     mls: createGroupMLS({ access, identity: member.identity, entrySlot: member.slot }),
   }
 }
+
+test('readControl returns the host version and a defensive single-incarnation identity', async () => {
+  const group = await createRealGroup(1, 'group-A')
+  const member = group.members[0]
+  if (member == null) throw new Error('missing member')
+  const store = createTransactionalStore(member.handle)
+  const db = {
+    loadVersion: async (groupID: string) => {
+      if (groupID !== member.handle.groupID) throw new Error('wrong group')
+      return store.snapshot().revision
+    },
+    saveState: async (_groupID: string, state: Uint8Array, write?: AdoptionWrite) =>
+      store.save(store.snapshot().revision, state, member.handle.ledgerTokens, undefined, write),
+  }
+  await db.saveState('group-A', encodeClientState(member.handle.state))
+  const access = simpleHandleAccess({
+    handle: () => member.handle,
+    stateVersion: () => db.loadVersion('group-A'),
+    adopt: (next) => {
+      member.handle = next
+    },
+    persist: (handle, write) => db.saveState('group-A', encodeClientState(handle.state), write),
+  })
+  const mls = createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
+  const source = await mls.readRecoverySource()
+  expect(source.key).toEqual({ groupID: 'group-A', incarnation: 1 })
+  expect(source.stateVersion).toBe(await db.loadVersion('group-A'))
+  expect(source.identity).toEqual({
+    ...source.key,
+    epoch: source.epoch,
+    authenticator: source.authenticator,
+  })
+  expect(source.authenticator).toEqual(member.handle.state.keySchedule.epochAuthenticator)
+  expect(source).not.toHaveProperty('lineage')
+  source.key.incarnation = 9
+  source.authenticator.fill(0)
+  source.identity?.authenticator.fill(0)
+  expect((await mls.readRecoverySource()).key.incarnation).toBe(1)
+  expect((await mls.readRecoverySource()).authenticator).toEqual(
+    member.handle.state.keySchedule.epochAuthenticator,
+  )
+  await access.readControl(async (scope) => {
+    await db.saveState('group-A', encodeClientState(member.handle.state))
+    const refreshed = await scope.refresh()
+    expect(refreshed.source.stateVersion).toBe(await db.loadVersion('group-A'))
+  })
+  const staged: Array<StagedAdoption> = []
+  const commit = await buildRealCommit(group)
+  await mls.processCommit(commit, {
+    resolveLedgerEntries: group.resolveLedgerEntries,
+    adoption: (summary) => {
+      staged.push(summary)
+      return { mutationID: 'advance', changes: {} }
+    },
+  })
+  expect(staged[0]?.incarnation).toBe(1)
+})
 
 test('persist receives the write once and the factory sees the staged epoch', async () => {
   const host = await fixture('adoption-write-advance')
@@ -177,7 +234,7 @@ test.each(['mutate', 'replace'] as const)(
     const group = await createRealGroup(1, `adoption-write-no-persist-${operation}`)
     const member = group.members[0]
     if (member == null) throw new Error('missing member')
-    const access = simpleHandleAccess({
+    const access = testHandleAccess({
       handle: () => member.handle,
       adopt: (next) => {
         member.handle = next

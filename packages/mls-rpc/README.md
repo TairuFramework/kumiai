@@ -17,7 +17,7 @@ depend on both.
 
 ## Exports
 
-- `simpleHandleAccess({ handle, adopt, persist? })` — serialised access to a live handle; the
+- `simpleHandleAccess({ handle, adopt, stateVersion, key?, persist? })` — serialised access to a live handle; the
   `HandleAccess` type for a host that brings its own.
 - `createGroupCrypto({ access, entryLabel?, runtime?, pending? })` — `GroupCrypto` over that access.
 - `createGroupMLS({ access, identity, entrySlot, recoverySecret?, recoveryBinding? })` — `GroupMLS`
@@ -48,6 +48,7 @@ Migrating from 0.9: build one adapter and pass it to both factories. Replace the
 ```ts
 const access = simpleHandleAccess({
   handle: () => handle,
+  stateVersion: () => store.loadVersion(groupID),
   adopt,
   persist: (current, write) => store.save(current, write),
 })
@@ -61,15 +62,26 @@ mutation, and mark the matching pending anchor landed using `write.anchorLanded`
 transaction leaves all of these unchanged. Ordinary saves can omit `write`; ignoring a supplied
 write loses adoption bookkeeping on restart even if the MLS state was saved.
 
+The required `stateVersion` callback reads the host's stored version for this handle.
+Serialise its state writes through the same access. Every write, including seals, opens and proposal changes, advances that version.
+An epoch is not a state version. Reopening loads the stored version. Reads and searches leave it unchanged.
+An omitted `key` uses `{ groupID: handle.groupID, incarnation: 1 }` for temporary single-incarnation access.
+A configured key remains fixed for that access. Registry ownership replaces this host seam in phase 2.2b.
+
 ### A host's own `HandleAccess`
 
 A host with its own handle store implements the port instead:
 
+- `readControl(fn)` owns the existing access gate and supplies a coherent handle and `AdoptionExpected` source.
+  Its `refresh()` repeats the owned read without entering the gate again.
+  A transactional host waits for issued storage writes, then restores one row's state and version together.
+  It never pairs a live handle with a newer row's version or waits for open publication while owning that gate.
+  An open may have committed its consumed receive state before publishing its handle.
 - `read(fn)` lends the handle for the callback only. `mutate(fn, adoption?)` serialises with every other
   operation and resolves after the state is stored. `fn`'s `persist` argument goes to
   `processMessage` and `bootstrapLedger`. `replace(next, adoption?, prepare?)` stores before publishing.
   A transactional host may restore a fresh handle per mutation, discard it on rollback, and publish on commit.
-- An `AdoptionWriteFactory` receives `{ epochAfter, removed, epochAuthenticator }` from the staged handle.
+- An `AdoptionWriteFactory` receives `{ incarnation, epochAfter, removed, epochAuthenticator }` from the staged handle.
   Invoke it before saving, including self-removal. Commit its `AdoptionWrite` atomically with the state.
   `processCommit(commit, context)` supplies it as `context.adoption`. Live and restored recovery candidates require
   `onAccepted(adoption)` and reject calls without a factory.
@@ -97,6 +109,7 @@ record and resolves for an unknown id. Deduplicate inserts by `record.frame.id`.
 ```ts
 const access = simpleHandleAccess({
   handle: () => handle,
+  stateVersion: () => store.loadVersion(groupID),
   adopt: (next) => { handle = next },
   persist: (current, write) => store.save(current, write),
 })
@@ -152,6 +165,7 @@ const { group } = await createGroup(identity, groupID, {
 let handle = group
 const access = simpleHandleAccess({
   handle: () => handle,
+  stateVersion: () => store.loadVersion(groupID),
   adopt: (next) => { handle = next },
   persist: (current, write) => store.save(current, write),
 })
@@ -201,6 +215,7 @@ const result = await applyCommit({
   ownDID: identity.id,
   persist: async (staged) => {
     const write = adoption?.({
+      incarnation: key.incarnation,
       epochAfter: Number(staged.epoch),
       removed: !staged.listMembers().some(
         (member) => member.leafIndex === staged.state.privatePath.leafIndex,

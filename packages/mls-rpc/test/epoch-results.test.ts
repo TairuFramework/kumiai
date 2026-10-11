@@ -1,15 +1,14 @@
 import { expect, test } from 'vitest'
 
-import { simpleHandleAccess } from '../src/access.js'
 import { createGroupCrypto } from '../src/crypto.js'
 import { createGroupMLS } from '../src/mls.js'
-import { buildRealCommit, createRealGroup } from './fixtures/real-group.js'
+import { buildRealCommit, createRealGroup, testHandleAccess } from './fixtures/real-group.js'
 
 test('operation results carry the epoch used by the handle', async () => {
   const group = await createRealGroup(1, 'epoch-results')
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
-  const access = simpleHandleAccess({
+  const access = testHandleAccess({
     handle: () => member.handle,
     adopt: (next) => {
       member.handle = next
@@ -17,7 +16,7 @@ test('operation results carry the epoch used by the handle', async () => {
   })
   const crypto = createGroupCrypto({ access })
   const sender = createGroupCrypto({
-    access: simpleHandleAccess({
+    access: testHandleAccess({
       handle: () => group.committer.handle,
       adopt: (next) => {
         group.committer.handle = next

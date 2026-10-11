@@ -2,10 +2,15 @@ import { commitLedgerEntries, encodeClientState, signLedgerEntry } from '@kumiai
 import { type AppFrameRef, AppFrameStorageError } from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
-import { type HandleAccess, simpleHandleAccess } from '../src/access.js'
+import type { HandleAccess } from '../src/access.js'
 import { createGroupCrypto } from '../src/crypto.js'
 import { createGroupMLS } from '../src/mls.js'
-import { createRealGroup, persistedTestAccess, type RealGroup } from './fixtures/real-group.js'
+import {
+  createRealGroup,
+  persistedTestAccess,
+  type RealGroup,
+  testHandleAccess,
+} from './fixtures/real-group.js'
 import {
   createTransactionalAccess,
   createTransactionalStore,
@@ -44,13 +49,58 @@ async function setup(name: string) {
   const host = await createTransactionalAccess(receiver, store)
   const crypto = createGroupCrypto({ access: host.access, pending: host.pending })
   const sender = createGroupCrypto({
-    access: simpleHandleAccess({ handle: () => group.committer.handle, adopt: () => {} }),
+    access: testHandleAccess({ handle: () => group.committer.handle, adopt: () => {} }),
   })
   const seal = async (text: string) => await sender.wrap(utf8.encode(text), { aad })
   return { group, store, host, crypto, seal }
 }
 
 describe('transactional access: atomic durable open', () => {
+  test('transactional readControl uses committed receive state before open publication', async () => {
+    const { store, host, seal } = await setup('group-A')
+    const sealed = await seal('hello')
+    const committed = deferred()
+    const release = deferred()
+    const crypto = createGroupCrypto({
+      access: host.access,
+      pending: {
+        ...host.pending,
+        persistOpened: async (state, record) => {
+          await host.pending.persistOpened(state, record)
+          committed.resolve()
+          await release.promise
+        },
+      },
+    })
+    const before = encodeClientState(host.live().state)
+    const opening = crypto.unwrap(sealed, { expectedAAD: aad, frame: frameRef('f1') })
+    await committed.promise
+    expect(encodeClientState(host.live().state)).toEqual(before)
+    const row = store.snapshot()
+    expect(row.state).not.toEqual(before)
+    try {
+      await host.access.readControl(async (scope) => {
+        expect(encodeClientState(scope.handle.state)).toEqual(row.state)
+        expect(scope.source.stateVersion).toBe(row.revision)
+        expect(scope.source.key).toEqual({ groupID: 'group-A', incarnation: 1 })
+        const reader = createGroupCrypto({
+          access: testHandleAccess({
+            handle: () => scope.handle,
+            adopt: () => {},
+            stateVersion: () => row.revision,
+          }),
+        })
+        await expect(reader.unwrap(sealed, { expectedAAD: aad })).rejects.toThrow()
+        const refreshed = await scope.refresh()
+        expect(encodeClientState(refreshed.handle.state)).toEqual(row.state)
+        expect(refreshed.source.stateVersion).toBe(row.revision)
+      })
+    } finally {
+      release.resolve()
+    }
+    await opening
+    expect(encodeClientState(host.live().state)).toEqual(row.state)
+  })
   test('the working handle is published only after the write commits, and the lock is free meanwhile', async () => {
     const { store, host, crypto, seal } = await setup('tx-publish-on-commit')
     const sealed = await seal('hello')
@@ -328,7 +378,7 @@ test('a bootstrap whose host callback throws after the write still publishes the
     entrySlot: member.slot,
   })
   const responder = createGroupMLS({
-    access: simpleHandleAccess({ handle: () => group.committer.handle, adopt: () => {} }),
+    access: testHandleAccess({ handle: () => group.committer.handle, adopt: () => {} }),
     identity: group.committer.identity,
     entrySlot: group.committer.slot,
   })

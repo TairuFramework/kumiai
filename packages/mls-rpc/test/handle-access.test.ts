@@ -2,10 +2,9 @@ import { setImmediate } from 'node:timers/promises'
 import type { GroupHandle } from '@kumiai/mls'
 import { expect, test, vi } from 'vitest'
 
-import { simpleHandleAccess } from '../src/access.js'
 import { createGroupCrypto } from '../src/crypto.js'
 import { createGroupMLS } from '../src/mls.js'
-import { buildRealCommit, createRealGroup } from './fixtures/real-group.js'
+import { buildRealCommit, createRealGroup, testHandleAccess } from './fixtures/real-group.js'
 
 test('replacement checks and carries under the same gate as persistence and sealing', async () => {
   const group = await createRealGroup(0, 'prepared-replacement')
@@ -19,7 +18,7 @@ test('replacement checks and carries under the same gate as persistence and seal
     release = resolve
   })
   const phases: Array<string> = []
-  const access = simpleHandleAccess({
+  const access = testHandleAccess({
     handle: () => member.handle,
     adopt: (handle) => {
       member.handle = handle
@@ -64,7 +63,7 @@ test('a replacement refused by the identity check never persists or installs', a
   const next = member.handle
   member.handle = old
   let saves = 0
-  const access = simpleHandleAccess({
+  const access = testHandleAccess({
     handle: () => member.handle,
     adopt: (handle) => {
       member.handle = handle
@@ -84,7 +83,7 @@ test('admission stays synchronous at the old epoch through awaited adoption', as
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
   const epochBefore = Number(member.handle.epoch)
-  const access = simpleHandleAccess({
+  const access = testHandleAccess({
     handle: () => member.handle,
     adopt: async (next) => {
       member.handle = next
@@ -109,7 +108,7 @@ test('failed adoption neither confirms the candidate nor publishes its snapshots
   const group = await createRealGroup(1, 'failed-admission-adoption')
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
-  const access = simpleHandleAccess({
+  const access = testHandleAccess({
     handle: () => member.handle,
     adopt: async () => {
       throw new Error('adoption failed')
@@ -131,7 +130,7 @@ test.each(['mutate', 'open'] as const)(
     const group = await createRealGroup(1, `admission-${operation}`)
     const member = group.members[0]
     if (member == null) throw new Error('missing member')
-    const access = simpleHandleAccess({ handle: () => member.handle, adopt: () => {} })
+    const access = testHandleAccess({ handle: () => member.handle, adopt: () => {} })
     const before = access.admission()
     const commit = await buildRealCommit(group)
     const run = async () => {
@@ -151,7 +150,7 @@ test('sendAdmission reads only the published access snapshot', async () => {
   const group = await createRealGroup(1, 'admission-direct-access')
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
-  const access = simpleHandleAccess({ handle: () => member.handle, adopt: () => {} })
+  const access = testHandleAccess({ handle: () => member.handle, adopt: () => {} })
   const mls = createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
   const spies = [
     vi.spyOn(access, 'read'),
@@ -168,7 +167,7 @@ test('one access instance serves both ports and publishes replacement after save
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
   const saved = vi.fn()
-  const access = simpleHandleAccess({
+  const access = testHandleAccess({
     handle: () => member.handle,
     adopt: (next) => {
       member.handle = next
@@ -193,7 +192,7 @@ test('read holds access until its callback settles', async () => {
   const group = await createRealGroup(1, 'access-read-lifetime')
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
-  const access = simpleHandleAccess({ handle: () => member.handle, adopt: () => {} })
+  const access = testHandleAccess({ handle: () => member.handle, adopt: () => {} })
   let release!: () => void
   const held = new Promise<void>((resolve) => {
     release = resolve
@@ -220,7 +219,7 @@ test('mutate saves once at the library boundary and publishes only a successful 
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
   const saved = vi.fn()
-  const access = simpleHandleAccess({
+  const access = testHandleAccess({
     handle: () => member.handle,
     adopt: () => {},
     persist: saved,
@@ -250,7 +249,7 @@ test('replace saves before adoption and open passes through the staged writer', 
   const persist = vi.fn(async () => {
     await waiting
   })
-  const access = simpleHandleAccess({
+  const access = testHandleAccess({
     handle: () => member.handle,
     adopt: (handle) => {
       member.handle = handle

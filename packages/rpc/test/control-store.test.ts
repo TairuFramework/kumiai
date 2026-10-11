@@ -7,6 +7,7 @@ import {
 import { applyChanges, applyResolved, controlSettled, pruneWindow } from '../src/control/store.js'
 import type {
   AppliedCommit,
+  ControlSlot,
   ControlSnapshot,
   ControlStore,
   Operation,
@@ -21,6 +22,8 @@ import {
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
 
 const empty = (): ControlSnapshot => ({
+  commitOnce: null,
+  commitOnceAcceptance: null,
   operations: [],
   rejoin: null,
   outcomes: [],
@@ -36,6 +39,7 @@ const operation = (id: string, seq: number): Operation => ({
   revokes: false,
   body: new Uint8Array([1]),
   enqueuedAt: 100,
+  deadline: 30_100,
   stage: 'intent',
 })
 const applied = (epoch: number): AppliedCommit => ({
@@ -58,7 +62,12 @@ const rejoin: RejoinRecord = {
   request: new Uint8Array([2]),
   requestKey: new Uint8Array([3]),
   candidate: new Uint8Array([4]),
-  source: { epoch: 1, authenticator: new Uint8Array([5]), lineage: 0, head: null },
+  source: {
+    epoch: 1,
+    authenticator: new Uint8Array([5]),
+    key: { groupID: 'group-A', incarnation: 1 },
+    head: null,
+  },
   digest: 'rejoin-digest',
   epochAfter: 2,
   ledgerBefore: [],
@@ -66,6 +75,46 @@ const rejoin: RejoinRecord = {
 }
 
 describe('control changes', () => {
+  test('slot survives operation deletion outcome acknowledgement and reopen', async () => {
+    const db = createMemoryHostDatabase()
+    const store = db.control('group-A')
+    const slot: ControlSlot = {
+      opID: 'owner',
+      incarnation: 1,
+      epoch: 4,
+      authenticatorBefore: new Uint8Array([1]),
+      publishID: 'publish',
+      searchFrom: asLogPosition('003'),
+      expectedHead: asLogPosition('003'),
+      payload: new Uint8Array([2]),
+      payloadDigest: 'payload',
+      digest: 'commit',
+      bodies: ['body'],
+      journal: new Uint8Array([3]),
+      welcome: { bytes: new Uint8Array([4]), recipients: ['bob'] },
+    }
+    const expected = structuredClone(slot)
+    await store.apply({ commitOnce: slot, putOperations: [operation('owner', 1)] }, 'build')
+    slot.payload.fill(0)
+    slot.journal.fill(0)
+    slot.welcome?.recipients.push('mallory')
+    await store.apply(
+      {
+        deleteOperations: ['owner'],
+        putOutcomes: [{ id: 'owner', opID: 'owner', at: 1, kind: 'unknown' }],
+      },
+      'settle',
+    )
+    await store.apply({ deleteOutcomes: ['owner'] }, 'ack')
+    const reopened = db.control('group-A')
+    const loaded = await reopened.load()
+    expect(loaded.operations).toEqual([])
+    expect(loaded.outcomes).toEqual([])
+    expect(loaded.commitOnce).toEqual(expected)
+    loaded.commitOnce?.authenticatorBefore.fill(0)
+    loaded.commitOnce?.welcome?.bytes.fill(0)
+    expect((await reopened.load()).commitOnce).toEqual(expected)
+  })
   test('deletes precede puts, operations replace by ID and remain FIFO, and input stays unchanged', () => {
     const before = {
       ...empty(),
@@ -189,6 +238,7 @@ describe('resolved writes', () => {
     controller.abort(reason)
     Object.defineProperty(controller.signal, 'throwIfAborted', { value: undefined })
     const store: ControlStore = {
+      key: { groupID: 'group-A', incarnation: 1 },
       load: async () => empty(),
       apply: async () => {
         throw new StorageOutcomeUnknownError()
@@ -209,6 +259,7 @@ describe('resolved writes', () => {
       readStarted = resolve
     })
     const store: ControlStore = {
+      key: { groupID: 'group-A', incarnation: 1 },
       load: async () => empty(),
       apply: async () => {
         throw new StorageOutcomeUnknownError()
@@ -238,6 +289,7 @@ describe('resolved writes', () => {
         sleepStarted = resolve
       })
       const store: ControlStore = {
+        key: { groupID: 'group-A', incarnation: 1 },
         load: async () => empty(),
         apply: async () => {
           throw new StorageOutcomeUnknownError()
@@ -270,7 +322,7 @@ describe('resolved writes', () => {
 
   test('the structural memory double resolves ambiguity through the RPC ControlStore port', async () => {
     const store: ControlStore & Pick<MemoryControlStore, 'commitThenRejectNext'> =
-      createMemoryControlStore()
+      createMemoryControlStore({ groupID: 'group-A', incarnation: 1 })
     store.commitThenRejectNext('apply')
     await applyResolved(store, { putOperations: [operation('double', 1)] }, 'double-mutation')
     expect((await store.load()).operations).toEqual([operation('double', 1)])
@@ -285,6 +337,7 @@ describe('resolved writes', () => {
 
   test('an ambiguous rejection without a commit signals a safe retry', async () => {
     const store: ControlStore = {
+      key: { groupID: 'group-A', incarnation: 1 },
       load: async () => empty(),
       apply: async () => {
         throw new StorageOutcomeUnknownError()
@@ -300,6 +353,7 @@ describe('resolved writes', () => {
     const delays: Array<number> = []
     let reads = 0
     const store: ControlStore = {
+      key: { groupID: 'group-A', incarnation: 1 },
       load: async () => empty(),
       apply: async () => {
         throw new StorageOutcomeUnknownError()
@@ -322,6 +376,7 @@ describe('resolved writes', () => {
   test('known write failures propagate without reading back', async () => {
     const failure = new Error('known rejection')
     const store: ControlStore = {
+      key: { groupID: 'group-A', incarnation: 1 },
       load: async () => empty(),
       apply: async () => {
         throw failure
