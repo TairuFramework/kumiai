@@ -10,6 +10,7 @@ import {
   type AnchorSlot,
   applyChanges,
   type CommitOnceWriteContext,
+  type ControlEvidenceSnapshot,
   type ControlSnapshot,
   type ControlStore,
   type PendingAppFrame,
@@ -57,6 +58,7 @@ export type TransactionalStore = {
   records: Map<string, PendingAppFrame>
   /** Resolves once every write issued so far has settled: a read after it sees them. */
   settled(): Promise<void>
+  readEvidence(): Promise<ControlEvidenceSnapshot>
   /** Another connection's commit to the row: same state, next revision. */
   bump(): void
   /**
@@ -119,6 +121,19 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
     return saving
   }
   const store: TransactionalStore = {
+    readEvidence: async () => {
+      await tail
+      const snapshot = structuredClone(row)
+      const identity = identityOf(snapshot.state)
+      const state = decodeClientState(snapshot.state)
+      if (state === undefined) throw new Error('Invalid evidence state')
+      return {
+        source: { key: { ...key }, stateVersion: snapshot.revision, identity },
+        applied: snapshot.control.applied,
+        cursor: snapshot.control.cursor,
+        terminal: state.groupActiveState.kind === 'removedFromGroup',
+      }
+    },
     control: {
       get key() {
         return { ...key }

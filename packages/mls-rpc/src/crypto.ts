@@ -4,9 +4,11 @@ import {
   FrameEpochError,
   type GroupCrypto,
   isAppFrameStorageError,
+  LedgerEntryRefusedError,
   type PendingAppFrame,
   type PendingAppFrames,
   sortPendingAppFrames,
+  UnsupportedLedgerEntriesVersionError,
 } from '@kumiai/rpc'
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js'
 import { createRuntime, type Runtime } from '@sozai/runtime'
@@ -71,17 +73,26 @@ export function sealEntries(
 }
 
 function assertSealedEntryBlob(sealed: Uint8Array): void {
-  if (sealed.length <= 1 + ENTRY_NONCE_BYTES) throw new Error('openEntries: not a sealed blob')
+  if (sealed.length <= 1 + ENTRY_NONCE_BYTES)
+    throw new LedgerEntryRefusedError('openEntries: not a sealed blob')
   if (sealed[0] !== ENTRY_VERSION) {
-    throw new Error(`openEntries: unsupported blob version ${sealed[0]}`)
+    throw new UnsupportedLedgerEntriesVersionError(
+      `openEntries: unsupported blob version ${sealed[0]}`,
+    )
   }
 }
 
 export function openEntries(key: Uint8Array, sealed: Uint8Array): Uint8Array {
   assertSealedEntryBlob(sealed)
-  return xchacha20poly1305(key, sealed.subarray(1, 1 + ENTRY_NONCE_BYTES)).decrypt(
-    sealed.subarray(1 + ENTRY_NONCE_BYTES),
-  )
+  try {
+    return xchacha20poly1305(key, sealed.subarray(1, 1 + ENTRY_NONCE_BYTES)).decrypt(
+      sealed.subarray(1 + ENTRY_NONCE_BYTES),
+    )
+  } catch (error) {
+    if (error instanceof Error && error.message === 'invalid tag')
+      throw new LedgerEntryRefusedError('Ledger entry authentication refused', { cause: error })
+    throw error
+  }
 }
 
 export type GroupCryptoParams = {

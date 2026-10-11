@@ -5,9 +5,11 @@ import type {
   AnchorStore,
   AppCursorStore,
   ControlChanges,
+  ControlEvidenceSnapshot,
   ControlSnapshot,
   ControlStore,
   EpochIdentity,
+  GroupForkEvidence,
   GroupKey,
 } from '@kumiai/rpc'
 
@@ -16,7 +18,7 @@ export type OwnershipContextPort = {
   get(): object | undefined
 }
 
-export type { EpochIdentity, GroupKey } from '@kumiai/rpc'
+export type { EpochIdentity, GroupForkEvidence, GroupKey } from '@kumiai/rpc'
 
 export type PackageUse = { sourceID: string; ref: string; kind: 'ordinary' | 'last-resort' }
 
@@ -120,6 +122,7 @@ export type GroupTransition = {
 export type GroupPersistence<TTx extends GroupTransaction> = {
   load(groupID: string): Promise<GroupLifetime | null>
   loadState(key: GroupKey): Promise<GroupStateRecord | null>
+  readEvidence(key: GroupKey): Promise<ControlEvidenceSnapshot>
   loadTrust(groupID: string): Promise<GroupRecoveryTrust | null>
   list(): Promise<Array<GroupLifetime>>
   ports(key: GroupKey): GroupPersistencePorts
@@ -374,17 +377,6 @@ export type AppStatusEvent = GroupKey & { id: string; entry: AppOutboxEntry } & 
         nextIncarnation?: number
       }
   )
-
-export type GroupForkEvidence =
-  | {
-      kind: 'digest-divergence'
-      epoch: number
-      position: string
-      localDigest: string
-      remoteDigest: string
-    }
-  | { kind: 'epoch-authenticator'; epoch: number; local: Uint8Array; remote: Uint8Array }
-  | { kind: 'unexplained-own-commit'; epoch: number; position: string; digest: string }
 
 export type ForkHalt = { eventID: string; evidence: GroupForkEvidence; detectedAt: number }
 

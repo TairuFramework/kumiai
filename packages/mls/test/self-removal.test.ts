@@ -3,7 +3,11 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
 import { deriveGroup } from '../src/group-handle.js'
 import { renewLeaf } from '../src/group-lifecycle.js'
-import { commitSelfRemovals, proposeSelfRemoval } from '../src/index.js'
+import {
+  CommitValidationUnavailableError,
+  commitSelfRemovals,
+  proposeSelfRemoval,
+} from '../src/index.js'
 import {
   agent,
   lowLevelWelcome,
@@ -69,9 +73,10 @@ test('selfRemovalCommittedByAnotherMemberKeepsSender', async () => {
     ],
   })
   expect(joined.state.groupActiveState.kind).toBe('removedFromGroup')
-  await expect(withoutProposal.processMessage(result.commitMessage)).rejects.toMatchObject({
-    name: 'CommitRejectedError',
-    reason: 'invalid',
+  const missingProposal = withoutProposal.processMessage(result.commitMessage)
+  await expect(missingProposal).rejects.toBeInstanceOf(CommitValidationUnavailableError)
+  await expect(missingProposal).rejects.toMatchObject({
+    cause: { name: 'ValidationError', message: 'Could not find proposal with supplied reference' },
   })
   expect(await commitSelfRemovals(result.newGroup)).toBeNull()
 })

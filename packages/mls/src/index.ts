@@ -70,8 +70,10 @@ export {
 } from './envelope-fold.js'
 export {
   CarryIdentityError,
+  CommitValidationUnavailableError,
   DeviceRegistryCodecError,
   type DeviceRegistryCodecErrorParams,
+  isConclusiveCommitError,
   LeafBindingError,
   type LeafBindingReason,
   LeafLapsedError,

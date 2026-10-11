@@ -10,6 +10,7 @@ import {
   type PendingAppFrames,
   sortPendingAppFrames,
 } from '../../src/crypto.js'
+import { LedgerEntryRefusedError } from '../../src/ledger-entries.js'
 import { decodeMemoryCommit } from './memory-group-mls.js'
 
 export type FakeCryptoOptions = {
@@ -435,13 +436,16 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
   }
 
   const openEntries: GroupCrypto['openEntries'] = (sealed) => {
-    if (sealed.length < ENTRY_TAG_BYTES) throw new Error('cannot open: not a sealed entry blob')
+    if (sealed.length < ENTRY_TAG_BYTES)
+      throw new LedgerEntryRefusedError('cannot open: not a sealed entry blob')
     const key = entryKey(epoch)
     const ciphertext = sealed.subarray(ENTRY_TAG_BYTES)
     const expected = entryTag(ciphertext, key)
     for (let i = 0; i < ENTRY_TAG_BYTES; i++) {
       if (sealed[i] !== expected[i]) {
-        throw new Error(`cannot open entry blob: wrong epoch or tampered (at epoch ${epoch})`)
+        throw new LedgerEntryRefusedError(
+          `cannot open entry blob: wrong epoch or tampered (at epoch ${epoch})`,
+        )
       }
     }
     return entryStream(ciphertext, key)

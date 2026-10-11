@@ -1,5 +1,6 @@
 import { normalizeDID, type OwnIdentity } from '@kokuin/token'
 import {
+  CommitValidationUnavailableError,
   confirmationKey,
   createRecoveryRequest,
   encodeGroupAnchor,
@@ -316,7 +317,18 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
     async processCommit(commit: Uint8Array, context: CommitContext): Promise<ProcessCommitResult> {
       const frameEpoch = readMessageEpoch(commit)
       const eligible = await access.read(async (group) => {
-        const header = await group.readCommitHeader(commit)
+        let header: Awaited<ReturnType<GroupHandle['readCommitHeader']>>
+        try {
+          header = await group.readCommitHeader(commit)
+        } catch (error) {
+          if (error instanceof CommitValidationUnavailableError)
+            return {
+              eligible: false,
+              epoch: Number(group.epoch),
+              validation: 'unavailable' as const,
+            }
+          throw error
+        }
         return {
           eligible: header != null && frameEpoch === group.epoch,
           epoch: Number(group.epoch),
@@ -328,6 +340,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           advanced: false,
           epochBefore: eligible.epoch,
           epochAfter: eligible.epoch,
+          ...(eligible.validation === undefined ? {} : { validation: eligible.validation }),
         }
       }
       const ids = readCommitEntryIDs(commit)
@@ -337,6 +350,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       const ignored = Symbol('ignored commit')
       let refusedEpoch: number | undefined
       let refusal: RecoveryRefusalReason | undefined
+      let validation: 'unavailable' | undefined
       try {
         return await access.mutate(async (group, persist) => {
           if (group.epoch !== frameEpoch) {
@@ -361,6 +375,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           if (!result.applied) {
             refusedEpoch = result.epochBefore
             refusal = result.refusal
+            validation = result.validation
             throw ignored
           }
           return {
@@ -368,6 +383,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
             advanced: result.advanced,
             epochBefore: result.epochBefore,
             epochAfter: result.epochAfter,
+            ...(result.validation === undefined ? {} : { validation: result.validation }),
           }
         }, context.adoption)
       } catch (error) {
@@ -378,6 +394,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
             epochBefore: refusedEpoch,
             epochAfter: refusedEpoch,
             ...(refusal == null ? {} : { refusal }),
+            ...(validation === undefined ? {} : { validation }),
           }
         throw error
       }

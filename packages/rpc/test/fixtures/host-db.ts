@@ -46,6 +46,9 @@ export type MemoryHostDatabase = {
   seed(groupID: string, state: Uint8Array, options?: SeedOptions): Promise<void>
   loadVersion(groupID: string): Promise<number>
   loadState(groupID: string): Promise<Uint8Array | null>
+  snapshot(
+    groupID: string,
+  ): Promise<{ version: number; state: Uint8Array | null; control: ControlSnapshot }>
   delete(groupID: string): Promise<void>
   failNext(point: FailurePoint): void
   commitThenRejectNext(point: WritePoint): void
@@ -214,6 +217,14 @@ export function createMemoryHostDatabase(
     }),
     loadVersion: async (groupID) => read(groupID).version,
     loadState: async (groupID) => read(groupID).state?.slice() ?? null,
+    snapshot: async (groupID) => {
+      const row = read(groupID)
+      return {
+        version: row.version,
+        state: row.state?.slice() ?? null,
+        control: structuredClone(row.control),
+      }
+    },
     seed: async (groupID, state, options) => {
       const ownedState = state.slice()
       const replace = options?.replace === true

@@ -14,23 +14,26 @@ import type { GroupCrypto } from './crypto.js'
  * of "I can apply this frame", never a precondition of reading it.
  */
 
-/**
- * Current ledger-entry blob format version.
- *
- * Unversioned, this format degrades tolerably only by ACCIDENT: the resolver's `catch` turns a
- * mis-parse into an empty answer, which the lane files as poison. That is an accident and not a
- * contract — nothing stops a later layout from parsing as a plausible token list under today's
- * rules — so the version byte makes the refusal a decision instead of a lucky one.
- *
- * An unknown version is REFUSED here, distinguishably. It does not heal: the blob rides INSIDE a
- * commit frame, and it is the handshake header the lane reads first that carries the heal rule.
- */
 export const LEDGER_ENTRIES_VERSION = 1
 
 const VERSION_BYTES = 1
 const COUNT_BYTES = 2
 const HEADER_BYTES = VERSION_BYTES + COUNT_BYTES
 const LENGTH_BYTES = 4
+
+export class LedgerEntryRefusedError extends Error {
+  constructor(message?: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'LedgerEntryRefusedError'
+  }
+}
+
+export class UnsupportedLedgerEntriesVersionError extends Error {
+  constructor(message?: string) {
+    super(message)
+    this.name = 'UnsupportedLedgerEntriesVersionError'
+  }
+}
 
 /** Encode the signed tokens a Commit enacts, for sealing into its frame. */
 export function encodeLedgerEntries(tokens: Array<string>): Uint8Array {
@@ -59,7 +62,9 @@ export function decodeLedgerEntries(bytes: Uint8Array): Array<string> {
   }
   const version = bytes[0]
   if (version !== LEDGER_ENTRIES_VERSION) {
-    throw new Error(`unsupported ledger entry blob version: ${version}`)
+    throw new UnsupportedLedgerEntriesVersionError(
+      `unsupported ledger entry blob version: ${version}`,
+    )
   }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const count = view.getUint16(VERSION_BYTES, true)
@@ -77,53 +82,27 @@ export function decodeLedgerEntries(bytes: Uint8Array): Array<string> {
     tokens.push(toUTF(bytes.subarray(start, start + length)))
     offset = start + length
   }
+  if (offset !== bytes.length) throw new Error('ledger entry blob has trailing bytes')
   return tokens
 }
 
-/**
- * A ledger-entry resolver over the blob of the commit frame being applied. The MLS port calls
- * it with the ids the Commit's control envelope names; it answers with the bodies sealed into
- * that same frame — making body delivery atomic with the commit, so first delivery cannot
- * strand.
- *
- * Answers with every token in the blob, not just the named subset: tokens are
- * content-addressed, so the caller binds each body to its id by digesting, and an unrequested
- * body is ignored. A responder can fail to answer, never inject.
- *
- * A blob this peer cannot open yields NO entries, not an error: the commit fails to resolve and
- * the port raises missing-entries, never corruption. THE OPEN GETS EXACTLY ONE ATTEMPT — the lane
- * files that commit as poison, advances the cursor over it and never re-reads it (`peer.ts`, the
- * `isMissingLedgerEntries` branch of the walk). So this must not be used to absorb a failure that
- * a retry would fix: there is no retry. In practice it should not arise at all on the apply path,
- * since the port asks only for a commit it is applying, framed at this peer's epoch, which is the
- * epoch the blob is sealed under.
- *
- * The `catch` is deliberately narrow about what it means and deliberately blind to which of three
- * things happened: the AEAD refused the bytes, the plaintext did not decode as an entry list, or
- * the blob genuinely lacked the ids. Only the first is reachable by TAMPERING — a hub that flips
- * one byte turns that commit into poison for the targeted peer, silently and unattributably. The
- * cost is bounded and known: the peer skips the commit, the next one is framed ahead of it, and
- * the `ahead` disposition strands it into a rejoin that re-gathers the ledger. Nothing is
- * injected, because bodies are content-addressed and signature-verified downstream. But the
- * poison rule's justification — "a blob this peer cannot open is one no member at this epoch can"
- * — holds only for an honest hub, and this is where that assumption is spent.
- *
- * Opened with {@link GroupCrypto.openEntries} and NOT with `unwrap`, because this runs INSIDE the
- * MLS port's apply of the commit it is resolving for. `unwrap` consumes a ratchet generation and
- * mutates the handle; an open that does either is unsound while the handle is mid-apply, whatever
- * order it is scheduled in. `openEntries` derives its key from the epoch's exporter secret, so it
- * is pure and re-entrant and this resolver may be called from anywhere the epoch is right.
- */
+// Opening is pure: transport/storage failures must reach the walker without consuming a key.
 export function createLedgerEntryResolver(
   sealedEntries: Uint8Array,
   openEntries: GroupCrypto['openEntries'],
 ): (ids: Array<string>) => Promise<Array<string>> {
   return async (_ids: Array<string>): Promise<Array<string>> => {
+    let opened: Uint8Array
     try {
-      // Body trust comes from the token's own signature + content-address, which the caller
-      // re-verifies — not from the seal, which only buys confidentiality from the hub.
-      return decodeLedgerEntries(await openEntries(sealedEntries))
-    } catch {
+      opened = await openEntries(sealedEntries)
+    } catch (error) {
+      if (error instanceof LedgerEntryRefusedError) return []
+      throw error
+    }
+    try {
+      return decodeLedgerEntries(opened)
+    } catch (error) {
+      if (error instanceof UnsupportedLedgerEntriesVersionError) throw error
       return []
     }
   }

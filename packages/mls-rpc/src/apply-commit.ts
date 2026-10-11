@@ -1,6 +1,7 @@
 import { normalizeDID } from '@kokuin/token'
 import {
   CommitRejectedError,
+  CommitValidationUnavailableError,
   type GroupHandle,
   MissingLedgerEntriesError,
   readMessageEpoch,
@@ -24,6 +25,7 @@ export type ApplyCommitParams = CommitContext & {
 }
 
 export type ApplyCommitResult = {
+  validation?: 'unavailable'
   refusal?: RecoveryRefusalReason
   /** The handle took the commit's state. A host keeps it even when `advanced` is false. */
   applied: boolean
@@ -84,7 +86,14 @@ export async function applyCommit(params: ApplyCommitParams): Promise<ApplyCommi
       .map((entry) => entry.verified)
       .filter((verified) => !verified.entry.type.startsWith(CONTROL_TYPE_PREFIX))
 
-  const header = await handle.readCommitHeader(commit)
+  let header: Awaited<ReturnType<GroupHandle['readCommitHeader']>>
+  try {
+    header = await handle.readCommitHeader(commit)
+  } catch (error) {
+    if (error instanceof CommitValidationUnavailableError)
+      return { ...refused(), validation: 'unavailable' }
+    throw error
+  }
   if (header == null || readMessageEpoch(commit) !== before) return refused()
   const committerDID = header.committerDID
   if (committerDID != null && normalizeDID(committerDID) === normalizeDID(ownDID)) {
@@ -125,6 +134,8 @@ export async function applyCommit(params: ApplyCommitParams): Promise<ApplyCommi
     })
   } catch (error) {
     if (error instanceof MissingLedgerEntriesError || persistFailed || resolverFailed) throw error
+    if (error instanceof CommitValidationUnavailableError)
+      return { ...refused(committerDID), validation: 'unavailable' }
     threw = true
     if (error instanceof CommitRejectedError) refusal = error.reason
   } finally {

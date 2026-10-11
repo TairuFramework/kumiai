@@ -69,6 +69,7 @@ export type ConformanceProcessCommitResult = {
   epochBefore: number
   epochAfter: number
   refusal?: ConformanceRecoveryRefusalReason
+  validation?: 'unavailable'
 }
 export type ConformanceAppliedRecovery =
   | ConformancePendingRecovery

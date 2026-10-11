@@ -18,6 +18,7 @@ import {
   isUnsupportedCommitFrameVersion,
 } from './commit-frame.js'
 import { appliedRows, forkEvidence } from './control/forks.js'
+import { searchOccurrence } from './control/occurrence.js'
 import {
   enqueueOperation,
   type OperationDeps,
@@ -25,6 +26,11 @@ import {
   stepOperation,
 } from './control/operations.js'
 import { type RejoinDeps, rejoinBarrier, type SourceScan, stepRejoin } from './control/rejoin.js'
+import {
+  type CertifiedControlRange,
+  type ControlSearchWork,
+  isCertifiedControlLoser,
+} from './control/search.js'
 import { applyResolved as applyControlResolved, pruneWindow } from './control/store.js'
 import type {
   AdoptionWriteFactory,
@@ -1281,14 +1287,45 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     port: GroupMLS,
     topicID: string,
     forRecovery = false,
+    search?: {
+      through: LogPosition | null
+      range: CertifiedControlRange | null
+      work: ControlSearchWork
+    },
   ): Promise<boolean> => {
     if (anchorRecoveryPending || locallyRemoved) return false
     let advancedEpoch = false
     const started = logDelivery?.beginWalk() ?? 0
+    const unprocessable = async (
+      position: LogPosition,
+      commitDigest: string,
+      localEpoch: number,
+      claimedEpoch: number | null,
+    ): Promise<boolean> => {
+      stranded = true
+      healRequested = true
+      await persistStrand()
+      observeStrand({
+        position,
+        commitDigest,
+        localEpoch,
+        claimedEpoch,
+        kind: 'unprocessable-gap',
+        confidence: 'claimed',
+      })
+      return advancedEpoch
+    }
     let covered = true
     // The tip from the SAME reply whose frames were processed, so it can never run ahead of them.
     const takeHead = (head: string | null): void => {
       commitLogHead = head == null ? null : asLogPosition(head)
+      if (
+        search !== undefined &&
+        search.through !== null &&
+        commitLogHead !== null &&
+        commitLogHead > search.through
+      )
+        commitLogHead = search.through
       if (covered && !stranded && floor.covered) {
         if (!advancedEpoch) floor = { ...floor, position: reconciledHead }
         logDelivery?.certify(floor.epoch, started)
@@ -1297,6 +1334,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     while (true) {
       if (disposed) return false
       const pageAfter = reconciledHead
+      if (search !== undefined) {
+        if (
+          search.through === null ||
+          (pageAfter !== null && pageAfter >= search.through) ||
+          !search.work.takeFetch()
+        )
+          return advancedEpoch
+      }
       const result = checkedFetchResult(
         await mux.fetchTopic({
           topicID,
@@ -1351,6 +1396,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // operation carries that across a restart); meeting its own commit here means its saved operation
         // was lost or never written.
         const position = asLogPosition(message.sequenceID)
+        if (
+          search !== undefined &&
+          (search.through === null || position > search.through || !search.work.takeFrame())
+        )
+          return advancedEpoch
         if (rejoinPosition != null && position >= rejoinPosition) return advancedEpoch
         let frame: ReturnType<typeof decodeHandshakeFrame>
         try {
@@ -1448,7 +1498,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         let localEpoch = await port.readEpoch()
         if (disposed) return false
         while (true) {
-          const readHeader = await port.readCommitHeader(commitFrame.commit)
+          let readHeader: Awaited<ReturnType<GroupMLS['readCommitHeader']>>
+          try {
+            readHeader = await port.readCommitHeader(commitFrame.commit)
+          } catch (error) {
+            if (error instanceof Error && error.name === 'CommitValidationUnavailableError')
+              return unprocessable(position, commitDigest, localEpoch, localEpoch)
+            throw error
+          }
           if (disposed) return false
           // Normalized before `classifyCommit` compares it against `state.localDID` (also
           // normalized, at construction) — an own-unmerged commit authenticated under a different
@@ -1457,6 +1514,25 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             readHeader?.committerDID != null
               ? { ...readHeader, committerDID: normalizeDID(readHeader.committerDID) }
               : readHeader
+          const certificate = search?.range
+          if (certificate != null && header != null) {
+            const key = (await port.readRecoverySource()).key
+            const winner = appliedByEpoch.get(certificate.source.epoch)
+            if (
+              winner?.sequenceID === certificate.winner.position &&
+              winner.payloadDigest === certificate.winner.payloadDigest &&
+              isCertifiedControlLoser(
+                certificate,
+                key,
+                header.epoch,
+                position,
+                toB64U(sha256(message.payload)),
+              )
+            ) {
+              await saveCommitCursor(position)
+              break
+            }
+          }
           const disposition = classifyCommit({
             header,
             sequenceID: position,
@@ -1560,6 +1636,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
                   external: header?.external === true,
                 })
           let applied: ProcessCommitResult
+          let resolverFailed = false
           try {
             // Through the seam, like every other site that ratchets the handle: it reads this
             // epoch's app frames ahead of the apply and takes the anchor if the roster moved.
@@ -1582,10 +1659,17 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
                   // epoch, the epoch the blob is sealed under, making body delivery atomic with the
                   // commit. Called from INSIDE the apply, so the open must not touch the handle's
                   // ratchet: `openEntries` reads only the epoch's exporter secret and is pure.
-                  resolveLedgerEntries: createLedgerEntryResolver(
-                    commitFrame.sealedEntries,
-                    crypto.openEntries,
-                  ),
+                  resolveLedgerEntries: async (ids) => {
+                    try {
+                      return await createLedgerEntryResolver(
+                        commitFrame.sealedEntries,
+                        crypto.openEntries,
+                      )(ids)
+                    } catch (error) {
+                      resolverFailed = true
+                      throw error
+                    }
+                  },
                 })
                 return result
               },
@@ -1601,6 +1685,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             })
           } catch (error) {
             if (disposed) return false
+            if (
+              resolverFailed ||
+              (error instanceof Error && error.name === 'CommitValidationUnavailableError')
+            ) {
+              await resolveAnchorRotation({ port, knownUnlanded: true })
+              return unprocessable(position, commitDigest, framedEpoch, header?.epoch ?? null)
+            }
             if (!isMissingLedgerEntries(error)) {
               // The port broke its contract. The cursor stays and the frame is re-read — the pull is
               // a retry, and this is not an outcome it can name.
@@ -1635,6 +1726,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             break
           }
           if (disposed) return false
+          if (applied.validation === 'unavailable') {
+            await resolveAnchorRotation({ port, knownUnlanded: true })
+            return unprocessable(position, commitDigest, framedEpoch, header?.epoch ?? null)
+          }
           if (applied.applied && snapshot != null && control != null) {
             const settled = await control.load()
             for (const op of snapshot.operations) {
@@ -2708,7 +2803,21 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         assertLive()
         return result
       },
-      searchLog: (from, digest) => operationDeps().searchLog(from, digest),
+      searchLog: (from, digest) =>
+        searchOccurrence(
+          async (after) => {
+            assertLive()
+            return checkedFetchResult(
+              await mux.fetchTopic({
+                topicID: commits,
+                ...(after === null ? {} : { after }),
+                limit: COMMIT_FETCH_LIMIT,
+              }),
+            )
+          },
+          from,
+          digest,
+        ),
       confirm: async (record) => {
         const position = record.position
         if (position == null) throw new Error('Published rejoin has no position')

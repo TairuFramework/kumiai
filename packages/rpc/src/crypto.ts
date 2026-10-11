@@ -164,6 +164,8 @@ export type ProcessCommitResult = {
   epochBefore: number
   epochAfter: number
   refusal?: RecoveryRefusalReason
+  /** Unavailable requires no adoption, no advance and equal before/after epochs. */
+  validation?: 'unavailable'
 }
 
 /** A frame refused against the locked handle epoch, before spending a decrypt key. */

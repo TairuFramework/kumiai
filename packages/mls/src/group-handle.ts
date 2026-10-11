@@ -2,6 +2,7 @@ import { normalizeDID } from '@kokuin/token'
 import { EventEmitter, type EventsSource } from '@sozai/event'
 import {
   type ClientState,
+  CodecError,
   contentTypes,
   createApplicationMessage,
   createProposal,
@@ -20,14 +21,16 @@ import {
   nodeTypes,
   type ProcessMessageResult,
   type ProposalWithSender,
+  processPublicMessage,
   senderTypes,
+  ValidationError,
   wireformats,
 } from 'ts-mls'
 
 import { type GroupAnchor, readGroupAnchor } from './anchor.js'
 import { verifyLeafCredential } from './authentication.js'
 import { cloneData } from './clone.js'
-import { encodeClientState } from './codec.js'
+import { decodeClientState, encodeClientState } from './codec.js'
 import {
   didFromCredential,
   type GroupMember,
@@ -39,6 +42,8 @@ import { decodeControlEnvelope } from './envelope.js'
 import { foldEnvelope, GROUP_TYPE_PREFIX } from './envelope-fold.js'
 import {
   CarryIdentityError,
+  CommitValidationUnavailableError,
+  isConclusiveCommitError,
   LeafBindingError,
   LeafLapsedError,
   RevokeProofError,
@@ -218,15 +223,20 @@ function wrapCommitPolicy(
   }
 }
 
-/**
- * Read a PrivateMessage commit's cleartext `authenticatedData`, available before
- * any epoch secret. Returns undefined for anything that is not a PrivateMessage of
- * contentType commit (those keep the pre-envelope path). Narrows the `unknown`
- * frame structurally, not by cast.
- */
-function readPrivateCommit(decoded: unknown): { authenticatedData: Uint8Array } | undefined {
+function readMemberCommit(decoded: unknown): { authenticatedData: Uint8Array } | undefined {
   if (decoded == null || typeof decoded !== 'object') return undefined
   const frame = decoded as { wireformat?: unknown; privateMessage?: unknown }
+  if (frame.wireformat === wireformats.mls_public_message) {
+    const publicMessage = (
+      decoded as MlsFramedMessage & { wireformat: typeof wireformats.mls_public_message }
+    ).publicMessage
+    if (
+      publicMessage.senderType === senderTypes.member &&
+      publicMessage.content.contentType === contentTypes.commit
+    )
+      return { authenticatedData: publicMessage.content.authenticatedData }
+    return undefined
+  }
   if (frame.wireformat !== wireformats.mls_private_message) return undefined
   const pm = frame.privateMessage as
     | { contentType?: unknown; authenticatedData?: unknown }
@@ -1137,7 +1147,7 @@ export class GroupHandle {
     const callerPolicy = opts?.commitPolicy ?? this.#commitPolicy
     const capture: CommitCapture = {}
 
-    const commit = readPrivateCommit(decoded)
+    const commit = readMemberCommit(decoded)
     let externalCommitDID: string | undefined
     let isCommitMessage = commit != null
     if (commit == null) {
@@ -1345,50 +1355,37 @@ export class GroupHandle {
     }
   }
 
-  /**
-   * Does this external commit carry a signature that verifies as its own UpdatePath leaf's?
-   *
-   * An external commit is self-signed: the key that signed it is the `signaturePublicKey` of the
-   * same UpdatePath leaf whose credential names the committer. So a verified signature binds the
-   * two — whoever authored these bytes held the key of the leaf claiming that DID — and an
-   * unverified one means the credential is a field somebody wrote, nothing more.
-   *
-   * WHAT IT REQUIRES, and why the answer is only ever available at this handle's own epoch.
-   * MLS binds the full GroupContext into the signed FramedContentTBS for a new_member_commit
-   * sender, so verifying needs the group context the signer signed against: group id, epoch, tree
-   * hash, confirmed transcript hash, extensions. This handle holds exactly one — its current
-   * epoch's. It holds none for an epoch AHEAD of it, which no peer can, and that is not a gap
-   * this check can close: a peer that has fallen behind holds nothing to check the group's future
-   * with. So a commit framed anywhere but here answers false, and the caller reports no committer
-   * rather than an unauthenticated one.
-   *
-   * WHAT IT DOES NOT ESTABLISH. Possession of a key is not permission to use it: a verified
-   * signature says "the holder of that leaf key authored these bytes", never "this member may
-   * rejoin". And it is a property of the bytes, not of their delivery — a GENUINE external commit
-   * captured and re-published verifies exactly as it did the first time.
-   *
-   * Implemented by asking the MLS library to process the message with a callback that refuses it,
-   * which runs the real verification and stops before anything is applied. Deliberately not a
-   * reimplementation: a check that verified less than the apply path does would pass frames the
-   * apply path rejects, and the two must not drift. Non-mutating — the refusal returns this same
-   * state, and the result is discarded either way. Any throw is a "no": the library raises on a
-   * bad signature, on an epoch that is not this one, and on a malformed frame, and none of those
-   * is an authenticated committer.
-   */
-  async #externalCommitAuthenticates(decoded: unknown): Promise<boolean> {
+  // ts-mls authenticates before resolving proposals; work on a copy and refuse adoption.
+  async #authenticatePublicCommit(
+    decoded: unknown,
+  ): Promise<{ senderLeafIndex: number | undefined; proposals: Array<ProposalWithSender> } | null> {
+    const message = decoded as MlsFramedMessage
+    if (message.wireformat !== wireformats.mls_public_message) return null
+    let capture: {
+      senderLeafIndex: number | undefined
+      proposals: Array<ProposalWithSender>
+    } | null = null
     try {
-      const result = await mlsProcessMessage({
+      const state = decodeClientState(encodeClientState(this.#state))
+      if (state === undefined)
+        throw new CommitValidationUnavailableError('Public authentication state unavailable')
+      const result = await processPublicMessage({
         context: this.#context,
-        state: this.#state,
-        message: decoded as MlsFramedMessage,
-        callback: (): IncomingMessageAction => 'reject',
+        state,
+        publicMessage: message.publicMessage,
+        callback: (incoming): IncomingMessageAction => {
+          if (incoming.kind === 'commit')
+            capture = { senderLeafIndex: incoming.senderLeafIndex, proposals: incoming.proposals }
+          return 'reject'
+        },
       })
-      // Zeroed rather than assumed empty: the refusal path hands back nothing to retire today,
-      // and this must not become a way to leak retired key material if that ever changes.
       zeroAll(result.consumed)
-      return result.kind === 'newState' && result.actionTaken === 'reject'
-    } catch {
-      return false
+      return result.actionTaken === 'reject' ? capture : null
+    } catch (error) {
+      if (isConclusiveCommitError(error)) return null
+      throw new CommitValidationUnavailableError('Public commit authentication unavailable', {
+        cause: error,
+      })
     }
   }
 
@@ -1436,41 +1433,7 @@ export class GroupHandle {
     return undefined
   }
 
-  /**
-   * Read what a Commit says about itself against this handle, WITHOUT advancing state.
-   *
-   * **`null` means "these bytes are not a Commit" and nothing else.** It does not mean "a
-   * Commit I could not read": callers file `null` as poison and step over it, so answering it
-   * for a Commit this handle merely cannot authenticate would make a reader treat every commit
-   * framed away from its own epoch as garbage — including the ones that say it fell behind.
-   *
-   * The two facts the header carries are NOT equally available, and the return type says so:
-   * - `epoch` is in the message's CLEARTEXT ({@link readMessageEpoch}). Keyless, so it is
-   *   readable for a Commit framed at any epoch — and unauthenticated, so it is the
-   *   publisher's word and may only be used to decide what to try.
-   * - `committerDID` needs the epoch's sender-data secret. A member commit (PrivateMessage)
-   *   has its committer encrypted under it: decrypt to the sender leaf index and resolve that
-   *   against this handle's ratchet tree — the same leaf->DID the commit policy sees as
-   *   `didOfLeaf(senderLeafIndex)`. Both the secret and the tree are THIS epoch's, so the
-   *   committer resolves only for a Commit framed where this handle stands, and is ABSENT
-   *   otherwise. Absent is "I cannot vouch for the author", never "there is no author": a
-   *   caller must not substitute an unauthenticated one.
-   *
-   * An external commit needs no epoch secret and no tree lookup — it is a public message and its
-   * committer's DID rides its own UpdatePath leaf (see {@link readExternalCommit}), which is also
-   * what makes it recognizable as external. It is NOT exempt from authentication. The credential
-   * carrying that DID is a plain field, so it is returned only once the commit's own self-signed
-   * signature verifies, and it is ABSENT otherwise — the same rule the member path follows, for
-   * the same reason. Verifiable only at this handle's own epoch, since MLS binds the GroupContext
-   * into what an external commit signs; a commit framed elsewhere reports no committer.
-   *
-   * `external: true` is reported either way: it is read from the wireformat and sender type, both
-   * cleartext, so it is as available as the epoch and says nothing about who authored the frame.
-   *
-   * Runs on the handle mutex so the epoch secret, tree, and epoch are one snapshot against a
-   * concurrent processMessage. Non-mutating: sender-data decrypt is epoch-level and consumes
-   * no per-message key. Async only because the KDF and AEAD are.
-   */
+  /** Structural epoch at other epochs; authenticated author or unavailable diagnostics here. */
   async readCommitHeader(
     commit: Uint8Array,
   ): Promise<{ epoch: bigint; committerDID?: string; external?: boolean } | null> {
@@ -1478,37 +1441,20 @@ export class GroupHandle {
       let decoded: unknown
       try {
         decoded = decode(mlsMessageDecoder, commit)
-      } catch {
-        // ts-mls `decode` throws CodecError on malformed/truncated frames; the contract is
-        // "null for bytes that are not a Commit", and the lane treats null as poison (advance
-        // the cursor, never retry). An unguarded throw would instead wedge the commit lane on
-        // this frame forever. Mirrors readMessageEpoch, which guards this same decode.
-        return null
+      } catch (error) {
+        if (error instanceof CodecError) return null
+        throw new CommitValidationUnavailableError('Commit decode unavailable', { cause: error })
       }
       if (decoded == null) return null
       const epoch = readMessageEpoch(commit)
       if (epoch == null) return null
 
-      // External-join commit: the committer holds no pre-commit leaf, so its DID rides the
-      // commit's own UpdatePath leaf. No tree lookup, no sender-data decrypt.
-      //
-      // `external: true` is reported, not just consumed to find the committer: a resync rejoin
-      // is invisible to every before/after diff a caller could run — it changes no member DID
-      // (the roster already held it); its leaf lands on the leftmost blank and may shift, but
-      // the DID set is unchanged. A caller that must know the group's membership shifted has no
-      // other way to see it, so the fact is surfaced here rather than discarded. Absent means a
-      // member commit.
       const external = readExternalCommit(decoded)
       if (external != null) {
-        // It IS a commit, so it gets a header even when the leaf credential will not parse to a
-        // DID and even when the signature will not verify — the epoch is readable and the
-        // caller's epoch rows are entitled to it. Only the committer goes missing.
-        //
-        // The signature is checkable only where this handle holds the GroupContext the commit's
-        // signature is bound to, which is the epoch this handle stands at. A commit framed
-        // anywhere else comes back with no committer — indistinguishable, from here, from a
-        // forgery, and treated as one.
-        const authentic = external.did != null && (await this.#externalCommitAuthenticates(decoded))
+        const authentic =
+          epoch === this.epoch &&
+          external.did != null &&
+          (await this.#authenticatePublicCommit(decoded)) !== null
         return {
           epoch,
           external: true,
@@ -1516,15 +1462,26 @@ export class GroupHandle {
         }
       }
 
+      const publicMessage = decoded as MlsFramedMessage
+      if (
+        publicMessage.wireformat === wireformats.mls_public_message &&
+        publicMessage.publicMessage.senderType === senderTypes.member &&
+        publicMessage.publicMessage.content.contentType === contentTypes.commit
+      ) {
+        if (epoch !== this.epoch) return { epoch }
+        const authenticated = await this.#authenticatePublicCommit(decoded)
+        if (authenticated === null) return { epoch }
+        if (authenticated.senderLeafIndex === undefined)
+          throw new CommitValidationUnavailableError('Public commit sender key unavailable')
+        const committerDID = this.#didOfLeaf(authenticated.senderLeafIndex)
+        if (committerDID === undefined)
+          throw new CommitValidationUnavailableError('Public commit sender key unavailable')
+        return { epoch, committerDID }
+      }
+
       const pm = readPrivateFrame(decoded, contentTypes.commit)
-      // The ONLY "not a Commit" verdict on this path, and the only thing `null` is for: the
-      // frame is not a PrivateMessage of contentType commit. Both of those fields are cleartext,
-      // so this verdict needs no key and is the same at every epoch.
       if (pm == null) return null
-      // From here the bytes ARE a commit, and every exit carries its epoch. The committer is
-      // what may be missing: sender-data is sealed under the epoch secret this handle holds
-      // right now, so a commit framed at any other epoch decrypts to nothing, and a leaf this
-      // tree does not hold resolves to nobody. Neither is a reason to call the frame garbage.
+      if (epoch !== this.epoch) return { epoch }
       const leafIndex = await readSenderLeafIndex(
         this.#context,
         this.#state.keySchedule.senderDataSecret,
@@ -1532,7 +1489,9 @@ export class GroupHandle {
       )
       if (leafIndex == null) return { epoch }
       const committerDID = this.#didOfLeaf(leafIndex)
-      return committerDID == null ? { epoch } : { epoch, committerDID }
+      if (committerDID === undefined)
+        throw new CommitValidationUnavailableError('Commit sender key unavailable')
+      return { epoch, committerDID }
     })
   }
 
@@ -1637,6 +1596,19 @@ export class GroupHandle {
         })
       } catch (error) {
         if (application != null) throw error
+        const bindingRefused =
+          capture.bindingError !== undefined &&
+          error instanceof ValidationError &&
+          error.message === 'Could not validate credential'
+        if (!isConclusiveCommitError(error) && !bindingRefused)
+          throw new CommitValidationUnavailableError(
+            error instanceof Error
+              ? `Commit validation unavailable: ${error.message}`
+              : 'Commit validation unavailable',
+            {
+              cause: error,
+            },
+          )
         const rejection = new CommitRejectedError(
           capture.rejected?.proposals ?? [],
           capture.rejected?.senderLeafIndex,

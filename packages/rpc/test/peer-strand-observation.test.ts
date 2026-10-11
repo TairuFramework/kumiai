@@ -40,6 +40,54 @@ async function publishUnreadable(
 }
 
 describe('commit strand observations', () => {
+  test.each(['header', 'processing'] as const)(
+    'ordinary unavailable validation strands as an unprocessable gap: %s',
+    async (seam) => {
+      const hub = new FakeHub()
+      const rs = secret(seam === 'header' ? 0xa1 : 0xa2)
+      const mls = createMemoryGroupMLS({
+        localDID: 'bob',
+        groupID: commitTopic(rs),
+        recoverySecret: rs,
+        members,
+        epoch: 1,
+      })
+      if (seam === 'header')
+        mls.readCommitHeader = async () => {
+          const error = new Error('retained key unavailable')
+          error.name = 'CommitValidationUnavailableError'
+          throw error
+        }
+      else
+        mls.processCommit = async () => ({
+          applied: false,
+          advanced: false,
+          epochBefore: 1,
+          epochAfter: 1,
+          validation: 'unavailable',
+        })
+      const frame = await publishCommit({ hub, senderDID: 'carol', recoverySecret: rs, epoch: 1 })
+      const observations: Array<StrandObservation> = []
+      const bob = makeMLSPeer(hub, 'bob', rs, {
+        mls,
+        members,
+        recovery,
+        onStrand: (value) => {
+          observations.push(value)
+        },
+      })
+      await vi.waitFor(() => expect(observations).toHaveLength(1))
+      expect(observations[0]).toMatchObject({
+        kind: 'unprocessable-gap',
+        position: frame.sequenceID,
+        localEpoch: 1,
+      })
+      expect(bob.mls.epoch()).toBe(1)
+      expect((await bob.control.load()).cursor?.position ?? null).toBeNull()
+      await bob.peer.dispose()
+    },
+  )
+
   test.each(['losing', 'winning'] as const)(
     '%s fork reports only when this peer loses',
     async (branch) => {

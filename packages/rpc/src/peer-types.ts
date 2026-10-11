@@ -115,6 +115,7 @@ export type StrandKind =
   | 'ahead'
   | 'unknown-version'
   | 'retention-gap'
+  | 'unprocessable-gap'
 /**
  * For `own-unmerged`, `authenticated` means this device sealed a commit at this epoch that the
  * hub now places in the log. `readCommitHeader` identifies its leaf from PrivateMessage sender

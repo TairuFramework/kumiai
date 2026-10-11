@@ -1,3 +1,5 @@
+import { CodecError, CryptoError, CryptoVerificationError } from 'ts-mls'
+
 export type DeviceRegistryCodecErrorParams = { message: string; cause?: unknown }
 
 export class DeviceRegistryCodecError extends Error {
@@ -90,4 +92,21 @@ export class RevokeProofError extends Error {
   get reason(): RevokeProofReason {
     return this.#reason
   }
+}
+
+export class CommitValidationUnavailableError extends Error {
+  constructor(message?: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'CommitValidationUnavailableError'
+  }
+}
+
+export function isConclusiveCommitError(error: unknown): boolean {
+  return (
+    error instanceof CodecError ||
+    error instanceof CryptoVerificationError ||
+    (error instanceof CryptoError &&
+      /invalid ghash tag|invalid tag|invalid poly1305 tag/.test(error.message)) ||
+    (error instanceof Error && ['aes-gcm: invalid tag', 'invalid tag'].includes(error.message))
+  )
 }

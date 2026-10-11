@@ -7,6 +7,7 @@ import {
   mlsMessageDecoder,
   mlsMessageEncoder,
   protocolVersions,
+  senderTypes,
   wireformats,
 } from 'ts-mls'
 
@@ -63,10 +64,18 @@ export function readMessageAAD(bytes: Uint8Array): Uint8Array | null {
 export function readCommitEntryIDs(bytes: Uint8Array): Array<string> {
   try {
     const message = decode(mlsMessageDecoder, bytes)
-    if (message?.wireformat !== wireformats.mls_private_message) return []
-    const frame = message.privateMessage
-    if (frame.contentType !== contentTypes.commit) return []
-    const envelope = decodeControlEnvelope(frame.authenticatedData)
+    let data: Uint8Array
+    if (message?.wireformat === wireformats.mls_private_message) {
+      if (message.privateMessage.contentType !== contentTypes.commit) return []
+      data = message.privateMessage.authenticatedData
+    } else if (
+      message?.wireformat === wireformats.mls_public_message &&
+      message.publicMessage.senderType === senderTypes.member &&
+      message.publicMessage.content.contentType === contentTypes.commit
+    ) {
+      data = message.publicMessage.content.authenticatedData
+    } else return []
+    const envelope = decodeControlEnvelope(data)
     return envelope.ok ? (envelope.envelope.entries ?? []) : []
   } catch {
     return []

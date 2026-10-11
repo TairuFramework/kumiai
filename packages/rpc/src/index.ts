@@ -41,7 +41,25 @@ export type {
   PrepareControlResult,
   SaveControlBuild,
 } from './control/build.js'
+export { searchOccurrence } from './control/occurrence.js'
 export type { HostBuilt, OperationDeps } from './control/operations.js'
+export {
+  type CertifiedControlRange,
+  CONTROL_SEARCH_BUDGET,
+  type ControlEvidenceSnapshot,
+  type ControlFrameValidation,
+  type ControlHold,
+  type ControlLogFrame,
+  type ControlSearchBudget,
+  type ControlSearchDeps,
+  type ControlSearchWork,
+  type ControlValidation,
+  type ControlValidationPort,
+  createControlSearch,
+  type FollowWinnerResult,
+  type GroupForkEvidence,
+  isCertifiedControlLoser,
+} from './control/search.js'
 export {
   applyChanges,
   applyResolved,
@@ -144,6 +162,8 @@ export {
   decodeLedgerEntries,
   encodeLedgerEntries,
   LEDGER_ENTRIES_VERSION,
+  LedgerEntryRefusedError,
+  UnsupportedLedgerEntriesVersionError,
 } from './ledger-entries.js'
 export type { AppOutboxCleared, EpochFloor } from './log-delivery.js'
 export {

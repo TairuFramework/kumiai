@@ -31,6 +31,7 @@ export {
   decodeControlJournal,
   encodeControlJournal,
 } from './control-journal.js'
+export { createControlValidationPort } from './control-validation.js'
 export {
   createGroupCrypto,
   deriveEntryKey,

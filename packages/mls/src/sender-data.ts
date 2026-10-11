@@ -1,5 +1,7 @@
 import type { MlsContext } from 'ts-mls'
 
+import { CommitValidationUnavailableError, isConclusiveCommitError } from './errors.js'
+
 /**
  * PrivateMessage sender-data decrypt, reimplemented from RFC 9420 §6.3.2.
  *
@@ -106,8 +108,6 @@ export async function readSenderLeafIndex(
 ): Promise<number | null> {
   const { hpke } = context.cipherSuite
   const sampled = sample(context, pm.ciphertext)
-  const key = await expandWithLabel(context, senderDataSecret, 'key', sampled, hpke.keyLength)
-  const nonce = await expandWithLabel(context, senderDataSecret, 'nonce', sampled, hpke.nonceLength)
   // SenderDataAAD = { opaque group_id<V>; uint64 epoch; ContentType content_type (uint8) }.
   const aad = concat([
     varLen(pm.groupId),
@@ -116,9 +116,18 @@ export async function readSenderLeafIndex(
   ])
   let plaintext: Uint8Array
   try {
+    const key = await expandWithLabel(context, senderDataSecret, 'key', sampled, hpke.keyLength)
+    const nonce = await expandWithLabel(
+      context,
+      senderDataSecret,
+      'nonce',
+      sampled,
+      hpke.nonceLength,
+    )
     plaintext = await hpke.decryptAead(key, nonce, aad, pm.encryptedSenderData)
-  } catch {
-    return null
+  } catch (error) {
+    if (isConclusiveCommitError(error)) return null
+    throw new CommitValidationUnavailableError('Sender data unavailable', { cause: error })
   }
   // SenderData = { uint32 leaf_index; uint32 generation; opaque reuse_guard[4] }.
   if (plaintext.length < 4) return null

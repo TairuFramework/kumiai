@@ -7,6 +7,7 @@ import { fromB64U, fromUTF, toB64U, toUTF } from '@sozai/codec'
 
 import type { AnchorStore } from '../../src/anchor.js'
 import type { SaveControlBuild } from '../../src/control/build.js'
+import type { ControlEvidenceSnapshot } from '../../src/control/search.js'
 import type {
   AdoptionWrite,
   ControlStore,
@@ -26,6 +27,7 @@ import { ControlWriteNotCommittedError } from '../../src/errors.js'
 import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
 
 export type MemoryGroupMLS = GroupMLS & {
+  readEvidence(): Promise<ControlEvidenceSnapshot>
   saveBuilt: SaveControlBuild
   control: () => ControlStore
   anchorStore: () => AnchorStore
@@ -931,6 +933,25 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     evict(did: string) {
       slotRemoveDID(did)
     },
+    readEvidence: () =>
+      serialise(async () => {
+        const snapshot = await hostDB.snapshot(storageID)
+        const key = { groupID, incarnation: 1 }
+        const identity =
+          snapshot.state === null
+            ? null
+            : decodeMemoryGroupIdentity(snapshot.state, key, recoverySecret)
+        const state =
+          snapshot.state === null
+            ? null
+            : (JSON.parse(toUTF(snapshot.state)) as { slots: Array<[number, string]> })
+        return {
+          source: { key, stateVersion: snapshot.version, identity },
+          applied: snapshot.control.applied,
+          cursor: snapshot.control.cursor,
+          terminal: state !== null && !state.slots.some(([, did]) => did === localDID),
+        }
+      }),
     readRecoverySource: () =>
       serialise(async () => {
         const key = { groupID, incarnation: 1 }

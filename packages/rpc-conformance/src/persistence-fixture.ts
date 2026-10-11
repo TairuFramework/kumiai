@@ -230,6 +230,16 @@ export type ConformanceGroupPersistence<
 > = {
   load(groupID: string): Promise<ConformanceGroupLifetime | null>
   loadState(key: ConformanceGroupKey): Promise<ConformanceGroupStateRecord | null>
+  readEvidence(key: ConformanceGroupKey): Promise<{
+    source: {
+      key: ConformanceGroupKey
+      stateVersion: number
+      identity: ConformanceEpochIdentity | null
+    }
+    applied: ConformanceControlSnapshot<Position>['applied']
+    cursor: ConformanceControlSnapshot<Position>['cursor']
+    terminal: boolean
+  }>
   loadTrust(groupID: string): Promise<ConformanceGroupRecoveryTrust | null>
   list(): Promise<Array<ConformanceGroupLifetime>>
   ports(key: ConformanceGroupKey): ConformanceGroupPersistencePorts<Position>

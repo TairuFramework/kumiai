@@ -845,6 +845,28 @@ export function createMemoryGroupCoordinator(params: {
     load: (groupID) => read(groupID, (stores) => stores.lifetime.load()),
     loadState: (key) =>
       read(key.groupID, (stores) => stores.incarnation(key.incarnation).state.load()),
+    readEvidence: (key) => {
+      const owned = { ...key }
+      return read(owned.groupID, async (stores) => {
+        const lifetime = await stores.lifetime.load()
+        const rows = stores.incarnation(owned.incarnation)
+        const state = await rows.state.load()
+        const control = await rows.control.load()
+        return {
+          source: {
+            key: owned,
+            stateVersion: state?.version ?? 0,
+            identity:
+              lifetime?.activeIncarnation === owned.incarnation && state != null && !state.deleted
+                ? { ...owned, epoch: state.epoch, authenticator: state.epochAuthenticator.slice() }
+                : null,
+          },
+          applied: control.applied,
+          cursor: control.cursor,
+          terminal: state != null && !state.deleted && state.terminal,
+        }
+      })
+    },
     loadTrust: (groupID) => read(groupID, (stores) => stores.trust.load()),
     async list() {
       if (owners.failure !== null) throw owners.failure
