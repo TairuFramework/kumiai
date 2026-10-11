@@ -261,9 +261,7 @@ export function createMemoryHostDatabase(
       await transact(groupID, 'save', (next) => {
         const slot = next.control.commitOnce
         const key =
-          ownedWrite?.expected?.key ??
-          keys.get(groupID) ??
-          (slot == null ? null : { groupID, incarnation: slot.incarnation })
+          keys.get(groupID) ?? (slot == null ? null : { groupID, incarnation: slot.incarnation })
         const before =
           next.state === null || key === null ? null : readIdentity(groupID, next.state, key)
         const expected = ownedWrite?.expected

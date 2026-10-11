@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest'
 
+import type { ConformanceAdoptionWrite } from './control-store.js'
 import type {
   ConformanceGroupPersistence,
   ConformanceGroupStores,
@@ -574,6 +575,50 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
         expect(await fixture.inspectSideRow('event-effect')).toEqual(utf8('effect-event'))
         await fixture.reopen()
         await scanSealed(fixture)
+      } finally {
+        await fixture.close()
+      }
+    })
+
+    test('refuses a proof-bearing state save without retained acceptance', async () => {
+      const fixture = await params.createFixture(groupID)
+      try {
+        const groups = fixture.ports.device.groups
+        const seed = await storageSeed(groups)
+        const source = {
+          key,
+          identity: {
+            ...key,
+            epoch: seed.state.epoch,
+            authenticator: seed.state.epochAuthenticator,
+          },
+          stateVersion: seed.state.version,
+        }
+        const expected: ConformanceAdoptionWrite<string>['expected'] = {
+          ...source,
+          acceptance: {
+            source,
+            from: null,
+            position: 'unretained-occurrence',
+            payloadDigest: 'unretained-payload',
+          },
+          journal: utf8('unretained-candidate'),
+        }
+        const before = await fixture.inspectRows()
+        await expect(
+          groups.transition(
+            await storageChange(groups, groupID, 'unretained-adoption'),
+            async (stores) =>
+              stores
+                .incarnation(1)
+                .state.save(
+                  { ...seed.state, version: seed.state.version + 1, senderHWM: 32 },
+                  expected,
+                ),
+          ),
+        ).rejects.toMatchObject({ name: 'ControlAdoptionMovedError' })
+        expect(await fixture.inspectRows()).toEqual(before)
+        expect(await groups.loadState(key)).toEqual(seed.state)
       } finally {
         await fixture.close()
       }

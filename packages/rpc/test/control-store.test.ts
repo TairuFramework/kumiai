@@ -413,6 +413,47 @@ describe('resolved writes', () => {
 })
 
 describe('memory host database', () => {
+  test.each([
+    { groupID: 'other-group', incarnation: 1 },
+    { groupID: 'actual', incarnation: 2 },
+  ])('refuses adoption for a different bound key: %j', async (expectedKey) => {
+    const db = createMemoryHostDatabase({
+      readIdentity: (_state, key) => ({
+        ...key,
+        epoch: 1,
+        authenticator: new Uint8Array([7]),
+      }),
+    })
+    const key = { groupID: 'actual', incarnation: 1 }
+    const store = db.control('storage', key)
+    await db.seed('storage', new Uint8Array([1]))
+    const before = await db.snapshot('storage')
+    await expect(
+      db.saveState('storage', new Uint8Array([2]), {
+        expected: {
+          key: expectedKey,
+          identity: { ...expectedKey, epoch: 1, authenticator: new Uint8Array([7]) },
+          stateVersion: before.version,
+        },
+        changes: { putApplied: [applied(1)] },
+        mutationID: 'wrong-key',
+      }),
+    ).rejects.toMatchObject({ name: 'ControlAdoptionMovedError' })
+    expect(await db.snapshot('storage')).toEqual(before)
+    expect(await store.lastMutation()).toBeNull()
+    await db.saveState('storage', new Uint8Array([2]), {
+      expected: {
+        key,
+        identity: { ...key, epoch: 1, authenticator: new Uint8Array([7]) },
+        stateVersion: before.version,
+      },
+      changes: {},
+      mutationID: 'matching-key',
+    })
+    expect(await db.loadState('storage')).toEqual(new Uint8Array([2]))
+    expect(await store.lastMutation()).toBe('matching-key')
+  })
+
   test('unsettled control prevents deletion and settled deletion removes the whole group only', async () => {
     const db = createMemoryHostDatabase()
     await db.saveState('other', new Uint8Array([9]))

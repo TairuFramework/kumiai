@@ -6,8 +6,8 @@ import { expect, test } from 'vitest'
 import { controlAdoptionFixture } from '../../../packages/mls-rpc/test/fixtures/control-adoption.js'
 import { createMemoryHostDatabase } from './host-db.js'
 
-test.each(['hold', 'acceptance'] as const)(
-  'the simple host refuses a %s committed in the persist callback after preparation',
+test.each(['hold', 'acceptance', 'group-key', 'incarnation'] as const)(
+  'the simple host refuses a %s changed in the persist callback after preparation',
   async (changed) => {
     const f = await controlAdoptionFixture()
     const key = f.proof.source.key
@@ -58,13 +58,37 @@ test.each(['hold', 'acceptance'] as const)(
       },
       stateVersion: () => db.loadVersion(key.groupID),
       persist: async (next, write) => {
-        await control.apply(
-          changed === 'hold'
-            ? { controlHold: { reason: 'unsupported-version', position: f.proof.position } }
-            : { commitOnceAcceptance: { ...f.proof, position: asLogPosition('other-occurrence') } },
-          'race',
-        )
-        await db.saveState(key.groupID, encodeClientState(next.state), write)
+        let persistedWrite = write
+        if (changed === 'hold' || changed === 'acceptance') {
+          await control.apply(
+            changed === 'hold'
+              ? { controlHold: { reason: 'unsupported-version', position: f.proof.position } }
+              : {
+                  commitOnceAcceptance: { ...f.proof, position: asLogPosition('other-occurrence') },
+                },
+            'race',
+          )
+        } else {
+          if (write?.expected?.identity == null) throw new Error('Missing adoption expectation')
+          const expectedKey =
+            changed === 'group-key'
+              ? { ...key, groupID: 'other-group' }
+              : { ...key, incarnation: key.incarnation + 1 }
+          persistedWrite = {
+            ...write,
+            expected: {
+              ...write.expected,
+              key: expectedKey,
+              identity: { ...write.expected.identity, ...expectedKey },
+            },
+          }
+        }
+        const before = await db.snapshot(key.groupID)
+        try {
+          await db.saveState(key.groupID, encodeClientState(next.state), persistedWrite)
+        } finally {
+          expect(await db.snapshot(key.groupID)).toEqual(before)
+        }
       },
     })
     const port = createControlAdoptionPort({

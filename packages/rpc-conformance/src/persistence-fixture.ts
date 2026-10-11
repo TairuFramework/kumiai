@@ -168,7 +168,7 @@ export type ConformanceIncarnationStores<Position extends string = string> = {
     loadInitialIdentity(): Promise<ConformanceEpochIdentity | null>
     save(
       record: ConformanceGroupStateRecord,
-      expected?: ConformanceAdoptionWrite<never>['expected'],
+      expected?: ConformanceAdoptionWrite<Position>['expected'],
     ): Promise<void>
   }
   control: {
