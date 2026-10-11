@@ -64,7 +64,11 @@ export type GroupTransaction = {
 }
 
 export type IncarnationStores = {
-  state: { load(): Promise<GroupStateRecord | null>; save(record: GroupStateRecord): Promise<void> }
+  state: {
+    load(): Promise<GroupStateRecord | null>
+    loadInitialIdentity(): Promise<EpochIdentity | null>
+    save(record: GroupStateRecord): Promise<void>
+  }
   control: {
     load(): Promise<ControlSnapshot>
     apply(changes: ControlChanges, mutationID: string): Promise<void>

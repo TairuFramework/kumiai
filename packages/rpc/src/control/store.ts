@@ -12,6 +12,7 @@ import type {
   ControlSnapshot,
   ControlStore,
   EpochIdentity,
+  GroupKey,
   Outcome,
 } from './types.js'
 
@@ -42,7 +43,8 @@ function cloneControlValue<TValue>(value: TValue): TValue {
 
 export type CommitOnceWriteContext =
   | { kind: 'build'; source: AdoptionExpected; queueHeadID: string; checkpoint: LogPosition | null }
-  | { kind: 'adoption'; before: EpochIdentity; after: EpochIdentity | null; retired: boolean }
+  | { kind: 'adoption'; before: EpochIdentity; after: EpochIdentity | null }
+  | { kind: 'retirement'; key: GroupKey }
   | { kind: 'head'; source: EpochIdentity }
 
 function sameValue(left: unknown, right: unknown): boolean {
@@ -96,15 +98,21 @@ export function assertCommitOnceChange(
       return
   }
   if (
+    context?.kind === 'retirement' &&
+    previous !== null &&
+    next === null &&
+    previous.incarnation === context.key.incarnation
+  )
+    return
+  if (
     context?.kind === 'adoption' &&
     previous !== null &&
     next === null &&
     slotSource(previous, context.before) &&
-    (context.retired ||
-      (context.after !== null &&
-        context.after.groupID === context.before.groupID &&
-        context.after.incarnation === context.before.incarnation &&
-        context.after.epoch > context.before.epoch))
+    context.after !== null &&
+    context.after.groupID === context.before.groupID &&
+    context.after.incarnation === context.before.incarnation &&
+    context.after.epoch > context.before.epoch
   )
     return
   if (

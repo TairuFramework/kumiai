@@ -164,6 +164,7 @@ export type ConformanceGroupTransaction = {
 export type ConformanceIncarnationStores<Position extends string = string> = {
   state: {
     load(): Promise<ConformanceGroupStateRecord | null>
+    loadInitialIdentity(): Promise<ConformanceEpochIdentity | null>
     save(record: ConformanceGroupStateRecord): Promise<void>
   }
   control: {

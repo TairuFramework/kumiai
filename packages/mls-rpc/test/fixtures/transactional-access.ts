@@ -216,7 +216,6 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
                   kind: 'adoption',
                   before: identityOf(row.state),
                   after: identityOf(state),
-                  retired: false,
                 }),
           mutationID: write?.mutationID ?? row.mutationID,
           anchorSlot: structuredClone(row.anchorSlot),

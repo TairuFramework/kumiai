@@ -450,8 +450,13 @@ export function createMemoryGroupCoordinator(params: {
                     const retired =
                       proposedLifetime !== undefined &&
                       proposedLifetime.activeIncarnation !== incarnation
+                    if (retired)
+                      return {
+                        kind: 'retirement',
+                        key: { groupID: change.groupID, incarnation },
+                      }
                     const after = savedStates.get(incarnation)
-                    if (!retired && (after === undefined || after.deleted)) return null
+                    if (after === undefined || after.deleted) return null
                     const prior = await memoryRecordTable<GroupStateRecord>({
                       tx: { ...tx, rows: before },
                       key: { groupID: change.groupID, incarnation },
@@ -476,11 +481,11 @@ export function createMemoryGroupCoordinator(params: {
                               epoch: after.epoch,
                               authenticator: after.epochAuthenticator,
                             },
-                      retired,
                     }
                   },
                 })
                 const state: ReturnType<typeof raw.state> = {
+                  loadInitialIdentity: rows.state.loadInitialIdentity,
                   load: rows.state.load,
                   async save(value) {
                     const owned = copyStoredValue(value)
@@ -508,6 +513,7 @@ export function createMemoryGroupCoordinator(params: {
                 return {
                   ...rows,
                   state: {
+                    loadInitialIdentity: state.loadInitialIdentity,
                     load: state.load,
                     save: memoryOperation(tx, state.save, 'domain'),
                   },
@@ -690,6 +696,8 @@ export function createMemoryGroupCoordinator(params: {
                       incarnation,
                       version: state.version + 1,
                       deleted: false,
+                      initialIdentity:
+                        (await raw.stateMetadata(incarnation).load())?.initialIdentity ?? null,
                     })
                   }
                 }

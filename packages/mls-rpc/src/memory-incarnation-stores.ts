@@ -304,7 +304,10 @@ export function createUnlockedIncarnationStores(params: {
         const slotOnly = Object.keys(owned).every(
           (name) => name === 'commitOnce' || name === 'commitOnceAcceptance',
         )
-        if (!owedOnly && !(slotOnly && context?.kind === 'adoption' && context.retired))
+        if (
+          !owedOnly &&
+          !(slotOnly && context?.kind === 'retirement' && sameStoredValue(context.key, key))
+        )
           await active()
         await control.save('current', {
           snapshot: applyChanges(previous, owned, context),
@@ -454,6 +457,7 @@ export function createIncarnationStores(
   const { tx } = params
   return {
     state: {
+      loadInitialIdentity: memoryOperation(tx, stores.state.loadInitialIdentity),
       load: memoryOperation(tx, stores.state.load),
       save: memoryOperation(tx, stores.state.save, 'domain'),
     },

@@ -528,6 +528,92 @@ test('owning retirement releases only its retained slot', async () => {
   expect((await host.control.load()).commitOnce).toBeNull()
 })
 
+test('owning retirement releases a slot retained from an earlier epoch', async () => {
+  const host = await setup()
+  expect((await host.make().prepareBuild(intent, host.frame)).kind).toBe('saved')
+  const slot = (await host.control.load()).commitOnce
+  if (slot === null) throw new Error('Missing slot')
+  await host.control.apply(
+    {
+      commitOnceAcceptance: {
+        source: await host.source(),
+        from: slot.searchFrom,
+        position: asLogPosition('1'),
+        payloadDigest: slot.payloadDigest,
+      },
+    },
+    'accepted',
+  )
+  await advance(host, false)
+  expect((await host.control.load()).commitOnce?.epoch).toBe(0)
+  expect((await host.groups.loadState(host.key))?.deleted).toBe(false)
+  expect(host.handle.epoch).toBe(1n)
+  const before = host.db.snapshot()
+  await expect(advance(host, true)).rejects.toMatchObject({ name: 'ControlStoreInvariantError' })
+  expect(host.db.snapshot()).toEqual(before)
+  const change = await nextChange(host.groups, host.key.groupID, 'retire-older-slot')
+  await host.groups.transition(change, async (stores) => {
+    const life = await stores.lifetime.load()
+    if (life === null) throw new Error('Missing lifetime')
+    await stores.lifetime.save({
+      ...life,
+      activeIncarnation: null,
+      revision: life.revision + 1,
+      mutationID: change.mutationID,
+    })
+    await stores.incarnation(1).control.apply({ commitOnce: null }, change.mutationID)
+  })
+  expect((await host.groups.load(host.key.groupID))?.activeIncarnation).toBeNull()
+  expect(await host.groups.loadState(host.key)).toMatchObject({ deleted: true })
+  const cleared = await host.control.load()
+  expect(cleared.commitOnce).toBeNull()
+  expect(cleared.commitOnceAcceptance).toBeNull()
+})
+
+test.each([
+  { later: false, reopen: false },
+  { later: false, reopen: true },
+  { later: true, reopen: false },
+  { later: true, reopen: true },
+])(
+  'real-provider absent cursor requires original installation: later=$later reopen=$reopen',
+  async ({ later, reopen }) => {
+    const host = await setup()
+    await host.control.apply({ cursor: null }, 'absent-cursor')
+    if (later) await advance(host, false)
+    const groups = reopen
+      ? createMemoryGroupPersistence({
+          db: host.db,
+          owners: createOwnerQueues(),
+          atRest: host.atRest,
+          providerID: 'build',
+        })
+      : host.groups
+    const control = groups.ports(host.key).control
+    const source = await host.source()
+    const built = await host.slot()
+    built.epoch = Number(host.handle.epoch)
+    const before = host.db.snapshot()
+    const marker = await control.lastMutation()
+    expect((await control.load()).cursor).toBeNull()
+    expect(
+      await createPersistenceBuildSaver({ persistence: groups, key: host.key })(
+        intent,
+        built,
+        source,
+        'absent-cursor-build',
+      ),
+    ).toBe(later ? 'moved' : 'saved')
+    if (later) {
+      expect(host.db.snapshot()).toEqual(before)
+      expect(await control.lastMutation()).toBe(marker)
+    } else {
+      expect((await control.load()).commitOnce).toEqual(built)
+      expect((await control.load()).cursor).toBeNull()
+    }
+  },
+)
+
 test.each([false, true])(
   'transactional build with absent cursor requires retained initial identity: later=%s',
   async (later) => {

@@ -11,6 +11,7 @@ import { GroupStateConflictError, PersistencePhaseError } from './persistence-er
 import { assertStateTransition, assertTrustTransition } from './persistence-guards.js'
 import type {
   AtRestCodec,
+  EpochIdentity,
   GroupKey,
   GroupRecoveryTrust,
   GroupStateRecord,
@@ -19,7 +20,12 @@ import type {
   MemoryTransaction,
 } from './persistence-types.js'
 
-type StateMetadata = GroupKey & { version: number; deleted: boolean }
+type StateMetadata = GroupKey & {
+  version: number
+  deleted: boolean
+  // Trust follows epoch installations; the absent-cursor boundary stays fixed.
+  initialIdentity: EpochIdentity | null
+}
 
 export type GroupStateStores = Pick<GroupStores<MemoryTransaction>, 'tx' | 'lifetime' | 'trust'> & {
   state(incarnation: number): IncarnationStores['state']
@@ -398,6 +404,9 @@ export function createUnlockedGroupStateStores(params: {
       }
       const row = slot<GroupStateRecord>('state', incarnation)
       return {
+        async loadInitialIdentity() {
+          return (await stateMetadata(incarnation).load())?.initialIdentity ?? null
+        },
         async load() {
           const value = await row.load()
           if (value !== null && value.incarnation !== incarnation) {
@@ -410,9 +419,11 @@ export function createUnlockedGroupStateStores(params: {
           if (value.incarnation !== incarnation)
             throw new GroupStateConflictError('Row incarnation mismatch')
           const metadata = stateMetadata(incarnation)
+          const previousMetadata = await metadata.load()
+          let initialIdentity = previousMetadata?.initialIdentity ?? null
           if (value.deleted) {
             // Retirement needs administrative version/identity, never private ratchets.
-            const previous = await metadata.load()
+            const previous = previousMetadata
             if (
               previous === null &&
               tx.rows.state?.has(
@@ -439,6 +450,13 @@ export function createUnlockedGroupStateStores(params: {
               retained,
               bootstrapTrusts.get(tx.rows)?.has(groupID),
             )
+            if (previous === null && previousMetadata === null)
+              initialIdentity = {
+                groupID,
+                incarnation,
+                epoch: value.epoch,
+                authenticator: Uint8Array.from(value.epochAuthenticator),
+              }
           }
           const stateBytes = await row.prepare(value)
           const metadataBytes = await metadata.prepare({
@@ -446,6 +464,7 @@ export function createUnlockedGroupStateStores(params: {
             incarnation,
             version: value.version,
             deleted: value.deleted,
+            initialIdentity,
           })
           row.store(stateBytes)
           metadata.store(metadataBytes)
@@ -480,6 +499,7 @@ export function createGroupStateStores(
     state(incarnation) {
       const state = stores.state(incarnation)
       return {
+        loadInitialIdentity: memoryOperation(tx, state.loadInitialIdentity),
         load: memoryOperation(tx, state.load),
         save: memoryOperation(tx, state.save, 'domain'),
       }

@@ -252,15 +252,18 @@ export function createMemoryHostDatabase(
             ownedWrite.changes,
             before === null
               ? null
-              : {
-                  kind: 'adoption',
-                  before,
-                  after,
-                  retired:
-                    after !== null &&
-                    after.groupID === before.groupID &&
-                    after.incarnation > before.incarnation,
-                },
+              : after !== null &&
+                  after.groupID === before.groupID &&
+                  after.incarnation > before.incarnation
+                ? {
+                    kind: 'retirement',
+                    key: { groupID: before.groupID, incarnation: before.incarnation },
+                  }
+                : {
+                    kind: 'adoption',
+                    before,
+                    after,
+                  },
           )
           next.mutationID = ownedWrite.mutationID
           if (

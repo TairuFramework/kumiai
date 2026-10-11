@@ -67,8 +67,8 @@ type Context =
       kind: 'adoption'
       before: ConformanceEpochIdentity
       after: ConformanceEpochIdentity | null
-      retired: boolean
     }
+  | { kind: 'retirement'; key: ConformanceGroupKey }
   | { kind: 'head'; source: ConformanceEpochIdentity }
 
 function equal(left: unknown, right: unknown): boolean {
@@ -128,12 +128,15 @@ function guard(
         previous !== null &&
         next === null &&
         matches(previous, context.before) &&
-        (context.retired ||
-          (context.after !== null &&
-            context.after.groupID === context.before.groupID &&
-            context.after.incarnation === context.before.incarnation &&
-            context.after.epoch > context.before.epoch))
+        context.after !== null &&
+        context.after.groupID === context.before.groupID &&
+        context.after.incarnation === context.before.incarnation &&
+        context.after.epoch > context.before.epoch
       )
+        return
+      break
+    case 'retirement':
+      if (previous !== null && next === null && previous.incarnation === context.key.incarnation)
         return
   }
   throw new Error('Unverified commit-once change')
@@ -325,15 +328,18 @@ export function createMemoryControlStore<Position extends string = string>(
           write.changes,
           before === null
             ? null
-            : {
-                kind: 'adoption',
-                before,
-                after,
-                retired:
-                  after !== null &&
-                  after.groupID === before.groupID &&
-                  after.incarnation > before.incarnation,
-              },
+            : after !== null &&
+                after.groupID === before.groupID &&
+                after.incarnation > before.incarnation
+              ? {
+                  kind: 'retirement',
+                  key: { groupID: before.groupID, incarnation: before.incarnation },
+                }
+              : {
+                  kind: 'adoption',
+                  before,
+                  after,
+                },
         )
         next.mutationID = write.mutationID
         if (write.anchorLanded != null && next.anchor?.pending?.advance === write.anchorLanded) {

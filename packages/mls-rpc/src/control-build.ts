@@ -117,8 +117,8 @@ export function createPersistenceBuildSaver<TTx extends GroupTransaction>(params
           )
             throw new PreparationMoved()
           if (snapshot.cursor === null) {
-            const trust = await stores.trust.load()
-            if (!sameStoredValue(trust?.installed, identity)) throw new PreparationMoved()
+            const initialIdentity = await rows.state.loadInitialIdentity()
+            if (!sameStoredValue(initialIdentity, identity)) throw new PreparationMoved()
           }
           if (
             snapshot.commitOnce !== null &&

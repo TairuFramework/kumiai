@@ -616,6 +616,52 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       expect((await host.control.load()).commitOnce).toBeNull()
       expect((await host.control.load()).commitOnceAcceptance).toBeNull()
     })
+    test('retirement releases an older slot while adoption requires the exact source', async () => {
+      const host = await params.open()
+      const { slot, source } = await prepareSlot(host)
+      await host.control.apply(
+        {
+          commitOnceAcceptance: {
+            source,
+            from: slot.searchFrom,
+            position: 'accepted',
+            payloadDigest: slot.payloadDigest,
+          },
+        },
+        'accepted',
+      )
+      const advanced = {
+        ...source.identity,
+        epoch: slot.epoch + 1,
+        authenticator: new Uint8Array([47]),
+      }
+      await host.saveState(encodeControlFixtureState(advanced))
+      const before = await host.control.load()
+      const marker = await host.control.lastMutation()
+      await expect(
+        host.saveState(encodeControlFixtureState({ ...advanced, epoch: advanced.epoch + 1 }), {
+          changes: { commitOnce: null },
+          mutationID: 'wrong-source',
+        }),
+      ).rejects.toThrow()
+      expect(await host.control.load()).toEqual(before)
+      expect(await host.loadState()).toEqual(encodeControlFixtureState(advanced))
+      expect(await host.control.lastMutation()).toBe(marker)
+      await host.saveState(
+        encodeControlFixtureState({
+          ...advanced,
+          incarnation: advanced.incarnation + 1,
+          epoch: 0,
+          authenticator: new Uint8Array([48]),
+        }),
+        { changes: { commitOnce: null }, mutationID: 'retire-older-slot' },
+      )
+      const reopened = await params.reopen()
+      const cleared = await reopened.control.load()
+      expect(cleared.commitOnce).toBeNull()
+      expect(cleared.commitOnceAcceptance).toBeNull()
+      expect(await reopened.control.lastMutation()).toBe('retire-older-slot')
+    })
     test.each(['omitted', 'unchanged'] as const)(
       'authorised slot clear validates resulting acceptance: %s',
       async (mode) => {
