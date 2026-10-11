@@ -21,6 +21,7 @@ import {
   buildRealCommit,
   buildRealExternalCommit,
   buildRealRotation,
+  buildRealUnavailableCommit,
   createRealBoundRecovery,
   createRealGroup,
   persistedTestAccess,
@@ -209,6 +210,12 @@ testGroupMLSConformance({
     let hintOffset = 0
     const stores = group.members.map((member) => createTransactionalStore(member.handle))
     return {
+      buildUnavailableCommit: () => buildRealUnavailableCommit(group),
+      readEvidence: (index) => {
+        const store = stores[index]
+        if (store === undefined) throw new Error('missing store')
+        return store.readEvidence()
+      },
       groupID: group.committer.handle.groupID,
       restartMember: async (index) => {
         const member = group.members[index]

@@ -210,6 +210,7 @@ type MemoryCommit = {
   signerDID?: string
   /** Sender data remains readable, but tampered commit content cannot be processed. */
   invalidContent?: true
+  missingProposal?: true
   /**
    * The roster op this Commit enacts, applied to `leaves` when the commit ADVANCES this handle.
    * The real double has no MLS proposals, so this stands in for the one tree effect a Commit's
@@ -277,6 +278,7 @@ export function decodeMemoryCommit(commit: Uint8Array): MemoryCommit | null {
       (value.external != null && typeof value.external !== 'boolean') ||
       (value.signerDID != null && typeof value.signerDID !== 'string') ||
       (value.invalidContent != null && value.invalidContent !== true) ||
+      (value.missingProposal != null && value.missingProposal !== true) ||
       !Array.isArray(value.entryIDs) ||
       (value.adds != null && !isDIDArray(value.adds)) ||
       (value.removes != null && !isDIDArray(value.removes))
@@ -1027,6 +1029,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         if (parsed.epoch !== epoch) {
           return { applied: false, advanced: false, epochBefore: epoch, epochAfter: epoch }
         }
+
         // Sender-data authorship and commit-content validity are separate in real MLS. A hub can
         // change ciphertext beyond the sampled prefix without breaking the sender-data read.
         if (
@@ -1039,6 +1042,15 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             epochBefore: epoch,
             epochAfter: epoch,
             refusal: 'invalid' as const,
+          }
+        }
+        if (parsed.missingProposal === true) {
+          return {
+            applied: false,
+            advanced: false,
+            epochBefore: epoch,
+            epochAfter: epoch,
+            validation: 'unavailable' as const,
           }
         }
         // A member can never apply the frame that is its OWN commit: MLS merges a pending

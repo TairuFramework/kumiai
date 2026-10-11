@@ -16,7 +16,12 @@
 
 import { describe, expect, test } from 'vitest'
 
-import type { ConformanceAdoptionWrite, ConformanceControlSource } from './control-store.js'
+import type {
+  ConformanceAdoptionExpected,
+  ConformanceAdoptionWrite,
+  ConformanceControlSnapshot,
+  ConformanceControlSource,
+} from './control-store.js'
 
 /** The `CommitHeader` of `@kumiai/rpc`, re-declared structurally. */
 export type ConformanceCommitHeader = {
@@ -171,6 +176,12 @@ export type ConformanceCommit = {
 }
 
 export type ConformanceMLSGroup = {
+  readEvidence(member: number): Promise<{
+    source: ConformanceAdoptionExpected
+    applied: ConformanceControlSnapshot['applied']
+    cursor: ConformanceControlSnapshot['cursor']
+    terminal: boolean
+  }>
   groupID: string
   /** Restore a fresh port from this member's durable state. */
   restartMember: (member: number) => Promise<ConformanceMLSMember>
@@ -208,6 +219,8 @@ export type ConformanceMLSGroup = {
    * `adds` list — `adds` only asks each harness to exercise that existing path on request.
    */
   buildCommit: (options?: { removes?: number; adds?: boolean }) => Promise<ConformanceCommit>
+  /** Authenticated source-epoch commit with a referenced proposal missing at the receiver. */
+  buildUnavailableCommit: () => Promise<Uint8Array>
   /**
    * A genuine EXTERNAL commit — a rejoin — framed at the group's current epoch, together with a
    * forgery of it: the same frame with only the claimed author rewritten, which is what a
@@ -267,6 +280,61 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
   }
 
   describe(`GroupMLS conformance — ${label}`, () => {
+    test('unavailable validation never applies, advances, or invokes adoption', async () => {
+      await withGroup(1, 'unavailable-validation', async (group) => {
+        const member = memberAt(group.members, 0)
+        const before = await member.mls.readRecoverySource()
+        const evidence = await group.readEvidence(0)
+        const roster = await member.mls.rosterEntries()
+        const ledger = await member.mls.getLedger()
+        let adoptions = 0
+        const result = await member.mls.processCommit(await group.buildUnavailableCommit(), {
+          adoption: () => {
+            adoptions++
+            return { mutationID: 'unavailable', changes: {} }
+          },
+        })
+        expect(result).toMatchObject({
+          validation: 'unavailable',
+          applied: false,
+          advanced: false,
+          epochBefore: before.epoch,
+          epochAfter: before.epoch,
+        })
+        expect(await member.mls.readRecoverySource()).toEqual(before)
+        expect(await member.mls.rosterEntries()).toEqual(roster)
+        expect(await member.mls.getLedger()).toEqual(ledger)
+        expect(adoptions).toBe(0)
+        expect(await group.readEvidence(0)).toEqual(evidence)
+      })
+    })
+    test('evidence agrees with the committed source identity and version after receive', async () => {
+      await withGroup(1, 'committed-evidence', async (group) => {
+        const member = memberAt(group.members, 0)
+        const before = await group.readEvidence(0)
+        if (before.source.identity === null) throw new Error('missing committed source identity')
+        const commit = await group.buildCommit()
+        expect(
+          await member.mls.processCommit(commit.commit, {
+            ...commit.context,
+            adoption: () => ({ mutationID: 'committed-evidence', changes: {} }),
+          }),
+        ).toMatchObject({ applied: true, advanced: true })
+        const source = await member.mls.readRecoverySource()
+        const evidence = await group.readEvidence(0)
+        expect(evidence.source).toEqual({
+          key: source.key,
+          stateVersion: source.stateVersion,
+          identity: source.identity,
+        })
+        expect(evidence.source.identity?.epoch).toBe(before.source.identity.epoch + 1)
+        expect(evidence.source.stateVersion).toBeGreaterThan(before.source.stateVersion)
+        expect(evidence.source.identity?.authenticator).toEqual(source.authenticator)
+        expect(evidence.applied).toEqual(before.applied)
+        expect(evidence.cursor).toEqual(before.cursor)
+        expect(evidence.terminal).toBe(false)
+      })
+    })
     test('competing empty rotations retain distinct epoch identities', async () => {
       await withGroup(3, 'competing-rotations', async (group) => {
         const alice = memberAt(group.members, 0)

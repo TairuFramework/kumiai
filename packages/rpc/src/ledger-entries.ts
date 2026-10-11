@@ -22,9 +22,19 @@ const HEADER_BYTES = VERSION_BYTES + COUNT_BYTES
 const LENGTH_BYTES = 4
 
 export class LedgerEntryRefusedError extends Error {
-  constructor(message?: string, options?: ErrorOptions) {
+  #reason: 'malformed' | 'authentication'
+
+  constructor(
+    message?: string,
+    options?: ErrorOptions & { reason?: 'malformed' | 'authentication' },
+  ) {
     super(message, options)
     this.name = 'LedgerEntryRefusedError'
+    this.#reason = options?.reason ?? 'authentication'
+  }
+
+  get reason(): 'malformed' | 'authentication' {
+    return this.#reason
   }
 }
 

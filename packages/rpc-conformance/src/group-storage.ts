@@ -255,6 +255,86 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
   params: StorageConformanceParams<TTx>,
 ): void {
   describe(`Group storage conformance -- ${params.label}`, () => {
+    test('evidence reads bind committed state version, cursor and applied rows to one fixed key', async () => {
+      const fixture = await params.createFixture(groupID)
+      try {
+        const groups = fixture.ports.device.groups
+        const seed = await storageSeed(groups)
+        const before = await groups.readEvidence(key)
+        expect(before.source).toEqual({
+          key,
+          stateVersion: seed.state.version,
+          identity: {
+            ...key,
+            epoch: seed.state.epoch,
+            authenticator: seed.state.epochAuthenticator,
+          },
+        })
+        expect(before.terminal).toBe(false)
+        const row = {
+          epoch: seed.state.epoch - 1,
+          digest: 'evidence-commit',
+          payloadDigest: 'evidence-payload',
+          sequenceID: '000101',
+          opID: null,
+          removed: false,
+        }
+        const cursor = { position: '000101', epoch: seed.state.epoch }
+        await groups.transition(
+          await storageChange(groups, groupID, 'evidence-write'),
+          async (stores) => {
+            await stores
+              .incarnation(1)
+              .control.apply({ putApplied: [row], cursor }, 'evidence-write')
+          },
+        )
+        const reopened = (await fixture.reopen()).device.groups
+        const evidence = await reopened.readEvidence(key)
+        const state = await reopened.loadState(key)
+        const control = await reopened.ports(key).control.load()
+        expect(evidence.source).toEqual({ ...before.source, stateVersion: seed.state.version + 1 })
+        expect(evidence.source.stateVersion).toBe(state?.version)
+        expect(evidence.applied).toEqual(control.applied)
+        expect(evidence.applied).toContainEqual(row)
+        expect(evidence.cursor).toEqual(cursor)
+        await expect(
+          groups.transition(
+            await storageChange(groups, groupID, 'evidence-rollback'),
+            async (stores) => {
+              await stores
+                .incarnation(1)
+                .control.apply(
+                  { cursor: { position: '000102', epoch: seed.state.epoch } },
+                  'evidence-rollback',
+                )
+              throw new Error('rollback evidence')
+            },
+          ),
+        ).rejects.toThrow('rollback evidence')
+        expect(await groups.readEvidence(key)).toEqual(evidence)
+        await groups.transition(
+          await storageChange(groups, groupID, 'evidence-retire'),
+          async (stores) => {
+            const life = await stores.lifetime.load()
+            if (life === null) throw new Error('missing lifetime')
+            await stores.lifetime.save({
+              ...life,
+              activeIncarnation: null,
+              revision: life.revision + 1,
+              mutationID: 'evidence-retire',
+            })
+          },
+        )
+        expect(await groups.readEvidence(key)).toMatchObject({
+          source: { key, identity: null },
+          terminal: false,
+          applied: control.applied,
+          cursor,
+        })
+      } finally {
+        await fixture.close()
+      }
+    })
     test('authenticates every physical byte copy and atomically commits side rows', async () => {
       const fixture = await params.createFixture(groupID)
       try {

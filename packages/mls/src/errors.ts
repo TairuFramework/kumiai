@@ -1,4 +1,4 @@
-import { CodecError, CryptoError, CryptoVerificationError } from 'ts-mls'
+import { CodecError, CryptoVerificationError } from 'ts-mls'
 
 export type DeviceRegistryCodecErrorParams = { message: string; cause?: unknown }
 
@@ -95,18 +95,84 @@ export class RevokeProofError extends Error {
 }
 
 export class CommitValidationUnavailableError extends Error {
-  constructor(message?: string, options?: ErrorOptions) {
+  #reason: CommitValidationUnavailableReason
+
+  constructor(
+    message?: string,
+    options?: ErrorOptions & { reason?: CommitValidationUnavailableReason },
+  ) {
     super(message, options)
     this.name = 'CommitValidationUnavailableError'
+    this.#reason = options?.reason ?? 'unrecognised'
+  }
+
+  get reason(): CommitValidationUnavailableReason {
+    return this.#reason
   }
 }
 
+export type CommitValidationUnavailableReason =
+  | 'missing-proposal'
+  | 'missing-key'
+  | 'resolver'
+  | 'unrecognised'
+
+// Pinned ts-mls rc.13 and kokuin/noble diagnostics. Unknown dependency failures stay unavailable.
+const DEPENDENCY_REASONS: Record<
+  string,
+  CommitValidationUnavailableReason | 'authentication' | 'policy' | 'credential'
+> = {
+  'Could not validate credential': 'credential',
+  'Could not find proposal with supplied reference': 'missing-proposal',
+  'Desired gen in the past': 'missing-key',
+  'Desired generation too far in the future': 'authentication',
+  'aes-gcm: invalid tag': 'authentication',
+  'invalid tag': 'authentication',
+  'invalid ghash tag': 'authentication',
+  'invalid poly1305 tag': 'authentication',
+  'Invalid signature': 'authentication',
+  'Could not validate epoch': 'policy',
+  'Invalid proposals': 'policy',
+  'Update path is required': 'policy',
+  'Commit cannot contain an update proposal sent by committer': 'policy',
+  'Commit cannot contain a remove proposal removing committer': 'policy',
+  'Commit cannot contain multiple update and/or remove proposals that apply to the same leaf':
+    'policy',
+  'Commit cannot contain multiple Add proposals that contain KeyPackages that represent the same client':
+    'policy',
+  'Commit cannot contain an Add proposal for someone already in the group': 'policy',
+  "Added leaf node that doesn't support extension in GroupContext": 'policy',
+  'Commit cannot contain PreSharedKey proposals that reference the same PreSharedKeyID': 'policy',
+  'Commit cannot contain multiple GroupContextExtensions proposals': 'policy',
+  'Tried to remove empty leaf node': 'policy',
+}
+
+export function commitValidationReason(
+  error: unknown,
+): CommitValidationUnavailableReason | 'authentication' | 'policy' | 'credential' | undefined {
+  if (!(error instanceof Error)) return undefined
+  if (error instanceof CommitValidationUnavailableError) return error.reason
+  return Object.hasOwn(DEPENDENCY_REASONS, error.message)
+    ? DEPENDENCY_REASONS[error.message]
+    : undefined
+}
+
 export function isConclusiveCommitError(error: unknown): boolean {
+  if (error instanceof LeafBindingError) {
+    const seen = new Set<unknown>()
+    let cause: unknown = error
+    while (cause instanceof LeafBindingError && !seen.has(cause)) {
+      seen.add(cause)
+      if (cause.cause === undefined) return true
+      cause = cause.cause
+    }
+    return cause instanceof LeafBindingError ? false : isConclusiveCommitError(cause)
+  }
+  const reason = commitValidationReason(error)
   return (
     error instanceof CodecError ||
     error instanceof CryptoVerificationError ||
-    (error instanceof CryptoError &&
-      /invalid ghash tag|invalid tag|invalid poly1305 tag/.test(error.message)) ||
-    (error instanceof Error && ['aes-gcm: invalid tag', 'invalid tag'].includes(error.message))
+    reason === 'authentication' ||
+    reason === 'policy'
   )
 }

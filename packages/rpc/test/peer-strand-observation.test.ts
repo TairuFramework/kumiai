@@ -40,6 +40,32 @@ async function publishUnreadable(
 }
 
 describe('commit strand observations', () => {
+  test('an unauthenticated source-epoch sender is skipped without stranding the ordinary lane', async () => {
+    const hub = new FakeHub()
+    const rs = secret(0xa3)
+    const mls = createMemoryGroupMLS({ localDID: 'bob', recoverySecret: rs, members, epoch: 1 })
+    mls.readCommitHeader = async () => ({ epoch: 1 })
+    mls.processCommit = async () => ({
+      applied: false,
+      advanced: false,
+      epochBefore: 1,
+      epochAfter: 1,
+      refusal: 'invalid',
+    })
+    const frame = await publishCommit({ hub, senderDID: 'carol', recoverySecret: rs, epoch: 1 })
+    const onStrand = vi.fn()
+    const bob = makeMLSPeer(hub, 'bob', rs, { mls, members, onStrand })
+    try {
+      await vi.waitFor(async () =>
+        expect((await bob.control.load()).cursor?.position).toBe(frame.sequenceID),
+      )
+      expect((await bob.control.load()).cursor?.stranded).toBeUndefined()
+      expect(onStrand).not.toHaveBeenCalled()
+      expect(bob.mls.epoch()).toBe(1)
+    } finally {
+      await bob.peer.dispose()
+    }
+  })
   test.each(['header', 'processing'] as const)(
     'ordinary unavailable validation strands as an unprocessable gap: %s',
     async (seam) => {

@@ -365,6 +365,65 @@ test('older suffix replays require retained applied evidence', async () => {
   expect(await f.search.searchLog(built)).toMatchObject({ kind: 'first-valid' })
 })
 
+test('older suffix conflicts with a present applied row are skippable', async () => {
+  const f = fixture([
+    { id: 101, value: 1 },
+    { id: 102, value: 2 },
+  ])
+  f.deps.validation = {
+    restoreValidation: async () => ({
+      source,
+      readCommitHeader: async (commit) => ({ epoch: commit[0] === 1 ? 64 : 65 }),
+      validateFrame: f.validateFrame,
+      verifyOwn: async () => true,
+    }),
+  }
+  f.deps.readEvidence = async () => ({
+    source,
+    applied: [
+      {
+        epoch: 64,
+        digest: 'other',
+        payloadDigest: 'other',
+        sequenceID: position(50),
+        opID: null,
+        removed: false,
+      },
+    ],
+    cursor: { position: position(100), epoch: 65 },
+    terminal: false,
+  })
+  expect(await f.search.searchLog(built)).toMatchObject({
+    kind: 'first-valid',
+    proof: { position: position(102) },
+  })
+})
+
+test('committed own occurrence beyond a captured empty head forbids absence', async () => {
+  const f = fixture([], {
+    readEvidence: async () => ({
+      source: { ...source, identity: { ...source.identity, epoch: 66 } },
+      applied: [
+        {
+          epoch: 65,
+          digest: built.digest,
+          payloadDigest: built.payloadDigest,
+          sequenceID: position(101),
+          opID: 'own',
+          removed: false,
+        },
+      ],
+      cursor: { position: position(101), epoch: 66 },
+      terminal: false,
+    }),
+  })
+  expect(built.epoch).toBe(65)
+  expect(built.searchFrom).toBe(position(100))
+  expect(await f.search.searchLog(built)).toEqual({ kind: 'unknown' })
+  expect(f.hold).toHaveBeenLastCalledWith(expect.objectContaining({ reason: 'acceptance-unknown' }))
+  expect(f.followWinner).not.toHaveBeenCalled()
+})
+
 test('retired keys never follow a successor incarnation', async () => {
   const f = fixture(
     [
@@ -383,6 +442,7 @@ test('retired keys never follow a successor incarnation', async () => {
   expect(await f.search.searchLog(built)).toEqual({ kind: 'unknown' })
   expect(f.fetch).not.toHaveBeenCalled()
   expect(f.followWinner).not.toHaveBeenCalled()
+  expect(f.hold).toHaveBeenLastCalledWith(expect.objectContaining({ reason: 'acceptance-unknown' }))
 })
 
 test('budget yields preserve discovery through a prefix larger than one invocation', async () => {

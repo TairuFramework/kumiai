@@ -94,7 +94,7 @@ export async function applyCommit(params: ApplyCommitParams): Promise<ApplyCommi
       return { ...refused(), validation: 'unavailable' }
     throw error
   }
-  if (header == null || readMessageEpoch(commit) !== before) return refused()
+  if (header?.committerDID === undefined || readMessageEpoch(commit) !== before) return refused()
   const committerDID = header.committerDID
   if (committerDID != null && normalizeDID(committerDID) === normalizeDID(ownDID)) {
     return refused(committerDID)

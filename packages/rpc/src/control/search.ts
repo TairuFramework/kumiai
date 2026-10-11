@@ -34,7 +34,11 @@ export type ControlFrameValidation =
 export type ControlValidation = {
   source: AdoptionExpected
   readCommitHeader(commit: Uint8Array): Promise<CommitHeader | null>
-  validateFrame(frame: ControlLogFrame, built: BuiltCommit): Promise<ControlFrameValidation>
+  validateFrame(
+    frame: ControlLogFrame,
+    built: BuiltCommit,
+    header?: CommitHeader | null,
+  ): Promise<ControlFrameValidation>
   verifyOwn(built: BuiltCommit): Promise<boolean>
 }
 export type ControlValidationPort = {
@@ -182,6 +186,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
     if (!Number.isSafeInteger(limit) || limit < 1)
       throw new RangeError('Control search budgets must be positive integers')
   }
+  // The owning peer lane must await each searchLog call before starting another.
   let continuation: Discovery | null = null
   return {
     async searchLog(built) {
@@ -249,7 +254,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
       }
       if (!(await coherent())) {
         continuation = null
-        return { kind: 'unknown' }
+        return unknown()
       }
       const applied = () => evidence.applied.find((row) => row.epoch === retained.epoch)
       if (
@@ -429,7 +434,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
             }
             if (header.epoch < retained.epoch) {
               const historic = evidence.applied.find((entry) => entry.epoch === header.epoch)
-              if (historic === undefined || historic.digest !== digestAppliedCommit(commit)) {
+              if (historic === undefined) {
                 continuation = null
                 return unknown(position)
               }
@@ -440,7 +445,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
               discovery.through = position
               continue
             }
-            const result = await validation.validateFrame(frame, built)
+            const result = await validation.validateFrame(frame, built, header)
             if (result.kind === 'unavailable') {
               continuation = null
               if (result.reason === 'unexplained-own')
@@ -490,6 +495,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
         }
         const nextHead = probe.head === null ? null : asLogPosition(probe.head)
         if (nextHead === discovery.head) {
+          if (!(await committedWinner())) return unknown(discovery.through)
           continuation = null
           return { kind: 'absent' }
         }

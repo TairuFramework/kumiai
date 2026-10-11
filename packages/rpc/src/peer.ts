@@ -223,6 +223,27 @@ function verdictForOutcome(
 export function createGroupPeer<Protocols extends Record<string, ProtocolDefinition>>(
   input: GroupPeerParams<Protocols>,
 ): GroupPeer<Protocols> {
+  return createGroupPeerWithControlWalk<Protocols>(input).peer
+}
+
+type ControlWalkRequest = {
+  through: LogPosition | null
+  range: CertifiedControlRange | null
+  work: ControlSearchWork
+}
+
+/** Internal construction seam for bounded control reconciliation. */
+export function createGroupPeerWithControlWalk<
+  Protocols extends Record<string, ProtocolDefinition>,
+>(
+  input: GroupPeerParams<Protocols>,
+): {
+  peer: GroupPeer<Protocols>
+  controlWalk: {
+    walkCommits(search: ControlWalkRequest): Promise<boolean>
+    head(): LogPosition | null
+  }
+} {
   const boundary = createHostBoundary()
   const controlAbort = new AbortController()
   const applyResolved: typeof applyControlResolved = (store, changes, mutationID) =>
@@ -1287,11 +1308,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     port: GroupMLS,
     topicID: string,
     forRecovery = false,
-    search?: {
-      through: LogPosition | null
-      range: CertifiedControlRange | null
-      work: ControlSearchWork
-    },
+    search?: ControlWalkRequest,
   ): Promise<boolean> => {
     if (anchorRecoveryPending || locallyRemoved) return false
     let advancedEpoch = false
@@ -1396,11 +1413,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // operation carries that across a restart); meeting its own commit here means its saved operation
         // was lost or never written.
         const position = asLogPosition(message.sequenceID)
-        if (
-          search !== undefined &&
-          (search.through === null || position > search.through || !search.work.takeFrame())
-        )
-          return advancedEpoch
+        if (search !== undefined) {
+          if (search.through === null) return advancedEpoch
+          if (position > search.through) {
+            takeHead(search.through)
+            return advancedEpoch
+          }
+          if (!search.work.takeFrame()) return advancedEpoch
+        }
         if (rejoinPosition != null && position >= rejoinPosition) return advancedEpoch
         let frame: ReturnType<typeof decodeHandshakeFrame>
         try {
@@ -3380,7 +3400,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     } as ProtocolSurface<Protocols[typeof name]>
   }
 
-  return {
+  const peer: GroupPeer<Protocols> = {
     protocol: protocolMethod,
     retryAppDelivery: async (topicID) => {
       if (disposed) return
@@ -3520,6 +3540,22 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         if (disposeErrors.length > 1) throw new AggregateError(disposeErrors, 'Peer dispose failed')
       })()
       return disposePromise
+    },
+  }
+  return {
+    peer,
+    controlWalk: {
+      // External callers acquire the lane here. In-lane follow/reconcile call walkCommits directly.
+      walkCommits: async (search) => {
+        await ready
+        assertLive()
+        return runSerial(async () => {
+          if (mls == null || commitTopicID == null) return false
+          await refreshControl()
+          return walkCommits(mls, commitTopicID, false, search)
+        })
+      },
+      head: () => commitLogHead,
     },
   }
 }

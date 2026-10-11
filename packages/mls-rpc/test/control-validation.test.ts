@@ -1,5 +1,8 @@
+import type * as TokenModule from '@kokuin/token'
 import { randomIdentity } from '@kokuin/token'
 import {
+  CommitValidationUnavailableError,
+  type ControllerBinding,
   commitInvite,
   commitKeyRotation,
   commitLedgerEntries,
@@ -44,9 +47,13 @@ import {
   bytesToBase64,
   createCommit,
   createProposal,
+  decode,
   defaultProposalTypes,
   encode,
+  generateKeyPackageWithKey,
+  mlsMessageDecoder,
   mlsMessageEncoder,
+  nodeTypes,
   senderTypes,
   ValidationError,
   wireformats,
@@ -65,8 +72,28 @@ import { buildRealCommit, createRealGroup, testHandleAccess } from './fixtures/r
 import { installSeed, makeStorageSeed } from './fixtures/storage-seed.js'
 import { createTransactionalStore } from './fixtures/transactional-access.js'
 
-async function fixture(options: GroupOptions = {}, beforeJoin = 0, afterJoin = 0) {
-  const group = await createRealGroup(beforeJoin > 0 ? 0 : 1, 'validation')
+const verifierFault = vi.hoisted(() => ({
+  token: '',
+  error: new Error('transient credential verifier'),
+}))
+vi.mock('@kokuin/token', async (importOriginal) => {
+  const actual = await importOriginal<typeof TokenModule>()
+  return {
+    ...actual,
+    verifyToken: (...args: Parameters<typeof actual.verifyToken>) => {
+      if (args[0] === verifierFault.token) throw verifierFault.error
+      return actual.verifyToken(...args)
+    },
+  }
+})
+
+async function fixture(
+  options: GroupOptions = {},
+  beforeJoin = 0,
+  afterJoin = 0,
+  blankLeaf = false,
+) {
+  const group = await createRealGroup(beforeJoin > 0 ? 0 : blankLeaf ? 2 : 1, 'validation')
   if (beforeJoin > 0) {
     for (let index = 0; index < beforeJoin; index++)
       group.committer.handle = (await commitKeyRotation(group.committer.handle)).newGroup
@@ -94,6 +121,17 @@ async function fixture(options: GroupOptions = {}, beforeJoin = 0, afterJoin = 0
   }
   const member = group.members[0]
   if (member === undefined) throw new Error('missing member')
+  if (blankLeaf) {
+    const removed = group.members[1]
+    if (removed === undefined) throw new Error('missing removed member')
+    const removal = await removeMember(
+      group.committer.handle,
+      removed.handle.state.privatePath.leafIndex,
+    )
+    group.committer.handle = removal.newGroup
+    await member.handle.processMessage(removal.commitMessage)
+    group.members.splice(1, 1)
+  }
   for (let index = 0; index < afterJoin; index++) {
     const rotation = await commitKeyRotation(group.committer.handle)
     group.committer.handle = rotation.newGroup
@@ -592,6 +630,69 @@ test('public member ledger commits run mandatory policy checks', async () => {
   ).toEqual({ kind: 'invalid', reason: 'policy' })
 })
 
+test.each(['malformed-list', 'not-sealed'] as const)(
+  'malformed ledger body reports malformed: %s',
+  async (kind) => {
+    const f = await fixture()
+    const ledger = await publicLedger(f)
+    const key = await deriveEntryKey(f.member.handle)
+    const sealed =
+      kind === 'malformed-list' ? sealEntries(key, new Uint8Array([1])) : new Uint8Array([0])
+    key.fill(0)
+    const frame = {
+      ...ledger.frame,
+      payload: encodeHandshakeFrame(
+        HANDSHAKE_KIND.commit,
+        encodeCommitFrame(ledger.commit, sealed),
+      ),
+    }
+    const validation = await f.port.restoreValidation(f.built)
+    expect(await validation?.validateFrame(frame, f.built)).toEqual({
+      kind: 'invalid',
+      reason: 'malformed',
+    })
+  },
+)
+
+test('one source restore per header and frame, and own verification reuses its candidate', async () => {
+  const getCiphersuiteImpl = vi.fn(nobleCryptoProvider.getCiphersuiteImpl)
+  const f = await fixture({ cryptoProvider: { getCiphersuiteImpl } })
+  const competitor = (await commitKeyRotation(f.group.committer.handle)).commitMessage
+  const validation = await f.port.restoreValidation(f.built)
+  if (validation === null) throw new Error('missing validation')
+  getCiphersuiteImpl.mockClear()
+  const header = await validation.readCommitHeader(competitor)
+  expect(await validation.validateFrame(f.frame(competitor), f.built, header)).toMatchObject({
+    kind: 'valid',
+    own: false,
+  })
+  expect(getCiphersuiteImpl).toHaveBeenCalledOnce()
+  getCiphersuiteImpl.mockClear()
+  const { decodeCommitFrame, decodeHandshakeFrame } = await import('@kumiai/rpc')
+  const ownCommit = decodeCommitFrame(decodeHandshakeFrame(f.built.payload).payload).commit
+  const ownHeader = await validation.readCommitHeader(ownCommit)
+  expect(
+    await validation.validateFrame(
+      { ...f.frame(ownCommit), payload: f.built.payload },
+      f.built,
+      ownHeader,
+    ),
+  ).toMatchObject({ kind: 'valid', own: true })
+  expect(await validation.verifyOwn(f.built)).toBe(true)
+  expect(getCiphersuiteImpl).toHaveBeenCalledTimes(2)
+})
+
+test('a frame at another epoch is malformed for this retained source', async () => {
+  const f = await fixture()
+  const rotation = await commitKeyRotation(f.group.committer.handle)
+  const future = (await commitKeyRotation(rotation.newGroup)).commitMessage
+  const validation = await f.port.restoreValidation(f.built)
+  expect(await validation?.validateFrame(f.frame(future), f.built)).toEqual({
+    kind: 'invalid',
+    reason: 'malformed',
+  })
+})
+
 test('validator owns its resolver callbacks and buffers', async () => {
   const validatorNotifications = vi.fn()
   const f = await fixture({ onLedgerEntries: validatorNotifications })
@@ -651,11 +752,7 @@ test('validator owns its resolver callbacks and buffers', async () => {
   await expect(f.member.slot.resolve(['uninstalled'])).rejects.toThrow()
 })
 
-test.each([
-  'Desired generation too far in the future',
-  'Desired gen in the past',
-  'transient member AEAD',
-] as const)(
+test.each(['Desired gen in the past', 'transient member AEAD'] as const)(
   'unavailable header or body resolution cannot hide an earlier winner: %s',
   async (message) => {
     const error = message.startsWith('Desired') ? new ValidationError(message) : new Error(message)
@@ -751,6 +848,50 @@ test('sender-data derivation failures propagate typed unavailable diagnostics', 
   const searched = await searchReal(f, competitor)
   expect(searched.result).toEqual({ kind: 'unknown' })
   expect(searched.followWinner).not.toHaveBeenCalled()
+})
+
+test('typed unavailable reason survives a message without diagnostic keywords', async () => {
+  const f = await fixture({
+    cryptoProvider: {
+      getCiphersuiteImpl: async (id) => {
+        const suite = await nobleCryptoProvider.getCiphersuiteImpl(id)
+        return {
+          ...suite,
+          hpke: {
+            ...suite.hpke,
+            decryptAead: async () => {
+              throw new CommitValidationUnavailableError('retry later', { reason: 'missing-key' })
+            },
+          },
+        }
+      },
+    },
+  })
+  const competitor = (await commitKeyRotation(f.group.committer.handle)).commitMessage
+  const validation = await f.port.restoreValidation(f.built)
+  expect(await validation?.validateFrame(f.frame(competitor), f.built)).toEqual({
+    kind: 'unavailable',
+    reason: 'missing-key',
+  })
+})
+
+test('an authenticated alternate own commit retains fork evidence', async () => {
+  const f = await fixture()
+  const other = (await commitKeyRotation(f.member.handle)).commitMessage
+  const validation = await f.port.restoreValidation(f.built)
+  expect(await validation?.validateFrame(f.frame(other), f.built)).toEqual({
+    kind: 'unavailable',
+    reason: 'unexplained-own',
+  })
+  const searched = await searchReal(f, other)
+  expect(searched.result).toEqual({ kind: 'unknown' })
+  expect(searched.hold).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      reason: 'fork-evidence',
+      evidence: expect.objectContaining({ kind: 'unexplained-own-commit' }),
+    }),
+  )
+  expect(searched.persisted).not.toHaveBeenCalled()
 })
 
 test('live unavailable validation refuses without moving or saving', async () => {
@@ -894,6 +1035,245 @@ test('conclusive member AEAD rejection is skippable poison', async () => {
   })
 })
 
+async function forgeSender(f: Awaited<ReturnType<typeof fixture>>, leafIndex: number) {
+  const author = f.group.committer.handle
+  const suite = author.context.cipherSuite
+  const result = await createCommit({
+    context: {
+      ...author.context,
+      cipherSuite: {
+        ...suite,
+        hpke: {
+          ...suite.hpke,
+          encryptAead: async (key, nonce, aad, plaintext) => {
+            const altered = plaintext.slice()
+            if (plaintext.length === 12) {
+              new DataView(altered.buffer).setUint32(0, leafIndex)
+            }
+            return suite.hpke.encryptAead(key, nonce, aad, altered)
+          },
+        },
+      },
+    },
+    state: author.state,
+    authenticatedData: encodeControlEnvelope({ v: 1 }),
+  })
+  return encode(mlsMessageEncoder, result.commit)
+}
+
+test.each(['tampered-own', 'forged-own-sender', 'forged-own-signature'] as const)(
+  'unauthenticated own claim is poison without a fork hold: %s',
+  async (kind) => {
+    const f = await fixture()
+    let commit: Uint8Array
+    if (kind === 'tampered-own') {
+      const { decodeCommitFrame, decodeHandshakeFrame } = await import('@kumiai/rpc')
+      commit = decodeCommitFrame(decodeHandshakeFrame(f.built.payload).payload).commit.slice()
+      const parsed = decode(mlsMessageDecoder, commit)
+      if (parsed?.wireformat !== wireformats.mls_private_message)
+        throw new Error('expected private')
+      expect(parsed.privateMessage.ciphertext.length).toBeGreaterThan(
+        f.member.handle.context.cipherSuite.kdf.size,
+      )
+      const last = parsed.privateMessage.ciphertext.length - 1
+      parsed.privateMessage.ciphertext[last] = (parsed.privateMessage.ciphertext[last] ?? 0) ^ 1
+      commit = encode(mlsMessageEncoder, parsed)
+    } else if (kind === 'forged-own-sender')
+      commit = await forgeSender(f, f.member.handle.state.privatePath.leafIndex)
+    else {
+      const state = decodeClientState(f.state)
+      if (state === undefined) throw new Error('missing source')
+      state.signaturePrivateKey = f.group.committer.identity.privateKey
+      const forged = await createCommit({
+        context: f.member.handle.context,
+        state,
+        authenticatedData: encodeControlEnvelope({ v: 1 }),
+      })
+      commit = encode(mlsMessageEncoder, forged.commit)
+    }
+    const validation = await f.port.restoreValidation(f.built)
+    expect(await validation?.readCommitHeader(commit)).toMatchObject({
+      committerDID: f.member.identity.id,
+    })
+    expect(await validation?.validateFrame(f.frame(commit), f.built)).toEqual({
+      kind: 'invalid',
+      reason: 'authentication',
+    })
+    const searched = await searchReal(f, commit)
+    expect(searched.result).toMatchObject({
+      kind: 'first-valid',
+      proof: { position: asLogPosition('000102') },
+    })
+    expect(searched.hold).not.toHaveBeenCalled()
+    expect(searched.persisted).not.toHaveBeenCalled()
+  },
+)
+
+test.each(['blank', 'unknown'] as const)(
+  'forged %s sender leaf is authentication poison in validation and the ordinary port',
+  async (kind) => {
+    const f = await fixture({}, 0, 0, kind === 'blank')
+    const leaf = kind === 'blank' ? 2 : 999
+    expect(f.member.handle.state.ratchetTree[leaf * 2]).toBeUndefined()
+    const commit = await forgeSender(f, leaf)
+    expect(await f.member.handle.readCommitHeader(commit)).toEqual({ epoch: f.member.handle.epoch })
+    const validation = await f.port.restoreValidation(f.built)
+    expect(await validation?.validateFrame(f.frame(commit), f.built)).toEqual({
+      kind: 'invalid',
+      reason: 'authentication',
+    })
+    const live = createGroupMLS({
+      access: testHandleAccess({
+        handle: () => f.member.handle,
+        adopt: () => {
+          throw new Error('must not adopt')
+        },
+      }),
+      identity: f.member.identity,
+      entrySlot: f.member.slot,
+    })
+    const refused = await live.processCommit(commit, {})
+    expect(refused.validation).toBeUndefined()
+    expect(refused).toMatchObject({
+      applied: false,
+      advanced: false,
+      epochBefore: f.built.epoch,
+      epochAfter: f.built.epoch,
+    })
+    const searched = await searchReal(f, commit)
+    expect(searched.result).toMatchObject({ kind: 'first-valid' })
+    expect(searched.hold).not.toHaveBeenCalled()
+  },
+)
+
+test('authenticated public Add refused by credential authentication is policy poison', async () => {
+  const f = await fixture()
+  const author = f.group.committer.handle
+  const stranger = randomIdentity()
+  const bundle = await generateKeyPackageWithKey({
+    credential: {
+      credentialType: 1,
+      identity: new TextEncoder().encode(JSON.stringify({ id: randomIdentity().id })),
+    },
+    signatureKeyPair: { signKey: stranger.privateKey, publicKey: stranger.publicKey },
+    cipherSuite: author.context.cipherSuite,
+    capabilities:
+      author.state.ratchetTree[0]?.nodeType === nodeTypes.leaf
+        ? author.state.ratchetTree[0].leaf.capabilities
+        : undefined,
+  })
+  const result = await createCommit({
+    context: { ...author.context, authService: { validateCredential: async () => true } },
+    state: author.state,
+    wireAsPublicMessage: true,
+    authenticatedData: encodeControlEnvelope({ v: 1 }),
+    extraProposals: [
+      { proposalType: defaultProposalTypes.add, add: { keyPackage: bundle.publicPackage } },
+    ],
+  })
+  const commit = encode(mlsMessageEncoder, result.commit)
+  const validation = await f.port.restoreValidation(f.built)
+  expect(await validation?.readCommitHeader(commit)).toMatchObject({
+    committerDID: f.group.committer.identity.id,
+  })
+  expect(await validation?.validateFrame(f.frame(commit), f.built)).toEqual({
+    kind: 'invalid',
+    reason: 'policy',
+  })
+  expect((await searchReal(f, commit)).result).toMatchObject({ kind: 'first-valid' })
+})
+
+test.each(['credential', 'holder'] as const)(
+  'transient credential verifier failure stops before a later exact own occurrence: %s',
+  async (path) => {
+    const f = await fixture()
+    const newcomer = randomIdentity()
+    const helpers = (await import(
+      new URL('../../mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
+    )) as {
+      timedBinding(params: {
+        identity: typeof newcomer
+        iat: number
+        exp: number
+        issuer?: typeof newcomer
+        parent?: string
+      }): Promise<ControllerBinding>
+    }
+    const now = Math.floor(Date.now() / 1000)
+    const holder = randomIdentity()
+    const parent = await helpers.timedBinding({ identity: holder, iat: now - 20, exp: now + 1000 })
+    const binding = await helpers.timedBinding({
+      identity: newcomer,
+      iat: now - 10,
+      exp: now + 500,
+      ...(path === 'holder' ? { issuer: holder, parent: parent.capability } : {}),
+    })
+    const bundle = await createKeyPackageBundle(newcomer, { controller: binding })
+    const { invite } = await createInvite({
+      group: f.group.committer.handle,
+      identity: f.group.committer.identity,
+      recipientDID: newcomer.id,
+      permission: 'member',
+    })
+    const added = await commitInvite(f.group.committer.handle, bundle.publicPackage, invite)
+    const commit = added.commitMessage
+    const key = await deriveEntryKey(f.member.handle)
+    const payload = encodeHandshakeFrame(
+      HANDSHAKE_KIND.commit,
+      encodeCommitFrame(commit, sealEntries(key, encodeLedgerEntries(invite.ledgerEntries))),
+    )
+    key.fill(0)
+    const validation = await f.port.restoreValidation(f.built)
+    expect(await validation?.validateFrame({ ...f.frame(commit), payload }, f.built)).toMatchObject(
+      { kind: 'valid', own: false },
+    )
+    const token = path === 'holder' ? binding.holderGrant : binding.capability
+    if (token === undefined) throw new Error('missing holder grant')
+    verifierFault.token = token
+    try {
+      expect(
+        await validation?.validateFrame({ ...f.frame(commit), payload }, f.built),
+      ).toMatchObject({ kind: 'unavailable' })
+      const searched = await searchReal(f, commit, f.port, payload)
+      expect(searched.result).toEqual({ kind: 'unknown' })
+      expect(searched.followWinner).not.toHaveBeenCalled()
+      expect(searched.persisted).not.toHaveBeenCalled()
+      expect((await searched.store.control.load()).cursor?.position).toBe(f.built.searchFrom)
+      expect((await searched.store.control.load()).commitOnce?.payloadDigest).toBe(
+        f.built.payloadDigest,
+      )
+      expect((await searched.store.control.load()).welcomes).toEqual([])
+      const persisted = vi.fn(async () => {})
+      const live = createGroupMLS({
+        access: testHandleAccess({
+          handle: () => f.member.handle,
+          adopt: () => {
+            throw new Error('must not adopt')
+          },
+          persist: persisted,
+        }),
+        identity: f.member.identity,
+        entrySlot: f.member.slot,
+      })
+      expect(
+        await live.processCommit(commit, {
+          resolveLedgerEntries: async (ids) =>
+            invite.ledgerEntries.filter((token) => ids.includes(ledgerEntryDigest(token))),
+        }),
+      ).toMatchObject({
+        validation: 'unavailable',
+        applied: false,
+        advanced: false,
+        epochBefore: f.built.epoch,
+        epochAfter: f.built.epoch,
+      })
+      expect(persisted).not.toHaveBeenCalled()
+    } finally {
+      verifierFault.token = ''
+    }
+  },
+)
+
 test('provider evidence reads identity version terminal and control in one snapshot', async () => {
   const db = createMemoryTransaction({ rows: {} })
   const groups = createMemoryGroupPersistence({
@@ -989,8 +1369,8 @@ test('dependency diagnostics survive binding-error replacement', async () => {
   expect(consumedGeneration.message).toBe('Desired gen in the past')
   const validation = await f.port.restoreValidation(f.built)
   const result = await validation?.validateFrame(f.frame(futureBytes), f.built)
-  expect(result?.kind).toBe('unavailable')
-  expect(result).toMatchObject({ reason: 'missing-key' })
+  expect(result).toEqual({ kind: 'invalid', reason: 'authentication' })
+  expect((await searchReal(f, futureBytes)).result).toMatchObject({ kind: 'first-valid' })
   const journal = decodeControlJournal(f.built.journal)
   const consumedBuild = {
     ...f.built,

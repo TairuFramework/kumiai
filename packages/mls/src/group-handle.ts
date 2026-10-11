@@ -43,6 +43,7 @@ import { foldEnvelope, GROUP_TYPE_PREFIX } from './envelope-fold.js'
 import {
   CarryIdentityError,
   CommitValidationUnavailableError,
+  commitValidationReason,
   isConclusiveCommitError,
   LeafBindingError,
   LeafLapsedError,
@@ -1365,12 +1366,27 @@ export class GroupHandle {
       senderLeafIndex: number | undefined
       proposals: Array<ProposalWithSender>
     } | null = null
+    let authenticated = false
     try {
       const state = decodeClientState(encodeClientState(this.#state))
       if (state === undefined)
         throw new CommitValidationUnavailableError('Public authentication state unavailable')
       const result = await processPublicMessage({
-        context: this.#context,
+        context: {
+          ...this.#context,
+          cipherSuite: {
+            ...this.#context.cipherSuite,
+            signature: {
+              ...this.#context.cipherSuite.signature,
+              verify: async (...args) => {
+                const valid = await this.#context.cipherSuite.signature.verify(...args)
+                // Membership verification precedes the first (content) signature check.
+                authenticated ||= valid
+                return valid
+              },
+            },
+          },
+        },
         state,
         publicMessage: message.publicMessage,
         callback: (incoming): IncomingMessageAction => {
@@ -1382,11 +1398,63 @@ export class GroupHandle {
       zeroAll(result.consumed)
       return result.actionTaken === 'reject' ? capture : null
     } catch (error) {
+      if (authenticated) {
+        const sender = message.publicMessage.content.sender
+        return {
+          senderLeafIndex: sender.senderType === senderTypes.member ? sender.leafIndex : undefined,
+          proposals: [],
+        }
+      }
       if (isConclusiveCommitError(error)) return null
       throw new CommitValidationUnavailableError('Public commit authentication unavailable', {
         cause: error,
       })
     }
+  }
+
+  /** Authenticate content on disposable state, without adopting or running host policy. */
+  async verifyCommitSignature(commit: Uint8Array): Promise<boolean> {
+    return mutexFor(this).run(async () => {
+      let authenticated = false
+      try {
+        const message = decode(mlsMessageDecoder, commit)
+        if (
+          message == null ||
+          (message.wireformat !== wireformats.mls_private_message &&
+            message.wireformat !== wireformats.mls_public_message)
+        )
+          return false
+        const state = decodeClientState(encodeClientState(this.#state))
+        if (state === undefined)
+          throw new CommitValidationUnavailableError('Signature state unavailable')
+        const result = await mlsProcessMessage({
+          state,
+          message,
+          context: {
+            ...this.#context,
+            cipherSuite: {
+              ...this.#context.cipherSuite,
+              signature: {
+                ...this.#context.cipherSuite.signature,
+                verify: async (...args) => {
+                  const valid = await this.#context.cipherSuite.signature.verify(...args)
+                  authenticated ||= valid
+                  return valid
+                },
+              },
+            },
+          },
+          callback: () => 'reject',
+        })
+        zeroAll(result.consumed)
+      } catch (error) {
+        if (!authenticated && !isConclusiveCommitError(error))
+          throw new CommitValidationUnavailableError('Commit signature unavailable', {
+            cause: error,
+          })
+      }
+      return authenticated
+    })
   }
 
   /** The DID at a ratchet-tree leaf index, or undefined if that leaf is empty/unparsable. */
@@ -1471,11 +1539,9 @@ export class GroupHandle {
         if (epoch !== this.epoch) return { epoch }
         const authenticated = await this.#authenticatePublicCommit(decoded)
         if (authenticated === null) return { epoch }
-        if (authenticated.senderLeafIndex === undefined)
-          throw new CommitValidationUnavailableError('Public commit sender key unavailable')
+        if (authenticated.senderLeafIndex === undefined) return { epoch }
         const committerDID = this.#didOfLeaf(authenticated.senderLeafIndex)
-        if (committerDID === undefined)
-          throw new CommitValidationUnavailableError('Public commit sender key unavailable')
+        if (committerDID === undefined) return { epoch }
         return { epoch, committerDID }
       }
 
@@ -1489,8 +1555,7 @@ export class GroupHandle {
       )
       if (leafIndex == null) return { epoch }
       const committerDID = this.#didOfLeaf(leafIndex)
-      if (committerDID === undefined)
-        throw new CommitValidationUnavailableError('Commit sender key unavailable')
+      if (committerDID === undefined) return { epoch }
       return { epoch, committerDID }
     })
   }
@@ -1598,15 +1663,23 @@ export class GroupHandle {
         if (application != null) throw error
         const bindingRefused =
           capture.bindingError !== undefined &&
+          isConclusiveCommitError(capture.bindingError) &&
           error instanceof ValidationError &&
-          error.message === 'Could not validate credential'
+          commitValidationReason(error) === 'credential'
         if (!isConclusiveCommitError(error) && !bindingRefused)
+          // biome-ignore lint/style/useErrorCause: the captured credential cause preserves the verifier failure hidden by ts-mls.
           throw new CommitValidationUnavailableError(
             error instanceof Error
               ? `Commit validation unavailable: ${error.message}`
               : 'Commit validation unavailable',
             {
-              cause: error,
+              cause: capture.bindingError ?? error,
+              reason: (() => {
+                const reason = commitValidationReason(error)
+                return reason === 'missing-proposal' || reason === 'missing-key'
+                  ? reason
+                  : 'unrecognised'
+              })(),
             },
           )
         const rejection = new CommitRejectedError(

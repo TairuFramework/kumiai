@@ -2,16 +2,19 @@ import { normalizeDID, type OwnIdentity } from '@kokuin/token'
 import {
   CommitRejectedError,
   CommitValidationUnavailableError,
+  commitValidationReason,
   decodeClientState,
   encodeClientState,
   type GroupHandle,
   type GroupOptions,
   isConclusiveCommitError,
+  LeafBindingError,
   MissingLedgerEntriesError,
   restoreGroup,
 } from '@kumiai/mls'
 import {
   type BuiltCommit,
+  type CommitHeader,
   type ControlFrameValidation,
   type ControlValidationPort,
   decodeCommitFrame,
@@ -43,17 +46,20 @@ function diagnostic(error: unknown): Exclude<ControlFrameValidation, { kind: 'va
   const seen = new Set<unknown>()
   while (current instanceof Error && !seen.has(current)) {
     seen.add(current)
-    if (current.message === 'Could not find proposal with supplied reference')
-      return { kind: 'unavailable', reason: 'missing-proposal' }
-    if (
-      current.message === 'Desired generation too far in the future' ||
-      current.message === 'Desired gen in the past' ||
-      current.message.includes('sender key unavailable')
-    )
-      return { kind: 'unavailable', reason: 'missing-key' }
+    if (current instanceof CommitValidationUnavailableError)
+      return { kind: 'unavailable', reason: current.reason }
+    if (current instanceof LeafBindingError)
+      return isConclusiveCommitError(current)
+        ? { kind: 'invalid', reason: 'policy' }
+        : { kind: 'unavailable', reason: 'unrecognised' }
+    const dependencyReason = commitValidationReason(current)
+    if (dependencyReason === 'missing-proposal' || dependencyReason === 'missing-key')
+      return { kind: 'unavailable', reason: dependencyReason }
+    if (dependencyReason === 'policy') return { kind: 'invalid', reason: 'policy' }
     if (current instanceof CodecError) return { kind: 'invalid', reason: 'malformed' }
-    if (isConclusiveCommitError(current) || current instanceof LedgerEntryRefusedError)
-      return { kind: 'invalid', reason: 'authentication' }
+    if (current instanceof LedgerEntryRefusedError)
+      return { kind: 'invalid', reason: current.reason }
+    if (isConclusiveCommitError(current)) return { kind: 'invalid', reason: 'authentication' }
     if (
       isUnsupportedCommitFrameVersion(current) ||
       current instanceof UnsupportedLedgerEntriesVersionError
@@ -106,7 +112,9 @@ export function createControlValidationPort(params: {
         const slot = createLedgerEntrySlot()
         const state = decodeClientState(journal.sourceState.slice())
         if (state === undefined)
-          throw new CommitValidationUnavailableError('Retained source unavailable')
+          throw new CommitValidationUnavailableError('Retained source unavailable', {
+            reason: 'missing-key',
+          })
         const credential = decodeStoredValue(
           encodeStoredValue(journal.sourceCredential),
         ) as typeof journal.sourceCredential
@@ -120,7 +128,18 @@ export function createControlValidationPort(params: {
           }),
         }
       }
-      const verifyOwn = async (value: BuiltCommit): Promise<boolean> => {
+      type Restored = Awaited<ReturnType<typeof restore>>
+      type MLSHeader = Awaited<ReturnType<GroupHandle['readCommitHeader']>>
+      const reads = new WeakMap<
+        CommitHeader,
+        { restored: Restored; header: MLSHeader; commit: Uint8Array }
+      >()
+      let ownVerification: Promise<boolean> | undefined
+      const verifyOwn = async (
+        value: BuiltCommit,
+        restored?: Restored,
+        readHeader?: MLSHeader,
+      ): Promise<boolean> => {
         if (
           value.searchFrom !== journal.checkpoint ||
           value.epoch !== identity.epoch ||
@@ -133,52 +152,58 @@ export function createControlValidationPort(params: {
           value.digest !== built.digest
         )
           return false
-        try {
-          const handshake = decodeHandshakeFrame(value.payload)
-          if (handshake.version !== HANDSHAKE_VERSION || handshake.kind !== HANDSHAKE_KIND.commit)
-            return false
-          const commit = decodeCommitFrame(handshake.payload).commit
-          if (digestAppliedCommit(commit) !== value.digest) return false
-          const { group: source } = await restore()
-          const header = await source.readCommitHeader(commit)
-          if (
-            header?.epoch !== BigInt(identity.epoch) ||
-            header.committerDID === undefined ||
-            normalizeDID(header.committerDID) !== normalizeDID(params.identity.id) ||
-            normalizeDID(journal.sourceCredential.id) !== normalizeDID(params.identity.id)
-          )
-            return false
-          const candidate = await params.restoreCandidate(journal.candidate.slice())
-          const history = candidate.state.historicalReceiverData.get(BigInt(identity.epoch))
-          return (
-            candidate.groupID === identity.groupID &&
-            candidate.epoch === BigInt(identity.epoch + 1) &&
-            normalizeDID(candidate.credential.id) === normalizeDID(params.identity.id) &&
-            history !== undefined &&
-            sameBytes(history.resumptionPsk, source.state.keySchedule.resumptionPsk) &&
-            sameBytes(history.senderDataSecret, source.state.keySchedule.senderDataSecret) &&
-            sameBytes(
-              encodeClientState({
-                ...source.state,
-                groupContext: history.groupContext,
-                ratchetTree: history.ratchetTree,
-              }),
-              encodeClientState(source.state),
+        ownVerification ??= (async () => {
+          try {
+            const handshake = decodeHandshakeFrame(value.payload)
+            if (handshake.version !== HANDSHAKE_VERSION || handshake.kind !== HANDSHAKE_KIND.commit)
+              return false
+            const commit = decodeCommitFrame(handshake.payload).commit
+            if (digestAppliedCommit(commit) !== value.digest) return false
+            const { group: source } = restored ?? (await restore())
+            const header = readHeader ?? (await source.readCommitHeader(commit))
+            if (
+              header?.epoch !== BigInt(identity.epoch) ||
+              header.committerDID === undefined ||
+              normalizeDID(header.committerDID) !== normalizeDID(params.identity.id) ||
+              normalizeDID(journal.sourceCredential.id) !== normalizeDID(params.identity.id)
             )
-          )
-        } catch {
-          return false
-        }
+              return false
+            const candidate = await params.restoreCandidate(journal.candidate.slice())
+            const history = candidate.state.historicalReceiverData.get(BigInt(identity.epoch))
+            return (
+              candidate.groupID === identity.groupID &&
+              candidate.epoch === BigInt(identity.epoch + 1) &&
+              normalizeDID(candidate.credential.id) === normalizeDID(params.identity.id) &&
+              history !== undefined &&
+              sameBytes(history.resumptionPsk, source.state.keySchedule.resumptionPsk) &&
+              sameBytes(history.senderDataSecret, source.state.keySchedule.senderDataSecret) &&
+              sameBytes(
+                encodeClientState({
+                  ...source.state,
+                  groupContext: history.groupContext,
+                  ratchetTree: history.ratchetTree,
+                }),
+                encodeClientState(source.state),
+              )
+            )
+          } catch {
+            return false
+          }
+        })()
+        return ownVerification
       }
       return {
         source: journal.source,
         async readCommitHeader(commit) {
-          const { group } = await restore()
-          const header = await group.readCommitHeader(commit.slice())
-          return header === null ? null : { ...header, epoch: Number(header.epoch) }
+          const restored = await restore()
+          const header = await restored.group.readCommitHeader(commit.slice())
+          if (header === null) return null
+          const converted = { ...header, epoch: Number(header.epoch) }
+          reads.set(converted, { restored, header, commit: commit.slice() })
+          return converted
         },
         verifyOwn,
-        async validateFrame(frame, value) {
+        async validateFrame(frame, value, readHeader) {
           let commit: Uint8Array
           let sealedEntries: Uint8Array
           try {
@@ -196,28 +221,39 @@ export function createControlValidationPort(params: {
               : { kind: 'invalid', reason: 'malformed' }
           }
           let restored: Awaited<ReturnType<typeof restore>>
+          const read = readHeader == null ? undefined : reads.get(readHeader)
+          const retainedRead =
+            read !== undefined && sameBytes(read.commit, commit) ? read : undefined
+          if (readHeader != null) reads.delete(readHeader)
           try {
-            restored = await restore()
+            restored = retainedRead?.restored ?? (await restore())
           } catch (error) {
             return diagnostic(error)
           }
           const { group: working, slot } = restored
           let header: Awaited<ReturnType<GroupHandle['readCommitHeader']>>
           try {
-            header = await working.readCommitHeader(commit)
+            header = retainedRead?.header ?? (await working.readCommitHeader(commit))
           } catch (error) {
             return diagnostic(error)
           }
           if (header === null) return { kind: 'invalid', reason: 'non-commit' }
           if (header.epoch !== BigInt(identity.epoch))
-            return { kind: 'unavailable', reason: 'missing-key' }
+            return { kind: 'invalid', reason: 'malformed' }
           if (header.committerDID === undefined)
             return { kind: 'invalid', reason: 'authentication' }
           const own = normalizeDID(header.committerDID) === normalizeDID(params.identity.id)
           if (own) {
-            if (!sameBytes(frame.payload, value.payload))
+            if (!sameBytes(frame.payload, value.payload)) {
+              try {
+                if (!(await working.verifyCommitSignature(commit)))
+                  return { kind: 'invalid', reason: 'authentication' }
+              } catch (error) {
+                return diagnostic(error)
+              }
               return { kind: 'unavailable', reason: 'unexplained-own' }
-            return (await verifyOwn(value))
+            }
+            return (await verifyOwn(value, restored, header))
               ? {
                   kind: 'valid',
                   header: { ...header, epoch: Number(header.epoch) },
@@ -242,7 +278,10 @@ export function createControlValidationPort(params: {
                 return decodeLedgerEntries(opened)
               } catch (error) {
                 if (error instanceof UnsupportedLedgerEntriesVersionError) throw error
-                throw new LedgerEntryRefusedError('Malformed ledger entries', { cause: error })
+                throw new LedgerEntryRefusedError('Malformed ledger entries', {
+                  cause: error,
+                  reason: 'malformed',
+                })
               }
             } catch (error) {
               resolverError = error

@@ -71,6 +71,8 @@ export {
 export {
   CarryIdentityError,
   CommitValidationUnavailableError,
+  type CommitValidationUnavailableReason,
+  commitValidationReason,
   DeviceRegistryCodecError,
   type DeviceRegistryCodecErrorParams,
   isConclusiveCommitError,

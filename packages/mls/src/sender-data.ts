@@ -1,6 +1,10 @@
 import type { MlsContext } from 'ts-mls'
 
-import { CommitValidationUnavailableError, isConclusiveCommitError } from './errors.js'
+import {
+  CommitValidationUnavailableError,
+  commitValidationReason,
+  isConclusiveCommitError,
+} from './errors.js'
 
 /**
  * PrivateMessage sender-data decrypt, reimplemented from RFC 9420 §6.3.2.
@@ -127,7 +131,11 @@ export async function readSenderLeafIndex(
     plaintext = await hpke.decryptAead(key, nonce, aad, pm.encryptedSenderData)
   } catch (error) {
     if (isConclusiveCommitError(error)) return null
-    throw new CommitValidationUnavailableError('Sender data unavailable', { cause: error })
+    const reason = commitValidationReason(error)
+    throw new CommitValidationUnavailableError('Sender data unavailable', {
+      cause: error,
+      reason: reason === 'missing-key' ? reason : 'unrecognised',
+    })
   }
   // SenderData = { uint32 leaf_index; uint32 generation; opaque reuse_guard[4] }.
   if (plaintext.length < 4) return null

@@ -74,7 +74,7 @@ export function sealEntries(
 
 function assertSealedEntryBlob(sealed: Uint8Array): void {
   if (sealed.length <= 1 + ENTRY_NONCE_BYTES)
-    throw new LedgerEntryRefusedError('openEntries: not a sealed blob')
+    throw new LedgerEntryRefusedError('openEntries: not a sealed blob', { reason: 'malformed' })
   if (sealed[0] !== ENTRY_VERSION) {
     throw new UnsupportedLedgerEntriesVersionError(
       `openEntries: unsupported blob version ${sealed[0]}`,

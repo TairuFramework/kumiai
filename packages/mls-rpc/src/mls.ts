@@ -330,8 +330,12 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           throw error
         }
         return {
-          eligible: header != null && frameEpoch === group.epoch,
+          eligible: header?.committerDID !== undefined && frameEpoch === group.epoch,
           epoch: Number(group.epoch),
+          refusal:
+            header != null && frameEpoch === group.epoch && header.committerDID === undefined
+              ? ('invalid' as const)
+              : undefined,
         }
       })
       if (!eligible.eligible) {
@@ -341,6 +345,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           epochBefore: eligible.epoch,
           epochAfter: eligible.epoch,
           ...(eligible.validation === undefined ? {} : { validation: eligible.validation }),
+          ...(eligible.refusal === undefined ? {} : { refusal: eligible.refusal }),
         }
       }
       const ids = readCommitEntryIDs(commit)

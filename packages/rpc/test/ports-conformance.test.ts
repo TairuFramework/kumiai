@@ -243,6 +243,21 @@ testGroupMLSConformance({
         hintOffset = offset
       },
       committerDID: COMMITTER_DID,
+      readEvidence: (index) => {
+        const member = members[index]
+        if (member === undefined) throw new Error('missing member')
+        return member.mls.readEvidence()
+      },
+      buildUnavailableCommit: async () =>
+        fromUTF(
+          JSON.stringify({
+            epoch: committerEpoch,
+            committerDID: COMMITTER_DID,
+            entryIDs: [],
+            signerDID: COMMITTER_DID,
+            missingProposal: true,
+          }),
+        ),
       buildCommit: async (options) => {
         const removes = options?.removes == null ? undefined : [didAt(options.removes)]
         // A genuinely new identity — never one already modelled in `members` — so a reuse test

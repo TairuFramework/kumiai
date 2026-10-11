@@ -2,7 +2,7 @@ import type { HubFetchTopicResult } from '@kumiai/hub-tunnel'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { toB64U } from '@sozai/codec'
 
-import { asLogPosition, type LogPosition } from '../cursor.js'
+import { asLogPosition, assertForwardPage, type LogPosition } from '../cursor.js'
 
 export async function searchOccurrence(
   fetch: (after: LogPosition | null) => Promise<HubFetchTopicResult>,
@@ -18,11 +18,8 @@ export async function searchOccurrence(
         return { found: asLogPosition(row.sequenceID) }
     }
     if (page.gap) return 'gap'
-    let previous: string | null = after
-    for (const row of page.messages) {
-      if (previous !== null && row.sequenceID <= previous) return 'gap'
-      previous = row.sequenceID
-    }
+    assertForwardPage(after, page.messages)
+    const previous = page.messages.at(-1)?.sequenceID ?? after
     if (page.head === null) return previous === null ? 'absent' : 'gap'
     if (previous !== null && previous >= page.head) return 'absent'
     const last = page.messages.at(-1)

@@ -23,7 +23,7 @@ import type { SubscribeFailure } from '../../src/hub-mux.js'
 import { encodeLedgerEntries } from '../../src/ledger-entries.js'
 import type { AppOutboxCleared } from '../../src/log-delivery.js'
 import {
-  createGroupPeer,
+  createGroupPeerWithControlWalk,
   type GroupPeer,
   type RecoveryEvent,
   type StrandObservation,
@@ -55,6 +55,7 @@ export const chat = {
 export type Protocols = { chat: typeof chat }
 
 export type TestPeer = {
+  controlWalk: ReturnType<typeof createGroupPeerWithControlWalk<Protocols>>['controlWalk']
   peer: GroupPeer<Protocols>
   crypto: FakeCrypto
   mls: MemoryGroupMLS
@@ -190,7 +191,7 @@ export function makeMLSPeer(
     options.appCursorStore ?? restartOf?.appCursorStore ?? createMemoryAppCursorStore()
   const appOutbox = options.appOutbox ?? restartOf?.appOutbox ?? createMemoryAppOutbox()
   const welcomes = options.welcomes ?? restartOf?.welcomes ?? []
-  const peer = createGroupPeer<Protocols>({
+  const { peer, controlWalk } = createGroupPeerWithControlWalk<Protocols>({
     hub,
     crypto,
     mls,
@@ -236,6 +237,7 @@ export function makeMLSPeer(
     ...(options.recovery != null ? { recovery: options.recovery } : {}),
   })
   return {
+    controlWalk,
     peer,
     crypto,
     mls,

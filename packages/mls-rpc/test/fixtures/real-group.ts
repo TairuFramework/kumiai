@@ -6,6 +6,7 @@ import {
   createInvite,
   createKeyPackageBundle,
   encodeClientState,
+  encodeControlEnvelope,
   exportGroupInfo,
   type GroupHandle,
   joinGroupExternal,
@@ -15,8 +16,10 @@ import {
   renewLeaf,
 } from '@kumiai/mls'
 import {
+  bytesToBase64,
   createCommit,
   decode,
+  defaultProposalTypes,
   encode,
   mlsMessageDecoder,
   mlsMessageEncoder,
@@ -42,6 +45,30 @@ export async function buildRealRotation(handle: GroupHandle): Promise<Uint8Array
     context: handle.context,
     state: handle.state,
     extraProposals: [],
+  })
+  return encode(mlsMessageEncoder, result.commit)
+}
+
+export async function buildRealUnavailableCommit(group: RealGroup): Promise<Uint8Array> {
+  const handle = group.committer.handle
+  const member = group.members[0]
+  if (member === undefined) throw new Error('missing receiver')
+  const result = await createCommit({
+    context: handle.context,
+    state: {
+      ...handle.state,
+      unappliedProposals: {
+        [bytesToBase64(new Uint8Array(32).fill(8))]: {
+          proposal: {
+            proposalType: defaultProposalTypes.remove,
+            remove: { removed: member.handle.state.privatePath.leafIndex },
+          },
+          senderLeafIndex: handle.state.privatePath.leafIndex,
+        },
+      },
+    },
+    wireAsPublicMessage: true,
+    authenticatedData: encodeControlEnvelope({ v: 1 }),
   })
   return encode(mlsMessageEncoder, result.commit)
 }
