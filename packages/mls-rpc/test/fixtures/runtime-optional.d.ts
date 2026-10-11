@@ -1,0 +1,1 @@
+declare var Float16Array: Float32ArrayConstructor
