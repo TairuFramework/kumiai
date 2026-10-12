@@ -19,7 +19,6 @@ import {
   type ControlSlot,
   commitTopic,
   controlBuildRef,
-  createGroupPeerWithControlWalk,
   digestAppliedCommit,
   encodeCommitFrame,
   encodeHandshakeFrame,
@@ -28,6 +27,7 @@ import {
   HANDSHAKE_KIND,
   type Operation,
 } from '@kumiai/rpc'
+import { createGroupPeerWithControlWalk } from '@kumiai/rpc/testing'
 import type { CommitOnceEvidence, StorageTestPorts } from '@kumiai/rpc-conformance'
 import { expect, vi } from 'vitest'
 
@@ -66,6 +66,12 @@ import {
 } from '../../src/testing.js'
 import { createDeterministicAtRestCodec } from './at-rest.js'
 import { createSealedControlAccess } from './sealed-control-access.js'
+import {
+  buildSealedMemoryOperation,
+  memoryModel,
+  restoreMemoryControlHandle,
+  sealedMemoryValidation,
+} from './sealed-memory-mls.js'
 import { installSeed, makeStorageSeed, nextChange } from './storage-seed.js'
 
 const sideNamespace = 'host-side'
@@ -116,7 +122,6 @@ function address(namespace: string, key: string): Omit<RawStoredRecord, 'bytes'>
 export async function createStorageFixture(params: {
   id: string
   mode: 'real-mls' | 'double'
-  controlRuntime?: boolean
   effects?: TransactionalGroupEffects<MemoryTransaction>
   ownershipContext?: OwnershipContextPort
 }): Promise<PersistenceFixture<StorageTestPorts<MemoryTransaction>>> {
@@ -315,7 +320,7 @@ export async function createStorageFixture(params: {
     id: params.id,
     incarnation: 1,
     epoch: 3,
-    mode: params.controlRuntime ? 'real-mls' : params.mode,
+    mode: params.mode,
   })
   await installSeed(initial.device.groups, seed, 'seed')
   if (params.id !== 'group-B') {
@@ -680,7 +685,7 @@ export async function createStorageFixture(params: {
 }
 
 export async function createControlCrashHarness(mode: 'real-mls' | 'double') {
-  const fixture = await createStorageFixture({ id: 'control-crash', mode, controlRuntime: true })
+  const fixture = await createStorageFixture({ id: 'control-crash', mode })
   const key = { groupID: 'control-crash', incarnation: 1 }
   const closers: Array<() => Promise<void>> = []
   const fixtureClose = fixture.close.bind(fixture)
@@ -759,7 +764,8 @@ export async function createControlCrashHarness(mode: 'real-mls' | 'double') {
       ...createFullIdentity(initial.signaturePrivateKey),
       privateKey: initial.signaturePrivateKey,
     }
-    const initialHandle = await restoreGroup({
+    const restoreHandle = mode === 'double' ? restoreMemoryControlHandle : restoreGroup
+    const initialHandle = await restoreHandle({
       state: initial,
       credential: stored.credential,
       ledgerEntries: stored.ledger,
@@ -770,11 +776,17 @@ export async function createControlCrashHarness(mode: 'real-mls' | 'double') {
       () => observations.handlePublications++,
       () => hooks.beforeAdopt?.(),
       initialHandle,
+      restoreHandle,
     )
     const restoreCandidate = async (bytes: Uint8Array) => {
       const state = decodeClientState(bytes)
       if (state === undefined) throw new Error('Invalid candidate')
-      return restoreGroup({ state, credential: stored.credential, ledgerEntries: stored.ledger })
+      const slot = (await control.load()).commitOnce
+      return restoreHandle({
+        state,
+        credential: stored.credential,
+        ledgerEntries: slot?.bodies ?? stored.ledger,
+      })
     }
     const adoption = createControlAdoptionPort({ access: host.access, control, restoreCandidate })
     const adoptControl: typeof adoption.adopt = async (bytes, expected, write) => {
@@ -787,6 +799,7 @@ export async function createControlCrashHarness(mode: 'real-mls' | 'double') {
       handle: Awaited<ReturnType<typeof restoreCandidate>>,
     ) => {
       observations.builds++
+      if (mode === 'double') return buildSealedMemoryOperation(op, handle)
       const { invite, publicPackage } = decodeStoredValue(op.body) as {
         invite: Parameters<typeof commitInvite>[2]
         publicPackage: Parameters<typeof commitInvite>[1]
@@ -813,8 +826,30 @@ export async function createControlCrashHarness(mode: 'real-mls' | 'double') {
     })
     const entrySlot = createLedgerEntrySlot()
     const cryptoPort = createGroupCrypto({ access: host.access })
-    const mls = createGroupMLS({ access: host.access, identity, entrySlot })
-    const validation = createControlValidationPort({ identity, restoreCandidate, options: {} })
+    const mls =
+      mode === 'double'
+        ? new Proxy(memoryModel(initialHandle), {
+            get(_target, property) {
+              if (property === 'readRecoverySource')
+                return async () => {
+                  const value = await source()
+                  if (value.identity === null) throw new Error('Missing memory source identity')
+                  return {
+                    ...value,
+                    epoch: value.identity.epoch,
+                    authenticator: value.identity.authenticator,
+                  }
+                }
+              const current = memoryModel(host.live())
+              const value = Reflect.get(current, property)
+              return typeof value === 'function' ? value.bind(current) : value
+            },
+          })
+        : createGroupMLS({ access: host.access, identity, entrySlot })
+    const validation =
+      mode === 'double'
+        ? sealedMemoryValidation()
+        : createControlValidationPort({ identity, restoreCandidate, options: {} })
     let running: ReturnType<typeof createGroupPeerWithControlWalk> | undefined
     const runtime = () => {
       if (running === undefined) {
@@ -857,18 +892,22 @@ export async function createControlCrashHarness(mode: 'real-mls' | 'double') {
       const retained = (await control.load()).operations.find((row) => row.stage === 'intent')
       if (retained?.stage === 'intent') return retained
       const invitee = randomIdentity()
-      const bundle = await createKeyPackageBundle(invitee)
-      const { invite } = await createInvite({
-        group: host.live(),
-        identity,
-        recipientDID: invitee.id,
-        permission: 'member',
-      })
+      const body = await (async () => {
+        if (mode === 'double') return encodeStoredValue({ target: invitee.id })
+        const bundle = await createKeyPackageBundle(invitee)
+        const { invite } = await createInvite({
+          group: host.live(),
+          identity,
+          recipientDID: invitee.id,
+          permission: 'member',
+        })
+        return encodeStoredValue({ invite, publicPackage: bundle.publicPackage })
+      })()
       const op: Operation & { stage: 'intent' } = {
         id: crypto.randomUUID(),
         kind: 'invite',
         revokes: false,
-        body: encodeStoredValue({ invite, publicPackage: bundle.publicPackage }),
+        body,
         seq: 1,
         enqueuedAt: Date.now(),
         deadline: Date.now() + 30_000,
@@ -1049,7 +1088,7 @@ export async function runControlProofConflict(
   await h.peer.resync()
   const intent = await h.intent()
   if (stage !== 'built') {
-    await h.controlWalk.stepOperation(intent)
+    await h.controlWalk.stepOperation(intent.id)
     const built = (await h.control.load()).commitOnce
     if (built === null) throw new Error('Missing saved slot')
     await h.hub.publish({
@@ -1073,7 +1112,7 @@ export async function runControlProofConflict(
   let completed = false
   let latch: ReturnType<typeof h.fixture.holdNextSeal> | undefined
   try {
-    const saving = h.controlWalk.stepOperation(await h.operation()).then(
+    const saving = h.controlWalk.stepOperation((await h.operation()).id).then(
       () => null,
       (error: unknown) => error,
     )

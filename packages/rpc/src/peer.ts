@@ -249,7 +249,8 @@ export function createGroupPeerWithControlWalk<
   controlWalk: {
     walkCommits(search: ControlWalkRequest): Promise<boolean>
     head(): LogPosition | null
-    stepOperation(op: Operation): Promise<Operation | null>
+    stepOperation(operationID?: string): Promise<Operation | null>
+    /** Stateful test control: may follow a winner or persist a hold. */
     searchLog: OperationDeps['searchLog']
   }
 } {
@@ -3930,15 +3931,35 @@ export function createGroupPeerWithControlWalk<
         assertLive()
         return runSerial(async () => searchControlLog(slot, position))
       },
-      stepOperation: async (op) => {
+      stepOperation: async (operationID) => {
         await ready
         assertLive()
+        if (activeRecovery != null) await activeRecovery
         return runSerial(async () => {
+          assertLive()
+          if (control == null) throw new Error('Missing control store')
           await refreshControl()
+          const snapshot = await control.load()
+          const op = snapshot.operations[0]
+          if (op == null) throw new Error('Missing queued operation')
+          if (operationID != null && op.id !== operationID)
+            throw new Error('Stale operation: not the durable FIFO head')
+          if (snapshot.outcomes.some((row) => row.opID === op.id))
+            throw new Error('Operation already settled')
+          if (rejoinHeld || activeRecovery != null || anchorRecoveryPending || locallyRemoved)
+            return op
+          // One deterministic step is bounded below the scheduler's attempt ceiling.
+          controlReplayed = true
           const next = await stepOperation(operationDeps(), op)
           await deliverPendingWelcomes()
           await refreshControl()
-          if (epochNeedsBuild) await rebuildEpoch()
+          if (epochNeedsBuild && mls != null && !locallyRemoved) {
+            await resolveAnchorRotation({ port: mls })
+            if (anchorPending == null && epochRuntime.hasInboxLane()) {
+              await rebuildEpoch()
+              epochNeedsBuild = false
+            }
+          }
           return next
         })
       },

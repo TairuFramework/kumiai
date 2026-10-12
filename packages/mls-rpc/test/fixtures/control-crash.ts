@@ -1,6 +1,7 @@
 import type { AdoptionWrite, ControlSlot, FirstValidCommit } from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
+import { GroupStateConflictError } from '../../src/persistence-errors.js'
 import { createControlCrashHarness, runControlProofConflict } from './storage-persistence.js'
 
 function crashAdoptionWrite(slot: ControlSlot, proof: FirstValidCommit): AdoptionWrite {
@@ -51,7 +52,7 @@ export function testControlCrashBoundaries(mode: 'real-mls' | 'double'): void {
         h.hooks.beforeSave = (slot) => {
           first = slot
         }
-        await expect(h.controlWalk.stepOperation(op)).rejects.toBe(died)
+        await expect(h.controlWalk.stepOperation(op.id)).rejects.toBe(died)
         expect(first?.welcome).not.toBeNull()
         expect(first).toBeDefined()
         expect(h.hub.published).toEqual([])
@@ -66,10 +67,26 @@ export function testControlCrashBoundaries(mode: 'real-mls' | 'double'): void {
           expect((await reopened.control.load()).commitOnce).toBeNull()
           const secondOp = await reopened.intent()
           expect(secondOp).toEqual(op)
-          await reopened.controlWalk.stepOperation(secondOp)
-          const second = (await reopened.control.load()).commitOnce
-          expect(second).not.toBeNull()
-          await reopened.controlWalk.stepOperation(await reopened.operation())
+          let second: ControlSlot | undefined
+          reopened.hooks.beforeSave = (slot) => {
+            second = slot
+          }
+          await reopened.peer.replay()
+          expect(second).toBeDefined()
+          const saved = await reopened.control.load()
+          expect(saved.commitOnce).toBeNull()
+          expect(saved.applied).toContainEqual(
+            expect.objectContaining({
+              payloadDigest: second?.payloadDigest,
+              opID: secondOp.id,
+            }),
+          )
+          expect(saved.outcomes).toContainEqual(
+            expect.objectContaining({
+              opID: secondOp.id,
+              kind: 'landed',
+            }),
+          )
           expect(
             h.publications.some(
               (row) =>
@@ -185,14 +202,26 @@ export function testControlCrashBoundaries(mode: 'real-mls' | 'double'): void {
         const retained = await restored.control.load()
         if (retained.commitOnce === null || retained.commitOnceAcceptance === null)
           throw new Error('Missing durable accepted slot')
-        await expect(
-          restored.adopt(
-            { ...(await restored.source()), acceptance: retained.commitOnceAcceptance },
-            crashAdoptionWrite(retained.commitOnce, retained.commitOnceAcceptance),
-          ),
-        ).rejects.toThrow()
+        const refused = restored.adopt(
+          { ...(await restored.source()), acceptance: retained.commitOnceAcceptance },
+          crashAdoptionWrite(retained.commitOnce, retained.commitOnceAcceptance),
+        )
+        await expect(refused).rejects.toBeInstanceOf(GroupStateConflictError)
+        await expect(refused).rejects.toThrow('Lost private state requires a new incarnation')
         expect(await h.fixture.inspectRows()).toEqual(before)
+        expect(await restored.recoveryTrust()).toEqual(trust)
+        const state = await restored.groups.loadState(restored.key)
+        expect(state).toMatchObject({
+          state: null,
+          epoch: built.slot.epoch,
+          epochAuthenticator: built.slot.authenticatorBefore,
+        })
         expect((await restored.control.load()).commitOnce).toEqual(built.slot)
+        expect((await restored.control.load()).commitOnceAcceptance).toEqual(
+          retained.commitOnceAcceptance,
+        )
+        expect(h.observations.ownAdoptions).toBe(0)
+        expect(h.observations.handlePublications).toBe(0)
       } finally {
         await h.fixture.close()
       }
@@ -245,7 +274,7 @@ export function testControlCrashBoundaries(mode: 'real-mls' | 'double'): void {
           try {
             await h.peer.resync()
             const op = await h.intent()
-            if (stage !== 'built') await h.controlWalk.stepOperation(op)
+            if (stage !== 'built') await h.controlWalk.stepOperation(op.id)
             const built = (await h.control.load()).commitOnce
             if (stage !== 'built') {
               if (built === null) throw new Error('Missing saved slot')
@@ -262,6 +291,8 @@ export function testControlCrashBoundaries(mode: 'real-mls' | 'double'): void {
             const started =
               Promise.withResolvers<ReturnType<typeof h.fixture.rejectCommitPending>>()
             const hooks: Array<string> = []
+            const rollbackDeath = new Error('process died before rolled-back build retry')
+            let attemptedBuild: ControlSlot | undefined
             h.armFault(
               stage,
               async () => {
@@ -272,7 +303,14 @@ export function testControlCrashBoundaries(mode: 'real-mls' | 'double'): void {
                 hooks.push('commit')
               },
             )
-            const action = h.controlWalk.stepOperation(await h.operation()).then(
+            if (stage === 'built') {
+              const arm = h.hooks.beforeSave
+              h.hooks.beforeSave = (slot) => {
+                attemptedBuild = slot
+                arm?.(slot)
+              }
+            }
+            const action = h.controlWalk.stepOperation((await h.operation()).id).then(
               (value) => ({ ok: true as const, value }),
               (error: unknown) => ({ ok: false as const, error }),
             )
@@ -286,14 +324,23 @@ export function testControlCrashBoundaries(mode: 'real-mls' | 'double'): void {
             expect(h.observations.welcomeDeliveries).toBe(0)
             expect(hooks).toEqual([])
             expect(await h.fixture.inspectRows()).toEqual(before)
+            if (stage === 'built' && completion === 'rollback') {
+              h.hooks.beforeSave = () => {
+                throw rollbackDeath
+              }
+            }
             await fault.finish(completion)
             finished = true
             const settled = await action
-            // A rollback cannot release the candidate, even if preparation retries.
-            if (completion === 'rollback' && stage !== 'built') expect(settled.ok).toBe(false)
+            const candidate = stage === 'built' ? attemptedBuild : built
+            if (candidate == null) throw new Error('Missing attempted candidate')
+            if (completion === 'rollback') {
+              expect(settled.ok).toBe(false)
+              if (stage === 'built' && !settled.ok) expect(settled.error).toBe(rollbackDeath)
+            }
             if (completion === 'commit') {
               expect(settled.ok).toBe(true)
-              if (stage === 'built') await h.controlWalk.stepOperation(await h.operation())
+              if (stage === 'built') await h.controlWalk.stepOperation((await h.operation()).id)
               expect(h.observations.ownAdoptions).toBe(1)
               expect(h.observations.welcomeDeliveries).toBe(1)
             }
@@ -304,7 +351,33 @@ export function testControlCrashBoundaries(mode: 'real-mls' | 'double'): void {
               if (completion === 'commit') {
                 expect(saved.applied).toHaveLength(1)
                 expect(saved.commitOnce).toBeNull()
-              } else if (stage !== 'built') {
+                expect(saved.outcomes).toContainEqual(
+                  expect.objectContaining({ opID: op.id, kind: 'landed' }),
+                )
+                expect((await reopened.source()).identity?.epoch).toBe(candidate.epoch + 1)
+                expect(h.publications).toHaveLength(baseline + (stage === 'built' ? 1 : 0))
+              } else if (stage === 'built') {
+                expect(await h.fixture.inspectRows()).toEqual(before)
+                expect(saved.commitOnce).toBeNull()
+                expect(saved.commitOnceAcceptance).toBeNull()
+                expect(saved.operations).toEqual([op])
+                expect(saved.applied).toEqual([])
+                expect(saved.welcomes).toEqual([])
+                expect(saved.outcomes.some((row) => row.opID === op.id)).toBe(false)
+                expect((await reopened.source()).identity?.epoch).toBe(candidate.epoch)
+                expect(h.publications).toHaveLength(baseline)
+                expect(
+                  h.hub.published.some(
+                    (row) =>
+                      row.publishID === attemptedBuild?.publishID ||
+                      JSON.stringify(row.payload) === JSON.stringify(attemptedBuild?.payload),
+                  ),
+                ).toBe(false)
+                expect(h.observations.ownAdoptions).toBe(0)
+                expect(h.observations.handlePublications).toBe(0)
+                expect(h.observations.welcomeDeliveries).toBe(0)
+                expect(hooks).toEqual([])
+              } else {
                 expect(saved.commitOnce).toEqual(built)
                 expect(saved.applied).toEqual([])
                 expect(h.observations.ownAdoptions).toBe(0)

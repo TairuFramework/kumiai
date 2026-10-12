@@ -3,7 +3,10 @@
   "compilerOptions": {
     "types": ["node"],
     "rootDir": ".",
-    "noEmit": true
+    "noEmit": true,
+    "paths": {
+      "@kumiai/rpc/testing": ["./src/testing.ts"]
+    }
   },
   "include": ["./src/**/*", "./test/**/*"]
 }

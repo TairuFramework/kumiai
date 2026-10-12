@@ -59,7 +59,6 @@ import type {
 } from '@kumiai/rpc'
 import {
   commitTopic,
-  createGroupPeerWithControlWalk,
   createLedgerEntryResolver,
   decodeCommitFrame,
   decodeHandshakeFrame,
@@ -70,6 +69,7 @@ import {
   HANDSHAKE_KIND,
   OperationRejectedError,
 } from '@kumiai/rpc'
+import { createGroupPeerWithControlWalk } from '@kumiai/rpc/testing'
 import {
   type CommitOnceEvidence,
   type CommitOnceScenario,

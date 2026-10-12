@@ -17,6 +17,7 @@ import type {
   MemoryTransaction,
 } from '../../src/persistence-types.js'
 import { buildRealCommit, createRealGroup } from './real-group.js'
+import { seedMemoryControlState } from './sealed-memory-mls.js'
 
 export type StorageSeed = {
   key: GroupKey
@@ -92,6 +93,7 @@ export async function makeStorageSeed(params: {
       groupActiveState: { kind: 'active' },
       treeHashCache: [],
     }
+    client = seedMemoryControlState(client, { id: identity.id, groupID: params.id })
     trust = {
       groupID: params.id,
       genesisAnchor: encodeGroupAnchor({ creatorDID: identity.id, version: 1 }),

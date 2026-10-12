@@ -2,6 +2,7 @@ import { decodeClientState, encodeClientState, type GroupHandle, restoreGroup } 
 import type { AdoptionWrite } from '@kumiai/rpc'
 
 import type { ControlRead, HandleAccess } from '../../src/access.js'
+import { decodeControlJournal } from '../../src/control-journal.js'
 import type { GroupKey, GroupPersistence, MemoryTransaction } from '../../src/persistence-types.js'
 import { nextChange } from './storage-seed.js'
 
@@ -18,14 +19,23 @@ export async function createSealedControlAccess(
   adopted: () => void,
   beforeAdopt: () => void,
   fallback: GroupHandle,
+  restore: (params: {
+    state: GroupHandle['state']
+    credential: GroupHandle['credential']
+    ledgerEntries: Array<string>
+  }) => Promise<GroupHandle> = restoreGroup,
 ) {
   const read = async () => {
     const row = await groups.loadState(key)
-    if (row === null || row.deleted || row.state === null)
-      throw new Error('Missing adoption source')
-    const state = decodeClientState(row.state)
+    if (row === null || row.deleted) throw new Error('Missing adoption source')
+    const retained = (await groups.ports(key).control.load()).commitOnce
+    const bytes =
+      row.state ??
+      (retained === null ? undefined : decodeControlJournal(retained.journal).sourceState)
+    if (bytes === undefined) throw new Error('Missing retained adoption source')
+    const state = decodeClientState(bytes)
     if (state === undefined) throw new Error('Invalid adoption source')
-    const handle = await restoreGroup({
+    const handle = await restore({
       state,
       credential: row.credential,
       ledgerEntries: row.ledger,

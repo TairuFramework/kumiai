@@ -1,4 +1,5 @@
 import type { LogHub } from '@kumiai/hub-tunnel'
+import { createGroupPeerWithControlWalk } from '@kumiai/rpc/testing'
 import type { CommitOnceEvidence, CommitOnceScenario } from '@kumiai/rpc-conformance'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { toB64U } from '@sozai/codec'
@@ -28,12 +29,7 @@ import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../.
 import type { SubscribeFailure } from '../../src/hub-mux.js'
 import { createLedgerEntryResolver, encodeLedgerEntries } from '../../src/ledger-entries.js'
 import type { AppOutboxCleared } from '../../src/log-delivery.js'
-import {
-  createGroupPeerWithControlWalk,
-  type GroupPeer,
-  type RecoveryEvent,
-  type StrandObservation,
-} from '../../src/peer.js'
+import type { GroupPeer, RecoveryEvent, StrandObservation } from '../../src/peer.js'
 import type { GroupProtocolDefinition } from '../../src/protocol.js'
 import { commitTopic } from '../../src/topic.js'
 import { createMemoryAnchorStore, type MemoryAnchorStore } from './anchor.js'
@@ -729,7 +725,7 @@ export async function runCommitOnceHost(
       stage: 'intent',
     }
     await host.control.apply({ putOperations: [op] }, crypto.randomUUID())
-    let operation = await host.controlWalk.stepOperation(op)
+    let operation = await host.controlWalk.stepOperation(op.id)
     const slot = (await host.control.load()).commitOnce
     if (slot === null || operation === null || operation.stage !== 'built')
       throw new Error('Missing saved build')
@@ -785,7 +781,7 @@ export async function runCommitOnceHost(
     } else if (scenario === 'late-acked-slot') {
       host.setGap(true)
       now = op.deadline
-      await host.controlWalk.stepOperation(operation)
+      await host.controlWalk.stepOperation(operation.id)
       await host.control.apply({ deleteOutcomes: [op.id] }, crypto.randomUUID())
       host.setGap(false)
       await append(slot.payload)
@@ -793,7 +789,7 @@ export async function runCommitOnceHost(
       now = op.deadline
     }
     if (scenario === 'slot-guards') {
-      operation = await host.controlWalk.stepOperation(operation)
+      operation = await host.controlWalk.stepOperation(operation.id)
       const queued: Operation & { stage: 'intent' } = {
         ...op,
         id: crypto.randomUUID(),
@@ -802,7 +798,7 @@ export async function runCommitOnceHost(
         deadline: now + 30_000,
       }
       await host.control.apply({ putOperations: [queued] }, crypto.randomUUID())
-      await host.controlWalk.stepOperation(queued)
+      await host.controlWalk.stepOperation(queued.id)
       await host.control.apply(
         {
           deleteOperations: [queued.id],
@@ -830,7 +826,7 @@ export async function runCommitOnceHost(
       }
     }
     if (scenario === 'built-restart' && operation !== null)
-      operation = await host.controlWalk.stepOperation(operation)
+      operation = await host.controlWalk.stepOperation(operation.id)
     // A restart restores only committed rows; observations remain outside the reconstructed host.
     if (
       scenario === 'built-restart' ||
@@ -847,7 +843,7 @@ export async function runCommitOnceHost(
       await host.peer.replay()
     } else {
       for (let i = 0; operation !== null && i < 6; i++) {
-        const next = await host.controlWalk.stepOperation(operation)
+        const next = await host.controlWalk.stepOperation(operation.id)
         operation = next
       }
     }

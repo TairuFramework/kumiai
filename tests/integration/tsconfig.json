@@ -5,7 +5,8 @@
     "types": ["node"],
     "rootDir": "../..",
     "paths": {
-      "@kumiai/rpc": ["../../packages/rpc/src/index.ts"]
+      "@kumiai/rpc": ["../../packages/rpc/src/index.ts"],
+      "@kumiai/rpc/testing": ["../../packages/rpc/src/testing.ts"]
     },
     "noEmit": true
   },
