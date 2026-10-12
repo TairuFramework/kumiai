@@ -225,6 +225,10 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
         return unknown()
       }
       let evidence = await deps.readEvidence()
+      if (evidence.cursor?.stranded === true) {
+        continuation = null
+        return unknown(evidence.cursor.position)
+      }
       const coherent = async (): Promise<boolean> => {
         const current = evidence.source.identity
         if (
@@ -442,6 +446,11 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
               continue
             }
             if (header.epoch > retained.epoch) {
+              if (discovery.winner === null) {
+                continuation = null
+                await deps.reconcileAbsent(position, null, work)
+                return unknown(position)
+              }
               discovery.through = position
               continue
             }

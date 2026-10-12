@@ -40,8 +40,10 @@ export function createControlAdoptionPort(params: {
               return false
             const snapshot = await params.control.load()
             if (
-              snapshot.controlHold !== null &&
-              snapshot.controlHold.reason !== 'acceptance-unknown'
+              snapshot.strand !== null ||
+              snapshot.cursor?.stranded === true ||
+              (snapshot.controlHold !== null &&
+                snapshot.controlHold.reason !== 'acceptance-unknown')
             )
               return false
             const installed =

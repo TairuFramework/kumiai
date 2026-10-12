@@ -409,6 +409,22 @@ test('a durable control hold refuses installation with an otherwise current proo
   expect(f.store.snapshot()).toEqual(before)
 })
 
+test.each(['strand', 'cursor'] as const)(
+  'retained adoption refuses a durable %s with an otherwise current proof',
+  async (evidence) => {
+    const f = await controlAdoptionFixture()
+    await f.store.control.apply(
+      evidence === 'strand'
+        ? { strand: { reason: 'ahead' } }
+        : { cursor: { position: null, epoch: f.slot.epoch, stranded: true } },
+      'ahead',
+    )
+    const before = structuredClone(f.store.snapshot())
+    expect(await f.port.adopt(f.slot.journal, await f.expected(), f.write)).toBe('moved')
+    expect(f.store.snapshot()).toEqual(before)
+  },
+)
+
 test('transport clearing preserves a durable control hold and its cursor evidence', async () => {
   const db = createMemoryTransaction({ rows: {} })
   const groups = createMemoryGroupPersistence({

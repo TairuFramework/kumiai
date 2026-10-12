@@ -34,11 +34,24 @@ describe('memory control store', () => {
 
 describe('memory host database', () => {
   let db: MemoryHostDatabase
-  const saveBuilt: ConformanceSaveControlBuild = (intent, built, expected, mutationID) =>
-    db.saveBuilt(
+  const saveBuilt: ConformanceSaveControlBuild = (intent, built, expected, mutationID) => {
+    const { pendingPublish, ...request } = intent
+    return db.saveBuilt(
       'group-A',
       { groupID: 'group-A', incarnation: 1 },
-      intent,
+      {
+        ...request,
+        ...(pendingPublish === undefined
+          ? {}
+          : {
+              pendingPublish: {
+                expectedHead:
+                  pendingPublish.expectedHead === null
+                    ? null
+                    : asLogPosition(pendingPublish.expectedHead),
+              },
+            }),
+      },
       {
         ...built,
         searchFrom: built.searchFrom === null ? null : asLogPosition(built.searchFrom),
@@ -47,6 +60,7 @@ describe('memory host database', () => {
       expected,
       mutationID,
     )
+  }
   const host = () => ({
     control: db.control('group-A', { groupID: 'group-A', incarnation: 1 }),
     saveBuilt,

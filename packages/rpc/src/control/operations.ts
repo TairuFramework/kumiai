@@ -81,6 +81,13 @@ export function landedChanges(
 }
 
 async function settle(deps: OperationDeps, op: Operation, outcome: Outcome): Promise<null> {
+  // Only delete a still-present operation and write its outcome together, under the runner lane.
+  const current = await deps.control.load()
+  if (
+    !current.operations.some((row) => row.id === op.id) ||
+    current.outcomes.some((row) => row.opID === op.id)
+  )
+    return null
   await applyResolved(
     deps.control,
     { deleteOperations: [op.id], putOutcomes: [outcome] },
@@ -202,6 +209,9 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
   const identity = evidence.source.identity
   if (
     evidence.terminal ||
+    snapshot.strand !== null ||
+    snapshot.cursor?.stranded === true ||
+    evidence.cursor?.stranded === true ||
     identity === null ||
     evidence.source.key.incarnation !== slot.incarnation
   )
@@ -209,12 +219,37 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
   if (identity.epoch > slot.epoch) return resetIntent()
   if (snapshot.controlHold?.reason === 'acceptance-unknown')
     await applyResolved(deps.control, { controlHold: null }, deps.newID(), undefined, deps.signal)
-  if (expired()) return finish('lost')
   const expectedHead = await deps.readHead()
-  if (expired()) return finish('lost')
+  const current = snapshot.operations.find((row) => row.id === op.id)
+  if (current === undefined || snapshot.outcomes.some((row) => row.opID === op.id)) return null
+  const pending = current.pendingPublish
+  const outstanding =
+    pending !== undefined &&
+    (expectedHead === null ||
+      (pending.expectedHead !== null && expectedHead <= pending.expectedHead))
+  const absentOutcome = () => finish(outstanding ? 'unknown' : 'lost')
+  if (expired()) return absentOutcome()
   const refreshed = { ...slot, expectedHead }
   await applyResolved(deps.control, { commitOnce: refreshed }, deps.newID(), undefined, deps.signal)
-  if (expired()) return finish('lost')
+  if (expired()) return absentOutcome()
+  const { pendingPublish: _previous, ...withoutPending } = current
+  await applyResolved(
+    deps.control,
+    { putOperations: [{ ...current, pendingPublish: { expectedHead } }] },
+    deps.newID(),
+    undefined,
+    deps.signal,
+  )
+  if (expired()) {
+    await applyResolved(
+      deps.control,
+      { putOperations: [outstanding ? current : withoutPending] },
+      deps.newID(),
+      undefined,
+      deps.signal,
+    )
+    return absentOutcome()
+  }
   try {
     const published = await deps.publish(
       refreshed.payload,
@@ -224,11 +259,35 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
     asLogPosition(published.sequenceID)
   } catch (error) {
     deps.publishFailed?.(op.id, error)
+    if (
+      error instanceof Error &&
+      ['HeadMismatchError', 'AuthorizationDeniedError', 'RecoveryRequiredError'].includes(
+        error.name,
+      )
+    )
+      await applyResolved(
+        deps.control,
+        { putOperations: [outstanding ? current : withoutPending] },
+        deps.newID(),
+        undefined,
+        deps.signal,
+      )
     // A failed handoff may have committed. Discovery owns acceptance either way.
   }
   result = await discover()
   if (result === 'landed' || result === 'superseded') return null
   if (result === 'absent' && (await deps.control.load()).commitOnce === null) return advanceAbsent()
-  if (expired()) return finish(result === 'absent' ? 'lost' : 'unknown')
+  if (expired()) {
+    if (result !== 'absent') return finish('unknown')
+    const after = (await deps.control.load()).operations.find((row) => row.id === op.id)
+    const head = await deps.readHead()
+    const attempt = after?.pendingPublish
+    return finish(
+      attempt !== undefined &&
+        (head === null || (attempt.expectedHead !== null && head <= attempt.expectedHead))
+        ? 'unknown'
+        : 'lost',
+    )
+  }
   return op
 }

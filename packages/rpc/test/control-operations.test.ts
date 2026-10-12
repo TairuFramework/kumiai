@@ -372,8 +372,107 @@ test('transport failure retries before expiry and never hands off after expiry',
   h.tick(op.deadline)
   expect(await stepOperation(h.deps, op)).toBeNull()
   expect(h.deps.publish).toHaveBeenCalledOnce()
-  expect((await h.store.load()).outcomes).toMatchObject([{ kind: 'lost' }])
+  expect((await h.store.load()).outcomes).toMatchObject([{ kind: 'unknown' }])
 })
+
+test('ambiguous handoff survives reconstruction and late landing replaces its unknown row', async () => {
+  const h = await setup()
+  const op = await h.built()
+  h.deps.publish = async () => {
+    throw new Error('Reply lost while the request can still land')
+  }
+  await stepOperation(h.deps, op)
+  const restarted = { ...h.deps }
+  const retained = (await h.store.load()).operations[0]
+  if (retained === undefined) throw new Error('Missing retained operation')
+  h.tick(op.deadline)
+  expect(await stepOperation(restarted, retained)).toBeNull()
+  expect((await h.store.load()).outcomes).toEqual([
+    { id: op.id, opID: op.id, at: op.deadline, kind: 'unknown' },
+  ])
+  expect((await h.store.load()).welcomes).toEqual([])
+  h.found()
+  await stepOperation(restarted, retained)
+  expect((await h.store.load()).outcomes).toEqual([
+    {
+      id: JSON.stringify(['control:landed', op.id, publishID, position]),
+      opID: op.id,
+      at: op.deadline,
+      kind: 'landed',
+      position,
+    },
+  ])
+  expect((await h.store.load()).welcomes).toMatchObject([{ opID: op.id, committed: true }])
+})
+
+test('complete absence without a handoff loses at expiry and retains the slot', async () => {
+  const h = await setup()
+  const op = await h.built()
+  const slot = (await h.store.load()).commitOnce
+  h.tick(op.deadline)
+  expect(await stepOperation(h.deps, op)).toBeNull()
+  expect((await h.store.load()).outcomes).toEqual([
+    { id: op.id, opID: op.id, at: op.deadline, kind: 'lost' },
+  ])
+  expect((await h.store.load()).commitOnce).toEqual(slot)
+  expect(h.deps.publish).not.toHaveBeenCalled()
+})
+
+test.each([null, head])(
+  'absence past an ambiguous CAS head %s loses at expiry',
+  async (casHead) => {
+    const h = await setup()
+    const op = await h.built()
+    h.deps.readHead = async () => casHead
+    h.deps.publish = async () => {
+      throw new Error('Reply lost')
+    }
+    await stepOperation(h.deps, op)
+    h.deps.readHead = async () => asLogPosition('006')
+    h.tick(op.deadline)
+    expect(await stepOperation(h.deps, op)).toBeNull()
+    expect((await h.store.load()).outcomes).toMatchObject([{ opID: op.id, kind: 'lost' }])
+  },
+)
+
+test.each(['HeadMismatchError', 'AuthorizationDeniedError'])(
+  'a later %s refusal cannot erase an earlier ambiguous handoff at the same head',
+  async (name) => {
+    const h = await setup()
+    const op = await h.built()
+    h.deps.publish = async () => {
+      throw new Error('Reply lost')
+    }
+    await stepOperation(h.deps, op)
+    h.deps.publish = async () => {
+      throw Object.assign(new Error('Refused'), { name })
+    }
+    await stepOperation(h.deps, op)
+    h.tick(op.deadline)
+    expect(await stepOperation(h.deps, op)).toBeNull()
+    expect((await h.store.load()).outcomes).toMatchObject([{ opID: op.id, kind: 'unknown' }])
+  },
+)
+
+test.each(['strand', 'cursor'] as const)(
+  'a retained built operation with a durable %s cannot publish or adopt',
+  async (evidence) => {
+    const h = await setup()
+    const op = await h.built()
+    await h.store.apply(
+      evidence === 'strand'
+        ? { strand: { reason: 'ahead' } }
+        : { cursor: { position: head, epoch: 4, stranded: true } },
+      'strand',
+    )
+    h.found()
+    expect(await stepOperation(h.deps, op)).toEqual(op)
+    expect(h.deps.publish).not.toHaveBeenCalled()
+    expect(h.deps.adopt).not.toHaveBeenCalled()
+    expect((await h.store.load()).commitOnce?.opID).toBe(op.id)
+    expect((await h.store.load()).outcomes).toEqual([])
+  },
+)
 
 test('already handed-off acceptance can land after expiry without another handoff', async () => {
   const h = await setup()
@@ -460,6 +559,19 @@ test('settlement emits only after the outcome is durably committed', async () =>
   expect(h.emitted).toEqual((await h.store.load()).outcomes)
 })
 
+test('runner expiry preserves an existing outcome even when its operation row remains', async () => {
+  const h = await setup()
+  const op = await h.built()
+  const outcome: Outcome = { id: op.id, opID: op.id, at: 200, kind: 'lost' }
+  await h.store.apply({ putOutcomes: [outcome] }, 'already-settled')
+  h.deps.searchLog = async () => ({ kind: 'unknown' })
+  h.tick(op.deadline)
+  expect(await stepOperation(h.deps, op)).toBeNull()
+  expect((await h.store.load()).outcomes).toEqual([outcome])
+  expect((await h.store.load()).operations).toEqual([op])
+  expect(h.emitted).toEqual([])
+})
+
 test.each(['hold', 'terminal'] as const)(
   'expiry during an intent %s read settles lost',
   async (during) => {
@@ -501,6 +613,8 @@ test.each(['RecoveryRequiredError', 'AuthorizationDeniedError', 'Error'])(
     }
     expect(await stepOperation(h.deps, op)).toEqual(op)
     expect(seen).toEqual([{ id: op.id, failure: error }])
-    expect((await h.store.load()).operations).toEqual([op])
+    expect((await h.store.load()).operations).toEqual([
+      name === 'Error' ? { ...op, pendingPublish: { expectedHead: head } } : op,
+    ])
   },
 )

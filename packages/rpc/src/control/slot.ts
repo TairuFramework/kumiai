@@ -37,6 +37,7 @@ export async function settleControlSlot(
   const snapshot = await deps.control.load()
   const slot = snapshot.commitOnce
   if (slot === null) return 'empty'
+  if (snapshot.strand !== null || snapshot.cursor?.stranded === true) return 'unknown'
   if (snapshot.controlHold !== null && snapshot.controlHold.reason !== 'acceptance-unknown')
     return 'unknown'
   const evidence = await deps.readEvidence()
@@ -150,6 +151,8 @@ export async function settleControlSlot(
     return 'superseded'
   }
   const proof = found.proof
+  const searched = await deps.control.load()
+  if (searched.strand !== null || searched.cursor?.stranded === true) return 'unknown'
   // A retained acceptance plus no obligation records a completed delivery.
   const prior = snapshot.commitOnceAcceptance
   const sameAcceptance =
@@ -208,6 +211,9 @@ export async function settleControlSlot(
         ...(current.controlHold?.reason === 'acceptance-unknown' ? { controlHold: null } : {}),
         commitOnce: null,
         deleteOperations: [slot.opID],
+        deleteOutcomes: current.outcomes
+          .filter((row) => row.opID === slot.opID)
+          .map((row) => row.id),
         putOutcomes: [outcome],
         ...(slot.welcome === null || !current.welcomes.some((row) => row.opID === slot.opID)
           ? {}
@@ -232,7 +238,6 @@ export async function settleControlSlot(
           },
         ],
         cursor: { position: proof.position, epoch: slot.epoch + 1 },
-        strand: null,
       },
     },
   )

@@ -136,6 +136,7 @@ export type ConformanceOperation<Position extends string = string> = Conformance
   seq: number
   enqueuedAt: number
   deadline: number
+  pendingPublish?: { expectedHead: Position | null }
 } & (
     | { stage: 'intent' }
     | { stage: 'built'; built: ConformanceControlBuildRef<Position> }
@@ -1051,6 +1052,21 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       await reopened.control.apply({ deleteOutcomes: ['unacked'] }, 'ack')
       expect((await (await params.reopen()).control.load()).outcomes).toEqual([])
     })
+
+    test.each([null, '005'])(
+      'pending publication at head %s survives reopen and replacement',
+      async (expectedHead) => {
+        const host = await params.open()
+        const original = records().putOperations?.[0]
+        if (original === undefined) throw new Error('Missing conformance operation')
+        const operation = { ...original, pendingPublish: { expectedHead } }
+        await host.control.apply({ putOperations: [operation] }, 'handoff')
+        const reopened = await params.reopen()
+        expect((await reopened.control.load()).operations).toEqual([operation])
+        await reopened.control.apply({ putOperations: [original] }, 'refused')
+        expect((await (await params.reopen()).control.load()).operations).toEqual([original])
+      },
+    )
 
     test('deletes precede replacements and operations remain FIFO by sequence', async () => {
       const host = await params.open()

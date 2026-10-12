@@ -84,12 +84,12 @@ test.each(
       {
         deleteOperations: [f.op.id],
         putOutcomes: [
-          { id: 'prior', opID: f.op.id, at: 1_000, kind: prior === 'lost' ? 'lost' : 'unknown' },
+          { id: f.op.id, opID: f.op.id, at: 1_000, kind: prior === 'lost' ? 'lost' : 'unknown' },
         ],
       },
       'settle',
     )
-    if (acked) await f.store.apply({ deleteOutcomes: ['prior'] }, 'ack')
+    if (acked) await f.store.apply({ deleteOutcomes: [f.op.id] }, 'ack')
     const afterAck = await f.store.load()
     expect(afterAck.operations).toEqual([])
     expect(afterAck.outcomes).toHaveLength(acked ? 0 : 1)
@@ -98,7 +98,7 @@ test.each(
     expect(await settleControlSlot(f.deps)).toBe('landed')
     const landed = await f.store.load()
     expect(landed.applied).toMatchObject([{ payloadDigest: 'saved-payload' }])
-    expect(landed.outcomes.filter((row) => row.kind === 'landed')).toEqual([
+    expect(landed.outcomes).toEqual([
       {
         id: '["control:landed","invite","saved-publish","000001"]',
         opID: f.op.id,
@@ -124,6 +124,23 @@ test('accepted replay rechecks proof before adopt', async () => {
   expect(f.deps.adoption.adopt).not.toHaveBeenCalled()
   expect((await f.store.load()).commitOnce).toEqual(f.slot)
   expect((await f.store.load()).applied).toEqual([])
+})
+
+test('acknowledging the prior unknown after late landing preserves the landed outcome', async () => {
+  const f = await fixture()
+  await f.store.apply(
+    {
+      deleteOperations: [f.op.id],
+      putOutcomes: [{ id: f.op.id, opID: f.op.id, at: 1_000, kind: 'unknown' }],
+    },
+    'unknown',
+  )
+  f.deps.search.searchLog = async () => ({ kind: 'first-valid', proof: f.proof })
+  expect(await settleControlSlot(f.deps)).toBe('landed')
+  await f.store.apply({ deleteOutcomes: [f.op.id] }, 'ack-unknown')
+  expect((await f.store.load()).outcomes).toEqual([
+    expect.objectContaining({ opID: f.op.id, kind: 'landed', position: f.proof.position }),
+  ])
 })
 
 test('complete absence retains the orphan slot without resurrecting its operation', async () => {

@@ -2291,6 +2291,9 @@ export function createGroupPeerWithControlWalk<
             const slot = snapshot.commitOnce
             if (
               hardControlHeld() ||
+              stranded ||
+              snapshot.strand !== null ||
+              snapshot.cursor?.stranded === true ||
               (snapshot.controlHold !== null &&
                 snapshot.controlHold.reason !== 'acceptance-unknown') ||
               slot?.opID !== obligation.opID ||
@@ -2394,6 +2397,7 @@ export function createGroupPeerWithControlWalk<
           },
           reconcileAbsent: async (through, range, work) => {
             if (commitTopicID == null) return false
+            if (stranded || durableStrand !== null) return false
             if (through === null) {
               commitLogHead = null
               return true
@@ -2402,6 +2406,8 @@ export function createGroupPeerWithControlWalk<
             const reconciled =
               reconciledHead !== null &&
               reconciledHead >= through &&
+              !stranded &&
+              durableStrand === null &&
               controlHold?.reason !== 'fork-evidence'
             // An already covered suffix makes the bounded walk return without fetching its head.
             if (reconciled) commitLogHead = through
@@ -2475,7 +2481,14 @@ export function createGroupPeerWithControlWalk<
         assertLive()
         const snapshot = await control.load()
         const operation = snapshot.operations[0]
-        if (operation == null || Date.now() >= operation.deadline || snapshot.controlHold !== null)
+        if (
+          operation == null ||
+          Date.now() >= operation.deadline ||
+          snapshot.controlHold !== null ||
+          stranded ||
+          snapshot.strand !== null ||
+          snapshot.cursor?.stranded === true
+        )
           throw new RecoveryRequiredError('Control publication is held or expired')
         const slot = snapshot.commitOnce
         const evidence = await params.readEvidence()

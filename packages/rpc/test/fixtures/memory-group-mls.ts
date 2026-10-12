@@ -935,6 +935,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         const identity = { groupID, incarnation: 1, epoch, authenticator: authenticator() }
         const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
         if (
+          snapshot.control.strand !== null ||
+          snapshot.control.cursor?.stranded === true ||
           (snapshot.control.controlHold !== null &&
             snapshot.control.controlHold.reason !== 'acceptance-unknown') ||
           !same(journal.source.key, expected.key) ||

@@ -112,7 +112,13 @@ export type OperationRequest = {
   body: Uint8Array
 }
 /** The operation deadline is `enqueuedAt + operationTimeoutMs`, so a restart keeps it. */
-export type Operation = OperationRequest & { seq: number; enqueuedAt: number; deadline: number } & (
+export type Operation = OperationRequest & {
+  seq: number
+  enqueuedAt: number
+  deadline: number
+  /** Persisted before handoff. Absence at this head cannot exclude a delayed CAS. */
+  pendingPublish?: { expectedHead: LogPosition | null }
+} & (
     | { stage: 'intent' }
     | { stage: 'built'; built: ControlBuildRef }
     | {

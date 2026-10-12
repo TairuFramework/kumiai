@@ -82,6 +82,7 @@ export function controlAdoptionAllowed(
     return false
   const proof = expected.acceptance
   if (proof === undefined) return true
+  if (snapshot.strand !== null || snapshot.cursor?.stranded === true) return false
   const slot = snapshot.commitOnce
   return (
     slot !== null &&

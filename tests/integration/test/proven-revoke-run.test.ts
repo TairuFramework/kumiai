@@ -297,11 +297,24 @@ let controlDatabase: MemoryHostDatabase
 const controlHost = () => ({
   control: controlDatabase.control('state', { groupID: 'state', incarnation: 1 }),
   loadVersion: () => controlDatabase.loadVersion('state'),
-  saveBuilt: ((intent, built, expected, mutationID) =>
-    controlDatabase.saveBuilt(
+  saveBuilt: ((intent, built, expected, mutationID) => {
+    const { pendingPublish, ...request } = intent
+    return controlDatabase.saveBuilt(
       'state',
       { groupID: 'state', incarnation: 1 },
-      intent,
+      {
+        ...request,
+        ...(pendingPublish === undefined
+          ? {}
+          : {
+              pendingPublish: {
+                expectedHead:
+                  pendingPublish.expectedHead === null
+                    ? null
+                    : asLogPosition(pendingPublish.expectedHead),
+              },
+            }),
+      },
       {
         ...built,
         searchFrom: built.searchFrom === null ? null : asLogPosition(built.searchFrom),
@@ -309,7 +322,8 @@ const controlHost = () => ({
       },
       expected,
       mutationID,
-    )) satisfies ConformanceSaveControlBuild,
+    )
+  }) satisfies ConformanceSaveControlBuild,
   anchor: controlDatabase.anchorStore('state'),
   saveState: (state: Uint8Array, write?: AdoptionWrite) =>
     controlDatabase.saveState('state', state, write),

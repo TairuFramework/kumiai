@@ -95,6 +95,28 @@ test('uncommitted Welcome delivery refuses a strong hold detected during adoptio
   expect(bob.welcomes).toEqual([])
 })
 
+test('uncommitted Welcome delivery refuses a strand detected during adoption', async () => {
+  vi.useFakeTimers()
+  const hub = new FakeHub()
+  const bob = member(hub, {
+    adopt: async () => {
+      await bob.control.apply({ strand: { reason: 'ahead' } }, 'ahead-before-install')
+      return 'moved'
+    },
+  })
+  await bob.peer.replay()
+  const op = await seedBuiltOperation(bob, buildInviteCommit(bob, 'invitee'))
+  await bob.controlWalk.stepOperation(op.id)
+  expect(bob.welcomes).toEqual([])
+  const snapshot = await bob.control.load()
+  expect(snapshot.strand).toEqual({ reason: 'ahead' })
+  expect(snapshot.commitOnce).not.toBeNull()
+  expect(snapshot.welcomes).toEqual([
+    { opID: op.id, welcome: op.slot.welcome?.bytes, recipients: ['invitee'] },
+  ])
+  expect(bob.mls.epoch()).toBe(op.slot.epoch)
+})
+
 test.each(['advancement', 'retirement', 'disposal', 'hard-hold'] as const)(
   'slot retries coalesce reconnect hints and cancel on %s',
   async (stop) => {
@@ -191,7 +213,7 @@ test.each(
   await again.peer.replay()
   const snapshot = await again.control.load()
   expect(snapshot.operations).toEqual([])
-  expect(snapshot.outcomes).toHaveLength(acked ? 1 : 2)
+  expect(snapshot.outcomes).toHaveLength(1)
   expect(snapshot.outcomes.filter((row) => row.kind === 'landed')).toEqual([
     expect.objectContaining({
       id: JSON.stringify(['control:landed', op.id, op.slot.publishID, accepted.sequenceID]),
@@ -249,7 +271,7 @@ test.each([false, true])(
 
 test.each(
   ['restore', 'header', 'resolver'].flatMap((input) =>
-    ['unknown', 'lost', 'abandon'].map((prior) => [input, prior] as const),
+    ['unknown', 'ambiguous', 'abandon'].map((prior) => [input, prior] as const),
   ),
 )(
   'orphan slot retries recovered %s input after %s without new delivery or host call',
@@ -313,11 +335,12 @@ test.each(
       )
       const slot = (await bob.control.load()).commitOnce
       if (slot === null) throw new Error('missing slot')
-      if (prior === 'lost') {
+      if (prior === 'ambiguous') {
         unavailable = false
+        await bob.controlWalk.stepOperation(request.id)
         await vi.advanceTimersByTimeAsync(1_001)
         await bob.peer.replay()
-        expect((await bob.peer.outcomes())[0]?.kind).toBe('lost')
+        expect((await bob.peer.outcomes())[0]?.kind).toBe('unknown')
         unavailable = true
       }
       const accepted = await publish({
@@ -330,9 +353,7 @@ test.each(
       })
       if (prior === 'abandon') await bob.peer.abandon()
       else if (prior === 'unknown') await vi.advanceTimersByTimeAsync(1_001)
-      await vi.waitFor(async () =>
-        expect((await bob.peer.outcomes())[0]?.kind).toBe(prior === 'lost' ? 'lost' : 'unknown'),
-      )
+      await vi.waitFor(async () => expect((await bob.peer.outcomes())[0]?.kind).toBe('unknown'))
       for (const outcome of await bob.peer.outcomes()) await bob.peer.ack(outcome.id)
       expect((await bob.control.load()).operations).toEqual([])
       expect((await bob.control.load()).outcomes).toEqual([])
@@ -388,6 +409,85 @@ afterEach(async () => {
   vi.useRealTimers()
 })
 
+test.each([false, true])(
+  'an ahead prefix retains the built slot without publication or own adoption (own=%s)',
+  async (own) => {
+    vi.useFakeTimers()
+    const hub = new FakeHub()
+    const bob = member(hub)
+    await bob.peer.replay()
+    const op = await seedBuiltOperation(bob, buildInviteCommit(bob, 'invitee'))
+    // Suppress push delivery so the runner itself meets the ahead frame in search.
+    const ahead = await publishCommit({
+      hub,
+      senderDID: 'bob',
+      committerDID: 'alice',
+      signerDID: 'bob',
+      recoverySecret: secret,
+      epoch: op.slot.epoch + 1,
+    })
+    if (own)
+      await hub.publish({
+        senderDID: 'bob',
+        topicID: commitTopic(secret),
+        payload: op.slot.payload,
+        publishID: op.slot.publishID,
+        expectedHead: ahead.sequenceID,
+        retain: 'log',
+      })
+    const publications = hub.published.length
+    await bob.controlWalk.stepOperation(op.id)
+    expect(hub.published).toHaveLength(publications)
+    const snapshot = await bob.control.load()
+    expect(snapshot.strand).toEqual({ reason: 'ahead' })
+    expect(snapshot.cursor?.stranded).toBe(true)
+    expect(snapshot.commitOnce).toEqual(op.slot)
+    expect(snapshot.commitOnceAcceptance).toBeNull()
+    expect(snapshot.applied).toEqual([])
+    expect(snapshot.outcomes).toEqual([])
+    expect(bob.mls.epoch()).toBe(op.slot.epoch)
+    expect(bob.welcomes).toEqual([])
+  },
+)
+
+test('nested competitor removal keeps its lost outcome when the stale runner expires', async () => {
+  vi.useFakeTimers()
+  const hub = new FakeHub()
+  const seen: Array<Outcome> = []
+  const bob = member(hub, {
+    onOutcome: (outcome) => {
+      seen.push(outcome)
+    },
+  })
+  await bob.peer.replay()
+  const op = await seedBuiltOperation(bob, buildInviteCommit(bob, 'invitee'))
+  await publishCommit({
+    hub,
+    senderDID: 'bob',
+    committerDID: 'alice',
+    recoverySecret: secret,
+    epoch: op.slot.epoch,
+    removes: ['bob'],
+  })
+  const process = bob.mls.processCommit.bind(bob.mls)
+  vi.spyOn(bob.mls, 'processCommit').mockImplementation(async (...args) => {
+    const result = await process(...args)
+    expect((await bob.control.load()).outcomes).toEqual([
+      expect.objectContaining({ opID: op.id, kind: 'lost' }),
+    ])
+    vi.setSystemTime(op.deadline)
+    return result
+  })
+  await bob.controlWalk.stepOperation(op.id)
+  await vi.advanceTimersByTimeAsync(0)
+  expect((await bob.control.load()).operations).toEqual([])
+  expect((await bob.control.load()).outcomes).toEqual([
+    expect.objectContaining({ opID: op.id, kind: 'lost' }),
+  ])
+  expect(seen).toEqual([expect.objectContaining({ opID: op.id, kind: 'lost' })])
+  expect(bob.welcomes).toEqual([])
+})
+
 test('a publish success with different retained bytes cannot install or settle the operation', async () => {
   const hub = new FakeHub()
   const bob = member(hub)
@@ -406,7 +506,9 @@ test('a publish success with different retained bytes cannot install or settle t
   expect(bob.mls.epoch()).toBe(1)
   expect(await bob.mls.getLedger()).toEqual([])
   const snapshot = await bob.control.load()
-  expect(snapshot.operations).toEqual([op])
+  expect(snapshot.operations).toEqual([
+    { ...op, pendingPublish: { expectedHead: op.slot.expectedHead } },
+  ])
   expect(snapshot.outcomes).toEqual([])
   expect(snapshot.applied).toEqual([])
   expect(snapshot.cursor?.position).toBe(hub.head(commitTopic(secret)))
@@ -565,7 +667,7 @@ test.each(['enqueue', 'commit'] as const)(
   },
 )
 
-test.each(['unknown', 'lost', 'abandon'] as const)(
+test.each(['unknown', 'ambiguous', 'abandon'] as const)(
   'the own walker adopts an acked late %s slot before walking its occurrence',
   async (prior) => {
     vi.useFakeTimers()
@@ -586,15 +688,30 @@ test.each(['unknown', 'lost', 'abandon'] as const)(
     vi.spyOn(bob.validation, 'restoreValidation').mockImplementation((built) =>
       unavailable ? Promise.resolve(null) : restore(built),
     )
-    await bob.control.apply(
-      {
-        deleteOperations: [op.id],
-        putOutcomes: [
-          { id: op.id, opID: op.id, at: Date.now(), kind: prior === 'lost' ? 'lost' : 'unknown' },
-        ],
-      },
-      crypto.randomUUID(),
-    )
+    if (prior === 'ambiguous') {
+      unavailable = false
+      const publish = hub.publish.bind(hub)
+      const handoff = vi.spyOn(hub, 'publish').mockImplementation(async (params) => {
+        if (params.topicID === commitTopic(secret)) throw new Error('Reply lost')
+        return publish(params)
+      })
+      await bob.controlWalk.stepOperation(op.id)
+      vi.setSystemTime(op.deadline)
+      await bob.controlWalk.stepOperation(op.id)
+      expect(await bob.peer.outcomes()).toEqual([
+        expect.objectContaining({ id: op.id, opID: op.id, kind: 'unknown' }),
+      ])
+      handoff.mockRestore()
+      unavailable = true
+    } else {
+      await bob.control.apply(
+        {
+          deleteOperations: [op.id],
+          putOutcomes: [{ id: op.id, opID: op.id, at: Date.now(), kind: 'unknown' }],
+        },
+        crypto.randomUUID(),
+      )
+    }
     const accepted = await hub.publish({
       senderDID: 'bob',
       topicID: commitTopic(secret),
@@ -626,7 +743,7 @@ test.each(['unknown', 'lost', 'abandon'] as const)(
   },
 )
 
-test.each(['expiry', 'terminal', 'divergence'] as const)(
+test.each(['expiry', 'terminal', 'divergence', 'strand'] as const)(
   '%s during submission drain prevents handoff',
   async (move) => {
     let now = 1_000
@@ -664,6 +781,8 @@ test.each(['expiry', 'terminal', 'divergence'] as const)(
       await vi.waitFor(() => expect(draining).toBe(true))
       expect((await bob.control.load()).commitOnce?.opID).toBe(request.id)
       if (move === 'expiry') now = 2_000
+      else if (move === 'strand')
+        await bob.control.apply({ strand: { reason: 'ahead' } }, 'ahead-during-drain')
       else {
         if (move === 'terminal') bob.mls.adopt(bob.mls.buildCommit([], { removes: ['bob'] }))
         else {
