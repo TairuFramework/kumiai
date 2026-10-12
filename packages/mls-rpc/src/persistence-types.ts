@@ -14,6 +14,8 @@ import type {
   GroupKey,
 } from '@kumiai/rpc'
 
+import type { EntryReads, Prepared } from './entry-capability.js'
+
 export type OwnershipContextPort = {
   run<T>(token: object, fn: () => T): T
   get(): object | undefined
@@ -245,7 +247,24 @@ type FixtureDeviceStores<TPorts> = TPorts extends {
   ? TStores
   : never
 
+type FixtureEntryReads<TPorts> = Omit<EntryReads, 'control'> & {
+  control(incarnation: number): FixtureGroupStores<TPorts> extends {
+    incarnation(incarnation: number): { control: { load(): infer TResult } }
+  }
+    ? TResult
+    : never
+}
+
 export type PersistenceFixture<TPorts> = {
+  entry(): {
+    read<T>(groupID: string, fn: (reads: FixtureEntryReads<TPorts>) => Promise<T>): Promise<T>
+    run<P, T>(
+      request: Pick<GroupTransition, 'groupID' | 'mutationID'>,
+      prepare: (reads: FixtureEntryReads<TPorts>) => Promise<Prepared<P>>,
+      work: (stores: FixtureGroupStores<TPorts>, prepared: P) => Promise<T>,
+    ): Promise<T>
+  }
+  constructPrepareStores(key: GroupKey): FixtureGroupStores<TPorts>
   ports: TPorts
   reopen(): Promise<TPorts>
   reopenWithoutBarrier(): Promise<TPorts>

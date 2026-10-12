@@ -36,12 +36,16 @@ import { createControlBuildPort, createPersistenceBuildSaver } from '../../src/c
 import { decodeControlJournal } from '../../src/control-journal.js'
 import { createControlValidationPort } from '../../src/control-validation.js'
 import { createGroupCrypto } from '../../src/crypto.js'
+import { entryCapability } from '../../src/entry-capability.js'
 import { memoryGroupOwnerQueues } from '../../src/memory-group-persistence.js'
-import { createGroupStateStores } from '../../src/memory-group-state.js'
+import {
+  createGroupStateStores,
+  createMemoryPrepareTransaction,
+} from '../../src/memory-group-state.js'
 import { groupOwnerKey } from '../../src/memory-incarnation-stores.js'
 import * as packageReads from '../../src/memory-package-stores.js'
 import { createGroupMLS, createLedgerEntrySlot } from '../../src/mls.js'
-import { ownerEntryFailureSignal } from '../../src/owner-queue.js'
+import { type OwnerEntry, ownerEntryFailureSignal } from '../../src/owner-queue.js'
 import {
   decodeStoredValue,
   encodeStoredValue,
@@ -185,6 +189,8 @@ export async function createStorageFixture(params: {
   }>()
   let readDevice!: <T>(fn: (stores: DeviceStores<MemoryTransaction>) => Promise<T>) => Promise<T>
   const instrumented = new WeakSet<object>()
+  const activeEntries = new Map<string, OwnerEntry>()
+  let registeredGroups!: GroupPersistence<MemoryTransaction>
   function instrumentOwners(database: typeof db): void {
     const owners = memoryGroupOwnerQueues(database)
     if (owners === undefined || instrumented.has(owners)) return
@@ -203,6 +209,7 @@ export async function createStorageFixture(params: {
         kind,
         scopes,
         async (entry) => {
+          if (entry.scopes.groupID !== null) activeEntries.set(entry.scopes.groupID, entry)
           let attemptSignal: AbortSignal | undefined
           const invoke = (phase: Phase) => {
             const fn = callbacks.get(phase)
@@ -275,6 +282,8 @@ export async function createStorageFixture(params: {
             })
           } finally {
             callbacks.clear()
+            if (entry.scopes.groupID !== null && activeEntries.get(entry.scopes.groupID) === entry)
+              activeEntries.delete(entry.scopes.groupID)
             signal?.removeEventListener('abort', clear)
             attemptSignal?.removeEventListener('abort', clear)
           }
@@ -310,6 +319,7 @@ export async function createStorageFixture(params: {
       capture.mockRestore()
     }
     instrumentOwners(database)
+    registeredGroups = device.groups
     return {
       device,
       packageStores: (sourceID: string) => createMemoryPackageStores({ device, sourceID }),
@@ -465,6 +475,28 @@ export async function createStorageFixture(params: {
     return value.slice()
   }
   const fixture: PersistenceFixture<StorageTestPorts<MemoryTransaction>> = {
+    entry() {
+      active()
+      const capability = entryCapability(registeredGroups)
+      if (capability === null) throw new Error('Missing entry capability')
+      return capability
+    },
+    constructPrepareStores(key) {
+      active()
+      const owners = memoryGroupOwnerQueues(db)
+      const entry = activeEntries.get(key.groupID)
+      if (owners === undefined || entry === undefined || entry.phase !== 'prepare')
+        throw new Error('Missing prepare entry')
+      const tx = createMemoryPrepareTransaction({
+        rows: db.snapshot(),
+        entry,
+        owners,
+        groupID: key.groupID,
+        providerID,
+      })
+      // Reconstructed containers retain the explicit binding through their guarded maps.
+      return fixture.constructGroupStores({ ...tx, rows: { ...tx.rows } }, key)
+    },
     ports: ports(),
     async reopenWithoutBarrier() {
       active()

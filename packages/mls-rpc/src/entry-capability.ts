@@ -1,0 +1,64 @@
+import type { ControlSnapshot } from '@kumiai/rpc'
+
+import type {
+  EpochIdentity,
+  GroupKey,
+  GroupLifetime,
+  GroupPersistence,
+  GroupRecoveryTrust,
+  GroupStateRecord,
+  GroupStores,
+  GroupTransaction,
+  GroupTransition,
+} from './persistence-types.js'
+
+export type StateMetadata = GroupKey & {
+  version: number
+  deleted: boolean
+  initialIdentity: EpochIdentity | null
+}
+export type EntryReads = {
+  lifetime(): Promise<GroupLifetime | null>
+  trust(): Promise<GroupRecoveryTrust | null>
+  metadata(incarnation: number): Promise<StateMetadata | null>
+  state(incarnation: number): Promise<GroupStateRecord | null>
+  control(incarnation: number): Promise<ControlSnapshot>
+  controlMutation(incarnation: number): Promise<string | null>
+  diagnoseState(
+    incarnation: number,
+  ): Promise<'missing' | 'null' | 'deleted' | 'readable' | 'unreadable'>
+}
+export type Prepared<T> = { expected: GroupTransition['expected']; value: T }
+export type EntryCapability<TTx extends GroupTransaction> = {
+  read<T>(groupID: string, fn: (reads: EntryReads) => Promise<T>): Promise<T>
+  run<P, T>(
+    request: Pick<GroupTransition, 'groupID' | 'mutationID'>,
+    prepare: (reads: EntryReads) => Promise<Prepared<P>>,
+    work: (stores: GroupStores<TTx>, prepared: P) => Promise<T>,
+  ): Promise<T>
+}
+
+const bindings = new WeakMap<object, { capability: unknown; coordinatorBinding: object }>()
+
+export function bindEntryCapability<TTx extends GroupTransaction>(params: {
+  persistence: GroupPersistence<TTx>
+  capability: EntryCapability<TTx>
+  coordinatorBinding: object
+}): void {
+  bindings.set(params.persistence, {
+    capability: params.capability,
+    coordinatorBinding: params.coordinatorBinding,
+  })
+}
+
+export function entryCapability<TTx extends GroupTransaction>(
+  persistence: GroupPersistence<TTx>,
+): EntryCapability<TTx> | null {
+  return (bindings.get(persistence)?.capability as EntryCapability<TTx> | undefined) ?? null
+}
+
+export function coordinatorBinding<TTx extends GroupTransaction>(
+  persistence: GroupPersistence<TTx>,
+): object | null {
+  return bindings.get(persistence)?.coordinatorBinding ?? null
+}

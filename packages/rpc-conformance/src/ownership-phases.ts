@@ -9,6 +9,7 @@ import {
   writeStorageInstall,
 } from './group-storage.js'
 import type {
+  ConformanceEntryReads,
   ConformanceGroupLifetime,
   ConformanceGroupStores,
   ConformanceGroupTransaction,
@@ -89,6 +90,7 @@ function runOwnershipPhasesConformance<TTx extends ConformanceGroupTransaction>(
 ): void {
   type Fixture = ConformancePersistenceFixture<StorageTestPorts<TTx>>
   describe(`Ownership phases conformance -- ${params.label}`, () => {
+    testPreparedOwnership(params)
     testOperationOwnership(params)
     describe('phase capabilities', () => {
       for (const access of ['supplied', 'constructed'] as const) {
@@ -1866,4 +1868,262 @@ export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTrans
         }),
     })
   }
+}
+
+function testPreparedOwnership<TTx extends ConformanceGroupTransaction>(
+  params: OwnershipPhasesConformanceParams<TTx>,
+): void {
+  const expected = (life: ConformanceGroupLifetime | null) =>
+    life === null ? null : { revision: life.revision, activeIncarnation: life.activeIncarnation }
+  const request = (mutationID: string) => ({ groupID, mutationID })
+  describe('prepare capability', () => {
+    test('fresh prepare stores refuse domain and side writes', async () => {
+      const fixture = await params.createFixture(groupID)
+      try {
+        const before = await fixture.inspectRows()
+        let codecs = 0
+        await fixture.entry().run(
+          request('prepare-writes'),
+          async (reads) => {
+            const life = await reads.lifetime()
+            if (life === null) throw new Error('Missing lifetime')
+            const stores = fixture.constructPrepareStores(key)
+            fixture.probeCodec(async () => {
+              codecs++
+            })
+            await expect(stores.lifetime.save(life)).rejects.toMatchObject({
+              name: 'PersistencePhaseError',
+            })
+            expect(codecs).toBe(0)
+            await expect(
+              stores.incarnation(1).control.apply({ putOutcomes: [] }, 'forbidden'),
+            ).rejects.toMatchObject({ name: 'PersistencePhaseError' })
+            await expect(
+              params.writeSideRow(stores.tx, 'prepare-side', utf8('forbidden')),
+            ).rejects.toMatchObject({ name: 'PersistencePhaseError' })
+            expect(codecs).toBe(0)
+            expect(await fixture.inspectRows()).toEqual(before)
+            return { expected: expected(life), value: null }
+          },
+          async () => undefined,
+        )
+        expect(await fixture.inspectSideRow('prepare-side')).toBeNull()
+      } finally {
+        await fixture.close()
+      }
+    })
+    test('prepare bindings expire', async () => {
+      const fixture = await params.createFixture(groupID)
+      let captured!: ConformanceEntryReads
+      let constructed!: ConformanceGroupStores<TTx>
+      try {
+        await fixture.entry().run(
+          request('prepare-expire'),
+          async (reads) => {
+            captured = reads
+            constructed = fixture.constructPrepareStores(key)
+            return { expected: expected(await reads.lifetime()), value: null }
+          },
+          async () => {
+            await expect(captured.lifetime()).rejects.toMatchObject({
+              name: 'PersistencePhaseError',
+            })
+            await expect(constructed.trust.load()).rejects.toMatchObject({
+              name: 'PersistencePhaseError',
+            })
+          },
+        )
+        await expect(captured.control(1)).rejects.toMatchObject({ name: 'PersistencePhaseError' })
+        await expect(constructed.lifetime.load()).rejects.toMatchObject({
+          name: 'PersistencePhaseError',
+        })
+      } finally {
+        await fixture.close()
+      }
+    })
+    test('prepared CAS serialises concurrent writes', async () => {
+      const fixture = await params.createFixture(groupID)
+      try {
+        const revisions = await Promise.all(
+          ['one', 'two'].map((mutationID) =>
+            fixture.entry().run(
+              request(mutationID),
+              async (reads) => {
+                const life = await reads.lifetime()
+                if (life === null) throw new Error('Missing lifetime')
+                return { expected: expected(life), value: life.revision }
+              },
+              async (stores, revision) => {
+                expect((await stores.lifetime.load())?.revision).toBe(revision)
+                return revision + 1
+              },
+            ),
+          ),
+        )
+        expect(revisions).toEqual([3, 4])
+        expect((await fixture.ports.device.groups.load(groupID))?.revision).toBe(4)
+      } finally {
+        await fixture.close()
+      }
+    })
+    test('work refuses stale prepared expected', async () => {
+      const fixture = await params.createFixture(groupID)
+      let work = 0
+      try {
+        const before = await fixture.inspectRows()
+        await expect(
+          fixture.entry().run(
+            request('stale'),
+            async (reads) => {
+              const life = await reads.lifetime()
+              expect(await reads.trust()).not.toBeNull()
+              expect(await reads.state(1)).toMatchObject({ deleted: false })
+              if (life === null) throw new Error('Missing lifetime')
+              return {
+                expected: { revision: life.revision - 1, activeIncarnation: 1 },
+                value: null,
+              }
+            },
+            async () => {
+              work++
+            },
+          ),
+        ).rejects.toMatchObject({ name: 'GroupStateConflictError' })
+        expect(work).toBe(0)
+        expect(await fixture.inspectRows()).toEqual(before)
+      } finally {
+        await fixture.close()
+      }
+    })
+    test('read preserves revisions', async () => {
+      const fixture = await params.createFixture(groupID)
+      try {
+        const before = await fixture.inspectRows()
+        for (let index = 0; index < 3; index++) {
+          await fixture.entry().read(groupID, async (reads) => {
+            expect((await reads.lifetime())?.revision).toBe(2)
+            expect((await reads.metadata(1))?.version).toBe(2)
+            expect((await reads.state(1))?.version).toBe(2)
+            expect(await reads.controlMutation(1)).toBe('seed-records')
+            expect((await reads.control(1)).outcomes).toHaveLength(1)
+            expect(await reads.diagnoseState(1)).toBe('readable')
+          })
+        }
+        expect(await fixture.inspectRows()).toEqual(before)
+      } finally {
+        await fixture.close()
+      }
+    })
+    test.each(['proof', 'backend'] as const)(
+      'prepare waits behind committed but unsettled entry (%s)',
+      async (settlement) => {
+        const fixture = await params.createFixture(groupID)
+        const proof = localDeferred<void>()
+        const release = localDeferred<void>()
+        let prepared = false
+        const fault = settlement === 'backend' ? fixture.rejectCommitPending() : undefined
+        let completed = false
+        try {
+          if (settlement === 'proof') {
+            fixture.onPhase('proof', async () => {
+              proof.resolve()
+              await release.promise
+            })
+            fixture.commitThenReject()
+          }
+          const first = fixture.entry().run(
+            request('unsettled'),
+            async (reads) => ({ expected: expected(await reads.lifetime()), value: null }),
+            async () => undefined,
+          )
+          await within(fault?.barrierWaiting ?? proof.promise)
+          const next = fixture.entry().read(groupID, async (reads) => {
+            prepared = true
+            return await reads.lifetime()
+          })
+          await turn()
+          expect(prepared).toBe(false)
+          expect(
+            await within(fixture.entry().read('group-B', (reads) => reads.lifetime())),
+          ).toMatchObject({ revision: 1 })
+          release.resolve()
+          await fault?.finish('commit')
+          completed = true
+          await within(first)
+          expect(await within(next)).toMatchObject({ revision: 3 })
+        } finally {
+          release.resolve()
+          if (!completed) await fault?.finish('rollback')
+          await fixture.close()
+        }
+      },
+    )
+    test('prepare roots refuse', async () => {
+      const fixture = await params.createFixture(groupID, {
+        ownershipContext: params.ownershipContext?.(),
+      })
+      try {
+        await fixture.entry().run(
+          request('prepare-root'),
+          async (reads) => {
+            const root = fixture.ports.device.groups.load(groupID)
+            await expect(within(root)).rejects.toMatchObject({ name: 'ReentrantOwnershipError' })
+            if (params.ownershipContext !== undefined) {
+              await Promise.resolve()
+              await expect(within(fixture.ports.device.groups.load(groupID))).rejects.toMatchObject(
+                { name: 'ReentrantOwnershipError' },
+              )
+            }
+            return { expected: expected(await reads.lifetime()), value: null }
+          },
+          async () => undefined,
+        )
+      } finally {
+        await fixture.close()
+      }
+    })
+    test('diagnostic does not authorise state', async () => {
+      const fixture = await params.createFixture(groupID)
+      try {
+        const record = (await fixture.inspectRawBytes()).find(
+          (row) => row.namespace === 'state' && row.groupID === groupID,
+        )
+        if (record === undefined) throw new Error('Missing state row')
+        await fixture.mutateStoredRecord('state', record.key, (bytes) => {
+          bytes[0] = (bytes[0] ?? 0) ^ 1
+          return bytes
+        })
+        await fixture.entry().run(
+          request('diagnose-safety'),
+          async (reads) => {
+            expect(await reads.diagnoseState(1)).toBe('unreadable')
+            expect(await reads.metadata(1)).toMatchObject({ version: 2, deleted: false })
+            return { expected: expected(await reads.lifetime()), value: null }
+          },
+          async (stores) => {
+            await stores
+              .incarnation(1)
+              .control.apply(
+                { putOutcomes: [{ id: 'safety', opID: 'safety', at: 1, kind: 'unknown' }] },
+                'diagnose-safety',
+              )
+          },
+        )
+        const before = await fixture.inspectRows()
+        await expect(
+          fixture.entry().run(
+            request('required'),
+            async (reads) => {
+              await expect(reads.state(1)).rejects.toBeDefined()
+              return { expected: expected(await reads.lifetime()), value: null }
+            },
+            async () => undefined,
+          ),
+        ).rejects.toMatchObject({ name: 'GroupStateConflictError' })
+        expect(await fixture.inspectRows()).toEqual(before)
+      } finally {
+        await fixture.close()
+      }
+    })
+  })
 }

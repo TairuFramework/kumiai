@@ -1,3 +1,4 @@
+import type { StateMetadata } from './entry-capability.js'
 import type { OwnerAttempt, OwnerEntry, OwnerQueues, WriteTarget } from './owner-queue.js'
 import {
   decodeStoredValue,
@@ -11,21 +12,12 @@ import { GroupStateConflictError, PersistencePhaseError } from './persistence-er
 import { assertStateTransition, assertTrustTransition } from './persistence-guards.js'
 import type {
   AtRestCodec,
-  EpochIdentity,
-  GroupKey,
   GroupRecoveryTrust,
   GroupStateRecord,
   GroupStores,
   IncarnationStores,
   MemoryTransaction,
 } from './persistence-types.js'
-
-type StateMetadata = GroupKey & {
-  version: number
-  deleted: boolean
-  // Trust follows epoch installations; the absent-cursor boundary stays fixed.
-  initialIdentity: EpochIdentity | null
-}
 
 export type GroupStateStores = Pick<GroupStores<MemoryTransaction>, 'tx' | 'lifetime' | 'trust'> & {
   state(incarnation: number): IncarnationStores['state']
@@ -43,7 +35,8 @@ type TransactionBinding = {
   attempt: OwnerAttempt
   changes: number
   requiredReadsAdmitted: number
-  writer: CoordinatorWriter
+  writer: CoordinatorWriter | null
+  prepare: boolean
 }
 const transactionEntries = new WeakMap<MemoryTransaction['rows'], TransactionBinding>()
 const coordinatorRows = new WeakSet<object>()
@@ -133,7 +126,137 @@ export function bindMemoryOwner(
     changes: 0,
     requiredReadsAdmitted: 0,
     writer: new CoordinatorWriter({ tx, entry, attempt }),
+    prepare: false,
   })
+}
+
+export function createMemoryPrepareTransaction(params: {
+  rows: MemoryTransaction['rows']
+  entry: OwnerEntry
+  owners: OwnerQueues
+  groupID: string
+  providerID: string
+}): MemoryTransaction {
+  const { entry, owners, groupID, providerID } = params
+  const attempt = entry.attempt()
+  const assertLive = () => {
+    if (owners.failure !== null) throw owners.failure
+    attempt.assertLive()
+    if (entry.phase !== 'prepare') throw new PersistencePhaseError('Prepare capability expired')
+  }
+  const copy = (value: unknown) => decodeStoredValue(encodeStoredValue(value))
+  const maps: MemoryTransaction['rows'] = {}
+  const groupNamespaces = [
+    'lifetime',
+    'trust',
+    'state',
+    'control',
+    'anchor',
+    'pending',
+    'poison',
+    'cursor',
+    'outbox',
+    'meta',
+    'group-owner',
+  ]
+  for (const namespace of new Set([...groupNamespaces, ...Object.keys(params.rows)])) {
+    if (namespace.startsWith('device')) continue
+    const source = params.rows[namespace] ?? new Map<string, unknown>()
+    const rows = new Map<string, unknown>()
+    for (const [key, value] of source) {
+      if (groupNamespaces.includes(namespace) && (JSON.parse(key) as [string])[0] !== groupID)
+        continue
+      rows.set(key, copy(value))
+    }
+    maps[namespace] = new Proxy(rows, {
+      get(target, property) {
+        assertLive()
+        if (property === 'set' || property === 'delete' || property === 'clear')
+          return () => {
+            throw new PersistencePhaseError('Prepare rows are read-only')
+          }
+        if (property === 'get')
+          return (key: string) => {
+            assertLive()
+            return copy(target.get(key))
+          }
+        if (property === 'has')
+          return (key: string) => {
+            assertLive()
+            return target.has(key)
+          }
+        if (property === 'size') return target.size
+        if (property === 'forEach')
+          return (fn: (value: unknown, key: string, map: Map<string, unknown>) => void) => {
+            for (const [key, value] of target) {
+              assertLive()
+              fn(copy(value), key, maps[namespace] as Map<string, unknown>)
+            }
+          }
+        if (
+          property === Symbol.iterator ||
+          ['entries', 'keys', 'values'].includes(String(property))
+        )
+          return function* () {
+            for (const [key, value] of target) {
+              assertLive()
+              yield property === 'keys'
+                ? key
+                : property === 'values'
+                  ? copy(value)
+                  : [key, copy(value)]
+            }
+          }
+        return undefined
+      },
+      set() {
+        throw new PersistencePhaseError('Prepare rows are read-only')
+      },
+      defineProperty() {
+        throw new PersistencePhaseError('Prepare rows are read-only')
+      },
+      deleteProperty() {
+        throw new PersistencePhaseError('Prepare rows are read-only')
+      },
+    })
+  }
+  const rows = new Proxy(maps, {
+    get(target, property) {
+      assertLive()
+      return Reflect.get(target, property)
+    },
+    set() {
+      throw new PersistencePhaseError('Prepare namespaces are read-only')
+    },
+    defineProperty() {
+      throw new PersistencePhaseError('Prepare namespaces are read-only')
+    },
+    deleteProperty() {
+      throw new PersistencePhaseError('Prepare namespaces are read-only')
+    },
+  })
+  transactionIdentities.set(rows, rows)
+  for (const map of Object.values(maps)) transactionIdentities.set(map, rows)
+  transactionEntries.set(rows, {
+    entry,
+    owners,
+    attempt,
+    changes: 0,
+    requiredReadsAdmitted: 0,
+    writer: null,
+    prepare: true,
+  })
+  return {
+    providerID,
+    groupID,
+    rows,
+    onCommit() {
+      throw new PersistencePhaseError('Prepare reads cannot register hooks')
+    },
+    onRollback() {
+      throw new PersistencePhaseError('Prepare reads cannot register hooks')
+    },
+  }
 }
 
 export function memoryTransactionEntry(rows: MemoryTransaction['rows']): OwnerEntry | undefined {
@@ -163,7 +286,11 @@ export function assertMemoryAccess(rows: MemoryTransaction['rows']): void {
   if (binding === undefined) return
   if (binding.owners.failure !== null) throw binding.owners.failure
   binding.attempt.assertLive()
-  const phases = coordinatorRows.has(rows) ? ['finalise', 'account'] : ['work', 'effects']
+  const phases = binding.prepare
+    ? ['prepare']
+    : coordinatorRows.has(rows)
+      ? ['finalise', 'account']
+      : ['work', 'effects']
   if (!phases.includes(binding.entry.phase))
     throw new PersistencePhaseError('Transaction capability expired')
 }
@@ -239,6 +366,8 @@ export function memoryOperation<TArgs extends Array<unknown>, TValue>(
   const binding = transactionBinding(tx.rows)
   return (...args) => {
     try {
+      assertMemoryAccess(tx.rows)
+      if (target !== undefined) assertMemoryWrite(tx, target)
       const owned = memoryCallback(tx, () => decodeStoredValue(encodeStoredValue(args)) as TArgs)
       const run = async () => {
         const changes = binding?.changes
@@ -269,7 +398,8 @@ export function coordinateMemoryTransaction<TValue>(
   work: (writerTx: MemoryTransaction) => Promise<TValue>,
 ): Promise<TValue> {
   const binding = transactionBinding(tx.rows)
-  if (binding === undefined) throw new GroupStateConflictError('Missing transaction ownership')
+  if (binding === undefined || binding.writer === null)
+    throw new GroupStateConflictError('Missing transaction ownership')
   return binding.writer.run((writerTx) => work({ ...tx, rows: writerTx.rows }))
 }
 

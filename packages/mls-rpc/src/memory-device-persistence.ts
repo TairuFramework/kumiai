@@ -128,7 +128,7 @@ export function createMemoryDevicePersistence(params: {
       onRollback: (hook) => entry.onRollback(hook),
     }
   }
-  async function prepare(entry: OwnerEntry): Promise<void> {
+  async function prepareBarrier(entry: OwnerEntry): Promise<void> {
     await entry.enter('prepare')
     const keys = [JSON.stringify(['device', ownerDID])]
     if (entry.scopes.groupID !== null) keys.push(JSON.stringify(['group', entry.scopes.groupID]))
@@ -147,6 +147,9 @@ export function createMemoryDevicePersistence(params: {
       }
       for (const key of keys) owners.markStarted(key)
     }
+  }
+  async function prepare(entry: OwnerEntry): Promise<void> {
+    await prepareBarrier(entry)
     await entry.enter('work')
   }
   function read<TValue>(work: (tx: MemoryTransaction) => Promise<TValue>): Promise<TValue> {

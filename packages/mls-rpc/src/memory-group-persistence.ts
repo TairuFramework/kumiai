@@ -1,15 +1,18 @@
 import { controlAdoptionAllowed } from '@kumiai/rpc'
 
+import { bindEntryCapability, type EntryCapability, type EntryReads } from './entry-capability.js'
 import {
   bindMemoryGroupPorts,
   createMemoryGroupPorts,
   UnchangedGroupResult,
 } from './memory-group-ports.js'
 import {
+  assertMemoryAccess,
   bindMemoryOwner,
   bindMemorySnapshot,
   coordinateMemoryTransaction,
   createGroupStateStores,
+  createMemoryPrepareTransaction,
   createUnlockedGroupStateStores,
   memoryOperation,
   memorySeal,
@@ -187,7 +190,7 @@ export function createMemoryGroupCoordinator(params: {
         createIncarnationStores({ tx: bound, key: { groupID, incarnation }, atRest }),
     }
   }
-  async function prepare(entry: OwnerEntry, groupID: string): Promise<void> {
+  async function prepareBarrier(entry: OwnerEntry, groupID: string): Promise<void> {
     await entry.enter('prepare')
     const key = JSON.stringify(['group', groupID])
     if (!owners.started(key)) {
@@ -201,7 +204,74 @@ export function createMemoryGroupCoordinator(params: {
       }
       owners.markStarted(key)
     }
+  }
+  async function prepare(entry: OwnerEntry, groupID: string): Promise<void> {
+    await prepareBarrier(entry, groupID)
     await entry.enter('work')
+  }
+  function prepareReads(entry: OwnerEntry, groupID: string): EntryReads {
+    const tx = createMemoryPrepareTransaction({
+      rows: db.snapshot(),
+      entry,
+      owners,
+      groupID,
+      providerID,
+    })
+    const states = createUnlockedGroupStateStores({ tx, groupID, atRest })
+    const incarnation = (incarnation: number) =>
+      createUnlockedIncarnationStores({ tx, key: { groupID, incarnation }, atRest })
+    const reads: EntryReads = {
+      lifetime: memoryOperation(tx, states.lifetime.load),
+      trust: memoryOperation(tx, states.trust.load),
+      metadata: memoryOperation(
+        tx,
+        async (incarnation: number) => await states.stateMetadata(incarnation).load(),
+      ),
+      state: memoryOperation(
+        tx,
+        async (incarnation: number) => await states.state(incarnation).load(),
+      ),
+      control: memoryOperation(
+        tx,
+        async (number: number) => await incarnation(number).control.load(),
+      ),
+      controlMutation: memoryOperation(
+        tx,
+        async (incarnation: number) =>
+          (
+            await memoryRecordTable<ControlRecord>({
+              tx,
+              key: { groupID, incarnation },
+              namespace: 'control',
+              atRest,
+            }).load('current')
+          )?.mutationID ?? null,
+      ),
+      diagnoseState: memoryOperation(tx, async (incarnation: number) => {
+        try {
+          const value = await createUnlockedGroupStateStores({
+            tx,
+            groupID,
+            atRest,
+            requiredOpen: false,
+          })
+            .state(incarnation)
+            .load()
+          return value === null
+            ? 'missing'
+            : value.deleted
+              ? 'deleted'
+              : value.state === null
+                ? 'null'
+                : 'readable'
+        } catch {
+          // Revocation is never classified as corruption. The diagnostic exposes no bytes.
+          assertMemoryAccess(tx.rows)
+          return 'unreadable'
+        }
+      }),
+    }
+    return Object.freeze(reads)
   }
   async function readOwned<TValue>(
     entry: OwnerEntry,
@@ -937,6 +1007,60 @@ export function createMemoryGroupCoordinator(params: {
     },
     resolve,
   }
+  const capability: EntryCapability<MemoryTransaction> = {
+    read(groupID, fn) {
+      return owners.run('read', { groupID, ownerDID: null }, async (entry) => {
+        try {
+          await prepareBarrier(entry, groupID)
+          const result = await entry.callback(() => fn(prepareReads(entry, groupID)))
+          await entry.enter('outcome')
+          return result
+        } catch (error) {
+          entry
+            .attempt()
+            .revoke(
+              owners.failure ??
+                new PersistencePhaseError('Prepare read rejected', { cause: error }),
+            )
+          entry.release()
+          throw error
+        }
+      })
+    },
+    run(request, prepare, work) {
+      const owned = copyStoredValue(request)
+      return owners.run(
+        'transition',
+        { groupID: owned.groupID, ownerDID: null },
+        async (entry) => {
+          try {
+            await prepareBarrier(entry, owned.groupID)
+            const prepared = await entry.callback(() => prepare(prepareReads(entry, owned.groupID)))
+            // Capture caller-controlled expectations before entering work. Prepared values stay opaque.
+            const expected = entry.callback(() => copyStoredValue(prepared.expected))
+            const value = entry.callback(() => prepared.value)
+            await entry.enter('work')
+            if (entry.rollbackOnly) throw new GroupStateConflictError('Prepare is rollback-only')
+            return await transitionOwned(
+              { ...owned, expected },
+              (stores) => work(stores, value),
+              entry,
+            )
+          } catch (error) {
+            entry
+              .attempt()
+              .revoke(
+                owners.failure ??
+                  new PersistencePhaseError('Prepare transition rejected', { cause: error }),
+              )
+            throw error
+          }
+        },
+        { mutationID: owned.mutationID },
+      )
+    },
+  }
+  bindEntryCapability({ persistence: groups, capability, coordinatorBinding: binding })
   bindMemoryGroupPorts(groups, {
     read: (key, work) => read(key.groupID, work),
     write: (key, work, options) => {

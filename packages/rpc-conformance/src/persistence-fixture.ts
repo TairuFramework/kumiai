@@ -228,6 +228,32 @@ export type ConformanceGroupTransition = {
   expected: { revision: number; activeIncarnation: number | null } | null
 }
 
+export type ConformanceStateMetadata = ConformanceGroupKey & {
+  version: number
+  deleted: boolean
+  initialIdentity: ConformanceEpochIdentity | null
+}
+export type ConformanceEntryReads = {
+  lifetime(): Promise<ConformanceGroupLifetime | null>
+  trust(): Promise<ConformanceGroupRecoveryTrust | null>
+  metadata(incarnation: number): Promise<ConformanceStateMetadata | null>
+  state(incarnation: number): Promise<ConformanceGroupStateRecord | null>
+  control(incarnation: number): Promise<ConformanceControlSnapshot>
+  controlMutation(incarnation: number): Promise<string | null>
+  diagnoseState(
+    incarnation: number,
+  ): Promise<'missing' | 'null' | 'deleted' | 'readable' | 'unreadable'>
+}
+export type ConformancePrepared<T> = { expected: ConformanceGroupTransition['expected']; value: T }
+export type ConformanceEntryCapability<TTx extends ConformanceGroupTransaction> = {
+  read<T>(groupID: string, fn: (reads: ConformanceEntryReads) => Promise<T>): Promise<T>
+  run<P, T>(
+    request: Pick<ConformanceGroupTransition, 'groupID' | 'mutationID'>,
+    prepare: (reads: ConformanceEntryReads) => Promise<ConformancePrepared<P>>,
+    work: (stores: ConformanceGroupStores<TTx>, prepared: P) => Promise<T>,
+  ): Promise<T>
+}
+
 export type ConformanceGroupPersistence<
   TTx extends ConformanceGroupTransaction,
   Position extends string = string,
@@ -392,6 +418,14 @@ type ConformanceFixtureDeviceStores<TPorts> = TPorts extends {
   : never
 
 export type ConformancePersistenceFixture<TPorts> = {
+  entry(): ConformanceEntryCapability<
+    ConformanceFixtureGroupStores<TPorts> extends {
+      tx: infer TTx extends ConformanceGroupTransaction
+    }
+      ? TTx
+      : never
+  >
+  constructPrepareStores(key: ConformanceGroupKey): ConformanceFixtureGroupStores<TPorts>
   ports: TPorts
   reopen(): Promise<TPorts>
   reopenWithoutBarrier(): Promise<TPorts>
