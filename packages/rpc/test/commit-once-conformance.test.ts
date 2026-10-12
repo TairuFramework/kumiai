@@ -1,9 +1,3 @@
-import { testCommitOnceConformance } from '@kumiai/rpc-conformance'
-
-import { runMemoryCommitOnceScenario } from './fixtures/peer.js'
-
-testCommitOnceConformance({ label: 'strict memory MLS', run: runMemoryCommitOnceScenario })
-
 import type {
   ConformanceControlAdoptionPort,
   ConformanceControlBuildRef,
@@ -13,6 +7,7 @@ import type {
   ConformanceFirstValidCommit,
   ConformanceOperation,
 } from '@kumiai/rpc-conformance'
+import { peerCommitOnceScenarios, testCommitOnceConformance } from '@kumiai/rpc-conformance'
 
 import type { ControlHold, ControlValidationPort } from '../src/control/search.js'
 import type {
@@ -23,6 +18,7 @@ import type {
   Operation,
 } from '../src/control/types.js'
 import type { LogPosition } from '../src/cursor.js'
+import { runMemoryCommitOnceScenario } from './fixtures/peer.js'
 
 type RPCRecords = {
   slot: ControlSlot
@@ -44,3 +40,9 @@ type Mirrors = {
 }
 const _mirrorsCoverPorts = (value: Mirrors): RPCRecords => value
 const _portsCoverMirrors = (value: RPCRecords): Mirrors => value
+
+testCommitOnceConformance({
+  label: 'strict memory MLS',
+  run: runMemoryCommitOnceScenario,
+  scenarios: peerCommitOnceScenarios,
+})

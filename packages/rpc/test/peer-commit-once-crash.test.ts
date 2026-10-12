@@ -7,7 +7,6 @@ import {
   makeMLSPeer,
   reconstructMemoryPeer,
   seedBuiltOperation,
-  testControlCrashBoundaries,
 } from './fixtures/peer.js'
 
 const secret = new Uint8Array(32).fill(0x63)
@@ -81,5 +80,3 @@ test('accepted restart rechecks checkpoint suffix before adoption or Welcome', a
     await restarted.peer.drained()
   }
 })
-
-testControlCrashBoundaries('double')

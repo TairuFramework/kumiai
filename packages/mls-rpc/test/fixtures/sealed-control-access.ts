@@ -1,0 +1,164 @@
+import { decodeClientState, encodeClientState, type GroupHandle, restoreGroup } from '@kumiai/mls'
+import type { AdoptionWrite } from '@kumiai/rpc'
+
+import type { ControlRead, HandleAccess } from '../../src/access.js'
+import type { GroupKey, GroupPersistence, MemoryTransaction } from '../../src/persistence-types.js'
+import { nextChange } from './storage-seed.js'
+
+export type AdoptionFault = {
+  skipTrust?: boolean
+  reuseAuthenticator?: boolean
+  staleLifetime?: boolean
+  absentLifetime?: boolean
+}
+
+export async function createSealedControlAccess(
+  groups: GroupPersistence<MemoryTransaction>,
+  key: GroupKey,
+  adopted: () => void,
+  beforeAdopt: () => void,
+  fallback: GroupHandle,
+) {
+  const read = async () => {
+    const row = await groups.loadState(key)
+    if (row === null || row.deleted || row.state === null)
+      throw new Error('Missing adoption source')
+    const state = decodeClientState(row.state)
+    if (state === undefined) throw new Error('Invalid adoption source')
+    const handle = await restoreGroup({
+      state,
+      credential: row.credential,
+      ledgerEntries: row.ledger,
+    })
+    const source = {
+      key,
+      stateVersion: row.version,
+      identity: { ...key, epoch: row.epoch, authenticator: row.epochAuthenticator.slice() },
+    }
+    return { row, handle, source }
+  }
+  let live = fallback
+  let tail: Promise<void> = Promise.resolve()
+  let fault: AdoptionFault = {}
+  const serial = async <T>(work: () => Promise<T>): Promise<T> => {
+    const previous = tail
+    const latch = Promise.withResolvers<void>()
+    tail = latch.promise
+    await previous
+    try {
+      return await work()
+    } finally {
+      latch.resolve()
+    }
+  }
+  const persist = async (next: GroupHandle, write?: AdoptionWrite) => {
+    const change = await nextChange(groups, key.groupID, write?.mutationID ?? crypto.randomUUID())
+    if (fault.staleLifetime && change.expected !== null)
+      change.expected = { ...change.expected, revision: change.expected.revision - 1 }
+    if (fault.absentLifetime) change.expected = null
+    await groups.transition(change, async (stores) => {
+      const rows = stores.incarnation(key.incarnation)
+      const state = await rows.state.load()
+      const trust = await stores.trust.load()
+      if (state === null || state.deleted || trust === null)
+        throw new Error('Missing adoption source')
+      const candidate = decodeClientState(encodeClientState(next.state))
+      if (candidate === undefined) throw new Error('Invalid candidate')
+      if (fault.reuseAuthenticator)
+        candidate.keySchedule.epochAuthenticator = state.epochAuthenticator.slice()
+      await rows.state.save(
+        {
+          ...state,
+          version: state.version + 1,
+          state: encodeClientState(candidate),
+          ledger: next.ledgerTokens,
+          epoch: Number(candidate.groupContext.epoch),
+          epochAuthenticator: candidate.keySchedule.epochAuthenticator,
+        },
+        write?.expected,
+      )
+      if (!fault.skipTrust)
+        await stores.trust.save({
+          ...trust,
+          installed: {
+            ...key,
+            epoch: Number(candidate.groupContext.epoch),
+            authenticator: candidate.keySchedule.epochAuthenticator,
+          },
+          signerTree: candidate.ratchetTree,
+          ledger: next.ledgerTokens,
+          registry: next.registry,
+        })
+      if (write !== undefined) {
+        await rows.control.apply(write.changes, write.mutationID)
+        const anchor = await rows.anchor.load()
+        if (anchor?.pending !== undefined && anchor.pending.advance === write.anchorLanded)
+          await rows.anchor.save({ ...anchor, pending: { ...anchor.pending, landed: true } })
+      }
+    })
+  }
+  const access: HandleAccess = {
+    epoch: () => Number(live.epoch),
+    admission: () => live.sendAdmission(),
+    read: (fn) => serial(async () => fn(live)),
+    readControl: (fn) =>
+      serial(async () => {
+        let active = true
+        const refresh = async (): Promise<ControlRead> => {
+          if (!active) throw new Error('Control read scope has ended')
+          const { handle, source } = await read()
+          return { handle, source }
+        }
+        try {
+          return await fn({ ...(await refresh()), refresh })
+        } finally {
+          active = false
+        }
+      }),
+    replace: (next, adoption, prepare) =>
+      serial(async () => {
+        const current = await read()
+        if (prepare !== undefined && !(await prepare(current.handle, current.source))) return
+        const write = adoption?.({
+          incarnation: key.incarnation,
+          epochAfter: Number(next.epoch),
+          epochAuthenticator: next.state.keySchedule.epochAuthenticator.slice(),
+          removed: false,
+        })
+        beforeAdopt()
+        await persist(next, write)
+        live = next
+        next.confirmAdopted()
+        adopted()
+      }),
+    mutate: (fn, adoption) =>
+      serial(async () => {
+        const current = await read()
+        let saved = false
+        const save = async (handle: GroupHandle) => {
+          const write = adoption?.({
+            incarnation: key.incarnation,
+            epochAfter: Number(handle.epoch),
+            epochAuthenticator: handle.state.keySchedule.epochAuthenticator.slice(),
+            removed: false,
+          })
+          await persist(handle, write)
+          saved = true
+        }
+        const result = await fn(current.handle, save)
+        if (!saved) await save(current.handle)
+        live = current.handle
+        return result
+      }),
+    open: async () => {
+      throw new Error('Crash harness has no application frames')
+    },
+  }
+  return {
+    access,
+    live: () => live,
+    fault: (value: AdoptionFault) => {
+      fault = value
+    },
+  }
+}

@@ -1,9 +1,9 @@
-import { testCommitOnceConformance } from '@kumiai/rpc-conformance'
+import { peerCommitOnceScenarios, testCommitOnceConformance } from '@kumiai/rpc-conformance'
 
 import { runRealCommitOnceScenario } from './app-lane-e2e.js'
 
-testCommitOnceConformance({ label: 'real MLS', run: runRealCommitOnceScenario })
-
-import { testControlCrashBoundaries } from '../../../packages/rpc/test/fixtures/peer.js'
-
-testControlCrashBoundaries('real-mls')
+testCommitOnceConformance({
+  label: 'real MLS',
+  run: runRealCommitOnceScenario,
+  scenarios: peerCommitOnceScenarios,
+})

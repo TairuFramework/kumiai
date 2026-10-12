@@ -69,10 +69,12 @@ const scenarios: Array<[CommitOnceScenario, string]> = [
 
 export function testCommitOnceConformance(params: {
   label: string
+  scenarios?: Array<CommitOnceScenario>
   run(scenario: CommitOnceScenario): Promise<CommitOnceEvidence>
 }): void {
   describe(`commit-once conformance: ${params.label}`, () => {
     for (const [scenario, name] of scenarios) {
+      if (params.scenarios !== undefined && !params.scenarios.includes(scenario)) continue
       test(name, async () => {
         const evidence = await params.run(scenario)
         expect(evidence.publicationsBeforeProof).toBe(0)
@@ -99,6 +101,7 @@ export function testCommitOnceConformance(params: {
             expect(evidence.ownAdoptions).toBe(0)
             expect(evidence.welcomeDeliveries).toBe(0)
             expect(evidence.slotAfterAck).not.toBeNull()
+            expect(evidence.cursor).toBe(evidence.searchFrom)
             break
           case 'deadline':
           case 'slot-guards':
@@ -135,3 +138,7 @@ export function testCommitOnceConformance(params: {
     }
   })
 }
+
+export const peerCommitOnceScenarios = scenarios
+  .map(([scenario]) => scenario)
+  .filter((scenario) => scenario !== 'ownership-conflict')

@@ -33,6 +33,7 @@ export {
 export {
   type CommitOnceEvidence,
   type CommitOnceScenario,
+  peerCommitOnceScenarios,
   testCommitOnceConformance,
 } from './commit-once.js'
 export {

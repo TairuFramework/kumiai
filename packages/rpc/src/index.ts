@@ -171,6 +171,7 @@ export {
 export type { AppOutboxCleared, EpochFloor } from './log-delivery.js'
 export {
   createGroupPeer,
+  createGroupPeerWithControlWalk,
   type GroupPeer,
   type GroupPeerMLSParams,
   type GroupPeerParams,

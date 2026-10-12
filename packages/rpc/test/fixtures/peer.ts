@@ -2,37 +2,26 @@ import type { LogHub } from '@kumiai/hub-tunnel'
 import type { CommitOnceEvidence, CommitOnceScenario } from '@kumiai/rpc-conformance'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { toB64U } from '@sozai/codec'
-import { describe, expect, test, vi } from 'vitest'
+import { vi } from 'vitest'
 
-import type { AnchorSlot } from '../../src/anchor.js'
 import type { AppWindowPruned } from '../../src/app-cursor.js'
 import type { AppDeliveryResumed, AppDeliveryStalled } from '../../src/app-lane.js'
 import type { AppOutbox } from '../../src/app-outbox.js'
 import { digestAppliedCommit } from '../../src/classify.js'
 import { decodeCommitFrame, encodeCommitFrame } from '../../src/commit-frame.js'
-import type { FrameControlBuild, SaveControlBuild } from '../../src/control/build.js'
-import { type HostBuilt, type OperationDeps, stepOperation } from '../../src/control/operations.js'
-import {
-  CONTROL_SEARCH_BUDGET,
-  type ControlEvidenceSnapshot,
-  type ControlValidationPort,
-  createControlSearch,
-} from '../../src/control/search.js'
+import type { FrameControlBuild } from '../../src/control/build.js'
+import type { HostBuilt, OperationDeps } from '../../src/control/operations.js'
+import type { ControlEvidenceSnapshot, ControlValidationPort } from '../../src/control/search.js'
 import { controlBuildRef } from '../../src/control/slot.js'
 import type {
-  AdoptionExpected,
-  AdoptionWrite,
   ControlSlot,
   ControlStore,
-  FirstValidCommit,
-  GroupKey,
   Operation,
   OperationRequest,
   Outcome,
   RejoinRecord,
   WelcomeObligation,
 } from '../../src/control/types.js'
-import { deliverObligations } from '../../src/control/welcome.js'
 import { asLogPosition } from '../../src/cursor.js'
 import { OperationRejectedError } from '../../src/errors.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../../src/handshake.js'
@@ -716,10 +705,6 @@ export async function runCommitOnceHost(
     published,
     outcome: (value) => emitted.push(value),
   })
-  const head = async () => {
-    const page = await hub.fetchTopic({ subscriberDID: localDID, topicID })
-    return page.head == null ? null : asLogPosition(page.head)
-  }
   const append = (payload: Uint8Array, publishID = crypto.randomUUID()) =>
     hub.publish({
       senderDID: localDID,
@@ -728,83 +713,8 @@ export async function runCommitOnceHost(
       publishID,
       retain: 'log',
     })
-  let gap = false
-  let failPublish = scenario === 'poison-head' || scenario === 'built-restart'
   let progressPreserved = false
   let checkProgress: (() => Promise<boolean>) | undefined
-  const deps = (): OperationDeps => {
-    const search = createControlSearch({
-      budget: CONTROL_SEARCH_BUDGET,
-      validation: host.validation,
-      readEvidence: host.readEvidence,
-      fetch: async (after) => {
-        const page = await hub.fetchTopic({
-          subscriberDID: localDID,
-          topicID,
-          ...(after === null ? {} : { after }),
-        })
-        return {
-          ...page,
-          head: page.head ?? null,
-          oldest: page.oldest ?? null,
-          gap: gap || page.gap,
-        }
-      },
-      followWinner: async (frame, range, work) => {
-        await host.controlWalk.walkCommits({ through: frame.position, range, work })
-        const applied = (await host.readEvidence()).applied.find(
-          (row) => row.epoch === range.source.epoch,
-        )
-        return applied?.sequenceID === frame.position
-          ? { kind: 'applied', position: frame.position }
-          : { kind: 'unavailable' }
-      },
-      reconcileAbsent: async (through, range, work) => {
-        if (through === null) return (await head()) === null
-        await host.controlWalk.walkCommits({ through, range, work })
-        const cursor = (await host.readEvidence()).cursor
-        return cursor?.position != null && cursor.position >= through
-      },
-      hold: async (controlHold) => host.control.apply({ controlHold }, crypto.randomUUID()),
-    })
-    return {
-      control: host.control,
-      prepareBuild: host.prepareBuild,
-      adopt: host.adopt,
-      searchLog: search.searchLog,
-      readEvidence: host.readEvidence,
-      readHead: head,
-      frame: async (built, seal) => ({
-        payload: encodeHandshakeFrame(
-          HANDSHAKE_KIND.commit,
-          encodeCommitFrame(built.commit, (await seal(encodeLedgerEntries(built.bodies))).sealed),
-        ),
-        publishID: crypto.randomUUID(),
-        expectedHead: await head(),
-      }),
-      publish: async (payload, publishID, expectedHead) => {
-        published(payload, publishID, expectedHead)
-        if (failPublish) {
-          failPublish = false
-          await append(new Uint8Array([255, 255]))
-        }
-        return hub.publish({
-          senderDID: localDID,
-          topicID,
-          payload,
-          publishID,
-          expectedHead,
-          retain: 'log',
-        })
-      },
-      pullToHead: async () => {
-        await host.peer.resync()
-      },
-      now: () => now,
-      newID: () => crypto.randomUUID(),
-      emit: (outcome) => emitted.push(outcome),
-    }
-  }
   try {
     await host.peer.resync()
     if (scenario === 'trimmed-checkpoint') {
@@ -819,7 +729,7 @@ export async function runCommitOnceHost(
       stage: 'intent',
     }
     await host.control.apply({ putOperations: [op] }, crypto.randomUUID())
-    let operation = await stepOperation(deps(), op)
+    let operation = await host.controlWalk.stepOperation(op)
     const slot = (await host.control.load()).commitOnce
     if (slot === null || operation === null || operation.stage !== 'built')
       throw new Error('Missing saved build')
@@ -855,14 +765,11 @@ export async function runCommitOnceHost(
       scenario === 'trimmed-checkpoint' ||
       scenario === 'accepted-restart'
     ) {
-      const own = await append(slot.payload)
+      await append(slot.payload)
       if (scenario === 'accepted-restart') {
-        const proof = {
-          source: (await host.readEvidence()).source,
-          from: slot.searchFrom,
-          position: asLogPosition(own.sequenceID),
-          payloadDigest: slot.payloadDigest,
-        }
+        const found = await host.controlWalk.searchLog(slot)
+        if (found.kind !== 'first-valid') throw new Error('Search did not prove acceptance')
+        const proof = found.proof
         await host.control.apply(
           {
             commitOnceAcceptance: proof,
@@ -873,23 +780,20 @@ export async function runCommitOnceHost(
           crypto.randomUUID(),
         )
       }
-      gap = true
       host.setGap(true)
       now = op.deadline
     } else if (scenario === 'late-acked-slot') {
-      gap = true
       host.setGap(true)
       now = op.deadline
-      await stepOperation(deps(), operation)
+      await host.controlWalk.stepOperation(operation)
       await host.control.apply({ deleteOutcomes: [op.id] }, crypto.randomUUID())
-      gap = false
       host.setGap(false)
       await append(slot.payload)
     } else if (scenario === 'deadline' || scenario === 'slot-guards') {
       now = op.deadline
     }
     if (scenario === 'slot-guards') {
-      operation = await stepOperation(deps(), operation)
+      operation = await host.controlWalk.stepOperation(operation)
       const queued: Operation & { stage: 'intent' } = {
         ...op,
         id: crypto.randomUUID(),
@@ -898,7 +802,7 @@ export async function runCommitOnceHost(
         deadline: now + 30_000,
       }
       await host.control.apply({ putOperations: [queued] }, crypto.randomUUID())
-      await host.prepareBuild(queued, deps().frame)
+      await host.controlWalk.stepOperation(queued)
       await host.control.apply(
         {
           deleteOperations: [queued.id],
@@ -926,7 +830,7 @@ export async function runCommitOnceHost(
       }
     }
     if (scenario === 'built-restart' && operation !== null)
-      operation = await stepOperation(deps(), operation)
+      operation = await host.controlWalk.stepOperation(operation)
     // A restart restores only committed rows; observations remain outside the reconstructed host.
     if (
       scenario === 'built-restart' ||
@@ -943,21 +847,10 @@ export async function runCommitOnceHost(
       await host.peer.replay()
     } else {
       for (let i = 0; operation !== null && i < 6; i++) {
-        const next = await stepOperation(deps(), operation)
+        const next = await host.controlWalk.stepOperation(operation)
         operation = next
       }
     }
-    const saved = await host.control.load()
-    await deliverObligations(
-      {
-        control: host.control,
-        canDeliver: async (row) => row.committed === true,
-        deliverWelcome: async () => {
-          welcomeDeliveries++
-        },
-      },
-      saved,
-    )
     if (checkProgress !== undefined) progressPreserved = await checkProgress()
     const facts = (await host.control.load()).outcomes
     const last = facts.filter((row) => row.opID === op.id).at(-1)
@@ -1002,12 +895,8 @@ export async function runCommitOnceHost(
 export async function runMemoryCommitOnceScenario(
   scenario: CommitOnceScenario,
 ): Promise<CommitOnceEvidence> {
-  if (scenario === 'ownership-conflict') {
-    const { runControlProofConflict } = (await import(
-      new URL('../../../mls-rpc/test/fixtures/storage-persistence.ts', import.meta.url).href
-    )) as { runControlProofConflict(mode: 'double'): Promise<CommitOnceEvidence> }
-    return runControlProofConflict('double')
-  }
+  if (scenario === 'ownership-conflict')
+    throw new Error('Sealed provider scenario lives in mls-rpc')
   const secret = new Uint8Array(32).fill(0x6c)
   const hub = new FakeHub()
   const database = createMemoryHostDatabase()
@@ -1017,6 +906,7 @@ export async function runMemoryCommitOnceScenario(
     scenario,
     async (observe) => {
       let networkGap = false
+      let failPublish = scenario === 'poison-head' || scenario === 'built-restart'
       const view: LogHub = {
         subscribe: hub.subscribe.bind(hub),
         unsubscribe: hub.unsubscribe.bind(hub),
@@ -1032,6 +922,15 @@ export async function runMemoryCommitOnceScenario(
               params.publishID ?? globalThis.crypto.randomUUID(),
               params.expectedHead ?? null,
             )
+          if (params.topicID === commitTopic(secret) && failPublish) {
+            failPublish = false
+            await hub.publish({
+              topicID: params.topicID,
+              senderDID: localDID,
+              payload: new Uint8Array([255, 255]),
+              retain: 'log',
+            })
+          }
           return hub.publish(params)
         },
       }
@@ -1051,6 +950,7 @@ export async function runMemoryCommitOnceScenario(
           if (state === null) throw new Error('Missing committed memory state')
           mls.restoreState(state)
         }
+        crypto.setEpoch(mls.epoch())
         const build = async (op: Operation) => {
           observe.built()
           return buildMemoryOperation(mls, op)
@@ -1163,349 +1063,4 @@ export async function runMemoryCommitOnceScenario(
     commitTopic(secret),
     localDID,
   )
-}
-
-type SealedCrashHost = {
-  control: ControlStore
-  key: GroupKey
-  source(): Promise<AdoptionExpected>
-  build(): Promise<{
-    intent: Operation & { stage: 'intent' }
-    slot: ControlSlot
-    expected: AdoptionExpected
-  }>
-  saveBuilt: SaveControlBuild
-  accept(slot: ControlSlot, mutationID: string): Promise<FirstValidCommit>
-  armAnchor(slot: ControlSlot): Promise<void>
-  loadAnchor(): Promise<AnchorSlot | null>
-  losePrivateState(): Promise<void>
-  recoveryTrust(): Promise<unknown>
-  adopt(
-    expected: AdoptionExpected & { acceptance: FirstValidCommit },
-    write: AdoptionWrite,
-    fault?: {
-      skipTrust?: boolean
-      reuseAuthenticator?: boolean
-      staleLifetime?: boolean
-      absentLifetime?: boolean
-    },
-  ): Promise<void>
-  reopen(): Promise<Omit<SealedCrashHost, 'fixture' | 'reopen'>>
-  fixture: {
-    failNext(point: 'after-first-write'): void
-    rejectCommitPending(): {
-      rejected: Promise<void>
-      barrierWaiting: Promise<void>
-      finish(outcome: 'commit' | 'rollback'): Promise<void>
-    }
-    onPhase(phase: 'work' | 'hook', fn: () => void): void
-    inspectRows(): Promise<unknown>
-    close(): Promise<void>
-  }
-}
-
-async function sealedCrashHost(mode: 'real-mls' | 'double'): Promise<SealedCrashHost> {
-  const module = (await import(
-    new URL('../../../mls-rpc/test/fixtures/storage-persistence.ts', import.meta.url).href
-  )) as {
-    createControlCrashHarness(mode: 'real-mls' | 'double'): Promise<SealedCrashHost>
-  }
-  return module.createControlCrashHarness(mode)
-}
-
-function crashAdoptionWrite(slot: ControlSlot, proof: FirstValidCommit): AdoptionWrite {
-  return {
-    mutationID: 'adopted',
-    anchorLanded: slot.digest,
-    changes: {
-      commitOnce: null,
-      deleteOperations: [slot.opID],
-      cursor: { position: proof.position, epoch: slot.epoch + 1 },
-      putApplied: [
-        {
-          epoch: slot.epoch,
-          digest: slot.digest,
-          payloadDigest: slot.payloadDigest,
-          sequenceID: proof.position,
-          opID: slot.opID,
-          removed: false,
-        },
-      ],
-      putOutcomes: [
-        {
-          id: slot.opID,
-          opID: slot.opID,
-          at: Date.now(),
-          kind: 'landed',
-          position: proof.position,
-        },
-      ],
-    },
-  }
-}
-
-export function testControlCrashBoundaries(mode: 'real-mls' | 'double'): void {
-  describe(`sealed control reconstruction: ${mode}`, () => {
-    test('death after preparation before built-save releases no bytes', async () => {
-      const h = await sealedCrashHost(mode)
-      try {
-        const first = await h.build()
-        const hub = new FakeHub()
-        const reopened = await h.reopen()
-        expect((await reopened.control.load()).commitOnce).toBeNull()
-        const second = await reopened.build()
-        expect(second.intent).toEqual(first.intent)
-        expect(hub.published).toEqual([])
-        await reopened.saveBuilt(second.intent, second.slot, second.expected, 'rebuilt')
-        await hub.publish({
-          senderDID: 'alice',
-          topicID: commitTopic(new Uint8Array(32).fill(0x6e)),
-          payload: second.slot.payload,
-          publishID: second.slot.publishID,
-          retain: 'log',
-        })
-        expect(hub.published).toHaveLength(1)
-        expect(hub.published[0]?.payload).not.toEqual(first.slot.payload)
-        expect((await reopened.control.load()).commitOnce).toEqual(second.slot)
-      } finally {
-        await h.fixture.close()
-      }
-    })
-    test('built-save first logical operation write rolls back with slot', async () => {
-      const h = await sealedCrashHost(mode)
-      try {
-        const built = await h.build()
-        const before = await h.fixture.inspectRows()
-        h.fixture.failNext('after-first-write')
-        await expect(
-          h.saveBuilt(built.intent, built.slot, built.expected, 'built'),
-        ).rejects.toThrow()
-        expect(await h.fixture.inspectRows()).toEqual(before)
-        const reopened = await h.reopen()
-        expect((await reopened.control.load()).commitOnce).toBeNull()
-        expect((await reopened.control.load()).operations).toEqual([built.intent])
-      } finally {
-        await h.fixture.close()
-      }
-    })
-    test('adoption rollback leaves state control and anchor unchanged', async () => {
-      const h = await sealedCrashHost(mode)
-      try {
-        const built = await h.build()
-        await h.saveBuilt(built.intent, built.slot, built.expected, 'built')
-        const proof = await h.accept(built.slot, 'accepted')
-        await h.armAnchor(built.slot)
-        const anchorBefore = await h.loadAnchor()
-        const expected = { ...(await h.source()), acceptance: proof }
-        const before = await h.fixture.inspectRows()
-        h.fixture.failNext('after-first-write')
-        await expect(h.adopt(expected, crashAdoptionWrite(built.slot, proof))).rejects.toThrow()
-        expect(await h.fixture.inspectRows()).toEqual(before)
-        const reopened = await h.reopen()
-        expect((await reopened.control.load()).commitOnce).toEqual(built.slot)
-        expect((await reopened.control.load()).commitOnceAcceptance).toEqual(proof)
-        expect((await reopened.control.load()).applied).toEqual([])
-        expect(await reopened.loadAnchor()).toEqual(anchorBefore)
-      } finally {
-        await h.fixture.close()
-      }
-    })
-    test.each([
-      'state-version',
-      'lifetime-revision',
-      'absent-lifetime',
-      'spent-authenticator',
-      'missing-trust',
-    ] as const)(
-      'control adoption preserves the provider %s guard after reconstruction',
-      async (guard) => {
-        const h = await sealedCrashHost(mode)
-        try {
-          const built = await h.build()
-          await h.saveBuilt(built.intent, built.slot, built.expected, 'built')
-          await h.accept(built.slot, 'accepted')
-          const restored = await h.reopen()
-          const retained = await restored.control.load()
-          if (retained.commitOnce === null || retained.commitOnceAcceptance === null)
-            throw new Error('Missing durable accepted slot')
-          const expected = {
-            ...(await restored.source()),
-            acceptance: retained.commitOnceAcceptance,
-          }
-          if (guard === 'state-version') expected.stateVersion--
-          const before = await h.fixture.inspectRows()
-          await expect(
-            restored.adopt(
-              expected,
-              crashAdoptionWrite(retained.commitOnce, retained.commitOnceAcceptance),
-              {
-                staleLifetime: guard === 'lifetime-revision',
-                absentLifetime: guard === 'absent-lifetime',
-                reuseAuthenticator: guard === 'spent-authenticator',
-                skipTrust: guard === 'missing-trust',
-              },
-            ),
-          ).rejects.toThrow()
-          expect(await h.fixture.inspectRows()).toEqual(before)
-          expect((await (await h.reopen()).control.load()).commitOnce).toEqual(built.slot)
-        } finally {
-          await h.fixture.close()
-        }
-      },
-    )
-    test('null state retains recovery metadata and control adoption refuses same-incarnation reinstall', async () => {
-      const h = await sealedCrashHost(mode)
-      try {
-        const built = await h.build()
-        await h.saveBuilt(built.intent, built.slot, built.expected, 'built')
-        await h.accept(built.slot, 'accepted')
-        const trust = await h.recoveryTrust()
-        await h.losePrivateState()
-        const restored = await h.reopen()
-        expect(await restored.recoveryTrust()).toEqual(trust)
-        const before = await h.fixture.inspectRows()
-        const retained = await restored.control.load()
-        if (retained.commitOnce === null || retained.commitOnceAcceptance === null)
-          throw new Error('Missing durable accepted slot')
-        await expect(
-          restored.adopt(
-            { ...(await restored.source()), acceptance: retained.commitOnceAcceptance },
-            crashAdoptionWrite(retained.commitOnce, retained.commitOnceAcceptance),
-          ),
-        ).rejects.toThrow()
-        expect(await h.fixture.inspectRows()).toEqual(before)
-        expect((await restored.control.load()).commitOnce).toEqual(built.slot)
-      } finally {
-        await h.fixture.close()
-      }
-    })
-    test('committed adoption reconstructs one applied row cursor and landed fact', async () => {
-      const h = await sealedCrashHost(mode)
-      try {
-        const built = await h.build()
-        await h.saveBuilt(built.intent, built.slot, built.expected, 'built')
-        const proof = await h.accept(built.slot, 'accepted')
-        const write = crashAdoptionWrite(built.slot, proof)
-        await h.armAnchor(built.slot)
-        h.fixture.onPhase('hook', () => {
-          throw new Error('process died after committed adoption')
-        })
-        await expect(h.adopt({ ...(await h.source()), acceptance: proof }, write)).rejects.toThrow(
-          'process died after committed adoption',
-        )
-        const reopened = await h.reopen()
-        const rows = await reopened.control.load()
-        expect(rows.applied).toEqual(write.changes.putApplied)
-        expect(rows.cursor).toEqual(write.changes.cursor)
-        expect(rows.outcomes.filter((row) => row.kind === 'landed')).toEqual(
-          write.changes.putOutcomes,
-        )
-        expect(rows.operations).toEqual([])
-        expect(rows.commitOnce).toBeNull()
-        expect(rows.commitOnceAcceptance).toBeNull()
-        expect((await reopened.source()).identity?.epoch).toBe(built.slot.epoch + 1)
-        expect((await reopened.loadAnchor())?.pending?.landed).toBe(true)
-      } finally {
-        await h.fixture.close()
-      }
-    })
-    for (const stage of ['built', 'accepted', 'adoption'] as const) {
-      test(`control transition proof conflict fail-stops before publication Welcome or hooks (${stage})`, async () => {
-        const module = (await import(
-          new URL('../../../mls-rpc/test/fixtures/storage-persistence.ts', import.meta.url).href
-        )) as {
-          runControlProofConflict(
-            mode: 'real-mls' | 'double',
-            stage: 'built' | 'accepted' | 'adoption',
-          ): Promise<CommitOnceEvidence>
-        }
-        const evidence = await module.runControlProofConflict(mode, stage)
-        expect(evidence.publicationsBeforeProof).toBe(0)
-        expect(evidence.payloads).toEqual([])
-        expect(evidence.ownAdoptions).toBe(0)
-        expect(evidence.welcomeDeliveries).toBe(0)
-      })
-    }
-    for (const stage of ['built', 'accepted', 'adoption'] as const) {
-      for (const completion of ['commit', 'rollback'] as const) {
-        test(`ambiguous built accepted and adoption saves release no bytes before proof (${stage}, ${completion})`, async () => {
-          const h = await sealedCrashHost(mode)
-          let fault: ReturnType<SealedCrashHost['fixture']['rejectCommitPending']> | undefined
-          let finished = false
-          try {
-            const built = await h.build()
-            if (stage !== 'built')
-              await h.saveBuilt(built.intent, built.slot, built.expected, 'built')
-            const proof = stage === 'adoption' ? await h.accept(built.slot, 'accepted') : null
-            if (stage === 'adoption') await h.armAnchor(built.slot)
-            const expected = proof === null ? null : { ...(await h.source()), acceptance: proof }
-            const before = await h.fixture.inspectRows()
-            const started = Promise.withResolvers<NonNullable<typeof fault>>()
-            h.fixture.onPhase('work', () => started.resolve(h.fixture.rejectCommitPending()))
-            const hooks: Array<string> = []
-            h.fixture.onPhase('hook', () => {
-              hooks.push('commit')
-            })
-            const hub = new FakeHub()
-            const secret = new Uint8Array(32).fill(0x6e)
-            const action =
-              stage === 'built'
-                ? h.saveBuilt(built.intent, built.slot, built.expected, 'built')
-                : stage === 'accepted'
-                  ? h.accept(built.slot, 'accepted')
-                  : expected === null || proof === null
-                    ? Promise.reject(new Error('Missing adoption proof'))
-                    : h.adopt(expected, crashAdoptionWrite(built.slot, proof))
-            let released = false
-            const result = action.then(
-              async () => {
-                released = true
-                await hub.publish({
-                  topicID: commitTopic(secret),
-                  senderDID: 'alice',
-                  payload: built.slot.payload,
-                  publishID: built.slot.publishID,
-                  retain: 'log',
-                })
-                return { ok: true as const }
-              },
-              (error: unknown) => ({ ok: false as const, error }),
-            )
-            fault = await started.promise
-            await fault.rejected
-            await fault.barrierWaiting
-            expect(released).toBe(false)
-            expect(hub.published).toEqual([])
-            expect(hooks).toEqual([])
-            expect(await h.fixture.inspectRows()).toEqual(before)
-            await fault.finish(completion)
-            finished = true
-            const settled = await result
-            expect(settled.ok).toBe(completion === 'commit')
-            expect(hub.published).toHaveLength(completion === 'commit' ? 1 : 0)
-            expect(hooks).toHaveLength(completion === 'commit' ? 1 : 0)
-            const reopened = await h.reopen()
-            const saved = await reopened.control.load()
-            if (completion === 'rollback') {
-              expect(saved.commitOnce).toEqual(stage === 'built' ? null : built.slot)
-              expect(saved.commitOnceAcceptance).toEqual(proof)
-            } else if (stage === 'built') expect(saved.commitOnce).toEqual(built.slot)
-            else if (stage === 'accepted')
-              expect(saved.commitOnceAcceptance?.payloadDigest).toBe(built.slot.payloadDigest)
-            else {
-              expect(saved.applied).toHaveLength(1)
-              expect(saved.cursor).toEqual({
-                position: proof?.position,
-                epoch: built.slot.epoch + 1,
-              })
-              expect(saved.commitOnce).toBeNull()
-            }
-          } finally {
-            if (!finished) await fault?.finish('rollback')
-            await h.fixture.close()
-          }
-        })
-      }
-    }
-  })
 }

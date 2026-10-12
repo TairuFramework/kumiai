@@ -59,6 +59,7 @@ import type {
 } from '@kumiai/rpc'
 import {
   commitTopic,
+  createGroupPeerWithControlWalk,
   createLedgerEntryResolver,
   decodeCommitFrame,
   decodeHandshakeFrame,
@@ -88,10 +89,6 @@ import {
 import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
 import type { WireHub } from './log-hub-over-wire.js'
 import { createWireHub } from './log-hub-over-wire.js'
-
-const { createGroupPeerWithControlWalk } = (await import(
-  new URL('../../../packages/rpc/lib/peer.js', import.meta.url).href
-)) as typeof import('../../../packages/rpc/src/peer.js')
 
 export { createMemoryAppOutbox }
 
@@ -794,6 +791,7 @@ export async function runRealCommitOnceScenario(
       scenario,
       async (observe) => {
         let networkGap = false
+        let failPublish = scenario === 'poison-head' || scenario === 'built-restart'
         const view: WireHub = {
           dispose: wire.dispose,
           connect: (identity) => {
@@ -811,6 +809,15 @@ export async function runRealCommitOnceScenario(
                     params.publishID ?? crypto.randomUUID(),
                     params.expectedHead ?? null,
                   )
+                if (params.topicID === topicID && failPublish) {
+                  failPublish = false
+                  await connection.publish({
+                    topicID,
+                    senderDID: identity.id,
+                    payload: new Uint8Array([255, 255]),
+                    retain: 'log',
+                  })
+                }
                 return connection.publish(params)
               },
             }

@@ -45,6 +45,7 @@ import type {
   ControlStore,
   ExternalResponse,
   ForkEvidence,
+  Operation,
   OperationRequest,
   Outcome,
   RejoinRecord,
@@ -248,6 +249,8 @@ export function createGroupPeerWithControlWalk<
   controlWalk: {
     walkCommits(search: ControlWalkRequest): Promise<boolean>
     head(): LogPosition | null
+    stepOperation(op: Operation): Promise<Operation | null>
+    searchLog: OperationDeps['searchLog']
   }
 } {
   const boundary = createHostBoundary()
@@ -2173,14 +2176,10 @@ export function createGroupPeerWithControlWalk<
         owningSlot.payloadDigest === payloadDigest,
     )
     const mutationID = newPublishID()
-    return (staged) => ({
-      mutationID,
-      ...(!staged.removed ? { anchorLanded: digest } : {}),
-      changes: {
-        ...pruneWindow(snapshot, epoch),
-        ...(clearsSlot && staged.epochAfter > epoch ? { commitOnce: null } : {}),
-        // Removal must retain a proven loser before terminal settlement marks other work unknown.
-        ...(staged.removed &&
+    return (staged) => {
+      // Removal retains a proven loser before terminal settlement marks other work unknown.
+      const settled =
+        staged.removed &&
         clearsSlot &&
         owningSlot.payloadDigest !== payloadDigest &&
         snapshot.operations.some((op) => op.id === owningSlot.opID)
@@ -2195,69 +2194,76 @@ export function createGroupPeerWithControlWalk<
                 },
               ],
             }
-          : {}),
-        ...(controlHold?.reason === 'acceptance-unknown' && staged.epochAfter > epoch
-          ? { controlHold: null }
-          : {}),
-        ...(clearsSlot &&
-        owningSlot.payloadDigest !== payloadDigest &&
-        snapshot.welcomes.some((row) => row.opID === owningSlot.opID && !row.committed)
-          ? { deleteWelcomes: [owningSlot.opID] }
-          : {}),
-        putApplied: [
-          {
-            epoch,
-            digest,
-            payloadDigest,
-            sequenceID: position,
-            opID: matches[0]?.id ?? null,
-            removed: staged.removed,
+          : matches.length === 0
+            ? {}
+            : {
+                deleteOperations: matches.map((op) => op.id),
+                putOutcomes: matches.map(
+                  (op): Outcome => ({
+                    id: op.id,
+                    opID: op.id,
+                    at: Date.now(),
+                    kind: 'landed',
+                    position,
+                  }),
+                ),
+              }
+      return {
+        mutationID,
+        ...(!staged.removed ? { anchorLanded: digest } : {}),
+        changes: {
+          ...pruneWindow(snapshot, epoch),
+          ...settled,
+          ...(clearsSlot && staged.epochAfter > epoch ? { commitOnce: null } : {}),
+          ...(controlHold?.reason === 'acceptance-unknown' && staged.epochAfter > epoch
+            ? { controlHold: null }
+            : {}),
+          ...(clearsSlot &&
+          owningSlot.payloadDigest !== payloadDigest &&
+          snapshot.welcomes.some((row) => row.opID === owningSlot.opID && !row.committed)
+            ? { deleteWelcomes: [owningSlot.opID] }
+            : {}),
+          putApplied: [
+            {
+              epoch,
+              digest,
+              payloadDigest,
+              sequenceID: position,
+              opID: matches[0]?.id ?? null,
+              removed: staged.removed,
+            },
+          ],
+          ...(!stranded ? { strand: null } : {}),
+          cursor: {
+            position: stranded
+              ? (snapshot.cursor?.position ?? null)
+              : snapshot.cursor?.position != null && snapshot.cursor.position > position
+                ? snapshot.cursor.position
+                : position,
+            epoch: staged.epochAfter,
+            ...(stranded
+              ? {
+                  stranded: true,
+                  ...(snapshot.cursor?.fork == null ? {} : { fork: snapshot.cursor.fork }),
+                }
+              : {}),
           },
-        ],
-        ...(!stranded ? { strand: null } : {}),
-        cursor: {
-          position: stranded
-            ? (snapshot.cursor?.position ?? null)
-            : snapshot.cursor?.position != null && snapshot.cursor.position > position
-              ? snapshot.cursor.position
-              : position,
-          epoch: staged.epochAfter,
-          ...(stranded
+          ...(external
             ? {
-                stranded: true,
-                ...(snapshot.cursor?.fork == null ? {} : { fork: snapshot.cursor.fork }),
+                putResponses: [
+                  {
+                    position,
+                    digest,
+                    epoch,
+                    kind: 'applied' as const,
+                    epochAfter: staged.epochAfter,
+                  },
+                ],
               }
             : {}),
         },
-        ...(matches.length === 0
-          ? {}
-          : {
-              deleteOperations: matches.map((op) => op.id),
-              putOutcomes: matches.map(
-                (op): Outcome => ({
-                  id: op.id,
-                  opID: op.id,
-                  at: Date.now(),
-                  kind: 'landed',
-                  position,
-                }),
-              ),
-            }),
-        ...(external
-          ? {
-              putResponses: [
-                {
-                  position,
-                  digest,
-                  epoch,
-                  kind: 'applied' as const,
-                  epochAfter: staged.epochAfter,
-                },
-              ],
-            }
-          : {}),
-      },
-    })
+      }
+    }
   }
   let welcomeTimer: ReturnType<typeof setTimeout> | undefined
   let welcomeBackoff = 1000
@@ -3917,6 +3923,23 @@ export function createGroupPeerWithControlWalk<
           if (mls == null || commitTopicID == null) return false
           await refreshControl()
           return walkCommits(mls, commitTopicID, search)
+        })
+      },
+      searchLog: async (slot, position) => {
+        await ready
+        assertLive()
+        return runSerial(async () => searchControlLog(slot, position))
+      },
+      stepOperation: async (op) => {
+        await ready
+        assertLive()
+        return runSerial(async () => {
+          await refreshControl()
+          const next = await stepOperation(operationDeps(), op)
+          await deliverPendingWelcomes()
+          await refreshControl()
+          if (epochNeedsBuild) await rebuildEpoch()
+          return next
         })
       },
       head: () => commitLogHead,
