@@ -174,6 +174,85 @@ describe('independent registry handle', () => {
     },
   )
 
+  test('double reconstruction refuses a signed body substituted under an enacted ID', async () => {
+    const identity = randomIdentity()
+    const { group } = await createGroup(identity, 'restored-ledger-body')
+    const handle = await restoreMemoryControlHandle({
+      state: seedMemoryControlState(group.state, group.credential),
+      credential: group.credential,
+    })
+    const signed = (subject: string) => {
+      return signLedgerEntry(identity, {
+        type: 'kumiai.role',
+        groupID: handle.groupID,
+        subject,
+        value: 'admin',
+      })
+    }
+    const original = await signed(randomIdentity().id)
+    const substituted = await signed(randomIdentity().id)
+    const mls = memoryModel(handle)
+    await mls.adopt(mls.buildCommit([original]))
+    const state = structuredClone(handle.state)
+    const durable = JSON.parse(new TextDecoder().decode(state.confirmationTag)) as {
+      ledger: Array<string>
+      bodies: Array<[string, string]>
+    }
+    expect(durable.ledger).toEqual([ledgerEntryDigest(original)])
+    durable.bodies = [[durable.ledger[0] as string, substituted]]
+    state.confirmationTag = new TextEncoder().encode(JSON.stringify(durable))
+
+    const real = await restoreGroup({
+      state,
+      credential: handle.credential,
+      ledgerEntries: [substituted],
+    })
+    expect(real.ledger.map(({ entryID }) => entryID)).toEqual([ledgerEntryDigest(substituted)])
+    expect(await real.isLedgerComplete()).toBe(false)
+    await expect(real.bootstrapLedger([substituted])).rejects.toThrow()
+    await expect(
+      restoreMemoryControlHandle({ state, credential: handle.credential }),
+    ).rejects.toThrow('Memory ledger body ID mismatch')
+  })
+
+  test.each(['all', 'some'])(
+    'double reconstruction preserves an incomplete ledger with %s bodies missing',
+    async (missing) => {
+      const { handle, identity, token } = await setup()
+      const enacted = await signLedgerEntry(identity, {
+        type: 'kumiai.role',
+        groupID: handle.groupID,
+        subject: randomIdentity().id,
+        value: 'admin',
+      })
+      const mls = memoryModel(handle)
+      await mls.adopt(mls.buildCommit([enacted]))
+      const state = structuredClone(handle.state)
+      const durable = JSON.parse(new TextDecoder().decode(state.confirmationTag)) as {
+        bodies: Array<[string, string]>
+      }
+      durable.bodies = missing === 'all' ? [] : [[ledgerEntryDigest(token), token]]
+      state.confirmationTag = new TextEncoder().encode(JSON.stringify(durable))
+      const restored = await restoreMemoryControlHandle({ state, credential: handle.credential })
+      const held = missing === 'all' ? [] : [token, token]
+      expect(restored.ledgerTokens).toEqual(held)
+      expect(await memoryModel(restored).getLedger()).toEqual(held)
+      expect(await restored.isLedgerComplete()).toBe(false)
+      expect(readLedgerHead(restored)?.head).toEqual(readLedgerHead(handle)?.head)
+      const real = await restoreGroup({
+        state,
+        credential: handle.credential,
+        ledgerEntries: held,
+      })
+      expect(await real.isLedgerComplete()).toBe(false)
+      await expect(restored.bootstrapLedger(held)).rejects.toThrow()
+      await restored.bootstrapLedger([token, token, enacted])
+      expect(await restored.isLedgerComplete()).toBe(true)
+      expect(await memoryModel(restored).isLedgerComplete()).toBe(true)
+      expect(restored.ledgerTokens).toEqual([token, token, enacted])
+    },
+  )
+
   test('double refuses invalid enactments without changing control facts', async () => {
     const { handle, identity } = await setup()
     const outsider = randomIdentity()

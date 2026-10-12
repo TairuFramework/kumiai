@@ -809,6 +809,10 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       throw new Error('Memory state group mismatch')
     if (localDID !== undefined && value.ownerDID !== undefined && value.ownerDID !== localDID)
       throw new Error('Memory state owner mismatch')
+    // Missing bodies are allowed; held bodies must match their content-addressed IDs.
+    for (const [id, token] of value.bodies) {
+      if (entryDigest(token) !== id) throw new Error('Memory ledger body ID mismatch')
+    }
     slots = new Map(value.slots)
     ledger = value.ledger
     ledgerHead = value.ledgerHead
