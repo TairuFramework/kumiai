@@ -1,14 +1,40 @@
 import { randomIdentity } from '@kokuin/token'
 import {
+  commitKeyRotation,
   createKeyPackageBundle,
+  decodeClientState,
+  encodeClientState,
   encodeKeyPackage,
   encodePrivateKeyPackage,
   keyPackageRef,
+  nobleCryptoProvider,
+  restoreGroup,
 } from '@kumiai/mls'
 import type { KeyPackageRecord } from '@kumiai/mls-hub'
-import type { StorageTestPorts } from '@kumiai/rpc-conformance'
-import { vi } from 'vitest'
+import {
+  type AdoptionExpected,
+  type AdoptionWrite,
+  asLogPosition,
+  type ControlSlot,
+  commitTopic,
+  controlBuildRef,
+  digestAppliedCommit,
+  encodeCommitFrame,
+  encodeHandshakeFrame,
+  encodeLedgerEntries,
+  type FirstValidCommit,
+  HANDSHAKE_KIND,
+  type Operation,
+} from '@kumiai/rpc'
+import type { CommitOnceEvidence, StorageTestPorts } from '@kumiai/rpc-conformance'
+import { sha256 } from '@noble/hashes/sha2.js'
+import { toB64U } from '@sozai/codec'
+import { mlsExporter } from 'ts-mls'
+import { expect, vi } from 'vitest'
 
+import { createPersistenceBuildSaver } from '../../src/control-build.js'
+import { decodeControlJournal, encodeControlJournal } from '../../src/control-journal.js'
+import { ENTRY_SEAL_LABEL, sealEntries } from '../../src/crypto.js'
 import { memoryGroupOwnerQueues } from '../../src/memory-group-persistence.js'
 import { createGroupStateStores } from '../../src/memory-group-state.js'
 import { groupOwnerKey } from '../../src/memory-incarnation-stores.js'
@@ -17,6 +43,7 @@ import { ownerEntryFailureSignal } from '../../src/owner-queue.js'
 import { physicalRecordKey } from '../../src/persistence-codec.js'
 import type {
   DeviceStores,
+  GroupPersistence,
   MemoryTransaction,
   OwnershipContextPort,
   PendingCommitFault,
@@ -637,4 +664,394 @@ export async function createStorageFixture(params: {
     },
   }
   return fixture
+}
+
+export async function createControlCrashHarness(mode: 'real-mls' | 'double') {
+  const { encodeMemoryCommit } = (await import(
+    new URL('../../../rpc/test/fixtures/memory-group-mls.ts', import.meta.url).href
+  )) as { encodeMemoryCommit(epoch: number, author: string): Uint8Array }
+  const fixture = await createStorageFixture({ id: 'control-crash', mode })
+  const key = { groupID: 'control-crash', incarnation: 1 }
+  const attach = () => {
+    const groups = fixture.ports.device.groups as GroupPersistence<MemoryTransaction>
+    const control = groups.ports(key).control
+    const saveBuilt = createPersistenceBuildSaver({ persistence: groups, key })
+    const source = async () => (await groups.readEvidence(key)).source
+    const build = async () => {
+      const state = await groups.loadState(key)
+      if (state === null || state.deleted || state.state === null)
+        throw new Error('Missing crash source')
+      const client = decodeClientState(state.state)
+      if (client === undefined) throw new Error('Invalid crash source')
+      let candidate: Uint8Array
+      let commit: Uint8Array
+      if (mode === 'real-mls') {
+        const handle = await restoreGroup({
+          state: client,
+          credential: state.credential,
+          ledgerEntries: state.ledger,
+        })
+        const built = await commitKeyRotation(handle)
+        candidate = encodeClientState(built.newGroup.state)
+        commit = built.commitMessage
+      } else {
+        client.groupContext.epoch++
+        client.keySchedule.epochAuthenticator = crypto.getRandomValues(new Uint8Array(32))
+        candidate = encodeClientState(client)
+        commit = encodeMemoryCommit(state.epoch, state.credential.id)
+      }
+      const retained = (await control.load()).operations.find((row) => row.stage === 'intent')
+      const intent: Operation & { stage: 'intent' } =
+        retained?.stage === 'intent'
+          ? retained
+          : {
+              id: crypto.randomUUID(),
+              kind: 'rotation',
+              revokes: false,
+              body: new Uint8Array(),
+              seq: 1,
+              enqueuedAt: Date.now(),
+              deadline: Date.now() + 30_000,
+              stage: 'intent',
+            }
+      await control.apply(
+        { putOperations: [intent], cursor: { position: null, epoch: state.epoch } },
+        'intent',
+      )
+      const expected = await source()
+      const entryKey = await mlsExporter(
+        client.keySchedule.exporterSecret,
+        ENTRY_SEAL_LABEL,
+        new Uint8Array(),
+        32,
+        await nobleCryptoProvider.getCiphersuiteImpl(client.groupContext.cipherSuite),
+      )
+      const sealed = sealEntries(entryKey, encodeLedgerEntries([]))
+      entryKey.fill(0)
+      const payload = encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(commit, sealed))
+      const slot: ControlSlot = {
+        opID: intent.id,
+        incarnation: 1,
+        epoch: state.epoch,
+        authenticatorBefore: state.epochAuthenticator,
+        publishID: crypto.randomUUID(),
+        expectedHead: null,
+        searchFrom: null,
+        payload,
+        payloadDigest: toB64U(sha256(payload)),
+        digest: digestAppliedCommit(commit),
+        bodies: [],
+        welcome: null,
+        journal: encodeControlJournal({
+          version: 1,
+          source: expected,
+          checkpoint: null,
+          sourceState: state.state,
+          sourceCredential: state.credential,
+          sourceLedger: state.ledger,
+          candidate,
+        }),
+      }
+      return { intent, slot, expected }
+    }
+    const accept = async (slot: ControlSlot, mutationID: string) => {
+      const proof: FirstValidCommit = {
+        source: await source(),
+        from: slot.searchFrom,
+        position: asLogPosition('000000000001'),
+        payloadDigest: slot.payloadDigest,
+      }
+      const op = (await control.load()).operations.find((row) => row.id === slot.opID)
+      if (op === undefined) throw new Error('Missing crash operation')
+      await control.apply(
+        {
+          commitOnceAcceptance: proof,
+          putOperations: [
+            {
+              ...op,
+              stage: 'accepted',
+              built: controlBuildRef(slot),
+              acceptedAs: proof.position,
+              acceptance: proof,
+            },
+          ],
+        },
+        mutationID,
+      )
+      return proof
+    }
+    const adopt = async (
+      expected: AdoptionExpected & { acceptance: FirstValidCommit },
+      write: AdoptionWrite,
+      fault: {
+        skipTrust?: boolean
+        reuseAuthenticator?: boolean
+        staleLifetime?: boolean
+        absentLifetime?: boolean
+      } = {},
+    ) => {
+      const slot = (await control.load()).commitOnce
+      if (slot === null) throw new Error('Missing durable crash slot')
+      const journal = decodeControlJournal(slot.journal)
+      const candidate = decodeClientState(journal.candidate)
+      if (candidate === undefined) throw new Error('Invalid candidate')
+      const change = await nextChange(groups, key.groupID, write.mutationID)
+      if (fault.staleLifetime && change.expected !== null)
+        change.expected = { ...change.expected, revision: change.expected.revision - 1 }
+      if (fault.absentLifetime) change.expected = null
+      await groups.transition(change, async (stores) => {
+        const rows = stores.incarnation(1)
+        const state = await rows.state.load()
+        const trust = await stores.trust.load()
+        if (state === null || state.deleted || trust === null)
+          throw new Error('Missing adoption source')
+        if (fault.reuseAuthenticator)
+          candidate.keySchedule.epochAuthenticator = state.epochAuthenticator.slice()
+        await rows.state.save(
+          {
+            ...state,
+            version: state.version + 1,
+            state: fault.reuseAuthenticator ? encodeClientState(candidate) : journal.candidate,
+            epoch: Number(candidate.groupContext.epoch),
+            epochAuthenticator: candidate.keySchedule.epochAuthenticator,
+          },
+          { ...expected, journal: slot.journal },
+        )
+        if (!fault.skipTrust)
+          await stores.trust.save({
+            ...trust,
+            installed: {
+              ...key,
+              epoch: Number(candidate.groupContext.epoch),
+              authenticator: candidate.keySchedule.epochAuthenticator,
+            },
+            signerTree: candidate.ratchetTree,
+          })
+        await rows.control.apply(write.changes, write.mutationID)
+        const anchor = await rows.anchor.load()
+        if (anchor?.pending !== undefined && anchor.pending.advance === write.anchorLanded)
+          await rows.anchor.save({ ...anchor, pending: { ...anchor.pending, landed: true } })
+      })
+    }
+    const armAnchor = async (slot: ControlSlot) => {
+      const state = await groups.loadState(key)
+      if (state === null || state.deleted) throw new Error('Missing anchor source')
+      await groups.ports(key).anchor.save({
+        anchor: { epoch: slot.epoch, secret: new Uint8Array(32).fill(0x72) },
+        pending: {
+          epochBefore: slot.epoch,
+          epochAfter: slot.epoch + 1,
+          rosterBefore: [state.credential.id],
+          forced: false,
+          advance: slot.digest,
+        },
+      })
+    }
+    return {
+      groups,
+      control,
+      key,
+      source,
+      build,
+      saveBuilt,
+      accept,
+      adopt,
+      armAnchor,
+      loadAnchor: () => groups.ports(key).anchor.load(),
+      recoveryTrust: () => groups.loadTrust(key.groupID),
+      losePrivateState: async () => {
+        const state = await groups.loadState(key)
+        if (state === null || state.deleted) throw new Error('Missing private state')
+        await groups.transition(
+          await nextChange(groups, key.groupID, 'lost-private-state'),
+          async (stores) => {
+            await stores
+              .incarnation(1)
+              .state.save({ ...state, version: state.version + 1, state: null })
+          },
+        )
+      },
+    }
+  }
+  return {
+    fixture,
+    ...attach(),
+    async reopen() {
+      await fixture.reopen()
+      return attach()
+    },
+  }
+}
+
+export async function runControlProofConflict(
+  mode: 'real-mls' | 'double',
+  stage: 'built' | 'accepted' | 'adoption' = 'built',
+): Promise<CommitOnceEvidence> {
+  const h = await createControlCrashHarness(mode)
+  const { intent, slot, expected } = await h.build()
+  if (stage !== 'built') await h.saveBuilt(intent, slot, expected, 'built')
+  const proof = stage === 'adoption' ? await h.accept(slot, 'accepted') : null
+  const adoptionExpected = proof === null ? null : { ...(await h.source()), acceptance: proof }
+  const controlBefore = await h.control.load()
+  const otherChange = await nextChange(h.groups, 'group-B', 'draining')
+  const { FakeHub } = (await import(
+    new URL('../../../rpc/test/fixtures/fake-hub.ts', import.meta.url).href
+  )) as {
+    FakeHub: new () => {
+      published: Array<{ sequenceID: string }>
+      publish(params: {
+        senderDID: string
+        topicID: string
+        payload: Uint8Array
+        publishID: string
+        retain: 'log'
+      }): Promise<{ sequenceID: string }>
+    }
+  }
+  const hub = new FakeHub()
+  const topicID = commitTopic(new Uint8Array(32).fill(0x6e))
+  const payloads: Array<Uint8Array> = []
+  const calls: Array<string> = []
+  const transition = h.groups.transition.bind(h.groups)
+  const started = Promise.withResolvers<ReturnType<typeof h.fixture.rejectCommitPending>>()
+  h.groups.transition = (change, work) => {
+    return transition(change, async (stores) => {
+      stores.tx.onCommit(() => {
+        calls.push('commit')
+      })
+      stores.tx.onRollback(() => {
+        calls.push('rollback')
+      })
+      return work(stores)
+    })
+  }
+  h.fixture.onPhase('work', () => started.resolve(h.fixture.rejectCommitPending()))
+  h.fixture.onPhase('hook', () => {
+    calls.push('hook')
+  })
+  let fault: ReturnType<typeof h.fixture.rejectCommitPending> | undefined
+  let completed = false
+  let latch: ReturnType<typeof h.fixture.holdNextSeal> | undefined
+  try {
+    const action =
+      stage === 'built'
+        ? h.saveBuilt(intent, slot, expected, 'conflicted-build')
+        : stage === 'accepted'
+          ? h.accept(slot, 'conflicted-acceptance')
+          : adoptionExpected === null || proof === null
+            ? Promise.reject(new Error('Missing proof'))
+            : h.adopt(adoptionExpected, {
+                mutationID: 'conflicted-adoption',
+                changes: {
+                  commitOnce: null,
+                  deleteOperations: [intent.id],
+                  cursor: { position: proof.position, epoch: slot.epoch + 1 },
+                  putApplied: [
+                    {
+                      epoch: slot.epoch,
+                      digest: slot.digest,
+                      payloadDigest: slot.payloadDigest,
+                      sequenceID: proof.position,
+                      opID: intent.id,
+                      removed: false,
+                    },
+                  ],
+                },
+              })
+    const saving = action
+      .then(async () => {
+        payloads.push(slot.payload.slice())
+        return hub.publish({
+          senderDID: expected.identity?.groupID ?? h.key.groupID,
+          topicID,
+          payload: slot.payload,
+          publishID: slot.publishID,
+          retain: 'log',
+        })
+      })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      )
+    fault = await started.promise
+    await fault.rejected
+    await fault.barrierWaiting
+    expect(payloads).toEqual([])
+    expect(calls).toEqual([])
+    latch = h.fixture.holdNextSeal()
+    const operations: Array<Promise<unknown>> = []
+    const draining = h.groups
+      .transition(otherChange, async (stores) => {
+        operations.push(
+          stores
+            .incarnation(1)
+            .cursor.save('active', '2')
+            .then(
+              () => null,
+              (error: unknown) => error,
+            ),
+        )
+        operations.push(
+          stores
+            .incarnation(1)
+            .cursor.save('queued', '3')
+            .then(
+              () => null,
+              (error: unknown) => error,
+            ),
+        )
+        await Promise.all(operations)
+      })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      )
+    await latch.reached
+    const later = h.groups.load('group-B').then(
+      () => null,
+      (error: unknown) => error,
+    )
+    await h.fixture.forceOwnerMarker(
+      { groupID: h.key.groupID },
+      { mutationID: 'intruder', revision: 99 },
+    )
+    await fault.finish('rollback')
+    completed = true
+    const error = await saving
+    expect(error).toMatchObject({ name: 'GroupStateConflictError' })
+    expect(await later).toBe(error)
+    expect(await draining).toBe(error)
+    for (const operation of operations) expect(await operation).toBe(error)
+    latch.release()
+    expect(
+      await h.groups.load(h.key.groupID).then(
+        () => null,
+        (failure: unknown) => failure,
+      ),
+    ).toBe(error)
+    expect(calls).toEqual([])
+    const reopened = await h.reopen()
+    expect(await reopened.control.load()).toEqual(controlBefore)
+    return {
+      outcome: 'unknown',
+      builds: 1,
+      ownAdoptions: 0,
+      welcomeDeliveries: 0,
+      payloads,
+      publishIDs: hub.published.map((row) => row.sequenceID),
+      expectedHeads: hub.published.map(() => null),
+      searchFrom: slot.searchFrom,
+      slotAfterAck: (await reopened.control.load()).commitOnce,
+      winnerFollowed: false,
+      candidateMatchesReceiver: false,
+      progressPreserved: false,
+      cursor: (await reopened.control.load()).cursor?.position ?? null,
+      terminal: (await reopened.groups.readEvidence(reopened.key)).terminal,
+      publicationsBeforeProof: payloads.length,
+    }
+  } finally {
+    latch?.release()
+    if (!completed) await fault?.finish('rollback')
+    await h.fixture.close()
+  }
 }

@@ -2,12 +2,14 @@ import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import {
   type ClientState,
   commitInvite,
+  commitKeyRotation,
   commitLedgerEntries,
   createGroup,
   createInvite,
   createKeyPackageBundle,
   decodeClientState,
   encodeClientState,
+  encodeControlEnvelope,
   type GroupHandle,
   type Invite,
   type KeyPackageBundle,
@@ -26,6 +28,8 @@ import {
   createControlValidationPort,
   createGroupCrypto,
   createGroupMLS,
+  createLedgerEntrySlot,
+  deriveRecoverySecret,
   type GroupMLSParams,
   type HandleAccess,
   type LedgerEntrySlot,
@@ -48,15 +52,46 @@ import type {
   HostBuilt,
   Operation,
   OperationRequest,
+  Outcome,
   PendingAppFrame,
   RecoveryEvent,
   WelcomeObligation,
 } from '@kumiai/rpc'
-import { createGroupPeer, digestAppliedCommit, OperationRejectedError } from '@kumiai/rpc'
-import { createMemoryAppOutbox } from '@kumiai/rpc-conformance'
+import {
+  commitTopic,
+  createLedgerEntryResolver,
+  decodeCommitFrame,
+  decodeHandshakeFrame,
+  digestAppliedCommit,
+  encodeCommitFrame,
+  encodeHandshakeFrame,
+  encodeLedgerEntries,
+  HANDSHAKE_KIND,
+  OperationRejectedError,
+} from '@kumiai/rpc'
+import {
+  type CommitOnceEvidence,
+  type CommitOnceScenario,
+  createMemoryAppOutbox,
+} from '@kumiai/rpc-conformance'
+import { createCommit, encode, mlsMessageEncoder } from 'ts-mls'
 
+import {
+  buildRealUnavailableCommit,
+  createRealGroup,
+  testHandleAccess,
+} from '../../../packages/mls-rpc/test/fixtures/real-group.js'
+import {
+  type CommitOnceTestHost,
+  runCommitOnceHost,
+} from '../../../packages/rpc/test/fixtures/peer.js'
 import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
 import type { WireHub } from './log-hub-over-wire.js'
+import { createWireHub } from './log-hub-over-wire.js'
+
+const { createGroupPeerWithControlWalk } = (await import(
+  new URL('../../../packages/rpc/lib/peer.js', import.meta.url).href
+)) as typeof import('../../../packages/rpc/src/peer.js')
 
 export { createMemoryAppOutbox }
 
@@ -144,20 +179,23 @@ export type StateStore = {
 
 export function createMemoryStateStore(
   key: GroupKey = { groupID: 'state', incarnation: 1 },
+  retainedDatabase?: MemoryHostDatabase,
 ): StateStore {
-  const database = createMemoryHostDatabase({
-    readIdentity: (blob, key) => {
-      const journal = JSON.parse(new TextDecoder().decode(blob)) as { state: Array<number> }
-      const state = decodeClientState(Uint8Array.from(journal.state))
-      if (state == null) throw new Error('Invalid stored MLS state')
-      return {
-        groupID: new TextDecoder().decode(state.groupContext.groupId),
-        incarnation: key.incarnation,
-        epoch: Number(state.groupContext.epoch),
-        authenticator: state.keySchedule.epochAuthenticator.slice(),
-      }
-    },
-  })
+  const database =
+    retainedDatabase ??
+    createMemoryHostDatabase({
+      readIdentity: (blob, key) => {
+        const journal = JSON.parse(new TextDecoder().decode(blob)) as { state: Array<number> }
+        const state = decodeClientState(Uint8Array.from(journal.state))
+        if (state == null) throw new Error('Invalid stored MLS state')
+        return {
+          groupID: new TextDecoder().decode(state.groupContext.groupId),
+          incarnation: key.incarnation,
+          epoch: Number(state.groupContext.epoch),
+          authenticator: state.keySchedule.epochAuthenticator.slice(),
+        }
+      },
+    })
   const control = database.control('state', key)
   return {
     database,
@@ -217,8 +255,12 @@ export function createMemoryStateStore(
 export type Member = {
   hostHooks: {
     afterAdopt?: (next: GroupHandle) => void | Promise<void>
+    beforeBuild?: () => void
     serializeJournal?: (next: GroupHandle) => Uint8Array | Promise<Uint8Array>
   }
+  controlWalk: ReturnType<typeof createGroupPeerWithControlWalk<Protocols>>['controlWalk']
+  validation: ReturnType<typeof createControlValidationPort>
+  adoptControl: ReturnType<typeof createControlAdoptionPort>['adopt']
   identity: OwnIdentity
   mls: GroupMLS
   crypto: ReturnType<typeof createGroupCrypto>
@@ -259,10 +301,14 @@ export type MakeMemberParams = {
   restartOf?: Member
   deliverWelcome?: (obligation: WelcomeObligation) => Promise<void>
   beforeAdopt?: (next: GroupHandle) => void | Promise<void>
+  onControlAdopt?: () => void
+  stateStore?: StateStore
+  operationTimeoutMs?: number
   durablePending?: boolean
   recoveryBinding?: GroupMLSParams['recoveryBinding']
   recovery?: { timeoutMs?: number; deadlineMs?: number; getDelayMs?: () => number }
   onRecovery?: (event: RecoveryEvent) => void | Promise<void>
+  onOutcome?: (outcome: Outcome) => void | Promise<void>
 }
 
 export function makeMember(params: MakeMemberParams): Member {
@@ -271,7 +317,9 @@ export function makeMember(params: MakeMemberParams): Member {
   const hostHooks: Member['hostHooks'] = {}
   const appCursorStore = restartOf?.appCursorStore ?? createMemoryAppCursorStore()
   const stateStore =
-    restartOf?.stateStore ?? createMemoryStateStore({ groupID: handle.groupID, incarnation: 1 })
+    params.stateStore ??
+    restartOf?.stateStore ??
+    createMemoryStateStore({ groupID: handle.groupID, incarnation: 1 })
   const anchorStore =
     restartOf?.anchorStore ?? createMemoryAnchorStore(stateStore.database.anchorStore('state'))
   const pendingStore =
@@ -284,7 +332,7 @@ export function makeMember(params: MakeMemberParams): Member {
     handle = next
     await hostHooks.afterAdopt?.(next)
   }
-  void stateStore.save(handle)
+  if (params.stateStore === undefined) void stateStore.save(handle)
 
   const access = simpleHandleAccess({
     handle: getHandle,
@@ -319,6 +367,7 @@ export function makeMember(params: MakeMemberParams): Member {
   const signers = restartOf?.signers ?? new Map([[identity.id, identity]])
   const deliveries = new Map<string, (welcome: Uint8Array) => void>()
   const build = async (op: Operation, supplied?: GroupHandle): Promise<HostBuilt> => {
+    hostHooks.beforeBuild?.()
     const custom = builders.get(op.id)
     if (custom != null) return custom(op)
     const body = decodeOperationBody(op.body) as {
@@ -402,9 +451,19 @@ export function makeMember(params: MakeMemberParams): Member {
   })
   const connection = hub.connect(identity)
   const appOutbox = restartOf?.appOutbox ?? createMemoryAppOutbox()
-  const peer = createGroupPeer<Protocols>({
+  const adoptControl: ReturnType<typeof createControlAdoptionPort>['adopt'] = async (
+    bytes,
+    expected,
+    write,
+  ) => {
+    const result = await adoption.adopt(bytes, expected, write)
+    if (result === 'installed') params.onControlAdopt?.()
+    return result
+  }
+  const { peer, controlWalk } = createGroupPeerWithControlWalk<Protocols>({
     appOutboxLimit: 128,
     onRecovery: params.onRecovery,
+    onOutcome: params.onOutcome,
     recovery: params.recovery,
     hub: connection,
     crypto,
@@ -419,7 +478,8 @@ export function makeMember(params: MakeMemberParams): Member {
     localDID: identity.id,
     protocols: { chat },
     handlers: { chat: params.handlers ?? {} } as never,
-    adopt: adoption.adopt,
+    adopt: adoptControl,
+    operationTimeoutMs: params.operationTimeoutMs,
     deliverWelcome:
       params.deliverWelcome ??
       (async (obligation) => {
@@ -431,6 +491,9 @@ export function makeMember(params: MakeMemberParams): Member {
 
   return {
     hostHooks,
+    controlWalk,
+    validation,
+    adoptControl,
     identity,
     mls,
     crypto,
@@ -683,5 +746,247 @@ function candidateRestorer(
     if (state == null) throw new Error('Invalid candidate state')
     const credential = await access.read((handle) => handle.credential)
     return restoreGroup({ state, credential, ledgerEntries: saved.ledger, options })
+  }
+}
+
+export async function runRealCommitOnceScenario(
+  scenario: CommitOnceScenario,
+): Promise<CommitOnceEvidence> {
+  if (scenario === 'ownership-conflict') {
+    const { runControlProofConflict } = await import(
+      '../../../packages/mls-rpc/test/fixtures/storage-persistence.js'
+    )
+    return runControlProofConflict('real-mls')
+  }
+  const group = await createRealGroup(2, `commit-once-${scenario}`)
+  const identity = group.committer.identity
+  if (scenario === 'terminal-winner') {
+    const author = group.members[0]
+    if (author === undefined) throw new Error('Missing removal author')
+    const role = await signLedgerEntry(identity, {
+      type: ROLE_ENTRY_TYPE,
+      groupID: group.committer.handle.groupID,
+      subject: author.identity.id,
+      value: 'admin',
+    })
+    group.bodies.set(ledgerEntryDigest(role), role)
+    const committed = await commitLedgerEntries(group.committer.handle, [role])
+    group.committer.handle = committed.newGroup
+    for (const member of group.members) await member.handle.processMessage(committed.commitMessage)
+  }
+  const wire = createWireHub()
+  const publisher = wire.connect(identity)
+  const secret = await deriveRecoverySecret(group.committer.handle)
+  const topicID = commitTopic(secret)
+  const store = createMemoryStateStore({ groupID: group.committer.handle.groupID, incarnation: 1 })
+  await store.save(group.committer.handle)
+  const invitee = randomIdentity()
+  const { invite } = await createInvite({
+    group: group.committer.handle,
+    identity,
+    recipientDID: invitee.id,
+    permission: 'member',
+  })
+  const bundle = await createKeyPackageBundle(invitee)
+  const request = operationRequest('invite', { type: 'invite', material: { invite, bundle } })
+  try {
+    return await runCommitOnceHost(
+      scenario,
+      async (observe) => {
+        let networkGap = false
+        const view: WireHub = {
+          dispose: wire.dispose,
+          connect: (identity) => {
+            const connection = wire.connect(identity)
+            return {
+              ...connection,
+              fetchTopic: async (params) => ({
+                ...(await connection.fetchTopic(params)),
+                ...(networkGap ? { gap: true } : {}),
+              }),
+              publish: async (params) => {
+                if (params.topicID === topicID)
+                  observe.published(
+                    params.payload,
+                    params.publishID ?? crypto.randomUUID(),
+                    params.expectedHead ?? null,
+                  )
+                return connection.publish(params)
+              },
+            }
+          },
+        }
+        const create = async (restore: boolean): Promise<CommitOnceTestHost> => {
+          const stateStore = createMemoryStateStore(store.control.key, store.database)
+          const entrySlot = createLedgerEntrySlot()
+          const saved = await stateStore.saved()
+          if (saved === null) throw new Error('Missing committed MLS state')
+          const state = decodeClientState(saved.state)
+          if (state === undefined) throw new Error('Invalid committed MLS state')
+          const handle = await restoreGroup({
+            state,
+            credential: { id: identity.id, groupID: stateStore.control.key.groupID },
+            ledgerEntries: saved.ledger,
+            options: { resolveLedgerEntries: entrySlot.resolve },
+          })
+          const member = makeMember({
+            hub: view,
+            identity,
+            group: handle,
+            entrySlot,
+            stateStore,
+            operationTimeoutMs: restore ? 90_000 : 30_000,
+            onControlAdopt: observe.adopted,
+            onOutcome: observe.outcome,
+            deliverWelcome: async () => {
+              observe.delivered()
+            },
+          })
+          member.hostHooks.beforeBuild = observe.built
+          const competitors: Array<Uint8Array> = []
+          return {
+            control: member.control,
+            prepareBuild: member.prepareBuild,
+            adopt: member.adoptControl,
+            validation: member.validation,
+            readEvidence: stateStore.readEvidence,
+            peer: member.peer,
+            controlWalk: member.controlWalk,
+            request,
+            reopen: () => create(true),
+            deleteGroup: () => store.database.delete('state'),
+            setGap: (value) => {
+              networkGap = value
+            },
+            competing: async (kind) => {
+              const author = group.members[0]
+              if (author === undefined) throw new Error('Missing competitor')
+              let commit: Uint8Array
+              let entries: Array<string> = []
+              if (kind === 'unavailable')
+                commit = await buildRealUnavailableCommit({
+                  ...group,
+                  committer: author,
+                  members: [group.committer],
+                })
+              else if (kind === 'remove') {
+                const leaf = author.handle.findMemberLeafIndex(identity.id)
+                if (leaf == null) throw new Error('Missing target leaf')
+                entries = [
+                  await signLedgerEntry(author.identity, {
+                    type: ROLE_ENTRY_TYPE,
+                    groupID: author.handle.groupID,
+                    subject: identity.id,
+                    value: 'member',
+                  }),
+                ]
+                commit = (await removeMember(author.handle, leaf, entries)).commitMessage
+              } else if (kind === 'public') {
+                const result = await createCommit({
+                  context: author.handle.context,
+                  state: { ...author.handle.state, unappliedProposals: {} },
+                  extraProposals: [],
+                  wireAsPublicMessage: true,
+                  authenticatedData: encodeControlEnvelope({ v: 1 }),
+                })
+                commit = encode(mlsMessageEncoder, result.commit)
+              } else commit = (await commitKeyRotation(author.handle)).commitMessage
+              const crypto = createGroupCrypto({
+                access: testHandleAccess({
+                  handle: () => author.handle,
+                  adopt: (next) => {
+                    author.handle = next
+                  },
+                  persist: async () => {},
+                }),
+              })
+              const sealed = await crypto.sealEntries(encodeLedgerEntries(entries))
+              const payload = encodeHandshakeFrame(
+                HANDSHAKE_KIND.commit,
+                encodeCommitFrame(commit, sealed.sealed),
+              )
+              competitors.push(payload)
+              return payload
+            },
+            receiver: async (slot) => {
+              const receiver = group.members[1]
+              if (receiver === undefined) throw new Error('Missing receiver')
+              const access = testHandleAccess({
+                handle: () => receiver.handle,
+                adopt: (next) => {
+                  receiver.handle = next
+                },
+                persist: async () => {},
+              })
+              const mls = createGroupMLS({
+                access,
+                identity: receiver.identity,
+                entrySlot: receiver.slot,
+              })
+              const crypto = createGroupCrypto({ access })
+              for (const payload of competitors) {
+                const prior = decodeCommitFrame(decodeHandshakeFrame(payload).payload)
+                await mls.processCommit(prior.commit, {
+                  resolveLedgerEntries: createLedgerEntryResolver(
+                    prior.sealedEntries,
+                    crypto.openEntries,
+                  ),
+                })
+              }
+              const frame = decodeCommitFrame(decodeHandshakeFrame(slot.payload).payload)
+              const result = await mls.processCommit(frame.commit, {
+                resolveLedgerEntries: createLedgerEntryResolver(
+                  frame.sealedEntries,
+                  crypto.openEntries,
+                ),
+              })
+              const source = await member.mls.readRecoverySource()
+              return (
+                result.applied &&
+                source.authenticator.every(
+                  (byte, index) =>
+                    byte === receiver.handle.state.keySchedule.epochAuthenticator[index],
+                )
+              )
+            },
+            progress: async () => {
+              const sender = group.members[0]
+              if (sender === undefined) throw new Error('Missing sender')
+              const bytes = await sender.handle.encrypt(new Uint8Array([7]))
+              await member.crypto.unwrap(bytes)
+              await member.crypto.wrap(new Uint8Array([8]))
+              const sourceEpoch = member.handle().epoch
+              const ownLeaf = member.handle().state.privatePath.leafIndex * 2
+              const before =
+                member.handle().state.secretTree.leafNodes[ownLeaf]?.application.generation
+              return async () => {
+                let refused = false
+                try {
+                  await member.crypto.unwrap(bytes)
+                } catch {
+                  refused = true
+                }
+                return (
+                  refused &&
+                  member.handle().state.historicalReceiverData.get(sourceEpoch)?.secretTree
+                    .leafNodes[ownLeaf]?.application.generation === before
+                )
+              }
+            },
+            close: async () => {
+              await member.peer.dispose()
+              await member.peer.drained()
+              await member.disconnect()
+            },
+          }
+        }
+        return create(false)
+      },
+      publisher,
+      topicID,
+      identity.id,
+    )
+  } finally {
+    await wire.dispose()
   }
 }

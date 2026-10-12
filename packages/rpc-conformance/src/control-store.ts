@@ -35,6 +35,20 @@ export type ConformanceControlSearchPort<Position extends string = string> = {
 }
 export type ConformanceControlSlot<Position extends string = string> =
   ConformanceBuiltCommit<Position> & { opID: string }
+export type ConformanceControlHold<Position extends string = string> = {
+  reason: 'acceptance-unknown' | 'unsupported-version' | 'fork-evidence'
+  position: Position | null
+  evidence?:
+    | {
+        kind: 'digest-divergence'
+        epoch: number
+        position: string
+        localDigest: string
+        remoteDigest: string
+      }
+    | { kind: 'epoch-authenticator'; epoch: number; local: Uint8Array; remote: Uint8Array }
+    | { kind: 'unexplained-own-commit'; epoch: number; position: string; digest: string }
+}
 export type ConformanceControlBuildRef<Position extends string = string> = Pick<
   ConformanceBuiltCommit<Position>,
   'incarnation' | 'epoch' | 'publishID' | 'payloadDigest'
@@ -47,20 +61,7 @@ export type ConformanceHostBuilt<Position extends string = string> = Pick<
 export type ConformanceControlSnapshot<Position extends string = string> = {
   commitOnce: ConformanceControlSlot<Position> | null
   commitOnceAcceptance: ConformanceFirstValidCommit<Position> | null
-  controlHold: {
-    reason: 'acceptance-unknown' | 'unsupported-version' | 'fork-evidence'
-    position: Position | null
-    evidence?:
-      | {
-          kind: 'digest-divergence'
-          epoch: number
-          position: string
-          localDigest: string
-          remoteDigest: string
-        }
-      | { kind: 'epoch-authenticator'; epoch: number; local: Uint8Array; remote: Uint8Array }
-      | { kind: 'unexplained-own-commit'; epoch: number; position: string; digest: string }
-  } | null
+  controlHold: ConformanceControlHold<Position> | null
   strand: {
     reason: 'retention-gap' | 'unprocessable-gap' | 'lost-state' | 'ahead' | 'unsupported-version'
   } | null
@@ -254,6 +255,14 @@ export type ConformanceSaveControlBuild<Position extends string = string> = (
   expected: ConformanceAdoptionExpected,
   mutationID: string,
 ) => Promise<'saved' | 'moved' | 'occupied'>
+
+export type ConformanceControlAdoptionPort<Position extends string = string> = {
+  adopt(
+    journal: Uint8Array,
+    expected: ConformanceAdoptionExpected & { acceptance: ConformanceFirstValidCommit<Position> },
+    write: ConformanceAdoptionWrite<Position>,
+  ): Promise<'installed' | 'noop' | 'moved'>
+}
 
 export function encodeControlFixtureState(identity: ConformanceEpochIdentity): Uint8Array {
   return new TextEncoder().encode(

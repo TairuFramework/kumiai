@@ -2,7 +2,12 @@ import { describe, expect, test } from 'vitest'
 
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { buildInviteCommit, buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
+import {
+  buildInviteCommit,
+  buildLedgerCommit,
+  makeMLSPeer,
+  reconstructMemoryPeer,
+} from './fixtures/peer.js'
 
 const secret = new Uint8Array(32).fill(0x43)
 
@@ -29,7 +34,7 @@ describe('a group of one survives its first commit crash', () => {
       await seed.peer.drained()
       const saved = await seed.control.load()
       if (trim) hub.trim(commitTopic(secret), '999999999999')
-      const restarted = makeMLSPeer(hub, 'alice', secret, { restartOf: seed })
+      const restarted = await reconstructMemoryPeer(hub, 'alice', secret, seed.database)
       await restarted.peer.resync()
       if (trim) {
         expect(restarted.mls.epoch()).toBe(1)
@@ -44,7 +49,7 @@ describe('a group of one survives its first commit crash', () => {
         await restarted.peer.dispose()
         await restarted.peer.drained()
         const held = await restarted.control.load()
-        const again = makeMLSPeer(hub, 'alice', secret, { restartOf: restarted })
+        const again = await reconstructMemoryPeer(hub, 'alice', secret, restarted.database)
         await again.peer.replay()
         expect((await again.control.load()).controlHold).toEqual(held.controlHold)
         expect((await again.control.load()).cursor).toEqual(held.cursor)

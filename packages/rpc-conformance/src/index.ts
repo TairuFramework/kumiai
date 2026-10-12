@@ -31,14 +31,21 @@ export {
   testAppOutboxConformance,
 } from './app-outbox.js'
 export {
+  type CommitOnceEvidence,
+  type CommitOnceScenario,
+  testCommitOnceConformance,
+} from './commit-once.js'
+export {
   type ConformanceAdoptionExpected,
   type ConformanceAdoptionWrite,
   type ConformanceAppliedCommit,
   type ConformanceBuiltCommit,
   type ConformanceCommitSearchResult,
+  type ConformanceControlAdoptionPort,
   type ConformanceControlBuildRef,
   type ConformanceControlChanges,
   type ConformanceControlCommitCursor,
+  type ConformanceControlHold,
   type ConformanceControlHost,
   type ConformanceControlSearchPort,
   type ConformanceControlSlot,
@@ -73,6 +80,9 @@ export {
   type ConformanceCommit,
   type ConformanceCommitContext,
   type ConformanceCommitHeader,
+  type ConformanceControlFrameValidation,
+  type ConformanceControlValidation,
+  type ConformanceControlValidationPort,
   type ConformanceGroupMLS,
   type ConformanceMLSGroup,
   type ConformanceMLSMember,

@@ -19,9 +19,47 @@ import { describe, expect, test } from 'vitest'
 import type {
   ConformanceAdoptionExpected,
   ConformanceAdoptionWrite,
+  ConformanceBuiltCommit,
   ConformanceControlSnapshot,
   ConformanceControlSource,
 } from './control-store.js'
+
+export type ConformanceControlFrameValidation =
+  | {
+      kind: 'valid'
+      header: ConformanceCommitHeader
+      own: boolean
+      advanced: boolean
+      removed: boolean
+    }
+  | { kind: 'invalid'; reason: 'non-commit' | 'malformed' | 'authentication' | 'policy' }
+  | {
+      kind: 'unavailable'
+      reason:
+        | 'unsupported-version'
+        | 'missing-proposal'
+        | 'missing-key'
+        | 'resolver'
+        | 'unrecognised'
+        | 'unexplained-own'
+    }
+
+export type ConformanceControlValidation<Position extends string = string> = {
+  source: ConformanceAdoptionExpected
+  readCommitHeader(commit: Uint8Array): Promise<ConformanceCommitHeader | null>
+  validateFrame(
+    frame: { position: Position; payload: Uint8Array; senderDID: string },
+    built: ConformanceBuiltCommit<Position>,
+    header?: ConformanceCommitHeader | null,
+  ): Promise<ConformanceControlFrameValidation>
+  verifyOwn(built: ConformanceBuiltCommit<Position>): Promise<boolean>
+}
+
+export type ConformanceControlValidationPort<Position extends string = string> = {
+  restoreValidation(
+    built: ConformanceBuiltCommit<Position>,
+  ): Promise<ConformanceControlValidation<Position> | null>
+}
 
 /** The `CommitHeader` of `@kumiai/rpc`, re-declared structurally. */
 export type ConformanceCommitHeader = {

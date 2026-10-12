@@ -2179,6 +2179,23 @@ export function createGroupPeerWithControlWalk<
       changes: {
         ...pruneWindow(snapshot, epoch),
         ...(clearsSlot && staged.epochAfter > epoch ? { commitOnce: null } : {}),
+        // Removal must retain a proven loser before terminal settlement marks other work unknown.
+        ...(staged.removed &&
+        clearsSlot &&
+        owningSlot.payloadDigest !== payloadDigest &&
+        snapshot.operations.some((op) => op.id === owningSlot.opID)
+          ? {
+              deleteOperations: [owningSlot.opID],
+              putOutcomes: [
+                {
+                  id: owningSlot.opID,
+                  opID: owningSlot.opID,
+                  at: Date.now(),
+                  kind: 'lost' as const,
+                },
+              ],
+            }
+          : {}),
         ...(controlHold?.reason === 'acceptance-unknown' && staged.epochAfter > epoch
           ? { controlHold: null }
           : {}),
@@ -2375,11 +2392,13 @@ export function createGroupPeerWithControlWalk<
               return true
             }
             await walkCommits(mls, commitTopicID, { through, range, work })
-            return (
+            const reconciled =
               reconciledHead !== null &&
               reconciledHead >= through &&
               controlHold?.reason !== 'fork-evidence'
-            )
+            // An already covered suffix makes the bounded walk return without fetching its head.
+            if (reconciled) commitLogHead = through
+            return reconciled
           },
         })
 

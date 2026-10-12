@@ -5,7 +5,12 @@ import { asLogPosition } from '../src/cursor.js'
 import { commitTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { buildInviteCommit, makeMLSPeer, seedBuiltOperation } from './fixtures/peer.js'
+import {
+  buildInviteCommit,
+  makeMLSPeer,
+  reconstructMemoryPeer,
+  seedBuiltOperation,
+} from './fixtures/peer.js'
 
 const secret = new Uint8Array(32).fill(0x48)
 const obligation: WelcomeObligation = {
@@ -69,7 +74,9 @@ describe('durable Welcome obligations', () => {
         },
         'retained-acceptance',
       )
-      const restarted = makeMLSPeer(hub, 'alice', secret, { restartOf: member })
+      const restarted = await reconstructMemoryPeer(hub, 'alice', secret, member.database, {
+        welcomes: member.welcomes,
+      })
       const restore =
         condition === 'unavailable'
           ? vi.spyOn(restarted.validation, 'restoreValidation').mockResolvedValue(null)
@@ -188,7 +195,9 @@ describe('durable Welcome obligations', () => {
     await member.peer.dispose()
     await member.peer.drained()
     expect(member.welcomes).toEqual([])
-    const restarted = makeMLSPeer(hub, 'alice', secret, { restartOf: member })
+    const restarted = await reconstructMemoryPeer(hub, 'alice', secret, member.database, {
+      welcomes: member.welcomes,
+    })
     try {
       await restarted.peer.resync()
       expect(restarted.welcomes).toEqual([request.id])
@@ -199,7 +208,7 @@ describe('durable Welcome obligations', () => {
     }
   })
 
-  test('transport acceptance before deletion is delivered again after restart', async () => {
+  test('Welcome delivery repeats after acceptance-before-delete crash', async () => {
     const hub = new FakeHub()
     const member = makeMLSPeer(hub, 'alice', secret, {
       deliverWelcome: async (row) => {
@@ -214,7 +223,9 @@ describe('durable Welcome obligations', () => {
     await member.peer.dispose()
     await member.peer.drained()
     expect((await member.control.load()).welcomes).toHaveLength(1)
-    const restarted = makeMLSPeer(hub, 'alice', secret, { restartOf: member })
+    const restarted = await reconstructMemoryPeer(hub, 'alice', secret, member.database, {
+      welcomes: member.welcomes,
+    })
     try {
       await restarted.peer.resync()
       expect(restarted.welcomes).toEqual([request.id, request.id])
