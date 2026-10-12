@@ -39,6 +39,7 @@ import { createGroupCrypto } from '../../src/crypto.js'
 import { entryCapability } from '../../src/entry-capability.js'
 import { memoryGroupOwnerQueues } from '../../src/memory-group-persistence.js'
 import {
+  assertMemoryWrite,
   createGroupStateStores,
   createMemoryPrepareTransaction,
 } from '../../src/memory-group-state.js'
@@ -104,6 +105,7 @@ export async function writeSideRow(
   key: string,
   bytes: Uint8Array,
 ): Promise<void> {
+  assertMemoryWrite(tx, 'side')
   const rows = tx.rows[sideNamespace]
   if (rows === undefined) throw new Error('Missing transaction side-row namespace')
   rows.set(key, bytes.slice())
@@ -488,7 +490,7 @@ export async function createStorageFixture(params: {
       if (owners === undefined || entry === undefined || entry.phase !== 'prepare')
         throw new Error('Missing prepare entry')
       const tx = createMemoryPrepareTransaction({
-        rows: db.snapshot(),
+        rows: db.snapshot(key.groupID),
         entry,
         owners,
         groupID: key.groupID,

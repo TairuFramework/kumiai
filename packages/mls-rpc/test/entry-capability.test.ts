@@ -3,8 +3,10 @@ import { expect, test } from 'vitest'
 import { coordinatorBinding, type EntryReads, entryCapability } from '../src/entry-capability.js'
 import { createMemoryDevicePersistence } from '../src/memory-device-persistence.js'
 import { createMemoryGroupPersistence } from '../src/memory-group-persistence.js'
+import { createMemoryPrepareTransaction } from '../src/memory-group-state.js'
 import { createOwnerQueues } from '../src/owner-queue.js'
 import { GroupStateConflictError } from '../src/persistence-errors.js'
+import type { MemoryStoreRows } from '../src/persistence-types.js'
 import { createMemoryTransaction } from '../src/testing.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
 import { installSeed, makeStorageSeed } from './fixtures/storage-seed.js'
@@ -17,9 +19,9 @@ function deferred() {
   return { promise, resolve }
 }
 
-async function setup() {
+async function setup(rows: MemoryStoreRows = {}) {
   const owners = createOwnerQueues()
-  const db = createMemoryTransaction({ rows: {} })
+  const db = createMemoryTransaction({ rows })
   const codec = createDeterministicAtRestCodec({ key: new Uint8Array(32).fill(98) })
   let open: typeof codec.open = (...args) => codec.open(...args)
   const atRest = {
@@ -45,6 +47,66 @@ async function setup() {
     },
   }
 }
+
+test('unrelated host rows cannot block prepare reads or runs', async () => {
+  const fixture = await setup({ host: new Map([['unrelated', new Date(0)]]) })
+  expect(await fixture.groups.load('review-group')).toBeNull()
+  await fixture.capability.read('review-group', async (reads) => {
+    const entry = fixture.owners.current()
+    if (entry === undefined) throw new Error('Missing prepare entry')
+    const tx = createMemoryPrepareTransaction({
+      ...fixture,
+      entry,
+      groupID: 'review-group',
+      rows: fixture.db.snapshot(),
+    })
+    expect(tx.rows.host).toBeUndefined()
+    expect(tx.rows.state?.size).toBe(0)
+    expect(await reads.lifetime()).toBeNull()
+  })
+  expect(
+    await fixture.capability.run(
+      { groupID: 'entry-group', mutationID: 'host-row' },
+      async (reads) => {
+        const life = await reads.lifetime()
+        expect(life).toMatchObject({ revision: 1, activeIncarnation: 1 })
+        return { expected: { revision: 1, activeIncarnation: 1 }, value: 'prepared' }
+      },
+      async (_stores, value) => value,
+    ),
+  ).toBe('prepared')
+  expect(fixture.db.snapshot().host?.get('unrelated')).toEqual(new Date(0))
+})
+
+test.each([
+  'orphan-invalid-key',
+  'null',
+  '["entry-group"]',
+  '["entry-group",0,"current"]',
+  '["entry-group",1,2]',
+])('malformed orphan address %s cannot block prepare reads or diagnostics', async (key) => {
+  const fixture = await setup({ state: new Map([[key, new Uint8Array([1])]]) })
+  expect(await fixture.groups.load('review-group')).toBeNull()
+  await fixture.capability.read('entry-group', async (reads) => {
+    const entry = fixture.owners.current()
+    if (entry === undefined) throw new Error('Missing prepare entry')
+    const tx = createMemoryPrepareTransaction({
+      ...fixture,
+      entry,
+      groupID: 'entry-group',
+      rows: fixture.db.snapshot(),
+    })
+    expect(tx.rows.state?.has(key)).toBe(false)
+    expect(await reads.lifetime()).toMatchObject({ revision: 1, activeIncarnation: 1 })
+    expect(await reads.metadata(1)).toMatchObject({ version: 1, deleted: false })
+    expect(await reads.state(1)).toMatchObject({ groupID: 'entry-group', incarnation: 1 })
+    expect(await reads.diagnoseState(1)).toBe('readable')
+  })
+  await fixture.capability.read('review-group', async (reads) => {
+    expect(await reads.lifetime()).toBeNull()
+    expect(await reads.diagnoseState(1)).toBe('missing')
+  })
+})
 
 test('prepare has real committed reads', async () => {
   const fixture = await setup()

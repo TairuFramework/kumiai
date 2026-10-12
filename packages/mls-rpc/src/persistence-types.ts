@@ -166,7 +166,7 @@ export type MemoryDatabase = {
     options?: OutcomeAwareTransactionOptions,
   ): Promise<TValue>
   completionBarrier(scope: { groupID: string | null; devicePackages: boolean }): Promise<void>
-  snapshot(): MemoryStoreRows
+  snapshot(groupID?: string): MemoryStoreRows
 }
 
 export type DeviceRecord = { revision: number; mutationID: string; restoreWork: RestoreWork | null }

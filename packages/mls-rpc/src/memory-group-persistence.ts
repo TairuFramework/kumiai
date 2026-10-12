@@ -211,7 +211,7 @@ export function createMemoryGroupCoordinator(params: {
   }
   function prepareReads(entry: OwnerEntry, groupID: string): EntryReads {
     const tx = createMemoryPrepareTransaction({
-      rows: db.snapshot(),
+      rows: db.snapshot(groupID),
       entry,
       owners,
       groupID,

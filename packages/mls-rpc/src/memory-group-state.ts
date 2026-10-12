@@ -1,4 +1,5 @@
 import type { StateMetadata } from './entry-capability.js'
+import { belongs, cloneValue, groupNamespaces } from './memory-rows.js'
 import type { OwnerAttempt, OwnerEntry, OwnerQueues, WriteTarget } from './owner-queue.js'
 import {
   decodeStoredValue,
@@ -144,28 +145,14 @@ export function createMemoryPrepareTransaction(params: {
     attempt.assertLive()
     if (entry.phase !== 'prepare') throw new PersistencePhaseError('Prepare capability expired')
   }
-  const copy = (value: unknown) => decodeStoredValue(encodeStoredValue(value))
+  const copy = cloneValue
   const maps: MemoryTransaction['rows'] = {}
-  const groupNamespaces = [
-    'lifetime',
-    'trust',
-    'state',
-    'control',
-    'anchor',
-    'pending',
-    'poison',
-    'cursor',
-    'outbox',
-    'meta',
-    'group-owner',
-  ]
-  for (const namespace of new Set([...groupNamespaces, ...Object.keys(params.rows)])) {
-    if (namespace.startsWith('device')) continue
+  const scope = { groupID, devicePackages: false }
+  for (const namespace of groupNamespaces) {
     const source = params.rows[namespace] ?? new Map<string, unknown>()
     const rows = new Map<string, unknown>()
     for (const [key, value] of source) {
-      if (groupNamespaces.includes(namespace) && (JSON.parse(key) as [string])[0] !== groupID)
-        continue
+      if (!belongs(namespace, key, scope)) continue
       rows.set(key, copy(value))
     }
     maps[namespace] = new Proxy(rows, {
