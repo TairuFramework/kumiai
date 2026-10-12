@@ -1,17 +1,23 @@
 import { randomIdentity } from '@kokuin/token'
 import {
   type ControllerBinding,
+  computeHead,
   createGroup,
   decodeClientState,
   encodeClientState,
   GroupHandle,
   type GroupOptions,
+  ledgerEntryDigest,
   readGroupAnchorExtension,
+  readLedgerHead,
+  readLedgerHeadExtension,
+  restoreGroup,
   signLedgerEntry,
 } from '@kumiai/mls'
 import { describe, expect, test } from 'vitest'
 
 import { encodeStoredValue } from '../src/persistence-codec.js'
+import { recoveryTrustFor } from '../src/registry/trust.js'
 import { validateRegistryHandle } from '../src/registry/validation.js'
 import {
   buildSealedMemoryOperation,
@@ -29,7 +35,7 @@ async function setup(options: GroupOptions = {}) {
     subject: identity.id,
     value: 'admin',
   })
-  const state = seedMemoryControlState(group.state, group.credential)
+  const state = seedMemoryControlState(group.state, group.credential, [token, token])
   const handle = await restoreMemoryControlHandle({
     state,
     credential: group.credential,
@@ -64,6 +70,174 @@ async function candidate(handle: GroupHandle, options: GroupOptions = {}) {
 }
 
 describe('independent registry handle', () => {
+  test.each(['floating', 'bound'])(
+    'signed model enactment projects ledger and control facts live and after reconstruction (%s)',
+    async (mode) => {
+      const { bindingFor } = (await import(
+        new URL('../../mls/test/fixtures/lifecycle-ledger.ts', import.meta.url).href
+      )) as {
+        bindingFor(identity: ReturnType<typeof randomIdentity>): Promise<ControllerBinding>
+      }
+      const identity = randomIdentity()
+      const binding = await bindingFor(identity)
+      const { group } = await createGroup(
+        identity,
+        'signed-model-ledger',
+        mode === 'bound' ? { controller: binding } : {},
+      )
+      const handle = await restoreMemoryControlHandle({
+        state: seedMemoryControlState(group.state, group.credential),
+        credential: group.credential,
+        ledgerEntries: [],
+      })
+      const subject = randomIdentity().id
+      const beacon = await signLedgerEntry(identity, {
+        type: 'kumiai.device',
+        groupID: group.groupID,
+        subject: binding.id,
+        value: {
+          op: 'beacon',
+          logLength: binding.prefix.length,
+          headDigest: 'signed-model-beacon',
+        },
+      })
+      const role = await signLedgerEntry(identity, {
+        type: 'kumiai.role',
+        groupID: group.groupID,
+        subject,
+        value: 'admin',
+      })
+      const tokens = mode === 'bound' ? [beacon, beacon] : [role, role]
+      const mls = memoryModel(handle)
+      await mls.adopt(mls.buildCommit(tokens))
+      const assertProjection = async (current: GroupHandle) => {
+        expect(await memoryModel(current).getLedger()).toEqual(tokens)
+        expect(current.ledgerTokens).toEqual(tokens)
+        expect(current.ledger.map(({ entryID }) => entryID)).toEqual(tokens.map(ledgerEntryDigest))
+        expect(readLedgerHead(current)?.head).toEqual(
+          computeHead(current.groupID, tokens.map(ledgerEntryDigest)),
+        )
+        expect(await current.isLedgerComplete()).toBe(true)
+        expect(await memoryModel(current).isLedgerComplete()).toBe(true)
+        const reference = await restoreGroup({
+          state: current.state,
+          credential: current.credential,
+          ledgerEntries: tokens,
+        })
+        expect(current.roster).toEqual(reference.roster)
+        if (mode === 'floating') expect(current.roster.roles.get(subject)).toBe('admin')
+        expect(current.registry).toEqual(reference.registry)
+        if (mode === 'bound')
+          expect(current.registry.controllers.get(binding.id)?.beacon).toEqual({
+            logLength: binding.prefix.length,
+            headDigest: 'signed-model-beacon',
+          })
+        const key = { groupID: current.groupID, incarnation: 1 }
+        const facts = recoveryTrustFor(current, key, null)
+        expect(facts).toEqual(recoveryTrustFor(reference, key, null))
+        expect(facts.ledger).toEqual(await memoryModel(current).getLedger())
+        return facts
+      }
+      const facts = await assertProjection(handle)
+      const bytes = encodeClientState(handle.state)
+      const state = decodeClientState(bytes)
+      if (state === undefined) throw new Error('Missing signed model state')
+      const restored = await restoreMemoryControlHandle({
+        state,
+        credential: { ...handle.credential },
+        // The model ledger is restored from bytes, with no separately supplied token list.
+      })
+      expect(await assertProjection(restored)).toEqual(facts)
+      expect(memoryModel(restored)).not.toBe(mls)
+      const incomplete = JSON.parse(
+        new TextDecoder().decode(memoryModel(restored).serializeState()),
+      )
+      incomplete.ledger = []
+      incomplete.bodies = []
+      memoryModel(restored).restoreState(new TextEncoder().encode(JSON.stringify(incomplete)))
+      expect(restored.ledgerTokens).toEqual([])
+      expect(await restored.isLedgerComplete()).toBe(false)
+      expect(await memoryModel(restored).isLedgerComplete()).toBe(false)
+      expect(readLedgerHead(restored)?.head).toEqual(readLedgerHead(handle)?.head)
+      await expect(restored.bootstrapLedger(tokens.slice(1))).rejects.toThrow()
+      await expect(
+        restored.bootstrapLedger(tokens, {
+          persist: () => {
+            throw new Error('bootstrap persistence refused')
+          },
+        }),
+      ).rejects.toThrow('bootstrap persistence refused')
+      expect(restored.ledgerTokens).toEqual([])
+      expect(await restored.isLedgerComplete()).toBe(false)
+      await restored.bootstrapLedger(tokens)
+      expect(await assertProjection(restored)).toEqual(facts)
+    },
+  )
+
+  test('double refuses invalid enactments without changing control facts', async () => {
+    const { handle, identity } = await setup()
+    const outsider = randomIdentity()
+    const claim = {
+      type: 'kumiai.role',
+      groupID: handle.groupID,
+      subject: outsider.id,
+      value: 'admin',
+    }
+    const invalid = [
+      'invalid-token',
+      await signLedgerEntry(identity, { ...claim, groupID: 'other-group' }),
+      await signLedgerEntry(outsider, claim),
+      await signLedgerEntry(identity, { ...claim, type: 'kumiai.unknown' }),
+      await signLedgerEntry(identity, { ...claim, subject: identity.id, value: 'member' }),
+      await signLedgerEntry(identity, {
+        ...claim,
+        type: 'kumiai.device',
+        subject: identity.id,
+        value: { op: 'register', controller: outsider.id },
+      }),
+    ]
+    const mls = memoryModel(handle)
+    const facts = recoveryTrustFor(handle, { groupID: handle.groupID, incarnation: 1 }, null)
+    for (const token of invalid) {
+      await expect(
+        Promise.resolve().then(() => mls.adopt(mls.buildCommit([token]))),
+      ).rejects.toThrow()
+      expect(recoveryTrustFor(handle, { groupID: handle.groupID, incarnation: 1 }, null)).toEqual(
+        facts,
+      )
+      expect(await mls.getLedger()).toEqual(handle.ledgerTokens)
+    }
+    const commit = JSON.parse(new TextDecoder().decode(mls.buildCommit([])))
+    commit.head = 'forged-head'
+    await expect(
+      Promise.resolve().then(() => mls.adopt(new TextEncoder().encode(JSON.stringify(commit)))),
+    ).rejects.toThrow()
+    expect(await handle.isLedgerComplete()).toBe(true)
+    expect(recoveryTrustFor(handle, { groupID: handle.groupID, incarnation: 1 }, null)).toEqual(
+      facts,
+    )
+    await expect(
+      restoreMemoryControlHandle({
+        state: handle.state,
+        credential: handle.credential,
+        ledgerEntries: [],
+      }),
+    ).rejects.toThrow('projection mismatch')
+    const state = structuredClone(handle.state)
+    const extension = state.groupContext.extensions.find(
+      (held) => held.extensionType === readLedgerHeadExtension(handle)?.extensionType,
+    )
+    if (!(extension?.extensionData instanceof Uint8Array)) throw new Error('Missing ledger head')
+    extension.extensionData[1] = (extension.extensionData[1] as number) ^ 1
+    await expect(
+      restoreMemoryControlHandle({
+        state,
+        credential: handle.credential,
+        ledgerEntries: handle.ledgerTokens,
+      }),
+    ).rejects.toThrow('authenticated ledger head mismatch')
+  })
+
   test('double constructs a valid anchored handle', async () => {
     const options: GroupOptions = {
       keyRetention: {
@@ -122,7 +296,7 @@ describe('independent registry handle', () => {
     expect(added.memberCount).toBe(2)
     expect(added.findMemberLeafIndex(invitee.id)).toBe(1)
     const mls = memoryModel(added)
-    mls.adopt(mls.buildCommit([], { removes: [invitee.id] }))
+    await mls.adopt(mls.buildCommit([], { removes: [invitee.id] }))
     expect(added.listMembers().map((member) => member.id)).toEqual([s.identity.id])
     expect(added.bindingOfDID(invitee.id)).toBeUndefined()
     expect(added.epoch).toBe(2n)

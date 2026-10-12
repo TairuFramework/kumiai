@@ -822,7 +822,7 @@ export async function createControlCrashHarness(mode: 'real-mls' | 'double', see
       return restoreHandle({
         state,
         credential: stored.credential,
-        ledgerEntries: slot?.bodies ?? stored.ledger,
+        ledgerEntries: mode === 'double' ? undefined : (slot?.bodies ?? stored.ledger),
       })
     }
     const adoption = createControlAdoptionPort({ access: host.access, control, restoreCandidate })

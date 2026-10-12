@@ -60,6 +60,10 @@ export type MemoryGroupMLS = GroupMLS & {
   lastSender: () => string | undefined
   /** The content ids this member's ledger has enacted, in order. */
   ledgerIDs: () => Array<string>
+  ledgerTokens: () => Array<string>
+  authenticatedLedgerHead: () => string
+  applyLedgerEntries: (tokens: Array<string>) => Promise<void>
+  bootstrapLedger: (tokens: Array<string>, persist?: () => Promise<void> | void) => Promise<void>
   /**
    * The ledger folded, last-write-wins by position: `subject=value` tokens reduced in the
    * order the ledger holds them. It is the whole reason re-enactment is filtered — the fold
@@ -85,7 +89,7 @@ export type MemoryGroupMLS = GroupMLS & {
     options?: { adds?: Array<string>; removes?: Array<string> },
   ) => Uint8Array
   /** Adopt a Commit this member produced: enact its entries and advance. */
-  adopt: (commit: Uint8Array) => void
+  adopt: (commit: Uint8Array) => void | Promise<void>
   /**
    * Drop a member's leaf. The double has no Remove proposal, so this stands in for the one
    * effect a remove has on the tree — and it is what ADOPTING the post-commit handle of a
@@ -165,6 +169,10 @@ export type MemoryGroupMLSOptions = {
    *  member that resolved them from a commit frame keeps them. Holding a body is not the
    *  same as having enacted it: the ledger is what a commit enacted, and it starts empty. */
   bodies?: Array<string>
+  ledgerEntries?: Array<string>
+  entryDigest?: (token: string) => string
+  computeLedgerHead?: (ids: Array<string>) => string
+  validateLedgerEntries?: (tokens: Array<string>, previous: Array<string> | null) => Promise<void>
   /** The members this handle's tree holds a leaf for. Defaults to this member alone. */
   members?: Array<string>
   memberSlots?: Array<[number, string]>
@@ -510,6 +518,8 @@ function openWithKey(
  * for wiring, not a production implementation (a real port adapts a live MLS group).
  */
 export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): MemoryGroupMLS {
+  const entryDigest = options.entryDigest ?? memoryEntryID
+  const computeLedgerHead = options.computeLedgerHead ?? memoryLedgerHead
   const recoverySecret = options.recoverySecret ?? new Uint8Array(32).fill(0x33)
   const localDID = options.localDID
   const acceptsCommitter = options.acceptsCommitter ?? (() => true)
@@ -524,12 +534,13 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   let seen = 0
   let lastSender: string | undefined
   /** The entries this handle has ENACTED, in order. A rejoined handle holds none. */
-  let ledger: Array<string> = []
+  let ledger: Array<string> = (options.ledgerEntries ?? []).map(entryDigest)
   /** The head this handle's group state attests to. Genesis until a commit moves it. */
-  let ledgerHead = memoryLedgerHead([])
+  let ledgerHead = computeLedgerHead(ledger)
   /** Entry bodies by content id — what this member can serve, and what it can enact. */
   let bodies = new Map<string, string>()
-  for (const token of options.bodies ?? []) bodies.set(memoryEntryID(token), token)
+  for (const token of [...(options.bodies ?? []), ...(options.ledgerEntries ?? [])])
+    bodies.set(entryDigest(token), token)
   // Hole-preserving leaf-slot model, keyed by ratchet-tree leaf index. Real ts-mls blanks a
   // removed leaf and fills the leftmost blank on add; a compact array cannot, and would hand out
   // position-indices the real port never does (more permissive — forbidden for a double).
@@ -702,6 +713,24 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     if (info.groupID !== groupID || info.to !== (localDID ?? '') || info.requestID !== requestID)
       return null
     return info
+  }
+
+  const validateEnactment = async (
+    parsed: MemoryCommit,
+    held: Map<string, string>,
+  ): Promise<void> => {
+    if (options.validateLedgerEntries === undefined) return
+    if (
+      computeLedgerHead(ledger) !== ledgerHead ||
+      (parsed.head ?? ledgerHead) !== computeLedgerHead([...ledger, ...parsed.entryIDs])
+    )
+      throw new LedgerIncompleteError('enactment does not extend the authenticated ledger head')
+    const tokens = parsed.entryIDs.map((id) => {
+      const token = held.get(id)
+      if (token === undefined) throw new MissingLedgerEntriesError([id])
+      return token
+    })
+    await options.validateLedgerEntries(tokens, ledgerTokens())
   }
 
   const enact = (parsed: MemoryCommit, commit: Uint8Array): void => {
@@ -1101,6 +1130,14 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     seen: () => seen,
     lastSender: () => lastSender,
     ledgerIDs: () => [...ledger],
+    ledgerTokens,
+    authenticatedLedgerHead: () => ledgerHead,
+    applyLedgerEntries: (tokens) =>
+      serialise(async () => {
+        await options.validateLedgerEntries?.(tokens, null)
+        for (const token of tokens) bodies.set(entryDigest(token), token)
+        ledger.push(...tokens.map(entryDigest))
+      }),
     leaves: () => occupiedDIDs(),
     async rosterEntries() {
       return rosterEntries()
@@ -1121,13 +1158,13 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       options: { adds?: Array<string>; removes?: Array<string> } = {},
     ) {
       const entryIDs = tokens.map((token) => {
-        const id = memoryEntryID(token)
+        const id = entryDigest(token)
         bodies.set(id, token)
         return id
       })
       return encodeMemoryCommit(epoch, localDID ?? '', entryIDs, {
         branch: toB64U(crypto.getRandomValues(new Uint8Array(16))),
-        head: memoryLedgerHead([...ledger, ...entryIDs]),
+        head: computeLedgerHead([...ledger, ...entryIDs]),
         ...(options.adds != null ? { adds: options.adds } : {}),
         ...(options.removes != null ? { removes: options.removes } : {}),
       })
@@ -1146,6 +1183,13 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         !acceptsCommitter(parsed.committerDID)
       )
         throw new Error('adopt: unauthorised or invalid commit')
+      if (options.validateLedgerEntries != null) {
+        return serialise(async () => {
+          if (parsed.epoch !== epoch) throw new Error('adopt: source epoch moved')
+          await validateEnactment(parsed, bodies)
+          enact(parsed, commit)
+        })
+      }
       enact(parsed, commit)
     },
     evict(did: string) {
@@ -1297,7 +1341,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         if (missing.length > 0) {
           const tokens = (await context.resolveLedgerEntries?.(missing)) ?? []
           for (const token of tokens) {
-            const id = memoryEntryID(token)
+            const id = entryDigest(token)
             // Content-addressed: a body binds to the id it hashes to, or it is ignored.
             if (missing.includes(id)) nextBodies.set(id, token)
           }
@@ -1306,6 +1350,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             throw new MissingLedgerEntriesError(stillMissing)
           }
         }
+        await validateEnactment(parsed, nextBodies)
         const epochBefore = epoch
         const nextSlots = new Map(slots)
         for (const did of parsed.removes ?? []) slotRemoveDID(did, nextSlots)
@@ -1364,24 +1409,25 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         return { applied: true, advanced: !removed, epochBefore, epochAfter }
       }),
     async isLedgerComplete() {
-      return memoryLedgerHead(ledger) === ledgerHead
+      return computeLedgerHead(ledger) === ledgerHead
     },
     async getLedger() {
       return ledgerTokens()
     },
-    bootstrapLedger: (tokens: Array<string>) =>
+    bootstrapLedger: (tokens: Array<string>, persist?: () => Promise<void> | void) =>
       serialise(async () => {
         // The gate, and nothing below it touches the handle until the check has passed: the
         // head is recomputed over the gathered ids IN THE ORDER GIVEN and compared against the
         // one this handle's own group state carries. A rejected ledger writes nothing.
-        const entryIDs = tokens.map(memoryEntryID)
-        if (memoryLedgerHead(entryIDs) !== ledgerHead) {
+        const entryIDs = tokens.map(entryDigest)
+        if (computeLedgerHead(entryIDs) !== ledgerHead) {
           throw new LedgerIncompleteError(
             'bootstrapLedger: the gathered ledger does not fold to the head this group attests to',
           )
         }
+        await options.validateLedgerEntries?.(tokens, null)
         const nextBodies = new Map(bodies)
-        for (const token of tokens) nextBodies.set(memoryEntryID(token), token)
+        for (const token of tokens) nextBodies.set(entryDigest(token), token)
         const state = durableState({
           epoch,
           slots: [...slots],
@@ -1392,9 +1438,16 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
           recoveryAuthenticator,
           epochIdentity,
         })
-        await hostDB.saveState(storageID, state)
+        if (persist === undefined) await hostDB.saveState(storageID, state)
+        const previous = serializeState()
         bodies = nextBodies
         ledger = entryIDs
+        try {
+          await persist?.()
+        } catch (error) {
+          restoreState(previous)
+          throw error
+        }
       }),
     async createRecoveryRequest(requestID: string) {
       const requesterDID = localDID ?? ''

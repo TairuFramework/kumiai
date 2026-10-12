@@ -93,7 +93,15 @@ export async function makeStorageSeed(params: {
       groupActiveState: { kind: 'active' },
       treeHashCache: [],
     }
-    client = seedMemoryControlState(client, { id: identity.id, groupID: params.id })
+    const ledger = [
+      await signLedgerEntry(identity, {
+        type: 'kumiai.role',
+        groupID: params.id,
+        subject: identity.id,
+        value: 'admin',
+      }),
+    ]
+    client = seedMemoryControlState(client, { id: identity.id, groupID: params.id }, ledger)
     trust = {
       groupID: params.id,
       genesisAnchor: encodeGroupAnchor({ creatorDID: identity.id, version: 1 }),
@@ -106,14 +114,7 @@ export async function makeStorageSeed(params: {
       registry: { devices: new Map(), controllers: new Map() },
       credential: { id: identity.id, groupID: params.id },
       binding: null,
-      ledger: [
-        await signLedgerEntry(identity, {
-          type: 'kumiai.role',
-          groupID: params.id,
-          subject: identity.id,
-          value: 'admin',
-        }),
-      ],
+      ledger,
       ciphersuiteName,
       spentEpochAuthenticators: [client.keySchedule.epochAuthenticator.slice()],
     }

@@ -1,20 +1,31 @@
 import { getSignatureInfo, normalizeDID } from '@kokuin/token'
 import {
   buildGroupAnchorExtension,
+  buildLedgerHeadExtension,
   type ClientState,
+  computeHead,
+  controllerOf,
+  DEVICE_ENTRY_TYPE,
+  type DeviceValue,
   decodeClientState,
   decodeGroupAnchor,
   encodeClientState,
+  foldEnvelope,
   GROUP_ANCHOR_EXTENSION_TYPE,
   GroupHandle,
   type GroupHandleParams,
   type GroupMember,
   type GroupOptions,
+  LEDGER_HEAD_EXTENSION_TYPE,
   type LeafBinding,
+  ledgerEntryDigest,
   type MemberCredential,
   parseMLSCredentialIdentity,
+  readLedgerHead,
   restoreGroup,
   type SendAdmission,
+  type VerifiedLedgerEntry,
+  verifyLedgerEntry,
 } from '@kumiai/mls'
 import {
   type ControlValidationPort,
@@ -26,7 +37,7 @@ import {
   type Operation,
 } from '@kumiai/rpc'
 import { sha256 } from '@noble/hashes/sha2.js'
-import { toB64U } from '@sozai/codec'
+import { fromB64U, toB64U } from '@sozai/codec'
 import type { EpochReceiverData } from 'ts-mls'
 
 import { decodeControlJournal } from '../../src/control-journal.js'
@@ -34,6 +45,10 @@ import { ENTRY_SEAL_LABEL, openEntries } from '../../src/crypto.js'
 import { decodeStoredValue, encodeStoredValue } from '../../src/persistence-codec.js'
 
 type MemoryMLS = GroupMLS & {
+  ledgerTokens(): Array<string>
+  authenticatedLedgerHead(): string
+  applyLedgerEntries(tokens: Array<string>): Promise<void>
+  bootstrapLedger(tokens: Array<string>, persist?: () => Promise<void> | void): Promise<void>
   memberSlots(): Array<[number, string]>
   setReceiveState(state: Uint8Array): void
   setReceiveHistory(history: Array<[number, { identity: string; state: Uint8Array }]>): void
@@ -47,7 +62,7 @@ type MemoryMLS = GroupMLS & {
     tokens?: Array<string>,
     options?: { adds?: Array<string>; removes?: Array<string> },
   ): Uint8Array
-  adopt(commit: Uint8Array): void
+  adopt(commit: Uint8Array): void | Promise<void>
 }
 
 const { createMemoryGroupMLS } = (await import(
@@ -61,7 +76,22 @@ const { createMemoryGroupMLS } = (await import(
     members?: Array<string>
     memberSlots?: Array<[number, string]>
     retainKeysForEpochs?: number
+    ledgerEntries?: Array<string>
+    entryDigest: typeof ledgerEntryDigest
+    computeLedgerHead(ids: Array<string>): string
+    validateLedgerEntries(tokens: Array<string>, previous: Array<string> | null): Promise<void>
   }): MemoryMLS
+}
+const { verifyDeviceEntry } = (await import(
+  new URL('../../../mls/src/device-proof.ts', import.meta.url).href
+)) as {
+  verifyDeviceEntry(
+    entry: VerifiedLedgerEntry<DeviceValue>,
+    context: {
+      bindingOfDID(did: string): LeafBinding | undefined
+      controllerOf(did: string): string | undefined
+    },
+  ): Promise<boolean>
 }
 const { fakeEpochSecret } = (await import(
   new URL('../../../rpc/test/fixtures/fake-crypto.ts', import.meta.url).href
@@ -69,13 +99,17 @@ const { fakeEpochSecret } = (await import(
   fakeEpochSecret(epoch: number, label: string, length: number, secret: Uint8Array): Uint8Array
 }
 
+const verifiedLedgers = new WeakMap<MemoryMLS, Map<string, VerifiedLedgerEntry>>()
+
 function model(
   state: ClientState,
   credential: MemberCredential,
   restore = true,
   receiver = false,
   options: GroupOptions = {},
+  ledgerEntries: Array<string> = [],
 ): MemoryMLS {
+  const verified = new Map<string, VerifiedLedgerEntry>()
   const mls = createMemoryGroupMLS({
     groupID: credential.groupID,
     ...(receiver ? {} : { localDID: credential.id }),
@@ -86,7 +120,56 @@ function model(
       return [[index / 2, parseMLSCredentialIdentity(node.leaf.credential.identity).id]]
     }),
     retainKeysForEpochs: options.keyRetention?.retainKeysForEpochs,
+    ledgerEntries,
+    entryDigest: ledgerEntryDigest,
+    computeLedgerHead: (ids) => toB64U(computeHead(credential.groupID, ids)),
+    validateLedgerEntries: async (tokens, previous) => {
+      const entries = await Promise.all(
+        tokens.map(async (token) => {
+          const entry = await verifyLedgerEntry(token)
+          if (entry === null || entry.entry.groupID !== credential.groupID)
+            throw new Error('Invalid memory ledger')
+          return { token, entryID: ledgerEntryDigest(token), verified: entry }
+        }),
+      )
+      if (previous !== null) {
+        const base = await restoreGroup({
+          state: envelope(state, mls),
+          credential,
+          ledgerEntries: previous,
+          options,
+        })
+        const result = foldEnvelope({
+          entries,
+          baseRoster: base.roster,
+          baseRegistry: base.registry,
+          groupID: credential.groupID,
+          context:
+            base.anchor.controller == null
+              ? undefined
+              : {
+                  controllerID: base.anchor.controller,
+                  memberController: (did) => base.bindingOfDID(did)?.controller,
+                },
+        })
+        if (!result.ok) throw new Error(`Invalid memory enactment: ${result.reason}`)
+        for (const { verified: entry } of entries) {
+          if (entry.entry.type !== DEVICE_ENTRY_TYPE) continue
+          if (base.anchor.controller != null && (entry.entry.value as DeviceValue).op !== 'beacon')
+            continue
+          if (
+            !(await verifyDeviceEntry(entry as VerifiedLedgerEntry<DeviceValue>, {
+              bindingOfDID: (did) => base.bindingOfDID(did),
+              controllerOf: (did) => controllerOf(base.registry, did),
+            }))
+          )
+            throw new Error('Invalid memory device proof')
+        }
+      }
+      for (const entry of entries) verified.set(entry.token, entry.verified)
+    },
   })
+  verifiedLedgers.set(mls, verified)
   if (restore) mls.restoreState(state.confirmationTag)
   return mls
 }
@@ -133,7 +216,16 @@ function envelope(state: ClientState, mls: MemoryMLS): ClientState {
   return {
     ...state,
     ratchetTree: tree,
-    groupContext: { ...state.groupContext, epoch: BigInt(mls.epoch()) },
+    groupContext: {
+      ...state.groupContext,
+      epoch: BigInt(mls.epoch()),
+      extensions: [
+        ...state.groupContext.extensions.filter(
+          (extension) => extension.extensionType !== LEDGER_HEAD_EXTENSION_TYPE,
+        ),
+        buildLedgerHeadExtension(fromB64U(mls.authenticatedLedgerHead())),
+      ],
+    },
     keySchedule: {
       ...state.keySchedule,
       epochAuthenticator: mls.authenticator(),
@@ -161,7 +253,11 @@ function envelope(state: ClientState, mls: MemoryMLS): ClientState {
   }
 }
 
-export function seedMemoryControlState(state: ClientState, credential: MemberCredential) {
+export function seedMemoryControlState(
+  state: ClientState,
+  credential: MemberCredential,
+  ledgerEntries: Array<string> = [],
+) {
   const seeded = structuredClone(state)
   if (
     !seeded.groupContext.extensions.some(
@@ -171,7 +267,7 @@ export function seedMemoryControlState(state: ClientState, credential: MemberCre
     seeded.groupContext.extensions.push(
       buildGroupAnchorExtension({ creatorDID: credential.id, version: 1 }),
     )
-  const mls = model(seeded, credential, false)
+  const mls = model(seeded, credential, false, false, {}, ledgerEntries)
   captureReceiveState(seeded, mls)
   return envelope(seeded, mls)
 }
@@ -238,6 +334,12 @@ class MemoryControlHandle extends GroupHandle {
     if (!models.has(this)) return super.state
     if (this.#view.groupContext.epoch !== BigInt(this.#mls.epoch()))
       Object.assign(this.#view, envelope(this.#view, this.#mls))
+    this.#view.groupContext.extensions = [
+      ...this.#view.groupContext.extensions.filter(
+        (extension) => extension.extensionType !== LEDGER_HEAD_EXTENSION_TYPE,
+      ),
+      buildLedgerHeadExtension(fromB64U(this.#mls.authenticatedLedgerHead())),
+    ]
     // Keep the live progress buffers visible; only the durable model snapshot is copied.
     captureReceiveState(this.#view, this.#mls)
     this.#view.confirmationTag = this.#mls.serializeState()
@@ -273,8 +375,66 @@ class MemoryControlHandle extends GroupHandle {
     return super.bindingOfDID(did)
   }
 
+  #projection(): GroupHandle {
+    return new GroupHandle({
+      state: this.state,
+      credential: this.credential,
+      // Do not replace the live context's deny provider with a snapshot.
+      context: { ...this.context },
+      ledger: this.#mls.ledgerTokens().map((token) => {
+        const verified = verifiedLedgers.get(this.#mls)?.get(token)
+        if (verified === undefined) throw new Error('Unverified memory ledger projection')
+        return { token, verified, entryID: ledgerEntryDigest(token) }
+      }),
+    })
+  }
+
+  override get ledger(): GroupHandle['ledger'] {
+    return models.has(this) ? this.#projection().ledger : super.ledger
+  }
+  override get ledgerTokens(): GroupHandle['ledgerTokens'] {
+    return models.has(this) ? this.#projection().ledgerTokens : super.ledgerTokens
+  }
+  override get roster(): GroupHandle['roster'] {
+    return models.has(this) ? this.#projection().roster : super.roster
+  }
+  override get registry(): GroupHandle['registry'] {
+    return models.has(this) ? this.#projection().registry : super.registry
+  }
+  override currentDenySet() {
+    return models.has(this) ? this.#projection().currentDenySet() : super.currentDenySet()
+  }
+  override revokedDevices() {
+    return this.#projection().revokedDevices()
+  }
+  override async getLedger() {
+    return this.ledgerTokens
+  }
+  override async isLedgerComplete() {
+    return this.#projection().isLedgerComplete()
+  }
+
+  override async applyLedgerEntries(tokens: Array<string>): Promise<Array<VerifiedLedgerEntry>> {
+    await this.#mls.applyLedgerEntries(tokens)
+    return tokens.map((token) => {
+      const verified = verifiedLedgers.get(this.#mls)?.get(token)
+      if (verified === undefined) throw new Error('Unverified memory ledger projection')
+      return verified
+    })
+  }
+
+  override async bootstrapLedger(
+    tokens: Array<string>,
+    opts?: { persist?: (handle: GroupHandle) => Promise<void> | void },
+  ): Promise<void> {
+    await this.#mls.bootstrapLedger(
+      tokens,
+      opts?.persist === undefined ? undefined : () => opts.persist?.(this),
+    )
+  }
+
   override sendAdmission(): SendAdmission {
-    return { ...super.sendAdmission(), epoch: Number(this.epoch) }
+    return this.#projection().sendAdmission()
   }
 
   override async exportSecret(
@@ -302,7 +462,7 @@ class MemoryControlHandle extends GroupHandle {
 export async function restoreMemoryControlHandle(params: {
   state: ClientState
   credential: MemberCredential
-  ledgerEntries: Array<string>
+  ledgerEntries?: Array<string>
   options?: GroupOptions
 }): Promise<GroupHandle> {
   const { credential, ledgerEntries, options = {} } = params
@@ -322,15 +482,26 @@ export async function restoreMemoryControlHandle(params: {
     toB64U(mls.authenticator()) !== toB64U(state.keySchedule.epochAuthenticator)
   )
     throw new Error('Memory state identity mismatch')
+  const tokens = mls.ledgerTokens()
+  if (
+    ledgerEntries !== undefined &&
+    (tokens.length !== ledgerEntries.length ||
+      tokens.some((token, index) => token !== ledgerEntries[index]))
+  )
+    throw new Error('Memory ledger projection mismatch')
   // Reuse only context construction and signed ledger folding, never MLS transitions.
   const restored = await restoreGroup({
     state,
     credential: { ...credential },
-    ledgerEntries,
+    ledgerEntries: tokens,
     options,
   })
-  if (restored.ledgerTokens.length !== ledgerEntries.length)
-    throw new Error('Invalid memory ledger')
+  if (restored.ledgerTokens.length !== tokens.length) throw new Error('Invalid memory ledger')
+  if (toB64U(readLedgerHead(restored)?.head ?? new Uint8Array()) !== mls.authenticatedLedgerHead())
+    throw new Error('Memory authenticated ledger head mismatch')
+  const verified = verifiedLedgers.get(mls)
+  if (verified === undefined) throw new Error('Missing memory verification cache')
+  for (const entry of restored.ledger) verified.set(entry.token, entry.verified)
   return new MemoryControlHandle({
     state,
     credential: restored.credential,
@@ -356,7 +527,7 @@ export async function buildSealedMemoryOperation(
   const commit = mls.buildCommit([], { adds: [target] })
   let candidate: Uint8Array
   try {
-    mls.adopt(commit)
+    await mls.adopt(commit)
     candidate = encodeClientState(envelope(sourceState, mls))
   } finally {
     mls.restoreState(before)
