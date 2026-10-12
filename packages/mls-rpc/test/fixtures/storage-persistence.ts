@@ -72,7 +72,7 @@ import {
   restoreMemoryControlHandle,
   sealedMemoryValidation,
 } from './sealed-memory-mls.js'
-import { installSeed, makeStorageSeed, nextChange } from './storage-seed.js'
+import { installSeed, makeStorageSeed, nextChange, type StorageSeed } from './storage-seed.js'
 
 const sideNamespace = 'host-side'
 const markerNamespaces = new Set(['group-owner', 'device-owner'])
@@ -124,6 +124,7 @@ export async function createStorageFixture(params: {
   mode: 'real-mls' | 'double'
   effects?: TransactionalGroupEffects<MemoryTransaction>
   ownershipContext?: OwnershipContextPort
+  seed?: StorageSeed
 }): Promise<PersistenceFixture<StorageTestPorts<MemoryTransaction>>> {
   const identity = randomIdentity()
   const ownerDID = identity.id
@@ -316,12 +317,14 @@ export async function createStorageFixture(params: {
   }
   const initial = ports({})
   await initial.device.load()
-  const seed = await makeStorageSeed({
-    id: params.id,
-    incarnation: 1,
-    epoch: 3,
-    mode: params.mode,
-  })
+  const seed =
+    params.seed ??
+    (await makeStorageSeed({
+      id: params.id,
+      incarnation: 1,
+      epoch: 3,
+      mode: params.mode,
+    }))
   await installSeed(initial.device.groups, seed, 'seed')
   if (params.id !== 'group-B') {
     const independent = await makeStorageSeed({
@@ -684,8 +687,8 @@ export async function createStorageFixture(params: {
   return fixture
 }
 
-export async function createControlCrashHarness(mode: 'real-mls' | 'double') {
-  const fixture = await createStorageFixture({ id: 'control-crash', mode })
+export async function createControlCrashHarness(mode: 'real-mls' | 'double', seed?: StorageSeed) {
+  const fixture = await createStorageFixture({ id: 'control-crash', mode, seed })
   const key = { groupID: 'control-crash', incarnation: 1 }
   const closers: Array<() => Promise<void>> = []
   const fixtureClose = fixture.close.bind(fixture)
@@ -1007,6 +1010,7 @@ export async function createControlCrashHarness(mode: 'real-mls' | 'double') {
       groups,
       control,
       key,
+      validation,
       get peer() {
         return runtime().peer
       },

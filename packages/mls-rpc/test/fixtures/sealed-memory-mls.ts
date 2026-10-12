@@ -196,6 +196,8 @@ export function sealedMemoryValidation(): ControlValidationPort {
         validateFrame: async (frame) => {
           try {
             const { result, header } = await check(frame.payload)
+            if (result.validation === 'unavailable')
+              return { kind: 'unavailable', reason: 'missing-proposal' }
             if (!result.applied || header === null) return { kind: 'invalid', reason: 'policy' }
             return {
               kind: 'valid',
