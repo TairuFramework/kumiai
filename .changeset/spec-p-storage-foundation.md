@@ -23,3 +23,7 @@ Capture host effects before finalise to preserve getter errors and avoid unhandl
 Ignore revoked attempts' late failures, reject roots invoked by argument getters, roll back admitted required-read failures, and promptly reject failed Reads.
 
 MLS, broadcast and rpc runtime code no longer needs structuredClone, String.isWellFormed or AbortSignal.throwIfAborted; Hermes hosts need Web Crypto and TextEncoder polyfills.
+
+Persist one private control build per source epoch. Validate checkpoint-bound first-valid acceptance before adoption or Welcome delivery. Retain source slots across deadlines and outcome acknowledgement.
+
+Add an @kumiai/rpc/testing entry point for deterministic control-step tests.
