@@ -1,4 +1,4 @@
-import { createFullIdentity, randomIdentity } from '@kokuin/token'
+import { createFullIdentity, type OwnIdentity, randomIdentity } from '@kokuin/token'
 import type { LogHub } from '@kumiai/hub-tunnel'
 import {
   commitInvite,
@@ -51,10 +51,13 @@ import {
   decodeStoredValue,
   encodeStoredValue,
   physicalRecordKey,
+  recordAAD,
 } from '../../src/persistence-codec.js'
 import type {
+  DevicePersistence,
   DeviceStores,
   GroupPersistence,
+  MemoryStoreRows,
   MemoryTransaction,
   OwnershipContextPort,
   PendingCommitFault,
@@ -62,6 +65,7 @@ import type {
   RawStoredRecord,
   TransactionalGroupEffects,
 } from '../../src/persistence-types.js'
+import { deferred } from '../../src/runtime.js'
 import {
   createIncarnationStores,
   createMemoryDevicePersistence,
@@ -125,14 +129,41 @@ function address(namespace: string, key: string): Omit<RawStoredRecord, 'bytes'>
   return { namespace, key, groupID: value[0], incarnation: value[1], recordID: value[2] }
 }
 
+type WorkFaultPoint = 'pending' | 'after-first-write' | 'before-commit' | 'commit-then-reject'
+type WorkFaultControl = Pick<PendingCommitFault, 'rejected' | 'finish'>
+type ArmedWorkFault = {
+  point: WorkFaultPoint
+  mutation: ReturnType<typeof deferred<string>>
+  rejected: ReturnType<typeof deferred<void>>
+  backend: ReturnType<typeof deferred<PendingCommitFault>>
+}
+type RegistryStoragePorts = {
+  device: DevicePersistence<MemoryTransaction>
+  packageStores(sourceID: string): ReturnType<typeof createMemoryPackageStores>
+}
+export type RegistryStorageFixture = PersistenceFixture<RegistryStoragePorts> & {
+  armNextWorkFault(point: 'pending'): WorkFaultControl & { mutationID: Promise<string> }
+  armNextWorkFault(point: Exclude<WorkFaultPoint, 'pending'>): { mutationID: Promise<string> }
+  armWorkFault(mutationID: string, point: 'pending'): WorkFaultControl
+  armWorkFault(mutationID: string, point: Exclude<WorkFaultPoint, 'pending'>): void
+  holdProof(mutationID: string): { started: Promise<void>; release(): void }
+  mutateMetadata(
+    key: { groupID: string; incarnation: number },
+    fn: (value: unknown) => unknown,
+  ): Promise<void>
+}
+
 export async function createStorageFixture(params: {
   id: string
   mode: 'real-mls' | 'double'
   effects?: TransactionalGroupEffects<MemoryTransaction>
   ownershipContext?: OwnershipContextPort
   seed?: StorageSeed
-}): Promise<PersistenceFixture<StorageTestPorts<MemoryTransaction>>> {
-  const identity = randomIdentity()
+  identity?: OwnIdentity
+  setup?: 'empty' | 'seeded'
+  rows?: MemoryStoreRows
+}): Promise<RegistryStorageFixture> {
+  const identity = params.identity ?? randomIdentity()
   const ownerDID = identity.id
   const providerID = 'storage-provider'
   const codec = createDeterministicAtRestCodec({ key: new Uint8Array(32).fill(98) })
@@ -180,7 +211,7 @@ export async function createStorageFixture(params: {
     open: (bytes: Uint8Array, aad: Uint8Array) => codecCall('open', bytes, aad),
     seal: (bytes: Uint8Array, aad: Uint8Array) => codecCall('seal', bytes, aad),
   }
-  let db = createMemoryTransaction({ rows: { [sideNamespace]: new Map() } })
+  let db = createMemoryTransaction({ rows: params.rows ?? { [sideNamespace]: new Map() } })
   let closed = false
   let fakeTime = false
   const pending = new Set<{
@@ -189,6 +220,28 @@ export async function createStorageFixture(params: {
     completed: Promise<void>
     done(): void
   }>()
+  let nextWorkFault: ArmedWorkFault | undefined
+  const workFaults = new Map<string, ArmedWorkFault>()
+  const proofHolds = new Map<
+    string,
+    { started: ReturnType<typeof deferred<void>>; released: ReturnType<typeof deferred<void>> }
+  >()
+  function arm(point: WorkFaultPoint): ArmedWorkFault {
+    return {
+      point,
+      mutation: deferred<string>(),
+      rejected: deferred<void>(),
+      backend: deferred<PendingCommitFault>(),
+    }
+  }
+  function pendingControl(armed: ArmedWorkFault): WorkFaultControl {
+    return {
+      rejected: armed.rejected.promise,
+      async finish(outcome) {
+        await (await armed.backend.promise).finish(outcome)
+      },
+    }
+  }
   let readDevice!: <T>(fn: (stores: DeviceStores<MemoryTransaction>) => Promise<T>) => Promise<T>
   const instrumented = new WeakSet<object>()
   const activeEntries = new Map<string, OwnerEntry>()
@@ -212,6 +265,12 @@ export async function createStorageFixture(params: {
         scopes,
         async (entry) => {
           if (entry.scopes.groupID !== null) activeEntries.set(entry.scopes.groupID, entry)
+          const mutationID = entry.mutationID
+          if (kind !== 'read' && mutationID !== null && nextWorkFault !== undefined) {
+            if (workFaults.has(mutationID)) throw new Error('Work fault already armed')
+            workFaults.set(mutationID, nextWorkFault)
+            nextWorkFault = undefined
+          }
           let attemptSignal: AbortSignal | undefined
           const invoke = (phase: Phase) => {
             const fn = callbacks.get(phase)
@@ -228,6 +287,20 @@ export async function createStorageFixture(params: {
             if (restarting && phase === 'prepare') return
             if (restarting && phase === 'work') restarting = false
             await enter(phase)
+            if (phase === 'work' && mutationID !== null) {
+              const armed = workFaults.get(mutationID)
+              if (armed !== undefined) {
+                workFaults.delete(mutationID)
+                armed.mutation.resolve(mutationID)
+                if (armed.point === 'pending') {
+                  const fault = fixture.rejectCommitPending()
+                  armed.backend.resolve(fault)
+                  void fault.rejected.then(() => armed.rejected.resolve())
+                } else if (armed.point === 'commit-then-reject')
+                  memoryFaults(database).commitThenReject()
+                else memoryFaults(database).failNext(armed.point)
+              }
+            }
             const nextSignal = entry.attempt().signal
             if (nextSignal !== attemptSignal) {
               attemptSignal?.removeEventListener('abort', clear)
@@ -238,6 +311,12 @@ export async function createStorageFixture(params: {
           }
           entry.retain = (proof) =>
             retain(async () => {
+              const hold = mutationID === null ? undefined : proofHolds.get(mutationID)
+              if (hold !== undefined) {
+                hold.started.resolve()
+                await hold.released.promise
+                proofHolds.delete(mutationID as string)
+              }
               await invoke('proof')
               return await proof()
             })
@@ -329,141 +408,145 @@ export async function createStorageFixture(params: {
   }
   const initial = ports({})
   await initial.device.load()
-  const seed =
-    params.seed ??
-    (await makeStorageSeed({
-      id: params.id,
-      incarnation: 1,
-      epoch: 3,
-      mode: params.mode,
-    }))
-  await installSeed(initial.device.groups, seed, 'seed')
-  if (params.id !== 'group-B') {
-    const independent = await makeStorageSeed({
-      id: 'group-B',
-      incarnation: 1,
-      epoch: 3,
-      mode: params.mode,
-    })
-    await installSeed(initial.device.groups, independent, 'seed-B')
-  }
-  const plaintext = new TextEncoder().encode('plaintext-sentinel')
-  const topicID = 'topic-secret'
-  await initial.device.groups.transition(
-    await nextChange(initial.device.groups, params.id, 'seed-records'),
-    async (stores) => {
-      const rows = stores.incarnation(1)
-      await rows.control.apply(
-        { putOutcomes: [{ id: 'operation-1', opID: 'operation-1', at: 1000, kind: 'unknown' }] },
-        'seed-records',
-      )
-      await rows.anchor.save({ anchor: { epoch: 3, secret: new Uint8Array(32).fill(97) } })
-      for (const [id, position] of [
-        ['frame-2', '10'],
-        ['frame-1', '2'],
-      ]) {
-        if (id === undefined || position === undefined) throw new Error('Missing frame address')
-        const frame = {
-          ...seed.key,
-          id,
-          topicID,
-          protocol: 'chat',
-          procedure: 'posted',
-          segment: 3,
-          position,
-        }
-        await rows.pending.put([
-          {
-            frame,
-            payload: plaintext,
-            senderDID: seed.trust.credential.id,
-            epoch: 3,
-            idempotencyKey: JSON.stringify([
-              'kumiai/frame/v1',
-              params.id,
-              1,
-              topicID,
-              position,
-              'chat',
-              'posted',
-            ]),
-          },
-        ])
-      }
-      await rows.pending.poison([
-        {
-          frame: {
+  if (params.setup !== 'empty' && params.rows === undefined) {
+    const seed =
+      params.seed ??
+      (await makeStorageSeed({
+        id: params.id,
+        incarnation: 1,
+        epoch: 3,
+        mode: params.mode,
+        identity: params.identity,
+      }))
+    await installSeed(initial.device.groups, seed, 'seed')
+    if (params.id !== 'group-B') {
+      const independent = await makeStorageSeed({
+        id: 'group-B',
+        incarnation: 1,
+        epoch: 3,
+        mode: params.mode,
+        identity: params.identity,
+      })
+      await installSeed(initial.device.groups, independent, 'seed-B')
+    }
+    const plaintext = new TextEncoder().encode('plaintext-sentinel')
+    const topicID = 'topic-secret'
+    await initial.device.groups.transition(
+      await nextChange(initial.device.groups, params.id, 'seed-records'),
+      async (stores) => {
+        const rows = stores.incarnation(1)
+        await rows.control.apply(
+          { putOutcomes: [{ id: 'operation-1', opID: 'operation-1', at: 1000, kind: 'unknown' }] },
+          'seed-records',
+        )
+        await rows.anchor.save({ anchor: { epoch: 3, secret: new Uint8Array(32).fill(97) } })
+        for (const [id, position] of [
+          ['frame-2', '10'],
+          ['frame-1', '2'],
+        ]) {
+          if (id === undefined || position === undefined) throw new Error('Missing frame address')
+          const frame = {
             ...seed.key,
-            id: 'poison-1',
+            id,
             topicID,
             protocol: 'chat',
+            procedure: 'posted',
             segment: 3,
-            position: '1',
+            position,
+          }
+          await rows.pending.put([
+            {
+              frame,
+              payload: plaintext,
+              senderDID: seed.trust.credential.id,
+              epoch: 3,
+              idempotencyKey: JSON.stringify([
+                'kumiai/frame/v1',
+                params.id,
+                1,
+                topicID,
+                position,
+                'chat',
+                'posted',
+              ]),
+            },
+          ])
+        }
+        await rows.pending.poison([
+          {
+            frame: {
+              ...seed.key,
+              id: 'poison-1',
+              topicID,
+              protocol: 'chat',
+              segment: 3,
+              position: '1',
+            },
+            reason: 'invalid frame',
+            keyConsumed: true,
           },
-          reason: 'invalid frame',
-          keyConsumed: true,
-        },
-      ])
-      await rows.cursor.save(topicID, '2')
-      const entry = {
-        seq: 7,
-        protocol: 'chat',
-        prc: 'posted',
-        data: plaintext,
-        status: 'accepted' as const,
-        lastAttempt: null,
-      }
-      await rows.outbox.put([entry])
-      await rows.meta.putSettlement(7, {
-        sequenceID: '10',
-        attemptID: 'publish-1',
-        topicID,
-        outcome: 'published',
-      })
-      await rows.meta.putEvents([{ ...seed.key, id: 'event-1', kind: 'accepted', entry }])
-    },
-  )
-  const bundle = await createKeyPackageBundle(identity)
-  const ordinary: KeyPackageRecord = {
-    kind: 'ordinary',
-    ref: await keyPackageRef(bundle.publicPackage),
-    keyPackage: encodeKeyPackage(bundle.publicPackage),
-    privatePackage: encodePrivateKeyPackage(bundle.privatePackage),
-    notAfter: Number(bundle.publicPackage.leafNode.lifetime.notAfter),
+        ])
+        await rows.cursor.save(topicID, '2')
+        const entry = {
+          seq: 7,
+          protocol: 'chat',
+          prc: 'posted',
+          data: plaintext,
+          status: 'accepted' as const,
+          lastAttempt: null,
+        }
+        await rows.outbox.put([entry])
+        await rows.meta.putSettlement(7, {
+          sequenceID: '10',
+          attemptID: 'publish-1',
+          topicID,
+          outcome: 'published',
+        })
+        await rows.meta.putEvents([{ ...seed.key, id: 'event-1', kind: 'accepted', entry }])
+      },
+    )
+    const bundle = await createKeyPackageBundle(identity)
+    const ordinary: KeyPackageRecord = {
+      kind: 'ordinary',
+      ref: await keyPackageRef(bundle.publicPackage),
+      keyPackage: encodeKeyPackage(bundle.publicPackage),
+      privatePackage: encodePrivateKeyPackage(bundle.privatePackage),
+      notAfter: Number(bundle.publicPackage.leafNode.lifetime.notAfter),
+    }
+    await initial.device.transition(
+      { mutationID: 'seed-device', expectedRevision: 0, group: null },
+      async (stores) => {
+        await stores.ordinary('source-1').put(ownerDID, ordinary)
+        // The receipt keeps its own real package reference, while another private record remains inspectable.
+        const consumedBundle = await createKeyPackageBundle(identity)
+        const consumed = {
+          ...ordinary,
+          ref: await keyPackageRef(consumedBundle.publicPackage),
+          keyPackage: encodeKeyPackage(consumedBundle.publicPackage),
+          privatePackage: encodePrivateKeyPackage(consumedBundle.privatePackage),
+        }
+        await stores.ordinary('source-1').put(ownerDID, consumed)
+        await stores.ordinary('source-1').consume(consumed.ref, params.id)
+        await stores
+          .lastResort('source-1')
+          .put(ownerDID, { ...ordinary, kind: 'last-resort', uploadedAt: null })
+        await stores.cleanup.put({
+          id: 'cleanup-1',
+          ownerDID,
+          sourceID: 'source-1',
+          ref: consumed.ref,
+          kind: 'ordinary',
+          groupID: params.id,
+          notAfter: ordinary.notAfter,
+        })
+        await stores.restore.save({
+          id: 'restore-1',
+          stage: 'invalidate',
+          remainingGroups: [params.id],
+        })
+      },
+    )
   }
-  await initial.device.transition(
-    { mutationID: 'seed-device', expectedRevision: 0, group: null },
-    async (stores) => {
-      await stores.ordinary('source-1').put(ownerDID, ordinary)
-      // The receipt keeps its own real package reference, while another private record remains inspectable.
-      const consumedBundle = await createKeyPackageBundle(identity)
-      const consumed = {
-        ...ordinary,
-        ref: await keyPackageRef(consumedBundle.publicPackage),
-        keyPackage: encodeKeyPackage(consumedBundle.publicPackage),
-        privatePackage: encodePrivateKeyPackage(consumedBundle.privatePackage),
-      }
-      await stores.ordinary('source-1').put(ownerDID, consumed)
-      await stores.ordinary('source-1').consume(consumed.ref, params.id)
-      await stores
-        .lastResort('source-1')
-        .put(ownerDID, { ...ordinary, kind: 'last-resort', uploadedAt: null })
-      await stores.cleanup.put({
-        id: 'cleanup-1',
-        ownerDID,
-        sourceID: 'source-1',
-        ref: consumed.ref,
-        kind: 'ordinary',
-        groupID: params.id,
-        notAfter: ordinary.notAfter,
-      })
-      await stores.restore.save({
-        id: 'restore-1',
-        stage: 'invalidate',
-        remainingGroups: [params.id],
-      })
-    },
-  )
   function active(): void {
     if (closed) throw new Error('Closed storage fixture')
   }
@@ -476,7 +559,37 @@ export async function createStorageFixture(params: {
     if (!(value instanceof Uint8Array)) throw new Error('Not sealed bytes')
     return value.slice()
   }
-  const fixture: PersistenceFixture<StorageTestPorts<MemoryTransaction>> = {
+  const fixture: RegistryStorageFixture = {
+    armNextWorkFault(point: WorkFaultPoint) {
+      active()
+      if (nextWorkFault !== undefined) throw new Error('Next work fault already armed')
+      const armed = arm(point)
+      nextWorkFault = armed
+      return { ...pendingControl(armed), mutationID: armed.mutation.promise }
+    },
+    armWorkFault(mutationID: string, point: WorkFaultPoint) {
+      active()
+      if (workFaults.has(mutationID)) throw new Error('Work fault already armed')
+      const armed = arm(point)
+      workFaults.set(mutationID, armed)
+      return pendingControl(armed)
+    },
+    holdProof(mutationID) {
+      active()
+      if (proofHolds.has(mutationID)) throw new Error('Proof already held')
+      const value = { started: deferred<void>(), released: deferred<void>() }
+      proofHolds.set(mutationID, value)
+      return { started: value.started.promise, release: () => value.released.resolve() }
+    },
+    async mutateMetadata(key, fn) {
+      active()
+      const location = { ...key, namespace: 'meta', recordID: JSON.stringify(['state-version']) }
+      const physicalKey = physicalRecordKey(location)
+      const bytes = ciphertext('meta', physicalKey)
+      const value = decodeStoredValue(await atRest.open(bytes, recordAAD(location)))
+      const changed = await atRest.seal(encodeStoredValue(fn(value)), recordAAD(location))
+      memoryFaults(db).forceCommittedRow('meta', physicalKey, changed)
+    },
     entry() {
       active()
       const capability = entryCapability(registeredGroups)
@@ -519,6 +632,11 @@ export async function createStorageFixture(params: {
       for (const key of db.snapshot()['group-owner']?.keys() ?? [])
         groups.add(address('group-owner', key).groupID)
       for (const groupID of groups) await db.completionBarrier({ groupID, devicePackages: false })
+      clearInstrumentation()
+      nextWorkFault = undefined
+      workFaults.clear()
+      for (const hold of proofHolds.values()) hold.released.resolve()
+      proofHolds.clear()
       db = createMemoryTransaction({ rows: db.snapshot() })
       fixture.ports = ports()
       return fixture.ports
@@ -704,6 +822,8 @@ export async function createStorageFixture(params: {
     },
     async close() {
       if (closed) return
+      for (const hold of proofHolds.values()) hold.released.resolve()
+      proofHolds.clear()
       sealLatch?.release()
       openLatch?.release()
       clearInstrumentation()

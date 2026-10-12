@@ -1,9 +1,12 @@
-import { randomIdentity } from '@kokuin/token'
+import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import {
   type ClientState,
+  commitKeyRotation,
+  createGroup,
   createKeyPackageBundle,
   encodeClientState,
   encodeGroupAnchor,
+  type GroupOptions,
   signLedgerEntry,
 } from '@kumiai/mls'
 
@@ -33,14 +36,25 @@ export async function makeStorageSeed(params: {
   incarnation: number
   epoch: number
   mode: 'real-mls' | 'double'
+  identity?: OwnIdentity
+  options?: GroupOptions
 }): Promise<StorageSeed> {
   const key = { groupID: params.id, incarnation: params.incarnation }
   let client: ClientState
   let trust: GroupRecoveryTrust
   if (params.mode === 'real-mls') {
-    const real = await createRealGroup(0, params.id)
-    while (real.committer.handle.epoch < params.epoch) await buildRealCommit(real)
-    const handle = real.committer.handle
+    const real = params.identity === undefined ? await createRealGroup(0, params.id) : null
+    let handle =
+      real === null
+        ? (await createGroup(params.identity ?? randomIdentity(), params.id, params.options)).group
+        : real.committer.handle
+    while (handle.epoch < params.epoch) {
+      if (real === null) handle = (await commitKeyRotation(handle)).newGroup
+      else {
+        await buildRealCommit(real)
+        handle = real.committer.handle
+      }
+    }
     client = structuredClone(handle.state)
     trust = {
       groupID: params.id,
@@ -60,7 +74,7 @@ export async function makeStorageSeed(params: {
     }
   } else {
     // Storage values only: this branch never constructs a GroupHandle.
-    const identity = randomIdentity()
+    const identity = params.identity ?? randomIdentity()
     const bundle = await createKeyPackageBundle(identity)
     const secret = () => crypto.getRandomValues(new Uint8Array(32))
     client = {
