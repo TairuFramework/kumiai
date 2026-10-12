@@ -40,6 +40,11 @@ export type MemoryGroupMLS = GroupMLS & {
   serializeState: () => Uint8Array
   restoreState: (state: Uint8Array) => void
   authenticator: () => Uint8Array
+  memberSlots: () => Array<[number, string]>
+  setReceiveState: (state: Uint8Array) => void
+  setReceiveHistory: (history: Array<[number, { identity: string; state: Uint8Array }]>) => void
+  receiveHistory: () => Array<[number, { identity: string; state: Uint8Array }]>
+  carryReceiveProgress: (candidate: MemoryGroupMLS) => void
   adoptOperation: (
     blob: Uint8Array,
     expected: Parameters<ControlAdoptionPort['adopt']>[1],
@@ -162,6 +167,8 @@ export type MemoryGroupMLSOptions = {
   bodies?: Array<string>
   /** The members this handle's tree holds a leaf for. Defaults to this member alone. */
   members?: Array<string>
+  memberSlots?: Array<[number, string]>
+  retainKeysForEpochs?: number
   /**
    * The group's commit policy, modelled: a Commit whose committer this refuses is
    * well-formed and deliberately NOT applied — a removed member's commit is exactly that.
@@ -259,6 +266,7 @@ type MemoryCommit = {
   /** Sender data remains readable, but tampered commit content cannot be processed. */
   invalidContent?: true
   missingProposal?: true
+  branch?: string
   /**
    * The roster op this Commit enacts, applied to `leaves` when the commit ADVANCES this handle.
    * The real double has no MLS proposals, so this stands in for the one tree effect a Commit's
@@ -292,6 +300,7 @@ export function encodeMemoryCommit(
     removes?: Array<string>
     /** Override the signer to forge: the commit claims `committerDID` but is signed by this. */
     signerDID?: string
+    branch?: string
   } = {},
 ): Uint8Array {
   // A commit that enacts nothing proposes no head extension: the head it found is the head it
@@ -303,6 +312,7 @@ export function encodeMemoryCommit(
     epoch,
     committerDID,
     entryIDs,
+    ...(options.branch == null ? {} : { branch: options.branch }),
     ...(head != null ? { head } : {}),
     ...(options.external === true ? { external: true } : {}),
     // A genuine commit is signed by the member it names. Only a forger passes these apart.
@@ -320,7 +330,9 @@ export function decodeMemoryCommit(commit: Uint8Array): MemoryCommit | null {
     const isDIDArray = (v: unknown): boolean =>
       Array.isArray(v) && v.every((did) => typeof did === 'string')
     if (
-      typeof value?.epoch !== 'number' ||
+      !Number.isSafeInteger(value?.epoch) ||
+      value.epoch < 0 ||
+      (value.branch != null && typeof value.branch !== 'string') ||
       typeof value?.committerDID !== 'string' ||
       (value.head != null && typeof value.head !== 'string') ||
       (value.external != null && typeof value.external !== 'boolean') ||
@@ -504,6 +516,9 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   const serveLedger = options.serveLedger ?? ((ledger: Array<string>) => ledger)
   let recoveryAuthenticator: string | undefined
   let epochIdentity: string | undefined
+  let receiveState: string | undefined
+  let receiveHistory = new Map<number, { identity: string; state: string }>()
+  const retainKeysForEpochs = options.retainKeysForEpochs ?? 4
   let epoch = options.epoch ?? 0
   let commits = 0
   let seen = 0
@@ -522,6 +537,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   ;(options.members ?? (localDID != null ? [localDID] : [])).forEach((did, i) => {
     slots.set(i, did)
   })
+
+  if (options.memberSlots != null) slots = new Map(options.memberSlots)
 
   const lowestFreeSlot = (target = slots): number => {
     let i = 0
@@ -604,6 +621,14 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   }
 
   const advance = (to: number): void => {
+    if (to === epoch + 1 && receiveState !== undefined) {
+      receiveHistory.set(epoch, { identity: toB64U(authenticator()), state: receiveState })
+      while (receiveHistory.size > retainKeysForEpochs) {
+        const oldest = Math.min(...receiveHistory.keys())
+        receiveHistory.delete(oldest)
+      }
+    }
+    receiveState = undefined
     recoveryAuthenticator = undefined
     epochIdentity = undefined
     epoch = to
@@ -681,6 +706,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
 
   const enact = (parsed: MemoryCommit, commit: Uint8Array): void => {
     const nextIdentity = toB64U(sha256(concatBytes(authenticator(), commit)))
+    advance(epoch + 1)
     ledger.push(...parsed.entryIDs)
     // The head is the committer's, not this receiver's: a handle whose ledger is incomplete
     // must stay visibly incomplete rather than re-anchor on its own truncated fold. A commit
@@ -703,25 +729,45 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       slotRemoveDID(parsed.committerDID)
       slotAdd(parsed.committerDID)
     }
-    advance(epoch + 1)
     epochIdentity = nextIdentity
   }
 
-  const serializeState = (): Uint8Array =>
-    fromUTF(
+  const durableState = (value: { epoch: number } & Record<string, unknown>): Uint8Array => {
+    const history = new Map(receiveHistory)
+    if (value.epoch === epoch + 1 && receiveState !== undefined) {
+      history.set(epoch, { identity: toB64U(authenticator()), state: receiveState })
+      while (history.size > retainKeysForEpochs) history.delete(Math.min(...history.keys()))
+    }
+    return fromUTF(
       JSON.stringify({
-        epoch,
-        slots: [...slots],
-        ledger,
-        ledgerHead,
-        bodies: [...bodies],
-        terminal: localDID !== undefined && ![...slots.values()].includes(localDID),
-        recoveryAuthenticator,
-        epochIdentity,
+        ...value,
+        groupID,
+        ownerDID: localDID,
+        receiveState: value.epoch === epoch ? receiveState : undefined,
+        receiveHistory: [...history],
+        binding: value.binding ?? binding,
+        ...(value.receiveHistory === undefined ? {} : { receiveHistory: value.receiveHistory }),
       }),
     )
+  }
+  const serializeState = (): Uint8Array =>
+    durableState({
+      epoch,
+      slots: [...slots],
+      ledger,
+      ledgerHead,
+      bodies: [...bodies],
+      terminal: localDID !== undefined && ![...slots.values()].includes(localDID),
+      recoveryAuthenticator,
+      epochIdentity,
+    })
   const restoreState = (state: Uint8Array): void => {
     const value = JSON.parse(toUTF(state)) as {
+      groupID?: string
+      ownerDID?: string
+      receiveState?: string
+      receiveHistory?: Array<[number, { identity: string; state: string }]>
+      binding?: MemoryRecoveryBinding
       epoch: number
       slots: Array<[number, string]>
       ledger: Array<string>
@@ -730,6 +776,10 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       recoveryAuthenticator?: string
       epochIdentity?: string
     }
+    if (value.groupID !== undefined && value.groupID !== groupID)
+      throw new Error('Memory state group mismatch')
+    if (localDID !== undefined && value.ownerDID !== undefined && value.ownerDID !== localDID)
+      throw new Error('Memory state owner mismatch')
     slots = new Map(value.slots)
     ledger = value.ledger
     ledgerHead = value.ledgerHead
@@ -737,6 +787,9 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     advance(value.epoch)
     recoveryAuthenticator = value.recoveryAuthenticator
     epochIdentity = value.epochIdentity
+    receiveState = value.receiveState
+    receiveHistory = new Map(value.receiveHistory ?? [])
+    binding = value.binding
   }
   const authenticator = (): Uint8Array => {
     const identity = recoveryAuthenticator ?? epochIdentity
@@ -846,6 +899,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
               bodies = new Map(value.bodies)
               advance(value.epoch)
               recoveryAuthenticator = value.recoveryAuthenticator
+              receiveHistory.clear()
+              receiveState = undefined
               binding = candidateBinding
               return
             }
@@ -865,16 +920,16 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             removed: false,
             epochAuthenticator: authenticator,
           })
-          const state = fromUTF(
-            JSON.stringify({
-              epoch: info.epoch + 1,
-              slots: [...nextSlots],
-              ledger: [],
-              ledgerHead: info.head,
-              bodies: [...bodies],
-              recoveryAuthenticator: toB64U(authenticator),
-            }),
-          )
+          const state = durableState({
+            epoch: info.epoch + 1,
+            receiveHistory: [],
+            binding: candidateBinding,
+            slots: [...nextSlots],
+            ledger: [],
+            ledgerHead: info.head,
+            bodies: [...bodies],
+            recoveryAuthenticator: toB64U(authenticator),
+          })
           try {
             await hostDB.saveState(storageID, state, write)
           } catch (error) {
@@ -891,6 +946,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
           slots = nextSlots
           advance(info.epoch + 1)
           recoveryAuthenticator = toB64U(authenticator)
+          receiveHistory.clear()
+          receiveState = undefined
           binding = candidateBinding
         }).catch((error: unknown) => {
           accepted = undefined
@@ -926,6 +983,63 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     serializeState,
     restoreState,
     authenticator,
+    memberSlots: () => [...slots].sort(([a], [b]) => a - b),
+    setReceiveState: (state) => {
+      receiveState = toB64U(state)
+    },
+    setReceiveHistory: (history) => {
+      const next = new Map<number, { identity: string; state: string }>()
+      for (const [at, held] of history) {
+        if (receiveHistory.get(at)?.identity !== held.identity)
+          throw new Error('Memory retained identity changed')
+        next.set(at, { identity: held.identity, state: toB64U(held.state) })
+      }
+      receiveHistory = next
+    },
+    receiveHistory: () =>
+      [...receiveHistory].map(([at, held]) => [
+        at,
+        {
+          identity: held.identity,
+          state: fromB64U(held.state),
+        },
+      ]),
+    carryReceiveProgress: (candidate) => {
+      const value = JSON.parse(toUTF(candidate.serializeState())) as {
+        groupID?: string
+        ownerDID?: string
+        epoch: number
+        receiveHistory: Array<[number, { identity: string; state: string }]>
+      }
+      const history = new Map(value.receiveHistory)
+      if (
+        value.groupID !== groupID ||
+        value.ownerDID !== localDID ||
+        value.epoch !== epoch + 1 ||
+        history.get(epoch)?.identity !== toB64U(authenticator()) ||
+        receiveState === undefined
+      )
+        throw new Error('Memory candidate source changed')
+      history.set(epoch, { identity: toB64U(authenticator()), state: receiveState })
+      for (const [at, target] of history) {
+        if (at >= epoch) continue
+        const source = receiveHistory.get(at)
+        if (source === undefined) history.delete(at)
+        else {
+          if (source.identity !== target.identity)
+            throw new Error('Memory retained identity changed')
+          history.set(at, { ...source })
+        }
+      }
+      candidate.restoreState(
+        fromUTF(
+          JSON.stringify({
+            ...JSON.parse(toUTF(candidate.serializeState())),
+            receiveHistory: [...history],
+          }),
+        ),
+      )
+    },
     adoptOperation: (blob, expected, write) =>
       serialise(async () => {
         const journal = decodeMemoryControlJournal(blob)
@@ -1012,6 +1126,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         return id
       })
       return encodeMemoryCommit(epoch, localDID ?? '', entryIDs, {
+        branch: toB64U(crypto.getRandomValues(new Uint8Array(16))),
         head: memoryLedgerHead([...ledger, ...entryIDs]),
         ...(options.adds != null ? { adds: options.adds } : {}),
         ...(options.removes != null ? { removes: options.removes } : {}),
@@ -1022,6 +1137,15 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       if (parsed == null || parsed.epoch !== epoch) {
         throw new Error("adopt: not a commit framed at this member's current epoch")
       }
+      if (
+        parsed.invalidContent ||
+        parsed.missingProposal ||
+        parsed.signerDID !== parsed.committerDID ||
+        parsed.committerDID !== localDID ||
+        !slotHas(parsed.committerDID) ||
+        !acceptsCommitter(parsed.committerDID)
+      )
+        throw new Error('adopt: unauthorised or invalid commit')
       enact(parsed, commit)
     },
     evict(did: string) {
@@ -1198,17 +1322,15 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         )
         const nextLedger = [...ledger, ...parsed.entryIDs]
         const nextHead = parsed.head ?? ledgerHead
-        const state = fromUTF(
-          JSON.stringify({
-            epoch: epochAfter,
-            slots: [...nextSlots],
-            ledger: nextLedger,
-            ledgerHead: nextHead,
-            bodies: [...nextBodies],
-            terminal: removed,
-            epochIdentity: nextIdentity,
-          }),
-        )
+        const state = durableState({
+          epoch: epochAfter,
+          slots: [...nextSlots],
+          ledger: nextLedger,
+          ledgerHead: nextHead,
+          bodies: [...nextBodies],
+          terminal: removed,
+          epochIdentity: nextIdentity,
+        })
         const write = context.adoption?.({
           incarnation: 1,
           epochAfter,
@@ -1232,12 +1354,12 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
           commits += 1
           return { applied: true, advanced: !removed, epochBefore, epochAfter }
         }
+        if (!removed) advance(epochAfter)
         bodies = nextBodies
         slots = nextSlots
         ledger = nextLedger
         ledgerHead = nextHead
         commits += 1
-        if (!removed) advance(epochAfter)
         epochIdentity = nextIdentity
         return { applied: true, advanced: !removed, epochBefore, epochAfter }
       }),
@@ -1260,17 +1382,16 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         }
         const nextBodies = new Map(bodies)
         for (const token of tokens) nextBodies.set(memoryEntryID(token), token)
-        const state = fromUTF(
-          JSON.stringify({
-            epoch,
-            slots: [...slots],
-            ledger: entryIDs,
-            ledgerHead,
-            bodies: [...nextBodies],
-            recoveryAuthenticator,
-            epochIdentity,
-          }),
-        )
+        const state = durableState({
+          epoch,
+          slots: [...slots],
+          ledger: entryIDs,
+          terminal: localDID !== undefined && ![...slots.values()].includes(localDID),
+          ledgerHead,
+          bodies: [...nextBodies],
+          recoveryAuthenticator,
+          epochIdentity,
+        })
         await hostDB.saveState(storageID, state)
         bodies = nextBodies
         ledger = entryIDs
