@@ -2,8 +2,13 @@ import {
   type Capabilities,
   type CiphersuiteName,
   defaultCapabilities,
+  defaultKeyPackageEqualityConfig,
+  defaultKeyRetentionConfig,
+  defaultLifetimeConfig,
+  defaultPaddingConfig,
   type GroupContextExtension,
   getCiphersuiteImpl,
+  type KeyRetentionConfig,
   type MlsContext,
 } from 'ts-mls'
 
@@ -36,12 +41,15 @@ export async function resolveMlsContext(
 ): Promise<MlsContext> {
   const name = (options?.ciphersuiteName ?? DEFAULT_CIPHERSUITE) as CiphersuiteName
   const cipherSuite = await getCiphersuiteImpl(name, options?.cryptoProvider ?? nobleCryptoProvider)
-  return createMlsContext(cipherSuite, anchor)
+  return createMlsContext(cipherSuite, anchor, options)
 }
+
+export type MlsContextOptions = { keyRetention?: Partial<KeyRetentionConfig> }
 
 export function createMlsContext(
   cipherSuite: MlsContext['cipherSuite'],
   anchor?: GroupAnchor,
+  options?: MlsContextOptions,
 ): MlsContext {
   // The deny set cannot be known here — the handle that folds it does not exist yet. Bind a mutable
   // holder the auth service reads; the GroupHandle constructor points it at its own currentDenySet().
@@ -56,7 +64,16 @@ export function createMlsContext(
     leafLifetime: () => holder.leafLifetime,
     trustedGrantLifetime: () => holder.trustedGrantLifetime,
   })
-  const context: MlsContext = { cipherSuite, authService }
+  const context: MlsContext = {
+    cipherSuite,
+    authService,
+    clientConfig: {
+      keyRetentionConfig: { ...defaultKeyRetentionConfig, ...options?.keyRetention },
+      lifetimeConfig: defaultLifetimeConfig,
+      keyPackageEqualityConfig: defaultKeyPackageEqualityConfig,
+      paddingConfig: defaultPaddingConfig,
+    },
+  }
   DENY_HOLDERS.set(context, holder)
   return context
 }

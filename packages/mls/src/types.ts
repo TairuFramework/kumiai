@@ -4,6 +4,7 @@ import type {
   GroupContextExtension,
   IncomingMessageCallback,
   KeyPackage,
+  KeyRetentionConfig,
   PrivateKeyPackage,
 } from 'ts-mls'
 
@@ -11,6 +12,8 @@ import type { ControllerBinding } from './credential.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
 
 export type GroupOptions = {
+  /** MLS key retention overrides. Unspecified fields keep the ts-mls defaults. */
+  keyRetention?: Partial<KeyRetentionConfig>
   /** Creator or key-package leaf binding. Creates a lifecycle group when passed to createGroup. */
   controller?: ControllerBinding
   /** Lifecycle leaf lifetime in seconds. Defaults to 86,400; maximum 604,800. */

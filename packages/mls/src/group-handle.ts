@@ -1826,10 +1826,12 @@ export function buildCommitPolicyContext(
 
 /** Build the handle a commit hands back: the post-commit state, everything else inherited. */
 export function deriveGroup(group: GroupHandle, state: ClientState): GroupHandle {
+  const context = createMlsContext(group.context.cipherSuite, group.anchor)
+  if (group.context.clientConfig != null) context.clientConfig = group.context.clientConfig
   return new GroupHandle({
     state,
     credential: group.credential,
-    context: createMlsContext(group.context.cipherSuite, group.anchor),
+    context,
     ledger: group.ledger,
     commitPolicy: group.commitPolicy,
     resolveLedgerEntries: group.resolveLedgerEntries,
