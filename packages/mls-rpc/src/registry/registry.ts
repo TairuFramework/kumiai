@@ -260,17 +260,25 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         },
       })
       owner.access = {
-        ...access,
         get key() {
           return access.key
         },
-        admission() {
-          assertOpen()
-          const reason = held(owner.key)
-          return reason === null
-            ? access.admission()
-            : { epoch: owner.snapshot.epoch, admissible: false, reason }
+        get runtime() {
+          return access.runtime
         },
+        epoch: access.epoch,
+        stateVersion: access.stateVersion,
+        admission() {
+          const admission = access.admission()
+          const reason = held(owner.key)
+          return reason === null ? admission : { epoch: admission.epoch, admissible: false, reason }
+        },
+        read: access.read,
+        readControl: access.readControl,
+        mutate: access.mutate,
+        replace: access.replace,
+        adopt: access.adopt,
+        onRetire: access.onRetire,
       }
       slot.owner = owner
     } else {

@@ -7,7 +7,7 @@ import {
   signLedgerEntry,
 } from '@kumiai/mls'
 import { forkEventID, recoveryUnavailableEventID } from '@kumiai/rpc'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import {
   bindEntryCapability,
@@ -16,6 +16,7 @@ import {
 } from '../src/entry-capability.js'
 import { createGroupHandleRegistry } from '../src/index.js'
 import type { GroupKey, GroupStores, MemoryTransaction } from '../src/persistence-types.js'
+import * as registryRuntime from '../src/registry/runtime.js'
 import { createRegistryRuntime } from '../src/registry/runtime.js'
 import { publicRuntimeFacts } from '../src/registry/runtime-facts.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
@@ -212,6 +213,37 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect(fixture.restoreCount(groupID)).toBe(count)
         expect(notifications).toEqual([2])
       } finally {
+        await fixture.close()
+      }
+    })
+
+    test('access follows a replaced runtime through later publications', async () => {
+      const fixture = await create()
+      const runtimeFactory = createRegistryRuntime
+      const controllers: Array<ReturnType<typeof createRegistryRuntime>> = []
+      const spy = vi.spyOn(registryRuntime, 'createRegistryRuntime').mockImplementation(() => {
+        const controller = runtimeFactory()
+        controllers.push(controller)
+        return controller
+      })
+      try {
+        const access = await registry(fixture).access(groupID)
+        const controller = controllers[0]
+        const snapshot = access.runtime.snapshot()
+        if (controller === undefined || snapshot === null) throw new Error('Missing runtime')
+        const replacement = runtimeFactory()
+        replacement.publish({ ...snapshot, epoch: 1, stateVersion: 2 })
+        controller.runtime = replacement.runtime
+        expect(access.runtime.snapshot()).toMatchObject({ ...key, epoch: 1, stateVersion: 2 })
+        const epochs: Array<number | undefined> = []
+        access.runtime.onEpochChanged((value) => {
+          epochs.push(value?.epoch)
+        })
+        replacement.publish({ ...snapshot, epoch: 2, stateVersion: 3 })
+        expect(access.runtime.snapshot()).toMatchObject({ ...key, epoch: 2, stateVersion: 3 })
+        expect(epochs).toEqual([2])
+      } finally {
+        spy.mockRestore()
         await fixture.close()
       }
     })

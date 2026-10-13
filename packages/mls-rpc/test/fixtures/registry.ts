@@ -206,9 +206,9 @@ export function registryFixtureObserve(
   return capability.observe(...args)
 }
 
-export async function registryFixtureSafety(fixture: RegistryFixture): Promise<GroupSafety> {
+export async function registryFixtureSafetyParams(fixture: RegistryFixture) {
   const handle = await fixture.makeHandle(0)
-  return createGroupSafety({
+  return {
     registry: fixture.registry,
     persistence: fixture.device.groups,
     mls: createGroupMLS({
@@ -224,7 +224,11 @@ export async function registryFixtureSafety(fixture: RegistryFixture): Promise<G
     resolveTarget: async () => {
       throw new Error('Unexpected target resolution')
     },
-  })
+  }
+}
+
+export async function registryFixtureSafety(fixture: RegistryFixture): Promise<GroupSafety> {
+  return createGroupSafety(await registryFixtureSafetyParams(fixture))
 }
 
 export async function createRegistryFixture(params: FixtureParams): Promise<RegistryFixture> {

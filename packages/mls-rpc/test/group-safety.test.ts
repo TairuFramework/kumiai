@@ -2,7 +2,6 @@ import { encodeClientState } from '@kumiai/mls'
 import { forkEventID, type GroupForkEvidence, recoveryUnavailableEventID } from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
-import { simpleHandleAccess } from '../src/access.js'
 import {
   bindEntryCapability,
   coordinatorBinding,
@@ -11,10 +10,11 @@ import {
 } from '../src/entry-capability.js'
 import {
   createGroupSafety,
+  DisplacedGroupHandleError,
   ForkReportRefusedError,
   ManualRecoveryUnavailableError,
 } from '../src/index.js'
-import { createGroupMLS, createLedgerEntrySlot } from '../src/mls.js'
+import { RegistryRetiringError } from '../src/persistence-errors.js'
 import type { GroupKey } from '../src/persistence-types.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { deferred } from '../src/runtime.js'
@@ -22,33 +22,15 @@ import {
   createRegistryFixture,
   type RegistryFixture,
   registryFixtureRestore,
+  registryFixtureRetirement,
   registryFixtureSafety,
+  registryFixtureSafetyParams,
 } from './fixtures/registry.js'
 
 function entry(fixture: RegistryFixture) {
   const value = entryCapability(fixture.device.groups)
   if (value === null) throw new Error('Missing entry capability')
   return value
-}
-async function factoryParams(fixture: RegistryFixture) {
-  const handle = await fixture.makeHandle(0)
-  return {
-    registry: fixture.registry,
-    persistence: fixture.device.groups,
-    mls: createGroupMLS({
-      access: simpleHandleAccess({
-        key: { groupID: handle.groupID, incarnation: 1 },
-        stateVersion: () => 1,
-        handle: () => handle,
-        adopt: () => {},
-      }),
-      identity: fixture.identity,
-      entrySlot: createLedgerEntrySlot(),
-    }),
-    resolveTarget: async () => {
-      throw new Error('Unexpected target resolution')
-    },
-  }
 }
 async function safety(fixture: RegistryFixture) {
   return registryFixtureSafety(fixture)
@@ -280,6 +262,44 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
+    test.each(['displaced', 'retiring', 'disposed'] as const)(
+      'latched admission preserves the %s access error',
+      async (state) => {
+        const fixture = await create()
+        try {
+          const access = await fixture.registry.access(groupID)
+          const api = await safety(fixture)
+          await api.reportFork(key, await authenticatorEvidence(fixture, key))
+          expect(access.admission()).toEqual({
+            epoch: 0,
+            admissible: false,
+            reason: 'fork-halted',
+          })
+          if (state === 'retiring') {
+            const attempt = registryFixtureRetirement(fixture.registry).beginRetirement(key)
+            try {
+              expect(access.admission).toThrow(new RegistryRetiringError({ key }))
+            } finally {
+              attempt.settle('rolled-back')
+            }
+            expect(access.admission()).toMatchObject({ reason: 'fork-halted' })
+          } else {
+            if (state === 'displaced') await (await move(fixture, key, 2))()
+            else await fixture.registry.dispose()
+            expect(access.admission).toThrow(
+              new DisplacedGroupHandleError(
+                state === 'displaced'
+                  ? 'Registry owner is no longer current'
+                  : 'Registry is disposed',
+              ),
+            )
+          }
+        } finally {
+          await fixture.close()
+        }
+      },
+    )
+
     test.each(['epoch', 'incarnation'] as const)(
       'report refuses moved %s identity',
       async (kind) => {
@@ -477,7 +497,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
-    test('report rollback isolates incarnation latch and unreadable snapshot retains safety admission', async () => {
+    test('report rollback isolates incarnation latch and unreadable state displaces access', async () => {
       const fixture = await create()
       try {
         const access = await fixture.registry.access(groupID)
@@ -493,7 +513,9 @@ for (const mode of ['real-mls', 'double'] as const) {
           .ports(key)
           .control.apply({ cursor: { position: null, epoch: 0 } }, 'unreadable')
         expect(access.runtime.snapshot()).toBeNull()
-        expect(access.admission()).toMatchObject({ reason: 'fork-halted' })
+        expect(access.admission).toThrow(
+          new DisplacedGroupHandleError('Registry owner is no longer current'),
+        )
       } finally {
         await fixture.close()
       }
@@ -507,6 +529,9 @@ for (const mode of ['real-mls', 'double'] as const) {
         ).rejects.toBeDefined()
         await (await move(fresh, key, 2))()
         expect(access.runtime.snapshot()).toBeNull()
+        expect(access.admission).toThrow(
+          new DisplacedGroupHandleError('Registry owner is no longer current'),
+        )
         expect((await fresh.registry.access(groupID)).admission().admissible).toBe(true)
         expect(await api.epochAuthenticator(key)).toBeNull()
       } finally {
@@ -522,7 +547,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         setup: 'seeded',
       })
       try {
-        const params = await factoryParams(fixture)
+        const params = await registryFixtureSafetyParams(fixture)
         expect(() => createGroupSafety({ ...params, registry: { ...params.registry } })).toThrow(
           TypeError,
         )
