@@ -1,6 +1,6 @@
 import { normalizeDID } from '@kokuin/token'
 import type { GroupHandle } from '@kumiai/mls'
-import type { ControlSnapshot, SendAdmission } from '@kumiai/rpc'
+import { type ControlSnapshot, controlSafetyHeld, type SendAdmission } from '@kumiai/rpc'
 
 import type { EntryReads, StateMetadata } from '../entry-capability.js'
 import { decodeStoredValue, encodeStoredValue, isStoredOpenFailure } from '../persistence-codec.js'
@@ -184,6 +184,8 @@ export async function loadValidatedGroup(
 
 export function admissionFor(value: ValidatedGroupState, control: ControlSnapshot): SendAdmission {
   const epoch = value.snapshot.epoch
+  const safety = controlSafetyHeld(control)
+  if (safety !== null) return { epoch, admissible: false, reason: safety }
   if (value.record.terminal || !value.ownMember)
     return { epoch, admissible: false, reason: 'terminal' }
   if (control.strand !== null) return { epoch, admissible: false, reason: 'stranded' }

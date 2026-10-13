@@ -68,12 +68,14 @@ export type {
 } from './owner-queue.js'
 export {
   DisplacedGroupHandleError,
+  ForkReportRefusedError,
   GroupControlUnsettledError,
   GroupStateConflictError,
   GroupStateUncertainError,
   GroupUnavailableError,
   type GroupUnavailableReason,
   InvalidAppEntryError,
+  ManualRecoveryUnavailableError,
   NonRootProviderError,
   OutboxReplacementError,
   PersistencePhaseError,
@@ -149,3 +151,9 @@ export {
   publishRevokeProof,
   type RevokeJournalOptions,
 } from './revoke.js'
+export {
+  createGroupSafety,
+  type GroupSafety,
+  type ManualRecovery,
+  type RecoveryTarget,
+} from './safety.js'

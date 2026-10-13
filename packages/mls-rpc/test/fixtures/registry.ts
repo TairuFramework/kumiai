@@ -19,6 +19,7 @@ import {
 import type { ConformanceControlSearchPort } from '@kumiai/rpc-conformance'
 import { createApplicationMessage } from 'ts-mls'
 
+import { simpleHandleAccess } from '../../src/access.js'
 import { encodeControlJournal } from '../../src/control-journal.js'
 import { controlBuildContexts } from '../../src/control-write-context.js'
 import {
@@ -27,6 +28,7 @@ import {
   type EntryCapability,
   entryCapability,
 } from '../../src/entry-capability.js'
+import { createGroupMLS, createLedgerEntrySlot } from '../../src/mls.js'
 import {
   decodeStoredValue,
   encodeStoredValue,
@@ -58,6 +60,7 @@ import type {
 } from '../../src/registry/types.js'
 import { type RecoveryEnvironment, registryOptions } from '../../src/registry/validation.js'
 import { deferred } from '../../src/runtime.js'
+import { createGroupSafety, type GroupSafety } from '../../src/safety.js'
 import { createRegistryRecovery } from './registry-recovery.js'
 import { createRegistryWelcomeHistory, registryHandle } from './registry-welcome.js'
 import { memoryModel, restoreMemoryControlHandle } from './sealed-memory-mls.js'
@@ -201,6 +204,27 @@ export function registryFixtureObserve(
   const capability = entryCapability(fixture.device.groups)
   if (capability === null) throw new Error('Unknown registry fixture capability')
   return capability.observe(...args)
+}
+
+export async function registryFixtureSafety(fixture: RegistryFixture): Promise<GroupSafety> {
+  const handle = await fixture.makeHandle(0)
+  return createGroupSafety({
+    registry: fixture.registry,
+    persistence: fixture.device.groups,
+    mls: createGroupMLS({
+      access: simpleHandleAccess({
+        key: { groupID: handle.groupID, incarnation: 1 },
+        stateVersion: () => 1,
+        handle: () => handle,
+        adopt: () => {},
+      }),
+      identity: fixture.identity,
+      entrySlot: createLedgerEntrySlot(),
+    }),
+    resolveTarget: async () => {
+      throw new Error('Unexpected target resolution')
+    },
+  })
 }
 
 export async function createRegistryFixture(params: FixtureParams): Promise<RegistryFixture> {

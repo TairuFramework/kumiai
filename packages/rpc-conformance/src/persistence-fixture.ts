@@ -251,12 +251,13 @@ export type ConformanceAccountedGroupObservation<Position extends string = strin
   stateStatus: 'missing' | 'null' | 'deleted' | 'readable' | 'unreadable'
   terminal: boolean | null
 }
-export type ConformanceEntryReads = {
+export type ConformanceEntryReads<Position extends string = string> = {
   lifetime(): Promise<ConformanceGroupLifetime | null>
   trust(): Promise<ConformanceGroupRecoveryTrust | null>
   metadata(incarnation: number): Promise<ConformanceStateMetadata | null>
   state(incarnation: number): Promise<ConformanceGroupStateRecord | null>
-  control(incarnation: number): Promise<ConformanceControlSnapshot>
+  control(incarnation: number): Promise<ConformanceControlSnapshot<Position>>
+  events(incarnation: number): Promise<Array<ConformancePersistenceEvent>>
   controlMutation(incarnation: number): Promise<string | null>
   diagnoseState(
     incarnation: number,

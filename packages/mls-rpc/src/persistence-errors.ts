@@ -121,3 +121,21 @@ export class SeedAdmissionRefusedError extends Error {
 export class RegistryRecoveryReplacementError extends Error {
   override name = 'RegistryRecoveryReplacementError'
 }
+
+export class ForkReportRefusedError extends Error {
+  override name = 'ForkReportRefusedError'
+  #reason: 'key' | 'epoch' | 'authenticator'
+
+  constructor(params: { reason: 'key' | 'epoch' | 'authenticator' }) {
+    super(`Fork report refused: ${params.reason}`)
+    this.#reason = params.reason
+  }
+
+  get reason(): 'key' | 'epoch' | 'authenticator' {
+    return this.#reason
+  }
+}
+
+export class ManualRecoveryUnavailableError extends Error {
+  override name = 'ManualRecoveryUnavailableError'
+}

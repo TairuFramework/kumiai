@@ -2009,6 +2009,86 @@ function testPreparedOwnership<TTx extends ConformanceGroupTransaction>(
         await fixture.close()
       }
     })
+    test('event reads are neutral and proof fenced', async () => {
+      const fixture = await params.createFixture(groupID)
+      let fault: ReturnType<typeof fixture.rejectCommitPending> | undefined
+      let committed = false
+      try {
+        const groups = fixture.ports.device.groups
+        const before = await fixture.inspectRows()
+        const phases: Array<string> = []
+        fixture.onPhase('work', () => {
+          phases.push('work')
+        })
+        const events = await fixture.entry().read(groupID, (reads) => reads.events(1))
+        expect(events).toHaveLength(1)
+        expect(phases).toEqual([])
+        const first = events[0]
+        if (first?.kind !== 'accepted') throw new Error('Missing app event')
+        first.entry.data.fill(0)
+        expect(await fixture.entry().read(groupID, (reads) => reads.events(1))).toEqual([
+          expect.objectContaining({
+            entry: expect.objectContaining({ data: utf8('plaintext-sentinel') }),
+          }),
+        ])
+        expect(await fixture.inspectRows()).toEqual(before)
+        const mutationID = 'event-tombstone'
+        await groups.transition(
+          await storageChange(groups, groupID, mutationID),
+          async (stores) => {
+            const life = await stores.lifetime.load()
+            const state = await stores.incarnation(1).state.load()
+            if (life === null || state === null) throw new Error('Missing source')
+            await stores.lifetime.save({
+              ...life,
+              activeIncarnation: null,
+              revision: life.revision + 1,
+              mutationID,
+            })
+            await stores
+              .incarnation(1)
+              .state.save({ ...key, deleted: true, version: state.version + 1 })
+          },
+        )
+        const tombstone = await fixture.inspectRows()
+        expect(await fixture.entry().read(groupID, (reads) => reads.events(1))).toHaveLength(1)
+        expect(await fixture.inspectRows()).toEqual(tombstone)
+        fixture.onPhase('work', () => {
+          fault = fixture.rejectCommitPending()
+        })
+        const writing = observed(
+          groups.transition(
+            await storageChange(groups, groupID, 'event-pending'),
+            async (stores) => {
+              await stores.incarnation(1).meta.putEvents([event])
+            },
+          ),
+        )
+        while (fault === undefined) await turn()
+        await within(fault.barrierWaiting)
+        let readStarted = false
+        const reading = observed(
+          fixture.entry().read(groupID, async (reads) => {
+            readStarted = true
+            return await reads.events(1)
+          }),
+        )
+        await turn()
+        expect(readStarted).toBe(false)
+        expect(reading.settled()).toBe(false)
+        await fault.finish('commit')
+        committed = true
+        expect((await within(writing.result)).ok).toBe(true)
+        const committedRows = await fixture.inspectRows()
+        const result = await within(reading.result)
+        expect(result.ok).toBe(true)
+        if (result.ok) expect(result.value).toHaveLength(2)
+        expect(await fixture.inspectRows()).toEqual(committedRows)
+      } finally {
+        await fault?.finish(committed ? 'commit' : 'rollback')
+        await fixture.close()
+      }
+    })
     test('read preserves revisions', async () => {
       const fixture = await params.createFixture(groupID)
       try {

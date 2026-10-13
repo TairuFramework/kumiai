@@ -4,6 +4,7 @@ import type * as Rpc from '@kumiai/rpc'
 import type * as Mirror from '@kumiai/rpc-conformance'
 import { expect, test } from 'vitest'
 
+import type { EntryReads } from '../src/entry-capability.js'
 import type * as Actual from '../src/persistence-types.js'
 import {
   createMemoryDevicePersistence,
@@ -102,6 +103,7 @@ test('returns detached raw snapshots and side rows without opening ciphertext', 
 
 // Each direction checks every value union and transaction/store callback signature.
 type ActualContracts = [
+  EntryReads,
   Actual.GroupKey,
   Actual.EpochIdentity,
   Actual.PackageUse,
@@ -164,6 +166,7 @@ type ActualContracts = [
   Rpc.SafetyHold,
 ]
 type MirrorContracts = [
+  Mirror.ConformanceEntryReads<Rpc.LogPosition>,
   Mirror.ConformanceGroupKey,
   Mirror.ConformanceEpochIdentity,
   Mirror.ConformancePackageUse,

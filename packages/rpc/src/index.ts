@@ -1,3 +1,5 @@
+export type { LogHub, MailboxHub } from '@kumiai/hub-tunnel'
+
 /**
  * High-level MLS-aware group RPC for Enkaku.
  *

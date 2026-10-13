@@ -1,4 +1,5 @@
 import { normalizeDID } from '@kokuin/token'
+import { controlSafetyHeld, type SafetyHold } from '@kumiai/rpc'
 
 import {
   type AccountedGroupObservation,
@@ -24,6 +25,7 @@ import {
 } from './retirement.js'
 import { createRegistryRuntime } from './runtime.js'
 import { accountedRuntime } from './runtime-facts.js'
+import { bindRegistrySafety } from './safety.js'
 import { createRegistrySeed } from './seed.js'
 import { readRecoverySource } from './source.js'
 import { createRegistrySwitch } from './switch.js'
@@ -64,6 +66,13 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     restore: params.restore,
   }
   const slots = new Map<string, GroupSlot>()
+  const latches = new Map<string, NonNullable<SafetyHold>>()
+  const keyID = (key: GroupKey) => JSON.stringify([key.groupID, key.incarnation])
+  const held = (key: GroupKey): SafetyHold => latches.get(keyID(key)) ?? null
+  function latch(key: GroupKey, reason: NonNullable<SafetyHold>): void {
+    groupSlot(key.groupID)
+    if (held(key) !== 'fork-halted') latches.set(keyID(key), reason)
+  }
   const observers = new Set<() => void>()
   const inflight = new Set<Promise<unknown>>()
   let closing = false
@@ -122,6 +131,14 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       const unsubscribe = capability.observe(
         groupID,
         (observation) => {
+          if (
+            observation.activeKey !== null &&
+            observation.controlStatus === 'readable' &&
+            observation.control !== null
+          ) {
+            const reason = controlSafetyHeld(observation.control)
+            if (reason !== null) latch(observation.activeKey, reason)
+          }
           const previous = observedSlot.owner
           observedSlot.generation++
           if (previous !== null) previous.cacheValid = false
@@ -199,6 +216,8 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       environment,
     )
     assertLoadCurrent()
+    const reason = controlSafetyHeld(control)
+    if (reason !== null) latch(value.key, reason)
     if (admittedOwner !== undefined && value.key.incarnation !== admittedOwner.key.incarnation)
       throw new DisplacedGroupHandleError('Registry access belongs to a retired incarnation')
     if (slot.owner === null || slot.owner.key.incarnation !== value.key.incarnation) {
@@ -216,7 +235,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         hooks: slot.hooks.callbacks,
         access: null,
       }
-      owner.access = createRegistryAccess({
+      const access = createRegistryAccess({
         owner,
         capability,
         environment,
@@ -240,6 +259,19 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
           else invalidate(slot)
         },
       })
+      owner.access = {
+        ...access,
+        get key() {
+          return access.key
+        },
+        admission() {
+          assertOpen()
+          const reason = held(owner.key)
+          return reason === null
+            ? access.admission()
+            : { epoch: owner.snapshot.epoch, admissible: false, reason }
+        },
+      }
       slot.owner = owner
     } else {
       slot.owner.value = value
@@ -454,6 +486,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       return await promise
     },
   }
+  bindRegistrySafety(registry, { binding: registryBinding, entry: capability, latch, held })
   bindRegistryRetirement(registry, retirement)
   liveRegistries.set(binding, registry)
   return registry

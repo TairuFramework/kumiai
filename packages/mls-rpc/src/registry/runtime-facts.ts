@@ -8,7 +8,7 @@ import {
   parseMLSCredentialIdentity,
   publicMembershipFacts,
 } from '@kumiai/mls'
-import type { SendAdmission } from '@kumiai/rpc'
+import { controlSafetyHeld, type SendAdmission } from '@kumiai/rpc'
 
 import type { AccountedGroupObservation } from '../entry-capability.js'
 import { assertTrustTransition } from '../persistence-guards.js'
@@ -104,6 +104,7 @@ export function accountedRuntime(params: {
       ownerDID,
     })
     const epoch = trust.installed.epoch
+    const safety = controlSafetyHeld(control)
     return {
       snapshot: {
         ...trust.installed,
@@ -113,13 +114,15 @@ export function accountedRuntime(params: {
         available: facts.ownPresent && !terminal,
       },
       admission:
-        terminal || !facts.ownPresent
-          ? { epoch, admissible: false, reason: 'terminal' }
-          : control.strand !== null
-            ? { epoch, admissible: false, reason: 'stranded' }
-            : facts.lapsed
-              ? { epoch, admissible: false, reason: 'lapsed' }
-              : { epoch, admissible: true },
+        safety !== null
+          ? { epoch, admissible: false, reason: safety }
+          : terminal || !facts.ownPresent
+            ? { epoch, admissible: false, reason: 'terminal' }
+            : control.strand !== null
+              ? { epoch, admissible: false, reason: 'stranded' }
+              : facts.lapsed
+                ? { epoch, admissible: false, reason: 'lapsed' }
+                : { epoch, admissible: true },
     }
   } catch {
     return null

@@ -10,6 +10,7 @@ import type {
   GroupStores,
   GroupTransaction,
   GroupTransition,
+  PersistenceEvent,
 } from './persistence-types.js'
 
 export type StateMetadata = GroupKey & {
@@ -39,6 +40,7 @@ export type EntryReads = {
   metadata(incarnation: number): Promise<StateMetadata | null>
   state(incarnation: number): Promise<GroupStateRecord | null>
   control(incarnation: number): Promise<ControlSnapshot>
+  events(incarnation: number): Promise<Array<PersistenceEvent>>
   controlMutation(incarnation: number): Promise<string | null>
   diagnoseState(
     incarnation: number,

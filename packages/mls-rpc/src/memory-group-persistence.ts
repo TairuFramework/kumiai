@@ -252,6 +252,10 @@ export function createMemoryGroupCoordinator(params: {
         tx,
         async (number: number) => await incarnation(number).control.load(),
       ),
+      events: memoryOperation(
+        tx,
+        async (number: number) => await incarnation(number).meta.events(),
+      ),
       controlMutation: memoryOperation(
         tx,
         async (incarnation: number) =>

@@ -6,6 +6,7 @@ import {
   publicMembershipFacts,
   signLedgerEntry,
 } from '@kumiai/mls'
+import { forkEventID, recoveryUnavailableEventID } from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
 import {
@@ -157,6 +158,39 @@ for (const mode of ['real-mls', 'double'] as const) {
         })
         expect(access.admission()).toEqual({ epoch: 0, admissible: false, reason: 'terminal' })
         expect(access.runtime.snapshot()?.available).toBe(false)
+        await fixture.installRows({
+          key,
+          control: {
+            recoveryUnavailable: {
+              ...key,
+              id: recoveryUnavailableEventID(key),
+              kind: 'group:recovery-unavailable',
+              reason: 'trust-unreadable',
+            },
+          },
+        })
+        expect(access.admission()).toEqual({
+          epoch: 0,
+          admissible: false,
+          reason: 'recovery-unavailable',
+        })
+        await fixture.installRows({
+          key,
+          control: {
+            forkHalt: {
+              eventID: forkEventID(key),
+              detectedAt: 42,
+              evidence: {
+                kind: 'digest-divergence',
+                epoch: 0,
+                position: '1',
+                localDigest: 'local',
+                remoteDigest: 'remote',
+              },
+            },
+          },
+        })
+        expect(access.admission()).toEqual({ epoch: 0, admissible: false, reason: 'fork-halted' })
       } finally {
         await fixture.close()
       }
