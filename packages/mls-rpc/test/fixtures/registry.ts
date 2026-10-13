@@ -25,7 +25,9 @@ import type {
   PackageUse,
   PersistenceEvent,
 } from '../../src/persistence-types.js'
+import { registryRetirement } from '../../src/registry/retirement.js'
 import { recoveryTrustFor } from '../../src/registry/trust.js'
+import type { GroupHandleRegistry } from '../../src/registry/types.js'
 import { type RecoveryEnvironment, registryOptions } from '../../src/registry/validation.js'
 import { deferred } from '../../src/runtime.js'
 import { createRegistryRecovery } from './registry-recovery.js'
@@ -108,10 +110,24 @@ const restorers = new WeakMap<
   RegistryFixtureBase,
   (record: GroupStateRecord & { deleted: false; state: Uint8Array }) => Promise<GroupHandle>
 >()
+const markerWriters = new WeakMap<RegistryFixtureBase, RegistryStorageFixture['forceOwnerMarker']>()
 export function registryFixtureRestore(fixture: RegistryFixtureBase) {
   const restore = restorers.get(fixture)
   if (restore === undefined) throw new Error('Unknown registry fixture')
   return restore
+}
+
+export function registryFixtureRetirement(registry: GroupHandleRegistry) {
+  return registryRetirement(registry)
+}
+
+export function registryFixtureForceOwnerMarker(
+  fixture: RegistryFixtureBase,
+  ...args: Parameters<RegistryStorageFixture['forceOwnerMarker']>
+): Promise<void> {
+  const write = markerWriters.get(fixture)
+  if (write === undefined) throw new Error('Unknown registry fixture')
+  return write(...args)
 }
 
 export function registryFixtureObserve(
@@ -289,6 +305,7 @@ async function assemble(
     armWorkFault: storage.armWorkFault,
   }
   restorers.set(fixture, restore)
+  markerWriters.set(fixture, storage.forceOwnerMarker)
   if (params.setup === 'seeded' && rows === undefined) {
     const handle = await fixture.makeHandle(0)
     await fixture.installRows({

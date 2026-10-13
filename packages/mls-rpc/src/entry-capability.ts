@@ -46,6 +46,8 @@ export type EntryReads = {
 }
 export type Prepared<T> = { expected: GroupTransition['expected']; value: T }
 export type EntryCapability<TTx extends GroupTransaction> = {
+  activity(groupID: string, excludingMutationID?: string): { generation: number; pending: number }
+  failureSignal?: AbortSignal
   observe(
     groupID: string,
     onProof: (observation: AccountedGroupObservation) => void,

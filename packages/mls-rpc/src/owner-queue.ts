@@ -57,6 +57,8 @@ export type OwnerEntry = {
   retain(proof: () => Promise<ProofOutcome>): Promise<ProofOutcome>
 }
 export type OwnerQueues = {
+  activity(groupID: string, excludingMutationID?: string): { generation: number; pending: number }
+  failureSignal: AbortSignal
   run<T>(
     kind: EntryKind,
     scopes: OwnerScopes,
@@ -117,6 +119,7 @@ export function createOwnerQueues(options?: {
   awaitRelease()
   const slots = new Map<string, Slot>()
   const entries = new Set<Owned>()
+  const activityGenerations = new Map<string, number>()
   const started = new Set<string>()
   const stopped = new AbortController()
   let failure: GroupStateConflictError | null = null
@@ -178,6 +181,22 @@ export function createOwnerQueues(options?: {
   }
 
   const queues: OwnerQueues = {
+    get failureSignal() {
+      return stopped.signal
+    },
+    activity(groupID, excludingMutationID) {
+      assertRunning()
+      let pending = 0
+      let excluded = 0
+      for (const { entry } of entries) {
+        if (entry.kind === 'read' || entry.scopes.groupID !== groupID) continue
+        if (excludingMutationID !== undefined && entry.mutationID === excludingMutationID)
+          excluded++
+        else pending++
+      }
+      // Rechecks exclude their own still-pending admission, never another entry's completion.
+      return { generation: (activityGenerations.get(groupID) ?? 0) - excluded, pending }
+    },
     get failure() {
       return failure
     },
@@ -292,6 +311,11 @@ export function createOwnerQueues(options?: {
         signal.removeEventListener('abort', cancelAttempt)
         binding.dispose()
         entries.delete(owned)
+        if (kind !== 'read' && scopes.groupID !== null)
+          activityGenerations.set(
+            scopes.groupID,
+            (activityGenerations.get(scopes.groupID) ?? 0) + 1,
+          )
         for (const unlock of releases.reverse()) unlock()
         releases.length = 0
         if (outcome === 'committed' && failure === null) {
@@ -547,6 +571,8 @@ export function createOwnerQueues(options?: {
         },
       }
       entries.add(owned)
+      if (kind !== 'read' && scopes.groupID !== null)
+        activityGenerations.set(scopes.groupID, (activityGenerations.get(scopes.groupID) ?? 0) + 1)
 
       async function cleanup(): Promise<void> {
         if (failure !== null || owned.proof !== null) return

@@ -9,6 +9,11 @@ import {
 import type { GroupTransaction } from '../persistence-types.js'
 import { createRegistryAccess, type RegistryOwner } from './access.js'
 import { admissionFor, type ColdEnvironment, loadValidatedGroup } from './cold.js'
+import {
+  bindRegistryRetirement,
+  createRegistryRetirement,
+  type RetirementSlot,
+} from './retirement.js'
 import { createRegistryRuntime } from './runtime.js'
 import { readRecoverySource } from './source.js'
 import type {
@@ -18,9 +23,7 @@ import type {
 } from './types.js'
 import { registryOptions } from './validation.js'
 
-type GroupSlot = {
-  generation: number
-  owner: RegistryOwner | null
+type GroupSlot = RetirementSlot & {
   load: { generation: number; promise: Promise<RegistryHandleAccess> } | null
 }
 class StaleRegistryGeneration extends Error {}
@@ -71,7 +74,14 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   function groupSlot(groupID: string): GroupSlot {
     let slot = slots.get(groupID)
     if (slot === undefined) {
-      slot = { generation: 0, owner: null, load: null }
+      slot = {
+        generation: 0,
+        retirementGeneration: 0,
+        lastRetirementKey: null,
+        retirement: null,
+        owner: null,
+        load: null,
+      }
       slots.set(groupID, slot)
     }
     return slot
@@ -84,24 +94,46 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     if (previous !== null && previous !== slot.owner) previous.runtime.publish(null)
     if (slot.owner !== null) slot.owner.runtime.publish(slot.owner.value.snapshot)
   }
+  const retirement = createRegistryRetirement({
+    slot: groupSlot,
+    drain: (groupID) => capability.read(groupID, async () => {}),
+    displace(slot, key) {
+      const previous = slot.owner
+      if (previous?.key.incarnation === key.incarnation) {
+        slot.owner = null
+        previous.runtime.publish(null)
+      }
+    },
+    failureSignal: capability.failureSignal,
+  })
   async function load(
     reads: EntryReads,
     groupID: string,
     slot: GroupSlot,
     generation = slot.generation,
+    admittedOwner?: RegistryOwner,
   ) {
-    if (slot.generation !== generation) throw new StaleRegistryGeneration()
+    function assertLoadCurrent(): void {
+      if (admittedOwner !== undefined) {
+        if (slot.owner !== admittedOwner)
+          throw new DisplacedGroupHandleError('Registry owner is no longer current')
+      } else if (slot.generation !== generation) throw new StaleRegistryGeneration()
+    }
+    assertLoadCurrent()
     const { value, control } = await loadValidatedGroup(
       reads,
       groupID,
-      slot.owner?.value ?? null,
+      slot.owner?.cacheValid ? slot.owner.value : null,
       environment,
     )
-    if (slot.generation !== generation) throw new StaleRegistryGeneration()
+    assertLoadCurrent()
+    if (admittedOwner !== undefined && value.key.incarnation !== admittedOwner.key.incarnation)
+      throw new DisplacedGroupHandleError('Registry access belongs to a retired incarnation')
     if (slot.owner === null || slot.owner.key.incarnation !== value.key.incarnation) {
       const owner: RegistryOwner = {
         key: { ...value.key },
         value,
+        cacheValid: true,
         admission: admissionFor(value, control),
         runtime: createRegistryRuntime(),
         hooks: new Set(),
@@ -111,19 +143,27 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         owner,
         capability,
         environment,
-        load: (reads) => load(reads, groupID, slot),
+        load: (reads) => load(reads, groupID, slot, slot.generation, owner),
         publish: () => publish(slot, owner),
         assertCurrent: () => {
           if (slot.owner !== owner)
             throw new DisplacedGroupHandleError('Registry owner is no longer current')
         },
-        invalidate: () => {
-          if (slot.owner === owner) invalidate(slot)
+        assertAvailable: () => {
+          if (slot.owner !== owner)
+            throw new DisplacedGroupHandleError('Registry owner is no longer current')
+          retirement.assertAvailable(groupID)
+        },
+        invalidate: (displaced) => {
+          if (slot.owner !== owner) return
+          if (slot.retirement !== null && !displaced) owner.cacheValid = false
+          else invalidate(slot)
         },
       })
       slot.owner = owner
     } else {
       slot.owner.value = value
+      slot.owner.cacheValid = true
       slot.owner.admission = admissionFor(value, control)
     }
     return value
@@ -134,11 +174,14 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       return capability.read(groupID, (reads) => readRecoverySource(reads, groupID))
     },
     async access(groupID) {
+      retirement.assertAvailable(groupID)
       await start()
       const slot = groupSlot(groupID)
+      retirement.assertAvailable(groupID)
       if (slot.load !== null && slot.load.generation === slot.generation)
         return await slot.load.promise
       let generation = slot.generation
+      const retirementGeneration = slot.retirementGeneration
       const previous = slot.owner
       let promise!: Promise<RegistryHandleAccess>
       promise = (async () => {
@@ -146,6 +189,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
           for (;;) {
             try {
               const access = await capability.read(groupID, async (reads) => {
+                retirement.assertGeneration(groupID, retirementGeneration)
                 await load(reads, groupID, slot, generation)
                 const access = slot.owner?.access
                 if (access === null || access === undefined)
@@ -155,8 +199,11 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
               if (slot.generation !== generation || slot.owner?.access !== access)
                 throw new StaleRegistryGeneration()
               publish(slot, previous)
+              retirement.assertGeneration(groupID, retirementGeneration)
               return access
             } catch (error) {
+              retirement.assertGeneration(groupID, retirementGeneration)
+              retirement.assertAvailable(groupID)
               if (!(error instanceof StaleRegistryGeneration)) {
                 if (
                   slot.generation === generation &&
@@ -180,6 +227,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       return await promise
     },
   }
+  bindRegistryRetirement(registry, retirement)
   liveRegistries.set(binding, registry)
   return registry
 }

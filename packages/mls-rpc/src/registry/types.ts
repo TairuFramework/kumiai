@@ -42,6 +42,12 @@ export type GroupHandleRegistry = {
 }
 export type ReadableGroupState = GroupStateRecord & { deleted: false; state: Uint8Array }
 
+export type RetirementAttempt = {
+  generation: number
+  drain(): Promise<void>
+  settle(outcome: 'committed' | 'rolled-back'): void
+}
+
 /** Providers must register entry capability and a shared coordinator token for every root wrapper.
  * Copied wrappers are unregistered; one live registry owns the shared token. */
 export type GroupHandleRegistryParams<TTx extends GroupTransaction> = {

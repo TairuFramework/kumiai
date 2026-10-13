@@ -1126,6 +1126,8 @@ export function createMemoryGroupCoordinator(params: {
     resolve,
   }
   const capability: EntryCapability<MemoryTransaction> = {
+    activity: (groupID, excludingMutationID) => owners.activity(groupID, excludingMutationID),
+    failureSignal: owners.failureSignal,
     observe(groupID, onProof, afterRelease) {
       const listener: Observer = { active: true, onProof, afterRelease }
       let listeners = observers.get(groupID)

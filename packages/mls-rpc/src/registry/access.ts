@@ -12,6 +12,7 @@ import type { RegistryHandleAccess } from './types.js'
 export type RegistryOwner = {
   key: GroupKey
   value: ValidatedGroupState
+  cacheValid: boolean
   admission: SendAdmission
   runtime: ReturnType<typeof createRegistryRuntime>
   hooks: Set<() => Promise<void>>
@@ -24,8 +25,9 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
   environment: ColdEnvironment
   load(reads: EntryReads): Promise<ValidatedGroupState>
   publish(): void
-  invalidate(): void
+  invalidate(displaced: boolean): void
   assertCurrent(): void
+  assertAvailable(): void
 }): RegistryHandleAccess {
   const { owner, capability, environment } = params
   async function isolated(reads: EntryReads): Promise<ControlRead> {
@@ -48,11 +50,15 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
       }
     } catch (error) {
       if (error instanceof GroupUnavailableError || error instanceof DisplacedGroupHandleError)
-        params.invalidate()
+        params.invalidate(
+          error instanceof DisplacedGroupHandleError ||
+            (error instanceof GroupUnavailableError && error.reason === 'deleted'),
+        )
       throw error
     }
   }
   async function read<T>(fn: (handle: GroupHandle) => T | Promise<T>): Promise<T> {
+    params.assertAvailable()
     try {
       return await capability.read(owner.key.groupID, async (reads) => {
         const { handle } = await isolated(reads)
@@ -63,6 +69,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     }
   }
   async function readControl<T>(fn: (scope: ControlReadScope) => Promise<T>): Promise<T> {
+    params.assertAvailable()
     try {
       return await capability.read(owner.key.groupID, async (reads) => {
         let active = true
@@ -89,15 +96,26 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     get runtime() {
       return owner.runtime.runtime
     },
-    epoch: () => owner.value.snapshot.epoch,
-    stateVersion: () => owner.value.record.version,
-    admission: () => ({ ...owner.admission }),
+    epoch() {
+      params.assertAvailable()
+      return owner.value.snapshot.epoch
+    },
+    stateVersion() {
+      params.assertAvailable()
+      return owner.value.record.version
+    },
+    admission() {
+      params.assertAvailable()
+      return { ...owner.admission }
+    },
     read,
     readControl,
     onRetire(hook) {
-      owner.hooks.add(hook)
+      params.assertAvailable()
+      const registered = () => hook()
+      owner.hooks.add(registered)
       return () => {
-        owner.hooks.delete(hook)
+        owner.hooks.delete(registered)
       }
     },
   }
