@@ -330,6 +330,137 @@ export type ControlStoreConformanceParams = {
   commitThenReject(): void
 }
 
+export function testControlSafetyInputConformance(params: {
+  open(): Promise<ConformanceControlStore>
+  reopen(): Promise<ConformanceControlStore>
+}): void {
+  const keyFields = ['forkHalt', 'recoveryUnavailable'] as const
+  const evidenceBodies: Array<ConformanceGroupForkEvidence> = [
+    {
+      kind: 'epoch-authenticator',
+      epoch: 4,
+      local: new Uint8Array([1]),
+      remote: new Uint8Array([2]),
+    },
+    {
+      kind: 'digest-divergence',
+      epoch: 4,
+      position: '004',
+      localDigest: 'local',
+      remoteDigest: 'remote',
+    },
+    { kind: 'unexplained-own-commit', epoch: 4, position: '004', digest: 'commit' },
+  ]
+  const safety = (key: ConformanceGroupKey, evidence = evidenceBodies[0]) => {
+    if (evidence === undefined) throw new Error('Missing evidence')
+    return {
+      forkHalt: {
+        eventID: JSON.stringify(['group:fork', key.groupID, key.incarnation]),
+        evidence,
+        detectedAt: 100,
+      },
+      recoveryUnavailable: {
+        ...key,
+        id: JSON.stringify(['group:recovery-unavailable', key.groupID, key.incarnation]),
+        kind: 'group:recovery-unavailable' as const,
+        reason: 'trust-unreadable' as const,
+      },
+    }
+  }
+
+  describe('ControlStore safety inputs', () => {
+    test.each(keyFields)('reads the supplied %s accessor once', async (field) => {
+      const store = await params.open()
+      const expected = safety(store.key)[field]
+      let reads = 0
+      const changes = Object.defineProperty({}, field, {
+        enumerable: true,
+        get: () => (++reads === 1 ? expected : null),
+      })
+      await store.apply(changes, 'accessor')
+      expect(reads).toBe(1)
+      const reopened = await params.reopen()
+      expect((await reopened.load())[field]).toEqual(expected)
+      await reopened.apply({ [field]: expected }, 'same-accessor')
+      expect((await reopened.load())[field]).toEqual(expected)
+    })
+
+    for (const shape of ['inherited', 'accessor', 'extra'] as const) {
+      test.each(evidenceBodies)(
+        `canonicalizes ${shape} safety bodies with $kind evidence`,
+        async (evidence) => {
+          const store = await params.open()
+          const expected = safety(store.key, evidence)
+          const materialize = <TValue extends object>(body: TValue): TValue => {
+            if (shape === 'inherited') return Object.create(body) as TValue
+            if (shape === 'extra') return { ...body, unknown: 'discard' }
+            const result = {}
+            for (const [name, value] of Object.entries(body)) {
+              let reads = 0
+              Object.defineProperty(result, name, {
+                enumerable: true,
+                get: () => (++reads === 1 ? value : undefined),
+              })
+            }
+            return result as TValue
+          }
+          const changes = {
+            forkHalt: materialize({ ...expected.forkHalt, evidence: materialize(evidence) }),
+            recoveryUnavailable: materialize(expected.recoveryUnavailable),
+          }
+          await store.apply(changes, 'materialized')
+          const reopened = await params.reopen()
+          const read = await reopened.load()
+          expect(read.forkHalt).toEqual(expected.forkHalt)
+          expect(read.recoveryUnavailable).toEqual(expected.recoveryUnavailable)
+          await reopened.apply(expected, 'identical')
+          expect(await reopened.load()).toEqual(read)
+          expect(await reopened.lastMutation()).toBe('identical')
+        },
+      )
+    }
+
+    test.each(keyFields)('preserves inherited and non-enumerable %s writes', async (field) => {
+      const store = await params.open()
+      const expected = safety(store.key)[field]
+      const changes: ConformanceControlChanges = Object.create({ [field]: expected })
+      await store.apply(changes, 'inherited')
+      const read = await store.load()
+      expect(read[field]).toEqual(expected)
+      await store.apply(Object.defineProperty({}, field, { value: expected }), 'non-enumerable')
+      expect(await store.load()).toEqual(read)
+      expect(await store.lastMutation()).toBe('non-enumerable')
+    })
+
+    for (const field of keyFields) {
+      test.each([null, undefined, {}, 'invalid'])(
+        `inherited ${field} value %j rejects ordinary writes atomically`,
+        async (value) => {
+          let store = await params.open()
+          for (const held of [false, true]) {
+            if (held) await store.apply(safety(store.key), 'safety')
+            const before = await store.load()
+            const marker = await store.lastMutation()
+            const changes: ConformanceControlChanges = Object.assign(
+              Object.create({ [field]: value }),
+              { putOutcomes: [{ id: 'bad', opID: null, at: 1, kind: 'lost' }] },
+            )
+            await expect(store.apply(changes, 'invalid-inherited')).rejects.toMatchObject(
+              value === null
+                ? { name: 'ControlSafetyImmutableError', field }
+                : { name: 'TypeError' },
+            )
+            const reopened = await params.reopen()
+            expect(await reopened.load()).toEqual(before)
+            expect(await reopened.lastMutation()).toBe(marker)
+            store = reopened
+          }
+        },
+      )
+    }
+  })
+}
+
 function fixtureBuilt(): ConformanceBuiltCommit {
   return {
     publishID: 'publish',
@@ -449,6 +580,10 @@ async function prepareSlot(host: ConformanceControlHost) {
 }
 
 export function testControlStoreConformance(params: ControlStoreConformanceParams): void {
+  testControlSafetyInputConformance({
+    open: async () => (await params.open()).control,
+    reopen: async () => (await params.reopen()).control,
+  })
   describe('ControlStore conformance', () => {
     const safety = (key: ConformanceGroupKey) => ({
       forkHalt: {
@@ -504,7 +639,7 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
                   evidence: { ...values.forkHalt.evidence, remote: new Uint8Array([8, 9]) },
                 },
               ]
-            : [{ ...values.recoveryUnavailable, detail: 'replacement' }]
+            : []
         for (const replacement of [null, ...replacements]) {
           const changes = {
             ...safety(host.control.key),

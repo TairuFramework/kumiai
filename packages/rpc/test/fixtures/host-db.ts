@@ -138,7 +138,24 @@ export function createMemoryHostDatabase(
         load: async () => structuredClone(read(storageID).control),
         lastMutation: async () => read(storageID).mutationID,
         apply: async (changes, mutationID) => {
-          const ownedChanges = structuredClone(changes)
+          const { forkHalt, recoveryUnavailable, ...ordinary } = changes
+          // Materialize safety before an own-property clone can erase supplied fields.
+          const safety = applyChanges(
+            emptyRecord().control,
+            {
+              ...('forkHalt' in changes ? { forkHalt } : {}),
+              ...('recoveryUnavailable' in changes ? { recoveryUnavailable } : {}),
+            },
+            null,
+            fixedKey,
+          )
+          const ownedChanges = {
+            ...structuredClone(ordinary),
+            ...(safety.forkHalt === null ? {} : { forkHalt: safety.forkHalt }),
+            ...(safety.recoveryUnavailable === null
+              ? {}
+              : { recoveryUnavailable: safety.recoveryUnavailable }),
+          }
           await transact(storageID, 'apply', (next) => {
             const proofKey = ownedChanges.commitOnceAcceptance?.source.key
             if (

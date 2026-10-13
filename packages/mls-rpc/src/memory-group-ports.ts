@@ -1,6 +1,11 @@
 import type { ControlChanges } from '@kumiai/rpc'
 
-import { copyStoredValue, sameStoredValue, statusEventID } from './memory-incarnation-stores.js'
+import {
+  copyControlChanges,
+  copyStoredValue,
+  sameStoredValue,
+  statusEventID,
+} from './memory-incarnation-stores.js'
 import { GroupStateConflictError, NonRootProviderError } from './persistence-errors.js'
 import type {
   AppOutboxEntry,
@@ -72,7 +77,7 @@ export function createMemoryGroupPorts(params: {
       },
       load: () => access.read(key, (stores) => stores.incarnation(key.incarnation).control.load()),
       async apply(changes, mutationID) {
-        const owned = copyStoredValue(changes)
+        const owned = copyControlChanges(changes, key)
         await access.write(
           key,
           (stores) => stores.incarnation(key.incarnation).control.apply(owned, mutationID),

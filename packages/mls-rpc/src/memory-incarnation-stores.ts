@@ -1,8 +1,15 @@
-import { applyChanges, type CommitOnceWriteContext, type ControlSnapshot } from '@kumiai/rpc'
+import {
+  applyChanges,
+  type CommitOnceWriteContext,
+  type ControlChanges,
+  type ControlSnapshot,
+} from '@kumiai/rpc'
 
 import { controlBuildContexts } from './control-write-context.js'
 import {
+  assertMemoryWrite,
   createUnlockedGroupStateStores,
+  memoryCallback,
   memoryOpen,
   memoryOperation,
   memoryReadAdmitted,
@@ -172,6 +179,28 @@ const emptyControl = (): ControlSnapshot => ({
   responses: [],
   cursor: null,
 })
+
+export function copyControlChanges(changes: ControlChanges, key: GroupKey): ControlChanges {
+  const { forkHalt, recoveryUnavailable, ...ordinary } = changes
+  // Materialize safety before an own-property clone can erase supplied fields.
+  const safety = applyChanges(
+    emptyControl(),
+    {
+      ...('forkHalt' in changes ? { forkHalt } : {}),
+      ...('recoveryUnavailable' in changes ? { recoveryUnavailable } : {}),
+    },
+    null,
+    key,
+  )
+  return {
+    ...copyStoredValue(ordinary),
+    ...(safety.forkHalt === null ? {} : { forkHalt: safety.forkHalt }),
+    ...(safety.recoveryUnavailable === null
+      ? {}
+      : { recoveryUnavailable: safety.recoveryUnavailable }),
+  }
+}
+
 const settlementID = (seq: number) => JSON.stringify(['settlement', seq])
 const eventID = (id: string) => JSON.stringify(['event', id])
 
@@ -297,7 +326,7 @@ export function createUnlockedIncarnationStores(params: {
         return (await control.load('current'))?.snapshot ?? emptyControl()
       },
       async apply(changes, mutationID) {
-        const owned = copyStoredValue(changes)
+        const owned = copyControlChanges(changes, key)
         if (mutationID !== groupMutationID(tx, key.groupID))
           throw new GroupStateConflictError('Control mutation mismatch')
         const owedOnly = Object.keys(owned).every(
@@ -480,6 +509,8 @@ export function createIncarnationStores(
 ): IncarnationStores {
   const stores = createUnlockedIncarnationStores(params)
   const { tx } = params
+  const key = { ...params.key }
+  const applyControl = memoryOperation(tx, stores.control.apply, 'side')
   return {
     state: {
       loadInitialIdentity: memoryOperation(tx, stores.state.loadInitialIdentity),
@@ -489,7 +520,11 @@ export function createIncarnationStores(
     },
     control: {
       load: memoryOperation(tx, stores.control.load),
-      apply: memoryOperation(tx, stores.control.apply, 'side'),
+      apply: async (changes, mutationID) => {
+        assertMemoryWrite(tx, 'side')
+        const owned = memoryCallback(tx, () => copyControlChanges(changes, key))
+        await applyControl(owned, mutationID)
+      },
     },
     anchor: {
       load: memoryOperation(tx, stores.anchor.load),

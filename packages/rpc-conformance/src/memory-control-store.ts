@@ -7,7 +7,9 @@ import type {
   ConformanceControlSnapshot,
   ConformanceControlStore,
   ConformanceEpochIdentity,
+  ConformanceForkHalt,
   ConformanceGroupKey,
+  ConformanceRecoveryUnavailableEvent,
   ConformanceSafetyHold,
   ConformanceSaveControlBuild,
 } from './control-store.js'
@@ -106,6 +108,39 @@ class ControlSafetyImmutableError extends Error {
   get field(): 'forkHalt' | 'recoveryUnavailable' {
     return this.#field
   }
+}
+
+function copyEvidence(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') return value
+  const kind: unknown = Reflect.get(value, 'kind')
+  const names =
+    kind === 'epoch-authenticator'
+      ? ['epoch', 'local', 'remote']
+      : kind === 'digest-divergence'
+        ? ['epoch', 'position', 'localDigest', 'remoteDigest']
+        : kind === 'unexplained-own-commit'
+          ? ['epoch', 'position', 'digest']
+          : ['epoch']
+  const result: Record<string, unknown> = { kind }
+  for (const name of names) {
+    const child: unknown = Reflect.get(value, name)
+    result[name] = child instanceof Uint8Array ? new Uint8Array(child) : child
+  }
+  return result
+}
+
+function copySafety(field: 'forkHalt' | 'recoveryUnavailable', value: unknown): unknown {
+  if (value === null || typeof value !== 'object') return value
+  const names =
+    field === 'forkHalt'
+      ? ['eventID', 'evidence', 'detectedAt']
+      : ['groupID', 'incarnation', 'id', 'kind', 'reason']
+  const result: Record<string, unknown> = {}
+  for (const name of names) {
+    const child: unknown = Reflect.get(value, name)
+    result[name] = field === 'forkHalt' && name === 'evidence' ? copyEvidence(child) : child
+  }
+  return result
 }
 
 function completeEvidence(value: unknown): boolean {
@@ -223,19 +258,24 @@ function mutateControl<Position extends string>(
   context: Context | null = null,
   key: ConformanceGroupKey | null = null,
 ): void {
-  const owned = cloneValue(changes)
+  const { forkHalt, recoveryUnavailable, ...ordinary } = changes
+  const safety: Pick<ConformanceControlChanges, 'forkHalt' | 'recoveryUnavailable'> = {}
+  if ('forkHalt' in changes) {
+    const body = copySafety('forkHalt', forkHalt)
+    checkSafetyIdentity('forkHalt', body, key)
+    safety.forkHalt = body as ConformanceForkHalt
+  }
+  if ('recoveryUnavailable' in changes) {
+    const body = copySafety('recoveryUnavailable', recoveryUnavailable)
+    checkSafetyIdentity('recoveryUnavailable', body, key)
+    safety.recoveryUnavailable = body as ConformanceRecoveryUnavailableEvent
+  }
   const fields = ['forkHalt', 'recoveryUnavailable'] as const
   for (const field of fields) {
-    if (Object.hasOwn(owned, field)) checkSafetyIdentity(field, owned[field], key)
-  }
-  for (const field of fields) {
-    if (
-      Object.hasOwn(owned, field) &&
-      snapshot[field] !== null &&
-      !equal(snapshot[field], owned[field])
-    )
+    if (field in safety && snapshot[field] !== null && !equal(snapshot[field], safety[field]))
       throw new ControlSafetyImmutableError(field)
   }
+  const owned = cloneValue(ordinary)
   const slot = owned.commitOnce === undefined ? snapshot.commitOnce : owned.commitOnce
   guard(snapshot.commitOnce, slot, context)
   const proof =
@@ -296,8 +336,8 @@ function mutateControl<Position extends string>(
   if (owned.commitOnce !== undefined) snapshot.commitOnce = owned.commitOnce
   snapshot.commitOnceAcceptance = proof
   if (owned.controlHold !== undefined) snapshot.controlHold = owned.controlHold
-  snapshot.forkHalt ??= owned.forkHalt ?? null
-  snapshot.recoveryUnavailable ??= owned.recoveryUnavailable ?? null
+  snapshot.forkHalt ??= safety.forkHalt ?? null
+  snapshot.recoveryUnavailable ??= safety.recoveryUnavailable ?? null
   if (owned.strand !== undefined) snapshot.strand = owned.strand
   if (owned.cursor !== undefined) snapshot.cursor = owned.cursor
   snapshot.operations.sort((a, b) => a.seq - b.seq)

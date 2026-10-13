@@ -71,6 +71,7 @@ export {
   type ConformanceSafetyHold,
   type ConformanceWelcomeObligation,
   type ControlStoreConformanceParams,
+  testControlSafetyInputConformance,
   testControlStoreConformance,
 } from './control-store.js'
 export { testDeviceStorageConformance } from './device-storage.js'

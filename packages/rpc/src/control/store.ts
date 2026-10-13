@@ -6,6 +6,7 @@ import {
   PeerDisposedError,
   StorageOutcomeUnknownError,
 } from '../errors.js'
+import type { ForkHalt, RecoveryUnavailableEvent } from './safety.js'
 import { forkEventID, recoveryUnavailableEventID } from './safety.js'
 import type {
   AdoptionExpected,
@@ -157,6 +158,55 @@ export function assertCommitOnceChange(
   throw new ControlStoreInvariantError('Commit-once slot change requires provider-verified context')
 }
 
+function materializeForkEvidence(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') return value
+  const body = value as Record<string, unknown>
+  const kind = body.kind
+  const epoch = body.epoch
+  switch (kind) {
+    case 'digest-divergence':
+      return {
+        kind,
+        epoch,
+        position: body.position,
+        localDigest: body.localDigest,
+        remoteDigest: body.remoteDigest,
+      }
+    case 'epoch-authenticator': {
+      const local = body.local
+      const remote = body.remote
+      return {
+        kind,
+        epoch,
+        local: local instanceof Uint8Array ? Uint8Array.from(local) : local,
+        remote: remote instanceof Uint8Array ? Uint8Array.from(remote) : remote,
+      }
+    }
+    case 'unexplained-own-commit':
+      return { kind, epoch, position: body.position, digest: body.digest }
+    default:
+      return { kind, epoch }
+  }
+}
+
+function materializeSafetyBody(field: 'forkHalt' | 'recoveryUnavailable', value: unknown): unknown {
+  if (value === null || typeof value !== 'object') return value
+  const body = value as Record<string, unknown>
+  return field === 'forkHalt'
+    ? {
+        eventID: body.eventID,
+        evidence: materializeForkEvidence(body.evidence),
+        detectedAt: body.detectedAt,
+      }
+    : {
+        groupID: body.groupID,
+        incarnation: body.incarnation,
+        id: body.id,
+        kind: body.kind,
+        reason: body.reason,
+      }
+}
+
 function validForkEvidence(value: unknown): boolean {
   if (value === null || typeof value !== 'object') return false
   const evidence = value as Record<string, unknown>
@@ -213,12 +263,20 @@ export function applyChanges(
   context: CommitOnceWriteContext | null = null,
   key: GroupKey | null = null,
 ): ControlSnapshot {
+  const safety: Pick<ControlChanges, 'forkHalt' | 'recoveryUnavailable'> = {}
   const fields = ['forkHalt', 'recoveryUnavailable'] as const
-  for (const field of fields) {
-    if (field in changes) assertSafetyIdentity(field, changes[field], key)
+  if ('forkHalt' in changes) {
+    const body = materializeSafetyBody('forkHalt', changes.forkHalt)
+    assertSafetyIdentity('forkHalt', body, key)
+    safety.forkHalt = body as ForkHalt
+  }
+  if ('recoveryUnavailable' in changes) {
+    const body = materializeSafetyBody('recoveryUnavailable', changes.recoveryUnavailable)
+    assertSafetyIdentity('recoveryUnavailable', body, key)
+    safety.recoveryUnavailable = body as RecoveryUnavailableEvent
   }
   for (const field of fields) {
-    if (field in changes && snapshot[field] !== null && !sameValue(snapshot[field], changes[field]))
+    if (field in safety && snapshot[field] !== null && !sameValue(snapshot[field], safety[field]))
       throw new ControlSafetyImmutableError(field)
   }
   const nextSlot = changes.commitOnce === undefined ? snapshot.commitOnce : changes.commitOnce
@@ -264,8 +322,8 @@ export function applyChanges(
     commitOnce: changes.commitOnce === undefined ? snapshot.commitOnce : changes.commitOnce,
     commitOnceAcceptance: acceptance,
     controlHold: changes.controlHold === undefined ? snapshot.controlHold : changes.controlHold,
-    forkHalt: snapshot.forkHalt ?? changes.forkHalt ?? null,
-    recoveryUnavailable: snapshot.recoveryUnavailable ?? changes.recoveryUnavailable ?? null,
+    forkHalt: snapshot.forkHalt ?? safety.forkHalt ?? null,
+    recoveryUnavailable: snapshot.recoveryUnavailable ?? safety.recoveryUnavailable ?? null,
     strand: changes.strand === undefined ? snapshot.strand : changes.strand,
     operations: putRows(
       snapshot.operations.filter((row) => !changes.deleteOperations?.includes(row.id)),

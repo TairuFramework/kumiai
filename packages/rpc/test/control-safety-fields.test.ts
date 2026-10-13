@@ -125,6 +125,51 @@ describe('control safety fields', () => {
     expect(Rpc.applyChanges(snapshot, {}).forkHalt).toEqual(expected)
   })
 
+  test.each(['forkHalt', 'recoveryUnavailable'] as const)(
+    'reads the supplied %s getter once and projects the validated body',
+    (field) => {
+      let reads = 0
+      const expected = field === 'forkHalt' ? halt() : unavailable()
+      const changes = Object.defineProperty({}, field, {
+        get: () => (++reads === 1 ? expected : null),
+      })
+      const snapshot = Rpc.applyChanges(empty(), changes, null, key)
+      expect(reads).toBe(1)
+      expect(snapshot[field]).toEqual(expected)
+      expect(Rpc.applyChanges(snapshot, { [field]: expected }, null, key)).toEqual(snapshot)
+    },
+  )
+
+  test.each(['inherited', 'accessor', 'extra'] as const)(
+    'materializes only known safety fields from %s bodies',
+    (shape) => {
+      const expected = { forkHalt: halt(), recoveryUnavailable: unavailable() }
+      const materialize = <TValue extends object>(value: TValue): TValue => {
+        if (shape === 'inherited') return Object.create(value) as TValue
+        if (shape === 'extra') return { ...value, unknown: 'discard' }
+        const body = {}
+        for (const [name, child] of Object.entries(value)) {
+          let reads = 0
+          Object.defineProperty(body, name, {
+            get: () => (++reads === 1 ? child : undefined),
+          })
+        }
+        return body as TValue
+      }
+      const changes = {
+        forkHalt: materialize({
+          ...expected.forkHalt,
+          evidence: materialize(expected.forkHalt.evidence),
+        }),
+        recoveryUnavailable: materialize(expected.recoveryUnavailable),
+      }
+      const snapshot = Rpc.applyChanges(empty(), changes, null, key)
+      expect(snapshot.forkHalt).toEqual(expected.forkHalt)
+      expect(snapshot.recoveryUnavailable).toEqual(expected.recoveryUnavailable)
+      expect(Rpc.applyChanges(snapshot, expected, null, key)).toEqual(snapshot)
+    },
+  )
+
   test('replacement rejects both-field and ordinary changes atomically', () => {
     const snapshot = Rpc.applyChanges(empty(), { forkHalt: halt() }, null, key)
     const before = structuredClone(snapshot)
