@@ -1,8 +1,8 @@
 import type { EntryReads, StateMetadata } from '../entry-capability.js'
 import { decodeStoredValue, encodeStoredValue, isStoredOpenFailure } from '../persistence-codec.js'
 import { GroupStateConflictError, GroupUnavailableError } from '../persistence-errors.js'
-import { assertTrustTransition } from '../persistence-guards.js'
 import type { GroupLifetime, GroupRecoveryTrust } from '../persistence-types.js'
+import { assertRecoverySourceTrust } from './source-trust.js'
 import type { RecoverySource } from './types.js'
 
 function refuseUnreadable(cause: unknown): never {
@@ -54,7 +54,7 @@ export async function readRecoverySource(
       trust === null
     )
       throw new GroupStateConflictError('Recovery source metadata or trust unavailable')
-    assertTrustTransition(null, trust)
+    assertRecoverySourceTrust(trust)
     if (
       trust.groupID !== groupID ||
       trust.installed.groupID !== key.groupID ||

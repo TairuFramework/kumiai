@@ -12,6 +12,7 @@ import {
   GroupUnavailableError,
   type RecoverySource,
 } from '../src/index.js'
+import type { GroupRecoveryTrust } from '../src/persistence-types.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import {
   createRegistryFixture,
@@ -250,6 +251,148 @@ for (const mode of ['real-mls', 'double'] as const) {
         await expect(registry(fixture).recoverySource(groupID)).rejects.toBeInstanceOf(
           GroupUnavailableError,
         )
+      } finally {
+        await fixture.close()
+      }
+    })
+
+    const malformedTrustCases: Array<{
+      name: string
+      damage(trust: GroupRecoveryTrust): unknown
+    }> = [
+      {
+        name: 'missing leaf payload',
+        damage: (trust) => ({ ...trust, signerTree: [{ nodeType: 1 }] }),
+      },
+      {
+        name: 'missing parent payload',
+        damage: (trust) => ({ ...trust, signerTree: [{ nodeType: 2 }] }),
+      },
+      { name: 'numeric ledger token', damage: (trust) => ({ ...trust, ledger: [42] }) },
+      { name: 'missing member ID', damage: (trust) => ({ ...trust, credential: { groupID } }) },
+      {
+        name: 'incomplete binding',
+        damage: (trust) => ({ ...trust, binding: { id: 'controller' } }),
+      },
+      {
+        name: 'malformed binding prefix',
+        damage: (trust) => ({
+          ...trust,
+          binding: { id: 'controller', capability: 'token', prefix: [42] },
+        }),
+      },
+      {
+        name: 'malformed device record',
+        damage: (trust) => ({
+          ...trust,
+          registry: { ...trust.registry, devices: new Map([['device', 42]]) },
+        }),
+      },
+      {
+        name: 'malformed controller record',
+        damage: (trust) => ({
+          ...trust,
+          registry: { ...trust.registry, controllers: new Map([['controller', 42]]) },
+        }),
+      },
+      {
+        name: 'malformed parent fields',
+        damage: (trust) => ({
+          ...trust,
+          signerTree: [
+            {
+              nodeType: 2,
+              parent: {
+                hpkePublicKey: new Uint8Array(),
+                parentHash: new Uint8Array(),
+                unmergedLeaves: ['leaf'],
+              },
+            },
+          ],
+        }),
+      },
+      ...[
+        'hpkePublicKey',
+        'signaturePublicKey',
+        'credential',
+        'capabilities',
+        'leafNodeSource',
+        'extensions',
+        'signature',
+        'lifetime',
+      ].map((field) => ({
+        name: `malformed leaf ${field}`,
+        damage: (trust: GroupRecoveryTrust) => {
+          const node = trust.signerTree.find((entry) => entry?.nodeType === 1)
+          if (node?.nodeType !== 1) throw new Error('Missing fixture leaf')
+          return { ...trust, signerTree: [{ ...node, leaf: { ...node.leaf, [field]: 42 } }] }
+        },
+      })),
+    ]
+
+    test.each(malformedTrustCases)(
+      '$name refuses malformed nested recovery trust',
+      async ({ damage }) => {
+        const fixture = await create()
+        try {
+          intercept(fixture, (reads) => ({
+            ...reads,
+            trust: async () => {
+              const trust = await reads.trust()
+              if (trust === null) throw new Error('Missing fixture trust')
+              // Inject a serializable malformed provider row at the administrative read boundary.
+              return damage(trust) as GroupRecoveryTrust
+            },
+          }))
+          await expect(registry(fixture).recoverySource(groupID)).rejects.toMatchObject({
+            name: 'GroupUnavailableError',
+            reason: 'invalid',
+          })
+        } finally {
+          await fixture.close()
+        }
+      },
+    )
+
+    test('complete public parent, update, commit and binding fields remain available', async () => {
+      const fixture = await create()
+      try {
+        const retained = await fixture.device.groups.loadTrust(groupID)
+        if (retained === null) throw new Error('Missing fixture trust')
+        const node = retained.signerTree.find((entry) => entry?.nodeType === 1)
+        if (node?.nodeType !== 1) throw new Error('Missing fixture leaf')
+        const { lifetime: _lifetime, ...publicLeaf } = node.leaf as typeof node.leaf & {
+          lifetime?: unknown
+        }
+        const trust: GroupRecoveryTrust = {
+          ...retained,
+          signerTree: [
+            node,
+            {
+              nodeType: 2,
+              parent: {
+                hpkePublicKey: new Uint8Array([1]),
+                parentHash: new Uint8Array([2]),
+                unmergedLeaves: [0],
+              },
+            },
+            undefined,
+            { nodeType: 1, leaf: { ...publicLeaf, leafNodeSource: 2 } },
+            {
+              nodeType: 1,
+              leaf: { ...publicLeaf, leafNodeSource: 3, parentHash: new Uint8Array([3]) },
+            },
+          ],
+          binding: {
+            id: 'controller',
+            capability: 'capability',
+            holderGrant: 'grant',
+            prefix: [{ event: { v: 1, t: 'icp', g: 0, s: 0, crit: true }, sigs: ['signature'] }],
+          },
+          ledger: ['token'],
+        }
+        intercept(fixture, (reads) => ({ ...reads, trust: async () => trust }))
+        expect((await registry(fixture).recoverySource(groupID)).trust).toEqual(trust)
       } finally {
         await fixture.close()
       }
