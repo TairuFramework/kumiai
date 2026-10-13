@@ -3,6 +3,7 @@ import {
   type CommitOnceWriteContext,
   type ControlChanges,
   type ControlSnapshot,
+  forkEventID,
 } from '@kumiai/rpc'
 
 import { controlBuildContexts } from './control-write-context.js'
@@ -357,10 +358,17 @@ export function createUnlockedIncarnationStores(params: {
           !(slotOnly && context?.kind === 'retirement' && sameStoredValue(context.key, key))
         )
           await active()
-        await control.save('current', {
-          snapshot: applyChanges(previous, owned, context, key),
-          mutationID,
-        })
+        const snapshot = applyChanges(previous, owned, context, key)
+        if (previous.forkHalt === null && snapshot.forkHalt !== null)
+          await putEvent({
+            ...key,
+            id: forkEventID(key),
+            kind: 'group:fork',
+            halt: snapshot.forkHalt,
+          })
+        if (previous.recoveryUnavailable === null && snapshot.recoveryUnavailable !== null)
+          await putEvent(snapshot.recoveryUnavailable)
+        await control.save('current', { snapshot, mutationID })
       },
     },
     anchor: {
@@ -487,6 +495,8 @@ export function createUnlockedIncarnationStores(params: {
             commitOnce: previous.snapshot.commitOnce,
             commitOnceAcceptance: previous.snapshot.commitOnceAcceptance,
             controlHold: previous.snapshot.controlHold,
+            forkHalt: previous.snapshot.forkHalt,
+            recoveryUnavailable: previous.snapshot.recoveryUnavailable,
             strand: previous.snapshot.strand,
             outcomes: previous.snapshot.outcomes,
             welcomes: previous.snapshot.welcomes,

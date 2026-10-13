@@ -2,6 +2,7 @@ import { signLedgerEntry } from '@kumiai/mls'
 import { asLogPosition, type ControlChanges, controlSettled } from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
+import { entryCapability } from '../src/entry-capability.js'
 import { physicalRecordKey } from '../src/persistence-codec.js'
 import type {
   AppOutboxEntry,
@@ -180,6 +181,81 @@ for (const mode of ['real-mls', 'double'] as const) {
           name: 'GroupStateConflictError',
         })
         expect(await fixture.inspectRows()).toEqual(before)
+      } finally {
+        await fixture.close()
+      }
+    })
+
+    test('retirement preserves safety fields, unacked events and local history', async () => {
+      let fixture = await create()
+      try {
+        const forkHalt = {
+          eventID: JSON.stringify(['group:fork', groupID, 1]),
+          detectedAt: 1234,
+          evidence: {
+            kind: 'unexplained-own-commit' as const,
+            epoch: 0,
+            position: '19',
+            digest: 'fork',
+          },
+        }
+        const recoveryUnavailable = {
+          ...source,
+          id: JSON.stringify(['group:recovery-unavailable', groupID, 1]),
+          kind: 'group:recovery-unavailable' as const,
+          reason: 'trust-unreadable' as const,
+        }
+        await fixture.installRows({
+          key: source,
+          control: {
+            forkHalt,
+            recoveryUnavailable,
+            putApplied: [
+              {
+                epoch: 0,
+                digest: 'local-commit',
+                payloadDigest: 'local-payload',
+                sequenceID: '10',
+                opID: null,
+                removed: false,
+              },
+            ],
+            putResponses: [
+              {
+                position: asLogPosition('10'),
+                digest: 'local-commit',
+                kind: 'applied',
+                epoch: 0,
+                epochAfter: 1,
+              },
+            ],
+            putOutcomes: [{ id: 'owed', opID: null, at: 42, kind: 'unknown' }],
+            cursor: { epoch: 0, position: asLogPosition('10') },
+          },
+        })
+        const before = await fixture.device.groups.ports(source).control.load()
+        await switchSource(fixture)
+        fixture = await fixture.reopen()
+        expect(await fixture.device.groups.ports(source).control.load()).toEqual(before)
+        const capability = entryCapability(fixture.device.groups)
+        if (capability === null) throw new Error('Missing Read capability')
+        expect(
+          await capability.read(groupID, async () =>
+            fixture.constructPrepareStores().incarnation(1).meta.events(),
+          ),
+        ).toEqual([
+          { ...source, id: forkHalt.eventID, kind: 'group:fork', halt: forkHalt },
+          recoveryUnavailable,
+        ])
+        expect(
+          await fixture.device.groups.ports({ groupID, incarnation: 2 }).control.load(),
+        ).toMatchObject({
+          forkHalt: null,
+          recoveryUnavailable: null,
+          applied: [],
+          responses: [],
+          cursor: null,
+        })
       } finally {
         await fixture.close()
       }

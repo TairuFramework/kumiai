@@ -43,6 +43,17 @@ const welcome = {
   epochAfter: 1,
   committed: true as const,
 }
+const forkHalt = {
+  eventID: JSON.stringify(['group:fork', groupID, 1]),
+  detectedAt: 1234,
+  evidence: { kind: 'unexplained-own-commit' as const, epoch: 0, position: '19', digest: 'fork' },
+}
+const recoveryUnavailable = {
+  ...key,
+  id: JSON.stringify(['group:recovery-unavailable', groupID, 1]),
+  kind: 'group:recovery-unavailable' as const,
+  reason: 'trust-unreadable' as const,
+}
 function entry(seq = 1): AppOutboxEntry {
   return {
     seq,
@@ -439,6 +450,56 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
+    test.each([
+      { label: 'fork halt', changes: { forkHalt } },
+      { label: 'recovery unavailable', changes: { recoveryUnavailable } },
+      { label: 'both safety fields', changes: { forkHalt, recoveryUnavailable } },
+    ])(
+      'delete under $label preserves safety and still requires drainage and settled control',
+      async ({ changes }) => {
+        let fixture = await create()
+        try {
+          const owner = registry(fixture)
+          const access = await owner.access(groupID)
+          let drained = 0
+          access.onRetire(async () => {
+            drained++
+          })
+          await fixture.installRows({
+            key,
+            control: { ...changes, putOutcomes: [outcome], putWelcomes: [welcome] },
+          })
+          const before = await fixture.inspectRows()
+          await expect(owner.delete(key)).rejects.toBeInstanceOf(GroupControlUnsettledError)
+          expect(drained).toBe(1)
+          expect(await fixture.inspectRows()).toEqual(before)
+          await fixture.device.groups
+            .ports(key)
+            .control.apply(
+              { deleteOutcomes: [outcome.id], deleteWelcomes: [welcome.opID] },
+              'settle-control',
+            )
+          await owner.delete(key)
+          expect(drained).toBe(2)
+          fixture = await fixture.reopen()
+          expect(await fixture.device.groups.loadState(key)).toMatchObject({ deleted: true })
+          expect(await fixture.device.groups.ports(key).control.load()).toMatchObject(changes)
+          expect(
+            await capability(fixture).read(groupID, async () =>
+              fixture.constructPrepareStores().incarnation(1).meta.events(),
+            ),
+          ).toEqual([
+            ...('forkHalt' in changes
+              ? [{ ...key, id: forkHalt.eventID, kind: 'group:fork', halt: forkHalt }]
+              : []),
+            ...('recoveryUnavailable' in changes ? [recoveryUnavailable] : []),
+          ])
+        } finally {
+          await fixture.close()
+        }
+      },
+    )
+
     test('delete fails uncertified entries once and retains trust, events, cleanup and host history', async () => {
       const fixture = await create()
       try {
@@ -517,6 +578,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           }
           await fixture.installRows({
             key,
+            control: { forkHalt, recoveryUnavailable },
             outbox: [certified],
             settlements: [{ seq: 1, value: obligation }],
           })

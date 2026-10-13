@@ -1,12 +1,14 @@
 import { describe, expect, test } from 'vitest'
 
-import type { ConformanceAdoptionWrite } from './control-store.js'
+import type { ConformanceAdoptionWrite, ConformanceControlChanges } from './control-store.js'
 import type {
   ConformanceGroupPersistence,
   ConformanceGroupStores,
   ConformanceGroupTransaction,
   ConformanceGroupTransition,
+  ConformancePersistenceEvent,
   ConformancePersistenceFixture,
+  GroupStorageConformanceParams,
   StorageConformanceParams,
   StorageTestPorts,
 } from './persistence-fixture.js'
@@ -15,6 +17,44 @@ const groupID = 'group-A'
 const key = { groupID, incarnation: 1 }
 const topicID = 'topic-secret'
 const utf8 = (value: string) => new TextEncoder().encode(value)
+
+const forkHalt = {
+  eventID: JSON.stringify(['group:fork', groupID, 1]),
+  detectedAt: 1234,
+  evidence: {
+    kind: 'digest-divergence' as const,
+    epoch: 3,
+    position: '10',
+    localDigest: 'local-commit',
+    remoteDigest: 'remote-commit',
+  },
+}
+const recoveryUnavailable = {
+  ...key,
+  id: JSON.stringify(['group:recovery-unavailable', groupID, 1]),
+  kind: 'group:recovery-unavailable' as const,
+  reason: 'trust-unreadable' as const,
+}
+const safetyRows: Array<{
+  field: 'forkHalt' | 'recoveryUnavailable'
+  changes: ConformanceControlChanges
+  event: ConformancePersistenceEvent
+}> = [
+  {
+    field: 'forkHalt',
+    changes: { forkHalt },
+    event: { ...key, id: forkHalt.eventID, kind: 'group:fork', halt: forkHalt },
+  },
+  { field: 'recoveryUnavailable', changes: { recoveryUnavailable }, event: recoveryUnavailable },
+]
+
+async function storageEvents<TTx extends ConformanceGroupTransaction>(
+  fixture: ConformancePersistenceFixture<StorageTestPorts<TTx>>,
+): Promise<Array<ConformancePersistenceEvent>> {
+  return fixture
+    .entry()
+    .read(groupID, async () => fixture.constructPrepareStores(key).incarnation(1).meta.events())
+}
 
 function containsBytes(haystack: Uint8Array, needle: Uint8Array): boolean {
   for (let start = 0; start <= haystack.length - needle.length; start++) {
@@ -253,9 +293,359 @@ export async function assertPartialLossSpentRefused<TTx extends ConformanceGroup
 }
 
 export function testGroupStorageConformance<TTx extends ConformanceGroupTransaction>(
-  params: StorageConformanceParams<TTx>,
+  params: GroupStorageConformanceParams<TTx>,
 ): void {
   describe(`Group storage conformance -- ${params.label}`, () => {
+    for (const { field, changes, event } of safetyRows) {
+      test(`${field}: halt and event co-commit`, async () => {
+        const fixture = await params.createFixture(groupID)
+        try {
+          const groups = fixture.ports.device.groups
+          await groups.ports(key).control.apply(changes, 'hold-safety')
+          expect((await groups.ports(key).control.load())[field]).toEqual(changes[field])
+          expect((await storageEvents(fixture)).filter((row) => row.id === event.id)).toEqual([
+            event,
+          ])
+          await groups.ports(key).control.apply(changes, 'repeat-safety')
+          await fixture.reopen()
+          expect((await storageEvents(fixture)).filter((row) => row.id === event.id)).toEqual([
+            event,
+          ])
+          await scanSealed(fixture)
+        } finally {
+          await fixture.close()
+        }
+      })
+
+      test.each(['after-first-write', 'before-commit', 'commit-then-reject'] as const)(
+        `${field}: fault/ambiguous COMMIT preserves both-or-neither on %s`,
+        async (point) => {
+          const fixture = await params.createFixture(groupID)
+          try {
+            const groups = fixture.ports.device.groups
+            const before = await fixture.inspectRows()
+            fixture.armWorkFault('hold-safety', point)
+            const writing = groups.ports(key).control.apply(changes, 'hold-safety')
+            if (point === 'commit-then-reject') await writing
+            else {
+              await expect(writing).rejects.toThrow()
+              expect(await fixture.inspectRows()).toEqual(before)
+            }
+            const committed = point === 'commit-then-reject'
+            const reopened = (await fixture.reopen()).device.groups
+            expect((await reopened.ports(key).control.load())[field]).toEqual(
+              committed ? changes[field] : null,
+            )
+            expect((await storageEvents(fixture)).filter((row) => row.id === event.id)).toEqual(
+              committed ? [event] : [],
+            )
+          } finally {
+            await fixture.close()
+          }
+        },
+      )
+
+      test.each(['commit', 'rollback'] as const)(
+        `${field}: pending proof preserves both-or-neither after %s`,
+        async (finish) => {
+          const fixture = await params.createFixture(groupID)
+          const proof = fixture.holdProof('hold-safety')
+          try {
+            const groups = fixture.ports.device.groups
+            const before = await fixture.inspectRows()
+            const fault = fixture.armWorkFault('hold-safety', 'pending')
+            let writeDone = false
+            const writing = groups
+              .ports(key)
+              .control.apply(changes, 'hold-safety')
+              .then(
+                () => {
+                  writeDone = true
+                },
+                (error: unknown) => {
+                  writeDone = true
+                  return error
+                },
+              )
+            await fault.rejected
+            await proof.started
+            expect(await fixture.inspectRows()).toEqual(before)
+            expect(writeDone).toBe(false)
+            let readDone = false
+            const reading = groups
+              .ports(key)
+              .control.load()
+              .then((snapshot) => {
+                readDone = true
+                return snapshot
+              })
+            await groups.ports({ groupID: 'group-B', incarnation: 1 }).control.load()
+            expect(readDone).toBe(false)
+            const resolution = groups.resolve(groupID, 'hold-safety')
+            await fault.finish(finish)
+            expect(readDone).toBe(false)
+            expect(writeDone).toBe(false)
+            proof.release()
+            expect(await writing).toEqual(
+              finish === 'commit'
+                ? undefined
+                : expect.objectContaining({ name: 'StorageOutcomeUnknownError' }),
+            )
+            expect((await reading)[field]).toEqual(finish === 'commit' ? changes[field] : null)
+            expect(await resolution).toBe(finish === 'commit' ? 'committed' : 'rolled-back')
+            await fixture.reopen()
+            expect((await storageEvents(fixture)).filter((row) => row.id === event.id)).toEqual(
+              finish === 'commit' ? [event] : [],
+            )
+            if (finish === 'rollback') expect(await fixture.inspectRows()).toEqual(before)
+          } finally {
+            proof.release()
+            await fixture.close()
+          }
+        },
+      )
+
+      test(`${field}: conflicting same-ID event rolls back control`, async () => {
+        const fixture = await params.createFixture(groupID)
+        try {
+          const groups = fixture.ports.device.groups
+          const conflict =
+            event.kind === 'group:fork'
+              ? { ...event, halt: { ...event.halt, detectedAt: 99 } }
+              : { ...key, id: event.id, kind: 'group:fork' as const, halt: forkHalt }
+          await groups.transition(
+            await storageChange(groups, groupID, 'preinstall-conflict'),
+            async (stores) => stores.incarnation(1).meta.putEvents([conflict]),
+          )
+          const before = await fixture.inspectRows()
+          const snapshot = await groups.ports(key).control.load()
+          await expect(
+            groups
+              .ports(key)
+              .control.apply(
+                { ...changes, putOutcomes: [{ id: 'mixed', opID: null, at: 9, kind: 'unknown' }] },
+                'conflict-safety',
+              ),
+          ).rejects.toMatchObject({ name: 'GroupStateConflictError' })
+          expect(await fixture.inspectRows()).toEqual(before)
+          expect(await groups.ports(key).control.load()).toEqual(snapshot)
+          expect((await storageEvents(fixture)).filter((row) => row.id === event.id)).toEqual([
+            conflict,
+          ])
+        } finally {
+          await fixture.close()
+        }
+      })
+
+      test(`${field}: ack keeps halt and identical reapply does not resurrect event`, async () => {
+        const fixture = await params.createFixture(groupID)
+        try {
+          const groups = fixture.ports.device.groups
+          await groups.ports(key).control.apply(changes, 'hold-safety')
+          expect((await storageEvents(fixture)).filter((row) => row.id === event.id)).toEqual([
+            event,
+          ])
+          await groups.transition(
+            await storageChange(groups, groupID, 'ack-safety'),
+            async (stores) => stores.incarnation(1).meta.ackEvent(event.id),
+          )
+          expect((await groups.ports(key).control.load())[field]).toEqual(changes[field])
+          await groups.ports(key).control.apply(changes, 'repeat-safety')
+          await fixture.reopen()
+          expect((await fixture.ports.device.groups.ports(key).control.load())[field]).toEqual(
+            changes[field],
+          )
+          expect((await storageEvents(fixture)).filter((row) => row.id === event.id)).toEqual([])
+        } finally {
+          await fixture.close()
+        }
+      })
+
+      test(`${field}: outbox cannot ack safety event`, async () => {
+        const fixture = await params.createFixture(groupID)
+        try {
+          const groups = fixture.ports.device.groups
+          await groups.transition(
+            await storageChange(groups, groupID, 'preinstall-safety'),
+            async (stores) => stores.incarnation(1).meta.putEvents([event]),
+          )
+          const before = await fixture.inspectRows()
+          await expect(groups.ports(key).outbox.ackEvent(event.id)).rejects.toBeInstanceOf(
+            TypeError,
+          )
+          expect(await fixture.inspectRows()).toEqual(before)
+          expect((await storageEvents(fixture)).filter((row) => row.id === event.id)).toEqual([
+            event,
+          ])
+          await groups.transition(
+            await storageChange(groups, groupID, 'ack-safety'),
+            async (stores) => stores.incarnation(1).meta.ackEvent(event.id),
+          )
+          const acknowledged = await fixture.inspectRows()
+          await groups.ports(key).outbox.ackEvent(event.id)
+          expect(await fixture.inspectRows()).toEqual(acknowledged)
+        } finally {
+          await fixture.close()
+        }
+      })
+
+      test(`${field}: absent stable safety ID is an idempotent outbox ack`, async () => {
+        const fixture = await params.createFixture(groupID)
+        try {
+          const groups = fixture.ports.device.groups
+          const before = await fixture.inspectRows()
+          await groups.ports(key).outbox.ackEvent(event.id)
+          expect(await fixture.inspectRows()).toEqual(before)
+        } finally {
+          await fixture.close()
+        }
+      })
+
+      test.each(['facade', 'transaction'] as const)(
+        `${field}: safety fields permit certified storage finalisation through %s`,
+        async (route) => {
+          const fixture = await params.createFixture(groupID)
+          try {
+            const groups = fixture.ports.device.groups
+            const outbox = groups.ports(key).outbox
+            const initialEntries = await outbox.list()
+            const attempted = {
+              seq: 31,
+              protocol: 'chat',
+              prc: 'posted',
+              data: utf8('certified-data'),
+              status: 'accepted' as const,
+              lastAttempt: {
+                incarnation: 1,
+                epoch: 3,
+                floor: null,
+                attempts: 1,
+                publishID: 'publish-1',
+                segment: 3,
+                topicID,
+              },
+            }
+            const occurrence = { incarnation: 1, segment: 3, topicID, position: '10' }
+            await groups.transition(
+              await storageChange(groups, groupID, 'bind-attempt'),
+              async (stores) => {
+                const rows = stores.incarnation(1)
+                await rows.outbox.put([attempted])
+                await rows.meta.putSettlement(31, {
+                  sequenceID: '10',
+                  attemptID: 'publish-1',
+                  topicID,
+                  outcome: 'published',
+                })
+              },
+            )
+            await groups.ports(key).control.apply(changes, 'hold-safety')
+            const before = await fixture.inspectRows()
+            await expect(outbox.remove(31, { ...occurrence, position: '11' })).rejects.toThrow(
+              'original occurrence',
+            )
+            expect(await fixture.inspectRows()).toEqual(before)
+            if (route === 'facade') await outbox.remove(31, occurrence)
+            else
+              await groups.transition(
+                await storageChange(groups, groupID, 'finalise-certified'),
+                async (stores) => {
+                  const rows = stores.incarnation(1)
+                  await rows.meta.putEvents([
+                    {
+                      ...key,
+                      id: 'original-publication',
+                      kind: 'published',
+                      entry: attempted,
+                      occurrence,
+                    },
+                  ])
+                  await rows.outbox.remove([31])
+                },
+              )
+            expect(await outbox.list()).toEqual(initialEntries)
+            expect(await outbox.loadSettlement(31)).toBeNull()
+            await fixture.reopen()
+            expect((await fixture.ports.device.groups.ports(key).control.load())[field]).toEqual(
+              changes[field],
+            )
+            expect(await fixture.ports.device.groups.ports(key).outbox.list()).toEqual(
+              initialEntries,
+            )
+            expect(
+              await fixture.ports.device.groups.ports(key).outbox.loadSettlement(31),
+            ).toBeNull()
+            expect(
+              (await fixture.ports.device.groups.ports(key).outbox.events()).filter(
+                (row) => row.kind === 'published',
+              ),
+            ).toEqual([
+              { ...key, id: expect.any(String), kind: 'published', entry: attempted, occurrence },
+            ])
+            expect((await storageEvents(fixture)).filter((row) => row.id === event.id)).toEqual([
+              event,
+            ])
+          } finally {
+            await fixture.close()
+          }
+        },
+      )
+    }
+
+    test.each(['clear', 'terminal', 'retire', 'delete'] as const)(
+      '%s preserves both safety fields and unacked events',
+      async (action) => {
+        const fixture = await params.createFixture(groupID)
+        const donor = action === 'retire' ? await params.createFixture(groupID) : null
+        try {
+          const groups = fixture.ports.device.groups
+          const seed = await storageSeed(donor?.ports.device.groups ?? groups)
+          await groups.ports(key).control.apply({ forkHalt, recoveryUnavailable }, 'hold-safety')
+          if (action === 'clear' || action === 'delete')
+            await fixture.deleteCommittedRow(
+              'meta',
+              JSON.stringify([groupID, 1, JSON.stringify(['settlement', 7])]),
+            )
+          await groups.transition(
+            await storageChange(groups, groupID, 'preserve-safety'),
+            async (stores) => {
+              const rows = stores.incarnation(1)
+              if (action === 'terminal') {
+                const state = await rows.state.load()
+                if (state === null || state.deleted) throw new Error('Missing active state')
+                await rows.state.save({ ...state, version: state.version + 1, terminal: true })
+              } else if (action === 'retire') {
+                await writeStorageInstall(stores, seed, 'preserve-safety', 2)
+              } else {
+                await rows.clearTransport()
+                if (action === 'delete') {
+                  const life = await stores.lifetime.load()
+                  if (life === null) throw new Error('Missing lifetime')
+                  await stores.lifetime.save({
+                    ...life,
+                    activeIncarnation: null,
+                    revision: life.revision + 1,
+                    mutationID: 'preserve-safety',
+                  })
+                }
+              }
+            },
+          )
+          await fixture.reopen()
+          expect(await fixture.ports.device.groups.ports(key).control.load()).toMatchObject({
+            forkHalt,
+            recoveryUnavailable,
+          })
+          expect(
+            (await storageEvents(fixture)).filter((row) => row.kind.startsWith('group:')),
+          ).toEqual(safetyRows.map((row) => row.event))
+        } finally {
+          await fixture.close()
+          await donor?.close()
+        }
+      },
+    )
+
     test.each([
       { label: 'ordinary failure', reason: 'removed' as const, stableID: true },
       {

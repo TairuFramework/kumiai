@@ -629,3 +629,25 @@ export type StorageConformanceParams<TTx extends ConformanceGroupTransaction> = 
     options?: FixtureOptions<TTx>,
   ): Promise<ConformancePersistenceFixture<StorageTestPorts<TTx>>>
 }
+
+export type GroupStorageConformanceParams<TTx extends ConformanceGroupTransaction> = Omit<
+  StorageConformanceParams<TTx>,
+  'createFixture'
+> & {
+  createFixture(
+    id: string,
+    options?: FixtureOptions<TTx>,
+  ): Promise<
+    ConformancePersistenceFixture<StorageTestPorts<TTx>> & {
+      armWorkFault(
+        mutationID: string,
+        point: 'pending',
+      ): Pick<ConformancePendingCommitFault, 'rejected' | 'finish'>
+      armWorkFault(
+        mutationID: string,
+        point: 'after-first-write' | 'before-commit' | 'commit-then-reject',
+      ): void
+      holdProof(mutationID: string): { started: Promise<void>; release(): void }
+    }
+  >
+}

@@ -3,6 +3,7 @@ import {
   type AppliedCommit,
   asLogPosition,
   type ControlSlot,
+  type ForkHalt,
   type Operation,
   type Outcome,
 } from '@kumiai/rpc'
@@ -74,6 +75,11 @@ const obligation: AppSettlementObligation = {
   outcome: 'published',
 }
 const event: PersistenceEvent = { ...key, id: 'event-1', kind: 'accepted', entry }
+const forkHalt: ForkHalt = {
+  eventID: JSON.stringify(['group:fork', groupID, 1]),
+  detectedAt: 1234,
+  evidence: { kind: 'unexplained-own-commit', epoch: 3, position: '10', digest: 'fork-commit' },
+}
 const applied: AppliedCommit = {
   epoch: 3,
   digest: 'digest-3',
@@ -1315,6 +1321,23 @@ for (const mode of ['real-mls', 'double'] as const) {
       memoryFaults(db).commitThenReject()
       await ports.outbox.put(entry)
       expect(await ports.outbox.list()).toEqual([entry])
+    })
+
+    test('outbox ack checks the stored event kind rather than the stable safety ID', async () => {
+      const { groups } = await setup()
+      const appEvent = { ...event, id: forkHalt.eventID }
+      await groups.transition(
+        await nextChange(groups, groupID, 'app-with-safety-id'),
+        async (stores) => stores.incarnation(1).meta.putEvents([appEvent]),
+      )
+      await groups.ports(key).outbox.ackEvent(forkHalt.eventID)
+      expect(await groups.ports(key).outbox.events()).not.toContainEqual(appEvent)
+      await groups.ports(key).control.apply({ forkHalt }, 'halt-after-app-ack')
+      const before = await groups.ports(key).control.load()
+      await expect(groups.ports(key).outbox.ackEvent(forkHalt.eventID)).rejects.toBeInstanceOf(
+        TypeError,
+      )
+      expect(await groups.ports(key).control.load()).toEqual(before)
     })
 
     test('keeps owed records and fork evidence on transport clearing and refuses unresolved obligations', async () => {

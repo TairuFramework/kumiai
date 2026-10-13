@@ -241,12 +241,12 @@ export function createMemoryGroupPorts(params: {
       async ackEvent(id) {
         await access.write(key, (stores) => stores.incarnation(key.incarnation).meta.ackEvent(id), {
           async check(stores) {
-            if (
-              !(await stores.incarnation(key.incarnation).meta.events()).some(
-                (event) => event.id === id,
-              )
+            const event = (await stores.incarnation(key.incarnation).meta.events()).find(
+              (event) => event.id === id,
             )
-              unchangedGroupResult(undefined)
+            if (event === undefined) unchangedGroupResult(undefined)
+            if (event.kind === 'group:fork' || event.kind === 'group:recovery-unavailable')
+              throw new TypeError('App outbox cannot acknowledge a safety event')
           },
         })
       },
