@@ -22,6 +22,7 @@ import type {
   ConformancePersistenceEvent,
   ConformanceStorageAppOutboxEntry,
 } from './persistence-fixture.js'
+import type { ConformanceGroupSafety } from './safety.js'
 
 export type ConformanceRegistryHandle = {
   groupID: string
@@ -187,7 +188,9 @@ export type ConformanceRegistryFixtureBase<
   inspectRows(): Promise<Record<string, Map<string, unknown>>>
   corruptState(key: ConformanceGroupKey): Promise<void>
   removeStateBytes(key: ConformanceGroupKey): Promise<void>
-  corruptTrust(groupID: string): Promise<void>
+  corruptTrust(groupID: string, damage?: 'unreadable' | 'empty-spent'): Promise<void>
+  removeTrust(groupID: string): Promise<void>
+  failTrustReads(error: Error | null): void
   mutateMetadata(key: ConformanceGroupKey, fn: (value: unknown) => unknown): Promise<void>
   holdColdPublication(groupID: string): { started: Promise<void>; release(): void }
   holdRestore(groupID: string): { started: Promise<void>; release(): void }
@@ -221,5 +224,6 @@ export type ConformanceRegistryFixture<
   TTx extends ConformanceGroupTransaction = ConformanceGroupTransaction,
 > = Omit<ConformanceRegistryFixtureBase<THandle, TTx>, 'reopen'> & {
   registry: ConformanceRegistry<THandle>
+  safety(): ConformanceGroupSafety
   reopen(): Promise<ConformanceRegistryFixture<THandle, TTx>>
 }

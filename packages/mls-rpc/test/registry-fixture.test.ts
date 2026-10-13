@@ -46,6 +46,23 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
+    test('complete fixture forwards a synchronous safety factory through reopen', async () => {
+      let fixture = await create('seeded')
+      try {
+        for (let round = 0; round < 3; round++) {
+          expect(fixture).toHaveProperty('safety', expect.any(Function))
+          const api = fixture.safety()
+          expect(api).not.toHaveProperty('then')
+          expect(await api.epochAuthenticator(key)).toEqual(
+            (await fixture.device.groups.loadTrust(groupID))?.installed,
+          )
+          if (round < 2) fixture = await fixture.reopen()
+        }
+      } finally {
+        await fixture.close()
+      }
+    })
+
     test('failed mutation proof read preserves the next work phase callback', async () => {
       const fixture = await create('seeded')
       try {

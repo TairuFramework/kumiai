@@ -119,3 +119,8 @@ export {
 export * from './persistence-fixture.js'
 export { testRegistryConformance, testRegistryCrashConformance } from './registry.js'
 export * from './registry-fixture.js'
+export {
+  type ConformanceGroupSafety,
+  type ConformanceManualRecovery,
+  runGroupSafetyContract,
+} from './safety.js'

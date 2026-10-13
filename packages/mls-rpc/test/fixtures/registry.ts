@@ -26,6 +26,7 @@ import {
   bindEntryCapability,
   coordinatorBinding,
   type EntryCapability,
+  type EntryReads,
   entryCapability,
 } from '../../src/entry-capability.js'
 import { createGroupMLS, createLedgerEntrySlot } from '../../src/mls.js'
@@ -33,6 +34,7 @@ import {
   decodeStoredValue,
   encodeStoredValue,
   physicalRecordKey,
+  sealRecord,
 } from '../../src/persistence-codec.js'
 import type {
   AppOutboxEntry,
@@ -44,6 +46,7 @@ import type {
   GroupStores,
   MemoryStoreRows,
   MemoryTransaction,
+  OwnershipContextPort,
   PackageUse,
   PersistenceEvent,
   TransactionalGroupEffects,
@@ -61,6 +64,7 @@ import type {
 import { type RecoveryEnvironment, registryOptions } from '../../src/registry/validation.js'
 import { deferred } from '../../src/runtime.js'
 import { createGroupSafety, type GroupSafety } from '../../src/safety.js'
+import { createDeterministicAtRestCodec } from './at-rest.js'
 import { createRegistryRecovery } from './registry-recovery.js'
 import { createRegistryWelcomeHistory, registryHandle } from './registry-welcome.js'
 import { memoryModel, restoreMemoryControlHandle } from './sealed-memory-mls.js'
@@ -79,6 +83,7 @@ export type RegistryRowSetup = {
 }
 export type RegistryFixture = Omit<RegistryFixtureBase, 'reopen'> & {
   registry: GroupHandleRegistry
+  safety(): GroupSafety
   reopen(): Promise<RegistryFixture>
 }
 export type RegistryFixtureBase = {
@@ -115,7 +120,9 @@ export type RegistryFixtureBase = {
   inspectRows(): Promise<MemoryStoreRows>
   corruptState(key: GroupKey): Promise<void>
   removeStateBytes(key: GroupKey): Promise<void>
-  corruptTrust(groupID: string): Promise<void>
+  corruptTrust(groupID: string, damage?: 'unreadable' | 'empty-spent'): Promise<void>
+  removeTrust(groupID: string): Promise<void>
+  failTrustReads(error: Error | null): void
   mutateMetadata(key: GroupKey, fn: (value: unknown) => unknown): Promise<void>
   holdColdPublication(groupID: string): { started: Promise<void>; release(): void }
   holdRestore(groupID: string): { started: Promise<void>; release(): void }
@@ -153,6 +160,7 @@ type FixtureParams = {
   groupID: string
   options?: GroupOptions
   effects?: TransactionalGroupEffects<MemoryTransaction>
+  ownershipContext?: OwnershipContextPort
 }
 type Hold = {
   started: ReturnType<typeof deferred<void>>
@@ -246,7 +254,7 @@ export async function registryFixtureSafetyParams(fixture: RegistryFixture) {
 }
 
 export async function registryFixtureSafety(fixture: RegistryFixture): Promise<GroupSafety> {
-  return createGroupSafety(await registryFixtureSafetyParams(fixture))
+  return fixture.safety()
 }
 
 export async function createRegistryFixture(params: FixtureParams): Promise<RegistryFixture> {
@@ -269,6 +277,7 @@ async function assemble(
     setup: 'empty',
     rows,
     effects: params.effects,
+    ownershipContext: params.ownershipContext,
   })
   const key = { groupID: params.groupID, incarnation: 1 }
   const restoreHolds = new Map<string, Hold>()
@@ -280,6 +289,8 @@ async function assemble(
     | undefined
   let closed = false
   let owner: GroupHandleRegistry | undefined
+  let safetyMLS: ReturnType<typeof createGroupMLS>
+  let trustReadFailure: Error | null = null
   async function restore(
     record: GroupStateRecord & { deleted: false; state: Uint8Array },
   ): Promise<GroupHandle> {
@@ -323,6 +334,15 @@ async function assemble(
       return owner
     },
     device: storage.ports.device,
+    safety: () =>
+      createGroupSafety({
+        registry: fixture.registry,
+        persistence: fixture.device.groups,
+        mls: safetyMLS,
+        resolveTarget: async () => {
+          throw new Error('Unexpected target resolution')
+        },
+      }),
     identity,
     environment,
     async makeHandle(epoch, groupID = params.groupID) {
@@ -490,8 +510,27 @@ async function assemble(
         physicalRecordKey({ ...target, namespace: 'state', recordID: 'current' }),
       )
     },
-    async corruptTrust(groupID) {
-      await corrupt(storage, 'trust', { groupID, incarnation: null })
+    async corruptTrust(groupID, damage = 'unreadable') {
+      if (damage === 'unreadable') {
+        await corrupt(storage, 'trust', { groupID, incarnation: null })
+        return
+      }
+      const trust = await fixture.device.groups.loadTrust(groupID)
+      if (trust === null) throw new Error('Missing retained trust')
+      const location = { groupID, incarnation: null, namespace: 'trust', recordID: 'current' }
+      const codec = createDeterministicAtRestCodec({ key: new Uint8Array(32).fill(98) })
+      const bytes = await sealRecord(codec, location, { ...trust, spentEpochAuthenticators: [] })
+      // Physical damage bypasses the domain's monotonic spent-set guard.
+      await storage.mutateStoredRecord('trust', physicalRecordKey(location), () => bytes)
+    },
+    async removeTrust(groupID) {
+      await storage.deleteCommittedRow(
+        'trust',
+        physicalRecordKey({ groupID, incarnation: null, namespace: 'trust', recordID: 'current' }),
+      )
+    },
+    failTrustReads: (error) => {
+      trustReadFailure = error
     },
     mutateMetadata: storage.mutateMetadata,
     holdColdPublication: (groupID) => hold(publicationHolds, groupID),
@@ -533,6 +572,15 @@ async function assemble(
   const capability = entryCapability(fixture.device.groups)
   const binding = coordinatorBinding(fixture.device.groups)
   if (capability === null || binding === null) throw new Error('Missing fixture binding')
+  function faultReads(reads: EntryReads): EntryReads {
+    return {
+      ...reads,
+      trust: async () => {
+        if (trustReadFailure !== null) throw trustReadFailure
+        return reads.trust()
+      },
+    }
+  }
   bindEntryCapability({
     persistence: fixture.device.groups,
     coordinatorBinding: binding,
@@ -540,7 +588,7 @@ async function assemble(
       ...capability,
       async read(groupID, fn) {
         const before = coldCounts.get(groupID) ?? 0
-        const result = await capability.read(groupID, fn)
+        const result = await capability.read(groupID, (reads) => fn(faultReads(reads)))
         const held = publicationHolds.get(groupID)
         if (held !== undefined && (coldCounts.get(groupID) ?? 0) > before) {
           publicationHolds.delete(groupID)
@@ -549,11 +597,24 @@ async function assemble(
         }
         return result
       },
+      run: (request, prepare, work) =>
+        capability.run(request, (reads) => prepare(faultReads(reads)), work),
     },
   })
   restorers.set(fixture, restore)
   markerWriters.set(fixture, storage.forceOwnerMarker)
   rowRemovers.set(fixture, storage.deleteCommittedRow)
+  const safetyHandle = await fixture.makeHandle(0)
+  safetyMLS = createGroupMLS({
+    access: simpleHandleAccess({
+      key,
+      stateVersion: () => 1,
+      handle: () => safetyHandle,
+      adopt: () => {},
+    }),
+    identity,
+    entrySlot: createLedgerEntrySlot(),
+  })
   if (params.setup === 'seeded' && rows === undefined) {
     const handle = await fixture.makeHandle(0)
     await fixture.installRows({

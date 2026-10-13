@@ -55,6 +55,7 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
       let fixture = await create()
       try {
         expect(fixture.registry, 'complete initial fixture forwards registry').toBeDefined()
+        expect(fixture.safety, 'complete fixture forwards safety').toEqual(expect.any(Function))
         const forwarding = Object.getOwnPropertyNames(fixture).map(
           (name) => [name, typeof Reflect.get(fixture, name)] as const,
         )
@@ -68,6 +69,16 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
             ).toBe(type)
           expect(fixture.coldLoadCount(groupID)).toBe(0)
           expect((await fixture.registry.access(groupID)).runtime.snapshot()).toEqual(before)
+          expect(await fixture.safety().epochAuthenticator({ groupID, incarnation: 1 })).toEqual(
+            before === null
+              ? null
+              : {
+                  groupID,
+                  incarnation: before.incarnation,
+                  epoch: before.epoch,
+                  authenticator: before.authenticator,
+                },
+          )
         }
       } finally {
         await fixture.close()
@@ -743,6 +754,143 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
     const key = { groupID, incarnation: 1 }
     const destination = { groupID, incarnation: 2 }
     const create = (setup: 'empty' | 'seeded' = 'empty') => params.createFixture({ groupID, setup })
+
+    const reported = {
+      kind: 'unexplained-own-commit' as const,
+      epoch: 0,
+      position: '1',
+      digest: 'unexpected',
+    }
+    const eventID = JSON.stringify(['group:fork', groupID, 1])
+
+    test('halt committed before notification replays identical body/ID', async () => {
+      let fixture = await create('seeded')
+      try {
+        // No live observer is installed before the crash seam.
+        const fault = fixture.armNextWorkFault('commit-then-reject')
+        await fixture.safety().reportFork(key, reported)
+        const mutationID = await fault.mutationID
+        const halt = (await fixture.device.groups.ports(key).control.load()).forkHalt
+        const events = [{ ...key, id: eventID, kind: 'group:fork', halt }]
+        expect(await fixture.safety().events(key)).toEqual(events)
+        fixture = await fixture.reopen()
+        expect(await fixture.device.groups.resolve(groupID, mutationID)).toBe('committed')
+        expect(await fixture.safety().events(key)).toEqual(events)
+        expect((await fixture.registry.access(groupID)).admission()).toMatchObject({
+          reason: 'fork-halted',
+        })
+        fixture = await fixture.reopen()
+        expect(await fixture.safety().events(key)).toEqual(events)
+        await fixture.safety().ackEvent(key, eventID)
+        fixture = await fixture.reopen()
+        expect(await fixture.safety().events(key)).toEqual([])
+        expect((await fixture.device.groups.ports(key).control.load()).forkHalt).toEqual(halt)
+      } finally {
+        await fixture.close()
+      }
+    })
+
+    test.each(['after-first-write', 'before-commit'] as const)(
+      'rolled-back report holds only live incarnation (%s)',
+      async (point) => {
+        let fixture = await create('seeded')
+        try {
+          const access = await fixture.registry.access(groupID)
+          const before = await fixture.inspectRows()
+          fixture.armNextWorkFault(point)
+          await expect(fixture.safety().reportFork(key, reported)).rejects.toMatchObject({
+            message: `Injected ${point} failure`,
+          })
+          expect(await fixture.inspectRows()).toEqual(before)
+          expect(await fixture.safety().events(key)).toEqual([])
+          expect(access.admission()).toMatchObject({ reason: 'fork-halted' })
+          const other = await fixture.makeHandle(0, `${groupID}-other`)
+          const otherKey = await fixture.registry.seed(other, { packageUse: null })
+          expect((await fixture.registry.access(otherKey.groupID)).admission().admissible).toBe(
+            true,
+          )
+          fixture = await fixture.reopen()
+          expect((await fixture.registry.access(groupID)).admission().admissible).toBe(true)
+          const next = await fixture.registry.seed(await fixture.makeHandle(2), {
+            replace: true,
+            packageUse: { sourceID: 'source', ref: 'fresh', kind: 'ordinary' },
+          })
+          expect(next).toEqual(destination)
+          expect((await fixture.registry.access(groupID)).admission().admissible).toBe(true)
+          expect(await fixture.safety().events(key)).toEqual([])
+        } finally {
+          await fixture.close()
+        }
+      },
+    )
+
+    test.each(['commit', 'rollback'] as const)(
+      'ambiguous report proves both-or-neither before Read release (%s)',
+      async (outcome) => {
+        const fixture = await create('seeded')
+        const api = fixture.safety()
+        const pending = fixture.armNextWorkFault('pending')
+        let finished = false
+        let proof: { started: Promise<void>; release(): void } | undefined
+        try {
+          const access = await fixture.registry.access(groupID)
+          const notifications: Array<unknown> = []
+          access.runtime.onEpochChanged((value) => notifications.push(value))
+          let complete = false
+          const report = caught(
+            api.reportFork(key, reported).then(() => {
+              complete = true
+            }),
+          )
+          const mutationID = await pending.mutationID
+          proof = fixture.holdProof(mutationID)
+          await pending.rejected
+          await proof.started
+          expect(access.admission()).toMatchObject({ reason: 'fork-halted' })
+          expect(complete).toBe(false)
+          expect(notifications).toEqual([])
+          let readDone = false
+          const reads = Promise.all([api.events(key), api.epochAuthenticator(key)]).then(
+            (value) => {
+              readDone = true
+              return value
+            },
+          )
+          await turn()
+          expect(readDone).toBe(false)
+          await fixture.registry.seed(await fixture.makeHandle(0, `${groupID}-other`), {
+            packageUse: null,
+          })
+          await pending.finish(outcome)
+          finished = true
+          await turn()
+          expect(readDone).toBe(false)
+          expect(complete).toBe(false)
+          expect(notifications).toEqual([])
+          proof.release()
+          const result = await report
+          if (outcome === 'commit') expect(result).toEqual({ value: undefined })
+          else expect(result).toHaveProperty('error')
+          const [events, identity] = await reads
+          const halt = (await fixture.device.groups.ports(key).control.load()).forkHalt
+          expect(identity).toEqual((await fixture.device.groups.loadTrust(groupID))?.installed)
+          if (outcome === 'commit') {
+            expect(halt).toEqual({ eventID, evidence: reported, detectedAt: expect.any(Number) })
+            expect(events).toEqual([{ ...key, id: eventID, kind: 'group:fork', halt }])
+            expect(notifications).toHaveLength(1)
+          } else {
+            expect(halt).toBeNull()
+            expect(events).toEqual([])
+            expect(notifications).toEqual([])
+          }
+          expect(access.admission()).toMatchObject({ reason: 'fork-halted' })
+        } finally {
+          proof?.release()
+          if (!finished) await pending.finish('rollback')
+          await fixture.close()
+        }
+      },
+    )
 
     test('seed committed before reopen retains marker proof and refuses fresh spent seed', async () => {
       let fixture = await create()
