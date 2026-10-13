@@ -10,7 +10,7 @@ import {
   signLedgerEntry,
 } from '@kumiai/mls'
 import { APP_TOPIC_LABEL, asLogPosition, type ControlChanges } from '@kumiai/rpc'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import { decodeRecoveryCandidate, encodeRecoveryCandidate } from '../src/recovery-codec.js'
 import { createGroupHandleRegistry } from '../src/registry/registry.js'
@@ -21,6 +21,7 @@ import {
   createRegistryFixture,
   type RegistryFixtureBase,
   registryFixtureRestore,
+  registryFixtureRetirement,
 } from './fixtures/registry.js'
 import { createRegistryRecovery } from './fixtures/registry-recovery.js'
 import { registryHandle } from './fixtures/registry-welcome.js'
@@ -85,6 +86,125 @@ for (const mode of ['real-mls', 'double'] as const) {
       expect(await s.fixture.inspectRows()).toEqual(before)
       expect(await s.access.read((handle) => handle.groupID)).toBe(groupID)
     }
+
+    test.each(['device', 'group'] as const)(
+      'switch refuses pending %s restore before retirement',
+      async (scope) => {
+        const fixture = await createRegistryFixture({ mode, setup: 'seeded', groupID })
+        try {
+          const recovery = await fixture.confirmedRecovery(key, { confirm: true })
+          if (scope === 'device') {
+            await fixture.device.transition(
+              {
+                mutationID: 'pending-device-restore',
+                expectedRevision: (await fixture.device.load()).revision,
+                group: null,
+              },
+              async (stores) => {
+                await stores.restore.save({
+                  id: 'switch-restore',
+                  stage: 'groups',
+                  remainingGroups: [groupID],
+                })
+              },
+            )
+          } else {
+            await fixture.device.groups.transition(
+              await nextChange(fixture.device.groups, groupID, 'pending-group-restore'),
+              async (stores) => {
+                const lifetime = await stores.lifetime.load()
+                if (lifetime === null) throw new Error('Missing source lifetime')
+                await stores.lifetime.save({
+                  ...lifetime,
+                  revision: lifetime.revision + 1,
+                  mutationID: 'pending-group-restore',
+                  restorePending: true,
+                })
+              },
+            )
+          }
+          const owner = registry(fixture)
+          const retirement = registryFixtureRetirement(owner)
+          const begin = vi.spyOn(retirement, 'beginRetirement')
+          const before = await fixture.inspectRows()
+          const restores = fixture.restoreCount(groupID)
+          await expect(
+            owner.switchIncarnation(recovery.candidate, {
+              source: recovery.source,
+              rejoinID: recovery.record.id,
+              proof: recovery.proof,
+              write: {
+                mutationID: crypto.randomUUID(),
+                source: { rejoinID: recovery.record.id },
+                destination: {
+                  control: {
+                    cursor: {
+                      position: recovery.proof.position,
+                      epoch: Number(recovery.candidate.epoch),
+                    },
+                  },
+                },
+              },
+            }),
+          ).rejects.toMatchObject({ reason: 'restore-pending' })
+          expect(begin).not.toHaveBeenCalled()
+          expect(await fixture.inspectRows()).toEqual(before)
+          expect(fixture.restoreCount(groupID)).toBe(restores)
+          expect(() => retirement.assertAvailable(groupID)).not.toThrow()
+          await owner.dispose()
+        } finally {
+          await fixture.close()
+        }
+      },
+    )
+
+    test('switch recovers unreadable source ciphertext without restoring the old handle', async () => {
+      const fixture = await createRegistryFixture({ mode, setup: 'seeded', groupID })
+      try {
+        const recovery = await fixture.confirmedRecovery(key, { confirm: true })
+        const owner = registry(fixture)
+        await fixture.corruptState(key)
+        await expect(fixture.device.groups.loadState(key)).rejects.toThrow()
+        const source = await owner.recoverySource(groupID)
+        expect(source).toEqual(recovery.source)
+        const restores = fixture.restoreCount(groupID)
+        expect(
+          await owner.switchIncarnation(recovery.candidate, {
+            source,
+            rejoinID: recovery.record.id,
+            proof: recovery.proof,
+            write: {
+              mutationID: crypto.randomUUID(),
+              source: { rejoinID: recovery.record.id },
+              destination: {
+                control: {
+                  cursor: {
+                    position: recovery.proof.position,
+                    epoch: Number(recovery.candidate.epoch),
+                  },
+                },
+              },
+            },
+          }),
+        ).toEqual(destination)
+        expect(fixture.restoreCount(groupID)).toBe(restores)
+        expect(await fixture.device.groups.loadState(key)).toMatchObject({ deleted: true })
+        expect(await fixture.device.groups.loadState(destination)).toMatchObject({
+          version: 1,
+          deleted: false,
+          state: encodeClientState(recovery.candidate.state),
+          ledger: recovery.candidate.ledgerTokens,
+          senderHWM: 0,
+        })
+        expect(await fixture.device.groups.ports(key).control.load()).toMatchObject({
+          rejoin: { ...recovery.record, stage: 'adopted' },
+        })
+        expect((await owner.access(groupID)).key).toEqual(destination)
+        await owner.dispose()
+      } finally {
+        await fixture.close()
+      }
+    })
 
     test('switch atomicity and isolation', async () => {
       const s = await setup({

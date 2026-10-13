@@ -74,6 +74,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
   retirement: RegistryRetirement
   recovery: RecoveryEnvironment
   ownerDID: string
+  start(): Promise<void>
 }): GroupHandleRegistry['switchIncarnation'] {
   const { persistence, capability, retirement } = environment
   return async (candidate: GroupHandle, params) => {
@@ -114,6 +115,8 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
     })
     if (replay) return destination
 
+    retirement.assertAvailable(groupID)
+    await environment.start()
     // A losing attempt never obtains a settlement capable of lifting the winner's fence.
     const attempt = retirement.beginRetirement(source.key)
     let stopObservation = () => {}
@@ -183,7 +186,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
         },
         async (stores, prepared) => {
           const lifetime = await stores.lifetime.load()
-          const metadata = await stores.incarnation(source.key.incarnation).state.load()
+          const metadata = await stores.incarnation(source.key.incarnation).state.loadMetadata()
           const trust = await stores.trust.load()
           if (
             lifetime === null ||

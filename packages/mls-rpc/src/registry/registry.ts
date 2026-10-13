@@ -84,6 +84,9 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   }
   async function start(): Promise<void> {
     assertOpen()
+    await initialise()
+  }
+  async function initialise(): Promise<void> {
     if (started) return
     if (starting !== null) return await starting
     starting = (async () => {
@@ -357,6 +360,8 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     retirement,
     recovery: environment.recovery,
     ownerDID: environment.ownerDID,
+    // Issued switches remain tracked while disposal closes public admission.
+    start: initialise,
   })
   const registry: GroupHandleRegistry = {
     start,
