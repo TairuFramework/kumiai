@@ -71,6 +71,7 @@ import {
   type LifecycleGate,
   leafAt,
   prepareLifecycleGate,
+  publicMembers,
   rejectionReason,
 } from './lifecycle.js'
 import { createMutex, type Mutex } from './mutex.js'
@@ -80,7 +81,6 @@ import {
   MissingLedgerEntriesError,
 } from './policy.js'
 import {
-  beaconOf,
   controllerOf,
   DEVICE_ENTRY_TYPE,
   type DeviceOp,
@@ -807,35 +807,7 @@ export class GroupHandle {
   }
 
   *#iterateMembers(): Generator<GroupMember> {
-    const tree = this.#state.ratchetTree
-    for (let i = 0; i < tree.length; i++) {
-      const node = tree[i]
-      if (node != null && node.nodeType === nodeTypes.leaf) {
-        const credential = node.leaf.credential
-        if ('identity' in credential) {
-          let parsed: ReturnType<typeof parseMLSCredentialIdentity>
-          try {
-            parsed = parseMLSCredentialIdentity(credential.identity)
-          } catch {
-            continue
-          }
-          // `?? parsed.id` is the did:key case, where long form IS the id. It is unreachable
-          // for peer:4 for any leaf that entered through an add or a join: makeMLSCredential
-          // refuses to build a peer:4 identity without a long form, and validateCredential
-          // rejects any peer:4 leaf lacking one before it can enter a ratchet tree. restore
-          // trusts the host's own persisted state, so neither gate runs on that path.
-          const controller = parsed.controller ? parsed.controller.id : undefined
-          const beacon = controller != null ? beaconOf(this.#registry, controller) : undefined
-          yield {
-            leafIndex: i / 2,
-            id: parsed.id,
-            longForm: parsed.longForm ?? parsed.id,
-            ...(controller ? { controller } : {}),
-            ...(beacon ? { controllerBeacon: beacon } : {}),
-          }
-        }
-      }
-    }
+    yield* publicMembers({ tree: this.#state.ratchetTree, registry: this.#registry })
   }
 
   findMemberLeafIndex(id: string): number | undefined {

@@ -13,7 +13,7 @@ import {
   type ProposalWithSender,
 } from 'ts-mls'
 
-import { LEDGER_HEAD_EXTENSION_TYPE } from './anchor.js'
+import { type GroupAnchor, LEDGER_HEAD_EXTENSION_TYPE } from './anchor.js'
 import { checkHolderEvidence, verifyLeafCredential } from './authentication.js'
 import {
   assertCapabilityLifetime,
@@ -21,7 +21,11 @@ import {
   MAX_TRUSTED_GRANT_LIFETIME,
   readCapability,
 } from './capability.js'
-import { type ControllerBinding, parseMLSCredentialIdentity } from './credential.js'
+import {
+  type ControllerBinding,
+  type GroupMember,
+  parseMLSCredentialIdentity,
+} from './credential.js'
 import { LeafBindingError, LeafLapsedError, RevokeProofError } from './errors.js'
 import { assertBindingAuthorTime, makeMLSCredential } from './group-credential.js'
 import type { GroupHandle } from './group-handle.js'
@@ -30,7 +34,13 @@ import { HISTORY_HORIZON, historySize } from './history.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
 import { isEvidencedChild, verifyLifecycleProof } from './lifecycle-proof.js'
 import { type CommitPolicyContext, evaluateGroupContextExtensions } from './policy.js'
-import { DEVICE_ENTRY_TYPE, type DeviceRegistry, type DeviceValue, denySetOf } from './registry.js'
+import {
+  beaconOf,
+  DEVICE_ENTRY_TYPE,
+  type DeviceRegistry,
+  type DeviceValue,
+  denySetOf,
+} from './registry.js'
 
 export type CommitRejectionReason = 'binding' | 'lapse' | 'floor' | 'policy' | 'invalid'
 
@@ -80,21 +90,82 @@ function timeOf(tree: ClientState['ratchetTree'], controllerID: string, floor: n
   return time
 }
 
-export function treeTime(group: GroupHandle, controllerID: string): number {
-  const floor =
-    group.anchor.controller == null
-      ? 0
-      : (group.registry.controllers.get(normalizeDID(controllerID))?.timeFloor ?? 0)
-  return timeOf(group.state.ratchetTree, controllerID, floor)
+type PublicMembershipInputs = {
+  tree: ClientState['ratchetTree']
+  anchor: GroupAnchor
+  registry: DeviceRegistry
 }
 
-export function isLapsed(group: GroupHandle, leaf: LeafNode): boolean {
-  const controller = group.anchor.controller
+function publicTreeTime(params: PublicMembershipInputs, controllerID: string): number {
+  const floor =
+    params.anchor.controller == null
+      ? 0
+      : (params.registry.controllers.get(normalizeDID(controllerID))?.timeFloor ?? 0)
+  return timeOf(params.tree, controllerID, floor)
+}
+
+function publicLeafLapsed(params: PublicMembershipInputs, leaf: LeafNode): boolean {
+  const controller = params.anchor.controller
   if (controller == null) return false
   const binding = identity(leaf).controller
   return (
-    binding != null && readCapability(binding.capability).payload.exp < treeTime(group, controller)
+    binding != null &&
+    readCapability(binding.capability).payload.exp < publicTreeTime(params, controller)
   )
+}
+
+export function treeTime(group: GroupHandle, controllerID: string): number {
+  return publicTreeTime(
+    { tree: group.state.ratchetTree, anchor: group.anchor, registry: group.registry },
+    controllerID,
+  )
+}
+
+export function isLapsed(group: GroupHandle, leaf: LeafNode): boolean {
+  return publicLeafLapsed(
+    { tree: group.state.ratchetTree, anchor: group.anchor, registry: group.registry },
+    leaf,
+  )
+}
+
+/** @internal The handle and public projection share credential parsing and leaf order. */
+export function* publicMembers(
+  params: Pick<PublicMembershipInputs, 'tree' | 'registry'>,
+): Generator<GroupMember> {
+  for (const [index, node] of params.tree.entries()) {
+    if (node?.nodeType !== nodeTypes.leaf || !('identity' in node.leaf.credential)) continue
+    let parsed: ReturnType<typeof parseMLSCredentialIdentity>
+    try {
+      parsed = parseMLSCredentialIdentity(node.leaf.credential.identity)
+    } catch {
+      continue
+    }
+    const controller = parsed.controller?.id
+    const beacon = controller == null ? undefined : beaconOf(params.registry, controller)
+    yield {
+      leafIndex: index / 2,
+      id: parsed.id,
+      longForm: parsed.longForm ?? parsed.id,
+      ...(controller ? { controller } : {}),
+      ...(beacon ? { controllerBeacon: beacon } : {}),
+    }
+  }
+}
+
+export type PublicRuntimeFacts = { members: Array<string>; ownPresent: boolean; lapsed: boolean }
+
+/** Pure projection of validated public inputs; it performs no authentication or host callbacks. */
+export function publicMembershipFacts(
+  params: PublicMembershipInputs & { ownerDID: string },
+): PublicRuntimeFacts {
+  const members = [...publicMembers(params)]
+  const own = members.find((member) => normalizeDID(member.id) === normalizeDID(params.ownerDID))
+  const leaf = own == null ? undefined : leafAt(params.tree, own.leafIndex)
+  return {
+    members: members.map((member) => normalizeDID(member.id)),
+    ownPresent: own != null,
+    lapsed: leaf != null && publicLeafLapsed(params, leaf),
+  }
 }
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {

@@ -185,7 +185,12 @@ export {
   type VerifiedLedgerEntry,
   verifyLedgerEntry,
 } from './ledger.js'
-export { type AssertRecoveryBindingParams, assertRecoveryBinding } from './lifecycle.js'
+export {
+  type AssertRecoveryBindingParams,
+  assertRecoveryBinding,
+  type PublicRuntimeFacts,
+  publicMembershipFacts,
+} from './lifecycle.js'
 export {
   type CommitPolicyContext,
   defaultCommitPolicy,

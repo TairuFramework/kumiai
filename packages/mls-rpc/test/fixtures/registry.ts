@@ -24,6 +24,7 @@ import type {
   MemoryTransaction,
   PackageUse,
   PersistenceEvent,
+  TransactionalGroupEffects,
 } from '../../src/persistence-types.js'
 import { registryRetirement } from '../../src/registry/retirement.js'
 import { recoveryTrustFor } from '../../src/registry/trust.js'
@@ -99,6 +100,7 @@ type FixtureParams = {
   setup: 'empty' | 'seeded'
   groupID: string
   options?: GroupOptions
+  effects?: TransactionalGroupEffects<MemoryTransaction>
 }
 type Hold = {
   started: ReturnType<typeof deferred<void>>
@@ -158,6 +160,7 @@ async function assemble(
     identity,
     setup: 'empty',
     rows,
+    effects: params.effects,
   })
   const key = { groupID: params.groupID, incarnation: 1 }
   const restoreHolds = new Map<string, Hold>()

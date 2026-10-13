@@ -6,21 +6,29 @@ export function copyRuntimeSnapshot(value: GroupRuntimeSnapshot): GroupRuntimeSn
 
 export function createRegistryRuntime(): {
   runtime: GroupEpochRuntime
+  install(value: GroupRuntimeSnapshot | null): (() => void) | undefined
   publish(value: GroupRuntimeSnapshot | null): void
+  listenerFailures(): { count: number; lastError: unknown }
 } {
   let current: GroupRuntimeSnapshot | null = null
   const listeners = new Set<(value: GroupRuntimeSnapshot | null) => void>()
-  return {
+  let failureCount = 0
+  let lastError: unknown
+  function listenerFailed(error: unknown): void {
+    failureCount++
+    lastError = error
+  }
+  const controller = {
     runtime: {
       snapshot: () => (current === null ? null : copyRuntimeSnapshot(current)),
-      onEpochChanged(listener) {
+      onEpochChanged(listener: (value: GroupRuntimeSnapshot | null) => void) {
         listeners.add(listener)
         return () => {
           listeners.delete(listener)
         }
       },
     },
-    publish(value) {
+    install(value: GroupRuntimeSnapshot | null) {
       if (current === null && value === null) return
       if (
         current !== null &&
@@ -37,12 +45,26 @@ export function createRegistryRuntime(): {
       )
         return
       current = value === null ? null : copyRuntimeSnapshot(value)
-      // Notifications run after the Read entry has released ownership.
-      for (const listener of listeners) {
-        try {
-          listener(current === null ? null : copyRuntimeSnapshot(current))
-        } catch {}
+      const notification = current
+      const registered = [...listeners]
+      return () => {
+        for (const listener of registered) {
+          if (!listeners.has(listener)) continue
+          try {
+            const result: unknown = listener(
+              notification === null ? null : copyRuntimeSnapshot(notification),
+            )
+            if (result != null) void Promise.resolve(result).catch(listenerFailed)
+          } catch (error) {
+            listenerFailed(error)
+          }
+        }
       }
     },
+    listenerFailures: () => ({ count: failureCount, lastError }),
+    publish(value: GroupRuntimeSnapshot | null) {
+      controller.install(value)?.()
+    },
   }
+  return controller
 }

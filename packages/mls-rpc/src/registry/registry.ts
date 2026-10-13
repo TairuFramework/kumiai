@@ -1,6 +1,11 @@
 import { normalizeDID } from '@kokuin/token'
 
-import { coordinatorBinding, type EntryReads, entryCapability } from '../entry-capability.js'
+import {
+  type AccountedGroupObservation,
+  coordinatorBinding,
+  type EntryReads,
+  entryCapability,
+} from '../entry-capability.js'
 import {
   DisplacedGroupHandleError,
   GroupStateConflictError,
@@ -15,6 +20,7 @@ import {
   type RetirementSlot,
 } from './retirement.js'
 import { createRegistryRuntime } from './runtime.js'
+import { accountedRuntime } from './runtime-facts.js'
 import { readRecoverySource } from './source.js'
 import type {
   GroupHandleRegistry,
@@ -83,6 +89,38 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         load: null,
       }
       slots.set(groupID, slot)
+      const observedSlot = slot
+      const notifications = new WeakMap<AccountedGroupObservation, () => void>()
+      capability.observe(
+        groupID,
+        (observation) => {
+          const previous = observedSlot.owner
+          observedSlot.generation++
+          if (previous !== null) previous.cacheValid = false
+          const projected = accountedRuntime({
+            observation,
+            groupID,
+            ownerDID: environment.ownerDID,
+            previous: previous?.value.trust ?? null,
+          })
+          if (previous === null) return
+          if (projected === null || projected.snapshot.incarnation !== previous.key.incarnation) {
+            observedSlot.owner = null
+            const dispatch = previous.runtime.install(null)
+            if (dispatch !== undefined) notifications.set(observation, dispatch)
+            return
+          }
+          previous.snapshot = projected.snapshot
+          previous.admission = projected.admission
+          const dispatch = previous.runtime.install(projected.snapshot)
+          if (dispatch !== undefined) notifications.set(observation, dispatch)
+        },
+        (observation) => {
+          const dispatch = notifications.get(observation)
+          notifications.delete(observation)
+          dispatch?.()
+        },
+      )
     }
     return slot
   }
@@ -92,7 +130,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   }
   function publish(slot: GroupSlot, previous: RegistryOwner | null): void {
     if (previous !== null && previous !== slot.owner) previous.runtime.publish(null)
-    if (slot.owner !== null) slot.owner.runtime.publish(slot.owner.value.snapshot)
+    if (slot.owner !== null) slot.owner.runtime.publish(slot.owner.snapshot)
   }
   const retirement = createRegistryRetirement({
     slot: groupSlot,
@@ -134,6 +172,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         key: { ...value.key },
         value,
         cacheValid: true,
+        snapshot: value.snapshot,
         admission: admissionFor(value, control),
         runtime: createRegistryRuntime(),
         hooks: new Set(),
@@ -164,6 +203,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     } else {
       slot.owner.value = value
       slot.owner.cacheValid = true
+      slot.owner.snapshot = value.snapshot
       slot.owner.admission = admissionFor(value, control)
     }
     return value

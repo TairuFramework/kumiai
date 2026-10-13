@@ -7,12 +7,13 @@ import { DisplacedGroupHandleError, GroupUnavailableError } from '../persistence
 import type { GroupKey, GroupTransaction } from '../persistence-types.js'
 import { type ColdEnvironment, restoreValidated, type ValidatedGroupState } from './cold.js'
 import type { createRegistryRuntime } from './runtime.js'
-import type { RegistryHandleAccess } from './types.js'
+import type { GroupRuntimeSnapshot, RegistryHandleAccess } from './types.js'
 
 export type RegistryOwner = {
   key: GroupKey
   value: ValidatedGroupState
   cacheValid: boolean
+  snapshot: GroupRuntimeSnapshot
   admission: SendAdmission
   runtime: ReturnType<typeof createRegistryRuntime>
   hooks: Set<() => Promise<void>>
@@ -98,11 +99,11 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     },
     epoch() {
       params.assertAvailable()
-      return owner.value.snapshot.epoch
+      return owner.snapshot.epoch
     },
     stateVersion() {
       params.assertAvailable()
-      return owner.value.record.version
+      return owner.snapshot.stateVersion
     },
     admission() {
       params.assertAvailable()
