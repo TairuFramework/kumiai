@@ -111,6 +111,7 @@ export type GroupPeerMLSParams = {
 export type StrandKind =
   | 'own-unmerged'
   | 'fork-losing'
+  | 'fork-winning'
   | 'ahead'
   | 'unknown-version'
   | 'retention-gap'

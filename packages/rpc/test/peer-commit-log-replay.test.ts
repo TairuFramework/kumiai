@@ -4,6 +4,7 @@ import { classifyCommit } from '../src/classify.js'
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
+import { assertDurableForkHalt } from './fixtures/control-hold.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { encodeMemoryCommit } from './fixtures/memory-group-mls.js'
 import { makeMLSPeer } from './fixtures/peer.js'
@@ -279,7 +280,7 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     await alice.peer.dispose()
   })
 
-  test('two DIFFERENT commits at one epoch still fork, served in the same order', async () => {
+  test('two different commits at one epoch halt on a below-cursor reveal', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x84)
 
@@ -317,18 +318,17 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     expect(alice.mls.epoch()).toBe(2)
     expect(recoveryRequests(hub, rs)).toHaveLength(0)
 
-    // Bob's arrives below her cursor. Different bytes at an epoch she holds a record for: a fork,
-    // and she is on the losing side, so she heals. Polled, not slept on — a fixed wait for
-    // something that must HAPPEN is the flaky shape.
+    const before = await alice.control.load()
     hub.revealTo('alice', loserSeq)
     await wakeLane(hub, rs)
-    for (let i = 0; i < 40 && recoveryRequests(hub, rs).length === 0; i++) await flush(25)
-    expect(recoveryRequests(hub, rs).length).toBeGreaterThan(0)
+    await alice.peer.replay()
+    expect(recoveryRequests(hub, rs)).toEqual([])
+    expect((await alice.control.load()).cursor).toEqual(before.cursor)
+    expect((await alice.control.load()).applied).toEqual(before.applied)
+    await assertDurableForkHalt(alice, hub, rs, 'alice', {
+      evidence: { kind: 'digest-divergence', epoch: 1, position: loserSeq },
+    })
 
-    // THE VERDICT, directly — the recovery-request assertion above proves only that A heal
-    // fired, not why: anything that triggered a heal for a different reason would satisfy it
-    // just as well. This pins that the heal was specifically the `fork` row, on the LOSING
-    // branch, against the sequenceID Alice actually recorded for the commit she applied.
     expect(
       classifyCommit({
         header: { epoch: 1, committerDID: 'bob' },

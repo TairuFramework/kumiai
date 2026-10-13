@@ -721,10 +721,18 @@ test.each([false, true])(
       await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 1 })
     ).sequenceID
     await alice.peer.resync()
+    const original = hub.published.find((row) => row.sequenceID === removed)
+    if (original === undefined) throw new Error('Missing retained commit')
     hub.trim(topicID, '999999999999')
     const retained = suffix
-      ? (await publishCommit({ hub, senderDID: 'dave', recoverySecret: secret, epoch: 1 }))
-          .sequenceID
+      ? (
+          await hub.publish({
+            senderDID: 'dave',
+            topicID,
+            payload: original.payload,
+            retain: 'log',
+          })
+        ).sequenceID
       : null
     const built: Array<RejoinRecord> = []
     const apply = bob.control.apply.bind(bob.control)

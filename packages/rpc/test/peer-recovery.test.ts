@@ -25,7 +25,7 @@ function recoveryReplyCount(hub: FakeHub, recoverySecret: Uint8Array): number {
 }
 
 describe('recovery rendezvous', { concurrent: false }, () => {
-  test('a losing fork followed by an applicable external commit produces no confirmation', async () => {
+  test('a losing fork halts before a later external commit or confirmation', async () => {
     const hub = new FakeHub()
     const secret = new Uint8Array(32).fill(0x45)
     const winning = await publishCommit({
@@ -58,7 +58,9 @@ describe('recovery rendezvous', { concurrent: false }, () => {
         epoch: 2,
         external: true,
       })
-      await vi.waitFor(() => expect(alice.mls.epoch()).toBe(3))
+      await vi.waitFor(async () => expect((await alice.control.load()).forkHalt).not.toBeNull())
+      expect(alice.mls.epoch()).toBe(2)
+      expect((await alice.control.load()).responses).toEqual([])
       const requestID = 'stranded-confirm'
       const { request } = await bob.createRecoveryRequest(requestID)
       await hub.publish({

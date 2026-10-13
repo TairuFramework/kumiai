@@ -129,8 +129,7 @@ const armAhead: Arm = async (hub, rs, withResponder) => {
 
 /**
  * A hub forked the log, and Bob is on the losing branch — the one whose commit carries the
- * HIGHER sequenceID. Shown the branch he lost, he heals; unhealed he sits at epoch 2 on a
- * branch of his own.
+ * HIGHER sequenceID. Shown the competing branch, he halts at epoch 2.
  */
 const armForkLosing: Arm = async (hub, rs, withResponder) => {
   hub.acceptAtAnyHead()
@@ -173,7 +172,8 @@ const armForkLosing: Arm = async (hub, rs, withResponder) => {
   // Bob applied the loser branch (the winner was hidden). Now show him the branch he lost.
   hub.revealTo('bob', winnerSeq)
   await wakeLane(hub, rs)
-  await waitForHeal({ bob, hub, events, withResponder })
+  await drainUntil(async () => (await bob.control.load()).forkHalt !== null, 'fork halt')
+  expect(events).toEqual([])
   return { bob, responder, staleEpoch: 2 }
 }
 
@@ -225,27 +225,31 @@ describe('heal strand', { concurrent: false }, () => {
         expect(bob.mls.epoch()).toBe(staleEpoch)
         expect((await bob.control.load()).operations[0]?.stage).toBe('intent')
 
-        if (trigger.arm === armOwnUnmerged)
+        if (trigger.arm !== armAhead)
           await assertDurableForkHalt(bob, hub, rs, 'bob', {
-            evidence: { kind: 'unexplained-own-commit' },
+            evidence: {
+              kind: trigger.arm === armOwnUnmerged ? 'unexplained-own-commit' : 'digest-divergence',
+            },
           })
         await bob.peer.dispose()
       })
 
-      test(`${trigger.name}: a responder answers — ${trigger.arm === armOwnUnmerged ? 'the durable hold still blocks control' : 'the peer heals, then commits'}`, async () => {
+      test(`${trigger.name}: a responder answers — ${trigger.arm !== armAhead ? 'the durable halt still blocks control' : 'the peer heals, then commits'}`, async () => {
         const hub = new FakeHub()
         const rs = new Uint8Array(32).fill(0x62)
         const { bob, responder, staleEpoch } = await trigger.arm(hub, rs, true)
 
         expect(responder).toBeDefined()
         const carol = responder as TestPeer
-        if (trigger.arm === armOwnUnmerged) {
+        if (trigger.arm !== armAhead) {
           expect(bob.mls.epoch()).toBe(staleEpoch)
           expect(carol.mls.epoch()).toBe(2)
           await bob.peer.enqueue(buildLedgerCommit(bob, ['role:zoe=admin']))
           expect((await bob.control.load()).operations[0]?.stage).toBe('intent')
           await assertDurableForkHalt(bob, hub, rs, 'bob', {
-            evidence: { kind: 'unexplained-own-commit' },
+            evidence: {
+              kind: trigger.arm === armOwnUnmerged ? 'unexplained-own-commit' : 'digest-divergence',
+            },
           })
           await carol.peer.dispose()
           return

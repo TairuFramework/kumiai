@@ -271,70 +271,36 @@ describe('a hub that forked the log', { concurrent: false }, () => {
     return { winner, loser, winnerSeq, loserSeq }
   }
 
-  test('the losing branch rejoins the winner, and re-enacts the entries the winner never had', async () => {
+  test('the losing branch halts and retains its entries without reenactment', async () => {
     controlRecoveryClock(5)
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x58)
-    const { winner, loser, winnerSeq } = await setUpFork(hub, rs)
-
+    const { loser, winnerSeq } = await setUpFork(hub, rs)
     const carol = makeMLSPeer(hub, 'carol', rs, { epoch: 1, members, recovery })
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-    await drainUntil(
-      () => carol.mls.epoch() === 2 && bob.mls.epoch() === 2,
-      'each branch applies its commit',
-    )
-
-    // Each applied the only commit it was shown, at epoch 1, and each holds a ledger the other
-    // has never heard of. Nobody has done anything wrong, and the group has two histories.
-    expect(carol.mls.fold().get('role:carol')).toBe('admin')
-    expect(bob.mls.fold().get('role:bob')).toBe('admin')
-    expect(bob.mls.fold().get('role:carol')).toBeUndefined()
-    expect(recoveryRequests(hub, rs)).toHaveLength(0)
-
-    // Now the hub shows Bob the branch he lost — a frame BELOW his own cursor, at an epoch he
-    // has a record for, with a sequenceID that is not the one he applied there.
+    await carol.peer.replay()
+    await bob.peer.replay()
+    const before = await bob.control.load()
+    expect(bob.mls.ledgerIDs()).toEqual([memoryEntryID(loser)])
     hub.revealTo('bob', winnerSeq)
     await wakeLane(hub, rs)
-    await drainUntil(
-      () =>
-        bob.mls.epoch() === carol.mls.epoch() &&
-        carol.mls.leaves().filter((did) => did === 'bob').length === 1 &&
-        bob.mls.fold().get('role:carol') === 'admin',
-      'bob rejoins the winning branch',
-    )
-
-    // He heals: he is on the higher-sequenceID branch, so he is the loser, and he rejoins onto
-    // the winner's. Carol, on the winning branch, does nothing.
-    expect(recoveryRequests(hub, rs)).toHaveLength(1)
-    expect(bob.mls.epoch()).toBe(carol.mls.epoch())
-    expect(carol.mls.leaves().filter((did) => did === 'bob')).toHaveLength(1)
-    // The rejoin left him folding the WINNER's ledger, and his own branch's entry is gone from
-    // his handle entirely — the rejoined ledger is the group's, head-verified.
-    expect(bob.mls.fold().get('role:carol')).toBe('admin')
-
-    // ...and his entry comes back to be re-enacted, because the group's authenticated ledger
-    // does not contain it: it only ever landed on a branch the group discarded. This is where
-    // the membership filter earns its keep in the other direction — an implementation that
-    // re-enacts nothing loses Bob's admin grant with no error anywhere.
-    const { reenact = [] } = await bob.peer.replay()
-    expect(reenact).toEqual([loser])
-    await reenactFrom(bob, reenact)
-    await drainUntil(
-      () => carol.mls.ledgerIDs().length === 2 && carol.mls.fold().get('role:bob') === 'admin',
-      'carol applies the re-enacted entry',
-    )
-
-    // Both branches' entries are now in one ledger, once each, and both peers agree.
-    expect(bob.mls.fold().get('role:bob')).toBe('admin')
-    expect(bob.mls.fold().get('role:carol')).toBe('admin')
-    expect(carol.mls.fold().get('role:bob')).toBe('admin')
-    expect(carol.mls.ledgerIDs()).toEqual([memoryEntryID(winner), memoryEntryID(loser)])
-
-    await bob.peer.dispose()
+    await drainUntil(async () => (await bob.control.load()).forkHalt !== null, 'fork halt')
+    expect((await bob.peer.replay()).reenact ?? []).toEqual([])
+    const after = await bob.control.load()
+    expect(after.cursor).toEqual(before.cursor)
+    expect(after.applied).toEqual(before.applied)
+    expect(after.outcomes).toEqual(before.outcomes)
+    expect(bob.mls.epoch()).toBe(2)
+    expect(bob.mls.ledgerIDs()).toEqual([memoryEntryID(loser)])
+    expect(bob.mls.fold().get('role:carol')).toBeUndefined()
+    expect(recoveryRequests(hub, rs)).toEqual([])
+    await assertDurableForkHalt(bob, hub, rs, 'bob', {
+      evidence: { kind: 'digest-divergence', epoch: 1, position: winnerSeq },
+    })
     await carol.peer.dispose()
   })
 
-  test('the winning branch sees the same fork and does not heal', async () => {
+  test('the winning branch halts on the same fork without advancing', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x59)
     const { winner, winnerSeq, loserSeq } = await setUpFork(hub, rs)
@@ -343,11 +309,7 @@ describe('a hub that forked the log', { concurrent: false }, () => {
     await flush(80)
     expect(carol.mls.epoch()).toBe(2)
 
-    // The hub shows Carol the other branch too. She holds the LOWER sequenceID at that epoch,
-    // so the tiebreak says she is the winner: she steps over the frame and stays exactly where
-    // she is. Both sides evaluate the same rule on the same two frames and reach opposite
-    // conclusions, which is the whole point of the tiebreak — an implementation that healed on
-    // both sides would rejoin the two halves of the group onto each other forever.
+    const before = await carol.control.load()
     hub.revealTo('carol', loserSeq)
     await wakeLane(hub, rs)
     await flush(280)
@@ -358,12 +320,6 @@ describe('a hub that forked the log', { concurrent: false }, () => {
     expect(carol.mls.ledgerIDs()).toEqual([memoryEntryID(winner)])
     expect(carol.mls.fold().get('role:bob')).toBeUndefined()
 
-    // THE VERDICT, which the peer cannot be asked for. Everything above is an absence, and a
-    // WINNING fork and plain history are the same three statements inside the lane — step over
-    // the frame, move the head, heal nothing — so every assertion above holds just as well for a
-    // peer that diagnosed no fork at all. The classifier is the only place the two are different
-    // things, and this asks it about the scenario's OWN frames at the positions the hub gave
-    // them: the tiebreak has to fall this way round for Carol's silence to be a decision.
     expect(
       classifyCommit({
         header: { epoch: 1, committerDID: 'yolanda' },
@@ -379,7 +335,12 @@ describe('a hub that forked the log', { concurrent: false }, () => {
       }),
     ).toEqual({ row: 'fork', appliedSequenceID: winnerSeq, branch: 'winning' })
 
-    await carol.peer.dispose()
+    const after = await carol.control.load()
+    expect(after.cursor).toEqual(before.cursor)
+    expect(after.applied).toEqual(before.applied)
+    await assertDurableForkHalt(carol, hub, rs, 'carol', {
+      evidence: { kind: 'digest-divergence', epoch: 1, position: loserSeq },
+    })
   })
 })
 

@@ -102,7 +102,7 @@ describe('delayed ledger bootstrap', () => {
     await bob.peer.dispose()
   })
 
-  test('an adopted rejoin records its commit before acceptance rejects', async () => {
+  test('an adopted rejoin retains its recorded commit when a competing branch halts it', async () => {
     const observations: Array<StrandObservation> = []
     const state = await setup(0xcd, (observation) => {
       observations.push(observation)
@@ -159,7 +159,12 @@ describe('delayed ledger bootstrap', () => {
     await vi.waitFor(() =>
       expect(observations.map((observation) => observation.kind)).toContain('fork-losing'),
     )
-    await vi.waitFor(() => expect(recoveryRequests()).toBeGreaterThan(requestsBefore))
+    expect(recoveryRequests()).toBe(requestsBefore)
+    expect((await alice.control.load()).forkHalt?.evidence).toMatchObject({
+      kind: 'digest-divergence',
+      position: competing.sequenceID,
+    })
+    expect((await alice.control.load()).applied.some((row) => row.epoch === 2)).toBe(true)
     expect(events.some((event) => event.phase === 'bootstrapped')).toBe(true)
     await alice.peer.dispose()
     await bob.peer.dispose()

@@ -74,7 +74,8 @@ test.each([false, true])(
     await restarted.peer.drained()
     const observer = member(hub, { restartOf: restarted })
     await observer.peer.replay()
-    await publishCommit({
+    const before = await observer.control.load()
+    const conflict = await publishCommit({
       hub,
       senderDID: 'alice',
       recoverySecret: secret,
@@ -82,11 +83,18 @@ test.each([false, true])(
       external: true,
       adds: ['dave'],
     })
-    await vi.waitFor(async () =>
-      expect((await observer.control.load()).responses).toEqual([
-        expect.objectContaining({ kind: 'superseded', epoch: 1 }),
-      ]),
-    )
+    await vi.waitFor(async () => expect((await observer.control.load()).forkHalt).not.toBeNull())
+    const after = await observer.control.load()
+    expect(after.forkHalt?.evidence).toEqual({
+      kind: 'digest-divergence',
+      epoch: 1,
+      position: conflict.sequenceID,
+      localDigest: publishedCommitDigest(hub, result.sequenceID),
+      remoteDigest: publishedCommitDigest(hub, conflict.sequenceID),
+    })
+    expect(after.responses).toEqual(before.responses)
+    expect(after.cursor).toEqual(before.cursor)
+    expect(after.applied).toEqual(before.applied)
   },
 )
 
@@ -446,15 +454,15 @@ test('adoptions retain exactly the newest 64 epochs of rows and responses', asyn
     external: true,
     adds: ['conflict'],
   })
-  await vi.waitFor(async () =>
-    expect((await again.control.load()).responses).toContainEqual(
-      expect.objectContaining({
-        position: conflict.sequenceID,
-        epoch: 2,
-        kind: 'superseded',
-      }),
-    ),
-  )
+  await vi.waitFor(async () => expect((await again.control.load()).forkHalt).not.toBeNull())
+  const halted = await again.control.load()
+  expect(halted.forkHalt?.evidence).toMatchObject({
+    kind: 'digest-divergence',
+    epoch: 2,
+    position: conflict.sequenceID,
+  })
+  expect(halted.responses).toEqual(snapshot.responses)
+  expect(halted.cursor).toEqual({ position: old.sequenceID, epoch: 66 })
   expect((await again.control.load()).applied).toEqual(snapshot.applied)
 })
 

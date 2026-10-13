@@ -2,14 +2,16 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { toB64U } from '@sozai/codec'
 import { expect, test, vi } from 'vitest'
 
+import { decodeCommitFrame } from '../src/commit-frame.js'
 import type { CertifiedControlRange } from '../src/control/search.js'
 import { asLogPosition } from '../src/cursor.js'
+import { decodeHandshakeFrame } from '../src/handshake.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import { makeMLSPeer } from './fixtures/peer.js'
 
-test.each(['position', 'digest'] as const)(
+test.each(['key', 'epoch', 'position', 'payload'] as const)(
   'bounded peer walk skips listed losers but classifies unlisted %s divergence',
   async (fault) => {
     const hub = new FakeHub()
@@ -35,6 +37,7 @@ test.each(['position', 'digest'] as const)(
       recoverySecret: rs,
       epoch: 1,
       adds: ['dave'],
+      external: true,
     })
     let bounded = false
     const fetch = hub.fetchTopic.bind(hub)
@@ -79,45 +82,49 @@ test.each(['position', 'digest'] as const)(
       expect(headers).toHaveBeenCalledOnce()
       expect(work.takeFrame).toHaveBeenCalledOnce()
       expect((await bob.control.load()).responses).toEqual([])
-      const nextRange =
-        fault === 'position'
-          ? range
-          : {
-              ...range,
-              through: asLogPosition(divergent.sequenceID),
-              losers: [
-                ...range.losers,
-                { position: asLogPosition(divergent.sequenceID), payloadDigest: 'different-bytes' },
-              ],
-            }
-      // An external frame's fork disposition is durably recorded; an incorrect certificate skip leaves no response.
       const divergentRow = hub.published.find((entry) => entry.sequenceID === divergent.sequenceID)
       if (divergentRow === undefined) throw new Error('missing divergence')
-      const { decodeCommitFrame, encodeCommitFrame } = await import('../src/commit-frame.js')
-      const { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } = await import(
-        '../src/handshake.js'
-      )
-      const { decodeMemoryCommit, encodeMemoryCommit } = await import(
-        './fixtures/memory-group-mls.js'
-      )
-      const decoded = decodeCommitFrame(decodeHandshakeFrame(divergentRow.payload).payload)
-      const parsed = decodeMemoryCommit(decoded.commit)
-      if (parsed === null) throw new Error('missing commit')
-      divergentRow.payload = encodeHandshakeFrame(
-        HANDSHAKE_KIND.commit,
-        encodeCommitFrame(
-          encodeMemoryCommit(1, 'alice', [], { external: true, adds: ['dave'] }),
-          decoded.sealedEntries,
-        ),
-      )
+      const winnerRow = hub.published.find((entry) => entry.sequenceID === winner.sequenceID)
+      if (winnerRow === undefined) throw new Error('missing winner frame')
+      const nextRange: CertifiedControlRange = {
+        ...range,
+        key: fault === 'key' ? { ...range.key, incarnation: range.key.incarnation + 1 } : range.key,
+        source: fault === 'epoch' ? { ...range.source, epoch: 2 } : range.source,
+        through: asLogPosition(divergent.sequenceID),
+        losers: [
+          {
+            position:
+              fault === 'position'
+                ? asLogPosition(loser.sequenceID)
+                : asLogPosition(divergent.sequenceID),
+            payloadDigest:
+              fault === 'payload' ? 'different-bytes' : toB64U(sha256(divergentRow.payload)),
+          },
+        ],
+      }
+      const before = await bob.control.load()
+      const head = bob.controlWalk.head()
       await bob.controlWalk.walkCommits({
         through: asLogPosition(divergent.sequenceID),
         range: nextRange,
         work,
       })
-      expect((await bob.control.load()).responses).toContainEqual(
-        expect.objectContaining({ position: divergent.sequenceID, kind: 'superseded' }),
-      )
+      const after = await bob.control.load()
+      expect(after.forkHalt?.evidence).toEqual({
+        kind: 'digest-divergence',
+        epoch: 1,
+        position: divergent.sequenceID,
+        localDigest: toB64U(
+          sha256(decodeCommitFrame(decodeHandshakeFrame(winnerRow.payload).payload).commit),
+        ),
+        remoteDigest: toB64U(
+          sha256(decodeCommitFrame(decodeHandshakeFrame(divergentRow.payload).payload).commit),
+        ),
+      })
+      expect(after.cursor).toEqual(before.cursor)
+      expect(after.applied).toEqual(before.applied)
+      expect(after.responses).toEqual(before.responses)
+      expect(bob.controlWalk.head()).toBe(head)
       expect(headers).toHaveBeenCalledTimes(2)
     } finally {
       await bob.peer.dispose()

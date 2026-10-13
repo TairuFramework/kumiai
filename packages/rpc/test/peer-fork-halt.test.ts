@@ -1,17 +1,24 @@
+import { sha256 } from '@noble/hashes/sha2.js'
+import { toB64U } from '@sozai/codec'
 import { afterEach, expect, test, vi } from 'vitest'
 
+import { decodeCommitFrame } from '../src/commit-frame.js'
 import type { ForkHalt, GroupForkEvidence, SafetyHold } from '../src/control/safety.js'
 import { forkEventID, recoveryUnavailableEventID } from '../src/control/safety.js'
 import type { WelcomeObligation } from '../src/control/types.js'
 import { asLogPosition } from '../src/cursor.js'
 import { ControlSafetyImmutableError, StorageOutcomeUnknownError } from '../src/errors.js'
 import {
+  decodeHandshakeFrame,
   encodeHandshakeFrame,
   HANDSHAKE_KIND,
   HANDSHAKE_MAGIC,
   HANDSHAKE_VERSION,
 } from '../src/handshake.js'
+import * as logDeliveryModule from '../src/log-delivery.js'
 import { commitTopic } from '../src/topic.js'
+import { publishCommit } from './fixtures/commits.js'
+import { assertDurableForkHalt } from './fixtures/control-hold.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import {
   buildInviteCommit,
@@ -29,6 +36,7 @@ afterEach(async () => {
     await member.peer.drained()
   }
   vi.useRealTimers()
+  vi.restoreAllMocks()
 })
 const evidence: GroupForkEvidence = {
   kind: 'unexplained-own-commit',
@@ -582,4 +590,219 @@ test('fork rollback backoff doubles from 100 ms and caps at 15 seconds', async (
   expect(bodies.every((body) => JSON.stringify(body) === JSON.stringify(bodies[0]))).toBe(true)
   expect(new Set(mutations).size).toBe(11)
   expect(onSafetyEvent).toHaveBeenCalledOnce()
+})
+
+async function observedFork(branch: 'losing' | 'winning') {
+  const hub = new FakeHub()
+  const first = await publishCommit({
+    hub,
+    senderDID: 'bob',
+    recoverySecret: secret,
+    epoch: 1,
+    external: true,
+  })
+  const second = await publishCommit({
+    hub,
+    senderDID: 'carol',
+    recoverySecret: secret,
+    epoch: 1,
+    external: true,
+  })
+  const applied = branch === 'losing' ? second : first
+  const remote = branch === 'losing' ? first : second
+  const next = await publishCommit({
+    hub,
+    senderDID: 'bob',
+    recoverySecret: secret,
+    epoch: 2,
+    adds: ['dave'],
+  })
+  hub.hideFrom('alice', remote.sequenceID)
+  hub.hideFrom('alice', next.sequenceID)
+  let revealed = false
+  const fetch = hub.fetchTopic.bind(hub)
+  vi.spyOn(hub, 'fetchTopic').mockImplementation(async (params) => {
+    const page = await fetch(params)
+    return !revealed && params.topicID === commitTopic(secret)
+      ? { ...page, head: applied.sequenceID }
+      : page
+  })
+  const createDelivery = logDeliveryModule.createLogDelivery
+  const deliveries: Array<ReturnType<typeof createDelivery>> = []
+  const create = vi.spyOn(logDeliveryModule, 'createLogDelivery').mockImplementation((params) => {
+    const delivery = createDelivery(params)
+    deliveries.push(delivery)
+    return delivery
+  })
+  const onStrand = vi.fn()
+  const onRecovery = vi.fn()
+  const onSafetyEvent = vi.fn()
+  const member = makeMLSPeer(hub, 'alice', secret, {
+    members: ['alice', 'bob', 'carol'],
+    onStrand,
+    onRecovery,
+    onSafetyEvent,
+    recovery: { timeoutMs: 10, deadlineMs: 30, getDelayMs: () => 0 },
+  })
+  peers.push(member)
+  create.mockRestore()
+  await member.peer.replay()
+  expect(member.mls.epoch()).toBe(2)
+  const delivery = deliveries[0]
+  if (delivery === undefined) throw new Error('Missing log delivery')
+  const certify = vi.spyOn(delivery, 'certify')
+  const commitDigest = (position: string) => {
+    const row = hub.published.find((row) => row.sequenceID === position)
+    if (row === undefined) throw new Error('Missing published commit')
+    return toB64U(sha256(decodeCommitFrame(decodeHandshakeFrame(row.payload).payload).commit))
+  }
+  const expected = {
+    kind: 'digest-divergence' as const,
+    epoch: 1,
+    position: remote.sequenceID,
+    localDigest: commitDigest(applied.sequenceID),
+    remoteDigest: commitDigest(remote.sequenceID),
+  }
+  expect(expected.localDigest).not.toBe(expected.remoteDigest)
+  return {
+    member,
+    hub,
+    onStrand,
+    onRecovery,
+    onSafetyEvent,
+    certify,
+    expected,
+    reveal: async () => {
+      revealed = true
+      hub.revealTo('alice', remote.sequenceID)
+      hub.revealTo('alice', next.sequenceID)
+      return member.controlWalk.walkCommits({
+        through: asLogPosition(next.sequenceID),
+        range: null,
+        work: { takeFetch: () => true, takeFrame: () => true },
+      })
+    },
+  }
+}
+
+test.each(['losing', 'winning'] as const)('%s branch halts without advancing', async (branch) => {
+  const { member, hub, reveal, expected, certify, onStrand, onSafetyEvent } =
+    await observedFork(branch)
+  const before = await member.control.load()
+  const head = member.controlWalk.head()
+  const published = hub.published.length
+  const process = vi.spyOn(member.mls, 'processCommit')
+  expect(await reveal()).toBe(false)
+  const after = await member.control.load()
+  expect(after.forkHalt?.evidence).toEqual(expected)
+  expect(member.controlWalk.safetyHold()).toBe('fork-halted')
+  expect(after.cursor).toEqual(before.cursor)
+  expect(member.controlWalk.head()).toBe(head)
+  expect(after.strand).toEqual(before.strand)
+  expect(after.applied).toEqual(before.applied)
+  expect(after.outcomes).toEqual(before.outcomes)
+  expect(after.responses).toEqual(before.responses)
+  expect(hub.published).toHaveLength(published)
+  expect(certify).not.toHaveBeenCalled()
+  expect(process).not.toHaveBeenCalled()
+  expect(onStrand).toHaveBeenCalledExactlyOnceWith({
+    groupID: commitTopic(secret),
+    position: expected.position,
+    commitDigest: expected.remoteDigest,
+    localEpoch: 2,
+    claimedEpoch: 1,
+    kind: branch === 'losing' ? 'fork-losing' : 'fork-winning',
+    confidence: 'observed',
+  })
+  expect(onSafetyEvent).toHaveBeenCalledOnce()
+})
+
+test.each(['losing', 'winning'] as const)(
+  '%s branch never heals after delayed retries',
+  async (branch) => {
+    const { member, hub, reveal, onRecovery } = await observedFork(branch)
+    vi.useFakeTimers()
+    const request = vi.spyOn(member.mls, 'createRecoveryRequest')
+    const rejoin = vi.spyOn(member.mls, 'applyRecovery')
+    const prepare = vi.spyOn(member.mls, 'prepareRecovery')
+    await reveal()
+    const published = hub.published.length
+    await vi.advanceTimersByTimeAsync(60_000)
+    await member.peer.replay()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(request).not.toHaveBeenCalled()
+    expect(rejoin).not.toHaveBeenCalled()
+    expect(prepare).not.toHaveBeenCalled()
+    expect(onRecovery).not.toHaveBeenCalled()
+    expect(hub.published).toHaveLength(published)
+    expect((await member.control.load()).rejoin).toBeNull()
+    expect((await member.control.load()).cursor?.stranded).not.toBe(true)
+  },
+)
+
+test.each(['losing', 'winning'] as const)(
+  '%s divergence stays held after restart',
+  async (branch) => {
+    const { member, hub, reveal, expected } = await observedFork(branch)
+    await reveal()
+    await assertDurableForkHalt(member, hub, secret, 'alice', { evidence: expected })
+  },
+)
+
+test('past commits with no applied history stay non-fork', async () => {
+  const hub = new FakeHub()
+  const first = await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
+  const second = await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 1 })
+  const onStrand = vi.fn()
+  const member = makeMLSPeer(hub, 'alice', secret, { epoch: 2, onStrand })
+  peers.push(member)
+  await member.peer.replay()
+  const after = await member.control.load()
+  expect(first.sequenceID).not.toBe(second.sequenceID)
+  expect(after.cursor?.position).toBe(second.sequenceID)
+  expect(after.applied).toEqual([])
+  expect(after.forkHalt).toBeNull()
+  expect(member.controlWalk.safetyHold()).toBeNull()
+  expect(member.mls.seen()).toBe(0)
+  expect(onStrand).not.toHaveBeenCalled()
+})
+
+test('identical re-sealed commit stays history below the cursor', async () => {
+  const hub = new FakeHub()
+  const first = await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
+  const original = hub.published.find((row) => row.sequenceID === first.sequenceID)
+  if (original === undefined) throw new Error('Missing original')
+  const commit = decodeCommitFrame(decodeHandshakeFrame(original.payload).payload).commit
+  const second = await publishCommit({
+    hub,
+    senderDID: 'bob',
+    recoverySecret: secret,
+    epoch: 1,
+    commit,
+    entries: ['different-seal'],
+  })
+  expect(hub.published.find((row) => row.sequenceID === second.sequenceID)?.payload).not.toEqual(
+    original.payload,
+  )
+  hub.hideFrom('alice', first.sequenceID)
+  const onStrand = vi.fn()
+  const member = makeMLSPeer(hub, 'alice', secret, { onStrand })
+  peers.push(member)
+  await member.peer.replay()
+  const before = await member.control.load()
+  hub.revealTo('alice', first.sequenceID)
+  await member.controlWalk.walkCommits({
+    through: asLogPosition(second.sequenceID),
+    range: null,
+    work: { takeFetch: () => true, takeFrame: () => true },
+  })
+  await member.peer.replay()
+  const after = await member.control.load()
+  expect(after.forkHalt).toBeNull()
+  expect(member.controlWalk.safetyHold()).toBeNull()
+  expect(after.applied).toEqual(before.applied)
+  expect(after.cursor).toEqual(before.cursor)
+  expect(member.mls.epoch()).toBe(2)
+  expect(member.mls.seen()).toBe(1)
+  expect(onStrand).not.toHaveBeenCalled()
 })

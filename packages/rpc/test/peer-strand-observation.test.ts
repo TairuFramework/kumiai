@@ -117,7 +117,7 @@ describe('commit strand observations', () => {
   )
 
   test.each(['losing', 'winning'] as const)(
-    '%s fork reports only when this peer loses',
+    '%s fork halts with observed confidence',
     async (branch) => {
       const hub = new FakeHub()
       hub.acceptAtAnyHead()
@@ -153,21 +153,21 @@ describe('commit strand observations', () => {
         topicID: commitTopic(rs),
         payload: new Uint8Array([0]),
       })
-      if (branch === 'losing') {
-        await vi.waitFor(() => expect(observations).toHaveLength(1))
-        expect(observations[0]).toEqual({
-          groupID: commitTopic(rs),
-          position: winner.sequenceID,
-          commitDigest: publishedCommitDigest(hub, winner.sequenceID),
-          localEpoch: 2,
-          claimedEpoch: 1,
-          kind: 'fork-losing',
-          confidence: 'observed',
-        })
-      } else {
-        await bob.peer.replay()
-        expect(observations).toEqual([])
-      }
+      await vi.waitFor(() => expect(observations).toHaveLength(1))
+      expect(observations[0]).toEqual({
+        groupID: commitTopic(rs),
+        position: hidden.sequenceID,
+        commitDigest: publishedCommitDigest(hub, hidden.sequenceID),
+        localEpoch: 2,
+        claimedEpoch: 1,
+        kind: branch === 'losing' ? 'fork-losing' : 'fork-winning',
+        confidence: 'observed',
+      })
+      expect((await bob.control.load()).forkHalt?.evidence).toMatchObject({
+        kind: 'digest-divergence',
+        epoch: 1,
+        position: hidden.sequenceID,
+      })
       await bob.peer.dispose()
     },
   )

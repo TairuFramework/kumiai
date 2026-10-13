@@ -99,8 +99,7 @@ describe('the cursor table', () => {
       // This peer's own branch carries the LOWER sequenceID, so it is the one that stands.
       branch: 'winning',
     })
-    // And the peer whose branch carries the higher one rejoins onto the other. Both sides
-    // reach the same verdict from the same two frames, with nobody to arbitrate.
+    // Both observed branches halt. Classification retains which position was applied.
     expect(
       classifyCommit({
         header: { epoch: 3, committerDID: 'alice' },

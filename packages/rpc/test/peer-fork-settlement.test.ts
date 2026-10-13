@@ -12,6 +12,7 @@ import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
+import { memoryEntryID } from './fixtures/memory-group-mls.js'
 import {
   buildLedgerCommit,
   makeMLSPeer,
@@ -287,10 +288,10 @@ afterEach(async () => {
   await Promise.all(peers.splice(0).map(({ peer }) => peer.drained()))
 })
 
-describe('durable fork evidence', () => {
-  test('a fork loser restarts and writes strand and evidence together when the winner is shown', async () => {
+describe('durable fork halts', () => {
+  test('a fork loser persists a halt after restart without changing its cursor', async () => {
     const hub = new FakeHub()
-    const shared = await publishCommit({
+    await publishCommit({
       hub,
       senderDID: 'alice',
       recoverySecret: secret,
@@ -321,37 +322,36 @@ describe('durable fork evidence', () => {
       topicID: commitTopic(secret),
       payload: new Uint8Array([0]),
     })
-    await expect.poll(async () => (await again.control.load()).cursor?.stranded).toBe(true)
+    await expect.poll(async () => (await again.control.load()).forkHalt).not.toBeNull()
     await again.peer.dispose()
     await again.peer.drained()
     const evidence = {
-      conflictEpoch: 2,
-      sharedPosition: asLogPosition(shared.sequenceID),
-      frameDigest: publishedCommitDigest(hub, winner.sequenceID),
+      kind: 'digest-divergence' as const,
+      epoch: 2,
+      position: winner.sequenceID,
+      localDigest: publishedCommitDigest(hub, loser.sequenceID),
+      remoteDigest: publishedCommitDigest(hub, winner.sequenceID),
     }
     expect(await again.control.load()).toMatchObject({
       rejoin: null,
       outcomes: [],
-      cursor: { ...cursor, position: loser.sequenceID, stranded: true, fork: evidence },
+      cursor,
+      strand: null,
+      forkHalt: { evidence },
     })
     expect(hub.published.filter((row) => row.topicID === rendezvousTopic(secret))).toEqual([])
-    // The hub never serves the competing frame again.
     hub.hideFrom('bob', winner.sequenceID)
     const restarted = member(hub, { restartOf: again })
-    await expect
-      .poll(() => hub.published.filter((row) => row.topicID === rendezvousTopic(secret)).length)
-      .toBeGreaterThan(0)
-    expect((await restarted.control.load()).cursor).toEqual({
-      ...cursor,
-      stranded: true,
-      fork: evidence,
-    })
+    await restarted.peer.replay()
+    expect((await restarted.control.load()).cursor).toEqual(cursor)
+    expect(restarted.controlWalk.safetyHold()).toBe('fork-halted')
+    expect(hub.published.filter((row) => row.topicID === rendezvousTopic(secret))).toEqual([])
     await restarted.peer.enqueue(buildLedgerCommit(restarted, []))
   })
 
-  test('later fork reveals preserve the earliest known conflict epoch for settlement', async () => {
+  test('later fork reveals leave the first halt and all applied history unchanged', async () => {
     const hub = new FakeHub()
-    const shared = await publishCommit({
+    await publishCommit({
       hub,
       senderDID: 'alice',
       recoverySecret: secret,
@@ -387,15 +387,19 @@ describe('durable fork evidence', () => {
     await expect
       .poll(() => observations.map((observation) => observation.claimedEpoch))
       .toEqual([2])
-    expect((await bob.control.load()).cursor).toEqual({
-      ...cursor,
-      stranded: true,
-      fork: {
-        conflictEpoch: 2,
-        sharedPosition: asLogPosition(shared.sequenceID),
-        frameDigest: publishedCommitDigest(hub, winner.sequenceID),
-      },
+    const held = await bob.control.load()
+    expect(held.cursor).toEqual(cursor)
+    expect(held.strand).toBeNull()
+    expect(held.forkHalt?.evidence).toMatchObject({
+      kind: 'digest-divergence',
+      epoch: 2,
+      position: winner.sequenceID,
+      remoteDigest: publishedCommitDigest(hub, winner.sequenceID),
     })
+    await bob.peer.replay()
+    expect((await bob.control.load()).forkHalt).toEqual(held.forkHalt)
+    expect((await bob.control.load()).applied).toEqual(held.applied)
+    expect(observations).toHaveLength(1)
   })
 
   test.each(['live', 'restart'] as const)(
@@ -474,7 +478,7 @@ describe('durable fork evidence', () => {
     },
   )
 
-  async function healStoredFork(
+  async function restartStoredForkHalt(
     options: { acceptedInvite?: boolean; collision?: boolean; reenact?: boolean } = {},
   ) {
     const hub = new FakeHub()
@@ -493,7 +497,12 @@ describe('durable fork evidence', () => {
     const rows = options.collision
       ? [applied(1, 'own')]
       : [applied(0, 'older'), applied(1, 'own'), applied(2, 'later')]
-    const accepted = { ...operation('invite', 1, 'accepted'), kind: 'invite' as const }
+    const accepted = {
+      ...operation('invite', 1, 'accepted'),
+      kind: 'invite' as const,
+      enqueuedAt: Date.now(),
+      deadline: Date.now() + 30_000,
+    }
     if (options.acceptedInvite) {
       bob.mls.adopt(bob.mls.buildCommit([], { adds: ['dave'] }))
       await bob.database.saveState('bob', bob.mls.serializeState())
@@ -510,12 +519,18 @@ describe('durable fork evidence', () => {
         cursor: {
           position: null,
           epoch: bob.mls.epoch(),
-          stranded: true,
-          fork: { conflictEpoch: 1, sharedPosition: null, frameDigest: 'withheld-competitor' },
         },
       },
       'stored-fork',
     )
+    await bob.controlWalk.haltFork({
+      kind: 'digest-divergence',
+      epoch: 1,
+      position: '000000000001',
+      localDigest: 'commit-own',
+      remoteDigest: 'withheld-competitor',
+    })
+    const before = await bob.control.load()
     await bob.peer.dispose()
     await bob.peer.drained()
     const restarted = member(hub, {
@@ -523,73 +538,48 @@ describe('durable fork evidence', () => {
       recovery: { timeoutMs: 30, deadlineMs: 300, getDelayMs: () => 0 },
       adopt: async () => 'moved',
     })
-    await expect
-      .poll(
-        async () => {
-          const snapshot = await restarted.control.load()
-          return (
-            snapshot.rejoin == null &&
-            snapshot.outcomes.some(
-              (outcome) => outcome.opID === 'own' && outcome.kind === 'unknown',
-            )
-          )
-        },
-        { timeout: 5000 },
-      )
-      .toBe(true)
-    return { hub, alice, restarted, snapshot: await restarted.control.load() }
+    await restarted.peer.replay()
+    const snapshot = await restarted.control.load()
+    expect(snapshot.forkHalt).toEqual(before.forkHalt)
+    expect(snapshot.cursor).toEqual(before.cursor)
+    expect(snapshot.strand).toEqual(before.strand)
+    expect(snapshot.applied).toEqual(before.applied)
+    expect(snapshot.outcomes).toEqual(before.outcomes)
+    expect(snapshot.rejoin).toBeNull()
+    expect(hub.published).toEqual([])
+    return { hub, alice, restarted, snapshot, before }
   }
 
-  test('rejoin uses stored fork evidence after a crash before its build', async () => {
-    const { snapshot } = await healStoredFork()
-    expect(snapshot.outcomes).toEqual([
-      landed('older', 0),
-      expect.objectContaining({ opID: 'own', kind: 'unknown' }),
-      expect.objectContaining({ opID: 'later', kind: 'unknown' }),
-    ])
-    expect(snapshot.cursor?.fork).toBeUndefined()
+  test('a stored fork halt survives a crash without recovery or history repair', async () => {
+    const { restarted, snapshot } = await restartStoredForkHalt()
+    expect(snapshot.outcomes).toEqual([landed('older', 0), landed('own', 1), landed('later', 2)])
+    expect(restarted.controlWalk.safetyHold()).toBe('fork-halted')
   })
-  test('a forged lower-position conflict heals without asserting which operation won', async () => {
-    const { snapshot } = await healStoredFork()
-    expect(
-      snapshot.outcomes
-        .filter((outcome) => outcome.opID !== 'older')
-        .map((outcome) => outcome.kind),
-    ).toEqual(['unknown', 'unknown'])
+  test('an observed lower-position conflict preserves proven landed outcomes', async () => {
+    const { snapshot } = await restartStoredForkHalt()
+    expect(snapshot.outcomes.map((outcome) => outcome.kind)).toEqual(['landed', 'landed', 'landed'])
   })
-  test('rejoin settles a losing-branch invite as unknown and its roster decides membership', async () => {
-    const { restarted, snapshot } = await healStoredFork({ acceptedInvite: true })
-    expect(snapshot.operations).toEqual([])
-    expect(restarted.mls.leaves()).not.toContain('dave')
-    expect(snapshot.outcomes).toContainEqual(
-      expect.objectContaining({ opID: 'invite', kind: 'unknown' }),
-    )
-    expect(await restarted.mls.rosterEntries()).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ did: 'alice' }),
-        expect.objectContaining({ did: 'bob' }),
-      ]),
-    )
+  test('a halted losing-branch invite retains its operation and membership', async () => {
+    const { restarted, snapshot } = await restartStoredForkHalt({ acceptedInvite: true })
+    expect(snapshot.operations).toMatchObject([{ id: 'invite', stage: 'accepted' }])
+    expect(restarted.mls.leaves()).toContain('dave')
+    expect(snapshot.outcomes.some((outcome) => outcome.opID === 'invite')).toBe(false)
   })
-  test('rejoin adoption overwrites an own landed row only after settling its operation as unknown', async () => {
-    const { snapshot } = await healStoredFork({ collision: true })
-    expect(snapshot.applied).toEqual([expect.objectContaining({ epoch: 1, opID: null })])
-    expect(snapshot.outcomes).toEqual([expect.objectContaining({ opID: 'own', kind: 'unknown' })])
+  test('a halted applied own row keeps its landed outcome', async () => {
+    const { snapshot } = await restartStoredForkHalt({ collision: true })
+    expect(snapshot.applied).toEqual([applied(1, 'own')])
+    expect(snapshot.outcomes).toEqual([landed('own', 1)])
   })
-  test('fork loser restart and winner reveal produce unknown and reenact outcomes', async () => {
-    const { snapshot } = await healStoredFork({ reenact: true })
-    expect(snapshot.outcomes).toContainEqual(
-      expect.objectContaining({ kind: 'reenact', tokens: ['branch-token'] }),
-    )
-    expect(snapshot.outcomes).toContainEqual(
-      expect.objectContaining({ opID: 'own', kind: 'unknown' }),
-    )
+  test('a halted fork retains branch entries without reenact outcomes', async () => {
+    const { snapshot, restarted } = await restartStoredForkHalt({ reenact: true })
+    expect(snapshot.outcomes.some((outcome) => outcome.kind === 'reenact')).toBe(false)
+    expect(restarted.mls.ledgerIDs()).toContain(memoryEntryID('branch-token'))
+    expect((await restarted.peer.replay()).reenact ?? []).toEqual([])
   })
-  test('final rejoin apply retains its row at or above the conflict epoch', async () => {
-    const { snapshot, restarted } = await healStoredFork()
-    const rows = snapshot.applied
-    expect(rows).toEqual([applied(0, 'older'), expect.objectContaining({ epoch: 1, opID: null })])
+  test('a halted restart retains every applied row across repeated replay', async () => {
+    const { snapshot, restarted } = await restartStoredForkHalt()
+    expect(snapshot.applied).toEqual([applied(0, 'older'), applied(1, 'own'), applied(2, 'later')])
     await restarted.peer.replay()
-    expect((await restarted.control.load()).applied).toEqual(rows)
+    expect((await restarted.control.load()).applied).toEqual(snapshot.applied)
   })
 })

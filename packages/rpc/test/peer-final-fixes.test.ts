@@ -98,7 +98,7 @@ test('a restart at the same epoch rediscovers a strand the durable cursor never 
   expect(restarted[0]).toMatchObject({ position: ahead.sequenceID, kind: 'ahead' })
 })
 
-test('a losing fork strand survives a restart through the durable cursor', async () => {
+test('a losing fork halt survives restart without changing the durable cursor', async () => {
   const hub = new FakeHub()
   hub.acceptAtAnyHead()
   const members = ['alice', 'bob', 'carol']
@@ -131,6 +131,7 @@ test('a losing fork strand survives a restart through the durable cursor', async
   })
   await vi.waitFor(() => expect(bob.mls.epoch()).toBe(2))
   expect((await store.load()).cursor).toEqual({ position: loser.sequenceID, epoch: 2 })
+  const before = await store.load()
   hub.revealTo('bob', winner.sequenceID)
   await hub.publish({
     senderDID: 'zoe',
@@ -138,15 +139,14 @@ test('a losing fork strand survives a restart through the durable cursor', async
     payload: new Uint8Array([0]),
   })
   await vi.waitFor(() => expect(strands.map((strand) => strand.kind)).toEqual(['fork-losing']))
-  expect((await store.load()).cursor).toEqual({
-    position: loser.sequenceID,
-    epoch: 2,
-    stranded: true,
-    fork: {
-      conflictEpoch: 1,
-      sharedPosition: null,
-      frameDigest: publishedCommitDigest(hub, winner.sequenceID),
-    },
+  expect((await store.load()).cursor).toEqual(before.cursor)
+  expect((await store.load()).strand).toBeNull()
+  expect((await store.load()).forkHalt?.evidence).toEqual({
+    kind: 'digest-divergence',
+    epoch: 1,
+    position: winner.sequenceID,
+    localDigest: publishedCommitDigest(hub, loser.sequenceID),
+    remoteDigest: publishedCommitDigest(hub, winner.sequenceID),
   })
   await bob.peer.dispose()
   await bob.peer.drained()
@@ -160,37 +160,39 @@ test('a losing fork strand survives a restart through the durable cursor', async
       recoveries.push(event)
     },
   })
-  await again.peer.resync()
-  await vi.waitFor(() => expect(recoveries.some((event) => event.phase === 'started')).toBe(true))
+  await again.peer.replay()
+  expect(recoveries).toEqual([])
+  expect((await again.control.load()).cursor).toEqual(before.cursor)
+  expect((await again.control.load()).applied).toEqual(before.applied)
+  expect(again.controlWalk.safetyHold()).toBe('fork-halted')
 })
 
-test('a rejoin that lands on the stranded epoch number clears the strand', async () => {
-  controlRecoveryClock(5)
+test('a stored fork halt keeps the epoch and cursor despite an available responder', async () => {
   const hub = new FakeHub()
   const members = ['alice', 'bob', 'carol']
-  const recovery = { timeoutMs: 60, deadlineMs: 250, getDelayMs: () => 5 }
-  const carol = makeMLSPeer(hub, 'carol', secret, { epoch: 2, members, recovery })
+  const carol = makeMLSPeer(hub, 'carol', secret, { epoch: 2, members })
   peers.push(carol)
-  await carol.peer.resync()
-  // Bob stranded on a losing branch one epoch past the group: the rejoin lands on epoch 3 again.
-  const database = createMemoryHostDatabase()
-  const store = database.control('bob', { groupID: 'memory-group', incarnation: 1 })
-  await store.apply({ cursor: { position: null, epoch: 3, stranded: true } }, 'stranded-cursor')
-  const events: Array<RecoveryEvent> = []
-  const bob = member(hub, {
-    database,
-    epoch: 3,
-    members,
-    recovery,
-    onRecovery: (event) => {
-      events.push(event)
-    },
+  await carol.peer.replay()
+  const bob = member(hub, { epoch: 3, members })
+  await bob.peer.replay()
+  const before = await bob.control.load()
+  await bob.controlWalk.haltFork({
+    kind: 'digest-divergence',
+    epoch: 2,
+    position: '000000000001',
+    localDigest: 'retained-branch',
+    remoteDigest: 'competing-branch',
   })
-  await drainUntil(() => events.some((event) => event.phase === 'succeeded'), 'rejoin')
-  expect(await bob.mls.readEpoch()).toBe(3)
-  expect((await store.load()).cursor?.stranded).toBeUndefined()
-  await bob.peer.commit(buildLedgerCommit(bob, []))
-  expect(await bob.mls.readEpoch()).toBe(4)
+  await bob.peer.dispose()
+  await bob.peer.drained()
+  const recovery = vi.fn()
+  const again = member(hub, { restartOf: bob, onRecovery: recovery })
+  await again.peer.replay()
+  expect(again.mls.epoch()).toBe(3)
+  expect((await again.control.load()).cursor).toEqual(before.cursor)
+  expect((await again.control.load()).applied).toEqual(before.applied)
+  expect(recovery).not.toHaveBeenCalled()
+  expect(again.controlWalk.safetyHold()).toBe('fork-halted')
 })
 
 test('a rejoin that lands on the same epoch number captures a new app anchor', async () => {

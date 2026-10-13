@@ -17,7 +17,7 @@ import {
   encodeCommitFrame,
   isUnsupportedCommitFrameVersion,
 } from './commit-frame.js'
-import { appliedRows, forkEvidence } from './control/forks.js'
+import { appliedRows } from './control/forks.js'
 import { searchOccurrence } from './control/occurrence.js'
 import {
   enqueueOperation,
@@ -1699,32 +1699,24 @@ export function createGroupPeerWithControlWalk<
             break
           }
           if (disposition.row === 'fork') {
-            // Two commits at one epoch. The lower-sequenceID branch wins; the loser rejoins onto it
-            // (a heal). The winner just steps over the frame.
-            if (disposition.branch === 'losing') {
-              stranded = true
-              if (control != null && header != null) {
-                await persistStrand(forkEvidence(await control.load(), header.epoch, commitDigest))
-              }
-            }
-            await saveCommitCursor(
+            const applied = header == null ? undefined : appliedByEpoch.get(header.epoch)
+            if (header == null || applied == null) throw new Error('Missing applied fork history')
+            await haltFork({
+              kind: 'digest-divergence',
+              epoch: header.epoch,
               position,
-              header?.external && disposition.branch !== 'losing' && !stranded
-                ? { position, digest: commitDigest, kind: 'superseded', epoch: header.epoch }
-                : undefined,
-            )
-            if (disposition.branch === 'losing') {
-              healRequested = safetyHold() === null
-              observeStrand({
-                position,
-                commitDigest,
-                localEpoch,
-                claimedEpoch: header?.epoch ?? null,
-                kind: 'fork-losing',
-                confidence: 'observed',
-              })
-            }
-            break
+              localDigest: applied.digest,
+              remoteDigest: commitDigest,
+            })
+            observeStrand({
+              position,
+              commitDigest,
+              localEpoch,
+              claimedEpoch: header.epoch,
+              kind: disposition.branch === 'losing' ? 'fork-losing' : 'fork-winning',
+              confidence: 'observed',
+            })
+            return advancedEpoch
           }
           if (disposition.row === 'poison') {
             await saveCommitCursor(position) // not a commit at all: stepped over, and never retried
@@ -2171,7 +2163,6 @@ export function createGroupPeerWithControlWalk<
         reconciledHead = cursor.position
       floor = { epoch: cursor.epoch, position: cursor.position, covered: true }
       if (cursor.stranded) {
-        if (!stranded && !hardControlHeld()) healRequested = safetyHold() === null
         stranded = true
       }
     }

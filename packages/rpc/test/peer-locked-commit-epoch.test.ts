@@ -9,7 +9,7 @@ import {
 } from '../src/handshake.js'
 import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
 import { commitTopic } from '../src/topic.js'
-import { publishCommit } from './fixtures/commits.js'
+import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
 import { assertDurableControlHold, assertDurableForkHalt } from './fixtures/control-hold.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
@@ -129,7 +129,12 @@ describe('commit decisions use the handle epoch', { concurrent: false }, () => {
         recoverySecret: secret,
         epoch: 1,
       })
-      await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 1 })
+      const loser = await publishCommit({
+        hub,
+        senderDID: 'carol',
+        recoverySecret: secret,
+        epoch: 1,
+      })
       hub.hideFrom('bob', winner.sequenceID)
       const crypto = createFakeCrypto({ epoch: 1, localDID: 'bob' })
       const actualEpoch = crypto.epoch
@@ -144,6 +149,8 @@ describe('commit decisions use the handle epoch', { concurrent: false }, () => {
         },
       })
       await vi.waitFor(() => expect(bob.mls.epoch()).toBe(2))
+      await bob.peer.replay()
+      const before = await bob.control.load()
       hub.revealTo('bob', winner.sequenceID)
       await hub.publish({
         senderDID: 'zoe',
@@ -155,6 +162,15 @@ describe('commit decisions use the handle epoch', { concurrent: false }, () => {
       )
       expect(observations.at(-1)?.localEpoch).toBe(2)
       expect(bob.mls.commits()).toBe(1)
+      const after = await bob.control.load()
+      expect(after.cursor).toEqual(before.cursor)
+      expect(after.forkHalt?.evidence).toEqual({
+        kind: 'digest-divergence',
+        epoch: 1,
+        position: winner.sequenceID,
+        localDigest: publishedCommitDigest(hub, loser.sequenceID),
+        remoteDigest: publishedCommitDigest(hub, winner.sequenceID),
+      })
       await bob.peer.dispose()
     },
   )
