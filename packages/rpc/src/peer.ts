@@ -3607,6 +3607,7 @@ export function createGroupPeerWithControlWalk<
             })
           },
         })
+        if (verdict.kind === 'error') safetyRefusal(verdict.error)
         assertLive()
         assertSafetyOpen()
         if (verdict.kind === 'refused' && ['binding', 'lapse', 'floor'].includes(verdict.refusal))
@@ -3884,16 +3885,13 @@ export function createGroupPeerWithControlWalk<
       }
       return failed('deadline')
     } catch (error) {
-      if (safetyRefusal(error) || safetyHold() !== null) {
-        if (trigger === 'consumer') {
-          assertSafetyOpen()
-          throw error
-        }
-        return { advanced: false }
-      }
       if (disposed || error instanceof PeerDisposedError) {
         emitRecovery({ ...base, phase: 'failed', reason: 'disposed' })
         throw error instanceof PeerDisposedError ? error : new PeerDisposedError('Peer is disposed')
+      }
+      if (safetyRefusal(error)) {
+        if (trigger === 'consumer') throw error
+        return { advanced: false }
       }
       retryRecovery()
       emitRecovery({ ...base, phase: 'failed', reason: 'error', error })
@@ -3946,9 +3944,9 @@ export function createGroupPeerWithControlWalk<
 
   const recover = async (): Promise<{ advanced: boolean; reenact: Array<string> }> => {
     assertSafetyOpen()
+    renewalRequiredEpoch = null
     await ready
     assertSafetyOpen()
-    renewalRequiredEpoch = null
     if (control != null && (await control.load()).rejoin?.stage === 'refused') {
       await runSerial(async () => {
         assertSafetyOpen()

@@ -4,8 +4,9 @@ import { forkEventID, recoveryUnavailableEventID, type SafetyHold } from '../src
 import type { ExternalResponse } from '../src/control/types.js'
 import type { GroupMLS } from '../src/crypto.js'
 import { asLogPosition } from '../src/cursor.js'
-import { GroupSafetyHeldError } from '../src/errors.js'
+import { GroupSafetyHeldError, PeerDisposedError } from '../src/errors.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
+import type { RecoveryEvent } from '../src/peer-types.js'
 import {
   decodeRecoveryRequest,
   encodeLedgerReply,
@@ -103,6 +104,119 @@ test.each(reasons)('explicit recovery refuses safety (%s)', async (reason) => {
   expect(request).not.toHaveBeenCalled()
   expect(publish).not.toHaveBeenCalled()
 })
+
+test.each(reasons)('held confirmation refusal latches after abandon (%s)', async (reason) => {
+  const hub = new FakeHub()
+  const alice = makeMLSPeer(hub, 'alice', secret, { members: ['alice', 'bob'] })
+  const member = makeMLSPeer(hub, 'bob', secret, {
+    members: ['alice', 'bob'],
+    recovery: { timeoutMs: 1000, deadlineMs: 3000, getDelayMs: () => 0 },
+  })
+  peers.push(alice, member)
+  await alice.peer.replay()
+  await member.peer.replay()
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<never>()
+  vi.spyOn(member.mls, 'openRecoveryVerdict').mockImplementation(async () => {
+    entered.resolve()
+    return await release.promise
+  })
+  const recovering = member.peer.recover().catch((error: unknown) => error)
+  await entered.promise
+  expect((await member.control.load()).rejoin?.stage).toBe('published')
+  await member.peer.abandon()
+  expect((await member.control.load()).rejoin).toBeNull()
+  await alice.peer.dispose()
+  await alice.peer.drained()
+  const fetch = vi.spyOn(hub, 'fetchTopic')
+  const publish = hub.publish.bind(hub)
+  const handoff = vi.spyOn(hub, 'publish')
+  const methods = [
+    'readCommitHeader',
+    'processCommit',
+    'prepareRecovery',
+    'createRecoveryRequest',
+    'applyRecovery',
+    'restoreRecovery',
+    'confirmationKey',
+    'openRecoveryVerdict',
+    'sealGroupInfo',
+    'sealLedger',
+    'openSealedLedger',
+    'sealRecoveryVerdict',
+  ] as const
+  const starts = methods.map((method) => vi.spyOn(member.mls, method).mockClear())
+  const cryptoStarts = member.crypto.starts
+  release.reject(new GroupSafetyHeldError(reason))
+  const error = await recovering
+  expect(member.controlWalk.safetyHold()).toBe(reason)
+  expect(error).toBeInstanceOf(GroupSafetyHeldError)
+  await publish({
+    senderDID: 'alice',
+    topicID: commitTopic(secret),
+    payload: new Uint8Array([255]),
+    retain: 'log',
+  })
+  await member.peer.replay()
+  await expect(member.peer.recover()).rejects.toEqual(new GroupSafetyHeldError(reason))
+  expect(fetch).not.toHaveBeenCalled()
+  expect(handoff).not.toHaveBeenCalled()
+  for (const start of starts) expect(start).not.toHaveBeenCalled()
+  expect(member.crypto.starts).toEqual(cryptoStarts)
+})
+
+test.each(
+  reasons.flatMap((reason) =>
+    (['consumer', 'automatic'] as const).flatMap((trigger) =>
+      (['disposed', 'error'] as const).map((failure) => [reason, trigger, failure] as const),
+    ),
+  ),
+)(
+  'latched recovery preserves non-safety failure (%s, %s, %s)',
+  async (reason, trigger, failure) => {
+    const hub = new FakeHub()
+    const events: Array<RecoveryEvent> = []
+    const member = makeMLSPeer(hub, 'bob', secret, {
+      members: ['alice', 'bob'],
+      recovery: { timeoutMs: 1000, deadlineMs: 3000, getDelayMs: () => 0 },
+      onRecovery: (event) => {
+        events.push(event)
+      },
+    })
+    peers.push(member)
+    await member.peer.replay()
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<never>()
+    vi.spyOn(member.mls, 'createRecoveryRequest').mockImplementation(async () => {
+      entered.resolve()
+      return await release.promise
+    })
+    const recovering =
+      trigger === 'consumer' ? member.peer.recover().catch((error: unknown) => error) : undefined
+    if (trigger === 'automatic')
+      await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 3 })
+    await entered.promise
+    latchPeerSafety(member, reason)
+    const error =
+      failure === 'disposed'
+        ? new PeerDisposedError('Peer is disposed')
+        : new Error('request failed')
+    const dispose = failure === 'disposed' && trigger === 'consumer'
+    if (dispose) await member.peer.dispose()
+    release.reject(error)
+    if (recovering !== undefined) expect(await recovering).toBe(error)
+    if (dispose) {
+      await member.peer.drained()
+      expect(events.map((event) => event.phase)).toEqual(['started'])
+    } else {
+      await vi.waitFor(() =>
+        expect(events).toContainEqual(
+          expect.objectContaining({ trigger, phase: 'failed', reason: failure }),
+        ),
+      )
+    }
+  },
+)
 
 test.each(
   reasons.flatMap((reason) =>

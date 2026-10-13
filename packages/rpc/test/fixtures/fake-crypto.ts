@@ -31,6 +31,7 @@ export type FakeCryptoOptions = {
 }
 
 export type FakeCrypto = GroupCrypto & {
+  starts: Record<'wrap' | 'unwrap' | 'sealEntries' | 'openEntries', number>
   restart: () => FakeCrypto
   setEpoch: (n: number) => void
   saveState: () => Uint8Array
@@ -192,6 +193,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
   const secret = options.secret ?? FAKE_BASE_SECRET
   const key = options.key ?? 0x5a
   const localDID = options.localDID ?? ''
+  const starts = { wrap: 0, unwrap: 0, sealEntries: 0, openEntries: 0 }
 
   const xor = (bytes: Uint8Array, at: number): Uint8Array => {
     const epochKey = (key ^ at) & 0xff
@@ -219,6 +221,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     )
 
   const wrap: GroupCrypto['wrap'] = (bytes, opts) => {
+    starts.wrap++
     const did = fromUTF(localDID)
     const aad = opts?.aad ?? new Uint8Array()
     const framed = new Uint8Array(
@@ -359,6 +362,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     return { payload, senderDID, spentKey }
   }
   const unwrap: GroupCrypto['unwrap'] = (bytes, opts) => {
+    starts.unwrap++
     if (opts?.frame == null) {
       const { payload, senderDID } = open(bytes, opts, true)
       return { payload, senderDID, epoch }
@@ -427,6 +431,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     hmac(sha256, key, ciphertext).subarray(0, ENTRY_TAG_BYTES)
 
   const sealEntries: GroupCrypto['sealEntries'] = (bytes) => {
+    starts.sealEntries++
     const key = entryKey(epoch)
     const ciphertext = entryStream(bytes, key)
     const sealed = new Uint8Array(ENTRY_TAG_BYTES + ciphertext.length)
@@ -436,6 +441,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
   }
 
   const openEntries: GroupCrypto['openEntries'] = (sealed) => {
+    starts.openEntries++
     if (sealed.length < ENTRY_TAG_BYTES)
       throw new LedgerEntryRefusedError('cannot open: not a sealed entry blob')
     const key = entryKey(epoch)
@@ -452,6 +458,9 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
   }
 
   return {
+    get starts() {
+      return { ...starts }
+    },
     restart: () => createFakeCrypto({ ...options, state: saveState() }),
     epoch: () => epoch,
     // `label` is the CALLER's, taken as given and never defaulted or ignored here — a fake that

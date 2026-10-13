@@ -45,7 +45,7 @@ test.each(reasons)(
     const { hub, member } = await fixture()
     const directed = await member.peer.protocol('chat').to('alice')
     latchPeerSafety(member, reason)
-    const wrap = vi.spyOn(member.crypto, 'wrap')
+    const starts = member.crypto.starts
     const publish = vi.spyOn(hub, 'publish')
     const surface = member.peer.protocol('chat')
     await expect(surface.dispatch('chat/changed', { data: {} })).rejects.toEqual(
@@ -60,7 +60,7 @@ test.each(reasons)(
     await expect(
       directed.request('chat/echo', { param: {}, signal: AbortSignal.timeout(100) }),
     ).rejects.toEqual(new SendNotAdmissibleError(reason))
-    expect(wrap).not.toHaveBeenCalled()
+    expect(member.crypto.starts.wrap).toBe(starts.wrap)
     expect(publish).not.toHaveBeenCalled()
   },
 )
@@ -99,7 +99,7 @@ test.each(reasons)('protocol and inbox inbound frames stay unopened (%s)', async
   const handler = vi.fn()
   const { hub, member } = await fixture({ 'chat/changed': handler, 'chat/echo': handler })
   latchPeerSafety(member, reason)
-  const unwrap = vi.spyOn(member.crypto, 'unwrap')
+  const starts = member.crypto.starts
   const sender = createFakeCrypto({ localDID: 'alice' })
   const anchor = fakeEpochSecret(1, APP_TOPIC_LABEL)
   const topic = protocolTopic(anchor, 1, 'chat')
@@ -130,7 +130,7 @@ test.each(reasons)('protocol and inbox inbound frames stay unopened (%s)', async
     })
   }
   await new Promise((resolve) => setTimeout(resolve, 20))
-  expect(unwrap).not.toHaveBeenCalled()
+  expect(member.crypto.starts.unwrap).toBe(starts.unwrap)
   expect(handler).not.toHaveBeenCalled()
 })
 
@@ -262,11 +262,11 @@ test.each(
     ).catch(() => {})
     await entered.promise
     latchPeerSafety(member, reason)
-    const wrap = vi.spyOn(member.crypto, 'wrap')
+    const starts = member.crypto.starts
     release.resolve()
     await vi.waitFor(() => expect(completed).toHaveBeenCalledOnce())
     await request
-    expect(wrap).not.toHaveBeenCalled()
+    expect(member.crypto.starts.wrap).toBe(starts.wrap)
     expect(hub.published.filter((row) => row.senderDID === 'bob').length).toBe(0)
   },
 )
@@ -286,12 +286,12 @@ test.each(reasons)('gather callbacks cannot send after halt (%s)', async (reason
     timeoutMs: 100,
     onReply: () => {
       latchPeerSafety(member, reason)
-      const wrap = vi.spyOn(member.crypto, 'wrap')
+      const starts = member.crypto.starts
       void member.peer
         .protocol('chat')
         .dispatch('chat/changed', { data: {} })
         .catch((error: unknown) => {
-          wrapsAfterLatch = wrap.mock.calls.length
+          wrapsAfterLatch = member.crypto.starts.wrap - starts.wrap
           result.resolve(error)
         })
     },
