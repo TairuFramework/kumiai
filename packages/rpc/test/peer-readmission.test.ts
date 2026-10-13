@@ -42,6 +42,8 @@ function unsettled(): ControlSnapshot {
     commitOnce: null,
     commitOnceAcceptance: null,
     controlHold: null,
+    forkHalt: null,
+    recoveryUnavailable: null,
     strand: null,
     operations: [
       { ...operation, id: 'intent', seq: 1, stage: 'intent' },

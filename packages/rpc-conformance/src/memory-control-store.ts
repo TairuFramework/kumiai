@@ -8,6 +8,7 @@ import type {
   ConformanceControlStore,
   ConformanceEpochIdentity,
   ConformanceGroupKey,
+  ConformanceSafetyHold,
   ConformanceSaveControlBuild,
 } from './control-store.js'
 import { decodeControlFixtureState } from './control-store.js'
@@ -86,6 +87,79 @@ function equal(left: unknown, right: unknown): boolean {
     )
   )
 }
+
+export function controlSafetyHeld(snapshot: ConformanceControlSnapshot): ConformanceSafetyHold {
+  if (snapshot.forkHalt !== null) return 'fork-halted'
+  if (snapshot.recoveryUnavailable !== null) return 'recovery-unavailable'
+  return null
+}
+
+class ControlSafetyImmutableError extends Error {
+  override name = 'ControlSafetyImmutableError'
+  #field: 'forkHalt' | 'recoveryUnavailable'
+
+  constructor(field: 'forkHalt' | 'recoveryUnavailable') {
+    super(`Immutable safety field: ${field}`)
+    this.#field = field
+  }
+
+  get field(): 'forkHalt' | 'recoveryUnavailable' {
+    return this.#field
+  }
+}
+
+function completeEvidence(value: unknown): boolean {
+  if (value === null || typeof value !== 'object') return false
+  const evidence = value as Record<string, unknown>
+  if (typeof evidence.epoch !== 'number' || !Number.isFinite(evidence.epoch)) return false
+  if (evidence.kind === 'epoch-authenticator')
+    return evidence.local instanceof Uint8Array && evidence.remote instanceof Uint8Array
+  if (evidence.kind === 'digest-divergence')
+    return (
+      typeof evidence.position === 'string' &&
+      typeof evidence.localDigest === 'string' &&
+      typeof evidence.remoteDigest === 'string'
+    )
+  return (
+    evidence.kind === 'unexplained-own-commit' &&
+    typeof evidence.position === 'string' &&
+    typeof evidence.digest === 'string'
+  )
+}
+
+function checkSafetyIdentity(
+  field: 'forkHalt' | 'recoveryUnavailable',
+  value: unknown,
+  key: ConformanceGroupKey | null,
+): void {
+  if (
+    key === null ||
+    typeof key.groupID !== 'string' ||
+    typeof key.incarnation !== 'number' ||
+    !Number.isFinite(key.incarnation)
+  )
+    throw new TypeError('A safety write requires the store key')
+  if (value === null) throw new ControlSafetyImmutableError(field)
+  if (typeof value !== 'object') throw new TypeError('Incomplete safety value')
+  const body = value as Record<string, unknown>
+  if (field === 'forkHalt') {
+    if (
+      body.eventID !== JSON.stringify(['group:fork', key.groupID, key.incarnation]) ||
+      typeof body.detectedAt !== 'number' ||
+      !Number.isFinite(body.detectedAt) ||
+      !completeEvidence(body.evidence)
+    )
+      throw new TypeError('Invalid fork halt')
+  } else if (
+    body.id !== JSON.stringify(['group:recovery-unavailable', key.groupID, key.incarnation]) ||
+    body.kind !== 'group:recovery-unavailable' ||
+    body.groupID !== key.groupID ||
+    body.incarnation !== key.incarnation ||
+    body.reason !== 'trust-unreadable'
+  )
+    throw new TypeError('Invalid recovery event')
+}
+
 function matches(slot: ConformanceControlSlot, identity: ConformanceEpochIdentity): boolean {
   return (
     slot.epoch === identity.epoch &&
@@ -147,8 +221,21 @@ function mutateControl<Position extends string>(
   snapshot: ConformanceControlSnapshot<Position>,
   changes: ConformanceControlChanges<Position>,
   context: Context | null = null,
+  key: ConformanceGroupKey | null = null,
 ): void {
   const owned = cloneValue(changes)
+  const fields = ['forkHalt', 'recoveryUnavailable'] as const
+  for (const field of fields) {
+    if (Object.hasOwn(owned, field)) checkSafetyIdentity(field, owned[field], key)
+  }
+  for (const field of fields) {
+    if (
+      Object.hasOwn(owned, field) &&
+      snapshot[field] !== null &&
+      !equal(snapshot[field], owned[field])
+    )
+      throw new ControlSafetyImmutableError(field)
+  }
   const slot = owned.commitOnce === undefined ? snapshot.commitOnce : owned.commitOnce
   guard(snapshot.commitOnce, slot, context)
   const proof =
@@ -209,6 +296,8 @@ function mutateControl<Position extends string>(
   if (owned.commitOnce !== undefined) snapshot.commitOnce = owned.commitOnce
   snapshot.commitOnceAcceptance = proof
   if (owned.controlHold !== undefined) snapshot.controlHold = owned.controlHold
+  snapshot.forkHalt ??= owned.forkHalt ?? null
+  snapshot.recoveryUnavailable ??= owned.recoveryUnavailable ?? null
   if (owned.strand !== undefined) snapshot.strand = owned.strand
   if (owned.cursor !== undefined) snapshot.cursor = owned.cursor
   snapshot.operations.sort((a, b) => a.seq - b.seq)
@@ -236,6 +325,8 @@ export function createMemoryControlStore<Position extends string = string>(
       commitOnce: null,
       commitOnceAcceptance: null,
       controlHold: null,
+      forkHalt: null,
+      recoveryUnavailable: null,
       strand: null,
       operations: [],
       rejoin: null,
@@ -275,7 +366,12 @@ export function createMemoryControlStore<Position extends string = string>(
         !equal(changes.commitOnceAcceptance.source.key, fixedKey)
       )
         throw new Error('Proof key mismatch')
-      mutateControl(next.control, changes, source === null ? null : { kind: 'head', source })
+      mutateControl(
+        next.control,
+        changes,
+        source === null ? null : { kind: 'head', source },
+        fixedKey,
+      )
       next.mutationID = mutationID
       finish(next, 'apply')
     },
@@ -304,20 +400,25 @@ export function createMemoryControlStore<Position extends string = string>(
         previous.epoch >= (identity?.epoch ?? 0)
       )
         return 'occupied'
-      mutateControl(next.control, {
-        putOperations: [
-          {
-            ...intent,
-            stage: 'built',
-            built: {
-              incarnation: built.incarnation,
-              epoch: built.epoch,
-              publishID: built.publishID,
-              payloadDigest: built.payloadDigest,
+      mutateControl(
+        next.control,
+        {
+          putOperations: [
+            {
+              ...intent,
+              stage: 'built',
+              built: {
+                incarnation: built.incarnation,
+                epoch: built.epoch,
+                publishID: built.publishID,
+                payloadDigest: built.payloadDigest,
+              },
             },
-          },
-        ],
-      })
+          ],
+        },
+        null,
+        fixedKey,
+      )
       mutateControl(
         next.control,
         { commitOnce: built, commitOnceAcceptance: null },
@@ -327,6 +428,7 @@ export function createMemoryControlStore<Position extends string = string>(
           queueHeadID: intent.id,
           checkpoint: next.control.cursor?.position ?? null,
         },
+        fixedKey,
       )
       next.mutationID = mutationID
       finish(next, 'apply')
@@ -385,6 +487,7 @@ export function createMemoryControlStore<Position extends string = string>(
                   before,
                   after,
                 },
+          fixedKey,
         )
         next.mutationID = write.mutationID
         if (write.anchorLanded != null && next.anchor?.pending?.advance === write.anchorLanded) {

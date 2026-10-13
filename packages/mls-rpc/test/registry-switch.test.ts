@@ -276,6 +276,8 @@ for (const mode of ['real-mls', 'double'] as const) {
           commitOnce: null,
           commitOnceAcceptance: null,
           controlHold: null,
+          forkHalt: null,
+          recoveryUnavailable: null,
           strand: null,
           operations: [],
           rejoin: null,

@@ -88,6 +88,8 @@ export function createTransactionalStore(
         commitOnce: null,
         commitOnceAcceptance: null,
         controlHold: null,
+        forkHalt: null,
+        recoveryUnavailable: null,
         strand: null,
         operations: [],
         rejoin: null,
@@ -158,7 +160,7 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
           row = {
             ...row,
             revision: row.revision + 1,
-            control: applyChanges(row.control, owned, { kind: 'head', source }),
+            control: applyChanges(row.control, owned, { kind: 'head', source }, key),
             mutationID,
           }
         })
@@ -203,6 +205,7 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
             commitOnceAcceptance: null,
           },
           context,
+          key,
         )
         row = { ...row, revision: row.revision + 1, control, mutationID }
         return 'saved'
@@ -254,11 +257,16 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
           control:
             write == null
               ? row.control
-              : applyChanges(row.control, write.changes, {
-                  kind: 'adoption',
-                  before: identityOf(row.state),
-                  after: identityOf(state),
-                }),
+              : applyChanges(
+                  row.control,
+                  write.changes,
+                  {
+                    kind: 'adoption',
+                    before: identityOf(row.state),
+                    after: identityOf(state),
+                  },
+                  key,
+                ),
           mutationID: write?.mutationID ?? row.mutationID,
           anchorSlot: structuredClone(row.anchorSlot),
         }

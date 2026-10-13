@@ -44,6 +44,16 @@ export type {
 export { searchOccurrence } from './control/occurrence.js'
 export type { HostBuilt, OperationDeps } from './control/operations.js'
 export {
+  controlSafetyHeld,
+  type ForkHalt,
+  forkEventID,
+  type GroupForkEvidence,
+  type GroupSafetyEvent,
+  type RecoveryUnavailableEvent,
+  recoveryUnavailableEventID,
+  type SafetyHold,
+} from './control/safety.js'
+export {
   type CertifiedControlRange,
   CONTROL_SEARCH_BUDGET,
   type ControlEvidenceSnapshot,
@@ -57,7 +67,6 @@ export {
   type ControlValidationPort,
   createControlSearch,
   type FollowWinnerResult,
-  type GroupForkEvidence,
   isCertifiedControlLoser,
 } from './control/search.js'
 export { type ControlSlotDeps, controlBuildRef, settleControlSlot } from './control/slot.js'
@@ -139,6 +148,7 @@ export {
 export {
   AppEntryTooLargeError,
   AppOutboxFullError,
+  ControlSafetyImmutableError,
   ControlWriteNotCommittedError,
   GroupControlUnsettledError,
   OperationOutcomeError,

@@ -1,5 +1,6 @@
 import type { RecoveryRefusalReason } from '../crypto.js'
 import type { LogPosition } from '../cursor.js'
+import type { ForkHalt, RecoveryUnavailableEvent } from './safety.js'
 import type { ControlHold } from './search.js'
 
 export type GroupKey = { groupID: string; incarnation: number }
@@ -38,6 +39,8 @@ export type ControlSnapshot = {
   commitOnce: ControlSlot | null
   commitOnceAcceptance: FirstValidCommit | null
   controlHold: ControlHold | null
+  forkHalt: ForkHalt | null
+  recoveryUnavailable: RecoveryUnavailableEvent | null
   strand: {
     reason: 'retention-gap' | 'unprocessable-gap' | 'lost-state' | 'ahead' | 'unsupported-version'
   } | null
@@ -62,6 +65,8 @@ export type ControlChanges = {
   commitOnce?: ControlSlot | null
   commitOnceAcceptance?: FirstValidCommit | null
   controlHold?: ControlHold | null
+  forkHalt?: ForkHalt
+  recoveryUnavailable?: RecoveryUnavailableEvent
   strand?: ControlSnapshot['strand']
   putOperations?: Array<Operation>
   deleteOperations?: Array<string>

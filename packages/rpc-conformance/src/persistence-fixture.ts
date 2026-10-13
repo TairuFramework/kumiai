@@ -6,6 +6,8 @@ import type {
   ConformanceControlChanges,
   ConformanceControlSnapshot,
   ConformanceControlStore,
+  ConformanceGroupSafetyEvent,
+  ConformanceRecoveryUnavailableEvent,
 } from './control-store.js'
 
 export type ConformanceMemberCredential = { id: string; groupID: string }
@@ -590,34 +592,12 @@ export type ConformanceAppStatusEvent = ConformanceGroupKey & {
       }
   )
 
-export type ConformanceGroupForkEvidence =
-  | {
-      kind: 'digest-divergence'
-      epoch: number
-      position: string
-      localDigest: string
-      remoteDigest: string
-    }
-  | { kind: 'epoch-authenticator'; epoch: number; local: Uint8Array; remote: Uint8Array }
-  | { kind: 'unexplained-own-commit'; epoch: number; position: string; digest: string }
-
-export type ConformanceForkHalt = {
-  eventID: string
-  evidence: ConformanceGroupForkEvidence
-  detectedAt: number
-}
-
-export type ConformanceGroupSafetyEvent = ConformanceGroupKey & {
-  id: string
-  kind: 'group:fork'
-  halt: ConformanceForkHalt
-}
-
-export type ConformanceRecoveryUnavailableEvent = ConformanceGroupKey & {
-  id: string
-  kind: 'group:recovery-unavailable'
-  reason: 'trust-unreadable'
-}
+export type {
+  ConformanceForkHalt,
+  ConformanceGroupForkEvidence,
+  ConformanceGroupSafetyEvent,
+  ConformanceRecoveryUnavailableEvent,
+} from './control-store.js'
 
 export type ConformancePersistenceEvent =
   | ConformanceAppStatusEvent

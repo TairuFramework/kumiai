@@ -72,6 +72,8 @@ function emptyRecord(): GroupRecord {
       commitOnce: null,
       commitOnceAcceptance: null,
       controlHold: null,
+      forkHalt: null,
+      recoveryUnavailable: null,
       strand: null,
       operations: [],
       rejoin: null,
@@ -151,6 +153,7 @@ export function createMemoryHostDatabase(
               next.control,
               ownedChanges,
               source === null ? null : { kind: 'head', source },
+              fixedKey,
             )
             next.mutationID = mutationID
           })
@@ -198,13 +201,17 @@ export function createMemoryHostDatabase(
             queueHeadID: intent.id,
             checkpoint: next.control.cursor?.position ?? null,
           }
-          next.control = applyChanges(next.control, {
-            putOperations: [{ ...intent, stage: 'built', built: controlBuildRef(built) }],
-          })
+          next.control = applyChanges(
+            next.control,
+            { putOperations: [{ ...intent, stage: 'built', built: controlBuildRef(built) }] },
+            null,
+            key,
+          )
           next.control = applyChanges(
             next.control,
             { commitOnce: built, commitOnceAcceptance: null },
             context,
+            key,
           )
           next.mutationID = mutationID
           result = 'saved'
@@ -250,7 +257,12 @@ export function createMemoryHostDatabase(
         next.initialState = ownedState.slice()
         next.state = ownedState
         if (replace) {
-          next.control = applyChanges(next.control, readmissionChanges(next.control))
+          next.control = applyChanges(
+            next.control,
+            readmissionChanges(next.control),
+            null,
+            keys.get(groupID),
+          )
           next.anchorSlot = null
         }
       })
@@ -306,6 +318,7 @@ export function createMemoryHostDatabase(
                     before,
                     after,
                   },
+            key,
           )
           next.mutationID = ownedWrite.mutationID
           if (

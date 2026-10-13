@@ -35,19 +35,41 @@ export type ConformanceControlSearchPort<Position extends string = string> = {
 }
 export type ConformanceControlSlot<Position extends string = string> =
   ConformanceBuiltCommit<Position> & { opID: string }
+export type ConformanceSafetyHold = 'fork-halted' | 'recovery-unavailable' | null
+
+export type ConformanceGroupForkEvidence =
+  | {
+      kind: 'digest-divergence'
+      epoch: number
+      position: string
+      localDigest: string
+      remoteDigest: string
+    }
+  | { kind: 'epoch-authenticator'; epoch: number; local: Uint8Array; remote: Uint8Array }
+  | { kind: 'unexplained-own-commit'; epoch: number; position: string; digest: string }
+
+export type ConformanceForkHalt = {
+  eventID: string
+  evidence: ConformanceGroupForkEvidence
+  detectedAt: number
+}
+
+export type ConformanceGroupSafetyEvent = ConformanceGroupKey & {
+  id: string
+  kind: 'group:fork'
+  halt: ConformanceForkHalt
+}
+
+export type ConformanceRecoveryUnavailableEvent = ConformanceGroupKey & {
+  id: string
+  kind: 'group:recovery-unavailable'
+  reason: 'trust-unreadable'
+}
+
 export type ConformanceControlHold<Position extends string = string> = {
   reason: 'acceptance-unknown' | 'unsupported-version' | 'fork-evidence'
   position: Position | null
-  evidence?:
-    | {
-        kind: 'digest-divergence'
-        epoch: number
-        position: string
-        localDigest: string
-        remoteDigest: string
-      }
-    | { kind: 'epoch-authenticator'; epoch: number; local: Uint8Array; remote: Uint8Array }
-    | { kind: 'unexplained-own-commit'; epoch: number; position: string; digest: string }
+  evidence?: ConformanceGroupForkEvidence
 }
 export type ConformanceControlBuildRef<Position extends string = string> = Pick<
   ConformanceBuiltCommit<Position>,
@@ -62,6 +84,8 @@ export type ConformanceControlSnapshot<Position extends string = string> = {
   commitOnce: ConformanceControlSlot<Position> | null
   commitOnceAcceptance: ConformanceFirstValidCommit<Position> | null
   controlHold: ConformanceControlHold<Position> | null
+  forkHalt: ConformanceForkHalt | null
+  recoveryUnavailable: ConformanceRecoveryUnavailableEvent | null
   strand: {
     reason: 'retention-gap' | 'unprocessable-gap' | 'lost-state' | 'ahead' | 'unsupported-version'
   } | null
@@ -86,6 +110,8 @@ export type ConformanceControlChanges<Position extends string = string> = {
   commitOnce?: ConformanceControlSlot<Position> | null
   commitOnceAcceptance?: ConformanceFirstValidCommit<Position> | null
   controlHold?: ConformanceControlSnapshot<Position>['controlHold']
+  forkHalt?: ConformanceForkHalt
+  recoveryUnavailable?: ConformanceRecoveryUnavailableEvent
   strand?: ConformanceControlSnapshot<Position>['strand']
   putOperations?: Array<ConformanceOperation<Position>>
   deleteOperations?: Array<string>
@@ -424,6 +450,173 @@ async function prepareSlot(host: ConformanceControlHost) {
 
 export function testControlStoreConformance(params: ControlStoreConformanceParams): void {
   describe('ControlStore conformance', () => {
+    const safety = (key: ConformanceGroupKey) => ({
+      forkHalt: {
+        eventID: JSON.stringify(['group:fork', key.groupID, key.incarnation]),
+        evidence: {
+          kind: 'epoch-authenticator' as const,
+          epoch: 4,
+          local: new Uint8Array([1, 2]),
+          remote: new Uint8Array([3, 4]),
+        },
+        detectedAt: 100,
+      },
+      recoveryUnavailable: {
+        ...key,
+        id: JSON.stringify(['group:recovery-unavailable', key.groupID, key.incarnation]),
+        kind: 'group:recovery-unavailable' as const,
+        reason: 'trust-unreadable' as const,
+      },
+    })
+
+    test('safety fields start null and persist without a strand or ControlHold', async () => {
+      const host = await params.open()
+      const initial = await host.control.load()
+      expect(initial.forkHalt).toBeNull()
+      expect(initial.recoveryUnavailable).toBeNull()
+      const changes = safety(host.control.key)
+      await host.control.apply(changes, 'safety')
+      const read = await (await params.reopen()).control.load()
+      expect(read.forkHalt).toEqual(changes.forkHalt)
+      expect(read.recoveryUnavailable).toEqual(changes.recoveryUnavailable)
+      expect(read.strand).toBeNull()
+      expect(read.controlHold).toBeNull()
+      await host.control.apply(safety(host.control.key), 'same-safety')
+      expect(await host.control.load()).toEqual(read)
+      expect(await host.control.lastMutation()).toBe('same-safety')
+    })
+
+    test.each(['forkHalt', 'recoveryUnavailable'] as const)(
+      'safety writes are immutable and atomic when %s conflicts',
+      async (field) => {
+        const host = await params.open()
+        const values = safety(host.control.key)
+        await host.control.apply({ [field]: values[field] }, 'safety')
+        const before = await host.control.load()
+        const marker = await host.control.lastMutation()
+        const replacements =
+          field === 'forkHalt'
+            ? [
+                { ...values.forkHalt, detectedAt: 101 },
+                { ...values.forkHalt, evidence: { ...values.forkHalt.evidence, epoch: 5 } },
+                {
+                  ...values.forkHalt,
+                  evidence: { ...values.forkHalt.evidence, remote: new Uint8Array([8, 9]) },
+                },
+              ]
+            : [{ ...values.recoveryUnavailable, detail: 'replacement' }]
+        for (const replacement of [null, ...replacements]) {
+          const changes = {
+            ...safety(host.control.key),
+            [field]: replacement,
+            putOperations: records().putOperations,
+          } as unknown as ConformanceControlChanges
+          await expect(host.control.apply(changes, 'conflict')).rejects.toMatchObject({
+            name: 'ControlSafetyImmutableError',
+            field,
+          })
+          const reopened = await params.reopen()
+          expect(await reopened.control.load()).toEqual(before)
+          expect(await reopened.control.lastMutation()).toBe(marker)
+        }
+      },
+    )
+
+    test.each(['forkHalt', 'recoveryUnavailable'] as const)(
+      'an untyped null %s cannot clear an unset field',
+      async (field) => {
+        const host = await params.open()
+        const before = await host.control.load()
+        const changes = { [field]: null } as unknown as ConformanceControlChanges
+        await expect(host.control.apply(changes, 'clear')).rejects.toMatchObject({
+          name: 'ControlSafetyImmutableError',
+          field,
+        })
+        expect(await host.control.load()).toEqual(before)
+        expect(await host.control.lastMutation()).toBeNull()
+      },
+    )
+
+    test.each([
+      'fork-ID',
+      'recovery-ID',
+      'recovery-kind',
+      'recovery-groupID',
+      'recovery-incarnation',
+      'recovery-reason',
+      'partial-fork',
+      'partial-evidence',
+      'partial-recovery',
+    ])('safety identity and complete values reject %s before any mutation', async (invalid) => {
+      const host = await params.open()
+      const values = safety(host.control.key)
+      const cases: Record<string, unknown> = {
+        'fork-ID': { forkHalt: { ...values.forkHalt, eventID: 'wrong' } },
+        'recovery-ID': { recoveryUnavailable: { ...values.recoveryUnavailable, id: 'wrong' } },
+        'recovery-kind': {
+          recoveryUnavailable: { ...values.recoveryUnavailable, kind: 'accepted' },
+        },
+        'recovery-groupID': {
+          recoveryUnavailable: { ...values.recoveryUnavailable, groupID: 'foreign' },
+        },
+        'recovery-incarnation': {
+          recoveryUnavailable: {
+            ...values.recoveryUnavailable,
+            incarnation: host.control.key.incarnation + 1,
+          },
+        },
+        'recovery-reason': {
+          recoveryUnavailable: { ...values.recoveryUnavailable, reason: 'other' },
+        },
+        'partial-fork': { forkHalt: { eventID: values.forkHalt.eventID } },
+        'partial-evidence': {
+          forkHalt: { ...values.forkHalt, evidence: { kind: 'epoch-authenticator', epoch: 4 } },
+        },
+        'partial-recovery': { recoveryUnavailable: { id: values.recoveryUnavailable.id } },
+      }
+      const changes = {
+        ...values,
+        ...(cases[invalid] as object),
+        putOperations: records().putOperations,
+      } as ConformanceControlChanges
+      const before = await host.control.load()
+      await expect(host.control.apply(changes, 'invalid')).rejects.toMatchObject({
+        name: 'TypeError',
+      })
+      expect(await host.control.load()).toEqual(before)
+      expect(await host.control.lastMutation()).toBeNull()
+      await host.control.apply(safety(host.control.key), 'valid')
+      const held = await host.control.load()
+      await expect(host.control.apply(changes, 'invalid-reapply')).rejects.toMatchObject({
+        name: 'TypeError',
+      })
+      expect(await host.control.load()).toEqual(held)
+      expect(await host.control.lastMutation()).toBe('valid')
+    })
+
+    test('safety values are defensive across inputs, reads and reopen', async () => {
+      const host = await params.open()
+      const input = safety(host.control.key)
+      const expected = safety(host.control.key)
+      await host.control.apply(input, 'safety')
+      input.forkHalt.evidence.local.fill(9)
+      input.forkHalt.evidence.remote.fill(9)
+      input.forkHalt.detectedAt = 200
+      input.recoveryUnavailable.groupID = 'changed'
+      const read = await host.control.load()
+      expect(read.forkHalt).toEqual(expected.forkHalt)
+      expect(read.recoveryUnavailable).toEqual(expected.recoveryUnavailable)
+      if (read.forkHalt?.evidence.kind !== 'epoch-authenticator')
+        throw new Error('Missing evidence')
+      read.forkHalt.evidence.local.fill(8)
+      read.forkHalt.evidence.remote.fill(8)
+      if (read.recoveryUnavailable === null) throw new Error('Missing recovery event')
+      read.recoveryUnavailable.groupID = 'changed'
+      const reread = await (await params.reopen()).control.load()
+      expect(reread.forkHalt).toEqual(expected.forkHalt)
+      expect(reread.recoveryUnavailable).toEqual(expected.recoveryUnavailable)
+    })
+
     test('slot changes require provider-verified context: arbitrary apply cannot create a slot', async () => {
       const host = await params.open()
       const op = records().putOperations?.[0]
@@ -967,6 +1160,8 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
         commitOnce: null,
         commitOnceAcceptance: null,
         controlHold: null,
+        forkHalt: null,
+        recoveryUnavailable: null,
         strand: null,
         operations: changes.putOperations,
         rejoin: changes.putRejoin,

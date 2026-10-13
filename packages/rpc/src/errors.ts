@@ -22,6 +22,20 @@ export class ControlWriteNotCommittedError extends Error {
   override name = 'ControlWriteNotCommittedError'
 }
 
+export class ControlSafetyImmutableError extends Error {
+  override name = 'ControlSafetyImmutableError'
+  #field: 'forkHalt' | 'recoveryUnavailable'
+
+  constructor(field: 'forkHalt' | 'recoveryUnavailable') {
+    super(`Control safety field is immutable: ${field}`)
+    this.#field = field
+  }
+
+  get field(): 'forkHalt' | 'recoveryUnavailable' {
+    return this.#field
+  }
+}
+
 export class GroupControlUnsettledError extends Error {
   override name = 'GroupControlUnsettledError'
 }

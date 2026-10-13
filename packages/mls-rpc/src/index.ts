@@ -19,7 +19,13 @@
  * @module mls-rpc
  */
 
-export type { ControlAdoptionPort } from '@kumiai/rpc'
+export type {
+  ControlAdoptionPort,
+  ForkHalt,
+  GroupSafetyEvent,
+  RecoveryUnavailableEvent,
+  SafetyHold,
+} from '@kumiai/rpc'
 
 export { type HandleAccess, type SimpleHandleAccessParams, simpleHandleAccess } from './access.js'
 export { type ApplyCommitParams, type ApplyCommitResult, applyCommit } from './apply-commit.js'
@@ -91,7 +97,6 @@ export type {
   DeviceRecord,
   DeviceStores,
   EpochIdentity,
-  ForkHalt,
   GroupBatchOptions,
   GroupForkEvidence,
   GroupKey,
@@ -99,7 +104,6 @@ export type {
   GroupPersistence,
   GroupPersistencePorts,
   GroupRecoveryTrust,
-  GroupSafetyEvent,
   GroupStateRecord,
   GroupStores,
   GroupTransaction,
@@ -118,7 +122,6 @@ export type {
   PersistenceFixture,
   PreOpenAppFrameRef,
   RawStoredRecord,
-  RecoveryUnavailableEvent,
   RestoreWork,
   TransactionalGroupEffects,
   TransactionHookSettlement,

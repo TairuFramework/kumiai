@@ -7,6 +7,7 @@ import { decodeCommitFrame, isUnsupportedCommitFrameVersion } from '../commit-fr
 import type { CommitHeader } from '../crypto.js'
 import { asLogPosition, type LogPosition } from '../cursor.js'
 import { decodeHandshakeFrame, HANDSHAKE_KIND, HANDSHAKE_VERSION } from '../handshake.js'
+import type { GroupForkEvidence } from './safety.js'
 import type {
   AdoptionExpected,
   AppliedCommit,
@@ -50,16 +51,7 @@ export type ControlEvidenceSnapshot = {
   cursor: CommitCursor | null
   terminal: boolean
 }
-export type GroupForkEvidence =
-  | {
-      kind: 'digest-divergence'
-      epoch: number
-      position: string
-      localDigest: string
-      remoteDigest: string
-    }
-  | { kind: 'epoch-authenticator'; epoch: number; local: Uint8Array; remote: Uint8Array }
-  | { kind: 'unexplained-own-commit'; epoch: number; position: string; digest: string }
+export type { GroupForkEvidence } from './safety.js'
 export type CertifiedControlRange = {
   key: GroupKey
   source: EpochIdentity

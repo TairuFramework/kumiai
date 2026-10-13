@@ -10,8 +10,9 @@ import type {
   ControlSnapshot,
   ControlStore,
   EpochIdentity,
-  GroupForkEvidence,
   GroupKey,
+  GroupSafetyEvent,
+  RecoveryUnavailableEvent,
 } from '@kumiai/rpc'
 
 import type { EntryReads, Prepared, StateMetadata } from './entry-capability.js'
@@ -21,7 +22,15 @@ export type OwnershipContextPort = {
   get(): object | undefined
 }
 
-export type { EpochIdentity, GroupForkEvidence, GroupKey } from '@kumiai/rpc'
+export type {
+  EpochIdentity,
+  ForkHalt,
+  GroupForkEvidence,
+  GroupKey,
+  GroupSafetyEvent,
+  RecoveryUnavailableEvent,
+  SafetyHold,
+} from '@kumiai/rpc'
 
 export type PackageUse = { sourceID: string; ref: string; kind: 'ordinary' | 'last-resort' }
 
@@ -398,16 +407,6 @@ export type AppStatusEvent = GroupKey & { id: string; entry: AppOutboxEntry } & 
         nextIncarnation?: number
       }
   )
-
-export type ForkHalt = { eventID: string; evidence: GroupForkEvidence; detectedAt: number }
-
-export type GroupSafetyEvent = GroupKey & { id: string; kind: 'group:fork'; halt: ForkHalt }
-
-export type RecoveryUnavailableEvent = GroupKey & {
-  id: string
-  kind: 'group:recovery-unavailable'
-  reason: 'trust-unreadable'
-}
 
 export type PersistenceEvent = AppStatusEvent | GroupSafetyEvent | RecoveryUnavailableEvent
 

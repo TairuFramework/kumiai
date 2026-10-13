@@ -159,6 +159,9 @@ type ActualContracts = [
   Rpc.AnchorStore,
   Rpc.AppCursorStore,
   Rpc.ControlStore,
+  Rpc.ControlSnapshot,
+  Rpc.ControlChanges,
+  Rpc.SafetyHold,
 ]
 type MirrorContracts = [
   Mirror.ConformanceGroupKey,
@@ -218,6 +221,9 @@ type MirrorContracts = [
   Mirror.ConformanceAnchorStore,
   Mirror.ConformanceAppCursorStore,
   Mirror.ConformanceControlStore<Rpc.LogPosition>,
+  Mirror.ConformanceControlSnapshot<Rpc.LogPosition>,
+  Mirror.ConformanceControlChanges<Rpc.LogPosition>,
+  Mirror.ConformanceSafetyHold,
 ]
 function assignContracts(actual: ActualContracts, mirror: MirrorContracts): void {
   const mirrored: MirrorContracts = actual

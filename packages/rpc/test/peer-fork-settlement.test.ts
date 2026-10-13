@@ -23,6 +23,8 @@ const empty = (): ControlSnapshot => ({
   commitOnce: null,
   commitOnceAcceptance: null,
   controlHold: null,
+  forkHalt: null,
+  recoveryUnavailable: null,
   strand: null,
   operations: [],
   rejoin: null,

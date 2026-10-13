@@ -161,6 +161,8 @@ const emptyControl = (): ControlSnapshot => ({
   commitOnce: null,
   commitOnceAcceptance: null,
   controlHold: null,
+  forkHalt: null,
+  recoveryUnavailable: null,
   strand: null,
   operations: [],
   rejoin: null,
@@ -327,7 +329,7 @@ export function createUnlockedIncarnationStores(params: {
         )
           await active()
         await control.save('current', {
-          snapshot: applyChanges(previous, owned, context),
+          snapshot: applyChanges(previous, owned, context, key),
           mutationID,
         })
       },

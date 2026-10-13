@@ -1,10 +1,12 @@
 import { getAbortReason, throwIfAborted } from '../abort.js'
 import type { LogPosition } from '../cursor.js'
 import {
+  ControlSafetyImmutableError,
   ControlWriteNotCommittedError,
   PeerDisposedError,
   StorageOutcomeUnknownError,
 } from '../errors.js'
+import { forkEventID, recoveryUnavailableEventID } from './safety.js'
 import type {
   AdoptionExpected,
   AdoptionWrite,
@@ -155,12 +157,70 @@ export function assertCommitOnceChange(
   throw new ControlStoreInvariantError('Commit-once slot change requires provider-verified context')
 }
 
+function validForkEvidence(value: unknown): boolean {
+  if (value === null || typeof value !== 'object') return false
+  const evidence = value as Record<string, unknown>
+  if (typeof evidence.epoch !== 'number' || !Number.isFinite(evidence.epoch)) return false
+  switch (evidence.kind) {
+    case 'digest-divergence':
+      return (
+        typeof evidence.position === 'string' &&
+        typeof evidence.localDigest === 'string' &&
+        typeof evidence.remoteDigest === 'string'
+      )
+    case 'epoch-authenticator':
+      return evidence.local instanceof Uint8Array && evidence.remote instanceof Uint8Array
+    case 'unexplained-own-commit':
+      return typeof evidence.position === 'string' && typeof evidence.digest === 'string'
+    default:
+      return false
+  }
+}
+
+function assertSafetyIdentity(
+  field: 'forkHalt' | 'recoveryUnavailable',
+  value: unknown,
+  key: GroupKey | null,
+): void {
+  if (
+    key === null ||
+    typeof key.groupID !== 'string' ||
+    typeof key.incarnation !== 'number' ||
+    !Number.isFinite(key.incarnation)
+  )
+    throw new TypeError('Safety changes require a group key')
+  if (value === null) throw new ControlSafetyImmutableError(field)
+  if (typeof value !== 'object') throw new TypeError(`Invalid safety field: ${field}`)
+  const body = value as Record<string, unknown>
+  const valid =
+    field === 'forkHalt'
+      ? body.eventID === forkEventID(key) &&
+        typeof body.detectedAt === 'number' &&
+        Number.isFinite(body.detectedAt) &&
+        validForkEvidence(body.evidence)
+      : body.id === recoveryUnavailableEventID(key) &&
+        body.kind === 'group:recovery-unavailable' &&
+        body.groupID === key.groupID &&
+        body.incarnation === key.incarnation &&
+        body.reason === 'trust-unreadable'
+  if (!valid) throw new TypeError(`Safety field does not bind the group key: ${field}`)
+}
+
 /** Deletes precede puts so a replacement at the fork epoch survives settlement. */
 export function applyChanges(
   snapshot: ControlSnapshot,
   changes: ControlChanges,
   context: CommitOnceWriteContext | null = null,
+  key: GroupKey | null = null,
 ): ControlSnapshot {
+  const fields = ['forkHalt', 'recoveryUnavailable'] as const
+  for (const field of fields) {
+    if (field in changes) assertSafetyIdentity(field, changes[field], key)
+  }
+  for (const field of fields) {
+    if (field in changes && snapshot[field] !== null && !sameValue(snapshot[field], changes[field]))
+      throw new ControlSafetyImmutableError(field)
+  }
   const nextSlot = changes.commitOnce === undefined ? snapshot.commitOnce : changes.commitOnce
   assertCommitOnceChange(snapshot.commitOnce, nextSlot, context)
   const acceptance =
@@ -204,6 +264,8 @@ export function applyChanges(
     commitOnce: changes.commitOnce === undefined ? snapshot.commitOnce : changes.commitOnce,
     commitOnceAcceptance: acceptance,
     controlHold: changes.controlHold === undefined ? snapshot.controlHold : changes.controlHold,
+    forkHalt: snapshot.forkHalt ?? changes.forkHalt ?? null,
+    recoveryUnavailable: snapshot.recoveryUnavailable ?? changes.recoveryUnavailable ?? null,
     strand: changes.strand === undefined ? snapshot.strand : changes.strand,
     operations: putRows(
       snapshot.operations.filter((row) => !changes.deleteOperations?.includes(row.id)),
