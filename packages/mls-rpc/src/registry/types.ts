@@ -74,6 +74,8 @@ export type GroupHandleRegistry = {
   ): Promise<GroupKey>
   access(groupID: string): Promise<RegistryHandleAccess>
   recoverySource(groupID: string): Promise<RecoverySource>
+  delete(key: GroupKey): Promise<void>
+  dispose(): Promise<void>
 }
 export type ReadableGroupState = GroupStateRecord & { deleted: false; state: Uint8Array }
 

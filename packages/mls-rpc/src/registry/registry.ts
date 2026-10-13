@@ -8,12 +8,15 @@ import {
 } from '../entry-capability.js'
 import {
   DisplacedGroupHandleError,
+  GroupControlUnsettledError,
   GroupStateConflictError,
   GroupUnavailableError,
+  StorageOutcomeUnknownError,
 } from '../persistence-errors.js'
-import type { GroupTransaction } from '../persistence-types.js'
+import type { GroupKey, GroupTransaction } from '../persistence-types.js'
 import { createRegistryAccess, type RegistryOwner } from './access.js'
 import { admissionFor, type ColdEnvironment, loadValidatedGroup } from './cold.js'
+import { deleteIncarnations } from './retired.js'
 import {
   bindRegistryRetirement,
   createRegistryRetirement,
@@ -35,6 +38,7 @@ type GroupSlot = RetirementSlot & {
   load: { generation: number; promise: Promise<RegistryHandleAccess> } | null
 }
 class StaleRegistryGeneration extends Error {}
+class DeleteDrainChanged extends Error {}
 
 const liveRegistries = new WeakMap<object, GroupHandleRegistry>()
 
@@ -53,15 +57,25 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   if (liveRegistries.has(binding))
     throw new GroupStateConflictError('Coordinator already has a live registry')
   const capability = registeredCapability
+  const registryBinding = binding
   const environment: ColdEnvironment = {
     ownerDID: persistence.ownerDID,
     recovery: { ...params.recovery, options: registryOptions(params.recovery.options) },
     restore: params.restore,
   }
   const slots = new Map<string, GroupSlot>()
+  const observers = new Set<() => void>()
+  const deleting = new Set<Promise<void>>()
+  let closing = false
+  let disposal: Promise<void> | null = null
   let starting: Promise<void> | null = null
   let started = false
+  function assertOpen(): void {
+    if (capability.failureSignal?.aborted) throw capability.failureSignal.reason
+    if (closing) throw new DisplacedGroupHandleError('Registry is disposed')
+  }
   async function start(): Promise<void> {
+    assertOpen()
     if (started) return
     if (starting !== null) return await starting
     starting = (async () => {
@@ -94,7 +108,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       slots.set(groupID, slot)
       const observedSlot = slot
       const notifications = new WeakMap<AccountedGroupObservation, () => void>()
-      capability.observe(
+      const unsubscribe = capability.observe(
         groupID,
         (observation) => {
           const previous = observedSlot.owner
@@ -129,6 +143,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
           dispatch?.()
         },
       )
+      observers.add(unsubscribe)
     }
     return slot
   }
@@ -203,6 +218,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
             throw new DisplacedGroupHandleError('Registry owner is no longer current')
         },
         assertAvailable: () => {
+          assertOpen()
           if (slot.owner !== owner)
             throw new DisplacedGroupHandleError('Registry owner is no longer current')
           retirement.assertAvailable(groupID)
@@ -223,6 +239,101 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     }
     return value
   }
+  async function deleteGroup(requestedKey: GroupKey): Promise<void> {
+    assertOpen()
+    const key = { ...requestedKey }
+    const slot = groupSlot(key.groupID)
+    const attempt = retirement.beginRetirement(key)
+    let unknown = false
+    try {
+      for (let round = 0; round < 3; round++) {
+        await attempt.drain()
+        const activity = capability.activity(key.groupID)
+        const generation = slot.generation
+        const mutationID = crypto.randomUUID()
+        try {
+          await capability.run(
+            { groupID: key.groupID, mutationID },
+            async (reads) => {
+              const lifetime = await reads.lifetime()
+              if (lifetime?.activeIncarnation !== key.incarnation)
+                throw new DisplacedGroupHandleError('Inactive deletion source')
+              return { expected: lifetime, value: null }
+            },
+            async (stores) => {
+              const current = capability.activity(key.groupID, mutationID)
+              if (
+                slot.retirement?.attempt !== attempt ||
+                slot.generation !== generation ||
+                current.generation !== activity.generation ||
+                current.pending !== 0
+              )
+                throw new DeleteDrainChanged()
+              stores.tx.onCommit(() => attempt.settle('committed'))
+              stores.tx.onRollback(() => attempt.settle('rolled-back'))
+              await deleteIncarnations(stores, key, mutationID)
+            },
+          )
+          return
+        } catch (error) {
+          if (error instanceof DeleteDrainChanged) continue
+          unknown = error instanceof StorageOutcomeUnknownError
+          throw error
+        }
+      }
+      throw new GroupControlUnsettledError('Group work changed during three deletion drains')
+    } finally {
+      if (!unknown) attempt.settle('rolled-back')
+    }
+  }
+  function dispose(): Promise<void> {
+    if (disposal !== null) return disposal
+    closing = true
+    disposal = (async () => {
+      try {
+        await Promise.allSettled([...(starting === null ? [] : [starting]), ...deleting])
+        const results = await Promise.allSettled(
+          [...slots].map(async ([groupID, slot]) => {
+            const key = slot.hooks?.key ?? slot.owner?.key
+            if (key === undefined) {
+              await capability.read(groupID, async () => {})
+              return
+            }
+            const attempt = slot.retirement?.attempt ?? retirement.beginRetirement(key)
+            try {
+              try {
+                await attempt.drain()
+              } finally {
+                // Even a rejecting hook may have submitted completion work.
+                await capability.read(groupID, async () => {})
+              }
+            } finally {
+              attempt.settle('rolled-back')
+            }
+          }),
+        )
+        const rejected = results.filter((result) => result.status === 'rejected')
+        if (rejected.length === 1) throw rejected[0]?.reason
+        if (rejected.length > 1)
+          throw new AggregateError(
+            rejected.map((result) => result.reason),
+            'Registry disposal failed',
+          )
+      } finally {
+        for (const unsubscribe of observers) unsubscribe()
+        observers.clear()
+        for (const slot of slots.values()) {
+          const previous = slot.owner
+          invalidate(slot)
+          slot.hooks?.callbacks.clear()
+          slot.hooks = null
+          previous?.runtime.publish(null)
+        }
+        liveRegistries.delete(registryBinding)
+      }
+    })()
+    return disposal
+  }
   const registry: GroupHandleRegistry = {
     start,
     seed: createRegistrySeed({
@@ -239,13 +350,30 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       recovery: environment.recovery,
       ownerDID: environment.ownerDID,
     }),
+    delete(key) {
+      const pending = deleteGroup(key)
+      deleting.add(pending)
+      void pending.then(
+        () => deleting.delete(pending),
+        () => deleting.delete(pending),
+      )
+      return pending
+    },
+    dispose,
     recoverySource(groupID) {
-      groupSlot(groupID)
+      try {
+        assertOpen()
+        groupSlot(groupID)
+      } catch (error) {
+        return Promise.reject(error)
+      }
       return capability.read(groupID, (reads) => readRecoverySource(reads, groupID))
     },
     async access(groupID) {
+      assertOpen()
       retirement.assertAvailable(groupID)
       await start()
+      assertOpen()
       const slot = groupSlot(groupID)
       retirement.assertAvailable(groupID)
       if (slot.load !== null && slot.load.generation === slot.generation)
@@ -269,6 +397,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
               if (slot.generation !== generation || slot.owner?.access !== access)
                 throw new StaleRegistryGeneration()
               publish(slot, previous)
+              assertOpen()
               retirement.assertGeneration(groupID, retirementGeneration)
               return access
             } catch (error) {

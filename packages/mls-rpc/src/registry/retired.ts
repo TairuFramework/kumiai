@@ -2,6 +2,7 @@ import {
   type ControlChanges,
   type ControlSearchPort,
   type ControlSnapshot,
+  controlSettled,
   deliverObligations,
   type Outcome,
   type WelcomeObligation,
@@ -10,13 +11,58 @@ import {
 import { decodeControlJournal } from '../control-journal.js'
 import { entryCapability } from '../entry-capability.js'
 import { sameStoredValue } from '../memory-incarnation-stores.js'
-import { DisplacedGroupHandleError, GroupStateConflictError } from '../persistence-errors.js'
+import {
+  DisplacedGroupHandleError,
+  GroupControlUnsettledError,
+  GroupStateConflictError,
+} from '../persistence-errors.js'
 import type {
   GroupKey,
   GroupPersistence,
   GroupStores,
   GroupTransaction,
 } from '../persistence-types.js'
+
+/** All incarnations must be settled before clearing any transport. */
+export async function deleteIncarnations<TTx extends GroupTransaction>(
+  stores: GroupStores<TTx>,
+  key: GroupKey,
+  mutationID: string,
+): Promise<void> {
+  const lifetime = await stores.lifetime.load()
+  if (lifetime?.activeIncarnation !== key.incarnation)
+    throw new DisplacedGroupHandleError('Inactive deletion source')
+  for (let incarnation = 1; incarnation <= lifetime.latestIncarnation; incarnation++) {
+    const rows = stores.incarnation(incarnation)
+    if (!controlSettled(await rows.control.load()))
+      throw new GroupControlUnsettledError('Group control remains unsettled')
+    for (const entry of await rows.outbox.list())
+      if ((await rows.meta.loadSettlement(entry.seq)) !== null)
+        throw new GroupControlUnsettledError('Certified publication remains unsettled')
+  }
+  const active = stores.incarnation(key.incarnation)
+  for (const entry of await active.outbox.list()) {
+    const failed = { ...entry, status: 'failed' as const }
+    await active.outbox.put([failed])
+    await active.meta.putEvents([
+      {
+        ...key,
+        id: JSON.stringify(['deleted', key.groupID, key.incarnation, entry.seq]),
+        kind: 'failed',
+        reason: 'deleted',
+        entry: failed,
+      },
+    ])
+  }
+  for (let incarnation = 1; incarnation <= lifetime.latestIncarnation; incarnation++)
+    await stores.incarnation(incarnation).clearTransport()
+  await stores.lifetime.save({
+    ...lifetime,
+    activeIncarnation: null,
+    revision: lifetime.revision + 1,
+    mutationID,
+  })
+}
 
 /** The caller drains source hooks before entering this transaction and saves the new lifetime after. */
 export async function retireIncarnation<TTx extends GroupTransaction>(
