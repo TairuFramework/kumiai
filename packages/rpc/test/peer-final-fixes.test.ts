@@ -2,6 +2,7 @@ import { afterEach, expect, test, vi } from 'vitest'
 
 import { digestAppliedCommit } from '../src/classify.js'
 import { decodeCommitFrame } from '../src/commit-frame.js'
+import { forkEventID } from '../src/control/safety.js'
 import { asLogPosition } from '../src/cursor.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
@@ -194,6 +195,131 @@ test('a stored fork halt keeps the epoch and cursor despite an available respond
   expect(recovery).not.toHaveBeenCalled()
   expect(again.controlWalk.safetyHold()).toBe('fork-halted')
 })
+
+test.each(['retention-gap', 'unprocessable-gap'] as const)(
+  'a persisted %s strand heals on restart and clears at the same epoch number',
+  async (reason) => {
+    controlRecoveryClock(5)
+    const hub = new FakeHub()
+    const members = ['alice', 'bob', 'carol']
+    const recovery = { timeoutMs: 60, deadlineMs: 250, getDelayMs: () => 5 }
+    const carol = makeMLSPeer(hub, 'carol', secret, { epoch: 2, members, recovery })
+    peers.push(carol)
+    await carol.peer.resync()
+    const bob = member(hub, { epoch: 3, members, recovery })
+    await bob.peer.resync()
+    await bob.peer.dispose()
+    await bob.peer.drained()
+    peers.splice(peers.indexOf(bob), 1)
+    await bob.control.apply(
+      { cursor: { position: null, epoch: 3, stranded: true }, strand: { reason } },
+      'persisted-gap-strand',
+    )
+    const events: Array<RecoveryEvent> = []
+    const again = member(hub, {
+      restartOf: bob,
+      members,
+      recovery,
+      onRecovery: (event) => {
+        events.push(event)
+      },
+    })
+    await vi.waitFor(() => {
+      expect(
+        events.some((event) => event.phase === 'started' && event.trigger === 'automatic'),
+      ).toBe(true)
+    })
+    await drainUntil(() => events.some((event) => event.phase === 'succeeded'), 'rejoin')
+    expect(await again.mls.readEpoch()).toBe(3)
+    expect((await again.control.load()).cursor?.stranded).toBeUndefined()
+    expect((await again.control.load()).strand).toBeNull()
+    await again.peer.commit(buildLedgerCommit(again, []))
+    expect(await again.mls.readEpoch()).toBe(4)
+  },
+)
+
+test('a persisted retention-gap strand with a fork halt never heals on restart', async () => {
+  controlRecoveryClock()
+  const hub = new FakeHub()
+  const bob = member(hub)
+  await bob.peer.resync()
+  await bob.peer.dispose()
+  await bob.peer.drained()
+  peers.splice(peers.indexOf(bob), 1)
+  await bob.control.apply(
+    {
+      cursor: { position: null, epoch: 1, stranded: true },
+      strand: { reason: 'retention-gap' },
+      forkHalt: {
+        eventID: forkEventID(bob.control.key),
+        detectedAt: Date.now(),
+        evidence: {
+          kind: 'unexplained-own-commit',
+          epoch: 1,
+          position: '000000000001',
+          digest: 'unexplained-commit',
+        },
+      },
+    },
+    'persisted-held-strand',
+  )
+  const before = await bob.control.load()
+  const events: Array<RecoveryEvent> = []
+  const again = member(hub, {
+    restartOf: bob,
+    onRecovery: (event) => {
+      events.push(event)
+    },
+  })
+  const requests = vi.spyOn(again.mls, 'createRecoveryRequest')
+  const prepare = vi.spyOn(again.mls, 'prepareRecovery')
+  await again.peer.replay()
+  await vi.advanceTimersByTimeAsync(120_000)
+  await again.peer.replay()
+  expect(again.controlWalk.safetyHold()).toBe('fork-halted')
+  expect(events).toEqual([])
+  expect(requests).not.toHaveBeenCalled()
+  expect(prepare).not.toHaveBeenCalled()
+  expect(await again.control.load()).toEqual(before)
+  expect(hub.published).toEqual([])
+})
+
+test.each(['fork-losing', 'fork-winning'] as const)(
+  'a persisted legacy %s strand without a safety hold never heals on restart',
+  async (kind) => {
+    controlRecoveryClock()
+    const hub = new FakeHub()
+    const bob = member(hub)
+    await bob.peer.resync()
+    await bob.peer.dispose()
+    await bob.peer.drained()
+    peers.splice(peers.indexOf(bob), 1)
+    const strand = { reason: 'lost-state' as const, kind }
+    await bob.control.apply(
+      { cursor: { position: null, epoch: 1, stranded: true }, strand },
+      'persisted-legacy-strand',
+    )
+    const before = await bob.control.load()
+    const events: Array<RecoveryEvent> = []
+    const again = member(hub, {
+      restartOf: bob,
+      onRecovery: (event) => {
+        events.push(event)
+      },
+    })
+    const requests = vi.spyOn(again.mls, 'createRecoveryRequest')
+    const prepare = vi.spyOn(again.mls, 'prepareRecovery')
+    await again.peer.replay()
+    await vi.advanceTimersByTimeAsync(120_000)
+    await again.peer.replay()
+    expect(again.controlWalk.safetyHold()).toBeNull()
+    expect(events).toEqual([])
+    expect(requests).not.toHaveBeenCalled()
+    expect(prepare).not.toHaveBeenCalled()
+    expect(await again.control.load()).toEqual(before)
+    expect(hub.published).toEqual([])
+  },
+)
 
 test('a rejoin that lands on the same epoch number captures a new app anchor', async () => {
   controlRecoveryClock(5)

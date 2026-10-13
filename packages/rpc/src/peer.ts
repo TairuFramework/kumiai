@@ -2163,6 +2163,17 @@ export function createGroupPeerWithControlWalk<
         reconciledHead = cursor.position
       floor = { epoch: cursor.epoch, position: cursor.position, covered: true }
       if (cursor.stranded) {
+        const strandKind =
+          snapshot.strand !== null && 'kind' in snapshot.strand
+            ? snapshot.strand.kind
+            : snapshot.strand?.reason
+        if (
+          !stranded &&
+          !hardControlHeld() &&
+          strandKind !== 'fork-losing' &&
+          strandKind !== 'fork-winning'
+        )
+          healRequested = safetyHold() === null
         stranded = true
       }
     }
