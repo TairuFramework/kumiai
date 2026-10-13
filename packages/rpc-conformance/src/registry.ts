@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 
-import type { ConformanceWelcomeObligation } from './control-store.js'
+import type { ConformanceControlChanges, ConformanceWelcomeObligation } from './control-store.js'
 import type {
   ConformanceRegistryFixture,
   ConformanceRegistryHandle,
@@ -54,10 +54,21 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
     test('complete fixture reopen preserves committed access and starts cold', async () => {
       let fixture = await create()
       try {
+        expect(fixture.registry, 'complete initial fixture forwards registry').toBeDefined()
+        const forwarding = Object.getOwnPropertyNames(fixture).map(
+          (name) => [name, typeof Reflect.get(fixture, name)] as const,
+        )
         const before = (await fixture.registry.access(groupID)).runtime.snapshot()
-        fixture = await fixture.reopen()
-        expect(fixture.restoreCount(groupID)).toBe(0)
-        expect((await fixture.registry.access(groupID)).runtime.snapshot()).toEqual(before)
+        for (let round = 0; round < 2; round++) {
+          fixture = await fixture.reopen()
+          for (const [name, type] of forwarding)
+            expect(
+              typeof Reflect.get(fixture, name),
+              `complete reopened fixture forwards ${name}`,
+            ).toBe(type)
+          expect(fixture.coldLoadCount(groupID)).toBe(0)
+          expect((await fixture.registry.access(groupID)).runtime.snapshot()).toEqual(before)
+        }
       } finally {
         await fixture.close()
       }
@@ -704,6 +715,110 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
             await sourceAccess.mutate(async (handle, persist) => {
               await persist(await fixture.advance(handle))
             })
+            const advancedState = await fixture.device.groups.loadState(key)
+            if (advancedState === null || advancedState.deleted)
+              throw new Error('Missing source state')
+            const sourceEpoch = sourceAccess.runtime.snapshot()?.epoch
+            if (sourceEpoch === undefined) throw new Error('Missing source epoch')
+            const sentinels = {
+              putOperations: [
+                {
+                  id: 'old-operation',
+                  kind: 'rotation',
+                  revokes: false,
+                  body: new Uint8Array([11]),
+                  seq: 1,
+                  enqueuedAt: 1,
+                  deadline: 30_001,
+                  stage: 'intent',
+                },
+              ],
+              putOutcomes: [{ id: 'old-outcome', opID: null, at: 2, kind: 'unknown' }],
+              putWelcomes: [
+                {
+                  opID: 'old-welcome',
+                  welcome: new Uint8Array([12]),
+                  recipients: [fixture.identity.id],
+                  committed: true,
+                },
+              ],
+              putApplied: [
+                {
+                  epoch: sourceEpoch,
+                  digest: 'old-applied',
+                  payloadDigest: 'old-payload',
+                  sequenceID: 'old-control-position',
+                  opID: null,
+                  removed: true,
+                },
+              ],
+              putResponses: [
+                {
+                  position: 'old-response',
+                  epoch: sourceEpoch,
+                  digest: 'old-response-digest',
+                  kind: 'refused',
+                  reason: 'policy',
+                },
+              ],
+              cursor: { position: 'old-control-position', epoch: sourceEpoch },
+            } satisfies ConformanceControlChanges<string>
+            const certified = {
+              seq: 41,
+              protocol: 'chat',
+              prc: 'posted',
+              data: new Uint8Array([13]),
+              status: 'accepted' as const,
+              lastAttempt: null,
+            }
+            const uncertified = { ...certified, seq: 42, data: new Uint8Array([14]) }
+            const settlement = {
+              attemptID: 'old-certified-attempt',
+              topicID: 'old-app-topic',
+              sequenceID: 'old-certified-position',
+              outcome: 'published' as const,
+            }
+            const sourceAnchor = {
+              anchor: { epoch: sourceEpoch, secret: new Uint8Array(32).fill(15) },
+            }
+            await fixture.installRows({
+              key,
+              state: { ...advancedState, version: advancedState.version + 1, senderHWM: 7 },
+              control: sentinels,
+              anchor: sourceAnchor,
+              outbox: [certified, uncertified],
+              settlements: [{ seq: certified.seq, value: settlement }],
+            })
+            const sourcePorts = fixture.device.groups.ports(key)
+            await sourcePorts.cursor.save('old-app-topic', 'old-app-position')
+            const sourceState = await fixture.device.groups.loadState(key)
+            expect(
+              sourceState !== null && !sourceState.deleted ? sourceState.senderHWM : null,
+              'isolation source has nonzero sender progress',
+            ).toBeGreaterThan(0)
+            const sourceControl = await sourcePorts.control.load()
+            for (const namespace of [
+              'operations',
+              'outcomes',
+              'welcomes',
+              'applied',
+              'responses',
+            ] as const)
+              expect(
+                sourceControl[namespace],
+                `isolation source populates ${namespace}`,
+              ).not.toEqual([])
+            expect(await sourcePorts.outbox.list(), 'isolation source populates outbox').toEqual([
+              certified,
+              uncertified,
+            ])
+            expect(await sourcePorts.outbox.loadSettlement(certified.seq)).toEqual(settlement)
+            expect(await sourcePorts.anchor.load()).toEqual(sourceAnchor)
+            expect(sourceControl.cursor).toEqual(sentinels.cursor)
+            expect(
+              await sourcePorts.cursor.load('old-app-topic'),
+              'isolation source saves application cursor',
+            ).toBe('old-app-position')
             const advancedAuthenticator = await sourceAccess.read((handle) =>
               fixture.authenticator(handle),
             )
@@ -751,13 +866,19 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
             const trust = await fixture.device.groups.loadTrust(groupID)
             if (outcome === 'commit') {
               expect(await fixture.device.groups.loadState(key)).toMatchObject({ deleted: true })
-              expect(await fixture.device.groups.loadState(destination)).toMatchObject({
+              expect(
+                await fixture.device.groups.loadState(destination),
+                'destination starts with fresh sender progress',
+              ).toMatchObject({
                 version: 1,
                 senderHWM: 0,
                 state: fixture.stateBytes(recovery.candidate),
               })
               const ports = fixture.device.groups.ports(destination)
-              expect(await ports.control.load()).toMatchObject({
+              expect(
+                await ports.control.load(),
+                'destination control namespaces are isolated',
+              ).toMatchObject({
                 operations: [],
                 outcomes: [],
                 welcomes: [],
@@ -769,11 +890,78 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
                   epoch: Number(recovery.candidate.epoch),
                 },
               })
-              expect(await ports.outbox.list()).toEqual([])
-              expect(await ports.cursor.load('old-app-topic')).toBeNull()
-              expect(await ports.anchor.load()).toMatchObject({
+              expect(await ports.outbox.list(), 'destination outbox is isolated').toEqual([])
+              expect(await ports.outbox.loadSettlement(certified.seq)).toBeNull()
+              expect(await ports.outbox.events()).toEqual([])
+              expect(
+                await ports.cursor.load('old-app-topic'),
+                'destination application cursor is isolated',
+              ).toBeNull()
+              const destinationAnchor = await ports.anchor.load()
+              expect(destinationAnchor).toMatchObject({
                 anchor: { epoch: Number(recovery.candidate.epoch) },
               })
+              expect(destinationAnchor?.anchor.secret, 'destination anchor is fresh').not.toEqual(
+                sourceAnchor.anchor.secret,
+              )
+              const retired = await fixture.device.groups.ports(key).control.load()
+              expect(retired.operations).toEqual([])
+              expect(
+                retired.outcomes,
+                'source retains owed outcomes and settles queued work',
+              ).toEqual([
+                ...sentinels.putOutcomes,
+                {
+                  id: 'old-operation',
+                  opID: 'old-operation',
+                  kind: 'unknown',
+                  at: expect.any(Number),
+                },
+              ])
+              expect(retired.welcomes, 'source retains Welcome obligations').toEqual(
+                sentinels.putWelcomes,
+              )
+              expect(retired.applied).toEqual(sentinels.putApplied)
+              expect(retired.responses).toEqual(sentinels.putResponses)
+              expect(retired.cursor).toEqual(sentinels.cursor)
+              expect(retired.rejoin, 'source retains adopted recovery continuation').toEqual({
+                ...recovery.record,
+                stage: 'adopted',
+              })
+              const retiredPorts = fixture.device.groups.ports(key)
+              expect(
+                await retiredPorts.outbox.list(),
+                'source retains certified outbox obligation',
+              ).toEqual([certified])
+              expect(await retiredPorts.outbox.loadSettlement(certified.seq)).toEqual(settlement)
+              expect(
+                await retiredPorts.outbox.events(),
+                'source retains uncertified failure event',
+              ).toEqual([
+                {
+                  ...key,
+                  id: JSON.stringify(['incarnation-abandoned', groupID, 1, uncertified.seq]),
+                  kind: 'failed',
+                  reason: 'incarnation-abandoned',
+                  entry: { ...uncertified, status: 'failed' },
+                  nextIncarnation: destination.incarnation,
+                },
+              ])
+              expect(await retiredPorts.cursor.load('old-app-topic')).toBe('old-app-position')
+              expect(await retiredPorts.anchor.load()).toEqual(sourceAnchor)
+            } else {
+              expect(await fixture.device.groups.ports(key).control.load()).toEqual({
+                ...sourceControl,
+                rejoin: recovery.record,
+              })
+              expect(await fixture.device.groups.ports(key).outbox.list()).toEqual([
+                certified,
+                uncertified,
+              ])
+              expect(await fixture.device.groups.ports(key).outbox.events()).toEqual([])
+              expect(await fixture.device.groups.ports(key).cursor.load('old-app-topic')).toBe(
+                'old-app-position',
+              )
             }
             expect(trust?.spentEpochAuthenticators).toHaveLength(
               spentBefore.length + (outcome === 'commit' ? 1 : 0),
@@ -1141,6 +1329,8 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
               }),
             )
             await (restoring ?? held).started
+            const suspendedColdLoads = fixture.coldLoadCount(groupID)
+            expect(suspendedColdLoads, 'suspended access started one cold state load').toBe(1)
             if (outcome === 'refusal') fixture.armNextWorkFault('before-commit')
             const write = switchWrite(recovery)
             if (outcome !== 'refusal') pending = fixture.armNextWorkFault('pending')
@@ -1197,7 +1387,10 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
               const access = await owner.access(groupID)
               expect(access.key).toEqual(key)
               expect(access.runtime.snapshot()?.available).toBe(true)
-              expect(fixture.restoreCount(groupID)).toBeGreaterThan(1)
+              expect(
+                fixture.coldLoadCount(groupID),
+                'rollback/refusal reactivation starts a new cold state load',
+              ).toBeGreaterThan(suspendedColdLoads)
             }
           } finally {
             restoring?.release()

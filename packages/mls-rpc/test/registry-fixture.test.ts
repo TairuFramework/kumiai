@@ -416,6 +416,32 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
+    test('cold load count excludes recovery and candidate reconstruction', async () => {
+      const fixture = await create('seeded')
+      try {
+        expect(fixture, 'fixture forwards a separate cold load counter').toHaveProperty(
+          'coldLoadCount',
+          expect.any(Function),
+        )
+        const count = fixture.coldLoadCount
+        expect(count(groupID)).toBe(0)
+        await fixture.confirmedRecovery(key, { confirm: true })
+        expect(fixture.restoreCount(groupID)).toBeGreaterThan(0)
+        expect(count(groupID), 'recovery reconstruction is not a cold state load').toBe(0)
+        const access = await fixture.registry.access(groupID)
+        expect(count(groupID)).toBe(1)
+        const ordinary = await fixture.acceptedOrdinary(access)
+        const nonCold = fixture.restoreCount(groupID) - count(groupID)
+        await access.adopt(ordinary.candidate, ordinary.expected, ordinary.write)
+        expect(
+          fixture.restoreCount(groupID) - count(groupID),
+          'candidate reconstruction is not a cold state load',
+        ).toBe(nonCold + 1)
+      } finally {
+        await fixture.close()
+      }
+    })
+
     test('restore hold and override exercise cold reconstruction', async () => {
       const fixture = await create('seeded')
       try {

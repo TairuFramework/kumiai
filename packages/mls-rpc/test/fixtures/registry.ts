@@ -116,6 +116,7 @@ export type RegistryFixtureBase = {
   holdRestore(groupID: string): { started: Promise<void>; release(): void }
   holdProof(mutationID: string): { started: Promise<void>; release(): void }
   restoreCount(groupID: string): number
+  coldLoadCount(groupID: string): number
   overrideRestore(
     fn: (record: GroupStateRecord & { deleted: false; state: Uint8Array }) => Promise<GroupHandle>,
   ): void
@@ -225,6 +226,7 @@ async function assemble(
   const restoreHolds = new Map<string, Hold>()
   const publicationHolds = new Map<string, Hold>()
   const counts = new Map<string, number>()
+  const coldCounts = new Map<string, number>()
   let override:
     | ((record: GroupStateRecord & { deleted: false; state: Uint8Array }) => Promise<GroupHandle>)
     | undefined
@@ -264,7 +266,10 @@ async function assemble(
         persistence: fixture.device,
         providerID: fixture.device.providerID,
         recovery: environment,
-        restore,
+        restore: (record) => {
+          coldCounts.set(record.groupID, (coldCounts.get(record.groupID) ?? 0) + 1)
+          return restore(record)
+        },
         restoreCandidate: (bytes) => restoreHost(fixture, bytes),
       })
       return owner
@@ -429,6 +434,7 @@ async function assemble(
     holdRestore: (groupID) => hold(restoreHolds, groupID),
     holdProof: storage.holdProof,
     restoreCount: (groupID) => counts.get(groupID) ?? 0,
+    coldLoadCount: (groupID) => coldCounts.get(groupID) ?? 0,
     overrideRestore: (fn) => {
       override = fn
     },
@@ -453,6 +459,7 @@ async function assemble(
       publicationHolds.clear()
       override = undefined
       counts.clear()
+      coldCounts.clear()
       await storage.close()
     },
     armNextWorkFault: storage.armNextWorkFault,
@@ -468,10 +475,10 @@ async function assemble(
     capability: {
       ...capability,
       async read(groupID, fn) {
-        const before = counts.get(groupID) ?? 0
+        const before = coldCounts.get(groupID) ?? 0
         const result = await capability.read(groupID, fn)
         const held = publicationHolds.get(groupID)
-        if (held !== undefined && (counts.get(groupID) ?? 0) > before) {
+        if (held !== undefined && (coldCounts.get(groupID) ?? 0) > before) {
           publicationHolds.delete(groupID)
           held.started.resolve()
           await held.released.promise

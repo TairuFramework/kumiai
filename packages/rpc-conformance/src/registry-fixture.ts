@@ -191,6 +191,7 @@ export type ConformanceRegistryFixtureBase<
   holdRestore(groupID: string): { started: Promise<void>; release(): void }
   holdProof(mutationID: string): { started: Promise<void>; release(): void }
   restoreCount(groupID: string): number
+  coldLoadCount(groupID: string): number
   overrideRestore(
     fn: (
       record: ConformanceGroupStateRecord & { deleted: false; state: Uint8Array },
