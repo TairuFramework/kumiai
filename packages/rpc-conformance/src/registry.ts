@@ -765,27 +765,67 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
 
     test('halt committed before notification replays identical body/ID', async () => {
       let fixture = await create('seeded')
+      let notifications = 0
+      const observe = async () => {
+        const access = await fixture.registry.access(groupID)
+        access.runtime.onEpochChanged(() => {
+          notifications++
+        })
+      }
       try {
-        // No live observer is installed before the crash seam.
+        await observe()
         const fault = fixture.armNextWorkFault('commit-then-reject')
         await fixture.safety().reportFork(key, reported)
         const mutationID = await fault.mutationID
         const halt = (await fixture.device.groups.ports(key).control.load()).forkHalt
         const events = [{ ...key, id: eventID, kind: 'group:fork', halt }]
         expect(await fixture.safety().events(key)).toEqual(events)
+        expect(notifications).toBe(1)
         fixture = await fixture.reopen()
+        notifications = 0
+        await observe()
         expect(await fixture.device.groups.resolve(groupID, mutationID)).toBe('committed')
         expect(await fixture.safety().events(key)).toEqual(events)
         expect((await fixture.registry.access(groupID)).admission()).toMatchObject({
           reason: 'fork-halted',
         })
+        expect(notifications).toBe(0)
         fixture = await fixture.reopen()
+        notifications = 0
+        await observe()
         expect(await fixture.safety().events(key)).toEqual(events)
+        expect(notifications).toBe(0)
         await fixture.safety().ackEvent(key, eventID)
         fixture = await fixture.reopen()
+        notifications = 0
+        await observe()
         expect(await fixture.safety().events(key)).toEqual([])
         expect((await fixture.device.groups.ports(key).control.load()).forkHalt).toEqual(halt)
+        expect(notifications).toBe(0)
       } finally {
+        await fixture.close()
+      }
+    })
+
+    test('work-phase trust read failure writes no safety evidence', async () => {
+      const fixture = await create('seeded')
+      try {
+        const access = await fixture.registry.access(groupID)
+        const before = await fixture.inspectRows()
+        const error = new Error('Transient retained trust work I/O')
+        let workCalls = 0
+        fixture.onPhase('work', () => {
+          workCalls++
+          fixture.failTrustReads(error)
+        })
+        await expect(fixture.safety().reportFork(key, reported)).rejects.toBe(error)
+        fixture.failTrustReads(null)
+        expect(workCalls).toBe(1)
+        expect(await fixture.inspectRows()).toEqual(before)
+        expect(await fixture.safety().events(key)).toEqual([])
+        expect(access.admission()).toMatchObject({ reason: 'fork-halted' })
+      } finally {
+        fixture.failTrustReads(null)
         await fixture.close()
       }
     })
@@ -836,51 +876,59 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
           const access = await fixture.registry.access(groupID)
           const notifications: Array<unknown> = []
           access.runtime.onEpochChanged((value) => notifications.push(value))
-          let complete = false
-          const report = caught(
-            api.reportFork(key, reported).then(() => {
-              complete = true
-            }),
-          )
+          let reportSettled = false
+          const report = caught(api.reportFork(key, reported)).then((result) => {
+            reportSettled = true
+            return result
+          })
           const mutationID = await pending.mutationID
           proof = fixture.holdProof(mutationID)
           await pending.rejected
           await proof.started
           expect(access.admission()).toMatchObject({ reason: 'fork-halted' })
-          expect(complete).toBe(false)
+          expect(reportSettled, 'report remains pending while proof is held').toBe(false)
           expect(notifications).toEqual([])
-          let readDone = false
-          const reads = Promise.all([api.events(key), api.epochAuthenticator(key)]).then(
-            (value) => {
-              readDone = true
-              return value
-            },
-          )
+          let eventsSettled = false
+          const eventsRead = caught(api.events(key)).then((result) => {
+            eventsSettled = true
+            return result
+          })
+          let identitySettled = false
+          const identityRead = caught(api.epochAuthenticator(key)).then((result) => {
+            identitySettled = true
+            return result
+          })
           await turn()
-          expect(readDone).toBe(false)
+          expect(reportSettled, 'report remains pending while proof is held').toBe(false)
+          expect(eventsSettled, 'events Read remains pending while proof is held').toBe(false)
+          expect(identitySettled, 'identity Read remains pending while proof is held').toBe(false)
           await fixture.registry.seed(await fixture.makeHandle(0, `${groupID}-other`), {
             packageUse: null,
           })
           await pending.finish(outcome)
           finished = true
           await turn()
-          expect(readDone).toBe(false)
-          expect(complete).toBe(false)
+          expect(reportSettled, 'report remains pending before proof release').toBe(false)
+          expect(eventsSettled, 'events Read remains pending before proof release').toBe(false)
+          expect(identitySettled, 'identity Read remains pending before proof release').toBe(false)
           expect(notifications).toEqual([])
           proof.release()
           const result = await report
           if (outcome === 'commit') expect(result).toEqual({ value: undefined })
           else expect(result).toHaveProperty('error')
-          const [events, identity] = await reads
+          const events = await eventsRead
+          const identity = await identityRead
           const halt = (await fixture.device.groups.ports(key).control.load()).forkHalt
-          expect(identity).toEqual((await fixture.device.groups.loadTrust(groupID))?.installed)
+          expect(identity).toEqual({
+            value: (await fixture.device.groups.loadTrust(groupID))?.installed,
+          })
           if (outcome === 'commit') {
             expect(halt).toEqual({ eventID, evidence: reported, detectedAt: expect.any(Number) })
-            expect(events).toEqual([{ ...key, id: eventID, kind: 'group:fork', halt }])
+            expect(events).toEqual({ value: [{ ...key, id: eventID, kind: 'group:fork', halt }] })
             expect(notifications).toHaveLength(1)
           } else {
             expect(halt).toBeNull()
-            expect(events).toEqual([])
+            expect(events).toEqual({ value: [] })
             expect(notifications).toEqual([])
           }
           expect(access.admission()).toMatchObject({ reason: 'fork-halted' })

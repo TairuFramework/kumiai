@@ -597,8 +597,27 @@ async function assemble(
         }
         return result
       },
-      run: (request, prepare, work) =>
-        capability.run(request, (reads) => prepare(faultReads(reads)), work),
+      run: (request, prepare, work) => {
+        return capability.run(
+          request,
+          (reads) => prepare(faultReads(reads)),
+          (stores, prepared) => {
+            return work(
+              {
+                ...stores,
+                trust: {
+                  ...stores.trust,
+                  load: async () => {
+                    if (trustReadFailure !== null) throw trustReadFailure
+                    return stores.trust.load()
+                  },
+                },
+              },
+              prepared,
+            )
+          },
+        )
+      },
     },
   })
   restorers.set(fixture, restore)
