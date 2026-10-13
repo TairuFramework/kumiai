@@ -15,6 +15,36 @@ const examples = [...readme.matchAll(/persist: (\([^)]*\) => store\.save\([^\n]*
 )
 if (examples.length === 0) throw new Error('No documented store persistence callbacks')
 
+const accessExamples = [
+  ...readme.matchAll(/const access = (simpleHandleAccess\(\{[\s\S]*?^\}\))/gm),
+].map((match) => match[1])
+if (accessExamples.length === 0) throw new Error('No documented simple access constructors')
+
+test.each(accessExamples)(
+  'documented simple access uses the stored key (example %#)',
+  async (example) => {
+    const group = await createRealGroup(1, 'readme-access-key')
+    const member = group.members[0]
+    if (member == null) throw new Error('missing member')
+    const access = runInNewContext(`(${example})`, {
+      simpleHandleAccess,
+      handle: member.handle,
+      groupID: member.handle.groupID,
+      adopt: (next: GroupHandle) => {
+        member.handle = next
+      },
+      store: {
+        control: { key: { groupID: member.handle.groupID, incarnation: 7 } },
+        loadVersion: () => 0,
+        save: () => Promise.resolve(),
+      },
+    }) as ReturnType<typeof simpleHandleAccess>
+    await access.readControl(async ({ source }) => {
+      expect(source.key).toEqual({ groupID: member.handle.groupID, incarnation: 7 })
+    })
+  },
+)
+
 test.each(examples)(
   'documented persistence co-commits adoption writes (example %#)',
   async (example) => {

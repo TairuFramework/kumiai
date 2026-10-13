@@ -110,6 +110,7 @@ record and resolves for an unknown id. Deduplicate inserts by `record.frame.id`.
 
 ```ts
 const access = simpleHandleAccess({
+  key: store.control.key,
   handle: () => handle,
   stateVersion: () => store.loadVersion(groupID),
   adopt: (next) => { handle = next },
@@ -166,6 +167,7 @@ const { group } = await createGroup(identity, groupID, {
 
 let handle = group
 const access = simpleHandleAccess({
+  key: store.control.key,
   handle: () => handle,
   stateVersion: () => store.loadVersion(groupID),
   adopt: (next) => { handle = next },
