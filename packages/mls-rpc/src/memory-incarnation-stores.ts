@@ -268,7 +268,11 @@ export function createUnlockedIncarnationStores(params: {
     } else {
       const existing = (await events()).some(
         (event) =>
-          (event.kind === 'failed' && sameStoredValue(event.entry, entry)) ||
+          (event.kind === 'failed' &&
+            event.reason === 'incarnation-abandoned' &&
+            event.id ===
+              JSON.stringify(['incarnation-abandoned', key.groupID, key.incarnation, seq]) &&
+            sameStoredValue(event.entry, entry)) ||
           ((event.kind === 'published' || event.kind === 'failed') &&
             event.entry.seq === seq &&
             event.id.startsWith(`[${JSON.stringify(groupMutationID(tx, key.groupID))},`)),

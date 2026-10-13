@@ -256,6 +256,69 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
   params: StorageConformanceParams<TTx>,
 ): void {
   describe(`Group storage conformance -- ${params.label}`, () => {
+    test.each([
+      { label: 'ordinary failure', reason: 'removed' as const, stableID: true },
+      {
+        label: 'abandonment with a nonstable ID',
+        reason: 'incarnation-abandoned' as const,
+        stableID: false,
+      },
+    ])('removing an entry after $label still emits removed', async ({ reason, stableID }) => {
+      const fixture = await params.createFixture(groupID)
+      try {
+        const groups = fixture.ports.device.groups
+        const initialEntries = await groups.ports(key).outbox.list()
+        const initialEvents = await groups.ports(key).outbox.events()
+        const entry = {
+          seq: 31,
+          protocol: 'chat',
+          prc: 'posted',
+          data: utf8('ordinary-failed-data'),
+          lastAttempt: null,
+          status: 'failed' as const,
+        }
+        const event = {
+          ...key,
+          id: stableID
+            ? JSON.stringify(['incarnation-abandoned', groupID, 1, entry.seq])
+            : JSON.stringify(['prior-failure', entry.seq, 'failed']),
+          kind: 'failed' as const,
+          reason,
+          nextIncarnation: reason === 'incarnation-abandoned' ? 2 : undefined,
+          entry,
+        }
+        await groups.transition(
+          await storageChange(groups, groupID, 'prior-failure'),
+          async (stores) => {
+            const source = stores.incarnation(1)
+            await source.outbox.put([entry])
+            await source.meta.putEvents([event])
+          },
+        )
+        await groups.transition(
+          await storageChange(groups, groupID, 'ordinary-removal'),
+          async (stores) => stores.incarnation(1).outbox.remove([entry.seq]),
+        )
+        const expectedEvents = [
+          ...initialEvents,
+          event,
+          {
+            ...key,
+            id: JSON.stringify(['ordinary-removal', entry.seq, 'failed']),
+            kind: 'failed',
+            reason: 'removed',
+            entry,
+          },
+        ]
+        expect(await groups.ports(key).outbox.list()).toEqual(initialEntries)
+        expect(await groups.ports(key).outbox.events()).toEqual(expectedEvents)
+        const reopened = await fixture.reopen()
+        expect(await reopened.device.groups.ports(key).outbox.events()).toEqual(expectedEvents)
+      } finally {
+        await fixture.close()
+      }
+    })
+
     test('removing an abandoned entry retains its matching stable failure event', async () => {
       const fixture = await params.createFixture(groupID)
       try {
