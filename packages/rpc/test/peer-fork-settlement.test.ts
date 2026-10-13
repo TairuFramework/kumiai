@@ -286,7 +286,10 @@ describe('durable fork halts', () => {
     expect((await restarted.control.load()).cursor).toEqual(cursor)
     expect(restarted.controlWalk.safetyHold()).toBe('fork-halted')
     expect(hub.published.filter((row) => row.topicID === rendezvousTopic(secret))).toEqual([])
-    await restarted.peer.enqueue(buildLedgerCommit(restarted, []))
+    await expect(restarted.peer.enqueue(buildLedgerCommit(restarted, []))).rejects.toMatchObject({
+      name: 'GroupSafetyHeldError',
+      reason: 'fork-halted',
+    })
   })
 
   test('later fork reveals leave the first halt and all applied history unchanged', async () => {

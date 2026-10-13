@@ -35,6 +35,8 @@ export type AppOutboxAcceptanceParams = {
   outbox: AppOutbox
   limit: number
   admission: () => SendAdmission
+  /** Initial safety reads only; full peer startup may depend on this queue. */
+  admissionReady?: () => Promise<void>
 }
 
 export type AppOutboxAcceptance = {
@@ -87,6 +89,7 @@ export function createAppOutboxAcceptance(params: AppOutboxAcceptanceParams): Ap
   const accept = async (
     input: Pick<AppOutboxEntry, 'protocol' | 'prc' | 'data'>,
   ): Promise<void> => {
+    if (params.admissionReady !== undefined) await params.admissionReady()
     // Later calls must join the handoff until earlier waiters have resumed.
     if (!listed || waiting > 0) {
       waiting++

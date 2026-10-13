@@ -2,7 +2,8 @@ import { decodeFrame, encodeEventFrame } from '@kumiai/broadcast'
 import type { HubFetchTopicResult } from '@kumiai/hub-tunnel'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
-import type { AppOutboxCleared } from '../src/log-delivery.js'
+import { createAppOutboxAcceptance } from '../src/app-outbox.js'
+import { type AppOutboxCleared, createLogDelivery } from '../src/log-delivery.js'
 import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
 import { commitTopic, protocolTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
@@ -18,6 +19,102 @@ import {
 } from './fixtures/peer.js'
 import { controlRecoveryClock, drainUntil } from './fixtures/recovery-clock.js'
 import { deferred } from './fixtures/single-connection-host.js'
+
+describe('held live publication proof', () => {
+  afterEach(() => vi.useRealTimers())
+  test.each(
+    (['fork-halted', 'recovery-unavailable'] as const).flatMap((reason) =>
+      [
+        [true, false],
+        [true, true],
+        [false, false],
+      ].map(([hasProof, failRemoval]) => [reason, hasProof, failRemoval] as const),
+    ),
+  )(
+    'live settlement under %s (prior proof=%s, failed removal=%s)',
+    async (reason, hasProof, failRemoval) => {
+      vi.useFakeTimers()
+      let held = false
+      const store = createMemoryAppOutbox()
+      const queue = createAppOutboxAcceptance({
+        outbox: store,
+        limit: 4,
+        admission: () => ({ admissible: true, epoch: 1 }),
+      })
+      await queue.accept({ protocol: 'chat', prc: 'chat/posted', data: new Uint8Array([1]) })
+      const entered = deferred<void>()
+      const release = deferred<void>()
+      const probe = vi.fn(async () => ({ messages: [], head: null, oldest: null, gap: false }))
+      probe.mockImplementationOnce(async () => ({
+        messages: [],
+        head: null,
+        oldest: null,
+        gap: false,
+      }))
+      probe.mockImplementationOnce(async () => {
+        entered.resolve()
+        await release.promise
+        return { messages: [], head: null, oldest: null, gap: false }
+      })
+      const floor = { epoch: 1, position: null, covered: true }
+      const seal = vi.fn(async () => ({ topicID: 'app', payload: new Uint8Array([2]), floor }))
+      const publish = vi.fn(async () => {})
+      const remove = vi.fn(async (seq: number) => store.remove(seq))
+      if (failRemoval) remove.mockRejectedValueOnce(new Error('removal failed'))
+      const delivery = createLogDelivery({
+        queue,
+        ready: async () => {},
+        floor: () => floor,
+        held: () => held,
+        safetyHold: () => (held ? reason : null),
+        probe,
+        pull: vi.fn(),
+        heal: vi.fn(),
+        seal,
+        put: store.put,
+        publish,
+        remove,
+        clear: store.clear,
+        cleared: vi.fn(),
+        deliveredWindowMs: 60_000,
+        deliveredLimit: 4,
+      })
+      try {
+        delivery.trigger()
+        const pass = vi.advanceTimersByTimeAsync(0)
+        await entered.promise
+        if (hasProof) delivery.certify(1, delivery.beginWalk())
+        held = true
+        if (!hasProof) delivery.certify(1, delivery.beginWalk())
+        probe.mockClear()
+        seal.mockClear()
+        publish.mockClear()
+        release.resolve()
+        await pass
+        if (failRemoval) {
+          expect(await store.list()).toHaveLength(1)
+          await vi.advanceTimersByTimeAsync(1_000)
+        }
+        if (hasProof) {
+          expect(await store.list()).toEqual([])
+          expect(queue.entries()).toEqual([])
+          expect(remove).toHaveBeenCalledTimes(failRemoval ? 2 : 1)
+        } else {
+          expect(await store.list()).toHaveLength(1)
+          await vi.advanceTimersByTimeAsync(1_000)
+          expect(queue.entries()).toHaveLength(1)
+          expect(remove).not.toHaveBeenCalled()
+        }
+        expect(probe).not.toHaveBeenCalled()
+        expect(seal).not.toHaveBeenCalled()
+        expect(publish).not.toHaveBeenCalled()
+      } finally {
+        delivery.close()
+        queue.close()
+      }
+    },
+  )
+})
 
 describe('recovery ordering', { concurrent: false }, () => {
   const secret = new Uint8Array(32).fill(15)

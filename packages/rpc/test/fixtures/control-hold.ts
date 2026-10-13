@@ -97,6 +97,18 @@ export async function assertDurableForkHalt(
     expect(after.strand).toEqual(before.strand)
     expect(after.cursor).toEqual(before.cursor)
     expect(restarted.mls.epoch()).toBe(epoch)
+    const put = vi.spyOn(restarted.appOutbox, 'put')
+    await expect(
+      restarted.peer.protocol('chat').dispatch('chat/posted', { data: {} }),
+    ).rejects.toMatchObject({ name: 'SendNotAdmissibleError', reason: 'fork-halted' })
+    expect(put).not.toHaveBeenCalled()
+    await expect(
+      restarted.peer.enqueue(buildLedgerCommit(restarted, ['held'])),
+    ).rejects.toMatchObject({
+      name: 'GroupSafetyHeldError',
+      reason: 'fork-halted',
+    })
+    expect((await restarted.control.load()).operations).toEqual(after.operations)
     expect(requests()).toEqual([])
   } finally {
     await restarted.peer.dispose()

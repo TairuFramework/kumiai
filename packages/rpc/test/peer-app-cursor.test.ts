@@ -73,42 +73,13 @@ describe('the app-lane drain reads from a durable position and reports what aged
     await second.peer.dispose()
   })
 
-  /**
-   * THE ADVANCE RULE, and the test that holds it: a frame sealed AHEAD of the walk is not done, and
-   * a cursor may not pass it — across restart after restart, for as long as the peer stays behind.
-   *
-   * The frame is sealed at epoch 4 and reaches a peer sitting at epoch 1 — a publisher the group
-   * has carried further than this reader. `unwrap` refuses it exactly as it refuses a frame from an
-   * epoch already spent, and that is the whole difficulty: one of those will open later and the
-   * other never will, and only the frame's own cleartext epoch tells them apart. A drain that
-   * treated "will not open" as done would write a position past this frame, and the next restart
-   * would fetch after it and never see it again. Nothing would report that.
-   *
-   * The log here carries the group to epoch 4, but the retention rule does not depend on the hub
-   * showing those commits. A future claim stays sealed until the reader reaches that epoch or an
-   * operator drops it. This reader cannot get there because it strands on its own commit.
-   *
-   * WHICH MAKES THE READER A STRANDED ONE, necessarily. A peer that merely lags reads the log,
-   * applies what is in it, and arrives — the very commits that justify the frame are the ones that
-   * carry it to the frame's epoch, so the wait lasts one walk and no longer (that is the case
-   * `peer-app-drain-integrity` covers). For the wait to survive a restart the peer has to be unable
-   * to apply what it can see, which is a strand: here, bob meets his OWN un-merged commit at the
-   * head of his walk, the drain stops dead on it, and no restart gets him past it while no
-   * responder exists to heal him.
-   *
-   * The frame is never delivered in this test, and that is not an omission. A stranded peer's only
-   * exit is a rejoin, a rejoin rotates the anchor, and a rotation moves the group to a new topic and
-   * drops this buffer — so "delivered when the walk reaches it" belongs to the lagging peer, not to
-   * this one. What this holds is the half that is real for a strand: it is not his to skip, it is
-   * his to wait for, and the cursor never passes it.
-   */
-  test('a justified frame ahead of a stranded peer is never passed, however often it restarts', async () => {
+  // An orphaned own commit halts before the app drain can spend either frame's key.
+  test('a halted peer leaves current and future frames unopened across restarts', async () => {
     const hub = new DurableFakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x82)
     const seen: Array<unknown> = []
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
     const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
-    // Fast enough that a heal which will find nobody gives up inside the test.
     const recovery = { timeoutMs: 60, getDelayMs: () => 5, deadlineMs: 250 }
 
     // Bob's own commit, accepted by the hub at epoch 1, with his process dead before he adopted it
@@ -140,16 +111,13 @@ describe('the app-lane drain reads from a durable position and reports what aged
     const posted = hub.published.filter((m) => m.topicID === topicID)
     expect(posted).toHaveLength(2)
 
-    // Bob comes up at epoch 1 and strands: nobody is live to answer his rendezvous, so the heal
-    // finds no responder and he stays exactly where he is.
     const first = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers, recovery })
     await flush(300)
     expect(first.mls.epoch()).toBe(1)
 
-    // He read what his epoch opens, and stopped: the position sits on the frame he delivered and
-    // NOT on the one he could not.
-    expect(seen).toEqual([{ text: 'at epoch one' }])
-    expect(first.appCursorStore.stored(topicID)).toBe(posted[0]?.sequenceID)
+    expect(first.controlWalk.safetyHold()).toBe('fork-halted')
+    expect(seen).toEqual([])
+    expect(first.appCursorStore.stored(topicID)).toBeNull()
 
     // Restart after restart over the same durable state changes nothing and loses nothing. The
     // frame is neither delivered nor gone, and the position never moves past it — which is the only
@@ -164,8 +132,9 @@ describe('the app-lane drain reads from a durable position and reports what aged
       })
       await flush(300)
       expect(next.mls.epoch()).toBe(1)
-      expect(seen).toEqual([{ text: 'at epoch one' }])
-      expect(next.appCursorStore.stored(topicID)).toBe(posted[0]?.sequenceID)
+      expect(next.controlWalk.safetyHold()).toBe('fork-halted')
+      expect(seen).toEqual([])
+      expect(next.appCursorStore.stored(topicID)).toBeNull()
       previous = next
     }
 

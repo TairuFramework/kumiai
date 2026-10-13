@@ -1,6 +1,7 @@
 import type { HubFetchTopicResult } from '@kumiai/hub-tunnel'
 
 import type { AppOutboxAcceptance, AppOutboxEntry } from './app-outbox.js'
+import type { SafetyHold } from './control/safety.js'
 import type { LogPosition } from './cursor.js'
 
 export type EpochFloor = { epoch: number; position: LogPosition | null; covered: boolean }
@@ -25,6 +26,7 @@ export type LogDeliveryParams = {
   ready: () => Promise<void>
   floor: () => EpochFloor
   held: () => boolean
+  safetyHold?: () => SafetyHold
   probe: () => Promise<CoveredFetchResult>
   pull: () => Promise<void>
   heal: () => Promise<void>
@@ -42,6 +44,7 @@ export type LogDeliveryParams = {
 
 /** Publication evidence stays in memory. A prepared durable attempt proves nothing. */
 export function createLogDelivery(params: LogDeliveryParams) {
+  const safetyHeld = () => params.safetyHold?.() != null
   const publications = new Map<number, Publication>()
   const proven = new Set<number>()
   const delivered: Array<Delivered> = []
@@ -90,6 +93,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
   }
 
   const certify = (epoch: number, started: number): void => {
+    if (safetyHeld()) return
     for (const [seq, publication] of publications) {
       if (publication.epoch === epoch && publication.acknowledged <= started) proven.add(seq)
     }
@@ -112,6 +116,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
     }
     // A failed durable removal retries alone, even after another epoch arrives.
     if (!(await removeProven())) return
+    if (safetyHeld()) return
     // Sent again ahead of the queue, so a rejoined member reads them in their original order.
     while (resend.length > 0) {
       const next = resend[0]
@@ -127,7 +132,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
     if (params.queue.entries().length === 0) return
     let count = 0
     for (const entry of params.queue.entries()) {
-      if (closed) return
+      if (closed || safetyHeld()) return
       const fence = params.queue.lowestUnresolvedSeq()
       if (fence != null && entry.seq >= fence) return
       if (count++ === 64) {
@@ -136,6 +141,10 @@ export function createLogDelivery(params: LogDeliveryParams) {
       }
       if (proven.has(entry.seq)) continue
       const before = await params.probe()
+      if (safetyHeld()) {
+        await removeProven()
+        return
+      }
       if (headPastFloor(before.head, params.floor())) await params.pull()
       if (closed || removed) {
         immediate = removed && params.queue.lowestUnresolvedSeq() == null
@@ -189,8 +198,13 @@ export function createLogDelivery(params: LogDeliveryParams) {
         break
       }
     }
+    if (safetyHeld()) return
     const result = await params.probe()
     if (closed) return
+    if (safetyHeld()) {
+      await removeProven()
+      return
+    }
     for (const [seq, publication] of publications) {
       if (result.head == null || (publication.floor != null && result.head <= publication.floor)) {
         proven.add(seq)

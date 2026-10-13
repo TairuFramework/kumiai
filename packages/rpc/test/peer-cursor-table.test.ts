@@ -354,7 +354,7 @@ describe('a hostile commit cannot make an honest peer do expensive work', {
 })
 
 describe('a peer that must recover before it can commit', { concurrent: false }, () => {
-  test('keeps the operation pending until recovery or disposal', async () => {
+  test('refuses an operation after halting on an orphaned own commit', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x48)
 
@@ -368,10 +368,14 @@ describe('a peer that must recover before it can commit', { concurrent: false },
     await flush(120)
     expect(alice.mls.epoch()).toBe(1)
 
-    // The durable intent waits for recovery without racing an unreconciled head.
-    await alice.peer.enqueue(buildLedgerCommit(alice, ['signed-token: a']))
+    await expect(
+      alice.peer.enqueue(buildLedgerCommit(alice, ['signed-token: a'])),
+    ).rejects.toMatchObject({
+      name: 'GroupSafetyHeldError',
+      reason: 'fork-halted',
+    })
     expect(hub.published.filter((m) => m.topicID === commitTopic(rs))).toHaveLength(1)
-    expect((await alice.control.load()).operations[0]?.stage).toBe('intent')
+    expect((await alice.control.load()).operations).toEqual([])
 
     await alice.peer.dispose()
   })

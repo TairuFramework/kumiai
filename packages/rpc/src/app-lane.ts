@@ -7,6 +7,7 @@ import { fromUTF, toB64U, toUTF } from '@sozai/codec'
 import type { Anchor } from './anchor.js'
 import { decodeAppAAD, encodeAppAAD } from './app-aad.js'
 import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
+import type { SafetyHold } from './control/safety.js'
 import {
   type GroupCrypto,
   type GroupUnwrapResult,
@@ -15,6 +16,7 @@ import {
   type PendingAppFrame,
 } from './crypto.js'
 import { asLogPosition, assertForwardPage, type LogPosition } from './cursor.js'
+import { GroupSafetyHeldError } from './errors.js'
 import type { BusHandlerMaps } from './handlers.js'
 import { notifyHost } from './host-notice.js'
 import type { HubMux } from './hub-mux.js'
@@ -92,6 +94,8 @@ export type AppLaneParams = {
   onAppDeliveryResumed?: ((event: AppDeliveryResumed) => void) | undefined
   /** Start workers after the caller's serialization boundary; direct lanes start immediately. */
   scheduleDelivery?: ((start: () => void) => void) | undefined
+  safetyHold?: () => SafetyHold
+  onSafetyHeld?: (reason: NonNullable<SafetyHold>) => void
   /**
    * The live anchor, read rather than held: it moves under the peer, and the topic every buffer
    * and cursor here belongs to is derived from it. Read once per lazy buffer creation, so a
@@ -182,6 +186,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
     onAppDeliveryStalled,
     onAppDeliveryResumed,
     scheduleDelivery = (start) => start(),
+    safetyHold = () => null,
+    onSafetyHeld = () => {},
     anchor,
     groupID,
   } = params
@@ -392,10 +398,13 @@ export function createAppLane(params: AppLaneParams): AppLane {
    * epoch whose frames were never read, and `fetched` is moved only by pages that arrived.
    */
   const loadSegment = async (): Promise<void> => {
+    if (safetyHold() !== null) return
     // One protocol per lane, sharing nothing (a topic is derived per protocol NAME). Paged
     // concurrently — otherwise each protocol waits out the previous one's whole pull.
     const loadOne = async (name: string): Promise<void> => {
+      if (safetyHold() !== null) return
       const { frames, cursor } = await laneFor(name)
+      if (safetyHold() !== null) return
       const topicID = cursor.topicID
       // Carrying the window on the listener-less subscribe too: a member that is AWAY reaches a
       // segment by rotating onto it mid-walk, pulled here and never listened on.
@@ -413,6 +422,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
 
       let after: LogPosition | null = cursor.fetched ?? cursor.position
       while (true) {
+        if (safetyHold() !== null) return
         const result = await mux.fetchTopic({
           topicID,
           ...(after != null ? { after } : {}),
@@ -443,6 +453,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
           after = position
         }
         cursor.fetched = after
+        if (safetyHold() !== null) return
         if (result.messages.length < APP_FETCH_LIMIT) break
       }
     }
@@ -640,10 +651,11 @@ export function createAppLane(params: AppLaneParams): AppLane {
    */
   let syncScheduled = false
   const scheduleSync = (): void => {
-    if (syncScheduled) return
+    if (syncScheduled || safetyHold() !== null) return
     syncScheduled = true
     void runAppLane(async () => {
       syncScheduled = false
+      if (safetyHold() !== null) return
       await loadSegment()
       for (const [name, frames] of segment) await advanceCursor(name, frames)
     }).catch(() => {
@@ -673,6 +685,11 @@ export function createAppLane(params: AppLaneParams): AppLane {
    * move the cursor over frames the log does not contain.
    */
   const note = (name: string, topicID: string, message: StoredMessage, failure: unknown): void => {
+    if (failure instanceof GroupSafetyHeldError) {
+      onSafetyHeld(failure.reason)
+      return
+    }
+    if (safetyHold() !== null) return
     const position = message.logPosition
     if (position == null) return
     if (crypto.pending != null) {
@@ -706,6 +723,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       }
       for (const frame of frames) {
         if (frame.sealed.state !== 'sealed') continue
+        if (safetyHold() !== null) break
         const sealed = frame.sealed.bytes
         // Unreadable bytes are dead. Past and future are the open's locked answer, below.
         if (crypto.frameEpoch(sealed) == null) {
@@ -741,6 +759,10 @@ export function createAppLane(params: AppLaneParams): AppLane {
             ...(ref == null ? {} : { frame: ref }),
           })
         } catch (error) {
+          if (error instanceof GroupSafetyHeldError) {
+            onSafetyHeld(error.reason)
+            break
+          }
           if (isFrameAhead(error)) {
             // A future claim keeps its bytes and position even when the hub omits its commit.
             if (crypto.pending != null) {

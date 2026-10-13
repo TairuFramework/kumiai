@@ -686,7 +686,11 @@ test('a classified own-unmerged strand persists evidence without a recovery bypa
   ).sequenceID
   const tip = (await publishCommit({ hub, senderDID: 'dave', recoverySecret: secret, epoch: 1 }))
     .sequenceID
-  await alice.peer.resync()
+  await vi.waitFor(() => expect(alice.controlWalk.safetyHold()).toBe('fork-halted'))
+  await expect(alice.peer.resync()).rejects.toMatchObject({
+    name: 'GroupSafetyHeldError',
+    reason: 'fork-halted',
+  })
   const built: Array<RejoinRecord> = []
   const apply = bob.control.apply.bind(bob.control)
   vi.spyOn(bob.control, 'apply').mockImplementation(async (changes, id) => {
@@ -857,7 +861,12 @@ test.each(['acceptance-unknown', 'unsupported-version', 'fork-halted'] as const)
       expect((await bob.control.load()).cursor?.stranded).toBeUndefined()
       expect((await bob.control.load()).controlHold).toBeNull()
     } else {
-      await bob.peer.resync()
+      if (reason === 'fork-halted')
+        await expect(bob.peer.resync()).rejects.toMatchObject({
+          name: 'GroupSafetyHeldError',
+          reason,
+        })
+      else await bob.peer.resync()
       expect(bob.mls.epoch()).toBe(1)
       if (reason === 'fork-halted') expect((await bob.control.load()).forkHalt).not.toBeNull()
       else expect((await bob.control.load()).controlHold?.reason).toBe(reason)

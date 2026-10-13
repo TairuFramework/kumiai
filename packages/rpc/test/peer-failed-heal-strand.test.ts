@@ -208,7 +208,7 @@ describe('heal strand', { concurrent: false }, () => {
 
   describe('a heal trigger under a failed heal', () => {
     for (const trigger of triggers) {
-      test(`${trigger.name}: no responder -- the intent waits, and nothing lands`, async () => {
+      test(`${trigger.name}: no responder -- nothing lands`, async () => {
         const hub = new FakeHub()
         const rs = new Uint8Array(32).fill(0x61)
         const { bob, staleEpoch } = await trigger.arm(hub, rs, false)
@@ -217,13 +217,22 @@ describe('heal strand', { concurrent: false }, () => {
         const headBefore = hub.head(commitTopic(rs))
         const framesBefore = commitFrames(hub, rs)
 
-        await bob.peer.enqueue(buildLedgerCommit(bob, ['role:zoe=admin']))
+        const request = buildLedgerCommit(bob, ['role:zoe=admin'])
+        if (trigger.arm === armAhead) {
+          await bob.peer.enqueue(request)
+          expect((await bob.control.load()).operations[0]?.stage).toBe('intent')
+        } else {
+          await expect(bob.peer.enqueue(request)).rejects.toMatchObject({
+            name: 'GroupSafetyHeldError',
+            reason: 'fork-halted',
+          })
+          expect((await bob.control.load()).operations).toEqual([])
+        }
 
         // The stored intent cannot publish or advance the group while stranded.
         expect(commitFrames(hub, rs)).toBe(framesBefore)
         expect(hub.head(commitTopic(rs))).toBe(headBefore)
         expect(bob.mls.epoch()).toBe(staleEpoch)
-        expect((await bob.control.load()).operations[0]?.stage).toBe('intent')
 
         if (trigger.arm !== armAhead)
           await assertDurableForkHalt(bob, hub, rs, 'bob', {
@@ -244,8 +253,13 @@ describe('heal strand', { concurrent: false }, () => {
         if (trigger.arm !== armAhead) {
           expect(bob.mls.epoch()).toBe(staleEpoch)
           expect(carol.mls.epoch()).toBe(2)
-          await bob.peer.enqueue(buildLedgerCommit(bob, ['role:zoe=admin']))
-          expect((await bob.control.load()).operations[0]?.stage).toBe('intent')
+          await expect(
+            bob.peer.enqueue(buildLedgerCommit(bob, ['role:zoe=admin'])),
+          ).rejects.toMatchObject({
+            name: 'GroupSafetyHeldError',
+            reason: 'fork-halted',
+          })
+          expect((await bob.control.load()).operations).toEqual([])
           await assertDurableForkHalt(bob, hub, rs, 'bob', {
             evidence: {
               kind: trigger.arm === armOwnUnmerged ? 'unexplained-own-commit' : 'digest-divergence',

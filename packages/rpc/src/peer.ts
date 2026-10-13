@@ -428,6 +428,8 @@ export function createGroupPeerWithControlWalk<
     retentionSeconds: appLogRetentionSeconds,
     anchor: () => anchor,
     groupID: () => commitTopicID,
+    safetyHold,
+    onSafetyHeld: latchSafetyHold,
     ...(appCursorStore != null ? { appCursorStore } : {}),
     ...(onAppWindowPruned != null ? { onAppWindowPruned } : {}),
     ...(params.onAppDeliveryStalled != null
@@ -548,18 +550,19 @@ export function createGroupPeerWithControlWalk<
   let appPullBackoff = 1000
   let appPullRetryNow = false
   const armAppPull = (delay: number): void => {
-    if (disposed || appPullActive || appPullTimer != null) return
+    if (disposed || safetyHold() !== null || appPullActive || appPullTimer != null) return
     appPullTimer = setTimeout(() => {
       appPullTimer = undefined
-      if (disposed) return
+      if (disposed || safetyHold() !== null) return
       appPullActive = true
       appPullNeeded = false
       let retryDelay = 0
       void (async () => {
         try {
           await ready
-          if (disposed) return
+          if (disposed || safetyHold() !== null) return
           await runSerial(async () => {
+            if (safetyHold() !== null) return
             await settleOperations()
             await ensureLedger(Date.now() + recoveryTimeoutMs)
             await reconcileCommits()
@@ -581,6 +584,7 @@ export function createGroupPeerWithControlWalk<
     }, delay)
   }
   const requestAppPull = (): void => {
+    if (safetyHold() !== null) return
     appPullNeeded = true
     armAppPull(0)
   }
@@ -620,7 +624,7 @@ export function createGroupPeerWithControlWalk<
     ledgerRetryBackoff = Math.min(ledgerRetryBackoff * 2, 60_000)
   }
   const retryAppPull = (): void => {
-    if (disposed) return
+    if (disposed || safetyHold() !== null) return
     appPullBackoff = 1000
     appPullNeeded = true
     if (appPullTimer != null) {
@@ -668,7 +672,13 @@ export function createGroupPeerWithControlWalk<
       : createAppOutboxAcceptance({
           outbox: params.appOutbox,
           limit: params.appOutboxLimit,
-          admission: () => mls.sendAdmission(),
+          admissionReady: () => safetyReady,
+          admission: () => {
+            const reason = safetyHold()
+            return reason === null
+              ? mls.sendAdmission()
+              : { admissible: false, reason, epoch: mls.sendAdmission().epoch }
+          },
         })
 
   let floor: EpochFloor = { epoch: crypto.epoch(), position: null, covered: true }
@@ -687,6 +697,7 @@ export function createGroupPeerWithControlWalk<
             }
           },
           floor: () => floor,
+          safetyHold,
           held: () =>
             safetyHold() !== null ||
             logSendsHeld() ||
@@ -724,8 +735,20 @@ export function createGroupPeerWithControlWalk<
           },
           seal: async (entry) => {
             while (true) {
+              const reason = safetyHold()
+              if (reason !== null) throw new SendNotAdmissibleError(reason)
               const at = anchor
-              const frame = await sealForSegment(entry.protocol, entry.data, 'log')
+              const frame = await sealForSegment(entry.protocol, entry.data, 'log').catch(
+                (error: unknown) => {
+                  if (error instanceof GroupSafetyHeldError) {
+                    latchSafetyHold(error.reason)
+                    throw new SendNotAdmissibleError(error.reason)
+                  }
+                  throw error
+                },
+              )
+              const currentReason = safetyHold()
+              if (currentReason !== null) throw new SendNotAdmissibleError(currentReason)
               const epoch = crypto.frameEpoch(frame.payload)
               const snapshot = floor
               const admission = mls.sendAdmission()
@@ -740,7 +763,7 @@ export function createGroupPeerWithControlWalk<
           put: (entry) => params.appOutbox.put(entry),
           publish: (frame) => {
             // No await between the hold check, registration and transport handoff.
-            if (logSendsHeld()) return null
+            if (safetyHold() !== null || logSendsHeld()) return null
             let settle = (): void => {}
             const completion = new Promise<void>((resolve) => {
               settle = resolve
@@ -3075,9 +3098,13 @@ export function createGroupPeerWithControlWalk<
   const enqueue = async (request: OperationRequest): Promise<void> => {
     await ready
     assertLive()
+    const reason = safetyHold()
+    if (reason !== null) throw new GroupSafetyHeldError(reason)
     try {
       await runSerial(async () => {
         assertLive()
+        const reason = safetyHold()
+        if (reason !== null) throw new GroupSafetyHeldError(reason)
         if (locallyRemoved) throw new PeerRemovedError('Peer was removed')
         // A host write may persist the intent before its promise settles.
         if (request.revokes) revokeHold = true
@@ -3179,9 +3206,18 @@ export function createGroupPeerWithControlWalk<
         await refreshControl()
       }
     })
+    if (safetyHold() !== null) {
+      scheduleOperations()
+      return {}
+    }
     const result = await runSerial(async () => {
+      if (safetyHold() !== null) return {}
       if (await settleOperations()) await rebuildEpoch()
-      if (mls != null && (await ensureLedger(Date.now() + recoveryTimeoutMs)))
+      if (
+        safetyHold() === null &&
+        mls != null &&
+        (await ensureLedger(Date.now() + recoveryTimeoutMs))
+      )
         await finalizeBootstrap(mls)
       assertLive()
       const reenact = pendingReenact
@@ -3793,8 +3829,9 @@ export function createGroupPeerWithControlWalk<
     }
   }
 
+  const safetyReady = refreshControl()
   const ready = (async () => {
-    await refreshControl()
+    await safetyReady
     const stored = await anchorStore?.load()
     if (disposed) return
     if (stored != null) {
@@ -3986,11 +4023,12 @@ export function createGroupPeerWithControlWalk<
         assertLive()
         await appLane.dropFrame(topicID, position)
         assertLive()
+        if (safetyHold() !== null) return
         await settleOperations()
         await ensureLedger(Date.now() + recoveryTimeoutMs)
         await reconcileCommits()
       })
-      await healIfRequested()
+      if (safetyHold() === null) await healIfRequested()
       assertLive()
     },
     enqueue,
@@ -4008,16 +4046,24 @@ export function createGroupPeerWithControlWalk<
       // and no second teardown reaches it. Invisible from the hub — the mux deliberately leaves
       // `subscriptions` standing, so nothing re-subscribes; the whole cost is held locally.
       assertLive()
+      const reason = safetyHold()
+      if (reason !== null) throw new GroupSafetyHeldError(reason)
       // Every other `rebuildEpoch` caller runs under the commit mutex. Unlocked, a host-called
       // resync interleaves with an inbound-commit rebuild and runs two teardown/build cycles over
       // one set of runtimes. Safe to wrap only because `rebuildEpoch` takes no lock itself and
       // this is a top-level entry — `runSerial` is not reentrant.
       if (locallyRemoved) throw new PeerRemovedError('Peer was removed')
-      await runSerial(() => rebuildEpoch())
+      await runSerial(async () => {
+        const reason = safetyHold()
+        if (reason !== null) throw new GroupSafetyHeldError(reason)
+        await rebuildEpoch()
+      })
       assertLive()
     },
     anchorEpoch: () => anchor.epoch,
     reauthorize: () => {
+      const reason = safetyHold()
+      if (reason !== null) throw new GroupSafetyHeldError(reason)
       // No `assertLive`/`ready` wait: rearming a refused subscription is a synchronous, idempotent
       // hint the mux applies against its own state, safe on a peer that is still initializing and a
       // no-op on a disposed one (the mux guards `disposed`). It touches only topics the hub already

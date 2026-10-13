@@ -593,7 +593,10 @@ test('a moved acceptance with rewrapped payload stays accepted and strands the p
     strand: snapshot.strand,
     cursor: snapshot.cursor,
   })
-  await bob.peer.enqueue(buildLedgerCommit(bob, []))
+  await expect(bob.peer.enqueue(buildLedgerCommit(bob, []))).rejects.toMatchObject({
+    name: 'GroupSafetyHeldError',
+    reason: 'fork-halted',
+  })
   const held = await bob.control.load()
   const recoveryRequests = () =>
     hub.published.filter(

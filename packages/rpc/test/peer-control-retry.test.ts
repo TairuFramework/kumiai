@@ -259,7 +259,7 @@ test('a post-adoption host failure resolves commit from its co-committed landed 
   expect((await member.control.load()).operations).toEqual([])
 })
 
-test('a stranded commit waits for its durable outcome until disposal', async () => {
+test('a commit refuses after an orphaned own commit halts the peer', async () => {
   const hub = new FakeHub()
   await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
   const member = makeMLSPeer(hub, 'bob', secret, {
@@ -268,19 +268,12 @@ test('a stranded commit waits for its durable outcome until disposal', async () 
   peers.push(member)
   await member.peer.replay()
   const request = buildLedgerCommit(member, ['wait-for-recovery'])
-  let settled = false
-  const committing = member.peer.commit(request).finally(() => {
-    settled = true
+  await expect(member.peer.commit(request)).rejects.toMatchObject({
+    name: 'GroupSafetyHeldError',
+    reason: 'fork-halted',
   })
-  void committing.catch(() => {})
-  await vi.waitFor(async () => expect((await member.control.load()).operations).toHaveLength(1))
-  expect(settled).toBe(false)
+  expect((await member.control.load()).operations).toEqual([])
   await member.peer.dispose()
-  await expect(committing).rejects.toBeInstanceOf(PeerDisposedError)
-  expect((await member.control.load()).operations[0]).toMatchObject({
-    id: request.id,
-    stage: 'intent',
-  })
 })
 
 test.each(['backoff', 'read'] as const)(
