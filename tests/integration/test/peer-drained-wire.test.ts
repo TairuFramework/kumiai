@@ -15,7 +15,12 @@ describe('peer drain over the wire hub', () => {
     const publisher = wire.connect(publisherIdentity)
     const group = await createFoundingGroup(identity, 'peer-drain-wire', createLedgerEntrySlot())
     const crypto = createGroupCrypto({
-      access: simpleHandleAccess({ stateVersion: () => 0, handle: () => group, adopt: () => {} }),
+      access: simpleHandleAccess({
+        key: { groupID: group.groupID, incarnation: 1 },
+        stateVersion: () => 0,
+        handle: () => group,
+        adopt: () => {},
+      }),
     })
     const { secret, epoch } = await crypto.exportSecret(APP_TOPIC_LABEL)
     const topicID = protocolTopic(secret, epoch, 'chat')

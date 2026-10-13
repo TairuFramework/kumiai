@@ -346,6 +346,7 @@ export function persistedTestAccess(
   store: TransactionalStore = createTransactionalStore(params.handle()),
 ): HandleAccess {
   return simpleHandleAccess({
+    key: { groupID: params.handle().groupID, incarnation: 1 },
     ...params,
     stateVersion: () => store.snapshot().revision,
     persist: (handle, write) =>
@@ -360,12 +361,14 @@ export function persistedTestAccess(
 }
 
 export function testHandleAccess(
-  params: Omit<SimpleHandleAccessParams, 'stateVersion'> & {
+  params: Omit<SimpleHandleAccessParams, 'stateVersion' | 'key'> & {
+    key?: SimpleHandleAccessParams['key']
     stateVersion?: SimpleHandleAccessParams['stateVersion']
   },
 ): HandleAccess {
   let version = 0
   return simpleHandleAccess({
+    key: { groupID: params.handle().groupID, incarnation: 1 },
     ...params,
     stateVersion: params.stateVersion ?? (() => version),
     persist:

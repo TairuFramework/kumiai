@@ -38,7 +38,7 @@ export type HandleAccess = {
 }
 
 export type SimpleHandleAccessParams = {
-  key?: GroupKey
+  key: GroupKey
   stateVersion: () => number | Promise<number>
   handle: () => GroupHandle
   adopt: (next: GroupHandle) => void | Promise<void>
@@ -46,7 +46,7 @@ export type SimpleHandleAccessParams = {
 }
 
 export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAccess {
-  const key = { ...(params.key ?? { groupID: params.handle().groupID, incarnation: 1 }) }
+  const key = { ...params.key }
   let publishedAdmission = params.handle().sendAdmission()
   let tail: Promise<void> = Promise.resolve()
   const serialise = async <TValue>(fn: () => Promise<TValue>): Promise<TValue> => {

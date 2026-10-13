@@ -17,7 +17,7 @@ depend on both.
 
 ## Exports
 
-- `simpleHandleAccess({ handle, adopt, stateVersion, key?, persist? })` — serialised access to a live handle; the
+- `simpleHandleAccess({ handle, adopt, stateVersion, key, persist? })` — serialised access to a live handle; the
   `HandleAccess` type for a host that brings its own.
 - `createGroupCrypto({ access, entryLabel?, runtime?, pending? })` — `GroupCrypto` over that access.
 - `createGroupMLS({ access, identity, entrySlot, recoverySecret?, recoveryBinding? })` — `GroupMLS`
@@ -47,6 +47,7 @@ Migrating from 0.9: build one adapter and pass it to both factories. Replace the
 
 ```ts
 const access = simpleHandleAccess({
+  key: store.control.key,
   handle: () => handle,
   stateVersion: () => store.loadVersion(groupID),
   adopt,
@@ -65,8 +66,9 @@ write loses adoption bookkeeping on restart even if the MLS state was saved.
 The required `stateVersion` callback reads the host's stored version for this handle.
 Serialise its state writes through the same access. Every write, including seals, opens and proposal changes, advances that version.
 An epoch is not a state version. Reopening loads the stored version. Reads and searches leave it unchanged.
-An omitted `key` uses `{ groupID: handle.groupID, incarnation: 1 }` for temporary single-incarnation access.
-A configured key remains fixed for that access. Registry ownership replaces this host seam in phase 2.2b.
+The required `key: GroupKey` identifies the host's stored group incarnation and remains fixed for that access.
+Supply incarnation 1 explicitly only for a single-incarnation host.
+Simple access forwards this key to source reads and adoption writes.
 
 ### A host's own `HandleAccess`
 

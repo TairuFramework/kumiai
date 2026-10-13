@@ -37,6 +37,7 @@ test.each(examples)(
       store,
     }) as SimpleHandleAccessParams['persist']
     const access = simpleHandleAccess({
+      key: { groupID: member.handle.groupID, incarnation: 1 },
       handle: () => member.handle,
       adopt: (next) => {
         member.handle = next

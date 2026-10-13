@@ -332,6 +332,7 @@ export function makeMember(params: MakeMemberParams): Member {
   if (params.stateStore === undefined) void stateStore.save(handle)
 
   const access = simpleHandleAccess({
+    key: stateStore.control.key,
     handle: getHandle,
     stateVersion: () => stateStore.database.loadVersion('state'),
     adopt: adoptHandle,
@@ -680,6 +681,7 @@ export async function createDurableHandleAccess(
   const store = createMemoryStateStore({ groupID: params.handle().groupID, incarnation: 1 })
   await store.save(params.handle())
   const access = simpleHandleAccess({
+    key: store.control.key,
     ...params,
     persist: store.save,
     stateVersion: () => store.database.loadVersion('state'),

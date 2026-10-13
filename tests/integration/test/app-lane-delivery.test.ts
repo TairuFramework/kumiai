@@ -291,6 +291,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       const { createGroupMLS, simpleHandleAccess } = await import('@kumiai/mls-rpc')
       return await createGroupMLS({
         access: simpleHandleAccess({
+          key: { groupID: bob.handle().groupID, incarnation: 1 },
           stateVersion: () => 0,
           handle: () => bob.handle(),
           adopt: () => {},

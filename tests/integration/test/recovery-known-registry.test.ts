@@ -71,6 +71,7 @@ async function setup(
     identity: bob,
     entrySlot: createLedgerEntrySlot(),
     access: simpleHandleAccess({
+      key: { groupID: responderGroup.groupID, incarnation: 1 },
       stateVersion: () => 0,
       handle: () => responderGroup,
       adopt: () => {
@@ -82,6 +83,7 @@ async function setup(
     identity,
     entrySlot: createLedgerEntrySlot(),
     access: simpleHandleAccess({
+      key: { groupID: group.groupID, incarnation: 1 },
       stateVersion: () => 0,
       handle: () => group,
       adopt: (next: GroupHandle) => {
@@ -126,6 +128,7 @@ test('the adapter judge retains own-ledger revocations when the reply offers a s
     identity: mallory,
     entrySlot: createLedgerEntrySlot(),
     access: simpleHandleAccess({
+      key: { groupID: malloryGroup.groupID, incarnation: 1 },
       stateVersion: () => 0,
       handle: () => malloryGroup,
       adopt: () => {

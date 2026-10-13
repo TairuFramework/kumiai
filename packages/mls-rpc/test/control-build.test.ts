@@ -87,6 +87,7 @@ async function setup() {
   const control = groups.ports(key).control
   await control.apply({ putOperations: [intent], cursor: { position: null, epoch: 0 } }, 'intent')
   const access = simpleHandleAccess({
+    key,
     handle: () => handle,
     adopt: () => {},
     stateVersion: async () => {
