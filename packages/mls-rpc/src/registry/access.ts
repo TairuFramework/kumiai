@@ -232,6 +232,61 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
       proof.from === journal.checkpoint
     )
   }
+  async function ordinaryDestination(
+    reads: EntryReads,
+    source: AdoptionExpected,
+    next: GroupHandle,
+    expected: AdoptionExpected,
+    write: AdoptionWrite,
+    committed: boolean,
+    prepare?: () => Promise<boolean>,
+  ): Promise<GroupHandle | null> {
+    const journal = journalFor(write)
+    if (!ordinaryProof(write, journal)) throw moved()
+    const destination = await destinationFor(next, write)
+    if (committed) return null
+    const control = await reads.control(owner.key.incarnation)
+    const proof = write.expected?.acceptance
+    if (proof === undefined) throw moved()
+    if (
+      sameStoredValue(source.identity, {
+        ...owner.key,
+        epoch: Number(destination.epoch),
+        authenticator: destination.state.keySchedule.epochAuthenticator,
+      })
+    ) {
+      const row = control.applied.find((row) => row.epoch === journal.source.identity?.epoch)
+      if (
+        (row?.payloadDigest === proof.payloadDigest && row.sequenceID === proof.position) ||
+        (await reads.controlMutation(owner.key.incarnation)) === write.mutationID
+      )
+        return null
+      throw moved()
+    }
+    if (
+      !sameStoredValue(source, expected) ||
+      !sameStoredValue(source, {
+        key: write.expected?.key,
+        stateVersion: write.expected?.stateVersion,
+        identity: write.expected?.identity,
+      }) ||
+      !sameStoredValue(source.identity, journal.source.identity)
+    )
+      throw moved()
+    if (prepare !== undefined && !(await prepare())) throw moved()
+    if (
+      control.strand !== null ||
+      control.cursor?.stranded === true ||
+      (control.controlHold !== null && control.controlHold.reason !== 'acceptance-unknown') ||
+      control.commitOnce === null ||
+      control.commitOnce.payloadDigest !== proof.payloadDigest ||
+      control.commitOnce.searchFrom !== proof.from ||
+      !sameStoredValue(control.commitOnce.journal, write.expected?.journal) ||
+      !sameStoredValue(control.commitOnceAcceptance, proof)
+    )
+      throw moved()
+    return destination
+  }
   async function ordinary(
     next: GroupHandle,
     expected: AdoptionExpected,
@@ -247,50 +302,16 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
           const { handle: current, source } = await isolated(reads)
           const value = owner.value
           const lifetime = await reads.lifetime()
-          const journal = journalFor(write)
-          if (!ordinaryProof(write, journal)) throw moved()
-          const destination = await destinationFor(next, write)
-          if (committed) throw new Noop()
-          const control = await reads.control(owner.key.incarnation)
-          const proof = write.expected?.acceptance
-          if (proof === undefined) throw moved()
-          if (
-            sameStoredValue(source.identity, {
-              ...owner.key,
-              epoch: Number(destination.epoch),
-              authenticator: destination.state.keySchedule.epochAuthenticator,
-            })
-          ) {
-            const row = control.applied.find((row) => row.epoch === journal.source.identity?.epoch)
-            if (
-              (row?.payloadDigest === proof.payloadDigest && row.sequenceID === proof.position) ||
-              (await reads.controlMutation(owner.key.incarnation)) === write.mutationID
-            )
-              throw new Noop()
-            throw moved()
-          }
-          if (
-            !sameStoredValue(source, expected) ||
-            !sameStoredValue(source, {
-              key: write.expected?.key,
-              stateVersion: write.expected?.stateVersion,
-              identity: write.expected?.identity,
-            }) ||
-            !sameStoredValue(source.identity, journal.source.identity)
+          const destination = await ordinaryDestination(
+            reads,
+            source,
+            next,
+            expected,
+            write,
+            committed,
+            prepare === undefined ? undefined : () => prepare(current, source),
           )
-            throw moved()
-          if (prepare !== undefined && !(await prepare(current, source))) throw moved()
-          if (
-            control.strand !== null ||
-            control.cursor?.stranded === true ||
-            (control.controlHold !== null && control.controlHold.reason !== 'acceptance-unknown') ||
-            control.commitOnce === null ||
-            control.commitOnce.payloadDigest !== proof.payloadDigest ||
-            control.commitOnce.searchFrom !== proof.from ||
-            !sameStoredValue(control.commitOnce.journal, write.expected?.journal) ||
-            !sameStoredValue(control.commitOnceAcceptance, proof)
-          )
-            throw moved()
+          if (destination === null) throw new Noop()
           // The decoded handle is isolated from the caller and only now may carry source progress.
           await current.carryReceiveProgress(destination)
           const record = recordFor(destination, value)
@@ -330,6 +351,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
   }
   const mutate: HandleAccess['mutate'] = async (fn, adoption) => {
     params.assertAvailable()
+    let noopResult: { value: Awaited<ReturnType<typeof fn>> } | undefined
     try {
       return await capability.run(
         {
@@ -343,28 +365,35 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
           let record: ReadableGroupState | undefined
           let trust: ValidatedGroupState['trust'] | undefined
           let write: AdoptionWrite | undefined
+          let nooped = false
           let active = true
           const persist = async (candidate: GroupHandle): Promise<void> => {
             if (!active) throw new Error('Mutation prepare scope has ended')
             const proposed = adoption?.(staged(candidate))
-            write =
+            const stagedWrite =
               proposed === undefined
                 ? undefined
                 : (decodeStoredValue(encodeStoredValue(proposed)) as AdoptionWrite)
             let final = candidate
-            if (write?.expected?.journal !== undefined) {
-              const journal = journalFor(write)
-              if (
-                !ordinaryProof(write, journal) ||
-                !sameStoredValue(source, {
-                  key: write.expected.key,
-                  stateVersion: write.expected.stateVersion,
-                  identity: write.expected.identity,
-                }) ||
-                !sameStoredValue(source.identity, journal.source.identity)
+            if (stagedWrite?.expected?.journal !== undefined) {
+              const destination = await ordinaryDestination(
+                reads,
+                source,
+                candidate,
+                {
+                  key: stagedWrite.expected.key,
+                  stateVersion: stagedWrite.expected.stateVersion,
+                  identity: stagedWrite.expected.identity,
+                },
+                stagedWrite,
+                // Attempt-bound lifetime reads prove the provider-accounted mutation without a root call.
+                lifetime?.mutationID === stagedWrite.mutationID,
               )
-                throw moved()
-              final = await destinationFor(candidate, write)
+              if (destination === null) {
+                nooped = true
+                return
+              }
+              final = destination
               const committedSource = await restoreValidated(value, environment)
               await committedSource.carryReceiveProgress(final)
             }
@@ -373,13 +402,18 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
             if (!active) throw new Error('Mutation prepare scope has ended')
             record = stagedRecord
             trust = stagedTrust
+            write = stagedWrite
           }
           let result: Awaited<ReturnType<typeof fn>>
           try {
             result = await fn(handle, persist)
-            if (record === undefined) await persist(handle)
+            if (record === undefined && !nooped) await persist(handle)
           } finally {
             active = false
+          }
+          if (record === undefined && nooped) {
+            noopResult = { value: result }
+            throw new Noop()
           }
           if (record === undefined || trust === undefined)
             throw new Error('Mutation state was not staged')
@@ -404,6 +438,9 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
           return prepared.result
         },
       )
+    } catch (error) {
+      if (error instanceof Noop && noopResult !== undefined) return noopResult.value
+      throw error
     } finally {
       params.publish()
     }

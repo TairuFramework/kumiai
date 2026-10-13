@@ -4,6 +4,7 @@ import {
   type AdoptionExpected,
   type AdoptionWrite,
   asLogPosition,
+  type ControlChanges,
   type ControlSlot,
 } from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
@@ -70,6 +71,7 @@ function registry(
 async function accepted(
   fixture: RegistryFixtureBase,
   access: Awaited<ReturnType<ReturnType<typeof registry>['access']>>,
+  slotFor: (slot: ControlSlot) => ControlSlot | null = (slot) => slot,
 ) {
   const { handle, source } = await access.readControl(async ({ handle, source }) => ({
     handle,
@@ -101,6 +103,7 @@ async function accepted(
     welcome: null,
     journal,
   }
+  const occupied = slotFor(slot)
   await fixture.installRows({
     key: access.key,
     control: {
@@ -116,7 +119,7 @@ async function accepted(
           stage: 'intent',
         },
       ],
-      commitOnce: slot,
+      commitOnce: occupied,
     },
   })
   const proof = {
@@ -125,7 +128,17 @@ async function accepted(
     position: asLogPosition('00001'),
     payloadDigest: slot.payloadDigest,
   }
-  await fixture.installRows({ key: access.key, control: { commitOnceAcceptance: proof } })
+  if (occupied !== null)
+    await fixture.installRows({
+      key: access.key,
+      control: {
+        commitOnceAcceptance: {
+          ...proof,
+          from: occupied.searchFrom,
+          payloadDigest: occupied.payloadDigest,
+        },
+      },
+    })
   const expected = await access.readControl(async ({ source }) => source)
   const write: AdoptionWrite = {
     mutationID: 'ordinary-adoption',
@@ -583,6 +596,199 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect(await fixture.device.groups.ports(access.key).control.lastMutation()).toBe(
           'mutation-control',
         )
+      } finally {
+        await fixture.close()
+      }
+    })
+
+    test.each([
+      'strand',
+      'stranded cursor',
+      'control hold',
+      'missing slot',
+      'payload',
+      'searchFrom',
+      'journal',
+      'acceptance',
+    ] as const)('journal-bearing mutate refuses %s before work', async (kind) => {
+      const fixture = await create()
+      try {
+        const access = await registry(fixture).access(groupID)
+        const { candidate, write } = await accepted(fixture, access, (slot) => {
+          if (kind === 'missing slot') return null
+          return {
+            ...slot,
+            ...(kind === 'payload' ? { payloadDigest: 'another-payload' } : {}),
+            ...(kind === 'searchFrom' ? { searchFrom: asLogPosition('00000') } : {}),
+            ...(kind === 'journal' ? { journal: new Uint8Array([9]) } : {}),
+          }
+        })
+        const control = await fixture.device.groups.ports(access.key).control.load()
+        if (control.commitOnceAcceptance === null && kind !== 'missing slot')
+          throw new Error('Missing accepted slot')
+        let changes: ControlChanges
+        if (kind === 'strand') changes = { strand: { reason: 'retention-gap' } }
+        else if (kind === 'stranded cursor')
+          changes = {
+            cursor: { position: asLogPosition('00000'), epoch: 0, stranded: true },
+          }
+        else if (kind === 'control hold')
+          changes = {
+            controlHold: { reason: 'unsupported-version', position: null },
+          }
+        else if (kind === 'acceptance') {
+          const proof = write.expected?.acceptance
+          if (proof === undefined) throw new Error('Missing write acceptance')
+          changes = {
+            commitOnceAcceptance: {
+              ...proof,
+              position: asLogPosition('00002'),
+            },
+          }
+        } else changes = {}
+        await fixture.installRows({ key: access.key, control: changes })
+        write.expected = {
+          ...write.expected,
+          ...(await access.readControl(async ({ source }) => source)),
+        }
+        const before = await evidence(fixture, access)
+        const work = vi.fn()
+        fixture.onPhase('work', work)
+        await expect(
+          access.mutate(
+            async (_handle, persist) => {
+              await persist(candidate)
+            },
+            () => write,
+          ),
+        ).rejects.toMatchObject({ name: 'ControlAdoptionMovedError' })
+        expect(work).not.toHaveBeenCalled()
+        expect(await evidence(fixture, access)).toEqual(before)
+      } finally {
+        await fixture.close()
+      }
+    })
+
+    test.each(['marker', 'applied', 'control mutation', 'unproved'] as const)(
+      'journal-bearing mutate replay with %s proof does not save again',
+      async (kind) => {
+        const fixture = await create()
+        try {
+          const access = await registry(fixture).access(groupID)
+          const { candidate, expected, write } = await accepted(fixture, access)
+          if (kind === 'marker' || kind === 'control mutation') write.changes.putApplied = []
+          expect(await access.adopt(candidate, expected, write)).toBe('installed')
+          if (kind === 'applied') {
+            await fixture.installRows({
+              key: access.key,
+              control: { cursor: { position: asLogPosition('00002'), epoch: 1 } },
+            })
+          } else if (kind === 'control mutation') {
+            await fixture.installRows({ key: access.key, anchor: null })
+          } else if (kind === 'unproved') {
+            await fixture.installRows({ key: access.key, control: { deleteAppliedFrom: 0 } })
+          }
+          const before = await evidence(fixture, access)
+          const work = vi.fn()
+          fixture.onPhase('work', work)
+          const result = access.mutate(
+            async (_handle, persist) => {
+              await persist(candidate)
+              return 'replay-result'
+            },
+            () => write,
+          )
+          if (kind === 'unproved')
+            await expect(result).rejects.toMatchObject({ name: 'ControlAdoptionMovedError' })
+          else expect(await result).toBe('replay-result')
+          expect(work).not.toHaveBeenCalled()
+          expect(await evidence(fixture, access)).toEqual(before)
+        } finally {
+          await fixture.close()
+        }
+      },
+    )
+
+    test('journal-bearing mutate installs accepted ordinary state and control together', async () => {
+      const fixture = await create()
+      try {
+        const access = await registry(fixture).access(groupID)
+        const { candidate, write } = await accepted(fixture, access)
+        const version = access.stateVersion()
+        expect(
+          await access.mutate(
+            async (_handle, persist) => {
+              await persist(candidate)
+              return 'installed-result'
+            },
+            () => write,
+          ),
+        ).toBe('installed-result')
+        expect(access.epoch()).toBe(1)
+        expect(access.stateVersion()).toBe(version + 1)
+        const control = fixture.device.groups.ports(access.key).control
+        expect(await control.load()).toMatchObject({
+          commitOnce: null,
+          cursor: { position: '00001', epoch: 1 },
+        })
+        expect(await control.lastMutation()).toBe(write.mutationID)
+        expect(await fixture.device.groups.loadTrust(groupID)).toMatchObject({
+          installed: { epoch: 1 },
+        })
+      } finally {
+        await fixture.close()
+      }
+    })
+
+    test('caught rejected persist preserves the accepted state, control and mutation ID', async () => {
+      const fixture = await create()
+      try {
+        const access = await registry(fixture).access(groupID)
+        const foreign = await fixture.makeHandle(0, 'foreign-group')
+        const beforeTrust = await fixture.device.groups.loadTrust(groupID)
+        let state: Uint8Array | undefined
+        let attempts = 0
+        expect(
+          await access.mutate(
+            async (handle, persist) => {
+              await handle.encrypt(new Uint8Array([6]))
+              state = encodeClientState(handle.state)
+              await persist(handle)
+              await expect(persist(foreign)).rejects.toThrow()
+              return 'accepted-result'
+            },
+            () => {
+              attempts++
+              return {
+                mutationID: attempts === 1 ? 'accepted-persist' : 'rejected-persist',
+                changes: {
+                  cursor: { position: asLogPosition(attempts === 1 ? '00002' : '00003'), epoch: 0 },
+                },
+              }
+            },
+          ),
+        ).toBe('accepted-result')
+        expect(await access.read((handle) => encodeClientState(handle.state))).toEqual(state)
+        expect(access.stateVersion()).toBe(2)
+        expect(await fixture.device.groups.loadTrust(groupID)).toEqual(beforeTrust)
+        const control = fixture.device.groups.ports(access.key).control
+        expect((await control.load()).cursor?.position).toBe('00002')
+        expect(await control.lastMutation()).toBe('accepted-persist')
+        expect(await fixture.device.groups.load(groupID)).toMatchObject({
+          revision: 2,
+          mutationID: 'accepted-persist',
+        })
+        expect(
+          (await fixture.inspectRows())['group-owner']?.get(groupOwnerKey(groupID)),
+        ).toMatchObject({
+          mutationID: 'accepted-persist',
+        })
+        expect(await fixture.device.groups.resolve(groupID, 'accepted-persist')).toBe('committed')
+        await expect(
+          fixture.device.groups.resolve(groupID, 'rejected-persist'),
+        ).rejects.toMatchObject({
+          name: 'GroupStateUncertainError',
+        })
       } finally {
         await fixture.close()
       }
