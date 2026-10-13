@@ -1340,7 +1340,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       expect(await groups.ports(key).control.load()).toEqual(before)
     })
 
-    test('keeps owed records and fork evidence on transport clearing and refuses unresolved obligations', async () => {
+    test('keeps owed records and fork safety on transport clearing and refuses unresolved obligations', async () => {
       const { db, groups } = await setup()
       await groups.transition(
         await nextChange(groups, groupID, 'prepare-clear'),
@@ -1357,10 +1357,10 @@ for (const mode of ['real-mls', 'double'] as const) {
                 },
               ],
               putApplied: [applied],
+              forkHalt,
               cursor: {
                 epoch: 3,
                 position: asLogPosition('10'),
-                fork: { conflictEpoch: 3, sharedPosition: asLogPosition('2'), frameDigest: 'fork' },
               },
             },
             'prepare-clear',
@@ -1384,10 +1384,13 @@ for (const mode of ['real-mls', 'double'] as const) {
           expect(control.outcomes).toEqual([outcome])
           expect(control.welcomes).toHaveLength(1)
           expect(control.applied).toEqual([])
-          expect(control.cursor?.fork).toEqual({
-            conflictEpoch: 3,
-            sharedPosition: asLogPosition('2'),
-            frameDigest: 'fork',
+          expect(control.cursor).toBeNull()
+          expect(control.forkHalt).toEqual(forkHalt)
+          expect(await rows.meta.events()).toContainEqual({
+            ...key,
+            id: forkHalt.eventID,
+            kind: 'group:fork',
+            halt: forkHalt,
           })
           expect(await rows.meta.events()).toContainEqual(event)
           await rows.outbox.put([{ ...entry, seq: 8 }])

@@ -712,7 +712,10 @@ for (const mode of ['real-mls', 'double'] as const) {
           } else if (kind === 'control mutation') {
             await fixture.installRows({ key: access.key, anchor: null })
           } else if (kind === 'unproved') {
-            await fixture.installRows({ key: access.key, control: { deleteAppliedFrom: 0 } })
+            await fixture.installRows({
+              key: access.key,
+              control: { deleteAppliedBelow: Number.MAX_SAFE_INTEGER + 1 },
+            })
           }
           const before = await evidence(fixture, access)
           const work = vi.fn()

@@ -441,7 +441,6 @@ for (const mode of ['real-mls', 'double'] as const) {
             epoch: 0,
             position: asLogPosition('source-position'),
             stranded: true,
-            fork: { conflictEpoch: 1, sharedPosition: null, frameDigest: 'fork-frame' },
           },
         }
         await fixture.installRows({ key: source, control: changes })

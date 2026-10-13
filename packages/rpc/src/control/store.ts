@@ -344,9 +344,7 @@ export function applyChanges(
     ),
     applied: putRows(
       snapshot.applied.filter(
-        (row) =>
-          (changes.deleteAppliedFrom == null || row.epoch < changes.deleteAppliedFrom) &&
-          (changes.deleteAppliedBelow == null || row.epoch >= changes.deleteAppliedBelow),
+        (row) => changes.deleteAppliedBelow == null || row.epoch >= changes.deleteAppliedBelow,
       ),
       changes.putApplied,
       (row) => row.epoch,
@@ -391,7 +389,7 @@ export function readmissionChanges(snapshot: ControlSnapshot): ControlChanges {
     deleteOperations: snapshot.operations.map(({ id }) => id),
     deleteRejoin: true,
     putOutcomes: outcomes,
-    deleteAppliedFrom: 0,
+    deleteAppliedBelow: Number.MAX_SAFE_INTEGER + 1,
     deleteResponsesBelow: newestResponseEpoch + 1,
     cursor: null,
     strand: null,

@@ -2,7 +2,8 @@ import { afterEach, describe, expect, test } from 'vitest'
 
 import { createMemoryControlStore } from '../../rpc-conformance/src/memory-control-store.js'
 import { classifyCommit } from '../src/classify.js'
-import { appliedRows, forkEvidence, forkSettlement } from '../src/control/forks.js'
+import { appliedRows } from '../src/control/forks.js'
+import { forkEventID } from '../src/control/safety.js'
 import { controlBuildRef } from '../src/control/slot.js'
 import { applyChanges, applyResolved } from '../src/control/store.js'
 import type { AppliedCommit, ControlSnapshot, Operation, Outcome } from '../src/control/types.js'
@@ -100,37 +101,21 @@ const landed = (opID: string, epoch: number): Outcome => ({
   position: asLogPosition(applied(epoch).sequenceID),
 })
 
-describe('fork settlement', () => {
-  test('settles every acceptance and affected own row once, leaving queued builds and older outcomes', () => {
-    const snapshot: ControlSnapshot = {
-      ...empty(),
-      operations: [
-        operation('accepted', 1, 'accepted'),
-        operation('both', 2, 'accepted'),
-        operation('intent', 3, 'intent'),
-        operation('built', 4, 'built'),
-      ],
-      applied: [applied(1, 'older'), applied(2, 'both'), applied(3), applied(4, 'landed')],
-      outcomes: [landed('older', 1), landed('both', 2), landed('landed', 4)],
-    }
-    const before = structuredClone(snapshot)
-    const rejoin = { ...applied(5), digest: 'rejoin' }
-    const changes = forkSettlement(snapshot, 2, rejoin)
-    const result = applyChanges(snapshot, changes)
-    expect(changes.deleteOperations).toEqual(['accepted', 'both'])
-    expect(result.operations.map((op) => op.id)).toEqual(['intent', 'built'])
-    expect(result.outcomes).toEqual([
-      landed('older', 1),
-      expect.objectContaining({ id: 'both', opID: 'both', kind: 'unknown' }),
-      expect.objectContaining({ id: 'landed', opID: 'landed', kind: 'unknown' }),
-      expect.objectContaining({ id: 'accepted', opID: 'accepted', kind: 'unknown' }),
+describe('fork history preservation', () => {
+  test('classification reads only retained applied history', () => {
+    const snapshot = { ...empty(), applied: [applied(1), applied(2)] }
+    const rows = appliedRows(snapshot)
+    expect([...rows.entries()]).toEqual([
+      [1, applied(1)],
+      [2, applied(2)],
     ])
-    expect(changes.putOutcomes).toHaveLength(3)
-    expect(result.applied).toEqual([applied(1, 'older'), rejoin])
-    expect(snapshot).toEqual(before)
+    expect(rows.get(0)).toBeUndefined()
+    expect(rows.get(3)).toBeUndefined()
+    rows.delete(1)
+    expect(snapshot.applied).toEqual([applied(1), applied(2)])
   })
 
-  test('an own winner at the divergence epoch becomes unknown when a competitor was adopted', () => {
+  test('an own winner still identifies a losing divergence without repairing history', () => {
     const own = operation('winning-invite', 1, 'accepted')
     if (own.stage !== 'accepted') throw new Error('Missing acceptance')
     const snapshot = {
@@ -146,96 +131,51 @@ describe('fork settlement', () => {
         state: { localDID: 'bob', epoch: 3, appliedByEpoch: appliedRows(snapshot) },
       }),
     ).toMatchObject({ row: 'fork', branch: 'losing' })
-    const result = applyChanges(snapshot, forkSettlement(snapshot, 2, applied(3)))
-    expect(result.outcomes).toEqual([
-      expect.objectContaining({ opID: 'winning-invite', kind: 'unknown' }),
-    ])
+    expect(snapshot.outcomes).toEqual([])
+    expect(snapshot.applied).toEqual([applied(2)])
   })
 
-  test('late-revealed divergence leaves rows and landed outcomes below the detected epoch alone', () => {
-    const snapshot = {
-      ...empty(),
-      applied: [
-        applied(1, 'divergence'),
-        applied(2, 'second'),
-        applied(3, 'third'),
-        applied(4, 'fourth'),
-      ],
-      outcomes: [
-        landed('divergence', 1),
-        landed('second', 2),
-        landed('third', 3),
-        landed('fourth', 4),
-      ],
-    }
-    expect(forkEvidence(snapshot, 4, 'competitor')).toEqual({
-      conflictEpoch: 4,
-      sharedPosition: asLogPosition('000000000003'),
-      frameDigest: 'competitor',
-    })
-    const result = applyChanges(snapshot, forkSettlement(snapshot, 4, applied(5)))
-    expect(result.applied).toEqual([
-      applied(1, 'divergence'),
-      applied(2, 'second'),
-      applied(3, 'third'),
-      applied(5),
-    ])
-    expect(result.outcomes).toEqual([
-      landed('divergence', 1),
-      landed('second', 2),
-      landed('third', 3),
-      expect.objectContaining({ opID: 'fourth', kind: 'unknown' }),
-    ])
-  })
-
-  test('forged lower-position conflict proves no outcome beyond unknown', () => {
-    const snapshot = { ...empty(), applied: [applied(2, 'invite')] }
-    const evidence = forkEvidence(snapshot, 2, 'fake-commit')
-    expect(evidence.sharedPosition).toBeNull()
-    const result = applyChanges(
-      snapshot,
-      forkSettlement(snapshot, evidence.conflictEpoch, applied(3)),
-    )
-    expect(result.outcomes).toEqual([expect.objectContaining({ opID: 'invite', kind: 'unknown' })])
-  })
-
-  test('an invite accepted on the losing branch is unknown and its Welcome obligation stays durable', () => {
-    const invite = { ...operation('invite', 1, 'accepted'), kind: 'invite' as const }
-    const obligation = { opID: invite.id, welcome: new Uint8Array([7]), recipients: ['dave'] }
-    const snapshot = { ...empty(), operations: [invite], welcomes: [obligation] }
-    const result = applyChanges(snapshot, forkSettlement(snapshot, 4, applied(5)))
-    expect(result.operations).toEqual([])
-    expect(result.outcomes).toEqual([expect.objectContaining({ opID: 'invite', kind: 'unknown' })])
-    expect(result.welcomes).toEqual([obligation])
-  })
-
-  test.each([2, 3])(
-    'reads an own landed row before the rejoin replaces it at epoch %s',
+  test.each([2, 4])(
+    'a halt at epoch %s preserves operations, outcomes and Welcome obligations',
     (epoch) => {
-      const rejoin = { ...applied(epoch), digest: 'rejoin' }
-      const snapshot = {
+      const snapshot: ControlSnapshot = {
         ...empty(),
-        applied: [applied(1), applied(2, 'own'), applied(3, 'later')],
-        outcomes: [landed('own', 2), landed('later', 3)],
+        operations: [
+          operation('accepted', 1, 'accepted'),
+          operation('intent', 2, 'intent'),
+          operation('built', 3, 'built'),
+        ],
+        applied: [applied(1, 'older'), applied(2, 'own'), applied(3), applied(4, 'later')],
+        outcomes: [landed('older', 1), landed('own', 2), landed('later', 4)],
+        welcomes: [{ opID: 'accepted', welcome: new Uint8Array([7]), recipients: ['dave'] }],
+        cursor: { position: asLogPosition('000000000004'), epoch: 5 },
       }
-      const result = applyChanges(snapshot, forkSettlement(snapshot, 2, rejoin))
-      expect(result.applied).toEqual([applied(1), rejoin])
-      expect(result.outcomes).toEqual([
-        expect.objectContaining({ opID: 'own', kind: 'unknown' }),
-        expect.objectContaining({ opID: 'later', kind: 'unknown' }),
-      ])
+      const before = structuredClone(snapshot)
+      const key = { groupID: 'group-A', incarnation: 1 }
+      const forkHalt = {
+        eventID: forkEventID(key),
+        detectedAt: 100,
+        evidence: {
+          kind: 'digest-divergence' as const,
+          epoch,
+          position: String(epoch),
+          localDigest: `commit-${epoch}`,
+          remoteDigest: 'competitor',
+        },
+      }
+      const result = applyChanges(snapshot, { forkHalt }, undefined, key)
+      expect(result).toEqual({ ...before, forkHalt })
+      expect(snapshot).toEqual(before)
     },
   )
 
   test.each(['host', 'double'] as const)(
-    'settlement is atomic and survives an ambiguous %s write',
+    'halt preservation is atomic and survives an ambiguous %s write',
     async (provider) => {
       const database = createMemoryHostDatabase()
-      const double = createMemoryControlStore<LogPosition>({ groupID: 'group-A', incarnation: 1 })
-      const store =
-        provider === 'host'
-          ? database.control('group', { groupID: 'group', incarnation: 1 })
-          : double
+      const key = { groupID: 'group', incarnation: 1 }
+      const double = createMemoryControlStore<LogPosition>(key)
+      const store = provider === 'host' ? database.control('group', key) : double
       await store.apply(
         {
           putOperations: [operation('accepted', 1, 'accepted')],
@@ -245,8 +185,18 @@ describe('fork settlement', () => {
         'seed',
       )
       const before = await store.load()
-      const rejoin = { ...applied(2), digest: 'rejoin' }
-      const changes = forkSettlement(before, 2, rejoin)
+      const forkHalt = {
+        eventID: forkEventID(key),
+        detectedAt: 100,
+        evidence: {
+          kind: 'digest-divergence' as const,
+          epoch: 2,
+          position: '000000000002',
+          localDigest: 'commit-2',
+          remoteDigest: 'competitor',
+        },
+      }
+      const changes = { forkHalt }
       if (provider === 'host') database.failNext('mid-apply')
       else double.failNext('mid-apply')
       await expect(store.apply(changes, 'failed')).rejects.toThrow('Injected')
@@ -254,20 +204,10 @@ describe('fork settlement', () => {
       expect(await store.lastMutation()).toBe('seed')
       if (provider === 'host') database.commitThenRejectNext('apply')
       else double.commitThenRejectNext('apply')
-      await applyResolved(store, changes, 'settled')
-      const reopened =
-        provider === 'host'
-          ? database.control('group', { groupID: 'group', incarnation: 1 })
-          : double
-      expect(await reopened.lastMutation()).toBe('settled')
-      expect(await reopened.load()).toMatchObject({
-        operations: [],
-        applied: [applied(1), rejoin],
-        outcomes: [
-          expect.objectContaining({ opID: 'own', kind: 'unknown' }),
-          expect.objectContaining({ opID: 'accepted', kind: 'unknown' }),
-        ],
-      })
+      await applyResolved(store, changes, 'halted')
+      const reopened = provider === 'host' ? database.control('group', key) : double
+      expect(await reopened.lastMutation()).toBe('halted')
+      expect(await reopened.load()).toEqual({ ...before, forkHalt })
     },
   )
 })

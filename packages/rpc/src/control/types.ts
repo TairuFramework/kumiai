@@ -50,16 +50,7 @@ export type ControlSnapshot = {
   welcomes: Array<WelcomeObligation>
   applied: Array<AppliedCommit> // newest 64 epochs
   responses: Array<ExternalResponse> // responder outcomes, newest 64 epochs
-  cursor: CommitCursor | null // {position, epoch, stranded?, fork?}
-}
-/**
- * Durable with the strand. A detected conflict, not a proven divergence point: the framed epoch is
- * unauthenticated below the current epoch, and divergence may lie lower (D5).
- */
-export type ForkEvidence = {
-  conflictEpoch: number
-  sharedPosition: LogPosition | null
-  frameDigest: string
+  cursor: CommitCursor | null // {position, epoch, stranded?}
 }
 export type ControlChanges = {
   commitOnce?: ControlSlot | null
@@ -77,7 +68,6 @@ export type ControlChanges = {
   putWelcomes?: Array<WelcomeObligation>
   deleteWelcomes?: Array<string>
   putApplied?: Array<AppliedCommit>
-  deleteAppliedFrom?: number // drops rows at epoch >= n, before puts
   deleteAppliedBelow?: number // drops rows at epoch < n, before puts
   putResponses?: Array<ExternalResponse>
   deleteResponsesBelow?: number // by `epoch`
@@ -190,7 +180,7 @@ export type RejoinRecord = {
   epochAfter: number
   /** Ledger tokens held before the rejoin, for `reenact`. */
   ledgerBefore: Array<string>
-  /** `ForkEvidence.conflictEpoch`, when the rejoin heals a detected fork (D5). */
+  /** Reserved conflict epoch; new recovery attempts leave it null. */
   conflictEpoch: number | null
   position?: LogPosition
   verdict?: Uint8Array
@@ -224,7 +214,6 @@ export type CommitCursor = {
   position: LogPosition | null
   epoch: number
   stranded?: true
-  fork?: ForkEvidence
 }
 
 export type StagedAdoption = {

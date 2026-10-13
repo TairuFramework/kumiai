@@ -2,7 +2,6 @@ import { isHeadMismatch } from '../commit.js'
 import type { CommitHeader } from '../crypto.js'
 import { asLogPosition, type LogPosition } from '../cursor.js'
 import type { ConfirmationOutcome } from '../recovery-confirmation.js'
-import { forkSettlement } from './forks.js'
 import type { PublishOutcome } from './operations.js'
 import { controlSafetyHeld } from './safety.js'
 import { applyResolved, pruneWindow } from './store.js'
@@ -183,16 +182,13 @@ export async function stepRejoin(
     }
     const next: RejoinRecord = { ...record, stage: 'adopted' }
     const deferred = snapshot.operations.filter((op) => op.stage === 'accepted')
-    const settlement =
-      record.conflictEpoch == null
-        ? {
-            deleteOperations: deferred.map((op) => op.id),
-            putOutcomes: deferred.map(
-              (op): Outcome => ({ id: op.id, opID: op.id, at: deps.now(), kind: 'unknown' }),
-            ),
-            putApplied: [row],
-          }
-        : forkSettlement(snapshot, record.conflictEpoch, row)
+    const settlement = {
+      deleteOperations: deferred.map((op) => op.id),
+      putOutcomes: deferred.map(
+        (op): Outcome => ({ id: op.id, opID: op.id, at: deps.now(), kind: 'unknown' }),
+      ),
+      putApplied: [row],
+    }
     if (await held()) return record
     const mutationID = deps.newID()
     await deps.adopt(record, (staged) => ({

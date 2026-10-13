@@ -57,7 +57,6 @@ export {
   type ConformanceEpochIdentity,
   type ConformanceExternalResponse,
   type ConformanceFirstValidCommit,
-  type ConformanceForkEvidence,
   type ConformanceForkHalt,
   type ConformanceGroupForkEvidence,
   type ConformanceGroupKey,

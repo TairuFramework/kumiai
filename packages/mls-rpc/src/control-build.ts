@@ -114,9 +114,7 @@ export function createPersistenceBuildSaver<TTx extends GroupTransaction>(params
             journal.checkpoint !== built.searchFrom ||
             built.searchFrom !== (snapshot.cursor?.position ?? null) ||
             (snapshot.cursor !== null &&
-              (snapshot.cursor.epoch !== identity.epoch ||
-                snapshot.cursor.stranded ||
-                snapshot.cursor.fork)) ||
+              (snapshot.cursor.epoch !== identity.epoch || snapshot.cursor.stranded)) ||
             snapshot.operations[0]?.id !== intent.id ||
             !sameStoredValue(snapshot.operations[0], intent)
           )
@@ -223,9 +221,7 @@ export function createControlBuildPort(params: {
         if (identity === null) return { kind: 'moved', operation: saved }
         if (
           snapshot.cursor !== null &&
-          (snapshot.cursor.epoch !== identity.epoch ||
-            snapshot.cursor.stranded ||
-            snapshot.cursor.fork)
+          (snapshot.cursor.epoch !== identity.epoch || snapshot.cursor.stranded)
         )
           return { kind: 'moved', operation: saved }
         if (
@@ -328,9 +324,7 @@ export function createControlBuildPort(params: {
             fresh.source.stateVersion === expected.stateVersion ||
             (current.cursor?.position ?? null) !== checkpoint ||
             (current.cursor !== null &&
-              (current.cursor.epoch !== identity.epoch ||
-                current.cursor.stranded ||
-                current.cursor.fork)) ||
+              (current.cursor.epoch !== identity.epoch || current.cursor.stranded)) ||
             !sameStoredValue(current.operations[0], saved)
           )
             return { kind: 'moved', operation: saved }

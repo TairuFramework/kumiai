@@ -150,11 +150,11 @@ describe('control changes', () => {
     const result = applyChanges(before, {
       deleteOperations: ['first'],
       putOperations: [operation('first', 3), operation('second', 2)],
-      deleteAppliedFrom: 5,
+      deleteAppliedBelow: 5,
       putApplied: [{ ...applied(5), digest: 'replacement' }],
     })
     expect(result.operations.map((row) => row.id)).toEqual(['second', 'first'])
-    expect(result.applied).toEqual([applied(4), { ...applied(5), digest: 'replacement' }])
+    expect(result.applied).toEqual([{ ...applied(5), digest: 'replacement' }, applied(6)])
     expect(before).toEqual(copy)
   })
 
@@ -191,20 +191,20 @@ describe('control changes', () => {
     expect(applyChanges(result, { cursor: null }).cursor).toBeNull()
   })
 
-  test('applied range deletions precede puts and preserve the retained interval', () => {
+  test('applied prune-below precedes puts and preserves the retained boundary', () => {
     const snapshot = {
       ...empty(),
       applied: [applied(0), applied(1), applied(2), applied(3), applied(4)],
     }
     const result = applyChanges(snapshot, {
       deleteAppliedBelow: 2,
-      deleteAppliedFrom: 4,
       putApplied: [{ ...applied(0), digest: 'replacement' }],
     })
     expect(result.applied).toEqual([
       { ...applied(0), digest: 'replacement' },
       applied(2),
       applied(3),
+      applied(4),
     ])
     expect(snapshot.applied).toEqual([applied(0), applied(1), applied(2), applied(3), applied(4)])
   })

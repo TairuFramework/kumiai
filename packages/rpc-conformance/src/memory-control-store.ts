@@ -317,10 +317,7 @@ function mutateControl<Position extends string>(
   removeRows(snapshot.outcomes, (row) => owned.deleteOutcomes?.includes(row.id) === true)
   removeRows(snapshot.welcomes, (row) => owned.deleteWelcomes?.includes(row.opID) === true)
   removeRows(snapshot.applied, (row) => {
-    return (
-      (owned.deleteAppliedFrom != null && row.epoch >= owned.deleteAppliedFrom) ||
-      (owned.deleteAppliedBelow != null && row.epoch < owned.deleteAppliedBelow)
-    )
+    return owned.deleteAppliedBelow != null && row.epoch < owned.deleteAppliedBelow
   })
   removeRows(snapshot.responses, (row) => {
     return owned.deleteResponsesBelow != null && row.epoch < owned.deleteResponsesBelow
@@ -429,9 +426,7 @@ export function createMemoryControlStore<Position extends string = string>(
         !equal(next.control.operations[0], intent) ||
         built.searchFrom !== (next.control.cursor?.position ?? null) ||
         (next.control.cursor !== null &&
-          (next.control.cursor.epoch !== identity?.epoch ||
-            next.control.cursor.stranded ||
-            next.control.cursor.fork))
+          (next.control.cursor.epoch !== identity?.epoch || next.control.cursor.stranded))
       )
         return 'moved'
       const previous = next.control.commitOnce

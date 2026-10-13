@@ -200,9 +200,7 @@ export function createMemoryHostDatabase(
             !same(next.control.operations[0], intent) ||
             built.searchFrom !== (next.control.cursor?.position ?? null) ||
             (next.control.cursor !== null &&
-              (next.control.cursor.epoch !== identity.epoch ||
-                next.control.cursor.stranded ||
-                next.control.cursor.fork))
+              (next.control.cursor.epoch !== identity.epoch || next.control.cursor.stranded))
           )
             throw unchanged
           const occupied = next.control.commitOnce

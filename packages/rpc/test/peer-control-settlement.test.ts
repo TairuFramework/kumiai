@@ -969,12 +969,22 @@ test('a committed acknowledgement tolerates transient evidence failure and uncha
   expect(reads).toBe(before)
 })
 
-test('a hard hold preserves cursor fork evidence and keeps the first hard reason', async () => {
+test('a hard hold preserves applied history and keeps the first hard reason', async () => {
   const hub = new FakeHub()
   const bob = member(hub)
   await bob.peer.replay()
-  const fork = { conflictEpoch: 1, sharedPosition: null, frameDigest: 'retained-fork' }
-  await bob.control.apply({ cursor: { position: null, epoch: 1, fork } }, 'fork-before-hold')
+  const applied = {
+    epoch: 0,
+    digest: 'prior-commit',
+    payloadDigest: 'prior-payload',
+    sequenceID: '000',
+    opID: null,
+    removed: false,
+  }
+  await bob.control.apply(
+    { cursor: { position: null, epoch: 1 }, putApplied: [applied] },
+    'history-before-hold',
+  )
   const frame = encodeHandshakeFrame(HANDSHAKE_KIND.commit, new Uint8Array([1]))
   frame[HANDSHAKE_MAGIC.length] = HANDSHAKE_VERSION + 1
   await hub.publish({
@@ -986,11 +996,11 @@ test('a hard hold preserves cursor fork evidence and keeps the first hard reason
   await vi.waitFor(async () =>
     expect((await bob.control.load()).controlHold?.reason).toBe('unsupported-version'),
   )
-  expect((await bob.control.load()).cursor?.fork).toEqual(fork)
+  expect((await bob.control.load()).applied).toEqual([applied])
   await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
   await bob.peer.replay()
   expect((await bob.control.load()).controlHold?.reason).toBe('unsupported-version')
-  expect((await bob.control.load()).cursor?.fork).toEqual(fork)
+  expect((await bob.control.load()).applied).toEqual([applied])
 })
 
 test('pre-adoption Welcome delivery reuses the proof just checked in its settlement pass', async () => {

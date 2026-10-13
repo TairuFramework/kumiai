@@ -102,7 +102,6 @@ export type {
   EpochIdentity,
   ExternalResponse,
   FirstValidCommit,
-  ForkEvidence,
   GroupKey,
   Operation,
   OperationRequest,

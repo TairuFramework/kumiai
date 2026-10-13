@@ -1,5 +1,6 @@
 import { afterEach, expect, test, vi } from 'vitest'
 
+import { forkEventID, recoveryUnavailableEventID } from '../src/control/safety.js'
 import { controlBuildRef } from '../src/control/slot.js'
 import { applyChanges, readmissionChanges } from '../src/control/store.js'
 import type { ControlSnapshot } from '../src/control/types.js'
@@ -117,7 +118,6 @@ function unsettled(): ControlSnapshot {
       position: asLogPosition('001'),
       epoch: 2,
       stranded: true,
-      fork: { conflictEpoch: 1, sharedPosition: null, frameDigest: 'fork' },
     },
   }
 }
@@ -151,6 +151,37 @@ test('re-admission forgets the old branch and retains outcomes and Welcome oblig
   expect(after.outcomes.slice(1).map(({ at }) => at)).toEqual([1000, 1000, 1000, 1000])
   expect(before).toEqual(copy)
   expect(applyChanges(after, readmissionChanges(after))).toEqual(after)
+})
+
+test('readmission clears applied with existing prune-below', () => {
+  const key = { groupID: 'group-A', incarnation: 1 }
+  const before = unsettled()
+  before.forkHalt = {
+    eventID: forkEventID(key),
+    evidence: { kind: 'unexplained-own-commit', epoch: 1, position: '001', digest: 'old-commit' },
+    detectedAt: 100,
+  }
+  before.recoveryUnavailable = {
+    ...key,
+    id: recoveryUnavailableEventID(key),
+    kind: 'group:recovery-unavailable',
+    reason: 'trust-unreadable',
+  }
+  before.applied.push({
+    epoch: Number.MAX_SAFE_INTEGER,
+    digest: 'max-epoch-commit',
+    payloadDigest: 'max-epoch-payload',
+    sequenceID: '004',
+    opID: null,
+    removed: false,
+  })
+  const changes = readmissionChanges(before)
+  expect(changes.deleteAppliedBelow).toBe(Number.MAX_SAFE_INTEGER + 1)
+  expect(changes).not.toHaveProperty('deleteAppliedFrom')
+  const after = applyChanges(before, changes, undefined, key)
+  expectReset(before, after)
+  expect(after.forkHalt).toEqual(before.forkHalt)
+  expect(after.recoveryUnavailable).toEqual(before.recoveryUnavailable)
 })
 
 test('re-admission clears large response snapshots with repeated epochs', () => {

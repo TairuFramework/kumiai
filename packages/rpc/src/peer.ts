@@ -51,7 +51,6 @@ import type {
   ControlSnapshot,
   ControlStore,
   ExternalResponse,
-  ForkEvidence,
   Operation,
   OperationRequest,
   Outcome,
@@ -804,13 +803,8 @@ export function createGroupPeerWithControlWalk<
   let reconciledHead: LogPosition | null = null
   let durableCursor: CommitCursor | null = null
   let durableStrand: ControlSnapshot['strand'] = null
-  /**
-   * Persist the strand before anything steps past its evidence. The durable position stays where
-   * it was, so a restart re-reads an ahead frame; a losing fork was applied before its winner was
-   * seen, so only the flag carries it across a restart.
-   */
+  /** Keep the position fixed so restart re-reads an ahead frame. */
   const persistStrand = async (
-    fork?: ForkEvidence,
     reason: NonNullable<ControlSnapshot['strand']>['reason'] = 'lost-state',
   ): Promise<void> => {
     if (safetyHold() !== null || mls == null || control == null) return
@@ -819,21 +813,13 @@ export function createGroupPeerWithControlWalk<
     if (
       durableCursor?.stranded === true &&
       durableCursor.epoch === epoch &&
-      fork == null &&
       durableStrand?.reason === reason
     )
       return
-    // A later reveal must not discard rows already known to be affected by this strand.
-    const previous = durableCursor?.fork
-    const evidence =
-      previous != null && (fork == null || previous.conflictEpoch <= fork.conflictEpoch)
-        ? previous
-        : fork
     const cursor: CommitCursor = {
       position: durableCursor?.epoch === epoch ? durableCursor.position : null,
       epoch,
       stranded: true,
-      ...(evidence == null ? {} : { fork: evidence }),
     }
     await applyResolved(control, { cursor, strand: { reason } }, newPublishID())
     durableCursor = cursor
@@ -852,7 +838,6 @@ export function createGroupPeerWithControlWalk<
             position: durableCursor?.epoch === epoch ? durableCursor.position : null,
             epoch,
             stranded: true,
-            ...(durableCursor?.fork == null ? {} : { fork: durableCursor.fork }),
           }
         : {
             position:
@@ -1426,7 +1411,7 @@ export function createGroupPeerWithControlWalk<
     ): Promise<boolean> => {
       stranded = true
       healRequested = safetyHold() === null
-      await persistStrand(undefined, 'unprocessable-gap')
+      await persistStrand('unprocessable-gap')
       observeStrand({
         position,
         commitDigest,
@@ -1491,7 +1476,7 @@ export function createGroupPeerWithControlWalk<
         floor = { ...floor, covered: false }
         stranded = true
         healRequested = safetyHold() === null
-        await persistStrand(undefined, 'retention-gap')
+        await persistStrand('retention-gap')
         observeStrand({
           position: pageAfter,
           commitDigest: null,
@@ -1678,7 +1663,7 @@ export function createGroupPeerWithControlWalk<
             // The group advanced at an epoch this peer did not. Step over the frame — the heal
             // repairs this, not a re-read — and ask for one.
             stranded = true
-            await persistStrand(undefined, 'ahead')
+            await persistStrand('ahead')
             await saveCommitCursor(position)
             healRequested = safetyHold() === null
             observeStrand({
@@ -2305,7 +2290,6 @@ export function createGroupPeerWithControlWalk<
             ...(stranded
               ? {
                   stranded: true,
-                  ...(snapshot.cursor?.fork == null ? {} : { fork: snapshot.cursor.fork }),
                 }
               : {}),
           },
@@ -2514,7 +2498,6 @@ export function createGroupPeerWithControlWalk<
                 position: snapshot.cursor?.position ?? null,
                 epoch,
                 stranded: true,
-                ...(snapshot.cursor?.fork == null ? {} : { fork: snapshot.cursor.fork }),
               },
             }
           : {}),
@@ -3626,7 +3609,7 @@ export function createGroupPeerWithControlWalk<
               digest: digestAppliedCommit(pending.commit),
               epochAfter: pending.epoch,
               ledgerBefore,
-              conflictEpoch: (await controlStore.load()).cursor?.fork?.conflictEpoch ?? null,
+              conflictEpoch: null,
             }
             await applyResolved(controlStore, { putRejoin: record }, newPublishID())
             inFlightEntries = ledgerBefore

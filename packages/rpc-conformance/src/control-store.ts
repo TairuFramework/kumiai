@@ -94,16 +94,7 @@ export type ConformanceControlSnapshot<Position extends string = string> = {
   welcomes: Array<ConformanceWelcomeObligation>
   applied: Array<ConformanceAppliedCommit> // newest 64 epochs
   responses: Array<ConformanceExternalResponse<Position>> // responder outcomes, newest 64 epochs
-  cursor: ConformanceControlCommitCursor<Position> | null // {position, epoch, stranded?, fork?}
-}
-/**
- * Durable with the strand. A detected conflict, not a proven divergence point: the framed epoch is
- * unauthenticated below the current epoch, and divergence may lie lower (D5).
- */
-export type ConformanceForkEvidence<Position extends string = string> = {
-  conflictEpoch: number
-  sharedPosition: Position | null
-  frameDigest: string
+  cursor: ConformanceControlCommitCursor<Position> | null // {position, epoch, stranded?}
 }
 export type ConformanceControlChanges<Position extends string = string> = {
   commitOnce?: ConformanceControlSlot<Position> | null
@@ -121,7 +112,6 @@ export type ConformanceControlChanges<Position extends string = string> = {
   putWelcomes?: Array<ConformanceWelcomeObligation>
   deleteWelcomes?: Array<string>
   putApplied?: Array<ConformanceAppliedCommit>
-  deleteAppliedFrom?: number // drops rows at epoch >= n, before puts
   deleteAppliedBelow?: number // drops rows at epoch < n, before puts
   putResponses?: Array<ConformanceExternalResponse<Position>>
   deleteResponsesBelow?: number // by `epoch`
@@ -238,7 +228,7 @@ export type ConformanceRejoinRecord<Position extends string = string> = {
   epochAfter: number
   /** Ledger tokens held before the rejoin, for `reenact`. */
   ledgerBefore: Array<string>
-  /** `ConformanceForkEvidence<Position>.conflictEpoch`, when the rejoin heals a detected fork (D5). */
+  /** Reserved conflict epoch; new recovery attempts leave it null. */
   conflictEpoch: number | null
   position?: Position
   verdict?: Uint8Array
@@ -272,7 +262,6 @@ export type ConformanceControlCommitCursor<Position extends string = string> = {
   position: Position | null
   epoch: number
   stranded?: true
-  fork?: ConformanceForkEvidence<Position>
 }
 
 export type ConformanceSaveControlBuild<Position extends string = string> = (
@@ -553,7 +542,6 @@ function records(): ConformanceControlChanges {
       position: '001',
       epoch: 4,
       stranded: true,
-      fork: { conflictEpoch: 4, sharedPosition: '000', frameDigest: 'conflict' },
     },
   }
 }
@@ -1254,7 +1242,6 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
         position: null,
         epoch: 4,
         stranded: true,
-        fork: { conflictEpoch: 3, sharedPosition: null, frameDigest: 'competing-frame' },
       }
       await host.control.apply({ cursor }, 'initial-strand')
       const reopened = await params.reopen()
@@ -1273,7 +1260,7 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
             deleteRejoin: true,
             deleteOutcomes: ['outcome'],
             deleteWelcomes: ['operation'],
-            deleteAppliedFrom: 0,
+            deleteAppliedBelow: Number.MAX_SAFE_INTEGER + 1,
             deleteResponsesBelow: 100,
             cursor: null,
           },
@@ -1371,7 +1358,11 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
         'outcome',
       )
       await host.control.apply(
-        { cursor: { position: '005', epoch: 65 }, deleteAppliedFrom: 0, deleteResponsesBelow: 65 },
+        {
+          cursor: { position: '005', epoch: 65 },
+          deleteAppliedBelow: Number.MAX_SAFE_INTEGER + 1,
+          deleteResponsesBelow: 65,
+        },
         'prune',
       )
       const reopened = await params.reopen()
@@ -1420,7 +1411,7 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
           putWelcomes: [
             { opID: 'operation', welcome: new Uint8Array([42]), recipients: ['alice'] },
           ],
-          deleteAppliedFrom: 3,
+          deleteAppliedBelow: 4,
           putApplied: [
             {
               epoch: 3,
@@ -1488,7 +1479,6 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       await host.control.apply(
         {
           deleteAppliedBelow: 2,
-          deleteAppliedFrom: 4,
           putApplied: [
             { ...applied(0), digest: 'reinserted' },
             { ...applied(3), digest: 'replacement' },

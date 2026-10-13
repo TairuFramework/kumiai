@@ -185,9 +185,7 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
           journal.checkpoint !== owned.built.searchFrom ||
           owned.built.searchFrom !== (row.control.cursor?.position ?? null) ||
           (row.control.cursor !== null &&
-            (row.control.cursor.epoch !== identity.epoch ||
-              row.control.cursor.stranded ||
-              row.control.cursor.fork))
+            (row.control.cursor.epoch !== identity.epoch || row.control.cursor.stranded))
         )
           return 'moved'
         if (row.control.commitOnce !== null && row.control.commitOnce.epoch >= identity.epoch)

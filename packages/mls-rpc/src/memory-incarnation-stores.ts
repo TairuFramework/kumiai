@@ -502,12 +502,7 @@ export function createUnlockedIncarnationStores(params: {
             welcomes: previous.snapshot.welcomes,
             // Adopted recovery remains owed until explicit continuation settlement.
             rejoin: previous.snapshot.rejoin?.stage === 'adopted' ? previous.snapshot.rejoin : null,
-            cursor:
-              previous.snapshot.controlHold !== null
-                ? previous.snapshot.cursor
-                : previous.snapshot.cursor?.fork === undefined
-                  ? null
-                  : { ...previous.snapshot.cursor, position: null },
+            cursor: previous.snapshot.controlHold !== null ? previous.snapshot.cursor : null,
           },
         })
     },
