@@ -157,7 +157,12 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
     // make below (same context, same `SECRET_LENGTH`), so it would hand back the ledger-entry
     // seal key under another name. Refused here, loudly, rather than left to the doc alone.
     exportSecret: (label, length = SECRET_LENGTH) => {
-      assertSafety()
+      try {
+        assertSafety()
+      } catch (error) {
+        if (error instanceof GroupSafetyHeldError) return Promise.reject(error)
+        throw error
+      }
       if (label === entryLabel) {
         throw new Error(`exportSecret: label '${label}' is reserved for the ledger-entry seal`)
       }

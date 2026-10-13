@@ -80,7 +80,13 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   }
   const persistTrustUnavailable = trustUnavailableWriter({ entry: capability, latch })
   async function diagnoseFailure(error: unknown): Promise<void> {
-    if (error instanceof RetainedTrustUnavailableError) await persistTrustUnavailable(error.key)
+    if (!(error instanceof RetainedTrustUnavailableError)) return
+    try {
+      await persistTrustUnavailable(error.key)
+    } catch (failure) {
+      if (failure instanceof GroupUnavailableError && failure.reason === 'invalid') throw failure
+      // Failed persistence leaves the latch and original trust diagnosis authoritative.
+    }
   }
   const diagnosing = new Set<string>()
   function diagnoseObservation(observation: AccountedGroupObservation): void {
@@ -241,6 +247,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     slot: GroupSlot,
     generation = slot.generation,
     admittedOwner?: RegistryOwner,
+    assertMutationSafety?: () => void,
   ) {
     function assertLoadCurrent(): void {
       if (admittedOwner !== undefined) {
@@ -254,6 +261,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       groupID,
       slot.owner?.cacheValid ? slot.owner.value : null,
       environment,
+      assertMutationSafety,
     )
     assertLoadCurrent()
     const reason = controlSafetyHeld(control)
@@ -281,7 +289,8 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         environment,
         restoreCandidate: params.restoreCandidate,
         resolve: (mutationID) => persistence.groups.resolve(groupID, mutationID),
-        load: (reads) => load(reads, groupID, slot, slot.generation, owner),
+        load: (reads, assertMutationSafety) =>
+          load(reads, groupID, slot, slot.generation, owner, assertMutationSafety),
         publish: () => publish(slot, owner),
         safetyHeld: () =>
           held(owner.key) ??

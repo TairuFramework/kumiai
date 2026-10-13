@@ -1,4 +1,5 @@
 import {
+  type ControlSnapshot,
   forkEventID,
   type GroupMLS,
   type GroupSafetyEvent,
@@ -62,6 +63,16 @@ function safetyEvent(
   return event.kind === 'group:fork' || event.kind === 'group:recovery-unavailable'
 }
 
+async function readReportControl(read: () => Promise<ControlSnapshot>): Promise<ControlSnapshot> {
+  try {
+    return await read()
+  } catch (cause) {
+    if (!isStoredOpenFailure(cause) && !(cause instanceof GroupStateConflictError)) throw cause
+    // biome-ignore lint/style/useErrorCause: The constructor forwards cause.
+    throw new GroupUnavailableError({ reason: 'invalid', cause })
+  }
+}
+
 function validateEvidence(evidence: GroupForkEvidence, identity: EpochIdentity): void {
   if (
     !Number.isSafeInteger(evidence.epoch) ||
@@ -122,7 +133,7 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
         await entry.run(
           { groupID: key.groupID, mutationID },
           async (reads) => {
-            const control = await reads.control(key.incarnation)
+            const control = await readReportControl(() => reads.control(key.incarnation))
             if (control.forkHalt !== null) {
               capability.latch(key, 'fork-halted')
               throw new Noop()
@@ -139,7 +150,7 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
           },
           async (stores, identity) => {
             const target = stores.incarnation(key.incarnation)
-            const control = await target.control.load()
+            const control = await readReportControl(() => target.control.load())
             if (control.forkHalt !== null) throw new Noop()
             const lifetime = await stores.lifetime.load()
             if (lifetime?.groupID !== key.groupID || lifetime.activeIncarnation !== key.incarnation)
@@ -156,9 +167,6 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
           // biome-ignore lint/style/useErrorCause: The persisted diagnosis supplies the refusal reason.
           throw new GroupSafetyHeldError('recovery-unavailable')
         }
-        if (isStoredOpenFailure(error) || error instanceof GroupStateConflictError)
-          // biome-ignore lint/style/useErrorCause: The constructor forwards cause.
-          throw new GroupUnavailableError({ reason: 'invalid', cause: error })
         if (!(error instanceof Noop)) throw error
       }
     },

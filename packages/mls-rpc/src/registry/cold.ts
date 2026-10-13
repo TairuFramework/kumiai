@@ -73,6 +73,7 @@ export async function loadValidatedGroup(
   groupID: string,
   cached: ValidatedGroupState | null,
   environment: ColdEnvironment,
+  assertMutationSafety?: () => void,
 ): Promise<{ value: ValidatedGroupState; control: ControlSnapshot }> {
   let lifetime: GroupLifetime | null
   try {
@@ -120,6 +121,7 @@ export async function loadValidatedGroup(
   if (record === null || (!record.deleted && record.state === null))
     throw new GroupUnavailableError({ reason: 'state-unreadable' })
   if (record.deleted) throw new GroupUnavailableError({ reason: 'invalid' })
+  assertMutationSafety?.()
   try {
     if (
       !(record.state instanceof Uint8Array) ||

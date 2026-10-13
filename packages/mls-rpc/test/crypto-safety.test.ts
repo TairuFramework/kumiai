@@ -90,6 +90,21 @@ async function fixture() {
 
 for (const reason of ['fork-halted', 'recovery-unavailable'] as const) {
   describe(`crypto safety (${reason})`, () => {
+    test('held exportSecret rejects through catch without throwing synchronously', async () => {
+      const f = await fixture()
+      f.hold(reason)
+      let result: Promise<unknown> | undefined
+      expect(() => {
+        const exported = f.crypto.exportSecret('safety-export')
+        if (!(exported instanceof Promise)) throw new Error('Exporter must return a promise')
+        result = exported.catch((error: unknown) => error)
+      }).not.toThrow()
+      const error = await result
+      expect(error).toBeInstanceOf(GroupSafetyHeldError)
+      expect(error).toMatchObject({ reason })
+      f.assertUnused()
+    })
+
     test.each(boundaries)('%s refuses before crypto', async (boundary) => {
       const f = await fixture()
       f.hold(reason)

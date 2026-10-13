@@ -14,7 +14,11 @@ import {
   ForkReportRefusedError,
   ManualRecoveryUnavailableError,
 } from '../src/index.js'
-import { RegistryRetiringError } from '../src/persistence-errors.js'
+import {
+  GroupStateConflictError,
+  GroupUnavailableError,
+  RegistryRetiringError,
+} from '../src/persistence-errors.js'
 import type { GroupKey } from '../src/persistence-types.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { deferred } from '../src/runtime.js'
@@ -116,6 +120,84 @@ for (const mode of ['real-mls', 'double'] as const) {
     const groupID = `safety-${mode}`
     const key = { groupID, incarnation: 1 }
     const create = () => createRegistryFixture({ mode, groupID, setup: 'seeded' })
+
+    test.each(['lifetime', 'apply'] as const)(
+      'report preserves a %s conflict raised in work',
+      async (boundary) => {
+        const fixture = await create()
+        try {
+          const capability = entry(fixture)
+          const binding = coordinatorBinding(fixture.device.groups)
+          if (binding === null) throw new Error('Missing binding')
+          const conflict = new GroupStateConflictError('Concurrent report transition moved')
+          bindEntryCapability({
+            persistence: fixture.device.groups,
+            coordinatorBinding: binding,
+            capability: {
+              ...capability,
+              run: (request, prepare, work) => {
+                return capability.run(request, prepare, (stores, prepared) => {
+                  return work(
+                    {
+                      ...stores,
+                      lifetime: {
+                        ...stores.lifetime,
+                        load: async () => {
+                          if (boundary === 'lifetime') throw conflict
+                          return stores.lifetime.load()
+                        },
+                      },
+                      incarnation: (incarnation) => {
+                        const target = stores.incarnation(incarnation)
+                        return {
+                          ...target,
+                          control: {
+                            ...target.control,
+                            apply: async () => {
+                              throw conflict
+                            },
+                          },
+                        }
+                      },
+                    },
+                    prepared,
+                  )
+                })
+              },
+            },
+          })
+          const api = await safety(fixture)
+          const before = await fixture.inspectRows()
+          await expect(api.reportFork(key, await authenticatorEvidence(fixture, key))).rejects.toBe(
+            conflict,
+          )
+          expect(await fixture.inspectRows()).toEqual(before)
+        } finally {
+          await fixture.close()
+        }
+      },
+    )
+
+    test('report preserves invalid refusal for a control read conflict', async () => {
+      const fixture = await create()
+      try {
+        const conflict = new GroupStateConflictError('Unreadable report control')
+        overrideReads(fixture, (reads) => ({
+          ...reads,
+          control: async () => {
+            throw conflict
+          },
+        }))
+        const api = await safety(fixture)
+        const before = await fixture.inspectRows()
+        const work = api.reportFork(key, await authenticatorEvidence(fixture, key))
+        await expect(work).rejects.toBeInstanceOf(GroupUnavailableError)
+        await expect(work).rejects.toMatchObject({ reason: 'invalid', cause: conflict })
+        expect(await fixture.inspectRows()).toEqual(before)
+      } finally {
+        await fixture.close()
+      }
+    })
 
     test('field-only safety projects cold and accounted admission', async () => {
       let fixture = await create()

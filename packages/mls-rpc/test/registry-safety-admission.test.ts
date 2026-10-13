@@ -1,5 +1,10 @@
 import { encodeClientState } from '@kumiai/mls'
-import { forkEventID, recoveryUnavailableEventID, type SafetyHold } from '@kumiai/rpc'
+import {
+  forkEventID,
+  GroupSafetyHeldError,
+  recoveryUnavailableEventID,
+  type SafetyHold,
+} from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
 import {
@@ -8,8 +13,9 @@ import {
   type EntryReads,
   entryCapability,
 } from '../src/entry-capability.js'
+import { GroupStateConflictError, GroupUnavailableError } from '../src/persistence-errors.js'
 import type { GroupKey } from '../src/persistence-types.js'
-import { registrySafety } from '../src/registry/safety.js'
+import { RetainedTrustUnavailableError, registrySafety } from '../src/registry/safety.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { deferred } from '../src/runtime.js'
 import {
@@ -90,6 +96,140 @@ for (const mode of ['real-mls', 'double'] as const) {
     const groupID = `safety-admission-${mode}`
     const key = { groupID, incarnation: 1 }
     const create = () => createRegistryFixture({ mode, groupID, setup: 'seeded' })
+
+    test.each(['source', 'access', 'read', 'mutate', 'replace', 'adopt'] as const)(
+      '%s preserves trust diagnosis when hold persistence fails',
+      async (operation) => {
+        const fixture = await create()
+        try {
+          let armed = false
+          const trustFailure = new GroupStateConflictError('Corrupt retained trust')
+          const persistFailure = new Error('Hold persistence write failed')
+          intercept(fixture, (reads) => ({
+            ...reads,
+            trust: async () => {
+              if (armed) throw trustFailure
+              return reads.trust()
+            },
+          }))
+          const capability = entry(fixture)
+          const binding = coordinatorBinding(fixture.device.groups)
+          if (binding === null) throw new Error('Missing binding')
+          bindEntryCapability({
+            persistence: fixture.device.groups,
+            coordinatorBinding: binding,
+            capability: {
+              ...capability,
+              run: (request, prepare, work) => {
+                return capability.run(request, prepare, (stores, prepared) => {
+                  return work(
+                    {
+                      ...stores,
+                      incarnation: (incarnation) => {
+                        const target = stores.incarnation(incarnation)
+                        return {
+                          ...target,
+                          control: {
+                            ...target.control,
+                            apply: async (...args) => {
+                              if (armed) throw persistFailure
+                              await target.control.apply(...args)
+                            },
+                          },
+                        }
+                      },
+                    },
+                    prepared,
+                  )
+                })
+              },
+            },
+          })
+          const owner = fixture.registry
+          const access = await owner.access(groupID)
+          const accepted = await fixture.acceptedOrdinary(access)
+          const callback = vi.fn(async () => 1)
+          const adoption = vi.fn(() => accepted.write)
+          const before = await fixture.inspectRows()
+          armed = true
+          const work =
+            operation === 'source'
+              ? owner.recoverySource(groupID)
+              : operation === 'access'
+                ? owner.access(groupID)
+                : operation === 'read'
+                  ? access.read(callback)
+                  : operation === 'mutate'
+                    ? access.mutate(callback, adoption)
+                    : operation === 'replace'
+                      ? access.replace(accepted.candidate, adoption)
+                      : access.adopt(accepted.candidate, accepted.expected, accepted.write)
+          const mutation = ['mutate', 'replace', 'adopt'].includes(operation)
+          await expect(work).rejects.toBeInstanceOf(
+            mutation ? GroupSafetyHeldError : RetainedTrustUnavailableError,
+          )
+          await expect(work).rejects.toMatchObject({ reason: 'recovery-unavailable' })
+          if (!mutation) await expect(work).rejects.toMatchObject({ cause: trustFailure })
+          expect(registrySafety(owner)?.held(key)).toBe('recovery-unavailable')
+          expect(callback).not.toHaveBeenCalled()
+          expect(adoption).not.toHaveBeenCalled()
+          expect(await fixture.inspectRows()).toEqual(before)
+        } finally {
+          await fixture.close()
+        }
+      },
+    )
+
+    for (const cache of ['cached', 'uncached'] as const) {
+      for (const reason of ['fork-halted', 'recovery-unavailable'] as const) {
+        test.each(['mutate', 'replace', 'adopt'] as const)(
+          `%s stops before ${cache} restore when ${reason} arrives during state read`,
+          async (operation) => {
+            const fixture = await create()
+            try {
+              let armed = false
+              intercept(fixture, (reads) => ({
+                ...reads,
+                metadata: async (incarnation) => {
+                  const metadata = await reads.metadata(incarnation)
+                  return armed && cache === 'uncached' && metadata !== null
+                    ? { ...metadata, version: metadata.version + 1 }
+                    : metadata
+                },
+                state: async (incarnation) => {
+                  const record = await reads.state(incarnation)
+                  if (armed) registrySafety(fixture.registry)?.latch(key, reason)
+                  return armed && cache === 'uncached' && record !== null
+                    ? { ...record, version: record.version + 1 }
+                    : record
+                },
+              }))
+              const access = await fixture.registry.access(groupID)
+              const accepted = await fixture.acceptedOrdinary(access)
+              const callback = vi.fn(async () => true)
+              const adoption = vi.fn(() => accepted.write)
+              const restores = fixture.restoreCount(groupID)
+              const rows = await fixture.inspectRows()
+              armed = true
+              const work =
+                operation === 'mutate'
+                  ? access.mutate(callback, adoption)
+                  : operation === 'replace'
+                    ? access.replace(accepted.candidate, adoption, callback)
+                    : access.adopt(accepted.candidate, accepted.expected, accepted.write)
+              await expect(work).rejects.toBeInstanceOf(GroupSafetyHeldError)
+              await expect(work).rejects.toMatchObject({ reason })
+              expect(fixture.restoreCount(groupID)).toBe(restores)
+              expect(callback).not.toHaveBeenCalled()
+              expect(adoption).not.toHaveBeenCalled()
+              expect(await fixture.inspectRows()).toEqual(rows)
+            } finally {
+              await fixture.close()
+            }
+          },
+        )
+      }
+    }
 
     for (const reason of ['fork-halted', 'recovery-unavailable'] as const) {
       test.each(['mutate', 'replace', 'adopt'] as const)(
@@ -213,7 +353,11 @@ for (const mode of ['real-mls', 'double'] as const) {
           const recovery = await fixture.confirmedRecovery(key, { confirm: true })
           const owner = fixture.registry
           const access = await owner.access(groupID)
-          access.onRetire(() => setHold(fixture, key, reason))
+          let afterHook: Awaited<ReturnType<RegistryFixture['inspectRows']>> | undefined
+          access.onRetire(async () => {
+            await setHold(fixture, key, reason)
+            afterHook = await fixture.inspectRows()
+          })
           await expect(
             owner.switchIncarnation(recovery.candidate, {
               source: recovery.source,
@@ -233,8 +377,10 @@ for (const mode of ['real-mls', 'double'] as const) {
               },
             }),
           ).rejects.toMatchObject({ name: 'RegistryResyncRefusedError', reason })
+          expect(afterHook).toBeDefined()
           expect((await fixture.device.groups.load(groupID))?.activeIncarnation).toBe(1)
           expect(await fixture.device.groups.loadState({ groupID, incarnation: 2 })).toBeNull()
+          expect(await fixture.inspectRows()).toEqual(afterHook)
         } finally {
           await fixture.close()
         }
@@ -738,19 +884,68 @@ for (const mode of ['real-mls', 'double'] as const) {
         }
       },
     )
-    test.each(['read', 'mutate'] as const)(
+    test.each(['read', 'mutate', 'replace', 'adopt'] as const)(
       'held access %s reload persists trust loss',
       async (operation) => {
         const fixture = await create()
         try {
           const access = await fixture.registry.access(groupID)
+          const accepted = await fixture.acceptedOrdinary(access)
           await fixture.corruptTrust(groupID)
           const callback = vi.fn(async () => 1)
-          await expect(
-            operation === 'read' ? access.read(callback) : access.mutate(callback),
-          ).rejects.toMatchObject({ reason: 'recovery-unavailable' })
+          const work =
+            operation === 'read'
+              ? access.read(callback)
+              : operation === 'mutate'
+                ? access.mutate(callback)
+                : operation === 'replace'
+                  ? access.replace(
+                      accepted.candidate,
+                      () => accepted.write,
+                      async () => {
+                        callback()
+                        return true
+                      },
+                    )
+                  : access.adopt(accepted.candidate, accepted.expected, accepted.write)
+          await expect(work).rejects.toBeInstanceOf(
+            operation === 'read' ? GroupUnavailableError : GroupSafetyHeldError,
+          )
+          await expect(work).rejects.toMatchObject({ reason: 'recovery-unavailable' })
           expect(callback).not.toHaveBeenCalled()
           await durableDiagnosis(fixture, key)
+        } finally {
+          await fixture.close()
+        }
+      },
+    )
+    test.each(['mutate', 'replace', 'adopt'] as const)(
+      'transient trust I/O at %s mutation escapes unchanged',
+      async (operation) => {
+        const fixture = await create()
+        try {
+          let armed = false
+          const error = new Error('Transient mutation trust I/O')
+          intercept(fixture, (reads) => ({
+            ...reads,
+            trust: async () => {
+              if (armed) throw error
+              return reads.trust()
+            },
+          }))
+          const access = await fixture.registry.access(groupID)
+          const accepted = await fixture.acceptedOrdinary(access)
+          const before = await fixture.inspectRows()
+          armed = true
+          await expect(
+            operation === 'mutate'
+              ? access.mutate(async () => 1)
+              : operation === 'replace'
+                ? access.replace(accepted.candidate, () => accepted.write)
+                : access.adopt(accepted.candidate, accepted.expected, accepted.write),
+          ).rejects.toBe(error)
+          expect(registrySafety(fixture.registry)?.held(key)).toBeNull()
+          expect(await fixture.inspectRows()).toEqual(before)
         } finally {
           await fixture.close()
         }

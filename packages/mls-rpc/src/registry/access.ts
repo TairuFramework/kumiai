@@ -28,7 +28,7 @@ import type {
 } from '../persistence-types.js'
 import { type ColdEnvironment, restoreValidated, type ValidatedGroupState } from './cold.js'
 import type { createRegistryRuntime } from './runtime.js'
-import { readRetainedTrust } from './safety.js'
+import { RetainedTrustUnavailableError, readRetainedTrust } from './safety.js'
 import { readRecoverySource } from './source.js'
 import { recoveryTrustFor } from './trust.js'
 import type { GroupRuntimeSnapshot, ReadableGroupState, RegistryHandleAccess } from './types.js'
@@ -52,7 +52,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
   environment: ColdEnvironment
   restoreCandidate(candidate: Uint8Array): Promise<GroupHandle>
   resolve(mutationID: string): Promise<'committed' | 'rolled-back'>
-  load(reads: EntryReads): Promise<ValidatedGroupState>
+  load(reads: EntryReads, assertMutationSafety?: () => void): Promise<ValidatedGroupState>
   publish(): void
   invalidate(displaced: boolean): void
   assertCurrent(): void
@@ -70,11 +70,15 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     if (reason !== null) throw new GroupSafetyHeldError(reason)
     assertSafety()
   }
-  async function isolated(reads: EntryReads): Promise<ControlRead> {
+  async function isolated(
+    reads: EntryReads,
+    assertMutationSafety?: () => void,
+  ): Promise<ControlRead> {
     try {
-      const value = await params.load(reads)
+      const value = await params.load(reads, assertMutationSafety)
       if (value.key.incarnation !== owner.key.incarnation)
         throw new DisplacedGroupHandleError('Registry access belongs to a retired incarnation')
+      assertMutationSafety?.()
       const handle = await restoreValidated(value, environment)
       params.assertCurrent()
       return {
@@ -359,7 +363,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
             }
           }
           assertSafety()
-          const { handle: current, source } = await isolated(reads)
+          const { handle: current, source } = await isolated(reads, assertSafety)
           assertSafety()
           const value = owner.value
           const lifetime = await reads.lifetime()
@@ -422,6 +426,9 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     } catch (error) {
       if (error instanceof Noop) return 'noop'
       await params.diagnoseFailure(error)
+      if (error instanceof RetainedTrustUnavailableError)
+        // biome-ignore lint/style/useErrorCause: Mutation boundaries expose the diagnosed safety reason.
+        throw new GroupSafetyHeldError('recovery-unavailable')
       throw error
     } finally {
       params.publish()
@@ -439,7 +446,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
         },
         async (reads) => {
           assertSafety()
-          const { handle, source } = await isolated(reads)
+          const { handle, source } = await isolated(reads, assertSafety)
           assertSafety()
           const value = owner.value
           const lifetime = await reads.lifetime()
@@ -535,6 +542,9 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     } catch (error) {
       if (error instanceof Noop && noopResult !== undefined) return noopResult.value
       await params.diagnoseFailure(error)
+      if (error instanceof RetainedTrustUnavailableError)
+        // biome-ignore lint/style/useErrorCause: Mutation boundaries expose the diagnosed safety reason.
+        throw new GroupSafetyHeldError('recovery-unavailable')
       throw error
     } finally {
       params.publish()
