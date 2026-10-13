@@ -23,6 +23,7 @@ import { createRegistryRuntime } from './runtime.js'
 import { accountedRuntime } from './runtime-facts.js'
 import { createRegistrySeed } from './seed.js'
 import { readRecoverySource } from './source.js'
+import { createRegistrySwitch } from './switch.js'
 import type {
   GroupHandleRegistry,
   GroupHandleRegistryParams,
@@ -230,6 +231,13 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       environment: environment.recovery,
       ownerDID: environment.ownerDID,
       start,
+    }),
+    switchIncarnation: createRegistrySwitch({
+      persistence: persistence.groups,
+      capability,
+      retirement,
+      recovery: environment.recovery,
+      ownerDID: environment.ownerDID,
     }),
     recoverySource(groupID) {
       groupSlot(groupID)

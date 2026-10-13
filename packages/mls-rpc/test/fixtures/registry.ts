@@ -8,7 +8,7 @@ import {
   type GroupOptions,
   restoreGroup,
 } from '@kumiai/mls'
-import type { AnchorSlot, ControlChanges, RejoinRecord } from '@kumiai/rpc'
+import type { AnchorSlot, ControlChanges } from '@kumiai/rpc'
 
 import { controlBuildContexts } from '../../src/control-write-context.js'
 import { type EntryCapability, entryCapability } from '../../src/entry-capability.js'
@@ -28,6 +28,7 @@ import type {
   TransactionalGroupEffects,
 } from '../../src/persistence-types.js'
 import { registryRetirement } from '../../src/registry/retirement.js'
+import { readRecoverySource } from '../../src/registry/source.js'
 import { recoveryTrustFor } from '../../src/registry/trust.js'
 import type { GroupHandleRegistry } from '../../src/registry/types.js'
 import { type RecoveryEnvironment, registryOptions } from '../../src/registry/validation.js'
@@ -61,7 +62,10 @@ export type RegistryFixtureBase = {
     unusedOlder: GroupHandle
     packageUse: PackageUse
   }>
-  confirmedRecovery(sourceKey: GroupKey): Promise<{ candidate: GroupHandle; record: RejoinRecord }>
+  confirmedRecovery(
+    sourceKey: GroupKey,
+    options?: { confirm?: boolean },
+  ): ReturnType<typeof createRegistryRecovery>
   installRows(rows: RegistryRowSetup): Promise<void>
   inspectRows(): Promise<MemoryStoreRows>
   corruptState(key: GroupKey): Promise<void>
@@ -242,7 +246,7 @@ async function assemble(
         })
       ).history
     },
-    async confirmedRecovery(sourceKey) {
+    async confirmedRecovery(sourceKey, options) {
       const record = await fixture.device.groups.loadState(sourceKey)
       if (record === null || record.deleted || record.state === null)
         throw new Error('Missing recovery source')
@@ -253,8 +257,18 @@ async function assemble(
         options: environment.options,
         source,
         sourceKey,
+        sourceTrust: (await fixture.device.groups.loadTrust(sourceKey.groupID)) ?? undefined,
       })
-      return result
+      if (!options?.confirm) return result
+      await fixture.installRows({ key: sourceKey, control: { putRejoin: result.record } })
+      const capability = entryCapability(fixture.device.groups)
+      if (capability === null) throw new Error('Missing registry capability')
+      return {
+        ...result,
+        source: await capability.read(sourceKey.groupID, (reads) =>
+          readRecoverySource(reads, sourceKey.groupID),
+        ),
+      }
     },
     async installRows(setup) {
       const groups = fixture.device.groups

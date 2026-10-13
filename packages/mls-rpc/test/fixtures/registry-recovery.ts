@@ -28,7 +28,7 @@ import {
 } from '@kumiai/rpc'
 
 import { createGroupCrypto } from '../../src/crypto.js'
-import type { GroupKey } from '../../src/persistence-types.js'
+import type { GroupKey, GroupRecoveryTrust } from '../../src/persistence-types.js'
 import { createVerdictJudge } from '../../src/recovery.js'
 import { encodeRecoveryCandidate } from '../../src/recovery-codec.js'
 import { recoveryTrustFor } from '../../src/registry/trust.js'
@@ -42,6 +42,7 @@ export async function createRegistryRecovery(params: {
   options: GroupOptions
   source: GroupHandle
   sourceKey: GroupKey
+  sourceTrust?: GroupRecoveryTrust
   responder?: { identity: OwnIdentity; group: GroupHandle }
 }): Promise<{
   candidate: GroupHandle
@@ -102,14 +103,14 @@ export async function createRegistryRecovery(params: {
     sourceTree = params.source.state.ratchetTree
     replyLedger = remote.ledgerTokens
   } else {
-    const copy = () =>
+    const copy = (handle = params.source) =>
       restoreMemoryControlHandle({
-        state: structuredClone(params.source.state),
-        credential: params.source.credential,
-        ledgerEntries: params.source.ledgerTokens,
+        state: structuredClone(handle.state),
+        credential: handle.credential,
+        ledgerEntries: handle.ledgerTokens,
         options: params.options,
       })
-    const responder = await copy()
+    const responder = await copy(params.responder?.group)
     const responseModel = memoryModel(responder)
     if (params.responder == null)
       await responseModel.adopt(responseModel.buildCommit([], { adds: [signer.id] }))
@@ -178,7 +179,7 @@ export async function createRegistryRecovery(params: {
   })
   const state = decodeClientState(encodeClientState(candidate.state))
   if (state === undefined) throw new Error('Invalid recovery candidate')
-  const trust = recoveryTrustFor(params.source, params.sourceKey, null)
+  const trust = recoveryTrustFor(params.source, params.sourceKey, params.sourceTrust ?? null)
   trust.spentEpochAuthenticators.push(trust.installed.authenticator.slice())
   return {
     candidate,

@@ -52,7 +52,21 @@ export type ResyncProof = {
   payloadDigest: string
   verdict: Uint8Array
 }
+export type RegistrySwitchWrite = {
+  mutationID: string
+  source: { rejoinID: string }
+  destination: { control: { cursor: { position: LogPosition; epoch: number } } }
+}
 export type GroupHandleRegistry = {
+  switchIncarnation(
+    candidate: GroupHandle,
+    params: {
+      source: RecoverySource
+      rejoinID: string
+      proof: ResyncProof
+      write: RegistrySwitchWrite
+    },
+  ): Promise<GroupKey>
   start(): Promise<void>
   seed(
     group: GroupHandle,
