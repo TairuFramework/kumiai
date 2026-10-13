@@ -388,7 +388,18 @@ export type AppliedRecovery = PendingRecovery | { renewalRequired: true } | null
 
 export type SendAdmission =
   | { epoch: number; admissible: true }
-  | { epoch: number; admissible: false; reason: 'lapsed' }
+  | {
+      epoch: number
+      admissible: false
+      reason:
+        | 'lapsed'
+        | 'rotation-required'
+        | 'stranded'
+        | 'fork-halted'
+        | 'terminal'
+        | 'backup-restored'
+        | 'recovery-unavailable'
+    }
 
 /** The signed fields of a recovery ask that verified. */
 export type VerifiedRecoveryRequest = {

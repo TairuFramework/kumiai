@@ -105,7 +105,18 @@ export type ConformanceVerifiedRecoveryRequest = {
 export type ConformanceConfirmationKey = { epoch: number; key: Uint8Array }
 export type ConformanceSendAdmission =
   | { epoch: number; admissible: true }
-  | { epoch: number; admissible: false; reason: 'lapsed' }
+  | {
+      epoch: number
+      admissible: false
+      reason:
+        | 'lapsed'
+        | 'rotation-required'
+        | 'stranded'
+        | 'fork-halted'
+        | 'terminal'
+        | 'backup-restored'
+        | 'recovery-unavailable'
+    }
 export type ConformanceProcessCommitResult = {
   applied: boolean
   advanced: boolean

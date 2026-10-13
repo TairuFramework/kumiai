@@ -1,4 +1,5 @@
 import type { Outcome } from './control/types.js'
+import type { SendAdmission } from './crypto.js'
 
 /**
  * A peer that has been disposed refused an operation. A caller branches on this: retry against a
@@ -53,16 +54,18 @@ export class AppEntryTooLargeError extends Error {
   override name = 'AppEntryTooLargeError'
 }
 
+type SendNotAdmissibleReason = Extract<SendAdmission, { admissible: false }>['reason']
+
 export class SendNotAdmissibleError extends Error {
   override name = 'SendNotAdmissibleError'
-  #reason: 'lapsed'
+  #reason: SendNotAdmissibleReason
 
-  constructor(reason: 'lapsed') {
+  constructor(reason: SendNotAdmissibleReason) {
     super(`Send is not admissible: ${reason}`)
     this.#reason = reason
   }
 
-  get reason(): 'lapsed' {
+  get reason(): SendNotAdmissibleReason {
     return this.#reason
   }
 }
