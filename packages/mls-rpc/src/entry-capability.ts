@@ -44,7 +44,11 @@ export type EntryReads = {
     incarnation: number,
   ): Promise<'missing' | 'null' | 'deleted' | 'readable' | 'unreadable'>
 }
-export type Prepared<T> = { expected: GroupTransition['expected']; value: T }
+export type Prepared<T> = {
+  expected: GroupTransition['expected']
+  mutationID?: string
+  value: T
+}
 export type EntryCapability<TTx extends GroupTransaction> = {
   activity(groupID: string, excludingMutationID?: string): { generation: number; pending: number }
   failureSignal?: AbortSignal
@@ -56,7 +60,8 @@ export type EntryCapability<TTx extends GroupTransaction> = {
 
   read<T>(groupID: string, fn: (reads: EntryReads) => Promise<T>): Promise<T>
   run<P, T>(
-    request: Pick<GroupTransition, 'groupID' | 'mutationID'>,
+    // Null binds the ID supplied by prepare before any work write.
+    request: { groupID: string; mutationID: string | null },
     prepare: (reads: EntryReads) => Promise<Prepared<P>>,
     work: (stores: GroupStores<TTx>, prepared: P) => Promise<T>,
   ): Promise<T>

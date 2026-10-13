@@ -38,6 +38,7 @@ export type OwnerEntry = {
   readonly scopes: OwnerScopes
   readonly phase: EntryPhase
   readonly mutationID: string | null
+  bindMutationID(mutationID: string): void
   enter(phase: EntryPhase): Promise<void>
   attempt(): OwnerAttempt
   operation<T>(attempt: OwnerAttempt, run: (attempt: OwnerAttempt) => Promise<T>): Promise<T>
@@ -265,6 +266,7 @@ export function createOwnerQueues(options?: {
       )
       const signal = binding.signal
       const releases: Array<() => void> = []
+      let mutationID = options?.mutationID ?? null
       let phase: EntryPhase = 'queued'
       let outcome: ProofOutcome | null = null
       let tail = Promise.resolve()
@@ -385,7 +387,20 @@ export function createOwnerQueues(options?: {
       const entry: OwnerEntry = {
         kind,
         scopes,
-        mutationID: options?.mutationID ?? null,
+        get mutationID() {
+          return mutationID
+        },
+        bindMutationID(next) {
+          assertLive()
+          if (
+            phase !== 'work' ||
+            mutationID !== null ||
+            typeof next !== 'string' ||
+            next.length === 0
+          )
+            throw new PersistencePhaseError('Cannot bind mutation ID')
+          mutationID = next
+        },
         get phase() {
           return phase
         },

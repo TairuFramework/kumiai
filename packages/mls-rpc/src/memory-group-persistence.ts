@@ -1176,10 +1176,17 @@ export function createMemoryGroupCoordinator(params: {
             // Capture caller-controlled expectations before entering work. Prepared values stay opaque.
             const expected = entry.callback(() => copyStoredValue(prepared.expected))
             const value = entry.callback(() => prepared.value)
+            const mutationID = entry.callback(() => owned.mutationID ?? prepared.mutationID)
+            if (
+              typeof mutationID !== 'string' ||
+              (owned.mutationID === null && mutationID.length === 0)
+            )
+              throw new PersistencePhaseError('Prepare did not supply a mutation ID')
             await entry.enter('work')
+            if (owned.mutationID === null) entry.bindMutationID(mutationID)
             if (entry.rollbackOnly) throw new GroupStateConflictError('Prepare is rollback-only')
             return await transitionOwned(
-              { ...owned, expected },
+              { ...owned, mutationID, expected },
               (stores) => work(stores, value),
               entry,
             )
@@ -1193,7 +1200,7 @@ export function createMemoryGroupCoordinator(params: {
             throw error
           }
         },
-        { mutationID: owned.mutationID },
+        { mutationID: owned.mutationID ?? undefined },
       )
     },
   }

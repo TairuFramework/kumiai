@@ -117,3 +117,7 @@ export class SeedAdmissionRefusedError extends Error {
     return this.#reason
   }
 }
+
+export class RegistryRecoveryReplacementError extends Error {
+  override name = 'RegistryRecoveryReplacementError'
+}

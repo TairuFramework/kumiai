@@ -193,6 +193,8 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         owner,
         capability,
         environment,
+        restoreCandidate: params.restoreCandidate,
+        resolve: (mutationID) => persistence.groups.resolve(groupID, mutationID),
         load: (reads) => load(reads, groupID, slot, slot.generation, owner),
         publish: () => publish(slot, owner),
         assertCurrent: () => {

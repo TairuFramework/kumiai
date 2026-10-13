@@ -1,7 +1,7 @@
 import type { GroupHandle } from '@kumiai/mls'
-import type { AdoptionExpected, LogPosition, SendAdmission } from '@kumiai/rpc'
+import type { AdoptionExpected, AdoptionWrite, LogPosition, SendAdmission } from '@kumiai/rpc'
 
-import type { ControlReadScope } from '../access.js'
+import type { ControlReadScope, HandleAccess } from '../access.js'
 import type {
   DevicePersistence,
   EpochIdentity,
@@ -30,6 +30,13 @@ export type RegistryHandleAccess = {
   admission(): SendAdmission
   read<T>(fn: (handle: GroupHandle) => T | Promise<T>): Promise<T>
   readControl<T>(fn: (scope: ControlReadScope) => Promise<T>): Promise<T>
+  mutate: HandleAccess['mutate']
+  replace: HandleAccess['replace']
+  adopt(
+    next: GroupHandle,
+    expected: AdoptionExpected,
+    write: AdoptionWrite,
+  ): Promise<'installed' | 'noop' | 'moved'>
   onRetire(hook: () => Promise<void>): () => void
 }
 export type RecoverySource = AdoptionExpected & {

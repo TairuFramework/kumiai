@@ -1,5 +1,11 @@
 import { normalizeDID, type OwnIdentity } from '@kokuin/token'
-import { type GroupHandle, type GroupOptions, parseMLSCredentialIdentity } from '@kumiai/mls'
+import {
+  encodeClientState,
+  type GroupHandle,
+  type GroupOptions,
+  parseMLSCredentialIdentity,
+  readGroupAnchorExtension,
+} from '@kumiai/mls'
 import { ciphersuites, defaultKeyRetentionConfig } from 'ts-mls'
 
 import { GroupStateConflictError } from '../persistence-errors.js'
@@ -116,4 +122,39 @@ export function validateRegistryHandle(params: {
       sameLedger(trust.ledger, record.ledger),
     'Registry current recovery trust mismatch',
   )
+}
+
+/** Compare the accepted host destination before importing any committed progress. */
+export function ordinaryCandidateMatches(
+  next: GroupHandle,
+  destination: GroupHandle,
+  key: GroupKey,
+): boolean {
+  try {
+    const leaf = destination.state.ratchetTree[destination.state.privatePath.leafIndex * 2]
+    const anchor = readGroupAnchorExtension(next)?.extensionData
+    const acceptedAnchor = readGroupAnchorExtension(destination)?.extensionData
+    return (
+      next.groupID === key.groupID &&
+      destination.groupID === key.groupID &&
+      next.epoch === destination.epoch &&
+      sameBytes(
+        next.state.keySchedule.epochAuthenticator,
+        destination.state.keySchedule.epochAuthenticator,
+      ) &&
+      next.credential.groupID === key.groupID &&
+      destination.credential.groupID === key.groupID &&
+      normalizeDID(next.credential.id) === normalizeDID(destination.credential.id) &&
+      leaf?.nodeType === 1 &&
+      'identity' in leaf.leaf.credential &&
+      normalizeDID(destination.credential.id) ===
+        normalizeDID(parseMLSCredentialIdentity(leaf.leaf.credential.identity).id) &&
+      anchor instanceof Uint8Array &&
+      acceptedAnchor instanceof Uint8Array &&
+      sameBytes(anchor, acceptedAnchor) &&
+      sameBytes(encodeClientState(next.state), encodeClientState(destination.state))
+    )
+  } catch {
+    return false
+  }
 }
