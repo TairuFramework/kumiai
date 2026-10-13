@@ -283,3 +283,34 @@ one. The ones a host is most likely to trip on:
   Anyone who has seen a `GroupInfo` for the group can compute the rendezvous topic. That is tolerable
   for what the topic is for — a stranded peer, and a removed one, must both be able to name it — but
   a host must put nothing on it that confidentiality depends on.
+
+## Validated registry cold access
+
+`createGroupHandleRegistry({ persistence, providerID, recovery, restore, restoreCandidate })`
+provides `start()` and `access(groupID)` over device persistence. The provider ID must match
+`persistence.providerID`, and the recovery identity must own the device. `start()` checks device
+restore work and lifetime restore flags; this core refuses pending restore work. Access restores
+and validates active state with the supplied recovery options, including exact policy/resolver
+callbacks and key retention of at least 1000 generations and forward ratchet steps. Hosts must
+apply those options in their `restore` callback. `restoreCandidate` decodes host-serialised control
+journal candidates; cold access never uses candidates as a substitute for stored state.
+
+Providers must register the internal entry capability and an equivalent shared coordinator
+binding token for all root group wrappers on the same database ownership boundary. The registry
+owns that token: a second live registry is rejected synchronously before any load, restoration or
+subscription. Separately constructed memory devices over one database share the token, even
+though their `groups` objects differ. Spreading or copying a wrapper does not inherit registration.
+
+Cold access shares in-flight validation and caches validated records rather than mutable handles.
+Every `read` and `readControl` guarded-opens current stored state and restores an isolated handle;
+callback mutations are not persisted. Control refresh stays in the same Read entry and expires
+when its callback ends. Keys, runtime authenticators and membership sets are defensive copies.
+Runtime identity comes from current installed trust, while administrative initial identity stays
+historical. Terminal/removed state, persisted strand and MLS lapse determine send admission.
+Missing or retired runtime returns null. The access exposes retirement-hook registration for
+subsequent lifetime operations.
+
+`GroupUnavailableError.reason` distinguishes `absent`, `deleted`, `state-unreadable`, `invalid`
+and `restore-pending`. A surviving lifetime with missing metadata or trust is invalid. Null or
+corrupt state cannot use cached bytes, including at an unchanged state version, and failed
+restorations are never cached. Pure reads advance no persistence revision or state version.

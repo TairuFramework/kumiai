@@ -31,3 +31,24 @@ export class PersistencePhaseError extends Error {
 export class ReentrantOwnershipError extends Error {
   override name = 'ReentrantOwnershipError'
 }
+
+export type GroupUnavailableReason =
+  | 'absent'
+  | 'deleted'
+  | 'state-unreadable'
+  | 'invalid'
+  | 'restore-pending'
+
+export class GroupUnavailableError extends Error {
+  override name = 'GroupUnavailableError'
+  #reason: GroupUnavailableReason
+
+  constructor(params: { reason: GroupUnavailableReason; cause?: unknown }) {
+    super(`Group unavailable: ${params.reason}`, { cause: params.cause })
+    this.#reason = params.reason
+  }
+
+  get reason(): GroupUnavailableReason {
+    return this.#reason
+  }
+}

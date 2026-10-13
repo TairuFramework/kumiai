@@ -65,6 +65,8 @@ export {
   GroupControlUnsettledError,
   GroupStateConflictError,
   GroupStateUncertainError,
+  GroupUnavailableError,
+  type GroupUnavailableReason,
   InvalidAppEntryError,
   NonRootProviderError,
   OutboxReplacementError,
@@ -121,6 +123,15 @@ export type {
   TransactionalGroupEffects,
   TransactionHookSettlement,
 } from './persistence-types.js'
+export { createGroupHandleRegistry } from './registry/registry.js'
+export type {
+  GroupEpochRuntime,
+  GroupHandleRegistry,
+  GroupHandleRegistryParams,
+  GroupRuntimeSnapshot,
+  RegistryHandleAccess,
+} from './registry/types.js'
+export type { RecoveryEnvironment } from './registry/validation.js'
 export {
   buildRevokeProofOnHandle,
   buildRevokeProofOperation,

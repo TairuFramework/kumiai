@@ -5,6 +5,7 @@ import {
   decodeClientState,
   encodeClientState,
   type GroupHandle,
+  type GroupOptions,
   restoreGroup,
 } from '@kumiai/mls'
 import type { AnchorSlot, ControlChanges, RejoinRecord } from '@kumiai/rpc'
@@ -90,7 +91,12 @@ export type PendingFault = {
   finish(outcome: 'commit' | 'rollback'): Promise<void>
 }
 
-type FixtureParams = { mode: 'real-mls' | 'double'; setup: 'empty' | 'seeded'; groupID: string }
+type FixtureParams = {
+  mode: 'real-mls' | 'double'
+  setup: 'empty' | 'seeded'
+  groupID: string
+  options?: GroupOptions
+}
 type Hold = {
   started: ReturnType<typeof deferred<void>>
   released: ReturnType<typeof deferred<void>>
@@ -116,7 +122,10 @@ async function assemble(
   identity: OwnIdentity,
   rows?: MemoryStoreRows,
 ): Promise<RegistryFixtureBase> {
-  const environment: RecoveryEnvironment = { identity, options: registryOptions({}) }
+  const environment: RecoveryEnvironment = {
+    identity,
+    options: registryOptions(params.options ?? {}),
+  }
   const storage = await createStorageFixture({
     id: params.groupID,
     mode: params.mode,

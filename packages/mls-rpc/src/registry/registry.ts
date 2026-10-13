@@ -1,0 +1,175 @@
+import { normalizeDID } from '@kokuin/token'
+
+import { coordinatorBinding, type EntryReads, entryCapability } from '../entry-capability.js'
+import {
+  DisplacedGroupHandleError,
+  GroupStateConflictError,
+  GroupUnavailableError,
+} from '../persistence-errors.js'
+import type { GroupTransaction } from '../persistence-types.js'
+import { createRegistryAccess, type RegistryOwner } from './access.js'
+import { admissionFor, type ColdEnvironment, loadValidatedGroup } from './cold.js'
+import { createRegistryRuntime } from './runtime.js'
+import type {
+  GroupHandleRegistry,
+  GroupHandleRegistryParams,
+  RegistryHandleAccess,
+} from './types.js'
+import { registryOptions } from './validation.js'
+
+type GroupSlot = {
+  generation: number
+  owner: RegistryOwner | null
+  load: { generation: number; promise: Promise<RegistryHandleAccess> } | null
+}
+class StaleRegistryGeneration extends Error {}
+
+const liveRegistries = new WeakMap<object, GroupHandleRegistry>()
+
+export function createGroupHandleRegistry<TTx extends GroupTransaction>(
+  params: GroupHandleRegistryParams<TTx>,
+): GroupHandleRegistry {
+  const { persistence } = params
+  if (!params.providerID || params.providerID !== persistence.providerID)
+    throw new GroupStateConflictError('Registry provider mismatch')
+  if (normalizeDID(params.recovery.identity.id) !== normalizeDID(persistence.ownerDID))
+    throw new GroupStateConflictError('Registry owner mismatch')
+  const registeredCapability = entryCapability(persistence.groups)
+  const binding = coordinatorBinding(persistence.groups)
+  if (registeredCapability === null || binding === null)
+    throw new GroupStateConflictError('Registry requires registered entry capability')
+  if (liveRegistries.has(binding))
+    throw new GroupStateConflictError('Coordinator already has a live registry')
+  const capability = registeredCapability
+  const environment: ColdEnvironment = {
+    ownerDID: persistence.ownerDID,
+    recovery: { ...params.recovery, options: registryOptions(params.recovery.options) },
+    restore: params.restore,
+  }
+  const slots = new Map<string, GroupSlot>()
+  let starting: Promise<void> | null = null
+  let started = false
+  async function start(): Promise<void> {
+    if (started) return
+    if (starting !== null) return await starting
+    starting = (async () => {
+      const device = await persistence.load()
+      if (device.restoreWork !== null)
+        throw new GroupUnavailableError({ reason: 'restore-pending' })
+      const lifetimes = await persistence.groups.list()
+      if (lifetimes.some((value) => value.restorePending))
+        throw new GroupUnavailableError({ reason: 'restore-pending' })
+      started = true
+    })()
+    try {
+      await starting
+    } finally {
+      starting = null
+    }
+  }
+  function groupSlot(groupID: string): GroupSlot {
+    let slot = slots.get(groupID)
+    if (slot === undefined) {
+      slot = { generation: 0, owner: null, load: null }
+      slots.set(groupID, slot)
+    }
+    return slot
+  }
+  function invalidate(slot: GroupSlot): void {
+    slot.generation++
+    slot.owner = null
+  }
+  function publish(slot: GroupSlot, previous: RegistryOwner | null): void {
+    if (previous !== null && previous !== slot.owner) previous.runtime.publish(null)
+    if (slot.owner !== null) slot.owner.runtime.publish(slot.owner.value.snapshot)
+  }
+  async function load(
+    reads: EntryReads,
+    groupID: string,
+    slot: GroupSlot,
+    generation = slot.generation,
+  ) {
+    if (slot.generation !== generation) throw new StaleRegistryGeneration()
+    const { value, control } = await loadValidatedGroup(
+      reads,
+      groupID,
+      slot.owner?.value ?? null,
+      environment,
+    )
+    if (slot.generation !== generation) throw new StaleRegistryGeneration()
+    if (slot.owner === null || slot.owner.key.incarnation !== value.key.incarnation) {
+      const owner: RegistryOwner = {
+        key: { ...value.key },
+        value,
+        admission: admissionFor(value, control),
+        runtime: createRegistryRuntime(),
+        hooks: new Set(),
+        access: null,
+      }
+      owner.access = createRegistryAccess({
+        owner,
+        capability,
+        environment,
+        load: (reads) => load(reads, groupID, slot),
+        publish: () => publish(slot, owner),
+        assertCurrent: () => {
+          if (slot.owner !== owner)
+            throw new DisplacedGroupHandleError('Registry owner is no longer current')
+        },
+        invalidate: () => {
+          if (slot.owner === owner) invalidate(slot)
+        },
+      })
+      slot.owner = owner
+    } else {
+      slot.owner.value = value
+      slot.owner.admission = admissionFor(value, control)
+    }
+    return value
+  }
+  const registry: GroupHandleRegistry = {
+    start,
+    async access(groupID) {
+      await start()
+      const slot = groupSlot(groupID)
+      if (slot.load !== null && slot.load.generation === slot.generation)
+        return await slot.load.promise
+      let generation = slot.generation
+      const previous = slot.owner
+      let promise!: Promise<RegistryHandleAccess>
+      promise = (async () => {
+        try {
+          for (;;) {
+            try {
+              const access = await capability.read(groupID, async (reads) => {
+                await load(reads, groupID, slot, generation)
+                const access = slot.owner?.access
+                if (access === null || access === undefined)
+                  throw new GroupUnavailableError({ reason: 'invalid' })
+                return access
+              })
+              if (slot.generation !== generation) throw new StaleRegistryGeneration()
+              publish(slot, previous)
+              return access
+            } catch (error) {
+              if (!(error instanceof StaleRegistryGeneration)) {
+                if (slot.generation === generation) invalidate(slot)
+                publish(slot, previous)
+                throw error
+              }
+              // Re-enter Read: the active lifetime must permit loading before restoration retries.
+              generation = slot.generation
+              if (slot.load?.promise === promise) slot.load.generation = generation
+            }
+          }
+        } finally {
+          if (slot.load?.promise === promise) slot.load = null
+        }
+      })()
+      slot.load = { generation, promise }
+      return await promise
+    },
+  }
+  liveRegistries.set(binding, registry)
+  return registry
+}
