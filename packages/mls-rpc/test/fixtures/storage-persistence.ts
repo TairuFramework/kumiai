@@ -42,6 +42,8 @@ import {
   assertMemoryWrite,
   createGroupStateStores,
   createMemoryPrepareTransaction,
+  memoryTransactionEntry,
+  memoryTransactionFailureSignal,
 } from '../../src/memory-group-state.js'
 import { groupOwnerKey } from '../../src/memory-incarnation-stores.js'
 import * as packageReads from '../../src/memory-package-stores.js'
@@ -220,6 +222,22 @@ export async function createStorageFixture(params: {
     completed: Promise<void>
     done(): void
   }>()
+  function trackPendingFault(fault: PendingCommitFault): PendingCommitFault {
+    const { promise, resolve } = Promise.withResolvers<void>()
+    const owner = { fault, rejected: false, completed: promise, done: resolve }
+    pending.add(owner)
+    void fault.rejected.then(() => {
+      owner.rejected = true
+    })
+    return {
+      ...fault,
+      async finish(outcome) {
+        await fault.finish(outcome)
+        owner.done()
+        pending.delete(owner)
+      },
+    }
+  }
   let nextWorkFault: ArmedWorkFault | undefined
   const workFaults = new Map<string, ArmedWorkFault>()
   const proofHolds = new Map<
@@ -292,13 +310,27 @@ export async function createStorageFixture(params: {
               if (armed !== undefined) {
                 workFaults.delete(mutationID)
                 armed.mutation.resolve(mutationID)
+                const attempt = entry.attempt()
+                let selected: MemoryTransaction | undefined
+                // Work notification precedes backend work; select by its explicit owner/attempt binding.
+                const select = (tx: MemoryTransaction) => {
+                  if (
+                    selected === undefined &&
+                    memoryTransactionEntry(tx.rows) === entry &&
+                    memoryTransactionFailureSignal(tx.rows) === attempt.signal
+                  )
+                    selected = tx
+                  return selected === tx
+                }
                 if (armed.point === 'pending') {
-                  const fault = fixture.rejectCommitPending()
+                  const fault = trackPendingFault(
+                    memoryFaults(database).rejectCommitPending(select),
+                  )
                   armed.backend.resolve(fault)
                   void fault.rejected.then(() => armed.rejected.resolve())
                 } else if (armed.point === 'commit-then-reject')
-                  memoryFaults(database).commitThenReject()
-                else memoryFaults(database).failNext(armed.point)
+                  memoryFaults(database).commitThenReject(select)
+                else memoryFaults(database).failNext(armed.point, select)
               }
             }
             const nextSignal = entry.attempt().signal
@@ -651,21 +683,7 @@ export async function createStorageFixture(params: {
     },
     rejectCommitPending() {
       active()
-      const fault = memoryFaults(db).rejectCommitPending()
-      const { promise, resolve } = Promise.withResolvers<void>()
-      const owner = { fault, rejected: false, completed: promise, done: resolve }
-      pending.add(owner)
-      void fault.rejected.then(() => {
-        owner.rejected = true
-      })
-      return {
-        ...fault,
-        async finish(outcome) {
-          await fault.finish(outcome)
-          owner.done()
-          pending.delete(owner)
-        },
-      }
+      return trackPendingFault(memoryFaults(db).rejectCommitPending())
     },
     holdNextSeal() {
       active()

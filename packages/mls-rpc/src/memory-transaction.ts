@@ -277,13 +277,13 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
           },
           changed() {
             memoryTransactionChanged(tx.rows)
-            if (faults.take('after-first-write')) {
+            if (faults.take('after-first-write', tx)) {
               writeFailure = new Error('Injected after-first-write failure')
               throw writeFailure
             }
           },
           read() {
-            if (faults.take('status-read')) throw new Error('Injected status-read failure')
+            if (faults.take('status-read', tx)) throw new Error('Injected status-read failure')
           },
         }
         views[name] = guardedMap(mapParams)
@@ -430,8 +430,8 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
         }
         owner.active = false
         if (writeFailure !== undefined) throw writeFailure
-        if (faults.take('before-commit')) throw new Error('Injected before-commit failure')
-        const fault = faults.takeCommit()
+        if (faults.take('before-commit', tx)) throw new Error('Injected before-commit failure')
+        const fault = faults.takeCommit(tx)
         if (fault !== undefined) {
           retained = true
           if (fault === 'reject') {

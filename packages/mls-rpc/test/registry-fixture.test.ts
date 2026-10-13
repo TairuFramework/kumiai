@@ -11,12 +11,14 @@ import { createVerdictJudge } from '../src/recovery.js'
 import { decodeRecoveryCandidate } from '../src/recovery-codec.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { validateRegistryHandle } from '../src/registry/validation.js'
+import { deferred } from '../src/runtime.js'
 import {
   createRegistryFixture,
   type RegistryFixtureBase,
   registryFixtureRestore,
 } from './fixtures/registry.js'
 import { createRegistryWelcomeHistory } from './fixtures/registry-welcome.js'
+import { makeStorageSeed } from './fixtures/storage-seed.js'
 
 expectTypeOf<RegistryFixtureBase>().toExtend<ConformanceRegistryFixtureBase<GroupHandle>>()
 expectTypeOf<keyof RegistryFixtureBase>().toEqualTypeOf<
@@ -176,6 +178,99 @@ for (const mode of ['real-mls', 'double'] as const) {
         }
       },
     )
+
+    for (const arming of ['next', 'known'] as const) {
+      test.each(['before-commit', 'commit-then-reject', 'pending', 'after-first-write'] as const)(
+        `work fault isolates the selected transaction (${arming}, %s)`,
+        async (point) => {
+          const fixture = await create('seeded')
+          const unrelated = await makeStorageSeed({
+            id: `${groupID}-write`,
+            incarnation: 1,
+            epoch: 0,
+            mode,
+            identity: fixture.identity,
+            options: fixture.environment.options,
+          })
+          await fixture.installRows(unrelated)
+          const entry = entryCapability(fixture.device.groups)
+          if (entry === null) throw new Error('Missing capability')
+          const before = await fixture.device.groups.load(groupID)
+          const work = deferred<void>()
+          const released = deferred<void>()
+          const mutationID = 'isolated-work'
+          let proofs = 0
+          fixture.onPhase('work', async () => {
+            work.resolve()
+            await released.promise
+          })
+          fixture.onPhase('proof', () => {
+            proofs++
+          })
+          const pending =
+            point !== 'pending'
+              ? undefined
+              : arming === 'next'
+                ? fixture.armNextWorkFault('pending')
+                : fixture.armWorkFault(mutationID, 'pending')
+          if (point !== 'pending') {
+            if (arming === 'next') fixture.armNextWorkFault(point)
+            else fixture.armWorkFault(mutationID, point)
+          }
+          const operation = fixture.device.groups
+            .ports(key)
+            .control.apply({ strand: { reason: 'lost-state' } }, mutationID)
+            .then(
+              () => undefined,
+              (error: unknown) => error,
+            )
+          let finished = false
+          try {
+            await work.promise
+            await expect(
+              entry.read(`${groupID}-first-read`, (reads) => reads.lifetime()),
+            ).resolves.toBeNull()
+            await expect(
+              fixture.device.groups
+                .ports(unrelated.key)
+                .control.apply({ strand: { reason: 'lost-state' } }, 'unrelated-write'),
+            ).resolves.toBeUndefined()
+            expect((await fixture.device.groups.load(unrelated.key.groupID))?.revision).toBe(2)
+            expect(
+              (await fixture.device.groups.ports(unrelated.key).control.load()).strand,
+            ).toEqual({
+              reason: 'lost-state',
+            })
+            expect(proofs).toBe(0)
+            released.resolve()
+            if (pending !== undefined) {
+              await pending.rejected
+              await pending.finish('rollback')
+              finished = true
+            }
+            const error = await operation
+            if (point === 'commit-then-reject') expect(error).toBeUndefined()
+            else if (point === 'pending') expect(error).toBeInstanceOf(Error)
+            else expect(error).toEqual(new Error(`Injected ${point} failure`))
+            expect(proofs).toBe(point === 'commit-then-reject' || point === 'pending' ? 1 : 0)
+            expect((await fixture.device.groups.load(groupID))?.revision).toBe(
+              (before?.revision ?? 0) + (point === 'commit-then-reject' ? 1 : 0),
+            )
+            expect((await fixture.device.groups.ports(key).control.load()).strand).toEqual(
+              point === 'commit-then-reject' ? { reason: 'lost-state' } : null,
+            )
+          } finally {
+            released.resolve()
+            if (pending !== undefined && !finished) {
+              await pending.rejected
+              await pending.finish('rollback')
+            }
+            await operation
+            await fixture.close()
+          }
+        },
+      )
+    }
 
     test.each(['commit', 'rollback'] as const)(
       'pending work is controllable (%s)',
