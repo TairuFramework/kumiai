@@ -1,11 +1,12 @@
 import type { GroupHandle } from '@kumiai/mls'
-import type { SendAdmission } from '@kumiai/rpc'
+import type { AdoptionExpected, SendAdmission } from '@kumiai/rpc'
 
 import type { ControlReadScope } from '../access.js'
 import type {
   DevicePersistence,
   EpochIdentity,
   GroupKey,
+  GroupRecoveryTrust,
   GroupStateRecord,
   GroupTransaction,
 } from '../persistence-types.js'
@@ -30,9 +31,14 @@ export type RegistryHandleAccess = {
   readControl<T>(fn: (scope: ControlReadScope) => Promise<T>): Promise<T>
   onRetire(hook: () => Promise<void>): () => void
 }
+export type RecoverySource = AdoptionExpected & {
+  trust: GroupRecoveryTrust
+  lifetimeRevision: number
+}
 export type GroupHandleRegistry = {
   start(): Promise<void>
   access(groupID: string): Promise<RegistryHandleAccess>
+  recoverySource(groupID: string): Promise<RecoverySource>
 }
 export type ReadableGroupState = GroupStateRecord & { deleted: false; state: Uint8Array }
 

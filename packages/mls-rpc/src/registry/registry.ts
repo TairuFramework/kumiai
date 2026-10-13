@@ -10,6 +10,7 @@ import type { GroupTransaction } from '../persistence-types.js'
 import { createRegistryAccess, type RegistryOwner } from './access.js'
 import { admissionFor, type ColdEnvironment, loadValidatedGroup } from './cold.js'
 import { createRegistryRuntime } from './runtime.js'
+import { readRecoverySource } from './source.js'
 import type {
   GroupHandleRegistry,
   GroupHandleRegistryParams,
@@ -129,6 +130,9 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   }
   const registry: GroupHandleRegistry = {
     start,
+    recoverySource(groupID) {
+      return capability.read(groupID, (reads) => readRecoverySource(reads, groupID))
+    },
     async access(groupID) {
       await start()
       const slot = groupSlot(groupID)
