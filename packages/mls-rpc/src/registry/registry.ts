@@ -65,7 +65,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   }
   const slots = new Map<string, GroupSlot>()
   const observers = new Set<() => void>()
-  const deleting = new Set<Promise<void>>()
+  const inflight = new Set<Promise<unknown>>()
   let closing = false
   let disposal: Promise<void> | null = null
   let starting: Promise<void> | null = null
@@ -73,6 +73,14 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   function assertOpen(): void {
     if (capability.failureSignal?.aborted) throw capability.failureSignal.reason
     if (closing) throw new DisplacedGroupHandleError('Registry is disposed')
+  }
+  function track<TResult>(pending: Promise<TResult>): Promise<TResult> {
+    inflight.add(pending)
+    void pending.then(
+      () => inflight.delete(pending),
+      () => inflight.delete(pending),
+    )
+    return pending
   }
   async function start(): Promise<void> {
     assertOpen()
@@ -242,6 +250,8 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   async function deleteGroup(requestedKey: GroupKey): Promise<void> {
     assertOpen()
     const key = { ...requestedKey }
+    retirement.assertAvailable(key.groupID)
+    await start()
     const slot = groupSlot(key.groupID)
     const attempt = retirement.beginRetirement(key)
     let unknown = false
@@ -291,7 +301,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     closing = true
     disposal = (async () => {
       try {
-        await Promise.allSettled([...(starting === null ? [] : [starting]), ...deleting])
+        await Promise.allSettled([...(starting === null ? [] : [starting]), ...inflight])
         const results = await Promise.allSettled(
           [...slots].map(async ([groupID, slot]) => {
             const key = slot.hooks?.key ?? slot.owner?.key
@@ -334,30 +344,32 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     })()
     return disposal
   }
+  const seed = createRegistrySeed({
+    capability,
+    retirement,
+    environment: environment.recovery,
+    ownerDID: environment.ownerDID,
+    start,
+  })
+  const switchIncarnation = createRegistrySwitch({
+    persistence: persistence.groups,
+    capability,
+    retirement,
+    recovery: environment.recovery,
+    ownerDID: environment.ownerDID,
+  })
   const registry: GroupHandleRegistry = {
     start,
-    seed: createRegistrySeed({
-      capability,
-      retirement,
-      environment: environment.recovery,
-      ownerDID: environment.ownerDID,
-      start,
-    }),
-    switchIncarnation: createRegistrySwitch({
-      persistence: persistence.groups,
-      capability,
-      retirement,
-      recovery: environment.recovery,
-      ownerDID: environment.ownerDID,
-    }),
+    async seed(group, options) {
+      assertOpen()
+      return await track(seed(group, options))
+    },
+    async switchIncarnation(candidate, options) {
+      assertOpen()
+      return await track(switchIncarnation(candidate, options))
+    },
     delete(key) {
-      const pending = deleteGroup(key)
-      deleting.add(pending)
-      void pending.then(
-        () => deleting.delete(pending),
-        () => deleting.delete(pending),
-      )
-      return pending
+      return track(deleteGroup(key))
     },
     dispose,
     recoverySource(groupID) {

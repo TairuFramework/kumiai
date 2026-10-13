@@ -1,3 +1,4 @@
+import { setImmediate as waitForTurn } from 'node:timers/promises'
 import { GroupControlUnsettledError } from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
@@ -19,6 +20,8 @@ import {
   retireIncarnation,
   serveRetiredObligations,
 } from '../src/registry/retired.js'
+import { registryRetirement } from '../src/registry/retirement.js'
+import type { GroupHandleRegistry } from '../src/registry/types.js'
 import { deferred } from '../src/runtime.js'
 import {
   createRegistryFixture,
@@ -79,6 +82,35 @@ function overrideCapability(fixture: RegistryFixtureBase, value: ReturnType<type
 for (const mode of ['real-mls', 'double'] as const) {
   describe(`registry deletion and disposal -- ${mode}`, () => {
     const create = () => createRegistryFixture({ mode, setup: 'seeded', groupID })
+    async function mutationCall(
+      fixture: RegistryFixtureBase,
+      owner: GroupHandleRegistry,
+      kind: 'seed' | 'switch',
+    ) {
+      if (kind === 'seed') {
+        const candidate = await fixture.makeHandle(0, `${groupID}-new`)
+        return () => owner.seed(candidate, { packageUse: null })
+      }
+      const recovery = await fixture.confirmedRecovery(key, { confirm: true })
+      return () =>
+        owner.switchIncarnation(recovery.candidate, {
+          source: recovery.source,
+          rejoinID: recovery.record.id,
+          proof: recovery.proof,
+          write: {
+            mutationID: 'disposal-switch',
+            source: { rejoinID: recovery.record.id },
+            destination: {
+              control: {
+                cursor: {
+                  position: recovery.proof.position,
+                  epoch: Number(recovery.candidate.epoch),
+                },
+              },
+            },
+          },
+        })
+    }
     async function installOtherGroup(fixture: RegistryFixtureBase) {
       const otherKey = { groupID: 'group-B', incarnation: 1 }
       const seed = await makeStorageSeed({
@@ -132,6 +164,54 @@ for (const mode of ['real-mls', 'double'] as const) {
       )
       return { groupID, incarnation: 2 }
     }
+
+    test.each(['device', 'group'] as const)(
+      'delete refuses unchanged while %s restore work is pending',
+      async (scope) => {
+        const fixture = await create()
+        try {
+          if (scope === 'device') {
+            await fixture.device.transition(
+              {
+                mutationID: 'pending-device-restore',
+                expectedRevision: (await fixture.device.load()).revision,
+                group: null,
+              },
+              async (stores) => {
+                await stores.restore.save({
+                  id: 'delete-restore',
+                  stage: 'groups',
+                  remainingGroups: [groupID],
+                })
+              },
+            )
+          } else {
+            await fixture.device.groups.transition(
+              await nextChange(fixture.device.groups, groupID, 'pending-group-restore'),
+              async (stores) => {
+                const lifetime = await stores.lifetime.load()
+                if (lifetime === null) throw new Error('Missing source lifetime')
+                await stores.lifetime.save({
+                  ...lifetime,
+                  revision: lifetime.revision + 1,
+                  mutationID: 'pending-group-restore',
+                  restorePending: true,
+                })
+              },
+            )
+          }
+          const owner = registry(fixture)
+          const before = await fixture.inspectRows()
+          await expect(owner.delete(key)).rejects.toMatchObject({ reason: 'restore-pending' })
+          expect(await fixture.inspectRows()).toEqual(before)
+          expect(() => registryRetirement(owner).assertAvailable(groupID)).not.toThrow()
+          expect(await fixture.device.groups.loadState(key)).toMatchObject({ deleted: false })
+          await owner.dispose()
+        } finally {
+          await fixture.close()
+        }
+      },
+    )
 
     test.each(['outcome', 'welcome'] as const)(
       'delete refuses old-incarnation owed %s',
@@ -621,6 +701,131 @@ for (const mode of ['real-mls', 'double'] as const) {
         await fixture.close()
       }
     })
+
+    test.each(['seed', 'switch'] as const)(
+      'disposed registry refuses %s without writing after binding replacement',
+      async (kind) => {
+        const fixture = await create()
+        try {
+          const owner = registry(fixture)
+          const mutate = await mutationCall(fixture, owner, kind)
+          await owner.dispose()
+          const replacement = registry(fixture)
+          try {
+            const before = await fixture.inspectRows()
+            await expect(mutate()).rejects.toBeInstanceOf(DisplacedGroupHandleError)
+            expect(await fixture.inspectRows()).toEqual(before)
+            expect((await replacement.access(groupID)).key).toEqual(key)
+          } finally {
+            await replacement.dispose()
+          }
+        } finally {
+          await fixture.close()
+        }
+      },
+    )
+
+    test.each(['seed', 'switch'] as const)(
+      'dispose waits for issued %s suspended between read and mutation phases',
+      async (kind) => {
+        const fixture = await create()
+        const entered = deferred<void>()
+        const release = deferred<void>()
+        let issued: Promise<unknown> | undefined
+        let disposing: Promise<void> | undefined
+        try {
+          const original = capability(fixture)
+          let suspended = false
+          let armed = false
+          overrideCapability(fixture, {
+            ...original,
+            async read(groupID, fn) {
+              const result = await original.read(groupID, fn)
+              if (armed && !suspended) {
+                suspended = true
+                entered.resolve()
+                await release.promise
+              }
+              return result
+            },
+          })
+          const owner = registry(fixture)
+          await owner.start()
+          const mutate = await mutationCall(fixture, owner, kind)
+          armed = true
+          issued = mutate()
+          await entered.promise
+          let finished = false
+          disposing = owner.dispose().then(() => {
+            finished = true
+          })
+          await waitForTurn()
+          expect(finished).toBe(false)
+          expect(() => registry(fixture)).toThrow('live registry')
+          release.resolve()
+          expect(await issued).toEqual({
+            groupID: kind === 'seed' ? `${groupID}-new` : groupID,
+            incarnation: kind === 'seed' ? 1 : 2,
+          })
+          await disposing
+          const replacement = registry(fixture)
+          await replacement.dispose()
+        } finally {
+          release.resolve()
+          await issued
+          await disposing
+          await fixture.close()
+        }
+      },
+    )
+
+    test.each(['commit', 'rollback'] as const)(
+      'dispose retains an issued switch hold until unknown outcome resolves as %s',
+      async (result) => {
+        const fixture = await create()
+        let issued: Promise<unknown> | undefined
+        let disposing: Promise<void> | undefined
+        const fault = fixture.armWorkFault('disposal-switch', 'pending')
+        const proof = fixture.holdProof('disposal-switch')
+        try {
+          const owner = registry(fixture)
+          const mutate = await mutationCall(fixture, owner, 'switch')
+          const access = await owner.access(groupID)
+          issued = mutate().catch((error: unknown) => error)
+          await fault.rejected
+          await proof.started
+          let finished = false
+          disposing = owner.dispose().then(() => {
+            finished = true
+          })
+          await waitForTurn()
+          expect(finished).toBe(false)
+          expect(access.runtime.snapshot()?.incarnation).toBe(1)
+          expect(() => registryRetirement(owner).assertAvailable(groupID)).toThrow(
+            RegistryRetiringError,
+          )
+          expect(() => registry(fixture)).toThrow('live registry')
+          await fault.finish(result)
+          proof.release()
+          await issued
+          await disposing
+          expect(await fixture.device.groups.load(groupID)).toMatchObject({
+            activeIncarnation: result === 'commit' ? 2 : 1,
+          })
+          expect((await fixture.device.groups.ports(key).control.load()).rejoin?.stage).toBe(
+            result === 'commit' ? 'adopted' : 'confirmed',
+          )
+          const replacement = registry(fixture)
+          await replacement.dispose()
+        } finally {
+          await fault.finish(result)
+          proof.release()
+          await issued
+          await disposing
+          await fixture.close()
+        }
+      },
+    )
 
     test('dispose waits completion work submitted by a rejecting hook before releasing the binding', async () => {
       const fixture = await create()
