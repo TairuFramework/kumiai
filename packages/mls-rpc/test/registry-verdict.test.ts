@@ -10,6 +10,7 @@ import {
   parseMLSCredentialIdentity,
   processWelcome,
   type RecoveryVerdict,
+  readGroupAnchorExtension,
 } from '@kumiai/mls'
 import { asLogPosition } from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
@@ -153,6 +154,44 @@ for (const mode of ['real-mls', 'double'] as const) {
       await refuses(s, 'ineligible')
     })
 
+    test('cached anchor cannot bypass retained revoked signer', async () => {
+      const s = await setup(mode)
+      const controller = s.candidate.anchor.controller
+      if (controller == null) throw new Error('Missing bound controller')
+      s.source.trust.registry.devices = new Map(s.source.trust.registry.devices).set(
+        normalizeDID(s.signer.id),
+        { controller, status: 'revoked' },
+      )
+      await refuses(s, 'ineligible')
+      const before = encodeClientState(s.candidate.state)
+      delete s.candidate.anchor.controller
+      expect(encodeClientState(s.candidate.state)).toEqual(before)
+      expect(readGroupAnchorExtension(s.candidate)?.extensionData).toEqual(
+        s.source.trust.genesisAnchor,
+      )
+      await refuses(s, 'candidate')
+    })
+
+    test.each([
+      'creatorDID',
+      'version',
+      'controller',
+      'leafLifetime',
+      'trustedGrantLifetime',
+      'app',
+    ] as const)('cached anchor association refuses changed %s', async (field) => {
+      const s = await setup(mode)
+      const anchor = s.candidate.anchor
+      if (field === 'creatorDID') anchor.creatorDID = s.signer.id
+      if (field === 'version') anchor.version += 1
+      if (field === 'controller') anchor.controller = s.signer.id
+      if (field === 'leafLifetime') anchor.leafLifetime = (anchor.leafLifetime ?? 86_400) + 1
+      if (field === 'trustedGrantLifetime')
+        anchor.trustedGrantLifetime = (anchor.trustedGrantLifetime ?? 2_592_000) + 1
+      if (field === 'app') anchor.app = { changed: true }
+      await refuses(s, 'candidate')
+    })
+
     test.each([
       ['request', { requestID: 'another-request' }, 'malformed'],
       ['group', { groupID: 'another-group' }, 'malformed'],
@@ -283,6 +322,31 @@ for (const mode of ['real-mls', 'double'] as const) {
       s.source.key = { incarnation: s.source.key.incarnation, groupID: s.source.key.groupID }
       await expect(verifyRegistryResync(s)).resolves.toBeUndefined()
     })
+
+    test.each(['binding', 'prefix event'] as const)(
+      'source binding association is independent of property order: %s',
+      async (part) => {
+        const s = await setup(mode)
+        const binding = s.source.trust.binding
+        if (binding == null) throw new Error('Missing retained binding')
+        s.source.trust.binding =
+          part === 'binding'
+            ? {
+                capability: binding.capability,
+                prefix: binding.prefix,
+                id: binding.id,
+                ...(binding.holderGrant == null ? {} : { holderGrant: binding.holderGrant }),
+              }
+            : {
+                ...binding,
+                prefix: binding.prefix.map((entry) => ({
+                  ...Object.fromEntries(Object.entries(entry).reverse()),
+                  event: Object.fromEntries(Object.entries(entry.event).reverse()),
+                })) as ControllerBinding['prefix'],
+              }
+        await expect(verifyRegistryResync(s)).resolves.toBeUndefined()
+      },
+    )
 
     test('unbound confirmed does not require an own leaf in the retained source tree', async () => {
       const s = await setup(mode, false)

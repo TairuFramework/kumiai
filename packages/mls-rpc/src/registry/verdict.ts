@@ -1,6 +1,7 @@
 import { normalizeDID } from '@kokuin/token'
 import {
   type ClientState,
+  decodeGroupAnchor,
   encodeClientState,
   type GroupHandle,
   openRecoveryVerdict,
@@ -16,7 +17,6 @@ import {
   type RejoinRecord,
 } from '@kumiai/rpc'
 
-import { encodeStoredValue } from '../persistence-codec.js'
 import {
   type RegistryResyncRefusalReason,
   RegistryResyncRefusedError,
@@ -34,7 +34,32 @@ function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
 }
 
 function sameValue(left: unknown, right: unknown): boolean {
-  return sameBytes(encodeStoredValue(left), encodeStoredValue(right))
+  if (Object.is(left, right)) return true
+  if (left instanceof Uint8Array || right instanceof Uint8Array)
+    return left instanceof Uint8Array && right instanceof Uint8Array && sameBytes(left, right)
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false
+    for (let index = 0; index < left.length; index++) {
+      if (!sameValue(left[index], right[index])) return false
+    }
+    return true
+  }
+  if (left == null || right == null || typeof left !== 'object' || typeof right !== 'object')
+    return false
+  if (
+    ![Object.prototype, null].includes(Object.getPrototypeOf(left)) ||
+    ![Object.prototype, null].includes(Object.getPrototypeOf(right))
+  )
+    return false
+  const leftRecord = left as Record<string, unknown>
+  const rightRecord = right as Record<string, unknown>
+  const keys = Object.keys(leftRecord)
+  return (
+    keys.length === Object.keys(rightRecord).length &&
+    keys.every(
+      (key) => Object.hasOwn(rightRecord, key) && sameValue(leftRecord[key], rightRecord[key]),
+    )
+  )
 }
 
 function ownCredential(state: ClientState) {
@@ -201,6 +226,8 @@ export async function verifyRegistryResync(params: {
       ephemeralPrivateKey: record.requestKey,
     })
     requireMatch(opened.verdict.verdict === 'confirmed', 'unaccepted')
+    // The judge reads the mutable cached anchor, not the authenticated extension bytes.
+    requireMatch(sameValue(candidate.anchor, decodeGroupAnchor(anchor)), 'candidate')
     if (judge.judgeVerdict(opened) !== 'authoritative')
       throw new RegistryResyncRefusedError({ reason: judge.verdictRefusal(opened) ?? 'tuple' })
   } catch (cause) {
