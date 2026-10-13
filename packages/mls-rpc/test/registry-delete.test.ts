@@ -272,6 +272,31 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
+    test('delete displacement listeners can read the same-group root after release', async () => {
+      const fixture = await create()
+      try {
+        const owner = registry(fixture)
+        const access = await owner.access(groupID)
+        const reads: Array<Promise<unknown>> = []
+        const accesses: Array<Promise<unknown>> = []
+        access.runtime.onEpochChanged((snapshot) => {
+          if (snapshot !== null) return
+          try {
+            reads.push(fixture.device.groups.load(groupID))
+          } catch (error) {
+            reads.push(Promise.reject(error))
+          }
+          accesses.push(owner.access(groupID).catch((error: unknown) => error))
+        })
+        await owner.delete(key)
+        expect(reads).toHaveLength(1)
+        await expect(Promise.all(reads)).resolves.toMatchObject([{ activeIncarnation: null }])
+        expect(await Promise.all(accesses)).toMatchObject([{ name: 'GroupUnavailableError' }])
+      } finally {
+        await fixture.close()
+      }
+    })
+
     test('delete drains handler root reads and completion outside the slot', async () => {
       const fixture = await create()
       const release = deferred<void>()

@@ -258,6 +258,11 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     const slot = groupSlot(key.groupID)
     const attempt = retirement.beginRetirement(key)
     let unknown = false
+    let stopObservation = () => {}
+    function settle(outcome: 'committed' | 'rolled-back'): void {
+      attempt.settle(outcome)
+      stopObservation()
+    }
     try {
       for (let round = 0; round < 3; round++) {
         await attempt.drain()
@@ -265,6 +270,10 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         const generation = slot.generation
         const mutationID = crypto.randomUUID()
         try {
+          // Project displacement first; listeners dispatch only after owner release.
+          stopObservation = capability.observe(key.groupID, (observation) => {
+            if (observation.mutationID === mutationID) settle('committed')
+          })
           await capability.run(
             { groupID: key.groupID, mutationID },
             async (reads) => {
@@ -282,21 +291,23 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
                 current.pending !== 0
               )
                 throw new DeleteDrainChanged()
-              stores.tx.onCommit(() => attempt.settle('committed'))
-              stores.tx.onRollback(() => attempt.settle('rolled-back'))
+              stores.tx.onRollback(() => settle('rolled-back'))
               await deleteIncarnations(stores, key, mutationID)
             },
           )
           return
         } catch (error) {
-          if (error instanceof DeleteDrainChanged) continue
+          if (error instanceof DeleteDrainChanged) {
+            stopObservation()
+            continue
+          }
           unknown = error instanceof StorageOutcomeUnknownError
           throw error
         }
       }
       throw new GroupControlUnsettledError('Group work changed during three deletion drains')
     } finally {
-      if (!unknown) attempt.settle('rolled-back')
+      if (!unknown) settle('rolled-back')
     }
   }
   function dispose(): Promise<void> {

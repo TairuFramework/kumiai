@@ -513,6 +513,32 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
+    test.each(['missing', 'recovery'] as const)(
+      'ordinary adopt propagates the typed error for %s journal provenance',
+      async (kind) => {
+        const fixture = await create()
+        try {
+          const access = await registry(fixture).access(groupID)
+          const { candidate, expected, write } = await accepted(fixture, access)
+          const before = await evidence(fixture, access)
+          if (write.expected === undefined) throw new Error('Missing accepted provenance')
+          if (kind === 'missing') delete write.expected.journal
+          else
+            write.expected.journal = encodeStoredValue({
+              version: 1,
+              candidate: hostBytes(candidate),
+              requestID: 'recovery',
+            })
+          await expect(access.adopt(candidate, expected, write)).rejects.toMatchObject({
+            name: 'RegistryRecoveryReplacementError',
+          })
+          expect(await evidence(fixture, access)).toEqual(before)
+        } finally {
+          await fixture.close()
+        }
+      },
+    )
+
     test('ordinary replace refuses recovery envelope and absent provenance', async () => {
       const fixture = await create()
       try {

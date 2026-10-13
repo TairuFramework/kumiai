@@ -188,14 +188,23 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
     if (decision === 'alreadyJoined') return key
     const mutationID = crypto.randomUUID()
     let attempt: RetirementAttempt | null = null
+    let expectedAdmission = admission
     try {
       if (decision === 'readmit' && source !== null) {
         attempt = params.retirement.beginRetirement(source)
         await attempt.drain()
+        const drained = await params.capability.read(groupID, readAdmission)
+        if (
+          judge(drained) !== decision ||
+          drained.lifetime?.activeIncarnation !== source.incarnation ||
+          drained.lifetime?.latestIncarnation !== admission.lifetime?.latestIncarnation
+        )
+          throw new GroupStateConflictError('Seed admission moved')
+        expectedAdmission = drained
       }
       function recheck(inputs: AdmissionInputs): void {
         const current = judge(inputs)
-        if (current !== decision || !sameStoredValue(inputs, admission))
+        if (current !== decision || !sameStoredValue(inputs, expectedAdmission))
           throw new GroupStateConflictError('Seed admission moved')
       }
       const result = await params.capability.run(

@@ -3,6 +3,7 @@ import type {
   ConformanceAdoptionExpected,
   ConformanceAdoptionWrite,
   ConformanceControlChanges,
+  ConformanceControlSearchPort,
   ConformanceControlSnapshot,
   ConformanceRejoinRecord,
   ConformanceWelcomeObligation,
@@ -180,6 +181,7 @@ export type ConformanceRegistryFixtureBase<
   serveRetiredWelcomes(
     key: ConformanceGroupKey,
     deliver: (welcome: ConformanceWelcomeObligation) => Promise<void>,
+    search?: ConformanceControlSearchPort,
   ): Promise<{ remaining: Array<string>; failures: Array<unknown> }>
   installRows(rows: RegistryFixtureRows): Promise<void>
   inspectRows(): Promise<Record<string, Map<string, unknown>>>

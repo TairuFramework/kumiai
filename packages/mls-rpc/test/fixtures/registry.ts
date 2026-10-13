@@ -16,6 +16,7 @@ import {
   type ControlSlot,
   type WelcomeObligation,
 } from '@kumiai/rpc'
+import type { ConformanceControlSearchPort } from '@kumiai/rpc-conformance'
 import { createApplicationMessage } from 'ts-mls'
 
 import { encodeControlJournal } from '../../src/control-journal.js'
@@ -92,6 +93,7 @@ export type RegistryFixtureBase = {
   serveRetiredWelcomes(
     key: GroupKey,
     deliver: (welcome: WelcomeObligation) => Promise<void>,
+    search?: ConformanceControlSearchPort,
   ): Promise<{ remaining: Array<string>; failures: Array<unknown> }>
   advance(handle: GroupHandle): Promise<GroupHandle>
   welcomeHistory(kind: PackageUse['kind']): Promise<{
@@ -302,11 +304,27 @@ async function assemble(
       return handle.state.keySchedule.epochAuthenticator.slice()
     },
     acceptedOrdinary: (access, options) => acceptedOrdinary(fixture, access, options),
-    serveRetiredWelcomes: (key, deliverWelcome) =>
+    serveRetiredWelcomes: (key, deliverWelcome, search) =>
       serveRetiredObligations({
         persistence: fixture.device.groups,
         key,
-        search: { searchLog: async () => ({ kind: 'unknown' }) },
+        search: {
+          async searchLog(built, position) {
+            const result = await search?.searchLog(built, position)
+            if (result === undefined) return { kind: 'unknown' }
+            if (result.kind === 'superseded')
+              return { ...result, winner: asLogPosition(result.winner) }
+            if (result.kind !== 'first-valid') return result
+            return {
+              ...result,
+              proof: {
+                ...result.proof,
+                from: result.proof.from === null ? null : asLogPosition(result.proof.from),
+                position: asLogPosition(result.proof.position),
+              },
+            }
+          },
+        },
         deliverWelcome,
       }),
     async advance(handle) {

@@ -395,16 +395,47 @@ for (const mode of ['real-mls', 'double'] as const) {
         await fixture.close()
       }
     })
-    test('stale admission Read refuses on drift while group B proceeds', async () => {
+    test('readmission accepts completion and cursor writes from its retirement drain', async () => {
+      const fixture = await create('seeded')
+      try {
+        const owner = registry(fixture)
+        const access = await owner.access(groupID)
+        const before = await fixture.device.groups.load(groupID)
+        access.onRetire(async () => {
+          await fixture.device.groups.ports(key).control.apply({ deleteOutcomes: [] }, 'completion')
+          await fixture.device.groups.ports(key).cursor.save('draining-topic', 'finished')
+        })
+        await expect(
+          owner.seed(await fixture.makeHandle(2), { replace: true, packageUse }),
+        ).resolves.toEqual({ groupID, incarnation: 2 })
+        expect((await fixture.device.groups.load(groupID))?.revision).toBe(
+          (before?.revision ?? 0) + 3,
+        )
+        expect(await fixture.device.groups.ports(key).cursor.load('draining-topic')).toBe(
+          'finished',
+        )
+        expect(
+          await fixture.device.groups
+            .ports({ groupID, incarnation: 2 })
+            .cursor.load('draining-topic'),
+        ).toBeNull()
+        expect(access.runtime.snapshot()).toBeNull()
+      } finally {
+        await fixture.close()
+      }
+    })
+    test('post-drain admission Read refuses on drift while group B proceeds', async () => {
       const fixture = await create('seeded')
       try {
         const owner = registry(fixture)
         const access = await owner.access(groupID)
         access.onRetire(async () => {
-          await fixture.mutateMetadata(key, (value) => ({ ...(value as object), version: 99 }))
           expect(
             await owner.seed(await fixture.makeHandle(0, 'group-B'), { packageUse: null }),
           ).toEqual({ groupID: 'group-B', incarnation: 1 })
+          fixture.onPhase('work', async () => {
+            await fixture.mutateMetadata(key, (value) => ({ ...(value as object), version: 99 }))
+          })
         })
         await expect(
           owner.seed(await fixture.makeHandle(2), { replace: true, packageUse }),

@@ -580,6 +580,70 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
       }
     })
 
+    test.each(['first-valid', 'mismatched-proof', 'unknown'] as const)(
+      'retired Welcome release checks %s search evidence',
+      async (evidence) => {
+        const fixture = await create('empty')
+        try {
+          const history = await fixture.welcomeHistory('ordinary')
+          await fixture.registry.seed(history.exact, { packageUse: history.packageUse })
+          const access = await fixture.registry.access(groupID)
+          const source = await access.readControl(async ({ source }) => source)
+          await fixture.acceptedOrdinary(access)
+          const control = await fixture.device.groups.ports(key).control.load()
+          const slot = control.commitOnce
+          const acceptance = control.commitOnceAcceptance
+          if (slot === null || acceptance === null) throw new Error('Missing retained acceptance')
+          const proof = { ...acceptance, source }
+          const welcome: ConformanceWelcomeObligation = {
+            opID: slot.opID,
+            welcome: new Uint8Array([7, 8, 9]),
+            recipients: ['recipient'],
+          }
+          await fixture.installRows({
+            key,
+            control: { putWelcomes: [welcome], commitOnceAcceptance: proof },
+          })
+          await fixture.registry.seed(history.newer, {
+            replace: true,
+            packageUse: history.packageUse,
+          })
+          const restored = fixture.restoreCount(groupID)
+          const delivered: Array<ConformanceWelcomeObligation> = []
+          const result = await fixture.serveRetiredWelcomes(
+            key,
+            async (value) => {
+              expect(await fixture.device.groups.load(groupID)).toMatchObject({
+                activeIncarnation: 2,
+              })
+              delivered.push(value)
+            },
+            {
+              async searchLog(built) {
+                expect(built).toEqual(slot)
+                if (evidence === 'unknown') return { kind: 'unknown' }
+                return {
+                  kind: 'first-valid',
+                  proof:
+                    evidence === 'first-valid' ? proof : { ...proof, position: 'other-position' },
+                }
+              },
+            },
+          )
+          expect(delivered, 'retired Welcome requires matching first-valid evidence').toEqual(
+            evidence === 'first-valid' ? [welcome] : [],
+          )
+          expect(result).toMatchObject({
+            remaining: evidence === 'first-valid' ? [] : [welcome.opID],
+            failures: [],
+          })
+          expect(fixture.restoreCount(groupID)).toBe(restored)
+        } finally {
+          await fixture.close()
+        }
+      },
+    )
+
     test('delete refuses owed control, then tombstones and permanently displaces', async () => {
       const fixture = await create()
       try {
@@ -598,7 +662,27 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
         await fixture.device.groups
           .ports(key)
           .control.apply({ deleteOutcomes: ['owed'] }, 'ack-control')
+        const reads: Array<Promise<unknown>> = []
+        const accesses: Array<Promise<unknown>> = []
+        access.runtime.onEpochChanged((snapshot) => {
+          if (snapshot !== null) return
+          try {
+            reads.push(fixture.device.groups.load(groupID))
+          } catch (error) {
+            reads.push(Promise.reject(error))
+          }
+          accesses.push(caught(owner.access(groupID)))
+        })
         await owner.delete(key)
+        expect(reads).toHaveLength(1)
+        await expect(
+          Promise.all(reads),
+          'delete listeners run after owner release',
+        ).resolves.toMatchObject([{ activeIncarnation: null }])
+        expect(
+          await Promise.all(accesses),
+          'delete listeners run after retirement settles',
+        ).toMatchObject([{ error: { name: 'GroupUnavailableError' } }])
         expect(await fixture.device.groups.loadState(key)).toMatchObject({ deleted: true })
         expect(access.runtime.snapshot()).toBeNull()
         await expect(access.read(() => {})).rejects.toMatchObject({

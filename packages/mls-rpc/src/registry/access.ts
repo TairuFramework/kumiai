@@ -479,11 +479,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     try {
       return await ordinary(next, expected, write)
     } catch (error) {
-      if (
-        error instanceof RegistryRecoveryReplacementError ||
-        (error instanceof Error && error.name === 'ControlAdoptionMovedError')
-      )
-        return 'moved'
+      if (error instanceof Error && error.name === 'ControlAdoptionMovedError') return 'moved'
       throw error
     }
   }
