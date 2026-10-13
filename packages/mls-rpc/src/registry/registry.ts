@@ -25,7 +25,12 @@ import {
 } from './retirement.js'
 import { createRegistryRuntime } from './runtime.js'
 import { accountedRuntime } from './runtime-facts.js'
-import { bindRegistrySafety } from './safety.js'
+import {
+  bindRegistrySafety,
+  RetainedTrustUnavailableError,
+  readRetainedTrust,
+  trustUnavailableWriter,
+} from './safety.js'
 import { createRegistrySeed } from './seed.js'
 import { readRecoverySource } from './source.js'
 import { createRegistrySwitch } from './switch.js'
@@ -72,6 +77,40 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   function latch(key: GroupKey, reason: NonNullable<SafetyHold>): void {
     groupSlot(key.groupID)
     if (held(key) !== 'fork-halted') latches.set(keyID(key), reason)
+  }
+  const persistTrustUnavailable = trustUnavailableWriter({ entry: capability, latch })
+  async function diagnoseFailure(error: unknown): Promise<void> {
+    if (error instanceof RetainedTrustUnavailableError) await persistTrustUnavailable(error.key)
+  }
+  const diagnosing = new Set<string>()
+  function diagnoseObservation(observation: AccountedGroupObservation): void {
+    const key = observation.activeKey
+    if (
+      key === null ||
+      observation.control?.recoveryUnavailable != null ||
+      (observation.trustStatus === 'readable' &&
+        observation.trust !== null &&
+        observation.trust.spentEpochAuthenticators?.length !== 0)
+    )
+      return
+    const id = keyID(key)
+    if (diagnosing.has(id)) return
+    diagnosing.add(id)
+    const pending = (async () => {
+      try {
+        await capability.read(key.groupID, async (reads) => {
+          const lifetime = await reads.lifetime()
+          if (lifetime?.groupID === key.groupID && lifetime.activeIncarnation === key.incarnation)
+            await readRetainedTrust(reads, key)
+        })
+      } catch (error) {
+        await diagnoseFailure(error)
+      } finally {
+        diagnosing.delete(id)
+      }
+    })()
+    // Observations are advisory. Only the typed diagnosis can install a hold.
+    void track(pending).catch(() => {})
   }
   const observers = new Set<() => void>()
   const inflight = new Set<Promise<unknown>>()
@@ -169,6 +208,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
           const dispatch = notifications.get(observation)
           notifications.delete(observation)
           dispatch?.()
+          diagnoseObservation(observation)
         },
       )
       observers.add(unsubscribe)
@@ -243,6 +283,15 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         resolve: (mutationID) => persistence.groups.resolve(groupID, mutationID),
         load: (reads) => load(reads, groupID, slot, slot.generation, owner),
         publish: () => publish(slot, owner),
+        safetyHeld: () =>
+          held(owner.key) ??
+          (owner.admission.admissible
+            ? null
+            : owner.admission.reason === 'fork-halted' ||
+                owner.admission.reason === 'recovery-unavailable'
+              ? owner.admission.reason
+              : null),
+        diagnoseFailure,
         assertCurrent: () => {
           if (slot.owner !== owner)
             throw new DisplacedGroupHandleError('Registry owner is no longer current')
@@ -404,6 +453,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     environment: environment.recovery,
     ownerDID: environment.ownerDID,
     start,
+    held,
   })
   const switchIncarnation = createRegistrySwitch({
     persistence: persistence.groups,
@@ -413,6 +463,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     ownerDID: environment.ownerDID,
     // Issued switches remain tracked while disposal closes public admission.
     start: initialise,
+    held,
   })
   const registry: GroupHandleRegistry = {
     start,
@@ -428,14 +479,19 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       return track(deleteGroup(key))
     },
     dispose,
-    recoverySource(groupID) {
+    async recoverySource(groupID) {
       try {
         assertOpen()
         groupSlot(groupID)
       } catch (error) {
         return Promise.reject(error)
       }
-      return capability.read(groupID, (reads) => readRecoverySource(reads, groupID))
+      try {
+        return await capability.read(groupID, (reads) => readRecoverySource(reads, groupID))
+      } catch (error) {
+        await diagnoseFailure(error)
+        throw error
+      }
     },
     async access(groupID) {
       assertOpen()
@@ -469,6 +525,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
               retirement.assertGeneration(groupID, retirementGeneration)
               return access
             } catch (error) {
+              await diagnoseFailure(error)
               retirement.assertGeneration(groupID, retirementGeneration)
               retirement.assertAvailable(groupID)
               if (!(error instanceof StaleRegistryGeneration)) {
@@ -494,7 +551,13 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       return await promise
     },
   }
-  bindRegistrySafety(registry, { binding: registryBinding, entry: capability, latch, held })
+  bindRegistrySafety(registry, {
+    binding: registryBinding,
+    entry: capability,
+    latch,
+    held,
+    persistTrustUnavailable,
+  })
   bindRegistryRetirement(registry, retirement)
   liveRegistries.set(binding, registry)
   return registry

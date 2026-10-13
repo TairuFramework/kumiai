@@ -15,6 +15,7 @@ import type {
   GroupRecoveryTrust,
   GroupStateRecord,
 } from '../persistence-types.js'
+import { readRetainedTrust } from './safety.js'
 import type { GroupRuntimeSnapshot, ReadableGroupState } from './types.js'
 import { type RecoveryEnvironment, validateRegistryHandle } from './validation.js'
 
@@ -84,7 +85,7 @@ export async function loadValidatedGroup(
   if (lifetime.activeIncarnation === null) throw new GroupUnavailableError({ reason: 'deleted' })
   const key = { groupID, incarnation: lifetime.activeIncarnation }
   let metadata: StateMetadata | null
-  let trust: GroupRecoveryTrust | null
+  let trust: GroupRecoveryTrust
   let control: ControlSnapshot
   try {
     if (
@@ -95,13 +96,11 @@ export async function loadValidatedGroup(
       key.incarnation > lifetime.latestIncarnation
     )
       throw new GroupUnavailableError({ reason: 'invalid' })
-    metadata = await reads.metadata(key.incarnation)
-    // A surviving lifetime always requires retained trust, including incarnation one.
-    trust = await reads.trust()
     control = await reads.control(key.incarnation)
+    trust = await readRetainedTrust(reads, key)
+    metadata = await reads.metadata(key.incarnation)
     if (
       metadata === null ||
-      trust === null ||
       metadata.groupID !== groupID ||
       metadata.incarnation !== key.incarnation ||
       metadata.deleted ||

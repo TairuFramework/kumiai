@@ -1,5 +1,6 @@
 import { encodeClientState, type GroupHandle } from '@kumiai/mls'
 import { judgeWelcomeAdmission } from '@kumiai/mls-hub'
+import type { SafetyHold } from '@kumiai/rpc'
 
 import type { EntryCapability, EntryReads, StateMetadata } from '../entry-capability.js'
 import { sameStoredValue } from '../memory-incarnation-stores.js'
@@ -23,6 +24,7 @@ type AdmissionInputs = {
   lifetime: GroupLifetime | null
   metadata: StateMetadata | null
   trust: GroupRecoveryTrust | null
+  forkHalted?: boolean
 }
 type SeedDecision = 'join' | 'alreadyJoined' | 'readmit' | 'next-incarnation'
 
@@ -104,7 +106,8 @@ function metadataFailure(cause: unknown): never {
   throw cause
 }
 async function readAdmission(
-  reads: Pick<EntryReads, 'lifetime' | 'trust' | 'metadata'>,
+  reads: Pick<EntryReads, 'lifetime' | 'trust' | 'metadata' | 'control'>,
+  held: (key: GroupKey) => SafetyHold,
 ): Promise<AdmissionInputs> {
   let lifetime: GroupLifetime | null
   let trust: GroupRecoveryTrust | null
@@ -116,6 +119,20 @@ async function readAdmission(
     // biome-ignore lint/style/useErrorCause: The constructor forwards params.cause.
     throw new SeedAdmissionRefusedError({ reason: 'unavailable', cause })
   }
+  let forkHalted = false
+  if (lifetime !== null) {
+    try {
+      const control = await reads.control(lifetime.latestIncarnation)
+      forkHalted =
+        control.forkHalt !== null ||
+        held({ groupID: lifetime.groupID, incarnation: lifetime.latestIncarnation }) ===
+          'fork-halted'
+    } catch (cause) {
+      if (!(cause instanceof GroupStateConflictError) && !isStoredOpenFailure(cause)) throw cause
+      // biome-ignore lint/style/useErrorCause: The constructor forwards cause.
+      throw new SeedAdmissionRefusedError({ reason: 'unavailable', cause })
+    }
+  }
   let metadata: StateMetadata | null = null
   if (lifetime?.activeIncarnation != null) {
     try {
@@ -124,7 +141,7 @@ async function readAdmission(
       metadataFailure(cause)
     }
   }
-  return { lifetime, trust, metadata }
+  return { lifetime, trust, metadata, forkHalted }
 }
 
 export function createRegistrySeed<TTx extends GroupTransaction>(params: {
@@ -133,6 +150,7 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
   environment: RecoveryEnvironment
   ownerDID: string
   start(): Promise<void>
+  held(key: GroupKey): SafetyHold
 }) {
   return async (
     group: GroupHandle,
@@ -159,9 +177,20 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
     ) {
       throw new SeedAdmissionRefusedError({ reason: 'invalid-package-use' })
     }
-    const admission = await params.capability.read(groupID, readAdmission)
+    const admission = await params.capability.read(groupID, (reads) =>
+      readAdmission(reads, params.held),
+    )
     function judge(inputs: AdmissionInputs): SeedDecision {
-      const decision = seedAdmission({ ...inputs, welcome, replace, forkHalted: false })
+      const decision = seedAdmission({
+        ...inputs,
+        welcome,
+        replace,
+        forkHalted:
+          inputs.forkHalted === true ||
+          (inputs.lifetime !== null &&
+            params.held({ groupID, incarnation: inputs.lifetime.latestIncarnation }) ===
+              'fork-halted'),
+      })
       if (welcome.epoch === 0 && inputs.lifetime !== null)
         throw new SeedAdmissionRefusedError({ reason: 'invalid-genesis' })
       return decision
@@ -193,7 +222,9 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
       if (decision === 'readmit' && source !== null) {
         attempt = params.retirement.beginRetirement(source)
         await attempt.drain()
-        const drained = await params.capability.read(groupID, readAdmission)
+        const drained = await params.capability.read(groupID, (reads) =>
+          readAdmission(reads, params.held),
+        )
         if (
           judge(drained) !== decision ||
           drained.lifetime?.activeIncarnation !== source.incarnation ||
@@ -210,7 +241,7 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
       const result = await params.capability.run(
         { groupID, mutationID },
         async (reads) => {
-          const current = await readAdmission(reads)
+          const current = await readAdmission(reads, params.held)
           recheck(current)
           validateRegistryHandle({
             handle: group,
@@ -232,11 +263,15 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
           }
         },
         async (stores, prepared) => {
-          const current = await readAdmission({
-            lifetime: stores.lifetime.load,
-            trust: stores.trust.load,
-            metadata: (incarnation) => stores.incarnation(incarnation).state.loadMetadata(),
-          })
+          const current = await readAdmission(
+            {
+              lifetime: stores.lifetime.load,
+              trust: stores.trust.load,
+              metadata: (incarnation) => stores.incarnation(incarnation).state.loadMetadata(),
+              control: (incarnation) => stores.incarnation(incarnation).control.load(),
+            },
+            params.held,
+          )
           recheck(current)
           if (decision === 'readmit' && source !== null)
             await retireIncarnation(stores, {

@@ -1,3 +1,4 @@
+import type { SafetyHold } from './control/safety.js'
 import type { Outcome } from './control/types.js'
 import type { SendAdmission } from './crypto.js'
 
@@ -33,6 +34,20 @@ export class ControlSafetyImmutableError extends Error {
 
   get field(): 'forkHalt' | 'recoveryUnavailable' {
     return this.#field
+  }
+}
+
+export class GroupSafetyHeldError extends Error {
+  override name = 'GroupSafetyHeldError'
+  #reason: NonNullable<SafetyHold>
+
+  constructor(reason: NonNullable<SafetyHold>) {
+    super(`Group safety held: ${reason}`)
+    this.#reason = reason
+  }
+
+  get reason(): NonNullable<SafetyHold> {
+    return this.#reason
   }
 }
 

@@ -3,6 +3,7 @@ import {
   AppFrameStorageError,
   FrameEpochError,
   type GroupCrypto,
+  GroupSafetyHeldError,
   isAppFrameStorageError,
   LedgerEntryRefusedError,
   type PendingAppFrame,
@@ -139,6 +140,15 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto
 export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
   const { access, entryLabel = ENTRY_SEAL_LABEL, runtime = createRuntime(), pending } = params
 
+  function assertSafety(): void {
+    const admission = access.admission()
+    if (
+      !admission.admissible &&
+      (admission.reason === 'fork-halted' || admission.reason === 'recovery-unavailable')
+    )
+      throw new GroupSafetyHeldError(admission.reason)
+  }
+
   return {
     epoch: () => access.epoch(),
 
@@ -147,23 +157,35 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
     // make below (same context, same `SECRET_LENGTH`), so it would hand back the ledger-entry
     // seal key under another name. Refused here, loudly, rather than left to the doc alone.
     exportSecret: (label, length = SECRET_LENGTH) => {
+      assertSafety()
       if (label === entryLabel) {
         throw new Error(`exportSecret: label '${label}' is reserved for the ledger-entry seal`)
       }
-      return access.read(async (group) => ({
-        secret: await group.exportSecret(label, EXPORT_CONTEXT, length),
-        epoch: Number(group.epoch),
-      }))
+      return access.read(async (group) => {
+        assertSafety()
+        return {
+          secret: await group.exportSecret(label, EXPORT_CONTEXT, length),
+          epoch: Number(group.epoch),
+        }
+      })
     },
 
-    wrap: (bytes, opts) => access.mutate((group) => group.encrypt(bytes, opts)),
+    wrap: async (bytes, opts) => {
+      assertSafety()
+      return await access.mutate((group) => {
+        assertSafety()
+        return group.encrypt(bytes, opts)
+      })
+    },
 
     sealEntries: async (bytes) => {
-      const { key, epoch } = await access.read(async (group) => ({
-        key: await deriveEntryKey(group, entryLabel),
-        epoch: Number(group.epoch),
-      }))
+      assertSafety()
+      const { key, epoch } = await access.read(async (group) => {
+        assertSafety()
+        return { key: await deriveEntryKey(group, entryLabel), epoch: Number(group.epoch) }
+      })
       try {
+        assertSafety()
         return { sealed: sealEntries(key, bytes, runtime), epoch }
       } finally {
         key.fill(0)
@@ -171,9 +193,14 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
     },
 
     openEntries: async (sealed) => {
+      assertSafety()
       assertSealedEntryBlob(sealed)
-      const key = await access.read((group) => deriveEntryKey(group, entryLabel))
+      const key = await access.read((group) => {
+        assertSafety()
+        return deriveEntryKey(group, entryLabel)
+      })
       try {
+        assertSafety()
         return openEntries(key, sealed)
       } finally {
         key.fill(0)
@@ -181,6 +208,7 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
     },
 
     unwrap: async (bytes, opts) => {
+      assertSafety()
       if (opts?.frame != null) {
         if (pending == null) throw new Error('unwrap: pending store required for durable open')
         const frame = opts.frame
@@ -194,6 +222,7 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
         }
         let openError: unknown
         const open = async (group: GroupHandle, persistStaged: typeof persistOpened) => {
+          assertSafety()
           const epoch = Number(group.epoch)
           const frameEpoch = readMessageEpoch(bytes)
           if (frameEpoch != null && Number(frameEpoch) !== epoch) {
@@ -228,7 +257,12 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
         } catch (error) {
           // The open's own refusal says whether the frame is dead. Anything the adapter raised
           // around it (a restore, a read) left the key unspent, so the lane must retry.
-          if (error === openError || isAppFrameStorageError(error)) throw error
+          if (
+            error === openError ||
+            isAppFrameStorageError(error) ||
+            error instanceof GroupSafetyHeldError
+          )
+            throw error
           throw new AppFrameStorageError('handle access failed during durable open', {
             cause: error,
           })
@@ -236,6 +270,7 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
         return { payload: opened.payload, senderDID: opened.senderDID, epoch: opened.epoch }
       }
       const { payload, senderDID, epoch } = await access.mutate(async (group) => {
+        assertSafety()
         const epoch = Number(group.epoch)
         const frameEpoch = readMessageEpoch(bytes)
         if (frameEpoch != null && Number(frameEpoch) !== epoch) {

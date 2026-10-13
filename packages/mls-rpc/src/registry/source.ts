@@ -2,7 +2,7 @@ import type { EntryReads, StateMetadata } from '../entry-capability.js'
 import { decodeStoredValue, encodeStoredValue, isStoredOpenFailure } from '../persistence-codec.js'
 import { GroupStateConflictError, GroupUnavailableError } from '../persistence-errors.js'
 import type { GroupLifetime, GroupRecoveryTrust } from '../persistence-types.js'
-import { assertRecoverySourceTrust } from './source-trust.js'
+import { readRetainedTrust } from './safety.js'
 import type { RecoverySource } from './types.js'
 
 function refuseUnreadable(cause: unknown): never {
@@ -36,10 +36,9 @@ export async function readRecoverySource(
     throw new GroupUnavailableError({ reason: 'invalid' })
 
   let metadata: StateMetadata | null
-  let trust: GroupRecoveryTrust | null
+  const trust = await readRetainedTrust(reads, key)
   try {
     metadata = await reads.metadata(key.incarnation)
-    trust = await reads.trust()
   } catch (cause) {
     refuseUnreadable(cause)
   }
@@ -50,18 +49,9 @@ export async function readRecoverySource(
       metadata.incarnation !== key.incarnation ||
       metadata.deleted !== false ||
       !Number.isSafeInteger(metadata.version) ||
-      metadata.version < 1 ||
-      trust === null
+      metadata.version < 1
     )
       throw new GroupStateConflictError('Recovery source metadata or trust unavailable')
-    assertRecoverySourceTrust(trust)
-    if (
-      trust.groupID !== groupID ||
-      trust.installed.groupID !== key.groupID ||
-      trust.installed.incarnation !== key.incarnation ||
-      trust.spentEpochAuthenticators.length === 0
-    )
-      throw new GroupStateConflictError('Recovery source current trust mismatch')
     // Clone both projections separately: callers can mutate identity without changing retained trust.
     return {
       key,

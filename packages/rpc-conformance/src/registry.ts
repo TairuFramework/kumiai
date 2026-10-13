@@ -114,6 +114,14 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
             await fixture.mutateMetadata(key, (value) => ({ ...(value as object), version: -1 }))
           await expect(fixture.registry.access(groupID)).rejects.toMatchObject({
             name: 'GroupUnavailableError',
+            reason:
+              fault === 'trust'
+                ? 'recovery-unavailable'
+                : fault === 'absent'
+                  ? 'absent'
+                  : fault === 'metadata'
+                    ? 'invalid'
+                    : 'state-unreadable',
           })
           if (fault === 'state' || fault === 'missing-bytes') {
             expect((await fixture.registry.recoverySource(groupID)).key).toEqual(key)

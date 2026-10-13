@@ -1,5 +1,12 @@
 import { encodeClientState, type GroupHandle } from '@kumiai/mls'
-import { APP_TOPIC_LABEL, type RejoinRecord } from '@kumiai/rpc'
+import {
+  APP_TOPIC_LABEL,
+  type ControlSnapshot,
+  controlSafetyHeld,
+  type GroupKey,
+  type RejoinRecord,
+  type SafetyHold,
+} from '@kumiai/rpc'
 
 import type { EntryCapability } from '../entry-capability.js'
 import { copyStoredValue, sameStoredValue } from '../memory-incarnation-stores.js'
@@ -75,6 +82,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
   recovery: RecoveryEnvironment
   ownerDID: string
   start(): Promise<void>
+  held(key: GroupKey): SafetyHold
 }): GroupHandleRegistry['switchIncarnation'] {
   const { persistence, capability, retirement } = environment
   return async (candidate: GroupHandle, params) => {
@@ -89,6 +97,11 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
       throw new RegistryResyncRefusedError({ reason: 'tuple' })
     const groupID = source.key.groupID
     const destination = { groupID, incarnation: source.key.incarnation + 1 }
+    function assertSafety(control: ControlSnapshot): void {
+      const pending = environment.held(source.key)
+      const reason = pending === 'fork-halted' ? pending : (controlSafetyHeld(control) ?? pending)
+      if (reason !== null) throw new RegistryResyncRefusedError({ reason })
+    }
     let resolved: 'committed' | 'rolled-back' | undefined
     try {
       resolved = await persistence.resolve(groupID, write.mutationID)
@@ -96,7 +109,8 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
       if (!(error instanceof GroupStateUncertainError)) throw error
     }
     const replay = await capability.read(groupID, async (reads) => {
-      const record = (await reads.control(source.key.incarnation)).rejoin
+      const control = await reads.control(source.key.incarnation)
+      const record = control.rejoin
       if (record?.stage === 'adopted') {
         if (record.id !== rejoinID) throw new RegistryResyncRefusedError({ reason: 'unaccepted' })
         // Durable adoption proves this semantic replay even after later markers or retirement.
@@ -110,6 +124,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
       }
       if (resolved === 'committed')
         throw new GroupStateConflictError('Committed switch lacks matching adopted evidence')
+      assertSafety(control)
       confirmedRecord(record, rejoinID)
       return false
     })
@@ -117,6 +132,8 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
 
     retirement.assertAvailable(groupID)
     await environment.start()
+    const control = await capability.read(groupID, (reads) => reads.control(source.key.incarnation))
+    assertSafety(control)
     // A losing attempt never obtains a settlement capable of lifting the winner's fence.
     const attempt = retirement.beginRetirement(source.key)
     let stopObservation = () => {}
@@ -133,6 +150,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
       return await capability.run(
         { groupID, mutationID: write.mutationID },
         async (reads) => {
+          assertSafety(await reads.control(source.key.incarnation))
           const current = await readRecoverySource(reads, groupID)
           matchSource(current, source)
           const lifetime = await reads.lifetime()
@@ -170,6 +188,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
             senderHWM: 0,
           }
           const trust = recoveryTrustFor(candidate, destination, current.trust)
+          assertSafety(await reads.control(source.key.incarnation))
           const anchor = {
             anchor: {
               epoch: Number(candidate.epoch),
@@ -185,6 +204,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
           }
         },
         async (stores, prepared) => {
+          assertSafety(await stores.incarnation(source.key.incarnation).control.load())
           const lifetime = await stores.lifetime.load()
           const metadata = await stores.incarnation(source.key.incarnation).state.loadMetadata()
           const trust = await stores.trust.load()
@@ -213,6 +233,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
           )
           if (!sameStoredValue(record, prepared.record))
             throw new GroupStateConflictError('Registry switch confirmed record moved')
+          assertSafety(await stores.incarnation(source.key.incarnation).control.load())
           stores.tx.onRollback(() => settle('rolled-back'))
           await retireIncarnation(stores, {
             source: source.key,

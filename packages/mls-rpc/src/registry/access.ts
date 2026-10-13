@@ -1,5 +1,12 @@
 import { encodeClientState, type GroupHandle } from '@kumiai/mls'
-import type { AdoptionExpected, AdoptionWrite, SendAdmission } from '@kumiai/rpc'
+import {
+  type AdoptionExpected,
+  type AdoptionWrite,
+  controlSafetyHeld,
+  GroupSafetyHeldError,
+  type SafetyHold,
+  type SendAdmission,
+} from '@kumiai/rpc'
 
 import type { ControlRead, ControlReadScope, HandleAccess } from '../access.js'
 import { type ControlJournal, decodeControlJournal } from '../control-journal.js'
@@ -21,6 +28,8 @@ import type {
 } from '../persistence-types.js'
 import { type ColdEnvironment, restoreValidated, type ValidatedGroupState } from './cold.js'
 import type { createRegistryRuntime } from './runtime.js'
+import { readRetainedTrust } from './safety.js'
+import { readRecoverySource } from './source.js'
 import { recoveryTrustFor } from './trust.js'
 import type { GroupRuntimeSnapshot, ReadableGroupState, RegistryHandleAccess } from './types.js'
 import { ordinaryCandidateMatches, validateRegistryHandle } from './validation.js'
@@ -48,8 +57,19 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
   invalidate(displaced: boolean): void
   assertCurrent(): void
   assertAvailable(): void
+  safetyHeld(): SafetyHold
+  diagnoseFailure(error: unknown): Promise<void>
 }): RegistryHandleAccess {
   const { owner, capability, environment } = params
+  function assertSafety(): void {
+    const reason = params.safetyHeld()
+    if (reason !== null) throw new GroupSafetyHeldError(reason)
+  }
+  async function assertWorkSafety(stores: GroupStores<TTx>): Promise<void> {
+    const reason = controlSafetyHeld(await stores.incarnation(owner.key.incarnation).control.load())
+    if (reason !== null) throw new GroupSafetyHeldError(reason)
+    assertSafety()
+  }
   async function isolated(reads: EntryReads): Promise<ControlRead> {
     try {
       const value = await params.load(reads)
@@ -84,6 +104,9 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
         const { handle } = await isolated(reads)
         return await fn(handle)
       })
+    } catch (error) {
+      await params.diagnoseFailure(error)
+      throw error
     } finally {
       params.publish()
     }
@@ -105,6 +128,9 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
           active = false
         }
       })
+    } catch (error) {
+      await params.diagnoseFailure(error)
+      throw error
     } finally {
       params.publish()
     }
@@ -174,6 +200,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     write?: AdoptionWrite,
   ) {
     params.assertCurrent()
+    await assertWorkSafety(stores)
     const target = stores.incarnation(owner.key.incarnation)
     await target.state.save(record, write?.expected)
     await stores.trust.save(trust)
@@ -243,8 +270,10 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
   ): Promise<GroupHandle | null> {
     const journal = journalFor(write)
     if (!ordinaryProof(write, journal)) throw moved()
+    if (!committed) assertSafety()
     const destination = await destinationFor(next, write)
     if (committed) return null
+    assertSafety()
     const control = await reads.control(owner.key.incarnation)
     const proof = write.expected?.acceptance
     if (proof === undefined) throw moved()
@@ -273,7 +302,9 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
       !sameStoredValue(source.identity, journal.source.identity)
     )
       throw moved()
+    assertSafety()
     if (prepare !== undefined && !(await prepare())) throw moved()
+    assertSafety()
     if (
       control.strand !== null ||
       control.cursor?.stranded === true ||
@@ -289,39 +320,85 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
   }
   async function ordinary(
     next: GroupHandle,
-    expected: AdoptionExpected,
-    write: AdoptionWrite,
+    supplied: { expected: AdoptionExpected; write: AdoptionWrite } | undefined,
     prepare?: Parameters<HandleAccess['replace']>[2],
+    adoption?: Parameters<HandleAccess['replace']>[1],
   ): Promise<'installed' | 'noop'> {
     params.assertAvailable()
-    const committed = await proved(write.mutationID)
+    const committed = supplied === undefined ? false : await proved(supplied.write.mutationID)
     try {
       return await capability.run(
-        { groupID: owner.key.groupID, mutationID: write.mutationID },
+        { groupID: owner.key.groupID, mutationID: supplied?.write.mutationID ?? null },
         async (reads) => {
+          if (supplied !== undefined && (committed || params.safetyHeld() !== null)) {
+            const { write } = supplied
+            const journal = journalFor(write)
+            if (!ordinaryProof(write, journal)) throw moved()
+            let replay = committed
+            if (!replay) {
+              const current = await readRecoverySource(reads, owner.key.groupID)
+              const proof = write.expected?.acceptance
+              const control = await reads.control(owner.key.incarnation)
+              const row = control.applied.find(
+                (row) => row.epoch === journal.source.identity?.epoch,
+              )
+              replay =
+                proof !== undefined &&
+                sameStoredValue(current.identity, {
+                  ...owner.key,
+                  epoch: Number(next.epoch),
+                  authenticator: next.state.keySchedule.epochAuthenticator,
+                }) &&
+                ((row?.payloadDigest === proof.payloadDigest &&
+                  row.sequenceID === proof.position) ||
+                  (await reads.controlMutation(owner.key.incarnation)) === write.mutationID)
+            }
+            if (replay) {
+              await destinationFor(next, write)
+              throw new Noop()
+            }
+          }
+          assertSafety()
           const { handle: current, source } = await isolated(reads)
+          assertSafety()
           const value = owner.value
           const lifetime = await reads.lifetime()
+          assertSafety()
+          const write = supplied?.write ?? adoption?.(staged(next))
+          journalFor(write)
+          if (write === undefined || write.expected === undefined)
+            throw new RegistryRecoveryReplacementError('Ordinary replacement requires provenance')
+          const expected = supplied?.expected ?? {
+            key: write.expected.key,
+            stateVersion: write.expected.stateVersion,
+            identity: write.expected.identity,
+          }
           const destination = await ordinaryDestination(
             reads,
             source,
             next,
             expected,
             write,
-            committed,
+            committed || lifetime?.mutationID === write.mutationID,
             prepare === undefined ? undefined : () => prepare(current, source),
           )
           if (destination === null) throw new Noop()
+          assertSafety()
           // The decoded handle is isolated from the caller and only now may carry source progress.
           await current.carryReceiveProgress(destination)
           const record = recordFor(destination, value)
           const trust = recoveryTrustFor(destination, value.key, value.trust)
-          return { expected: lifetime, value: { source, record, trust } }
+          return {
+            expected: lifetime,
+            mutationID: write.mutationID,
+            value: { source, record, trust, write },
+          }
         },
         async (stores, prepared) => {
+          await assertWorkSafety(stores)
           const target = stores.incarnation(owner.key.incarnation)
           const record = await target.state.load()
-          const trust = await stores.trust.load()
+          const trust = await readRetainedTrust({ trust: stores.trust.load }, owner.key)
           if (
             record === null ||
             record.version !== prepared.source.stateVersion ||
@@ -335,7 +412,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
             after: prepared.trust.installed,
           })
           try {
-            await writeState(stores, prepared.record, prepared.trust, write)
+            await writeState(stores, prepared.record, prepared.trust, prepared.write)
           } finally {
             controlBuildContexts.delete(stores.tx)
           }
@@ -344,6 +421,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
       )
     } catch (error) {
       if (error instanceof Noop) return 'noop'
+      await params.diagnoseFailure(error)
       throw error
     } finally {
       params.publish()
@@ -351,6 +429,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
   }
   const mutate: HandleAccess['mutate'] = async (fn, adoption) => {
     params.assertAvailable()
+    assertSafety()
     let noopResult: { value: Awaited<ReturnType<typeof fn>> } | undefined
     try {
       return await capability.run(
@@ -359,7 +438,9 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
           mutationID: adoption === undefined ? crypto.randomUUID() : null,
         },
         async (reads) => {
+          assertSafety()
           const { handle, source } = await isolated(reads)
+          assertSafety()
           const value = owner.value
           const lifetime = await reads.lifetime()
           let record: ReadableGroupState | undefined
@@ -369,6 +450,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
           let active = true
           const persist = async (candidate: GroupHandle): Promise<void> => {
             if (!active) throw new Error('Mutation prepare scope has ended')
+            assertSafety()
             const proposed = adoption?.(staged(candidate))
             const stagedWrite =
               proposed === undefined
@@ -415,7 +497,9 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
           }
           let result: Awaited<ReturnType<typeof fn>>
           try {
+            assertSafety()
             result = await fn(handle, persist)
+            assertSafety()
             if (record === undefined && !nooped) await persist(handle)
           } finally {
             active = false
@@ -433,6 +517,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
           }
         },
         async (stores, prepared) => {
+          await assertWorkSafety(stores)
           if (prepared.write !== undefined && prepared.source.identity !== null)
             controlBuildContexts.set(stores.tx, {
               kind: 'adoption',
@@ -449,26 +534,16 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
       )
     } catch (error) {
       if (error instanceof Noop && noopResult !== undefined) return noopResult.value
+      await params.diagnoseFailure(error)
       throw error
     } finally {
       params.publish()
     }
   }
   const replace: HandleAccess['replace'] = async (next, adoption, prepare) => {
-    const write = adoption?.(staged(next))
-    journalFor(write)
-    if (write === undefined || write.expected === undefined)
-      throw new RegistryRecoveryReplacementError('Ordinary replacement requires provenance')
-    await ordinary(
-      next,
-      {
-        key: write.expected.key,
-        stateVersion: write.expected.stateVersion,
-        identity: write.expected.identity,
-      },
-      write,
-      prepare,
-    )
+    params.assertAvailable()
+    assertSafety()
+    await ordinary(next, undefined, prepare, adoption)
     next.confirmAdopted()
   }
   async function adopt(
@@ -477,7 +552,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     write: AdoptionWrite,
   ): Promise<'installed' | 'noop' | 'moved'> {
     try {
-      return await ordinary(next, expected, write)
+      return await ordinary(next, { expected, write })
     } catch (error) {
       if (error instanceof Error && error.name === 'ControlAdoptionMovedError') return 'moved'
       throw error

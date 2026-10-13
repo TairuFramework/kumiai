@@ -153,6 +153,7 @@ export {
   ControlSafetyImmutableError,
   ControlWriteNotCommittedError,
   GroupControlUnsettledError,
+  GroupSafetyHeldError,
   OperationOutcomeError,
   type OperationOutcomeErrorParams,
   OperationRejectedError,

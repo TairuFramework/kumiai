@@ -148,7 +148,9 @@ for (const mode of ['real-mls', 'double'] as const) {
             ? 'state-unreadable'
             : kind === 'absent' || kind === 'deleted'
               ? kind
-              : 'invalid'
+              : kind === 'missing-trust'
+                ? 'recovery-unavailable'
+                : 'invalid'
         await expect(owner.access(groupID)).rejects.toBeInstanceOf(GroupUnavailableError)
         await expect(owner.access(groupID)).rejects.toMatchObject({ reason })
         expect(fixture.restoreCount(groupID)).toBe(0)

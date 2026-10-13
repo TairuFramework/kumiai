@@ -418,7 +418,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
-    test('unreadable report trust refuses without fork latch', async () => {
+    test('unreadable report trust persists recovery refusal', async () => {
       const fixture = await create()
       try {
         const access = await fixture.registry.access(groupID)
@@ -427,12 +427,19 @@ for (const mode of ['real-mls', 'double'] as const) {
         await fixture.corruptTrust(groupID)
         const rows = await fixture.inspectRows()
         await expect(api.reportFork(key, evidence)).rejects.toMatchObject({
-          name: 'GroupUnavailableError',
-          reason: 'invalid',
+          name: 'GroupSafetyHeldError',
+          reason: 'recovery-unavailable',
         })
-        expect(access.admission().admissible).toBe(true)
-        expect(await api.events(key)).toEqual([])
-        expect(await fixture.inspectRows()).toEqual(rows)
+        expect(access.runtime.snapshot()).toBeNull()
+        expect(await api.events(key)).toEqual([
+          {
+            ...key,
+            id: recoveryUnavailableEventID(key),
+            kind: 'group:recovery-unavailable',
+            reason: 'trust-unreadable',
+          },
+        ])
+        expect(await fixture.inspectRows()).not.toEqual(rows)
       } finally {
         await fixture.close()
       }

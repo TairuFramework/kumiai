@@ -19,12 +19,14 @@ import type { GroupKey, GroupStores, MemoryTransaction } from '../src/persistenc
 import * as registryRuntime from '../src/registry/runtime.js'
 import { createRegistryRuntime } from '../src/registry/runtime.js'
 import { publicRuntimeFacts } from '../src/registry/runtime-facts.js'
+import { registrySafety } from '../src/registry/safety.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { deferred } from '../src/runtime.js'
 import {
   createRegistryFixture,
   type RegistryFixtureBase,
   registryFixtureObserve,
+  registryFixtureRemoveTrust,
   registryFixtureRestore,
 } from './fixtures/registry.js'
 import { registryHandle } from './fixtures/registry-welcome.js'
@@ -717,3 +719,125 @@ test('listener failures retain bounded internal diagnostics without affecting la
   await turn()
   expect(runtime.listenerFailures()).toEqual({ count: 2, lastError: asynchronous })
 })
+
+for (const mode of ['real-mls', 'double'] as const) {
+  describe(`accounted trust loss (${mode})`, () => {
+    const groupID = `accounted-trust-loss-${mode}`
+    const key = { groupID, incarnation: 1 }
+    test.each(['trust', 'both', 'missing', 'missing-readable'] as const)(
+      '%s loss persists after control-only transition',
+      async (damage) => {
+        const fixture = await createRegistryFixture({ mode, groupID, setup: 'seeded' })
+        let reopened: Awaited<ReturnType<typeof fixture.reopen>> | undefined
+        try {
+          if (damage === 'missing-readable') {
+            const capability = entryCapability(fixture.device.groups)
+            const binding = coordinatorBinding(fixture.device.groups)
+            if (capability === null || binding === null) throw new Error('Missing entry')
+            bindEntryCapability({
+              persistence: fixture.device.groups,
+              coordinatorBinding: binding,
+              capability: {
+                ...capability,
+                observe(id, onProof, afterRelease) {
+                  return capability.observe(
+                    id,
+                    (value) => {
+                      if (value.trust === null) value.trustStatus = 'readable'
+                      onProof(value)
+                    },
+                    afterRelease,
+                  )
+                },
+              },
+            })
+          }
+          const owner = fixture.registry
+          const access = await owner.access(groupID)
+          if (damage === 'missing' || damage === 'missing-readable')
+            await registryFixtureRemoveTrust(fixture, groupID)
+          else await fixture.corruptTrust(groupID)
+          if (damage === 'both') await fixture.corruptState(key)
+          const control = fixture.device.groups.ports(key).control
+          await control.apply({ deleteOutcomes: [] }, 'observe-trust-loss')
+          await expect
+            .poll(async () => (await control.load()).recoveryUnavailable)
+            .toEqual({
+              ...key,
+              id: JSON.stringify(['group:recovery-unavailable', groupID, 1]),
+              kind: 'group:recovery-unavailable',
+              reason: 'trust-unreadable',
+            })
+          expect(access.runtime.snapshot()).toBeNull()
+          expect(registrySafety(owner)?.held(key)).toBe('recovery-unavailable')
+          const rows = await fixture.inspectRows()
+          await expect(owner.recoverySource(groupID)).rejects.toMatchObject({
+            reason: 'recovery-unavailable',
+          })
+          expect(await fixture.inspectRows()).toEqual(rows)
+          reopened = await fixture.reopen()
+          expect(
+            (await reopened.device.groups.ports(key).control.load()).recoveryUnavailable,
+          ).not.toBeNull()
+          const capability = entryCapability(reopened.device.groups)
+          if (capability === null) throw new Error('Missing entry')
+          expect(await capability.read(groupID, (reads) => reads.events(1))).toHaveLength(1)
+        } finally {
+          await reopened?.close()
+          await fixture.close()
+        }
+      },
+    )
+    test('transient accounted diagnosis writes nothing', async () => {
+      const fixture = await createRegistryFixture({ mode, groupID, setup: 'seeded' })
+      try {
+        const capability = entryCapability(fixture.device.groups)
+        const binding = coordinatorBinding(fixture.device.groups)
+        if (capability === null || binding === null) throw new Error('Missing entry')
+        let fail = false
+        let diagnosed = 0
+        bindEntryCapability({
+          persistence: fixture.device.groups,
+          coordinatorBinding: binding,
+          capability: {
+            ...capability,
+            observe(id, onProof, afterRelease) {
+              return capability.observe(
+                id,
+                (value) => {
+                  value.trustStatus = 'unreadable'
+                  onProof(value)
+                },
+                afterRelease,
+              )
+            },
+            read: (id, read) =>
+              capability.read(id, (reads) =>
+                read({
+                  ...reads,
+                  trust: async () => {
+                    if (fail) {
+                      diagnosed++
+                      throw new Error('Transient trust I/O')
+                    }
+                    return reads.trust()
+                  },
+                }),
+              ),
+          },
+        })
+        const owner = fixture.registry
+        await owner.access(groupID)
+        fail = true
+        const control = fixture.device.groups.ports(key).control
+        await control.apply({ deleteOutcomes: [] }, 'transient-observation')
+        await expect.poll(() => diagnosed).toBe(1)
+        await turn()
+        expect((await control.load()).recoveryUnavailable).toBeNull()
+        expect(registrySafety(owner)?.held(key)).toBeNull()
+      } finally {
+        await fixture.close()
+      }
+    })
+  })
+}

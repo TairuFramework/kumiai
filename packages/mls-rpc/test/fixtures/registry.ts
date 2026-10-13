@@ -167,6 +167,24 @@ const restorers = new WeakMap<
 const markerWriters = new WeakMap<RegistryFixtureBase, RegistryStorageFixture['forceOwnerMarker']>()
 const rowRemovers = new WeakMap<RegistryFixtureBase, RegistryStorageFixture['deleteCommittedRow']>()
 
+const controlCorrupters = new WeakMap<RegistryFixtureBase, (key: GroupKey) => Promise<void>>()
+
+export async function registryFixtureCorruptControl(fixture: RegistryFixtureBase, key: GroupKey) {
+  const corrupt = controlCorrupters.get(fixture)
+  if (corrupt === undefined) throw new Error('Missing control corruption helper')
+  await fixture.device.groups.ports(key).control.apply({}, crypto.randomUUID())
+  await corrupt(key)
+}
+
+export async function registryFixtureRemoveTrust(fixture: RegistryFixtureBase, groupID: string) {
+  const remove = rowRemovers.get(fixture)
+  if (remove === undefined) throw new Error('Missing row removal helper')
+  await remove(
+    'trust',
+    physicalRecordKey({ groupID, incarnation: null, namespace: 'trust', recordID: 'current' }),
+  )
+}
+
 export async function registryFixtureRemoveMetadata(
   fixture: RegistryFixtureBase,
   key: GroupKey,
@@ -556,6 +574,7 @@ async function assemble(
     })
   }
   // Diagnostic enumeration must not construct a second live registry.
+  controlCorrupters.set(fixture, (key) => corrupt(storage, 'control', key))
   Object.defineProperty(fixture, 'registry', { enumerable: false })
   return fixture
 }

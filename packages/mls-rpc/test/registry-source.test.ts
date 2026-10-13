@@ -346,7 +346,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           }))
           await expect(registry(fixture).recoverySource(groupID)).rejects.toMatchObject({
             name: 'GroupUnavailableError',
-            reason: 'invalid',
+            reason: 'recovery-unavailable',
           })
         } finally {
           await fixture.close()

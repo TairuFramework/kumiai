@@ -56,6 +56,7 @@ export type GroupUnavailableReason =
   | 'absent'
   | 'deleted'
   | 'state-unreadable'
+  | 'recovery-unavailable'
   | 'invalid'
   | 'restore-pending'
 
@@ -74,6 +75,8 @@ export class GroupUnavailableError extends Error {
 }
 
 export type RegistryResyncRefusalReason =
+  | 'fork-halted'
+  | 'recovery-unavailable'
   | 'malformed'
   | 'unaccepted'
   | 'source'

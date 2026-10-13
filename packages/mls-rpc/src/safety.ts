@@ -2,6 +2,7 @@ import {
   forkEventID,
   type GroupMLS,
   type GroupSafetyEvent,
+  GroupSafetyHeldError,
   type LogHub,
   type MailboxHub,
   type RecoveryUnavailableEvent,
@@ -9,8 +10,10 @@ import {
 
 import { coordinatorBinding } from './entry-capability.js'
 import { sameStoredValue } from './memory-incarnation-stores.js'
+import { isStoredOpenFailure } from './persistence-codec.js'
 import {
   ForkReportRefusedError,
+  GroupStateConflictError,
   GroupUnavailableError,
   ManualRecoveryUnavailableError,
 } from './persistence-errors.js'
@@ -22,7 +25,11 @@ import type {
   GroupTransaction,
   PersistenceEvent,
 } from './persistence-types.js'
-import { registrySafety } from './registry/safety.js'
+import {
+  RetainedTrustUnavailableError,
+  readRetainedTrust,
+  registrySafety,
+} from './registry/safety.js'
 import { readRecoverySource } from './registry/source.js'
 import type { GroupHandleRegistry } from './registry/types.js'
 
@@ -96,7 +103,7 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
           const source = await readRecoverySource(reads, key.groupID)
           return source.identity
         } catch (error) {
-          if (error instanceof GroupUnavailableError) return null
+          if (error instanceof RetainedTrustUnavailableError) return null
           throw error
         }
       })
@@ -137,13 +144,21 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
             const lifetime = await stores.lifetime.load()
             if (lifetime?.groupID !== key.groupID || lifetime.activeIncarnation !== key.incarnation)
               throw new ForkReportRefusedError({ reason: 'key' })
-            const trust = await stores.trust.load()
+            const trust = await readRetainedTrust({ trust: stores.trust.load }, key)
             if (!sameStoredValue(trust?.installed, identity))
               throw new ForkReportRefusedError({ reason: 'authenticator' })
             await target.control.apply({ forkHalt: halt }, mutationID)
           },
         )
       } catch (error) {
+        if (error instanceof RetainedTrustUnavailableError) {
+          await capability.persistTrustUnavailable(error.key)
+          // biome-ignore lint/style/useErrorCause: The persisted diagnosis supplies the refusal reason.
+          throw new GroupSafetyHeldError('recovery-unavailable')
+        }
+        if (isStoredOpenFailure(error) || error instanceof GroupStateConflictError)
+          // biome-ignore lint/style/useErrorCause: The constructor forwards cause.
+          throw new GroupUnavailableError({ reason: 'invalid', cause: error })
         if (!(error instanceof Noop)) throw error
       }
     },
