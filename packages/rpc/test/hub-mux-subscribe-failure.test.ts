@@ -23,6 +23,96 @@ const flush = () => new Promise((r) => setTimeout(r, 30))
 /** Fast enough to finish inside a test, long enough to be a real schedule rather than a no-op. */
 const FAST_RETRIES = [1, 1, 1]
 
+test.each(['topic', 'all'] as const)(
+  'direct %s rearm obeys networkAllowed at attempt zero',
+  async (path) => {
+    const hub = new FakeHub({ maxRetention: 100 })
+    let allowed = true
+    const mux = createHubMux({
+      hub,
+      localDID: 'bob',
+      networkAllowed: () => allowed,
+      onSubscribeFailed: () => {},
+    })
+    try {
+      mux.retainTopic('topic:held', { retention: 101 })
+      await flush()
+      expect(hub.subscribeAttempts('topic:held')).toBe(1)
+      allowed = false
+      const subscribe = vi.spyOn(hub, 'subscribe')
+      if (path === 'topic') mux.rearmTopic('topic:held')
+      else mux.rearmRefusedTopics()
+      await flush()
+      expect(subscribe).not.toHaveBeenCalled()
+      await expect(mux.fetchTopic({ topicID: 'topic:held' })).rejects.toThrow(
+        RetentionExceededError,
+      )
+    } finally {
+      await mux.dispose()
+    }
+  },
+)
+
+test('delayed subscribe retry obeys a live halt', async () => {
+  const hub = new FakeHub()
+  let allowed = true
+  const subscribe = vi.spyOn(hub, 'subscribe').mockRejectedValue(new Error('connection lost'))
+  const mux = createHubMux({
+    hub,
+    localDID: 'bob',
+    networkAllowed: () => allowed,
+    subscribeRetryDelaysMs: [20],
+    onSubscribeFailed: () => {},
+  })
+  try {
+    mux.retainTopic('topic:retry')
+    expect(subscribe).toHaveBeenCalledOnce()
+    allowed = false
+    await flush()
+    expect(subscribe).toHaveBeenCalledOnce()
+    mux.retainTopic('topic:new')
+    expect(subscribe).toHaveBeenCalledOnce()
+  } finally {
+    await mux.dispose()
+  }
+})
+
+test('deferred start is gated and idempotent', async () => {
+  const hub = new FakeHub()
+  const receive = vi.spyOn(hub, 'receive')
+  const subscribe = vi.spyOn(hub, 'subscribe')
+  let allowed = false
+  const mux = createHubMux({
+    hub,
+    localDID: 'bob',
+    deferredStart: true,
+    networkAllowed: () => allowed,
+  })
+  try {
+    mux.start()
+    mux.retainTopic('topic:before-start')
+    expect(receive).not.toHaveBeenCalled()
+    expect(subscribe).not.toHaveBeenCalled()
+    allowed = true
+    mux.start()
+    mux.start()
+    mux.retainTopic('topic:after-start')
+    expect(receive).toHaveBeenCalledOnce()
+    expect(subscribe).toHaveBeenCalledExactlyOnceWith('bob', 'topic:after-start', undefined)
+  } finally {
+    await mux.dispose()
+  }
+})
+
+test('dispose before deferred start completes without receiving', async () => {
+  const hub = new FakeHub()
+  const receive = vi.spyOn(hub, 'receive')
+  const mux = createHubMux({ hub, localDID: 'bob', deferredStart: true })
+  await mux.dispose()
+  mux.start()
+  expect(receive).not.toHaveBeenCalled()
+})
+
 describe('a subscribe the hub refuses', () => {
   test('the refusal reaches the host instead of being swallowed', async () => {
     const hub = new FakeHub({ maxRetention: 100 })

@@ -83,6 +83,10 @@ export type HubMuxParams = {
   hub: LogHub
   /** Authenticated DID used to drain `hub.receive` and stamp bus publishes. */
   localDID: string
+  /** Leave receive idle until start. Default: eager. */
+  deferredStart?: boolean
+  /** Checked before receive, retain and every subscribe attempt. */
+  networkAllowed?: () => boolean
   /**
    * Called once per topic the hub has definitively refused. A NOTICE, not the enforcement: the
    * enforcement is that every publish and fetch on a refused topic throws (see
@@ -146,6 +150,8 @@ export type MuxFetchTopicParams = {
 }
 
 export type HubMux = {
+  /** Start receive at most once, while network is allowed. */
+  start: () => void
   readonly bus: BroadcastBus
   /** A mailbox-shaped view of the drain, for the directed tunnels. It carries no log. */
   readonly mailbox: MailboxHub
@@ -302,9 +308,9 @@ function isPermanentSubscribeFailure(error: unknown): boolean {
  *
  * ## The init-race window
  *
- * The drain starts synchronously in this constructor, before the caller registers the first
- * listener. A frame arriving in that window is handed to the first topic listener within the ack
- * TTL. Expiry drops it unacked so it returns on redelivery rather than reporting false success.
+ * By default the drain starts synchronously in this constructor. Deferred clients call `start`.
+ * A frame arriving before registration is handed to the first topic listener within the ack TTL.
+ * Expiry drops it unacked so it returns on redelivery rather than reporting false success.
  */
 export function createHubMux(params: HubMuxParams): HubMux {
   const { hub, localDID } = params
@@ -318,6 +324,8 @@ export function createHubMux(params: HubMuxParams): HubMux {
   const subscriptions = new Map<string, TopicSubscription>()
   const sinks = new Set<Sink>()
   let disposed = false
+  let started = false
+  const networkAllowed = (): boolean => !disposed && started && (params.networkAllowed?.() ?? true)
   let disposePromise: Promise<void> | undefined
   /**
    * A separate flag from `disposed`, set FIRST — before `peer.dispose()` awaits anything — by
@@ -373,6 +381,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
     options: HubSubscribeOptions | undefined,
     attempt: number,
   ): Promise<void> => {
+    if (!networkAllowed()) return
     subscriptions.set(topicID, { kind: 'asking' })
     try {
       // Inside the try, and awaited: `subscribe` may reject OR throw synchronously (the type
@@ -404,6 +413,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
   }
 
   const retain = (topicID: string, options?: HubSubscribeOptions): void => {
+    if (!networkAllowed()) return
     refcount.set(topicID, (refcount.get(topicID) ?? 0) + 1)
     // Gated on the SUBSCRIPTION, never on the refcount. A topic held, or currently being asked
     // for, is not asked for again. A refused one may be: the hub said no, so this peer does not
@@ -447,7 +457,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
    * nothing retains is not resurrected). Re-asks with the SAME `options` the hub refused.
    */
   const rearmTopic = (topicID: string): void => {
-    if (disposed) return
+    if (!networkAllowed()) return
     const state = subscriptions.get(topicID)
     if (state?.kind !== 'refused') return
     const { options } = state
@@ -539,8 +549,8 @@ export function createHubMux(params: HubMuxParams): HubMux {
     }
   }
 
-  const subscription = hub.receive(localDID)
-  const iterator = subscription[Symbol.asyncIterator]()
+  let subscription: HubReceiveSubscription | undefined
+  let iterator: AsyncIterator<StoredMessage> | undefined
 
   const pending = new Map<string, PendingAck>()
 
@@ -549,7 +559,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
     // so the rejection guard alone is not enough. A throw escaping here reaches the holder's
     // release; on the serialized open-once chain that would skip the next frame's open.
     try {
-      void Promise.resolve(subscription.ack?.(position)).catch(() => {})
+      void Promise.resolve(subscription?.ack?.(position)).catch(() => {})
     } catch {
       // ignore
     }
@@ -609,7 +619,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
       // a host's notice handler must not break the mux
     }
   }
-  void (async () => {
+  const drain = async (iterator: AsyncIterator<StoredMessage>): Promise<void> => {
     while (true) {
       let result: IteratorResult<StoredMessage>
       try {
@@ -686,7 +696,15 @@ export function createHubMux(params: HubMuxParams): HubMux {
         }
       }
     }
-  })()
+  }
+
+  const start = (): void => {
+    if (disposed || started || !(params.networkAllowed?.() ?? true)) return
+    started = true
+    subscription = hub.receive(localDID)
+    iterator = subscription[Symbol.asyncIterator]()
+    void drain(iterator)
+  }
 
   const bus: BroadcastBus = {
     publish: async (topicID, payload) => {
@@ -811,7 +829,10 @@ export function createHubMux(params: HubMuxParams): HubMux {
     )
   }
 
+  if (!params.deferredStart) start()
+
   return {
+    start,
     bus,
     mailbox,
     publish,
@@ -853,7 +874,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
         // the drain loop's in-flight `next()` that never settles during teardown. Post-dispose writes
         // are already blocked by the `publishSuspended` guards, so the close need not be awaited.
         // No-op catch keeps a late rejection off the unhandled-rejection path.
-        const closed = iterator.return?.()
+        const closed = iterator?.return?.()
         if (closed != null) void Promise.resolve(closed).catch(() => {})
       })()
       return disposePromise

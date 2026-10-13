@@ -370,9 +370,12 @@ export function createGroupPeerWithControlWalk<
     params.commitLogRetentionSeconds ?? DEFAULT_COMMIT_LOG_RETENTION_SECONDS
   const appLogRetentionSeconds = params.appLogRetentionSeconds ?? DEFAULT_APP_LOG_RETENTION_SECONDS
   const operationTimeoutMs = params.operationTimeoutMs ?? DEFAULT_COMMIT_DEADLINE_MS
+  let initialSafetyLoaded = false
   const mux: HubMux = createHubMux({
     hub,
     localDID,
+    deferredStart: true,
+    networkAllowed: () => initialSafetyLoaded && safetyHold() === null,
     ...(params.onSubscribeFailed != null ? { onSubscribeFailed: params.onSubscribeFailed } : {}),
     ...(params.onReceiveEnded != null ? { onReceiveEnded: params.onReceiveEnded } : {}),
   })
@@ -2156,9 +2159,9 @@ export function createGroupPeerWithControlWalk<
   }
 
   const initControlLanes = async (): Promise<void> => {
-    if (mls == null) return
+    if (mls == null || safetyHold() !== null) return
     const recoverySecret = await mls.exportRecoverySecret()
-    if (disposed) return
+    if (disposed || safetyHold() !== null) return
     commitTopicID = commitTopic(recoverySecret)
     rendezvousTopicID = rendezvousTopic(recoverySecret)
     // Both topics subscribed once for the peer's whole life — NOT rebuilt on resync, so a
@@ -2330,9 +2333,11 @@ export function createGroupPeerWithControlWalk<
   }
 
   const removalEffect = async (): Promise<void> => {
-    if (control == null) return
+    if (control == null || safetyHold() !== null) return
     const snapshot = await control.load()
-    if (!(await params.readEvidence?.())?.terminal) return
+    if (safetyHold() !== null) return
+    const evidence = await params.readEvidence?.()
+    if (safetyHold() !== null || !evidence?.terminal) return
     if (snapshot.operations.length > 0 || snapshot.rejoin != null) {
       const changes = unknownChanges(snapshot)
       await applyResolved(control, changes, newPublishID())
@@ -3330,6 +3335,11 @@ export function createGroupPeerWithControlWalk<
     if (locallyRemoved) return {}
     await runSerial(async () => {
       await refreshControl()
+      if (safetyHold() !== null) {
+        await settleOperations()
+        await deliverPendingWelcomes()
+        return
+      }
       if (hardControlHeld()) return
       const record = (await control?.load())?.rejoin
       if (record?.stage === 'confirmed' && activeRecovery == null) {
@@ -4026,88 +4036,112 @@ export function createGroupPeerWithControlWalk<
   const safetyReady = refreshControl()
   const ready = (async () => {
     await safetyReady
-    const stored = await anchorStore?.load()
-    if (disposed) return
-    if (stored != null) {
-      anchor = stored.anchor
-      anchorPending = stored.pending
-    }
-    await removalEffect()
-    if (disposed || locallyRemoved) return
-    if (hardControlHeld()) return
-    let anchorBackoff = 100
-    while (!disposed) {
-      try {
-        if (stored != null) {
-          if (mls != null) await resolveAnchorRotation({ port: mls, initial: true })
-        } else {
-          await captureAnchor()
-        }
-        break
-      } catch (error) {
-        if (disposed) return
-        if (!anchorSaveFailed) throw error
-        // Keep the captured secret and send barrier until the idempotent save is known.
-        await Promise.race([
-          new Promise<void>((resolve) => {
-            pendingRestoreTimer = setTimeout(resolve, anchorBackoff)
-          }),
-          pendingRestoreAborted,
-        ])
-        pendingRestoreTimer = undefined
-        anchorBackoff = Math.min(anchorBackoff * 2, 15_000)
+    initialSafetyLoaded = true
+    const stopped = () => disposed || safetyHold() !== null
+    let pendingRestored = false
+    try {
+      if (stopped()) return
+      mux.start()
+      const stored = await anchorStore?.load()
+      if (stopped()) return
+      if (stored != null) {
+        anchor = stored.anchor
+        anchorPending = stored.pending
       }
-    }
-    if (disposed) return
-    await restorePending()
-    if (disposed) return
-    await initControlLanes()
-    if (disposed) return
-    await refreshControl()
-    const startupCursor = (await control?.load())?.cursor
-    if (
-      control != null &&
-      startupCursor != null &&
-      startupCursor.epoch !== (await mls?.readEpoch())
-    ) {
-      await applyResolved(control, { cursor: null, strand: null }, newPublishID())
-      durableCursor = null
-    }
-    // Saved acceptances settle before the walker can meet our own unmerged commit.
-    await runSerial(async () => {
-      if (disposed) return
-      await settleRetainedControlSlot()
-      if (hardControlHeld()) return
-      await settleRejoinPublication()
-      await settleOperations()
-      if (disposed || locallyRemoved || anchorRecoveryPending) return
-      const ledgerReady = await ensureLedger(Date.now() + recoveryTimeoutMs)
-      if (disposed) return
-      if (ledgerReady && mls != null) await finalizeBootstrap(mls)
-      if (disposed) return
-      await pullCommits()
-    }).catch(() => {})
-    if (disposed || locallyRemoved) return
-    await buildEpoch()
-    epochNeedsBuild = anchorPending != null
-    if (disposed) return
-    if (anchorRecoveryPending) return
-    // The seed pull precedes the app listeners. Read once more after registration to close
-    // the publication gap; a failed read is retried on the same independent schedule.
-    if (crypto.pending != null) {
-      try {
-        await runSerial(async () => {
-          if (disposed) return
-          await settleOperations()
-          if (disposed) return
-          await ensureLedger(Date.now() + recoveryTimeoutMs)
-          if (disposed) return
-          await reconcileCommits()
-        })
-      } catch {
-        if (disposed) return
-        appPullNeeded = true
-        armAppPull(appPullBackoff)
+      await removalEffect()
+      if (stopped() || locallyRemoved || hardControlHeld()) return
+      let anchorBackoff = 100
+      while (!stopped()) {
+        try {
+          if (stored != null) {
+            if (mls != null) await resolveAnchorRotation({ port: mls, initial: true })
+          } else {
+            await captureAnchor()
+          }
+          break
+        } catch (error) {
+          if (stopped()) return
+          if (!anchorSaveFailed) throw error
+          // Keep the captured secret and send barrier until the idempotent save is known.
+          await Promise.race([
+            new Promise<void>((resolve) => {
+              pendingRestoreTimer = setTimeout(resolve, anchorBackoff)
+            }),
+            pendingRestoreAborted,
+          ])
+          pendingRestoreTimer = undefined
+          anchorBackoff = Math.min(anchorBackoff * 2, 15_000)
+        }
+      }
+      if (stopped()) return
+      await restorePending()
+      pendingRestored = true
+      if (stopped()) return
+      await initControlLanes()
+      if (stopped()) return
+      await refreshControl()
+      if (stopped()) return
+      const startupCursor = (await control?.load())?.cursor
+      if (stopped()) return
+      if (control != null && startupCursor != null) {
+        const epoch = await mls?.readEpoch()
+        if (stopped()) return
+        if (startupCursor.epoch !== epoch) {
+          await applyResolved(control, { cursor: null, strand: null }, newPublishID())
+          durableCursor = null
+        }
+      }
+      if (stopped()) return
+      // Saved acceptances settle before the walker can meet our own unmerged commit.
+      await runSerial(async () => {
+        if (stopped()) return
+        await settleRetainedControlSlot()
+        if (stopped() || hardControlHeld()) return
+        await settleRejoinPublication()
+        if (stopped()) return
+        await settleOperations()
+        if (stopped() || locallyRemoved || anchorRecoveryPending) return
+        const ledgerReady = await ensureLedger(Date.now() + recoveryTimeoutMs)
+        if (stopped()) return
+        if (ledgerReady && mls != null) await finalizeBootstrap(mls)
+        if (stopped()) return
+        await pullCommits()
+      }).catch(() => {})
+      if (stopped() || locallyRemoved) return
+      await buildEpoch()
+      if (stopped()) return
+      epochNeedsBuild = anchorPending != null
+      if (anchorRecoveryPending) return
+      // Close the publication gap after registering the app listeners.
+      if (crypto.pending != null) {
+        try {
+          await runSerial(async () => {
+            if (stopped()) return
+            await settleOperations()
+            if (stopped()) return
+            await ensureLedger(Date.now() + recoveryTimeoutMs)
+            if (stopped()) return
+            await reconcileCommits()
+          })
+        } catch {
+          if (stopped()) return
+          appPullNeeded = true
+          armAppPull(appPullBackoff)
+        }
+      }
+    } catch (error) {
+      if (!safetyRefusal(error)) throw error
+    } finally {
+      // Owed storage work survives every early safety exit, without control topics or a drain.
+      if (!disposed && safetyHold() !== null) {
+        if (!pendingRestored) await restorePending()
+        if (!disposed) {
+          await runSerial(async () => {
+            await settleOperations()
+            await deliverPendingWelcomes()
+          })
+          appLane.retryDelivery()
+        }
       }
     }
   })()
