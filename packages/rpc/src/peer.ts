@@ -2338,6 +2338,8 @@ export function createGroupPeerWithControlWalk<
       const checked = checkedWelcome
       checkedWelcome = null
       const snapshot = await control.load()
+      const safety = controlSafetyHeld(snapshot)
+      if (safety !== null) latchSafetyHold(safety)
       if (snapshot.welcomes.length === 0) return
       let accepted: Promise<boolean> | undefined
       await deliverObligations(
@@ -2436,7 +2438,7 @@ export function createGroupPeerWithControlWalk<
       try {
         const stored = (await control.load()).forkHalt
         if (stored !== null) {
-          if (committed && sameHalt(stored, halt))
+          if (sameHalt(stored, halt))
             hostOutbox.push(() =>
               notifyHost((event) => params.onSafetyEvent?.(event), {
                 ...key,
@@ -2485,7 +2487,7 @@ export function createGroupPeerWithControlWalk<
   const holdControl = async (value: ControlHold): Promise<void> => {
     if (control == null) return
     // First hard hold wins, including in memory when persistence fails.
-    if (hardControlHeld()) return
+    if (controlHoldPresent()) return
     controlHold = value
     const hard = value.reason !== 'acceptance-unknown'
     if (hard) {
