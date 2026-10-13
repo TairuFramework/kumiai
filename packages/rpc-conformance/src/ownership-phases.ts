@@ -9,6 +9,8 @@ import {
   writeStorageInstall,
 } from './group-storage.js'
 import type {
+  ConformanceAccountedGroupObservation,
+  ConformanceEntryCapability,
   ConformanceEntryReads,
   ConformanceGroupLifetime,
   ConformanceGroupStores,
@@ -90,6 +92,7 @@ function runOwnershipPhasesConformance<TTx extends ConformanceGroupTransaction>(
 ): void {
   type Fixture = ConformancePersistenceFixture<StorageTestPorts<TTx>>
   describe(`Ownership phases conformance -- ${params.label}`, () => {
+    testCommitObservation(params)
     testPreparedOwnership(params)
     testOperationOwnership(params)
     describe('phase capabilities', () => {
@@ -1845,10 +1848,21 @@ async function operationReady<T>(
   )
 }
 
-export type OwnershipPhasesConformanceParams<TTx extends ConformanceGroupTransaction> =
-  StorageConformanceParams<TTx> & {
-    ownershipContext?: () => ConformanceOwnershipContextPort
-  }
+export type OwnershipPhasesConformanceParams<TTx extends ConformanceGroupTransaction> = Omit<
+  StorageConformanceParams<TTx>,
+  'createFixture'
+> & {
+  createFixture(
+    id: string,
+    options?: Parameters<StorageConformanceParams<TTx>['createFixture']>[1],
+  ): Promise<
+    Omit<ConformancePersistenceFixture<StorageTestPorts<TTx>>, 'entry'> & {
+      entry(): ConformanceEntryCapability<TTx>
+    }
+  >
+
+  ownershipContext?: () => ConformanceOwnershipContextPort
+}
 
 export function testOwnershipPhasesConformance<TTx extends ConformanceGroupTransaction>(
   params: OwnershipPhasesConformanceParams<TTx>,
@@ -2122,6 +2136,260 @@ function testPreparedOwnership<TTx extends ConformanceGroupTransaction>(
         ).rejects.toMatchObject({ name: 'GroupStateConflictError' })
         expect(await fixture.inspectRows()).toEqual(before)
       } finally {
+        await fixture.close()
+      }
+    })
+  })
+}
+
+function testCommitObservation<TTx extends ConformanceGroupTransaction>(
+  params: OwnershipPhasesConformanceParams<TTx>,
+): void {
+  describe('accounted commit observation', () => {
+    test('every facade commit is observed with final versions', async () => {
+      const fixture = await params.createFixture(groupID)
+      try {
+        const groups = fixture.ports.device.groups
+        const seed = await storageSeed(groups)
+        const observations: Array<ConformanceAccountedGroupObservation> = []
+        const unsubscribe = fixture.entry().observe(groupID, (value) => observations.push(value))
+        const ports = groups.ports(key)
+        await ports.control.apply(
+          { cursor: { position: null, epoch: seed.state.epoch } },
+          'control-observed',
+        )
+        await ports.anchor.save({ anchor: { epoch: 3, secret: new Uint8Array(32).fill(98) } })
+        await ports.cursor.save('observed-topic', '000000000001')
+        await ports.outbox.put({ ...entry, seq: 8 })
+        expect(observations).toHaveLength(4)
+        for (const [index, value] of observations.entries()) {
+          expect(value.lifetime?.revision).toBe(seed.lifetime.revision + index + 1)
+          expect(value.activeKey).toEqual(key)
+          expect(value.activeVersion).toBe(seed.state.version + index + 1)
+          expect(value.metadata).toContainEqual(
+            expect.objectContaining({ ...key, version: value.activeVersion }),
+          )
+          expect(value.trust).toEqual(seed.trust)
+          expect(value.trustStatus).toBe('readable')
+          expect(value.stateStatus).toBe('readable')
+          expect(value.terminal).toBe(false)
+          expect(value.control?.cursor?.epoch).toBe(seed.state.epoch)
+        }
+        unsubscribe()
+        await ports.cursor.save('observed-topic', '000000000002')
+        expect(observations).toHaveLength(4)
+      } finally {
+        await fixture.close()
+      }
+    })
+
+    test('effect-only observation uses accounting once after side writes', async () => {
+      let supplied!: ConformanceGroupStores<TTx>
+      const donor = await params.createFixture(groupID)
+      const fixture = await params.createFixture(groupID, {
+        effects: {
+          async outbox() {
+            await supplied.incarnation(2).cursor.save('effect-observed', '000000000001')
+          },
+        },
+      })
+      try {
+        const groups = fixture.ports.device.groups
+        const fresh = await storageSeed(donor.ports.device.groups)
+        await groups.transition(
+          await storageChange(groups, groupID, 'install-observed'),
+          async (stores) => {
+            await writeStorageInstall(stores, fresh, 'install-observed', 2)
+          },
+        )
+        const installed = await groups.loadState({ ...key, incarnation: 2 })
+        const observations: Array<ConformanceAccountedGroupObservation> = []
+        fixture.entry().observe(groupID, (value) => observations.push(value))
+        const change = await storageChange(groups, groupID, 'effect-observed')
+        await groups.transition(change, async (stores) => {
+          supplied = stores
+          await stores.incarnation(1).meta.putEvents([event])
+        })
+        expect(observations).toHaveLength(1)
+        expect(observations[0]?.activeVersion).toBe((installed?.version ?? 0) + 1)
+        expect(await groups.ports({ ...key, incarnation: 2 }).cursor.load('effect-observed')).toBe(
+          '000000000001',
+        )
+      } finally {
+        await fixture.close()
+        await donor.close()
+      }
+    })
+
+    test.each(['commit', 'rollback', 'conflict'] as const)(
+      'pending proof publishes once and retains prior observation: %s',
+      async (outcome) => {
+        const fixture = await params.createFixture(groupID)
+        let fault: ReturnType<typeof fixture.rejectCommitPending> | undefined
+        try {
+          const groups = fixture.ports.device.groups
+          const observations: Array<ConformanceAccountedGroupObservation> = []
+          const released: Array<ConformanceAccountedGroupObservation> = []
+          fixture.entry().observe(
+            groupID,
+            (value) => observations.push(value),
+            (value) => released.push(value),
+          )
+          await groups.ports(key).cursor.save('prior', '1')
+          await turn()
+          const prior = observations[0]
+          const change = await storageChange(groups, groupID, 'pending-observed')
+          fixture.onPhase('work', () => {
+            fault = fixture.rejectCommitPending()
+          })
+          const saving = observed(
+            groups.transition(change, async (stores) => {
+              await stores.incarnation(1).cursor.save('pending', '2')
+            }),
+          )
+          const pending = await within(waitForFault())
+          await within(pending.rejected)
+          await within(pending.barrierWaiting)
+          expect(observations, 'no observation before proof').toEqual([prior])
+          expect(released).toEqual([prior])
+          if (outcome === 'conflict')
+            await fixture.forceOwnerMarker({ groupID }, { mutationID: 'intruder', revision: 99 })
+          await pending.finish(outcome === 'commit' ? 'commit' : 'rollback')
+          const result = await within(saving.result)
+          await turn()
+          expect(observations).toHaveLength(outcome === 'commit' ? 2 : 1)
+          expect(released).toHaveLength(observations.length)
+          if (outcome === 'commit') {
+            expect(result.ok).toBe(true)
+            expect(observations[1]?.mutationID).toBe(change.mutationID)
+            expect(released[1]).toBe(observations[1])
+          } else expect(result.ok).toBe(false)
+          async function waitForFault() {
+            while (fault === undefined) await turn()
+            return fault
+          }
+        } finally {
+          await fault?.finish(outcome === 'commit' ? 'commit' : 'rollback')
+          await fixture.close()
+        }
+      },
+    )
+
+    test.each([false, true])(
+      'afterRelease can call persistence roots; Combined=%s',
+      async (combined) => {
+        const context = params.ownershipContext?.()
+        const fixture = await params.createFixture(groupID, { ownershipContext: context })
+        try {
+          const device = fixture.ports.device
+          const groups = device.groups
+          const change = await storageChange(groups, groupID, 'release-observed')
+          const revision = (await device.load()).revision
+          const completed = localDeferred<void>()
+          let synchronous!: ConformanceAccountedGroupObservation
+          let token: object | undefined
+          let failure: unknown
+          const unsubscribe = fixture.entry().observe(
+            groupID,
+            (value) => {
+              synchronous = value
+            },
+            (value) => {
+              token = context?.get()
+              unsubscribe()
+              void (async () => {
+                expect(value).toBe(synchronous)
+                expect(token, 'afterRelease clears callback context').toBeUndefined()
+                expect(await groups.load(groupID)).toEqual(value.lifetime)
+                expect((await device.load()).revision).toBe(revision + (combined ? 1 : 0))
+                await groups.transition(
+                  await storageChange(groups, groupID, 'listener-transition'),
+                  async () => {},
+                )
+              })()
+                .catch((error: unknown) => {
+                  failure = error
+                })
+                .finally(() => completed.resolve())
+            },
+          )
+          if (combined)
+            await device.transition(
+              { mutationID: change.mutationID, expectedRevision: revision, group: change },
+              async (stores) => {
+                await stores.group?.incarnation(1).cursor.save('release', '1')
+              },
+            )
+          else await groups.transition(change, async () => {})
+          await within(completed.promise)
+          expect(failure).toBeUndefined()
+        } finally {
+          await fixture.close()
+        }
+      },
+    )
+
+    test('retried attempts drop their staged observation', async () => {
+      const fixture = await params.createFixture(groupID)
+      try {
+        const groups = fixture.ports.device.groups
+        const observations: Array<ConformanceAccountedGroupObservation> = []
+        const released: Array<ConformanceAccountedGroupObservation> = []
+        fixture.entry().observe(
+          groupID,
+          (value) => observations.push(value),
+          (value) => released.push(value),
+        )
+        const change = await storageChange(groups, groupID, 'retry-observed')
+        let attempts = 0
+        fixture.retryNextTransition()
+        await groups.transition(change, async (stores) => {
+          await stores.incarnation(1).cursor.save('retry-observed', String(++attempts))
+        })
+        await turn()
+        expect(attempts).toBe(2)
+        expect(observations, 'only the final accounted attempt is published').toHaveLength(1)
+        expect(released).toHaveLength(1)
+        expect(released[0]).toBe(observations[0])
+      } finally {
+        await fixture.close()
+      }
+    })
+
+    test('Combined observation waits both owners to prove', async () => {
+      const fixture = await params.createFixture(groupID)
+      let fault: ReturnType<typeof fixture.rejectCommitPending> | undefined
+      try {
+        const device = fixture.ports.device
+        const change = await storageChange(device.groups, groupID, 'combined-observed')
+        const revision = (await device.load()).revision
+        const observations: Array<ConformanceAccountedGroupObservation> = []
+        fixture.entry().observe(groupID, (value) => observations.push(value))
+        fixture.onPhase('work', () => {
+          fault = fixture.rejectCommitPending()
+        })
+        const saving = observed(
+          device.transition(
+            { mutationID: change.mutationID, expectedRevision: revision, group: change },
+            async () => {},
+          ),
+        )
+        while (fault === undefined) await turn()
+        await within(fault.rejected)
+        await within(fault.barrierWaiting)
+        expect(observations).toEqual([])
+        await fixture.forceOwnerMarker(
+          { groupID },
+          { mutationID: change.mutationID, revision: (change.expected?.revision ?? 0) + 1 },
+        )
+        await fault.finish('rollback')
+        expect(await within(saving.result)).toMatchObject({
+          ok: false,
+          error: { name: 'GroupStateConflictError' },
+        })
+        expect(observations).toEqual([])
+      } finally {
+        await fault?.finish('rollback')
         await fixture.close()
       }
     })

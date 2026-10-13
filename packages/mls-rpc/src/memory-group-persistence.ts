@@ -1,6 +1,12 @@
 import { controlAdoptionAllowed } from '@kumiai/rpc'
 
-import { bindEntryCapability, type EntryCapability, type EntryReads } from './entry-capability.js'
+import {
+  type AccountedGroupObservation,
+  bindEntryCapability,
+  type EntryCapability,
+  type EntryReads,
+  type StateMetadata,
+} from './entry-capability.js'
 import {
   bindMemoryGroupPorts,
   createMemoryGroupPorts,
@@ -71,7 +77,17 @@ type GroupOperation = {
   check?(stores: GroupStores<MemoryTransaction>): Promise<void>
 }
 
-type Binding = { providerID: string; owners: OwnerQueues; proofs: Map<string, Proof> }
+type Observer = {
+  active: boolean
+  onProof: (observation: AccountedGroupObservation) => void
+  afterRelease?: (observation: AccountedGroupObservation) => void
+}
+type Binding = {
+  providerID: string
+  owners: OwnerQueues
+  proofs: Map<string, Proof>
+  observers: Map<string, Set<Observer>>
+}
 const bindings = new WeakMap<MemoryDatabase, Binding>()
 const proofKey = (groupID: string, mutationID: string) => JSON.stringify([groupID, mutationID])
 const scope = (groupID: string) => ({ groupID, devicePackages: false })
@@ -164,7 +180,7 @@ export function createMemoryGroupCoordinator(params: {
     throw new TypeError('Expected callable at-rest seal and open')
   let binding = bindings.get(db)
   if (binding === undefined) {
-    binding = { providerID, owners, proofs: new Map() }
+    binding = { providerID, owners, proofs: new Map(), observers: new Map() }
     bindings.set(db, binding)
   } else if (binding.providerID !== providerID)
     throw new GroupStateConflictError('Persistence provider mismatch')
@@ -172,6 +188,7 @@ export function createMemoryGroupCoordinator(params: {
     throw new GroupStateConflictError('Persistence ownership queue mismatch')
   owners.bindOwnershipContext(params.ownershipContext)
   const proofs = binding.proofs
+  const observers = binding.observers
   const boundTx = (tx: MemoryTransaction, entry?: OwnerEntry): MemoryTransaction => {
     if (entry !== undefined) bindMemoryOwner(tx, entry, owners)
     return {
@@ -361,6 +378,92 @@ export function createMemoryGroupCoordinator(params: {
       throw new GroupStateUncertainError('Group mutation is superseded or unclassifiable')
     })
   }
+  async function captureObservation(
+    tx: MemoryTransaction,
+    before: MemoryStoreRows,
+    groupID: string,
+    mutationID: string,
+    entry: OwnerEntry,
+  ): Promise<void> {
+    const listeners = [...(observers.get(groupID) ?? [])]
+    if (listeners.length === 0) return
+    const observation = await coordinateMemoryTransaction(tx, async (tx) => {
+      const raw = createUnlockedGroupStateStores({ tx, groupID, atRest, requiredOpen: false })
+      const lifetime = await raw.lifetime.load()
+      const metadata: Array<StateMetadata> = []
+      for (const incarnation of changedIncarnations(before, snapshot(tx), groupID).keys()) {
+        const value = await raw.stateMetadata(incarnation).load()
+        if (value !== null) metadata.push(value)
+      }
+      let trust: GroupRecoveryTrust | null = null
+      let trustStatus: AccountedGroupObservation['trustStatus'] = 'missing'
+      try {
+        trust = await raw.trust.load()
+        trustStatus = trust === null ? 'missing' : 'readable'
+      } catch {
+        assertMemoryAccess(tx.rows)
+        trustStatus = 'unreadable'
+      }
+      const activeKey =
+        lifetime?.activeIncarnation == null
+          ? null
+          : { groupID, incarnation: lifetime.activeIncarnation }
+      let activeVersion: number | null = null
+      let control: AccountedGroupObservation['control'] = null
+      let stateStatus: AccountedGroupObservation['stateStatus'] = 'missing'
+      let terminal: boolean | null = null
+      if (activeKey !== null) {
+        activeVersion = (await raw.stateMetadata(activeKey.incarnation).load())?.version ?? null
+        control = await createUnlockedIncarnationStores({
+          tx,
+          key: activeKey,
+          atRest,
+        }).control.load()
+        try {
+          const state = await raw.state(activeKey.incarnation).load()
+          stateStatus =
+            state === null
+              ? 'missing'
+              : state.deleted
+                ? 'deleted'
+                : state.state === null
+                  ? 'null'
+                  : 'readable'
+          terminal = state === null || state.deleted ? null : state.terminal
+        } catch {
+          assertMemoryAccess(tx.rows)
+          stateStatus = 'unreadable'
+        }
+      }
+      return {
+        mutationID,
+        lifetime,
+        metadata,
+        trust,
+        trustStatus,
+        activeKey,
+        activeVersion,
+        control,
+        stateStatus,
+        terminal,
+      }
+    })
+    const attempt = entry.attempt()
+    // Clone before proof; each observer owns the same value through both callbacks.
+    for (const listener of listeners) {
+      const detached = copyStoredValue(observation)
+      entry.onCommit(() => {
+        if (listener.active && entry.attempt() === attempt) listener.onProof(detached)
+      })
+      if (listener.afterRelease !== undefined) {
+        const afterRelease = listener.afterRelease
+        entry.afterRelease(() => {
+          if (listener.active && entry.attempt() === attempt) afterRelease(detached)
+        })
+      }
+    }
+  }
+
   async function transitionOwned<TValue>(
     request: GroupTransition | GroupOperation,
     work: (stores: GroupStores<MemoryTransaction>, mutationID: string) => Promise<TValue>,
@@ -899,6 +1002,7 @@ export function createMemoryGroupCoordinator(params: {
             })
             if (entry.rollbackOnly)
               throw new GroupStateConflictError('Transaction is rollback-only')
+            await captureObservation(tx, before, change.groupID, change.mutationID, entry)
             return result
           } catch (error) {
             attempt.revoke(
@@ -1008,6 +1112,21 @@ export function createMemoryGroupCoordinator(params: {
     resolve,
   }
   const capability: EntryCapability<MemoryTransaction> = {
+    observe(groupID, onProof, afterRelease) {
+      const listener: Observer = { active: true, onProof, afterRelease }
+      let listeners = observers.get(groupID)
+      if (listeners === undefined) {
+        listeners = new Set()
+        observers.set(groupID, listeners)
+      }
+      listeners.add(listener)
+      return () => {
+        if (!listener.active) return
+        listener.active = false
+        listeners.delete(listener)
+        if (listeners.size === 0) observers.delete(groupID)
+      }
+    },
     read(groupID, fn) {
       return owners.run('read', { groupID, ownerDID: null }, async (entry) => {
         try {

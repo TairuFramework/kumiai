@@ -233,6 +233,18 @@ export type ConformanceStateMetadata = ConformanceGroupKey & {
   deleted: boolean
   initialIdentity: ConformanceEpochIdentity | null
 }
+export type ConformanceAccountedGroupObservation<Position extends string = string> = {
+  mutationID: string
+  lifetime: ConformanceGroupLifetime | null
+  metadata: Array<ConformanceStateMetadata>
+  trust: ConformanceGroupRecoveryTrust | null
+  trustStatus: 'missing' | 'readable' | 'unreadable'
+  activeKey: ConformanceGroupKey | null
+  activeVersion: number | null
+  control: ConformanceControlSnapshot<Position> | null
+  stateStatus: 'missing' | 'null' | 'deleted' | 'readable' | 'unreadable'
+  terminal: boolean | null
+}
 export type ConformanceEntryReads = {
   lifetime(): Promise<ConformanceGroupLifetime | null>
   trust(): Promise<ConformanceGroupRecoveryTrust | null>
@@ -246,6 +258,12 @@ export type ConformanceEntryReads = {
 }
 export type ConformancePrepared<T> = { expected: ConformanceGroupTransition['expected']; value: T }
 export type ConformanceEntryCapability<TTx extends ConformanceGroupTransaction> = {
+  observe(
+    groupID: string,
+    onProof: (observation: ConformanceAccountedGroupObservation) => void,
+    afterRelease?: (observation: ConformanceAccountedGroupObservation) => void,
+  ): () => void
+
   read<T>(groupID: string, fn: (reads: ConformanceEntryReads) => Promise<T>): Promise<T>
   run<P, T>(
     request: Pick<ConformanceGroupTransition, 'groupID' | 'mutationID'>,
@@ -418,12 +436,15 @@ type ConformanceFixtureDeviceStores<TPorts> = TPorts extends {
   : never
 
 export type ConformancePersistenceFixture<TPorts> = {
-  entry(): ConformanceEntryCapability<
-    ConformanceFixtureGroupStores<TPorts> extends {
-      tx: infer TTx extends ConformanceGroupTransaction
-    }
-      ? TTx
-      : never
+  entry(): Pick<
+    ConformanceEntryCapability<
+      ConformanceFixtureGroupStores<TPorts> extends {
+        tx: infer TTx extends ConformanceGroupTransaction
+      }
+        ? TTx
+        : never
+    >,
+    'read' | 'run'
   >
   constructPrepareStores(key: ConformanceGroupKey): ConformanceFixtureGroupStores<TPorts>
   ports: TPorts

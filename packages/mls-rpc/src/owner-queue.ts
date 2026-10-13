@@ -50,6 +50,7 @@ export type OwnerEntry = {
   backendSettled(): Promise<void>
   release(): void
   assertWrite(target: WriteTarget): void
+  afterRelease(fn: () => void): void
   onCommit(fn: () => void): void
   onRollback(fn: () => void): void
   settle(outcome: ProofOutcome): void
@@ -95,6 +96,25 @@ function scopeKey(kind: 'device' | 'group', id: string): string {
 export function createOwnerQueues(options?: {
   ownershipContext?: OwnershipContextPort
 }): OwnerQueues {
+  // Register the dispatcher outside callback context, including provider async context.
+  const releasedHooks: Array<() => void> = []
+  let wake!: () => void
+  function awaitRelease(): void {
+    void new Promise<void>((resolve) => {
+      wake = resolve
+    }).then(() => {
+      const hooks = releasedHooks.splice(0)
+      awaitRelease()
+      for (const hook of hooks) {
+        try {
+          hook()
+        } catch {
+          /* Listener exceptions cannot change settlement. */
+        }
+      }
+    })
+  }
+  awaitRelease()
   const slots = new Map<string, Slot>()
   const entries = new Set<Owned>()
   const started = new Set<string>()
@@ -227,6 +247,7 @@ export function createOwnerQueues(options?: {
       let tail = Promise.resolve()
       let closing: Promise<void> | null = null
       let bodyFinished = false
+      const afterRelease: Array<() => void> = []
       const commits: Array<() => void> = []
       const rollbacks: Array<() => void> = []
       const token = Object.freeze({})
@@ -273,6 +294,11 @@ export function createOwnerQueues(options?: {
         entries.delete(owned)
         for (const unlock of releases.reverse()) unlock()
         releases.length = 0
+        if (outcome === 'committed' && failure === null) {
+          releasedHooks.push(...afterRelease)
+          if (afterRelease.length !== 0) wake()
+        }
+        afterRelease.length = 0
       }
 
       function releaseSettled(): void {
@@ -437,6 +463,9 @@ export function createOwnerQueues(options?: {
                 : phase === 'finalise' || phase === 'account'
           if (!allowed) throw new PersistencePhaseError(`Cannot write ${target} in ${phase}`)
         },
+        afterRelease(fn) {
+          register(afterRelease, fn)
+        },
         onCommit(fn) {
           register(commits, fn)
         },
@@ -510,6 +539,7 @@ export function createOwnerQueues(options?: {
         drop(error) {
           commits.length = 0
           rollbacks.length = 0
+          afterRelease.length = 0
           // Backend completion owns already-started work; no new reservation may run.
           currentAttempt.attempt.revoke(error)
           release()

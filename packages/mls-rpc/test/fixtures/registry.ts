@@ -10,6 +10,7 @@ import {
 } from '@kumiai/mls'
 import type { AnchorSlot, ControlChanges, RejoinRecord } from '@kumiai/rpc'
 
+import { type EntryCapability, entryCapability } from '../../src/entry-capability.js'
 import { physicalRecordKey } from '../../src/persistence-codec.js'
 import type {
   AppOutboxEntry,
@@ -111,6 +112,15 @@ export function registryFixtureRestore(fixture: RegistryFixtureBase) {
   const restore = restorers.get(fixture)
   if (restore === undefined) throw new Error('Unknown registry fixture')
   return restore
+}
+
+export function registryFixtureObserve(
+  fixture: RegistryFixtureBase,
+  ...args: Parameters<EntryCapability<MemoryTransaction>['observe']>
+): () => void {
+  const capability = entryCapability(fixture.device.groups)
+  if (capability === null) throw new Error('Unknown registry fixture capability')
+  return capability.observe(...args)
 }
 
 export async function createRegistryFixture(params: FixtureParams): Promise<RegistryFixtureBase> {

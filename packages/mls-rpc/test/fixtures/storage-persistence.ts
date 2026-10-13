@@ -36,7 +36,7 @@ import { createControlBuildPort, createPersistenceBuildSaver } from '../../src/c
 import { decodeControlJournal } from '../../src/control-journal.js'
 import { createControlValidationPort } from '../../src/control-validation.js'
 import { createGroupCrypto } from '../../src/crypto.js'
-import { entryCapability } from '../../src/entry-capability.js'
+import { type EntryCapability, entryCapability } from '../../src/entry-capability.js'
 import { memoryGroupOwnerQueues } from '../../src/memory-group-persistence.js'
 import {
   assertMemoryWrite,
@@ -143,7 +143,8 @@ type RegistryStoragePorts = {
   device: DevicePersistence<MemoryTransaction>
   packageStores(sourceID: string): ReturnType<typeof createMemoryPackageStores>
 }
-export type RegistryStorageFixture = PersistenceFixture<RegistryStoragePorts> & {
+export type RegistryStorageFixture = Omit<PersistenceFixture<RegistryStoragePorts>, 'entry'> & {
+  entry(): EntryCapability<MemoryTransaction>
   armNextWorkFault(point: 'pending'): WorkFaultControl & { mutationID: Promise<string> }
   armNextWorkFault(point: Exclude<WorkFaultPoint, 'pending'>): { mutationID: Promise<string> }
   armWorkFault(mutationID: string, point: 'pending'): WorkFaultControl

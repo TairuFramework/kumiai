@@ -17,6 +17,18 @@ export type StateMetadata = GroupKey & {
   deleted: boolean
   initialIdentity: EpochIdentity | null
 }
+export type AccountedGroupObservation = {
+  mutationID: string
+  lifetime: GroupLifetime | null
+  metadata: Array<StateMetadata>
+  trust: GroupRecoveryTrust | null
+  trustStatus: 'missing' | 'readable' | 'unreadable'
+  activeKey: GroupKey | null
+  activeVersion: number | null
+  control: ControlSnapshot | null
+  stateStatus: 'missing' | 'null' | 'deleted' | 'readable' | 'unreadable'
+  terminal: boolean | null
+}
 export type EntryReads = {
   lifetime(): Promise<GroupLifetime | null>
   trust(): Promise<GroupRecoveryTrust | null>
@@ -30,6 +42,12 @@ export type EntryReads = {
 }
 export type Prepared<T> = { expected: GroupTransition['expected']; value: T }
 export type EntryCapability<TTx extends GroupTransaction> = {
+  observe(
+    groupID: string,
+    onProof: (observation: AccountedGroupObservation) => void,
+    afterRelease?: (observation: AccountedGroupObservation) => void,
+  ): () => void
+
   read<T>(groupID: string, fn: (reads: EntryReads) => Promise<T>): Promise<T>
   run<P, T>(
     request: Pick<GroupTransition, 'groupID' | 'mutationID'>,
