@@ -2490,23 +2490,27 @@ export function createGroupPeerWithControlWalk<
     if (controlHoldPresent()) return
     controlHold = value
     const hard = value.reason !== 'acceptance-unknown'
-    if (hard) {
+    if (hard && safetyHold() === null) {
       stranded = true
       healRequested = false
     }
     const snapshot = await control.load()
+    const epoch =
+      hard && safetyHold() === null
+        ? ((await mls?.readEpoch()) ?? crypto.epoch())
+        : (snapshot.cursor?.epoch ?? durableCursor?.epoch ?? crypto.epoch())
     await applyResolved(
       control,
       {
         controlHold: value,
-        ...(hard
+        ...(hard && safetyHold() === null
           ? {
               strand: {
                 reason: 'unsupported-version',
               },
               cursor: {
                 position: snapshot.cursor?.position ?? null,
-                epoch: (await mls?.readEpoch()) ?? crypto.epoch(),
+                epoch,
                 stranded: true,
                 ...(snapshot.cursor?.fork == null ? {} : { fork: snapshot.cursor.fork }),
               },

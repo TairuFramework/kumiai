@@ -411,13 +411,21 @@ test('a late unsupported-version hold persists alongside the safety latch', asyn
   const halting = member.controlWalk.haltFork(evidence)
   expect(member.controlWalk.safetyHold()).toBe('fork-halted')
   await vi.waitFor(async () => expect((await member.control.load()).forkHalt).not.toBeNull())
-  const halt = (await member.control.load()).forkHalt
+  const before = await member.control.load()
+  const epoch = vi.spyOn(member.mls, 'readEpoch')
   release.resolve()
   await walking
   await halting
   const after = await member.control.load()
+  // Exclude the incoming frame classifier's epoch read before hold persistence.
+  expect(
+    epoch.mock.calls.slice(1),
+    'ControlHold persistence must not read MLS after safety latches',
+  ).toHaveLength(0)
   expect(after.controlHold).toEqual({ reason: 'unsupported-version', position })
-  expect(after.forkHalt).toEqual(halt)
+  expect(after.forkHalt).toEqual(before.forkHalt)
+  expect(after.cursor).toEqual(before.cursor)
+  expect(after.strand).toEqual(before.strand)
   expect(member.controlWalk.safetyHold()).toBe('fork-halted')
 })
 
