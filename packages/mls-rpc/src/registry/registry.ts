@@ -148,12 +148,18 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
                   throw new GroupUnavailableError({ reason: 'invalid' })
                 return access
               })
-              if (slot.generation !== generation) throw new StaleRegistryGeneration()
+              if (slot.generation !== generation || slot.owner?.access !== access)
+                throw new StaleRegistryGeneration()
               publish(slot, previous)
               return access
             } catch (error) {
               if (!(error instanceof StaleRegistryGeneration)) {
-                if (slot.generation === generation) invalidate(slot)
+                if (
+                  slot.generation === generation &&
+                  (error instanceof GroupUnavailableError ||
+                    error instanceof DisplacedGroupHandleError)
+                )
+                  invalidate(slot)
                 publish(slot, previous)
                 throw error
               }

@@ -2,6 +2,17 @@ import { type DeviceRegistry, decodeDeviceRegistry, encodeDeviceRegistry } from 
 
 import type { AtRestCodec } from './persistence-types.js'
 
+// Preserve provider error identity while recording guarded open/decoding refusal.
+const storedOpenFailures = new WeakSet<object>()
+
+export function isStoredOpenFailure(cause: unknown): boolean {
+  return (
+    cause !== null &&
+    (typeof cause === 'object' || typeof cause === 'function') &&
+    storedOpenFailures.has(cause)
+  )
+}
+
 export type StoredAddress = {
   groupID: string
   incarnation: number | null
@@ -214,7 +225,16 @@ export async function openRecord(
   address: StoredAddress,
   bytes: Uint8Array,
 ): Promise<unknown> {
-  const plaintext = await codec.open(Uint8Array.from(bytes), recordAAD(address))
-  const value = decodeStoredValue(Uint8Array.from(plaintext))
-  return address.namespace === 'trust' ? decodeTrust(value) : value
+  try {
+    const plaintext = await codec.open(Uint8Array.from(bytes), recordAAD(address))
+    const value = decodeStoredValue(Uint8Array.from(plaintext))
+    return address.namespace === 'trust' ? decodeTrust(value) : value
+  } catch (cause) {
+    const error =
+      cause !== null && (typeof cause === 'object' || typeof cause === 'function')
+        ? cause
+        : new Error('Stored value open failed', { cause })
+    storedOpenFailures.add(error)
+    throw error
+  }
 }

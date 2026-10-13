@@ -187,6 +187,38 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
+    test('deleted state with active lifetime and metadata is invalid', async () => {
+      const fixture = await create()
+      try {
+        const { bindEntryCapability, entryCapability } = await import('../src/entry-capability.js')
+        const capability = entryCapability(fixture.device.groups)
+        const binding = coordinatorBinding(fixture.device.groups)
+        if (capability === null || binding === null) throw new Error('Missing capability')
+        bindEntryCapability({
+          persistence: fixture.device.groups,
+          coordinatorBinding: binding,
+          capability: {
+            ...capability,
+            read: (groupID, fn) =>
+              capability.read(groupID, (reads) =>
+                fn({
+                  ...reads,
+                  async state(incarnation) {
+                    const record = await reads.state(incarnation)
+                    if (record === null) throw new Error('Missing state')
+                    return { ...key, version: record.version, deleted: true }
+                  },
+                }),
+              ),
+          },
+        })
+        await expect(registry(fixture).access(groupID)).rejects.toMatchObject({ reason: 'invalid' })
+        expect(fixture.restoreCount(groupID)).toBe(0)
+      } finally {
+        await fixture.close()
+      }
+    })
+
     test('cold identity uses current trust instead of initial metadata', async () => {
       const fixture = await create()
       try {
@@ -343,6 +375,26 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
+    test('outstanding control refresh rejects after its callback ends', async () => {
+      const fixture = await create()
+      try {
+        const access = await registry(fixture).access(groupID)
+        let held: ReturnType<RegistryFixtureBase['holdRestore']> | undefined
+        let refreshed: Promise<unknown> | undefined
+        await access.readControl(async (scope) => {
+          held = fixture.holdRestore(groupID)
+          refreshed = scope.refresh()
+          // Attach the assertion before releasing restoration to handle rejection immediately.
+          refreshed = expect(refreshed).rejects.toThrow('scope has ended')
+          await held.started
+        })
+        held?.release()
+        await refreshed
+      } finally {
+        await fixture.close()
+      }
+    })
+
     test.each(['null', 'corrupt'] as const)(
       'warm unchanged version refuses %s state',
       async (kind) => {
@@ -493,6 +545,80 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
+    describe.each(['access', 'read', 'readControl'] as const)(
+      'transient failure during %s',
+      (operation) => {
+        test.each(['entry', 'lifetime', 'metadata', 'trust', 'control', 'state'] as const)(
+          'one-shot %s storage error preserves held access',
+          async (boundary) => {
+            const fixture = await create()
+            try {
+              const { bindEntryCapability, entryCapability } = await import(
+                '../src/entry-capability.js'
+              )
+              const capability = entryCapability(fixture.device.groups)
+              const binding = coordinatorBinding(fixture.device.groups)
+              if (capability === null || binding === null) throw new Error('Missing capability')
+              let failure: Error | null = null
+              function failOnce<TArgs extends Array<unknown>, TValue>(
+                fn: (...args: TArgs) => Promise<TValue>,
+              ) {
+                return async (...args: TArgs): Promise<TValue> => {
+                  const error = failure
+                  failure = null
+                  if (error !== null) throw error
+                  return await fn(...args)
+                }
+              }
+              bindEntryCapability({
+                persistence: fixture.device.groups,
+                coordinatorBinding: binding,
+                capability: {
+                  ...capability,
+                  read(groupID, fn) {
+                    if (boundary === 'entry' && failure !== null) {
+                      const error = failure
+                      failure = null
+                      return Promise.reject(error)
+                    }
+                    return capability.read(groupID, (reads) =>
+                      fn({
+                        ...reads,
+                        lifetime:
+                          boundary === 'lifetime' ? failOnce(reads.lifetime) : reads.lifetime,
+                        metadata:
+                          boundary === 'metadata' ? failOnce(reads.metadata) : reads.metadata,
+                        trust: boundary === 'trust' ? failOnce(reads.trust) : reads.trust,
+                        control: boundary === 'control' ? failOnce(reads.control) : reads.control,
+                        state: boundary === 'state' ? failOnce(reads.state) : reads.state,
+                      }),
+                    )
+                  },
+                },
+              })
+              const owner = registry(fixture)
+              const access = await owner.access(groupID)
+              const snapshot = access.runtime.snapshot()
+              const error = new Error('Temporary storage I/O failure')
+              failure = error
+              const reading =
+                operation === 'access'
+                  ? owner.access(groupID)
+                  : operation === 'read'
+                    ? access.read((handle) => handle.groupID)
+                    : access.readControl(async (scope) => scope.handle.groupID)
+              await expect(reading).rejects.toBe(error)
+              expect(access.runtime.snapshot()).toEqual(snapshot)
+              expect(await access.read((handle) => handle.credential.id)).toBe(fixture.identity.id)
+              expect(await owner.access(groupID)).toBe(access)
+            } finally {
+              await fixture.close()
+            }
+          },
+        )
+      },
+    )
+
     test('unchanged reads do not notify runtime listeners', async () => {
       const fixture = await create()
       try {
@@ -586,6 +712,73 @@ for (const mode of ['real-mls', 'double'] as const) {
         await expect(owner.start()).rejects.toMatchObject({ reason: 'restore-pending' })
         await expect(owner.access(groupID)).rejects.toMatchObject({ reason: 'restore-pending' })
         expect(fixture.restoreCount(groupID)).toBe(0)
+      } finally {
+        await fixture.close()
+      }
+    })
+
+    test('incarnation replacement after Read discards the loaded access before return', async () => {
+      const fixture = await create()
+      try {
+        const { bindEntryCapability, entryCapability } = await import('../src/entry-capability.js')
+        const capability = entryCapability(fixture.device.groups)
+        const binding = coordinatorBinding(fixture.device.groups)
+        if (capability === null || binding === null) throw new Error('Missing capability')
+        let afterRead: (() => Promise<void>) | undefined
+        bindEntryCapability({
+          persistence: fixture.device.groups,
+          coordinatorBinding: binding,
+          capability: {
+            ...capability,
+            async read(groupID, fn) {
+              const result = await capability.read(groupID, fn)
+              const callback = afterRead
+              afterRead = undefined
+              await callback?.()
+              return result
+            },
+          },
+        })
+        const owner = registry(fixture)
+        const previous = await owner.access(groupID)
+        const record = await recordFor(fixture, key)
+        const nextKey = { groupID, incarnation: 2 }
+        const handle = await fixture.makeHandle(0)
+        afterRead = async () => {
+          const lifetime = await fixture.device.groups.load(groupID)
+          if (lifetime === null) throw new Error('Missing lifetime')
+          await fixture.device.groups.transition(
+            { groupID, mutationID: 'replace-after-read', expected: lifetime },
+            async (stores) => {
+              await stores.lifetime.save({
+                ...lifetime,
+                latestIncarnation: 2,
+                activeIncarnation: 2,
+                revision: lifetime.revision + 1,
+                mutationID: 'replace-after-read',
+              })
+              await stores.incarnation(2).state.save({
+                ...record,
+                ...nextKey,
+                version: 1,
+                epochAuthenticator: handle.state.keySchedule.epochAuthenticator,
+                state: encodeClientState(handle.state),
+                credential: handle.credential,
+                ledger: handle.ledgerTokens,
+              })
+              await stores.trust.save(recoveryTrustFor(handle, nextKey, await stores.trust.load()))
+            },
+          )
+          await expect(previous.read(() => {})).rejects.toMatchObject({
+            name: 'DisplacedGroupHandleError',
+          })
+        }
+        const current = await owner.access(groupID)
+        expect(current.key).toEqual(nextKey)
+        expect(current).not.toBe(previous)
+        expect(previous.runtime.snapshot()).toBeNull()
+        expect(current.runtime.snapshot()).toMatchObject({ ...nextKey, available: true })
+        expect(await current.read((handle) => handle.credential.id)).toBe(fixture.identity.id)
       } finally {
         await fixture.close()
       }

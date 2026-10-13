@@ -3,7 +3,7 @@ import type { SendAdmission } from '@kumiai/rpc'
 
 import type { ControlRead, ControlReadScope } from '../access.js'
 import type { EntryCapability, EntryReads } from '../entry-capability.js'
-import { DisplacedGroupHandleError } from '../persistence-errors.js'
+import { DisplacedGroupHandleError, GroupUnavailableError } from '../persistence-errors.js'
 import type { GroupKey, GroupTransaction } from '../persistence-types.js'
 import { type ColdEnvironment, restoreValidated, type ValidatedGroupState } from './cold.js'
 import type { createRegistryRuntime } from './runtime.js'
@@ -47,7 +47,8 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
         },
       }
     } catch (error) {
-      params.invalidate()
+      if (error instanceof GroupUnavailableError || error instanceof DisplacedGroupHandleError)
+        params.invalidate()
       throw error
     }
   }
@@ -67,7 +68,9 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
         let active = true
         const refresh = async (): Promise<ControlRead> => {
           if (!active) throw new Error('Control read scope has ended')
-          return await isolated(reads)
+          const value = await isolated(reads)
+          if (!active) throw new Error('Control read scope has ended')
+          return value
         }
         try {
           return await fn({ ...(await refresh()), refresh })

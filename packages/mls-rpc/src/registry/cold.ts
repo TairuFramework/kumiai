@@ -3,8 +3,12 @@ import type { GroupHandle } from '@kumiai/mls'
 import type { ControlSnapshot, SendAdmission } from '@kumiai/rpc'
 
 import type { EntryReads, StateMetadata } from '../entry-capability.js'
-import { decodeStoredValue, encodeStoredValue } from '../persistence-codec.js'
-import { GroupUnavailableError } from '../persistence-errors.js'
+import { decodeStoredValue, encodeStoredValue, isStoredOpenFailure } from '../persistence-codec.js'
+import {
+  GroupStateConflictError,
+  GroupUnavailableError,
+  type GroupUnavailableReason,
+} from '../persistence-errors.js'
 import type {
   GroupKey,
   GroupLifetime,
@@ -35,6 +39,11 @@ function sameValue(left: unknown, right: unknown): boolean {
   const a = encodeStoredValue(left)
   const b = encodeStoredValue(right)
   return a.length === b.length && a.every((byte, index) => byte === b[index])
+}
+
+function refuseStoredValue(cause: unknown, reason: GroupUnavailableReason): never {
+  if (!isStoredOpenFailure(cause) && !(cause instanceof GroupStateConflictError)) throw cause
+  throw new GroupUnavailableError({ reason, cause })
 }
 
 export async function restoreValidated(
@@ -68,8 +77,7 @@ export async function loadValidatedGroup(
   try {
     lifetime = await reads.lifetime()
   } catch (cause) {
-    // biome-ignore lint/style/useErrorCause: The constructor forwards params.cause to Error.
-    throw new GroupUnavailableError({ reason: 'invalid', cause })
+    refuseStoredValue(cause, 'invalid')
   }
   if (lifetime === null) throw new GroupUnavailableError({ reason: 'absent' })
   if (lifetime.restorePending) throw new GroupUnavailableError({ reason: 'restore-pending' })
@@ -86,7 +94,7 @@ export async function loadValidatedGroup(
       !Number.isSafeInteger(lifetime.latestIncarnation) ||
       key.incarnation > lifetime.latestIncarnation
     )
-      throw new Error('Invalid active lifetime')
+      throw new GroupUnavailableError({ reason: 'invalid' })
     metadata = await reads.metadata(key.incarnation)
     // A surviving lifetime always requires retained trust, including incarnation one.
     trust = await reads.trust()
@@ -100,21 +108,19 @@ export async function loadValidatedGroup(
       !Number.isSafeInteger(metadata.version) ||
       metadata.version < 1
     )
-      throw new Error('Invalid active state metadata or trust')
+      throw new GroupUnavailableError({ reason: 'invalid' })
   } catch (cause) {
-    // biome-ignore lint/style/useErrorCause: The constructor forwards params.cause to Error.
-    throw new GroupUnavailableError({ reason: 'invalid', cause })
+    refuseStoredValue(cause, 'invalid')
   }
   let record: GroupStateRecord | null
   try {
     record = await reads.state(key.incarnation)
   } catch (cause) {
-    // biome-ignore lint/style/useErrorCause: The constructor forwards params.cause to Error.
-    throw new GroupUnavailableError({ reason: 'state-unreadable', cause })
+    refuseStoredValue(cause, 'state-unreadable')
   }
   if (record === null || (!record.deleted && record.state === null))
     throw new GroupUnavailableError({ reason: 'state-unreadable' })
-  if (record.deleted) throw new GroupUnavailableError({ reason: 'deleted' })
+  if (record.deleted) throw new GroupUnavailableError({ reason: 'invalid' })
   try {
     if (
       !(record.state instanceof Uint8Array) ||
