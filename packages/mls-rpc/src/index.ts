@@ -124,6 +124,11 @@ export type {
   TransactionHookSettlement,
 } from './persistence-types.js'
 export { createGroupHandleRegistry } from './registry/registry.js'
+export {
+  ackRetiredOutcome,
+  listRetiredOutcomes,
+  serveRetiredObligations,
+} from './registry/retired.js'
 export type {
   GroupEpochRuntime,
   GroupHandleRegistry,
