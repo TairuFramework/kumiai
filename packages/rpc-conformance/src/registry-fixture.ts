@@ -5,6 +5,7 @@ import type {
   ConformanceControlChanges,
   ConformanceControlSnapshot,
   ConformanceRejoinRecord,
+  ConformanceWelcomeObligation,
 } from './control-store.js'
 import type { ConformanceSendAdmission } from './group-mls.js'
 import type {
@@ -51,7 +52,7 @@ export type ConformanceRegistryAdoptionFactory = (staged: {
   epochAfter: number
   removed: boolean
   epochAuthenticator: Uint8Array
-}) => ConformanceAdoptionWrite<never>
+}) => ConformanceAdoptionWrite<string>
 export type ConformanceRegistryAccess<THandle> = {
   key: ConformanceGroupKey
   runtime: ConformanceRegistryRuntime
@@ -78,7 +79,7 @@ export type ConformanceRegistryAccess<THandle> = {
   adopt(
     next: THandle,
     expected: ConformanceAdoptionExpected,
-    write: ConformanceAdoptionWrite<never>,
+    write: ConformanceAdoptionWrite<string>,
   ): Promise<'installed' | 'noop' | 'moved'>
   onRetire(hook: () => Promise<void>): () => void
 }
@@ -95,6 +96,11 @@ export type ConformanceRegistryResyncProof = {
   payloadDigest: string
   verdict: Uint8Array
 }
+export type ConformanceRegistrySwitchWrite = {
+  mutationID: string
+  source: { rejoinID: string }
+  destination: { control: { cursor: { position: string; epoch: number } } }
+}
 export type ConformanceRegistry<THandle> = {
   start(): Promise<void>
   access(groupID: string): Promise<ConformanceRegistryAccess<THandle>>
@@ -109,7 +115,7 @@ export type ConformanceRegistry<THandle> = {
       source: ConformanceRegistryRecoverySource
       rejoinID: string
       proof: ConformanceRegistryResyncProof
-      write: ConformanceAdoptionWrite<never>
+      write: ConformanceRegistrySwitchWrite
     },
   ): Promise<ConformanceGroupKey>
   delete(key: ConformanceGroupKey): Promise<void>
@@ -120,7 +126,7 @@ type RegistryFixtureRows = {
   key: ConformanceGroupKey
   state?: ConformanceGroupStateRecord
   trust?: ConformanceGroupRecoveryTrust
-  control?: ConformanceControlChanges<never>
+  control?: ConformanceControlChanges<string>
   anchor?: ConformanceAnchorSlot | null
   outbox?: Array<ConformanceStorageAppOutboxEntry>
   events?: Array<ConformancePersistenceEvent>
@@ -140,24 +146,45 @@ export type ConformanceRegistryFixtureBase<
     identity: { id: string; privateKey: Uint8Array; publicKey: Uint8Array }
     options: object
   }
-  makeHandle(epoch: number): Promise<THandle>
+  makeHandle(epoch: number, groupID?: string): Promise<THandle>
+  authenticator(handle: THandle): Promise<Uint8Array>
+  stateBytes(handle: THandle): Uint8Array
+  advanceSender(handle: THandle): Promise<void>
   advance(handle: THandle): Promise<THandle>
   welcomeHistory(kind: ConformancePackageUse['kind']): Promise<{
     exact: THandle
     alternate: THandle
+    restored: THandle
     newer: THandle
     unusedOlder: THandle
     packageUse: ConformancePackageUse
   }>
   confirmedRecovery(
     sourceKey: ConformanceGroupKey,
-  ): Promise<{ candidate: THandle; record: ConformanceRejoinRecord }>
+    options?: { confirm?: boolean; missingLedger?: boolean },
+  ): Promise<{
+    candidate: THandle
+    record: ConformanceRejoinRecord
+    source: ConformanceRegistryRecoverySource
+    proof: ConformanceRegistryResyncProof
+  }>
+  acceptedOrdinary(access: ConformanceRegistryAccess<THandle>): Promise<{
+    candidate: THandle
+    alternate: THandle
+    expected: ConformanceAdoptionExpected
+    write: ConformanceAdoptionWrite<string>
+  }>
+  serveRetiredWelcomes(
+    key: ConformanceGroupKey,
+    deliver: (welcome: ConformanceWelcomeObligation) => Promise<void>,
+  ): Promise<{ remaining: Array<string>; failures: Array<unknown> }>
   installRows(rows: RegistryFixtureRows): Promise<void>
   inspectRows(): Promise<Record<string, Map<string, unknown>>>
   corruptState(key: ConformanceGroupKey): Promise<void>
   removeStateBytes(key: ConformanceGroupKey): Promise<void>
   corruptTrust(groupID: string): Promise<void>
   mutateMetadata(key: ConformanceGroupKey, fn: (value: unknown) => unknown): Promise<void>
+  holdColdPublication(groupID: string): { started: Promise<void>; release(): void }
   holdRestore(groupID: string): { started: Promise<void>; release(): void }
   holdProof(mutationID: string): { started: Promise<void>; release(): void }
   restoreCount(groupID: string): number
@@ -186,7 +213,7 @@ export type ConformanceRegistryFixtureBase<
 export type ConformanceRegistryFixture<
   THandle,
   TTx extends ConformanceGroupTransaction = ConformanceGroupTransaction,
-> = ConformanceRegistryFixtureBase<THandle, TTx> & {
+> = Omit<ConformanceRegistryFixtureBase<THandle, TTx>, 'reopen'> & {
   registry: ConformanceRegistry<THandle>
   reopen(): Promise<ConformanceRegistryFixture<THandle, TTx>>
 }

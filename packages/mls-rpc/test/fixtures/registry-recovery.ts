@@ -17,6 +17,7 @@ import {
   processWelcome,
   type RecoveryVerdict,
   sealRecoveryVerdict,
+  signLedgerEntry,
 } from '@kumiai/mls'
 import {
   asLogPosition,
@@ -43,6 +44,7 @@ export async function createRegistryRecovery(params: {
   source: GroupHandle
   sourceKey: GroupKey
   sourceTrust?: GroupRecoveryTrust
+  missingLedger?: boolean
   responder?: { identity: OwnIdentity; group: GroupHandle }
 }): Promise<{
   candidate: GroupHandle
@@ -181,6 +183,18 @@ export async function createRegistryRecovery(params: {
   if (state === undefined) throw new Error('Invalid recovery candidate')
   const trust = recoveryTrustFor(params.source, params.sourceKey, params.sourceTrust ?? null)
   trust.spentEpochAuthenticators.push(trust.installed.authenticator.slice())
+  const missing = params.missingLedger
+    ? await signLedgerEntry(params.identity, {
+        type: 'kumiai.role',
+        groupID: params.source.groupID,
+        subject: params.identity.id,
+        value: 'member',
+      })
+    : undefined
+  const ledgerBefore =
+    missing === undefined
+      ? params.source.ledgerTokens
+      : [missing, ...params.source.ledgerTokens, missing]
   return {
     candidate,
     source: {
@@ -286,7 +300,7 @@ export async function createRegistryRecovery(params: {
       },
       digest,
       epochAfter: Number(candidate.epoch),
-      ledgerBefore: params.source.ledgerTokens,
+      ledgerBefore,
       conflictEpoch: null,
       position,
       verdict,

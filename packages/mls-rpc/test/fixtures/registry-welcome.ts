@@ -7,10 +7,13 @@ import {
   createInvite,
   createKeyPackageBundle,
   createLastResortKeyPackageBundle,
+  decodeClientState,
+  encodeClientState,
   type GroupHandle,
   type GroupOptions,
   keyPackageRef,
   processWelcome,
+  restoreGroup,
 } from '@kumiai/mls'
 import { toB64U } from '@sozai/codec'
 import {
@@ -57,6 +60,7 @@ async function createRegistryWelcomeSetup(params: {
   identity: OwnIdentity
   options: GroupOptions
   kind: PackageUse['kind']
+  permission?: 'member' | 'admin'
 }) {
   const author = randomIdentity()
   const base = (await createGroup(author, params.groupID, params.options)).group
@@ -67,7 +71,7 @@ async function createRegistryWelcomeSetup(params: {
     group: base,
     identity: author,
     recipientDID: params.identity.id,
-    permission: 'member',
+    permission: params.permission ?? 'member',
   })
   return { author, base, bundle, invite }
 }
@@ -137,7 +141,10 @@ export async function createRegistryWelcomeHistory(params: {
   options: GroupOptions
   kind: PackageUse['kind']
 }) {
-  const { base, bundle, invite } = await createRegistryWelcomeSetup(params)
+  const { base, bundle, invite } = await createRegistryWelcomeSetup({
+    ...params,
+    permission: 'admin',
+  })
   const retained: Array<{ handle: GroupHandle; join(): Promise<GroupHandle> }> = []
   async function at(epoch: number) {
     let source = base
@@ -161,11 +168,20 @@ export async function createRegistryWelcomeHistory(params: {
   const unusedOlder = await at(0)
   const exact = await at(1)
   const alternate = await at(1)
+  const state = decodeClientState(encodeClientState(exact.state))
+  if (state === undefined) throw new Error('Invalid retained Welcome')
+  const restored = await (params.mode === 'double' ? restoreMemoryControlHandle : restoreGroup)({
+    state,
+    credential: exact.credential,
+    ledgerEntries: exact.ledgerTokens,
+    options: params.options,
+  })
   const newer = await at(2)
   return {
     history: {
       exact,
       alternate,
+      restored,
       newer,
       unusedOlder,
       packageUse: {
