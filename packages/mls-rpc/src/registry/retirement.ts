@@ -12,6 +12,7 @@ export type RetirementSlot = {
   retirementGeneration: number
   lastRetirementKey: GroupKey | null
   owner: RegistryOwner | null
+  hooks: { key: GroupKey; callbacks: Set<() => Promise<void>> } | null
   retirement: { key: GroupKey; attempt: RetirementAttempt } | null
 }
 export type RegistryRetirement = {
@@ -60,7 +61,10 @@ export function createRegistryRetirement(params: {
       assertAvailable(key.groupID)
       if (slot.owner !== null && slot.owner.key.incarnation !== key.incarnation)
         throw new DisplacedGroupHandleError('Retirement source is no longer current')
-      const hooks = slot.owner?.hooks ?? new Set<() => Promise<void>>()
+      const hooks =
+        slot.hooks?.key.incarnation === key.incarnation
+          ? slot.hooks.callbacks
+          : new Set<() => Promise<void>>()
       const generation = ++slot.generation
       slot.retirementGeneration++
       slot.lastRetirementKey = key
@@ -69,8 +73,10 @@ export function createRegistryRetirement(params: {
       function settle(outcome: 'committed' | 'rolled-back'): void {
         if (slot.retirement?.attempt !== attempt) return
         params.failureSignal?.removeEventListener('abort', onFailStop)
-        if (outcome === 'committed') params.displace(slot, key)
-        else if (slot.owner !== null) slot.owner.cacheValid = false
+        if (outcome === 'committed') {
+          if (slot.hooks?.key.incarnation === key.incarnation) slot.hooks = null
+          params.displace(slot, key)
+        } else if (slot.owner !== null) slot.owner.cacheValid = false
         slot.retirement = null
         slot.generation++
         slot.retirementGeneration++
@@ -105,10 +111,17 @@ export function createRegistryRetirement(params: {
                 failed,
               ])
               if (signal?.aborted) throw signal.reason
-              const rejected = results.find((result) => result.status === 'rejected')
-              if (rejected?.status === 'rejected')
+              const rejected = results.filter((result) => result.status === 'rejected')
+              const first = rejected[0]
+              if (first !== undefined)
                 throw new RegistryRetireHookError('Registry retirement hook rejected', {
-                  cause: rejected.reason,
+                  cause:
+                    rejected.length === 1
+                      ? first.reason
+                      : new AggregateError(
+                          rejected.map((result) => result.reason),
+                          'Registry retirement hooks rejected',
+                        ),
                 })
             } catch (error) {
               settle('rolled-back')

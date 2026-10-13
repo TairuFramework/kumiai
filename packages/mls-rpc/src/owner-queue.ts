@@ -190,7 +190,11 @@ export function createOwnerQueues(options?: {
       let excluded = 0
       for (const { entry } of entries) {
         if (entry.kind === 'read' || entry.scopes.groupID !== groupID) continue
-        if (excludingMutationID !== undefined && entry.mutationID === excludingMutationID)
+        if (
+          excluded === 0 &&
+          excludingMutationID !== undefined &&
+          entry.mutationID === excludingMutationID
+        )
           excluded++
         else pending++
       }

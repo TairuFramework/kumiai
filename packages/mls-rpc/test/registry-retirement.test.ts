@@ -180,12 +180,47 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
+    for (const reload of [false, true]) {
+      test(`retire hooks survive owner invalidation with reload=${reload}`, async () => {
+        const fixture = await create()
+        try {
+          const owner = registry(fixture)
+          const access = await owner.access(groupID)
+          const original = await access.read((handle) => handle)
+          const calls: Array<string> = []
+          access.onRetire(async () => {
+            calls.push('hook')
+          })
+          const unregister = access.onRetire(async () => {
+            calls.push('unregistered')
+          })
+          fixture.overrideRestore(async () => {
+            throw new Error('Host restoration failed')
+          })
+          await expect(access.read(() => {})).rejects.toMatchObject({ reason: 'invalid' })
+          expect(() => access.epoch()).toThrow('Registry owner is no longer current')
+          fixture.overrideRestore(async () => original)
+          if (reload) expect(await owner.access(groupID)).not.toBe(access)
+          unregister()
+          unregister()
+          const attempt = registryRetirement(owner).beginRetirement(key)
+          await attempt.drain()
+          calls.push('drained')
+          expect(calls).toEqual(['hook', 'drained'])
+          attempt.settle('rolled-back')
+        } finally {
+          await fixture.close()
+        }
+      })
+    }
+
     test('hook rejection restores active and observes every registered hook failure', async () => {
       const fixture = await create()
       try {
         const owner = registry(fixture)
         const access = await owner.access(groupID)
         const first = new Error('first hook failed')
+        const second = new Error('second hook failed')
         const calls: Array<number> = []
         access.onRetire(async () => {
           calls.push(1)
@@ -193,7 +228,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         })
         access.onRetire(async () => {
           calls.push(2)
-          throw new Error('second hook failed')
+          throw second
         })
         access.onRetire(async () => {
           calls.push(3)
@@ -201,7 +236,10 @@ for (const mode of ['real-mls', 'double'] as const) {
         const attempt = registryRetirement(owner).beginRetirement(key)
         const error = await attempt.drain().catch((error: unknown) => error)
         expect(error).toBeInstanceOf(RegistryRetireHookError)
-        expect(error).toMatchObject({ cause: first })
+        if (!(error instanceof RegistryRetireHookError)) throw error
+        expect(error.cause).toBeInstanceOf(AggregateError)
+        if (!(error.cause instanceof AggregateError)) throw new Error('Missing hook failures')
+        expect(error.cause.errors).toEqual([first, second])
         expect(calls).toEqual([1, 2, 3])
         expect(await owner.access(groupID)).toBe(access)
         expect(await access.read((handle) => handle.groupID)).toBe(groupID)
@@ -536,6 +574,66 @@ for (const mode of ['real-mls', 'double'] as const) {
         await fixture.close()
       }
     })
+
+    for (const kind of ['Transition', 'Combined'] as const) {
+      test(`activity exclusion preserves a queued same-ID ${kind} admission`, async () => {
+        const fixture = await create()
+        const release = deferred<void>()
+        const writes: Array<Promise<unknown>> = []
+        try {
+          const entry = capability(fixture)
+          const device = await fixture.device.load()
+          const lifetime = await fixture.device.groups.load(groupID)
+          const baseline = entry.activity(groupID)
+          const mutationID = 'shared-replacement'
+          const entered = deferred<void>()
+          const rollback = new Error('Replacement rolled back after recheck')
+          writes.push(
+            expect(
+              entry.run(
+                { groupID, mutationID },
+                async (reads) => ({ expected: await reads.lifetime(), value: null }),
+                async () => {
+                  entered.resolve()
+                  await release.promise
+                  expect(entry.activity(groupID, mutationID)).toEqual({
+                    generation: baseline.generation + 1,
+                    pending: 1,
+                  })
+                  throw rollback
+                },
+              ),
+            ).rejects.toBe(rollback),
+          )
+          await entered.promise
+          writes.push(
+            kind === 'Transition'
+              ? fixture.device.groups.transition(
+                  { groupID, mutationID, expected: lifetime },
+                  async () => {},
+                )
+              : fixture.device.transition(
+                  {
+                    mutationID,
+                    expectedRevision: device.revision,
+                    group: { groupID, mutationID, expected: lifetime },
+                  },
+                  async () => {},
+                ),
+          )
+          release.resolve()
+          await Promise.all(writes)
+          expect(entry.activity(groupID)).toEqual({
+            generation: baseline.generation + 4,
+            pending: 0,
+          })
+        } finally {
+          release.resolve()
+          await Promise.allSettled(writes)
+          await fixture.close()
+        }
+      })
+    }
 
     test('activity covers admission and completion for raw, registry and Combined writes', async () => {
       const fixture = await create()

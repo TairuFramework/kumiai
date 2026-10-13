@@ -86,6 +86,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         lastRetirementKey: null,
         retirement: null,
         owner: null,
+        hooks: null,
         load: null,
       }
       slots.set(groupID, slot)
@@ -168,6 +169,9 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     if (admittedOwner !== undefined && value.key.incarnation !== admittedOwner.key.incarnation)
       throw new DisplacedGroupHandleError('Registry access belongs to a retired incarnation')
     if (slot.owner === null || slot.owner.key.incarnation !== value.key.incarnation) {
+      // Host registrations survive cache invalidation, but never cross incarnations.
+      if (slot.hooks?.key.incarnation !== value.key.incarnation)
+        slot.hooks = { key: { ...value.key }, callbacks: new Set() }
       const owner: RegistryOwner = {
         key: { ...value.key },
         value,
@@ -175,7 +179,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         snapshot: value.snapshot,
         admission: admissionFor(value, control),
         runtime: createRegistryRuntime(),
-        hooks: new Set(),
+        hooks: slot.hooks.callbacks,
         access: null,
       }
       owner.access = createRegistryAccess({
