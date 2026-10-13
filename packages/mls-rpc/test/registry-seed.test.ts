@@ -86,6 +86,13 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect(await owner.seed(genesis, { packageUse: null })).toEqual(key)
         await expect(
           owner.seed(genesis, { packageUse: null, replace: true }),
+        ).rejects.toMatchObject(refused('spent'))
+        const unspentGenesis = await fixture.makeHandle(0)
+        expect(unspentGenesis.state.keySchedule.epochAuthenticator).not.toEqual(
+          genesis.state.keySchedule.epochAuthenticator,
+        )
+        await expect(
+          owner.seed(unspentGenesis, { packageUse: null, replace: true }),
         ).rejects.toMatchObject(refused('invalid-genesis'))
       } finally {
         await fixture.close()
@@ -135,6 +142,53 @@ for (const mode of ['real-mls', 'double'] as const) {
             owner.seed(candidate, { replace: true, packageUse: history.packageUse }),
           ).rejects.toMatchObject(refused('spent'))
         }
+      } finally {
+        await fixture.close()
+      }
+    })
+    test('alreadyJoined older unspent Welcome returns active key without writes and validates candidate', async () => {
+      const fixture = await create()
+      try {
+        const history = await fixture.welcomeHistory('ordinary')
+        const owner = registry(fixture)
+        await owner.seed(history.exact, { packageUse: history.packageUse })
+        await owner.seed(history.newer, { replace: true, packageUse: history.packageUse })
+        const activeKey = { groupID, incarnation: 2 }
+        const lifetime = await fixture.device.groups.load(groupID)
+        const state = await fixture.device.groups.loadState(activeKey)
+        const trust = await fixture.device.groups.loadTrust(groupID)
+        expect(Number(history.unusedOlder.epoch)).toBeLessThan(Number(history.newer.epoch))
+        expect(trust?.spentEpochAuthenticators).not.toContainEqual(
+          history.unusedOlder.state.keySchedule.epochAuthenticator,
+        )
+        const original = entry(fixture)
+        const binding = coordinatorBinding(fixture.device.groups)
+        if (binding === null) throw new Error('Missing binding')
+        let writeEntries = 0
+        const observed: EntryCapability<MemoryTransaction> = {
+          ...original,
+          run(request, prepare, work) {
+            writeEntries++
+            return original.run(request, prepare, work)
+          },
+        }
+        bindEntryCapability({
+          persistence: fixture.device.groups,
+          capability: observed,
+          coordinatorBinding: binding,
+        })
+        expect(await owner.seed(history.unusedOlder, { packageUse: history.packageUse })).toEqual(
+          activeKey,
+        )
+        fixture.environment.options.commitPolicy = () => 'accept'
+        const invalidCandidate = await fixture.makeHandle(Number(history.unusedOlder.epoch))
+        await expect(owner.seed(invalidCandidate, { packageUse })).rejects.toThrow(
+          'callback references mismatch',
+        )
+        expect(writeEntries).toBe(0)
+        expect(await fixture.device.groups.load(groupID)).toEqual(lifetime)
+        expect(await fixture.device.groups.loadState(activeKey)).toEqual(state)
+        expect(await fixture.device.groups.loadTrust(groupID)).toEqual(trust)
       } finally {
         await fixture.close()
       }

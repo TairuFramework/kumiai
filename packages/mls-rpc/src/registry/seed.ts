@@ -161,9 +161,10 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
     }
     const admission = await params.capability.read(groupID, readAdmission)
     function judge(inputs: AdmissionInputs): SeedDecision {
+      const decision = seedAdmission({ ...inputs, welcome, replace, forkHalted: false })
       if (welcome.epoch === 0 && inputs.lifetime !== null)
         throw new SeedAdmissionRefusedError({ reason: 'invalid-genesis' })
-      return seedAdmission({ ...inputs, welcome, replace, forkHalted: false })
+      return decision
     }
     const decision = judge(admission)
     const activeIncarnation = admission.lifetime?.activeIncarnation ?? null
