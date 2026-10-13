@@ -1,5 +1,5 @@
 import type { GroupHandle } from '@kumiai/mls'
-import type { AdoptionExpected, SendAdmission } from '@kumiai/rpc'
+import type { AdoptionExpected, LogPosition, SendAdmission } from '@kumiai/rpc'
 
 import type { ControlReadScope } from '../access.js'
 import type {
@@ -34,6 +34,15 @@ export type RegistryHandleAccess = {
 export type RecoverySource = AdoptionExpected & {
   trust: GroupRecoveryTrust
   lifetimeRevision: number
+}
+export type ResyncProof = {
+  targetID: string
+  topicID: string
+  groupInfoEpoch: number
+  captureHead: LogPosition | null
+  position: LogPosition
+  payloadDigest: string
+  verdict: Uint8Array
 }
 export type GroupHandleRegistry = {
   start(): Promise<void>

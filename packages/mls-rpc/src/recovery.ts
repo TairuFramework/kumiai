@@ -212,6 +212,38 @@ export function createVerdictJudge(params: VerdictJudgeParams) {
   const { group, sourceTree, known, requestID } = params
   let tuple: BoundRecoveryCommit | undefined =
     params.boundCommit == null ? undefined : { ...params.boundCommit }
+  function verdictRefusal(opened: OpenedRecoveryVerdict): 'tuple' | 'ineligible' | null {
+    const { signer, verdict } = opened
+    if (
+      normalizeDID(signer) === normalizeDID(group.credential.id) ||
+      tuple == null ||
+      verdict.groupID !== group.groupID ||
+      verdict.requestID !== requestID ||
+      verdict.position !== tuple.position ||
+      verdict.commitDigest !== tuple.commitDigest
+    )
+      return 'tuple'
+    if (
+      verdict.verdict === 'confirmed' &&
+      (verdict.epoch !== Number(group.epoch) || verdict.tag !== tuple.tag)
+    )
+      return 'tuple'
+    if (group.anchor.controller != null)
+      return recoverySignerEligible({ group, known, signer }) ? null : 'ineligible'
+    if (verdict.verdict === 'confirmed') return null
+    for (const node of sourceTree) {
+      if (node == null || !('leaf' in node)) continue
+      const credential = node.leaf.credential
+      if (!('identity' in credential)) continue
+      try {
+        if (
+          normalizeDID(parseMLSCredentialIdentity(credential.identity).id) === normalizeDID(signer)
+        )
+          return null
+      } catch {}
+    }
+    return 'ineligible'
+  }
   return {
     boundCommit: () => (tuple == null ? undefined : { ...tuple }),
     async confirmationKey(position: string, commitDigest: string) {
@@ -222,38 +254,9 @@ export function createVerdictJudge(params: VerdictJudgeParams) {
       tuple.tag = confirmationTag(key, requestID)
       return key
     },
+    verdictRefusal,
     judgeVerdict(opened: OpenedRecoveryVerdict): 'authoritative' | 'advisory' {
-      const { signer, verdict } = opened
-      if (
-        normalizeDID(signer) === normalizeDID(group.credential.id) ||
-        tuple == null ||
-        verdict.groupID !== group.groupID ||
-        verdict.requestID !== requestID ||
-        verdict.position !== tuple.position ||
-        verdict.commitDigest !== tuple.commitDigest
-      )
-        return 'advisory'
-      if (
-        verdict.verdict === 'confirmed' &&
-        (verdict.epoch !== Number(group.epoch) || verdict.tag !== tuple.tag)
-      )
-        return 'advisory'
-      if (group.anchor.controller != null)
-        return recoverySignerEligible({ group, known, signer }) ? 'authoritative' : 'advisory'
-      if (verdict.verdict === 'confirmed') return 'authoritative'
-      for (const node of sourceTree) {
-        if (node == null || !('leaf' in node)) continue
-        const credential = node.leaf.credential
-        if (!('identity' in credential)) continue
-        try {
-          if (
-            normalizeDID(parseMLSCredentialIdentity(credential.identity).id) ===
-            normalizeDID(signer)
-          )
-            return 'authoritative'
-        } catch {}
-      }
-      return 'advisory'
+      return verdictRefusal(opened) === null ? 'authoritative' : 'advisory'
     },
   }
 }

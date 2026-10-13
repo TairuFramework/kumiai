@@ -72,3 +72,25 @@ export class GroupUnavailableError extends Error {
     return this.#reason
   }
 }
+
+export type RegistryResyncRefusalReason =
+  | 'malformed'
+  | 'unaccepted'
+  | 'source'
+  | 'candidate'
+  | 'tuple'
+  | 'ineligible'
+
+export class RegistryResyncRefusedError extends Error {
+  override name = 'RegistryResyncRefusedError'
+  #reason: RegistryResyncRefusalReason
+
+  constructor(params: { reason: RegistryResyncRefusalReason; cause?: unknown }) {
+    super(`Registry resync refused: ${params.reason}`, { cause: params.cause })
+    this.#reason = params.reason
+  }
+
+  get reason(): RegistryResyncRefusalReason {
+    return this.#reason
+  }
+}

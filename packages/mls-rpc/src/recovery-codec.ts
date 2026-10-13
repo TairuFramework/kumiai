@@ -32,6 +32,7 @@ export function encodeRecoveryCandidate(
   snapshot: RecoverySnapshot,
   requestKey: Uint8Array,
 ): Uint8Array {
+  // Only the public tree belongs to the source; context/schedule remain those of the candidate.
   const sourceState = encodeClientState({ ...snapshot.state, ratchetTree: snapshot.sourceTree })
   const body = new TextEncoder().encode(
     JSON.stringify({
