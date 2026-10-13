@@ -36,7 +36,7 @@ nothing decided anything.
   It returns `{joined, joinRef: {sourceID, ref}}` without consuming the package.
   A receipted ref returns `{alreadyJoined: groupID}` before decryption.
   Independent source read failures appear as `joined.sourceErrors` on a successful fallback.
-- `judgeWelcomeAdmission(held, welcomeEpoch)` compares the authenticated epoch with live or deleted state.
+- `judgeWelcomeAdmission(params)` judges verified Welcome identity against held metadata and retained spent authenticators.
   It returns `join`, `alreadyJoined`, `replace`, or `refused`.
 - `HubRetryableError`, `HubRefusedError`, `HubCallStage` — the two outcomes of a failed hub call.
 
@@ -63,7 +63,14 @@ const sources = [pool, lastResort]
 const opened = await openWelcome(sources, { identity, invite, welcome, ratchetTree })
 if ('joined' in opened) {
   const { group } = opened.joined
-  const admission = judgeWelcomeAdmission(await host.held(group.groupID), Number(group.epoch))
+  const admission = judgeWelcomeAdmission({
+    held: await host.held(group.groupID),
+    spentEpochAuthenticators: await host.spentEpochAuthenticators(group.groupID),
+    welcome: {
+      epoch: Number(group.epoch),
+      epochAuthenticator: group.state.keySchedule.epochAuthenticator,
+    },
+  })
   if (admission === 'join' || admission === 'replace') {
     if (admission === 'replace') await host.stopAndDrainPeer(group.groupID)
     await host.seed(group, opened.joinRef, { replace: admission === 'replace' })
@@ -85,8 +92,17 @@ install the joined state and `joinRef`, apply rpc's `readmissionChanges(snapshot
 anchor slot. Open operations and the rejoin record become `unknown` outcomes and are deleted;
 applied commits, external responses and the commit cursor are cleared. Keep prior outcomes and
 Welcome obligations. Restart the peer as a fresh join so it captures the anchor at the joined
-epoch. A held group at E accepts a last-resort Welcome at E + 3 this way; one at E is
-`alreadyJoined`. A tombstone permits a join only above its epoch floor.
+epoch. Installation records the joined authenticator in the retained spent set.
+Spent authenticators refuse before epoch comparison, including alternate Welcome representations.
+An unspent Welcome at or below a live held epoch returns `alreadyJoined`. A newer unspent Welcome returns `replace`.
+Absent or deleted state admits any unspent Welcome. Tombstones have no highest epoch floor.
+Fork-halted state refuses. A live null epoch refuses and requires recovery.
+
+`held` contains `incarnation`, `epoch`, `deleted`, and `forkHalted`. Incarnations are positive safe integers.
+Epochs are non-negative safe integers. Only the held epoch may be null.
+Authenticators are non-empty `Uint8Array` values. Malformed parameters throw `TypeError`.
+The host derives live held epochs from installed trust, even when private state bytes are unavailable.
+Missing or invalid administrative metadata refuses before judgment. Missing surviving spent sets must never default to empty.
 
 `bundles()` throws if any retained record fails to decode, rather than skipping it and serving the
 rest — so one corrupt retired record blocks every join from that source. Deliberate within a single
@@ -148,7 +164,7 @@ the exact outage these stores exist to prevent. Tests and throwaway processes on
 Give each source a stable, distinct `sourceID` and a dedicated receipt-store namespace.
 At startup, consume each saved `joinRef` through its named source, then clear that reference.
 Ordinary consumption atomically deletes the package and writes the receipt. Last-resort consumption is a no-op and `receipt(ref)` always returns `null`.
-Repeated last-resort Welcomes reopen and pass through epoch admission.
+Repeated last-resort Welcomes reopen and pass through spent-authenticator admission.
 Receipts survive package pruning. Ambiguous writes reject with `StorageOutcomeUnknownError`, prompting receipt read-back.
 
 Ordinary package deletion retains the owner and ref without private material until `consume` writes its receipt.

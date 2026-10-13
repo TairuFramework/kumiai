@@ -333,11 +333,20 @@ describe('openWelcome', () => {
     const repeated = await openWelcome([provisioner], { identity: hub.identity, ...welcome })
     if (!('joined' in repeated)) throw new Error('Expected a repeat to reach admission')
     expect(
-      judgeWelcomeAdmission(
-        { epoch: Number(first.joined.group.epoch), deleted: false },
-        Number(repeated.joined.group.epoch),
-      ),
-    ).toBe('alreadyJoined')
+      judgeWelcomeAdmission({
+        held: {
+          incarnation: 1,
+          epoch: Number(first.joined.group.epoch),
+          deleted: false,
+          forkHalted: false,
+        },
+        spentEpochAuthenticators: [first.joined.group.state.keySchedule.epochAuthenticator.slice()],
+        welcome: {
+          epoch: Number(repeated.joined.group.epoch),
+          epochAuthenticator: repeated.joined.group.state.keySchedule.epochAuthenticator,
+        },
+      }),
+    ).toBe('refused')
     const later = await inviteFromLastResortSlot()
     const reopened = await openWelcome([provisioner], { identity: hub.identity, ...later })
     if (!('joined' in reopened)) throw new Error('Expected another Welcome to open')

@@ -188,6 +188,9 @@ test.each(['joined-before-consume', 'consume-mid-transaction', 'consumed-before-
         state: encodeClientState(opened.joined.group.state),
         ledger: opened.joined.group.ledgerTokens,
         joinRef: opened.joinRef as typeof opened.joinRef | null,
+        spentEpochAuthenticators: [
+          opened.joined.group.state.keySchedule.epochAuthenticator.slice(),
+        ],
       })
       const state = decodeClientState(persisted.state)
       if (state == null) throw new Error('Invalid saved joined state')
@@ -220,11 +223,20 @@ test.each(['joined-before-consume', 'consume-mid-transaction', 'consumed-before-
         const repeated = await openWelcome([ctx.source], { identity: ctx.invitee, ...artifact })
         if (!('joined' in repeated)) throw new Error('Package was consumed before the host saved')
         expect(
-          judgeWelcomeAdmission(
-            { epoch: Number(saved.group.epoch), deleted: false },
-            Number(repeated.joined.group.epoch),
-          ),
-        ).toBe('alreadyJoined')
+          judgeWelcomeAdmission({
+            held: {
+              incarnation: 1,
+              epoch: Number(saved.group.epoch),
+              deleted: false,
+              forkHalted: false,
+            },
+            spentEpochAuthenticators: persisted.spentEpochAuthenticators,
+            welcome: {
+              epoch: Number(repeated.joined.group.epoch),
+              epochAuthenticator: repeated.joined.group.state.keySchedule.epochAuthenticator,
+            },
+          }),
+        ).toBe('refused')
       }
       if (boundary === 'consumed-before-ack') await ctx.source.consume(ctx.ref, saved.group.groupID)
       // Startup finishes the saved joinRef before clearing it, including an already committed consume.
@@ -245,11 +257,20 @@ test.each(['joined-before-consume', 'consume-mid-transaction', 'consumed-before-
       })
       expect(bundles).not.toHaveBeenCalled()
       expect(
-        judgeWelcomeAdmission(
-          { epoch: Number(saved.group.epoch), deleted: false },
-          Number(opened.joined.group.epoch),
-        ),
-      ).toBe('alreadyJoined')
+        judgeWelcomeAdmission({
+          held: {
+            incarnation: 1,
+            epoch: Number(saved.group.epoch),
+            deleted: false,
+            forkHalted: false,
+          },
+          spentEpochAuthenticators: persisted.spentEpochAuthenticators,
+          welcome: {
+            epoch: Number(opened.joined.group.epoch),
+            epochAuthenticator: opened.joined.group.state.keySchedule.epochAuthenticator,
+          },
+        }),
+      ).toBe('refused')
     } finally {
       await ctx.member.peer.dispose()
       await ctx.member.peer.drained()

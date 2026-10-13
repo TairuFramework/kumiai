@@ -29,7 +29,7 @@ import { createMemoryLastResortStore } from '../../../packages/mls-hub/src/store
 import { createTestHub } from '../../../packages/mls-hub/test/fixtures/hub.js'
 import { createMemoryHostDatabase } from './host-db.js'
 
-test('a last-resort Welcome replaces held state three epochs ahead and repeats are alreadyJoined', async () => {
+test('a last-resort Welcome replaces held state three epochs ahead and spent repeats are refused', async () => {
   const hub = createTestHub()
   try {
     const store = createMemoryLastResortStore()
@@ -74,6 +74,7 @@ test('a last-resort Welcome replaces held state three epochs ahead and repeats a
     const opened = await openWelcome([source], firstWelcome)
     if (!('joined' in opened)) throw new Error('Expected initial join')
     const held = opened.joined.group
+    const spentEpochAuthenticators = [held.state.keySchedule.epochAuthenticator.slice()]
     const oldBranchMember = randomIdentity()
     const oldBundle = await createKeyPackageBundle(oldBranchMember)
     const oldInvite = await invite(oldBranchMember.id)
@@ -88,6 +89,7 @@ test('a last-resort Welcome replaces held state three epochs ahead and repeats a
     )
     group = oldCommit.newGroup
     await held.processMessage(oldCommit.commitMessage)
+    spentEpochAuthenticators.push(held.state.keySchedule.epochAuthenticator.slice())
     const epoch = Number(held.epoch)
     const db = createMemoryHostDatabase()
     const oldPosition = asLogPosition('00000000000000000001')
@@ -116,8 +118,15 @@ test('a last-resort Welcome replaces held state three epochs ahead and repeats a
     const repeated = await openWelcome([source], firstWelcome)
     if (!('joined' in repeated)) throw new Error('Last-resort repeat must reach epoch admission')
     expect(
-      judgeWelcomeAdmission({ epoch, deleted: false }, Number(repeated.joined.group.epoch)),
-    ).toBe('alreadyJoined')
+      judgeWelcomeAdmission({
+        held: { incarnation: 1, epoch, deleted: false, forkHalted: false },
+        spentEpochAuthenticators,
+        welcome: {
+          epoch: Number(repeated.joined.group.epoch),
+          epochAuthenticator: repeated.joined.group.state.keySchedule.epochAuthenticator,
+        },
+      }),
+    ).toBe('refused')
     expect(await db.loadState(held.groupID)).toEqual(encodeClientState(held.state))
 
     const leaf = group.findMemberLeafIndex(hub.identity.id)
@@ -140,7 +149,16 @@ test('a last-resort Welcome replaces held state three epochs ahead and repeats a
     const joined = readmitted.joined.group
     expect(joined.groupID).toBe(held.groupID)
     expect(Number(joined.epoch)).toBe(epoch + 3)
-    expect(judgeWelcomeAdmission({ epoch, deleted: false }, Number(joined.epoch))).toBe('replace')
+    expect(
+      judgeWelcomeAdmission({
+        held: { incarnation: 1, epoch, deleted: false, forkHalted: false },
+        spentEpochAuthenticators,
+        welcome: {
+          epoch: Number(joined.epoch),
+          epochAuthenticator: joined.state.keySchedule.epochAuthenticator,
+        },
+      }),
+    ).toBe('replace')
     await db.control(held.groupID, { groupID: held.groupID, incarnation: 1 }).apply(
       {
         putOperations: [
@@ -169,6 +187,7 @@ test('a last-resort Welcome replaces held state three epochs ahead and repeats a
       replace: true,
       expectedVersion: heldVersion,
     })
+    spentEpochAuthenticators.push(joined.state.keySchedule.epochAuthenticator.slice())
     await source.consume(ref, joined.groupID)
     const stateBytes = await db.loadState(joined.groupID)
     const state = stateBytes == null ? undefined : decodeClientState(stateBytes)
@@ -199,11 +218,101 @@ test('a last-resort Welcome replaces held state three epochs ahead and repeats a
     const again = await openWelcome([source], laterWelcome)
     if (!('joined' in again)) throw new Error('Last-resort repeat must reopen')
     expect(
-      judgeWelcomeAdmission(
-        { epoch: Number(restored.epoch), deleted: false },
-        Number(again.joined.group.epoch),
-      ),
+      judgeWelcomeAdmission({
+        held: { incarnation: 1, epoch: Number(restored.epoch), deleted: false, forkHalted: false },
+        spentEpochAuthenticators,
+        welcome: {
+          epoch: Number(again.joined.group.epoch),
+          epochAuthenticator: again.joined.group.state.keySchedule.epochAuthenticator,
+        },
+      }),
+    ).toBe('refused')
+  } finally {
+    await hub.dispose()
+  }
+})
+
+test('an unused older Welcome is alreadyJoined after removal and readmission', async () => {
+  const hub = createTestHub()
+  try {
+    const source = createLastResortProvisioner({
+      sourceID: 'fallback',
+      identity: hub.identity,
+      client: hub.client,
+      store: createMemoryLastResortStore(),
+    })
+    await source.ensureProvisioned().value
+    const [bundle] = await source.bundles()
+    if (bundle == null) throw new Error('Missing last-resort bundle')
+    const inviter = randomIdentity()
+    const tokens = new Map<string, string>()
+    const resolveLedgerEntries = async (ids: Array<string>) =>
+      ids.map((id) => {
+        const token = tokens.get(id)
+        if (token == null) throw new Error(`Missing ledger entry ${id}`)
+        return token
+      })
+    let { group } = await createGroup(inviter, 'unused-welcome', { resolveLedgerEntries })
+    const add = async (recipientDID: string, publicPackage: typeof bundle.publicPackage) => {
+      const { invite } = await createInvite({
+        group,
+        identity: inviter,
+        recipientDID,
+        permission: 'member',
+      })
+      for (const token of invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
+      const added = await commitInvite(group, publicPackage, invite)
+      group = added.newGroup
+      return {
+        identity: hub.identity,
+        invite,
+        welcome: added.welcomeMessage,
+        ratchetTree: group.state.ratchetTree,
+      }
+    }
+    for (let index = 0; index < 2; index++) {
+      const other = randomIdentity()
+      await add(other.id, (await createKeyPackageBundle(other)).publicPackage)
+    }
+    // W3 is authenticated but never installed by this host.
+    const w3 = await add(hub.identity.id, bundle.publicPackage)
+    const unused = await openWelcome([source], w3)
+    if (!('joined' in unused)) throw new Error('Expected unused Welcome to open')
+    expect(Number(unused.joined.group.epoch)).toBe(3)
+    const leaf = group.findMemberLeafIndex(hub.identity.id)
+    if (leaf == null) throw new Error('Missing invitee leaf')
+    group = (await removeMember(group, leaf)).newGroup
+    expect(Number(group.epoch)).toBe(4)
+    const w5 = await add(hub.identity.id, bundle.publicPackage)
+    const installed = await openWelcome([source], w5)
+    if (!('joined' in installed)) throw new Error('Expected readmission Welcome to open')
+    expect(Number(installed.joined.group.epoch)).toBe(5)
+    const db = createMemoryHostDatabase()
+    await db.seed(installed.joined.group.groupID, encodeClientState(installed.joined.group.state))
+    const spentEpochAuthenticators = [
+      installed.joined.group.state.keySchedule.epochAuthenticator.slice(),
+    ]
+    const held = { incarnation: 1, epoch: 5, deleted: false, forkHalted: false }
+    expect(
+      judgeWelcomeAdmission({
+        held,
+        spentEpochAuthenticators,
+        welcome: {
+          epoch: 3,
+          epochAuthenticator: unused.joined.group.state.keySchedule.epochAuthenticator,
+        },
+      }),
     ).toBe('alreadyJoined')
+    expect(
+      judgeWelcomeAdmission({
+        held,
+        spentEpochAuthenticators,
+        welcome: {
+          epoch: 5,
+          epochAuthenticator: installed.joined.group.state.keySchedule.epochAuthenticator.slice(),
+        },
+      }),
+    ).toBe('refused')
   } finally {
     await hub.dispose()
   }

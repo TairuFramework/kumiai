@@ -9,7 +9,7 @@
  * @module mls-hub
  */
 
-export { judgeWelcomeAdmission } from './admission.js'
+export { judgeWelcomeAdmission, type WelcomeAdmissionParams } from './admission.js'
 export {
   type HubCallStage,
   HubRefusedError,
