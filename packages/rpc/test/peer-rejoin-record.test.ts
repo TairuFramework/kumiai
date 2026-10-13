@@ -7,7 +7,7 @@ import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { RecoveryEvent } from '../src/peer-types.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
-import { assertDurableControlHold } from './fixtures/control-hold.js'
+import { assertDurableForkHalt } from './fixtures/control-hold.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
@@ -694,12 +694,11 @@ test('a classified own-unmerged strand persists evidence without a recovery bypa
     return apply(changes, id)
   })
   const again = member(hub, 'bob', { restartOf: bob, control: bob.control })
-  await assertDurableControlHold(again, hub, secret, 'bob', {
-    reason: 'fork-evidence',
-    position: examined,
+  await assertDurableForkHalt(again, hub, secret, 'bob', {
     evidence: {
       kind: 'unexplained-own-commit',
       epoch: 1,
+      position: examined,
       digest: publishedCommitDigest(hub, examined),
     },
   })
@@ -813,7 +812,7 @@ test('confirmed rejoin replay retains its record under a freshly persisted stron
   expect((await bob.control.load()).rejoin).toEqual(record)
 })
 
-test.each(['acceptance-unknown', 'unsupported-version', 'fork-evidence'] as const)(
+test.each(['acceptance-unknown', 'unsupported-version', 'fork-halted'] as const)(
   'an ordinary ahead gap heals only through a weak control hold: %s',
   async (reason) => {
     const hub = new FakeHub()
@@ -821,7 +820,27 @@ test.each(['acceptance-unknown', 'unsupported-version', 'fork-evidence'] as cons
     const bob = member(hub, 'bob')
     await alice.peer.replay()
     await bob.peer.replay()
-    await bob.control.apply({ controlHold: { reason, position: null } }, 'hold')
+    await bob.control.apply(
+      reason === 'fork-halted'
+        ? {
+            forkHalt: {
+              eventID: JSON.stringify([
+                'group:fork',
+                bob.control.key.groupID,
+                bob.control.key.incarnation,
+              ]),
+              detectedAt: 1,
+              evidence: {
+                kind: 'unexplained-own-commit',
+                epoch: 1,
+                position: '1',
+                digest: 'foreign',
+              },
+            },
+          }
+        : { controlHold: { reason, position: null } },
+      'hold',
+    )
     await bob.peer.ack('refresh')
     await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 2 })
     if (reason === 'acceptance-unknown') {
@@ -832,7 +851,8 @@ test.each(['acceptance-unknown', 'unsupported-version', 'fork-evidence'] as cons
     } else {
       await bob.peer.resync()
       expect(bob.mls.epoch()).toBe(1)
-      expect((await bob.control.load()).controlHold?.reason).toBe(reason)
+      if (reason === 'fork-halted') expect((await bob.control.load()).forkHalt).not.toBeNull()
+      else expect((await bob.control.load()).controlHold?.reason).toBe(reason)
     }
   },
 )

@@ -21,6 +21,7 @@ import type { AppDeliveryResumed, AppDeliveryStalled } from './app-lane.js'
 import type { AppOutbox } from './app-outbox.js'
 import type { ControlBuildPort } from './control/build.js'
 import type { OperationDeps } from './control/operations.js'
+import type { GroupSafetyEvent } from './control/safety.js'
 import type { ControlEvidenceSnapshot, ControlValidationPort } from './control/search.js'
 import type { ControlStore, OperationRequest, Outcome, WelcomeObligation } from './control/types.js'
 import type {
@@ -205,6 +206,7 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
    * Fire-and-forget: a throw is swallowed and the drain carries on.
    */
   onAppWindowPruned?: (event: AppWindowPruned) => void | Promise<void>
+  onSafetyEvent?: (event: GroupSafetyEvent) => void | Promise<void>
   onStrand?: (observation: StrandObservation) => void | Promise<void>
   onControlPublishError?: (notice: { opID: string; error: unknown }) => void | Promise<void>
   onOutcome?: (outcome: Outcome) => void | Promise<void>

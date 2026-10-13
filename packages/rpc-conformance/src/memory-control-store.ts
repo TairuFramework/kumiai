@@ -420,6 +420,7 @@ export function createMemoryControlStore<Position extends string = string>(
       const next = cloneValue(record)
       const identity = next.state === null ? null : decodeControlFixtureState(next.state)
       if (
+        controlSafetyHeld(next.control) !== null ||
         next.control.controlHold !== null ||
         !equal(expected.key, fixedKey) ||
         !equal(identity, expected.identity) ||
@@ -482,9 +483,10 @@ export function createMemoryControlStore<Position extends string = string>(
       if (next.state === null) next.initialIdentity = cloneValue(after)
       next.state = state.slice()
       if (
-        write !== undefined &&
-        next.control.controlHold !== null &&
-        next.control.controlHold.reason !== 'acceptance-unknown'
+        controlSafetyHeld(next.control) !== null ||
+        (write !== undefined &&
+          next.control.controlHold !== null &&
+          next.control.controlHold.reason !== 'acceptance-unknown')
       )
         throw Object.assign(new Error('Adoption is held'), { name: 'ControlAdoptionMovedError' })
       const expected = write?.expected
@@ -492,8 +494,9 @@ export function createMemoryControlStore<Position extends string = string>(
       const retained = next.control.commitOnce
       if (
         expected !== undefined &&
-        ((next.control.controlHold !== null &&
-          next.control.controlHold.reason !== 'acceptance-unknown') ||
+        (controlSafetyHeld(next.control) !== null ||
+          (next.control.controlHold !== null &&
+            next.control.controlHold.reason !== 'acceptance-unknown') ||
           !equal(expected.key, key) ||
           !equal(expected.identity, before) ||
           expected.stateVersion !== next.version ||

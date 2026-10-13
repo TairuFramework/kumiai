@@ -6,6 +6,8 @@ import {
   ControlStoreInvariantError,
   ControlWriteNotCommittedError,
   controlBuildRef,
+  controlSafetyHeld,
+  GroupSafetyHeldError,
   type HostBuilt,
   type Operation,
   OperationRejectedError,
@@ -92,6 +94,8 @@ export function createPersistenceBuildSaver<TTx extends GroupTransaction>(params
           const snapshot = await rows.control.load()
           const identity = expected.identity
           if (
+            controlSafetyHeld(snapshot) !== null ||
+            snapshot.controlHold !== null ||
             identity === null ||
             state === null ||
             state.deleted ||
@@ -209,6 +213,7 @@ export function createControlBuildPort(params: {
           return { kind: 'moved', operation: saved ?? op }
         if (params.now() >= saved.deadline) return { kind: 'expired', operation: saved }
         if (
+          controlSafetyHeld(snapshot) !== null ||
           snapshot.controlHold !== null ||
           scope.handle.state.groupActiveState.kind === 'removedFromGroup'
         )
@@ -242,13 +247,18 @@ export function createControlBuildPort(params: {
             !sameStoredValue(host.authenticatorBefore, identity.authenticator)
           )
             return { kind: 'moved', operation: saved }
+          if (controlSafetyHeld(await params.control.load()) !== null)
+            return { kind: 'occupied', operation: saved }
           const key = await deriveEntryKey(scope.handle, params.entryLabel)
           let framed: Awaited<ReturnType<typeof frame>>
           try {
-            framed = await frame(host, async (bytes) => ({
-              sealed: sealEntries(key, bytes, params.runtime),
-              epoch: identity.epoch,
-            }))
+            if (controlSafetyHeld(await params.control.load()) !== null)
+              return { kind: 'occupied', operation: saved }
+            framed = await frame(host, async (bytes) => {
+              const held = controlSafetyHeld(await params.control.load())
+              if (held !== null) throw new GroupSafetyHeldError(held)
+              return { sealed: sealEntries(key, bytes, params.runtime), epoch: identity.epoch }
+            })
           } finally {
             key.fill(0)
           }
@@ -285,6 +295,8 @@ export function createControlBuildPort(params: {
         let delay = 100
         for (;;) {
           if (params.now() >= saved.deadline) return { kind: 'expired', operation: saved }
+          if (controlSafetyHeld(await params.control.load()) !== null)
+            return { kind: 'occupied', operation: saved }
           let result: Awaited<ReturnType<SaveControlBuild>>
           try {
             attempts++
@@ -309,6 +321,8 @@ export function createControlBuildPort(params: {
           const fresh = await scope.refresh()
           const current = await params.control.load()
           if (
+            controlSafetyHeld(current) !== null ||
+            current.controlHold !== null ||
             !sameStoredValue(fresh.source.key, original.key) ||
             !sameStoredValue(fresh.source.identity, original.identity) ||
             fresh.source.stateVersion === expected.stateVersion ||

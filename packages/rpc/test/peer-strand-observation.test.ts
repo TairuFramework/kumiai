@@ -10,7 +10,7 @@ import {
 import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
 import { commitTopic } from '../src/topic.js'
 import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
-import { assertDurableControlHold } from './fixtures/control-hold.js'
+import { assertDurableForkHalt } from './fixtures/control-hold.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import {
   createMemoryGroupMLS,
@@ -213,10 +213,12 @@ describe('commit strand observations', () => {
     }
     expect(recoveries).toEqual([])
     expect(observations).toHaveLength(1)
-    await assertDurableControlHold(bob, hub, rs, 'bob', {
-      reason: 'fork-evidence',
-      position: sequenceID,
-      evidence: { kind: 'unexplained-own-commit', digest: publishedCommitDigest(hub, sequenceID) },
+    await assertDurableForkHalt(bob, hub, rs, 'bob', {
+      evidence: {
+        kind: 'unexplained-own-commit',
+        position: sequenceID,
+        digest: publishedCommitDigest(hub, sequenceID),
+      },
     })
     await bob.peer.dispose()
   })

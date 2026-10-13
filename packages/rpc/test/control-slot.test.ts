@@ -2,6 +2,7 @@ import { expect, test, vi } from 'vitest'
 
 import { encodeControlFixtureState } from '../../rpc-conformance/src/control-store.js'
 import { createMemoryControlStore } from '../../rpc-conformance/src/memory-control-store.js'
+import { forkEventID } from '../src/control/safety.js'
 import { type ControlSlotDeps, settleControlSlot } from '../src/control/slot.js'
 import type { ControlSlot, FirstValidCommit, Operation } from '../src/control/types.js'
 import { deliverObligations } from '../src/control/welcome.js'
@@ -47,8 +48,17 @@ async function fixture() {
     payloadDigest: slot.payloadDigest,
   }
   const emitted: Array<unknown> = []
+  let safety = false
   const deps: ControlSlotDeps = {
     control: store,
+    safetyHold: () => (safety ? 'fork-halted' : null),
+    haltFork: async (evidence) => {
+      safety = true
+      await store.apply(
+        { forkHalt: { eventID: forkEventID(store.key), evidence, detectedAt: 1 } },
+        'halt',
+      )
+    },
     search: { searchLog: vi.fn(async () => ({ kind: 'unknown' as const })) },
     adoption: {
       adopt: vi.fn(async (_journal, _expected, write) => {
@@ -153,7 +163,7 @@ test('complete absence retains the orphan slot without resurrecting its operatio
   expect(f.deps.adoption.adopt).not.toHaveBeenCalled()
 })
 
-test('control holds survive restart and copy fork evidence defensively', async () => {
+test('fork halts survive restart and copy evidence defensively', async () => {
   const f = await fixture()
   const evidence = {
     kind: 'epoch-authenticator' as const,
@@ -161,28 +171,19 @@ test('control holds survive restart and copy fork evidence defensively', async (
     local: new Uint8Array([7]),
     remote: new Uint8Array([8]),
   }
-  await f.store.apply(
-    { controlHold: { reason: 'fork-evidence', position: null, evidence } },
-    'hold',
-  )
+  await f.deps.haltFork(evidence)
   evidence.local.fill(0)
   const snapshot = await f.store.load()
-  expect(snapshot.controlHold).toEqual({
-    reason: 'fork-evidence',
-    position: null,
-    evidence: {
-      kind: 'epoch-authenticator',
-      epoch: 1,
-      local: new Uint8Array([7]),
-      remote: new Uint8Array([8]),
-    },
-  })
-  if (snapshot.controlHold?.evidence?.kind !== 'epoch-authenticator')
-    throw new Error('missing evidence')
-  snapshot.controlHold.evidence.remote.fill(0)
-  expect((await f.store.load()).controlHold?.evidence).toMatchObject({
+  expect(snapshot.forkHalt?.evidence).toEqual({
+    kind: 'epoch-authenticator',
+    epoch: 1,
+    local: new Uint8Array([7]),
     remote: new Uint8Array([8]),
   })
+  if (snapshot.forkHalt?.evidence.kind !== 'epoch-authenticator')
+    throw new Error('missing evidence')
+  snapshot.forkHalt.evidence.remote.fill(0)
+  expect((await f.store.load()).forkHalt?.evidence).toMatchObject({ remote: new Uint8Array([8]) })
 })
 
 test('one pre-adoption Welcome is delivered across moved retries and eventual installation', async () => {
@@ -239,9 +240,15 @@ test.each([true, false])(
       'mismatch',
     )
     expect(await settleControlSlot(f.deps)).toBe('unknown')
-    expect((await f.store.load()).controlHold?.reason).toBe(
-      sameDigest ? 'acceptance-unknown' : 'fork-evidence',
-    )
+    if (sameDigest) expect((await f.store.load()).controlHold?.reason).toBe('acceptance-unknown')
+    else
+      expect((await f.store.load()).forkHalt?.evidence).toEqual({
+        kind: 'digest-divergence',
+        epoch: f.slot.epoch,
+        position: f.proof.position,
+        localDigest: 'different-payload',
+        remoteDigest: f.slot.payloadDigest,
+      })
   },
 )
 
@@ -256,4 +263,69 @@ test('ambiguous slot acceptance writes obey their abort signal', async () => {
   await expect(settleControlSlot(f.deps)).rejects.toBe(reason)
   expect((await f.store.load()).commitOnceAcceptance).toEqual(f.proof)
   expect((await f.store.load()).applied).toEqual([])
+})
+
+test.each(['fork-halted', 'recovery-unavailable'] as const)(
+  'exact applied slot cleans up under %s with storage evidence',
+  async (reason) => {
+    const f = await fixture()
+    await f.store.apply(
+      {
+        putApplied: [
+          {
+            epoch: f.slot.epoch,
+            digest: f.slot.digest,
+            payloadDigest: f.slot.payloadDigest,
+            sequenceID: f.proof.position,
+            opID: f.op.id,
+            removed: false,
+          },
+        ],
+      },
+      'applied',
+    )
+    f.deps.safetyHold = () => reason
+    f.deps.haltFork = async () => {}
+    const read = vi.spyOn(f.deps, 'readEvidence')
+    const before = await f.store.load()
+    expect(await settleControlSlot(f.deps)).toBe('landed')
+    expect(read).not.toHaveBeenCalled()
+    expect(f.deps.search.searchLog).not.toHaveBeenCalled()
+    expect(f.deps.adoption.adopt).not.toHaveBeenCalled()
+    const after = await f.store.load()
+    expect(after.operations).toEqual([])
+    expect(after.commitOnce).toEqual(before.commitOnce)
+    expect(after.outcomes).toEqual(before.outcomes)
+    expect(after.cursor).toEqual(before.cursor)
+  },
+)
+
+test('direct slot authenticator divergence halts with exact evidence and preserves cursor and strand', async () => {
+  const f = await fixture()
+  const read = f.deps.readEvidence
+  f.deps.readEvidence = async () => {
+    const value = await read()
+    if (value.source.identity === null) throw new Error('Missing source')
+    return {
+      ...value,
+      source: {
+        ...value.source,
+        identity: { ...value.source.identity, authenticator: new Uint8Array([9]) },
+      },
+    }
+  }
+  const before = await f.store.load()
+  expect(await settleControlSlot(f.deps)).toBe('unknown')
+  const after = await f.store.load()
+  expect(after.forkHalt?.evidence).toEqual({
+    kind: 'epoch-authenticator',
+    epoch: f.slot.epoch,
+    local: f.slot.authenticatorBefore,
+    remote: new Uint8Array([9]),
+  })
+  expect(after.cursor).toEqual(before.cursor)
+  expect(after.strand).toEqual(before.strand)
+  expect(after.controlHold).toBeNull()
+  expect(f.deps.search.searchLog).not.toHaveBeenCalled()
+  expect(f.deps.adoption.adopt).not.toHaveBeenCalled()
 })

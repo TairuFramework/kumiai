@@ -4,7 +4,7 @@ import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { RecoveryEvent } from '../src/peer.js'
 import { commitTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
-import { assertDurableControlHold } from './fixtures/control-hold.js'
+import { assertDurableForkHalt } from './fixtures/control-hold.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { encodeMemoryCommit, memoryEntryID } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
@@ -85,10 +85,8 @@ const armOwnUnmerged: Arm = async (hub, rs, withResponder) => {
     },
   })
   await vi.waitFor(async () =>
-    expect((await bob.control.load()).controlHold).toMatchObject({
-      reason: 'fork-evidence',
-      position: occurrence.sequenceID,
-      evidence: { kind: 'unexplained-own-commit' },
+    expect((await bob.control.load()).forkHalt).toMatchObject({
+      evidence: { kind: 'unexplained-own-commit', epoch: 1, position: occurrence.sequenceID },
     }),
   )
   expect(events).toEqual([])
@@ -228,8 +226,7 @@ describe('heal strand', { concurrent: false }, () => {
         expect((await bob.control.load()).operations[0]?.stage).toBe('intent')
 
         if (trigger.arm === armOwnUnmerged)
-          await assertDurableControlHold(bob, hub, rs, 'bob', {
-            reason: 'fork-evidence',
+          await assertDurableForkHalt(bob, hub, rs, 'bob', {
             evidence: { kind: 'unexplained-own-commit' },
           })
         await bob.peer.dispose()
@@ -247,8 +244,7 @@ describe('heal strand', { concurrent: false }, () => {
           expect(carol.mls.epoch()).toBe(2)
           await bob.peer.enqueue(buildLedgerCommit(bob, ['role:zoe=admin']))
           expect((await bob.control.load()).operations[0]?.stage).toBe('intent')
-          await assertDurableControlHold(bob, hub, rs, 'bob', {
-            reason: 'fork-evidence',
+          await assertDurableForkHalt(bob, hub, rs, 'bob', {
             evidence: { kind: 'unexplained-own-commit' },
           })
           await carol.peer.dispose()

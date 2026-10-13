@@ -5,9 +5,11 @@ import {
   asLogPosition,
   type ControlSlot,
   ControlWriteNotCommittedError,
+  forkEventID,
   type GroupCrypto,
   type HostBuilt,
   type Operation,
+  recoveryUnavailableEventID,
   StorageOutcomeUnknownError,
 } from '@kumiai/rpc'
 import { createRuntime } from '@sozai/runtime'
@@ -813,5 +815,45 @@ test.each(['key', 'epoch', 'authenticator', 'checkpoint', 'cursor epoch', 'queue
     expect((await port.prepareBuild(intent, host.frame)).kind).toBe('moved')
     expect(host.db.snapshot()).toEqual(before)
     expect(host.counts()).toEqual({ buildCalls: 1, frameCalls: 1 })
+  },
+)
+
+test.each(['fork-halted', 'recovery-unavailable'] as const)(
+  'field-only %s refuses preparation and raw saved build without crypto',
+  async (reason) => {
+    const f = await setup()
+    const slot = await f.slot()
+    await f.control.apply(
+      reason === 'fork-halted'
+        ? {
+            forkHalt: {
+              eventID: forkEventID(f.key),
+              detectedAt: 1,
+              evidence: {
+                kind: 'unexplained-own-commit',
+                epoch: 0,
+                position: '1',
+                digest: 'foreign',
+              },
+            },
+          }
+        : {
+            recoveryUnavailable: {
+              ...f.key,
+              id: recoveryUnavailableEventID(f.key),
+              kind: 'group:recovery-unavailable',
+              reason: 'trust-unreadable',
+            },
+          },
+      'hold',
+    )
+    const expected = await f.source()
+    const before = f.db.snapshot()
+    const calls = f.cryptoTransactions.length
+    expect((await f.make().prepareBuild(intent, f.frame)).kind).toBe('occupied')
+    expect(await f.saver(intent, slot, expected, 'held-save')).toBe('moved')
+    expect(f.counts()).toEqual({ buildCalls: 0, frameCalls: 0 })
+    expect(f.cryptoTransactions).toHaveLength(calls)
+    expect(f.db.snapshot()).toEqual(before)
   },
 )

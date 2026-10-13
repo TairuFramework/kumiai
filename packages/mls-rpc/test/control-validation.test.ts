@@ -23,6 +23,7 @@ import {
   restoreGroup,
   signLedgerEntry,
 } from '@kumiai/mls'
+import type { GroupForkEvidence } from '@kumiai/rpc'
 import {
   type AdoptionExpected,
   type AdoptionWrite,
@@ -314,7 +315,9 @@ async function searchReal(
         : { kind: 'refused' as const }
     },
   )
+  const safety = safetyCallbacks()
   const search = createControlSearch({
+    ...safety,
     budget: { maxPasses: 2, maxFetches: 16, maxFrames: 256 },
     fetch,
     validation,
@@ -324,7 +327,7 @@ async function searchReal(
     hold,
   })
   const result = await search.searchLog(f.built)
-  return { result, store, fetch, hold, followWinner, persisted }
+  return { result, store, fetch, hold, haltFork: safety.haltFork, followWinner, persisted }
 }
 
 test('first-valid lands on a trimmed log', async () => {
@@ -394,6 +397,7 @@ test('budget discovery continues for an expired operation with its retained slot
   }))
   const followWinner = vi.fn(async () => ({ kind: 'refused' as const }))
   const deps = {
+    ...safetyCallbacks(),
     budget: { maxPasses: 2, maxFetches: 16, maxFrames: 256 },
     fetch,
     validation: f.port,
@@ -497,7 +501,9 @@ test('mismatched journal checkpoint refuses proof', async () => {
   const corrupted = { ...f.built, searchFrom: asLogPosition('000099') }
   expect(await f.port.restoreValidation(corrupted)).toBeNull()
   const followWinner = vi.fn(async () => ({ kind: 'refused' as const }))
+  const safety = safetyCallbacks()
   const search = createControlSearch({
+    ...safety,
     budget: { maxPasses: 2, maxFetches: 16, maxFrames: 256 },
     fetch: async () => {
       throw new Error('must not fetch')
@@ -894,11 +900,8 @@ test('an authenticated alternate own commit retains fork evidence', async () => 
   })
   const searched = await searchReal(f, other)
   expect(searched.result).toEqual({ kind: 'unknown' })
-  expect(searched.hold).toHaveBeenLastCalledWith(
-    expect.objectContaining({
-      reason: 'fork-evidence',
-      evidence: expect.objectContaining({ kind: 'unexplained-own-commit' }),
-    }),
+  expect(searched.haltFork).toHaveBeenLastCalledWith(
+    expect.objectContaining({ kind: 'unexplained-own-commit' }),
   )
   expect(searched.persisted).not.toHaveBeenCalled()
 })
@@ -984,6 +987,7 @@ test('already adopted own build requires committed full payload evidence after r
     removed: boolean
   }> = []
   const deps = {
+    ...safetyCallbacks(),
     budget: { maxPasses: 2, maxFetches: 16, maxFrames: 256 },
     validation: f.port,
     readEvidence: async () => ({
@@ -1029,7 +1033,7 @@ test('already adopted own build requires committed full payload evidence after r
   if (committed === undefined) throw new Error('missing applied row')
   applied = [{ ...committed, payloadDigest: 'conflicting-full-bytes' }]
   expect(await createControlSearch(deps).searchLog(f.built)).toEqual({ kind: 'unknown' })
-  expect(hold).toHaveBeenCalledWith(expect.objectContaining({ reason: 'fork-evidence' }))
+  expect(deps.haltFork).toHaveBeenCalledWith(expect.objectContaining({ kind: 'digest-divergence' }))
   expect(followWinner).not.toHaveBeenCalled()
 })
 
@@ -1724,7 +1728,9 @@ test.each(['refused', 'unavailable'] as const)(
     const f = await fixture()
     const competitor = (await commitKeyRotation(f.group.committer.handle)).commitMessage
     const followWinner = vi.fn(async () => ({ kind }))
+    const safety = safetyCallbacks()
     const search = createControlSearch({
+      ...safety,
       budget: { maxPasses: 2, maxFetches: 16, maxFrames: 256 },
       validation: f.port,
       readEvidence: async () => ({
@@ -1756,3 +1762,13 @@ test.each(['refused', 'unavailable'] as const)(
     expect(followWinner).toHaveBeenCalledOnce()
   },
 )
+
+function safetyCallbacks() {
+  let held = false
+  return {
+    safetyHold: () => (held ? ('fork-halted' as const) : null),
+    haltFork: vi.fn(async (_evidence: GroupForkEvidence) => {
+      held = true
+    }),
+  }
+}

@@ -1,4 +1,5 @@
 import type { AnchorSlot, AnchorStore } from '../../src/anchor.js'
+import { controlSafetyHeld } from '../../src/control/safety.js'
 import { controlBuildRef } from '../../src/control/slot.js'
 import {
   applyChanges,
@@ -186,6 +187,7 @@ export function createMemoryHostDatabase(
           const identity = expected.identity
           const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
           if (
+            controlSafetyHeld(next.control) !== null ||
             next.control.controlHold !== null ||
             !same(key, expected.key) ||
             identity === null ||
@@ -295,9 +297,10 @@ export function createMemoryHostDatabase(
           next.state === null || key === null ? null : readIdentity(groupID, next.state, key)
         const expected = ownedWrite?.expected
         if (
-          ownedWrite !== undefined &&
-          next.control.controlHold !== null &&
-          next.control.controlHold.reason !== 'acceptance-unknown'
+          controlSafetyHeld(next.control) !== null ||
+          (ownedWrite !== undefined &&
+            next.control.controlHold !== null &&
+            next.control.controlHold.reason !== 'acceptance-unknown')
         ) {
           throw Object.assign(new Error('Adoption is held'), { name: 'ControlAdoptionMovedError' })
         }

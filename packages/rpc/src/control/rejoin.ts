@@ -4,6 +4,7 @@ import { asLogPosition, type LogPosition } from '../cursor.js'
 import type { ConfirmationOutcome } from '../recovery-confirmation.js'
 import { forkSettlement } from './forks.js'
 import type { PublishOutcome } from './operations.js'
+import { controlSafetyHeld } from './safety.js'
 import { applyResolved, pruneWindow } from './store.js'
 import type {
   AdoptionWriteFactory,
@@ -106,6 +107,7 @@ export async function stepRejoin(
     deps.discarded(reason, record, blockingPosition)
     return null
   }
+  if (controlSafetyHeld(await deps.control.load()) !== null) return record
   if (record.stage === 'refused') return record
   if (record.stage === 'built') {
     let position: LogPosition
@@ -155,8 +157,10 @@ export async function stepRejoin(
   }
   if (record.stage === 'confirmed') {
     const held = async () => {
-      const hold = (await deps.control.load()).controlHold
+      const snapshot = await deps.control.load()
+      const hold = snapshot.controlHold
       return (
+        controlSafetyHeld(snapshot) !== null ||
         (hold !== null && hold.reason !== 'acceptance-unknown') ||
         (deps.canAdopt !== undefined && !(await deps.canAdopt()))
       )
@@ -215,9 +219,11 @@ export async function stepRejoin(
     return next
   }
   if (!(await deps.bootstrapLedger())) return record
+  if (controlSafetyHeld(await deps.control.load()) !== null) return record
   const held = new Set(await deps.getLedger())
   const tokens = record.ledgerBefore.filter((token) => !held.has(token))
   const snapshot = await deps.control.load()
+  if (controlSafetyHeld(snapshot) !== null) return record
   const outcome: Outcome = { id: record.id, opID: null, at: deps.now(), kind: 'reenact', tokens }
   await applyResolved(
     deps.control,

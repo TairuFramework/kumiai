@@ -1,5 +1,6 @@
 import type { GroupHandle } from '@kumiai/mls'
 import type { ControlAdoptionPort, ControlStore } from '@kumiai/rpc'
+import { controlSafetyHeld } from '@kumiai/rpc'
 
 import type { HandleAccess } from './access.js'
 import { decodeControlJournal } from './control-journal.js'
@@ -12,6 +13,7 @@ export function createControlAdoptionPort(params: {
 }): ControlAdoptionPort {
   return {
     async adopt(bytes, expected, write) {
+      if (controlSafetyHeld(await params.control.load()) !== null) return 'moved'
       const journal = decodeControlJournal(bytes)
       const proof = expected.acceptance
       if (
@@ -23,6 +25,7 @@ export function createControlAdoptionPort(params: {
       )
         return 'moved'
       const candidate = await params.restoreCandidate(journal.candidate)
+      if (controlSafetyHeld(await params.control.load()) !== null) return 'moved'
       if (candidate.groupID !== expected.key.groupID) return 'moved'
       let result: 'installed' | 'noop' | 'moved' = 'moved'
       try {
@@ -40,6 +43,7 @@ export function createControlAdoptionPort(params: {
               return false
             const snapshot = await params.control.load()
             if (
+              controlSafetyHeld(snapshot) !== null ||
               snapshot.strand !== null ||
               snapshot.cursor?.stranded === true ||
               (snapshot.controlHold !== null &&

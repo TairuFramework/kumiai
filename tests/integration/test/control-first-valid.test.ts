@@ -8,6 +8,7 @@ import {
   encodeControlEnvelope,
 } from '@kumiai/mls'
 import { createGroupMLS } from '@kumiai/mls-rpc'
+import type { ControlStore, GroupForkEvidence } from '@kumiai/rpc'
 import {
   asLogPosition,
   CONTROL_SEARCH_BUDGET,
@@ -94,7 +95,9 @@ async function firstValidRunner() {
     })
     return { sequenceID: position() }
   }
+  const safety = safetyCallbacks(host.control)
   const search = createControlSearch({
+    ...safety,
     budget: CONTROL_SEARCH_BUDGET,
     validation: host.validation,
     readEvidence: host.readEvidence,
@@ -119,6 +122,7 @@ async function firstValidRunner() {
   let now = op.enqueuedAt
   const emitted: Array<Outcome> = []
   const deps: OperationDeps = {
+    ...safety,
     control: host.control,
     prepareBuild: host.prepareBuild,
     adopt: host.adopt,
@@ -347,7 +351,9 @@ test.each(['unknown', 'lost', 'abandon'] as const)(
     let missing = true
     const restore = host.validation.restoreValidation.bind(host.validation)
     const position = asLogPosition('00000000000000000001')
+    const safety = safetyCallbacks(host.control)
     const search = createControlSearch({
+      ...safety,
       budget: CONTROL_SEARCH_BUDGET,
       validation: {
         restoreValidation: (built) => (missing ? Promise.resolve(null) : restore(built)),
@@ -379,6 +385,7 @@ test.each(['unknown', 'lost', 'abandon'] as const)(
     })
     const emitted: Array<Outcome> = []
     const deps = {
+      ...safety,
       control: host.control,
       search,
       adoption: { adopt: host.adopt },
@@ -441,3 +448,23 @@ test.each(['unknown', 'lost', 'abandon'] as const)(
     expect(emitted).toHaveLength(1)
   },
 )
+
+function safetyCallbacks(control: ControlStore) {
+  let held = false
+  return {
+    safetyHold: () => (held ? ('fork-halted' as const) : null),
+    haltFork: async (evidence: GroupForkEvidence) => {
+      held = true
+      await control.apply(
+        {
+          forkHalt: {
+            eventID: JSON.stringify(['group:fork', control.key.groupID, control.key.incarnation]),
+            evidence,
+            detectedAt: Date.now(),
+          },
+        },
+        crypto.randomUUID(),
+      )
+    },
+  }
+}

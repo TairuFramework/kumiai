@@ -2,6 +2,7 @@ import {
   type ControlChanges,
   type ControlSearchPort,
   type ControlSnapshot,
+  controlSafetyHeld,
   controlSettled,
   deliverObligations,
   type Outcome,
@@ -181,6 +182,7 @@ export async function serveRetiredObligations<TTx extends GroupTransaction>(para
           const slot = snapshot.commitOnce
           const acceptance = snapshot.commitOnceAcceptance
           if (
+            controlSafetyHeld(snapshot) !== null ||
             slot?.opID !== obligation.opID ||
             acceptance === null ||
             snapshot.strand !== null ||

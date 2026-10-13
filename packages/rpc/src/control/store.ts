@@ -7,7 +7,7 @@ import {
   StorageOutcomeUnknownError,
 } from '../errors.js'
 import type { ForkHalt, RecoveryUnavailableEvent } from './safety.js'
-import { forkEventID, recoveryUnavailableEventID } from './safety.js'
+import { controlSafetyHeld, forkEventID, recoveryUnavailableEventID } from './safety.js'
 import type {
   AdoptionExpected,
   AdoptionWrite,
@@ -77,6 +77,7 @@ export function controlAdoptionAllowed(
   expected: NonNullable<AdoptionWrite['expected']>,
 ): boolean {
   if (
+    controlSafetyHeld(snapshot) !== null ||
     (snapshot.controlHold !== null && snapshot.controlHold.reason !== 'acceptance-unknown') ||
     !sameValue(source.key, expected.key) ||
     !sameValue(source.identity, expected.identity) ||

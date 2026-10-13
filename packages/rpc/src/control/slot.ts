@@ -1,4 +1,4 @@
-import { asLogPosition } from '../cursor.js'
+import { controlSafetyHeld, type GroupForkEvidence, type SafetyHold } from './safety.js'
 import type { ControlEvidenceSnapshot, ControlLogFrame } from './search.js'
 import { applyResolved, pruneWindow } from './store.js'
 import type {
@@ -22,6 +22,8 @@ export function controlBuildRef(built: BuiltCommit): ControlBuildRef {
 export type ControlSlotDeps = {
   control: ControlStore
   signal?: AbortSignal
+  haltFork(evidence: GroupForkEvidence): Promise<void>
+  safetyHold(): SafetyHold
   search: ControlSearchPort
   adoption: ControlAdoptionPort
   readEvidence(): Promise<ControlEvidenceSnapshot>
@@ -37,54 +39,17 @@ export async function settleControlSlot(
   const snapshot = await deps.control.load()
   const slot = snapshot.commitOnce
   if (slot === null) return 'empty'
-  if (snapshot.strand !== null || snapshot.cursor?.stranded === true) return 'unknown'
-  if (snapshot.controlHold !== null && snapshot.controlHold.reason !== 'acceptance-unknown')
-    return 'unknown'
-  const evidence = await deps.readEvidence()
   const operation = snapshot.operations.find((op) => op.id === slot.opID)
-  if (
+  const exact = snapshot.applied.find((row) => row.epoch === slot.epoch)
+  const mismatch =
     operation !== undefined &&
     operation.stage !== 'intent' &&
     (operation.built.incarnation !== slot.incarnation ||
       operation.built.epoch !== slot.epoch ||
       operation.built.publishID !== slot.publishID ||
       operation.built.payloadDigest !== slot.payloadDigest)
-  ) {
-    const row = evidence.applied.find((row) => row.epoch === operation.built.epoch)
-    await applyResolved(
-      deps.control,
-      row === undefined || row.payloadDigest === operation.built.payloadDigest
-        ? {
-            controlHold: { reason: 'acceptance-unknown', position: null },
-          }
-        : {
-            controlHold: {
-              reason: 'fork-evidence',
-              position: asLogPosition(row.sequenceID),
-              evidence: {
-                kind: 'digest-divergence',
-                epoch: row.epoch,
-                position: row.sequenceID,
-                localDigest: row.payloadDigest,
-                remoteDigest: operation.built.payloadDigest,
-              },
-            },
-            strand: { reason: 'lost-state' },
-            cursor: {
-              position: snapshot.cursor?.position ?? null,
-              epoch: evidence.source.identity?.epoch ?? slot.epoch,
-              stranded: true,
-            },
-          },
-      deps.newID(),
-      undefined,
-      deps.signal,
-    )
-    return 'unknown'
-  }
-  const applied = evidence.applied.find((row) => row.epoch === slot.epoch)
-  if (applied?.payloadDigest === slot.payloadDigest && applied.digest === slot.digest) {
-    if (snapshot.operations.some((op) => op.id === slot.opID))
+  if (!mismatch && exact?.payloadDigest === slot.payloadDigest && exact.digest === slot.digest) {
+    if (operation !== undefined)
       await applyResolved(
         deps.control,
         { deleteOperations: [slot.opID] },
@@ -93,6 +58,36 @@ export async function settleControlSlot(
         deps.signal,
       )
     return 'landed'
+  }
+  const held = () => deps.safetyHold() !== null || controlSafetyHeld(snapshot) !== null
+  if (
+    held() ||
+    snapshot.strand !== null ||
+    snapshot.cursor?.stranded === true ||
+    (snapshot.controlHold !== null && snapshot.controlHold.reason !== 'acceptance-unknown')
+  )
+    return 'unknown'
+  const evidence = await deps.readEvidence()
+  if (held()) return 'unknown'
+  if (mismatch && operation !== undefined) {
+    const row = evidence.applied.find((row) => row.epoch === operation.built.epoch)
+    if (row !== undefined && row.payloadDigest !== operation.built.payloadDigest)
+      await deps.haltFork({
+        kind: 'digest-divergence',
+        epoch: row.epoch,
+        position: row.sequenceID,
+        localDigest: row.payloadDigest,
+        remoteDigest: operation.built.payloadDigest,
+      })
+    else
+      await applyResolved(
+        deps.control,
+        { controlHold: { reason: 'acceptance-unknown', position: null } },
+        deps.newID(),
+        undefined,
+        deps.signal,
+      )
+    return 'unknown'
   }
   const identity = evidence.source.identity
   if (
@@ -107,33 +102,16 @@ export async function settleControlSlot(
     (identity.authenticator.length !== slot.authenticatorBefore.length ||
       identity.authenticator.some((byte, index) => byte !== slot.authenticatorBefore[index]))
   ) {
-    await applyResolved(
-      deps.control,
-      {
-        controlHold: {
-          reason: 'fork-evidence',
-          position: evidence.cursor?.position ?? null,
-          evidence: {
-            kind: 'epoch-authenticator',
-            epoch: slot.epoch,
-            local: slot.authenticatorBefore,
-            remote: identity.authenticator,
-          },
-        },
-        strand: { reason: 'lost-state' },
-        cursor: {
-          position: snapshot.cursor?.position ?? null,
-          epoch: identity.epoch,
-          stranded: true,
-        },
-      },
-      deps.newID(),
-      undefined,
-      deps.signal,
-    )
+    await deps.haltFork({
+      kind: 'epoch-authenticator',
+      epoch: slot.epoch,
+      local: slot.authenticatorBefore,
+      remote: identity.authenticator,
+    })
     return 'unknown'
   }
   const found = await deps.search.searchLog(slot, occurrence?.position)
+  if (held()) return 'unknown'
   if (found.kind === 'unknown' || found.kind === 'absent') return found.kind
   if (found.kind === 'superseded') {
     const current = await deps.control.load()
@@ -152,6 +130,7 @@ export async function settleControlSlot(
   }
   const proof = found.proof
   const searched = await deps.control.load()
+  if (held() || controlSafetyHeld(searched) !== null) return 'unknown'
   if (searched.strand !== null || searched.cursor?.stranded === true) return 'unknown'
   // A retained acceptance plus no obligation records a completed delivery.
   const prior = snapshot.commitOnceAcceptance
@@ -192,7 +171,9 @@ export async function settleControlSlot(
     undefined,
     deps.signal,
   )
+  if (held()) return 'unknown'
   const expected = (await deps.readEvidence()).source
+  if (held()) return 'unknown'
   const outcome: Outcome = {
     id: JSON.stringify(['control:landed', slot.opID, slot.publishID, proof.position]),
     opID: slot.opID,
@@ -201,6 +182,7 @@ export async function settleControlSlot(
     position: proof.position,
   }
   const current = await deps.control.load()
+  if (held() || controlSafetyHeld(current) !== null) return 'unknown'
   const result = await deps.adoption.adopt(
     slot.journal,
     { ...expected, acceptance: proof },

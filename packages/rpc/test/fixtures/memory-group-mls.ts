@@ -7,6 +7,7 @@ import { fromB64U, fromUTF, toB64U, toUTF } from '@sozai/codec'
 
 import type { AnchorStore } from '../../src/anchor.js'
 import type { SaveControlBuild } from '../../src/control/build.js'
+import { controlSafetyHeld } from '../../src/control/safety.js'
 import type { ControlEvidenceSnapshot } from '../../src/control/search.js'
 import type {
   AdoptionExpected,
@@ -1084,6 +1085,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         if (
           snapshot.control.strand !== null ||
           snapshot.control.cursor?.stranded === true ||
+          controlSafetyHeld(snapshot.control) !== null ||
           (snapshot.control.controlHold !== null &&
             snapshot.control.controlHold.reason !== 'acceptance-unknown') ||
           !same(journal.source.key, expected.key) ||

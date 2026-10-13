@@ -36,6 +36,7 @@ export {
   peerCommitOnceScenarios,
   testCommitOnceConformance,
 } from './commit-once.js'
+export { type ControlSafetyFixture, runControlSafetyContract } from './control-safety.js'
 export {
   type ConformanceAdoptionExpected,
   type ConformanceAdoptionWrite,

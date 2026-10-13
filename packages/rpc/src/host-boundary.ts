@@ -110,6 +110,7 @@ export const peerHostFields = {
   appLogRetentionSeconds: 'data',
   onAppWindowPruned: 'callback',
   onStrand: 'callback',
+  onSafetyEvent: 'callback',
   onRecovery: 'callback',
   onOutcome: 'callback',
   onControlPublishError: 'callback',

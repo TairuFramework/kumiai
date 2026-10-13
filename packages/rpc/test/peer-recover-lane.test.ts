@@ -16,7 +16,7 @@ import {
 import { decodeRecoveryReply, encodeRecoveryReply, encodeRecoveryRequest } from '../src/recovery.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
-import { assertDurableControlHold } from './fixtures/control-hold.js'
+import { assertDurableForkHalt } from './fixtures/control-hold.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
@@ -534,11 +534,10 @@ describe("a crash in recover()'s own acceptance window", { concurrent: false }, 
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
     await bob.peer.resync()
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery })
-    await assertDurableControlHold(alice, hub, rs, 'alice', {
-      reason: 'fork-evidence',
-      position: own.sequenceID,
+    await assertDurableForkHalt(alice, hub, rs, 'alice', {
       evidence: {
         kind: 'unexplained-own-commit',
+        position: own.sequenceID,
         digest: publishedCommitDigest(hub, own.sequenceID),
       },
     })

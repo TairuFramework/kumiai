@@ -67,9 +67,8 @@ export type ConformanceRecoveryUnavailableEvent = ConformanceGroupKey & {
 }
 
 export type ConformanceControlHold<Position extends string = string> = {
-  reason: 'acceptance-unknown' | 'unsupported-version' | 'fork-evidence'
+  reason: 'acceptance-unknown' | 'unsupported-version'
   position: Position | null
-  evidence?: ConformanceGroupForkEvidence
 }
 export type ConformanceControlBuildRef<Position extends string = string> = Pick<
   ConformanceBuiltCommit<Position>,

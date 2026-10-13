@@ -12,6 +12,7 @@ import { digestAppliedCommit } from '../../src/classify.js'
 import { decodeCommitFrame, encodeCommitFrame } from '../../src/commit-frame.js'
 import type { FrameControlBuild } from '../../src/control/build.js'
 import type { HostBuilt, OperationDeps } from '../../src/control/operations.js'
+import { controlSafetyHeld, type GroupSafetyEvent } from '../../src/control/safety.js'
 import type { ControlEvidenceSnapshot, ControlValidationPort } from '../../src/control/search.js'
 import { controlBuildRef } from '../../src/control/slot.js'
 import type {
@@ -94,6 +95,7 @@ export type MakeMLSPeerOptions = {
   mls?: MemoryGroupMLS
   crypto?: FakeCrypto
   database?: MemoryHostDatabase
+  readEvidence?: () => Promise<ControlEvidenceSnapshot>
   control?: ControlStore
   build?: (op: Operation) => Promise<HostBuilt>
   adopt?: OperationDeps['adopt']
@@ -111,6 +113,7 @@ export type MakeMLSPeerOptions = {
   appCursorStore?: MemoryAppCursorStore
   /** The host's notice that an app topic's retention floor passed this peer's read position. */
   onAppWindowPruned?: (event: AppWindowPruned) => void
+  onSafetyEvent?: (event: GroupSafetyEvent) => void | Promise<void>
   onStrand?: (observation: StrandObservation) => void | Promise<void>
   onOutcome?: (outcome: Outcome) => void | Promise<void>
   onRecovery?: (event: RecoveryEvent) => void | Promise<void>
@@ -207,6 +210,7 @@ export function makeMLSPeer(
     mls,
     control,
     ...ports,
+    readEvidence: options.readEvidence ?? ports.readEvidence,
     deliverWelcome:
       options.deliverWelcome ??
       (async (row) => {
@@ -228,6 +232,7 @@ export function makeMLSPeer(
       ? { onAppOutboxCleared: options.onAppOutboxCleared }
       : {}),
     ...(options.onAppWindowPruned != null ? { onAppWindowPruned: options.onAppWindowPruned } : {}),
+    ...(options.onSafetyEvent != null ? { onSafetyEvent: options.onSafetyEvent } : {}),
     ...(options.onStrand != null ? { onStrand: options.onStrand } : {}),
     ...(options.onRecovery != null ? { onRecovery: options.onRecovery } : {}),
     ...(options.onOutcome != null ? { onOutcome: options.onOutcome } : {}),
@@ -477,8 +482,13 @@ export function memoryControlPorts(
       if (op.stage !== 'intent' || snapshot.operations[0]?.id !== op.id)
         return { kind: 'moved' as const, operation: op }
       if (Date.now() >= op.deadline) return { kind: 'expired' as const, operation: op }
+      if (controlSafetyHeld(snapshot) !== null) return { kind: 'occupied' as const, operation: op }
       const source = await mls.readRecoverySource()
-      if (snapshot.controlHold !== null || snapshot.commitOnce?.epoch === source.epoch)
+      if (
+        controlSafetyHeld(await control.load()) !== null ||
+        snapshot.controlHold !== null ||
+        snapshot.commitOnce?.epoch === source.epoch
+      )
         return { kind: 'occupied' as const, operation: op }
       const sourceState = mls.serializeState()
       const retainedCrypto = crypto.restart()
@@ -486,6 +496,7 @@ export function memoryControlPorts(
       try {
         const host = await build(op)
         const sameSource = async () => {
+          if (controlSafetyHeld(await control.load()) !== null) return false
           const current = await mls.readRecoverySource()
           return (
             current.key.groupID === source.key.groupID &&

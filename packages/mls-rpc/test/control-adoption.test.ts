@@ -5,6 +5,7 @@ import {
   encodeClientState,
   restoreGroup,
 } from '@kumiai/mls'
+import type { ControlStore, GroupForkEvidence } from '@kumiai/rpc'
 import {
   type AdoptionWrite,
   asLogPosition,
@@ -17,8 +18,10 @@ import {
   encodeCommitFrame,
   encodeHandshakeFrame,
   encodeLedgerEntries,
+  forkEventID,
   HANDSHAKE_KIND,
   type Operation,
+  recoveryUnavailableEventID,
   settleControlSlot,
 } from '@kumiai/rpc'
 import { expect, test, vi } from 'vitest'
@@ -271,7 +274,9 @@ test('acceptance persistence refreshes adoption expectations without rewriting h
   const slot = await f.build()
   const position = asLogPosition('000001')
   const beforeAcceptance = (await f.store.readEvidence()).source
+  const safety = safetyCallbacks(f.store.control)
   const search = createControlSearch({
+    ...safety,
     budget: CONTROL_SEARCH_BUDGET,
     validation: createControlValidationPort({
       identity: f.member.identity,
@@ -308,6 +313,7 @@ test('acceptance persistence refreshes adoption expectations without rewriting h
   })
   expect(
     await settleControlSlot({
+      ...safety,
       control: f.store.control,
       search,
       readEvidence: f.store.readEvidence,
@@ -737,3 +743,68 @@ test('transactional save rechecks the hold after its write gate before publishin
   expect(f.store.snapshot().control.applied).toEqual([])
   expect(f.store.snapshot().control.controlHold?.reason).toBe('unsupported-version')
 })
+
+test.each(['fork-halted', 'recovery-unavailable'] as const)(
+  'field-only %s refuses adoption before restoring the candidate',
+  async (reason) => {
+    const f = await retainedRotation()
+    const slot = await f.build()
+    const { proof, write } = await f.accept(f.store, slot)
+    const key = f.store.control.key
+    await f.store.control.apply(
+      reason === 'fork-halted'
+        ? {
+            forkHalt: {
+              eventID: forkEventID(key),
+              detectedAt: 1,
+              evidence: {
+                kind: 'unexplained-own-commit',
+                epoch: slot.epoch,
+                position: '1',
+                digest: 'foreign',
+              },
+            },
+          }
+        : {
+            recoveryUnavailable: {
+              ...key,
+              id: recoveryUnavailableEventID(key),
+              kind: 'group:recovery-unavailable',
+              reason: 'trust-unreadable',
+            },
+          },
+      'hold',
+    )
+    const before = structuredClone(f.store.snapshot())
+    const restoreCandidate = vi.fn(f.restoreCandidate)
+    const port = createControlAdoptionPort({
+      access: f.host.access,
+      control: f.store.control,
+      restoreCandidate,
+    })
+    const source = (await f.store.readEvidence()).source
+    expect(await port.adopt(slot.journal, { ...source, acceptance: proof }, write)).toBe('moved')
+    expect(restoreCandidate).not.toHaveBeenCalled()
+    expect(f.store.snapshot()).toEqual(before)
+  },
+)
+
+function safetyCallbacks(control: ControlStore) {
+  let held = false
+  return {
+    safetyHold: () => (held ? ('fork-halted' as const) : null),
+    haltFork: async (evidence: GroupForkEvidence) => {
+      held = true
+      await control.apply(
+        {
+          forkHalt: {
+            eventID: JSON.stringify(['group:fork', control.key.groupID, control.key.incarnation]),
+            evidence,
+            detectedAt: Date.now(),
+          },
+        },
+        crypto.randomUUID(),
+      )
+    },
+  }
+}

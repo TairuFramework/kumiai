@@ -8,6 +8,7 @@ import {
   type OperationDeps,
   stepOperation,
 } from '../src/control/operations.js'
+import { forkEventID } from '../src/control/safety.js'
 import { controlBuildRef } from '../src/control/slot.js'
 import type {
   ControlChanges,
@@ -68,7 +69,16 @@ async function setup() {
     position,
     payloadDigest: slot.payloadDigest,
   })
+  let safety = false
   const deps: OperationDeps = {
+    safetyHold: () => (safety ? 'fork-halted' : null),
+    haltFork: async (evidence) => {
+      safety = true
+      await store.apply(
+        { forkHalt: { eventID: forkEventID(store.key), evidence, detectedAt: 1 } },
+        'halt',
+      )
+    },
     control: {
       key,
       load: store.load,
@@ -515,7 +525,7 @@ test('same-epoch divergence never republishes', async () => {
   h.mismatch()
   expect(await stepOperation(h.deps, op)).toEqual(op)
   expect(h.deps.publish).not.toHaveBeenCalled()
-  expect((await h.store.load()).controlHold).toMatchObject({ reason: 'fork-evidence' })
+  expect((await h.store.load()).forkHalt?.evidence).toMatchObject({ kind: 'epoch-authenticator' })
 })
 
 test('accepted replay rechecks proof before adopt or Welcome release', async () => {
@@ -616,5 +626,49 @@ test.each(['RecoveryRequiredError', 'AuthorizationDeniedError', 'Error'])(
     expect((await h.store.load()).operations).toEqual([
       name === 'Error' ? { ...op, pendingPublish: { expectedHead: head } } : op,
     ])
+  },
+)
+
+test.each(['intent', 'built', 'pending', 'accepted'] as const)(
+  'expired %s under volatile safety settles using storage only',
+  async (stage) => {
+    const f = await setup()
+    let op = stage === 'intent' ? await f.enqueue() : await f.built()
+    if (op.stage !== 'intent' && stage === 'pending') {
+      op = { ...op, pendingPublish: { expectedHead: head } }
+    }
+    if (op.stage !== 'intent' && stage === 'accepted') {
+      const slot = (await f.store.load()).commitOnce
+      if (slot === null) throw new Error('missing slot')
+      const proof = {
+        source: (await f.deps.readEvidence()).source,
+        from: slot.searchFrom,
+        position,
+        payloadDigest: slot.payloadDigest,
+      }
+      op = { ...op, stage: 'accepted', acceptedAs: position, acceptance: proof }
+    }
+    op = { ...op, deadline: 0 }
+    await f.store.apply({ putOperations: [op] }, 'expire')
+    f.deps.safetyHold = () => 'fork-halted'
+    f.deps.haltFork = async () => {}
+    const read = vi.spyOn(f.deps, 'readEvidence')
+    vi.mocked(f.deps.pullToHead).mockClear()
+    vi.mocked(f.deps.prepareBuild).mockClear()
+    const before = await f.store.load()
+    expect(await stepOperation(f.deps, op)).toBeNull()
+    const after = await f.store.load()
+    expect(after.outcomes).toMatchObject([{ kind: stage === 'intent' ? 'lost' : 'unknown' }])
+    expect(after.commitOnce).toEqual(before.commitOnce)
+    expect(after.cursor).toEqual(before.cursor)
+    expect(after.strand).toEqual(before.strand)
+    expect(read).not.toHaveBeenCalled()
+    expect(f.deps.pullToHead).not.toHaveBeenCalled()
+    expect(f.deps.searchLog).not.toHaveBeenCalled()
+    expect(f.deps.prepareBuild).not.toHaveBeenCalled()
+    expect(f.deps.readHead).not.toHaveBeenCalled()
+    expect(f.deps.publish).not.toHaveBeenCalled()
+    await f.store.apply({ deleteOutcomes: after.outcomes.map((row) => row.id) }, 'ack')
+    expect((await f.store.load()).commitOnce).toEqual(before.commitOnce)
   },
 )

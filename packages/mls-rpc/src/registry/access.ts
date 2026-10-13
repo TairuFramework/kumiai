@@ -310,6 +310,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     if (prepare !== undefined && !(await prepare())) throw moved()
     assertSafety()
     if (
+      controlSafetyHeld(control) !== null ||
       control.strand !== null ||
       control.cursor?.stranded === true ||
       (control.controlHold !== null && control.controlHold.reason !== 'acceptance-unknown') ||

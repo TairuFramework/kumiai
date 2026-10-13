@@ -1,4 +1,4 @@
-import { controlAdoptionAllowed } from '@kumiai/rpc'
+import { controlAdoptionAllowed, controlSafetyHeld } from '@kumiai/rpc'
 
 import {
   type AccountedGroupObservation,
@@ -721,6 +721,17 @@ export function createMemoryGroupCoordinator(params: {
                               },
                       }
                       if (
+                        (controlSafetyHeld(snapshot) !== null &&
+                          !(
+                            expected === undefined &&
+                            owned.terminal &&
+                            prior !== null &&
+                            !prior.deleted &&
+                            sameStoredValue(
+                              { ...prior, version: owned.version, terminal: true },
+                              owned,
+                            )
+                          )) ||
                         (expected !== undefined &&
                           !controlAdoptionAllowed(snapshot, source, expected)) ||
                         (prior !== null &&

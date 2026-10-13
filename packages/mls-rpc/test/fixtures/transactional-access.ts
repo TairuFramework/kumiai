@@ -15,6 +15,7 @@ import {
   type ControlStore,
   controlAdoptionAllowed,
   controlBuildRef,
+  controlSafetyHeld,
   type PendingAppFrame,
 } from '@kumiai/rpc'
 
@@ -173,6 +174,8 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
         const journal = decodeControlJournal(owned.built.journal)
         const identity = identityOf(row.state)
         if (
+          controlSafetyHeld(row.control) !== null ||
+          row.control.controlHold !== null ||
           !sameStoredValue(owned.expected.key, key) ||
           !sameStoredValue(owned.expected.identity, identity) ||
           row.revision !== owned.expected.stateVersion ||
@@ -231,9 +234,10 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
         // One transaction: the state row and the pending row together. A duplicate frame ID keeps
         // its first record; the key is still consumed once, by this state.
         if (
-          write !== undefined &&
-          row.control.controlHold !== null &&
-          row.control.controlHold.reason !== 'acceptance-unknown'
+          controlSafetyHeld(row.control) !== null ||
+          (write !== undefined &&
+            row.control.controlHold !== null &&
+            row.control.controlHold.reason !== 'acceptance-unknown')
         )
           throw new RevisionConflictError(expected, row.revision)
         if (

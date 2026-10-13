@@ -54,7 +54,7 @@ describe('control safety fields', () => {
     expect(
       held({
         ...snapshot,
-        controlHold: { reason: 'fork-evidence', position: null },
+        controlHold: { reason: 'unsupported-version', position: null },
       }),
     ).toBeNull()
     const recovery = Rpc.applyChanges(snapshot, { recoveryUnavailable: unavailable() }, null, key)

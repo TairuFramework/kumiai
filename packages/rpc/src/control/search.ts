@@ -7,7 +7,7 @@ import { decodeCommitFrame, isUnsupportedCommitFrameVersion } from '../commit-fr
 import type { CommitHeader } from '../crypto.js'
 import { asLogPosition, type LogPosition } from '../cursor.js'
 import { decodeHandshakeFrame, HANDSHAKE_KIND, HANDSHAKE_VERSION } from '../handshake.js'
-import type { GroupForkEvidence } from './safety.js'
+import type { GroupForkEvidence, SafetyHold } from './safety.js'
 import type {
   AdoptionExpected,
   AppliedCommit,
@@ -64,9 +64,8 @@ export type FollowWinnerResult =
   | { kind: 'applied'; position: LogPosition }
   | { kind: 'unavailable' | 'refused' | 'moved' }
 export type ControlHold = {
-  reason: 'acceptance-unknown' | 'unsupported-version' | 'fork-evidence'
+  reason: 'acceptance-unknown' | 'unsupported-version'
   position: LogPosition | null
-  evidence?: GroupForkEvidence
 }
 export type ControlSearchBudget = { maxPasses: number; maxFetches: number; maxFrames: number }
 export type ControlSearchWork = { takeFetch(): boolean; takeFrame(): boolean }
@@ -86,6 +85,8 @@ export type ControlSearchDeps = {
     work: ControlSearchWork,
   ): Promise<boolean>
   hold(value: ControlHold): Promise<void>
+  haltFork(evidence: GroupForkEvidence): Promise<void>
+  safetyHold(): SafetyHold
 }
 
 export const CONTROL_SEARCH_BUDGET: ControlSearchBudget = {
@@ -184,10 +185,13 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
     async searchLog(built) {
       let fetches = 0
       let frames = 0
-      let forkHeld = false
-      const holdFork = async (value: ControlHold) => {
-        forkHeld = true
-        await deps.hold(value)
+      const held = () => deps.safetyHold() !== null
+      const stopped = () => {
+        continuation = null
+        return { kind: 'unknown' as const }
+      }
+      const holdFork = async (value: GroupForkEvidence) => {
+        await deps.haltFork(value)
       }
       const work: ControlSearchWork = {
         takeFetch: () => fetches < deps.budget.maxFetches && ++fetches > 0,
@@ -196,13 +200,17 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
       const unknown = async (
         position: LogPosition | null = null,
         reason: ControlHold['reason'] = 'acceptance-unknown',
-        evidence?: GroupForkEvidence,
       ) => {
-        if (!forkHeld)
-          await deps.hold({ reason, position, ...(evidence === undefined ? {} : { evidence }) })
+        if (!held()) await deps.hold({ reason, position })
         return { kind: 'unknown' as const }
       }
+      if (held()) return stopped()
+      const forkUnknown = async (value: GroupForkEvidence) => {
+        await holdFork(value)
+        return stopped()
+      }
       const validation = await deps.validation.restoreValidation(built)
+      if (held()) return stopped()
       const retained = validation?.source.identity
       if (
         validation === null ||
@@ -217,6 +225,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
         return unknown()
       }
       let evidence = await deps.readEvidence()
+      if (held()) return stopped()
       if (evidence.cursor?.stranded === true) {
         continuation = null
         return unknown(evidence.cursor.position)
@@ -235,14 +244,10 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
           !sameBytes(current.authenticator, retained.authenticator)
         ) {
           await holdFork({
-            reason: 'fork-evidence',
-            position: evidence.cursor?.position ?? null,
-            evidence: {
-              kind: 'epoch-authenticator',
-              epoch: retained.epoch,
-              local: retained.authenticator.slice(),
-              remote: current.authenticator.slice(),
-            },
+            kind: 'epoch-authenticator',
+            epoch: retained.epoch,
+            local: retained.authenticator.slice(),
+            remote: current.authenticator.slice(),
           })
           return false
         }
@@ -301,7 +306,9 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
               losers: discovery.losers.map((row) => ({ ...row })),
             }
       const committedWinner = async (): Promise<boolean> => {
+        if (held()) return false
         evidence = await deps.readEvidence()
+        if (held()) return false
         if (!(await coherent())) {
           continuation = null
           return false
@@ -325,35 +332,34 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
         ) {
           continuation = null
           await holdFork({
-            reason: 'fork-evidence',
+            kind: 'digest-divergence',
+            epoch: retained.epoch,
             position: winner.position,
-            evidence: {
-              kind: 'digest-divergence',
-              epoch: retained.epoch,
-              position: winner.position,
-              localDigest:
-                row.payloadDigest === winnerPayloadDigest ? row.digest : row.payloadDigest,
-              remoteDigest:
-                row.payloadDigest === winnerPayloadDigest ? winnerDigest : winnerPayloadDigest,
-            },
+            localDigest: row.payloadDigest === winnerPayloadDigest ? row.digest : row.payloadDigest,
+            remoteDigest:
+              row.payloadDigest === winnerPayloadDigest ? winnerDigest : winnerPayloadDigest,
           })
           return false
         }
         return true
       }
       const follow = async (): Promise<boolean> => {
+        if (held()) return false
         const certificate = range()
         if (certificate === null || discovery.winner === null) return true
-        if (!(await committedWinner())) return false
+        if (!(await committedWinner()) || held()) return false
         const followed = await deps.followWinner(discovery.winner, certificate, work)
+        if (held()) return false
         return followed.kind === 'applied' && followed.position === discovery.winner.position
       }
       const settleOccurrence = async () => {
+        if (held()) return stopped()
         if (discovery.winner === null || discovery.occurrence === null)
           return unknown(discovery.through)
         if (toB64U(sha256(discovery.winner.payload)) === built.payloadDigest) {
           if (!(await validation.verifyOwn(built)) || !(await committedWinner()))
             return unknown(discovery.winner.position)
+          if (held()) return stopped()
           continuation = null
           const proofSource = sameIdentity(evidence.source.identity, retained)
             ? evidence.source
@@ -369,6 +375,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
           }
         }
         if (!(await follow())) return unknown(discovery.winner.position)
+        if (held()) return stopped()
         continuation = null
         return { kind: 'superseded' as const, winner: discovery.winner.position }
       }
@@ -377,8 +384,10 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
       if (discovery.occurrence !== null) return settleOccurrence()
       for (let pass = 0; pass < deps.budget.maxPasses; pass++) {
         while (!discovery.complete) {
+          if (held()) return stopped()
           if (!work.takeFetch()) return unknown(discovery.through)
           const page = await deps.fetch(discovery.through)
+          if (held()) return stopped()
           if (!checkedPage(page, discovery.through, discovery.latestHead)) {
             continuation = null
             return unknown(discovery.through)
@@ -389,6 +398,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
             discovery.captured = true
           }
           for (const row of page.messages) {
+            if (held()) return stopped()
             const position = asLogPosition(row.sequenceID)
             if (discovery.head !== null && position > discovery.head) break
             if (!work.takeFrame()) return unknown(discovery.through)
@@ -420,6 +430,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
             let header: CommitHeader | null
             try {
               header = await validation.readCommitHeader(commit)
+              if (held()) return stopped()
             } catch {
               continuation = null
               return unknown(position)
@@ -446,11 +457,13 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
               discovery.through = position
               continue
             }
+            if (held()) return stopped()
             const result = await validation.validateFrame(frame, built, header)
+            if (held()) return stopped()
             if (result.kind === 'unavailable') {
               continuation = null
               if (result.reason === 'unexplained-own')
-                return unknown(position, 'fork-evidence', {
+                return await forkUnknown({
                   kind: 'unexplained-own-commit',
                   epoch: retained.epoch,
                   position,
@@ -470,7 +483,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
             else discovery.losers.push({ position, payloadDigest: fullDigest })
             if (result.own && fullDigest !== built.payloadDigest) {
               continuation = null
-              return unknown(position, 'fork-evidence', {
+              return await forkUnknown({
                 kind: 'unexplained-own-commit',
                 epoch: retained.epoch,
                 position,
@@ -488,8 +501,10 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
           return unknown(discovery.winner.position)
         if (!(await deps.reconcileAbsent(discovery.head, range(), work)))
           return unknown(discovery.through)
+        if (held()) return stopped()
         if (!work.takeFetch()) return unknown(discovery.through)
         const probe = await deps.fetch(discovery.through)
+        if (held()) return stopped()
         if (!checkedPage(probe, discovery.through, discovery.latestHead)) {
           continuation = null
           return unknown(discovery.through)
@@ -498,6 +513,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
         if (nextHead === discovery.head) {
           if (!(await committedWinner())) return unknown(discovery.through)
           continuation = null
+          if (held()) return stopped()
           return { kind: 'absent' }
         }
         discovery.head = nextHead

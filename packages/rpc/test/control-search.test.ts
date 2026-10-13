@@ -79,6 +79,10 @@ function fixture(
     }),
   )
   const reconcileAbsent = vi.fn(async () => true)
+  let safety = false
+  const haltFork = vi.fn(async () => {
+    safety = true
+  })
   const hold = vi.fn(async () => {})
   const deps: ControlSearchDeps = {
     budget: { maxPasses: 2, maxFetches: 16, maxFrames: 256 },
@@ -100,6 +104,8 @@ function fixture(
     followWinner,
     reconcileAbsent,
     hold,
+    haltFork,
+    safetyHold: () => (safety ? 'fork-halted' : null),
     ...overrides,
   }
   return {
@@ -110,6 +116,7 @@ function fixture(
     followWinner,
     reconcileAbsent,
     hold,
+    haltFork,
   }
 }
 
@@ -247,7 +254,7 @@ test('committed own evidence must also match the commit digest', async () => {
     }),
   })
   expect(await f.search.searchLog(built)).toEqual({ kind: 'unknown' })
-  expect(f.hold).toHaveBeenCalledWith(expect.objectContaining({ reason: 'fork-evidence' }))
+  expect(f.haltFork).toHaveBeenCalledWith(expect.objectContaining({ kind: 'digest-divergence' }))
 })
 
 test('conflicting committed evidence discards a budget continuation before resuming', async () => {
@@ -276,7 +283,7 @@ test('conflicting committed evidence discards a budget continuation before resum
   })
   expect(await f.search.searchLog(built)).toEqual({ kind: 'unknown' })
   expect(f.fetch).toHaveBeenCalledTimes(1)
-  expect(f.hold).toHaveBeenCalledWith(expect.objectContaining({ reason: 'fork-evidence' }))
+  expect(f.haltFork).toHaveBeenCalledWith(expect.objectContaining({ kind: 'digest-divergence' }))
 })
 
 test.each(['gap', 'backward head'] as const)(
@@ -574,22 +581,15 @@ test.each(['unsupported-version', 'unexplained-own'] as const)(
       }),
     }
     expect(await f.search.searchLog(built)).toEqual({ kind: 'unknown' })
-    expect(f.hold).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        reason: reason === 'unsupported-version' ? 'unsupported-version' : 'fork-evidence',
+    if (reason === 'unsupported-version')
+      expect(f.hold).toHaveBeenLastCalledWith({ reason, position: position(101) })
+    else
+      expect(f.haltFork).toHaveBeenLastCalledWith({
+        kind: 'unexplained-own-commit',
+        epoch: 65,
         position: position(101),
-        ...(reason === 'unexplained-own'
-          ? {
-              evidence: {
-                kind: 'unexplained-own-commit',
-                epoch: 65,
-                position: position(101),
-                digest: digest(new Uint8Array([1])),
-              },
-            }
-          : {}),
-      }),
-    )
+        digest: digest(new Uint8Array([1])),
+      })
     expect(f.followWinner).not.toHaveBeenCalled()
   },
 )
@@ -604,12 +604,7 @@ test('same-epoch authenticator divergence holds as fork evidence', async () => {
     }),
   })
   expect(await f.search.searchLog(built)).toEqual({ kind: 'unknown' })
-  expect(f.hold).toHaveBeenCalledWith(
-    expect.objectContaining({
-      reason: 'fork-evidence',
-      evidence: expect.objectContaining({ kind: 'epoch-authenticator' }),
-    }),
-  )
+  expect(f.haltFork).toHaveBeenCalledWith(expect.objectContaining({ kind: 'epoch-authenticator' }))
   expect(f.fetch).not.toHaveBeenCalled()
 })
 
@@ -632,11 +627,8 @@ test('a conflicting committed branch holds as evidence', async () => {
     }),
   })
   expect(await f.search.searchLog(built)).toEqual({ kind: 'unknown' })
-  expect(f.hold).toHaveBeenLastCalledWith(
-    expect.objectContaining({
-      reason: 'fork-evidence',
-      evidence: expect.objectContaining({ kind: 'digest-divergence' }),
-    }),
+  expect(f.haltFork).toHaveBeenLastCalledWith(
+    expect.objectContaining({ kind: 'digest-divergence' }),
   )
 })
 
@@ -798,3 +790,90 @@ test('complete absence requires reconciliation and a stable bounded head', async
   f.deps.reconcileAbsent = async () => false
   expect(await f.search.searchLog(built)).toEqual({ kind: 'unknown' })
 })
+
+test.each(['entry', 'restore', 'evidence', 'fetch', 'header', 'validation', 'reconcile'] as const)(
+  'direct search stops at a safety latch during %s',
+  async (at) => {
+    let held = at === 'entry'
+    const f = fixture([{ id: 101, value: 2 }])
+    const restore = f.deps.validation.restoreValidation
+    f.deps.safetyHold = () => (held ? 'fork-halted' : null)
+    f.deps.haltFork = async () => {
+      held = true
+    }
+    f.deps.validation.restoreValidation = vi.fn(async (value) => {
+      const v = await restore(value)
+      if (v === null) throw new Error('missing validation')
+      if (at === 'restore') held = true
+      return {
+        ...v,
+        readCommitHeader: vi.fn(async (bytes) => {
+          if (at === 'header') held = true
+          return v.readCommitHeader(bytes)
+        }),
+        validateFrame: vi.fn(async (...args) => {
+          if (at === 'validation') held = true
+          return v.validateFrame(args[0], args[1], args[2])
+        }),
+      }
+    })
+    const read = f.deps.readEvidence
+    f.deps.readEvidence = vi.fn(async () => {
+      if (at === 'evidence') held = true
+      return read()
+    })
+    f.deps.fetch = async (after) => {
+      if (at === 'fetch') held = true
+      return f.fetch(after)
+    }
+    if (at === 'reconcile') {
+      f.deps.fetch = async () => ({
+        messages: [],
+        head: built.searchFrom,
+        oldest: built.searchFrom,
+        gap: false,
+      })
+      f.deps.reconcileAbsent = async () => {
+        held = true
+        return true
+      }
+    }
+    expect(await f.search.searchLog(built)).toEqual({ kind: 'unknown' })
+    const calls = f.fetch.mock.calls.length
+    await f.search.searchLog(built)
+    expect(f.fetch).toHaveBeenCalledTimes(calls)
+    if (at === 'entry') {
+      expect(f.deps.validation.restoreValidation).not.toHaveBeenCalled()
+      expect(f.deps.readEvidence).not.toHaveBeenCalled()
+    }
+    if (['restore', 'evidence', 'fetch'].includes(at))
+      expect(f.validateFrame).not.toHaveBeenCalled()
+  },
+)
+
+test.each([null, position(100)])(
+  'in-flight absence through %s stays unknown after safety',
+  async (through) => {
+    let held = false
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const read = vi.fn(async () => ({ source, applied: [], cursor: null, terminal: false }))
+    const f = fixture([], {
+      safetyHold: () => (held ? 'fork-halted' : null),
+      readEvidence: read,
+      fetch: async () => ({ messages: [], head: through, oldest: through, gap: false }),
+      reconcileAbsent: async () => {
+        entered.resolve()
+        await release.promise
+        return true
+      },
+    })
+    const searching = f.search.searchLog({ ...built, searchFrom: through })
+    await entered.promise
+    held = true
+    const calls = read.mock.calls.length
+    release.resolve()
+    expect(await searching).toEqual({ kind: 'unknown' })
+    expect(read).toHaveBeenCalledTimes(calls)
+  },
+)

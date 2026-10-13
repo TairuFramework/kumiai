@@ -3,7 +3,7 @@ import { describe, expect, test } from 'vitest'
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
-import { assertDurableControlHold } from './fixtures/control-hold.js'
+import { assertDurableForkHalt } from './fixtures/control-hold.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { encodeMemoryCommit, memoryEntryID } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
@@ -62,9 +62,7 @@ describe('a peer that meets its own un-merged commit', { concurrent: false }, ()
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: fastRecovery })
     await waitFor(() => bob.mls.epoch() === 2, 'Bob applies the orphaned commit')
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery: fastRecovery })
-    await assertDurableControlHold(alice, hub, rs, 'alice', {
-      reason: 'fork-evidence',
-      position: occurrence.sequenceID,
+    await assertDurableForkHalt(alice, hub, rs, 'alice', {
       evidence: { kind: 'unexplained-own-commit', epoch: 1, position: occurrence.sequenceID },
     })
     expect(alice.mls.epoch()).toBe(1)
@@ -90,9 +88,7 @@ describe('a peer that meets its own un-merged commit', { concurrent: false }, ()
     await bob.peer.commit(buildLedgerCommit(bob, [token]))
     expect(bob.mls.epoch()).toBe(3)
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery: fastRecovery })
-    await assertDurableControlHold(alice, hub, rs, 'alice', {
-      reason: 'fork-evidence',
-      position: occurrence.sequenceID,
+    await assertDurableForkHalt(alice, hub, rs, 'alice', {
       evidence: { kind: 'unexplained-own-commit', epoch: 1, position: occurrence.sequenceID },
     })
     expect(alice.mls.epoch()).toBe(1)

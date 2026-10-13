@@ -573,9 +573,7 @@ test('a moved acceptance with rewrapped payload stays accepted and strands the p
     operations: [accepted],
     outcomes: [],
     applied: snapshot.applied,
-    controlHold: {
-      reason: 'fork-evidence',
-      position: row.sequenceID,
+    forkHalt: {
       evidence: {
         kind: 'digest-divergence',
         epoch: 1,
@@ -584,8 +582,8 @@ test('a moved acceptance with rewrapped payload stays accepted and strands the p
         remoteDigest: accepted.built.payloadDigest,
       },
     },
-    strand: { reason: 'lost-state' },
-    cursor: { ...snapshot.cursor, stranded: true },
+    strand: snapshot.strand,
+    cursor: snapshot.cursor,
   })
   await bob.peer.enqueue(buildLedgerCommit(bob, []))
   const held = await bob.control.load()

@@ -10,7 +10,7 @@ import {
 import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
 import { commitTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
-import { assertDurableControlHold } from './fixtures/control-hold.js'
+import { assertDurableControlHold, assertDurableForkHalt } from './fixtures/control-hold.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
@@ -86,9 +86,13 @@ async function runCase(kind: Case, offset: number) {
     repairStarted: recoveries.some((event) => event.phase === 'started'),
     repairFailed: recoveries.some((event) => event.phase === 'failed'),
   }
-  if (held)
+  if (kind === 'own')
+    await assertDurableForkHalt(bob, hub, secret, 'bob', {
+      evidence: { kind: 'unexplained-own-commit', position: sequenceID },
+    })
+  else if (held)
     await assertDurableControlHold(bob, hub, secret, 'bob', {
-      reason: kind === 'own' ? 'fork-evidence' : 'unsupported-version',
+      reason: 'unsupported-version',
       position: sequenceID,
     })
   await bob.peer.dispose()

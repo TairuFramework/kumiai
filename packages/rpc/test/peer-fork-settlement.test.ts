@@ -436,9 +436,7 @@ describe('durable fork evidence', () => {
         ],
         outcomes: [],
         applied: snapshot.applied,
-        controlHold: {
-          reason: 'fork-evidence',
-          position: row.sequenceID,
+        forkHalt: {
           evidence: {
             kind: 'digest-divergence',
             epoch: 1,
@@ -447,11 +445,8 @@ describe('durable fork evidence', () => {
             remoteDigest: accepted.built.payloadDigest,
           },
         },
-        strand: { reason: 'lost-state' },
-        cursor: {
-          ...snapshot.cursor,
-          stranded: true,
-        },
+        strand: snapshot.strand,
+        cursor: snapshot.cursor,
       })
       expect(
         hub.published.filter((message) => message.topicID === commitTopic(secret)),
