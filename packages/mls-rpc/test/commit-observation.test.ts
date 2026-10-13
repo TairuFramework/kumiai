@@ -3,7 +3,9 @@ import { describe, expect, expectTypeOf, test } from 'vitest'
 
 import type { ConformanceAccountedGroupObservation } from '../../rpc-conformance/lib/persistence-fixture.js'
 import type { AccountedGroupObservation } from '../src/entry-capability.js'
+import { physicalRecordKey } from '../src/persistence-codec.js'
 import { createRegistryFixture, registryFixtureObserve } from './fixtures/registry.js'
+import { createStorageFixture } from './fixtures/storage-persistence.js'
 import { nextChange } from './fixtures/storage-seed.js'
 
 expectTypeOf<AccountedGroupObservation>().toExtend<
@@ -15,6 +17,94 @@ expectTypeOf<
 
 for (const mode of ['real-mls', 'double'] as const) {
   describe(`commit observations -- ${mode}`, () => {
+    test.each(['control', 'metadata'] as const)(
+      'unreadable %s does not change commit outcome when observed',
+      async (corrupt) => {
+        const outcomes: Array<unknown> = []
+        for (const observed of [false, true]) {
+          const fixture = await createStorageFixture({ id: 'diagnostic', mode })
+          try {
+            const groups = fixture.ports.device.groups
+            const key = { groupID: 'diagnostic', incarnation: 1 }
+            if (corrupt === 'metadata') {
+              await fixture.mutateMetadata(key, () => ({ ...key, version: -1, deleted: false }))
+            } else {
+              await fixture.mutateStoredRecord(
+                'control',
+                physicalRecordKey({ ...key, namespace: 'control', recordID: 'current' }),
+                (bytes) => {
+                  bytes[bytes.length - 1] = (bytes[bytes.length - 1] ?? 0) ^ 1
+                  return bytes
+                },
+              )
+            }
+            const change = await nextChange(groups, key.groupID, 'diagnostic-transition')
+            const observations: Array<AccountedGroupObservation> = []
+            if (observed) fixture.entry().observe(key.groupID, (value) => observations.push(value))
+            await expect(groups.transition(change, async () => 'committed')).resolves.toBe(
+              'committed',
+            )
+            const lifetime = await groups.load(key.groupID)
+            expect(lifetime).toMatchObject({ revision: 3, mutationID: 'diagnostic-transition' })
+            outcomes.push(lifetime)
+            expect(observations).toHaveLength(observed ? 1 : 0)
+            if (observed) {
+              expect(observations[0]).toMatchObject({
+                mutationID: 'diagnostic-transition',
+                lifetime,
+                lifetimeStatus: 'readable',
+                activeKey: key,
+                stateStatus: 'readable',
+                trustStatus: 'readable',
+                ...(corrupt === 'control'
+                  ? { controlStatus: 'unreadable', control: null, metadataStatus: 'readable' }
+                  : {
+                      metadataStatus: 'unreadable',
+                      activeVersion: null,
+                      controlStatus: 'readable',
+                    }),
+              })
+            }
+          } finally {
+            await fixture.close()
+          }
+        }
+        expect(outcomes[1]).toEqual(outcomes[0])
+      },
+    )
+
+    test('unreadable lifetime during observation does not poison the commit', async () => {
+      const fixture = await createStorageFixture({ id: 'diagnostic-lifetime', mode })
+      try {
+        const groups = fixture.ports.device.groups
+        const change = await nextChange(groups, 'diagnostic-lifetime', 'diagnostic-transition')
+        const observations: Array<AccountedGroupObservation> = []
+        fixture.entry().observe(change.groupID, (value) => observations.push(value))
+        fixture.onPhase('account', () => {
+          // Accounting opens lifetime first. Only the subsequent diagnostic open fails.
+          fixture.probeCodec(async () => {
+            fixture.failNextOpen(new Error('Unreadable observation lifetime'))
+          })
+        })
+        await expect(groups.transition(change, async () => 'committed')).resolves.toBe('committed')
+        expect(observations).toHaveLength(1)
+        expect(observations[0]).toMatchObject({
+          lifetime: null,
+          lifetimeStatus: 'unreadable',
+          activeKey: null,
+          activeVersion: null,
+          control: null,
+          terminal: null,
+        })
+        expect(await groups.load(change.groupID)).toMatchObject({
+          revision: 3,
+          mutationID: change.mutationID,
+        })
+      } finally {
+        await fixture.close()
+      }
+    })
+
     test('observations are detached from rows and another observer', async () => {
       const fixture = await createRegistryFixture({ mode, setup: 'seeded', groupID: 'observed' })
       try {

@@ -236,12 +236,15 @@ export type ConformanceStateMetadata = ConformanceGroupKey & {
 export type ConformanceAccountedGroupObservation<Position extends string = string> = {
   mutationID: string
   lifetime: ConformanceGroupLifetime | null
+  lifetimeStatus: 'missing' | 'readable' | 'unreadable'
   metadata: Array<ConformanceStateMetadata>
+  metadataStatus: 'missing' | 'readable' | 'unreadable'
   trust: ConformanceGroupRecoveryTrust | null
   trustStatus: 'missing' | 'readable' | 'unreadable'
   activeKey: ConformanceGroupKey | null
   activeVersion: number | null
   control: ConformanceControlSnapshot<Position> | null
+  controlStatus: 'missing' | 'readable' | 'unreadable'
   stateStatus: 'missing' | 'null' | 'deleted' | 'readable' | 'unreadable'
   terminal: boolean | null
 }

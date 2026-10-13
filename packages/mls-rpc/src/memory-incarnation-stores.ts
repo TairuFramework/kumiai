@@ -67,6 +67,7 @@ export function memoryRecordTable<TValue>(params: {
   key: { groupID: string; incarnation: number | null }
   namespace: string
   atRest: AtRestCodec
+  requiredOpen?: boolean
 }) {
   const { tx, key, namespace, atRest } = params
   if (tx.groupID !== key.groupID) throw new GroupStateConflictError('Transaction group mismatch')
@@ -80,15 +81,19 @@ export function memoryRecordTable<TValue>(params: {
     async load(recordID: string): Promise<TValue | null> {
       const location = address(recordID)
       const id = physicalRecordKey(location)
-      const value = await memoryRequired(tx, async () => {
-        const rows = map()
-        memoryReadAdmitted(tx)
-        const bytes = rows.get(id)
-        if (bytes === undefined) return null
-        if (!(bytes instanceof Uint8Array))
-          throw new GroupStateConflictError('Unreadable sealed row')
-        return (await memoryOpen(tx, atRest, location, bytes)) as TValue
-      })
+      const value = await memoryRequired(
+        tx,
+        async () => {
+          const rows = map()
+          memoryReadAdmitted(tx, params.requiredOpen)
+          const bytes = rows.get(id)
+          if (bytes === undefined) return null
+          if (!(bytes instanceof Uint8Array))
+            throw new GroupStateConflictError('Unreadable sealed row')
+          return (await memoryOpen(tx, atRest, location, bytes)) as TValue
+        },
+        params.requiredOpen,
+      )
       map().has(id)
       return value
     },
@@ -192,12 +197,18 @@ export function createUnlockedIncarnationStores(params: {
   key: GroupKey
   atRest: AtRestCodec
   adoptionContext?: () => Promise<CommitOnceWriteContext | null>
+  requiredOpen?: boolean
 }): IncarnationStores {
   const { tx, atRest } = params
   const key = { ...params.key }
-  const stateStores = createUnlockedGroupStateStores({ tx, groupID: key.groupID, atRest })
+  const stateStores = createUnlockedGroupStateStores({
+    tx,
+    groupID: key.groupID,
+    atRest,
+    requiredOpen: params.requiredOpen,
+  })
   const table = <TValue>(namespace: string) =>
-    memoryRecordTable<TValue>({ tx, key, namespace, atRest })
+    memoryRecordTable<TValue>({ tx, key, namespace, atRest, requiredOpen: params.requiredOpen })
   const control = table<ControlRecord>('control')
   const anchor = table<Awaited<ReturnType<IncarnationStores['anchor']['load']>>>('anchor')
   const pending = table<PendingAppFrame>('pending')

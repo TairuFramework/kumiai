@@ -389,61 +389,75 @@ export function createMemoryGroupCoordinator(params: {
     if (listeners.length === 0) return
     const observation = await coordinateMemoryTransaction(tx, async (tx) => {
       const raw = createUnlockedGroupStateStores({ tx, groupID, atRest, requiredOpen: false })
-      const lifetime = await raw.lifetime.load()
+      async function diagnose<TValue>(load: () => Promise<TValue | null>): Promise<{
+        value: TValue | null
+        status: 'missing' | 'readable' | 'unreadable'
+      }> {
+        try {
+          const value = await load()
+          return { value, status: value === null ? 'missing' : 'readable' }
+        } catch {
+          // Diagnostic failures cannot change settlement. Revocation still aborts capture.
+          assertMemoryAccess(tx.rows)
+          return { value: null, status: 'unreadable' }
+        }
+      }
+      const { value: lifetime, status: lifetimeStatus } = await diagnose(raw.lifetime.load)
       const metadata: Array<StateMetadata> = []
+      let metadataStatus: AccountedGroupObservation['metadataStatus'] = 'missing'
+      async function loadMetadata(incarnation: number): Promise<StateMetadata | null> {
+        const { value, status } = await diagnose(raw.stateMetadata(incarnation).load)
+        if (status === 'unreadable' || metadataStatus === 'missing') metadataStatus = status
+        return value
+      }
       for (const incarnation of changedIncarnations(before, snapshot(tx), groupID).keys()) {
-        const value = await raw.stateMetadata(incarnation).load()
+        const value = await loadMetadata(incarnation)
         if (value !== null) metadata.push(value)
       }
-      let trust: GroupRecoveryTrust | null = null
-      let trustStatus: AccountedGroupObservation['trustStatus'] = 'missing'
-      try {
-        trust = await raw.trust.load()
-        trustStatus = trust === null ? 'missing' : 'readable'
-      } catch {
-        assertMemoryAccess(tx.rows)
-        trustStatus = 'unreadable'
-      }
+      const { value: trust, status: trustStatus } = await diagnose(raw.trust.load)
       const activeKey =
         lifetime?.activeIncarnation == null
           ? null
           : { groupID, incarnation: lifetime.activeIncarnation }
       let activeVersion: number | null = null
       let control: AccountedGroupObservation['control'] = null
+      let controlStatus: AccountedGroupObservation['controlStatus'] = 'missing'
       let stateStatus: AccountedGroupObservation['stateStatus'] = 'missing'
       let terminal: boolean | null = null
       if (activeKey !== null) {
-        activeVersion = (await raw.stateMetadata(activeKey.incarnation).load())?.version ?? null
-        control = await createUnlockedIncarnationStores({
+        activeVersion = (await loadMetadata(activeKey.incarnation))?.version ?? null
+        const activeStores = createUnlockedIncarnationStores({
           tx,
           key: activeKey,
           atRest,
-        }).control.load()
-        try {
-          const state = await raw.state(activeKey.incarnation).load()
-          stateStatus =
-            state === null
-              ? 'missing'
-              : state.deleted
-                ? 'deleted'
-                : state.state === null
-                  ? 'null'
-                  : 'readable'
-          terminal = state === null || state.deleted ? null : state.terminal
-        } catch {
-          assertMemoryAccess(tx.rows)
-          stateStatus = 'unreadable'
-        }
+          requiredOpen: false,
+        })
+        const diagnosticControl = await diagnose(activeStores.control.load)
+        control = diagnosticControl.value
+        controlStatus = diagnosticControl.status
+        const { value: state, status } = await diagnose(raw.state(activeKey.incarnation).load)
+        stateStatus =
+          state === null
+            ? status
+            : state.deleted
+              ? 'deleted'
+              : state.state === null
+                ? 'null'
+                : 'readable'
+        terminal = state === null || state.deleted ? null : state.terminal
       }
       return {
         mutationID,
         lifetime,
+        lifetimeStatus,
         metadata,
+        metadataStatus,
         trust,
         trustStatus,
         activeKey,
         activeVersion,
         control,
+        controlStatus,
         stateStatus,
         terminal,
       }
