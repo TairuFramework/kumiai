@@ -10,6 +10,7 @@ import {
 } from '@kumiai/mls'
 import type { AnchorSlot, ControlChanges, RejoinRecord } from '@kumiai/rpc'
 
+import { controlBuildContexts } from '../../src/control-write-context.js'
 import { type EntryCapability, entryCapability } from '../../src/entry-capability.js'
 import { physicalRecordKey } from '../../src/persistence-codec.js'
 import type {
@@ -259,7 +260,32 @@ async function assemble(
         const target = stores.incarnation(setup.key.incarnation)
         if (setup.state !== undefined) await target.state.save(setup.state)
         if (setup.trust !== undefined) await stores.trust.save(setup.trust)
-        if (setup.control !== undefined) await target.control.apply(setup.control, mutationID)
+        if (setup.control !== undefined) {
+          const slot = setup.control.commitOnce
+          if (slot != null) {
+            const state = await target.state.load()
+            if (state === null || state.deleted) throw new Error('Missing slot source')
+            controlBuildContexts.set(stores.tx, {
+              kind: 'build',
+              source: {
+                key: setup.key,
+                stateVersion: state.version,
+                identity: {
+                  ...setup.key,
+                  epoch: state.epoch,
+                  authenticator: state.epochAuthenticator,
+                },
+              },
+              queueHeadID: slot.opID,
+              checkpoint: slot.searchFrom,
+            })
+          }
+          try {
+            await target.control.apply(setup.control, mutationID)
+          } finally {
+            controlBuildContexts.delete(stores.tx)
+          }
+        }
         if (setup.anchor !== undefined) await target.anchor.save(setup.anchor)
         if (setup.outbox !== undefined) await target.outbox.put(setup.outbox)
         if (setup.events !== undefined) await target.meta.putEvents(setup.events)

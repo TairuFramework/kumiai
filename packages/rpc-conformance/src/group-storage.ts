@@ -256,6 +256,60 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
   params: StorageConformanceParams<TTx>,
 ): void {
   describe(`Group storage conformance -- ${params.label}`, () => {
+    test('removing an abandoned entry retains its matching stable failure event', async () => {
+      const fixture = await params.createFixture(groupID)
+      try {
+        const groups = fixture.ports.device.groups
+        const initialEntries = await groups.ports(key).outbox.list()
+        const initialEvents = await groups.ports(key).outbox.events()
+        const entry = {
+          seq: 31,
+          protocol: 'chat',
+          prc: 'posted',
+          data: utf8('retained-abandoned-data'),
+          lastAttempt: {
+            incarnation: 1,
+            epoch: 3,
+            floor: null,
+            attempts: 1,
+            publishID: 'abandoned-publish',
+            segment: 3,
+            topicID,
+          },
+          status: 'failed' as const,
+        }
+        const event = {
+          ...key,
+          id: JSON.stringify(['incarnation-abandoned', groupID, 1, 31]),
+          kind: 'failed' as const,
+          reason: 'incarnation-abandoned' as const,
+          nextIncarnation: 2,
+          entry,
+        }
+        await groups.transition(
+          await storageChange(groups, groupID, 'fail-abandoned'),
+          async (stores) => {
+            const source = stores.incarnation(1)
+            await source.outbox.put([entry])
+            await source.meta.putEvents([event])
+          },
+        )
+        await groups.transition(
+          await storageChange(groups, groupID, 'remove-abandoned'),
+          async (stores) => stores.incarnation(1).outbox.remove([31]),
+        )
+        expect(await groups.ports(key).outbox.list()).toEqual(initialEntries)
+        expect(await groups.ports(key).outbox.events()).toEqual([...initialEvents, event])
+        const reopened = await fixture.reopen()
+        expect(await reopened.device.groups.ports(key).outbox.events()).toEqual([
+          ...initialEvents,
+          event,
+        ])
+      } finally {
+        await fixture.close()
+      }
+    })
+
     test('evidence reads bind committed state version, cursor and applied rows to one fixed key', async () => {
       const fixture = await params.createFixture(groupID)
       try {

@@ -268,9 +268,10 @@ export function createUnlockedIncarnationStores(params: {
     } else {
       const existing = (await events()).some(
         (event) =>
-          (event.kind === 'published' || event.kind === 'failed') &&
-          event.entry.seq === seq &&
-          event.id.startsWith(`[${JSON.stringify(groupMutationID(tx, key.groupID))},`),
+          (event.kind === 'failed' && sameStoredValue(event.entry, entry)) ||
+          ((event.kind === 'published' || event.kind === 'failed') &&
+            event.entry.seq === seq &&
+            event.id.startsWith(`[${JSON.stringify(groupMutationID(tx, key.groupID))},`)),
       )
       if (!existing)
         await putEvent({
@@ -455,6 +456,8 @@ export function createUnlockedIncarnationStores(params: {
             strand: previous.snapshot.strand,
             outcomes: previous.snapshot.outcomes,
             welcomes: previous.snapshot.welcomes,
+            // Adopted recovery remains owed until explicit continuation settlement.
+            rejoin: previous.snapshot.rejoin?.stage === 'adopted' ? previous.snapshot.rejoin : null,
             cursor:
               previous.snapshot.controlHold !== null
                 ? previous.snapshot.cursor
