@@ -102,15 +102,20 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
             observation,
             groupID,
             ownerDID: environment.ownerDID,
-            previous: previous?.value.trust ?? null,
+            previous: previous?.acceptedTrust ?? null,
           })
           if (previous === null) return
-          if (projected === null || projected.snapshot.incarnation !== previous.key.incarnation) {
+          if (
+            projected === null ||
+            observation.trust === null ||
+            projected.snapshot.incarnation !== previous.key.incarnation
+          ) {
             observedSlot.owner = null
             const dispatch = previous.runtime.install(null)
             if (dispatch !== undefined) notifications.set(observation, dispatch)
             return
           }
+          previous.acceptedTrust = observation.trust
           previous.snapshot = projected.snapshot
           previous.admission = projected.admission
           const dispatch = previous.runtime.install(projected.snapshot)
@@ -175,6 +180,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       const owner: RegistryOwner = {
         key: { ...value.key },
         value,
+        acceptedTrust: value.trust,
         cacheValid: true,
         snapshot: value.snapshot,
         admission: admissionFor(value, control),
@@ -206,6 +212,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       slot.owner = owner
     } else {
       slot.owner.value = value
+      slot.owner.acceptedTrust = value.trust
       slot.owner.cacheValid = true
       slot.owner.snapshot = value.snapshot
       slot.owner.admission = admissionFor(value, control)
@@ -215,6 +222,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   const registry: GroupHandleRegistry = {
     start,
     recoverySource(groupID) {
+      groupSlot(groupID)
       return capability.read(groupID, (reads) => readRecoverySource(reads, groupID))
     },
     async access(groupID) {

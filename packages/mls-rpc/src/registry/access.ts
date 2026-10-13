@@ -4,7 +4,7 @@ import type { SendAdmission } from '@kumiai/rpc'
 import type { ControlRead, ControlReadScope } from '../access.js'
 import type { EntryCapability, EntryReads } from '../entry-capability.js'
 import { DisplacedGroupHandleError, GroupUnavailableError } from '../persistence-errors.js'
-import type { GroupKey, GroupTransaction } from '../persistence-types.js'
+import type { GroupKey, GroupRecoveryTrust, GroupTransaction } from '../persistence-types.js'
 import { type ColdEnvironment, restoreValidated, type ValidatedGroupState } from './cold.js'
 import type { createRegistryRuntime } from './runtime.js'
 import type { GroupRuntimeSnapshot, RegistryHandleAccess } from './types.js'
@@ -12,6 +12,7 @@ import type { GroupRuntimeSnapshot, RegistryHandleAccess } from './types.js'
 export type RegistryOwner = {
   key: GroupKey
   value: ValidatedGroupState
+  acceptedTrust: GroupRecoveryTrust
   cacheValid: boolean
   snapshot: GroupRuntimeSnapshot
   admission: SendAdmission

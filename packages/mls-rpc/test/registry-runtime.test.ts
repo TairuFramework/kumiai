@@ -190,11 +190,12 @@ for (const mode of ['real-mls', 'double'] as const) {
         access.runtime.onEpochChanged(() => {
           calls++
         })
+        const atProof: Array<{ stateVersion: number | undefined; calls: number }> = []
         registryFixtureObserve(fixture, groupID, () => {
-          expect(access.runtime.snapshot()?.stateVersion).toBe(2)
-          expect(calls).toBe(0)
+          atProof.push({ stateVersion: access.runtime.snapshot()?.stateVersion, calls })
         })
         await fixture.device.groups.ports(key).cursor.save('proof', '1')
+        expect(atProof).toEqual([{ stateVersion: 2, calls: 0 }])
         expect(calls).toBe(1)
       } finally {
         await fixture.close()
@@ -292,6 +293,63 @@ for (const mode of ['real-mls', 'double'] as const) {
         ;(snapshot.members as Set<string>).clear()
         expect(access.runtime.snapshot()?.members).toEqual(new Set([fixture.identity.id]))
         expect(access.epoch()).toBe(1)
+      } finally {
+        await fixture.close()
+      }
+    })
+
+    test('successive commits retain the last accepted spent trust baseline', async () => {
+      const fixture = await create()
+      try {
+        const capability = entryCapability(fixture.device.groups)
+        const binding = coordinatorBinding(fixture.device.groups)
+        if (capability === null || binding === null) throw new Error('Missing capability')
+        let proofs = 0
+        let firstAuthenticator: Uint8Array | undefined
+        let removed = false
+        bindEntryCapability({
+          persistence: fixture.device.groups,
+          coordinatorBinding: binding,
+          capability: {
+            ...capability,
+            observe(groupID, onProof, afterRelease) {
+              return capability.observe(
+                groupID,
+                (value) => {
+                  proofs++
+                  if (proofs === 1)
+                    firstAuthenticator = value.trust?.installed.authenticator.slice()
+                  if (proofs === 2 && value.trust !== null && firstAuthenticator !== undefined) {
+                    const spent = value.trust.spentEpochAuthenticators
+                    value.trust.spentEpochAuthenticators = spent.filter(
+                      (bytes) =>
+                        bytes.length !== firstAuthenticator?.length ||
+                        bytes.some((byte, index) => byte !== firstAuthenticator?.[index]),
+                    )
+                    removed = value.trust.spentEpochAuthenticators.length === spent.length - 1
+                  }
+                  onProof(value)
+                },
+                afterRelease,
+              )
+            },
+          },
+        })
+        const access = await registry(fixture).access(groupID)
+        const values: Array<number | null> = []
+        access.runtime.onEpochChanged((value) => {
+          values.push(value?.stateVersion ?? null)
+        })
+        await installNext(fixture, key)
+        expect(access.runtime.snapshot()).toMatchObject({ stateVersion: 2, epoch: 1 })
+        const restored = fixture.restoreCount(groupID)
+        await installNext(fixture, key)
+        expect(proofs).toBe(2)
+        expect(removed).toBe(true)
+        expect(fixture.restoreCount(groupID)).toBe(restored + 1)
+        expect(access.runtime.snapshot()).toBeNull()
+        expect(values).toEqual([2, null])
+        expect((await fixture.device.groups.loadTrust(groupID))?.installed.epoch).toBe(2)
       } finally {
         await fixture.close()
       }
@@ -399,6 +457,51 @@ for (const mode of ['real-mls', 'double'] as const) {
         await fixture.close()
       }
     })
+
+    test.each(['empty', 'seeded'] as const)(
+      'first recovery source call subscribes before entry for %s groups',
+      async (setup) => {
+        const fixture = await createRegistryFixture({ mode, groupID, setup })
+        try {
+          const capability = entryCapability(fixture.device.groups)
+          const binding = coordinatorBinding(fixture.device.groups)
+          if (capability === null || binding === null) throw new Error('Missing capability')
+          const order: Array<string> = []
+          bindEntryCapability({
+            persistence: fixture.device.groups,
+            coordinatorBinding: binding,
+            capability: {
+              ...capability,
+              observe(...args) {
+                order.push('subscribe')
+                return capability.observe(...args)
+              },
+              read(groupID, fn) {
+                order.push('entry')
+                return capability.read(groupID, fn)
+              },
+            },
+          })
+          const owner = registry(fixture)
+          async function readSource() {
+            if (setup === 'empty') {
+              await expect(owner.recoverySource(groupID)).rejects.toMatchObject({
+                reason: 'absent',
+              })
+            } else {
+              expect((await owner.recoverySource(groupID)).key).toEqual(key)
+            }
+          }
+          await readSource()
+          expect(order).toEqual(['subscribe', 'entry'])
+          await readSource()
+          expect(order).toEqual(['subscribe', 'entry', 'entry'])
+          expect(fixture.restoreCount(groupID)).toBe(0)
+        } finally {
+          await fixture.close()
+        }
+      },
+    )
 
     test('initially absent groups subscribe before the first cold call', async () => {
       const fixture = await createRegistryFixture({ mode, groupID, setup: 'empty' })
