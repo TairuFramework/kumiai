@@ -662,7 +662,10 @@ export function createGroupPeerWithControlWalk<
   } = epochRuntime
   const rebuildEpoch = async (): Promise<void> => {
     if (safetyHold() !== null) return
-    await rebuildEpochRuntime()
+    await rebuildEpochRuntime(() => {
+      const reason = safetyHold()
+      if (reason !== null) throw new GroupSafetyHeldError(reason)
+    })
     epochNeedsBuild = anchorPending != null
   }
 
@@ -738,15 +741,16 @@ export function createGroupPeerWithControlWalk<
               const reason = safetyHold()
               if (reason !== null) throw new SendNotAdmissibleError(reason)
               const at = anchor
-              const frame = await sealForSegment(entry.protocol, entry.data, 'log').catch(
-                (error: unknown) => {
-                  if (error instanceof GroupSafetyHeldError) {
-                    latchSafetyHold(error.reason)
-                    throw new SendNotAdmissibleError(error.reason)
-                  }
-                  throw error
-                },
-              )
+              const frame = await sealForSegment(entry.protocol, entry.data, 'log', () => {
+                const reason = safetyHold()
+                if (reason !== null) throw new SendNotAdmissibleError(reason)
+              }).catch((error: unknown) => {
+                if (error instanceof GroupSafetyHeldError) {
+                  latchSafetyHold(error.reason)
+                  throw new SendNotAdmissibleError(error.reason)
+                }
+                throw error
+              })
               const currentReason = safetyHold()
               if (currentReason !== null) throw new SendNotAdmissibleError(currentReason)
               const epoch = crypto.frameEpoch(frame.payload)

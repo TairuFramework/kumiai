@@ -94,7 +94,9 @@ export type AppLaneParams = {
   onAppDeliveryResumed?: ((event: AppDeliveryResumed) => void) | undefined
   /** Start workers after the caller's serialization boundary; direct lanes start immediately. */
   scheduleDelivery?: ((start: () => void) => void) | undefined
+  /** Current safety hold. Defaults to null. */
   safetyHold?: () => SafetyHold
+  /** Latch a held refusal. Defaults to a no-op. */
   onSafetyHeld?: (reason: NonNullable<SafetyHold>) => void
   /**
    * The live anchor, read rather than held: it moves under the peer, and the topic every buffer

@@ -72,8 +72,8 @@ export type EpochRuntimeParams<Protocols extends Record<string, ProtocolDefiniti
 export type EpochRuntime = {
   buildEpoch: () => Promise<void>
   teardownEpoch: () => Promise<void>
-  /** Teardown then build; a teardown failure still builds, then rethrows. */
-  rebuildEpoch: () => Promise<void>
+  /** Teardown then build if admitted; a teardown failure still builds, then rethrows. */
+  rebuildEpoch: (assertAdmissible?: () => void) => Promise<void>
   /** Resolves once no rebuild is in flight; never rejects. */
   epochSettled: () => Promise<void>
   surfaceFor: (name: string) => InternalSurface
@@ -81,6 +81,7 @@ export type EpochRuntime = {
     name: string,
     bytes: Uint8Array,
     intent?: 'ephemeral' | 'log',
+    assertAdmissible?: () => void,
   ) => Promise<SegmentFrame>
   hasInboxLane: () => boolean
   /** Dispose-only: `to()` has no lane left to build a directed client against. */
@@ -333,6 +334,7 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
     name: string,
     bytes: Uint8Array,
     intent: 'ephemeral' | 'log' = 'ephemeral',
+    assertAdmissible: () => void = () => {},
   ): Promise<SegmentFrame> => {
     while (true) {
       const refused = sealError()
@@ -344,6 +346,7 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
       }
       const at = anchor()
       const topicID = protocolTopic(at.secret, at.epoch, name)
+      assertAdmissible()
       const payload = await crypto.wrap(bytes, { aad: encodeAppAAD({ topicID, intent }) })
       const refusedAfter = sealError()
       if (refusedAfter != null) throw refusedAfter
@@ -448,13 +451,13 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
     while (rebuilding.size > 0) await Promise.allSettled(rebuilding)
   }
 
-  const rebuildEpoch = (): Promise<void> => {
-    const run = rebuildOnce().finally(() => rebuilding.delete(run))
+  const rebuildEpoch = (assertAdmissible: () => void = () => {}): Promise<void> => {
+    const run = rebuildOnce(assertAdmissible).finally(() => rebuilding.delete(run))
     rebuilding.add(run)
     return run
   }
 
-  const rebuildOnce = async (): Promise<void> => {
+  const rebuildOnce = async (assertAdmissible: () => void): Promise<void> => {
     if (isDisposed()) return
     // Teardown empties the runtimes before it reports a failed child, and a later walk sees the
     // advance as history. Build anyway, then report the failure.
@@ -465,6 +468,7 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
       failure = { error }
     }
     if (isDisposed()) return
+    assertAdmissible()
     await buildEpoch()
     if (failure != null) throw failure.error
   }

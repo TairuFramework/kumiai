@@ -1,12 +1,17 @@
-import { encodeEventFrame } from '@kumiai/broadcast'
+import type { ProtocolDefinition } from '@enkaku/protocol'
+import { BroadcastClient, encodeEventFrame } from '@kumiai/broadcast'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import { encodeAppAAD } from '../src/app-aad.js'
 import { forkEventID, recoveryUnavailableEventID, type SafetyHold } from '../src/control/safety.js'
 import type { Outcome, WelcomeObligation } from '../src/control/types.js'
 import type { PendingAppFrame } from '../src/crypto.js'
+import * as directedModule from '../src/directed.js'
 import { GroupSafetyHeldError, SendNotAdmissibleError } from '../src/errors.js'
+import type { HubMux } from '../src/hub-mux.js'
 import * as logDeliveryModule from '../src/log-delivery.js'
+import type { EpochRuntime, EpochRuntimeParams } from '../src/peer-epoch.js'
+import * as epochRuntimeModule from '../src/peer-epoch.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
@@ -23,6 +28,12 @@ import {
 const secret = new Uint8Array(32).fill(43)
 const reasons = ['fork-halted', 'recovery-unavailable'] as const
 const peers: Array<TestPeer> = []
+// Erase the generic factory for Vitest's recursive handler type inference.
+const epochFactory = epochRuntimeModule as unknown as {
+  createEpochRuntime: (
+    params: EpochRuntimeParams<Record<string, ProtocolDefinition>>,
+  ) => EpochRuntime
+}
 afterEach(async () => {
   for (const member of peers.splice(0)) {
     await member.peer.dispose()
@@ -174,6 +185,92 @@ test.each(reasons)('queued durable send is preserved under %s', async (reason) =
   expect(await member.appOutbox.list()).toMatchObject([{ lastAttempt: null }])
 })
 
+test.each([
+  ['fork-halted', false],
+  ['recovery-unavailable', false],
+  ['fork-halted', true],
+] as const)(
+  'seal barrier retry starts no new wrap under %s (failed halt write=%s)',
+  async (reason, failedWrite) => {
+    const barrier = Promise.withResolvers<void>()
+    const waiting = Promise.withResolvers<void>()
+    const finished = Promise.withResolvers<void>()
+    let pendingBarrier: Promise<void> | undefined
+    const createEpoch = epochFactory.createEpochRuntime
+    vi.spyOn(epochFactory, 'createEpochRuntime').mockImplementation((params) => {
+      return createEpoch({
+        ...params,
+        sealBarrier: () => {
+          if (pendingBarrier != null) waiting.resolve()
+          return pendingBarrier ?? params.sealBarrier()
+        },
+      })
+    })
+    const createDelivery = logDeliveryModule.createLogDelivery
+    vi.spyOn(logDeliveryModule, 'createLogDelivery').mockImplementation((params) =>
+      createDelivery({
+        ...params,
+        seal: (entry) => params.seal(entry).finally(() => finished.resolve()),
+      }),
+    )
+    const { member, hub } = await fixture()
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const wrap = member.crypto.wrap.bind(member.crypto)
+    const wraps = vi.spyOn(member.crypto, 'wrap').mockImplementationOnce(async (...args) => {
+      const payload = await wrap(...args)
+      entered.resolve()
+      await release.promise
+      return payload
+    })
+    const publish = vi.spyOn(hub, 'publish')
+    let halting: Promise<void> | undefined
+    try {
+      await member.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'queued' } })
+      await entered.promise
+      pendingBarrier = barrier.promise
+      if (failedWrite) {
+        const write = Promise.withResolvers<void>()
+        const apply = member.control.apply.bind(member.control)
+        vi.spyOn(member.control, 'apply').mockImplementation(async (changes, id) => {
+          if (changes.forkHalt === undefined) return apply(changes, id)
+          write.resolve()
+          throw new Error('halt write failed')
+        })
+        halting = member.controlWalk.haltFork({
+          kind: 'unexplained-own-commit',
+          epoch: 1,
+          position: '000001',
+          digest: 'own',
+        })
+        await write.promise
+        expect((await member.control.load()).forkHalt).toBeNull()
+        expect(member.controlWalk.safetyHold()).toBe('fork-halted')
+      } else {
+        latch(member, reason)
+      }
+      // The peer latch must guard retries even when MLS itself still admits sends.
+      vi.spyOn(member.mls, 'sendAdmission').mockReturnValue({ admissible: true, epoch: 1 })
+      release.resolve()
+      await waiting.promise
+      pendingBarrier = undefined
+      barrier.resolve()
+      await finished.promise
+      expect(wraps).toHaveBeenCalledOnce()
+      expect(publish).not.toHaveBeenCalled()
+      expect(await member.appOutbox.list()).toMatchObject([{ lastAttempt: null }])
+    } finally {
+      release.resolve()
+      pendingBarrier = undefined
+      barrier.resolve()
+      if (halting != null) {
+        await member.peer.dispose()
+        await halting
+      }
+    }
+  },
+)
+
 test.each(reasons)(
   'held durable seal refusal latches %s and preserves the queue',
   async (reason) => {
@@ -198,6 +295,47 @@ test.each(reasons)(
     expect(await member.appOutbox.list()).toMatchObject([{ lastAttempt: null }])
   },
 )
+
+test.each(reasons)('seal entry refusal under %s never consumes an attempt', async (reason) => {
+  const createDelivery = logDeliveryModule.createLogDelivery
+  let member: TestPeer
+  const refusals: Array<unknown> = []
+  vi.spyOn(logDeliveryModule, 'createLogDelivery').mockImplementation((params) =>
+    createDelivery({
+      ...params,
+      seal: async (entry) => {
+        latch(member, reason)
+        try {
+          return await params.seal(entry)
+        } catch (error) {
+          refusals.push(error)
+          throw error
+        }
+      },
+    }),
+  )
+  const hub = new FakeHub()
+  member = makeMLSPeer(hub, 'bob', secret)
+  peers.push(member)
+  await member.peer.replay()
+  vi.useFakeTimers()
+  const wrap = vi.spyOn(member.crypto, 'wrap')
+  const publish = vi.spyOn(hub, 'publish')
+  const put = vi.spyOn(member.appOutbox, 'put')
+  const remove = vi.spyOn(member.appOutbox, 'remove')
+  await member.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'queued' } })
+  const before = await member.appOutbox.list()
+  put.mockClear()
+  await vi.advanceTimersByTimeAsync(0)
+  expect(refusals).toEqual([new SendNotAdmissibleError(reason)])
+  await vi.advanceTimersByTimeAsync(120_000)
+  expect(await member.appOutbox.list()).toEqual(before)
+  expect(await member.appOutbox.list()).toMatchObject([{ lastAttempt: null }])
+  expect(put).not.toHaveBeenCalled()
+  expect(remove).not.toHaveBeenCalled()
+  expect(wrap).not.toHaveBeenCalled()
+  expect(publish).not.toHaveBeenCalled()
+})
 
 test.each(reasons)('final append handoff checks the current %s latch', async (reason) => {
   const handoff = Promise.withResolvers<void>()
@@ -285,6 +423,50 @@ test.each(reasons)(
     expect(await member.control.load()).toEqual(before)
   },
 )
+
+test.each(reasons)('resync builds no listeners after %s during teardown', async (reason) => {
+  let mux: HubMux | undefined
+  const createEpoch = epochFactory.createEpochRuntime
+  vi.spyOn(epochFactory, 'createEpochRuntime').mockImplementation((params) => {
+    mux = params.mux
+    return createEpoch(params)
+  })
+  const { member, hub } = await fixture()
+  if (mux == null) throw new Error('Epoch mux was not captured')
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  const dispose = BroadcastClient.prototype.dispose
+  vi.spyOn(BroadcastClient.prototype, 'dispose').mockImplementationOnce(function (
+    this: BroadcastClient,
+  ) {
+    const result = dispose.call(this)
+    entered.resolve()
+    return release.promise.then(() => result)
+  })
+  const resync = member.peer.resync().then(
+    () => null,
+    (error: unknown) => error,
+  )
+  try {
+    await entered.promise
+    latch(member, reason)
+    vi.spyOn(member.mls, 'sendAdmission').mockReturnValue({ admissible: true, epoch: 1 })
+    const buildInbox = vi.spyOn(directedModule, 'createInboxPath')
+    const listen = vi.spyOn(mux, 'onInbound')
+    const retain = vi.spyOn(mux, 'retainTopic')
+    const subscribe = vi.spyOn(hub, 'subscribe')
+    release.resolve()
+    const error = await resync
+    expect(buildInbox).not.toHaveBeenCalled()
+    expect(listen).not.toHaveBeenCalled()
+    expect(retain).not.toHaveBeenCalled()
+    expect(subscribe).not.toHaveBeenCalled()
+    expect(error).toEqual(new GroupSafetyHeldError(reason))
+  } finally {
+    release.resolve()
+    await resync
+  }
+})
 
 test.each(reasons)('replay skips its second phase under %s', async (reason) => {
   const { member, hub } = await fixture()

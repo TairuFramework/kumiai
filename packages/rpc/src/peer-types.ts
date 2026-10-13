@@ -359,6 +359,7 @@ export type GroupPeer<Protocols extends Record<string, GroupProtocolDefinition>>
    * against an answer would be worse). Once the host knows the peer is authorized (its membership
    * row has replicated), it calls this to ask again. Single-shot per call: a topic the hub still
    * refuses simply re-latches, so call it on each authorization change rather than to poll.
+   * Throws GroupSafetyHeldError synchronously when safety is latched.
    */
   reauthorize: () => void
   dispose: () => Promise<void>
