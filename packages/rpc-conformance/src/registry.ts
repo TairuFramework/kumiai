@@ -332,7 +332,7 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
       }
     })
 
-    test('mutate persists final prepare progress and never publishes a throwing callback', async () => {
+    test('mutate persists final staged prepare progress and never publishes a throwing callback', async () => {
       const fixture = await create()
       try {
         const access = await fixture.registry.access(groupID)
@@ -341,6 +341,8 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
           await persist(handle)
           await fixture.advanceSender(handle)
           finalBytes = fixture.stateBytes(handle)
+          await persist(handle)
+          await fixture.advanceSender(handle)
         })
         const committed = await fixture.device.groups.loadState(key)
         expect(committed).toMatchObject({ senderHWM: 1 })
@@ -360,23 +362,39 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
       }
     })
 
-    test('mutate without accepted provenance cannot bypass an unresolved control slot', async () => {
-      const fixture = await create()
-      try {
-        const access = await fixture.registry.access(groupID)
-        const accepted = await fixture.acceptedOrdinary(access)
-        const before = await fixture.inspectRows()
-        await expect(
-          access.mutate(async (_handle, persist) => {
-            await persist(accepted.candidate)
-          }),
-        ).rejects.toThrow()
-        expect(await fixture.inspectRows()).toEqual(before)
-        expect(access.epoch()).toBe(0)
-      } finally {
-        await fixture.close()
-      }
-    })
+    test.each(['accepted', 'unresolved'] as const)(
+      'mutate without accepted provenance cannot bypass an %s control slot',
+      async (stage) => {
+        const fixture = await create()
+        try {
+          const access = await fixture.registry.access(groupID)
+          const accepted = await fixture.acceptedOrdinary(access, {
+            accepted: stage === 'accepted',
+          })
+          if (stage === 'unresolved')
+            await fixture.installRows({
+              key,
+              control: {
+                controlHold: { reason: 'acceptance-unknown', position: null },
+              },
+            })
+          const control = await fixture.device.groups.ports(key).control.load()
+          expect(control.commitOnce).not.toBeNull()
+          if (stage === 'unresolved') expect(control.commitOnceAcceptance).toBeNull()
+          else expect(control.commitOnceAcceptance).not.toBeNull()
+          const before = await fixture.inspectRows()
+          await expect(
+            access.mutate(async (_handle, persist) => {
+              await persist(accepted.candidate)
+            }),
+          ).rejects.toMatchObject({ name: 'ControlAdoptionMovedError' })
+          expect(await fixture.inspectRows()).toEqual(before)
+          expect(access.epoch()).toBe(0)
+        } finally {
+          await fixture.close()
+        }
+      },
+    )
 
     test('ordinary replace refuses candidates without accepted provenance', async () => {
       const fixture = await create()
@@ -523,20 +541,24 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
         const state = await fixture.device.groups.loadState(key)
         const trust = await fixture.device.groups.loadTrust(groupID)
         const control = await fixture.device.groups.ports(key).control.load()
+        let workReached = false
         fixture.onPhase('work', async () => {
+          workReached = true
           await fixture.mutateMetadata(key, (value) => ({
             ...(value as object),
             version: source.stateVersion + 1,
           }))
         })
-        await expect(
+        const outcome = await caught(
           owner.switchIncarnation(recovery.candidate, {
             source,
             rejoinID: recovery.record.id,
             proof: recovery.proof,
             write: switchWrite(recovery),
           }),
-        ).rejects.toThrow()
+        )
+        expect(workReached).toBe(true)
+        expect(outcome).toMatchObject({ error: { name: 'GroupStateConflictError' } })
         expect(await fixture.device.groups.load(groupID)).toEqual(lifetime)
         expect(await fixture.device.groups.loadState(key)).toEqual(state)
         expect(await fixture.device.groups.loadTrust(groupID)).toEqual(trust)

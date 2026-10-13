@@ -16,6 +16,7 @@ import {
   type ControlSlot,
   type WelcomeObligation,
 } from '@kumiai/rpc'
+import { createApplicationMessage } from 'ts-mls'
 
 import { encodeControlJournal } from '../../src/control-journal.js'
 import { controlBuildContexts } from '../../src/control-write-context.js'
@@ -84,7 +85,10 @@ export type RegistryFixtureBase = {
   authenticator(handle: GroupHandle): Promise<Uint8Array>
   stateBytes(handle: GroupHandle): Uint8Array
   advanceSender(handle: GroupHandle): Promise<void>
-  acceptedOrdinary(access: RegistryHandleAccess): ReturnType<typeof acceptedOrdinary>
+  acceptedOrdinary(
+    access: RegistryHandleAccess,
+    options?: { accepted: boolean },
+  ): ReturnType<typeof acceptedOrdinary>
   serveRetiredWelcomes(
     key: GroupKey,
     deliver: (welcome: WelcomeObligation) => Promise<void>,
@@ -276,12 +280,23 @@ async function assemble(
     },
     stateBytes: (handle) => encodeClientState(handle.state),
     async advanceSender(handle) {
-      await handle.encrypt(new Uint8Array([9]))
+      if (params.mode === 'real-mls') await handle.encrypt(new Uint8Array([9]))
+      else {
+        // Inherited encrypt updates the superclass state, not the double's exposed projection.
+        const state = handle.state
+        const { newState } = await createApplicationMessage({
+          context: handle.context,
+          state,
+          message: new Uint8Array([9]),
+          authenticatedData: new Uint8Array(),
+        })
+        Object.assign(state, newState)
+      }
     },
     async authenticator(handle) {
       return handle.state.keySchedule.epochAuthenticator.slice()
     },
-    acceptedOrdinary: (access) => acceptedOrdinary(fixture, access),
+    acceptedOrdinary: (access, options) => acceptedOrdinary(fixture, access, options),
     serveRetiredWelcomes: (key, deliverWelcome) =>
       serveRetiredObligations({
         persistence: fixture.device.groups,
@@ -535,7 +550,11 @@ async function restoreHost(fixture: RegistryFixtureBase, bytes: Uint8Array): Pro
   })
 }
 
-async function acceptedOrdinary(fixture: RegistryFixtureBase, access: RegistryHandleAccess) {
+async function acceptedOrdinary(
+  fixture: RegistryFixtureBase,
+  access: RegistryHandleAccess,
+  options = { accepted: true },
+) {
   const { handle, source } = await access.readControl(async ({ handle, source }) => ({
     handle,
     source,
@@ -590,7 +609,8 @@ async function acceptedOrdinary(fixture: RegistryFixtureBase, access: RegistryHa
     position: asLogPosition('00001'),
     payloadDigest: slot.payloadDigest,
   }
-  await fixture.installRows({ key: access.key, control: { commitOnceAcceptance: proof } })
+  if (options.accepted)
+    await fixture.installRows({ key: access.key, control: { commitOnceAcceptance: proof } })
   const expected = await access.readControl(async ({ source }) => source)
   const write: AdoptionWrite = {
     mutationID: 'ordinary-adoption',

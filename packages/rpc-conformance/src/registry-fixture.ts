@@ -168,7 +168,10 @@ export type ConformanceRegistryFixtureBase<
     source: ConformanceRegistryRecoverySource
     proof: ConformanceRegistryResyncProof
   }>
-  acceptedOrdinary(access: ConformanceRegistryAccess<THandle>): Promise<{
+  acceptedOrdinary(
+    access: ConformanceRegistryAccess<THandle>,
+    options?: { accepted: boolean },
+  ): Promise<{
     candidate: THandle
     alternate: THandle
     expected: ConformanceAdoptionExpected

@@ -360,7 +360,8 @@ export async function createStorageFixture(params: {
           const signal = ownerEntryFailureSignal(entry)
           const clear = () => {
             callbacks.clear()
-            clearInstrumentation()
+            // A failed Read must not discard instrumentation reserved for the next transition.
+            if (kind !== 'read') clearInstrumentation()
           }
           signal?.addEventListener('abort', clear, { once: true })
           try {
@@ -379,8 +380,7 @@ export async function createStorageFixture(params: {
               try {
                 return await body(entry)
               } catch (error) {
-                clearInstrumentation()
-                callbacks.clear()
+                clear()
                 if (!first) throw error
                 first = false
                 if (

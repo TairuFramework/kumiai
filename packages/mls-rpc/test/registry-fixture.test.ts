@@ -46,6 +46,28 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
+    test('failed mutation proof read preserves the next work phase callback', async () => {
+      const fixture = await create('seeded')
+      try {
+        let calls = 0
+        fixture.onPhase('work', () => {
+          calls++
+        })
+        await expect(fixture.device.groups.resolve(groupID, 'missing-proof')).rejects.toMatchObject(
+          {
+            name: 'GroupStateUncertainError',
+          },
+        )
+        await fixture.installRows({
+          key,
+          control: { strand: { reason: 'lost-state' } },
+        })
+        expect(calls).toBe(1)
+      } finally {
+        await fixture.close()
+      }
+    })
+
     test('fixture owner matches every credential', async () => {
       const fixture = await create('seeded')
       const cold = await fixture.reopen()

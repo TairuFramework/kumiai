@@ -396,6 +396,15 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
               final = destination
               const committedSource = await restoreValidated(value, environment)
               await committedSource.carryReceiveProgress(final)
+            } else if (
+              Number(candidate.epoch) !== value.record.epoch ||
+              !sameStoredValue(
+                candidate.state.keySchedule.epochAuthenticator,
+                value.record.epochAuthenticator,
+              )
+            ) {
+              const control = await reads.control(owner.key.incarnation)
+              if (control.commitOnce !== null) throw moved()
             }
             const stagedRecord = recordFor(final, value)
             const stagedTrust = recoveryTrustFor(final, value.key, value.trust)
