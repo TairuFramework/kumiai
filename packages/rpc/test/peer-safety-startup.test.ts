@@ -29,10 +29,14 @@ const peers: Array<TestPeer> = []
 const evidenceReads = new WeakMap<TestPeer, ReturnType<typeof vi.fn>>()
 
 afterEach(async () => {
-  await Promise.all(peers.map(({ peer }) => peer.dispose()))
-  await Promise.all(peers.splice(0).map(({ peer }) => peer.drained()))
-  vi.useRealTimers()
-  vi.restoreAllMocks()
+  const created = peers.splice(0)
+  try {
+    await Promise.all(created.map(({ peer }) => peer.dispose()))
+    await Promise.all(created.map(({ peer }) => peer.drained()))
+  } finally {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  }
 })
 
 async function persist(control: ControlStore, reason: NonNullable<SafetyHold>) {
@@ -202,10 +206,13 @@ test.each(['suspended', 'failed'] as const)(
     const result = ready.catch((failure: unknown) => failure)
     const send = member.peer.protocol('chat').dispatch('chat/changed', { data: {} })
     const sent = send.catch((failure: unknown) => failure)
-    await Promise.resolve()
-    assertZero(network)
-    assertZero(work)
-    release.resolve()
+    try {
+      await Promise.resolve()
+      assertZero(network)
+      assertZero(work)
+    } finally {
+      release.resolve()
+    }
     if (mode === 'failed') {
       expect(await result).toBe(error)
       expect(await sent).toBe(error)
@@ -512,3 +519,139 @@ test.each(reasons.flatMap((reason) => [false, true].map((restart) => [reason, re
     assertZero(work)
   },
 )
+
+test.each(reasons)(
+  'held restart retries failed cleanup under %s without network',
+  async (reason) => {
+    const onOutcome = vi.fn()
+    const deliver = vi.fn(async (_row: WelcomeObligation) => {})
+    const { hub, member } = await seed()
+    const op = await seedBuiltOperation(member, buildLedgerCommit(member, []))
+    await member.peer.dispose()
+    await member.peer.drained()
+    const position = asLogPosition('000001')
+    const outcome = { id: op.id, opID: op.id, at: 1, kind: 'landed' as const, position }
+    const owed: WelcomeObligation = {
+      opID: 'separately-committed',
+      welcome: new Uint8Array([1, 3, 5]),
+      recipients: ['bob'],
+      committed: true,
+    }
+    await member.control.apply(
+      {
+        cursor: { epoch: 99, position, stranded: true },
+        strand: { reason: 'ahead' },
+        putApplied: [
+          {
+            epoch: op.slot.epoch,
+            digest: op.slot.digest,
+            payloadDigest: op.slot.payloadDigest,
+            sequenceID: position,
+            opID: op.id,
+            removed: false,
+          },
+        ],
+        putOutcomes: [outcome],
+        putWelcomes: [owed],
+      },
+      'cleanup-and-welcome',
+    )
+    await persist(member.control, reason)
+    const before = await member.control.load()
+    const apply = member.control.apply
+    let available = false
+    const cleanup = vi.fn()
+    const error = new Error('cleanup storage unavailable')
+    const control: ControlStore = {
+      ...member.control,
+      apply: async (changes, mutationID) => {
+        if (changes.deleteOperations?.includes(op.id)) {
+          cleanup()
+          if (!available) throw error
+        }
+        await apply(changes, mutationID)
+      },
+    }
+    const network = observeNetwork(hub)
+    const runtime = observeRuntime()
+    vi.useFakeTimers()
+    const runner = makePeer(hub, { restartOf: member, control, onOutcome, deliverWelcome: deliver })
+    const work = { ...observeWork(runner), ...runtime }
+    peers.push(runner)
+    expect(await runner.peer.outcomes().catch((failure: unknown) => failure)).toEqual([outcome])
+    expect(cleanup).toHaveBeenCalledOnce()
+    expect((await control.load()).operations).toHaveLength(1)
+    assertZero(network)
+    assertZero(work)
+
+    available = true
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(cleanup).toHaveBeenCalledTimes(2)
+    expect((await control.load()).operations).toEqual([])
+    expect(deliver).toHaveBeenCalledExactlyOnceWith(owed)
+    expect((await control.load()).welcomes).toEqual([])
+    expect(onOutcome).toHaveBeenCalledWith(outcome)
+    expect(await runner.peer.outcomes()).toEqual([outcome])
+    await runner.peer.ack(outcome.id)
+    await runner.peer.replay()
+    await vi.advanceTimersByTimeAsync(60_000)
+    const after = await control.load()
+    expect(after.outcomes).toEqual([])
+    expect(after.commitOnce).toEqual(before.commitOnce)
+    expect(after.applied).toEqual(before.applied)
+    expect(after.cursor).toEqual(before.cursor)
+    expect(after.strand).toEqual(before.strand)
+    expect(after.forkHalt).toEqual(before.forkHalt)
+    expect(after.recoveryUnavailable).toEqual(before.recoveryUnavailable)
+    assertZero(network)
+    assertZero(work)
+  },
+)
+
+test('held storage failure preserves the startup error and retries without ready or operations', async () => {
+  const { hub, member } = await seed()
+  await member.peer.dispose()
+  await member.peer.drained()
+  const owed: WelcomeObligation = {
+    opID: 'owed-after-startup-error',
+    welcome: new Uint8Array([7, 9]),
+    recipients: ['bob'],
+    committed: true,
+  }
+  await member.control.apply({ putWelcomes: [owed] }, 'owed-after-startup-error')
+  const startupError = new Error('anchor load failed')
+  const storageError = new Error('held storage load failed')
+  const load = member.control.load
+  let failLoad = false
+  const control: ControlStore = {
+    ...member.control,
+    load: async () => {
+      if (failLoad) {
+        failLoad = false
+        throw storageError
+      }
+      return load()
+    },
+  }
+  let runner: TestPeer
+  vi.spyOn(member.anchorStore, 'load').mockImplementation(async () => {
+    await persist(member.control, 'fork-halted')
+    latchPeerSafety(runner, 'fork-halted')
+    failLoad = true
+    throw startupError
+  })
+  const deliver = vi.fn(async (_row: WelcomeObligation) => {})
+  vi.useFakeTimers()
+  runner = makePeer(hub, { restartOf: member, control, deliverWelcome: deliver })
+  peers.push(runner)
+  expect(await runner.peer.outcomes().catch((failure: unknown) => failure)).toBe(startupError)
+  const network = observeNetwork(hub)
+  const work = { ...observeWork(runner), ...observeRuntime() }
+  await vi.advanceTimersByTimeAsync(1_000)
+  expect(deliver).toHaveBeenCalledExactlyOnceWith(owed)
+  expect((await control.load()).welcomes).toEqual([])
+  expect((await control.load()).operations).toEqual([])
+  expect(await runner.peer.outcomes().catch((failure: unknown) => failure)).toBe(startupError)
+  assertZero(network)
+  assertZero(work)
+})

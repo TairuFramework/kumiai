@@ -293,6 +293,7 @@ export function createGroupPeerWithControlWalk<
   let rejoinHeld = false
   let rejoinPosition: LogPosition | null = null
   let hasOperations = false
+  let storageServicePending = false
   let controlHold: ControlHold | null = null
   let safetyReason: SafetyHold = null
   let pendingForkHalt: ForkHalt | null = null
@@ -3006,7 +3007,7 @@ export function createGroupPeerWithControlWalk<
       disposed ||
       locallyRemoved ||
       control == null ||
-      !hasOperations ||
+      (!hasOperations && !storageServicePending) ||
       (rejoinHeld && safetyHold() === null) ||
       operationTimer != null ||
       operationRunning
@@ -3018,6 +3019,13 @@ export function createGroupPeerWithControlWalk<
       void (async () => {
         let retry = false
         try {
+          // Held storage retries must survive a rejected startup without enabling network work.
+          if (initialSafetyLoaded && safetyHold() !== null) {
+            await runSerial(serviceStorageOnly)
+            retry = hasOperations
+            if (!retry) operationBackoff = 1000
+            return
+          }
           await ready
           assertLive()
           if (activeRecovery != null) await activeRecovery
@@ -3054,7 +3062,7 @@ export function createGroupPeerWithControlWalk<
             } catch {
               retry = true
             }
-            if (hasOperations) {
+            if (hasOperations || storageServicePending) {
               scheduleOperations(retry ? operationBackoff : 0)
               if (retry) operationBackoff = Math.min(operationBackoff * 2, 15_000)
             }
@@ -3336,8 +3344,7 @@ export function createGroupPeerWithControlWalk<
     await runSerial(async () => {
       await refreshControl()
       if (safetyHold() !== null) {
-        await settleOperations()
-        await deliverPendingWelcomes()
+        await serviceStorageOnly()
         return
       }
       if (hardControlHeld()) return
@@ -4033,12 +4040,25 @@ export function createGroupPeerWithControlWalk<
     }
   }
 
+  let pendingRestored = false
+  const serviceStorageOnly = async (): Promise<void> => {
+    storageServicePending = true
+    if (!pendingRestored) {
+      await restorePending()
+      pendingRestored = true
+    }
+    if (disposed) return
+    await settleOperations()
+    await deliverPendingWelcomes()
+    appLane.retryDelivery()
+    storageServicePending = false
+  }
+
   const safetyReady = refreshControl()
   const ready = (async () => {
     await safetyReady
     initialSafetyLoaded = true
     const stopped = () => disposed || safetyHold() !== null
-    let pendingRestored = false
     try {
       if (stopped()) return
       mux.start()
@@ -4134,13 +4154,11 @@ export function createGroupPeerWithControlWalk<
     } finally {
       // Owed storage work survives every early safety exit, without control topics or a drain.
       if (!disposed && safetyHold() !== null) {
-        if (!pendingRestored) await restorePending()
-        if (!disposed) {
-          await runSerial(async () => {
-            await settleOperations()
-            await deliverPendingWelcomes()
-          })
-          appLane.retryDelivery()
+        try {
+          await runSerial(serviceStorageOnly)
+        } catch {
+          // Owed-work failures neither reject readiness nor replace an earlier startup error.
+          scheduleOperations(operationBackoff)
         }
       }
     }
