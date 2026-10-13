@@ -17,12 +17,14 @@ import {
 import { createRuntime, type Runtime } from '@sozai/runtime'
 
 import { encodeAppAAD } from './app-aad.js'
+import type { SafetyHold } from './control/safety.js'
 import type { GroupCrypto, GroupUnwrapResult } from './crypto.js'
 import {
   decodeDirectedPayload,
   encodeDirectedPayload,
   isLegacyDirectedPayload,
 } from './directed-tag.js'
+import { SendNotAdmissibleError } from './errors.js'
 import type { HubMux } from './hub-mux.js'
 import { createOpenOncePath } from './open-once.js'
 
@@ -124,6 +126,7 @@ export type DirectedClientParams = {
    * stream/channel creation.
    */
   requestTimeoutMs?: number
+  safetyHold?: () => SafetyHold
 }
 
 /**
@@ -139,17 +142,25 @@ export function createDirectedClient<Protocol extends ProtocolDefinition>(
 ): { client: Client<Protocol>; dispose: () => Promise<void> } {
   const { mux, localDID, memberDID, sendTopicID, receiveTopicID, inbound, wrap, protocol } = params
   const requestTimeoutMs = params.requestTimeoutMs ?? DEFAULT_DIRECTED_REQUEST_TIMEOUT_MS
+  const safetyHold = params.safetyHold ?? (() => null)
+  const assertSend = () => {
+    const reason = safetyHold()
+    if (reason !== null) throw new SendNotAdmissibleError(reason)
+  }
   const { getRandomID } = params.runtime ?? createRuntime()
   let unsubscribe: (() => void) | undefined
   const hub: MailboxHub = {
     async publish(publishParams) {
+      assertSend()
       const tagged = encodeDirectedPayload(protocol, publishParams.payload)
+      const payload = await wrap(tagged, {
+        aad: encodeAppAAD({ topicID: publishParams.topicID, intent: 'ephemeral' }),
+      })
+      assertSend()
       return mux.mailbox.publish({
         senderDID: publishParams.senderDID,
         topicID: publishParams.topicID,
-        payload: await wrap(tagged, {
-          aad: encodeAppAAD({ topicID: publishParams.topicID, intent: 'ephemeral' }),
-        }),
+        payload,
       })
     },
     subscribe() {},
@@ -238,6 +249,7 @@ export type InboxAcceptorParams<Protocol extends ProtocolDefinition> = {
   protocolName: string
   handlers: ProcedureHandlers<Protocol>
   wrap: GroupCrypto['wrap']
+  safetyHold?: () => SafetyHold
 }
 
 type ServerSession = {
@@ -315,6 +327,7 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
     handlers,
     wrap,
   } = params
+  const safetyHold = params.safetyHold ?? (() => null)
   // One shared Server across all sessions (its own resource limiter caps handlers/controllers
   // collectively). Its handlers are wrapped once to surface each frame's stamped sender as `iss`.
   const server = new Server<Protocol>({
@@ -332,10 +345,14 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
     let closed = false
     const sessionHub: MailboxHub = {
       async publish(publishParams) {
+        const reason = safetyHold()
+        if (reason !== null) throw new SendNotAdmissibleError(reason)
         const tagged = encodeDirectedPayload(protocolName, publishParams.payload)
         const sealed = await wrap(tagged, {
           aad: encodeAppAAD({ topicID: publishParams.topicID, intent: 'ephemeral' }),
         })
+        const currentReason = safetyHold()
+        if (currentReason !== null) throw new SendNotAdmissibleError(currentReason)
         return mux.mailbox.publish({
           senderDID: publishParams.senderDID,
           topicID: publishParams.topicID,
@@ -422,6 +439,7 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
   // guarantee: it opens one frame at a time, so a session is never double-created and a tunnel is
   // never fed out of wire order (which drops as a stale seq).
   const unsubscribe = inbound((message) => {
+    if (safetyHold() !== null) return
     if (message.topicID !== selfInboxTopic || message.protocol !== protocolName) return
     const senderDID = message.senderDID
     let frame: ReturnType<typeof decodeFrame>
@@ -490,6 +508,7 @@ export type UnroutedTagResponderParams = {
     recipientDID: string,
     taggedPayload: Uint8Array,
   ) => Promise<{ topicID: string; payload: Uint8Array }>
+  safetyHold?: () => SafetyHold
 }
 
 /**
@@ -511,6 +530,7 @@ export function createUnroutedTagResponder(params: UnroutedTagResponderParams): 
   dispose: () => void
 } {
   const { mux, localDID, inbound, isRegistered, sealReply } = params
+  const safetyHold = params.safetyHold ?? (() => null)
   // Monotonic across every session this responder answers: a caller's virgin tunnel expects seq 0,
   // and any seq >= its expected value is accepted, so one NACK per caller session is always fresh.
   // `seq` is assigned INSIDE the chained task below, immediately before the frame is built, so
@@ -523,6 +543,7 @@ export function createUnroutedTagResponder(params: UnroutedTagResponderParams): 
   // enqueue order; a failed link is swallowed so it never stalls the chain.
   let tail: Promise<void> = Promise.resolve()
   const unsubscribe = inbound((message) => {
+    if (safetyHold() !== null) return
     if (isRegistered(message.protocol)) return
     let frame: ReturnType<typeof decodeFrame>
     try {
@@ -542,6 +563,7 @@ export function createUnroutedTagResponder(params: UnroutedTagResponderParams): 
     const senderDID = message.senderDID
     tail = tail
       .then(async () => {
+        if (safetyHold() !== null) return
         const nack = encodeFrame({
           v: 1,
           sessionID: frame.sessionID,
@@ -551,6 +573,7 @@ export function createUnroutedTagResponder(params: UnroutedTagResponderParams): 
         })
         const tagged = encodeDirectedPayload(protocol, nack)
         const { topicID, payload: sealed } = await sealReply(senderDID, tagged)
+        if (safetyHold() !== null) return
         await mux.mailbox.publish({ senderDID: localDID, topicID, payload: sealed })
       })
       .catch(() => {})

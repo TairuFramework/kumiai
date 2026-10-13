@@ -311,6 +311,15 @@ export function createGroupPeerWithControlWalk<
     }
     return safetyReason
   }
+  const assertSafetyOpen = (): void => {
+    const reason = safetyHold()
+    if (reason !== null) throw new GroupSafetyHeldError(reason)
+  }
+  const safetyRefusal = (error: unknown): error is GroupSafetyHeldError => {
+    if (!(error instanceof GroupSafetyHeldError)) return false
+    latchSafetyHold(error.reason)
+    return true
+  }
   const controlHoldPresent = () =>
     controlHold !== null && controlHold.reason !== 'acceptance-unknown'
   const hardControlHeld = () => safetyHold() !== null || controlHoldPresent()
@@ -481,12 +490,13 @@ export function createGroupPeerWithControlWalk<
     }
   }
   const captureAnchor = async (advance?: string): Promise<void> => {
+    if (safetyHold() !== null) return
     const captured =
       anchorCapture != null && anchorCapture.advance === advance
         ? anchorCapture.anchor
         : await crypto.exportSecret(APP_TOPIC_LABEL)
     const { secret, epoch } = captured
-    if (disposed) return
+    if (disposed || safetyHold() !== null) return
     anchorCapture = { advance, anchor: { secret, epoch } }
     // Retain before the save can wait, so frames at the new anchor are buffered meanwhile.
     for (const name of Object.keys(protocols)) {
@@ -494,7 +504,7 @@ export function createGroupPeerWithControlWalk<
     }
     mux.retainTopic(inboxTopic(secret, epoch, localDID), { retention: appLogRetentionSeconds })
     await saveResolvedAnchor({ anchor: anchorCapture.anchor })
-    if (disposed) return
+    if (disposed || safetyHold() !== null) return
     anchor = { secret, epoch }
     anchorCapture = undefined
     anchorPending = undefined
@@ -506,7 +516,7 @@ export function createGroupPeerWithControlWalk<
   /** The rotation resolved without moving the anchor: drop the record and keep the anchor. */
   const keepAnchor = async (): Promise<void> => {
     await saveResolvedAnchor({ anchor })
-    if (disposed) return
+    if (disposed || safetyHold() !== null) return
     anchorPending = undefined
     sealError = undefined
     finishSealBarrier()
@@ -519,11 +529,14 @@ export function createGroupPeerWithControlWalk<
 
   const resolveAnchorRotation = async (params: ResolveAnchorRotationParams): Promise<void> => {
     const { port, knownUnlanded = false, initial = false } = params
+    if (safetyHold() !== null) return
     const record = anchorPending
     if (record == null) return
     const stored = await anchorStore?.load()
     if (stored?.pending?.advance === record.advance) record.landed = stored.pending.landed
+    if (safetyHold() !== null) return
     const epoch = await port.readEpoch()
+    if (safetyHold() !== null) return
     assertLive()
     if (!record.landed) {
       if (!knownUnlanded && !initial) return
@@ -535,6 +548,7 @@ export function createGroupPeerWithControlWalk<
       return
     }
     const roster = (await port.rosterEntries()).map((entry) => normalizeDID(entry.did))
+    if (safetyHold() !== null) return
     if (record.forced || detectRosterChange(record.rosterBefore, roster)) {
       await captureAnchor(record.advance)
     } else {
@@ -638,7 +652,37 @@ export function createGroupPeerWithControlWalk<
   const epochRuntime = createEpochRuntime<Protocols>({
     boundary,
     mux,
-    crypto,
+    crypto: {
+      epoch: () => crypto.epoch(),
+      exportSecret: (label) => crypto.exportSecret(label),
+      frameEpoch: (bytes) => crypto.frameEpoch(bytes),
+      frameAAD: (bytes) => crypto.frameAAD(bytes),
+      sealEntries: (...args) => crypto.sealEntries(...args),
+      openEntries: (...args) => crypto.openEntries(...args),
+      get pending() {
+        return crypto.pending
+      },
+      wrap: async (...args) => {
+        try {
+          return await crypto.wrap(...args)
+        } catch (error) {
+          if (safetyRefusal(error)) {
+            const refusal = new SendNotAdmissibleError(error.reason)
+            refusal.cause = error
+            throw refusal
+          }
+          throw error
+        }
+      },
+      unwrap: async (...args) => {
+        try {
+          return await crypto.unwrap(...args)
+        } catch (error) {
+          safetyRefusal(error)
+          throw error
+        }
+      },
+    },
     localDID,
     protocols,
     handlers,
@@ -651,6 +695,7 @@ export function createGroupPeerWithControlWalk<
     isDisposed: () => disposed,
     note: (name, topicID, message, failure) => appLane.note(name, topicID, message, failure),
     requestAppPull,
+    safetyHold,
   })
   const {
     buildEpoch,
@@ -1076,6 +1121,7 @@ export function createGroupPeerWithControlWalk<
         return value
       },
       (error: unknown) => {
+        safetyRefusal(error)
         flushHostOutbox()
         logDelivery?.trigger()
         throw error
@@ -1129,6 +1175,7 @@ export function createGroupPeerWithControlWalk<
       const verified = await port.verifyRecoveryRequest(request.request)
       if (
         disposed ||
+        safetyHold() !== null ||
         verified == null ||
         verified.requestID !== request.requestID ||
         normalizeDID(verified.requesterDID) === localDID
@@ -1144,9 +1191,9 @@ export function createGroupPeerWithControlWalk<
       let record = commitOutcomes.get(request.position)
       if (record == null) {
         await ready
-        if (disposed) return
+        if (disposed || safetyHold() !== null) return
         await runSerial(async () => {
-          if (disposed) return
+          if (disposed || safetyHold() !== null) return
           await settleOperations()
           await reconcileCommits()
         })
@@ -1163,8 +1210,8 @@ export function createGroupPeerWithControlWalk<
       ])
       let cached = verdictCache.get(cacheKey)
       if (cached == null) {
-        const outcome = await responseOutcome(port, record)
-        if (outcome == null) return
+        const outcome = await responseOutcome(port, record, safetyHold)
+        if (outcome == null || blocked()) return
         const verdict = verdictForOutcome(
           {
             groupID: verified.groupID,
@@ -1190,13 +1237,21 @@ export function createGroupPeerWithControlWalk<
       if (disposed || blocked() || expiresAt <= Date.now()) return
       const response = record
       const confirmable = async () =>
-        response.kind !== 'applied' || (await port.readEpoch()) === response.epochAfter
-      if (!(await confirmable())) return
+        !blocked() &&
+        (response.kind !== 'applied' || (await port.readEpoch()) === response.epochAfter)
+      if (!(await confirmable()) || blocked()) return
       const timer = setTimeout(
         () => {
           verdictTimers.delete(timer)
           void (async () => {
-            if (disposed || blocked() || expiresAt <= Date.now() || !(await confirmable())) return
+            if (
+              disposed ||
+              blocked() ||
+              expiresAt <= Date.now() ||
+              !(await confirmable()) ||
+              blocked()
+            )
+              return
             await mux.publish({
               topicID,
               payload: encodeHandshakeFrame(
@@ -1204,12 +1259,12 @@ export function createGroupPeerWithControlWalk<
                 encodeRecoveryVerdict(request.requestID, sealed),
               ),
             })
-          })().catch(() => {})
+          })().catch(safetyRefusal)
         },
         Math.max(0, Math.min(getReplyDelayMs(), recoveryTimeoutMs, expiresAt - Date.now())),
       )
       verdictTimers.add(timer)
-    })().catch(() => {})
+    })().catch(safetyRefusal)
   }
 
   // Responder: after a jitter delay, answer a recovery request with GroupInfo sealed to the
@@ -1217,7 +1272,14 @@ export function createGroupPeerWithControlWalk<
   // been observed (storm-collapse), in which case the scheduled reply is cancelled.
   const handleRecoveryRequest = (request: { requestID: string; request: Uint8Array }): void => {
     const { requestID } = request
-    if (mls == null || rendezvousTopicID == null || pendingRecovery != null) return
+    if (
+      mls == null ||
+      rendezvousTopicID == null ||
+      disposed ||
+      safetyHold() !== null ||
+      pendingRecovery != null
+    )
+      return
     if (suppressedRequests.has(requestID) || pendingReplies.has(requestID)) return
     const port = mls
     const topicID = rendezvousTopicID
@@ -1227,12 +1289,12 @@ export function createGroupPeerWithControlWalk<
         try {
           // The port verifies the request and checks the requester's leaf against its own current
           // tree. A refused request raises, and this peer stays silent.
-          if (pendingRecovery != null) return
+          if (disposed || safetyHold() !== null || pendingRecovery != null) return
           const groupInfo = await port.sealGroupInfo(request.request)
           // Same window as `handleLedgerRequest`'s guard: a timer that fired before dispose is
           // gone from `pendingReplies` by the time the clear sweep runs, and is then an await
           // away from here. Silent, for the same reason.
-          if (disposed || pendingRecovery != null) return
+          if (disposed || safetyHold() !== null || pendingRecovery != null) return
           // Mailbox class, deliberately: a rendezvous frame must never move the commit topic's
           // head, and its reader — the requester — subscribed before it asked.
           await mux.publish({
@@ -1242,7 +1304,8 @@ export function createGroupPeerWithControlWalk<
               encodeRecoveryReply(requestID, groupInfo),
             ),
           })
-        } catch {
+        } catch (error) {
+          safetyRefusal(error)
           // a refused or failed reply just means another responder (or a retry) covers it
         }
       })()
@@ -1293,14 +1356,15 @@ export function createGroupPeerWithControlWalk<
    * fails the head check, and the requester needs a second answer to fall through to.
    */
   const handleLedgerRequest = (request: { requestID: string; request: Uint8Array }): void => {
-    if (mls == null || rendezvousTopicID == null) return
+    if (mls == null || rendezvousTopicID == null || disposed || safetyHold() !== null) return
     const port = mls
     const topicID = rendezvousTopicID
     const timer = setTimeout(() => {
       pendingLedgerReplies.delete(timer)
       void (async () => {
         try {
-          if (!(await port.isLedgerComplete())) return
+          if (disposed || safetyHold() !== null) return
+          if (!(await port.isLedgerComplete()) || disposed || safetyHold() !== null) return
           // The port verifies the request and checks the requester's leaf against its own current
           // tree. A refused request raises, and this peer stays silent.
           const sealed = await port.sealLedger(request.request)
@@ -1308,7 +1372,7 @@ export function createGroupPeerWithControlWalk<
           // from `pendingLedgerReplies` when the sweep walked it — too late by construction, not
           // by race. Silent, like `onCommitDelivery`: there is no caller to tell, and the catch
           // below would swallow a throw anyway.
-          if (disposed) return
+          if (disposed || safetyHold() !== null) return
           await mux.publish({
             topicID,
             payload: encodeHandshakeFrame(
@@ -1316,7 +1380,8 @@ export function createGroupPeerWithControlWalk<
               encodeLedgerReply(request.requestID, sealed),
             ),
           })
-        } catch {
+        } catch (error) {
+          safetyRefusal(error)
           // a refused or failed reply just means another responder (or a retry) covers it
         }
       })()
@@ -1331,8 +1396,10 @@ export function createGroupPeerWithControlWalk<
   /** Read the departing epoch's frames and persist its rotation record before ratcheting. */
   const advanceHandle = async <TResult>(params: AdvanceHandleParams<TResult>): Promise<TResult> => {
     const { port, ratchet, identity, floorPosition } = params
+    assertSafetyOpen()
     await resolveAnchorRotation({ port })
     assertLive()
+    assertSafetyOpen()
     const pending = anchorPending
     const retry = pending?.advance === identity.advance
     const confirmedRecovery = identity.recovery === true && anchorRecoveryPending
@@ -1344,12 +1411,15 @@ export function createGroupPeerWithControlWalk<
     }
     if (!confirmedRecovery) await appLane.deliver()
     assertLive()
+    assertSafetyOpen()
     const rosterBefore =
       retry && pending != null
         ? pending.rosterBefore
         : (await port.rosterEntries()).map((entry) => normalizeDID(entry.did))
+    assertSafetyOpen()
     const epochBefore = await port.readEpoch()
     assertLive()
+    assertSafetyOpen()
     const record: PendingAnchorRotation =
       retry && pending != null
         ? pending
@@ -1362,32 +1432,41 @@ export function createGroupPeerWithControlWalk<
           }
     await anchorStore?.save({ anchor, pending: record })
     assertLive()
+    assertSafetyOpen()
     anchorPending = record
     if (sealBarrier == null)
       sealBarrier = new Promise<void>((resolve) => {
         releaseSealBarrier = resolve
       })
-    const observe = async (): Promise<void> => {
+    const observe = async (): Promise<boolean> => {
       await refreshControl()
+      if (safetyHold() !== null) return false
       await removalEffect()
+      assertSafetyOpen()
       const epoch = await port.readEpoch()
+      assertSafetyOpen()
       if (epoch !== epochBefore) epochNeedsBuild = true
       if (epoch === identity.epochAfter && epoch !== record.epochBefore && floorPosition != null)
         floor = { epoch, position: floorPosition, covered: true }
+      return true
     }
     try {
+      assertSafetyOpen()
       const advanced = await ratchet()
-      await observe()
+      if (!(await observe())) return advanced
+      assertSafetyOpen()
       await resolveAnchorRotation({ port, knownUnlanded: true })
       if (confirmedRecovery && anchorPending == null) anchorRecoveryPending = false
       return advanced
     } catch (error) {
+      if (safetyRefusal(error) || safetyHold() !== null) throw error
       try {
-        await observe()
-        await resolveAnchorRotation({ port })
-      } catch {
+        if (await observe()) await resolveAnchorRotation({ port })
+      } catch (repairError) {
+        if (safetyRefusal(repairError)) throw repairError
         // The record keeps the exact epoch available for the next repair.
       }
+      if (safetyHold() !== null) throw error
       if (anchorPending != null) {
         sealError = new Error('app anchor unavailable after failed epoch advance', { cause: error })
       }
@@ -1436,6 +1515,7 @@ export function createGroupPeerWithControlWalk<
       localEpoch: number,
       claimedEpoch: number | null,
     ): Promise<boolean> => {
+      if (safetyHold() !== null) return advancedEpoch
       stranded = true
       healRequested = safetyHold() === null
       await persistStrand('unprocessable-gap')
@@ -1487,6 +1567,26 @@ export function createGroupPeerWithControlWalk<
         }),
       )
       if (disposed) return false
+      if (safetyHold() !== null) {
+        // Unsupported-version holds remain storage-only service after a suspended fetch.
+        for (const message of result.messages) {
+          let unsupported = false
+          try {
+            const frame = decodeHandshakeFrame(message.payload)
+            unsupported = frame.version !== HANDSHAKE_VERSION
+            if (!unsupported && frame.kind === HANDSHAKE_KIND.commit)
+              decodeCommitFrame(frame.payload)
+          } catch (error) {
+            unsupported = isUnsupportedCommitFrameVersion(error)
+          }
+          if (unsupported)
+            await holdControl({
+              reason: 'unsupported-version',
+              position: asLogPosition(message.sequenceID),
+            })
+        }
+        return false
+      }
       const gap =
         result.gap ||
         (result.messages.length === 0 &&
@@ -1504,10 +1604,13 @@ export function createGroupPeerWithControlWalk<
         stranded = true
         healRequested = safetyHold() === null
         await persistStrand('retention-gap')
+        if (safetyHold() !== null) return advancedEpoch
+        const localEpoch = await port.readEpoch()
+        if (safetyHold() !== null) return advancedEpoch
         observeStrand({
           position: pageAfter,
           commitDigest: null,
-          localEpoch: await port.readEpoch(),
+          localEpoch,
           claimedEpoch: null,
           kind: 'retention-gap',
           confidence: 'claimed',
@@ -1527,6 +1630,7 @@ export function createGroupPeerWithControlWalk<
         return advancedEpoch
       }
       for (const message of result.messages) {
+        if (disposed || safetyHold() !== null) return advancedEpoch
         // A commit this peer landed moved its cursor to that frame's position on acceptance (the
         // operation carries that across a restart); meeting its own commit here means its saved operation
         // was lost or never written.
@@ -1551,7 +1655,9 @@ export function createGroupPeerWithControlWalk<
         // the magic means what this build thinks under an unknown version. On the commit topic —
         // and only here — that is evidence in itself, so it goes to the classifier, not dropped.
         if (frame.version !== HANDSHAKE_VERSION) {
+          if (safetyHold() !== null) return advancedEpoch
           const localEpoch = await port.readEpoch()
+          if (safetyHold() !== null) return advancedEpoch
           await holdControl({ reason: 'unsupported-version', position })
           observeStrand({
             position,
@@ -1578,7 +1684,9 @@ export function createGroupPeerWithControlWalk<
           // version fails BEFORE the commit bytes are extracted, so there is no next frame to
           // heal from — dropping it would step over the group's whole future. To the classifier.
           if (isUnsupportedCommitFrameVersion(error)) {
+            if (safetyHold() !== null) return advancedEpoch
             const localEpoch = await port.readEpoch()
+            if (safetyHold() !== null) return advancedEpoch
             await holdControl({ reason: 'unsupported-version', position })
             observeStrand({
               position,
@@ -1607,17 +1715,19 @@ export function createGroupPeerWithControlWalk<
         // trusted: it could stamp every recipient's own DID onto one poison frame and make the
         // whole group heal at once.
         let localEpoch = await port.readEpoch()
-        if (disposed) return false
+        if (disposed || safetyHold() !== null) return false
         while (true) {
+          if (safetyHold() !== null) return advancedEpoch
           let readHeader: Awaited<ReturnType<GroupMLS['readCommitHeader']>>
           try {
             readHeader = await port.readCommitHeader(commitFrame.commit)
           } catch (error) {
+            if (safetyRefusal(error) || safetyHold() !== null) return advancedEpoch
             if (error instanceof Error && error.name === 'CommitValidationUnavailableError')
               return unprocessable(position, commitDigest, localEpoch, localEpoch)
             throw error
           }
-          if (disposed) return false
+          if (disposed || safetyHold() !== null) return false
           // Normalized before `classifyCommit` compares it against `state.localDID` (also
           // normalized, at construction) — an own-unmerged commit authenticated under a different
           // form of this member's own DID must still be recognized as its own.
@@ -1628,6 +1738,7 @@ export function createGroupPeerWithControlWalk<
           const certificate = search?.range
           if (certificate != null && header != null) {
             const key = (await port.readRecoverySource()).key
+            if (safetyHold() !== null) return advancedEpoch
             const winner = appliedByEpoch.get(certificate.source.epoch)
             if (
               winner?.sequenceID === certificate.winner.position &&
@@ -1653,6 +1764,7 @@ export function createGroupPeerWithControlWalk<
 
           if (disposition.row === 'own-unmerged') {
             const slot = (await control?.load())?.commitOnce
+            if (safetyHold() !== null) return advancedEpoch
             if (
               slot !== null &&
               slot !== undefined &&
@@ -1737,10 +1849,11 @@ export function createGroupPeerWithControlWalk<
 
           // Framed at this peer's epoch, by somebody else: a frame it can apply. Everything below is
           // the port's answer to it.
-          if (disposed) return false
+          if (disposed || safetyHold() !== null) return false
           const framedEpoch = localEpoch
           const anchorEpochBefore = anchor.epoch
           const snapshot = await control?.load()
+          if (safetyHold() !== null) return advancedEpoch
           const adoption =
             snapshot == null
               ? undefined
@@ -1768,6 +1881,7 @@ export function createGroupPeerWithControlWalk<
                     epochAfter: framedEpoch,
                   }
                 }
+                assertSafetyOpen()
                 const result = await port.processCommit(commitFrame.commit, {
                   senderDID: message.senderDID,
                   ...(adoption == null ? {} : { adoption }),
@@ -1778,6 +1892,7 @@ export function createGroupPeerWithControlWalk<
                   // ratchet: `openEntries` reads only the epoch's exporter secret and is pure.
                   resolveLedgerEntries: async (ids) => {
                     try {
+                      assertSafetyOpen()
                       return await createLedgerEntryResolver(
                         commitFrame.sealedEntries,
                         crypto.openEntries,
@@ -1801,7 +1916,8 @@ export function createGroupPeerWithControlWalk<
               floorPosition: position,
             })
           } catch (error) {
-            if (disposed) return false
+            if (safetyRefusal(error) || safetyHold() !== null) return advancedEpoch
+            if (disposed || safetyHold() !== null) return false
             if (
               resolverFailed ||
               (error instanceof Error && error.name === 'CommitValidationUnavailableError')
@@ -1843,6 +1959,7 @@ export function createGroupPeerWithControlWalk<
             break
           }
           if (disposed) return false
+          if (safetyHold() !== null) return advancedEpoch || applied.advanced
           if (applied.validation === 'unavailable') {
             await resolveAnchorRotation({ port, knownUnlanded: true })
             return unprocessable(position, commitDigest, framedEpoch, header?.epoch ?? null)
@@ -2248,7 +2365,8 @@ export function createGroupPeerWithControlWalk<
     )
     const mutationID = newPublishID()
     return (staged) => {
-      const reason = safetyHold() ?? controlSafetyHeld(snapshot)
+      // A started commit finishes its atomic persistence without a safety-derived strand.
+      const reason = controlSafetyHeld(snapshot)
       if (reason !== null) throw new GroupSafetyHeldError(reason)
       // Removal retains a proven loser before terminal settlement marks other work unknown.
       const settled =
@@ -3038,7 +3156,7 @@ export function createGroupPeerWithControlWalk<
       requestID,
       Math.max(recoveryTimeoutMs, recoveryDeadlineMs),
     )
-    if (disposed) return false
+    if (disposed || safetyHold() !== null) return false
     return await new Promise<boolean>((resolve) => {
       let settled = false
       const bootstraps = new Set<Promise<void>>()
@@ -3049,11 +3167,13 @@ export function createGroupPeerWithControlWalk<
         ledgerGatherFinishes.delete(finishOnDispose)
         clearTimeout(timer)
         // Keep the lane until every bootstrap already touching this handle has finished.
-        if (bootstraps.size === 0) resolve(complete && !disposed)
+        if (bootstraps.size === 0) resolve(complete && !disposed && safetyHold() === null)
         else
           void Promise.allSettled([...bootstraps]).then((results) => {
             resolve(
-              !disposed && (complete || results.some((result) => result.status === 'fulfilled')),
+              !disposed &&
+                safetyHold() === null &&
+                (complete || results.some((result) => result.status === 'fulfilled')),
             )
           })
       }
@@ -3062,7 +3182,10 @@ export function createGroupPeerWithControlWalk<
       ledgerGatherFinishes.add(finishOnDispose)
       ledgerWaiters.set(requestID, (sealed) => {
         void (async () => {
-          if (settled || disposed) return
+          if (settled || disposed || safetyHold() !== null) {
+            finish(false)
+            return
+          }
           try {
             // Bytes this peer cannot open: another member's reply to another request, or a
             // hub-injected forgery. Dropped, gather waits — the per-request key is NOT consumed
@@ -3070,7 +3193,10 @@ export function createGroupPeerWithControlWalk<
             const tokens = await port.openSealedLedger(sealed, requestID, requestKey)
             if (tokens == null) return
             // Timeout or disposal can settle the gather while opening the reply.
-            if (settled || disposed) return
+            if (settled || disposed || safetyHold() !== null) {
+              finish(false)
+              return
+            }
             const bootstrap = port.bootstrapLedger(tokens)
             bootstraps.add(bootstrap)
             inFlightBootstraps.add(bootstrap)
@@ -3081,7 +3207,8 @@ export function createGroupPeerWithControlWalk<
               inFlightBootstraps.delete(bootstrap)
             }
             finish(true)
-          } catch {
+          } catch (error) {
+            if (safetyRefusal(error)) finish(false)
             // Recomputed head does not match the authenticated one: this responder withheld,
             // reordered or truncated an entry. Nothing folded. Wait for the next reply.
           }
@@ -3244,6 +3371,7 @@ export function createGroupPeerWithControlWalk<
     topicID: string,
     deadline: number,
   ): Promise<RendezvousOutcome> => {
+    assertSafetyOpen()
     const remaining = deadline - Date.now()
     const wait = Math.max(0, Math.min(recoveryTimeoutMs, remaining))
     const atDeadline = remaining <= recoveryTimeoutMs
@@ -3302,13 +3430,17 @@ export function createGroupPeerWithControlWalk<
   const scanRejoinSource = async (record: RejoinRecord): Promise<SourceScan> => {
     if (mls == null || control == null || commitTopicID == null)
       throw new Error('Missing recovery ports')
+    assertSafetyOpen()
     const current = await mls.readRecoverySource()
+    assertSafetyOpen()
     const responses = (await control.load()).responses
+    assertSafetyOpen()
     const frames: SourceScan['frames'] = []
     let after = record.source.head
     let gap = false
     for (;;) {
       assertLive()
+      assertSafetyOpen()
       const page = checkedFetchResult(
         await mux.fetchTopic({
           topicID: commitTopicID,
@@ -3316,6 +3448,7 @@ export function createGroupPeerWithControlWalk<
           limit: COMMIT_FETCH_LIMIT,
         }),
       )
+      assertSafetyOpen()
       gap ||= page.gap
       for (const row of page.messages) {
         const position = asLogPosition(row.sequenceID)
@@ -3331,7 +3464,9 @@ export function createGroupPeerWithControlWalk<
         } catch {
           /* Unparseable frames cannot move the source. */
         }
+        assertSafetyOpen()
         const header = commit == null ? null : await mls.readCommitHeader(commit)
+        assertSafetyOpen()
         const digest = commit == null ? null : digestAppliedCommit(commit)
         frames.push({
           position,
@@ -3351,12 +3486,12 @@ export function createGroupPeerWithControlWalk<
   }
 
   const recoveryCandidate = async (record: RejoinRecord): Promise<PendingRecovery> => {
+    assertSafetyOpen()
     if (pendingRecovery?.commitDigest === record.digest) return pendingRecovery.pending
     if (mls == null) throw new Error('Missing recovery port')
-    return wrapPendingRecovery(
-      boundary,
-      await mls.restoreRecovery(record.candidate, record.requestKey),
-    )
+    const pending = await mls.restoreRecovery(record.candidate, record.requestKey)
+    assertSafetyOpen()
+    return wrapPendingRecovery(boundary, pending)
   }
 
   let currentRecoveryAttemptID: string | null = null
@@ -3398,8 +3533,10 @@ export function createGroupPeerWithControlWalk<
       },
       publish: async (payload, publishID, expectedHead) => {
         assertLive()
+        assertSafetyOpen()
         await refreshControl()
         assertLive()
+        assertSafetyOpen()
         if (hardControlHeld()) throw new RecoveryRequiredError('Recovery publication is held')
         const result = await mux.publish({
           topicID: commits,
@@ -3415,24 +3552,31 @@ export function createGroupPeerWithControlWalk<
         searchOccurrence(
           async (after) => {
             assertLive()
-            return checkedFetchResult(
+            assertSafetyOpen()
+            const page = checkedFetchResult(
               await mux.fetchTopic({
                 topicID: commits,
                 ...(after === null ? {} : { after }),
                 limit: COMMIT_FETCH_LIMIT,
               }),
             )
+            assertSafetyOpen()
+            return page
           },
           from,
           digest,
         ),
       confirm: async (record) => {
+        assertSafetyOpen()
         const position = record.position
         if (position == null) throw new Error('Published rejoin has no position')
         const pending = await recoveryCandidate(record)
+        assertSafetyOpen()
         pendingRecovery = { position, commitDigest: record.digest, pending }
         const key = await pending.confirmationKey(position, record.digest)
+        assertSafetyOpen()
         const verified = await port.verifyRecoveryRequest(record.request)
+        assertSafetyOpen()
         if (verified == null) throw new Error('The recovery request did not verify')
         const verdict = await waitForRecoveryConfirmation({
           port,
@@ -3446,8 +3590,10 @@ export function createGroupPeerWithControlWalk<
           deadline,
           timeoutMs: recoveryTimeoutMs,
           waiters: confirmationWaiters,
-          send: () =>
-            mux.publish({
+          safetyHold,
+          send: async () => {
+            assertSafetyOpen()
+            return mux.publish({
               topicID: rendezvous,
               payload: encodeHandshakeFrame(
                 HANDSHAKE_KIND.recoveryConfirmRequest,
@@ -3458,9 +3604,11 @@ export function createGroupPeerWithControlWalk<
                   commitDigest: record.digest,
                 }),
               ),
-            }),
+            })
+          },
         })
         assertLive()
+        assertSafetyOpen()
         if (verdict.kind === 'refused' && ['binding', 'lapse', 'floor'].includes(verdict.refusal))
           pending.markBindingUnusable()
         rejoinFailureDetails =
@@ -3478,6 +3626,7 @@ export function createGroupPeerWithControlWalk<
       },
       adopt: async (record, write) => {
         await refreshControl()
+        assertSafetyOpen()
         if (hardControlHeld()) throw new RecoveryRequiredError('Recovery adoption is held')
         const pending = await recoveryCandidate(record)
         try {
@@ -3485,6 +3634,7 @@ export function createGroupPeerWithControlWalk<
             port,
             ratchet: async () => {
               await refreshControl()
+              assertSafetyOpen()
               if (hardControlHeld()) throw new RecoveryRequiredError('Recovery adoption is held')
               await pending.onAccepted(write)
             },
@@ -3508,7 +3658,9 @@ export function createGroupPeerWithControlWalk<
           }
         }
         assertLive()
+        assertSafetyOpen()
         await refreshControl()
+        assertSafetyOpen()
         reconciledHead = record.position ?? reconciledHead
         commitLogHead = record.position ?? commitLogHead
         healRequested = false
@@ -3517,7 +3669,10 @@ export function createGroupPeerWithControlWalk<
         rejoinRuntimeNeedsBuild = false
       },
       bootstrapLedger: () => ensureLedger(deadline),
-      getLedger: () => port.getLedger(),
+      getLedger: () => {
+        assertSafetyOpen()
+        return port.getLedger()
+      },
     }
   }
 
@@ -3529,6 +3684,7 @@ export function createGroupPeerWithControlWalk<
     rendezvous: string,
   ): Promise<{ advanced: boolean }> => {
     assertLive()
+    assertSafetyOpen()
     currentRecoveryTrigger = trigger
     const controlStore = control
     if (controlStore == null) throw new Error('Missing control store')
@@ -3573,6 +3729,7 @@ export function createGroupPeerWithControlWalk<
           if (safetyHold() !== null) return false
           if (await ensureLedger(Date.now() + recoveryTimeoutMs)) await finalizeBootstrap(port)
           assertLive()
+          assertSafetyOpen()
         }
         return safetyHold() === null
       })
@@ -3582,6 +3739,7 @@ export function createGroupPeerWithControlWalk<
       while (Date.now() < deadline) {
         if (safetyHold() !== null || recoveryGeneration !== generation) return { advanced: false }
         let record = (await controlStore.load()).rejoin
+        assertSafetyOpen()
         if (record?.stage === 'refused') return failed('refused', { refusal: record.refusal })
         if (record == null) {
           const built = await runSerial(async () => {
@@ -3593,37 +3751,46 @@ export function createGroupPeerWithControlWalk<
               await reconcileCommits()
             }
             assertLive()
+            assertSafetyOpen()
             if (safetyHold() !== null) return null
             const expectedHead = await readCommitHead(commits)
             if (safetyHold() !== null) return null
             if (!prepared) {
               prepared = true
-              if ((await port.prepareRecovery()) === 'renewal-required')
-                return failed('renewal-required')
+              const preparation = await port.prepareRecovery()
+              assertSafetyOpen()
+              if (preparation === 'renewal-required') return failed('renewal-required')
             }
+            assertSafetyOpen()
             const requestID = newPublishID()
             const { request, requestKey } = await port.createRecoveryRequest(
               requestID,
               Math.max(0, deadline - Date.now()),
             )
+            assertSafetyOpen()
             const outcome = await requestGroupInfo(request, requestID, rendezvous, deadline)
             assertLive()
+            assertSafetyOpen()
             if (outcome.kind === 'disposed') throw new PeerDisposedError('Peer is disposed')
             if (outcome.kind === 'publish-failed') throw outcome.error
             if (outcome.kind === 'timeout')
               return failed(outcome.atDeadline ? 'deadline' : 'no-responder')
             await reconcileCommits()
+            assertSafetyOpen()
             let pending: AppliedRecovery
             try {
               pending = await port.applyRecovery(outcome.sealed, requestID, requestKey)
-            } catch {
+            } catch (error) {
+              if (safetyRefusal(error)) throw error
               pending = null
             }
             assertLive()
+            assertSafetyOpen()
             if (pending == null) return null
             if ('renewalRequired' in pending) return failed('renewal-required')
             pending = wrapPendingRecovery(boundary, pending)
             const source = await port.readRecoverySource()
+            assertSafetyOpen()
             const ledgerBefore = [
               ...new Set([
                 ...(inFlightEntries ?? awaitingBootstrap?.entries ?? []),
@@ -3633,7 +3800,9 @@ export function createGroupPeerWithControlWalk<
                   : []),
               ]),
             ]
+            assertSafetyOpen()
             const { payload } = await frameCommit(pending.commit, [], null)
+            assertSafetyOpen()
             const record: RejoinRecord = {
               id: newPublishID(),
               stage: 'built',
@@ -3651,9 +3820,11 @@ export function createGroupPeerWithControlWalk<
               ledgerBefore,
               conflictEpoch: null,
             }
+            assertSafetyOpen()
             await applyResolved(controlStore, { putRejoin: record }, newPublishID())
             inFlightEntries = ledgerBefore
             assertLive()
+            assertSafetyOpen()
             pendingRecovery = { position: '', commitDigest: record.digest, pending }
             await refreshControl()
             return record
@@ -3667,6 +3838,7 @@ export function createGroupPeerWithControlWalk<
             awaitingBootstrap = { attemptID, trigger, entries: record.ledgerBefore }
             const complete = await ensureLedger(deadline)
             assertLive()
+            assertSafetyOpen()
             if (!complete) return false
             await finalizeBootstrap(port, false)
             return true
@@ -3681,6 +3853,7 @@ export function createGroupPeerWithControlWalk<
         rejoinFailureDetails = {}
         const advanceRecord = async (): Promise<RejoinRecord | null> => {
           const current = (await controlStore.load()).rejoin
+          assertSafetyOpen()
           return current?.id === record.id
             ? await stepRejoin(rejoinDeps(deadline), current)
             : current
@@ -3690,6 +3863,7 @@ export function createGroupPeerWithControlWalk<
             ? await stepRejoin(rejoinDeps(deadline), record)
             : await runSerial(advanceRecord)
         assertLive()
+        assertSafetyOpen()
         await runSerial(refreshControl)
         if (safetyHold() !== null || recoveryGeneration !== generation) return { advanced: false }
         if (next?.stage === 'adopted')
@@ -3710,6 +3884,13 @@ export function createGroupPeerWithControlWalk<
       }
       return failed('deadline')
     } catch (error) {
+      if (safetyRefusal(error) || safetyHold() !== null) {
+        if (trigger === 'consumer') {
+          assertSafetyOpen()
+          throw error
+        }
+        return { advanced: false }
+      }
       if (disposed || error instanceof PeerDisposedError) {
         emitRecovery({ ...base, phase: 'failed', reason: 'disposed' })
         throw error instanceof PeerDisposedError ? error : new PeerDisposedError('Peer is disposed')
@@ -3721,6 +3902,11 @@ export function createGroupPeerWithControlWalk<
   }
 
   const runRecovery = (trigger: RecoveryTrigger): Promise<{ advanced: boolean }> => {
+    const safety = safetyHold()
+    if (safety !== null)
+      return trigger === 'consumer'
+        ? Promise.reject(new GroupSafetyHeldError(safety))
+        : Promise.resolve({ advanced: false })
     if (hardControlHeld() || (trigger === 'automatic' && (renewalHeld() || refusalHeld)))
       return Promise.resolve({ advanced: false })
     if (activeRecovery != null) return activeRecovery
@@ -3729,6 +3915,7 @@ export function createGroupPeerWithControlWalk<
     attempt = (async (): Promise<{ advanced: boolean }> => {
       await ready
       assertLive()
+      assertSafetyOpen()
       if (locallyRemoved) throw new PeerRemovedError('Peer was removed')
       if (mls == null || commitTopicID == null || rendezvousTopicID == null) {
         return { advanced: false }
@@ -3758,11 +3945,16 @@ export function createGroupPeerWithControlWalk<
   }
 
   const recover = async (): Promise<{ advanced: boolean; reenact: Array<string> }> => {
-    renewalRequiredEpoch = null
+    assertSafetyOpen()
     await ready
+    assertSafetyOpen()
+    renewalRequiredEpoch = null
     if (control != null && (await control.load()).rejoin?.stage === 'refused') {
       await runSerial(async () => {
-        if ((await control.load()).rejoin?.stage === 'refused') {
+        assertSafetyOpen()
+        const record = (await control.load()).rejoin
+        assertSafetyOpen()
+        if (record?.stage === 'refused') {
           await applyResolved(control, { deleteRejoin: true }, newPublishID())
           await refreshControl()
         }
@@ -4007,6 +4199,8 @@ export function createGroupPeerWithControlWalk<
         const outcome = await epochOrAbort(config?.signal)
         assertLive()
         if (outcome === 'aborted') return []
+        const safety = safetyHold()
+        if (safety !== null) throw new SendNotAdmissibleError(safety)
         return surfaceFor(key).gather(prc, config)
       },
       to: (memberDID) => withEpoch(() => surfaceFor(key).to(memberDID)),

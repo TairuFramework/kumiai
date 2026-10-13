@@ -2,6 +2,7 @@ import { encodeMultibase } from '@kokuin/token'
 import { hmac } from '@noble/hashes/hmac.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 
+import type { SafetyHold } from './control/safety.js'
 import type { ExternalResponse } from './control/types.js'
 import type {
   GroupMLS,
@@ -9,6 +10,7 @@ import type {
   PendingRecovery,
   RecoveryRefusalReason,
 } from './crypto.js'
+import { GroupSafetyHeldError } from './errors.js'
 
 export type RecoveryCommitOutcome = { commitDigest: string } & (
   | { kind: 'applied'; epoch: number; key: Uint8Array }
@@ -20,15 +22,18 @@ export type RecoveryCommitOutcome = { commitDigest: string } & (
 export async function responseOutcome(
   port: GroupMLS,
   response: ExternalResponse,
+  safetyHold: () => SafetyHold = () => null,
 ): Promise<RecoveryCommitOutcome | undefined> {
+  if (safetyHold() !== null) return
   const commitDigest = response.digest
   if (response.kind === 'superseded') return { kind: 'superseded', commitDigest }
   if (response.kind === 'refused') {
     return { kind: 'refused', commitDigest, reason: response.reason ?? 'invalid' }
   }
   if ((await port.readEpoch()) !== response.epochAfter) return
+  if (safetyHold() !== null) return
   const derived = await port.confirmationKey(response.position, response.digest)
-  if (derived.epoch !== response.epochAfter) {
+  if (safetyHold() !== null || derived.epoch !== response.epochAfter) {
     derived.key.fill(0)
     return
   }
@@ -110,6 +115,7 @@ export type WaitForRecoveryConfirmationParams = {
   timeoutMs: number
   send: () => Promise<unknown>
   waiters: Map<string, ConfirmationWaiter>
+  safetyHold?: () => SafetyHold
 }
 
 export function waitForRecoveryConfirmation(
@@ -129,6 +135,7 @@ export function waitForRecoveryConfirmation(
     send,
     waiters,
   } = params
+  const safetyHold = params.safetyHold ?? (() => null)
   return new Promise((resolve) => {
     let finished = false
     let settle: ReturnType<typeof setTimeout> | undefined
@@ -147,6 +154,11 @@ export function waitForRecoveryConfirmation(
     }
     const ask = (): void => {
       if (finished) return
+      const reason = safetyHold()
+      if (reason !== null) {
+        finish({ kind: 'error', error: new GroupSafetyHeldError(reason) })
+        return
+      }
       void send().catch((error: unknown) => finish({ kind: 'error', error }))
     }
     const finishWithBest = (): void => {
@@ -160,8 +172,13 @@ export function waitForRecoveryConfirmation(
         opening = opening
           .then(async () => {
             if (finished) return
+            const reason = safetyHold()
+            if (reason !== null) {
+              finish({ kind: 'error', error: new GroupSafetyHeldError(reason) })
+              return
+            }
             const opened = await port.openRecoveryVerdict(sealed, requestID, requestKey)
-            if (finished || opened == null) return
+            if (finished || safetyHold() !== null || opened == null) return
             const verdict = opened.verdict
             const boundToAttempt =
               verdict.groupID === groupID &&

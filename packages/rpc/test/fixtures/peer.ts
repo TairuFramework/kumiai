@@ -12,7 +12,11 @@ import { digestAppliedCommit } from '../../src/classify.js'
 import { decodeCommitFrame, encodeCommitFrame } from '../../src/commit-frame.js'
 import type { FrameControlBuild } from '../../src/control/build.js'
 import type { HostBuilt, OperationDeps } from '../../src/control/operations.js'
-import { controlSafetyHeld, type GroupSafetyEvent } from '../../src/control/safety.js'
+import {
+  controlSafetyHeld,
+  type GroupSafetyEvent,
+  type SafetyHold,
+} from '../../src/control/safety.js'
 import type { ControlEvidenceSnapshot, ControlValidationPort } from '../../src/control/search.js'
 import { controlBuildRef } from '../../src/control/slot.js'
 import type {
@@ -78,6 +82,37 @@ export type TestPeer = {
   appCursorStore: MemoryAppCursorStore
   /** Every Welcome this host delivered, in order. Records the at-least-once repeats too. */
   welcomes: Array<string>
+}
+
+/** Leave the provider admissible so only the peer's volatile latch can stop continuations. */
+export function latchPeerSafety(member: TestPeer, reason: NonNullable<SafetyHold>): void {
+  const admission = vi.spyOn(member.mls, 'sendAdmission')
+  admission.mockReturnValue({ admissible: false, reason, epoch: member.mls.epoch() })
+  expectSafetyLatch(member, reason)
+  admission.mockReturnValue({ admissible: true, epoch: member.mls.epoch() })
+}
+
+function expectSafetyLatch(member: TestPeer, reason: NonNullable<SafetyHold>): void {
+  if (member.controlWalk.safetyHold() !== reason) throw new Error('Safety did not latch')
+}
+
+/** The halt write rolls back; disposal releases its storage retry loop. */
+export async function rollBackForkHalt(member: TestPeer): Promise<{ settled: Promise<void> }> {
+  const failed = Promise.withResolvers<void>()
+  const apply = member.control.apply.bind(member.control)
+  vi.spyOn(member.control, 'apply').mockImplementation(async (changes, mutationID) => {
+    if (changes.forkHalt === undefined) return apply(changes, mutationID)
+    failed.resolve()
+    throw new Error('halt write rolled back')
+  })
+  const settled = member.controlWalk.haltFork({
+    kind: 'unexplained-own-commit',
+    epoch: 1,
+    position: '000000000001',
+    digest: 'unmerged',
+  })
+  await failed.promise
+  return { settled }
 }
 
 export type MakeMLSPeerOptions = {

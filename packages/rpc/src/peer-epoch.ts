@@ -15,6 +15,7 @@ import type { Runtime } from '@sozai/runtime'
 import type { Anchor } from './anchor.js'
 import { decodeAppAAD, encodeAppAAD } from './app-aad.js'
 import type { AppLane } from './app-lane.js'
+import type { SafetyHold } from './control/safety.js'
 import { type GroupCrypto, type GroupUnwrapResult, isFrameAhead } from './crypto.js'
 import {
   createDirectedClient,
@@ -23,6 +24,7 @@ import {
   createUnroutedTagResponder,
   type InboundPath,
 } from './directed.js'
+import { GroupSafetyHeldError, SendNotAdmissibleError } from './errors.js'
 import { assertFrameFits } from './frame-size.js'
 import { adaptBusHandlers } from './handlers.js'
 import { type HostBoundary, wrapGatherOptions } from './host-boundary.js'
@@ -67,6 +69,7 @@ export type EpochRuntimeParams<Protocols extends Record<string, ProtocolDefiniti
   isDisposed: () => boolean
   note: AppLane['note']
   requestAppPull: () => void
+  safetyHold: () => SafetyHold
 }
 
 export type EpochRuntime = {
@@ -105,7 +108,20 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
     sealBarrier,
     sealError,
     isDisposed,
+    safetyHold,
   } = params
+  const assertSend = (): void => {
+    const reason = safetyHold()
+    if (reason !== null) throw new SendNotAdmissibleError(reason)
+  }
+  const guardedWrap: GroupCrypto['wrap'] = (bytes, options) => {
+    assertSend()
+    return crypto.wrap(bytes, options)
+  }
+  const assertOpen = (): void => {
+    const reason = safetyHold()
+    if (reason !== null) throw new GroupSafetyHeldError(reason)
+  }
 
   let runtimes = new Map<string, ProtocolRuntime>()
 
@@ -157,6 +173,7 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
       mux,
       topicID,
       unwrap: (b) => {
+        assertOpen()
         const hinted = crypto.frameAAD(b)
         const decoded = hinted == null ? null : decodeAppAAD(hinted)
         const intent = decoded?.topicID === topicID ? decoded.intent : 'ephemeral'
@@ -215,6 +232,7 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
         // rather than the answer: anything published through here was sealed by the `wrap` below,
         // so the recorded topic is the one that agrees with the seal.
         publish: async (builtFor, payload) => {
+          assertSend()
           await mux.bus.publish(sealedOn.get(payload) ?? builtFor, payload)
         },
         // Already-opened plaintext, from the topic's one inbound path. The `unwrap` below only
@@ -222,7 +240,7 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
         subscribe: (_listenOn, onMessage) => inbound(onMessage),
       },
       wrap: async (bytes) => {
-        const sealed = await sealForSegment(name, bytes)
+        const sealed = await sealForSegment(name, bytes, 'ephemeral', assertSend)
         sealedOn.set(sealed.payload, sealed.topicID)
         return sealed.payload
       },
@@ -241,10 +259,12 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
       path: createInboxPath({
         mux,
         topicID: selfInbox,
-        unwrap: (b) =>
-          crypto.unwrap(b, {
+        unwrap: (b) => {
+          assertOpen()
+          return crypto.unwrap(b, {
             expectedAAD: encodeAppAAD({ topicID: selfInbox, intent: 'ephemeral' }),
-          }),
+          })
+        },
         retainOnFailure,
       }),
     }
@@ -256,6 +276,7 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
       inbound: inboxLane.path,
       isRegistered: (name) => Object.hasOwn(protocols, name),
       sealReply: sealDirectedReply,
+      safetyHold,
     })
     for (const [name, protocol] of Object.entries(protocols)) {
       // The app topic is bound to the ANCHOR, not the live epoch — see {@link sealForSegment}.
@@ -295,7 +316,8 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
         protocol: protocol as ProtocolDefinition,
         protocolName: name,
         handlers: handlers[name] as unknown as ProcedureHandlers<ProtocolDefinition>,
-        wrap: crypto.wrap,
+        wrap: guardedWrap,
+        safetyHold,
       })
       next.set(name, { client, busServer, acceptor, directed: new Map() })
     }
@@ -370,6 +392,7 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
     tagged: Uint8Array,
   ): Promise<SegmentFrame> => {
     while (true) {
+      assertSend()
       const at = anchor()
       const topicID = inboxTopic(at.secret, at.epoch, recipientDID)
       const payload = await crypto.wrap(tagged, {
@@ -396,7 +419,9 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
             name,
             encodeEventFrame(prc, data),
             'log',
+            assertSend,
           )
+          assertSend()
           await mux.publish({ topicID, payload, retain: 'log' })
           return
         }
@@ -415,6 +440,7 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
           signal: config?.signal,
         }),
       to: async (memberDID) => {
+        assertSend()
         // Normalized ONCE, at the ingress: the cache key, the topic derivation and the
         // directed client's own filter (`senderDID !== memberDID`) must all see one canonical
         // form, or a long-form caller never converges onto the short form MLS actually replies
@@ -434,7 +460,8 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
           // a lane nobody listens to.
           receiveTopicID: lane.topicID,
           inbound: lane.path,
-          wrap: crypto.wrap,
+          wrap: guardedWrap,
+          safetyHold,
           protocol: name,
           ...(params.runtime != null ? { runtime: params.runtime } : {}),
         })
