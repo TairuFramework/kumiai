@@ -27,3 +27,9 @@ MLS, broadcast and rpc runtime code no longer needs structuredClone, String.isWe
 Persist one private control build per source epoch. Validate checkpoint-bound first-valid acceptance before adoption or Welcome delivery. Retain source slots across deadlines and outcome acknowledgement.
 
 Add an @kumiai/rpc/testing entry point for deterministic control-step tests.
+
+Add registry core with validated ownership on the shared database binding, retire hooks, committed runtime snapshots and accepted-journal candidate binding. Seed uses its normative signature and retained-entry proof; superseded marker resolution may be uncertain. Switch replay uses retained adopted rejoin evidence.
+
+After drainage, fail every uncertified old entry with incarnation-abandoned events and preserve certified settlement. Retain adopted bootstrap/reenact continuation for 2.2d. Require explicit simple-access keys and normative spent-first Welcome judgment.
+
+Core switch currently uses restricted RegistrySwitchWrite; 2.2d reconciles AdoptionWrite and wires consumers. Leases, batching, package burn/receipt, full factory parameters and crypto/settlement adapters follow in 2.3. `@kumiai/mls` exports its lapse/membership rule as a pure helper.
