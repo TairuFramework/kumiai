@@ -2,6 +2,7 @@ import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import {
   commitInvite,
   commitKeyRotation,
+  commitLedgerEntries,
   createGroup,
   createInvite,
   createKeyPackageBundle,
@@ -12,6 +13,15 @@ import {
   processWelcome,
 } from '@kumiai/mls'
 import { toB64U } from '@sozai/codec'
+import {
+  createCommit,
+  decode,
+  defaultProposalTypes,
+  encode,
+  mlsMessageDecoder,
+  mlsMessageEncoder,
+  wireformats,
+} from 'ts-mls'
 
 import type { PackageUse } from '../../src/persistence-types.js'
 import { restoreMemoryControlHandle, seedMemoryControlState } from './sealed-memory-mls.js'
@@ -42,8 +52,7 @@ export async function registryHandle(params: {
   })
 }
 
-export async function createRegistryWelcomeHistory(params: {
-  mode: 'real-mls' | 'double'
+async function createRegistryWelcomeSetup(params: {
   groupID: string
   identity: OwnIdentity
   options: GroupOptions
@@ -60,6 +69,75 @@ export async function createRegistryWelcomeHistory(params: {
     recipientDID: params.identity.id,
     permission: 'member',
   })
+  return { author, base, bundle, invite }
+}
+
+export async function alternateWireWelcome(): Promise<{
+  original: Uint8Array
+  alternate: Uint8Array
+  exact: GroupHandle
+  alternateHandle: GroupHandle
+}> {
+  const identity = randomIdentity()
+  const options: GroupOptions = {
+    keyRetention: { retainKeysForGenerations: 1000, maximumForwardRatchetSteps: 1000 },
+  }
+  const { author, base, bundle, invite } = await createRegistryWelcomeSetup({
+    groupID: 'registry-welcome-wire',
+    identity,
+    options,
+    kind: 'ordinary',
+  })
+  const otherIdentity = randomIdentity()
+  const otherBundle = await createKeyPackageBundle(otherIdentity, options)
+  const { invite: otherInvite } = await createInvite({
+    group: base,
+    identity: author,
+    recipientDID: otherIdentity.id,
+    permission: 'member',
+  })
+  const { newGroup: enacted } = await commitLedgerEntries(base, [
+    ...invite.ledgerEntries.slice(base.ledgerTokens.length),
+    ...otherInvite.ledgerEntries.slice(base.ledgerTokens.length),
+  ])
+  invite.ledgerEntries = enacted.ledgerTokens
+  otherInvite.ledgerEntries = enacted.ledgerTokens
+  const result = await createCommit({
+    context: enacted.context,
+    state: enacted.state,
+    extraProposals: [
+      { proposalType: defaultProposalTypes.add, add: { keyPackage: bundle.publicPackage } },
+      { proposalType: defaultProposalTypes.add, add: { keyPackage: otherBundle.publicPackage } },
+    ],
+    ratchetTreeExtension: true,
+  })
+  if (result.welcome == null) throw new Error('expected a Welcome for both recipients')
+  const original = encode(mlsMessageEncoder, result.welcome)
+  const decoded = decode(mlsMessageDecoder, original)
+  if (decoded?.wireformat !== wireformats.mls_welcome) {
+    throw new Error('expected a framed MLSMessage(Welcome)')
+  }
+  const alternate = encode(mlsMessageEncoder, {
+    ...decoded,
+    welcome: { ...decoded.welcome, secrets: [...decoded.welcome.secrets].reverse() },
+  })
+  const join = async (welcome: Uint8Array) => {
+    return (await processWelcome({ identity, invite, welcome, keyPackageBundle: bundle, options }))
+      .group
+  }
+  const exact = await join(original)
+  const alternateHandle = await join(alternate)
+  return { original, alternate, exact, alternateHandle }
+}
+
+export async function createRegistryWelcomeHistory(params: {
+  mode: 'real-mls' | 'double'
+  groupID: string
+  identity: OwnIdentity
+  options: GroupOptions
+  kind: PackageUse['kind']
+}) {
+  const { base, bundle, invite } = await createRegistryWelcomeSetup(params)
   const retained: Array<{ handle: GroupHandle; join(): Promise<GroupHandle> }> = []
   async function at(epoch: number) {
     let source = base
