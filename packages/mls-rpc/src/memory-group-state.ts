@@ -521,6 +521,7 @@ export function createUnlockedGroupStateStores(params: {
       }
       const row = slot<GroupStateRecord>('state', incarnation)
       return {
+        loadMetadata: stateMetadata(incarnation).load,
         async loadInitialIdentity() {
           return (await stateMetadata(incarnation).load())?.initialIdentity ?? null
         },
@@ -617,6 +618,7 @@ export function createGroupStateStores(
       const state = stores.state(incarnation)
       return {
         loadInitialIdentity: memoryOperation(tx, state.loadInitialIdentity),
+        loadMetadata: memoryOperation(tx, state.loadMetadata),
         load: memoryOperation(tx, state.load),
         save: memoryOperation(tx, state.save, 'domain'),
       }

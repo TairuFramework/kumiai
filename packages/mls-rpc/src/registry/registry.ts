@@ -21,6 +21,7 @@ import {
 } from './retirement.js'
 import { createRegistryRuntime } from './runtime.js'
 import { accountedRuntime } from './runtime-facts.js'
+import { createRegistrySeed } from './seed.js'
 import { readRecoverySource } from './source.js'
 import type {
   GroupHandleRegistry,
@@ -221,6 +222,13 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   }
   const registry: GroupHandleRegistry = {
     start,
+    seed: createRegistrySeed({
+      capability,
+      retirement,
+      environment: environment.recovery,
+      ownerDID: environment.ownerDID,
+      start,
+    }),
     recoverySource(groupID) {
       groupSlot(groupID)
       return capability.read(groupID, (reads) => readRecoverySource(reads, groupID))

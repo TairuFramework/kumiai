@@ -675,6 +675,7 @@ export function createMemoryGroupCoordinator(params: {
                 })
                 const state: ReturnType<typeof raw.state> = {
                   loadInitialIdentity: rows.state.loadInitialIdentity,
+                  loadMetadata: rows.state.loadMetadata,
                   load: rows.state.load,
                   async save(value, expected) {
                     const owned = copyStoredValue(value)
@@ -741,6 +742,7 @@ export function createMemoryGroupCoordinator(params: {
                   ...rows,
                   state: {
                     loadInitialIdentity: state.loadInitialIdentity,
+                    loadMetadata: state.loadMetadata,
                     load: state.load,
                     save: memoryOperation(tx, state.save, 'domain'),
                   },

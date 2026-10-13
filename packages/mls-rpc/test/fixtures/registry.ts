@@ -52,7 +52,7 @@ export type RegistryFixtureBase = {
   device: DevicePersistence<MemoryTransaction>
   identity: OwnIdentity
   environment: RecoveryEnvironment
-  makeHandle(epoch: number): Promise<GroupHandle>
+  makeHandle(epoch: number, groupID?: string): Promise<GroupHandle>
   advance(handle: GroupHandle): Promise<GroupHandle>
   welcomeHistory(kind: PackageUse['kind']): Promise<{
     exact: GroupHandle
@@ -114,6 +114,19 @@ const restorers = new WeakMap<
   (record: GroupStateRecord & { deleted: false; state: Uint8Array }) => Promise<GroupHandle>
 >()
 const markerWriters = new WeakMap<RegistryFixtureBase, RegistryStorageFixture['forceOwnerMarker']>()
+const rowRemovers = new WeakMap<RegistryFixtureBase, RegistryStorageFixture['deleteCommittedRow']>()
+
+export async function registryFixtureRemoveMetadata(
+  fixture: RegistryFixtureBase,
+  key: GroupKey,
+): Promise<void> {
+  const remove = rowRemovers.get(fixture)
+  if (remove === undefined) throw new Error('Unknown registry fixture')
+  await remove(
+    'meta',
+    physicalRecordKey({ ...key, namespace: 'meta', recordID: JSON.stringify(['state-version']) }),
+  )
+}
 export function registryFixtureRestore(fixture: RegistryFixtureBase) {
   const restore = restorers.get(fixture)
   if (restore === undefined) throw new Error('Unknown registry fixture')
@@ -201,9 +214,9 @@ async function assemble(
     device: storage.ports.device,
     identity,
     environment,
-    async makeHandle(epoch) {
+    async makeHandle(epoch, groupID = params.groupID) {
       if (!Number.isSafeInteger(epoch) || epoch < 0) throw new Error('Invalid fixture epoch')
-      let handle = (await createGroup(identity, params.groupID, environment.options)).group
+      let handle = (await createGroup(identity, groupID, environment.options)).group
       while (Number(handle.epoch) < epoch) handle = (await commitKeyRotation(handle)).newGroup
       return registryHandle({ mode: params.mode, handle, options: environment.options })
     },
@@ -335,6 +348,7 @@ async function assemble(
   }
   restorers.set(fixture, restore)
   markerWriters.set(fixture, storage.forceOwnerMarker)
+  rowRemovers.set(fixture, storage.deleteCommittedRow)
   if (params.setup === 'seeded' && rows === undefined) {
     const handle = await fixture.makeHandle(0)
     await fixture.installRows({

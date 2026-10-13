@@ -482,6 +482,7 @@ export function createIncarnationStores(
   return {
     state: {
       loadInitialIdentity: memoryOperation(tx, stores.state.loadInitialIdentity),
+      loadMetadata: memoryOperation(tx, stores.state.loadMetadata),
       load: memoryOperation(tx, stores.state.load),
       save: memoryOperation(tx, stores.state.save, 'domain'),
     },

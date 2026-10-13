@@ -94,3 +94,26 @@ export class RegistryResyncRefusedError extends Error {
     return this.#reason
   }
 }
+
+export type SeedAdmissionRefusalReason =
+  | 'spent'
+  | 'fork-halted'
+  | 'replace-required'
+  | 'invalid-active-metadata'
+  | 'unavailable'
+  | 'invalid-genesis'
+  | 'invalid-package-use'
+
+export class SeedAdmissionRefusedError extends Error {
+  override name = 'SeedAdmissionRefusedError'
+  #reason: SeedAdmissionRefusalReason
+
+  constructor(params: { reason: SeedAdmissionRefusalReason; cause?: unknown }) {
+    super(`Seed admission refused: ${params.reason}`, { cause: params.cause })
+    this.#reason = params.reason
+  }
+
+  get reason(): SeedAdmissionRefusalReason {
+    return this.#reason
+  }
+}

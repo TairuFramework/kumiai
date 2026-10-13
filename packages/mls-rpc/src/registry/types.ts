@@ -9,6 +9,7 @@ import type {
   GroupRecoveryTrust,
   GroupStateRecord,
   GroupTransaction,
+  PackageUse,
 } from '../persistence-types.js'
 import type { RecoveryEnvironment } from './validation.js'
 
@@ -46,6 +47,10 @@ export type ResyncProof = {
 }
 export type GroupHandleRegistry = {
   start(): Promise<void>
+  seed(
+    group: GroupHandle,
+    params: { replace?: boolean; packageUse: PackageUse | null },
+  ): Promise<GroupKey>
   access(groupID: string): Promise<RegistryHandleAccess>
   recoverySource(groupID: string): Promise<RecoverySource>
 }

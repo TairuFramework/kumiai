@@ -14,7 +14,7 @@ import type {
   GroupKey,
 } from '@kumiai/rpc'
 
-import type { EntryReads, Prepared } from './entry-capability.js'
+import type { EntryReads, Prepared, StateMetadata } from './entry-capability.js'
 
 export type OwnershipContextPort = {
   run<T>(token: object, fn: () => T): T
@@ -72,6 +72,7 @@ export type IncarnationStores = {
   state: {
     load(): Promise<GroupStateRecord | null>
     loadInitialIdentity(): Promise<EpochIdentity | null>
+    loadMetadata(): Promise<StateMetadata | null>
     save(record: GroupStateRecord, expected?: AdoptionWrite['expected']): Promise<void>
   }
   control: {
