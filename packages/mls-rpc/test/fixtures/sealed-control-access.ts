@@ -1,8 +1,9 @@
 import { decodeClientState, encodeClientState, type GroupHandle, restoreGroup } from '@kumiai/mls'
-import type { AdoptionWrite } from '@kumiai/rpc'
+import type { AdoptionWrite, ControlStore } from '@kumiai/rpc'
 
 import type { ControlRead, HandleAccess } from '../../src/access.js'
 import { decodeControlJournal } from '../../src/control-journal.js'
+import { DisplacedGroupHandleError } from '../../src/persistence-errors.js'
 import type { GroupKey, GroupPersistence, MemoryTransaction } from '../../src/persistence-types.js'
 import { nextChange } from './storage-seed.js'
 
@@ -117,10 +118,19 @@ export async function createSealedControlAccess(
         const refresh = async (): Promise<ControlRead> => {
           if (!active) throw new Error('Control read scope has ended')
           const { handle, source } = await read()
+          if (!active) throw new Error('Control read scope has ended')
           return { handle, source }
         }
+        const loadControl = async (control: ControlStore = groups.ports(key).control) => {
+          if (!active) throw new Error('Control read scope has ended')
+          if (control.key.groupID !== key.groupID || control.key.incarnation !== key.incarnation)
+            throw new DisplacedGroupHandleError('Control store belongs to another incarnation')
+          const value = await control.load()
+          if (!active) throw new Error('Control read scope has ended')
+          return value
+        }
         try {
-          return await fn({ ...(await refresh()), refresh })
+          return await fn({ ...(await refresh()), refresh, loadControl })
         } finally {
           active = false
         }
@@ -135,6 +145,8 @@ export async function createSealedControlAccess(
           epochAuthenticator: next.state.keySchedule.epochAuthenticator.slice(),
           removed: false,
         })
+        if (write?.expected?.journal !== undefined && write.expected.acceptance !== undefined)
+          await current.handle.carryReceiveProgress(next)
         beforeAdopt()
         await persist(next, write)
         live = next

@@ -18,7 +18,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { toB64U } from '@sozai/codec'
 import type { Runtime } from '@sozai/runtime'
 
-import type { HandleAccess } from './access.js'
+import type { ControlHandleAccess } from './access.js'
 import { decodeControlJournal, encodeControlJournal } from './control-journal.js'
 import { controlBuildContexts } from './control-write-context.js'
 import { deriveEntryKey, sealEntries } from './crypto.js'
@@ -187,7 +187,7 @@ export function createPersistenceBuildSaver<TTx extends GroupTransaction>(params
 }
 
 export function createControlBuildPort(params: {
-  access: HandleAccess
+  access: ControlHandleAccess
   control: ControlStore
   build: (op: Operation, group: GroupHandle) => Promise<HostBuilt>
   saveBuilt: SaveControlBuild
@@ -196,10 +196,17 @@ export function createControlBuildPort(params: {
   entryLabel?: string
   runtime?: Runtime
 }): ControlBuildPort {
+  const read = () =>
+    params.access.readControl(async (scope) => ({
+      handle: scope.handle,
+      source: scope.source,
+      snapshot: await scope.loadControl(params.control),
+    }))
+  const safetyHeld = async () => controlSafetyHeld((await read()).snapshot)
   return {
-    prepareBuild: (op, frame) =>
-      params.access.readControl(async (scope) => {
-        const snapshot = await params.control.load()
+    async prepareBuild(op, frame) {
+      const captured = await params.access.readControl(async (scope) => {
+        const snapshot = await scope.loadControl(params.control)
         const saved = snapshot.operations.find((row) => row.id === op.id)
         if (
           saved === undefined ||
@@ -208,131 +215,144 @@ export function createControlBuildPort(params: {
           !sameStoredValue(params.control.key, scope.source.key) ||
           scope.source.identity === null
         )
-          return { kind: 'moved', operation: saved ?? op }
-        if (params.now() >= saved.deadline) return { kind: 'expired', operation: saved }
+          return { kind: 'moved' as const, operation: saved ?? op }
+        if (params.now() >= saved.deadline) return { kind: 'expired' as const, operation: saved }
         if (
           controlSafetyHeld(snapshot) !== null ||
           snapshot.controlHold !== null ||
           scope.handle.state.groupActiveState.kind === 'removedFromGroup'
         )
-          return { kind: 'occupied', operation: saved }
+          return { kind: 'occupied' as const, operation: saved }
         const original = scope.source
         const identity = original.identity
-        if (identity === null) return { kind: 'moved', operation: saved }
+        if (identity === null) return { kind: 'moved' as const, operation: saved }
         if (
           snapshot.cursor !== null &&
           (snapshot.cursor.epoch !== identity.epoch || snapshot.cursor.stranded)
         )
-          return { kind: 'moved', operation: saved }
+          return { kind: 'moved' as const, operation: saved }
         if (
           snapshot.commitOnce !== null &&
           snapshot.commitOnce.incarnation === original.key.incarnation &&
           snapshot.commitOnce.epoch >= identity.epoch
         )
-          return { kind: 'occupied', operation: saved }
-        const checkpoint = snapshot.cursor?.position ?? null
-        const sourceState = encodeClientState(scope.handle.state)
-        const sourceCredential = { ...scope.handle.credential }
-        const sourceLedger = scope.handle.ledgerTokens
-        let built: ControlSlot
+          return { kind: 'occupied' as const, operation: saved }
+        return {
+          kind: 'captured' as const,
+          saved,
+          original,
+          identity,
+          handle: scope.handle,
+          checkpoint: snapshot.cursor?.position ?? null,
+          sourceState: encodeClientState(scope.handle.state),
+          sourceCredential: { ...scope.handle.credential },
+          sourceLedger: scope.handle.ledgerTokens,
+          key: await deriveEntryKey(scope.handle, params.entryLabel),
+        }
+      })
+      if (captured.kind !== 'captured') return captured
+      const {
+        saved,
+        original,
+        identity,
+        handle,
+        checkpoint,
+        sourceState,
+        sourceCredential,
+        sourceLedger,
+        key,
+      } = captured
+      let built: ControlSlot
+      try {
+        const host = await params.build(saved, handle)
+        if (
+          host.incarnation !== original.key.incarnation ||
+          host.epoch !== identity.epoch ||
+          !sameStoredValue(host.authenticatorBefore, identity.authenticator)
+        )
+          return { kind: 'moved', operation: saved }
+        if ((await safetyHeld()) !== null) return { kind: 'occupied', operation: saved }
+        const framed = await frame(host, async (bytes) => {
+          const held = await safetyHeld()
+          if (held !== null) throw new GroupSafetyHeldError(held)
+          return { sealed: sealEntries(key, bytes, params.runtime), epoch: identity.epoch }
+        })
+        const { commit: _commit, ...retained } = host
+        built = {
+          ...retained,
+          ...framed,
+          opID: saved.id,
+          searchFrom: checkpoint,
+          payloadDigest: toB64U(sha256(framed.payload)),
+          journal: encodeControlJournal({
+            version: 1,
+            source: original,
+            checkpoint,
+            sourceState,
+            sourceCredential,
+            sourceLedger,
+            candidate: host.journal,
+          }),
+        }
+      } catch (error) {
+        if (
+          error instanceof OperationRejectedError ||
+          (error instanceof Error &&
+            ['OperationRejectedError', 'FrameTooLargeError', 'CommitRejectedError'].includes(
+              error.name,
+            ))
+        )
+          return { kind: 'rejected', operation: saved, reason: error.message }
+        throw error
+      } finally {
+        key.fill(0)
+      }
+      let expected = original
+      let attempts = 0
+      let delay = 100
+      for (;;) {
+        if (params.now() >= saved.deadline) return { kind: 'expired', operation: saved }
+        if ((await safetyHeld()) !== null) return { kind: 'occupied', operation: saved }
+        let result: Awaited<ReturnType<SaveControlBuild>>
         try {
-          const host = await params.build(saved, scope.handle)
-          if (
-            host.incarnation !== original.key.incarnation ||
-            host.epoch !== identity.epoch ||
-            !sameStoredValue(host.authenticatorBefore, identity.authenticator)
-          )
-            return { kind: 'moved', operation: saved }
-          if (controlSafetyHeld(await params.control.load()) !== null)
-            return { kind: 'occupied', operation: saved }
-          const key = await deriveEntryKey(scope.handle, params.entryLabel)
-          let framed: Awaited<ReturnType<typeof frame>>
-          try {
-            if (controlSafetyHeld(await params.control.load()) !== null)
-              return { kind: 'occupied', operation: saved }
-            framed = await frame(host, async (bytes) => {
-              const held = controlSafetyHeld(await params.control.load())
-              if (held !== null) throw new GroupSafetyHeldError(held)
-              return { sealed: sealEntries(key, bytes, params.runtime), epoch: identity.epoch }
-            })
-          } finally {
-            key.fill(0)
-          }
-          const { commit: _commit, ...retained } = host
-          built = {
-            ...retained,
-            ...framed,
-            opID: saved.id,
-            searchFrom: checkpoint,
-            payloadDigest: toB64U(sha256(framed.payload)),
-            journal: encodeControlJournal({
-              version: 1,
-              source: original,
-              checkpoint,
-              sourceState,
-              sourceCredential,
-              sourceLedger,
-              candidate: host.journal,
-            }),
-          }
+          attempts++
+          result = await params.saveBuilt(saved, built, expected, params.newID())
         } catch (error) {
           if (
-            error instanceof OperationRejectedError ||
-            (error instanceof Error &&
-              ['OperationRejectedError', 'FrameTooLargeError', 'CommitRejectedError'].includes(
-                error.name,
-              ))
+            !(error instanceof ControlWriteNotCommittedError) &&
+            !(error instanceof Error && error.name === 'ControlWriteNotCommittedError')
           )
-            return { kind: 'rejected', operation: saved, reason: error.message }
-          throw error
-        }
-        let expected = original
-        let attempts = 0
-        let delay = 100
-        for (;;) {
-          if (params.now() >= saved.deadline) return { kind: 'expired', operation: saved }
-          if (controlSafetyHeld(await params.control.load()) !== null)
-            return { kind: 'occupied', operation: saved }
-          let result: Awaited<ReturnType<SaveControlBuild>>
-          try {
-            attempts++
-            result = await params.saveBuilt(saved, built, expected, params.newID())
-          } catch (error) {
-            if (
-              !(error instanceof ControlWriteNotCommittedError) &&
-              !(error instanceof Error && error.name === 'ControlWriteNotCommittedError')
-            )
-              throw error
-            if (attempts >= 8) throw error
-            await new Promise<void>((resolve) => setTimeout(resolve, delay))
-            delay = Math.min(delay * 2, 15_000)
-            continue
-          }
-          if (result === 'saved')
-            return {
-              kind: 'saved',
-              operation: { ...saved, stage: 'built', built: controlBuildRef(built) },
-            }
-          if (result === 'occupied') return { kind: 'occupied', operation: saved }
-          const fresh = await scope.refresh()
-          const current = await params.control.load()
-          if (
-            controlSafetyHeld(current) !== null ||
-            current.controlHold !== null ||
-            !sameStoredValue(fresh.source.key, original.key) ||
-            !sameStoredValue(fresh.source.identity, original.identity) ||
-            fresh.source.stateVersion === expected.stateVersion ||
-            (current.cursor?.position ?? null) !== checkpoint ||
-            (current.cursor !== null &&
-              (current.cursor.epoch !== identity.epoch || current.cursor.stranded)) ||
-            !sameStoredValue(current.operations[0], saved)
-          )
-            return { kind: 'moved', operation: saved }
-          if (attempts >= 8) return { kind: 'moved', operation: saved }
-          expected = fresh.source
+            throw error
+          if (attempts >= 8) throw error
           await new Promise<void>((resolve) => setTimeout(resolve, delay))
           delay = Math.min(delay * 2, 15_000)
+          continue
         }
-      }),
+        if (result === 'saved')
+          return {
+            kind: 'saved',
+            operation: { ...saved, stage: 'built', built: controlBuildRef(built) },
+          }
+        if (result === 'occupied') return { kind: 'occupied', operation: saved }
+        const fresh = await read()
+        const current = fresh.snapshot
+        if (
+          controlSafetyHeld(current) !== null ||
+          current.controlHold !== null ||
+          !sameStoredValue(fresh.source.key, original.key) ||
+          !sameStoredValue(fresh.source.identity, original.identity) ||
+          fresh.source.stateVersion === expected.stateVersion ||
+          (current.cursor?.position ?? null) !== checkpoint ||
+          (current.cursor !== null &&
+            (current.cursor.epoch !== identity.epoch || current.cursor.stranded)) ||
+          !sameStoredValue(current.operations[0], saved)
+        )
+          return { kind: 'moved', operation: saved }
+        if (attempts >= 8) return { kind: 'moved', operation: saved }
+        expected = fresh.source
+        await new Promise<void>((resolve) => setTimeout(resolve, delay))
+        delay = Math.min(delay * 2, 15_000)
+      }
+    },
   }
 }

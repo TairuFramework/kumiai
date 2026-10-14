@@ -2,6 +2,8 @@ import { encodeClientState, type GroupHandle } from '@kumiai/mls'
 import {
   type AdoptionExpected,
   type AdoptionWrite,
+  type ControlSnapshot,
+  type ControlStore,
   controlSafetyHeld,
   GroupSafetyHeldError,
   type SafetyHold,
@@ -126,8 +128,16 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
           if (!active) throw new Error('Control read scope has ended')
           return value
         }
+        const loadControl = async (control?: ControlStore): Promise<ControlSnapshot> => {
+          if (!active) throw new Error('Control read scope has ended')
+          if (control !== undefined && !sameStoredValue(control.key, owner.key))
+            throw new DisplacedGroupHandleError('Control store belongs to another incarnation')
+          const value = await reads.control(owner.key.incarnation)
+          if (!active) throw new Error('Control read scope has ended')
+          return value
+        }
         try {
-          return await fn({ ...(await refresh()), refresh })
+          return await fn({ ...(await refresh()), refresh, loadControl })
         } finally {
           active = false
         }
@@ -216,6 +226,13 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
           await target.anchor.save({ ...anchor, pending: { ...anchor.pending, landed: true } })
       }
     }
+  }
+  function assertMutationID(write: AdoptionWrite | undefined): void {
+    if (
+      write !== undefined &&
+      (typeof write.mutationID !== 'string' || write.mutationID.length === 0)
+    )
+      throw new TypeError('Adoption requires a mutation ID')
   }
   // Resolution precedes replay and spent checks. Uncertainty supplies no success/rollback inference.
   async function proved(mutationID: string): Promise<boolean> {
@@ -330,6 +347,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     adoption?: Parameters<HandleAccess['replace']>[1],
   ): Promise<'installed' | 'noop'> {
     params.assertAvailable()
+    assertMutationID(supplied?.write)
     const committed = supplied === undefined ? false : await proved(supplied.write.mutationID)
     try {
       return await capability.run(
@@ -370,6 +388,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
           const lifetime = await reads.lifetime()
           assertSafety()
           const write = supplied?.write ?? adoption?.(staged(next))
+          assertMutationID(write)
           journalFor(write)
           if (write === undefined || write.expected === undefined)
             throw new RegistryRecoveryReplacementError('Ordinary replacement requires provenance')
@@ -464,6 +483,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
               proposed === undefined
                 ? undefined
                 : (decodeStoredValue(encodeStoredValue(proposed)) as AdoptionWrite)
+            assertMutationID(stagedWrite)
             let final = candidate
             if (stagedWrite?.expected?.journal !== undefined) {
               const destination = await ordinaryDestination(

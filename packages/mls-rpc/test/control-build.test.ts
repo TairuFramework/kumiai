@@ -333,12 +333,19 @@ test('preparation framing does not reenter access', async () => {
     throw new Error('nested access')
   }
   const readControl = host.access.readControl
-  host.access.readControl = (fn) =>
+  const read = host.access.read
+  const guarded: typeof readControl = (fn) =>
     readControl(async (scope) => {
       host.access.read = nested
       host.access.readControl = nested
-      return fn(scope)
+      try {
+        return await fn(scope)
+      } finally {
+        host.access.read = read
+        host.access.readControl = guarded
+      }
     })
+  host.access.readControl = guarded
   expect((await host.make().prepareBuild(intent, host.frame)).kind).toBe('saved')
 })
 

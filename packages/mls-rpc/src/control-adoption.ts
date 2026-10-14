@@ -2,18 +2,21 @@ import type { GroupHandle } from '@kumiai/mls'
 import type { ControlAdoptionPort, ControlStore } from '@kumiai/rpc'
 import { controlSafetyHeld } from '@kumiai/rpc'
 
-import type { HandleAccess } from './access.js'
+import type { ControlHandleAccess } from './access.js'
 import { decodeControlJournal } from './control-journal.js'
 import { sameStoredValue } from './memory-incarnation-stores.js'
 
 export function createControlAdoptionPort(params: {
-  access: HandleAccess
+  access: ControlHandleAccess
   control: ControlStore
   restoreCandidate: (candidate: Uint8Array) => Promise<GroupHandle>
 }): ControlAdoptionPort {
   return {
     async adopt(bytes, expected, write) {
-      if (controlSafetyHeld(await params.control.load()) !== null) return 'moved'
+      const held = await params.access.readControl(async (scope) =>
+        controlSafetyHeld(await scope.loadControl(params.control)),
+      )
+      if (held !== null) return 'moved'
       const journal = decodeControlJournal(bytes)
       const proof = expected.acceptance
       if (
@@ -25,8 +28,12 @@ export function createControlAdoptionPort(params: {
       )
         return 'moved'
       const candidate = await params.restoreCandidate(journal.candidate)
-      if (controlSafetyHeld(await params.control.load()) !== null) return 'moved'
       if (candidate.groupID !== expected.key.groupID) return 'moved'
+      const captured = await params.access.readControl(async (scope) => ({
+        source: scope.source,
+        snapshot: await scope.loadControl(params.control),
+      }))
+      const lastMutation = await params.control.lastMutation()
       let result: 'installed' | 'noop' | 'moved' = 'moved'
       try {
         await params.access.replace(
@@ -41,7 +48,8 @@ export function createControlAdoptionPort(params: {
               })
             )
               return false
-            const snapshot = await params.control.load()
+            if (!sameStoredValue(source, captured.source)) return false
+            const snapshot = captured.snapshot
             if (
               controlSafetyHeld(snapshot) !== null ||
               snapshot.strand !== null ||
@@ -62,7 +70,7 @@ export function createControlAdoptionPort(params: {
               )
               if (
                 (row?.payloadDigest === proof.payloadDigest && row.sequenceID === proof.position) ||
-                (await params.control.lastMutation()) === write.mutationID
+                lastMutation === write.mutationID
               )
                 result = 'noop'
               return false
@@ -77,7 +85,6 @@ export function createControlAdoptionPort(params: {
               !sameStoredValue(snapshot.commitOnceAcceptance, proof)
             )
               return false
-            await current.carryReceiveProgress(candidate)
             result = 'installed'
             return true
           },

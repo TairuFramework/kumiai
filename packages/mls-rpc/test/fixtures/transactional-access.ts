@@ -23,6 +23,7 @@ import type { ControlRead, HandleAccess } from '../../src/access.js'
 import type { SaveControlBuild } from '../../src/control-build.js'
 import { decodeControlJournal } from '../../src/control-journal.js'
 import { sameStoredValue } from '../../src/memory-incarnation-stores.js'
+import { DisplacedGroupHandleError } from '../../src/persistence-errors.js'
 import type { RealMember } from './real-group.js'
 
 export class RevisionConflictError extends Error {
@@ -378,10 +379,22 @@ export async function createTransactionalAccess(
         let active = true
         const refresh = async (): Promise<ControlRead> => {
           if (!active) throw new Error('Control read scope has ended')
-          return await readControl()
+          const value = await readControl()
+          if (!active) throw new Error('Control read scope has ended')
+          return value
+        }
+        const loadControl = async (
+          control: ControlStore = store.control,
+        ): Promise<ControlSnapshot> => {
+          if (!active) throw new Error('Control read scope has ended')
+          if (!sameStoredValue(control.key, store.control.key))
+            throw new DisplacedGroupHandleError('Control store belongs to another incarnation')
+          const value = await control.load()
+          if (!active) throw new Error('Control read scope has ended')
+          return value
         }
         try {
-          return await fn({ ...(await readControl()), refresh })
+          return await fn({ ...(await readControl()), refresh, loadControl })
         } finally {
           active = false
         }
@@ -446,6 +459,8 @@ export async function createTransactionalAccess(
             .some((entry) => entry.leafIndex === next.state.privatePath.leafIndex),
           epochAuthenticator: next.state.keySchedule.epochAuthenticator.slice(),
         })
+        if (write?.expected?.journal !== undefined && write.expected.acceptance !== undefined)
+          await current.carryReceiveProgress(next)
         await store.save(
           row.revision,
           encodeClientState(next.state),

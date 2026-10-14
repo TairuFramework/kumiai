@@ -7,12 +7,14 @@ import {
 import {
   type AppFrameRef,
   AppFrameStorageError,
+  type ControlSnapshot,
+  type ControlStore,
   digestAppliedCommit,
   type Operation,
 } from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
-import type { ControlReadScope, HandleAccess } from '../src/access.js'
+import { type ControlReadScope, type HandleAccess, simpleHandleAccess } from '../src/access.js'
 import { createControlBuildPort } from '../src/control-build.js'
 import { decodeControlJournal } from '../src/control-journal.js'
 import { createGroupCrypto } from '../src/crypto.js'
@@ -535,3 +537,44 @@ test('transactional build uses committed open state before delayed publication',
 function cryptoRandomID(): string {
   return globalThis.crypto.randomUUID()
 }
+
+test.each(['simple', 'transactional'] as const)(
+  '%s control loads use the supplied store and expire across release',
+  async (kind) => {
+    const { store, host } = await setup(`control-load-${kind}`)
+    const key = store.control.key
+    const access =
+      kind === 'transactional'
+        ? host.access
+        : simpleHandleAccess({
+            key,
+            stateVersion: () => 0,
+            handle: host.live,
+            adopt: () => {},
+          })
+    let scope!: ControlReadScope
+    const pending = Promise.withResolvers<ControlSnapshot>()
+    const started = Promise.withResolvers<void>()
+    const supplied: ControlStore = {
+      ...store.control,
+      load: () => {
+        started.resolve()
+        return pending.promise
+      },
+    }
+    let loading!: Promise<ControlSnapshot>
+    await access.readControl(async (owned) => {
+      scope = owned
+      expect(await owned.loadControl(store.control)).toEqual(await store.control.load())
+      const foreign = { ...supplied, key: { ...key, incarnation: 2 } }
+      await expect(owned.loadControl(foreign)).rejects.toMatchObject({
+        name: 'DisplacedGroupHandleError',
+      })
+      loading = owned.loadControl(supplied)
+      await started.promise
+    })
+    pending.resolve(await store.control.load())
+    await expect(loading).rejects.toThrow('Control read scope has ended')
+    await expect(scope.loadControl(store.control)).rejects.toThrow('Control read scope has ended')
+  },
+)

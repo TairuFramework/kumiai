@@ -3,16 +3,28 @@ import {
   type AdoptionExpected,
   type AdoptionWrite,
   type AdoptionWriteFactory,
+  type ControlSnapshot,
+  type ControlStore,
   ControlWriteNotCommittedError,
   type GroupKey,
   type PendingAppFrame,
   type SendAdmission,
 } from '@kumiai/rpc'
 
+import { DisplacedGroupHandleError } from './persistence-errors.js'
+
 type PersistOpened = (stagedState: Uint8Array, record: PendingAppFrame) => Promise<void>
 
 export type ControlRead = { handle: GroupHandle; source: AdoptionExpected }
-export type ControlReadScope = ControlRead & { refresh(): Promise<ControlRead> }
+export type ControlReadScope = ControlRead & {
+  refresh(): Promise<ControlRead>
+  loadControl(control?: ControlStore): Promise<ControlSnapshot>
+}
+
+export type ControlHandleAccess = Pick<
+  HandleAccess,
+  'epoch' | 'admission' | 'read' | 'readControl' | 'mutate' | 'replace'
+>
 
 export type HandleAccess = {
   readControl<TValue>(fn: (scope: ControlReadScope) => Promise<TValue>): Promise<TValue>
@@ -77,7 +89,11 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
       },
     }
   }
-  const save = async (handle: GroupHandle, adoption?: AdoptionWriteFactory): Promise<void> => {
+  const save = async (
+    handle: GroupHandle,
+    adoption?: AdoptionWriteFactory,
+    current?: GroupHandle,
+  ): Promise<void> => {
     const write = adoption?.({
       incarnation: key.incarnation,
       epochAfter: Number(handle.epoch),
@@ -86,6 +102,12 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
         .some((member) => member.leafIndex === handle.state.privatePath.leafIndex),
       epochAuthenticator: handle.state.keySchedule.epochAuthenticator.slice(),
     })
+    if (
+      current !== undefined &&
+      write?.expected?.journal !== undefined &&
+      write.expected.acceptance !== undefined
+    )
+      await current.carryReceiveProgress(handle)
     await params.persist?.(handle, write)
   }
 
@@ -97,10 +119,21 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
         let active = true
         const refresh = async (): Promise<ControlRead> => {
           if (!active) throw new Error('Control read scope has ended')
-          return await readControl()
+          const value = await readControl()
+          if (!active) throw new Error('Control read scope has ended')
+          return value
+        }
+        const loadControl = async (control?: ControlStore): Promise<ControlSnapshot> => {
+          if (!active) throw new Error('Control read scope has ended')
+          if (control === undefined) throw new TypeError('A control store is required')
+          if (control.key.groupID !== key.groupID || control.key.incarnation !== key.incarnation)
+            throw new DisplacedGroupHandleError('Control store belongs to another incarnation')
+          const value = await control.load()
+          if (!active) throw new Error('Control read scope has ended')
+          return value
         }
         try {
-          return await fn({ ...(await readControl()), refresh })
+          return await fn({ ...(await readControl()), refresh, loadControl })
         } finally {
           active = false
         }
@@ -129,7 +162,7 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
         if (adoption != null && params.persist == null) {
           throw new ControlWriteNotCommittedError('adoption requires a persist callback')
         }
-        await save(next, adoption)
+        await save(next, adoption, current.handle)
         await params.adopt(next)
         publishedAdmission = next.sendAdmission()
         next.confirmAdopted()

@@ -27,7 +27,14 @@ export type {
   SafetyHold,
 } from '@kumiai/rpc'
 
-export { type HandleAccess, type SimpleHandleAccessParams, simpleHandleAccess } from './access.js'
+export {
+  type ControlHandleAccess,
+  type ControlRead,
+  type ControlReadScope,
+  type HandleAccess,
+  type SimpleHandleAccessParams,
+  simpleHandleAccess,
+} from './access.js'
 export { type ApplyCommitParams, type ApplyCommitResult, applyCommit } from './apply-commit.js'
 export { createControlAdoptionPort } from './control-adoption.js'
 export {
@@ -146,6 +153,7 @@ export type {
   ResyncProof,
 } from './registry/types.js'
 export type { RecoveryEnvironment } from './registry/validation.js'
+export { createRegistryHandleAccess } from './registry-handle-access.js'
 export {
   buildRevokeProofOnHandle,
   buildRevokeProofOperation,
