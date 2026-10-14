@@ -255,7 +255,7 @@ Identical field reapplication does not recreate an acknowledged event. There is 
 `ForkHalt`, `GroupForkEvidence`, `GroupSafetyEvent`, `RecoveryUnavailableEvent` and `SafetyHold` are exported here and re-exported by `@kumiai/mls-rpc`.
 
 Under either safety reason, peer sends reject with `SendNotAdmissibleError(reason)`.
-Enqueue, direct crypto, registry mutation, resync, reauthorize and peer recovery refuse with `GroupSafetyHeldError(reason)`.
+Enqueue, direct crypto, registry mutation, resync, reauthorize and consumer `recover()` refuse with `GroupSafetyHeldError(reason)`; automatic recovery stops without error.
 `reauthorize()` throws synchronously. Held crypto/resolver refusals latch the reason and retain the unprocessed frame and cursor for retry.
 New opens, control publication and automatic recovery stop. Already opened handlers may finish.
 Stored outcomes/events, opened-record restoration, committed Welcome delivery and existing live certified settlement remain serviceable.

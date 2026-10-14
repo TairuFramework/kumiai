@@ -22,7 +22,7 @@ depend on both.
 - `createGroupCrypto({ access, entryLabel?, runtime?, pending? })` — `GroupCrypto` over that access.
 - `createGroupMLS({ access, identity, entrySlot, recoverySecret?, recoveryBinding? })` — `GroupMLS`
   over the same access.
-- `createGroupSafety({ registry, persistence, mls, resolveTarget })` -- incarnation safety reports,
+- `createGroupSafety({ registry, persistence, mls, resolveTarget })` — incarnation safety reports,
   retained epoch authenticators and durable safety events over the registry's shared coordinator.
 - `applyCommit({ handle, commit, entrySlot, ownDID, persist?, ... })` — apply a received Commit inside the host's own
   transaction (see below).
