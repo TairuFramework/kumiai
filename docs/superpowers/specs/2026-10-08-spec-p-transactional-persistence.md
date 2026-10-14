@@ -1,17 +1,17 @@
 # Spec P: transactional persistence — design
 
 Date: 2026-10-08
-Status: draft r18 (2026-10-10)
+Status: draft r19 (2026-10-14)
 Parent: [client host, messaging protocol and multi-device e2e](2026-10-08-client-messaging-e2e-design.md)
 Control baseline: [Spec P2a](2026-10-08-spec-p2a-crash-safe-control-design.md), superseded where amended here.
 
 ## Model
 
-**Trust (r14 decision).** Use a strongly consistent delivery service: trust the hub for commit ordering
-(compare-and-set) and availability, never confidentiality or authenticity.
-Clients detect faults and forks; fork evidence halts the group durably and requires manual recovery.
-A device stranded without fork evidence automatically resyncs. Consistent split views require out-of-band
-comparison of epoch authenticators; in-log detection cannot expose them.
+**Trust (r19 decision).** Trust hub compare-and-set ordering, never confidentiality or MLS authenticity. Denial of service is the main concern.
+The hub cannot forge MLS content. Drop, delay, reorder, replay, byte tampering, junk and unknown frame versions mean non-delivery.
+Skip or diagnose such frames. Never derive a durable halt/hold, discard, rebuild, owed-work deletion or permanent stranding from them.
+Peers cannot prove non-delivery in-band. Fork detection is deferred to later out-of-band peer checkpoints.
+Host reportFork/authenticator comparison and genuinely local storage invariants retain their halt contracts.
 See [RFC 9750 §5.2–5.2.1](https://www.rfc-editor.org/rfc/rfc9750.html#section-5.2).
 
 1. **Incarnation monotonicity (r14 decision).** Key local state by `(groupID, incarnation)`.
@@ -35,17 +35,74 @@ Keep `onStrand` observations and their confidence. Classify evidence before sele
 
 | Observation | Action |
 |---|---|
-| Past-epoch digest divergence, on either classifier branch | durable fork halt; no winner continues automatically |
+| Competing past-epoch commit digest divergence, on either classifier branch | diagnostic poison; skip, never halt or frame-trigger automatic resync |
 | Host reports different authenticators for the same group/epoch | durable fork halt |
-| `own-unmerged` | settle the exact saved build before walking it; unexplained own commit halts as ordering evidence |
-| `ahead`, retention gap or unprocessable gap, without fork evidence | catch up if possible; otherwise durable stranded state and automatic resync |
-| Unknown frame version | hold sends/control and expose the diagnostic; do not skip it or resync to bypass unsupported semantics |
+| `own-unmerged` | recognise and validate saved own work with the receiver predicate; mismatch skips/advances cursor and preserves slot/unknown acceptance |
+| `ahead`, retention gap or unprocessable gap, without a local safety hold | catch up or use authenticated resync with bounded retry; a delivery fault never permanently strands the device |
+| Unknown/unsupported commit-frame or handshake-header version | diagnostic poison plus `upgrade-required` host diagnostic; skip, never create a durable hold |
 | Lost MLS state, retained recovery trust readable | stranded; automatic resync (r16 decision) |
 | Recovery trust also missing/unreadable | durable halt + `group:recovery-unavailable`; manual re-invite (r16 decision) |
 
-Later competitors/replays excluded by a fully validated first-valid prefix are superseded, not fork evidence (r16 decision). Other past-epoch divergence is observed
-evidence, not authenticated proof of a competitor or divergence epoch. The 64-epoch applied window can miss older forks. Strand signals alone prove none; fork
-evidence takes precedence and survives restart.
+**Delivery faults (r19 decision, Q0/Q1).** Competing past-epoch commits, including refused signed CAS losers, are diagnostic poison on both classifier branches.
+Skip with claimed `past-epoch-divergence` observation. Advance the skipped cursor without applied rewrite, fork event/latch or frame-triggered resync.
+Own-slot mismatches and delivery-driven search contradictions also skip/advance cursor, preserving saved work and unknown acceptance.
+Recovery acceptance-unknown permits authenticated recapture with bounded retry. Ordinary unknown slots permit identical bytes/ID at a fresh head with unchanged incarnation/epoch/authenticator.
+Neither condition becomes a durable safety hold. An unrecognised/tampered ordinary own-copy frame means non-delivery, never lost/absent/superseded.
+Commit-once retry is idempotent. Unresolved deadline outcome is unknown.
+No encoding, unsigned tag, sealed-entries blob, padding, position or frame-version difference supplies adverse acceptance evidence.
+Audit peer/classify, control search/slot/operations/store, mls-rpc control-validation/safety and registry producers, including their catch mappings.
+Only host reports/authenticator comparisons and genuine local storage inconsistency can produce new durable safety halts.
+slot.ts:94-110 and search.ts:242-252 compare trusted local committed identities. Retain these local-invariant halts.
+Fresh responder authenticator disagreement is a diagnostic retry, not a local-invariant halt.
+Existing persisted halts/unsupported-version holds remain readable and immutable. Legacy control-record version holds retain their separate policy.
+Unsupported sealed-entries outer/inner versions propagate through crypto/resolver/walker as poison plus upgrade-required diagnostics, advancing cursor without strand/heal.
+HEAD packages/mls-rpc/src/crypto.ts:76-84,200-209 -> packages/rpc/src/ledger-entries.ts:104-117 -> packages/rpc/src/peer.ts:1897-1930.
+Tasks 5a-5e own complete HEAD behavioural closures. Each unit changes implementation and conflicting assertions together, preserving restart/history/outcomes/Welcomes.
+Task 5a owns past divergence, 5b own/search contradictions, 5c frame/blob versions, 5d real validation/local registry guards and 5e app bounds.
+Every unit runs Control/Safety/full Port gates, both contract families on real implementations and doubles. Task 5c precedes Task 8a ledger-entries changes. Task 8b separately owns negative refusalAuthority through wire/replay/cache.
+Missing/unreadable retained local trust remains recovery-unavailable. Delivered bytes and provider/configuration failures cannot manufacture that condition.
+Already owed outcomes/Welcomes and source history remain serviceable. Independently MLS-validated applied state may settle work normally.
+
+**Applied-state settlement authority (r19 decision, Q3/P0).** Authenticated applied state decides whether recovery attempt X was applied.
+Authenticate responder GroupInfo and its signed epoch/authenticator/tree. Compare X's exact fresh cryptographic LeafNode, never DID/index alone.
+Later epoch with X's exact wire-encoded fresh LeafNode present means accepted -> settled. Adopt X only with existing bound confirmation.
+Fast path: known position from publish ack/exact-byte hit, and an authenticated responder still at epochAfter, permits bound confirmation/adoption of X.
+Otherwise settle X as accepted-unadoptable in ONE ControlStore transition: save compact public X facts/cumulative ledgerBefore in settledRejoins, clear active rejoin and raise recoveryEpochFloor.
+Omit request/requestKey/candidate/payload from settled storage. Zeroise owned secret buffers only after settlement commit proof.
+Keep at most one cumulative settlement row per source incarnation. Later settlements replace public provenance and union prior obligations.
+Carry ledgerBefore forward, as HEAD packages/rpc/src/peer.ts:3533 does. Restart retains settled X and its owed obligations before constructing Y.
+Build fresh Y at the recaptured epoch. Y's Remove targets X's sole same-identity leaf under normal replacement admission.
+X is frameCommit(pending.commit, [], null) (peer.ts:3823), enacting nothing. Reenact tokens are computed only after Y bootstrap (control/rejoin.ts:217-223).
+Never rebuild X at its capture epoch or label accepted X unapplied/absent. No new ResyncProof arm, applied-state proof or candidate-codec/registry-verifier change.
+No responder lookup without a known position. Bound confirmation retains its non-null position and original exporter tuple.
+Equal capture epoch/authenticator means the responder prefix lacks X. Retry identical saved bytes/ID/candidate at its fresh authenticated captureHead.
+Later epoch with X's leaf absent permits authenticated non-acceptance discard/build, including applied-then-removed, subject to removal/admission policy (r18:66,128).
+An already accepted/confirmed X instead retains its accepted settlement. Local switch rollback never proves remote non-acceptance.
+Same epoch/different authenticator means diagnostic retry/recapture, without forkHalt or durable hold.
+Log search is a confirmation hint. Absence, mismatches, gaps and junk never authorise discard or prevent recapture.
+Recapture uses fresh requestID/requestKey outside X's immutable record, with backoff bounded at 15 seconds.
+Hub-assigned head strings may regress or be inflated. Head regression is diagnostic only, never a refusal or permanent strand.
+Same epoch/authenticator retries at fresh authenticated captureHead even when lower. Null denotes the captured empty prefix.
+Persist a monotone recoveryEpochFloor independently of X. First save of X co-writes its authenticated capture epoch.
+Leaf-absent discard and R0 settlement raise it to the authenticated recaptured epoch in their pointer transition. Restart preserves the stored maximum.
+Task 14b tests each write/restart point separately. Reject lower epochs without deleting X.
+Busy groups may repeatedly accept X then advance before confirmation, causing accepted-unadoptable churn. This non-hub liveness residual remains explicit.
+Never build a second external attempt at one capture epoch.
+
+**Own-commit recognition (r19 decision, Q2/P1).** Keep existing digest fields, payloadDigest, stored shapes and frame version.
+Exact bytes provide positive evidence. A mismatch means nothing learned, never absence, supersession, refusal or permission to rebuild.
+One helper decodes then re-encodes the MLS-message commit half and hashes it. Malformed input returns null, never a fatal encoding exception.
+Match saved/delivered helper results only when both are non-null. Reconstruction serves recognition only, never application or publication.
+No-entry commits ignore blobs on author and receiver. Re-encoded/blob-changed copies can therefore recognise saved work.
+Named-entry commits use normal MLS validation and the receiver's own resolver/reference-verification predicate under retained pre-state.
+A different blob that passes that predicate can recognise saved work. Failed verification only skips/advances cursor and preserves unknown acceptance.
+Normal first-valid proof still gates own adoption/Welcome release. Saved payloadDigest binds saved work after recognition, without schema migration.
+No canonical intake gate, identity-version migration, equivalence taxonomy or competitor-authentication API is introduced.
+Only refusal of the authenticated commit itself authorises terminal negative verdicts.
+Transport/blob/framing/unsigned-field/copy-eligibility failures remain advisory, including persisted response replay and verdict caches.
+Unproven superseded verdicts never authorise recovery discard. Applied-state settlement authority independently decides later-epoch non-acceptance.
+Confirmed verdicts retain saved request, digest/position and candidate-derived tag binding.
+Origin-authorised signers removed after origin retain attestation authority, including signed floor inflation. This residual lies outside the hub threat model.
 
 **Fork halt (r14 decision).** Immediately hold the runtime while committing the halt, evidence and a stable-ID
 machine-readable `group:fork` event in one group transaction. Failure/ambiguity keeps the runtime held.
@@ -76,35 +133,40 @@ Safety-only transitions can write the hold/event without opening state/trust. No
 committed MLS snapshot and that prefix's cursor together. `captureHead: string | null` names the reconciled commit prefix where GroupInfo is current; null means
 empty, never delivery/unreconciled head.
 
-Add required `captureHead` to the signed responder attestation's JWT payload.
-Its encoding is a JSON string containing the exact log position, or explicit JSON null.
-The JWT payload uses base64url-encoded canonical UTF-8 JSON, with `captureHead` sorted before `groupID`
-(`node_modules/@kokuin/token/lib/utils.js:11`, `node_modules/@sozai/codec/lib/index.js:183`).
+Add required captureHead and groupInfoAuthenticator to the signed responder attestation's JWT payload.
+The authenticator is the captured committed epoch authenticator, canonical unpadded base64url with decoded length equal to the suite's KDF size.
+It is not derivable from public GroupInfo or the external candidate's temporary before handle.
+Encode captureHead as its exact JSON string or explicit null. Existing canonical token encoding sorts captureHead before groupID.
 Framing: `u32(tokenLength) || UTF8(token) || GroupInfo`, or lifecycle `u32(tokenLength) || UTF8(token) || u32(GroupInfoLength) || GroupInfo || ledger`.
-Lengths are big-endian. The signature binds captureHead, group, request and exact GroupInfo digest.
+Lengths are big-endian. The signature binds captureHead, captured epoch authenticator, group, request and exact GroupInfo digest.
 HPKE seals that signed token using the existing group/member/request authentication boundary (`packages/mls/src/recovery.ts:261`, `:566`, `:618`).
 This recovery-reply wire change stays within the 0.x band and requires coordinated producer/consumer updates.
 Use GroupInfo reply version 2 and HPKE info/AAD domains `kumiai/mls/recovery/v2` / `kumiai/mls/recovery-aad/v2`.
 The outer frame remains `u8(version) || enc(32 bytes) || ciphertext`. Ledger-only replies keep their existing format.
-Refuse v1, missing/wrong-type `captureHead`, invalid positions and failed attestation verification before building any external attempt.
+Refuse v1, missing/wrong-type `captureHead` or `groupInfoAuthenticator`, invalid positions/authenticators and failed attestation verification before building any external attempt.
+A capture position is explicit null or a nonempty opaque string of at most 64 JavaScript characters. Preserve its exact value; impose no decimal-position grammar.
 
-Persist `captureHead` with the exact external bytes/ID, candidate, request key and target before publication. Initial publication MUST set `expectedHead =
-captureHead`, including explicit null. Search for exact acceptance before any retry. On mismatch with proven absence, reconcile `(captureHead, currentHead]`
-completely using normal MLS validation. If no valid commit advanced the epoch, update only `expectedHead` and republish identical bytes/ID/candidate (commit-once).
-Non-commit, invalid and poison frames alone do not invalidate GroupInfo. Repeat reconciliation after every further mismatch. If a valid commit advanced the epoch,
-discard the attempt unadopted and request fresh authenticated GroupInfo. This refuses stale-epoch publication/adoption under honest ordering, not split views ([RFC
-9750 §5.3](https://www.rfc-editor.org/rfc/rfc9750.html#section-5.3)).
+Persist immutable captureHead/searchFrom/target and exact external bytes/ID/candidate/request key before publication.
+Initial expectedHead equals authenticated captureHead, including null. Search may accelerate bound confirmation under applied-state settlement authority.
+After mismatch or unknown acceptance, recapture authenticated responder state without replacing X or building another candidate.
+Equal epoch/authenticator means responder prefix lacks X: retry SAME bytes at its authenticated head, even if lower or after an inflated prior head.
+Later epoch with X's exact leaf means accepted -> settled. Adopt X only with bound confirmation; otherwise preserve accepted-unadoptable X and build leaf-replacing Y.
+Later epoch without X's leaf permits discard/build subject to admission/removal policy, including applied-then-removed. Log absence never decides discard.
 
-**Reconciliation limit (r15 decision).** Proof requires validation state for the capture epoch, including necessary secrets and referenced proposals.
-GroupInfo supplies no old receiver secrets. The candidate has only fresh post-commit secrets/empty history (`packages/mls/src/group-welcome.ts:226`, `node_modules/ts-mls/dist/src/createCommit.js:291`).
-After losing those secrets, a well-formed encrypted commit cannot generally be distinguished from an invalid encrypted frame.
-Do not infer poison-only absence. If the prefix is incomplete, unsupported or unclassifiable, and absence of the exact attempt is proven,
-discard the attempt unadopted and request fresh authenticated GroupInfo (r15 decision). This is safe at the same epoch:
-external commits are publicly framed (no handshake ratchet), and each attempt derives every secret from its own fresh
-KeyPackage and ExternalInit (`node_modules/ts-mls/dist/src/createCommit.js:234`), so a new attempt reuses no key material.
-Never discard while acceptance is unknown (gap/unresolved search): hold until proven accepted or absent.
-Keep bound confirmation/refusal of the exact external commit's application and normal MLS validation.
-A responder verdict does not choose a fork or authorise replacement of the old record in place.
+**Reconciliation limit (r19 decision).** Public GroupInfo and fresh external candidates lack old receiver secrets and referenced proposals.
+Unclassifiable frames cannot prove non-acceptance. Follow applied-state settlement authority rather than log-derived discard.
+Recapture remains available with gaps, byte mismatches or unknown acceptance. Preserve X and its immutable request/key/confirmation tuple.
+Fresh recapture keys remain separate. Head regression only diagnoses; member-signed recoveryEpochFloor survives settlement/discard/restart.
+Equal epoch/authenticator means responder prefix lacks X and retries SAME bytes at fresh head, including lower heads.
+Equal epoch/different authenticator diagnoses and recaptures without a durable hold.
+Later epoch with exact X leaf means accepted -> settled, adopting X only with bound confirmation; otherwise build fresh leaf-replacing Y after durable settlement.
+Later epoch without X's leaf permits policy-gated discard/build. Never build a second attempt at X's capture epoch. Backoff is bounded at 15 seconds.
+Unsupported delivered frame/blob versions skip with upgrade-required diagnostics. Legacy control-record holds retain their separate policy.
+Keep bound confirmation and normal MLS validation under applied-state settlement authority.
+Only refusal of the authenticated commit itself authorises terminal negative settlement. Transport/blob/framing/copy-eligibility failures never do.
+New negative response rows and signed verdicts carry refusalAuthority: 'authenticated-commit' only after authenticated MLS/policy refusal.
+Replay/caches and requester judgement treat missing or copy-derived provenance as advisory. Legacy negative rows remain readable without terminal replay.
+A responder verdict never chooses a fork or authorises replacement of X in place.
 Remove P2a's separate lower-epoch candidate-admission/source-prefix algorithm.
 Persisted accepted/confirmed stages replay the same attempt; an adopted stage never reinstalls its candidate.
 Policy refusal remains durable until host action; transport/no-responder failures retry with backoff while stranded.
@@ -253,36 +315,44 @@ Retry a rolled-back save with the already prepared bytes. Death before built-sav
 changes, outcome ack and deadline expiry cannot free it or create a second same-epoch build. Retain until epoch advancement/retirement to prevent protection-tree
 generation reuse.
 
-**Mismatch/restart (r16 decision).** Search from the immutable original build head for the full payload digest, including bodies.
+**Mismatch/restart (r19 decision).** Search from the immutable original build head for positive evidence of saved own work.
+Exact bytes suffice for recognition. Use the own-commit helper and receiver predicate for a changed copy. Mismatch alone decides nothing.
 A match proves occurrence only. Adoption and Welcome release require that occurrence to be the FIRST valid commit at its framed epoch.
 Validate the full prefix, including the already reconciled build checkpoint, through the occurrence with normal MLS/proposal/policy checks.
 Earlier valid competitor: settle `lost` (superseded), follow its state/cursor, never install our candidate or release its Welcome.
-Incomplete coverage or unavailable validation inputs: hold; deadline yields `unknown`. A match cannot bypass a gap.
+Incomplete coverage or unavailable validation inputs preserve unknown acceptance, never a durable safety hold. Deadline yields unknown.
+Normal first-valid proof cannot bypass missing coverage. Authenticated recapture remains available for recovery attempts.
+Ordinary unchanged incarnation/epoch/authenticator permits identical-byte/ID retry after an unrecognised copy, without adverse settlement.
 Replay by ANY party able to publish to the commit topic obeys this rule, including another publishID.
 See [RFC 9750 §5.2.1](https://www.rfc-editor.org/rfc/rfc9750.html#section-5.2.1).
 Only validated first-valid acceptance records an obligation and adopts before walking our own occurrence; retained accepted stages recheck that proof.
-Complete absence: reconcile intervening frames; unchanged incarnation, epoch and authenticator means refresh only expectedHead
-and republish identical payload/ID. A head, proposal or stateVersion change alone never permits rebuild.
-Epoch advancement permits a fresh build from the fresh handshake chain after intent revalidation.
-Same-number authenticator divergence halts; incarnation retirement settles old work rather than rebuilding in the new owner.
-Gaps/unresolved acceptance give `unknown`, not guessed absence. Fork evidence invokes D1, never automatic rejoin.
+With unchanged incarnation/epoch/authenticator, an unrecognised/tampered own-copy frame permits identical-byte/ID retry at a refreshed expectedHead.
+The copy counts as non-delivery for retry eligibility. Commit-once remains idempotent; unresolved deadline outcome is unknown.
+It never proves lost/absent/superseded or permits rebuilding.
+A head/proposal/stateVersion change alone never permits rebuild.
+Epoch advancement permits a fresh build only after independent authenticated settlement and intent revalidation.
+Same-number trusted local authenticator divergence remains a local-invariant halt. Retirement settles old work without rebuilding there.
+Gaps, missing validation inputs and copy mismatches preserve unknown acceptance. They never discard possibly accepted work or delete owed outcomes/Welcomes.
+Recovery unknown acceptance permits authenticated recapture under applied-state settlement authority. Host/local-invariant fork halts still forbid automatic rejoin.
 
-Retain candidate/journal and needed proposals/decryption keys. Missing references/keys hold the build and yield unknown at deadline.
+Retain candidate/journal and needed proposals/decryption keys. Missing inputs preserve unknown acceptance. Recovery attempts retain authenticated recapture; ordinary slots retain identical retry under unchanged identity.
+Delivered references/keys/resolver failures never create a durable safety hold or authorise erasing saved work.
 Extra proposals do not invalidate saved bytes; omitted proposals are cleared on adoption and require reproposal.
 Control builders pass `pendingProposals: {}`; rotation uses empty proposals/entries and refuses local pending proposals.
 Reconciliation and ordinary adoption preserve current sender/receive ratchet progress in matching retained history, including after restart.
 Never resurrect evicted epochs. Incarnation switches carry no progress.
 
 **Deadline/outcomes.** Persist `enqueuedAt + operationTimeoutMs` (default 30 s), unchanged by restart/retry. Before expiry retry transport failures with backoff. At
-expiry stop new publication handoffs and settle any in-flight acceptance. Proven first-valid exact occurrence becomes accepted/landed even after expiry. Superseded
-occurrences lose; accepted work retains its prefix proof. Complete absence at expiry gives `lost`; gaps, uncertain acceptance or fork-touched work give `unknown`.
+expiry stop new publication handoffs and settle in-flight acceptance. Proven first-valid recognition can land after expiry.
+Authenticated applied winner state can prove supersession. Complete absence gives lost only without unresolved acceptance; copy mismatches/gaps remain unknown.
 Expired never-built intent loses without building. Outcomes persist until ack; none releases the source-epoch slot. An unknown build cannot be automatically
 replaced, including by a new operation ID. Other intents wait for epoch change; a host may manually resync/readmit if no survivor advances. Once ordering trust
 fails, outcomes assert only locally observed facts.
 
 **Adoption (r16 decision).** One transaction installs state/recovery trust/spent authenticator, applied row, external response when relevant, control cursor/outcome,
-anchor changes and coupled settled outbox work. Recheck expected incarnation/identity/version inside the gate. Already committed mutation/matching applied payload is
-idempotent; hub acknowledgement alone writes no applied row/cursor. The current incarnation's terminal flag governs self-removal, independent of old epoch sorting.
+anchor changes and coupled settled outbox work. Recheck expected incarnation/identity/version inside the gate.
+Already committed mutation or matching validated saved-work proof is idempotent. Hub acknowledgement alone writes no applied row/cursor.
+The current incarnation's terminal flag governs self-removal, independent of old epoch sorting.
 
 ### D5. Codecs, registry and application keys
 
@@ -292,11 +362,14 @@ each sorted ref is `u32(UTF8Length) || UTF8(proposalRef)` and names exactly a pe
 Decode a copied body, then restore zero. Duplicate/unknown refs, non-absent body sender, invalid lengths/UTF-8/trailing bytes refuse.
 Empty/truncated input returns undefined; unsupported versions throw. Refuse every v1 blob: absence and lost zero are indistinguishable.
 
-Recovery candidate v2 uses AAD `kumiai/recovery-candidate/v2` and complete
+Recovery candidate v3 uses AAD `kumiai/recovery-candidate/v3` and complete
 `sourceState = encodeClientState({...snapshot.state, ratchetTree: snapshot.sourceTree})`.
-Decode it separately; never splice private-state bytes by envelope offsets. Refuse v1 candidates.
-Keep requestKey, binding/holder evidence and bound exact-external-commit confirmation tuple.
-
+Decode it separately; never splice private-state bytes by envelope offsets. Refuse v1/v2 candidates for new adoption.
+Keep requestKey, binding/holder evidence, exact-external-commit confirmation tuple, authenticated reply, immutable source/target/captureHead and original search origin.
+Legacy unadopted records lacking capture metadata, including non-null conflictEpoch, retain bytes/stage under unsupported-version hold.
+They never fabricate metadata, publish/adopt or silently settle. Their stop until manual recovery in 2.2e is an accepted compatibility cost.
+Legacy adopted work finishes only with proof of its existing installation.
+Candidate v3 retains existing full sourceState. This revision adds no journal format or additional secret-retention policy.
 **Registry.** Await shared cold load/restore/configuration validation before access. Validate groupID, epoch, credential and authenticator;
 missing/tombstoned/invalid records expose no fabricated handle. Host supplies context/policy/resolvers and ordered tokens including repeats.
 Only proven commits install runtime snapshots/notifications. Snapshots contain incarnation, epoch/authenticator, version, membership and
@@ -679,10 +752,10 @@ export type GroupHandleRegistry = {
   start(): Promise<void> // finishes restore-work idempotently before access/network work
   access(groupID: string): Promise<RegistryHandleAccess>
   seed(group: GroupHandle, params: { replace?: boolean; packageUse: PackageUse | null }): Promise<GroupKey>
-  recoverySource(groupID: string): Promise<RecoverySource>
+  recoverySource(groupID: string): Promise<RegistryRecoverySource>
   switchIncarnation(candidate: GroupHandle, params: {
-    source: RecoverySource
-    rejoinID: string; proof: ResyncProof; write: AdoptionWrite
+    source: RegistryRecoverySource
+    rejoinID: string; proof: ResyncProof; write: RegistrySwitchWrite
   }): Promise<GroupKey>
   delete(key: GroupKey): Promise<void>
   dispose(): Promise<void>
@@ -703,7 +776,8 @@ export type OpenAppResult =
   | { kind: 'opened'; record: PendingAppFrame }
   | { kind: 'refused'; frame: PreOpenAppFrameRef; reason: 'malformed-plaintext'; keyConsumed: true }
   | { kind: 'refused'; frame: PreOpenAppFrameRef; reason: 'invalid-ciphertext' | 'past-epoch' | 'wrong-aad'; keyConsumed: false }
-  | { kind: 'held'; frame: PreOpenAppFrameRef; reason: 'future-epoch' | 'unsupported-version' }
+  | { kind: 'held'; frame: PreOpenAppFrameRef; reason: 'future-epoch' | 'unsupported-version' } // future-epoch bounded after commit catch-up below; unsupported-version legacy/read-only
+// New outer-version/window/age refusal commits AppPoisonRecord with keyConsumed:false, then counts as a completed occurrence.
 export type AppPoisonRecord = { frame: PreOpenAppFrameRef; reason: string; keyConsumed: boolean }
 export type PendingAppFrame = { frame: AppFrameRef; payload: Uint8Array; senderDID: string; epoch: number; idempotencyKey: string }
 export type PendingAppFrames = { list(): Promise<Array<PendingAppFrame>>; complete(id: string): Promise<void> }
@@ -722,7 +796,16 @@ export function commitKeyRotation(group: GroupHandle): Promise<CommitKeyRotation
 `seal` consumes an already committed application lease. Durable attempt persistence belongs to its caller's transition. `receive` never writes for ephemeral traffic.
 `accepted` counts successful crypto opens, including subsequently malformed plaintext; it is an exact non-negative count. `openBatch` stages in input order and returns one mixed result per input only after atomic
 state/pending/poison commit (r16 decision). Authenticated plaintext supplies procedure and idempotency key; pre-open references supply neither. Validate fatal
-UTF-8/JSON, broadcast v2, type/procedure/schema/retention. Outer unsupported versions hold without opening. Malformed authenticated plaintext refuses, commits the consumed key and dead/poison occurrence, advances only a
+UTF-8/JSON, broadcast v2, type/procedure/schema/retention. Outer unsupported versions commit diagnostic poison without opening, count as completed, and never create durable holds.
+Before commit-lane catch-up, future-epoch claims hold as at HEAD. Catch-up means no applicable unapplied commit through its observed head.
+Only while caught up, require APP_FUTURE_EPOCH_WINDOW=2 of locked local epoch and hold age < APP_FUTURE_HOLD_MS=30,000 ms.
+Age starts when the commit lane first catches up after the future occurrence arrives, using local monotone time.
+Future occurrences arriving while caught up start age at observation. Duplicate/refetched copies preserve it; expiry needs no new traffic: each transition into catch-up re-runs app delivery, which starts age and schedules expiry.
+Task 5e wires peer commit-lane catch-up into app-lane. Recheck it before poison; after catch-up, try opening held frames before applying bounds.
+Use the open refusal's locked handle epoch, never a crypto epoch hint. Restart permits a fresh bounded wait, preserving committed poison/completed cursors.
+While caught up, beyond either bound commit diagnostic poison with keyConsumed:false and mark completed. Durable cursor commit records completion through the prefix.
+Task 5e tests honest lag >2 epochs delivering all frames after catch-up, plus caught-up +2/+3 and 29,999/30,000 ms boundaries.
+Malformed authenticated plaintext refuses, commits the consumed key and dead/poison occurrence, advances only a
 contiguous completed prefix, and never invokes a handler. Storage failure/ambiguity exposes no result; replay resolves saved pending/poison before reopening. Held
 inputs remain uncompleted. Registry crypto owns pending. `access` awaits `start()`; declaration itself only proves the durable restore-work write. Null/unreadable state permits retained-trust recovery, never handle access; recoverySource reads
 lifetime/version/trust independently of state bytes. Recovery uses switchIncarnation, never ordinary replace.
@@ -739,39 +822,245 @@ export type HostBuilt = Pick<BuiltCommit,
 > & { commit: Uint8Array }
 ```
 
-`RejoinRecord.source` is `RecoverySource` (r16 decision);
-its target is `{targetID: string; topicID: string; groupInfoEpoch: number; groupInfoAuthenticator: Uint8Array; captureHead: LogPosition | null}` (r15 decision).
-The authenticated `captureHead` and original search origin never change. Only a proven head-only retry refreshes `expectedHead`.
-MLS `SealGroupInfoParams` requires `captureHead: string | null`; `RecoveryGroupInfo` returns it after authentication (r15 decision).
-The GroupMLS responder port becomes `sealGroupInfo(request: Uint8Array, captureHead: LogPosition | null)`.
-Its pending recovery result carries `captureHead` through framing, persistence and replay, without importing rpc types into MLS.
-Drop conflictEpoch and the source-prefix scan; retain exact payload, requestKey, candidate and bound external verdict stages.
-RejoinRecord adds `trigger: 'automatic' | 'manual'` and `authorisationID: string | null`; a manual attempt requires its matching durable authorisation.
+RejoinRecord.source uses portable rpc RecoverySource<unknown>. mls-rpc validates/narrows it to RegistryRecoverySource internally.
+RecoveryTargetCapture = { targetID: string; topicID: string; groupInfoEpoch: number; groupInfoAuthenticator: Uint8Array; captureHead: LogPosition | null }.
+Authenticated captureHead/searchFrom never change. Only authenticated head-only retry refreshes expectedHead, including a lower head.
+Persist authenticated reply with candidate for restored target verification. CapturedPendingRecovery exposes immutable source and target/capture without fabricated trust.
+CapturedRecoveryPort supplies initial preparation/restoration and authentication/classification of recapture against saved X WITHOUT building.
+MLS/mls-rpc owns LeafNode/tree verification. rpc receives typed reconciliation and never decodes candidates or inspects opaque trust.
+Captured sealing requires the committed cursor and complete prefix. Keep the full live legacy producer/caller path until captured activation.
+Drop conflictEpoch/source-prefix scan for new attempts. Preserve payloadDigest/digest, exact bytes/requestKey/candidate and bound verdict stages.
+Task 14a prepares genuine dual fixtures. Task 14b activates production callers/mirrors/behavioural fixtures only after Tasks 15/16 provide continuation/coordinator. Preserve acceptance/convergence assertions.
+Legacy unadopted records then stop without fabricated metadata until 2.2e, an accepted compatibility cost. Proven adopted continuations finish without reinstalling.
+Write switchMutationID atomically with confirmed. Defensive confirmed+null startup assigns before coordinator work.
+Adopted source continuations bind destinationKey. Retirement preserves history, owed work, accepted settlements and immutable safety evidence.
+RejoinRecord adds `trigger: 'automatic' | 'manual'` and `authorisationID: string | null`; manual attempts require matching durable authorisation. Current 2.2d construction supports automatic/null-authorisation only. Authorised manual construction is deferred to 2.2e, not forbidden by the permanent record invariant. Structurally valid manual records decode, but execution holds as unsupported until that phase.
 `StagedAdoption` adds incarnation. Control adapters, applied rows/responses/cursor and outcomes bind GroupKey.
 ControlSnapshot adds `commitOnce: BuiltCommit | null`, `forkHalt: ForkHalt | null`, `recoveryUnavailable: RecoveryUnavailableEvent | null` (r16 decision), and
 `strand: {reason: StrandedReason | 'unsupported-version'} | null`, and `manualRecovery: ManualRecoveryRecord | null`.
+The strand/ControlHold 'unsupported-version' reason is legacy/read-only for hub-delivered frames; new frame-version faults diagnose/skip.
+Legacy local control-record version stops retain their compatibility policy, independently of delivered frame diagnostics.
 ControlChanges carries optional values for these fields; halt evidence is immutable on retirement.
 The commit-once slot survives operation outcome/ack. `deleteAppliedFrom` fork repair is removed; prune only within the incarnation.
-`searchFrom` is immutable. Accepted operations add `acceptance: FirstValidCommit` (r16 decision); expectedHead updates never change payload/ID.
+searchFrom is immutable. Accepted operations retain existing FirstValidCommit. expectedHead updates never change payload/ID.
+ControlSnapshot adds recoveryEpochFloor: number | null and settledRejoins: Array<AcceptedRejoinSettlement>, with matching ControlChanges recoveryEpochFloor/putSettledRejoins.
+AcceptedRejoinSettlement contains kind/id/digest/payloadDigest/epochAfter/acceptedEpoch, public origin, exact LeafNode digest and ledgerBefore.
+Public origin contains sourceKey, target/capture and original searchFrom, never opaque trust or private state.
+Store at most one cumulative row per source incarnation, idempotently by id. Later settlements replace public provenance and union every prior owed token.
+Request/requestKey/candidate/payload are omitted durably at settlement. Zeroise owned buffers only after proof of committed settlement.
+R0 settlement folds that row, deletes the active rejoin and raises the floor in one transition. Never delete outcomes/Welcomes or accepted facts through movement.
+Fresh snapshots and old persisted snapshots normalise missing floor/settlements to null/[] without changing saved record bytes.
+Task 1b owns packages/mls-rpc/src/memory-incarnation-stores.ts:168-182,326-327, real/double fixtures and required snapshot-field promotion.
+Its 16-file closure includes rpc peer-readmission.test.ts:20-122 null/[] fields and expectReset:125 against normalised load. Record semantics remain Task 14b.
+Task 1a keeps new fields optional, RejoinRecord aliased to legacy, and legacy source/proof overloads live. Each unit has a green gate and a closure below approximately 25 files.
+Task 1b creates a real persistence ControlStore conformance runner, reusing the contract and testing legacy snapshot loads. Run real/double Control and repo-wide types.
+Persist the monotone authenticated epoch floor independently of rejoin deletion. First save of X uses capture epoch.
+Leaf-absent discard and R0 settlement raise it to authenticated recapture epoch atomically. Restart preserves it, normalising missing legacy values only.
+Task 14b tests all four write/restart points. Task 3 also runs Control. Task 1a uses the explicit pre-runner command in the plan.
+Preserve HEAD peer.ts:3813-3821 ledgerBefore: de-duplicated inFlightEntries ?? awaitingBootstrap.entries, current ledger and conditional commitOnce bodies.
+Carry that union into Y. RecoveryCompletion exclusively settles source accepted operations to stable unknown outcomes, atomically/idempotently, matching control/rejoin.ts:184-212.
+Compute reenact after destination bootstrap. No automatic enqueue or ledgerBefore mapping removes owed tokens.
 No private builder exports a handshake reservation API or generation budget.
 
 ### Registry adapters and handler registration (r16 decision)
 
 ```ts
 export type AdoptionExpected = { key: GroupKey; stateVersion: number; identity: EpochIdentity | null }
-export type RecoverySource = AdoptionExpected & { trust: GroupRecoveryTrust; lifetimeRevision: number }
-export function createRegistryHandleAccess(params: { access: RegistryHandleAccess }): HandleAccess
+// @kumiai/rpc owns the portable recovery generic:
+export type RecoverySource<TTrust = unknown> = AdoptionExpected & { trust: TTrust; trustDigest: string; lifetimeRevision: number }
+// @kumiai/mls-rpc owns this specialisation and imports rpc ResyncProof:
+export type RegistryRecoverySource = RecoverySource<GroupRecoveryTrust>
+// Task 1a renames rpc control/rejoin.ts:16 local RecoverySource to SourceScanIdentity.
+// Task 1a renames old registry/types.ts:42-54 shapes to LegacyRegistryRecoverySource/LegacyResyncProof for live legacy overloads.
+// New RegistryRecoverySource/portable ResyncProof are additive. Task 7 supplies genuine trustDigest for captured sources, never fake legacy metadata.
+export function recoveryTrustDigest(trust: GroupRecoveryTrust): string
+// Let T=UTF8(kumiai/recovery-trust/v1), C=canonical UTF-8 JSON of validated public trust.
+// Uint8Array becomes base64url; bigint becomes canonical unsigned decimal strings; DeviceRegistry becomes base64url(encodeDeviceRegistry(registry)).
+// DeviceRegistry encoding sorts map entries. Bigint leaf lifetimes and sparse tree slots participate in the digest.
+// Omit undefined object fields; undefined tree slots become null. Recursively sort object keys; preserve array order.
+// Return base64url(SHA256(u32be(|T|)||T||u32be(|C|)||C)). Never compare raw opaque trust in rpc.
+// Store trustDigest with the saved source record/candidate. rpc compares digest strings only.
+// Reordered equivalent trust hashes equally; authority/key/ledger/spent changes differ.
+// SHA-256 base64url digest uses 43 characters. Size accounting includes full trust plus sealed record/candidate and duplicated trust/sourceState.
+export type ControlHandleAccess = Pick<HandleAccess, 'epoch' | 'admission' | 'read' | 'readControl' | 'mutate' | 'replace'>
+export function createRegistryHandleAccess(params: { access: RegistryHandleAccess }): ControlHandleAccess
+// Build/adoption and GroupMLS consume ControlHandleAccess; full registry crypto/open/leases remain 2.3.
+// ControlReadScope adds loadControl(control?: ControlStore): Promise<ControlSnapshot>.
+// Registry scopes check supplied control.key against entry groupID/incarnation before reading; foreign keys throw DisplacedGroupHandleError.
+// Simple/transactional scopes use the real supplied ControlStore; loadControl expires exactly with refresh, including after await.
+// Ordinary adoption may select an ID when mutationID is null.
+// Recovery adoption always uses saved switchMutationID; build reads/sealing release their entry before root save/retry.
 export function createGroupCrypto(params: Omit<GroupCryptoParams, 'access' | 'pending'> & {
   access: RegistryHandleAccess
 }): GroupCrypto & { pending: PendingAppFrames; unwrapBatch(frames: Array<OpenAppInput>): Promise<Array<OpenAppResult>> }
-export function createRegistryGroupMLS(params: Omit<GroupMLSParams, 'access'> & {
-  registry: GroupHandleRegistry; key: GroupKey; recovery: RecoveryEnvironment
-}): GroupMLS
-// Replacements for these existing port members:
-export type GroupMLSRecoverySourcePort = { readRecoverySource(): Promise<RecoverySource> }
-export type RecoveryAdoptionPort = {
-  onAccepted(expected: RecoverySource, proof: ResyncProof, write: AdoptionWriteFactory): Promise<void>
+export type RecoveryRouting = { targetID: string; topicID: string }
+export type RecoveryAdoptionDependencies = {
+  target: RecoveryRouting; environment: RecoveryEnvironment
+  readRecoverySource(): Promise<RegistryRecoverySource>
+  accept(candidate: GroupHandle, params: { source: RegistryRecoverySource; proof: ResyncProof; write: AdoptionWriteFactory }): Promise<void>
 }
+export type GroupMLSDependencies = {
+  control: ControlStore
+  readRecoverySource: () => Promise<AdoptionExpected>
+  recoveryAdoption?: RecoveryAdoptionDependencies
+  onSafetyHold?: (latch: (reason: NonNullable<SafetyHold>) => void) => () => void
+  recoverySecretFromTrust?: (trust: GroupRecoveryTrust) => Promise<Uint8Array>
+}
+// GroupMLSParams includes GroupMLSDependencies and uses access: ControlHandleAccess.
+// Stages are serial. Tasks 12/13 implement captured APIs additively; the complete legacy producer/caller/acceptance path stays live through Stage 6.
+// Task 14b activates captured production calls, mirrors and behavioural fixtures together, after Tasks 15/16 implement continuation/coordinator.
+// Task 14a prepares the 17-file fixture closure; 14b activates the 25-file production/mirror closure. Every unit remains below approximately 25 files. Never replace convergence with stops/skips.
+// Compatibility helpers retain explicit legacy names/types; no active requester produces legacy records after activation.
+// Ordinary source readers return identity-only AdoptionExpected, never fabricated trust/lifetimeRevision.
+// Only registry-injected recoveryAdoption supplies the trusted recovery source. Absent recoveryAdoption refuses captured recovery only.
+export function createRegistryGroupMLS(params: Omit<GroupMLSParams,
+  'access' | 'control' | 'readRecoverySource' | 'recoveryAdoption' | 'onSafetyHold'> & {
+  registry: GroupHandleRegistry; key: GroupKey; recovery: RecoveryEnvironment; target: RecoveryRouting
+  onConfirmedRecovery(handoff: ConfirmedRecoveryHandoff): void
+}): GroupMLS
+// Registry injects entry-bound control/identity/adoption/safety readers and separate trusted recovery reader, opening no old private handle.
+// Missing/invalid coordinator onConfirmedRecovery sink throws TypeError at registry GroupMLS construction, before requests.
+// target is stable host routing checked against the commit lane; GroupPeerMLSParams requires it.
+// MLS owns the one recognition helper. No RPC dependency or general intake gate.
+export function ownCommitDigest(commit: Uint8Array): string | null
+// Decode/re-encode the MLS-message commit half before SHA-256/base64url. Null for malformed input.
+// GroupMLS and independent rpc-conformance mirrors add these members:
+// ownCommitDigest(commit: Uint8Array): string | null
+// onSafetyHold(latch: (reason: NonNullable<SafetyHold>) => void): () => void
+// Helper/sink plumbing stays outside host-callback drain accounting. searchOccurrence keeps its three-argument found/absent/gap contract.
+// For recovery X, exact found is a confirmation hint. Every search result permits authenticated recapture; none authorises discard.
+// Ordinary slots retry identical bytes/ID after a failed own copy when incarnation/epoch/authenticator are unchanged; deadline stays unknown.
+// StrandKind adds 'past-epoch-divergence' with claimed confidence, diagnostic-only. Existing fork signal names remain compatibility types only.
+export type LegacyRejoinRecord = {
+  id: string; stage: 'built' | 'published' | 'confirmed' | 'adopted' | 'refused'
+  publishID: string; expectedHead: LogPosition | null; payload: Uint8Array; payloadDigest: string
+  requestID: string; request: Uint8Array; requestKey: Uint8Array; candidate: Uint8Array
+  source: { key: GroupKey; epoch: number; authenticator: Uint8Array; head: LogPosition | null }
+  digest: string; epochAfter: number; ledgerBefore: Array<string>; conflictEpoch: number | null
+  position?: LogPosition; verdict?: Uint8Array; refusal?: RecoveryRefusal
+}
+export type RecoveryTargetCapture = {
+  targetID: string; topicID: string; groupInfoEpoch: number; groupInfoAuthenticator: Uint8Array; captureHead: LogPosition | null
+}
+export type CapturedRejoinRecord = Omit<LegacyRejoinRecord, 'source' | 'conflictEpoch'> & {
+  format: 2; source: RecoverySource; target: RecoveryTargetCapture
+  captureHead: LogPosition | null; searchFrom: LogPosition | null
+  trigger: 'automatic' | 'manual'; authorisationID: string | null
+  switchMutationID: string | null; destinationKey: GroupKey | null
+}
+export type RejoinRecord = CapturedRejoinRecord
+export type StoredRejoinRecord = LegacyRejoinRecord | CapturedRejoinRecord
+// Task 1a preserves the live RejoinRecord legacy alias. Task 14b promotes it to CapturedRejoinRecord.
+// Task 6b widens ControlSnapshot.rejoin/ControlChanges.putRejoin and real/mirrored ControlStore load/apply to StoredRejoinRecord before Task 7.
+// Its HEAD-grepped 17-file closure covers rpc store/rejoin/peer, conformance control-store/memory double and mls-rpc registry switch/verdict/retired plus memory storage/readers.
+// switch.ts confirmedRecord:61 and saved reads:113-128,159-162,230-233 discriminate format:2 versus legacy before proof/source/codec access.
+// Legacy orchestration/verification/acceptance remain live. Captured storage never enters legacy steps; Task 7 supplies captured switching, Task 15 continuation.
+// Task 6b runs real/double Control/full Port and repo-wide build/types GREEN. Type activation in 14b selects production, promotes the public alias and applies legacy stops.
+// Transitional APIs retain exact legacy shapes and genuine ControlSource through a private reader until captured activation.
+// Keep LegacyPendingRecovery.onAccepted(write) isolated and live until activation; captured acceptance consumes portable RecoverySource<unknown>.
+// Activation gates old records only after captured lifecycle works. Portable mirrors use RecoverySource<unknown>; mls-rpc alone narrows trust.
+export type AcceptedRejoinSettlement = {
+  kind: 'accepted-unadoptable'; id: string; digest: string; payloadDigest: string
+  epochAfter: number; acceptedEpoch: number
+  origin: { sourceKey: GroupKey; target: RecoveryTargetCapture; searchFrom: LogPosition | null }
+  leafDigest: string; ledgerBefore: Array<string>
+}
+// leafDigest is SHA-256/base64url of the exact wire-encoded fresh LeafNode, supplied by MLS after authenticated matching.
+// No request/requestKey/candidate/payload or opaque trust. At most one cumulative settlement row per incarnation.
+export type CapturedRecapture = { sealed: Uint8Array; requestID: string; requestKey: Uint8Array; epochFloor: number | null }
+export type RecoveryReconciliation =
+  | { kind: 'accepted'; epoch: number; leafDigest: string }
+  | { kind: 'head-only'; head: LogPosition | null }
+  | { kind: 'unapplied-later'; epoch: number }
+  | { kind: 'retry' | 'held' }
+// held = local safety/missing retained trust only. retry = different authenticator, below-floor capture or transient failure.
+export type LegacyPendingRecovery = Pick<PendingRecovery, 'epoch' | 'markBindingUnusable' | 'confirmationKey' | 'judgeVerdict' | 'commit' | 'serialize'> & {
+  onAccepted(write: AdoptionWriteFactory): Promise<void>
+}
+export type CapturedPendingRecovery = Omit<LegacyPendingRecovery, 'onAccepted'> & {
+  source: RecoverySource<unknown>; target: RecoveryTargetCapture
+  onAccepted(expected: RecoverySource<unknown>, proof: ResyncProof, write: AdoptionWriteFactory): Promise<void>
+}
+export type CapturedAppliedRecovery = CapturedPendingRecovery | { renewalRequired: true } | null
+export type CapturedRecoveryPort = {
+  applyRecovery(sealed: Uint8Array, requestID: string, requestKey: Uint8Array): Promise<CapturedAppliedRecovery>
+  restoreRecovery(candidate: Uint8Array, requestKey: Uint8Array): Promise<CapturedPendingRecovery>
+  reconcileCapture(record: CapturedRejoinRecord, reply: CapturedRecapture): Promise<RecoveryReconciliation>
+  sealGroupInfo(request: Uint8Array, captureHead: LogPosition | null): Promise<Uint8Array>
+}
+// GroupMLS.capturedRecovery?: CapturedRecoveryPort is additive until Task 14b selects it for production recovery.
+// Task 1a: rpc declarations, crypto/host-boundary, registry types/barrels and independent GroupMLS mirror/memory fixture.
+// Task 12: real MLS/mls-rpc implementation, host-boundary classification/wrappers and strict independent mirror/double.
+// Initial apply returns genuine immutable source. reconcileCapture authenticates request/group/target/origin/floor and exact LeafNode against saved X without building.
+// Leaf/tree checks stay in MLS/mls-rpc. rpc sees typed reconciliation, never opaque trust internals. Fresh keys never overwrite X's original tuple.
+// Task 9 owns sealGroupInfo declaration/overload. Task 12 owns port delegation to its genuine snapshot/cursor pair.
+// Task 13 owns complete-prefix enforcement before activation. Task 17 owns exact real/mirror/host-boundary sink facades listed in the plan.
+// Same-epoch recapture, including lost private state, must make zero extra candidate builds.
+export type RegistrySwitchWrite = {
+  mutationID: string; source: { rejoinID: string }
+  destination: { control: { cursor: { position: LogPosition; epoch: number } } }
+}
+export type ConfirmedRecoveryHandoff = { record: CapturedRejoinRecord; completion: Promise<void> }
+export type RecoveryContinuation = { source: GroupKey; destination: GroupKey; record: StoredRejoinRecord }
+// Legacy adopted continuations require independently proven installation; never fabricate capture metadata or rewrite the saved record.
+export type RecoveryCompletion = (params: { ledger: Array<string>; mutationID: string }) => Promise<void>
+export type RecoveryContinuationPort = {
+  loadRecoveryContinuation(destination: GroupKey): Promise<RecoveryContinuation | null>
+  finishRecoveryContinuation(params: { continuation: RecoveryContinuation; ledger: Array<string>; mutationID: string }): Promise<void>
+}
+export function createRecoveryContinuationPort<TTx extends GroupTransaction>(params: {
+  registry: GroupHandleRegistry; persistence: GroupPersistence<TTx>
+}): RecoveryContinuationPort
+export type RegistryPeerOptions = {
+  mls: GroupMLS; recoveryOnly: boolean; target: RecoveryRouting
+  onConfirmedRecovery(handoff: ConfirmedRecoveryHandoff): void
+  continuation: RecoveryContinuation | null; completion: RecoveryCompletion | null
+}
+export type RegistryPeer = {
+  peer(): GroupPeer<Record<string, GroupProtocolDefinition>> | null
+  installedKey(): GroupKey; ready: Promise<void>; dispose(): void; drained(): Promise<void>
+}
+export function createRegistryPeer(params: {
+  registry: GroupHandleRegistry; key: GroupKey; recovery: RecoveryEnvironment; target: RecoveryRouting
+  continuation: RecoveryContinuationPort
+  settleAcceptedRecovery?: (record: CapturedRejoinRecord, acceptedEpoch: number, leafDigest: string) => Promise<void>
+  createMLS(key: GroupKey, onConfirmedRecovery: (handoff: ConfirmedRecoveryHandoff) => void): GroupMLS
+  createPeer(key: GroupKey, options: RegistryPeerOptions): Promise<GroupPeer<Record<string, GroupProtocolDefinition>>>
+}): Promise<RegistryPeer>
+// GroupPeerMLSParams adds onConfirmedRecovery?, continuation? and completion? with these exact types.
+// Continuation/completion must both be present or both absent/null.
+export declare class RegistrySourceMovedError extends GroupStateConflictError {
+  get reason(): 'source-expectation-moved'
+}
+export function createRecoverySwitchFactory(record: CapturedRejoinRecord): AdoptionWriteFactory
+// Replacements for these existing port members:
+export type GroupMLSRecoverySourcePort = { readRecoverySource(): Promise<AdoptionExpected> }
+// Ordinary certificates use identity-only source. Trust/lifetimeRevision belong only to registry recoveryAdoption.
+export type RecoveryAdoptionPort = {
+  onAccepted(expected: RecoverySource<unknown>, proof: ResyncProof, write: AdoptionWriteFactory): Promise<void>
+}
+// After source completion/host-boundary exit, coordinator rereads confirmed X, restores raw candidate and builds saved proof/factory, never retaining a proxy.
+// Defensive confirmed+null startup first assigns switchMutationID under ownership; never fabricates capture/source metadata.
+// Restart with confirmed+switchMutationID resumes coordinator before source work. Successful/proven switch creates destination MLS via createMLS.
+// Load continuation by current destination key (even after epoch advancement); pass MLS/continuation/completion into createPeer, including restart.
+// No continuation means ordinary destination startup. RecoveryCompletion owns source accepted-operation -> unknown settlement, atomically/idempotently.
+// Task 15 creates rpc rejoin-legacy.test.ts; Task 14b extends it. Task 15 tests switch-before-peer crash/restart and repeated completion, preserving existing outcomes/Welcomes, settled X facts and reenact obligations.
+// RegistrySourceMovedError alone permits fresh-counter retry of the same candidate/proof/switchMutationID for unchanged key/identity/trust/target.
+// Other local conflicts/proof/candidate/spent/invariant failures stop with diagnostics and confirmed bytes preserved.
+// Delivered confirmation/copy/transport failures instead diagnose/retry, preserving X under applied-state settlement authority.
+// A hold stays stopped. Identity/trust/key/target movement never deletes accepted/confirmed X. Local switch rollback is local-only.
+// Preserve confirmation/ledgerBefore/owed obligations while reconciling installation, or enter R0 accepted-unadoptable settlement at an authenticated recaptured epoch.
+// Discard/build is limited to D1 authenticated non-acceptance for unconfirmed X (later epoch with leaf absent), or a separate explicit host action.
+// Task 16 restart: delayed acceptance + source movement + rolled-back switch preserves X facts and obligations.
+// Task 16 keeps moved accepted X pending when settlement callback is absent. Captured production construction requires that callback at Task 14b activation.
+// Transient failures back off to at most 15 seconds; uncertain outcomes resolve before retry and never authorise another candidate.
+// Only hooked StorageOutcomeUnknownError transfers settlement. Unhooked GroupStateUncertainError settles the fence and resolves saved switchMutationID.
+// Catch provider GroupStateUncertainError without skipping the fresh Read, including when a later mutation superseded the latest marker.
+// A fresh registry Read checks that ID's proof marker, spent set, adopted source record and destination initial identity.
+// Classify saved-ID commit/rollback BEFORE movement: committed switch starts destination once, even after later movement; never discard/reinstall.
+// Explicit rolled-back proof permits only existing same-ID retry after origin/target checks. Missing/inconsistent proof stays pending or terminal.
+// Pending/restart uses proof-first bounded 15-second retry. Local refusal preserves accepted X; R0 then permits leaf-replacing Y under normal admission.
+// Never turn rollback into remote non-acceptance. Duplicate/missing ambiguous identities refuse; actual removed devices require fresh invitation (r18:66,128).
 export type ControlAdoptionPort = {
   adopt(journal: Uint8Array, expected: AdoptionExpected & { acceptance: FirstValidCommit }, write: AdoptionWrite): Promise<'installed' | 'noop' | 'moved'>
 }
@@ -797,7 +1086,8 @@ export type GroupPeerHandlerParams<TProtocols extends Record<string, GroupProtoc
 Registry `createGroupCrypto` routes wrap to lease-backed seal, ephemeral unwrap to receive, durable unwrap to a singleton openBatch.
 Singleton unwrap maps results to FrameEpochError (past/future), AppFrameStorageError (storage), InvalidAppEntryError (plaintext) or crypto refusal. `unwrapBatch` preserves per-input results; it never rejects valid siblings for crypto refusal.
 GroupMLS/PendingRecovery/GroupPeerMLSParams/OperationDeps use the named replacement port members above; GroupPeerParams adds GroupPeerHandlerParams.
-MLS recovery methods read `recoverySource` without handle access; live responder operations still use read/captured-prefix state.
+Registry-injected recovery methods read RegistryRecoverySource through recoveryAdoption without handle access.
+Ordinary GroupMLS readRecoverySource returns identity-only AdoptionExpected. Live responders still use read/captured-prefix state.
 Stale key/version/identity/lifetime revision refuses adoption/switch unchanged. Candidate replay resolves mutation proof before spent admission.
 Functions remain default at-least-once registrations. Transactional policy is valid only for log events; mixed listener policies refuse registration.
 `completion.transact` reloads uncompleted IDs, runs the registered effect and co-writes completion/cursor once; completed IDs invoke nothing.
@@ -806,6 +1096,8 @@ Functions remain default at-least-once registrations. Transactional policy is va
 
 ```ts
 export type StrandedReason = 'retention-gap' | 'unprocessable-gap' | 'lost-state' | 'ahead'
+// New digest-divergence/unexplained-own-commit evidence is host-report-only. Existing persisted evidence remains readable and immutable.
+// Delivered competitors/copies/versions produce diagnostic poison, never these durable halt bodies.
 export type GroupForkEvidence =
   | { kind: 'digest-divergence'; epoch: number; position: string; localDigest: string; remoteDigest: string }
   | { kind: 'epoch-authenticator'; epoch: number; local: Uint8Array; remote: Uint8Array }
@@ -824,8 +1116,8 @@ export type CommitSearchResult =
   | { kind: 'absent' } | { kind: 'unknown' }
 export type ControlSearchPort = { searchLog(built: BuiltCommit, position?: LogPosition): Promise<CommitSearchResult> }
 export type ResyncProof = {
-  targetID: string; topicID: string; groupInfoEpoch: number
-  captureHead: LogPosition | null // (r15 decision) authenticated reply's immutable head
+  targetID: string; topicID: string; groupInfoEpoch: number; groupInfoAuthenticator: Uint8Array
+  captureHead: LogPosition | null // authenticated reply's immutable head
   position: LogPosition; payloadDigest: string; verdict: Uint8Array
 }
 export type ManualRecovery = { mode: 'resync'; targetID: string } | { mode: 'successor'; successor: GroupKey }
@@ -847,7 +1139,18 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
 A successor must already be normally admitted/available; resolve it before retiring the source, without acquiring both group gates.
 The application owns target registration, URLs, topic selection and successor creation/admission; GroupMLS supplies configured identity/policy. Persist opaque target ID and sealed topicID;
 resolve transport objects again on restart. Acknowledgement never lifts a halt. No public clear-halt/reset flag exists.
-`ResyncProof` must verify exact external-commit application under the existing bound-verdict rules; it is not an arbitrary candidate approval.
+ResyncProof verifies exact external application under bound-verdict rules, never arbitrary candidate approval.
+The proof binds targetID/topicID/groupInfoEpoch/groupInfoAuthenticator/captureHead to the authenticated saved reply and exact confirmed external candidate.
+Origin trust supplies signer authority/floors/owner/anchor. Authenticated offered GroupInfo and exact external commit bind sourceTree/candidate.
+Do not require capture sourceTree to equal stale origin.trust.signerTree; membership/path changes between them are supported.
+proof.payloadDigest equals record.payloadDigest, binding exact saved work. Bound tuple/verdict commitDigest and confirmationKey use record.digest/position.
+Task 7 corrects packages/mls-rpc/src/registry/verdict.ts:205-218 and tests digest != payloadDigest. Never substitute proof.payloadDigest for commitDigest.
+Accepted-unadoptable settlement adds no proof arm, nullable cursor, exporter tag, candidate codec or registry-verifier branch.
+Keep existing fields/digests. A delivered-copy mismatch means nothing learned. It never authorises discard or invalidates confirmed work.
+ledgerBefore is the immutable local obligation union, not merely source.trust.ledger. Task 7 preserves in-flight/awaitingBootstrap tokens while authenticating origin.
+Recovery switch factory uses record.switchMutationID, including rollback/resolved-rolled-back; null-ID selection remains ordinary adoption only.
+Frame-driven contradictions never produce fork halt evidence under the interim rule. Host reportFork retains the existing evidence API.
+Preserve all existing durable halt bodies/events without reinterpretation, including historical frame-derived evidence.
 
 ### Welcome, outbox and host effects
 
@@ -892,18 +1195,33 @@ export type MlsContextOptions = { keyRetention?: Partial<KeyRetentionConfig> }
 // createMlsContext sets context.clientConfig = { ...defaultClientConfig, keyRetentionConfig: mergedRetention }.
 // deriveGroup/staged clones preserve it; recovery restoration rebuilds it from registry options.
 export type RecoveryEnvironment = { identity: OwnIdentity; options: GroupOptions; recoveryBinding?: RecoveryBinding }
+// @kumiai/mls primitives: no rpc or registry dependency.
+export type RecoveryTrustInputs = {
+  groupID: string; genesisAnchor: Uint8Array; signerTree: ClientState['ratchetTree']; registry: DeviceRegistry
+  credential: MemberCredential; binding: ControllerBinding | null; ledger: Array<string>; ciphersuiteName: string
+}
 export function createRecoveryRequestFromTrust(params: {
-  trust: GroupRecoveryTrust; identity: OwnIdentity; requestID: string; deadlineMs?: number
-}): Promise<{ request: Uint8Array; requestKey: Uint8Array }>
+  trust: RecoveryTrustInputs; identity: OwnIdentity; requestID: string; deadlineMs?: number
+}): Promise<{ request: string; requestKey: Uint8Array }>
 export function authenticateRecoveryReply(params: {
-  trust: GroupRecoveryTrust; sealed: Uint8Array; requestID: string; requestKey: Uint8Array; environment: RecoveryEnvironment
+  trust: RecoveryTrustInputs; sealed: Uint8Array; requestID: string; requestKey: Uint8Array; options: GroupOptions
 }): Promise<RecoveryGroupInfo | null>
+export function openRecoveryVerdictFromTrust(params: {
+  trust: RecoveryTrustInputs; sealed: Uint8Array; requestID: string; requestKey: Uint8Array; options: GroupOptions
+}): Promise<OpenedRecoveryVerdict>
+// @kumiai/mls-rpc facade: convert GroupRecoveryTrust to RecoveryTrustInputs; GroupMLS request bytes are UTF-8 of primitive request.
 export function buildRecoveryCandidate(params: {
-  source: RecoverySource; reply: RecoveryGroupInfo; requestID: string; requestKey: Uint8Array; environment: RecoveryEnvironment
-}): Promise<AppliedRecovery>
+  source: RegistryRecoverySource; reply: RecoveryGroupInfo; requestID: string; requestKey: Uint8Array
+  target: RecoveryRouting; environment: RecoveryEnvironment
+}): Promise<CapturedAppliedRecovery>
 export function restoreRecoveryCandidate(params: {
-  source: RecoverySource; candidate: Uint8Array; requestKey: Uint8Array; environment: RecoveryEnvironment
-}): Promise<RestoredPendingRecovery>
+  source: RegistryRecoverySource; candidate: Uint8Array; requestKey: Uint8Array; environment: RecoveryEnvironment
+}): Promise<CapturedPendingRecovery>
+export function deriveRecoverySecretFromTrust(trust: GroupRecoveryTrust, options?: GroupOptions): Promise<Uint8Array>
+// Default: suite KDF.expand(KDF.extract(UTF8(groupID), genesisAnchor), UTF8('kumiai/recovery/v1'), 32), exactly packages/mls-rpc/src/mls.ts:129-136.
+// genesisAnchor is the existing encoded anchor. Trust's ciphersuiteName selects the same configured suite/provider.
+// Registry recovery construction with custom recoverySecret but no recoverySecretFromTrust throws TypeError before requests/hold writes.
+// When live state is available, compare trust/live bytes and commit/rendezvous topics. Never silently change derivation or topics.
 export function createMlsContext(
   cipherSuite: MlsContext['cipherSuite'], anchor?: GroupAnchor, options?: MlsContextOptions
 ): MlsContext
@@ -1067,7 +1385,8 @@ Phase 6 kills children. After means proven transaction commit, never callback co
 | Restore declaration committed, before package invalidation or group failure transactions finish | startup remains held after reconstruction. Resume invalidation/holds/events before resync or any send (r15 decision). |
 
 There is no pending-complete/cursor seam, state/control/anchor split seam or handshake-reservation seam.
-Remaining external P2a publish/confirm/bootstrap/Welcome seams use its stage replay; fork-healing seams are replaced by durable halt/manual recovery.
+Remaining external P2a publish/confirm/bootstrap/Welcome seams use its stage replay. Frame-driven past divergence becomes diagnostic poison.
+Host-reported forks retain durable halt/manual recovery. Existing durable halts remain immutable.
 
 ## Conformance
 
@@ -1077,8 +1396,8 @@ Keep each meaningful existing case. Replace cases tied solely to removed mechani
 | Suite / phase | Case | Required assertion |
 |---|---|---|
 | codec / 2 | lossless sender | zero/one/absent clone/save/reopen, malformed sidecar and v1 refusal. Zero regression fails against current codec. |
-| recovery codec / 2 | complete sourceState | differing source/candidate trees, empty proposals and zero/one/absent senders. Persisted candidate/key restores bound verdict. V1 refuses. |
-| recovery reply / 2 | authenticated captureHead (r15 decision) | Responder exports the reconciled snapshot/cursor pair. String/null round-trip in attestation; missing/wrong-type head, tampering, invalid position and v1 refuse before build. Restart retains original captureHead and initial CAS head. |
+| recovery codec / 2 | complete sourceState and captured origin | differing source/candidate trees, empty proposals and zero/one/absent senders. Persisted v3 candidate/key restores bound verdict and immutable authenticated source/target/capture/search origin. V1/v2 adoption refuses. Legacy unadopted/conflictEpoch records hold without mutation or fabricated metadata; proven adopted continuations never reinstall. |
+| recovery reply / 2 | authenticated captureHead (r15 decision) | Responder exports a complete reconciled snapshot/cursor pair; empty gap or moved snapshot never certifies a head. String/null and captured authenticator round-trip in attestation; missing/wrong-type/tampered/invalid fields and v1 refuse before build. Restart retains original captureHead/target/search origin and initial CAS head. |
 | persistence / 2,3 | CAS and monotonicity | Stale revision/version, tombstone-as-absent, lower epoch, same-number different authenticator or same-identity progress/ceiling regression reject unchanged. Non-root factories refuse. |
 | | incarnation switch atomicity/isolation | Source A4 in n to accepted external-resync state in n+1. Mid-write rollback changes neither record. Commit tombstones n and installs n+1 with fresh progress/anchor/cursors/control. Old applied rows cannot mask new-incarnation self-removal. |
 | | source/candidate guards | stale incarnation/version/source, unaccepted/refused/spent resync result reject. Ambiguous successful switch resolves once. Adopted replay never reinstalls. |
@@ -1113,21 +1432,23 @@ Keep each meaningful existing case. Replace cases tied solely to removed mechani
 | | restart before proof | First entry of any kind per owner scope after restart runs barrier and marker check; resolve fallback runs the barrier, never a raw negative read. |
 | | storage guard witnesses | Partial-loss spent reinstall at incarnation 1 refuses; unreadable source state with readable trust retires to a fresh incarnation, corrupt trust refuses; internally consistent lower-epoch state refuses with epoch regression. |
 | | real database integration | Per provider, the D8 provider-evidence cases (a)-(g) with fault milestones, second-connection visibility, hook-queue and connection-identity assertions. SQLite, PostgreSQL, Expo (or explicit blocked reason) in 3. |
-| control / 2,3 | noncanonical own replay (r16 decision) | Competitor wins CAS at E, own exact payload later appears under another publishID. Complete prefix yields lost/superseded, winner state/cursor, no own adoption/Welcome. Match across missing coverage holds/unknown. |
+| control / 2,3 | delayed own replay (r19 decision) | Competitor wins CAS at E, saved own message later appears under another publishID. Receiver validation plus complete first-valid prefix proves supersession. Missing coverage or byte mismatch preserves slot/unknown acceptance, never a halt or rebuild. |
 | | commit-once poison head | refused/poison frame changes head without epoch move. Retry has identical payload/ID/handshake generation. Real receiver processes the poison prefix then applies the saved commit and matches candidate authenticator. Extra pending proposal is omitted, missing referenced proposal refuses. |
 | | commit-once restart | reconstruct after built-save/mismatch and after remote acceptance. Saved bytes/candidate survive. Refresh expectedHead only. No same-epoch build after deadline/outcome ack or from a second queued intent. |
-| | epoch move/deadline | complete absent range plus epoch advancement permits fresh build before deadline. First-valid found-after-deadline lands; superseded loses. Complete absence loses. Gap/uncertain acceptance yields unknown. Lost slot persists until epoch change. |
+| | epoch move/deadline | Own settlement requires authenticated applied state/normal first-valid proof. Recovery follows applied-state settlement authority. Recognition after deadline may land once. Copy mismatches/gaps preserve unknown work and owed outcomes/Welcomes. No same-epoch rebuild. |
 | | adoption/removal/resync | full-payload poison, moved, accepted-before-walk, refusal/holder evidence, exact-external-commit confirmation, revoke-hold/two-revoke and Welcome cases remain; source guard is incarnation/version. Remove automatic fork healing/source-prefix/row-retirement assertions. |
-| safety / 2,3 | fork halt live/restart | either divergence branch and host same-epoch authenticator mismatch co-write halt/evidence/event; no sends (including ephemeral), opens, control or automatic resync after commit/restart. Ack does not clear halt. Rollback/ambiguity releases nothing. History stays. |
-| | strand signals / detection limits | ahead/gap/own-unmerged/unknown-version preserve confidence; settle saved own commit first. Missing history/consistent split view does not claim local detection; host can compare exposed authenticator and report divergence. |
+| safety / 2,3 | host fork halt live/restart | Host reportFork/authenticator comparison co-writes halt/evidence/event. Live peers latch before proof, including failed writes. Ack never clears halt. Existing persisted halts remain immutable. |
+| | hub-fault audit | Both past divergence branches, signed CAS losers, own-slot/search contradictions, tampering, junk and unknown versions skip/diagnose. Advance skipped cursor, keep saved work, no new durable hold/halt, discard/rebuild or owed-work deletion. Host/local-storage invariant paths retain their contracts. |
+| | own recognition and recovery progress | Re-encoded/blob-changed own no-entry commit recognises with the helper. Named entries use the receiver resolver/verification predicate. Failed copies preserve unknown acceptance. Search results never block authenticated recapture. Provider errors retain their identity. |
+| | strand signals / detection limits | Ahead/gap/own-unmerged retain claimed confidence. Missing/identical applied history proves no fork. Current victim-spoof rejection still requires own-signature validation. Host comparisons of exposed authenticators remain available. |
 | | retained recovery trust (r16 decision) | State bytes unreadable, trust intact: request/authenticate/restore without GroupHandle and automatic resync. Both unreadable: durable halt/event, no automatic request/adoption, manual re-invite only. Every installing transaction refreshes trust atomically. |
-| | stranded automatic resync | retention gap/lost MLS state with no fork obtains sealed authenticated GroupInfo; Remove+ExternalInit accepted, one matching fresh leaf, generation 0 and new incarnation after restart. Unknown version is held, not skipped. |
-| | stale GroupInfo (r15 decision) | Valid commit lands after capture, before external publish. expectedHead=captureHead refuses. Reconcile, discard unadopted and request fresh GroupInfo. Old candidate never installs, including after restart. |
-| | capture-head poison retry (r15 decision) | Poison/non-commit/invalid frames after capture change head without valid epoch advancement. Proven complete reconciliation republishes identical payload/ID/candidate at refreshed head. Real member applies it; bound confirmation installs a fresh incarnation. Unclassifiable encrypted prefix with proven absence: attempt discarded unadopted, fresh GroupInfo requested, new attempt (fresh KeyPackage) lands; unknown acceptance holds. |
+| | stranded automatic resync | Retention gap/lost MLS state with no safety hold uses retained trust and authenticated GroupInfo. Remove+ExternalInit yields one matching fresh leaf, generation 0 and n+1 after restart. Unknown commit-frame/header versions skip with upgrade-required diagnostics, never new durable holds. Existing persisted unsupported-version holds remain immutable; legacy control-record holds retain their policy. |
+| | stale GroupInfo (r19 decision) | Recapture signed applied state: later epoch with X's exact leaf means accepted -> settled. Adopt X only with known position/current-epoch bound confirmation; otherwise atomically preserve accepted-unadoptable X/floor/ledger and build fresh Y removing X's sole identity leaf. Delayed advanced reply, pruned occurrence and settled restart succeed. Wrong leaf/request/group refuse. Later leaf absent includes applied-then-removed and obeys admission/removal policy. Mutation-check leaf matching in Task 14b. |
+| | capture-head retry (r19 decision) | Search mismatch/gap/junk never strands X or decides discard. Fresh recapture keys remain separate. Equal epoch/authenticator means responder prefix lacks X; retry SAME bytes at authenticated head even if lower/inflated previously. Only epoch floor refuses regression and survives settlement/discard/restart. Leaf present means accepted -> settled, adopting X only with bound confirmation; otherwise fresh leaf-replacing Y. Blob-derived negatives remain advisory through wire/replay/cache. Same-epoch lost-state recapture makes zero extra builds. |
 | | manual recovery | no automatic action while halted; chosen target/authorisation reopens across restart, validated resync switches once, refused attempt preserves halt. Already admitted successor permits source retirement without copying state or coordinating routing. |
 | registry / 2 | cold access/leases | concurrent cold load validated before access. Lease reserve/restart/failed seal never reuse generation. Lapsed/removed/suspended/proposals defer burn without blocking control. |
 | | rotation/retention | 500 bound, rejection/hold/resume, non-admin empty rotation, 1000 retention/window through every constructor/derive/recovery. Real/double forward-window parity. Ordinary adoption preserves sender/receive history, no evicted epoch resurrection. |
-| handlers / 2 | registration/adapters (r16 decision) | Public handlers policy union + completion runner, legacy functions, mixed-policy refusal. Real registry HandleAccess/crypto/MLS, version/incarnation guards and mixed-result batch run through concrete TPorts; doubles cannot supply a synthetic lost-state handle. |
+| handlers / 2 | registration/adapters (r16/r19 decision) | Public handler policy union + completion runner, legacy functions and mixed-policy refusal. Phase 2.2d supplies control-only registry access/GroupMLS/coordinator/continuation with incarnation/version guards. Full real registry crypto/open/leases and mixed-result application batch remain 2.3. Concrete TPorts and doubles never fabricate a lost-state handle. |
 | | all metadata paths | original authenticated epoch/incarnation on durable/live/anycast/directed kinds. Spoofed wire/header metadata loses. |
 | ephemeral / 2 | persists nothing | warmed pre-reserved lease, requests/responses/signals and decrypt batches: zero outbox/pending/cursor rows and zero transaction calls. Exhausted lease rejects without a transaction. |
 | outbox / 2,3 | attempt/settlement | all required topicIDs/identity/version round-trip. Inside-gate mismatch changes nothing. Test both proof paths and both queued orderings, attempt changes and version-only changes. |
@@ -1143,7 +1464,7 @@ Keep each meaningful existing case. Replace cases tied solely to removed mechani
 
 | Phase | Deliverable / gate |
 |---|---|
-| 2 | MLS state/recovery v2 codecs first. D8 owner queue/phases with memory as reference provider and the ownership-phases suite. Memory group coordinator, registry/incarnations/spent admission, durable fork halt/manual recovery and automatic stranded resync with authenticated captureHead, commit-once runner, fair adaptive batching and handler metadata/policies. DevicePersistence/package adapters, atomic Welcome burn, retained recovery trust and durable restore-work (r16 decision). Application leases/rotation, encrypted namespaces, durable settlements/events and mutation/side-row/fault fixtures. hub-client lifts and mls-rpc encryptor. Both contract suites on real MLS and doubles. Real HTTP smoke with injected DID. |
+| 2 | ClientState codec v2 and recovery candidate v3 codecs first. D8 owner queue/phases with memory as reference provider and the ownership-phases suite. Memory group coordinator, registry/incarnations/spent admission, durable fork halt/manual recovery and automatic stranded resync with authenticated captureHead, commit-once runner, fair adaptive batching and handler metadata/policies. DevicePersistence/package adapters, atomic Welcome burn, retained recovery trust and durable restore-work (r16 decision). Application leases/rotation, encrypted namespaces, durable settlements/events and mutation/side-row/fault fixtures. hub-client lifts and mls-rpc encryptor. Both contract suites on real MLS and doubles. Real HTTP smoke with injected DID. |
 | 3 | rpc-store sqlite/postgres providers and Expo support or explicit blocked reason. Each provider implements D8 primitives and passes ownership-phases plus its real-database integration row. Group/device-package transaction scope, root discriminator and outcome-aware Hozon hooks (including deferred rollback-hook settlement) are prerequisites. Provider CAS/barrier/late-COMMIT/raw-encryption/side-row tests. SQLite device reconstruction. |
 | 4 | client ownership, identity/Spec I, Spec H/hub policy, inventory/device cleanup, lifecycle and rotation scheduling. |
 | 5 | messaging protocols/MessageStore, transactional or idempotent handlers, durable status events, programmatic failed-send retry and per-anchor receipts. Expo bundle CI. |
@@ -1179,3 +1500,4 @@ ambiguity/external seams and automatic non-fork stranded resync remain.
 - r16 (r16 decision): first-valid own adoption/Welcome guard; atomic cross-group ordinary-package burn and device cleanup; retained handle-independent recovery trust; DevicePersistence/restore-work wiring; pre-open/mixed crypto results; concrete adapters, handler registration/completion, metadata/retention and conformance.
 - r17 (r17 decision): D8 single ownership model — per-device/per-group FIFO owner queues, typed entries (Transition, Combined, never-ambiguous Read), strict phases with phase-derived store capabilities, proof inside the retained entry with a conflicted outcome that fail-stops the factory, drain-before-slot deletion, post-effects account step, reentrancy refusal and per-provider primitives including absent-owner upsert barriers and quarantined-connection completion; ownership-phases conformance and real-database integration evidence for every provider. Replaces layered barrier/store-lock/gate/fence mechanisms after recurring deadlock, post-validation write and retained-read findings.
 - r18 (r18 decision): D8 runtime-neutral — per-entry operation lock over each operation's whole read-modify-write with nesting forbidden by construction (replaces inline nested sequencing after sibling deadlocks and lost writes); fatal operation failures make the transition rollback-only; operations bound to entry, transaction and attempt; coordinator authority is a private writer object, not ambient context (after codec and accessor callbacks inherited it); internal bindings explicit; reentrancy detection needs no runtime async-context API, with an optional opaque-token `ownershipContext` port for detection after `await`. Retires `GroupMutationGate`.
+- r19 (r19 decision): 2.2d captured recovery treats hub faults as non-delivery. Reply v2/candidate v3 preserve immutable origin and existing bound proof. Authenticated applied state settles acceptance. R0 adopts X only with bound confirmation, otherwise atomically preserves accepted-unadoptable X/floor/ledger and builds leaf-replacing Y. Regressing heads diagnose only. Portable non-building recapture and additive APIs precede serial lifecycle/activation stages. RecoveryCompletion settles source operations once. Local switch rollback never deletes accepted X. Existing local/historical safety and legacy-record stops remain. Fork detection stays deferred out-of-band; manual recovery/full registry crypto remain 2.2e/2.3.
