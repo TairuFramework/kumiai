@@ -90,8 +90,8 @@ export type ConformanceControlSnapshot<Position extends string = string> = {
   } | null
   operations: Array<ConformanceOperation<Position>> // FIFO by `seq`
   rejoin: ConformanceRejoinRecord<Position> | null
-  recoveryEpochFloor?: number | null
-  settledRejoins?: Array<ConformanceAcceptedRejoinSettlement<Position>>
+  recoveryEpochFloor: number | null
+  settledRejoins: Array<ConformanceAcceptedRejoinSettlement<Position>>
   outcomes: Array<ConformanceOutcome<Position>>
   welcomes: Array<ConformanceWelcomeObligation>
   applied: Array<ConformanceAppliedCommit> // newest 64 epochs
@@ -578,6 +578,107 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
     reopen: async () => (await params.reopen()).control,
   })
   describe('ControlStore conformance', () => {
+    test('fresh recovery state has a null floor and no settlements', async () => {
+      const host = await params.open()
+      const snapshot = await host.control.load()
+      expect(snapshot.recoveryEpochFloor).toBeNull()
+      expect(snapshot.settledRejoins).toEqual([])
+    })
+    test('recovery floor survives deletion, lower writes, null writes and reopen', async () => {
+      const host = await params.open()
+      const rejoin = records().putRejoin
+      await host.control.apply({ putRejoin: rejoin, recoveryEpochFloor: 4 }, 'capture')
+      await host.control.apply({ deleteRejoin: true, recoveryEpochFloor: 7 }, 'discard')
+      await host.control.apply({ recoveryEpochFloor: 5 }, 'lower')
+      await host.control.apply({ recoveryEpochFloor: null }, 'null')
+      const read = await (await params.reopen()).control.load()
+      expect(read.recoveryEpochFloor).toBe(7)
+      expect(read.rejoin).toBeNull()
+    })
+    test('settlements replace public provenance and retain cumulative owed tokens defensively', async () => {
+      const host = await params.open()
+      await host.control.apply({ ...records(), recoveryEpochFloor: 4 }, 'before-settlement')
+      const baseline = await host.control.load()
+      const settlement: ConformanceAcceptedRejoinSettlement = {
+        kind: 'accepted-unadoptable',
+        id: 'accepted-X',
+        digest: 'commit-X',
+        payloadDigest: 'payload-X',
+        epochAfter: 5,
+        acceptedEpoch: 6,
+        origin: {
+          sourceKey: { ...host.control.key },
+          target: {
+            targetID: 'target-X',
+            topicID: 'topic-X',
+            groupInfoEpoch: 4,
+            groupInfoAuthenticator: new Uint8Array([1, 2]),
+            captureHead: 'capture-X',
+          },
+          searchFrom: 'search-X',
+        },
+        leafDigest: 'leaf-X',
+        ledgerBefore: ['owed-X', 'shared', 'owed-X'],
+      }
+      const original = {
+        ...settlement,
+        origin: {
+          ...settlement.origin,
+          sourceKey: { ...settlement.origin.sourceKey },
+          target: {
+            ...settlement.origin.target,
+            groupInfoAuthenticator: Uint8Array.from(
+              settlement.origin.target.groupInfoAuthenticator,
+            ),
+          },
+        },
+        ledgerBefore: [...settlement.ledgerBefore],
+      }
+      // Extra private fields must not cross the public storage boundary.
+      const changes: ConformanceControlChanges = {
+        putSettledRejoins: [
+          { ...settlement, requestKey: new Uint8Array([9]) } as ConformanceAcceptedRejoinSettlement,
+        ],
+        deleteRejoin: true,
+        recoveryEpochFloor: 6,
+      }
+      params.injectFailure('mid-apply')
+      await expect(host.control.apply(changes, 'failed-settlement')).rejects.toThrow()
+      expect(await (await params.reopen()).control.load()).toEqual(baseline)
+      expect(await host.control.lastMutation()).toBe('before-settlement')
+      await host.control.apply(changes, 'settle-X')
+      settlement.origin.sourceKey.incarnation = 99
+      settlement.origin.target.groupInfoAuthenticator.fill(0)
+      settlement.ledgerBefore.push('mutated-input')
+      const reopened = await params.reopen()
+      const read = await reopened.control.load()
+      expect(read.rejoin).toBeNull()
+      expect(read.recoveryEpochFloor).toBe(6)
+      expect(read.outcomes).toEqual(baseline.outcomes)
+      expect(read.welcomes).toEqual(baseline.welcomes)
+      expect(read.settledRejoins).toEqual([{ ...original, ledgerBefore: ['owed-X', 'shared'] }])
+      read.settledRejoins?.[0]?.origin.target.groupInfoAuthenticator.fill(0)
+      read.settledRejoins?.[0]?.ledgerBefore.push('mutated-output')
+      expect((await reopened.control.load()).settledRejoins).toEqual([
+        { ...original, ledgerBefore: ['owed-X', 'shared'] },
+      ])
+      const next = {
+        ...original,
+        id: 'accepted-Y',
+        digest: 'commit-Y',
+        origin: {
+          ...original.origin,
+          target: { ...original.origin.target, targetID: 'target-Y', captureHead: 'capture-Y' },
+          searchFrom: 'search-Y',
+        },
+        ledgerBefore: ['shared', 'owed-Y'],
+      }
+      await reopened.control.apply({ putSettledRejoins: [next, next] }, 'settle-Y')
+      await reopened.control.apply({ putSettledRejoins: [next] }, 'repeat-Y')
+      expect((await (await params.reopen()).control.load()).settledRejoins).toEqual([
+        { ...next, ledgerBefore: ['owed-X', 'shared', 'owed-Y'] },
+      ])
+    })
     const safety = (key: ConformanceGroupKey) => ({
       forkHalt: {
         eventID: JSON.stringify(['group:fork', key.groupID, key.incarnation]),
@@ -1292,6 +1393,8 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
         strand: null,
         operations: changes.putOperations,
         rejoin: changes.putRejoin,
+        recoveryEpochFloor: null,
+        settledRejoins: [],
         outcomes: changes.putOutcomes,
         welcomes: changes.putWelcomes,
         applied: changes.putApplied,

@@ -79,6 +79,7 @@ export {
   type ConformanceStoredRejoinRecord,
   type ConformanceWelcomeObligation,
   type ControlStoreConformanceParams,
+  decodeControlFixtureState,
   testControlSafetyInputConformance,
   testControlStoreConformance,
 } from './control-store.js'

@@ -47,8 +47,8 @@ export type ControlSnapshot = {
   } | null
   operations: Array<Operation> // FIFO by `seq`
   rejoin: RejoinRecord | null
-  recoveryEpochFloor?: number | null
-  settledRejoins?: Array<AcceptedRejoinSettlement>
+  recoveryEpochFloor: number | null
+  settledRejoins: Array<AcceptedRejoinSettlement>
   outcomes: Array<Outcome>
   welcomes: Array<WelcomeObligation>
   applied: Array<AppliedCommit> // newest 64 epochs

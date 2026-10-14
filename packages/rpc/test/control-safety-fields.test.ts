@@ -30,6 +30,8 @@ const empty = (): Rpc.ControlSnapshot => ({
   strand: null,
   operations: [],
   rejoin: null,
+  recoveryEpochFloor: null,
+  settledRejoins: [],
   outcomes: [],
   welcomes: [],
   applied: [],

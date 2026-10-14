@@ -1,5 +1,6 @@
 import type { ConformanceAnchorSlot, ConformanceAnchorStore } from './anchor-store.js'
 import type {
+  ConformanceAcceptedRejoinSettlement,
   ConformanceAdoptionExpected,
   ConformanceAdoptionWrite,
   ConformanceControlChanges,
@@ -57,6 +58,52 @@ function cloneValue<TValue>(value: TValue): TValue {
     return copy as TValue
   }
   return value
+}
+
+function raiseFloor(current: number | null, epoch: number): number {
+  if (
+    !Number.isSafeInteger(epoch) ||
+    epoch < 0 ||
+    (current !== null && (!Number.isSafeInteger(current) || current < 0))
+  )
+    throw new TypeError('Invalid recovery epoch floor')
+  return current === null ? epoch : Math.max(current, epoch)
+}
+
+function foldSettlements<Position extends string>(
+  previous: Array<ConformanceAcceptedRejoinSettlement<Position>>,
+  puts: Array<ConformanceAcceptedRejoinSettlement<Position>> = [],
+): Array<ConformanceAcceptedRejoinSettlement<Position>> {
+  const rows = new Map<string, ConformanceAcceptedRejoinSettlement<Position>>()
+  for (const value of [...previous, ...puts]) {
+    const { sourceKey, target, searchFrom } = value.origin
+    const head = target.captureHead
+    if (head !== null && (typeof head !== 'string' || head.length === 0 || head.length > 64))
+      throw new TypeError('Invalid recovery capture head')
+    const key = JSON.stringify([sourceKey.groupID, sourceKey.incarnation])
+    rows.set(key, {
+      kind: value.kind,
+      id: value.id,
+      digest: value.digest,
+      payloadDigest: value.payloadDigest,
+      epochAfter: value.epochAfter,
+      acceptedEpoch: value.acceptedEpoch,
+      leafDigest: value.leafDigest,
+      origin: {
+        sourceKey: { groupID: sourceKey.groupID, incarnation: sourceKey.incarnation },
+        target: {
+          targetID: target.targetID,
+          topicID: target.topicID,
+          groupInfoEpoch: target.groupInfoEpoch,
+          groupInfoAuthenticator: Uint8Array.from(target.groupInfoAuthenticator),
+          captureHead: head,
+        },
+        searchFrom,
+      },
+      ledgerBefore: [...new Set([...(rows.get(key)?.ledgerBefore ?? []), ...value.ledgerBefore])],
+    })
+  }
+  return [...rows.values()]
 }
 
 type Context =
@@ -258,7 +305,8 @@ function mutateControl<Position extends string>(
   context: Context | null = null,
   key: ConformanceGroupKey | null = null,
 ): void {
-  const { forkHalt, recoveryUnavailable, ...ordinary } = changes
+  const { forkHalt, recoveryUnavailable, recoveryEpochFloor, putSettledRejoins, ...ordinary } =
+    changes
   const safety: Pick<ConformanceControlChanges, 'forkHalt' | 'recoveryUnavailable'> = {}
   if ('forkHalt' in changes) {
     const body = copySafety('forkHalt', forkHalt)
@@ -337,6 +385,11 @@ function mutateControl<Position extends string>(
   snapshot.recoveryUnavailable ??= safety.recoveryUnavailable ?? null
   if (owned.strand !== undefined) snapshot.strand = owned.strand
   if (owned.cursor !== undefined) snapshot.cursor = owned.cursor
+  snapshot.recoveryEpochFloor =
+    recoveryEpochFloor == null
+      ? (snapshot.recoveryEpochFloor ?? null)
+      : raiseFloor(snapshot.recoveryEpochFloor ?? null, recoveryEpochFloor)
+  snapshot.settledRejoins = foldSettlements(snapshot.settledRejoins ?? [], putSettledRejoins)
   snapshot.operations.sort((a, b) => a.seq - b.seq)
   snapshot.applied.sort((a, b) => a.epoch - b.epoch)
 }
@@ -367,6 +420,8 @@ export function createMemoryControlStore<Position extends string = string>(
       strand: null,
       operations: [],
       rejoin: null,
+      recoveryEpochFloor: null,
+      settledRejoins: [],
       outcomes: [],
       welcomes: [],
       applied: [],

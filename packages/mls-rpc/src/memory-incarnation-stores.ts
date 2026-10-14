@@ -174,6 +174,8 @@ const emptyControl = (): ControlSnapshot => ({
   strand: null,
   operations: [],
   rejoin: null,
+  recoveryEpochFloor: null,
+  settledRejoins: [],
   outcomes: [],
   welcomes: [],
   applied: [],
@@ -324,7 +326,12 @@ export function createUnlockedIncarnationStores(params: {
     state: stateStores.state(key.incarnation),
     control: {
       async load() {
-        return (await control.load('current'))?.snapshot ?? emptyControl()
+        const snapshot = (await control.load('current'))?.snapshot ?? emptyControl()
+        return {
+          ...snapshot,
+          recoveryEpochFloor: snapshot.recoveryEpochFloor ?? null,
+          settledRejoins: snapshot.settledRejoins ?? [],
+        }
       },
       async apply(changes, mutationID) {
         const owned = copyControlChanges(changes, key)
@@ -498,6 +505,8 @@ export function createUnlockedIncarnationStores(params: {
             forkHalt: previous.snapshot.forkHalt,
             recoveryUnavailable: previous.snapshot.recoveryUnavailable,
             strand: previous.snapshot.strand,
+            recoveryEpochFloor: previous.snapshot.recoveryEpochFloor ?? null,
+            settledRejoins: previous.snapshot.settledRejoins ?? [],
             outcomes: previous.snapshot.outcomes,
             welcomes: previous.snapshot.welcomes,
             // Adopted recovery remains owed until explicit continuation settlement.

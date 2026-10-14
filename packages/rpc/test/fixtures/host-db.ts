@@ -78,6 +78,8 @@ function emptyRecord(): GroupRecord {
       strand: null,
       operations: [],
       rejoin: null,
+      recoveryEpochFloor: null,
+      settledRejoins: [],
       outcomes: [],
       welcomes: [],
       applied: [],

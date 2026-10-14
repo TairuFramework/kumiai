@@ -97,6 +97,8 @@ function unsettled(): ControlSnapshot {
       position: asLogPosition('003'),
       verdict: new Uint8Array([9]),
     },
+    recoveryEpochFloor: null,
+    settledRejoins: [],
     outcomes: [{ id: 'settled', opID: 'settled', at: 50, kind: 'lost' }],
     welcomes: [
       { opID: 'accepted', welcome: new Uint8Array([10]), recipients: ['carol'], committed: true },
@@ -125,6 +127,8 @@ function unsettled(): ControlSnapshot {
 function expectReset(before: ControlSnapshot, after: ControlSnapshot) {
   expect(after.operations).toEqual([])
   expect(after.rejoin).toBeNull()
+  expect(after.recoveryEpochFloor).toBeNull()
+  expect(after.settledRejoins).toEqual([])
   expect(after.applied).toEqual([])
   expect(after.responses).toEqual([])
   expect(after.cursor).toBeNull()

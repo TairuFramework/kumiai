@@ -34,11 +34,24 @@ const empty = (): ControlSnapshot => ({
   strand: null,
   operations: [],
   rejoin: null,
+  recoveryEpochFloor: null,
+  settledRejoins: [],
   outcomes: [],
   welcomes: [],
   applied: [],
   responses: [],
   cursor: null,
+})
+
+test('legacy snapshot changes normalise recovery fields without rewriting the saved rejoin', () => {
+  const snapshot = { ...empty(), rejoin }
+  const { recoveryEpochFloor: _floor, settledRejoins: _settlements, ...legacy } = snapshot
+  const before = structuredClone(legacy)
+  const normalised = applyChanges(legacy, {})
+  expect(normalised.recoveryEpochFloor).toBeNull()
+  expect(normalised.settledRejoins).toEqual([])
+  expect(normalised.rejoin).toEqual(before.rejoin)
+  expect(legacy).toEqual(before)
 })
 const operation = (id: string, seq: number): Operation => ({
   id,

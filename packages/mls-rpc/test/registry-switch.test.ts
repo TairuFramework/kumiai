@@ -281,6 +281,8 @@ for (const mode of ['real-mls', 'double'] as const) {
           strand: null,
           operations: [],
           rejoin: null,
+          recoveryEpochFloor: null,
+          settledRejoins: [],
           outcomes: [],
           welcomes: [],
           applied: [],

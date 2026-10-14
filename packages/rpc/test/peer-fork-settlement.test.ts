@@ -30,6 +30,8 @@ const empty = (): ControlSnapshot => ({
   strand: null,
   operations: [],
   rejoin: null,
+  recoveryEpochFloor: null,
+  settledRejoins: [],
   outcomes: [],
   welcomes: [],
   applied: [],
@@ -274,6 +276,8 @@ describe('durable fork halts', () => {
     }
     expect(await again.control.load()).toMatchObject({
       rejoin: null,
+      recoveryEpochFloor: null,
+      settledRejoins: [],
       outcomes: [],
       cursor,
       strand: null,

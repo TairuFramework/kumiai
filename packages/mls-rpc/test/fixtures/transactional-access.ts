@@ -94,6 +94,8 @@ export function createTransactionalStore(
         strand: null,
         operations: [],
         rejoin: null,
+        recoveryEpochFloor: null,
+        settledRejoins: [],
         outcomes: [],
         welcomes: [],
         applied: [],

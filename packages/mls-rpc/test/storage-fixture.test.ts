@@ -163,6 +163,7 @@ type ActualContracts = [
   Rpc.ControlStore,
   Rpc.ControlSnapshot,
   Rpc.ControlChanges,
+  Rpc.AcceptedRejoinSettlement,
   Rpc.SafetyHold,
 ]
 type MirrorContracts = [
@@ -226,6 +227,7 @@ type MirrorContracts = [
   Mirror.ConformanceControlStore<Rpc.LogPosition>,
   Mirror.ConformanceControlSnapshot<Rpc.LogPosition>,
   Mirror.ConformanceControlChanges<Rpc.LogPosition>,
+  Mirror.ConformanceAcceptedRejoinSettlement<Rpc.LogPosition>,
   Mirror.ConformanceSafetyHold,
 ]
 function assignContracts(actual: ActualContracts, mirror: MirrorContracts): void {
@@ -235,6 +237,18 @@ function assignContracts(actual: ActualContracts, mirror: MirrorContracts): void
   void implementation
 }
 void assignContracts
+
+function requiredRecoveryFields(
+  actual: Rpc.ControlSnapshot,
+  mirror: Mirror.ConformanceControlSnapshot<Rpc.LogPosition>,
+): void {
+  const actualFloor: number | null = actual.recoveryEpochFloor
+  const mirrorFloor: number | null = mirror.recoveryEpochFloor
+  const actualSettlements: Array<Rpc.AcceptedRejoinSettlement> = actual.settledRejoins
+  const mirrorSettlements: Array<Rpc.AcceptedRejoinSettlement> = mirror.settledRejoins
+  void [actualFloor, mirrorFloor, actualSettlements, mirrorSettlements]
+}
+void requiredRecoveryFields
 
 const ciphertextNamespaces = [
   'lifetime',

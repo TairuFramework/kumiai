@@ -6,6 +6,11 @@ import {
   PeerDisposedError,
   StorageOutcomeUnknownError,
 } from '../errors.js'
+import {
+  type AcceptedRejoinSettlement,
+  copyRecoveryOrigin,
+  raiseRecoveryEpochFloor,
+} from '../recovery-types.js'
 import type { ForkHalt, RecoveryUnavailableEvent } from './safety.js'
 import { controlSafetyHeld, forkEventID, recoveryUnavailableEventID } from './safety.js'
 import type {
@@ -43,6 +48,29 @@ function cloneControlValue<TValue>(value: TValue): TValue {
     return copy as TValue
   }
   return value
+}
+
+function cumulativeSettlements(
+  previous: Array<AcceptedRejoinSettlement>,
+  puts: Array<AcceptedRejoinSettlement> = [],
+): Array<AcceptedRejoinSettlement> {
+  const rows = new Map<string, AcceptedRejoinSettlement>()
+  for (const row of [...previous, ...puts]) {
+    const origin = copyRecoveryOrigin(row.origin)
+    const key = JSON.stringify([origin.sourceKey.groupID, origin.sourceKey.incarnation])
+    rows.set(key, {
+      kind: row.kind,
+      id: row.id,
+      digest: row.digest,
+      payloadDigest: row.payloadDigest,
+      epochAfter: row.epochAfter,
+      acceptedEpoch: row.acceptedEpoch,
+      origin,
+      leafDigest: row.leafDigest,
+      ledgerBefore: [...new Set([...(rows.get(key)?.ledgerBefore ?? []), ...row.ledgerBefore])],
+    })
+  }
+  return [...rows.values()]
 }
 
 export type CommitOnceWriteContext =
@@ -259,7 +287,8 @@ function assertSafetyIdentity(
 
 /** Deletes precede puts so a replacement at the fork epoch survives settlement. */
 export function applyChanges(
-  snapshot: ControlSnapshot,
+  snapshot: Omit<ControlSnapshot, 'recoveryEpochFloor' | 'settledRejoins'> &
+    Partial<Pick<ControlSnapshot, 'recoveryEpochFloor' | 'settledRejoins'>>,
   changes: ControlChanges,
   context: CommitOnceWriteContext | null = null,
   key: GroupKey | null = null,
@@ -332,6 +361,11 @@ export function applyChanges(
       (row) => row.id,
     ).sort((a, b) => a.seq - b.seq),
     rejoin: changes.putRejoin ?? (changes.deleteRejoin ? null : snapshot.rejoin),
+    recoveryEpochFloor:
+      changes.recoveryEpochFloor == null
+        ? (snapshot.recoveryEpochFloor ?? null)
+        : raiseRecoveryEpochFloor(snapshot.recoveryEpochFloor ?? null, changes.recoveryEpochFloor),
+    settledRejoins: cumulativeSettlements(snapshot.settledRejoins ?? [], changes.putSettledRejoins),
     outcomes: putRows(
       snapshot.outcomes.filter((row) => !changes.deleteOutcomes?.includes(row.id)),
       changes.putOutcomes,
