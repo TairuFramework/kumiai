@@ -22,6 +22,8 @@ depend on both.
 - `createGroupCrypto({ access, entryLabel?, runtime?, pending? })` — `GroupCrypto` over that access.
 - `createGroupMLS({ access, identity, entrySlot, recoverySecret?, recoveryBinding? })` — `GroupMLS`
   over the same access.
+- `createGroupSafety({ registry, persistence, mls, resolveTarget })` -- incarnation safety reports,
+  retained epoch authenticators and durable safety events over the registry's shared coordinator.
 - `applyCommit({ handle, commit, entrySlot, ownDID, persist?, ... })` — apply a received Commit inside the host's own
   transaction (see below).
 - `createLedgerEntrySlot()` — the per-commit ledger-entry resolver seam (see below).
@@ -308,11 +310,41 @@ Every `read` and `readControl` guarded-opens current stored state and restores a
 callback mutations are not persisted. Control refresh stays in the same Read entry and expires
 when its callback ends. Keys, runtime authenticators and membership sets are defensive copies.
 Runtime identity comes from current installed trust, while administrative initial identity stays
-historical. Terminal/removed state, persisted strand and MLS lapse determine send admission.
+historical. Safety holds, terminal/removed state, persisted strand and MLS lapse determine send admission.
 Missing or retired runtime returns null. The access exposes retirement-hook registration for
 subsequent lifetime operations.
 
-`GroupUnavailableError.reason` distinguishes `absent`, `deleted`, `state-unreadable`, `invalid`
-and `restore-pending`. A surviving lifetime with missing metadata or trust is invalid. Null or
-corrupt state cannot use cached bytes, including at an unchanged state version, and failed
+`GroupUnavailableError.reason` distinguishes `absent`, `deleted`, `state-unreadable`, `invalid`,
+`restore-pending` and `recovery-unavailable`. A surviving lifetime with missing metadata is invalid.
+Missing, corrupt or empty-spent retained trust records `recovery-unavailable`.
+Null or corrupt state cannot use cached bytes, including at an unchanged state version, and failed
 restorations are never cached. Pure reads advance no persistence revision or state version.
+
+## Durable group safety
+
+`GroupSafety.epochAuthenticator(key)` reads a defensive copy of active installed trust without writing.
+`reportFork(key, evidence)` validates the active incarnation and committed identity before latching and atomically storing evidence with its event.
+`recover(key, choice)` currently rejects with `ManualRecoveryUnavailableError`.
+The factory requires a registered registry and persistence sharing its coordinator binding.
+
+`forkHalt` and `recoveryUnavailable` are immutable incarnation fields.
+Deletion and replacement preserve old-incarnation evidence and events, including fork-halted tombstones.
+`events(key)` supplies the complete durable safety event list, including host and registry diagnoses.
+`ackEvent(key, id)` removes only the event, never either safety field.
+Identical field reapplication preserves the original body and does not recreate an acknowledged event.
+
+`AppOutbox.ackEvent` rejects stored safety events with `TypeError`. Absent IDs are no-ops.
+
+Registry mutation, replacement, adoption and direct crypto refuse either safety reason with `GroupSafetyHeldError`.
+Peers observe committed fields on control refresh or restart. Immediate registry admission wiring into MLS and live peers belongs to 2.2d.
+Already opened handlers, stored outcomes/events, committed Welcome delivery and existing live certified settlement remain serviceable.
+Restart publication of frozen settlement under a safety hold remains a 2.3 obligation.
+
+Hosts derive `judgeWelcomeAdmission`'s `held.forkHalted` from `forkHalt` alone.
+`recoveryUnavailable` alone permits an otherwise admissible Welcome into the next incarnation when retained trust is valid.
+Missing, unreadable or empty-spent trust refuses seed as unavailable without changing admission state.
+Neither Welcome nor GroupInfo reconstructs the spent set. Ordinary readmission refuses a fork-halted tombstone.
+Manual re-invite after lost spent trust requires a new successor group with a new groupID. This recovery belongs to 2.2e.
+
+A validated latch survives failed or ambiguous writes in the current process. Only proven commits survive restart.
+A crash before durable writing can lose one-shot below-cursor or host-reported evidence.

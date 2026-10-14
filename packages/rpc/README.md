@@ -231,6 +231,10 @@ transaction, installs the joined state, applies `readmissionChanges(snapshot)` a
 anchor slot. Open operations and rejoin become `unknown` outcomes; applied commits, responses and
 the commit cursor are cleared. Existing outcomes and Welcome obligations remain. A new peer
 captures the anchor at the joined epoch. An equal or older Welcome is `alreadyJoined`.
+Hosts derive `judgeWelcomeAdmission`'s `held.forkHalted` from `forkHalt`, never from `recoveryUnavailable`.
+Fork-halted tombstones refuse ordinary readmission.
+With valid retained trust, a recovery-unavailable field alone permits an otherwise admissible Welcome into the next incarnation.
+Missing, unreadable or empty-spent trust refuses seed as unavailable. Welcome and GroupInfo cannot reconstruct the spent set.
 
 `controlSettled(snapshot)` must be true before host deletion. `abandon()` explicitly accepts loss
 of open operations, rejoin and undelivered Welcomes; outcomes still need acknowledgement.
@@ -242,14 +246,42 @@ ceiling would make every upward override an outright refusal — leaving the pee
 its own commit topic. The two windows are aligned so there is no span in which a returning member can
 rebuild its membership but not its messages.
 
+## Durable safety holds
+
+`ControlSnapshot.forkHalt` and `recoveryUnavailable` hold immutable, incarnation-scoped evidence.
+Their first write atomically stores a `group:fork` or `group:recovery-unavailable` event.
+Retirement and deletion retain old-incarnation evidence. Acknowledgement removes an event without clearing its field.
+Identical field reapplication does not recreate an acknowledged event. There is no public field-clearing API.
+`ForkHalt`, `GroupForkEvidence`, `GroupSafetyEvent`, `RecoveryUnavailableEvent` and `SafetyHold` are exported here and re-exported by `@kumiai/mls-rpc`.
+
+Under either safety reason, peer sends reject with `SendNotAdmissibleError(reason)`.
+Enqueue, direct crypto, registry mutation, resync, reauthorize and peer recovery refuse with `GroupSafetyHeldError(reason)`.
+`reauthorize()` throws synchronously. Held crypto/resolver refusals latch the reason and retain the unprocessed frame and cursor for retry.
+New opens, control publication and automatic recovery stop. Already opened handlers may finish.
+Stored outcomes/events, opened-record restoration, committed Welcome delivery and existing live certified settlement remain serviceable.
+Restart publication of frozen settlement under a safety hold remains a 2.3 obligation.
+
+Peers latch self-detected evidence and held port refusals immediately.
+Registry/host committed fields reach peers through control refresh or restart. Immediate registry admission wiring into consumers belongs to 2.2d.
+`GroupSafety.events(key)` in `@kumiai/mls-rpc` supplies the complete durable safety history until acknowledged.
+Its `ackEvent(key, id)` leaves safety fields intact. `AppOutbox.ackEvent` rejects stored safety events and ignores absent IDs.
+
+Optional `onSafetyEvent` fires at most once for this peer's matching halt after proven persistence, outside locks.
+It contains callback failures and promises no replay or notification for another writer's evidence.
+A validated latch holds the current process through failed or ambiguous writes. Only proven commits survive restart.
+A crash before writing can lose one-shot below-cursor or host-reported evidence, despite in-process storage retries.
+
+Manual safety recovery remains unavailable. `GroupSafety.recover` rejects with `ManualRecoveryUnavailableError` until 2.2e.
+Manual re-invite after lost spent trust requires a new successor group with a new groupID, also assigned to 2.2e.
+
 ## Host notices for commit strands and recovery
 
 `GroupPeerParams.onStrand` reports when the commit walk finds evidence that this peer is stranded.
 One observation marks one stranded episode; further frames stay silent unless they provide strictly
 stronger evidence. A successful recovery, including a bootstrap completed later, ends the episode.
-The next strand starts a new one. A failed attempt leaves the episode open. The strand and fork
-evidence are durable in the commit cursor; notification deduplication is in memory, so restarting
-a peer can produce a new observation for the same strand.
+The next strand starts a new one. A failed attempt leaves the episode open.
+Ordinary strands persist in the commit cursor. Fork evidence persists in `forkHalt`, without creating a safety-derived strand or stranded cursor.
+Notification deduplication is in memory, so restarting can repeat an observation.
 
 Each `StrandObservation` names the stable commit-topic `groupID`, the frame's log `position`, the
 peer's `localEpoch`, a `kind`, and a `confidence`. `claimedEpoch` comes from the cleartext header;
@@ -259,9 +291,14 @@ peer's `localEpoch`, a `kind`, and a `confidence`. `claimedEpoch` comes from the
 | --- | --- | --- |
 | `own-unmerged` | `authenticated` | Sender data proves this device sealed a commit at this epoch that the hub now places in the log. Commit content is unverified; a hub can tamper beyond the ciphertext sample or fake acceptance. Heal. |
 | `fork-losing` | `observed` | This peer enacted different commit bytes at that epoch and is on the branch that loses the log-position tiebreak. The other commit is not authenticated. |
+| `fork-winning` | `observed` | This peer enacted different commit bytes at that epoch and wins the log-position tiebreak. The other commit is not authenticated. |
 | `ahead` | `claimed` | A frame's cleartext epoch is ahead of this peer. A commit-topic publisher can forge that claim. |
 | `unknown-version` | `claimed` | A frame's handshake or commit-frame version cannot be read by this build. Its epoch and commit bytes are unavailable. |
 | `retention-gap` | `observed` | The hub reports a gap beyond the covered commit cursor. The peer cannot prove the missing range contained no membership changes. |
+
+Past-epoch commit-digest divergence halts on either classifier branch before authentication. The evidence is observed, not authenticated.
+Certified losers, identical bytes and missing applied history remain non-fork cases.
+Until authenticated `captureHead` lands in 2.2d, a stale-GroupInfo external recovery commit arriving after an applied commit halts the survivor.
 
 `GroupPeerParams.onRecovery` reports `started` and exactly one terminal event (`succeeded` or
 `failed`) for each attempt. The event's `attemptID`, `groupID` and `trigger` (`automatic` or
@@ -277,7 +314,7 @@ Its `anchorRecovery` records whether anchor recovery held the peer at invalidati
 Repeated `invalidated` failures with `anchorRecovery: true` and the same non-null `blockingPosition` identify an anchor-gated livelock.
 Newer GroupInfo and further `recover()` calls cannot reconcile the unwalked source prefix.
 
-For manual repair, stop the peer and await `drained()`.
+For manual repair of an ordinary strand with valid retained trust and no fork halt, stop the peer and await `drained()`.
 An authorised administrator removes the device's leaf and re-invites it with a fresh key package.
 The device verifies and installs the newer Welcome through authenticated Welcome re-admission (D4).
 That transaction resets control and anchor, settling open operations and the old rejoin as `unknown`.
