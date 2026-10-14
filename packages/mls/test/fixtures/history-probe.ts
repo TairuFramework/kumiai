@@ -21,7 +21,7 @@ import { exportGroupInfo } from '../../src/group-info.js'
 import { processWelcome } from '../../src/group-welcome.js'
 import { buildLedgerHeadExtension, computeHead } from '../../src/head.js'
 import { ledgerEntryDigest, signLedgerEntry } from '../../src/ledger.js'
-import { createRecoveryRequest, sealGroupInfo } from '../../src/recovery.js'
+import { createRecoveryRequest, sealCapturedGroupInfo, sealGroupInfo } from '../../src/recovery.js'
 
 export function printTable(rows: Array<Record<string, unknown>>) {
   if (process.env.KUMIAI_PROBE_REPORT !== '1') return
@@ -404,6 +404,16 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
       request: request.request,
     })
     const reply = rpc.encodeHandshakeFrame(2, rpc.encodeRecoveryReply(requestID, finalSeal))
+    const capturedSeal = await sealCapturedGroupInfo({
+      group: derived,
+      identity: alice,
+      request: request.request,
+      captureHead: 'capture/head',
+    })
+    const capturedReply = rpc.encodeHandshakeFrame(
+      2,
+      rpc.encodeRecoveryReply(requestID, capturedSeal),
+    )
     const delta = reply.length - provisional.length
     const invite = jsonBytes({
       groupID,
@@ -444,6 +454,7 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
       'Welcome + ledger (provisional binary attachment)': Buffer.concat([welcome, ledger]),
       'invite (JSON fixture)': invite,
       'sealed GroupInfo + ledger': reply,
+      'captured GroupInfo + ledger': capturedReply,
       'verdict (estimated shape)': verdict,
     }
     if (exactHorizon && consumer) {

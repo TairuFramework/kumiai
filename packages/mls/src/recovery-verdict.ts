@@ -9,15 +9,20 @@ import {
 } from '@kokuin/token'
 import { hmac } from '@noble/hashes/hmac.js'
 import { sha256 } from '@noble/hashes/sha2.js'
+import { type ClientState, nodeTypes } from 'ts-mls'
 
+import type { GroupAnchor } from './anchor.js'
 import { readCapability } from './capability.js'
+import { parseMLSCredentialIdentity } from './credential.js'
 import type { GroupHandle } from './group-handle.js'
 import {
-  type OpenSealedGroupInfoParams,
+  type OpenSealedReplyParams,
   openSealedReply,
+  recoveryLeafForDID,
   type SealedReplyKind,
   sealToRequest,
   verifyRecoveryRequest,
+  verifyRecoveryToken,
 } from './recovery.js'
 import type { DeviceRegistry } from './registry.js'
 
@@ -124,7 +129,7 @@ export async function sealRecoveryVerdict(params: SealRecoveryVerdictParams): Pr
 }
 
 export async function openRecoveryVerdict(
-  params: OpenSealedGroupInfoParams,
+  params: Omit<OpenSealedReplyParams, 'kind'> & { retainedTrust?: boolean },
 ): Promise<OpenedRecoveryVerdict> {
   const { group, sealed, requestID, ephemeralPrivateKey } = params
   const plaintext = await openSealedReply({
@@ -134,7 +139,10 @@ export async function openRecoveryVerdict(
     requestID,
     ephemeralPrivateKey,
   })
-  const token = await verifyToken(new TextDecoder().decode(plaintext))
+  const encoded = new TextDecoder().decode(plaintext)
+  const token = params.retainedTrust
+    ? await verifyRecoveryToken(encoded, group.context)
+    : await verifyToken(encoded)
   if (
     !isVerifiedToken(token) ||
     token.payload.type !== VERDICT_TYPE ||
@@ -191,4 +199,40 @@ export function recoverySignerEligible(params: RecoverySignerEligibleParams): bo
   } catch {
     return false
   }
+}
+
+/** @internal Origin authority does not depend on the offered tree's surviving leaves. */
+export function recoverySignerEligibleFromPublic(params: {
+  tree: ClientState['ratchetTree']
+  anchor: GroupAnchor
+  known: DeviceRegistry
+  signer: string
+  now?: number
+}): boolean {
+  const { tree, anchor, known, signer, now = Date.now() / 1000 } = params
+  const controller = anchor.controller
+  if (controller == null) return true
+  const leaf = recoveryLeafForDID(tree, signer)
+  if (leaf == null || !('identity' in leaf.credential)) return false
+  const binding = parseMLSCredentialIdentity(leaf.credential.identity).controller
+  if (binding == null || binding.id !== controller) return false
+  const payload = readCapability(binding.capability).payload
+  if (
+    known.devices.get(normalizeDID(signer))?.status === 'revoked' ||
+    (payload.cap != null && known.devices.get(normalizeDID(payload.iss))?.status === 'revoked')
+  )
+    return false
+  const folded = foldLog(controller, binding.prefix)
+  const projection = known.controllers.get(normalizeDID(controller))
+  if (!folded.ok || (folded.states.at(-1)?.gen ?? 0) < (projection?.genFloor ?? 0)) return false
+  let time = projection?.timeFloor ?? 0
+  for (const node of tree) {
+    if (node?.nodeType !== nodeTypes.leaf || !('identity' in node.leaf.credential)) continue
+    const held = parseMLSCredentialIdentity(node.leaf.credential.identity).controller
+    if (held?.id !== controller) continue
+    const capability = readCapability(held.capability).payload
+    const parent = Array.isArray(capability.cap) ? capability.cap[0] : capability.cap
+    time = Math.max(time, parent == null ? capability.iat : readCapability(parent).payload.iat)
+  }
+  return payload.exp >= Math.max(time, now - 300)
 }

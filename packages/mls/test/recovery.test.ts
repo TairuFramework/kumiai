@@ -20,6 +20,7 @@ import {
   openSealedGroupInfo,
   RecoveryRequestError,
   SealedGroupInfoError,
+  sealCapturedGroupInfo,
   sealGroupInfo,
 } from '../src/recovery.js'
 import type { Invite } from '../src/types.js'
@@ -651,5 +652,25 @@ describe('sealed GroupInfo recovery', () => {
     expect(new TextDecoder().decode((await bobGroup.processMessage(fromAlice)) as Uint8Array)).toBe(
       'thanks',
     )
+  })
+})
+
+test('legacy GroupInfo consumers continue to open v1 and refuse captured v2', async () => {
+  const identity = randomIdentity()
+  const { group } = await createGroup(identity, 'legacy-reply-boundary')
+  const held = await createRecoveryRequest({ group, identity, requestID: 'legacy' })
+  const params = { group, requestID: 'legacy', ephemeralPrivateKey: held.ephemeralPrivateKey }
+  const legacy = await sealGroupInfo({ group, identity, request: held.request })
+  expect(await openSealedGroupInfo({ ...params, sealed: legacy })).toEqual(
+    (await exportGroupInfo({ group })).groupInfo,
+  )
+  const captured = await sealCapturedGroupInfo({
+    group,
+    identity,
+    request: held.request,
+    captureHead: null,
+  })
+  await expect(openSealedGroupInfo({ ...params, sealed: captured })).rejects.toMatchObject({
+    reason: 'malformed',
   })
 })

@@ -20,6 +20,7 @@ import {
   RecoveryRequestError,
   SealedGroupInfoError,
   SealedLedgerError,
+  sealCapturedGroupInfo,
   sealGroupInfo,
   sealLedger,
 } from '../src/recovery.js'
@@ -703,4 +704,23 @@ test('a lifecycle reply authenticates the complete ordered ledger', async () => 
   } finally {
     clock.mockRestore()
   }
+})
+
+test('ledger replies retain v1 while captured replies remain a distinct kind', async () => {
+  const identity = randomIdentity()
+  const { group } = await createGroup(identity, 'ledger-capture-boundary')
+  const held = await createRecoveryRequest({ group, identity, requestID: 'same-key' })
+  const params = { group, requestID: 'same-key', ephemeralPrivateKey: held.ephemeralPrivateKey }
+  const ledger = await sealLedger({ group, request: held.request })
+  expect(ledger[0]).toBe(1)
+  expect(await openSealedLedger({ ...params, sealed: ledger })).toEqual(await group.getLedger())
+  const captured = await sealCapturedGroupInfo({
+    group,
+    identity,
+    request: held.request,
+    captureHead: 'head',
+  })
+  await expect(openSealedLedger({ ...params, sealed: captured })).rejects.toMatchObject({
+    reason: 'malformed',
+  })
 })

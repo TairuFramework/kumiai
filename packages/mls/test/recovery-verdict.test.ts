@@ -4,7 +4,12 @@ import { afterEach, expect, test, vi } from 'vitest'
 afterEach(() => vi.restoreAllMocks())
 
 import { createGroup } from '../src/group.js'
-import { createRecoveryRequest, openSealedGroupInfo, sealGroupInfo } from '../src/recovery.js'
+import {
+  createRecoveryRequest,
+  openSealedGroupInfo,
+  sealCapturedGroupInfo,
+  sealGroupInfo,
+} from '../src/recovery.js'
 import {
   confirmationKey,
   confirmationTag,
@@ -192,4 +197,27 @@ test('opening checks signature, token kind and signed bindings even inside a val
       ephemeralPrivateKey: held.ephemeralPrivateKey,
     }),
   ).rejects.toThrow()
+})
+
+test('legacy verdict opening refuses captured GroupInfo without consuming the retained key', async () => {
+  const identity = randomIdentity()
+  const { group } = await createGroup(identity, 'verdict-captured-kind')
+  const held = await createRecoveryRequest({ group, identity, requestID: 'kind' })
+  const captured = await sealCapturedGroupInfo({
+    group,
+    identity,
+    request: held.request,
+    captureHead: null,
+  })
+  const params = { group, requestID: 'kind', ephemeralPrivateKey: held.ephemeralPrivateKey }
+  await expect(openRecoveryVerdict({ ...params, sealed: captured })).rejects.toThrow()
+  const verdict = {
+    groupID: group.groupID,
+    requestID: 'kind',
+    position: 'head',
+    commitDigest: 'digest',
+    verdict: 'superseded' as const,
+  }
+  const sealed = await sealRecoveryVerdict({ group, identity, request: held.request, verdict })
+  expect((await openRecoveryVerdict({ ...params, sealed })).verdict).toEqual(verdict)
 })

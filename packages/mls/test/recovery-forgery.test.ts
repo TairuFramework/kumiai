@@ -47,6 +47,7 @@ import {
   SealedGroupInfoError,
   sealGroupInfo,
 } from '../src/recovery.js'
+import { authenticateRecoveryReply, createRecoveryRequestFromTrust } from '../src/recovery-trust.js'
 import type { Invite } from '../src/types.js'
 
 // ---------------------------------------------------------------------------
@@ -147,8 +148,13 @@ async function threeMemberGroup(groupID: string) {
 
 /** The AAD a sealed GroupInfo reply is bound to, rebuilt from the PUBLIC request
  *  fields alone — exactly what an observer reconstructs off the wire. */
-function recoveryAAD(groupID: string, requesterDID: string, requestID: string): Uint8Array {
-  const parts = [utf8.encode('kumiai/mls/recovery-aad/v1')]
+function recoveryAAD(
+  groupID: string,
+  requesterDID: string,
+  requestID: string,
+  version = 1,
+): Uint8Array {
+  const parts = [utf8.encode(`kumiai/mls/recovery-aad/v${version}`)]
   for (const field of [groupID, normalizeDID(requesterDID), requestID]) {
     const bytes = utf8.encode(field)
     const framed = new Uint8Array(4 + bytes.length)
@@ -219,10 +225,12 @@ async function sealForgedReply(opts: {
   requesterDID: string
   requestID: string
   groupInfo: Uint8Array
+  capture?: { captureHead: string | null; groupInfoAuthenticator: string }
 }): Promise<Uint8Array> {
   const signed = await opts.signer.signToken(
     {
       type: RECOVERY_GROUPINFO_TYPE,
+      ...opts.capture,
       groupID: opts.groupID,
       requestID: opts.requestID,
       groupInfoDigest: encodeMultibase(sha256(opts.groupInfo)),
@@ -236,8 +244,9 @@ async function sealForgedReply(opts: {
   plaintext.set(opts.groupInfo, 4 + token.length)
 
   const { hpke } = opts.requesterGroup.context.cipherSuite
-  const info = utf8.encode('kumiai/mls/recovery/v1')
-  const aad = recoveryAAD(opts.groupID, opts.requesterDID, opts.requestID)
+  const version = opts.capture == null ? 1 : 2
+  const info = utf8.encode(`kumiai/mls/recovery/v${version}`)
+  const aad = recoveryAAD(opts.groupID, opts.requesterDID, opts.requestID, version)
   const { ct, enc } = await hpke.seal(
     await hpke.importPublicKey(opts.ephemeralPublicKey),
     plaintext,
@@ -245,7 +254,7 @@ async function sealForgedReply(opts: {
     aad,
   )
   const sealed = new Uint8Array(1 + enc.length + ct.length)
-  sealed[0] = SEALED_GROUP_INFO_VERSION
+  sealed[0] = opts.capture == null ? SEALED_GROUP_INFO_VERSION : 2
   sealed.set(enc, 1)
   sealed.set(ct, 1 + enc.length)
   return sealed
@@ -478,4 +487,64 @@ describe('a forged GroupInfo reply is refused', () => {
     })
     await expect(refusedDave).rejects.toMatchObject({ reason: 'unauthenticated' })
   })
+})
+
+test('captured attestation authority stays in the origin tree after the offered tree advances', async () => {
+  const setup = await threeMemberGroup('origin-attestation-authority')
+  const { bobGroup, bob, carol, aliceGroup } = setup
+  const anchor = readGroupAnchorExtension(bobGroup)?.extensionData
+  if (!(anchor instanceof Uint8Array)) throw new Error('Missing anchor')
+  const trust = {
+    groupID: bobGroup.groupID,
+    genesisAnchor: anchor.slice(),
+    signerTree: structuredClone(bobGroup.state.ratchetTree),
+    registry: structuredClone(bobGroup.registry),
+    credential: { ...bobGroup.credential },
+    binding: null,
+    ledger: bobGroup.ledgerTokens,
+    ciphersuiteName: 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519',
+  }
+  const held = await createRecoveryRequestFromTrust({ trust, identity: bob, requestID: 'origin' })
+  const { ephemeralPublicKey } = await (await import('../src/recovery.js')).verifyRecoveryRequest(
+    held.request,
+  )
+  const index = aliceGroup.findMemberLeafIndex(carol.id)
+  if (index == null) throw new Error('Missing Carol')
+  const removal = await removeMember(aliceGroup, index)
+  const advanced = removal.newGroup
+  expect(advanced.findMemberLeafIndex(carol.id)).toBeUndefined()
+  const { groupInfo } = await exportGroupInfo({ group: advanced })
+  const capture = {
+    captureHead: 'advanced/opaque',
+    groupInfoAuthenticator: Buffer.from(advanced.state.keySchedule.epochAuthenticator).toString(
+      'base64url',
+    ),
+  }
+  const seal = (signer: OwnIdentity, bytes = groupInfo) =>
+    sealForgedReply({
+      requesterGroup: bobGroup,
+      signer,
+      ephemeralPublicKey,
+      groupID: trust.groupID,
+      requesterDID: bob.id,
+      requestID: 'origin',
+      groupInfo: bytes,
+      capture,
+    })
+  const open = (sealed: Uint8Array) =>
+    authenticateRecoveryReply({
+      trust,
+      sealed,
+      requestID: 'origin',
+      requestKey: held.requestKey,
+      options: {},
+    })
+  const reply = await open(await seal(carol))
+  expect(reply?.signer).toBe(carol.id)
+  expect(reply?.captureHead).toBe('advanced/opaque')
+  expect(reply?.groupInfoAuthenticator).toEqual(advanced.state.keySchedule.epochAuthenticator)
+  expect(await open(await seal(randomIdentity()))).toBeNull()
+  const different = await createGroup(randomIdentity(), trust.groupID)
+  const differentInfo = await exportGroupInfo({ group: different.group })
+  expect(await open(await seal(carol, differentInfo.groupInfo))).toBeNull()
 })

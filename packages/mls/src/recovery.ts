@@ -6,12 +6,23 @@ import {
   type SignedPayload,
   type SigningIdentity,
   stringifyToken,
+  type VerifiedToken,
   verifyToken,
 } from '@kokuin/token'
 import { sha256 } from '@noble/hashes/sha2.js'
-import { decode, mlsMessageDecoder, wireformats } from 'ts-mls'
+import { fromB64U, toB64U } from '@sozai/codec'
+import {
+  type ClientState,
+  decode,
+  type LeafNode,
+  type MlsContext,
+  mlsMessageDecoder,
+  nodeTypes,
+  wireformats,
+} from 'ts-mls'
 
-import { LEDGER_HEAD_EXTENSION_TYPE, readGroupAnchorExtension } from './anchor.js'
+import { type GroupAnchor, LEDGER_HEAD_EXTENSION_TYPE, readGroupAnchorExtension } from './anchor.js'
+import { didFromCredential, parseMLSCredentialIdentity } from './credential.js'
 import {
   exportGroupInfo,
   type GroupHandle,
@@ -31,8 +42,9 @@ export const RECOVERY_REQUEST_TYPE = 'kumiai.recovery-request'
  *  membership proof, so no token minted elsewhere can stand in for it. */
 export const RECOVERY_GROUPINFO_TYPE = 'kumiai.recovery-groupinfo'
 
-/** The only sealed-reply format this build produces or opens. */
+/** Legacy handle-based replies remain available during coordinated activation. */
 export const SEALED_GROUP_INFO_VERSION = 1
+export const SEALED_CAPTURED_GROUP_INFO_VERSION = 2
 
 /** The sealed ledger reply shares the frame — `[version][enc][ct]` — and nothing
  *  else: see {@link LEDGER_REPLY}. */
@@ -76,6 +88,13 @@ const GROUP_INFO_REPLY: SealedReplyKind = {
   hpkeInfo: utf8.encode('kumiai/mls/recovery/v1'),
   aadDomain: utf8.encode('kumiai/mls/recovery-aad/v1'),
   version: SEALED_GROUP_INFO_VERSION,
+  fail: (reason, message, options) => new SealedGroupInfoError(reason, message, options),
+}
+
+const CAPTURED_GROUP_INFO_REPLY: SealedReplyKind = {
+  hpkeInfo: utf8.encode('kumiai/mls/recovery/v2'),
+  aadDomain: utf8.encode('kumiai/mls/recovery-aad/v2'),
+  version: SEALED_CAPTURED_GROUP_INFO_VERSION,
   fail: (reason, message, options) => new SealedGroupInfoError(reason, message, options),
 }
 
@@ -255,6 +274,8 @@ type ResponderAttestation = {
   /** Multibase-encoded SHA-256 of the framed GroupInfo bytes. */
   groupInfoDigest: string
   ledgerDigest?: string
+  captureHead?: string | null
+  groupInfoAuthenticator?: string
 }
 
 /** Lifecycle replies length-frame GroupInfo too, followed by the authenticated ledger. */
@@ -375,7 +396,7 @@ export async function verifyRecoveryRequest(token: string): Promise<VerifiedReco
 export type CreateRecoveryRequestParams = {
   /** The requester's own (possibly stale) handle: it names the group, and its
    *  ciphersuite is the HPKE the ephemeral keypair must be minted under. */
-  group: GroupHandle
+  group: Pick<GroupHandle, 'groupID' | 'credential' | 'context'>
   identity: SigningIdentity
   /** Correlation id, minted per recover() call. Not authorization — the signature
    *  and the responder's roster check carry that. */
@@ -551,6 +572,24 @@ export type SealGroupInfoParams = {
  * for no other member, request, or kind.
  */
 export async function sealGroupInfo(params: SealGroupInfoParams): Promise<Uint8Array> {
+  return sealGroupInfoReply(params)
+}
+
+export async function sealCapturedGroupInfo(
+  params: SealGroupInfoParams & { captureHead: string | null },
+): Promise<Uint8Array> {
+  if (!isCaptureHead(params.captureHead)) throw new TypeError('Invalid capture head')
+  return sealGroupInfoReply(params, params.captureHead)
+}
+
+function isCaptureHead(value: unknown): value is string | null {
+  return value === null || (typeof value === 'string' && value.length > 0 && value.length <= 64)
+}
+
+async function sealGroupInfoReply(
+  params: SealGroupInfoParams,
+  captureHead?: string | null,
+): Promise<Uint8Array> {
   const { group, identity, request } = params
   if (normalizeDID(identity.id) !== normalizeDID(group.credential.id)) {
     throw new Error(
@@ -559,13 +598,29 @@ export async function sealGroupInfo(params: SealGroupInfoParams): Promise<Uint8A
   }
 
   const verified = await verifyRecoveryRequest(request)
+  const authenticator =
+    captureHead === undefined ? undefined : group.state.keySchedule.epochAuthenticator.slice()
+  if (authenticator != null && authenticator.length !== group.context.cipherSuite.kdf.size)
+    throw new TypeError('Invalid committed epoch authenticator')
+  const capture =
+    authenticator == null
+      ? undefined
+      : {
+          captureHead,
+          groupInfoAuthenticator: toB64U(authenticator),
+        }
+  // Capture public ledger and GroupInfo from the same committed state under the caller's owner gate.
+  const ledgerTokens = capture == null ? undefined : group.ledgerTokens
   const { groupInfo } = await exportGroupInfo({ group })
   const ledger =
-    group.anchor.controller == null ? undefined : encodeLedgerTokens(await group.getLedger())
+    group.anchor.controller == null
+      ? undefined
+      : encodeLedgerTokens(ledgerTokens ?? (await group.getLedger()))
 
   const signed = await identity.signToken<ResponderAttestation>(
     {
       type: RECOVERY_GROUPINFO_TYPE,
+      ...capture,
       groupID: verified.groupID,
       requestID: verified.requestID,
       groupInfoDigest: encodeMultibase(sha256(groupInfo)),
@@ -577,7 +632,12 @@ export async function sealGroupInfo(params: SealGroupInfoParams): Promise<Uint8A
   )
 
   const plaintext = frameAttestedGroupInfo(stringifyToken(signed), groupInfo, ledger)
-  return await sealToRequest({ kind: GROUP_INFO_REPLY, group, request, plaintext })
+  return await sealToRequest({
+    kind: capture == null ? GROUP_INFO_REPLY : CAPTURED_GROUP_INFO_REPLY,
+    group,
+    request,
+    plaintext,
+  })
 }
 
 export type OpenSealedGroupInfoParams = {
@@ -591,11 +651,23 @@ export type OpenSealedGroupInfoParams = {
   ephemeralPrivateKey: Uint8Array
 }
 
-export type OpenSealedReplyParams = OpenSealedGroupInfoParams & { kind: SealedReplyKind }
+export type OpenSealedReplyParams = Omit<OpenSealedGroupInfoParams, 'group'> & {
+  group: Pick<GroupHandle, 'groupID' | 'credential' | 'context'>
+  kind: SealedReplyKind
+}
+
+/** @internal Public authentication inputs, independent of receiver secrets. */
+export type PublicRecoveryGroup = Pick<GroupHandle, 'groupID' | 'credential' | 'context'> & {
+  anchor: GroupAnchor
+  genesisAnchor: Uint8Array
+  signerTree: ClientState['ratchetTree']
+}
 
 type AssertResponderIsMemberParams = {
   attestation: string
-  group: GroupHandle
+  group: PublicRecoveryGroup
+  captured: boolean
+  requireKnownSigner: boolean
   requestID: string
   groupInfo: Uint8Array
   /** The framed ledger of a lifecycle reply, bound by the attestation's `ledgerDigest`. */
@@ -615,19 +687,25 @@ type AssertResponderIsMemberParams = {
  * joined, or removed before the requester's last-known epoch) is refused; one still
  * in it (including one removed AFTER that epoch) is accepted.
  */
-async function assertResponderIsMember(params: AssertResponderIsMemberParams): Promise<string> {
+async function assertResponderIsMember(params: AssertResponderIsMemberParams): Promise<{
+  signer: string
+  capture?: { captureHead: string | null; groupInfoAuthenticator: Uint8Array }
+}> {
   const { attestation, group, requestID, groupInfo, ledger } = params
   let verified: Awaited<ReturnType<typeof verifyToken<ResponderAttestation>>>
-  try {
-    verified = await verifyToken<ResponderAttestation>(attestation)
-  } catch (cause) {
-    // biome-ignore lint/style/useErrorCause: cause IS passed; the rule only reads argument 1, and these take (reason, message, options).
-    throw new SealedGroupInfoError(
-      'unauthenticated',
-      'responder attestation signature did not verify',
-      { cause },
-    )
-  }
+  if (params.captured) {
+    verified = await verifyRecoveryToken<ResponderAttestation>(attestation, group.context)
+  } else
+    try {
+      verified = await verifyToken<ResponderAttestation>(attestation)
+    } catch (cause) {
+      // biome-ignore lint/style/useErrorCause: cause IS passed; the rule only reads argument 1, and these take (reason, message, options).
+      throw new SealedGroupInfoError(
+        'unauthenticated',
+        'responder attestation signature did not verify',
+        { cause },
+      )
+    }
   if (!isVerifiedToken<SignedPayload & ResponderAttestation>(verified)) {
     throw new SealedGroupInfoError('unauthenticated', 'responder attestation is not signed')
   }
@@ -653,17 +731,46 @@ async function assertResponderIsMember(params: AssertResponderIsMemberParams): P
       'responder attestation does not bind this group, request, and GroupInfo',
     )
   }
-  // Lifecycle authority is judged against the derived pending tree and joined registry.
+  let capture: { captureHead: string | null; groupInfoAuthenticator: Uint8Array } | undefined
+  if (params.captured) {
+    const { captureHead, groupInfoAuthenticator } = verified.payload
+    if (
+      !isCaptureHead(captureHead) ||
+      typeof groupInfoAuthenticator !== 'string' ||
+      !/^[A-Za-z0-9_-]+$/.test(groupInfoAuthenticator)
+    )
+      throw new SealedGroupInfoError('unauthenticated', 'Invalid capture metadata')
+    let authenticator: Uint8Array
+    try {
+      authenticator = fromB64U(groupInfoAuthenticator)
+    } catch (cause) {
+      // biome-ignore lint/style/useErrorCause: cause is passed in the third argument.
+      throw new SealedGroupInfoError('unauthenticated', 'Invalid capture authenticator', { cause })
+    }
+    if (
+      authenticator.length !== group.context.cipherSuite.kdf.size ||
+      toB64U(authenticator) !== groupInfoAuthenticator
+    )
+      throw new SealedGroupInfoError('unauthenticated', 'Invalid capture authenticator')
+    capture = { captureHead, groupInfoAuthenticator: authenticator }
+  }
+  // Legacy lifecycle callers judge authority after their candidate join.
   if (
-    group.anchor.controller == null &&
-    group.findMemberLeafIndex(normalizeDID(iss)) === undefined
+    (params.requireKnownSigner || group.anchor.controller == null) &&
+    !(params.captured
+      ? recoveryLeafForDID(group.signerTree, iss) != null
+      : group.signerTree.some(
+          (node) =>
+            node?.nodeType === nodeTypes.leaf &&
+            didFromCredential(node.leaf.credential) === normalizeDID(iss),
+        ))
   ) {
     throw new SealedGroupInfoError(
       'unauthenticated',
       "responder holds no leaf in the requester's last-known ratchet tree",
     )
   }
-  return normalizeDID(iss)
+  return { signer: normalizeDID(iss), capture }
 }
 
 /**
@@ -672,7 +779,7 @@ async function assertResponderIsMember(params: AssertResponderIsMemberParams): P
  * roster a peer folds, so a byte comparison against the requester's own refuses any
  * group whose authority root differs.
  */
-function assertGroupInfoBoundToGroup(groupInfo: Uint8Array, group: GroupHandle): void {
+function assertGroupInfoBoundToGroup(groupInfo: Uint8Array, group: PublicRecoveryGroup): void {
   const binding = readGroupInfoBinding(groupInfo)
   if (binding.groupID !== group.groupID) {
     throw new SealedGroupInfoError(
@@ -680,8 +787,7 @@ function assertGroupInfoBoundToGroup(groupInfo: Uint8Array, group: GroupHandle):
       `sealed GroupInfo names group ${binding.groupID}, not ${group.groupID}`,
     )
   }
-  const ownAnchor = readGroupAnchorExtension(group)
-  const ownData = ownAnchor?.extensionData instanceof Uint8Array ? ownAnchor.extensionData : null
+  const ownData = group.genesisAnchor
   if (
     ownData == null ||
     binding.anchorExtensionData == null ||
@@ -708,21 +814,67 @@ export async function openSealedGroupInfo(params: OpenSealedGroupInfoParams): Pr
   return (await openRecoveryGroupInfo(params)).groupInfo
 }
 
-export type RecoveryGroupInfo = {
+export type LegacyRecoveryGroupInfo = {
   groupInfo: Uint8Array
   /** The responder's ledger tokens; empty outside lifecycle groups. */
   ledger: Array<string>
   /** The responder's normalized DID. */
   signer: string
+  captureHead?: never
+  groupInfoAuthenticator?: never
 }
+
+export type CapturedRecoveryGroupInfo = Omit<
+  LegacyRecoveryGroupInfo,
+  'captureHead' | 'groupInfoAuthenticator'
+> & {
+  captureHead: string | null
+  groupInfoAuthenticator: Uint8Array
+}
+
+export type RecoveryGroupInfo = LegacyRecoveryGroupInfo | CapturedRecoveryGroupInfo
 
 /** @internal The authenticated recovery inputs retained for candidate judgement. */
 export async function openRecoveryGroupInfo(
   params: OpenSealedGroupInfoParams,
+): Promise<LegacyRecoveryGroupInfo> {
+  const { group } = params
+  const extension = readGroupAnchorExtension(group)
+  if (!(extension?.extensionData instanceof Uint8Array))
+    throw new SealedGroupInfoError('group-mismatch', 'Recovery group has no anchor')
+  return openRecoveryGroupInfoFromPublic({
+    ...params,
+    group: {
+      groupID: group.groupID,
+      credential: group.credential,
+      context: group.context,
+      anchor: group.anchor,
+      genesisAnchor: extension.extensionData,
+      signerTree: group.state.ratchetTree,
+    },
+    captured: false,
+  })
+}
+
+/** @internal Shared framing and attestation boundary for legacy and captured replies. */
+export function openRecoveryGroupInfoFromPublic(
+  params: Omit<OpenSealedGroupInfoParams, 'group'> & {
+    group: PublicRecoveryGroup
+    captured: false
+  },
+): Promise<LegacyRecoveryGroupInfo>
+export function openRecoveryGroupInfoFromPublic(
+  params: Omit<OpenSealedGroupInfoParams, 'group'> & { group: PublicRecoveryGroup; captured: true },
+): Promise<CapturedRecoveryGroupInfo>
+export async function openRecoveryGroupInfoFromPublic(
+  params: Omit<OpenSealedGroupInfoParams, 'group'> & {
+    group: PublicRecoveryGroup
+    captured: boolean
+  },
 ): Promise<RecoveryGroupInfo> {
-  const { group, sealed, requestID, ephemeralPrivateKey } = params
+  const { group, sealed, requestID, ephemeralPrivateKey, captured } = params
   const plaintext = await openSealedReply({
-    kind: GROUP_INFO_REPLY,
+    kind: captured ? CAPTURED_GROUP_INFO_REPLY : GROUP_INFO_REPLY,
     group,
     sealed,
     requestID,
@@ -759,7 +911,9 @@ export async function openRecoveryGroupInfo(
   }
 
   // Authenticate the responder, then bind the GroupInfo to this group.
-  const signer = await assertResponderIsMember({
+  const { signer, capture } = await assertResponderIsMember({
+    captured,
+    requireKnownSigner: captured,
     attestation,
     group,
     requestID,
@@ -767,7 +921,10 @@ export async function openRecoveryGroupInfo(
     ledger,
   })
   assertGroupInfoBoundToGroup(groupInfo, group)
-  if (ledger == null) return { groupInfo, ledger: [], signer }
+  if (ledger == null)
+    return capture == null
+      ? { groupInfo, ledger: [], signer }
+      : { groupInfo, ledger: [], signer, ...capture }
 
   let tokens: Array<string>
   try {
@@ -791,7 +948,9 @@ export async function openRecoveryGroupInfo(
       { cause },
     )
   }
-  return { groupInfo, ledger: tokens, signer }
+  return capture == null
+    ? { groupInfo, ledger: tokens, signer }
+    : { groupInfo, ledger: tokens, signer, ...capture }
 }
 
 /**
@@ -922,4 +1081,53 @@ export async function openSealedLedger(params: OpenSealedLedgerParams): Promise<
       cause,
     })
   }
+}
+
+/** @internal Wire refusals are distinct from a signature provider failing to answer. */
+export async function verifyRecoveryToken<Payload extends Record<string, unknown>>(
+  token: string,
+  context: MlsContext,
+): Promise<VerifiedToken<Payload>> {
+  let providerFailed = false
+  let providerFailure: unknown
+  try {
+    return await verifyToken<Payload>(token, {
+      verifiers: {
+        EdDSA: async (signature, message, publicKey) => {
+          try {
+            return await context.cipherSuite.signature.verify(publicKey, message, signature)
+          } catch (error) {
+            providerFailed = true
+            providerFailure = error
+            throw error
+          }
+        },
+      },
+    })
+  } catch (cause) {
+    if (providerFailed) throw providerFailure
+    // biome-ignore lint/style/useErrorCause: cause is passed in the third argument.
+    throw new SealedGroupInfoError('unauthenticated', 'Recovery token did not verify', { cause })
+  }
+}
+
+/** @internal Reading retained inputs can fail independently of credential parsing. */
+export function recoveryLeafForDID(
+  tree: ClientState['ratchetTree'],
+  did: string,
+): LeafNode | undefined {
+  for (const node of tree) {
+    if (node?.nodeType !== nodeTypes.leaf) continue
+    const credential = node.leaf.credential
+    if (!('identity' in credential)) continue
+    const identity = credential.identity
+    let parsed: ReturnType<typeof parseMLSCredentialIdentity>
+    try {
+      parsed = parseMLSCredentialIdentity(identity)
+    } catch {
+      continue
+    }
+    if (normalizeDID(parsed.id) === normalizeDID(did)) return node.leaf
+  }
+  return undefined
 }

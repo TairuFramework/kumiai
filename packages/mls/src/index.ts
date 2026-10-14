@@ -197,9 +197,11 @@ export {
   MissingLedgerEntriesError,
 } from './policy.js'
 export {
+  type CapturedRecoveryGroupInfo,
   type CreateRecoveryRequestParams,
   type CreateRecoveryRequestResult,
   createRecoveryRequest,
+  type LegacyRecoveryGroupInfo,
   type OpenSealedGroupInfoParams,
   type OpenSealedLedgerParams,
   openRecoveryGroupInfo,
@@ -210,6 +212,7 @@ export {
   type RecoveryRequest,
   RecoveryRequestError,
   type RecoveryRequestRejection,
+  SEALED_CAPTURED_GROUP_INFO_VERSION,
   SEALED_GROUP_INFO_VERSION,
   SEALED_LEDGER_VERSION,
   SealedGroupInfoError,
@@ -219,11 +222,20 @@ export {
   type SealedReplyRejection,
   type SealGroupInfoParams,
   type SealLedgerParams,
+  sealCapturedGroupInfo,
   sealGroupInfo,
   sealLedger,
   type VerifiedRecoveryRequest,
   verifyRecoveryRequest,
 } from './recovery.js'
+export {
+  type AuthenticateRecoveryReplyParams,
+  authenticateRecoveryReply,
+  type CreateRecoveryRequestFromTrustParams,
+  createRecoveryRequestFromTrust,
+  openRecoveryVerdictFromTrust,
+  type RecoveryTrustInputs,
+} from './recovery-trust.js'
 export {
   confirmationKey,
   confirmationTag,
