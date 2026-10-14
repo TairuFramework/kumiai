@@ -6,11 +6,12 @@ import { forkEventID, recoveryUnavailableEventID, type SafetyHold } from '../src
 import type { ControlStore, WelcomeObligation } from '../src/control/types.js'
 import type { PendingAppFrame } from '../src/crypto.js'
 import { asLogPosition } from '../src/cursor.js'
-import { GroupSafetyHeldError } from '../src/errors.js'
+import { GroupSafetyHeldError, SendNotAdmissibleError } from '../src/errors.js'
 import * as muxModule from '../src/hub-mux.js'
 import type { EpochRuntime, EpochRuntimeParams } from '../src/peer-epoch.js'
 import * as epochModule from '../src/peer-epoch.js'
 import { commitTopic } from '../src/topic.js'
+import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
@@ -270,6 +271,68 @@ test('reauthorize throws before ready after persisted safety latches', async () 
     await ready
   }
 })
+
+test.each(['enqueue', 'request', 'gather', 'to', 'resync'] as const)(
+  '%s refuses before ready while a startup fork halt write keeps failing',
+  async (entry) => {
+    const hub = new FakeHub()
+    await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+    const mls = createMemoryGroupMLS({ localDID: 'alice', recoverySecret: secret, epoch: 1 })
+    const apply = mls.control().apply
+    const haltWrites = vi.fn()
+    const control: ControlStore = {
+      ...mls.control(),
+      apply: async (changes, mutationID) => {
+        if (changes.forkHalt !== undefined) {
+          haltWrites()
+          throw new Error('halt storage unavailable')
+        }
+        return apply(changes, mutationID)
+      },
+    }
+    vi.useFakeTimers()
+    const member = makePeer(hub, { mls, control })
+    peers.push(member)
+    let readySettled = false
+    const ready = member.peer
+      .outcomes()
+      .finally(() => {
+        readySettled = true
+      })
+      .catch(() => {})
+    const protocol = member.peer.protocol('chat')
+    const calls: Record<typeof entry, () => Promise<unknown>> = {
+      enqueue: () => member.peer.enqueue(buildLedgerCommit(member, [])),
+      request: () => protocol.request('chat/echo', { param: {} }),
+      gather: () => protocol.gather('chat/echo', { param: {} }),
+      to: () => protocol.to('bob'),
+      resync: () => member.peer.resync(),
+    }
+    const expected =
+      entry === 'request' || entry === 'gather' || entry === 'to'
+        ? new SendNotAdmissibleError('fork-halted')
+        : new GroupSafetyHeldError('fork-halted')
+    let deadline: ReturnType<typeof setTimeout> | undefined
+    try {
+      await vi.waitFor(() => expect(haltWrites.mock.calls.length).toBeGreaterThanOrEqual(2))
+      expect(member.controlWalk.safetyHold()).toBe('fork-halted')
+      expect((await control.load()).forkHalt).toBeNull()
+      expect(readySettled).toBe(false)
+      const pending = new Promise<string>((resolve) => {
+        deadline = setTimeout(() => resolve('still waiting for ready'), 10)
+      })
+      await Promise.all([
+        expect(Promise.race([calls[entry](), pending])).rejects.toEqual(expected),
+        vi.advanceTimersByTimeAsync(10),
+      ])
+      expect(readySettled).toBe(false)
+    } finally {
+      clearTimeout(deadline)
+      await member.peer.dispose()
+      await ready
+    }
+  },
+)
 
 test('clean safety load precedes exactly one receive', async () => {
   const hub = new FakeHub()

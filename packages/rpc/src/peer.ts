@@ -3240,6 +3240,7 @@ export function createGroupPeerWithControlWalk<
   }
 
   const enqueue = async (request: OperationRequest): Promise<void> => {
+    assertSafetyOpen()
     await ready
     assertLive()
     const reason = safetyHold()
@@ -4185,6 +4186,8 @@ export function createGroupPeerWithControlWalk<
     )
     .catch(() => {})
   const withReady = async <T>(fn: () => T | Promise<T>): Promise<T> => {
+    const safety = safetyHold()
+    if (safety !== null) throw new SendNotAdmissibleError(safety)
     await ready
     assertLive()
     return fn()
@@ -4246,6 +4249,8 @@ export function createGroupPeerWithControlWalk<
       },
       request: (prc, config) => withEpoch(() => surfaceFor(key).request(prc, config)),
       gather: async (prc, config) => {
+        const held = safetyHold()
+        if (held !== null) throw new SendNotAdmissibleError(held)
         const outcome = await epochOrAbort(config?.signal)
         assertLive()
         if (outcome === 'aborted') return []
@@ -4287,6 +4292,7 @@ export function createGroupPeerWithControlWalk<
     replay,
     recover,
     resync: async () => {
+      assertSafetyOpen()
       await ready
       // Refuse a disposed peer BEFORE `rebuildEpoch`: its `buildEpoch` half re-registers every
       // listener and retain on a mux whose `dispose()` has already cleared `listeners` and
