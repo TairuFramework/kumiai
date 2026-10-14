@@ -169,7 +169,9 @@ test('ack retains immutable evidence and event identity after reopen', async () 
   await f.restart()
   expect(await f.safety().events(f.key)).toEqual([])
   expect((await f.member.control.load()).forkHalt).toEqual(event.halt)
-  await f.safety().reportFork(f.key, { ...event.halt.evidence, epoch: 0 })
+  await expect(
+    f.safety().reportFork(f.key, { ...event.halt.evidence, epoch: 0 }),
+  ).resolves.toBeUndefined()
   await f.member.control.apply({ forkHalt: event.halt }, crypto.randomUUID())
   await expect(
     f.member.control.apply(
@@ -229,15 +231,17 @@ test.each(['commit', 'rollback'] as const)(
       return apply(changes, mutationID)
     })
     const halting = f.member.controlWalk.haltFork(await f.authenticatorEvidence())
-    await fault.rejected
-    expect(f.member.controlWalk.safetyHold()).toBe('fork-halted')
-    expect(f.onSafetyEvent).not.toHaveBeenCalled()
-    expect(await f.registry.inspectRows()).toEqual(before)
-    await expect(
-      f.member.peer.protocol('chat').dispatch('chat/posted', { data: {} }),
-    ).rejects.toEqual(new SendNotAdmissibleError('fork-halted'))
+    let proofFinished = false
     try {
+      await fault.rejected
+      expect(f.member.controlWalk.safetyHold()).toBe('fork-halted')
+      expect(f.onSafetyEvent).not.toHaveBeenCalled()
+      expect(await f.registry.inspectRows()).toEqual(before)
+      await expect(
+        f.member.peer.protocol('chat').dispatch('chat/posted', { data: {} }),
+      ).rejects.toEqual(new SendNotAdmissibleError('fork-halted'))
       await fault.finish(outcome)
+      proofFinished = true
       if (outcome === 'rollback') {
         await retryEntered.promise
         expect(f.onSafetyEvent).not.toHaveBeenCalled()
@@ -250,6 +254,7 @@ test.each(['commit', 'rollback'] as const)(
       }
     } finally {
       retryRelease.resolve()
+      if (!proofFinished) await fault.finish('rollback')
     }
     await halting
     expect(f.onSafetyEvent).toHaveBeenCalledOnce()
@@ -298,7 +303,25 @@ test('crash before a one-shot halt commits cannot reconstruct the vanished evide
   expect(f.member.controlWalk.safetyHold()).toBe('fork-halted')
   expect(f.onSafetyEvent).not.toHaveBeenCalled()
   const stopping = f.member.peer.dispose()
-  await fault.finish('rollback')
+  // Observe closed admission before resolving rollback and releasing the storage retry.
+  try {
+    await expect
+      .poll(
+        async () => {
+          try {
+            await f.member.peer.replay()
+            return null
+          } catch (error) {
+            if (error instanceof Error) return error.name
+            throw error
+          }
+        },
+        { timeout: 1000 },
+      )
+      .toBe('PeerDisposedError')
+  } finally {
+    await fault.finish('rollback')
+  }
   await stopping
   await f.member.peer.drained()
   await revealing

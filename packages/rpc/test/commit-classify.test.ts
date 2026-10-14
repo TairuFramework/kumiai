@@ -84,8 +84,7 @@ describe('the cursor table', () => {
   })
 
   test('a second, different commit at an epoch this peer enacted is a fork', () => {
-    // The hub accepted two commits at one epoch, which it can only do by serving different
-    // logs to different members.
+    // Hub CAS compares positions, not epochs. A later stale commit can diverge even on one log.
     expect(
       classifyCommit({
         header: { epoch: 3, committerDID: 'alice' },
@@ -177,8 +176,7 @@ describe('the cursor table', () => {
   })
 
   test('a genuinely different commit still forks, at a position either side of the record', () => {
-    // The row the digest check must not delete. Different bytes at one epoch is the thing the hub
-    // can only produce by serving different logs to different members, and it still heals.
+    // Different bytes at an applied epoch halt on either side. Position CAS does not prevent this.
     const other = digestAppliedCommit(otherCommit)
     expect(
       classifyCommit({

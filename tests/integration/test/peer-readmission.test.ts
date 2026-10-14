@@ -18,6 +18,7 @@ import {
   encodeCommitFrame,
   encodeHandshakeFrame,
   encodeLedgerEntries,
+  forkEventID,
   HANDSHAKE_KIND,
 } from '@kumiai/rpc'
 import { expect, test } from 'vitest'
@@ -29,7 +30,7 @@ import { createMemoryLastResortStore } from '../../../packages/mls-hub/src/store
 import { createTestHub } from '../../../packages/mls-hub/test/fixtures/hub.js'
 import { createMemoryHostDatabase } from './host-db.js'
 
-test('a last-resort Welcome replaces held state three epochs ahead and spent repeats are refused', async () => {
+test.each([false, true])('last-resort readmission, fork halt: %s', async (halted) => {
   const hub = createTestHub()
   try {
     const store = createMemoryLastResortStore()
@@ -156,15 +157,30 @@ test('a last-resort Welcome replaces held state three epochs ahead and spent rep
     const joined = readmitted.joined.group
     expect(joined.groupID).toBe(held.groupID)
     expect(Number(joined.epoch)).toBe(epoch + 3)
+    const heldControl = db.control(held.groupID, { groupID: held.groupID, incarnation: 1 })
+    if (halted) {
+      const local = held.state.keySchedule.epochAuthenticator.slice()
+      const remote = local.map((byte) => byte ^ 1)
+      await heldControl.apply(
+        {
+          forkHalt: {
+            eventID: forkEventID(heldControl.key),
+            detectedAt: Date.now(),
+            evidence: { kind: 'epoch-authenticator', epoch, local, remote },
+          },
+        },
+        crypto.randomUUID(),
+      )
+    }
+    const forkHalted = (await heldControl.load()).forkHalt !== null
+    expect(forkHalted).toBe(halted)
     expect(
       judgeWelcomeAdmission({
         held: {
           incarnation: 1,
           epoch,
           deleted: false,
-          forkHalted:
-            (await db.control(held.groupID, { groupID: held.groupID, incarnation: 1 }).load())
-              .forkHalt !== null,
+          forkHalted,
         },
         spentEpochAuthenticators,
         welcome: {
@@ -172,7 +188,11 @@ test('a last-resort Welcome replaces held state three epochs ahead and spent rep
           epochAuthenticator: joined.state.keySchedule.epochAuthenticator,
         },
       }),
-    ).toBe('replace')
+    ).toBe(halted ? 'refused' : 'replace')
+    if (halted) {
+      expect(await db.loadState(held.groupID)).toEqual(encodeClientState(held.state))
+      return
+    }
     await db.control(held.groupID, { groupID: held.groupID, incarnation: 1 }).apply(
       {
         putOperations: [

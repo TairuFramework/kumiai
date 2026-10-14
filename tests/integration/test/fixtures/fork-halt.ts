@@ -436,8 +436,16 @@ export async function createForkFixture() {
 export function observeForkWork(fixture: { member: ForkPeer; hub: FakeHub }) {
   const { member, hub } = fixture
   member.readEvidence.mockClear()
+  const ephemeral = vi.fn<(params: Parameters<FakeHub['publish']>[0]) => void>()
+  const publish = vi.spyOn(hub, 'publish')
+  const send = publish.getMockImplementation() ?? FakeHub.prototype.publish
+  publish.mockImplementation(async (params) => {
+    if (params.retain !== 'log') ephemeral(params)
+    return send.call(hub, params)
+  })
   return {
-    publish: vi.spyOn(hub, 'publish'),
+    publish,
+    ephemeral,
     epoch: vi.spyOn(member.mls, 'readEpoch'),
     evidence: member.readEvidence,
     secret: vi.spyOn(member.crypto, 'exportSecret'),

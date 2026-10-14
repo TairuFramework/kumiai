@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import {
   commitInvite,
@@ -14,6 +15,7 @@ import { createGroupCrypto, createGroupMLS, createLedgerEntrySlot } from '@kumia
 import {
   commitTopic,
   createGroupPeer,
+  decodeCommitFrame,
   decodeHandshakeFrame,
   decodeRecoveryConfirmRequest,
   digestAppliedCommit,
@@ -22,6 +24,7 @@ import {
   encodeRecoveryVerdict,
   type GroupPeer,
   HANDSHAKE_KIND,
+  PeerDisposedError,
   type RecoveryConfirmRequest,
   type RecoveryEvent,
 } from '@kumiai/rpc'
@@ -382,8 +385,8 @@ test('simultaneous recovery releases both lanes while a third member confirms', 
   await vi.waitFor(() => expect(s.received).toContain('both confirmed'))
 })
 
-// The stale rejoin now halts its survivor before it can publish a superseded verdict.
-test.fails('stale GroupInfo is superseded and retried without adopting the stale candidate', async () => {
+// Spec :1125 (r15 captureHead, 2.2d) will refuse this race at publish. Rewrite this row then.
+test('stale GroupInfo external commit after an applied invite halts the survivor as fork evidence', async () => {
   controlRecoveryClock()
   const s = await setup({ deadlineMs: 10_000 })
   const source = s.aliceGroup()
@@ -404,8 +407,10 @@ test.fails('stale GroupInfo is superseded and retried without adopting the stale
   // commit is judged against.
   const request = operationRequest('invite', { material: offered.invite })
   const host = s.aliceHost
+  let localDigest: string | undefined
   host.builders.set(request.id, async () => {
     const rotated = await commitInvite(source, material.publicPackage, offered.invite)
+    localDigest = createHash('sha256').update(rotated.commitMessage).digest('base64url')
     return {
       commit: rotated.commitMessage,
       bodies: offered.invite.ledgerEntries,
@@ -418,6 +423,22 @@ test.fails('stale GroupInfo is superseded and retried without adopting the stale
     }
   })
   await s.alice.commit(request)
+  const alicePublished = vi.spyOn(s.aliceConnection, 'publish')
+  let staleCommit: { position: string; digest: string } | undefined
+  const publish = s.bobConnection.publish.bind(s.bobConnection)
+  vi.spyOn(s.bobConnection, 'publish').mockImplementation(async (value) => {
+    const frame = decodeHandshakeFrame(value.payload)
+    const result = await publish(value)
+    if (frame.kind === HANDSHAKE_KIND.commit) {
+      staleCommit = {
+        position: result.sequenceID,
+        digest: createHash('sha256')
+          .update(decodeCommitFrame(frame.payload).commit)
+          .digest('base64url'),
+      }
+    }
+    return result
+  })
   const seal = s.aliceMLS.sealGroupInfo.bind(s.aliceMLS)
   vi.spyOn(s.aliceMLS, 'sealGroupInfo')
     .mockImplementationOnce((request) => stalePort.sealGroupInfo(request))
@@ -436,28 +457,42 @@ test.fails('stale GroupInfo is superseded and retried without adopting the stale
     if (opened?.verdict.verdict === 'superseded') supersededOpened = true
     return opened
   })
-  let settled = false
-  const recovery = s.bob.recover().finally(() => {
-    settled = true
-  })
+  const recovery = s.bob.recover()
   void recovery.catch(() => {})
-  await drainUntil(
-    () => supersededOpened || s.strands.length > 0,
-    'superseded verdict or fork halt',
-  )
-  expect((await s.aliceHost.control.load()).forkHalt).toBeNull()
-  await drainUntil(() => supersededOpened, 'superseded ledger open')
+  await drainUntil(() => staleCommit !== undefined, 'stale recovery commit publication', 1000)
+  expect(localDigest).toBeTypeOf('string')
+  expect(staleCommit).toBeDefined()
+  expect(staleCommit?.digest).not.toBe(localDigest)
+  await expect
+    .poll(async () => (await s.aliceHost.control.load()).forkHalt?.evidence, {
+      timeout: 1000,
+    })
+    .toEqual({
+      kind: 'digest-divergence',
+      epoch: 1,
+      position: staleCommit?.position,
+      localDigest,
+      remoteDigest: staleCommit?.digest,
+    })
+  const sentAtHalt = alicePublished.mock.calls.length
+  const confirmsAtHalt = s.published.filter(
+    (kind) => kind === HANDSHAKE_KIND.recoveryConfirmRequest,
+  ).length
   await vi.advanceTimersByTimeAsync(60)
-  await drainUntil(() => settled, 'recovery settlement')
-  expect((await recovery).advanced).toBe(true)
-  expect(adopted).toEqual([3])
-  expect(s.published.filter((kind) => kind === HANDSHAKE_KIND.commit)).toHaveLength(2)
-  expect(
-    s
-      .aliceGroup()
-      .listMembers()
-      .filter((member) => member.id === s.bobID.id),
-  ).toHaveLength(1)
+  await drainUntil(
+    () =>
+      s.published.filter((kind) => kind === HANDSHAKE_KIND.recoveryConfirmRequest).length >
+      confirmsAtHalt,
+    'post-halt confirmation retry',
+    1000,
+  )
+  await s.alice.outcomes()
+  expect(alicePublished).toHaveBeenCalledTimes(sentAtHalt)
+  expect(supersededOpened).toBe(false)
+  expect(adopted).not.toContain(2)
+  expect(s.published.filter((kind) => kind === HANDSHAKE_KIND.commit)).toHaveLength(1)
+  await s.bob.dispose()
+  await expect(recovery).rejects.toBeInstanceOf(PeerDisposedError)
 })
 
 test('an invalid verdict envelope and a copied request for another position suppress nothing', async () => {

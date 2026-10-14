@@ -1,5 +1,7 @@
 import { randomIdentity } from '@kokuin/token'
 import {
+  commitInvite,
+  createInvite,
   decodeClientState,
   decodeKeyPackage,
   decodePrivateKeyPackage,
@@ -9,10 +11,11 @@ import {
   type GroupHandle,
   type KeyPackageBundle,
   keyPackageRef,
+  removeMember,
   restoreGroup,
 } from '@kumiai/mls'
 import { createLedgerEntrySlot } from '@kumiai/mls-rpc'
-import type { WelcomeObligation } from '@kumiai/rpc'
+import { forkEventID, type WelcomeObligation } from '@kumiai/rpc'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import { judgeWelcomeAdmission } from '../../../packages/mls-hub/src/admission.js'
@@ -283,3 +286,78 @@ test.each(['joined-before-consume', 'consume-mid-transaction', 'consumed-before-
     }
   },
 )
+
+test('invitee restart refuses a fresh later Welcome from persisted fork halt', async () => {
+  const ctx = await setup()
+  try {
+    const artifact = await deliverArtifact(ctx)
+    const opened = await openWelcome([ctx.source], { identity: ctx.invitee, ...artifact })
+    if (!('joined' in opened)) throw new Error('Expected initial join')
+    const joined = opened.joined.group
+    const database = createMemoryHostDatabase()
+    await database.seed(joined.groupID, encodeClientState(joined.state))
+    const control = database.control(joined.groupID, { groupID: joined.groupID, incarnation: 1 })
+    const local = joined.state.keySchedule.epochAuthenticator.slice()
+    await control.apply(
+      {
+        forkHalt: {
+          eventID: forkEventID(control.key),
+          detectedAt: Date.now(),
+          evidence: {
+            kind: 'epoch-authenticator',
+            epoch: Number(joined.epoch),
+            local,
+            remote: local.map((byte) => byte ^ 1),
+          },
+        },
+      },
+      crypto.randomUUID(),
+    )
+    const persisted = structuredClone(await control.load())
+    const leaf = ctx.member.handle().findMemberLeafIndex(ctx.invitee.id)
+    if (leaf == null) throw new Error('Missing invitee leaf')
+    const removed = await removeMember(ctx.member.handle(), leaf)
+    const offered = await createInvite({
+      group: removed.newGroup,
+      identity: ctx.member.identity,
+      recipientDID: ctx.invitee.id,
+      permission: 'member',
+    })
+    const later = await commitInvite(
+      removed.newGroup,
+      ctx.material.bundle.publicPackage,
+      offered.invite,
+    )
+    const readmitted = await openWelcome([ctx.source], {
+      identity: ctx.invitee,
+      invite: offered.invite,
+      welcome: later.welcomeMessage,
+      ratchetTree: later.newGroup.state.ratchetTree,
+      options: { resolveLedgerEntries: ctx.entrySlot.resolve },
+    })
+    if (!('joined' in readmitted)) throw new Error('Expected later Welcome to open')
+    const admission = {
+      held: {
+        incarnation: 1,
+        epoch: Number(joined.epoch),
+        deleted: false,
+        forkHalted: persisted.forkHalt !== null,
+      },
+      spentEpochAuthenticators: [local],
+      welcome: {
+        epoch: Number(readmitted.joined.group.epoch),
+        epochAuthenticator: readmitted.joined.group.state.keySchedule.epochAuthenticator,
+      },
+    }
+    expect(admission.held.forkHalted).toBe(true)
+    expect(
+      judgeWelcomeAdmission({ ...admission, held: { ...admission.held, forkHalted: false } }),
+    ).toBe('replace')
+    expect(judgeWelcomeAdmission(admission)).toBe('refused')
+    expect(await database.loadState(joined.groupID)).toEqual(encodeClientState(joined.state))
+  } finally {
+    await ctx.member.peer.dispose()
+    await ctx.member.peer.drained()
+    await ctx.hub.dispose()
+  }
+})
