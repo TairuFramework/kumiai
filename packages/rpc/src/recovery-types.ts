@@ -147,7 +147,7 @@ export function copyRecoverySource<TTrust>(source: RecoverySource<TTrust>): Reco
     identity:
       source.identity === null
         ? null
-        : { ...source.identity, authenticator: source.identity.authenticator.slice() },
+        : { ...source.identity, authenticator: Uint8Array.from(source.identity.authenticator) },
     trust: copyRecoveryValue(source.trust),
     trustDigest: source.trustDigest,
     lifetimeRevision: source.lifetimeRevision,
@@ -158,7 +158,7 @@ export function copyRecoveryTargetCapture(target: RecoveryTargetCapture): Recove
     targetID: target.targetID,
     topicID: target.topicID,
     groupInfoEpoch: target.groupInfoEpoch,
-    groupInfoAuthenticator: target.groupInfoAuthenticator.slice(),
+    groupInfoAuthenticator: Uint8Array.from(target.groupInfoAuthenticator),
     captureHead: validateCaptureHead(target.captureHead),
   }
 }

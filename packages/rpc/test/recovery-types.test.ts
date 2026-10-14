@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer'
 import { describe, expect, expectTypeOf, test } from 'vitest'
 
 import type {
@@ -176,6 +177,51 @@ test('target and public origin copies preserve original capture and search facts
   })
   savedTarget.groupInfoAuthenticator.fill(7)
   expect(savedOrigin.target.groupInfoAuthenticator).toEqual(new Uint8Array([1, 2]))
+})
+
+test.each(['input', 'copy'] as const)(
+  'source copying isolates Buffer authenticators from %s mutation',
+  (mutated) => {
+    const authenticator = Buffer.from([3, 4])
+    const source: RecoverySource = {
+      key: { groupID: 'source', incarnation: 1 },
+      stateVersion: 2,
+      identity: { groupID: 'source', incarnation: 1, epoch: 6, authenticator },
+      trust: null,
+      trustDigest: 'public-trust-digest',
+      lifetimeRevision: 3,
+    }
+    const saved = copyRecoverySource(source)
+    if (mutated === 'input') {
+      authenticator.fill(0)
+      expect(saved.identity?.authenticator).toEqual(new Uint8Array([3, 4]))
+    } else {
+      saved.identity?.authenticator.fill(9)
+      expect(authenticator).toEqual(Buffer.from([3, 4]))
+    }
+  },
+)
+
+describe.each(['target', 'origin'] as const)('%s copying with Buffer authenticators', (kind) => {
+  test.each(['input', 'copy'] as const)('isolates authenticator from %s mutation', (mutated) => {
+    const authenticator = Buffer.from([1, 2])
+    const capture = { ...target(), groupInfoAuthenticator: authenticator }
+    const saved =
+      kind === 'target'
+        ? copyRecoveryTargetCapture(capture)
+        : copyRecoveryOrigin({
+            sourceKey: { groupID: 'source', incarnation: 1 },
+            target: capture,
+            searchFrom: asLogPosition('search-origin'),
+          }).target
+    if (mutated === 'input') {
+      authenticator.fill(0)
+      expect(saved.groupInfoAuthenticator).toEqual(new Uint8Array([1, 2]))
+    } else {
+      saved.groupInfoAuthenticator.fill(9)
+      expect(authenticator).toEqual(Buffer.from([1, 2]))
+    }
+  })
 })
 
 test('switch mutation ID assignment is idempotent and refuses replacement', () => {
