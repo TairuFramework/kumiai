@@ -37,6 +37,7 @@ import {
   processWelcome,
   removeMember,
 } from '../src/group.js'
+import { deriveGroup } from '../src/group-handle.js'
 import { buildLedgerHeadExtension, genesisHead } from '../src/head.js'
 import { ledgerEntryDigest } from '../src/ledger.js'
 import {
@@ -49,6 +50,7 @@ import {
 } from '../src/recovery.js'
 import { authenticateRecoveryReply, createRecoveryRequestFromTrust } from '../src/recovery-trust.js'
 import type { Invite } from '../src/types.js'
+import { lowLevelWelcome, rawCommit, timedBinding } from './fixtures/lifecycle-pipeline.js'
 
 // ---------------------------------------------------------------------------
 // The recovery rendezvous seals its GroupInfo reply in HPKE base mode over an
@@ -227,6 +229,7 @@ async function sealForgedReply(opts: {
   groupInfo: Uint8Array
   capture?: { captureHead: string | null; groupInfoAuthenticator: string }
 }): Promise<Uint8Array> {
+  const ledger = opts.requesterGroup.anchor.controller == null ? undefined : new Uint8Array(4)
   const signed = await opts.signer.signToken(
     {
       type: RECOVERY_GROUPINFO_TYPE,
@@ -234,14 +237,22 @@ async function sealForgedReply(opts: {
       groupID: opts.groupID,
       requestID: opts.requestID,
       groupInfoDigest: encodeMultibase(sha256(opts.groupInfo)),
+      ...(ledger == null ? {} : { ledgerDigest: encodeMultibase(sha256(ledger)) }),
     },
     { embedLongForm: true },
   )
   const token = utf8.encode(stringifyToken(signed))
-  const plaintext = new Uint8Array(4 + token.length + opts.groupInfo.length)
+  const plaintext = new Uint8Array(
+    4 + token.length + opts.groupInfo.length + (ledger == null ? 0 : 4 + ledger.length),
+  )
   new DataView(plaintext.buffer).setUint32(0, token.length, false)
   plaintext.set(token, 4)
-  plaintext.set(opts.groupInfo, 4 + token.length)
+  if (ledger == null) plaintext.set(opts.groupInfo, 4 + token.length)
+  else {
+    new DataView(plaintext.buffer).setUint32(4 + token.length, opts.groupInfo.length)
+    plaintext.set(opts.groupInfo, 8 + token.length)
+    plaintext.set(ledger, 8 + token.length + opts.groupInfo.length)
+  }
 
   const { hpke } = opts.requesterGroup.context.cipherSuite
   const version = opts.capture == null ? 1 : 2
@@ -490,8 +501,19 @@ describe('a forged GroupInfo reply is refused', () => {
 })
 
 test('captured attestation authority stays in the origin tree after the offered tree advances', async () => {
-  const setup = await threeMemberGroup('origin-attestation-authority')
-  const { bobGroup, bob, carol, aliceGroup } = setup
+  const alice = randomIdentity()
+  const bob = randomIdentity()
+  const carol = randomIdentity()
+  const now = Math.floor(Date.now() / 1000)
+  const bindingOf = (identity: OwnIdentity) => timedBinding({ identity, iat: now, exp: now + 3600 })
+  const { group } = await createGroup(alice, 'origin-attestation-authority', {
+    controller: await bindingOf(alice),
+  })
+  const withBob = await lowLevelWelcome(group, bob, await bindingOf(bob))
+  const withCarol = await lowLevelWelcome(withBob.author, carol, await bindingOf(carol))
+  await withBob.joined.processMessage(withCarol.message)
+  const bobGroup = withBob.joined
+  const aliceGroup = withCarol.author
   const anchor = readGroupAnchorExtension(bobGroup)?.extensionData
   if (!(anchor instanceof Uint8Array)) throw new Error('Missing anchor')
   const trust = {
@@ -500,7 +522,7 @@ test('captured attestation authority stays in the origin tree after the offered 
     signerTree: structuredClone(bobGroup.state.ratchetTree),
     registry: structuredClone(bobGroup.registry),
     credential: { ...bobGroup.credential },
-    binding: null,
+    binding: await bindingOf(bob),
     ledger: bobGroup.ledgerTokens,
     ciphersuiteName: 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519',
   }
@@ -510,8 +532,11 @@ test('captured attestation authority stays in the origin tree after the offered 
   )
   const index = aliceGroup.findMemberLeafIndex(carol.id)
   if (index == null) throw new Error('Missing Carol')
-  const removal = await removeMember(aliceGroup, index)
-  const advanced = removal.newGroup
+  const removal = await rawCommit({
+    group: aliceGroup,
+    proposals: [{ proposalType: defaultProposalTypes.remove, remove: { removed: index } }],
+  })
+  const advanced = deriveGroup(aliceGroup, removal.newState)
   expect(advanced.findMemberLeafIndex(carol.id)).toBeUndefined()
   const { groupInfo } = await exportGroupInfo({ group: advanced })
   const capture = {

@@ -1,82 +1,70 @@
-import { encodeMultibase, randomIdentity, stringifyToken } from '@kokuin/token'
-import { sha256 } from '@noble/hashes/sha2.js'
 import { expect, test } from 'vitest'
 
-import { readGroupAnchorExtension } from '../src/anchor.js'
-import { createGroup, exportGroupInfo } from '../src/group.js'
 import * as mls from '../src/index.js'
-import { type SealedReplyKind, sealToRequest } from '../src/recovery.js'
+import { captureFixture, signedCapture } from './fixtures/recovery-capture.js'
 
-export async function captureFixture() {
-  const identity = randomIdentity()
-  const { group } = await createGroup(identity, 'captured-recovery')
-  const extension = readGroupAnchorExtension(group)
-  if (!(extension?.extensionData instanceof Uint8Array)) throw new Error('Missing anchor')
-  const trust = {
-    groupID: group.groupID,
-    genesisAnchor: extension.extensionData.slice(),
-    signerTree: structuredClone(group.state.ratchetTree),
-    registry: structuredClone(group.registry),
-    credential: { ...group.credential },
-    binding: null,
-    ledger: group.ledgerTokens,
-    ciphersuiteName: 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519',
-  }
-  const held = await mls.createRecoveryRequestFromTrust({ trust, identity, requestID: 'capture' })
-  const open = (sealed: Uint8Array, changed = trust) =>
-    mls.authenticateRecoveryReply({
-      trust: changed,
-      sealed,
-      requestID: 'capture',
-      requestKey: held.requestKey,
-      options: {},
+test('an independently sealed captured attestation authenticates', async () => {
+  const fixture = await captureFixture()
+  const reply = await fixture.open(await signedCapture({ fixture }))
+  expect(reply?.signer).toBe(fixture.identity.id)
+  expect(reply?.captureHead).toBe('opaque/組合')
+})
+
+for (const length of [0, 1, 63, 65]) {
+  test(`malformed Ed25519 signature length ${length} is a refused delivery`, async () => {
+    const fixture = await captureFixture()
+    const sealed = await signedCapture({
+      fixture,
+      transformToken: (token) => {
+        const parts = token.split('.')
+        parts[2] = Buffer.alloc(length).toString('base64url')
+        return parts.join('.')
+      },
     })
-  return { identity, group, trust, held, open }
+    expect(await fixture.open(sealed)).toBeNull()
+  })
 }
 
-export async function signedCapture(params: {
-  fixture: Awaited<ReturnType<typeof captureFixture>>
-  fields?: Record<string, unknown>
-  omit?: Array<string>
-  info?: string
-  aad?: string
-  tamper?: boolean
-}) {
-  const { fixture, fields = {}, omit = [] } = params
-  const { groupInfo } = await exportGroupInfo({ group: fixture.group })
-  const payload: Record<string, unknown> = {
-    type: 'kumiai.recovery-groupinfo',
-    groupID: fixture.group.groupID,
-    requestID: 'capture',
-    groupInfoDigest: encodeMultibase(sha256(groupInfo)),
-    captureHead: 'opaque/組合',
-    groupInfoAuthenticator: Buffer.from(
-      fixture.group.state.keySchedule.epochAuthenticator,
-    ).toString('base64url'),
-    ...fields,
-  }
-  for (const key of omit) delete payload[key]
-  let token = stringifyToken(await fixture.identity.signToken(payload, { embedLongForm: true }))
-  if (params.tamper) {
-    const parts = token.split('.')
-    const body = JSON.parse(Buffer.from(parts[1] as string, 'base64url').toString())
-    body.captureHead = 'tampered'
-    parts[1] = Buffer.from(JSON.stringify(body)).toString('base64url')
-    token = parts.join('.')
-  }
-  const bytes = new TextEncoder().encode(token)
-  const plaintext = new Uint8Array(4 + bytes.length + groupInfo.length)
-  new DataView(plaintext.buffer).setUint32(0, bytes.length)
-  plaintext.set(bytes, 4)
-  plaintext.set(groupInfo, 4 + bytes.length)
-  const kind: SealedReplyKind = {
-    hpkeInfo: new TextEncoder().encode(params.info ?? 'kumiai/mls/recovery/v2'),
-    aadDomain: new TextEncoder().encode(params.aad ?? 'kumiai/mls/recovery-aad/v2'),
-    version: 2,
-    fail: (_reason, message) => new Error(message),
-  }
-  return sealToRequest({ kind, group: fixture.group, request: fixture.held.request, plaintext })
+test('an alg:none captured attestation is refused', async () => {
+  const fixture = await captureFixture()
+  const sealed = await signedCapture({
+    fixture,
+    transformToken: (token) => {
+      const parts = token.split('.')
+      parts[0] = Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url')
+      parts[2] = ''
+      return parts.join('.')
+    },
+  })
+  expect(await fixture.open(sealed)).toBeNull()
+})
+
+for (const captureHead of ['', 'x'.repeat(65)]) {
+  test(`sealing refuses invalid capture head of length ${captureHead.length}`, async () => {
+    const fixture = await captureFixture()
+    await expect(
+      mls.sealCapturedGroupInfo({
+        group: fixture.group,
+        identity: fixture.identity,
+        request: fixture.held.request,
+        captureHead,
+      }),
+    ).rejects.toBeInstanceOf(TypeError)
+  })
 }
+
+test('sealing refuses a wrong-length committed authenticator', async () => {
+  const fixture = await captureFixture()
+  fixture.group.state.keySchedule.epochAuthenticator = new Uint8Array(31)
+  await expect(
+    mls.sealCapturedGroupInfo({
+      group: fixture.group,
+      identity: fixture.identity,
+      request: fixture.held.request,
+      captureHead: null,
+    }),
+  ).rejects.toBeInstanceOf(TypeError)
+})
 
 for (const captureHead of [null, 'opaque/組合 🚀', '0', 'x'.repeat(64), '🚀'.repeat(32)]) {
   test(`captured reply preserves exact head ${JSON.stringify(captureHead)} and committed authenticator`, async () => {

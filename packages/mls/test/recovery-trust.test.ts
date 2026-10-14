@@ -3,37 +3,181 @@ import { nodeTypes } from 'ts-mls'
 import { expect, test, vi } from 'vitest'
 
 import { readGroupAnchorExtension } from '../src/anchor.js'
+import { parseMLSCredentialIdentity } from '../src/credential.js'
 import { nobleCryptoProvider } from '../src/crypto.js'
-import { createGroup } from '../src/group.js'
+import { deriveGroup } from '../src/group-handle.js'
 import * as mls from '../src/index.js'
-import { pipelineGroup } from './fixtures/lifecycle-pipeline.js'
+import { recoverySignerEligibleFromPublic } from '../src/recovery-verdict.js'
+import {
+  agent,
+  controllerID,
+  lowLevelWelcome,
+  pipelineGroup,
+  rawAdd,
+  timedBinding,
+} from './fixtures/lifecycle-pipeline.js'
+import { captureFixture, signedCapture } from './fixtures/recovery-capture.js'
 
-async function captureFixture() {
-  const identity = randomIdentity()
-  const { group } = await createGroup(identity, 'captured-recovery')
-  const extension = readGroupAnchorExtension(group)
-  if (!(extension?.extensionData instanceof Uint8Array)) throw new Error('Missing anchor')
-  const trust = {
-    groupID: group.groupID,
-    genesisAnchor: extension.extensionData.slice(),
-    signerTree: structuredClone(group.state.ratchetTree),
-    registry: structuredClone(group.registry),
-    credential: { ...group.credential },
-    binding: null,
-    ledger: group.ledgerTokens,
-    ciphersuiteName: 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519',
-  }
-  const held = await mls.createRecoveryRequestFromTrust({ trust, identity, requestID: 'capture' })
-  const open = (sealed: Uint8Array, changed = trust) =>
-    mls.authenticateRecoveryReply({
-      trust: changed,
+test('controller-less origin refuses a different member as recovery signer', async () => {
+  const fixture = await captureFixture({ standard: true })
+  const signer = agent(52)
+  const added = await rawAdd(fixture.group, signer)
+  const author = deriveGroup(fixture.group, added.result.newState)
+  const trust = { ...fixture.trust, signerTree: structuredClone(author.state.ratchetTree) }
+  expect(
+    recoverySignerEligibleFromPublic({
+      tree: trust.signerTree,
+      anchor: author.anchor,
+      known: trust.registry,
+      signer: signer.id,
+    }),
+  ).toBe(false)
+  const sealed = await signedCapture({ fixture: { ...fixture, group: author, identity: signer } })
+  expect(await fixture.open(sealed, trust)).toBeNull()
+})
+
+test('retained authority checks a distinct signer and refuses malformed tree bindings', async () => {
+  const now = vi.spyOn(Date, 'now').mockReturnValue(150_000)
+  try {
+    const { group, identity } = await pipelineGroup()
+    const signer = agent(52)
+    const { author, joined } = await lowLevelWelcome(
+      group,
+      signer,
+      await timedBinding({ identity: signer, iat: 100, exp: 180 }),
+    )
+    const anchor = readGroupAnchorExtension(author)?.extensionData
+    if (!(anchor instanceof Uint8Array)) throw new Error('Missing anchor')
+    const owner = author.state.ratchetTree[0]
+    if (owner?.nodeType !== nodeTypes.leaf || !('identity' in owner.leaf.credential))
+      throw new Error('Missing owner')
+    const binding = parseMLSCredentialIdentity(owner.leaf.credential.identity).controller
+    if (binding == null) throw new Error('Missing binding')
+    const trust = {
+      groupID: author.groupID,
+      genesisAnchor: anchor,
+      signerTree: structuredClone(author.state.ratchetTree),
+      registry: structuredClone(author.registry),
+      credential: author.credential,
+      binding,
+      ledger: author.ledgerTokens,
+      ciphersuiteName: 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519',
+    }
+    const held = await mls.createRecoveryRequestFromTrust({
+      trust,
+      identity,
+      requestID: 'distinct',
+    })
+    const sealed = await mls.sealCapturedGroupInfo({
+      group: joined,
+      identity: signer,
+      request: held.request,
+      captureHead: 'distinct',
+    })
+    const verdict = await mls.sealRecoveryVerdict({
+      group: joined,
+      identity: signer,
+      request: held.request,
+      verdict: {
+        groupID: author.groupID,
+        requestID: 'distinct',
+        position: 'head',
+        commitDigest: 'digest',
+        verdict: 'superseded',
+      },
+    })
+    const params = {
+      trust,
       sealed,
-      requestID: 'capture',
+      requestID: 'distinct',
       requestKey: held.requestKey,
       options: {},
+    }
+    expect((await mls.authenticateRecoveryReply(params))?.signer).toBe(signer.id)
+    expect((await mls.openRecoveryVerdictFromTrust({ ...params, sealed: verdict })).signer).toBe(
+      signer.id,
+    )
+    for (const registry of [
+      {
+        ...trust.registry,
+        devices: new Map([[signer.id, { controller: controllerID, status: 'revoked' as const }]]),
+      },
+      {
+        ...trust.registry,
+        controllers: new Map([[controllerID, { recordedLog: [], genFloor: 1, timeFloor: 0 }]]),
+      },
+      {
+        ...trust.registry,
+        controllers: new Map([[controllerID, { recordedLog: [], genFloor: 0, timeFloor: 190 }]]),
+      },
+    ]) {
+      expect(
+        await mls.authenticateRecoveryReply({ ...params, trust: { ...trust, registry } }),
+      ).toBeNull()
+      await expect(
+        mls.openRecoveryVerdictFromTrust({
+          ...params,
+          sealed: verdict,
+          trust: { ...trust, registry },
+        }),
+      ).rejects.toThrow(/denied-id|Ineligible retained recovery signer/)
+    }
+    for (const identity of [
+      new TextEncoder().encode('{'),
+      new TextEncoder().encode(
+        JSON.stringify({ id: agent(63).id, controller: { ...binding, capability: 'malformed' } }),
+      ),
+      new TextEncoder().encode(
+        JSON.stringify({ id: agent(63).id, controller: { ...binding, capability: 1 } }),
+      ),
+    ]) {
+      const tree = structuredClone(trust.signerTree)
+      const extra = structuredClone(owner)
+      extra.leaf.credential = { credentialType: 1, identity }
+      tree.push(undefined, extra)
+      const changed = { ...params, trust: { ...trust, signerTree: tree } }
+      expect(
+        recoverySignerEligibleFromPublic({
+          tree,
+          anchor: author.anchor,
+          known: trust.registry,
+          signer: signer.id,
+        }),
+      ).toBe(false)
+      expect(await mls.authenticateRecoveryReply(changed)).toBeNull()
+      await expect(
+        mls.openRecoveryVerdictFromTrust({ ...changed, sealed: verdict }),
+      ).rejects.toMatchObject({ reason: 'unauthenticated' })
+    }
+    for (const credential of [null, 'malformed']) {
+      const tree = structuredClone(trust.signerTree)
+      const extra = structuredClone(owner)
+      Reflect.set(extra.leaf, 'credential', credential)
+      tree.push(undefined, extra)
+      const changed = { ...params, trust: { ...trust, signerTree: tree } }
+      expect(await mls.authenticateRecoveryReply(changed)).toBeNull()
+      await expect(
+        mls.openRecoveryVerdictFromTrust({ ...changed, sealed: verdict }),
+      ).rejects.toMatchObject({ reason: 'unauthenticated' })
+    }
+    const failure = new Error('unrelated credential reader unavailable')
+    const tree = structuredClone(trust.signerTree)
+    const extra = structuredClone(owner)
+    Object.defineProperty(extra.leaf.credential, 'identity', {
+      get() {
+        throw failure
+      },
     })
-  return { identity, group, trust, held, open }
-}
+    tree.push(undefined, extra)
+    const changed = { ...params, trust: { ...trust, signerTree: tree } }
+    await expect(mls.authenticateRecoveryReply(changed)).rejects.toBe(failure)
+    await expect(mls.openRecoveryVerdictFromTrust({ ...changed, sealed: verdict })).rejects.toBe(
+      failure,
+    )
+  } finally {
+    now.mockRestore()
+  }
+})
 
 test('requests and verdicts use retained public trust without private state', async () => {
   const fixture = await captureFixture()

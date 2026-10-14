@@ -13,6 +13,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { fromB64U, toB64U } from '@sozai/codec'
 import {
   type ClientState,
+  ciphersuites,
   decode,
   type LeafNode,
   type MlsContext,
@@ -1094,6 +1095,16 @@ export async function verifyRecoveryToken<Payload extends Record<string, unknown
     return await verifyToken<Payload>(token, {
       verifiers: {
         EdDSA: async (signature, message, publicKey) => {
+          const suite = Object.entries(ciphersuites).find(
+            ([, id]) => id === context.cipherSuite.id,
+          )?.[0]
+          const shape = suite?.endsWith('_Ed25519')
+            ? [64, 32]
+            : suite?.endsWith('_Ed448')
+              ? [114, 57]
+              : undefined
+          if (shape == null || signature.length !== shape[0] || publicKey.length !== shape[1])
+            throw new SealedGroupInfoError('unauthenticated', 'Invalid recovery signature shape')
           try {
             return await context.cipherSuite.signature.verify(publicKey, message, signature)
           } catch (error) {
@@ -1118,8 +1129,9 @@ export function recoveryLeafForDID(
 ): LeafNode | undefined {
   for (const node of tree) {
     if (node?.nodeType !== nodeTypes.leaf) continue
-    const credential = node.leaf.credential
-    if (!('identity' in credential)) continue
+    const credential = node.leaf?.credential
+    if (credential == null || typeof credential !== 'object' || !('identity' in credential))
+      continue
     const identity = credential.identity
     let parsed: ReturnType<typeof parseMLSCredentialIdentity>
     try {

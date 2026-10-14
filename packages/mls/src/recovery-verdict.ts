@@ -9,7 +9,7 @@ import {
 } from '@kokuin/token'
 import { hmac } from '@noble/hashes/hmac.js'
 import { sha256 } from '@noble/hashes/sha2.js'
-import { type ClientState, nodeTypes } from 'ts-mls'
+import { type ClientState, type LeafNode, nodeTypes } from 'ts-mls'
 
 import type { GroupAnchor } from './anchor.js'
 import { readCapability } from './capability.js'
@@ -211,28 +211,55 @@ export function recoverySignerEligibleFromPublic(params: {
 }): boolean {
   const { tree, anchor, known, signer, now = Date.now() / 1000 } = params
   const controller = anchor.controller
-  if (controller == null) return true
+  if (controller == null) return false
   const leaf = recoveryLeafForDID(tree, signer)
-  if (leaf == null || !('identity' in leaf.credential)) return false
-  const binding = parseMLSCredentialIdentity(leaf.credential.identity).controller
+  if (leaf == null) return false
+  const binding = recoveryLeafIdentity(leaf)?.controller
   if (binding == null || binding.id !== controller) return false
-  const payload = readCapability(binding.capability).payload
+  let payload: ReturnType<typeof readCapability>['payload']
+  let folded: ReturnType<typeof foldLog>
+  try {
+    payload = readCapability(binding.capability).payload
+    folded = foldLog(controller, binding.prefix)
+  } catch {
+    return false
+  }
   if (
     known.devices.get(normalizeDID(signer))?.status === 'revoked' ||
     (payload.cap != null && known.devices.get(normalizeDID(payload.iss))?.status === 'revoked')
   )
     return false
-  const folded = foldLog(controller, binding.prefix)
   const projection = known.controllers.get(normalizeDID(controller))
   if (!folded.ok || (folded.states.at(-1)?.gen ?? 0) < (projection?.genFloor ?? 0)) return false
   let time = projection?.timeFloor ?? 0
   for (const node of tree) {
-    if (node?.nodeType !== nodeTypes.leaf || !('identity' in node.leaf.credential)) continue
-    const held = parseMLSCredentialIdentity(node.leaf.credential.identity).controller
+    if (node?.nodeType !== nodeTypes.leaf) continue
+    const parsed = recoveryLeafIdentity(node.leaf)
+    if (parsed == null) return false
+    const held = parsed.controller
     if (held?.id !== controller) continue
-    const capability = readCapability(held.capability).payload
-    const parent = Array.isArray(capability.cap) ? capability.cap[0] : capability.cap
-    time = Math.max(time, parent == null ? capability.iat : readCapability(parent).payload.iat)
+    try {
+      const capability = readCapability(held.capability).payload
+      const parent = Array.isArray(capability.cap) ? capability.cap[0] : capability.cap
+      time = Math.max(time, parent == null ? capability.iat : readCapability(parent).payload.iat)
+    } catch {
+      return false
+    }
   }
   return payload.exp >= Math.max(time, now - 300)
+}
+
+function recoveryLeafIdentity(
+  leaf: LeafNode,
+): ReturnType<typeof parseMLSCredentialIdentity> | undefined {
+  const credential = leaf?.credential
+  if (credential == null || typeof credential !== 'object' || !('identity' in credential))
+    return undefined
+  // Reader faults are operational failures. Only parsing delivered bytes is a refusal.
+  const identity = credential.identity
+  try {
+    return parseMLSCredentialIdentity(identity)
+  } catch {
+    return undefined
+  }
 }
