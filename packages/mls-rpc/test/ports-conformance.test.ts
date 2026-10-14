@@ -3,10 +3,12 @@ import {
   type GroupCrypto,
   type GroupMLS,
   isAppFrameStorageError,
+  type LogPosition,
   type PendingAppFrame,
 } from '@kumiai/rpc'
 import {
   type ConformanceCryptoMember,
+  type ConformanceGroupMLS,
   type ConformanceMLSMember,
   testGroupCryptoConformance,
   testGroupMLSConformance,
@@ -53,7 +55,7 @@ const _mlsIsAPort = (mls: GroupMLS): ConformanceMLSMember['mls'] => mls
 // not carry. Adding one is then a decision — write the clause, or widen the shape and say why it
 // has none — rather than something that happens silently.
 const _cryptoCoversPort = (crypto: ConformanceCryptoMember['crypto']): GroupCrypto => crypto
-const _mlsCoversPort = (mls: ConformanceMLSMember['mls']): GroupMLS => mls
+const _mlsCoversPort = (mls: ConformanceGroupMLS<LogPosition>): GroupMLS => mls
 
 testGroupCryptoConformance({
   label: 'createGroupCrypto over a real GroupHandle',

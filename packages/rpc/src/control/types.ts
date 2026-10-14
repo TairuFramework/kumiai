@@ -1,5 +1,6 @@
 import type { RecoveryRefusalReason } from '../crypto.js'
 import type { LogPosition } from '../cursor.js'
+import type { AcceptedRejoinSettlement } from '../recovery-types.js'
 import type { ForkHalt, RecoveryUnavailableEvent } from './safety.js'
 import type { ControlHold } from './search.js'
 
@@ -46,6 +47,8 @@ export type ControlSnapshot = {
   } | null
   operations: Array<Operation> // FIFO by `seq`
   rejoin: RejoinRecord | null
+  recoveryEpochFloor?: number | null
+  settledRejoins?: Array<AcceptedRejoinSettlement>
   outcomes: Array<Outcome>
   welcomes: Array<WelcomeObligation>
   applied: Array<AppliedCommit> // newest 64 epochs
@@ -63,6 +66,8 @@ export type ControlChanges = {
   deleteOperations?: Array<string>
   putRejoin?: RejoinRecord
   deleteRejoin?: true
+  recoveryEpochFloor?: number | null
+  putSettledRejoins?: Array<AcceptedRejoinSettlement>
   putOutcomes?: Array<Outcome>
   deleteOutcomes?: Array<string>
   putWelcomes?: Array<WelcomeObligation>
@@ -153,7 +158,7 @@ export type Outcome = { id: string; opID: string | null; at: number } & (
   | { kind: 'refused'; reason: RecoveryRefusal } // a rejoin refused by policy (D6)
 )
 
-export type RejoinRecord = {
+export type LegacyRejoinRecord = {
   /** Random per rejoin. */
   id: string
   stage: 'built' | 'published' | 'confirmed' | 'adopted' | 'refused'
@@ -187,6 +192,8 @@ export type RejoinRecord = {
   /** Set with stage `refused`. */
   refusal?: RecoveryRefusal
 }
+// Keep live producers and readers on the legacy contract until captured recovery activates.
+export type RejoinRecord = LegacyRejoinRecord
 export type RecoveryRefusal = RecoveryRefusalReason
 export type WelcomeObligation = {
   opID: string

@@ -20,8 +20,14 @@ import type {
   ConformanceAdoptionExpected,
   ConformanceAdoptionWrite,
   ConformanceBuiltCommit,
+  ConformanceCapturedRejoinRecord,
   ConformanceControlSnapshot,
   ConformanceControlSource,
+  ConformanceGroupKey,
+  ConformanceRecoverySource,
+  ConformanceRecoveryTargetCapture,
+  ConformanceResyncProof,
+  ConformanceStoredRejoinRecord,
 } from './control-store.js'
 
 export type ConformanceControlFrameValidation =
@@ -135,7 +141,7 @@ export type ConformanceBoundRecovery = {
   ratchet: () => Promise<void>
   replaceBinding: () => Promise<void>
 }
-export type ConformancePendingRecovery = {
+export type ConformanceLegacyPendingRecovery = {
   epoch: number
   markBindingUnusable: () => void
   confirmationKey: (position: string, commitDigest: string) => Promise<Uint8Array>
@@ -144,6 +150,8 @@ export type ConformancePendingRecovery = {
   serialize: () => Uint8Array
   onAccepted(write: NonNullable<ConformanceCommitContext['adoption']>): Promise<void>
 }
+
+export type ConformancePendingRecovery = ConformanceLegacyPendingRecovery
 
 export type ConformanceRestoredPendingRecovery = Omit<ConformancePendingRecovery, 'onAccepted'> & {
   onAccepted(write: NonNullable<ConformanceCommitContext['adoption']>): Promise<void>
@@ -165,7 +173,8 @@ export type ConformanceRosterEntry = {
  * group's whole authority state. The rendezvous is a lane concern; the PORT is three calls
  * passing bytes between two instances, which is all the clauses below do.
  */
-export type ConformanceGroupMLS = {
+export type ConformanceGroupMLS<Position extends string = string> = {
+  capturedRecovery?: ConformanceCapturedRecoveryPort<Position>
   verifyRecoveryRequest: (request: Uint8Array) => Promise<ConformanceVerifiedRecoveryRequest | null>
   confirmationKey: (position: string, commitDigest: string) => Promise<ConformanceConfirmationKey>
   sealRecoveryVerdict: (
@@ -1556,4 +1565,77 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
       })
     })
   })
+}
+
+export type ConformanceAdoptionWriteFactory<Position extends string = string> = (staged: {
+  incarnation: number
+  epochAfter: number
+  removed: boolean
+  epochAuthenticator: Uint8Array
+}) => ConformanceAdoptionWrite<Position>
+export type ConformanceCapturedRecapture = {
+  sealed: Uint8Array
+  requestID: string
+  requestKey: Uint8Array
+  epochFloor: number | null
+}
+export type ConformanceRecoveryReconciliation<Position extends string = string> =
+  | { kind: 'accepted'; epoch: number; leafDigest: string }
+  | { kind: 'head-only'; head: Position | null }
+  | { kind: 'unapplied-later'; epoch: number }
+  | { kind: 'retry' | 'held' }
+export type ConformanceCapturedPendingRecovery<Position extends string = string> = Omit<
+  ConformancePendingRecovery,
+  'onAccepted'
+> & {
+  source: ConformanceRecoverySource<unknown>
+  target: ConformanceRecoveryTargetCapture<Position>
+  onAccepted(
+    expected: ConformanceRecoverySource<unknown>,
+    proof: ConformanceResyncProof<Position>,
+    write: ConformanceAdoptionWriteFactory<Position>,
+  ): Promise<void>
+}
+export type ConformanceCapturedAppliedRecovery<Position extends string = string> =
+  | ConformanceCapturedPendingRecovery<Position>
+  | { renewalRequired: true }
+  | null
+export type ConformanceCapturedRecoveryPort<Position extends string = string> = {
+  applyRecovery(
+    sealed: Uint8Array,
+    requestID: string,
+    requestKey: Uint8Array,
+  ): Promise<ConformanceCapturedAppliedRecovery<Position>>
+  restoreRecovery(
+    candidate: Uint8Array,
+    requestKey: Uint8Array,
+  ): Promise<ConformanceCapturedPendingRecovery<Position>>
+  reconcileCapture(
+    record: ConformanceCapturedRejoinRecord<Position>,
+    reply: ConformanceCapturedRecapture,
+  ): Promise<ConformanceRecoveryReconciliation<Position>>
+  sealGroupInfo(request: Uint8Array, captureHead: Position | null): Promise<Uint8Array>
+}
+export type ConformanceConfirmedRecoveryHandoff<Position extends string = string> = {
+  record: ConformanceCapturedRejoinRecord<Position>
+  completion: Promise<void>
+}
+export type ConformanceRecoveryContinuation<Position extends string = string> = {
+  source: ConformanceGroupKey
+  destination: ConformanceGroupKey
+  record: ConformanceStoredRejoinRecord<Position>
+}
+export type ConformanceRecoveryCompletion = (params: {
+  ledger: Array<string>
+  mutationID: string
+}) => Promise<void>
+export type ConformanceRecoveryContinuationPort<Position extends string = string> = {
+  loadRecoveryContinuation(
+    destination: ConformanceGroupKey,
+  ): Promise<ConformanceRecoveryContinuation<Position> | null>
+  finishRecoveryContinuation(params: {
+    continuation: ConformanceRecoveryContinuation<Position>
+    ledger: Array<string>
+    mutationID: string
+  }): Promise<void>
 }

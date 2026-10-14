@@ -139,8 +139,11 @@ export type {
   GroupHandleRegistry,
   GroupHandleRegistryParams,
   GroupRuntimeSnapshot,
-  RecoverySource,
+  LegacyRegistryRecoverySource,
+  LegacyResyncProof,
   RegistryHandleAccess,
+  RegistryRecoverySource,
+  ResyncProof,
 } from './registry/types.js'
 export type { RecoveryEnvironment } from './registry/validation.js'
 export {

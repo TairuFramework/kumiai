@@ -1,5 +1,6 @@
 import { encodeClientState } from '@kumiai/mls'
-import { describe, expect, test, vi } from 'vitest'
+import type { ResyncProof as PortableResyncProof, RecoverySource } from '@kumiai/rpc'
+import { describe, expect, expectTypeOf, test, vi } from 'vitest'
 
 import {
   bindEntryCapability,
@@ -10,7 +11,9 @@ import {
 import {
   createGroupHandleRegistry,
   GroupUnavailableError,
-  type RecoverySource,
+  type LegacyRegistryRecoverySource,
+  type RegistryRecoverySource,
+  type ResyncProof,
 } from '../src/index.js'
 import type { GroupRecoveryTrust } from '../src/persistence-types.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
@@ -91,7 +94,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           const lifetime = await fixture.device.groups.load(groupID)
           if (trust === null || lifetime === null)
             throw new Error('Missing current administrative rows')
-          const expected: RecoverySource = {
+          const expected: LegacyRegistryRecoverySource = {
             key,
             stateVersion: 5,
             identity: trust.installed,
@@ -427,3 +430,9 @@ for (const mode of ['real-mls', 'double'] as const) {
     })
   })
 }
+
+test('registry captured declarations specialise portable opaque trust without changing legacy sources', () => {
+  expectTypeOf<RegistryRecoverySource>().toEqualTypeOf<RecoverySource<GroupRecoveryTrust>>()
+  expectTypeOf<ResyncProof>().toEqualTypeOf<PortableResyncProof>()
+  expectTypeOf<Extract<keyof LegacyRegistryRecoverySource, 'trustDigest'>>().toEqualTypeOf<never>()
+})

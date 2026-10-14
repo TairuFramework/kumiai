@@ -5,7 +5,9 @@ import type {
   ConformanceControlChanges,
   ConformanceControlSearchPort,
   ConformanceControlSnapshot,
+  ConformanceRecoverySource,
   ConformanceRejoinRecord,
+  ConformanceResyncProof,
   ConformanceWelcomeObligation,
 } from './control-store.js'
 import type { ConformanceSendAdmission } from './group-mls.js'
@@ -85,11 +87,11 @@ export type ConformanceRegistryAccess<THandle> = {
   ): Promise<'installed' | 'noop' | 'moved'>
   onRetire(hook: () => Promise<void>): () => void
 }
-export type ConformanceRegistryRecoverySource = ConformanceAdoptionExpected & {
+export type ConformanceLegacyRegistryRecoverySource = ConformanceAdoptionExpected & {
   trust: ConformanceGroupRecoveryTrust
   lifetimeRevision: number
 }
-export type ConformanceRegistryResyncProof = {
+export type ConformanceLegacyResyncProof = {
   targetID: string
   topicID: string
   groupInfoEpoch: number
@@ -110,13 +112,13 @@ export type ConformanceRegistry<THandle> = {
     group: THandle,
     params: { replace?: boolean; packageUse: ConformancePackageUse | null },
   ): Promise<ConformanceGroupKey>
-  recoverySource(groupID: string): Promise<ConformanceRegistryRecoverySource>
+  recoverySource(groupID: string): Promise<ConformanceLegacyRegistryRecoverySource>
   switchIncarnation(
     candidate: THandle,
     params: {
-      source: ConformanceRegistryRecoverySource
+      source: ConformanceLegacyRegistryRecoverySource
       rejoinID: string
-      proof: ConformanceRegistryResyncProof
+      proof: ConformanceLegacyResyncProof
       write: ConformanceRegistrySwitchWrite
     },
   ): Promise<ConformanceGroupKey>
@@ -167,8 +169,8 @@ export type ConformanceRegistryFixtureBase<
   ): Promise<{
     candidate: THandle
     record: ConformanceRejoinRecord
-    source: ConformanceRegistryRecoverySource
-    proof: ConformanceRegistryResyncProof
+    source: ConformanceLegacyRegistryRecoverySource
+    proof: ConformanceLegacyResyncProof
   }>
   acceptedOrdinary(
     access: ConformanceRegistryAccess<THandle>,
@@ -227,3 +229,8 @@ export type ConformanceRegistryFixture<
   safety(): ConformanceGroupSafety
   reopen(): Promise<ConformanceRegistryFixture<THandle, TTx>>
 }
+
+export type ConformanceRegistryRecoverySource =
+  ConformanceRecoverySource<ConformanceGroupRecoveryTrust>
+export type ConformanceRegistryResyncProof<Position extends string = string> =
+  ConformanceResyncProof<Position>

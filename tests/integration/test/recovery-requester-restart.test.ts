@@ -1,7 +1,7 @@
 import type { OwnIdentity } from '@kokuin/token'
 import type { GroupHandle } from '@kumiai/mls'
 import type { LedgerEntrySlot } from '@kumiai/mls-rpc'
-import { commitTopic, type RejoinRecord } from '@kumiai/rpc'
+import { commitTopic, type LegacyRejoinRecord } from '@kumiai/rpc'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import { type Member, makeMember, restoreMemberHandle } from './app-lane-e2e.js'
@@ -82,7 +82,7 @@ test.each(['built', 'published', 'confirmed', 'adopted'] as const)(
     await expect(bob.peer.recover()).rejects.toThrow()
     await bob.peer.dispose()
     await bob.peer.drained()
-    const record: RejoinRecord | null = (await bob.control.load()).rejoin
+    const record: LegacyRejoinRecord | null = (await bob.control.load()).rejoin
     expect(record?.stage).toBe(stage)
     vi.mocked(bob.control.apply).mockRestore()
     const restored = await restoreMemberHandle(bob, bob.entrySlot)

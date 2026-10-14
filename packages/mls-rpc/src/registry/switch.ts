@@ -21,7 +21,11 @@ import { retireIncarnation } from './retired.js'
 import type { RegistryRetirement } from './retirement.js'
 import { readRecoverySource } from './source.js'
 import { recoveryTrustFor } from './trust.js'
-import type { GroupHandleRegistry, RecoverySource, RegistrySwitchWrite } from './types.js'
+import type {
+  GroupHandleRegistry,
+  LegacyRegistryRecoverySource,
+  RegistrySwitchWrite,
+} from './types.js'
 import { type RecoveryEnvironment, validateRegistryHandle } from './validation.js'
 import { verifyRegistryResync } from './verdict.js'
 
@@ -64,7 +68,10 @@ function confirmedRecord(record: RejoinRecord | null, rejoinID: string): RejoinR
   return record
 }
 
-function matchSource(actual: RecoverySource, expected: RecoverySource): void {
+function matchSource(
+  actual: LegacyRegistryRecoverySource,
+  expected: LegacyRegistryRecoverySource,
+): void {
   if (
     !sameStoredValue(actual.key, expected.key) ||
     actual.stateVersion !== expected.stateVersion ||

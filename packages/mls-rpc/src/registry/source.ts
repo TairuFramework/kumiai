@@ -3,7 +3,7 @@ import { decodeStoredValue, encodeStoredValue, isStoredOpenFailure } from '../pe
 import { GroupStateConflictError, GroupUnavailableError } from '../persistence-errors.js'
 import type { GroupLifetime, GroupRecoveryTrust } from '../persistence-types.js'
 import { readRetainedTrust } from './safety.js'
-import type { RecoverySource } from './types.js'
+import type { LegacyRegistryRecoverySource } from './types.js'
 
 function refuseUnreadable(cause: unknown): never {
   if (!isStoredOpenFailure(cause) && !(cause instanceof GroupStateConflictError)) throw cause
@@ -13,7 +13,7 @@ function refuseUnreadable(cause: unknown): never {
 export async function readRecoverySource(
   reads: EntryReads,
   groupID: string,
-): Promise<RecoverySource> {
+): Promise<LegacyRegistryRecoverySource> {
   let lifetime: GroupLifetime | null
   try {
     lifetime = await reads.lifetime()

@@ -1,4 +1,5 @@
 import type { AdoptionWriteFactory, ControlSource } from './control/types.js'
+import type { CapturedRecoveryPort } from './recovery-types.js'
 
 /**
  * Consumer-supplied MLS crypto port: epoch number, epoch-bound domain-separated exported secrets
@@ -359,7 +360,7 @@ export type CommitContext = {
  * A speculative external rejoin. Publication alone never authorises adoption.
  * The caller confirms the target epoch before accepting it.
  */
-export type PendingRecovery = {
+export type LegacyPendingRecovery = {
   epoch: number
   /** Mark an authoritative binding/lapse/floor refusal. Bounded memory survives ratchets, not restart. */
   markBindingUnusable(): void
@@ -377,6 +378,8 @@ export type PendingRecovery = {
   /** Sealed restorable candidate, including verdict and binding evidence. */
   serialize(): Uint8Array
 }
+
+export type PendingRecovery = LegacyPendingRecovery
 
 /** Restored adoption must co-commit its control changes with the candidate state. */
 export type RestoredPendingRecovery = Omit<PendingRecovery, 'onAccepted'> & {
@@ -423,6 +426,7 @@ export type RecoveryConfirmationKey = { epoch: number; key: Uint8Array }
  * until the suite was made to cover the shape rather than a sample of it.
  */
 export type GroupMLS = {
+  capturedRecovery?: CapturedRecoveryPort
   /** Verify the signed ask without requiring its issuer to remain in the current tree. */
   verifyRecoveryRequest(request: Uint8Array): Promise<VerifiedRecoveryRequest | null>
   confirmationKey(position: string, commitDigest: string): Promise<RecoveryConfirmationKey>

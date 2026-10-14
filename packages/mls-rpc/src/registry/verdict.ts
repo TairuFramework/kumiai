@@ -23,7 +23,7 @@ import {
 } from '../persistence-errors.js'
 import { createVerdictJudge, knownRecoveryRegistry } from '../recovery.js'
 import { decodeRecoveryCandidate } from '../recovery-codec.js'
-import type { RecoverySource, ResyncProof } from './types.js'
+import type { LegacyRegistryRecoverySource, LegacyResyncProof } from './types.js'
 
 function requireMatch(condition: boolean, reason: RegistryResyncRefusalReason): asserts condition {
   if (!condition) throw new RegistryResyncRefusedError({ reason })
@@ -70,10 +70,10 @@ function ownCredential(state: ClientState) {
 }
 
 export async function verifyRegistryResync(params: {
-  source: RecoverySource
+  source: LegacyRegistryRecoverySource
   candidate: GroupHandle
   record: RejoinRecord
-  proof: ResyncProof
+  proof: LegacyResyncProof
 }): Promise<void> {
   const { source, candidate, record, proof } = params
   let reason: RegistryResyncRefusalReason = 'malformed'

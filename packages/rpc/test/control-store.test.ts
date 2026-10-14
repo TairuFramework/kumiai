@@ -14,8 +14,8 @@ import type {
   ControlSlot,
   ControlSnapshot,
   ControlStore,
+  LegacyRejoinRecord,
   Operation,
-  RejoinRecord,
 } from '../src/control/types.js'
 import { asLogPosition } from '../src/cursor.js'
 import {
@@ -59,7 +59,7 @@ const applied = (epoch: number): AppliedCommit => ({
   removed: false,
 })
 
-const rejoin: RejoinRecord = {
+const rejoin: LegacyRejoinRecord = {
   id: 'rejoin',
   stage: 'built',
   publishID: 'rejoin-publish',
@@ -530,3 +530,29 @@ describe('memory host database', () => {
     expect(calls).toBe(1)
   })
 })
+
+test.each(['built', 'published', 'confirmed', 'adopted', 'refused'] as const)(
+  'legacy %s records retain saved bytes and conflict epoch across persistence',
+  async (stage) => {
+    const store = createMemoryControlStore({ groupID: 'group-A', incarnation: 1 })
+    const saved: LegacyRejoinRecord = {
+      ...structuredClone(rejoin),
+      stage,
+      conflictEpoch: 4,
+      position: asLogPosition('legacy-position'),
+      verdict: new Uint8Array([8, 9]),
+      ...(stage === 'refused' ? { refusal: 'policy' as const } : {}),
+    }
+    const expected = structuredClone(saved)
+    await store.apply({ putRejoin: saved }, 'legacy-save')
+    saved.requestKey.fill(0)
+    saved.candidate.fill(0)
+    saved.payload.fill(0)
+    saved.source.authenticator.fill(0)
+    saved.verdict?.fill(0)
+    const loaded = (await store.load()).rejoin
+    expect(loaded).toEqual(expected)
+    loaded?.requestKey.fill(0)
+    expect((await store.load()).rejoin).toEqual(expected)
+  },
+)

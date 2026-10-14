@@ -25,7 +25,7 @@ import {
   encodeCommitFrame,
   encodeHandshakeFrame,
   HANDSHAKE_KIND,
-  type RejoinRecord,
+  type LegacyRejoinRecord,
 } from '@kumiai/rpc'
 
 import { createGroupCrypto } from '../../src/crypto.js'
@@ -33,7 +33,7 @@ import type { GroupKey, GroupRecoveryTrust } from '../../src/persistence-types.j
 import { createVerdictJudge } from '../../src/recovery.js'
 import { encodeRecoveryCandidate } from '../../src/recovery-codec.js'
 import { recoveryTrustFor } from '../../src/registry/trust.js'
-import type { RecoverySource, ResyncProof } from '../../src/registry/types.js'
+import type { LegacyRegistryRecoverySource, LegacyResyncProof } from '../../src/registry/types.js'
 import { testHandleAccess } from './real-group.js'
 import { memoryModel, restoreMemoryControlHandle } from './sealed-memory-mls.js'
 
@@ -48,9 +48,9 @@ export async function createRegistryRecovery(params: {
   responder?: { identity: OwnIdentity; group: GroupHandle }
 }): Promise<{
   candidate: GroupHandle
-  record: RejoinRecord
-  source: RecoverySource
-  proof: ResyncProof
+  record: LegacyRejoinRecord
+  source: LegacyRegistryRecoverySource
+  proof: LegacyResyncProof
   sealVerdict(params: {
     verdict?: Partial<RecoveryVerdict>
     identity?: OwnIdentity

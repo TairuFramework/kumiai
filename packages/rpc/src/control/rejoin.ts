@@ -13,9 +13,9 @@ import type {
   RejoinRecord,
 } from './types.js'
 
-export type RecoverySource = Omit<RejoinRecord['source'], 'head'>
+export type SourceScanIdentity = Omit<RejoinRecord['source'], 'head'>
 export type SourceScan = {
-  current: RecoverySource
+  current: SourceScanIdentity
   gap: boolean
   frames: Array<{
     position: LogPosition

@@ -90,6 +90,8 @@ export type ConformanceControlSnapshot<Position extends string = string> = {
   } | null
   operations: Array<ConformanceOperation<Position>> // FIFO by `seq`
   rejoin: ConformanceRejoinRecord<Position> | null
+  recoveryEpochFloor?: number | null
+  settledRejoins?: Array<ConformanceAcceptedRejoinSettlement<Position>>
   outcomes: Array<ConformanceOutcome<Position>>
   welcomes: Array<ConformanceWelcomeObligation>
   applied: Array<ConformanceAppliedCommit> // newest 64 epochs
@@ -107,6 +109,8 @@ export type ConformanceControlChanges<Position extends string = string> = {
   deleteOperations?: Array<string>
   putRejoin?: ConformanceRejoinRecord<Position>
   deleteRejoin?: true
+  recoveryEpochFloor?: number | null
+  putSettledRejoins?: Array<ConformanceAcceptedRejoinSettlement<Position>>
   putOutcomes?: Array<ConformanceOutcome<Position>>
   deleteOutcomes?: Array<string>
   putWelcomes?: Array<ConformanceWelcomeObligation>
@@ -196,7 +200,7 @@ export type ConformanceOutcome<Position extends string = string> = {
   | { kind: 'refused'; reason: ConformanceRecoveryRefusal } // a rejoin refused by policy (D6)
 )
 
-export type ConformanceRejoinRecord<Position extends string = string> = {
+export type ConformanceLegacyRejoinRecord<Position extends string = string> = {
   /** Random per rejoin. */
   id: string
   stage: 'built' | 'published' | 'confirmed' | 'adopted' | 'refused'
@@ -235,6 +239,8 @@ export type ConformanceRejoinRecord<Position extends string = string> = {
   /** Set with stage `refused`. */
   refusal?: ConformanceRecoveryRefusal
 }
+export type ConformanceRejoinRecord<Position extends string = string> =
+  ConformanceLegacyRejoinRecord<Position>
 export type ConformanceRecoveryRefusal = 'binding' | 'lapse' | 'floor' | 'policy' | 'invalid'
 export type ConformanceWelcomeObligation = {
   opID: string
@@ -1540,4 +1546,57 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       )
     })
   })
+}
+
+export type ConformanceRecoverySource<TTrust = unknown> = ConformanceAdoptionExpected & {
+  trust: TTrust
+  trustDigest: string
+  lifetimeRevision: number
+}
+export type ConformanceRecoveryTargetCapture<Position extends string = string> = {
+  targetID: string
+  topicID: string
+  groupInfoEpoch: number
+  groupInfoAuthenticator: Uint8Array
+  captureHead: Position | null
+}
+export type ConformanceResyncProof<Position extends string = string> =
+  ConformanceRecoveryTargetCapture<Position> & {
+    position: Position
+    payloadDigest: string
+    verdict: Uint8Array
+  }
+export type ConformanceCapturedRejoinRecord<Position extends string = string> = Omit<
+  ConformanceLegacyRejoinRecord<Position>,
+  'source' | 'conflictEpoch'
+> & {
+  format: 2
+  source: ConformanceRecoverySource
+  target: ConformanceRecoveryTargetCapture<Position>
+  captureHead: Position | null
+  searchFrom: Position | null
+  trigger: 'automatic' | 'manual'
+  authorisationID: string | null
+  switchMutationID: string | null
+  destinationKey: ConformanceGroupKey | null
+}
+export type ConformanceStoredRejoinRecord<Position extends string = string> =
+  | ConformanceLegacyRejoinRecord<Position>
+  | ConformanceCapturedRejoinRecord<Position>
+export type ConformanceRecoveryOrigin<Position extends string = string> = {
+  sourceKey: ConformanceGroupKey
+  target: ConformanceRecoveryTargetCapture<Position>
+  searchFrom: Position | null
+}
+export type ConformanceAcceptedRejoinSettlement<Position extends string = string> = {
+  kind: 'accepted-unadoptable'
+  id: string
+  digest: string
+  payloadDigest: string
+  epochAfter: number
+  acceptedEpoch: number
+  origin: ConformanceRecoveryOrigin<Position>
+  /** SHA-256/base64url of the exact wire-encoded fresh LeafNode. */
+  leafDigest: string
+  ledgerBefore: Array<string>
 }

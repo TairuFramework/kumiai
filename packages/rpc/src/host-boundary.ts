@@ -71,6 +71,7 @@ export const mlsHostMembers = {
   bootstrapLedger: 'host',
   getLedger: 'host',
   exportRecoverySecret: 'host',
+  capturedRecovery: 'port',
 } as const satisfies HostMembers<GroupMLS>
 
 type Params = GroupPeerParams<Record<string, GroupProtocolDefinition>>

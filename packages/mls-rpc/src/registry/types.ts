@@ -1,5 +1,11 @@
 import type { GroupHandle } from '@kumiai/mls'
-import type { AdoptionExpected, AdoptionWrite, LogPosition, SendAdmission } from '@kumiai/rpc'
+import type {
+  AdoptionExpected,
+  AdoptionWrite,
+  LogPosition,
+  RecoverySource,
+  SendAdmission,
+} from '@kumiai/rpc'
 
 import type { ControlReadScope, HandleAccess } from '../access.js'
 import type {
@@ -39,11 +45,11 @@ export type RegistryHandleAccess = {
   ): Promise<'installed' | 'noop' | 'moved'>
   onRetire(hook: () => Promise<void>): () => void
 }
-export type RecoverySource = AdoptionExpected & {
+export type LegacyRegistryRecoverySource = AdoptionExpected & {
   trust: GroupRecoveryTrust
   lifetimeRevision: number
 }
-export type ResyncProof = {
+export type LegacyResyncProof = {
   targetID: string
   topicID: string
   groupInfoEpoch: number
@@ -61,9 +67,9 @@ export type GroupHandleRegistry = {
   switchIncarnation(
     candidate: GroupHandle,
     params: {
-      source: RecoverySource
+      source: LegacyRegistryRecoverySource
       rejoinID: string
-      proof: ResyncProof
+      proof: LegacyResyncProof
       write: RegistrySwitchWrite
     },
   ): Promise<GroupKey>
@@ -73,7 +79,7 @@ export type GroupHandleRegistry = {
     params: { replace?: boolean; packageUse: PackageUse | null },
   ): Promise<GroupKey>
   access(groupID: string): Promise<RegistryHandleAccess>
-  recoverySource(groupID: string): Promise<RecoverySource>
+  recoverySource(groupID: string): Promise<LegacyRegistryRecoverySource>
   delete(key: GroupKey): Promise<void>
   dispose(): Promise<void>
 }
@@ -94,3 +100,6 @@ export type GroupHandleRegistryParams<TTx extends GroupTransaction> = {
   restore(record: ReadableGroupState): Promise<GroupHandle>
   restoreCandidate(candidate: Uint8Array): Promise<GroupHandle>
 }
+
+export type RegistryRecoverySource = RecoverySource<GroupRecoveryTrust>
+export type { ResyncProof } from '@kumiai/rpc'
