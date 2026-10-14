@@ -26,6 +26,7 @@ import {
   mintInvite,
   restoreMemberHandle,
 } from './app-lane-e2e.js'
+import { createMemoryHostDatabase } from './host-db.js'
 import { createWireHub } from './log-hub-over-wire.js'
 
 afterEach(() => vi.restoreAllMocks())
@@ -184,7 +185,11 @@ test.each(['joined-before-consume', 'consume-mid-transaction', 'consumed-before-
       const artifact = await deliverArtifact(ctx)
       const opened = await openWelcome([ctx.source], { identity: ctx.invitee, ...artifact })
       if (!('joined' in opened)) throw new Error('Expected fresh join')
+      const database = createMemoryHostDatabase()
+      const groupID = opened.joined.group.groupID
+      await database.seed(groupID, encodeClientState(opened.joined.group.state))
       const persisted = structuredClone({
+        control: await database.control(groupID, { groupID, incarnation: 1 }).load(),
         state: encodeClientState(opened.joined.group.state),
         ledger: opened.joined.group.ledgerTokens,
         joinRef: opened.joinRef as typeof opened.joinRef | null,
@@ -228,7 +233,7 @@ test.each(['joined-before-consume', 'consume-mid-transaction', 'consumed-before-
               incarnation: 1,
               epoch: Number(saved.group.epoch),
               deleted: false,
-              forkHalted: false,
+              forkHalted: persisted.control.forkHalt !== null,
             },
             spentEpochAuthenticators: persisted.spentEpochAuthenticators,
             welcome: {
@@ -262,7 +267,7 @@ test.each(['joined-before-consume', 'consume-mid-transaction', 'consumed-before-
             incarnation: 1,
             epoch: Number(saved.group.epoch),
             deleted: false,
-            forkHalted: false,
+            forkHalted: persisted.control.forkHalt !== null,
           },
           spentEpochAuthenticators: persisted.spentEpochAuthenticators,
           welcome: {

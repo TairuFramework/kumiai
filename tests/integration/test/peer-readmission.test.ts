@@ -119,7 +119,14 @@ test('a last-resort Welcome replaces held state three epochs ahead and spent rep
     if (!('joined' in repeated)) throw new Error('Last-resort repeat must reach epoch admission')
     expect(
       judgeWelcomeAdmission({
-        held: { incarnation: 1, epoch, deleted: false, forkHalted: false },
+        held: {
+          incarnation: 1,
+          epoch,
+          deleted: false,
+          forkHalted:
+            (await db.control(held.groupID, { groupID: held.groupID, incarnation: 1 }).load())
+              .forkHalt !== null,
+        },
         spentEpochAuthenticators,
         welcome: {
           epoch: Number(repeated.joined.group.epoch),
@@ -151,7 +158,14 @@ test('a last-resort Welcome replaces held state three epochs ahead and spent rep
     expect(Number(joined.epoch)).toBe(epoch + 3)
     expect(
       judgeWelcomeAdmission({
-        held: { incarnation: 1, epoch, deleted: false, forkHalted: false },
+        held: {
+          incarnation: 1,
+          epoch,
+          deleted: false,
+          forkHalted:
+            (await db.control(held.groupID, { groupID: held.groupID, incarnation: 1 }).load())
+              .forkHalt !== null,
+        },
         spentEpochAuthenticators,
         welcome: {
           epoch: Number(joined.epoch),
@@ -219,7 +233,14 @@ test('a last-resort Welcome replaces held state three epochs ahead and spent rep
     if (!('joined' in again)) throw new Error('Last-resort repeat must reopen')
     expect(
       judgeWelcomeAdmission({
-        held: { incarnation: 1, epoch: Number(restored.epoch), deleted: false, forkHalted: false },
+        held: {
+          incarnation: 1,
+          epoch: Number(restored.epoch),
+          deleted: false,
+          forkHalted:
+            (await db.control(held.groupID, { groupID: held.groupID, incarnation: 1 }).load())
+              .forkHalt !== null,
+        },
         spentEpochAuthenticators,
         welcome: {
           epoch: Number(again.joined.group.epoch),
@@ -292,7 +313,20 @@ test('an unused older Welcome is alreadyJoined after removal and readmission', a
     const spentEpochAuthenticators = [
       installed.joined.group.state.keySchedule.epochAuthenticator.slice(),
     ]
-    const held = { incarnation: 1, epoch: 5, deleted: false, forkHalted: false }
+    const held = {
+      incarnation: 1,
+      epoch: 5,
+      deleted: false,
+      forkHalted:
+        (
+          await db
+            .control(installed.joined.group.groupID, {
+              groupID: installed.joined.group.groupID,
+              incarnation: 1,
+            })
+            .load()
+        ).forkHalt !== null,
+    }
     expect(
       judgeWelcomeAdmission({
         held,

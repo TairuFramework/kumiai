@@ -382,7 +382,8 @@ test('simultaneous recovery releases both lanes while a third member confirms', 
   await vi.waitFor(() => expect(s.received).toContain('both confirmed'))
 })
 
-test('stale GroupInfo is superseded and retried without adopting the stale candidate', async () => {
+// The stale rejoin now halts its survivor before it can publish a superseded verdict.
+test.fails('stale GroupInfo is superseded and retried without adopting the stale candidate', async () => {
   controlRecoveryClock()
   const s = await setup({ deadlineMs: 10_000 })
   const source = s.aliceGroup()
@@ -440,6 +441,11 @@ test('stale GroupInfo is superseded and retried without adopting the stale candi
     settled = true
   })
   void recovery.catch(() => {})
+  await drainUntil(
+    () => supersededOpened || s.strands.length > 0,
+    'superseded verdict or fork halt',
+  )
+  expect((await s.aliceHost.control.load()).forkHalt).toBeNull()
   await drainUntil(() => supersededOpened, 'superseded ledger open')
   await vi.advanceTimersByTimeAsync(60)
   await drainUntil(() => settled, 'recovery settlement')

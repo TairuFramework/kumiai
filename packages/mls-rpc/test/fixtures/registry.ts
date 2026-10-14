@@ -155,6 +155,7 @@ export type PendingFault = {
 }
 
 type FixtureParams = {
+  identity?: OwnIdentity
   mode: 'real-mls' | 'double'
   setup: 'empty' | 'seeded'
   groupID: string
@@ -258,7 +259,7 @@ export async function registryFixtureSafety(fixture: RegistryFixture): Promise<G
 }
 
 export async function createRegistryFixture(params: FixtureParams): Promise<RegistryFixture> {
-  return assemble(params, randomIdentity())
+  return assemble(params, params.identity ?? randomIdentity())
 }
 
 async function assemble(
