@@ -98,7 +98,6 @@ export function createRecoveryCache<TValue>(release: (value: TValue) => void = (
 
 export type ConfirmationOutcome =
   | { kind: 'confirmed'; position: string; epoch: number; sealed: Uint8Array }
-  | { kind: 'superseded' }
   | { kind: 'refused'; refusal: RecoveryRefusalReason; responder: string }
   | { kind: 'unconfirmed'; advisory: Array<OpenedRecoveryVerdict> }
   | { kind: 'disposed' }
@@ -144,7 +143,7 @@ export function waitForRecoveryConfirmation(
   return new Promise((resolve) => {
     let finished = false
     let settle: ReturnType<typeof setTimeout> | undefined
-    let best: Extract<ConfirmationOutcome, { kind: 'superseded' | 'refused' }> | undefined
+    let best: Extract<ConfirmationOutcome, { kind: 'refused' }> | undefined
     const advisory = new Map<string, OpenedRecoveryVerdict>()
     let opening = Promise.resolve()
     const finish = (outcome: ConfirmationOutcome): void => {

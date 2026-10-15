@@ -255,6 +255,51 @@ test('authenticated external policy refusal carries authority but copy eligibili
   expect(encodeClientState(f.member.handle.state)).toEqual(f.state)
 })
 
+test.each(['host-policy', 'local-fault'] as const)(
+  'a %s throw cannot give an authenticated external commit refusal authority',
+  async (kind) => {
+    const f = await fixture()
+    const fault = new Error('policy store offline')
+    const policy = vi.fn(() => {
+      throw fault
+    })
+    const state = decodeClientState(f.state)
+    if (state === undefined) throw new Error('Missing state')
+    f.member.handle = await restoreGroup({
+      state,
+      credential: f.member.handle.credential,
+      ledgerEntries: f.member.handle.ledgerTokens,
+      options: { commitPolicy: policy },
+    })
+    const commit = (
+      await joinGroupExternal({
+        identity: f.group.committer.identity,
+        groupInfo: (await exportGroupInfo({ group: f.group.committer.handle })).groupInfo,
+        credential: f.group.committer.handle.credential,
+        resync: true,
+      })
+    ).commitMessage
+    const live = createGroupMLS({
+      access: testHandleAccess({
+        handle: () => f.member.handle,
+        adopt: (next) => {
+          f.member.handle = next
+        },
+      }),
+      identity: f.member.identity,
+      entrySlot: f.member.slot,
+    })
+    expect(await live.readCommitHeader(commit)).toMatchObject({ external: true })
+    if (kind === 'local-fault')
+      vi.spyOn(f.member.handle, 'processMessage').mockRejectedValueOnce(fault)
+    const result = await live.processCommit(commit, {})
+    expect(policy).toHaveBeenCalledTimes(kind === 'host-policy' ? 1 : 0)
+    expect(result).toMatchObject({ applied: false })
+    expect(result).not.toHaveProperty('refusalAuthority')
+    expect(encodeClientState(f.member.handle.state)).toEqual(f.state)
+  },
+)
+
 async function searchReal(
   f: Awaited<ReturnType<typeof fixture>>,
   competitor?: Uint8Array,

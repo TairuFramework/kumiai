@@ -369,6 +369,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       const ignored = Symbol('ignored commit')
       let refusedEpoch: number | undefined
       let refusal: RecoveryRefusalReason | undefined
+      let refusalAuthority: ProcessCommitResult['refusalAuthority']
       let validation: 'unavailable' | undefined
       try {
         return await access.mutate(async (group, persist) => {
@@ -394,6 +395,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           if (!result.applied) {
             refusedEpoch = result.epochBefore
             refusal = result.refusal
+            refusalAuthority = result.refusalAuthority
             validation = result.validation
             throw ignored
           }
@@ -413,8 +415,10 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
             epochBefore: refusedEpoch,
             epochAfter: refusedEpoch,
             ...(refusal == null ? {} : { refusal }),
-            ...(refusal != null && eligible.authenticatedExternal && validation === undefined
-              ? { refusalAuthority: 'authenticated-commit' as const }
+            ...(refusalAuthority != null &&
+            eligible.authenticatedExternal &&
+            validation === undefined
+              ? { refusalAuthority }
               : {}),
             ...(validation === undefined ? {} : { validation }),
           }

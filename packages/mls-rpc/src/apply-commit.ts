@@ -27,6 +27,7 @@ export type ApplyCommitParams = CommitContext & {
 export type ApplyCommitResult = {
   validation?: 'unavailable'
   refusal?: RecoveryRefusalReason
+  refusalAuthority?: 'authenticated-commit'
   /** The handle took the commit's state. A host keeps it even when `advanced` is false. */
   applied: boolean
   /** The epoch moved. A commit removing this member is applied without advancing it. */
@@ -67,8 +68,10 @@ export async function applyCommit(params: ApplyCommitParams): Promise<ApplyCommi
   const refused = (
     committerDID?: string,
     refusal: RecoveryRefusalReason = 'invalid',
+    authenticatedRefusal = false,
   ): ApplyCommitResult => ({
     refusal,
+    ...(authenticatedRefusal ? { refusalAuthority: 'authenticated-commit' as const } : {}),
     applied: false,
     advanced: false,
     epochBefore: Number(before),
@@ -99,7 +102,7 @@ export async function applyCommit(params: ApplyCommitParams): Promise<ApplyCommi
   // An external replacement of this identity cannot use this leaf's old private keys. This is
   // a policy refusal, not evidence that our member leaf authored the frame.
   if (header.external === true && normalizeDID(committerDID) === normalizeDID(ownDID))
-    return refused(committerDID, 'policy')
+    return refused(committerDID, 'policy', true)
   if (
     header.external !== true &&
     committerDID != null &&
@@ -112,6 +115,7 @@ export async function applyCommit(params: ApplyCommitParams): Promise<ApplyCommi
   let persisted = false
   let resolverFailed = false
   let threw = false
+  let authenticatedRefusal = false
   let refusal: RecoveryRefusalReason = 'invalid'
   const resolve = params.resolveLedgerEntries
   entrySlot.install(
@@ -145,7 +149,10 @@ export async function applyCommit(params: ApplyCommitParams): Promise<ApplyCommi
     if (error instanceof CommitValidationUnavailableError)
       return { ...refused(committerDID), validation: 'unavailable' }
     threw = true
-    if (error instanceof CommitRejectedError) refusal = error.reason
+    if (error instanceof CommitRejectedError) {
+      refusal = error.reason
+      authenticatedRefusal = true
+    }
   } finally {
     entrySlot.install(undefined)
   }
@@ -156,7 +163,7 @@ export async function applyCommit(params: ApplyCommitParams): Promise<ApplyCommi
     const changed =
       rosterAfter.length !== rosterBefore.length ||
       rosterAfter.some((entry, index) => entry.did !== rosterBefore[index]?.did)
-    if (threw && !persisted && !changed) return refused(committerDID, refusal)
+    if (threw && !persisted && !changed) return refused(committerDID, refusal, authenticatedRefusal)
     const { refusal: _refusal, ...unchanged } = refused(committerDID)
     return { ...unchanged, applied: true, rosterAfter, surfacedEntries: surfaced() }
   }

@@ -1773,6 +1773,16 @@ export function createGroupPeerWithControlWalk<
         const commitDigest = digestAppliedCommit(commitFrame.commit)
         if (pendingRecovery?.position === position && pendingRecovery.commitDigest === commitDigest)
           return advancedEpoch
+        const recorded = commitOutcomes.get(position)
+        // A hub-assigned position cannot transfer an authenticated outcome to another commit.
+        if (
+          recorded != null &&
+          recorded.digest !== commitDigest &&
+          (recorded.kind === 'applied' || recorded.refusalAuthority === 'authenticated-commit')
+        ) {
+          await saveCommitCursor(position)
+          continue
+        }
         // The commit's OWN epoch and committer, from the commit's own bytes. Never
         // `message.senderDID` — the hub's word about who handed it over, and the hub is not
         // trusted: it could stamp every recipient's own DID onto one poison frame and make the

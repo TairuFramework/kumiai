@@ -4,20 +4,141 @@ import { createMemoryControlStore } from '../../rpc-conformance/src/memory-contr
 import type { RecoveryVerdict } from '../src/crypto.js'
 import { asLogPosition } from '../src/cursor.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
-import { encodeRecoveryConfirmRequest } from '../src/recovery.js'
+import { decodeRecoveryVerdict, encodeRecoveryConfirmRequest } from '../src/recovery.js'
 import {
   confirmationTag,
   createRecoveryCache,
   responseOutcome,
   waitForRecoveryConfirmation,
 } from '../src/recovery-confirmation.js'
-import { rendezvousTopic } from '../src/topic.js'
+import { commitTopic, rendezvousTopic } from '../src/topic.js'
+import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import { makeMLSPeer } from './fixtures/peer.js'
 
 describe('recovery ordering', { concurrent: false }, () => {
   afterEach(() => vi.useRealTimers())
+
+  test('a conflicting commit copy cannot replace an authenticated refusal across responder restart', async () => {
+    const hub = new FakeHub()
+    const secret = new Uint8Array(32).fill(0x64)
+    const { sequenceID: position } = await publishCommit({
+      hub,
+      senderDID: 'bob',
+      recoverySecret: secret,
+      epoch: 1,
+      external: true,
+    })
+    const digest = publishedCommitDigest(hub, position)
+    const copiedHub = new FakeHub()
+    const copied = await publishCommit({
+      hub: copiedHub,
+      senderDID: 'carol',
+      recoverySecret: secret,
+      epoch: 1,
+      external: true,
+    })
+    const copiedDigest = publishedCommitDigest(copiedHub, copied.sequenceID)
+    const message = copiedHub.published[0]
+    if (message == null) throw new Error('Missing copied commit')
+    expect(copiedDigest).not.toBe(digest)
+    const options = {
+      members: ['alice', 'bob', 'carol'],
+      acceptsCommitter: () => false,
+      recovery: { timeoutMs: 100, deadlineMs: 1000, getDelayMs: () => 50 },
+    }
+    let alice = makeMLSPeer(hub, 'alice', secret, options)
+    const bob = createMemoryGroupMLS({ members: options.members, localDID: 'bob' })
+    const requestID = 'preserved-refusal'
+    const { request, requestKey } = await bob.createRecoveryRequest(requestID)
+    const ask = (commitDigest: string) =>
+      hub.publish({
+        topicID: rendezvousTopic(secret),
+        senderDID: 'bob',
+        retain: 'mailbox',
+        payload: encodeHandshakeFrame(
+          HANDSHAKE_KIND.recoveryConfirmRequest,
+          encodeRecoveryConfirmRequest({ requestID, request, position, commitDigest }),
+        ),
+      })
+    try {
+      await alice.peer.replay()
+      const original = (await alice.control.load()).responses[0]
+      expect(original).toMatchObject({
+        position,
+        digest,
+        kind: 'refused',
+        refusalAuthority: 'authenticated-commit',
+      })
+      vi.useFakeTimers()
+      const seal = vi.spyOn(alice.mls, 'sealRecoveryVerdict')
+      await ask(digest)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(seal).toHaveBeenCalledOnce()
+      const fetch = hub.fetchTopic.bind(hub)
+      let replayCopy = true
+      vi.spyOn(hub, 'fetchTopic').mockImplementation(async (params) => {
+        if (replayCopy && params.topicID === commitTopic(secret)) {
+          replayCopy = false
+          return {
+            messages: [{ ...message, sequenceID: position, logPosition: position }],
+            head: position,
+            oldest: position,
+            gap: false,
+          }
+        }
+        return fetch(params)
+      })
+      await hub.publish({
+        topicID: commitTopic(secret),
+        senderDID: 'relay',
+        payload: new Uint8Array([0]),
+      })
+      await vi.advanceTimersByTimeAsync(0)
+      await alice.peer.ack('refresh')
+      expect(replayCopy).toBe(false)
+      expect((await alice.control.load()).responses).toEqual([original])
+      await vi.advanceTimersByTimeAsync(50)
+      const verdicts = () =>
+        hub.published.filter(
+          (row) =>
+            row.topicID === rendezvousTopic(secret) &&
+            decodeHandshakeFrame(row.payload).kind === HANDSHAKE_KIND.recoveryVerdict,
+        )
+      expect(verdicts()).toHaveLength(1)
+      await alice.peer.dispose()
+      await alice.peer.drained()
+      alice = makeMLSPeer(hub, 'alice', secret, { ...options, restartOf: alice })
+      await alice.peer.replay()
+      expect((await alice.control.load()).responses).toEqual([original])
+      await ask(digest)
+      await vi.advanceTimersByTimeAsync(50)
+      expect(verdicts()).toHaveLength(2)
+      for (const verdict of verdicts()) {
+        expect(
+          (
+            await bob.openRecoveryVerdict(
+              decodeRecoveryVerdict(decodeHandshakeFrame(verdict.payload).payload).sealed,
+              requestID,
+              requestKey,
+            )
+          )?.verdict,
+        ).toMatchObject({
+          verdict: 'refused',
+          commitDigest: digest,
+          refusalAuthority: 'authenticated-commit',
+        })
+      }
+      await ask(copiedDigest)
+      await vi.advanceTimersByTimeAsync(100)
+      expect(verdicts()).toHaveLength(2)
+    } finally {
+      await alice.peer.dispose()
+      await alice.peer.drained()
+      vi.restoreAllMocks()
+    }
+  })
 
   test('a delayed cached refusal rechecks the current persisted authority before publication', async () => {
     const hub = new FakeHub()
@@ -116,11 +237,12 @@ describe('recovery ordering', { concurrent: false }, () => {
         for (let restart = 0; restart < 2; restart++) {
           const row = (await store.load()).responses[0]
           if (row == null) throw new Error('Missing response')
-          cache.set(
-            'attempt',
-            await responseOutcome(port, { ...row, position: asLogPosition(row.position) }),
-            Date.now() + 1000,
-          )
+          const outcome = await responseOutcome(port, {
+            ...row,
+            position: asLogPosition(row.position),
+          })
+          expect(outcome).toBeUndefined()
+          cache.set('attempt', outcome, Date.now() + 1000)
           expect(cache.get('attempt')?.value).toBeUndefined()
         }
       } finally {
