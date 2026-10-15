@@ -1,4 +1,15 @@
-import { encodeClientState, sealCapturedGroupInfo } from '@kumiai/mls'
+import { createRotate } from '@kokuin/controller'
+import { type OwnIdentity, randomIdentity } from '@kokuin/token'
+import {
+  type ControllerBinding,
+  commitInvite,
+  createGroup,
+  createInvite,
+  createKeyPackageBundle,
+  encodeClientState,
+  processWelcome,
+  sealCapturedGroupInfo,
+} from '@kumiai/mls'
 import {
   asLogPosition,
   assignRecoverySwitchMutationID,
@@ -9,10 +20,10 @@ import {
   HANDSHAKE_KIND,
   type LegacyRejoinRecord,
 } from '@kumiai/rpc'
-import { toB64U } from '@sozai/codec'
+import { fromB64U, toB64U } from '@sozai/codec'
 import { beforeAll, describe, expect, test } from 'vitest'
 
-import { createGroupMLS } from '../src/mls.js'
+import { createGroupMLS, createLedgerEntrySlot } from '../src/mls.js'
 import {
   decodeStoredValue,
   encodeStoredValue,
@@ -32,7 +43,8 @@ import { decodeRecoveryRecord, validateCapturedRecoveryRecord } from '../src/rec
 import { recoveryTrustDigest } from '../src/recovery-trust-digest.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
-import { createRealGroup, testHandleAccess } from './fixtures/real-group.js'
+import { createRealGroup, type RealMember, testHandleAccess } from './fixtures/real-group.js'
+import { legacyRecoveryTrustDigest } from './fixtures/recovery-trust-digest-v1.js'
 
 let trust: GroupRecoveryTrust
 beforeAll(async () => {
@@ -145,8 +157,8 @@ test('invalid public trust is refused instead of hashing lossy JSON values', () 
   expect(() => recoveryTrustDigest(privateTree)).toThrow()
 })
 
-async function recordFixture() {
-  const group = await createRealGroup(2, 'captured-record')
+async function recordFixture(members?: Array<RealMember>) {
+  const group = members == null ? await createRealGroup(2, 'captured-record') : { members }
   const member = group.members[0]
   const responder = group.members[1]
   if (member == null || responder == null) throw new Error('Missing recovery members')
@@ -243,6 +255,141 @@ async function recordFixture() {
   }
   return { record, legacy, snapshot: captured }
 }
+
+describe('public trust JSON positions', () => {
+  let record: CapturedRejoinRecord
+
+  beforeAll(async () => {
+    const lifecycle = (await import(
+      new URL('../../mls/test/fixtures/lifecycle-ledger.ts', import.meta.url).href
+    )) as {
+      controllerSeed: Uint8Array
+      controllerID: string
+      inception: ControllerBinding['prefix'][number]
+      bindingFor(
+        identity: OwnIdentity,
+        prefix: ControllerBinding['prefix'],
+      ): Promise<ControllerBinding>
+    }
+    const prefix = [
+      lifecycle.inception,
+      createRotate({
+        seed: lifecycle.controllerSeed,
+        profile: 0,
+        did: lifecycle.controllerID,
+        prior: lifecycle.inception.event,
+        options: { keyPosition: { gen: 0, seq: 0 }, seal: '100' },
+      }),
+    ]
+    const identity = randomIdentity()
+    const responder = randomIdentity()
+    const controller = await lifecycle.bindingFor(identity, prefix)
+    const { group } = await createGroup(identity, 'captured-bound-record', { controller })
+    const { invite } = await createInvite({ group, identity, recipientDID: responder.id })
+    const bundle = await createKeyPackageBundle(responder, {
+      controller: await lifecycle.bindingFor(responder, prefix),
+    })
+    const added = await commitInvite(group, bundle.publicPackage, invite)
+    const joined = await processWelcome({
+      identity: responder,
+      invite,
+      welcome: added.welcomeMessage,
+      keyPackageBundle: bundle,
+    })
+    const fixture = await recordFixture([
+      { identity, handle: added.newGroup, slot: createLedgerEntrySlot() },
+      { identity: responder, handle: joined.group, slot: createLedgerEntrySlot() },
+    ])
+    const held = fixture.snapshot.source.trust
+    Object.assign(held, { extra: { bytes: 'AQID', bigint: '100' } })
+    const leaf = held.signerTree.find((node) => node?.nodeType === 1)
+    if (leaf?.nodeType !== 1) throw new Error('Missing signer leaf')
+    Object.assign(leaf.leaf, { extra: { bytes: 'AQID', bigint: '100' } })
+    const source = { ...fixture.snapshot.source, trustDigest: recoveryTrustDigest(held) }
+    record = {
+      ...fixture.record,
+      source,
+      candidate: encodeCapturedRecoveryCandidate(
+        { ...fixture.snapshot, source },
+        fixture.record.requestKey,
+      ),
+    }
+    expect(decodeRecoveryRecord(record).kind).toBe('captured')
+  })
+
+  test('genuine bound captures retain the original digest format', () => {
+    const held = record.source.trust as GroupRecoveryTrust
+    expect(held.binding?.prefix).toHaveLength(2)
+    expect(held.binding?.prefix[1]?.event).toMatchObject({ a: '100' })
+    expect(recoveryTrustDigest(held)).toBe(legacyRecoveryTrustDigest(held))
+    expect(recoveryTrustDigest(trust)).toBe(legacyRecoveryTrustDigest(trust))
+    const sparse = structuredClone(held)
+    sparse.signerTree.length += 2
+    sparse.signerTree[sparse.signerTree.length - 1] = undefined
+    if (sparse.binding === null) throw new Error('Missing binding')
+    sparse.binding.holderGrant = undefined
+    const event = sparse.binding.prefix[0]
+    if (event === undefined) throw new Error('Missing inception')
+    event.recoveryKey = undefined
+    event.event.i = undefined
+    event.event.p = undefined
+    expect(recoveryTrustDigest(sparse)).toBe(legacyRecoveryTrustDigest(sparse))
+  })
+
+  test.each(['k', 'ka', 'a'] as const)(
+    'binding event %s refuses erased-type replacements with the saved digest',
+    (field) => {
+      const invalid = structuredClone(record)
+      const held = invalid.source.trust as GroupRecoveryTrust
+      const event = held.binding?.prefix[field === 'a' ? 1 : 0]?.event as unknown as Record<
+        string,
+        unknown
+      >
+      if (field === 'a') {
+        expect(event.a).toBe('100')
+        event.a = 100n
+      } else {
+        const keys = event[field] as Array<unknown>
+        expect(typeof keys[0]).toBe('string')
+        const key = keys[0] as string
+        keys[0] = fromB64U(key)
+        expect(toB64U(keys[0] as Uint8Array)).toBe(key)
+      }
+      expect(invalid.source.trustDigest).toBe(record.source.trustDigest)
+      expect(invalid.candidate).toEqual(record.candidate)
+      expect.soft(() => recoveryTrustDigest(held)).toThrow(GroupStateConflictError)
+      expect.soft(() => validateCapturedRecoveryRecord(invalid)).toThrow(GroupStateConflictError)
+      expect.soft(() => decodeRecoveryRecord(invalid)).toThrow(GroupStateConflictError)
+    },
+  )
+
+  const invalidJSON = [
+    ['bytes', () => new Uint8Array([1, 2, 3])],
+    ['bigint', () => 100n],
+    ['undefined', () => undefined],
+    ['non-plain object', () => new Date(0)],
+    ['non-finite number', () => Number.NaN],
+  ] as const
+  test.each(
+    ['root', 'leaf'].flatMap((position) =>
+      invalidJSON.map(([kind, value]) => ({ position, kind, value })),
+    ),
+  )('unknown $position property refuses $kind', ({ position, kind, value }) => {
+    const invalid = structuredClone(record)
+    const held = invalid.source.trust as GroupRecoveryTrust
+    const leaf = held.signerTree.find((node) => node?.nodeType === 1)
+    if (leaf?.nodeType !== 1) throw new Error('Missing signer leaf')
+    const owner = (position === 'root' ? held : leaf.leaf) as unknown as {
+      extra: Record<string, unknown>
+    }
+    owner.extra[kind] = value()
+    expect(invalid.source.trustDigest).toBe(record.source.trustDigest)
+    expect(invalid.candidate).toEqual(record.candidate)
+    expect.soft(() => recoveryTrustDigest(held)).toThrow(GroupStateConflictError)
+    expect.soft(() => validateCapturedRecoveryRecord(invalid)).toThrow(GroupStateConflictError)
+    expect.soft(() => decodeRecoveryRecord(invalid)).toThrow(GroupStateConflictError)
+  })
+})
 
 describe('public trust field types', () => {
   let record: CapturedRejoinRecord
