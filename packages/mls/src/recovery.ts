@@ -398,6 +398,11 @@ export async function verifyRecoveryRequest(
 
   // Recovery supports only the X25519 KEM; this is the saved private key, not derivation material.
   if (requestKey !== undefined) {
+    if (requestKey.length !== KEM_OUTPUT_LENGTH)
+      throw new RecoveryRequestError(
+        'malformed',
+        `saved recovery request key must be ${KEM_OUTPUT_LENGTH} bytes`,
+      )
     const expected = x25519.getPublicKey(requestKey)
     if (!expected.every((byte, index) => byte === ephemeralPublicKey[index]))
       throw new RecoveryRequestError('malformed', 'recovery request does not match the saved key')

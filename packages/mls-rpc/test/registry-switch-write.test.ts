@@ -73,7 +73,7 @@ const tamperReasons = {
 
 async function setup(
   mode: 'real-mls' | 'double',
-  advanced: boolean | 'remove-signer' = false,
+  advanced: boolean | 'remove-signer' | 'controller-less' = false,
   trustMaps = false,
 ) {
   const identity = randomIdentity()
@@ -83,14 +83,21 @@ async function setup(
     setup: 'empty',
     groupID,
     identity,
-    options: { controller: await lifecycle.bindingFor(identity) },
+    options:
+      advanced === 'controller-less' ? {} : { controller: await lifecycle.bindingFor(identity) },
   })
   const options = fixture.environment.options
   const initial = (await createGroup(identity, groupID, options)).group
-  const bundle = await createKeyPackageBundle(signer, {
-    controller: await lifecycle.bindingFor(signer),
+  const bundle = await createKeyPackageBundle(
+    signer,
+    advanced === 'controller-less' ? {} : { controller: await lifecycle.bindingFor(signer) },
+  )
+  const { invite } = await createInvite({
+    group: initial,
+    identity,
+    recipientDID: signer.id,
+    ...(advanced === 'controller-less' ? { permission: 'member' as const } : {}),
   })
-  const { invite } = await createInvite({ group: initial, identity, recipientDID: signer.id })
   const added = await commitInvite(initial, bundle.publicPackage, invite)
   const source = added.newGroup
   let remote = (
@@ -142,7 +149,7 @@ async function setup(
     })
     await remote.bootstrapLedger(ledger)
     responder = survivor
-  } else if (advanced) {
+  } else if (advanced === true) {
     const outsider = randomIdentity()
     const packageBundle = await createKeyPackageBundle(outsider, {
       controller: await lifecycle.bindingFor(outsider),
@@ -242,6 +249,73 @@ async function setup(
 }
 for (const mode of ['real-mls', 'double'] as const) {
   describe(`captured restricted switch -- ${mode}`, () => {
+    test.each(['member', 'non-member'] as const)(
+      'controller-less confirmed %s proof switches with a bound tag',
+      async (signer) => {
+        const s = await setup(mode, 'controller-less')
+        try {
+          expect(s.candidate.anchor.controller).toBeUndefined()
+          expect(s.candidate.ledgerTokens.length).toBeGreaterThan(0)
+          if (signer === 'non-member') {
+            const identity = randomIdentity()
+            expect(s.sourceGroup.bindingOfDID(identity.id)).toBeFalsy()
+            s.record.verdict = s.proof.verdict = await s.sealVerdict({ identity })
+            await s.fixture.installRows({ key, control: { putRejoin: s.record } })
+            s.recovery.source = await s.owner.recoverySource(groupID)
+          }
+          await expect(
+            verifyRegistryResync({ ...s, source: s.recovery.source }),
+          ).resolves.toBeUndefined()
+          await expect(s.run()).resolves.toEqual(destination)
+          expect(await s.fixture.device.groups.loadState(destination)).not.toBeNull()
+        } finally {
+          await s.fixture.close()
+        }
+      },
+    )
+
+    test('controller-less confirmation with a wrong tag refuses with zero writes', async () => {
+      const s = await setup(mode, 'controller-less')
+      try {
+        s.record.verdict = s.proof.verdict = await s.sealVerdict({ verdict: { tag: 'wrong-tag' } })
+        await s.fixture.installRows({ key, control: { putRejoin: s.record } })
+        s.recovery.source = await s.owner.recoverySource(groupID)
+        const before = await s.fixture.inspectRows()
+        await expect(verifyRegistryResync({ ...s, source: s.recovery.source })).rejects.toEqual(
+          new RegistryResyncRefusedError({ reason: 'tuple' }),
+        )
+        await expect(s.run()).rejects.toEqual(new RegistryResyncRefusedError({ reason: 'tuple' }))
+        expect(await s.fixture.inspectRows()).toEqual(before)
+        expect(await s.fixture.device.groups.loadState(destination)).toBeNull()
+      } finally {
+        await s.fixture.close()
+      }
+    })
+
+    test('controller-less candidate ledger must reproduce the authenticated MLS head', async () => {
+      const s = await setup(mode, 'controller-less')
+      try {
+        const token = await signLedgerEntry(s.fixture.identity, {
+          type: 'kumiai.role',
+          groupID,
+          subject: s.responder.id,
+          value: 'admin',
+        })
+        await s.candidate.applyLedgerEntries([token])
+        const before = await s.fixture.inspectRows()
+        await expect(verifyRegistryResync(s)).rejects.toEqual(
+          new RegistryResyncRefusedError({ reason: 'candidate' }),
+        )
+        await expect(s.run()).rejects.toEqual(
+          new RegistryResyncRefusedError({ reason: 'candidate' }),
+        )
+        expect(await s.fixture.inspectRows()).toEqual(before)
+        expect(await s.fixture.device.groups.loadState(destination)).toBeNull()
+      } finally {
+        await s.fixture.close()
+      }
+    })
+
     test('origin signer removed from the offered tree retains confirmation authority', async () => {
       const s = await setup(mode, 'remove-signer')
       try {

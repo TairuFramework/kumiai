@@ -116,6 +116,7 @@ export async function createRegistryRecovery(
     candidate: encodeCapturedRecoveryCandidate(
       {
         ...snapshot,
+        replyLedger: params.source.anchor.controller == null ? [] : snapshot.replyLedger,
         sourceTree: params.responder.group.state.ratchetTree,
         source,
         target,

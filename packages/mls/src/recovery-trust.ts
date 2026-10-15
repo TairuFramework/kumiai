@@ -125,6 +125,7 @@ async function assertTrustedSigner(
 ): Promise<void> {
   await assertTrustedMember(group, trust, signer)
   if (
+    group.anchor.controller != null &&
     !recoverySignerEligibleFromPublic({
       tree: group.signerTree,
       anchor: group.anchor,
@@ -181,6 +182,8 @@ export async function openRecoveryVerdictFromTrust(
     ephemeralPrivateKey: requestKey,
     retainedTrust: true,
   })
-  await assertTrustedSigner(group, trust, opened.signer)
+  // Controller-less confirmations gain authority from the caller's candidate-derived tuple/tag check.
+  if (group.anchor.controller != null || opened.verdict.verdict !== 'confirmed')
+    await assertTrustedSigner(group, trust, opened.signer)
   return opened
 }

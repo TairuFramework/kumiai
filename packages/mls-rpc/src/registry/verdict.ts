@@ -1,14 +1,18 @@
 import { normalizeDID } from '@kokuin/token'
 import {
+  assertHeadMatches,
   authenticateRecoveryReply,
   type ClientState,
+  computeHead,
   decodeGroupAnchor,
   encodeClientState,
   type GroupHandle,
+  ledgerEntryDigest,
   openRecoveryVerdict,
   openRecoveryVerdictFromTrust,
   parseMLSCredentialIdentity,
   readGroupAnchorExtension,
+  readLedgerHead,
   verifyRecoveryRequest,
 } from '@kumiai/mls'
 import {
@@ -230,6 +234,7 @@ export async function verifyRegistryResync(params: {
     requireMatch(frame.kind === HANDSHAKE_KIND.commit, 'candidate')
     const anchor = readGroupAnchorExtension(candidate)?.extensionData
     requireMatch(anchor instanceof Uint8Array, 'candidate')
+    const standardCapture = captured !== null && decodeGroupAnchor(anchor)?.controller == null
     requireMatch(
       snapshot.requestID === record.requestID &&
         snapshot.epoch === record.epochAfter &&
@@ -242,13 +247,24 @@ export async function verifyRegistryResync(params: {
         normalizeDID(credential.id) === normalizeDID(candidate.credential.id) &&
         sameValue(credential.controller, controller) &&
         sameBytes(encodeClientState(snapshot.state), encodeClientState(candidate.state)) &&
-        sameValue(snapshot.replyLedger, candidate.ledgerTokens) &&
+        (standardCapture
+          ? snapshot.replyLedger.length === 0
+          : sameValue(snapshot.replyLedger, candidate.ledgerTokens)) &&
         digestAppliedCommit(snapshot.commit) === record.digest &&
         sameBytes(decodeCommitFrame(frame.payload).commit, snapshot.commit) &&
         digestAppliedCommit(record.payload) === record.payloadDigest &&
         sameBytes(anchor, source.trust.genesisAnchor),
       'candidate',
     )
+    if (standardCapture) {
+      // Standard replies omit tokens; the candidate's resolved ledger must reproduce its MLS head.
+      const head = readLedgerHead(candidate)
+      requireMatch(head !== null, 'candidate')
+      assertHeadMatches(
+        head.head,
+        computeHead(candidate.groupID, candidate.ledgerTokens.map(ledgerEntryDigest)),
+      )
+    }
 
     reason = 'source'
     requireMatch(normalizeDID(credential.id) === normalizeDID(source.trust.credential.id), 'source')

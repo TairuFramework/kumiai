@@ -45,6 +45,21 @@ test('signed recovery request binds the retained ephemeral private key', async (
   })
 })
 
+test.each([0, 1, 31, 33])(
+  'saved recovery key length %i gives a named malformed refusal',
+  async (length) => {
+    const identity = randomIdentity()
+    const { group } = await createGroup(identity, 'malformed-request-key')
+    const held = await createRecoveryRequest({ group, identity, requestID: 'malformed-key' })
+    await expect(verifyRecoveryRequest(held.request, new Uint8Array(length))).rejects.toMatchObject(
+      {
+        name: 'RecoveryRequestError',
+        reason: 'malformed',
+      },
+    )
+  },
+)
+
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
