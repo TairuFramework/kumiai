@@ -57,6 +57,10 @@ const AAD = new TextEncoder().encode('kumiai/recovery-candidate/v2')
 const VERSION = 2
 const NONCE_BYTES = 24
 
+export class RecoveryCandidateError extends TypeError {
+  override name = 'RecoveryCandidateError'
+}
+
 export function encodeRecoveryCandidate(
   snapshot: RecoverySnapshot,
   requestKey: Uint8Array,
@@ -264,6 +268,20 @@ export function encodeCapturedRecoveryCandidate(
 }
 
 export function decodeCapturedRecoveryCandidate(
+  bytes: Uint8Array,
+  requestKey: Uint8Array,
+): CapturedRecoverySnapshot {
+  try {
+    return decodeCapturedSnapshot(bytes, requestKey)
+  } catch (cause) {
+    throw new RecoveryCandidateError(
+      cause instanceof Error ? cause.message : 'Invalid saved recovery candidate',
+      { cause },
+    )
+  }
+}
+
+function decodeCapturedSnapshot(
   bytes: Uint8Array,
   requestKey: Uint8Array,
 ): CapturedRecoverySnapshot {

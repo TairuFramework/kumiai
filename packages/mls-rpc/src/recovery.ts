@@ -12,6 +12,7 @@ import {
   decodeGroupAnchor,
   type GroupHandle,
   type GroupOptions,
+  GroupRestoreError,
   joinGroupExternal,
   LeafBindingError,
   LeafLapsedError,
@@ -51,6 +52,7 @@ import {
   type CapturedRecoverySnapshot,
   decodeCapturedRecoveryCandidate,
   encodeCapturedRecoveryCandidate,
+  RecoveryCandidateError,
   validateRecoverySource,
 } from './recovery-codec.js'
 import {
@@ -64,9 +66,7 @@ import { recoveryTrustInputs } from './registry/trust.js'
 import type { RegistryRecoverySource } from './registry/types.js'
 import type { RecoveryEnvironment } from './registry/validation.js'
 
-export class RecoveryCandidateError extends TypeError {
-  override name = 'RecoveryCandidateError'
-}
+export { RecoveryCandidateError } from './recovery-codec.js'
 
 export const RECOVERY_LABEL = 'kumiai/recovery/v1'
 
@@ -417,7 +417,7 @@ function assertOwner(
     normalizeDID(source.trust.credential.id) !== normalizeDID(environment.identity.id) ||
     typeof environment.accept !== 'function'
   )
-    throw new TypeError('Invalid captured recovery environment')
+    throw new RecoveryCandidateError('Invalid captured recovery environment')
 }
 
 async function authenticateSnapshot(
@@ -425,29 +425,41 @@ async function authenticateSnapshot(
   requestKey: Uint8Array,
   environment: CapturedRecoveryEnvironment,
 ): Promise<void> {
-  const reply = await authenticateRecoveryReply({
-    trust: snapshot.source.trust,
-    sealed: snapshot.attestedReply,
-    requestID: snapshot.requestID,
-    requestKey,
-    options: environment.options,
-  })
-  if (
-    reply === null ||
-    !sameBytes(reply.groupInfo, snapshot.groupInfo) ||
-    reply.signer !== snapshot.signer ||
-    JSON.stringify(reply.ledger) !== JSON.stringify(snapshot.replyLedger) ||
-    reply.captureHead !== snapshot.captureHead ||
-    !sameBytes(reply.groupInfoAuthenticator, snapshot.target.groupInfoAuthenticator) ||
-    !sameBytes(
-      publicTreeBytes({
-        ...snapshot.state,
-        ratchetTree: offeredTree(snapshot.state, reply.groupInfo),
-      }).tree,
-      publicTreeBytes({ ...snapshot.state, ratchetTree: snapshot.sourceTree }).tree,
+  let reply: CapturedRecoveryGroupInfo | null
+  try {
+    reply = await authenticateRecoveryReply({
+      trust: snapshot.source.trust,
+      sealed: snapshot.attestedReply,
+      requestID: snapshot.requestID,
+      requestKey,
+      options: environment.options,
+    })
+  } catch (cause) {
+    if (cause instanceof SealedGroupInfoError || cause instanceof LeafBindingError)
+      throw new RecoveryCandidateError('Saved recovery attestation refused', { cause })
+    throw cause
+  }
+  try {
+    if (
+      reply === null ||
+      !sameBytes(reply.groupInfo, snapshot.groupInfo) ||
+      reply.signer !== snapshot.signer ||
+      JSON.stringify(reply.ledger) !== JSON.stringify(snapshot.replyLedger) ||
+      reply.captureHead !== snapshot.captureHead ||
+      !sameBytes(reply.groupInfoAuthenticator, snapshot.target.groupInfoAuthenticator) ||
+      !sameBytes(
+        publicTreeBytes({
+          ...snapshot.state,
+          ratchetTree: offeredTree(snapshot.state, reply.groupInfo),
+        }).tree,
+        publicTreeBytes({ ...snapshot.state, ratchetTree: snapshot.sourceTree }).tree,
+      )
     )
-  )
-    throw new RecoveryCandidateError('Captured recovery attestation mismatch')
+      throw new RecoveryCandidateError('Captured recovery attestation mismatch')
+  } catch (cause) {
+    if (cause instanceof RecoveryCandidateError) throw cause
+    throw new RecoveryCandidateError('Invalid saved recovery attestation', { cause })
+  }
 }
 
 async function capturedPending(
@@ -458,12 +470,19 @@ async function capturedPending(
   const source = copyRecoverySource(snapshot.source)
   const target = copyRecoveryTargetCapture(snapshot.target)
   const key = requestKey.slice()
-  const group = await restoreGroup({
-    state: snapshot.state,
-    credential: source.trust.credential,
-    ledgerEntries: snapshot.replyLedger,
-    options: { ...environment.options, ciphersuiteName: source.trust.ciphersuiteName },
-  })
+  let group: GroupHandle
+  try {
+    group = await restoreGroup({
+      state: snapshot.state,
+      credential: source.trust.credential,
+      ledgerEntries: snapshot.replyLedger,
+      options: { ...environment.options, ciphersuiteName: source.trust.ciphersuiteName },
+    })
+  } catch (cause) {
+    if (cause instanceof GroupRestoreError)
+      throw new RecoveryCandidateError('Saved recovery state refused', { cause })
+    throw cause
+  }
   const binding = capturedBindingState(environment)
   const judge = createVerdictJudge({
     group,
@@ -616,7 +635,12 @@ export async function restoreRecoveryCandidate(params: {
   requestKey: Uint8Array
   environment: CapturedRecoveryEnvironment
 }): Promise<CapturedPendingRecovery> {
-  const source = validateRecoverySource(params.source)
+  let source: RegistryRecoverySource
+  try {
+    source = validateRecoverySource(params.source)
+  } catch (cause) {
+    throw new RecoveryCandidateError('Invalid saved recovery source', { cause })
+  }
   assertOwner(source, params.environment)
   const snapshot = decodeCapturedRecoveryCandidate(params.candidate, params.requestKey)
   if (!sameOrigin(source, snapshot.source))

@@ -2261,6 +2261,7 @@ export function createGroupPeerWithControlWalk<
   const reconcileCommitPrefix = async (): Promise<CommitPrefix> => {
     await ready
     assertLive()
+    if (params.recoveryOnly) return { kind: 'incomplete' }
     return await runSerial(async () => {
       if (safetyHold() !== null) return { kind: 'held' }
       if (mls == null || params.readEvidence === undefined) return { kind: 'incomplete' }
@@ -3589,6 +3590,7 @@ export function createGroupPeerWithControlWalk<
   const abandon = async (): Promise<void> => {
     await ready
     assertLive()
+    if (params.recoveryOnly) throw new SendNotAdmissibleError('stranded')
     await runSerial(async () => {
       if (control == null) return
       const snapshot = await control.load()
@@ -4603,6 +4605,7 @@ export function createGroupPeerWithControlWalk<
     dropAppFrame: async (topicID, position) => {
       await ready
       assertLive()
+      if (params.recoveryOnly) throw new SendNotAdmissibleError('stranded')
       await runSerial(async () => {
         assertLive()
         await appLane.dropFrame(topicID, position)

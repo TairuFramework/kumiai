@@ -32,6 +32,13 @@ import type { RecoveryEnvironment } from './registry/validation.js'
 const SOURCE_RETIREMENT_TIMEOUT_MS = 5_000
 class PeerRetirementTimeoutError extends RegistryRetireHookError {}
 
+function retirementTimedOut(cause: unknown): boolean {
+  return (
+    cause instanceof PeerRetirementTimeoutError ||
+    (cause instanceof AggregateError && cause.errors.some(retirementTimedOut))
+  )
+}
+
 type Peer = GroupPeer<Record<string, GroupProtocolDefinition>>
 export type RegistryPeerOptions = {
   mls: GroupMLS
@@ -321,8 +328,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
           !(error instanceof RegistrySourceMovedError) &&
           (error instanceof GroupStateConflictError ||
             error instanceof RegistryResyncRefusedError ||
-            (error instanceof RegistryRetireHookError &&
-              !(error.cause instanceof PeerRetirementTimeoutError)) ||
+            (error instanceof RegistryRetireHookError && !retirementTimedOut(error.cause)) ||
             error instanceof RecoveryCandidateError ||
             error instanceof GroupUnavailableError)
         )

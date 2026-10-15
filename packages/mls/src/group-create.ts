@@ -11,7 +11,7 @@ import {
 } from './anchor.js'
 import { verifyLeafCredential } from './authentication.js'
 import type { MemberCredential } from './credential.js'
-import { LeafBindingError } from './errors.js'
+import { GroupRestoreError, LeafBindingError } from './errors.js'
 import { buildLeafCapabilities, resolveMlsContext } from './group-context.js'
 import { assertBindingAuthorTime, makeMLSCredential } from './group-credential.js'
 import { GroupHandle } from './group-handle.js'
@@ -163,14 +163,22 @@ export type RestoreGroupParams = {
 export async function restoreGroup(params: RestoreGroupParams): Promise<GroupHandle> {
   // Construction reseeds control authority from the anchor in the restored state;
   // an anchorless state throws (the same fail-closed guard).
-  const group = new GroupHandle({
-    state: params.state,
-    credential: params.credential,
-    context: await resolveMlsContext(params.options),
-    commitPolicy: params.options?.commitPolicy,
-    resolveLedgerEntries: params.options?.resolveLedgerEntries,
-    onLedgerEntries: params.options?.onLedgerEntries,
-  })
+  const context = await resolveMlsContext(params.options)
+  let group: GroupHandle
+  try {
+    group = new GroupHandle({
+      state: params.state,
+      credential: params.credential,
+      context,
+      commitPolicy: params.options?.commitPolicy,
+      resolveLedgerEntries: params.options?.resolveLedgerEntries,
+      onLedgerEntries: params.options?.onLedgerEntries,
+    })
+  } catch (cause) {
+    throw new GroupRestoreError(cause instanceof Error ? cause.message : 'Invalid restored group', {
+      cause,
+    })
+  }
   await group.applyLedgerEntries(params.ledgerEntries ?? [])
   return group
 }

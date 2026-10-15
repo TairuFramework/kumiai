@@ -1,14 +1,16 @@
 import { expect, test, vi } from 'vitest'
 
 import { digestAppliedCommit } from '../src/classify.js'
+import { asLogPosition } from '../src/cursor.js'
 import { SendNotAdmissibleError } from '../src/errors.js'
 import { encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
+import type { CapturedRejoinRecord } from '../src/recovery-types.js'
 import { rendezvousTopic } from '../src/topic.js'
 import { encodeSignedRecoveryConfirmation } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS, encodeMemoryCommit } from './fixtures/memory-group-mls.js'
-import { makeMLSPeer } from './fixtures/peer.js'
+import { buildRejoinRecord, makeMLSPeer } from './fixtures/peer.js'
 
 test('recovery-only startup never reads lost private state or opens application work', async () => {
   const hub = new FakeHub()
@@ -142,3 +144,70 @@ test('recovery-only peers ignore valid signed confirmation requests without priv
     await member.peer.drained()
   }
 })
+
+test.each(['dropAppFrame', 'reconcileCommitPrefix', 'abandon'] as const)(
+  'recovery-only %s preserves confirmed recovery without private MLS or control writes',
+  async (method) => {
+    const member = makeMLSPeer(new FakeHub(), 'alice', new Uint8Array(32).fill(13), {
+      recoveryOnly: true,
+    })
+    try {
+      await member.peer.replay()
+      const { source, conflictEpoch: _conflict, ...saved } = await buildRejoinRecord(member)
+      const record: CapturedRejoinRecord = {
+        ...saved,
+        format: 2,
+        source: {
+          key: source.key,
+          identity: { ...source.key, epoch: source.epoch, authenticator: source.authenticator },
+          stateVersion: 1,
+          lifetimeRevision: 1,
+          trust: { retained: new Uint8Array([1, 2, 3]) },
+          trustDigest: 'd'.repeat(43),
+        },
+        target: {
+          targetID: 'recovery-hub',
+          topicID: 'recovery-commits',
+          groupInfoEpoch: source.epoch,
+          groupInfoAuthenticator: source.authenticator.slice(),
+          captureHead: null,
+        },
+        captureHead: null,
+        searchFrom: null,
+        trigger: 'automatic',
+        authorisationID: null,
+        switchMutationID: crypto.randomUUID(),
+        destinationKey: null,
+        ledgerBefore: ['owed-before-recovery'],
+        stage: 'confirmed' as const,
+        position: asLogPosition('confirmed-recovery'),
+        verdict: new Uint8Array([1]),
+      }
+      await member.control.apply({ putRejoin: record }, 'confirmed-recovery')
+      const before = await member.control.load()
+      const epoch = vi.spyOn(member.mls, 'readEpoch')
+      const complete = vi.spyOn(member.mls, 'isLedgerComplete')
+      const ledger = vi.spyOn(member.mls, 'getLedger')
+      const writes = vi.spyOn(member.control, 'apply')
+      if (method === 'reconcileCommitPrefix') {
+        await expect(member.controlWalk.reconcileCommitPrefix()).resolves.toEqual({
+          kind: 'incomplete',
+        })
+      } else {
+        await expect(
+          method === 'abandon'
+            ? member.peer.abandon()
+            : member.peer.dropAppFrame('unopened-app-topic', 'blocked-position'),
+        ).rejects.toBeInstanceOf(SendNotAdmissibleError)
+      }
+      expect(epoch).not.toHaveBeenCalled()
+      expect(complete).not.toHaveBeenCalled()
+      expect(ledger).not.toHaveBeenCalled()
+      expect(writes).not.toHaveBeenCalled()
+      expect(await member.control.load()).toEqual(before)
+    } finally {
+      await member.peer.dispose()
+      await member.peer.drained()
+    }
+  },
+)

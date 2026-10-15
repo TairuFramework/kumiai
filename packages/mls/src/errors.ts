@@ -1,5 +1,9 @@
 import { CodecError, CryptoVerificationError } from 'ts-mls'
 
+export class GroupRestoreError extends Error {
+  override name = 'GroupRestoreError'
+}
+
 export type DeviceRegistryCodecErrorParams = { message: string; cause?: unknown }
 
 export class DeviceRegistryCodecError extends Error {

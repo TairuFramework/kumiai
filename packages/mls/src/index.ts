@@ -75,6 +75,7 @@ export {
   commitValidationReason,
   DeviceRegistryCodecError,
   type DeviceRegistryCodecErrorParams,
+  GroupRestoreError,
   isConclusiveCommitError,
   isTransientVerificationError,
   LeafBindingError,

@@ -1,4 +1,5 @@
 import { randomIdentity } from '@kokuin/token'
+import * as mlsAPI from '@kumiai/mls'
 import {
   commitInvite,
   createGroup,
@@ -12,10 +13,12 @@ import { describe, expect, test, vi } from 'vitest'
 
 import type { EntryReads } from '../src/entry-capability.js'
 import * as api from '../src/index.js'
+import { RecoveryCandidateError, restoreRecoveryCandidate } from '../src/recovery.js'
 import {
   decodeCapturedRecoveryCandidate,
   encodeCapturedRecoveryCandidate,
 } from '../src/recovery-codec.js'
+import * as publicRecovery from '../src/recovery-public-state.js'
 import { validateCapturedRecoveryRecord } from '../src/recovery-record.js'
 import { registryRecoveryCoordinator } from '../src/registry/recovery-coordinator.js'
 import { registryRetirement } from '../src/registry/retirement.js'
@@ -1162,6 +1165,260 @@ describe('registry peer recovery coordination', () => {
     } finally {
       owner?.dispose()
       await owner?.drained()
+      await s.f.close()
+    }
+  })
+
+  test.each([
+    'decode',
+    'owner',
+    'restore',
+    'restore-capability',
+    'authentication',
+    'authentication-refusal',
+    'attestation-tree',
+  ] as const)('a saved candidate %s failure stops with unchanged persistence', async (fault) => {
+    const s = await setup()
+    let owner: api.RegistryPeer | undefined
+    try {
+      const snapshot = decodeCapturedRecoveryCandidate(
+        s.recovery.record.candidate,
+        s.recovery.record.requestKey,
+      )
+      let record = s.recovery.record
+      if (fault === 'decode') {
+        const candidate = record.candidate.slice()
+        candidate[candidate.length - 1] = (candidate[candidate.length - 1] ?? 0) ^ 1
+        record = { ...record, candidate }
+      }
+      if (fault === 'restore') {
+        record = {
+          ...record,
+          candidate: encodeCapturedRecoveryCandidate(
+            {
+              ...snapshot,
+              state: {
+                ...snapshot.state,
+                groupContext: {
+                  ...snapshot.state.groupContext,
+                  extensions: snapshot.state.groupContext.extensions.filter(
+                    (extension) => extension.extensionType !== mlsAPI.GROUP_ANCHOR_EXTENSION_TYPE,
+                  ),
+                },
+              },
+            },
+            record.requestKey,
+          ),
+        }
+      }
+      if (fault === 'restore-capability') {
+        const controller = 'did:kokuin:invalid-saved-capability'
+        const leafIndex = snapshot.state.privatePath.leafIndex * 2
+        const tree = [...snapshot.state.ratchetTree]
+        const node = tree[leafIndex]
+        if (node?.nodeType !== 1 || !('identity' in node.leaf.credential))
+          throw new Error('Missing candidate leaf')
+        tree[leafIndex] = {
+          ...node,
+          leaf: {
+            ...node.leaf,
+            credential: {
+              ...node.leaf.credential,
+              identity: new TextEncoder().encode(
+                JSON.stringify({
+                  id: s.f.identity.id,
+                  controller: {
+                    id: controller,
+                    prefix: [],
+                    capability: 'invalid-saved-capability',
+                  },
+                }),
+              ),
+            },
+          },
+        }
+        record = {
+          ...record,
+          candidate: encodeCapturedRecoveryCandidate(
+            {
+              ...snapshot,
+              state: {
+                ...snapshot.state,
+                ratchetTree: tree,
+                groupContext: {
+                  ...snapshot.state.groupContext,
+                  extensions: snapshot.state.groupContext.extensions.map((extension) =>
+                    extension.extensionType === mlsAPI.GROUP_ANCHOR_EXTENSION_TYPE
+                      ? mlsAPI.buildGroupAnchorExtension({
+                          creatorDID: s.f.identity.id,
+                          version: 1,
+                          controller,
+                        })
+                      : extension,
+                  ),
+                },
+              },
+            },
+            record.requestKey,
+          ),
+        }
+      }
+      if (fault === 'authentication') {
+        record = {
+          ...record,
+          candidate: encodeCapturedRecoveryCandidate(
+            { ...snapshot, requestID: 'different-authenticated-request' },
+            record.requestKey,
+          ),
+          requestID: 'different-authenticated-request',
+        }
+      }
+      if (fault === 'authentication-refusal') {
+        vi.spyOn(mlsAPI, 'authenticateRecoveryReply').mockRejectedValue(
+          new mlsAPI.SealedGroupInfoError('unauthenticated', 'Saved attestation refused'),
+        )
+      }
+      if (fault === 'attestation-tree') {
+        vi.spyOn(publicRecovery, 'offeredTree').mockImplementation(() => {
+          throw new TypeError('Invalid saved attestation tree')
+        })
+      }
+      await s.f.installRows({ key: source, control: { putRejoin: record } })
+      const before = await s.f.inspectRows()
+      const resolve = vi.spyOn(registryRecoveryCoordinator(s.f.registry), 'resolveRecoverySwitch')
+      const write = vi.spyOn(s.f.registry, 'switchIncarnation')
+      if (fault === 'decode') {
+        await expect(resolve(record)).rejects.toBeInstanceOf(RecoveryCandidateError)
+        owner = await s.start()
+        await expect(owner.ready).rejects.toThrow('Invalid saved recovery record')
+      } else {
+        owner = await s.start(
+          fault === 'owner' ? { recovery: { ...s.f.environment, identity: randomIdentity() } } : {},
+        )
+        let failure: unknown
+        void owner.ready.catch((error: unknown) => {
+          failure = error
+        })
+        await vi.waitFor(() => expect(failure).toBeInstanceOf(RecoveryCandidateError), {
+          timeout: 1_000,
+        })
+        owner.dispose()
+        await expect(owner.drained()).rejects.toBeInstanceOf(RecoveryCandidateError)
+      }
+      expect(resolve).toHaveBeenCalledTimes(1)
+      expect(write).not.toHaveBeenCalled()
+      expect(await s.f.inspectRows()).toEqual(before)
+    } finally {
+      owner?.dispose()
+      await owner?.drained().catch(() => {})
+      vi.restoreAllMocks()
+      await s.f.close()
+    }
+  })
+
+  test('saved candidate source validation is terminal', async () => {
+    const s = await setup()
+    try {
+      await expect(
+        restoreRecoveryCandidate({
+          source: { ...s.recovery.source, trustDigest: 'invalid' },
+          candidate: s.recovery.record.candidate,
+          requestKey: s.recovery.record.requestKey,
+          environment: { ...s.f.environment, accept: async () => {} },
+        }),
+      ).rejects.toBeInstanceOf(RecoveryCandidateError)
+    } finally {
+      await s.f.close()
+    }
+  })
+
+  test.each(['restore', 'authentication'] as const)(
+    'a provider error from saved candidate %s keeps identity and retries',
+    async (phase) => {
+      const s = await setup()
+      let owner: api.RegistryPeer | undefined
+      try {
+        const error = new TypeError('Restore provider unavailable')
+        const restore =
+          phase === 'restore'
+            ? vi.spyOn(mlsAPI, 'restoreGroup').mockRejectedValueOnce(error)
+            : vi.spyOn(mlsAPI, 'authenticateRecoveryReply').mockRejectedValueOnce(error)
+        await expect(
+          restoreRecoveryCandidate({
+            source: s.recovery.source,
+            candidate: s.recovery.record.candidate,
+            requestKey: s.recovery.record.requestKey,
+            environment: { ...s.f.environment, accept: async () => {} },
+          }),
+        ).rejects.toBe(error)
+        restore.mockRejectedValueOnce(error)
+        const resolve = vi.spyOn(registryRecoveryCoordinator(s.f.registry), 'resolveRecoverySwitch')
+        owner = await s.start()
+        await owner.ready
+        expect(owner.installedKey()).toEqual(destination)
+        expect(resolve.mock.calls.length).toBeGreaterThanOrEqual(2)
+        expect((await s.f.device.groups.ports(source).control.load()).rejoin).toMatchObject({
+          stage: 'adopted',
+          switchMutationID: s.recovery.record.switchMutationID,
+        })
+      } finally {
+        owner?.dispose()
+        await owner?.drained()
+        vi.restoreAllMocks()
+        await s.f.close()
+      }
+    },
+  )
+
+  test('an aggregate retirement timeout retries the same saved switch', async () => {
+    const s = await setup(false)
+    const entered = deferred<void>()
+    const release = deferred<void>()
+    let sourceOwner: api.RegistryPeer | undefined
+    let switchOwner: api.RegistryPeer | undefined
+    let unregister = () => {}
+    try {
+      sourceOwner = await s.start({
+        createPeer: async () =>
+          peerDouble(async () => {
+            entered.resolve()
+            await release.promise
+          }),
+      })
+      await sourceOwner.ready
+      const capability = registrySafety(s.f.registry)
+      if (capability === null) throw new Error('Missing capability')
+      unregister = capability.onRetire(source, async () => {
+        throw new Error('Another hook failed')
+      })
+      await s.f.installRows({ key: source, control: { putRejoin: s.recovery.record } })
+      const before = await s.f.inspectRows()
+      const calls = vi.spyOn(s.f.registry, 'switchIncarnation')
+      vi.useFakeTimers()
+      switchOwner = await s.start()
+      void switchOwner.ready.catch(() => {})
+      await vi.waitFor(() => expect(calls).toHaveBeenCalledTimes(1))
+      await entered.promise
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(await s.f.inspectRows()).toEqual(before)
+      await expect(s.f.registry.access(groupID)).resolves.toMatchObject({ key: source })
+      unregister()
+      release.resolve()
+      await vi.advanceTimersByTimeAsync(100)
+      await switchOwner.ready
+      expect(switchOwner.installedKey()).toEqual(destination)
+      expect(calls.mock.calls.map(([, input]) => input.write.mutationID)).toEqual([
+        s.recovery.record.switchMutationID,
+        s.recovery.record.switchMutationID,
+      ])
+    } finally {
+      unregister()
+      release.resolve()
+      sourceOwner?.dispose()
+      switchOwner?.dispose()
+      await sourceOwner?.drained().catch(() => {})
+      await switchOwner?.drained().catch(() => {})
+      vi.useRealTimers()
       await s.f.close()
     }
   })
