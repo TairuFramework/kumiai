@@ -212,7 +212,6 @@ export function createAppLane(params: AppLaneParams): AppLane {
   let segment = new Map<string, Array<AppFrame>>()
   let segmentGeneration = 0
   const pendingRecords: Array<PendingAppFrame> = []
-  const eventTails = new Map<string, Promise<void>>()
   const reportedPruned = new Map<string, Set<string>>()
   const blockingFrames = new Map<string, AppDeliveryResumed>()
   let disposed = false
@@ -915,20 +914,14 @@ export function createAppLane(params: AppLaneParams): AppLane {
         const protocol = protocols[name]
         if (protocol === undefined) continue
         if (retentionOf(protocol, prc) !== 'log') continue
-        // Non-durable handlers consume the frame regardless of their outcome and may re-enter.
-        notifyAppHost(
-          (event) => {
-            scheduleDelivery(() => {
-              const delivery = (eventTails.get(name) ?? Promise.resolve())
-                .then(async () => {
-                  if (!disposed) await events.emit(prc, event)
-                })
-                .catch(() => {})
-              eventTails.set(name, delivery)
-            })
-          },
-          { data: message.payload.data ?? {}, senderDID },
-        )
+        try {
+          // Same door as the live push: emit the retained frame's plaintext into the
+          // per-protocol emitter the live bus is also built from. No listener → no-op.
+          await events.emit(prc, { data: message.payload.data ?? {}, senderDID })
+        } catch {
+          // A host listener that threw has been delivered to. Re-delivering on the next pull
+          // would retry the host's own bug at it, so the frame is consumed.
+        }
       }
       await advanceCursor(name, frames)
     }

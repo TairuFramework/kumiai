@@ -218,57 +218,105 @@ test('an expiry gap observer can await resync without blocking later serial work
   }
 })
 
-test('a non-durable handler reached by expiry can await resync', async () => {
+test('replacement receives a retained event whose handler never started before disposal', async () => {
   const hub = new DurableFakeHub()
-  const observed = Promise.withResolvers<void>()
+  const entered = Promise.withResolvers<void>()
   const release = Promise.withResolvers<void>()
+  const started: Array<string> = []
   const handler = vi.fn(async ({ data }: { data: { text: string } }) => {
-    if (data.text === 'first') await release.promise
-    await bob.peer.resync()
-    if (data.text === 'second') observed.resolve()
+    started.push(data.text)
+    if (data.text === 'first') {
+      entered.resolve()
+      await release.promise
+    }
   })
   const bob = makeMLSPeer(hub, 'bob', secret, { handlers: { 'chat/posted': handler } })
   await bob.peer.protocol('chat').to('alice')
-  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  hub.detach('bob')
+  const writer = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+  let replacement: ReturnType<typeof makeMLSPeer> | undefined
   try {
-    await hub.publish({
-      senderDID: 'alice',
-      topicID,
-      retain: 'log',
-      payload: await createFakeCrypto({ epoch: 3, localDID: 'alice' }).wrap(
-        encodeEventFrame('chat/posted', {}),
-        { aad: encodeAppAAD({ topicID, intent: 'log' }) },
-      ),
-    })
-    await bob.peer.replay()
-    await vi.advanceTimersByTimeAsync(0)
-    hub.detach('bob')
-    const writer = createFakeCrypto({ epoch: 1, localDID: 'alice' })
-    await hub.publish({
-      senderDID: 'alice',
-      topicID,
-      retain: 'log',
-      payload: await writer.wrap(encodeEventFrame('chat/posted', { text: 'first' }), {
-        aad: encodeAppAAD({ topicID, intent: 'log' }),
-      }),
-    })
-    const frame = await hub.publish({
-      senderDID: 'alice',
-      topicID,
-      retain: 'log',
-      payload: await writer.wrap(encodeEventFrame('chat/posted', { text: 'second' }), {
-        aad: encodeAppAAD({ topicID, intent: 'log' }),
-      }),
-    })
-    await vi.advanceTimersByTimeAsync(30_000)
-    expect(handler).toHaveBeenCalledOnce()
-    release.resolve()
-    await expectCompletion(Promise.all([observed.promise, bob.peer.resync()]))
-    expect(handler.mock.calls.map(([ctx]) => ctx.data.text)).toEqual(['first', 'second'])
-    expect(bob.appCursorStore.stored(topicID)).toBe(frame.sequenceID)
-  } finally {
-    release.resolve()
+    for (const text of ['first', 'second']) {
+      await hub.publish({
+        senderDID: 'alice',
+        topicID,
+        retain: 'log',
+        payload: await writer.wrap(encodeEventFrame('chat/posted', { text }), {
+          aad: encodeAppAAD({ topicID, intent: 'log' }),
+        }),
+      })
+    }
+    await bob.peer.retryAppDelivery()
+    await entered.promise
+    const cursorWhileBlocked = bob.appCursorStore.stored(topicID)
     await bob.peer.dispose()
+    release.resolve()
+    await bob.peer.drained()
+    expect(started).toEqual(['first'])
+
+    const received: Array<unknown> = []
+    replacement = makeMLSPeer(hub, 'bob', secret, {
+      restartOf: bob,
+      handlers: { 'chat/posted': ({ data }: { data: unknown }) => void received.push(data) },
+    })
+    await replacement.peer.replay()
+    expect(received).toEqual([{ text: 'second' }])
+    expect(cursorWhileBlocked).toBeNull()
+    expect(replacement.appCursorStore.stored(topicID)).toBe('000000000002')
+  } finally {
+    await bob.peer.dispose()
+    release.resolve()
+    await bob.peer.drained()
+    await replacement?.peer.dispose()
+  }
+})
+
+test('a blocked retained handler applies backpressure across new batches and public retries', async () => {
+  const hub = new DurableFakeHub()
+  const release = Promise.withResolvers<void>()
+  const handler = vi.fn(async () => {
+    await release.promise
+  })
+  const bob = makeMLSPeer(hub, 'bob', secret, { handlers: { 'chat/posted': handler } })
+  await bob.peer.protocol('chat').to('alice')
+  hub.detach('bob')
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  const writer = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+  const publish = async (count: number) => {
+    for (let index = 0; index < count; index++) {
+      await hub.publish({
+        senderDID: 'alice',
+        topicID,
+        retain: 'log',
+        payload: await writer.wrap(encodeEventFrame('chat/posted', {}), {
+          aad: encodeAppAAD({ topicID, intent: 'log' }),
+        }),
+      })
+    }
+  }
+  try {
+    await publish(2)
+    await bob.peer.retryAppDelivery()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(handler).toHaveBeenCalledOnce()
+    const unwraps: Array<number> = []
+    const starts: Array<number> = []
+    const cursors: Array<string | null> = []
+    for (let batch = 0; batch < 4; batch++) {
+      await publish(50)
+      await bob.peer.retryAppDelivery()
+      await vi.advanceTimersByTimeAsync(0)
+      unwraps.push(bob.crypto.starts.unwrap)
+      starts.push(handler.mock.calls.length)
+      cursors.push(bob.appCursorStore.stored(topicID))
+    }
+    expect(starts).toEqual([1, 1, 1, 1])
+    expect(unwraps).toEqual([1, 1, 1, 1])
+    expect(cursors).toEqual([null, null, null, null])
+  } finally {
+    await bob.peer.dispose()
+    release.resolve()
+    await bob.peer.drained()
   }
 })
 
