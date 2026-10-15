@@ -1223,13 +1223,16 @@ export function openRecoveryVerdictFromTrust(params: {
   trust: RecoveryTrustInputs; sealed: Uint8Array; requestID: string; requestKey: Uint8Array; options: GroupOptions
 }): Promise<OpenedRecoveryVerdict>
 // @kumiai/mls-rpc facade: convert GroupRecoveryTrust to RecoveryTrustInputs; GroupMLS request bytes are UTF-8 of primitive request.
+export type CapturedRecoveryEnvironment = RecoveryEnvironment & { accept: RecoveryAdoptionDependencies['accept'] }
 export function buildRecoveryCandidate(params: {
-  source: RegistryRecoverySource; reply: RecoveryGroupInfo; requestID: string; requestKey: Uint8Array
-  target: RecoveryRouting; environment: RecoveryEnvironment
+  source: RegistryRecoverySource; sealed: Uint8Array; requestID: string; requestKey: Uint8Array
+  target: RecoveryRouting; environment: CapturedRecoveryEnvironment
 }): Promise<CapturedAppliedRecovery>
 export function restoreRecoveryCandidate(params: {
-  source: RegistryRecoverySource; candidate: Uint8Array; requestKey: Uint8Array; environment: RecoveryEnvironment
+  source: RegistryRecoverySource; candidate: Uint8Array; requestKey: Uint8Array; environment: CapturedRecoveryEnvironment
 }): Promise<CapturedPendingRecovery>
+// buildRecoveryCandidate authenticates sealed under source trust itself and keeps those exact bytes as attestedReply;
+// a parsed reply never travels apart from its attestation. onAccepted delegates to environment.accept (r21).
 export function deriveRecoverySecretFromTrust(trust: GroupRecoveryTrust, options?: GroupOptions): Promise<Uint8Array>
 // Default: suite KDF.expand(KDF.extract(UTF8(groupID), genesisAnchor), UTF8('kumiai/recovery/v1'), 32), exactly packages/mls-rpc/src/mls.ts:129-136.
 // genesisAnchor is the existing encoded anchor. Trust's ciphersuiteName selects the same configured suite/provider.
