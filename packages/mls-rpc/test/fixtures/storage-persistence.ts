@@ -76,6 +76,7 @@ import {
   memoryFaults,
 } from '../../src/testing.js'
 import { createDeterministicAtRestCodec } from './at-rest.js'
+import { testGroupMLSDependencies } from './real-group.js'
 import { createSealedControlAccess } from './sealed-control-access.js'
 import {
   buildSealedMemoryOperation,
@@ -1021,7 +1022,7 @@ export async function createControlCrashHarness(mode: 'real-mls' | 'double', see
               return typeof value === 'function' ? value.bind(current) : value
             },
           })
-        : createGroupMLS({ access: host.access, identity, entrySlot })
+        : createGroupMLS({ ...testGroupMLSDependencies(host.access, control), identity, entrySlot })
     const validation =
       mode === 'double'
         ? sealedMemoryValidation()

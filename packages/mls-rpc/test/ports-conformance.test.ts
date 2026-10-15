@@ -28,6 +28,7 @@ import {
   createRealGroup,
   persistedTestAccess,
   sealRealRecoveryVerdict,
+  testGroupMLSDependencies,
   testHandleAccess,
 } from './fixtures/real-group.js'
 import { createTransactionalStore } from './fixtures/transactional-access.js'
@@ -237,14 +238,16 @@ testGroupMLSConformance({
           mls: createGroupMLS({
             identity: member.identity,
             entrySlot: member.slot,
-            access: persistedTestAccess(
-              {
-                handle: () => handle,
-                adopt: (next) => {
-                  handle = next
+            ...testGroupMLSDependencies(
+              persistedTestAccess(
+                {
+                  handle: () => handle,
+                  adopt: (next) => {
+                    handle = next
+                  },
                 },
-              },
-              store,
+                store,
+              ),
             ),
           }),
         }
@@ -260,12 +263,14 @@ testGroupMLSConformance({
           mls: createGroupMLS({
             identity: joined.identity,
             entrySlot: joined.slot,
-            access: persistedTestAccess({
-              handle: () => joined.handle,
-              adopt: (next) => {
-                joined.handle = next
-              },
-            }),
+            ...testGroupMLSDependencies(
+              persistedTestAccess({
+                handle: () => joined.handle,
+                adopt: (next) => {
+                  joined.handle = next
+                },
+              }),
+            ),
           }),
         }
       },
@@ -295,26 +300,29 @@ testGroupMLSConformance({
       members: group.members.map((member, index) => ({
         did: member.identity.id,
         mls: createGroupMLS({
-          access: (() => {
-            const store = stores[index]
-            if (store == null) throw new Error('missing store')
-            const base = testHandleAccess({
-              stateVersion: () => store.snapshot().revision,
-              handle: () => member.handle,
-              adopt: (next) => {
-                member.handle = next
-              },
-              persist: (handle, write) =>
-                store.save(
-                  store.snapshot().revision,
-                  encodeClientState(handle.state),
-                  handle.ledgerTokens,
-                  undefined,
-                  write,
-                ),
-            })
-            return { ...base, epoch: () => base.epoch() + hintOffset }
-          })(),
+          ...testGroupMLSDependencies(
+            (() => {
+              const store = stores[index]
+              if (store == null) throw new Error('missing store')
+              const base = testHandleAccess({
+                stateVersion: () => store.snapshot().revision,
+                handle: () => member.handle,
+                adopt: (next) => {
+                  member.handle = next
+                },
+                persist: (handle, write) =>
+                  store.save(
+                    store.snapshot().revision,
+                    encodeClientState(handle.state),
+                    handle.ledgerTokens,
+                    undefined,
+                    write,
+                  ),
+              })
+              return { ...base, epoch: () => base.epoch() + hintOffset }
+            })(),
+            stores[index]?.control,
+          ),
           identity: member.identity,
           entrySlot: member.slot,
         }),

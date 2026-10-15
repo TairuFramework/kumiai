@@ -80,6 +80,7 @@ import { createCommit, encode, mlsMessageEncoder } from 'ts-mls'
 import {
   buildRealUnavailableCommit,
   createRealGroup,
+  testGroupMLSDependencies,
   testHandleAccess,
 } from '../../../packages/mls-rpc/test/fixtures/real-group.js'
 import {
@@ -354,7 +355,7 @@ export function makeMember(params: MakeMemberParams): Member {
         }
   const crypto = createGroupCrypto({ access, pending })
   const mls = createGroupMLS({
-    access,
+    ...testGroupMLSDependencies(access, stateStore.control),
     identity,
     entrySlot,
     recoveryBinding: params.recoveryBinding,
@@ -928,7 +929,7 @@ export async function runRealCommitOnceScenario(
                 persist: async () => {},
               })
               const mls = createGroupMLS({
-                access,
+                ...testGroupMLSDependencies(access),
                 identity: receiver.identity,
                 entrySlot: receiver.slot,
               })

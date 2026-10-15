@@ -6,12 +6,18 @@ import {
   type GroupKey,
   type StagedAdoption,
 } from '@kumiai/rpc'
+import { createMemoryControlStore } from '@kumiai/rpc-conformance'
 import { expect, expectTypeOf, test, vi } from 'vitest'
 
 import { type SimpleHandleAccessParams, simpleHandleAccess } from '../src/access.js'
 import { createGroupMLS } from '../src/mls.js'
 import { controlAdoptionFixture } from './fixtures/control-adoption.js'
-import { buildRealCommit, createRealGroup, testHandleAccess } from './fixtures/real-group.js'
+import {
+  buildRealCommit,
+  createRealGroup,
+  testGroupMLSDependencies,
+  testHandleAccess,
+} from './fixtures/real-group.js'
 import {
   createTransactionalAccess,
   createTransactionalStore,
@@ -41,7 +47,11 @@ async function fixture(id: string) {
     failSave: () => {
       failSave = true
     },
-    mls: createGroupMLS({ access, identity: member.identity, entrySlot: member.slot }),
+    mls: createGroupMLS({
+      ...testGroupMLSDependencies(access),
+      identity: member.identity,
+      entrySlot: member.slot,
+    }),
   }
 }
 
@@ -75,7 +85,11 @@ test.each(['mutate', 'replace'] as const)(
       },
       persist: (handle, write) => db.saveState('group-A', encodeClientState(handle.state), write),
     })
-    const mls = createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
+    const mls = createGroupMLS({
+      ...testGroupMLSDependencies(access, createMemoryControlStore(key)),
+      identity: member.identity,
+      entrySlot: member.slot,
+    })
     const source = await mls.readRecoverySource()
     expect(source.key).toEqual({ groupID: 'group-A', incarnation: 7 })
     expect(source.stateVersion).toBe(await db.loadVersion('group-A'))
@@ -331,7 +345,7 @@ test.each(['mutate', 'replace'] as const)(
     const store = createTransactionalStore(member.handle, anchorSlot)
     const host = await createTransactionalAccess(member, store)
     const mls = createGroupMLS({
-      access: host.access,
+      ...testGroupMLSDependencies(host.access, store.control),
       identity: member.identity,
       entrySlot: member.slot,
     })

@@ -22,7 +22,12 @@ import {
 } from '../src/recovery-codec.js'
 import { recoveryTrustDigest } from '../src/recovery-trust-digest.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
-import { buildRealCommit, createRealGroup, testHandleAccess } from './fixtures/real-group.js'
+import {
+  buildRealCommit,
+  createRealGroup,
+  testGroupMLSDependencies,
+  testHandleAccess,
+} from './fixtures/real-group.js'
 import {
   createTransactionalAccess,
   createTransactionalStore,
@@ -52,15 +57,21 @@ async function setup(differentTree = false) {
     },
   })
   const requester = () =>
-    createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
+    createGroupMLS({
+      ...testGroupMLSDependencies(access),
+      identity: member.identity,
+      entrySlot: member.slot,
+    })
   const port = requester()
   const remote = createGroupMLS({
-    access: testHandleAccess({
-      handle: () => responder.handle,
-      adopt: (next) => {
-        responder.handle = next
-      },
-    }),
+    ...testGroupMLSDependencies(
+      testHandleAccess({
+        handle: () => responder.handle,
+        adopt: (next) => {
+          responder.handle = next
+        },
+      }),
+    ),
     identity: responder.identity,
     entrySlot: responder.slot,
   })
@@ -310,16 +321,22 @@ test('acceptance refuses a host without persistence and can retry after a failed
       if (shouldFail) throw new Error('save failed')
     },
   })
-  const port = createGroupMLS({ access, identity: s.member.identity, entrySlot: s.member.slot })
+  const port = createGroupMLS({
+    ...testGroupMLSDependencies(access),
+    identity: s.member.identity,
+    entrySlot: s.member.slot,
+  })
   const pending = await port.restoreRecovery(s.pending.serialize(), s.requestKey)
   const write = () => ({ mutationID: 'retry-save', changes: { deleteRejoin: true as const } })
   const noPersist = createGroupMLS({
-    access: testHandleAccess({
-      handle: () => s.member.handle,
-      adopt: (next) => {
-        s.member.handle = next
-      },
-    }),
+    ...testGroupMLSDependencies(
+      testHandleAccess({
+        handle: () => s.member.handle,
+        adopt: (next) => {
+          s.member.handle = next
+        },
+      }),
+    ),
     identity: s.member.identity,
     entrySlot: s.member.slot,
   })
@@ -358,7 +375,7 @@ test('restored adoption survives a crash with its control changes and no second 
   const store = createTransactionalStore(s.member.handle)
   const first = await createTransactionalAccess(s.member, store)
   const port = createGroupMLS({
-    access: first.access,
+    ...testGroupMLSDependencies(first.access, store.control),
     identity: s.member.identity,
     entrySlot: s.member.slot,
   })
@@ -376,7 +393,7 @@ test('restored adoption survives a crash with its control changes and no second 
   const restartedStore = await store.fork()
   const restartedAccess = await createTransactionalAccess(s.member, restartedStore)
   const restarted = createGroupMLS({
-    access: restartedAccess.access,
+    ...testGroupMLSDependencies(restartedAccess.access, restartedStore.control),
     identity: s.member.identity,
     entrySlot: s.member.slot,
   })
@@ -397,7 +414,7 @@ test('live acceptance requires a write and restart retains its co-committed chan
   const store = createTransactionalStore(s.member.handle)
   const first = await createTransactionalAccess(s.member, store)
   const port = createGroupMLS({
-    access: first.access,
+    ...testGroupMLSDependencies(first.access, store.control),
     identity: s.member.identity,
     entrySlot: s.member.slot,
   })
@@ -415,7 +432,7 @@ test('live acceptance requires a write and restart retains its co-committed chan
   const restartedStore = await store.fork()
   const restartedAccess = await createTransactionalAccess(s.member, restartedStore)
   const restarted = createGroupMLS({
-    access: restartedAccess.access,
+    ...testGroupMLSDependencies(restartedAccess.access, restartedStore.control),
     identity: s.member.identity,
     entrySlot: s.member.slot,
   })

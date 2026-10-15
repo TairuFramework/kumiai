@@ -18,6 +18,7 @@ import {
   createRealBoundRecovery,
   createRealGroup,
   sealRealRecoveryVerdict,
+  testGroupMLSDependencies,
   testHandleAccess,
 } from './fixtures/real-group.js'
 import {
@@ -162,8 +163,9 @@ testPendingGroupCryptoConformance({
 testGroupMLSConformance({
   createBoundRecovery: () =>
     createRealBoundRecovery(async (member) => {
-      const host = await createTransactionalAccess(member, createTransactionalStore(member.handle))
-      return host.access
+      const store = createTransactionalStore(member.handle)
+      const host = await createTransactionalAccess(member, store)
+      return { access: host.access, control: store.control }
     }),
   label: 'createGroupMLS over a transactional HandleAccess',
   createGroup: async (size, id) => {
@@ -189,11 +191,12 @@ testGroupMLSConformance({
         const member = group.members[index]
         const store = stores[index]
         if (member == null || store == null) throw new Error('missing member')
-        const host = await createTransactionalAccess(member, await store.fork())
+        const restartedStore = await store.fork()
+        const host = await createTransactionalAccess(member, restartedStore)
         return {
           did: member.identity.id,
           mls: createGroupMLS({
-            access: host.access,
+            ...testGroupMLSDependencies(host.access, restartedStore.control),
             identity: member.identity,
             entrySlot: member.slot,
           }),
@@ -205,14 +208,12 @@ testGroupMLSConformance({
         const other = await createRealGroup(1, `other-${id}`, [member.identity])
         const joined = other.members[0]
         if (joined == null) throw new Error('missing other member')
-        const host = await createTransactionalAccess(
-          joined,
-          createTransactionalStore(joined.handle),
-        )
+        const store = createTransactionalStore(joined.handle)
+        const host = await createTransactionalAccess(joined, store)
         return {
           did: joined.identity.id,
           mls: createGroupMLS({
-            access: host.access,
+            ...testGroupMLSDependencies(host.access, store.control),
             identity: joined.identity,
             entrySlot: joined.slot,
           }),
@@ -247,7 +248,10 @@ testGroupMLSConformance({
         return {
           did: member.identity.id,
           mls: createGroupMLS({
-            access: hinted(host.access, () => hintOffset),
+            ...testGroupMLSDependencies(
+              hinted(host.access, () => hintOffset),
+              stores[index]?.control,
+            ),
             identity: member.identity,
             entrySlot: member.slot,
           }),

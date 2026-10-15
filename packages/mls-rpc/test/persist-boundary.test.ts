@@ -7,6 +7,7 @@ import {
   buildRealExternalCommit,
   createRealGroup,
   persistedTestAccess,
+  testGroupMLSDependencies,
   testHandleAccess,
 } from './fixtures/real-group.js'
 
@@ -16,7 +17,11 @@ test('a refused commit does not save unchanged state', async () => {
   if (member == null) throw new Error('missing member')
   const persist = vi.fn()
   const access = testHandleAccess({ handle: () => member.handle, adopt: () => {}, persist })
-  const port = createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
+  const port = createGroupMLS({
+    ...testGroupMLSDependencies(access),
+    identity: member.identity,
+    entrySlot: member.slot,
+  })
   const { forged } = await buildRealExternalCommit(group, {
     rejoining: 0,
     forgeAs: 'did:key:forged',
@@ -38,7 +43,7 @@ test('processCommit keeps the handle at its old epoch on failed persist and retr
   })
   const access = testHandleAccess({ handle: () => member.handle, adopt, persist })
   const port = createGroupMLS({
-    access,
+    ...testGroupMLSDependencies(access),
     identity: member.identity,
     entrySlot: member.slot,
   })
@@ -77,7 +82,9 @@ test('processCommit reports an advance when a post-persist host callback throws'
   })
   const persist = vi.fn()
   const port = createGroupMLS({
-    access: testHandleAccess({ handle: () => member.handle, adopt: vi.fn(), persist }),
+    ...testGroupMLSDependencies(
+      testHandleAccess({ handle: () => member.handle, adopt: vi.fn(), persist }),
+    ),
     identity: member.identity,
     entrySlot: member.slot,
   })
@@ -117,12 +124,14 @@ test('recovery persists before adoption and bootstrap retries after a failed per
     if (fail) throw new Error('disk failed')
   })
   const requester = createGroupMLS({
-    access: testHandleAccess({ handle: () => member.handle, adopt, persist }),
+    ...testGroupMLSDependencies(testHandleAccess({ handle: () => member.handle, adopt, persist })),
     identity: member.identity,
     entrySlot: member.slot,
   })
   const responder = createGroupMLS({
-    access: testHandleAccess({ handle: () => group.committer.handle, adopt: vi.fn() }),
+    ...testGroupMLSDependencies(
+      testHandleAccess({ handle: () => group.committer.handle, adopt: vi.fn() }),
+    ),
     identity: group.committer.identity,
     entrySlot: group.committer.slot,
   })
@@ -166,17 +175,21 @@ test('an explicit recovery key remains usable after the former retention deadlin
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
   const requester = createGroupMLS({
-    access: persistedTestAccess({
-      handle: () => member.handle,
-      adopt: (next) => {
-        member.handle = next
-      },
-    }),
+    ...testGroupMLSDependencies(
+      persistedTestAccess({
+        handle: () => member.handle,
+        adopt: (next) => {
+          member.handle = next
+        },
+      }),
+    ),
     identity: member.identity,
     entrySlot: member.slot,
   })
   const responder = createGroupMLS({
-    access: testHandleAccess({ handle: () => group.committer.handle, adopt: vi.fn() }),
+    ...testGroupMLSDependencies(
+      testHandleAccess({ handle: () => group.committer.handle, adopt: vi.fn() }),
+    ),
     identity: group.committer.identity,
     entrySlot: group.committer.slot,
   })
@@ -199,17 +212,21 @@ test('accepting an older recovery cannot delete a replacement request key', asyn
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
   const requester = createGroupMLS({
-    access: persistedTestAccess({
-      handle: () => member.handle,
-      adopt: (next) => {
-        member.handle = next
-      },
-    }),
+    ...testGroupMLSDependencies(
+      persistedTestAccess({
+        handle: () => member.handle,
+        adopt: (next) => {
+          member.handle = next
+        },
+      }),
+    ),
     identity: member.identity,
     entrySlot: member.slot,
   })
   const responder = createGroupMLS({
-    access: testHandleAccess({ handle: () => group.committer.handle, adopt: vi.fn() }),
+    ...testGroupMLSDependencies(
+      testHandleAccess({ handle: () => group.committer.handle, adopt: vi.fn() }),
+    ),
     identity: group.committer.identity,
     entrySlot: group.committer.slot,
   })

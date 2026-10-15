@@ -37,7 +37,11 @@ import { createGroupMLS } from '../src/mls.js'
 import { createOwnerQueues } from '../src/owner-queue.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
 import { controlAdoptionFixture } from './fixtures/control-adoption.js'
-import { buildRealCommit, createRealGroup } from './fixtures/real-group.js'
+import {
+  buildRealCommit,
+  createRealGroup,
+  testGroupMLSDependencies,
+} from './fixtures/real-group.js'
 import { installSeed, makeStorageSeed, nextChange } from './fixtures/storage-seed.js'
 import {
   createTransactionalAccess,
@@ -393,7 +397,7 @@ test('own authorship requires the content signature rather than sender data alon
   const store = createTransactionalStore(member.handle)
   const host = await createTransactionalAccess(member, store)
   const mls = createGroupMLS({
-    access: host.access,
+    ...testGroupMLSDependencies(host.access, store.control),
     identity: member.identity,
     entrySlot: member.slot,
   })

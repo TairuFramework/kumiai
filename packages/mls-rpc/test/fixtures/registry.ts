@@ -19,7 +19,6 @@ import {
 import type { ConformanceControlSearchPort } from '@kumiai/rpc-conformance'
 import { createApplicationMessage } from 'ts-mls'
 
-import { simpleHandleAccess } from '../../src/access.js'
 import { encodeControlJournal } from '../../src/control-journal.js'
 import { controlBuildContexts } from '../../src/control-write-context.js'
 import {
@@ -65,6 +64,7 @@ import { type RecoveryEnvironment, registryOptions } from '../../src/registry/va
 import { deferred } from '../../src/runtime.js'
 import { createGroupSafety, type GroupSafety } from '../../src/safety.js'
 import { createDeterministicAtRestCodec } from './at-rest.js'
+import { testGroupMLSDependencies, testHandleAccess } from './real-group.js'
 import { createRegistryRecovery } from './registry-recovery.js'
 import { createRegistryWelcomeHistory, registryHandle } from './registry-welcome.js'
 import { memoryModel, restoreMemoryControlHandle } from './sealed-memory-mls.js'
@@ -239,12 +239,13 @@ export async function registryFixtureSafetyParams(fixture: RegistryFixture) {
     registry: fixture.registry,
     persistence: fixture.device.groups,
     mls: createGroupMLS({
-      access: simpleHandleAccess({
-        key: { groupID: handle.groupID, incarnation: 1 },
-        stateVersion: () => 1,
-        handle: () => handle,
-        adopt: () => {},
-      }),
+      ...testGroupMLSDependencies(
+        testHandleAccess({
+          key: { groupID: handle.groupID, incarnation: 1 },
+          handle: () => handle,
+          adopt: () => {},
+        }),
+      ),
       identity: fixture.identity,
       entrySlot: createLedgerEntrySlot(),
     }),
@@ -649,12 +650,13 @@ async function assemble(
   rowRemovers.set(fixture, storage.deleteCommittedRow)
   const safetyHandle = await fixture.makeHandle(0)
   safetyMLS = createGroupMLS({
-    access: simpleHandleAccess({
-      key,
-      stateVersion: () => 1,
-      handle: () => safetyHandle,
-      adopt: () => {},
-    }),
+    ...testGroupMLSDependencies(
+      testHandleAccess({
+        key,
+        handle: () => safetyHandle,
+        adopt: () => {},
+      }),
+    ),
     identity,
     entrySlot: createLedgerEntrySlot(),
   })

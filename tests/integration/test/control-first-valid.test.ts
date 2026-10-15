@@ -31,6 +31,7 @@ import { expect, test, vi } from 'vitest'
 import {
   buildRealUnavailableCommit,
   createRealGroup,
+  testGroupMLSDependencies,
   testHandleAccess,
 } from '../../../packages/mls-rpc/test/fixtures/real-group.js'
 import { stepOperation } from '../../../packages/rpc/src/control/operations.js'
@@ -152,13 +153,15 @@ async function firstValidRunner() {
   const receiverMLS = createGroupMLS({
     identity: receiver.identity,
     entrySlot: receiver.slot,
-    access: testHandleAccess({
-      handle: () => receiver.handle,
-      adopt: (next) => {
-        receiver.handle = next
-      },
-      persist: async () => {},
-    }),
+    ...testGroupMLSDependencies(
+      testHandleAccess({
+        handle: () => receiver.handle,
+        adopt: (next) => {
+          receiver.handle = next
+        },
+        persist: async () => {},
+      }),
+    ),
   })
   return {
     group,

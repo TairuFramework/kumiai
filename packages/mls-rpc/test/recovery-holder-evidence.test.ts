@@ -18,7 +18,7 @@ import { expect, test, vi } from 'vitest'
 
 import { createGroupMLS, createLedgerEntrySlot } from '../src/mls.js'
 import type { RecoveryBinding, RecoveryBindingRequest } from '../src/recovery.js'
-import { testHandleAccess } from './fixtures/real-group.js'
+import { testGroupMLSDependencies, testHandleAccess } from './fixtures/real-group.js'
 import { createTransactionalStore } from './fixtures/transactional-access.js'
 
 async function chainedRecovery() {
@@ -85,32 +85,37 @@ async function chainedRecovery() {
   const requester = (recoveryBinding?: RecoveryBinding) =>
     createGroupMLS({
       identity: bob,
-      access: testHandleAccess({
-        handle: () => member,
-        stateVersion: () => store.snapshot().revision,
-        adopt: (next) => {
-          member = next
-        },
-        persist: (handle, write) =>
-          store.save(
-            store.snapshot().revision,
-            encodeClientState(handle.state),
-            handle.ledgerTokens,
-            undefined,
-            write,
-          ),
-      }),
+      ...testGroupMLSDependencies(
+        testHandleAccess({
+          handle: () => member,
+          stateVersion: () => store.snapshot().revision,
+          adopt: (next) => {
+            member = next
+          },
+          persist: (handle, write) =>
+            store.save(
+              store.snapshot().revision,
+              encodeClientState(handle.state),
+              handle.ledgerTokens,
+              undefined,
+              write,
+            ),
+        }),
+        store.control,
+      ),
       entrySlot: createLedgerEntrySlot(),
       recoveryBinding,
     })
   const responder = createGroupMLS({
     identity: alice,
-    access: testHandleAccess({
-      handle: () => source,
-      adopt: (next) => {
-        source = next
-      },
-    }),
+    ...testGroupMLSDependencies(
+      testHandleAccess({
+        handle: () => source,
+        adopt: (next) => {
+          source = next
+        },
+      }),
+    ),
     entrySlot: createLedgerEntrySlot(),
   })
   return {

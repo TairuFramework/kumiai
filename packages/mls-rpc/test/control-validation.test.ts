@@ -81,7 +81,12 @@ import { createMemoryTransaction } from '../src/memory-transaction.js'
 import { createGroupMLS, createLedgerEntrySlot } from '../src/mls.js'
 import { createOwnerQueues } from '../src/owner-queue.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
-import { buildRealCommit, createRealGroup, testHandleAccess } from './fixtures/real-group.js'
+import {
+  buildRealCommit,
+  createRealGroup,
+  testGroupMLSDependencies,
+  testHandleAccess,
+} from './fixtures/real-group.js'
 import { installSeed, makeStorageSeed } from './fixtures/storage-seed.js'
 import { createTransactionalStore } from './fixtures/transactional-access.js'
 
@@ -216,7 +221,9 @@ async function fixture(
 test('wrong-epoch recovery bytes are rejected before copying state', async () => {
   const f = await fixture()
   const live = createGroupMLS({
-    access: testHandleAccess({ handle: () => f.member.handle, adopt: () => {} }),
+    ...testGroupMLSDependencies(
+      testHandleAccess({ handle: () => f.member.handle, adopt: () => {} }),
+    ),
     identity: f.member.identity,
     entrySlot: f.member.slot,
   })
@@ -257,12 +264,14 @@ test.each(['accept', 'reject', 'throw'] as const)(
       })
     ).commitMessage
     const live = createGroupMLS({
-      access: testHandleAccess({
-        handle: () => f.member.handle,
-        adopt: (next) => {
-          f.member.handle = next
-        },
-      }),
+      ...testGroupMLSDependencies(
+        testHandleAccess({
+          handle: () => f.member.handle,
+          adopt: (next) => {
+            f.member.handle = next
+          },
+        }),
+      ),
       identity: f.member.identity,
       entrySlot: f.member.slot,
     })
@@ -306,12 +315,14 @@ test('request dry-run carries refusal authority and ordinary intake remains advi
     })
   ).commitMessage
   const live = createGroupMLS({
-    access: testHandleAccess({
-      handle: () => f.member.handle,
-      adopt: (next) => {
-        f.member.handle = next
-      },
-    }),
+    ...testGroupMLSDependencies(
+      testHandleAccess({
+        handle: () => f.member.handle,
+        adopt: (next) => {
+          f.member.handle = next
+        },
+      }),
+    ),
     identity: f.member.identity,
     entrySlot: f.member.slot,
   })
@@ -356,12 +367,14 @@ test.each(['host-policy', 'local-fault'] as const)(
       })
     ).commitMessage
     const live = createGroupMLS({
-      access: testHandleAccess({
-        handle: () => f.member.handle,
-        adopt: (next) => {
-          f.member.handle = next
-        },
-      }),
+      ...testGroupMLSDependencies(
+        testHandleAccess({
+          handle: () => f.member.handle,
+          adopt: (next) => {
+            f.member.handle = next
+          },
+        }),
+      ),
       identity: f.member.identity,
       entrySlot: f.member.slot,
     })
@@ -417,7 +430,11 @@ async function searchReal(
     stateVersion: () => store.snapshot().revision,
     persist: persisted,
   })
-  const mls = createGroupMLS({ access, identity: f.member.identity, entrySlot: f.member.slot })
+  const mls = createGroupMLS({
+    ...testGroupMLSDependencies(access, store.control),
+    identity: f.member.identity,
+    entrySlot: f.member.slot,
+  })
   const rows = [
     ...(competitor === undefined
       ? []
@@ -919,7 +936,11 @@ test('validator owns its resolver callbacks and buffers', async () => {
     },
     persist,
   })
-  const live = createGroupMLS({ access, identity: f.member.identity, entrySlot: f.member.slot })
+  const live = createGroupMLS({
+    ...testGroupMLSDependencies(access),
+    identity: f.member.identity,
+    entrySlot: f.member.slot,
+  })
   const [validated, applied] = await Promise.all([
     validation.validateFrame(ledger.frame, f.built),
     live.processCommit(ledger.commit, { resolveLedgerEntries: f.group.resolveLedgerEntries }),
@@ -1105,7 +1126,7 @@ test('live unavailable validation refuses without moving or saving', async () =>
     persist,
   })
   const live = createGroupMLS({
-    access,
+    ...testGroupMLSDependencies(access),
     identity: f.member.identity,
     entrySlot: createLedgerEntrySlot(),
   })
@@ -1300,12 +1321,14 @@ test.each(['blank', 'unknown'] as const)(
       reason: 'authentication',
     })
     const live = createGroupMLS({
-      access: testHandleAccess({
-        handle: () => f.member.handle,
-        adopt: () => {
-          throw new Error('must not adopt')
-        },
-      }),
+      ...testGroupMLSDependencies(
+        testHandleAccess({
+          handle: () => f.member.handle,
+          adopt: () => {
+            throw new Error('must not adopt')
+          },
+        }),
+      ),
       identity: f.member.identity,
       entrySlot: f.member.slot,
     })
@@ -1466,7 +1489,7 @@ async function expectPolicyPoison(
     persist: persisted,
   })
   const live = createGroupMLS({
-    access,
+    ...testGroupMLSDependencies(access),
     identity: f.member.identity,
     entrySlot: f.member.slot,
   })
@@ -1693,13 +1716,15 @@ test.each(['credential', 'holder'] as const)(
       expect((await searched.store.control.load()).welcomes).toEqual([])
       const persisted = vi.fn(async () => {})
       const live = createGroupMLS({
-        access: testHandleAccess({
-          handle: () => f.member.handle,
-          adopt: () => {
-            throw new Error('must not adopt')
-          },
-          persist: persisted,
-        }),
+        ...testGroupMLSDependencies(
+          testHandleAccess({
+            handle: () => f.member.handle,
+            adopt: () => {
+              throw new Error('must not adopt')
+            },
+            persist: persisted,
+          }),
+        ),
         identity: f.member.identity,
         entrySlot: f.member.slot,
       })
@@ -2032,7 +2057,11 @@ test.each(['outer', 'inner'] as const)(
         throw new Error('poison must not persist MLS')
       },
     })
-    const mls = createGroupMLS({ access, identity: f.member.identity, entrySlot: f.member.slot })
+    const mls = createGroupMLS({
+      ...testGroupMLSDependencies(access, store.control),
+      identity: f.member.identity,
+      entrySlot: f.member.slot,
+    })
     const onStrand = vi.fn()
     const onRecovery = vi.fn()
     const deliverWelcome = vi.fn(async () => {})

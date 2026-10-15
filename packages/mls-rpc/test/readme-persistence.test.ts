@@ -6,7 +6,11 @@ import { expect, test } from 'vitest'
 
 import { type SimpleHandleAccessParams, simpleHandleAccess } from '../src/access.js'
 import { createGroupMLS } from '../src/mls.js'
-import { buildRealCommit, createRealGroup } from './fixtures/real-group.js'
+import {
+  buildRealCommit,
+  createRealGroup,
+  testGroupMLSDependencies,
+} from './fixtures/real-group.js'
 import { createTransactionalStore } from './fixtures/transactional-access.js'
 
 const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
@@ -75,7 +79,11 @@ test.each(examples)(
       persist,
       stateVersion: () => stored.snapshot().revision,
     })
-    const mls = createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
+    const mls = createGroupMLS({
+      ...testGroupMLSDependencies(access, stored.control),
+      identity: member.identity,
+      entrySlot: member.slot,
+    })
     const write = { mutationID: 'documented-adoption', changes: { deleteRejoin: true as const } }
     await mls.processCommit(await buildRealCommit(group), {
       resolveLedgerEntries: group.resolveLedgerEntries,

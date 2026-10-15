@@ -3,7 +3,12 @@ import { expect, test, vi } from 'vitest'
 
 import { createGroupCrypto } from '../src/crypto.js'
 import { createGroupMLS } from '../src/mls.js'
-import { buildRealCommit, createRealGroup, testHandleAccess } from './fixtures/real-group.js'
+import {
+  buildRealCommit,
+  createRealGroup,
+  testGroupMLSDependencies,
+  testHandleAccess,
+} from './fixtures/real-group.js'
 
 test('a commit resolves entries through access.read without re-entering mutate', async () => {
   const group = await createRealGroup(1, 'pre-resolve-real-commit')
@@ -16,7 +21,11 @@ test('a commit resolves entries through access.read without re-entering mutate',
     },
   })
   const crypto = createGroupCrypto({ access })
-  const mls = createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
+  const mls = createGroupMLS({
+    ...testGroupMLSDependencies(access),
+    identity: member.identity,
+    entrySlot: member.slot,
+  })
   const commit = await buildRealCommit(group)
   expect(readCommitEntryIDs(commit).length).toBeGreaterThan(0)
   const resolver = vi.fn(async (ids: Array<string>) => {
@@ -39,7 +48,11 @@ test('an empty entry list skips the resolver', async () => {
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
   const access = testHandleAccess({ handle: () => member.handle, adopt: () => {} })
-  const mls = createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
+  const mls = createGroupMLS({
+    ...testGroupMLSDependencies(access),
+    identity: member.identity,
+    entrySlot: member.slot,
+  })
   const commit = await buildRealCommit(group, { removes: 1 })
   expect(readCommitEntryIDs(commit)).toEqual([])
   const resolver = vi.fn(group.resolveLedgerEntries)
@@ -60,7 +73,11 @@ test('an epoch move during pre-resolution reports the new epoch without applying
       member.handle = next
     },
   })
-  const mls = createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
+  const mls = createGroupMLS({
+    ...testGroupMLSDependencies(access),
+    identity: member.identity,
+    entrySlot: member.slot,
+  })
   const commit = await buildRealCommit(group)
   const resolver = async (ids: Array<string>) => {
     await access.replace(group.committer.handle)
@@ -86,7 +103,11 @@ test('wrong-epoch and non-Commit frames never open entry bodies', async () => {
       member.handle = next
     },
   })
-  const mls = createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
+  const mls = createGroupMLS({
+    ...testGroupMLSDependencies(access),
+    identity: member.identity,
+    entrySlot: member.slot,
+  })
   const commit = await buildRealCommit(group)
   const opened = vi.fn(group.resolveLedgerEntries)
   await access.replace(group.committer.handle)
@@ -111,7 +132,11 @@ test('resolver faults and missing bodies retain their error boundary', async () 
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
   const access = testHandleAccess({ handle: () => member.handle, adopt: () => {} })
-  const mls = createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
+  const mls = createGroupMLS({
+    ...testGroupMLSDependencies(access),
+    identity: member.identity,
+    entrySlot: member.slot,
+  })
   const commit = await buildRealCommit(group)
   const fault = new Error('blob open failed')
   await expect(

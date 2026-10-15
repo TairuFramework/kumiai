@@ -5,7 +5,11 @@ import { expect, test, vi } from 'vitest'
 import { createGroupMLS, deriveRecoverySecret } from '../src/mls.js'
 import * as recovery from '../src/recovery.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
-import { createRealGroup, testHandleAccess } from './fixtures/real-group.js'
+import {
+  createRealGroup,
+  testGroupMLSDependencies,
+  testHandleAccess,
+} from './fixtures/real-group.js'
 
 async function port(name: string, recoverySecret?: (handle: GroupHandle) => Promise<Uint8Array>) {
   const group = await createRealGroup(1, name)
@@ -18,7 +22,7 @@ async function port(name: string, recoverySecret?: (handle: GroupHandle) => Prom
     },
   })
   const mls = createGroupMLS({
-    access,
+    ...testGroupMLSDependencies(access),
     identity: member.identity,
     entrySlot: member.slot,
     ...(recoverySecret != null && { recoverySecret }),

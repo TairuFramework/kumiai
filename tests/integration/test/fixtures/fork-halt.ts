@@ -46,6 +46,7 @@ import { recoveryTrustFor } from '../../../../packages/mls-rpc/src/registry/trus
 import {
   createRealGroup,
   type RealMember,
+  testGroupMLSDependencies,
 } from '../../../../packages/mls-rpc/test/fixtures/real-group.js'
 import {
   createRegistryFixture,
@@ -121,7 +122,11 @@ async function makePeer(
     },
   })
   const cryptoPort = createGroupCrypto({ access })
-  const mls = createGroupMLS({ access, identity: real.identity, entrySlot: real.slot })
+  const mls = createGroupMLS({
+    ...testGroupMLSDependencies(access, ports.control),
+    identity: real.identity,
+    entrySlot: real.slot,
+  })
   const restoreCandidate = async (bytes: Uint8Array) => {
     const saved = decodeStoredValue(bytes) as {
       state: Uint8Array

@@ -23,6 +23,7 @@ import {
   createRealGroup,
   persistedTestAccess,
   type RealGroup,
+  testGroupMLSDependencies,
   testHandleAccess,
 } from './fixtures/real-group.js'
 import {
@@ -407,17 +408,21 @@ test('a bootstrap whose host callback throws after the write still publishes the
   group.committer.handle = (await commitLedgerEntries(group.committer.handle, [note])).newGroup
   // Rejoin through recovery, which leaves the ledger incomplete until a bootstrap.
   const requester = createGroupMLS({
-    access: persistedTestAccess({
-      handle: () => member.handle,
-      adopt: (next) => {
-        member.handle = next
-      },
-    }),
+    ...testGroupMLSDependencies(
+      persistedTestAccess({
+        handle: () => member.handle,
+        adopt: (next) => {
+          member.handle = next
+        },
+      }),
+    ),
     identity: member.identity,
     entrySlot: member.slot,
   })
   const responder = createGroupMLS({
-    access: testHandleAccess({ handle: () => group.committer.handle, adopt: () => {} }),
+    ...testGroupMLSDependencies(
+      testHandleAccess({ handle: () => group.committer.handle, adopt: () => {} }),
+    ),
     identity: group.committer.identity,
     entrySlot: group.committer.slot,
   })
@@ -440,7 +445,7 @@ test('a bootstrap whose host callback throws after the write still publishes the
     },
   })
   const mls = createGroupMLS({
-    access: host.access,
+    ...testGroupMLSDependencies(host.access, store.control),
     identity: member.identity,
     entrySlot: member.slot,
   })

@@ -2,7 +2,12 @@ import { expect, test } from 'vitest'
 
 import { createGroupCrypto } from '../src/crypto.js'
 import { createGroupMLS } from '../src/mls.js'
-import { buildRealCommit, createRealGroup, testHandleAccess } from './fixtures/real-group.js'
+import {
+  buildRealCommit,
+  createRealGroup,
+  testGroupMLSDependencies,
+  testHandleAccess,
+} from './fixtures/real-group.js'
 
 test('operation results carry the epoch used by the handle', async () => {
   const group = await createRealGroup(1, 'epoch-results')
@@ -23,7 +28,11 @@ test('operation results carry the epoch used by the handle', async () => {
       },
     }),
   })
-  const mls = createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
+  const mls = createGroupMLS({
+    ...testGroupMLSDependencies(access),
+    identity: member.identity,
+    entrySlot: member.slot,
+  })
   const epoch = Number(member.handle.epoch)
 
   const { secret, epoch: exportedAt } = await crypto.exportSecret('kumiai/test/epoch')

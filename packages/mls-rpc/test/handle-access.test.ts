@@ -1,10 +1,88 @@
 import { setImmediate } from 'node:timers/promises'
 import type { GroupHandle } from '@kumiai/mls'
+import { asLogPosition } from '@kumiai/rpc'
 import { expect, test, vi } from 'vitest'
 
 import { createGroupCrypto } from '../src/crypto.js'
 import { createGroupMLS } from '../src/mls.js'
-import { buildRealCommit, createRealGroup, testHandleAccess } from './fixtures/real-group.js'
+import { authenticateRecoveryReply } from '../src/recovery.js'
+import { recoveryTrustFor } from '../src/registry/trust.js'
+import {
+  buildRealCommit,
+  createRealGroup,
+  testGroupMLSDependencies,
+  testHandleAccess,
+} from './fixtures/real-group.js'
+import {
+  createTransactionalAccess,
+  createTransactionalStore,
+} from './fixtures/transactional-access.js'
+
+test.each(['simple', 'transactional'] as const)(
+  '%s constructor dependencies retain the committed source and control cursor',
+  async (mode) => {
+    const group = await createRealGroup(1, `constructor-dependencies-${mode}`)
+    const member = group.members[0]
+    if (member === undefined) throw new Error('Missing member')
+    const store = createTransactionalStore(member.handle)
+    const access =
+      mode === 'transactional'
+        ? (await createTransactionalAccess(member, store)).access
+        : testHandleAccess({
+            handle: () => member.handle,
+            adopt: (next) => {
+              member.handle = next
+            },
+          })
+    const dependencies = testGroupMLSDependencies(
+      access,
+      mode === 'transactional' ? store.control : undefined,
+    )
+    const source = await dependencies.readRecoverySource()
+    expect(source).toEqual(await access.readControl(async (scope) => scope.source))
+    expect(source).not.toHaveProperty('trust')
+    expect(source).not.toHaveProperty('lifetimeRevision')
+    expect(dependencies.control.key).toEqual(source.key)
+    if (source.identity === null) throw new Error('Missing source identity')
+    if (mode === 'transactional') expect(dependencies.control).toBe(store.control)
+    const mls = createGroupMLS({
+      ...dependencies,
+      identity: member.identity,
+      entrySlot: member.slot,
+    })
+    const requestID = 'committed-head'
+    const { request, requestKey } = await mls.createRecoveryRequest(requestID)
+    const trust = recoveryTrustFor(member.handle, source.key, null)
+    for (const position of [null, asLogPosition('committed-prefix')]) {
+      await dependencies.control.apply(
+        { cursor: { position, epoch: source.identity.epoch } },
+        crypto.randomUUID(),
+      )
+      const head = (await dependencies.control.load()).cursor?.position ?? null
+      const sealed = await mls.sealGroupInfo(request, head)
+      const reply = await authenticateRecoveryReply({
+        trust,
+        sealed,
+        requestID,
+        requestKey,
+        options: {},
+      })
+      expect(reply?.captureHead).toBe(head)
+      expect(reply?.groupInfoAuthenticator).toEqual(source.identity.authenticator)
+    }
+    await expect(mls.sealGroupInfo(request, asLogPosition('uncommitted'))).rejects.toThrow(
+      'Capture head',
+    )
+    const commit = await buildRealCommit(group)
+    expect(
+      await mls.processCommit(commit, { resolveLedgerEntries: group.resolveLedgerEntries }),
+    ).toMatchObject({ applied: true, advanced: true })
+    const current = await dependencies.readRecoverySource()
+    expect(current.identity?.epoch).toBe(source.identity.epoch + 1)
+    expect(current).toEqual(await access.readControl(async (scope) => scope.source))
+    if (mode === 'transactional') expect(current.stateVersion).toBe(store.snapshot().revision)
+  },
+)
 
 test('replacement checks and carries under the same gate as persistence and sealing', async () => {
   const group = await createRealGroup(0, 'prepared-replacement')
@@ -93,7 +171,11 @@ test('admission stays synchronous at the old epoch through awaited adoption', as
       expect(confirm).not.toHaveBeenCalled()
     },
   })
-  const mls = createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
+  const mls = createGroupMLS({
+    ...testGroupMLSDependencies(access),
+    identity: member.identity,
+    entrySlot: member.slot,
+  })
   expect(access.admission()).toEqual({ epoch: epochBefore, admissible: true })
   await buildRealCommit(group)
   const next = group.committer.handle
@@ -151,7 +233,11 @@ test('sendAdmission reads only the published access snapshot', async () => {
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
   const access = testHandleAccess({ handle: () => member.handle, adopt: () => {} })
-  const mls = createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
+  const mls = createGroupMLS({
+    ...testGroupMLSDependencies(access),
+    identity: member.identity,
+    entrySlot: member.slot,
+  })
   const spies = [
     vi.spyOn(access, 'read'),
     vi.spyOn(access, 'mutate'),
@@ -175,7 +261,11 @@ test('one access instance serves both ports and publishes replacement after save
     persist: saved,
   })
   const crypto = createGroupCrypto({ access })
-  const mls = createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
+  const mls = createGroupMLS({
+    ...testGroupMLSDependencies(access),
+    identity: member.identity,
+    entrySlot: member.slot,
+  })
   expect(crypto.epoch()).toBe(Number(member.handle.epoch))
   expect(await mls.rosterEntries()).toContainEqual(
     expect.objectContaining({ did: member.identity.id }),

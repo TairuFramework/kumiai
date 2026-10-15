@@ -25,7 +25,12 @@ import type {
   PersistenceFixture,
 } from '../../src/persistence-types.js'
 import type { RecoveryCandidate } from '../../src/recovery.js'
-import { buildRealCommit, createRealGroup, testHandleAccess } from './real-group.js'
+import {
+  buildRealCommit,
+  createRealGroup,
+  testGroupMLSDependencies,
+  testHandleAccess,
+} from './real-group.js'
 import { createStorageFixture } from './storage-persistence.js'
 
 export async function createCodecReopenFixture(id: string): Promise<{
@@ -53,15 +58,21 @@ export async function createCodecReopenFixture(id: string): Promise<{
       member.handle = next
     },
   })
-  const requester = createGroupMLS({ identity: member.identity, access, entrySlot: member.slot })
+  const requester = createGroupMLS({
+    identity: member.identity,
+    ...testGroupMLSDependencies(access),
+    entrySlot: member.slot,
+  })
   const remote = createGroupMLS({
     identity: responder.identity,
-    access: testHandleAccess({
-      handle: () => responder.handle,
-      adopt: (next) => {
-        responder.handle = next
-      },
-    }),
+    ...testGroupMLSDependencies(
+      testHandleAccess({
+        handle: () => responder.handle,
+        adopt: (next) => {
+          responder.handle = next
+        },
+      }),
+    ),
     entrySlot: responder.slot,
   })
   const requestID = 'candidate-request'
@@ -188,13 +199,16 @@ export async function createCodecReopenFixture(id: string): Promise<{
     })
     const realPort = createGroupMLS({
       identity: member.identity,
-      access: testHandleAccess({
-        handle: () => handle,
-        stateVersion: () => stored.version,
-        adopt: (next) => {
-          handle = next
-        },
-      }),
+      ...testGroupMLSDependencies(
+        testHandleAccess({
+          handle: () => handle,
+          stateVersion: () => stored.version,
+          adopt: (next) => {
+            handle = next
+          },
+        }),
+        reopened.device.groups.ports(key).control,
+      ),
       entrySlot: createLedgerEntrySlot(),
     })
     return { fixture, key, zeroRef, boundVerdict, realPort, mutationID }

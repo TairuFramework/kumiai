@@ -15,6 +15,8 @@ import {
   removeMember,
   renewLeaf,
 } from '@kumiai/mls'
+import type { ControlStore } from '@kumiai/rpc'
+import { createMemoryControlStore } from '@kumiai/rpc-conformance'
 import {
   bytesToBase64,
   createCommit,
@@ -27,12 +29,32 @@ import {
 } from 'ts-mls'
 
 import {
+  type ControlHandleAccess,
   type HandleAccess,
   type SimpleHandleAccessParams,
   simpleHandleAccess,
 } from '../../src/access.js'
-import { createGroupMLS, createLedgerEntrySlot, type LedgerEntrySlot } from '../../src/mls.js'
+import {
+  createGroupMLS,
+  createLedgerEntrySlot,
+  type GroupMLSDependencies,
+  type LedgerEntrySlot,
+} from '../../src/mls.js'
 import { createTransactionalStore, type TransactionalStore } from './transactional-access.js'
+
+const controls = new WeakMap<ControlHandleAccess, ControlStore>()
+
+export function testGroupMLSDependencies(
+  access: ControlHandleAccess,
+  control: ControlStore | undefined = controls.get(access),
+): GroupMLSDependencies & { access: ControlHandleAccess } {
+  if (control === undefined) throw new Error('Missing fixture control store')
+  return {
+    access,
+    control,
+    readRecoverySource: () => access.readControl(async ({ source }) => source),
+  }
+}
 
 export type RealMember = {
   identity: OwnIdentity
@@ -74,13 +96,17 @@ export async function buildRealUnavailableCommit(group: RealGroup): Promise<Uint
 }
 
 export async function createRealBoundRecovery(
-  makeAccess: (member: RealMember) => Promise<HandleAccess> = async (member) =>
-    persistedTestAccess({
+  makeAccess: (
+    member: RealMember,
+  ) => Promise<{ access: HandleAccess; control: ControlStore }> = async (member) => {
+    const access = persistedTestAccess({
       handle: () => member.handle,
       adopt: (next) => {
         member.handle = next
       },
-    }),
+    })
+    return { access, control: testGroupMLSDependencies(access).control }
+  },
 ) {
   const fixture = (await import(
     new URL('../../../mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
@@ -115,21 +141,23 @@ export async function createRealBoundRecovery(
     })
   ).group
   const member = { identity: bob, handle: group, slot: createLedgerEntrySlot() }
-  const access = await makeAccess(member)
+  const { access, control } = await makeAccess(member)
   const requester = createGroupMLS({
     identity: bob,
-    access,
+    ...testGroupMLSDependencies(access, control),
     entrySlot: member.slot,
     recoveryBinding: async () => offered,
   })
   const responder = createGroupMLS({
     identity: alice,
-    access: testHandleAccess({
-      handle: () => source,
-      adopt: (next) => {
-        source = next
-      },
-    }),
+    ...testGroupMLSDependencies(
+      testHandleAccess({
+        handle: () => source,
+        adopt: (next) => {
+          source = next
+        },
+      }),
+    ),
     entrySlot: createLedgerEntrySlot(),
   })
   return {
@@ -345,7 +373,7 @@ export function persistedTestAccess(
   params: Pick<Parameters<typeof simpleHandleAccess>[0], 'handle' | 'adopt'>,
   store: TransactionalStore = createTransactionalStore(params.handle()),
 ): HandleAccess {
-  return simpleHandleAccess({
+  const access = simpleHandleAccess({
     key: { groupID: params.handle().groupID, incarnation: 1 },
     ...params,
     stateVersion: () => store.snapshot().revision,
@@ -358,6 +386,8 @@ export function persistedTestAccess(
         write,
       ),
   })
+  controls.set(access, store.control)
+  return access
 }
 
 export function testHandleAccess(
@@ -367,7 +397,7 @@ export function testHandleAccess(
   },
 ): HandleAccess {
   let version = 0
-  return simpleHandleAccess({
+  const access = simpleHandleAccess({
     key: { groupID: params.handle().groupID, incarnation: 1 },
     ...params,
     stateVersion: params.stateVersion ?? (() => version),
@@ -379,4 +409,9 @@ export function testHandleAccess(
             version += 1
           },
   })
+  controls.set(
+    access,
+    createMemoryControlStore(params.key ?? { groupID: params.handle().groupID, incarnation: 1 }),
+  )
+  return access
 }
