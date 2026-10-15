@@ -35,6 +35,11 @@ import type { GroupProcedureHandlers } from './handlers.js'
 import type { ReceiveLaneEnded, SubscribeFailure } from './hub-mux.js'
 import type { AppOutboxCleared } from './log-delivery.js'
 import type { GroupProtocolDefinition } from './protocol.js'
+import type {
+  ConfirmedRecoveryHandoff,
+  RecoveryCompletion,
+  RecoveryContinuation,
+} from './recovery-types.js'
 
 export const DEFAULT_RECOVERY_TIMEOUT_MS = 5000
 export const DEFAULT_RECOVERY_JITTER_MS = 250
@@ -73,6 +78,9 @@ export const DEFAULT_COMMIT_DEADLINE_MS = 30_000
 
 /** MLS lifecycle and the host stores used by the durable control and app lanes. */
 export type GroupPeerMLSParams = {
+  onConfirmedRecovery?: (handoff: ConfirmedRecoveryHandoff) => void
+  continuation?: RecoveryContinuation | null
+  completion?: RecoveryCompletion | null
   /** MLS lifecycle port. When provided, the peer runs the commit lane. */
   mls: GroupMLS
   /** Durable log plaintext. The host owns encryption at rest and erasure. */
@@ -244,6 +252,9 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
   | GroupPeerMLSParams
   | {
       mls?: undefined
+      onConfirmedRecovery?: undefined
+      continuation?: undefined
+      completion?: undefined
       appOutbox?: undefined
       appOutboxLimit?: undefined
       control?: undefined

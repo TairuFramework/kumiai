@@ -20,6 +20,7 @@ import { describe, expect, test, vi } from 'vitest'
 import { entryCapability } from '../src/entry-capability.js'
 import { decodeRecoveryCandidate, encodeRecoveryCandidate } from '../src/recovery-codec.js'
 import { recoveryTrustDigest } from '../src/recovery-trust-digest.js'
+import { createRecoveryContinuationPort } from '../src/registry/continuation.js'
 import { createGroupHandleRegistry } from '../src/registry/registry.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import type { RegistrySwitchWrite } from '../src/registry/types.js'
@@ -678,6 +679,11 @@ for (const mode of ['real-mls', 'double'] as const) {
         const control = await current.device.groups.ports(key).control.load()
         expect(control.rejoin).toEqual({ ...s.recovery.record, stage: 'adopted' })
         expect(control.rejoin?.ledgerBefore).toEqual(ledger)
+        const continuation = await createRecoveryContinuationPort({
+          registry: registry(current),
+          persistence: current.device.groups,
+        }).loadRecoveryContinuation(destination)
+        expect(continuation).toEqual({ source: key, destination, record: control.rejoin })
         expect(control.outcomes.some((row) => row.id === s.recovery.record.id)).toBe(false)
         expect((await current.device.groups.ports(destination).control.load()).operations).toEqual(
           [],

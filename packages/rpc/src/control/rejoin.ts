@@ -224,7 +224,7 @@ export async function stepRejoin(
   if (!(await deps.bootstrapLedger())) return record
   if (controlSafetyHeld(await deps.control.load()) !== null) return record
   const held = new Set(await deps.getLedger())
-  const tokens = record.ledgerBefore.filter((token) => !held.has(token))
+  const tokens = [...new Set(record.ledgerBefore)].filter((token) => !held.has(token))
   const snapshot = await deps.control.load()
   if (controlSafetyHeld(snapshot) !== null) return record
   const outcome: Outcome = { id: record.id, opID: null, at: deps.now(), kind: 'reenact', tokens }
@@ -232,9 +232,10 @@ export async function stepRejoin(
     deps.control,
     {
       deleteRejoin: true,
-      strand: null,
+      ...(snapshot.cursor?.incomplete ? {} : { strand: null }),
       ...(tokens.length === 0 ? {} : { putOutcomes: [outcome] }),
       cursor: {
+        ...(snapshot.cursor?.incomplete ? { incomplete: true as const } : {}),
         position: snapshot.cursor?.position ?? record.position ?? null,
         epoch: snapshot.cursor?.epoch ?? record.epochAfter,
       },

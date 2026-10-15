@@ -40,6 +40,7 @@ import type {
   PendingAppFrame,
   PersistenceEvent,
 } from './persistence-types.js'
+import { recoveryCompletionContexts } from './recovery-completion-context.js'
 
 export type GroupOwnerMarker = { revision: number; mutationID: string }
 
@@ -360,8 +361,14 @@ export function createUnlockedIncarnationStores(params: {
         const slotOnly = Object.keys(owned).every(
           (name) => name === 'commitOnce' || name === 'commitOnceAcceptance',
         )
+        const completion = recoveryCompletionContexts.get(tx)
+        const completing =
+          completion !== undefined &&
+          sameStoredValue(completion.key, key) &&
+          sameStoredValue(completion.changes, owned)
         if (
           !owedOnly &&
+          !completing &&
           !(slotOnly && context?.kind === 'retirement' && sameStoredValue(context.key, key))
         )
           await active()

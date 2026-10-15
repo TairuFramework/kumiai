@@ -36,6 +36,7 @@ import { createLedgerEntryResolver, encodeLedgerEntries } from '../../src/ledger
 import type { AppOutboxCleared } from '../../src/log-delivery.js'
 import type { GroupPeer, RecoveryEvent, StrandObservation } from '../../src/peer.js'
 import type { GroupProtocolDefinition } from '../../src/protocol.js'
+import type { RecoveryCompletion, RecoveryContinuation } from '../../src/recovery-types.js'
 import { commitTopic } from '../../src/topic.js'
 import { createMemoryAnchorStore, type MemoryAnchorStore } from './anchor.js'
 import { createMemoryAppCursorStore, type MemoryAppCursorStore } from './app-cursor.js'
@@ -116,6 +117,8 @@ export async function rollBackForkHalt(member: TestPeer): Promise<{ settled: Pro
 }
 
 export type MakeMLSPeerOptions = {
+  continuation?: RecoveryContinuation | null
+  completion?: RecoveryCompletion | null
   appOutbox?: AppOutbox
   appOutboxLimit?: number
   onAppOutboxCleared?: (notice: AppOutboxCleared) => void | Promise<void>
@@ -244,6 +247,8 @@ export function makeMLSPeer(
     crypto,
     mls,
     control,
+    continuation: options.continuation,
+    completion: options.completion,
     ...ports,
     readEvidence: options.readEvidence ?? ports.readEvidence,
     deliverWelcome:

@@ -98,14 +98,17 @@ export async function retireIncarnation<TTx extends GroupTransaction>(
   )
     throw new GroupStateConflictError('Retirement requires matching confirmed rejoin')
 
-  const outcomes: Array<Outcome> = control.operations.map(({ id }) => ({
+  const abandoned = control.operations.filter(
+    (op) => switchedRejoinID === undefined || op.stage !== 'accepted',
+  )
+  const outcomes: Array<Outcome> = abandoned.map(({ id }) => ({
     id,
     opID: id,
     at,
     kind: 'unknown',
   }))
   const changes: ControlChanges = {
-    deleteOperations: control.operations.map(({ id }) => id),
+    deleteOperations: abandoned.map(({ id }) => id),
   }
   if (rejoin !== null) {
     if (switchedRejoinID !== undefined)

@@ -292,6 +292,16 @@ export function createGroupPeerWithControlWalk<
     searchLog: OperationDeps['searchLog']
   }
 } {
+  if ((input.continuation == null) !== (input.completion == null))
+    throw new TypeError('Recovery continuation and completion must be supplied together')
+  if (
+    input.continuation != null &&
+    (input.mls == null ||
+      input.continuation.record.stage !== 'adopted' ||
+      input.continuation.source.groupID !== input.continuation.destination.groupID ||
+      input.continuation.source.incarnation + 1 !== input.continuation.destination.incarnation)
+  )
+    throw new TypeError('Installed recovery continuation required')
   const boundary = createHostBoundary()
   const controlAbort = new AbortController()
   const applyResolved: typeof applyControlResolved = (store, changes, mutationID) =>
@@ -312,6 +322,8 @@ export function createGroupPeerWithControlWalk<
     handlers,
     suppress,
   } = params
+  let continuation = params.continuation ?? null
+  let completionMutationID: string | null = null
   let revokeHold = false
   let rejoinHeld = false
   let rejoinPosition: LogPosition | null = null
@@ -597,6 +609,7 @@ export function createGroupPeerWithControlWalk<
       requireAnchorRecovery()
       return
     }
+    if (continuation !== null && !(await port.isLedgerComplete())) return
     const roster = (await port.rosterEntries()).map((entry) => normalizeDID(entry.did))
     if (safetyHold() !== null) return
     if (record.forced || detectRosterChange(record.rosterBefore, roster)) {
@@ -2495,14 +2508,16 @@ export function createGroupPeerWithControlWalk<
     operationDeadline = snapshot.operations[0]?.deadline ?? null
     hasOperations = snapshot.operations.length > 0
     revokeHold = revokeHeld(snapshot)
-    rejoinHeld = snapshot.rejoin != null
+    rejoinHeld = snapshot.rejoin != null || continuation !== null
     rejoinPosition = rejoinBarrier(snapshot.rejoin)
     refusalHeld = snapshot.rejoin?.stage === 'refused'
-    if (snapshot.rejoin?.stage === 'adopted' && awaitingBootstrap == null) {
+    const adopted =
+      continuation?.record ?? (snapshot.rejoin?.stage === 'adopted' ? snapshot.rejoin : null)
+    if (adopted !== null && awaitingBootstrap == null) {
       awaitingBootstrap = {
-        attemptID: snapshot.rejoin.id,
+        attemptID: adopted.id,
         trigger: 'automatic',
-        entries: snapshot.rejoin.ledgerBefore,
+        entries: adopted.ledgerBefore,
       }
       rejoinRuntimeNeedsBuild = true
     }
@@ -3332,6 +3347,7 @@ export function createGroupPeerWithControlWalk<
 
   const repairRejoin = async (): Promise<void> => {
     if (disposed || safetyHold() !== null || awaitingBootstrap == null) return
+    if (continuation !== null && mls != null && !(await mls.isLedgerComplete())) return
     // Restore the subscription before gathering the ledger: responders may already have
     // rotated to the new app anchor. A failed repair remains pending for the next lane call.
     if (mls != null) await resolveAnchorRotation({ port: mls })
@@ -3346,6 +3362,7 @@ export function createGroupPeerWithControlWalk<
   const finalizeBootstrap = async (port: GroupMLS, announce = true): Promise<void> => {
     assertLive()
     if (safetyHold() !== null || awaitingBootstrap == null) return
+    if (continuation !== null && !(await port.isLedgerComplete())) return
     const { attemptID, trigger, entries } = awaitingBootstrap
     await repairRejoin()
     assertLive()
@@ -3353,11 +3370,18 @@ export function createGroupPeerWithControlWalk<
     const held = new Set(await port.getLedger())
     assertLive()
     if (safetyHold() !== null) return
-    const owed = entries.filter((token) => !held.has(token))
+    const owed = [...new Set(entries)].filter((token) => !held.has(token))
     const record = (await control?.load())?.rejoin
     if (safetyHold() !== null) return
-    if (record != null && 'format' in record) return
-    if (record?.stage === 'adopted') {
+    if (continuation !== null) {
+      completionMutationID ??= newPublishID()
+      await params.completion?.({ ledger: [...held], mutationID: completionMutationID })
+      continuation = null
+      completionMutationID = null
+      await refreshControl()
+      if (safetyHold() !== null) return
+    } else if (record != null && 'format' in record) return
+    else if (record?.stage === 'adopted') {
       const deps = rejoinDeps(Date.now() + recoveryTimeoutMs)
       await stepRejoin({ ...deps, bootstrapLedger: async () => true }, record)
       await refreshControl()
@@ -4330,6 +4354,15 @@ export function createGroupPeerWithControlWalk<
     const stopped = () => disposed || safetyHold() !== null
     try {
       if (stopped()) return
+      if (continuation !== null) {
+        const source = await mls?.readRecoverySource()
+        if (
+          source === undefined ||
+          source.key.groupID !== continuation.destination.groupID ||
+          source.key.incarnation !== continuation.destination.incarnation
+        )
+          throw new TypeError('Recovery continuation belongs to another destination')
+      }
       mux.start()
       const stored = await anchorStore?.load()
       if (stopped()) return

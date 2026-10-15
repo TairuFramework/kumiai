@@ -149,6 +149,7 @@ export {
   openRecoveryVerdictFromTrust,
   restoreRecoveryCandidate,
 } from './recovery.js'
+export { createRecoveryContinuationPort } from './registry/continuation.js'
 export { createGroupHandleRegistry } from './registry/registry.js'
 export {
   ackRetiredOutcome,

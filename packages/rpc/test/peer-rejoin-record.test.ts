@@ -168,6 +168,39 @@ test('legacy confirmation preserves a captured replacement from the stored rerea
   expect((await bob.control.load()).rejoin).toEqual(replacement)
 })
 
+test('adopted legacy completion retains incomplete capture evidence', async () => {
+  const { bob } = await setup()
+  await bob.peer.dispose()
+  await bob.peer.drained()
+  const record = { ...(await buildRejoinRecord(bob)), stage: 'adopted' as const }
+  const cursor = {
+    position: asLogPosition('incomplete-prefix'),
+    epoch: 1,
+    incomplete: true as const,
+  }
+  await bob.control.apply({ putRejoin: record, cursor }, 'incomplete-adoption')
+  const unreachable = async (): Promise<never> => {
+    throw new Error('Unexpected legacy work')
+  }
+  const deps: RejoinDeps = {
+    control: bob.control,
+    publish: unreachable,
+    searchLog: unreachable,
+    confirm: unreachable,
+    runSerial: (fn) => fn(),
+    scan: unreachable,
+    adopt: unreachable,
+    bootstrapLedger: async () => true,
+    getLedger: async () => record.ledgerBefore,
+    newID: () => 'complete-incomplete',
+    now: () => 1234,
+    emit: () => {},
+    discarded: () => {},
+  }
+  expect(await stepRejoin(deps, record)).toBeNull()
+  expect((await bob.control.load()).cursor).toEqual(cursor)
+})
+
 test('a hold committed while loading a saved rejoin prevents external handoff', async () => {
   const { hub, bob } = await setup()
   const record = await buildRejoinRecord(bob)
