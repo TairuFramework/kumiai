@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { RecoveryEvent } from '../src/peer.js'
-import { commitTopic } from '../src/topic.js'
+import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { assertDurableForkHalt } from './fixtures/control-hold.js'
 import { FakeHub } from './fixtures/fake-hub.js'
@@ -169,10 +169,19 @@ const armForkLosing: Arm = async (hub, rs, withResponder) => {
     },
   })
   await bob.peer.resync()
+  const framesBefore = commitFrames(hub, rs)
+  const rendezvousBefore = hub.published.filter(
+    (message) => message.topicID === rendezvousTopic(rs),
+  )
   // Bob applied the loser branch (the winner was hidden). Now show him the branch he lost.
   hub.revealTo('bob', winnerSeq)
   await wakeLane(hub, rs)
   await bob.peer.replay()
+  // The mailbox wake is the only extra commit-topic frame.
+  expect(commitFrames(hub, rs)).toBe(framesBefore + 1)
+  expect(hub.published.filter((message) => message.topicID === rendezvousTopic(rs))).toEqual(
+    rendezvousBefore,
+  )
   expect((await bob.control.load()).forkHalt).toBeNull()
   expect(bob.controlWalk.safetyHold()).toBeNull()
   expect(events).toEqual([])
@@ -227,6 +236,10 @@ describe('heal strand', { concurrent: false }, () => {
           expect((await bob.control.load()).applied.slice(0, before.applied.length)).toEqual(
             before.applied,
           )
+          expect(commitFrames(hub, rs)).toBe(framesBefore + 1)
+          expect(
+            hub.published.filter((message) => message.topicID === rendezvousTopic(rs)),
+          ).toEqual([])
           await bob.peer.dispose()
           return
         }

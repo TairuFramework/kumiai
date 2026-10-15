@@ -4,7 +4,7 @@ import { toB64U } from '@sozai/codec'
 import type { CommitHeader } from './crypto.js'
 
 /**
- * What the lane does with one frame from the commit log. Eight rows, in EVALUATION order — the
+ * What the lane does with one frame from the commit log, in evaluation order. The
  * order is load-bearing, and this table is the `if` chain of {@link classifyCommit} plus the
  * port's answer to its last row:
  *
@@ -19,11 +19,9 @@ import type { CommitHeader } from './crypto.js'
  * | At this peer's current epoch, committed by THIS peer | settle a matching retained slot or preserve cursor and hold unexplained own evidence |
  * | At this peer's current epoch, committed by another — handed to the port | applied: advance and record this epoch -> the applied commit (digest and position) for history and divergence diagnostics; refused by policy or entries unresolvable: advance (poison — never retry, never heal) |
  *
- * Seven rows are decided here, reading bytes and decrypting nothing; only the last — a frame at
- * this peer's epoch authored by someone else — is handed to the MLS port, whose answer is the
- * eighth row. Order: the unreadable-version row settles first, since such a frame can't even be
- * asked if it's a commit; headerless-poison settles next, since non-commit bytes can't be asked
- * the epoch questions the rest turn on.
+ * Classification reads bytes and decrypts nothing. Only a frame at this peer's epoch authored
+ * by someone else reaches the MLS port. Unreadable versions settle before headerless poison,
+ * then epoch classification.
  *
  * **The header carries two facts with different trust.** The epoch is cleartext and only the
  * publisher's word. The committer is MLS-authenticated but recoverable only for a commit framed
@@ -83,7 +81,7 @@ export type CommitDisposition =
   | { row: 'history' }
   /** Past bytes can be a refused CAS loser or a forged copy. Skip without safety action. */
   | { row: 'past-epoch-divergence' }
-  /** Legacy classification shape, retained for compatibility. Never emitted. */
+  /** Legacy fork disposition, retained for compatibility. The classifier never emits it. */
   | { row: 'fork'; appliedSequenceID: string; branch: 'winning' | 'losing' }
   /**
    * This peer's OWN commit, framed at the epoch it is STILL at. MLS MERGES a pending commit,
@@ -206,7 +204,7 @@ export type ClassifyCommitParams = {
    * {@link UNKNOWN_FRAME_VERSION} where the frame's wire version put the header itself out of reach.
    */
   header: CommitFrameEvidence
-  /** Where the log carries this frame — the hub's own chaining, not the commit's word. */
+  /** Unused compatibility field. Hub positions do not decide past divergence. */
   sequenceID: string
   /**
    * {@link digestAppliedCommit} over this frame's commit bytes, or `null` where they were never

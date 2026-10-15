@@ -254,20 +254,24 @@ describe('durable fork halts', () => {
     const again = member(hub, { restartOf: seed })
     await again.peer.replay()
     const before = await again.control.load()
+    let seamFired = false
     again.database.seam('after-apply', () => {
+      seamFired = true
       void again.peer.dispose()
     })
     hub.revealTo('bob', hidden.sequenceID)
-    await hub.publish({
+    const poison = await hub.publish({
       senderDID: 'alice',
       topicID: commitTopic(secret),
       payload: new Uint8Array([0]),
+      retain: 'log',
     })
     await again.peer.replay().catch((error: unknown) => {
       expect(error).toMatchObject({ name: 'PeerDisposedError' })
     })
     await again.peer.dispose()
     await again.peer.drained()
+    expect(seamFired).toBe(true)
     const snapshot = await again.control.load()
     expect(snapshot.forkHalt).toBeNull()
     expect(snapshot.applied).toEqual(before.applied)
@@ -276,7 +280,9 @@ describe('durable fork halts', () => {
     expect(snapshot.cursor?.position).toBe(applied.sequenceID)
     const restarted = member(hub, { restartOf: again })
     await restarted.peer.replay()
-    expect((await restarted.control.load()).applied).toEqual(before.applied)
+    const restored = await restarted.control.load()
+    expect(restored.cursor?.position).toBe(poison.sequenceID)
+    expect(restored.applied).toEqual(before.applied)
     expect(restarted.controlWalk.safetyHold()).toBeNull()
     expect(hub.published.filter((row) => row.topicID === rendezvousTopic(secret))).toEqual([])
     await restarted.peer.commit(buildLedgerCommit(restarted, []))
@@ -319,7 +325,7 @@ describe('durable fork halts', () => {
     expect(after.forkHalt).toBeNull()
     expect(after.applied).toEqual(before.applied)
     expect(bob.controlWalk.safetyHold()).toBeNull()
-    expect(observations.length).toBeGreaterThan(0)
+    await expect.poll(() => observations.map((row) => row.claimedEpoch)).toEqual([2, 3])
     expect(
       observations.every(
         (row) => row.kind === 'past-epoch-divergence' && row.confidence === 'claimed',
