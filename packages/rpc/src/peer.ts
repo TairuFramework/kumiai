@@ -614,6 +614,7 @@ export function createGroupPeerWithControlWalk<
       return
     }
     if (continuation !== null && !(await port.isLedgerComplete())) return
+    if (safetyHold() !== null) return
     const roster = (await port.rosterEntries()).map((entry) => normalizeDID(entry.did))
     if (safetyHold() !== null) return
     if (record.forced || detectRosterChange(record.rosterBefore, roster)) {
@@ -1305,10 +1306,25 @@ export function createGroupPeerWithControlWalk<
           if (evaluation == null) {
             if (confirmationEvaluations.size >= maxPendingConfirmations) return
             evaluation = runSerial(async () => {
-              if (disposed || blocked() || !(await port.isLedgerComplete())) return { epoch }
+              if (
+                disposed ||
+                blocked() ||
+                !(await port.isLedgerComplete()) ||
+                disposed ||
+                blocked()
+              )
+                return { epoch }
               await settleOperations()
+              if (disposed || blocked()) return { epoch }
               await reconcileCommits()
-              if (disposed || blocked() || (await port.readEpoch()) !== epoch) return { epoch }
+              if (
+                disposed ||
+                blocked() ||
+                (await port.readEpoch()) !== epoch ||
+                disposed ||
+                blocked()
+              )
+                return { epoch }
               return await port.validateRecoveryCommit(request.commit)
             }).catch(() => ({ epoch }))
             confirmationEvaluations.set(memoKey, evaluation)
@@ -1332,7 +1348,7 @@ export function createGroupPeerWithControlWalk<
         }
         record = commitOutcomes.get(responseKey)
       }
-      if (disposed || blocked() || !(await port.isLedgerComplete())) return
+      if (disposed || blocked() || !(await port.isLedgerComplete()) || disposed || blocked()) return
       let outcome: RecoveryCommitOutcome | undefined
       let refusedEpoch: number | undefined
       if (record?.kind === 'applied' && record.digest === request.commitDigest) {
@@ -1388,7 +1404,7 @@ export function createGroupPeerWithControlWalk<
       if (disposed || blocked() || expiresAt <= Date.now()) return
       const response = record
       const confirmable = async () => {
-        if (blocked() || !(await port.isLedgerComplete())) return false
+        if (blocked() || !(await port.isLedgerComplete()) || disposed || blocked()) return false
         if (refusedEpoch !== undefined) return (await port.readEpoch()) === refusedEpoch
         const current = commitOutcomes.get(responseKey)
         return (
@@ -3367,6 +3383,7 @@ export function createGroupPeerWithControlWalk<
   const repairRejoin = async (): Promise<void> => {
     if (disposed || safetyHold() !== null || awaitingBootstrap == null) return
     if (continuation !== null && mls != null && !(await mls.isLedgerComplete())) return
+    if (disposed || safetyHold() !== null) return
     // Restore the subscription before gathering the ledger: responders may already have
     // rotated to the new app anchor. A failed repair remains pending for the next lane call.
     if (mls != null) await resolveAnchorRotation({ port: mls })
@@ -3382,6 +3399,7 @@ export function createGroupPeerWithControlWalk<
     assertLive()
     if (safetyHold() !== null || awaitingBootstrap == null) return
     if (continuation !== null && !(await port.isLedgerComplete())) return
+    if (disposed || safetyHold() !== null) return
     const { attemptID, trigger, entries } = awaitingBootstrap
     await repairRejoin()
     assertLive()
@@ -4375,6 +4393,8 @@ export function createGroupPeerWithControlWalk<
     storageServicePending = false
   }
 
+  // Core sinks latch synchronously, including holds already present at subscription.
+  const unsubscribeSafety = mls?.onSafetyHold?.(latchSafetyHold)
   const safetyReady = refreshControl()
   const ready = (async () => {
     await safetyReady
@@ -4671,6 +4691,7 @@ export function createGroupPeerWithControlWalk<
     dispose: () => {
       if (disposePromise != null) return disposePromise
       disposed = true
+      unsubscribeSafety?.()
       controlAbort.abort(new PeerDisposedError('Peer is disposed'))
       if (operationTimer != null) clearTimeout(operationTimer)
       cancelControlSlotRetry()

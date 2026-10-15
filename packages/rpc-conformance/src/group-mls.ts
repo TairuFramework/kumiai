@@ -178,6 +178,7 @@ export type ConformanceRosterEntry = {
  */
 export type ConformanceGroupMLS<Position extends string = string> = {
   ownCommitDigest(commit: Uint8Array): string | null
+  /** Core incarnation-bound sink. Replays an existing hold synchronously and returns an unsubscribe. */
   onSafetyHold?: (latch: (reason: 'fork-halted' | 'recovery-unavailable') => void) => () => void
   capturedRecovery?: ConformanceCapturedRecoveryPort<Position>
   signRecoveryConfirmation: (binding: {

@@ -174,6 +174,7 @@ export type MemoryRecoveryBinding = {
   holderGrant?: string
 }
 export type MemoryGroupMLSOptions = {
+  onSafetyHold?: GroupMLS['onSafetyHold']
   capturedRecovery?: {
     target: { targetID: string; topicID: string }
     readSource(): Promise<RecoverySource>
@@ -1484,6 +1485,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   }
 
   return {
+    ...(options.onSafetyHold === undefined ? {} : { onSafetyHold: options.onSafetyHold }),
     capturedRecovery,
     database: () => hostDB,
     persistInitialState: () =>

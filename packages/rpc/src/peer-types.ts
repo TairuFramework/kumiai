@@ -382,6 +382,7 @@ export type GroupPeer<Protocols extends Record<string, GroupProtocolDefinition>>
   dispose: () => Promise<void>
   /**
    * After dispose(), wait for teardown and every invoked host effect, including abandoned promises.
+   * Core safety subscriptions latch memory only and are released by dispose().
    * Never await from this peer's counted callbacks or port calls. Drain before replacing its owner.
    */
   drained: () => Promise<void>

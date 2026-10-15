@@ -68,7 +68,7 @@ export const pendingFrameHostMembers = {
 export const mlsHostMembers = {
   ownCommitDigest: 'data',
   validateRecoveryCommit: 'host',
-  onSafetyHold: 'core',
+  onSafetyHold: 'core', // Synchronous memory latch, outside host drain accounting.
   verifyRecoveryRequest: 'host',
   signRecoveryConfirmation: 'host',
   verifyRecoveryConfirmation: 'host',
