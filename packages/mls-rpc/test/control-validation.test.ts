@@ -1792,11 +1792,9 @@ test.each(['outer', 'inner'] as const)(
       reason: 'unsupported-version',
     })
     const searched = await searchReal(f, ledger.commit, f.port, payload)
-    expect(searched.result).toMatchObject({
-      kind: 'first-valid',
-      proof: { position: asLogPosition('000102') },
-    })
+    expect(searched.result).toEqual({ kind: 'unknown' })
     expect(searched.hold).not.toHaveBeenCalled()
+    expect(searched.followWinner).not.toHaveBeenCalled()
     const store = searched.store
     const operation = (await store.control.load()).operations[0]
     if (operation === undefined) throw new Error('missing saved operation')

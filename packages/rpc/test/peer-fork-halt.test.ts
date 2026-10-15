@@ -2,7 +2,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { toB64U } from '@sozai/codec'
 import { afterEach, expect, test, vi } from 'vitest'
 
-import { decodeCommitFrame } from '../src/commit-frame.js'
+import { COMMIT_FRAME_VERSION, decodeCommitFrame, encodeCommitFrame } from '../src/commit-frame.js'
 import type { ForkHalt, GroupForkEvidence, SafetyHold } from '../src/control/safety.js'
 import { forkEventID, recoveryUnavailableEventID } from '../src/control/safety.js'
 import type { WelcomeObligation } from '../src/control/types.js'
@@ -15,6 +15,7 @@ import {
   HANDSHAKE_MAGIC,
   HANDSHAKE_VERSION,
 } from '../src/handshake.js'
+import { UnsupportedLedgerEntriesVersionError } from '../src/ledger-entries.js'
 import * as logDeliveryModule from '../src/log-delivery.js'
 import { commitTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
@@ -431,6 +432,66 @@ test('an unsupported version fetched after a host halt preserves the safety latc
   expect(after.strand).toEqual(before.strand)
   expect(member.controlWalk.safetyHold()).toBe('fork-halted')
 })
+
+test.each(['handshake', 'commit-frame', 'sealed-entries'] as const)(
+  'an unsupported %s frame emits no diagnostic after a halt during cursor persistence',
+  async (layer) => {
+    const hub = new FakeHub()
+    const onStrand = vi.fn()
+    const member = makeMLSPeer(hub, 'alice', secret, { onStrand })
+    peers.push(member)
+    await member.peer.replay()
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const apply = member.control.apply.bind(member.control)
+    let suspended = false
+    vi.spyOn(member.control, 'apply').mockImplementation(async (changes, id) => {
+      await apply(changes, id)
+      if (changes.cursor?.position != null && !suspended) {
+        suspended = true
+        entered.resolve()
+        await release.promise
+      }
+    })
+    if (layer === 'sealed-entries') {
+      vi.spyOn(member.crypto, 'openEntries').mockRejectedValue(
+        new UnsupportedLedgerEntriesVersionError(),
+      )
+      await publishCommit({
+        hub,
+        senderDID: 'bob',
+        recoverySecret: secret,
+        epoch: 1,
+        entries: ['role:carol=admin'],
+      })
+    } else {
+      const inner = encodeCommitFrame(new Uint8Array([1]), new Uint8Array())
+      if (layer === 'commit-frame') inner[0] = COMMIT_FRAME_VERSION + 1
+      const payload = encodeHandshakeFrame(HANDSHAKE_KIND.commit, inner)
+      if (layer === 'handshake') payload[HANDSHAKE_MAGIC.length] = HANDSHAKE_VERSION + 1
+      await hub.publish({ senderDID: 'bob', topicID: commitTopic(secret), payload, retain: 'log' })
+    }
+    try {
+      await entered.promise
+      const halting = member.controlWalk.haltFork(evidence)
+      await vi.waitFor(async () => expect((await member.control.load()).forkHalt).not.toBeNull())
+      const before = await member.control.load()
+      expect(member.controlWalk.safetyHold()).toBe('fork-halted')
+      release.resolve()
+      await member.peer.replay()
+      await halting
+      const after = await member.control.load()
+      expect(after.forkHalt).toEqual(before.forkHalt)
+      expect(after.controlHold).toEqual(before.controlHold)
+      expect(after.cursor).toEqual(before.cursor)
+      expect(after.strand).toEqual(before.strand)
+      expect(member.mls.epoch()).toBe(1)
+      expect(onStrand).not.toHaveBeenCalled()
+    } finally {
+      release.resolve()
+    }
+  },
+)
 
 test.each(['intent', 'built', 'pending', 'accepted'] as const)(
   'live and restarted %s deadlines under halt use storage only',

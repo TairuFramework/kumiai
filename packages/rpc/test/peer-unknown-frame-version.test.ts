@@ -120,7 +120,7 @@ describe('a frame whose handshake version this build does not know', () => {
     const rs = new Uint8Array(32).fill(0x76)
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
     await bob.peer.replay()
-    const position = '000000000001'
+    const position = '000000000099'
     await bob.control.apply(
       {
         controlHold: { reason: 'unsupported-version', position: asLogPosition(position) },
@@ -130,7 +130,36 @@ describe('a frame whose handshake version this build does not know', () => {
       'saved-legacy-hold',
     )
     await bob.peer.ack('refresh-saved-hold')
+    const before = await bob.control.load()
+    const framesBefore = commitFrames(hub, rs)
+    const request = buildLedgerCommit(bob, ['held'])
+    const committing = bob.peer.commit(request)
+    void committing.catch(() => {})
+    await vi.waitFor(async () => {
+      expect((await bob.control.load()).operations).toContainEqual(
+        expect.objectContaining({ id: request.id, stage: 'intent' }),
+      )
+    })
+    await expect(bob.controlWalk.stepOperation(request.id)).resolves.toMatchObject({
+      id: request.id,
+      stage: 'intent',
+    })
+    expect(commitFrames(hub, rs)).toBe(framesBefore)
+    expect(bob.mls.epoch()).toBe(1)
+    const delivered = await publishFutureFrame(hub, rs)
+    expect(delivered.sequenceID).not.toBe(position)
+    await bob.peer.replay()
+    const after = await bob.control.load()
+    expect(after.controlHold).toEqual(before.controlHold)
+    expect(after.cursor).toEqual(before.cursor)
+    expect(after.strand).toEqual(before.strand)
+    expect(after.operations).toContainEqual(
+      expect.objectContaining({ id: request.id, stage: 'intent' }),
+    )
+    expect(commitFrames(hub, rs)).toBe(framesBefore + 1)
+    expect(bob.mls.epoch()).toBe(1)
     await assertDurableControlHold(bob, hub, rs, 'bob', { reason: 'unsupported-version', position })
+    await expect(committing).rejects.toThrow()
   })
 
   test('on the rendezvous topic: a well-formed reply is dropped, not routed to the heal', async () => {

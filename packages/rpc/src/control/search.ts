@@ -204,10 +204,10 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
       }
       const unknown = async (
         position: LogPosition | null = null,
-        reason: ControlHold['reason'] = 'acceptance-unknown',
+        reason: ControlHold['reason'] | null = 'acceptance-unknown',
         retryHead?: LogPosition | null,
       ) => {
-        if (!held()) await deps.hold({ reason, position })
+        if (reason !== null && !held()) await deps.hold({ reason, position })
         return { kind: 'unknown' as const, ...(retryHead === undefined ? {} : { retryHead }) }
       }
       if (held()) return stopped()
@@ -352,6 +352,11 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
       }
       const settleOccurrence = async () => {
         if (held()) return stopped()
+        // Skipping unknown semantics cannot certify the first valid prefix.
+        if (discovery.unsupportedVersion) {
+          continuation = null
+          return unknown(discovery.through, null)
+        }
         if (discovery.unexplainedOwn) return unknown(discovery.through)
         if (discovery.winner === null || discovery.occurrence === null)
           return unknown(discovery.through)
@@ -507,11 +512,11 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
           }
           discovery.complete = discovery.head === null || discovery.through === discovery.head
         }
-        if (discovery.latestOwnMatches === true) {
-          continuation = null
-          return unknown(discovery.through)
-        }
         if (discovery.unsupportedVersion) {
+          continuation = null
+          return unknown(discovery.through, null)
+        }
+        if (discovery.latestOwnMatches === true) {
           continuation = null
           return unknown(discovery.through)
         }

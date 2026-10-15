@@ -1649,6 +1649,7 @@ export function createGroupPeerWithControlWalk<
           const localEpoch = await port.readEpoch()
           if (safetyHold() !== null) return advancedEpoch
           await saveCommitCursor(position)
+          if (safetyHold() !== null) return advancedEpoch
           if (commitTopicID != null)
             emitStrand({
               groupID: commitTopicID,
@@ -1677,6 +1678,7 @@ export function createGroupPeerWithControlWalk<
             const localEpoch = await port.readEpoch()
             if (safetyHold() !== null) return advancedEpoch
             await saveCommitCursor(position)
+            if (safetyHold() !== null) return advancedEpoch
             if (commitTopicID != null)
               emitStrand({
                 groupID: commitTopicID,
@@ -1905,7 +1907,9 @@ export function createGroupPeerWithControlWalk<
             if (disposed || safetyHold() !== null) return false
             if (unsupportedEntries) {
               await resolveAnchorRotation({ port, knownUnlanded: true })
+              // A tampered version byte must not plant a digest-keyed refusal.
               await saveCommitCursor(position)
+              if (safetyHold() !== null) return advancedEpoch
               if (commitTopicID != null)
                 emitStrand({
                   groupID: commitTopicID,

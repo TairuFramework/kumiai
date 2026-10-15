@@ -935,13 +935,18 @@ test.each([null, position(100)])(
   },
 )
 
-test.each(['handshake', 'commit-frame', 'sealed-entries'] as const)(
-  'an unsupported %s copy is skipped before a later exact saved occurrence',
-  async (layer) => {
+test.each(
+  (['handshake', 'commit-frame', 'sealed-entries'] as const).flatMap((layer) =>
+    [false, true].map((competitor) => [layer, competitor] as const),
+  ),
+)(
+  'an unsupported %s prefix preserves unknown acceptance (competitor: %s)',
+  async (layer, competitor) => {
     const onUnsupportedVersion = vi.fn()
     const f = fixture([
       { id: 101, value: 1 },
-      { id: 102, value: 2 },
+      ...(competitor ? [{ id: 102, value: 3 }] : []),
+      { id: competitor ? 103 : 102, value: 2 },
     ])
     f.deps.onUnsupportedVersion = onUnsupportedVersion
     if (layer === 'sealed-entries') {
@@ -952,7 +957,13 @@ test.each(['handshake', 'commit-frame', 'sealed-entries'] as const)(
           validateFrame: async (frame) =>
             frame.position === position(101)
               ? { kind: 'unavailable', reason: 'unsupported-version' }
-              : { kind: 'valid', header: { epoch: 65 }, own: true, advanced: true, removed: false },
+              : {
+                  kind: 'valid',
+                  header: { epoch: 65 },
+                  own: frame.position === position(competitor ? 103 : 102),
+                  advanced: true,
+                  removed: false,
+                },
           verifyOwn: async () => true,
         }),
       }
@@ -968,16 +979,57 @@ test.each(['handshake', 'commit-frame', 'sealed-entries'] as const)(
         return page
       }
     }
-    expect(await f.search.searchLog(built)).toMatchObject({
-      kind: 'first-valid',
-      proof: { position: position(102) },
-    })
+    expect(await f.search.searchLog(built)).toEqual({ kind: 'unknown' })
     expect(f.hold).not.toHaveBeenCalled()
     expect(f.haltFork).not.toHaveBeenCalled()
+    expect(f.followWinner).not.toHaveBeenCalled()
     expect(onUnsupportedVersion).toHaveBeenCalledWith(
       expect.objectContaining({ position: position(101) }),
       65,
     )
+  },
+)
+
+test.each(['handshake', 'commit-frame', 'sealed-entries'] as const)(
+  'an unsupported %s frame after our exact occurrence cannot precede its proof',
+  async (layer) => {
+    const onUnsupportedVersion = vi.fn()
+    const f = fixture([
+      { id: 101, value: 2 },
+      { id: 102, value: 1 },
+    ])
+    f.deps.onUnsupportedVersion = onUnsupportedVersion
+    if (layer === 'sealed-entries') {
+      f.deps.validation = {
+        restoreValidation: async () => ({
+          source,
+          readCommitHeader: async () => ({ epoch: 65 }),
+          validateFrame: async (frame) =>
+            frame.position === position(102)
+              ? { kind: 'unavailable', reason: 'unsupported-version' }
+              : f.validateFrame(frame),
+          verifyOwn: async () => true,
+        }),
+      }
+    } else {
+      const fetch = f.deps.fetch
+      f.deps.fetch = async (after) => {
+        const page = await fetch(after)
+        const later = page.messages[1]
+        if (later === undefined) throw new Error('missing later frame')
+        if (layer === 'handshake') later.payload[HANDSHAKE_MAGIC.length] = HANDSHAKE_VERSION + 1
+        else later.payload[HANDSHAKE_MAGIC.length + 2] = COMMIT_FRAME_VERSION + 1
+        return page
+      }
+    }
+    expect(await f.search.searchLog(built)).toMatchObject({
+      kind: 'first-valid',
+      proof: { position: position(101) },
+    })
+    expect(f.validateFrame).toHaveBeenCalledOnce()
+    expect(onUnsupportedVersion).not.toHaveBeenCalled()
+    expect(f.hold).not.toHaveBeenCalled()
+    expect(f.haltFork).not.toHaveBeenCalled()
   },
 )
 
