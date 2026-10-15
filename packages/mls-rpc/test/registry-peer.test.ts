@@ -9,6 +9,7 @@ import {
   processWelcome,
 } from '@kumiai/mls'
 import type { ConfirmedRecoveryHandoff, GroupPeer, GroupProtocolDefinition } from '@kumiai/rpc'
+import { decodeCommitFrame, decodeHandshakeFrame } from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
 import type { EntryReads } from '../src/entry-capability.js'
@@ -150,6 +151,8 @@ async function setup(confirmed = true) {
   return {
     f,
     recovery,
+    responder,
+    responderIdentity,
     created,
     start,
     continuation,
@@ -287,7 +290,7 @@ describe('registry peer recovery coordination', () => {
     }
   })
 
-  test('moved identity preserves accepted bytes and obligations without a settlement callback', async () => {
+  test('moved identity preserves accepted bytes and obligations while offering authenticated settlement', async () => {
     const s = await setup()
     let owner: api.RegistryPeer | undefined
     try {
@@ -317,9 +320,11 @@ describe('registry peer recovery coordination', () => {
       })
       const before = await s.f.device.groups.ports(source).control.load()
       owner = await s.start()
-      await expect(owner.ready).rejects.toThrow()
+      await owner.ready
       expect(await s.f.device.groups.ports(source).control.load()).toEqual(before)
-      expect(owner.peer()).toBeNull()
+      expect(owner.peer()).not.toBeNull()
+      expect(s.created[0]?.options.reconcileConfirmedRecovery).toBe(before.rejoin?.id)
+      expect(s.created[0]?.options.settleAcceptedRecovery).toBeTypeOf('function')
     } finally {
       owner?.dispose()
       await owner?.drained().catch(() => {})
@@ -650,16 +655,12 @@ describe('registry peer recovery coordination', () => {
     }
   })
 
-  test('local rollback followed by authenticated source movement preserves accepted work across restart', async () => {
+  test('local switch rollback and source movement recapture accepted X through the shared settlement callback', async () => {
     const s = await setup()
-    let fixture = s.f
     let owner: api.RegistryPeer | undefined
     try {
-      const record = {
-        ...s.recovery.record,
-        ledgerBefore: ['owed-ledger-token', ...s.recovery.record.ledgerBefore],
-      }
-      await fixture.installRows({
+      const record = { ...s.recovery.record, ledgerBefore: ['owed-X'] }
+      await s.f.installRows({
         key: source,
         control: {
           putRejoin: record,
@@ -669,62 +670,92 @@ describe('registry peer recovery coordination', () => {
           putOutcomes: [{ id: 'prior', opID: null, at: 1, kind: 'unknown' }],
         },
       })
-      const before = await fixture.device.groups.ports(source).control.load()
-      fixture.armWorkFault(record.switchMutationID ?? 'missing-switch-id', 'before-commit')
-      const switchCall = fixture.registry.switchIncarnation.bind(fixture.registry)
-      vi.spyOn(fixture.registry, 'switchIncarnation').mockImplementation(
-        async (candidate, input) => {
-          try {
-            return await switchCall(candidate, input)
-          } catch (error) {
-            const state = await fixture.device.groups.loadState(source)
-            if (state === null || state.deleted) throw new Error('Missing state', { cause: error })
-            const trust = await fixture.device.groups.loadTrust(groupID)
-            const handle = await (await fixture.registry.access(groupID)).read((value) => value)
-            const advanced = await fixture.advance(handle)
-            await fixture.installRows({
-              key: source,
-              state: {
-                ...state,
-                version: state.version + 1,
-                epoch: Number(advanced.epoch),
-                epochAuthenticator: advanced.state.keySchedule.epochAuthenticator,
-                state: encodeClientState(advanced.state),
-              },
-              trust: recoveryTrustFor(advanced, source, trust),
-            })
-            throw error
-          }
+      const stored = await s.f.device.groups.loadState(source)
+      if (stored === null || stored.deleted) throw new Error('Missing source')
+      const trust = await s.f.device.groups.loadTrust(groupID)
+      const handle = await (await s.f.registry.access(groupID)).read((value) => value)
+      const moved = await s.f.advance(handle)
+      await s.f.installRows({
+        key: source,
+        state: {
+          ...stored,
+          version: stored.version + 1,
+          epoch: Number(moved.epoch),
+          epochAuthenticator: moved.state.keySchedule.epochAuthenticator,
+          state: encodeClientState(moved.state),
         },
-      )
+        trust: recoveryTrustFor(moved, source, trust),
+      })
       owner = await s.start()
-      await expect(owner.ready).rejects.toThrow('Accepted recovery origin moved')
-      expect(await fixture.device.groups.ports(source).control.load()).toEqual(before)
-      expect(await fixture.device.groups.loadState(destination)).toBeNull()
-      owner.dispose()
-      await expect(owner.drained()).rejects.toThrow('Accepted recovery origin moved')
-      owner = undefined
-      fixture = await fixture.reopen()
-      const createMLS = vi.fn(() => {
-        throw new Error('Moved accepted work must stay stopped')
+      await owner.ready
+      expect(owner.installedKey()).toEqual(source)
+      const options = s.created[0]?.options
+      if (
+        options?.reconcileAcceptedRecovery === undefined ||
+        options.settleAcceptedRecovery === undefined
+      )
+        throw new Error('Missing accepted settlement callbacks')
+      expect(options.recoveryOnly).toBe(true)
+      expect((await s.f.device.groups.ports(source).control.load()).rejoin).toEqual(record)
+      const requestID = 'moved-accepted-X'
+      const { request, requestKey } = await options.mls.createRecoveryRequest(requestID)
+      await s.responder.processMessage(
+        decodeCommitFrame(decodeHandshakeFrame(record.payload).payload).commit,
+      )
+      const advanced = await s.f.advance(s.responder)
+      const sealed = await mlsAPI.sealCapturedGroupInfo({
+        group: advanced,
+        identity: s.responderIdentity,
+        request: new TextDecoder().decode(request),
+        captureHead: null,
       })
-      owner = await s.start({
-        registry: fixture.registry,
-        recovery: fixture.environment,
-        continuation: api.createRecoveryContinuationPort({
-          registry: fixture.registry,
-          persistence: fixture.device.groups,
+      const result = await options.reconcileAcceptedRecovery(record, {
+        sealed,
+        requestID,
+        requestKey,
+        epochFloor: null,
+      })
+      expect(result).toMatchObject({
+        kind: 'accepted',
+        epoch: Number(advanced.epoch),
+        leafDigest: expect.any(String),
+      })
+      if (result.kind !== 'accepted') throw new Error('X acceptance was not authenticated')
+      await options.settleAcceptedRecovery(record, result.epoch, result.leafDigest)
+      const snapshot = await s.f.device.groups.ports(source).control.load()
+      expect(snapshot.rejoin).toBeNull()
+      expect(snapshot.recoveryEpochFloor).toBe(Number(advanced.epoch))
+      expect(snapshot.settledRejoins).toEqual([
+        expect.objectContaining({
+          kind: 'accepted-unadoptable',
+          id: record.id,
+          ledgerBefore: ['owed-X'],
         }),
-        createMLS,
+      ])
+      expect(snapshot.welcomes.map((row) => row.opID)).toEqual(['owed'])
+      expect(snapshot.outcomes).toContainEqual({ id: 'prior', opID: null, at: 1, kind: 'unknown' })
+      const yRequest = await options.mls.createRecoveryRequest('fresh-Y')
+      const yReply = await mlsAPI.sealCapturedGroupInfo({
+        group: advanced,
+        identity: s.responderIdentity,
+        request: new TextDecoder().decode(yRequest.request),
+        captureHead: null,
       })
-      await expect(owner.ready).rejects.toThrow('Accepted recovery origin moved')
-      expect(createMLS).not.toHaveBeenCalled()
-      expect(await fixture.device.groups.ports(source).control.load()).toEqual(before)
-      expect(await fixture.device.groups.loadState(destination)).toBeNull()
+      const y = await options.mls.capturedRecovery?.applyRecovery(
+        yReply,
+        'fresh-Y',
+        yRequest.requestKey,
+      )
+      if (y === null || y === undefined || 'renewalRequired' in y) throw new Error('Missing Y')
+      await advanced.processMessage(y.commit)
+      expect(Number(advanced.epoch)).toBe(result.epoch + 1)
+      expect(advanced.listMembers().filter((member) => member.id === s.f.identity.id)).toHaveLength(
+        1,
+      )
     } finally {
       owner?.dispose()
       await owner?.drained().catch(() => {})
-      await fixture.close()
+      await s.f.close()
     }
   })
 
@@ -1475,4 +1506,32 @@ describe('registry peer recovery coordination', () => {
       await s.f.close()
     }
   })
+})
+
+test('recovery retains the current ledger when private MLS state is unavailable', async () => {
+  const s = await setup(false)
+  try {
+    const trust = await s.f.device.groups.loadTrust(groupID)
+    if (trust === null) throw new Error('Missing retained trust')
+    expect(trust.ledger.length).toBeGreaterThan(0)
+    const restores = s.f.restoreCount(groupID)
+    await s.f.corruptState(source)
+    const mls = await api.createRegistryGroupMLS({
+      registry: s.f.registry,
+      key: source,
+      recovery: s.f.environment,
+      target,
+      identity: s.f.identity,
+      entrySlot: api.createLedgerEntrySlot(),
+      onConfirmedRecovery: () => {},
+    })
+    expect(mls.getRecoveryLedger).toBeTypeOf('function')
+    const ledger = await mls.getRecoveryLedger?.()
+    expect(ledger).toEqual(trust.ledger)
+    ledger?.push('caller mutation')
+    expect(await mls.getRecoveryLedger?.()).toEqual(trust.ledger)
+    expect(s.f.restoreCount(groupID)).toBe(restores)
+  } finally {
+    await s.f.close()
+  }
 })

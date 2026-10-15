@@ -32,7 +32,10 @@ function switchWrite<THandle extends ConformanceRegistryHandle>(
   recovery: Awaited<ReturnType<ConformanceRegistryFixture<THandle>['confirmedRecovery']>>,
 ): ConformanceRegistrySwitchWrite {
   return {
-    mutationID: crypto.randomUUID(),
+    mutationID:
+      'format' in recovery.record
+        ? (recovery.record.switchMutationID ?? crypto.randomUUID())
+        : crypto.randomUUID(),
     source: { rejoinID: recovery.record.id },
     destination: {
       control: {
@@ -1110,7 +1113,11 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
             const advancedAuthenticator = await sourceAccess.read((handle) =>
               fixture.authenticator(handle),
             )
-            const recovery = await fixture.confirmedRecovery(key, { confirm: true })
+            // This case exercises independent source sender progress through the legacy codec.
+            const recovery = await fixture.confirmedRecovery(key, {
+              confirm: true,
+              format: 'legacy',
+            })
             const source = await owner.recoverySource(groupID)
             const write = switchWrite(recovery)
             const snapshot = sourceAccess.runtime.snapshot()
@@ -1215,6 +1222,7 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
               expect(retired.rejoin, 'source retains adopted recovery continuation').toEqual({
                 ...recovery.record,
                 stage: 'adopted',
+                ...('format' in recovery.record ? { destinationKey: destination } : {}),
               })
               const retiredPorts = fixture.device.groups.ports(key)
               expect(
@@ -1308,6 +1316,7 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
         expect((await fixture.device.groups.ports(key).control.load()).rejoin).toEqual({
           ...recovery.record,
           stage: 'adopted',
+          ...('format' in recovery.record ? { destinationKey: destination } : {}),
         })
         await expect(fixture.registry.delete(destination)).rejects.toMatchObject({
           name: 'GroupControlUnsettledError',

@@ -62,7 +62,7 @@ for (const mode of ['real-mls', 'double'] as const) {
     async function setup(extra?: ControlChanges) {
       const fixture = await createRegistryFixture({ mode, setup: 'seeded', groupID })
       if (extra !== undefined) await fixture.installRows({ key, control: extra })
-      const recovery = await fixture.confirmedRecovery(key, { confirm: true })
+      const recovery = await fixture.confirmedRecovery(key, { confirm: true, format: 'legacy' })
       const owner = registry(fixture)
       const access = await owner.access(groupID)
       let hooks = 0
@@ -110,7 +110,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           const recovery =
             format === 'captured'
               ? await registryFixtureCapturedRecovery(fixture, key, { confirm: true })
-              : await fixture.confirmedRecovery(key, { confirm: true })
+              : await fixture.confirmedRecovery(key, { confirm: true, format: 'legacy' })
           const before = structuredClone(recovery.record)
           if ('format' in recovery.record) {
             expect(recovery.record.source.identity?.epoch).toBe(stored.epoch)
@@ -168,7 +168,8 @@ for (const mode of ['real-mls', 'double'] as const) {
       async (phase) => {
         const s = await setup()
         try {
-          const { source: _source, conflictEpoch: _conflict, ...common } = s.recovery.record
+          const { source: _source, ...common } = s.recovery.record
+          Reflect.deleteProperty(common, 'conflictEpoch')
           const record: CapturedRejoinRecord = {
             ...common,
             stage: phase === 'adopted' ? 'adopted' : 'confirmed',
@@ -237,7 +238,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       async (scope) => {
         const fixture = await createRegistryFixture({ mode, setup: 'seeded', groupID })
         try {
-          const recovery = await fixture.confirmedRecovery(key, { confirm: true })
+          const recovery = await fixture.confirmedRecovery(key, { confirm: true, format: 'legacy' })
           if (scope === 'device') {
             await fixture.device.transition(
               {
@@ -306,7 +307,7 @@ for (const mode of ['real-mls', 'double'] as const) {
     test('switch recovers unreadable source ciphertext without restoring the old handle', async () => {
       const fixture = await createRegistryFixture({ mode, setup: 'seeded', groupID })
       try {
-        const recovery = await fixture.confirmedRecovery(key, { confirm: true })
+        const recovery = await fixture.confirmedRecovery(key, { confirm: true, format: 'legacy' })
         const owner = registry(fixture)
         await fixture.corruptState(key)
         await expect(fixture.device.groups.loadState(key)).rejects.toThrow()
@@ -769,7 +770,10 @@ for (const mode of ['real-mls', 'double'] as const) {
       })
       try {
         await run(s)
-        const next = await s.fixture.confirmedRecovery(destination, { confirm: true })
+        const next = await s.fixture.confirmedRecovery(destination, {
+          confirm: true,
+          format: 'legacy',
+        })
         const savedSource = await s.owner.recoverySource(groupID)
         await s.fixture.device.groups
           .ports(key)

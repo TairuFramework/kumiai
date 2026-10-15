@@ -12,7 +12,7 @@ import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
-import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { createMemoryGroupMLS, requireCapturedRecovery } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 
 function gate() {
@@ -242,17 +242,19 @@ describe('peer host drain', { concurrent: false }, () => {
     const recovery = { timeoutMs: 60, deadlineMs: 600, getDelayMs: () => 0 }
     const alice = makeMLSPeer(hub, 'alice', secret, { members, recovery })
     const bob = makeMLSPeer(hub, 'bob', secret, { members, recovery })
-    const apply = bob.mls.applyRecovery.bind(bob.mls)
+    const apply = requireCapturedRecovery(bob.mls).applyRecovery.bind(
+      requireCapturedRecovery(bob.mls),
+    )
     let accepting = false
-    bob.mls.applyRecovery = async (...args) => {
+    requireCapturedRecovery(bob.mls).applyRecovery = async (...args) => {
       const pending = await apply(...args)
       if (pending == null || 'renewalRequired' in pending) return pending
       return {
         ...pending,
-        onAccepted: async (write) => {
+        onAccepted: async (...acceptedArgs) => {
           accepting = true
           await pause.promise
-          await pending.onAccepted(write)
+          await pending.onAccepted(...acceptedArgs)
         },
       }
     }

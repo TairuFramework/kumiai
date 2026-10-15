@@ -1,6 +1,10 @@
 import type { RecoveryRefusalReason } from '../crypto.js'
 import type { LogPosition } from '../cursor.js'
-import type { AcceptedRejoinSettlement, StoredRejoinRecord } from '../recovery-types.js'
+import type {
+  AcceptedRejoinSettlement,
+  CapturedRejoinRecord,
+  StoredRejoinRecord,
+} from '../recovery-types.js'
 import type { ForkHalt, RecoveryUnavailableEvent } from './safety.js'
 import type { ControlHold } from './search.js'
 
@@ -193,8 +197,7 @@ export type LegacyRejoinRecord = {
   /** Set with stage `refused`. */
   refusal?: RecoveryRefusal
 }
-// Keep live producers and readers on the legacy contract until captured recovery activates.
-export type RejoinRecord = LegacyRejoinRecord
+export type RejoinRecord = CapturedRejoinRecord
 export type RecoveryRefusal = RecoveryRefusalReason
 export type WelcomeObligation = {
   opID: string

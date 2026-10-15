@@ -595,16 +595,16 @@ test.each(reasons)(
 )
 
 test.each(reasons)(
-  'automatic recovery continuation stops after reconciliation (%s)',
+  'automatic recovery continuation stops after the capture reply reread (%s)',
   async (reason) => {
     const { member, hub } = await fixture()
     const entered = Promise.withResolvers<void>()
     const release = Promise.withResolvers<void>()
     let arm = false
-    const fetch = hub.fetchTopic.bind(hub)
-    vi.spyOn(hub, 'fetchTopic').mockImplementation(async (params) => {
-      const result = await fetch(params)
-      if (arm && params.topicID === commitTopic(secret)) {
+    const load = member.control.load.bind(member.control)
+    vi.spyOn(member.control, 'load').mockImplementation(async () => {
+      const result = await load()
+      if (arm) {
         arm = false
         entered.resolve()
         await release.promise
@@ -613,6 +613,7 @@ test.each(reasons)(
     })
     const alice = createMemoryGroupMLS({
       localDID: 'alice',
+      epoch: 1,
       members: ['alice', 'bob'],
       recoverySecret: secret,
     })
@@ -623,7 +624,7 @@ test.each(reasons)(
         const frame = decodeHandshakeFrame(params.payload)
         if (frame.kind === HANDSHAKE_KIND.recoveryRequest) {
           const { requestID, request } = decodeRecoveryRequest(frame.payload)
-          const reply = await alice.sealGroupInfo(request)
+          const reply = await alice.sealGroupInfo(request, null)
           arm = true
           await publish({
             senderDID: 'alice',

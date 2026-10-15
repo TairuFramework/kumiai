@@ -39,7 +39,7 @@ import { createStorageFixture } from './storage-persistence.js'
 
 export async function createCodecReopenFixture(
   id: string,
-  format: 'legacy' | 'captured' = 'legacy',
+  format: 'legacy' | 'captured' = 'captured',
 ): Promise<{
   fixture: PersistenceFixture<StorageTestPorts<MemoryTransaction>>
   key: GroupKey

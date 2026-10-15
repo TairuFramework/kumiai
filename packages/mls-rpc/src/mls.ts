@@ -301,6 +301,10 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           recoveryBinding: captured.environment.recoveryBinding ?? params.recoveryBinding,
         }
   const port: GroupMLS = {
+    getRecoveryLedger:
+      captured === undefined
+        ? undefined
+        : async () => [...(await captured.readRecoverySource()).trust.ledger],
     capturedRecovery:
       captured === undefined || capturedEnvironment === undefined
         ? undefined

@@ -65,7 +65,11 @@ import { deferred } from '../../src/runtime.js'
 import { createGroupSafety, type GroupSafety } from '../../src/safety.js'
 import { createDeterministicAtRestCodec } from './at-rest.js'
 import { testGroupMLSDependencies, testHandleAccess } from './real-group.js'
-import { type CapturedRecoveryFixture, createRegistryRecovery } from './registry-recovery.js'
+import {
+  type CapturedRecoveryFixture,
+  createRegistryRecovery,
+  type LegacyRecoveryFixture,
+} from './registry-recovery.js'
 import { createRegistryWelcomeHistory, registryHandle } from './registry-welcome.js'
 import { memoryModel, restoreMemoryControlHandle } from './sealed-memory-mls.js'
 import { createStorageFixture, type RegistryStorageFixture } from './storage-persistence.js'
@@ -114,8 +118,8 @@ export type RegistryFixtureBase = {
   }>
   confirmedRecovery(
     sourceKey: GroupKey,
-    options?: { confirm?: boolean; missingLedger?: boolean },
-  ): ReturnType<typeof createRegistryRecovery>
+    options?: { confirm?: boolean; missingLedger?: boolean; format?: 'legacy' | 'captured' },
+  ): Promise<LegacyRecoveryFixture | CapturedRecoveryFixture>
   installRows(rows: RegistryRowSetup): Promise<void>
   inspectRows(): Promise<MemoryStoreRows>
   corruptState(key: GroupKey, damage?: 'unreadable' | 'client-state' | 'identity'): Promise<void>
@@ -177,6 +181,19 @@ const markerWriters = new WeakMap<RegistryFixtureBase, RegistryStorageFixture['f
 const rowRemovers = new WeakMap<RegistryFixtureBase, RegistryStorageFixture['deleteCommittedRow']>()
 
 const controlCorrupters = new WeakMap<RegistryFixtureBase, (key: GroupKey) => Promise<void>>()
+type CapturedFixtureState = { keys: Set<string>; handles: WeakSet<GroupHandle> }
+const capturedStates = new WeakMap<RegistryFixtureBase, CapturedFixtureState>()
+function retainCapturedDestination(
+  fixture: RegistryFixtureBase,
+  recovery: { candidate: GroupHandle; source: { key: GroupKey } },
+) {
+  const retained = capturedStates.get(fixture)
+  if (retained === undefined) throw new Error('Missing captured fixture state')
+  retained.keys.add(
+    JSON.stringify([recovery.source.key.groupID, recovery.source.key.incarnation + 1]),
+  )
+  retained.handles.add(recovery.candidate)
+}
 
 export async function registryFixtureCapturedRecovery(
   fixture: RegistryFixtureBase,
@@ -196,6 +213,7 @@ export async function registryFixtureCapturedRecovery(
     recoverySource: await registryFixtureRecoverySource(fixture, sourceKey),
     missingLedger: options?.missingLedger,
   })
+  retainCapturedDestination(fixture, result)
   if (options?.confirm) {
     await fixture.installRows({ key: sourceKey, control: { putRejoin: result.record } })
     return { ...result, source: await registryFixtureRecoverySource(fixture, sourceKey) }
@@ -302,6 +320,7 @@ async function assemble(
   params: FixtureParams,
   identity: OwnIdentity,
   rows?: MemoryStoreRows,
+  captured: CapturedFixtureState = { keys: new Set(), handles: new WeakSet() },
 ): Promise<RegistryFixture> {
   const environment: RecoveryEnvironment = {
     identity,
@@ -342,12 +361,17 @@ async function assemble(
     if (override !== undefined) return override(record)
     const state = decodeClientState(record.state)
     if (state === undefined) throw new Error('Invalid fixture state')
-    return (params.mode === 'double' ? restoreMemoryControlHandle : restoreGroup)({
+    const real =
+      params.mode === 'real-mls' ||
+      captured.keys.has(JSON.stringify([record.groupID, record.incarnation]))
+    const handle = await (real ? restoreGroup : restoreMemoryControlHandle)({
       state,
       credential: record.credential,
       ledgerEntries: record.ledger,
       options: environment.options,
     })
+    if (real) captured.handles.add(handle)
+    return handle
   }
   function hold(map: Map<string, Hold>, id: string) {
     if (map.has(id)) throw new Error('Already held')
@@ -440,7 +464,11 @@ async function assemble(
         deliverWelcome,
       }),
     async advance(handle) {
-      if (params.mode === 'real-mls') return (await commitKeyRotation(handle)).newGroup
+      if (params.mode === 'real-mls' || captured.handles.has(handle)) {
+        const advanced = (await commitKeyRotation(handle)).newGroup
+        captured.handles.add(advanced)
+        return advanced
+      }
       const candidate = await restoreMemoryControlHandle({
         state: structuredClone(handle.state),
         credential: handle.credential,
@@ -466,7 +494,7 @@ async function assemble(
       if (record === null || record.deleted || record.state === null)
         throw new Error('Missing recovery source')
       const source = await restore({ ...record, state: record.state })
-      const result = await createRegistryRecovery({
+      const common = {
         ...params,
         identity,
         options: environment.options,
@@ -474,12 +502,21 @@ async function assemble(
         sourceKey,
         sourceTrust: (await fixture.device.groups.loadTrust(sourceKey.groupID)) ?? undefined,
         missingLedger: options?.missingLedger,
-      })
+      }
+      const result =
+        options?.format === 'legacy'
+          ? await createRegistryRecovery({ ...common, format: 'legacy' })
+          : await createRegistryRecovery({
+              ...common,
+              format: 'captured',
+              recoverySource: await registryFixtureRecoverySource(fixture, sourceKey),
+            })
+      if ('format' in result.record) retainCapturedDestination(fixture, result)
       if (!options?.confirm) return result
       const trust = await fixture.device.groups.loadTrust(sourceKey.groupID)
       await fixture.installRows({
         key: sourceKey,
-        ...(options?.missingLedger && trust !== null
+        ...(options?.missingLedger && trust !== null && !('format' in result.record)
           ? {
               state: { ...record, version: record.version + 1, ledger: result.record.ledgerBefore },
               trust: { ...trust, ledger: result.record.ledgerBefore },
@@ -609,7 +646,7 @@ async function assemble(
       await storage.reopen()
       const committed = await storage.inspectRows()
       await fixture.close()
-      return assemble({ ...params, setup: 'empty' }, identity, committed)
+      return assemble({ ...params, setup: 'empty' }, identity, committed, captured)
     },
     async close() {
       if (closed) return
@@ -681,6 +718,7 @@ async function assemble(
     },
   })
   restorers.set(fixture, restore)
+  capturedStates.set(fixture, captured)
   markerWriters.set(fixture, storage.forceOwnerMarker)
   rowRemovers.set(fixture, storage.deleteCommittedRow)
   const safetyHandle = await fixture.makeHandle(0)

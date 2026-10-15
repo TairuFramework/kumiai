@@ -102,7 +102,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           const recovery =
             format === 'captured'
               ? await registryFixtureCapturedRecovery(fixture, key, { confirm: true })
-              : await fixture.confirmedRecovery(key, { confirm: true })
+              : await fixture.confirmedRecovery(key, { confirm: true, format: 'legacy' })
           const expected = structuredClone(recovery.record)
           fixture = await fixture.reopen()
           expect((await fixture.device.groups.ports(key).control.load()).rejoin).toEqual(expected)
@@ -124,14 +124,17 @@ for (const mode of ['real-mls', 'double'] as const) {
         const candidate = await fixture.makeHandle(0, `${groupID}-new`)
         return () => owner.seed(candidate, { packageUse: null })
       }
-      const recovery = await fixture.confirmedRecovery(key, { confirm: true })
+      const recovery = await fixture.confirmedRecovery(key, { confirm: true, format: 'legacy' })
       return () =>
         owner.switchIncarnation(recovery.candidate, {
           source: recovery.source,
           rejoinID: recovery.record.id,
           proof: recovery.proof,
           write: {
-            mutationID: 'disposal-switch',
+            mutationID:
+              'format' in recovery.record
+                ? (recovery.record.switchMutationID ?? 'disposal-switch')
+                : 'disposal-switch',
             source: { rejoinID: recovery.record.id },
             destination: {
               control: {
@@ -298,6 +301,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect((await fixture.device.groups.ports(key).control.load()).rejoin).toEqual({
           ...record,
           stage: 'adopted',
+          ...('format' in record ? { destinationKey: nextKey } : {}),
         })
         expect((await owner.access(groupID)).key).toEqual(nextKey)
       } finally {

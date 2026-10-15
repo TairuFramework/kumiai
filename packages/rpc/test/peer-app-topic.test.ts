@@ -72,6 +72,12 @@ function makeRoomPeer(
     members: options.members ?? MEMBERS,
     onAdvance: (e) => crypto.setEpoch(e),
   })
+  const persisted = mls.persistInitialState()
+  const readEpoch = mls.readEpoch.bind(mls)
+  mls.readEpoch = async () => {
+    await persisted
+    return await readEpoch()
+  }
   const anchorStore = createMemoryAnchorStore({ backing: mls.anchorStore() })
   const appCursorStore = createMemoryAppCursorStore()
   const peer = createGroupPeer<Protocols>({

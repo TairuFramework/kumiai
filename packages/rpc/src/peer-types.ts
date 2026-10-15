@@ -36,9 +36,12 @@ import type { ReceiveLaneEnded, SubscribeFailure } from './hub-mux.js'
 import type { AppOutboxCleared } from './log-delivery.js'
 import type { GroupProtocolDefinition } from './protocol.js'
 import type {
+  CapturedRecapture,
+  CapturedRejoinRecord,
   ConfirmedRecoveryHandoff,
   RecoveryCompletion,
   RecoveryContinuation,
+  RecoveryReconciliation,
 } from './recovery-types.js'
 
 export const DEFAULT_RECOVERY_TIMEOUT_MS = 5000
@@ -80,6 +83,16 @@ export const DEFAULT_COMMIT_DEADLINE_MS = 30_000
 export type GroupPeerMLSParams = {
   recoveryOnly?: boolean
   onConfirmedRecovery?: (handoff: ConfirmedRecoveryHandoff) => void
+  settleAcceptedRecovery?: (
+    record: CapturedRejoinRecord,
+    acceptedEpoch: number,
+    leafDigest: string,
+  ) => Promise<void>
+  reconcileAcceptedRecovery?: (
+    record: CapturedRejoinRecord,
+    reply: CapturedRecapture,
+  ) => Promise<RecoveryReconciliation>
+  reconcileConfirmedRecovery?: string
   continuation?: RecoveryContinuation | null
   completion?: RecoveryCompletion | null
   /** MLS lifecycle port. When provided, the peer runs the commit lane. */
@@ -255,6 +268,9 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
       mls?: undefined
       recoveryOnly?: undefined
       onConfirmedRecovery?: undefined
+      settleAcceptedRecovery?: undefined
+      reconcileAcceptedRecovery?: undefined
+      reconcileConfirmedRecovery?: undefined
       continuation?: undefined
       completion?: undefined
       appOutbox?: undefined

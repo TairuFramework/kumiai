@@ -239,6 +239,7 @@ export type ConformanceGroupMLS<Position extends string = string> = {
   ) => Promise<ConformanceRestoredPendingRecovery>
   isLedgerComplete: () => Promise<boolean>
   getLedger: () => Promise<Array<string>>
+  getRecoveryLedger?: () => Promise<Array<string>>
   sealLedger: (request: Uint8Array) => Promise<Uint8Array>
   openSealedLedger: (
     sealed: Uint8Array,

@@ -40,6 +40,7 @@ import type { GroupPeer, RecoveryEvent, StrandObservation } from '../../src/peer
 import type { GroupProtocolDefinition } from '../../src/protocol.js'
 import type {
   CapturedRejoinRecord,
+  ConfirmedRecoveryHandoff,
   RecoveryCompletion,
   RecoveryContinuation,
   StoredRejoinRecord,
@@ -164,6 +165,7 @@ export type MakeMLSPeerOptions = {
   onStrand?: (observation: StrandObservation) => void | Promise<void>
   onOutcome?: (outcome: Outcome) => void | Promise<void>
   onRecovery?: (event: RecoveryEvent) => void | Promise<void>
+  onConfirmedRecovery?: (handoff: ConfirmedRecoveryHandoff) => void
   onAppDeliveryStalled?: (event: AppDeliveryStalled) => void
   onAppDeliveryResumed?: (event: AppDeliveryResumed) => void
   /** The host's notice that a subscribe was refused or exhausted its retries. */
@@ -257,6 +259,7 @@ export function makeMLSPeer(
     mls,
     control,
     recoveryOnly: options.recoveryOnly,
+    onConfirmedRecovery: options.onConfirmedRecovery,
     continuation: options.continuation,
     completion: options.completion,
     ...ports,
@@ -681,9 +684,8 @@ export function rejoinSourceEpoch(record: StoredRejoinRecord): number {
 
 export async function buildRejoinRecord(member: TestPeer): Promise<StoredRejoinRecord> {
   if (member.mls.capturedRecovery === undefined) return await buildLegacyRejoinRecord(member)
-  const prefix = await member.controlWalk.reconcileCommitPrefix()
-  if (prefix.kind !== 'complete') throw new Error('Incomplete recovery capture prefix')
-  return await buildCapturedRejoinRecord(member.mls, prefix.head)
+  const snapshot = await member.control.load()
+  return await buildCapturedRejoinRecord(member.mls, snapshot.cursor?.position ?? null)
 }
 
 export async function buildCapturedRejoinRecord(

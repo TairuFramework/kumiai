@@ -102,7 +102,7 @@ export type ConfirmationWaiter = { receive: (sealed: Uint8Array) => void; dispos
 
 export type WaitForRecoveryConfirmationParams = {
   port: GroupMLS
-  pending: PendingRecovery
+  pending: Pick<PendingRecovery, 'epoch' | 'judgeVerdict'>
   groupID: string
   requestID: string
   requestKey: Uint8Array

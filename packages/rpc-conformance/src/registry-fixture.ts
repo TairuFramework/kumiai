@@ -6,8 +6,8 @@ import type {
   ConformanceControlSearchPort,
   ConformanceControlSnapshot,
   ConformanceRecoverySource,
-  ConformanceRejoinRecord,
   ConformanceResyncProof,
+  ConformanceStoredRejoinRecord,
   ConformanceWelcomeObligation,
 } from './control-store.js'
 import type { ConformanceSendAdmission } from './group-mls.js'
@@ -165,12 +165,12 @@ export type ConformanceRegistryFixtureBase<
   }>
   confirmedRecovery(
     sourceKey: ConformanceGroupKey,
-    options?: { confirm?: boolean; missingLedger?: boolean },
+    options?: { confirm?: boolean; missingLedger?: boolean; format?: 'legacy' | 'captured' },
   ): Promise<{
     candidate: THandle
-    record: ConformanceRejoinRecord
-    source: ConformanceLegacyRegistryRecoverySource
-    proof: ConformanceLegacyResyncProof
+    record: ConformanceStoredRejoinRecord
+    source: ConformanceLegacyRegistryRecoverySource | ConformanceRegistryRecoverySource
+    proof: ConformanceLegacyResyncProof | ConformanceRegistryResyncProof
   }>
   acceptedOrdinary(
     access: ConformanceRegistryAccess<THandle>,

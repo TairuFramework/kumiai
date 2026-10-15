@@ -153,8 +153,7 @@ describe('recovery lifecycle', { concurrent: false }, () => {
     controlRecoveryClock(40)
     const hub = new FakeHub()
     const rs = secret(0xb5)
-    const first = await publishCommit({ hub, senderDID: 'zoe', recoverySecret: rs, epoch: 3 })
-    hub.hideFrom('carol', first.sequenceID)
+    await publishCommit({ hub, senderDID: 'carol', recoverySecret: rs, epoch: 3 })
     const carol = makeMLSPeer(hub, 'carol', rs, {
       epoch: 3,
       members,
@@ -524,8 +523,11 @@ describe('recovery lifecycle', { concurrent: false }, () => {
       return seal(...args)
     })
     await carol.peer.commit(buildLedgerCommit(carol, ['circle:x=Carol']))
-    const ahead = await publishCommit({ hub, senderDID: 'zoe', recoverySecret: rs, epoch: 3 })
-    hub.hideFrom('carol', ahead.sequenceID)
+    await carol.peer.commit(buildLedgerCommit(carol, []))
+    const hidden = hub.published.filter((row) => row.topicID === commitTopic(rs)).at(-1)
+    if (hidden === undefined) throw new Error('Missing withheld rotation')
+    hub.hideFrom('bob', hidden.sequenceID)
+    await publishCommit({ hub, senderDID: 'carol', recoverySecret: rs, epoch: 3 })
 
     const bobCrypto = createFakeCrypto({ epoch: 1, localDID: 'bob' })
     const bobMLS = createMemoryGroupMLS({

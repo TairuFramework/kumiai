@@ -2,7 +2,12 @@ import { isHeadMismatch } from '../commit.js'
 import type { CommitHeader } from '../crypto.js'
 import { asLogPosition, type LogPosition } from '../cursor.js'
 import type { ConfirmationOutcome } from '../recovery-confirmation.js'
-import type { StoredRejoinRecord } from '../recovery-types.js'
+import { settleRecovery } from '../recovery-reconcile.js'
+import type {
+  CapturedRejoinRecord,
+  RecoveryReconciliation,
+  StoredRejoinRecord,
+} from '../recovery-types.js'
 import type { PublishOutcome } from './operations.js'
 import { controlSafetyHeld } from './safety.js'
 import { applyResolved, pruneWindow } from './store.js'
@@ -62,7 +67,7 @@ export function sourceRecheck(scan: SourceScan, record: LegacyRejoinRecord): Sou
   return { kind: 'pass' }
 }
 
-export type RejoinDeps = {
+export type LegacyRejoinDeps = {
   control: ControlStore
   signal?: AbortSignal
   publish(
@@ -91,8 +96,8 @@ export type RejoinDeps = {
   ): void
 }
 
-export async function stepRejoin(
-  deps: RejoinDeps,
+export async function stepLegacyRejoin(
+  deps: LegacyRejoinDeps,
   record: LegacyRejoinRecord,
 ): Promise<StoredRejoinRecord | null> {
   const save = async (next: LegacyRejoinRecord): Promise<LegacyRejoinRecord> => {
@@ -100,7 +105,7 @@ export async function stepRejoin(
     return next
   }
   const discard = async (
-    reason: Parameters<RejoinDeps['discarded']>[0],
+    reason: Parameters<LegacyRejoinDeps['discarded']>[0],
     blockingPosition?: LogPosition | null,
   ): Promise<null> => {
     await applyResolved(deps.control, { deleteRejoin: true }, deps.newID(), undefined, deps.signal)
@@ -239,6 +244,245 @@ export async function stepRejoin(
         position: snapshot.cursor?.position ?? record.position ?? null,
         epoch: snapshot.cursor?.epoch ?? record.epochAfter,
       },
+    },
+    deps.newID(),
+    undefined,
+    deps.signal,
+  )
+  if (tokens.length > 0) deps.emit(outcome)
+  return null
+}
+
+export type RejoinDeps = Omit<LegacyRejoinDeps, 'confirm' | 'scan' | 'adopt' | 'discarded'> & {
+  confirm(record: CapturedRejoinRecord): Promise<ConfirmationOutcome & { candidate?: Uint8Array }>
+  reconcileCapture(record: CapturedRejoinRecord): Promise<RecoveryReconciliation>
+  adopt(record: CapturedRejoinRecord, write: AdoptionWriteFactory): Promise<'adopted' | 'handoff'>
+  reconcileBeforePublish?: boolean
+  reconcileConfirmedRecovery?: string
+  settleAcceptedRecovery?: (
+    record: CapturedRejoinRecord,
+    acceptedEpoch: number,
+    leafDigest: string,
+  ) => Promise<void>
+  discarded(reason: 'unapplied-later' | 'accepted', record: CapturedRejoinRecord): void
+}
+export type RejoinStep =
+  | CapturedRejoinRecord
+  | null
+  | { kind: 'handoff'; record: CapturedRejoinRecord }
+
+export async function stepRejoin(
+  deps: RejoinDeps,
+  record: CapturedRejoinRecord,
+): Promise<RejoinStep> {
+  const snapshot = await deps.control.load()
+  if (
+    controlSafetyHeld(snapshot) !== null ||
+    record.trigger !== 'automatic' ||
+    snapshot.controlHold?.reason === 'unsupported-version'
+  )
+    return record
+  const save = async (next: CapturedRejoinRecord) => {
+    await applyResolved(deps.control, { putRejoin: next }, deps.newID(), undefined, deps.signal)
+    return next
+  }
+  const reconcile = async (): Promise<RejoinStep> => {
+    // A propagated provider/origin failure is a retry, never authenticated non-acceptance.
+    const result = await deps.reconcileCapture(record)
+    return await deps.runSerial(async () => {
+      const snapshot = await deps.control.load()
+      const current = snapshot.rejoin
+      if (controlSafetyHeld(snapshot) !== null)
+        return current !== null && 'format' in current ? current : null
+      if (
+        current === null ||
+        !('format' in current) ||
+        current.id !== record.id ||
+        current.stage !== record.stage
+      )
+        return current !== null && 'format' in current ? current : null
+      if (
+        result.kind === 'head-only' &&
+        current.stage !== 'confirmed' &&
+        current.stage !== 'adopted'
+      )
+        return await save({ ...current, stage: 'built', expectedHead: result.head })
+      if (result.kind === 'accepted' || result.kind === 'unapplied-later') {
+        if (
+          result.kind === 'unapplied-later' &&
+          (current.stage === 'confirmed' || current.stage === 'adopted')
+        )
+          return current
+        if (result.kind === 'accepted' && deps.settleAcceptedRecovery !== undefined)
+          await deps.settleAcceptedRecovery(current, result.epoch, result.leafDigest)
+        else
+          await settleRecovery({
+            control: deps.control,
+            record: current,
+            provenance:
+              result.kind === 'accepted'
+                ? {
+                    kind: 'accepted-unadoptable',
+                    epoch: result.epoch,
+                    leafDigest: result.leafDigest,
+                  }
+                : { kind: 'not-accepted', epoch: result.epoch },
+            mutationID: deps.newID(),
+            signal: deps.signal,
+          })
+        record.requestKey.fill(0)
+        record.candidate.fill(0)
+        deps.discarded(result.kind === 'accepted' ? 'accepted' : 'unapplied-later', record)
+        return null
+      }
+      return current
+    })
+  }
+  if (record.stage === 'refused') return record
+  if (record.stage === 'built') {
+    if (deps.reconcileBeforePublish) {
+      try {
+        const found = await deps.searchLog(record.searchFrom, record.payloadDigest)
+        if (typeof found === 'object')
+          return await save({ ...record, stage: 'published', position: found.found })
+      } catch (error) {
+        if (deps.signal?.aborted) throw error
+      }
+      return await reconcile()
+    }
+    try {
+      const published = await deps.publish(record.payload, record.publishID, record.expectedHead)
+      return await save({
+        ...record,
+        stage: 'published',
+        position: asLogPosition(published.sequenceID),
+      })
+    } catch (error) {
+      if (!isHeadMismatch(error)) throw error
+      const found = await deps.searchLog(record.searchFrom, record.payloadDigest)
+      if (typeof found === 'object')
+        return await save({ ...record, stage: 'published', position: found.found })
+      return await reconcile()
+    }
+  }
+  if (record.stage === 'published') {
+    const verdict = await deps.confirm(record)
+    if (verdict.kind === 'confirmed')
+      return await deps.runSerial(async () => {
+        const current = (await deps.control.load()).rejoin
+        if (
+          current === null ||
+          !('format' in current) ||
+          current.id !== record.id ||
+          current.stage !== 'published'
+        )
+          return current !== null && 'format' in current ? current : null
+        return await save({
+          ...current,
+          stage: 'confirmed',
+          candidate: verdict.candidate ?? current.candidate,
+          verdict: verdict.sealed,
+          switchMutationID: current.switchMutationID ?? deps.newID(),
+        })
+      })
+    if (verdict.kind === 'error') throw verdict.error
+    if (verdict.kind === 'disposed') throw new Error('Recovery disposed')
+    if (
+      verdict.kind === 'refused' &&
+      (verdict.refusal === 'policy' || verdict.refusal === 'invalid')
+    ) {
+      return await deps.runSerial(async () => {
+        const current = (await deps.control.load()).rejoin
+        if (
+          current === null ||
+          !('format' in current) ||
+          current.id !== record.id ||
+          current.stage !== 'published'
+        )
+          return current !== null && 'format' in current ? current : null
+        const next: CapturedRejoinRecord = {
+          ...current,
+          stage: 'refused',
+          refusal: verdict.refusal,
+        }
+        const outcome: Outcome = {
+          id: record.id,
+          opID: null,
+          at: deps.now(),
+          kind: 'refused',
+          reason: verdict.refusal,
+        }
+        await applyResolved(
+          deps.control,
+          { putRejoin: next, putOutcomes: [outcome] },
+          deps.newID(),
+          undefined,
+          deps.signal,
+        )
+        deps.emit(outcome)
+        return next
+      })
+    }
+    return await reconcile()
+  }
+  if (record.stage === 'confirmed') {
+    if (deps.reconcileConfirmedRecovery === record.id) return await reconcile()
+    if (deps.canAdopt !== undefined && !(await deps.canAdopt())) return record
+    const confirmed = await deps.runSerial(async () => {
+      const snapshot = await deps.control.load()
+      const current = snapshot.rejoin
+      if (
+        controlSafetyHeld(snapshot) !== null ||
+        current === null ||
+        !('format' in current) ||
+        current.id !== record.id ||
+        current.stage !== 'confirmed'
+      )
+        return null
+      return current.switchMutationID === null
+        ? await save({ ...current, switchMutationID: deps.newID() })
+        : current
+    })
+    if (confirmed === null) return record
+    const mutationID = confirmed.switchMutationID
+    const position = confirmed.position
+    if (mutationID === null || position === undefined || confirmed.verdict === undefined)
+      throw new Error('Confirmed recovery proof required')
+    const result = await deps.adopt(confirmed, (staged) => ({
+      mutationID,
+      changes: {
+        putRejoin: {
+          ...confirmed,
+          stage: 'adopted',
+          destinationKey: {
+            groupID: confirmed.source.key.groupID,
+            incarnation: staged.incarnation,
+          },
+        },
+        cursor: { position, epoch: staged.epochAfter },
+      },
+    }))
+    return result === 'handoff'
+      ? { kind: 'handoff', record: confirmed }
+      : { ...confirmed, stage: 'adopted' }
+  }
+  if (!(await deps.bootstrapLedger())) return record
+  const current = await deps.control.load()
+  if (controlSafetyHeld(current) !== null) return record
+  const held = new Set(await deps.getLedger())
+  const tokens = [...new Set(record.ledgerBefore)].filter((token) => !held.has(token))
+  const outcome: Outcome = { id: record.id, opID: null, at: deps.now(), kind: 'reenact', tokens }
+  await applyResolved(
+    deps.control,
+    {
+      deleteRejoin: true,
+      ...(current.cursor?.incomplete ? {} : { strand: null }),
+      cursor: {
+        ...(current.cursor?.incomplete ? { incomplete: true as const } : {}),
+        position: current.cursor?.position ?? record.position ?? null,
+        epoch: current.cursor?.epoch ?? record.epochAfter,
+      },
+      ...(tokens.length === 0 ? {} : { putOutcomes: [outcome] }),
     },
     deps.newID(),
     undefined,

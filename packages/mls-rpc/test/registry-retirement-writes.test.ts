@@ -485,7 +485,11 @@ for (const mode of ['real-mls', 'double'] as const) {
         await switchSource(fixture, record.id)
         fixture = await fixture.reopen()
         const control = await fixture.device.groups.ports(source).control.load()
-        expect(control.rejoin).toEqual({ ...continuation, stage: 'adopted' })
+        expect(control.rejoin).toEqual({
+          ...continuation,
+          stage: 'adopted',
+          ...('format' in continuation ? { destinationKey: { groupID, incarnation: 2 } } : {}),
+        })
         expect(control.rejoin?.ledgerBefore).toEqual([missing, ...record.ledgerBefore, missing])
         expect(control.outcomes).toEqual([])
         expect(control.operations).toEqual([])
@@ -514,7 +518,11 @@ for (const mode of ['real-mls', 'double'] as const) {
         fixture = await fixture.reopen()
         const control = fixture.device.groups.ports(source).control
         const snapshot = await control.load()
-        expect(snapshot.rejoin).toEqual({ ...record, stage: 'adopted' })
+        expect(snapshot.rejoin).toEqual({
+          ...record,
+          stage: 'adopted',
+          ...('format' in record ? { destinationKey: { groupID, incarnation: 2 } } : {}),
+        })
         expect(controlSettled(snapshot)).toBe(false)
         await expect(control.apply({ deleteRejoin: true }, 'delete-adopted')).rejects.toMatchObject(
           { name: 'DisplacedGroupHandleError' },
@@ -532,7 +540,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           const recovery =
             format === 'captured'
               ? await registryFixtureCapturedRecovery(fixture, source)
-              : await fixture.confirmedRecovery(source)
+              : await fixture.confirmedRecovery(source, { format: 'legacy' })
           const record = {
             ...recovery.record,
             ...('format' in recovery.record

@@ -1,10 +1,11 @@
 import { afterEach, expect, test, vi } from 'vitest'
 
+import { decodeCommitFrame } from '../src/commit-frame.js'
 import {
-  type RejoinDeps,
+  type LegacyRejoinDeps as RejoinDeps,
   type SourceScan,
   sourceRecheck,
-  stepRejoin,
+  stepLegacyRejoin as stepRejoin,
 } from '../src/control/rejoin.js'
 import type { LegacyRejoinRecord } from '../src/control/types.js'
 import { asLogPosition } from '../src/cursor.js'
@@ -16,7 +17,7 @@ import { publishCommit } from './fixtures/commits.js'
 import { assertCommitPoison } from './fixtures/control-hold.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { createMemoryGroupMLS, decodeMemoryCommit } from './fixtures/memory-group-mls.js'
 import {
   buildLedgerCommit,
   buildLegacyRejoinRecord,
@@ -94,20 +95,17 @@ async function capturedRecord(bob: TestPeer): Promise<CapturedRejoinRecord> {
 }
 
 test.each(['built', 'published', 'confirmed', 'adopted', 'refused'] as const)(
-  'saved captured %s records survive legacy peer replay and recovery',
+  'saved legacy %s records survive captured peer replay and recovery',
   async (stage) => {
     const { hub, bob } = await setup()
     await bob.peer.dispose()
     await bob.peer.drained()
-    const captured = await capturedRecord(bob)
-    const record: CapturedRejoinRecord = {
-      ...captured,
+    const record: LegacyRejoinRecord = {
+      ...(await buildLegacyRejoinRecord(bob)),
       stage,
-      position: asLogPosition('captured-position'),
+      position: asLogPosition('legacy-position'),
       verdict: new Uint8Array([128, 255]),
-      ...(stage === 'adopted'
-        ? { destinationKey: { ...captured.source.key, incarnation: 2 } }
-        : {}),
+      conflictEpoch: 7,
       ...(stage === 'refused' ? { refusal: 'policy' } : {}),
     }
     await bob.control.apply({ putRejoin: record }, 'captured-save')
@@ -238,6 +236,8 @@ test.each(['built', 'published', 'confirmed', 'adopted'] as const)(
     await bob.peer.drained()
     const saved = (await bob.control.load()).rejoin
     expect(saved?.stage).toBe(stage)
+    if (saved !== null && 'format' in saved)
+      expect((await bob.control.load()).recoveryEpochFloor).toBe(saved.target.groupInfoEpoch)
     const again = member(hub, 'bob', { restartOf: bob })
     await expect.poll(async () => (await again.control.load()).rejoin).toBeNull()
     expect(again.mls.epoch()).toBe(alice.mls.epoch())
@@ -294,7 +294,18 @@ test.each(['found', 'absent', 'gap'] as const)(
       payload: new Uint8Array([0]),
       retain: 'log',
     })
-    if (result === 'gap') hub.trim(commitTopic(secret), '999999999999')
+    if (result === 'gap') {
+      const fetch = hub.fetchTopic.bind(hub)
+      let missing = true
+      vi.spyOn(hub, 'fetchTopic').mockImplementation(async (params) => {
+        const page = await fetch(params)
+        if (missing && params.subscriberDID === 'bob' && params.topicID === commitTopic(secret)) {
+          missing = false
+          return { ...page, messages: [], gap: true }
+        }
+        return page
+      })
+    }
     const replayedIDs: Array<string> = []
     const apply = bob.control.apply.bind(bob.control)
     vi.spyOn(bob.control, 'apply').mockImplementation(async (changes, id) => {
@@ -311,7 +322,7 @@ test.each(['found', 'absent', 'gap'] as const)(
       expect(replayedIDs).toEqual([])
     } else {
       expect(replayedIDs).toHaveLength(1)
-      expect(replayedIDs[0]).not.toBe(saved?.id)
+      expect(replayedIDs[0]).toBe(saved?.id)
     }
   },
 )
@@ -429,6 +440,9 @@ test.each(['policy', 'invalid'] as const)(
     expect(commits(hub)).toHaveLength(count)
     vi.spyOn(alice.mls, 'processCommit').mockImplementation(process)
     validation.mockRestore()
+    await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
+    await alice.peer.resync()
+    expect(alice.mls.epoch()).toBe(2)
     expect((await again.peer.recover()).advanced).toBe(true)
     expect((await again.control.load()).rejoin).toBeNull()
   },
@@ -517,7 +531,7 @@ test.each(['gap', 'epoch', 'authenticator', 'incarnation', 'groupID'] as const)(
   },
 )
 
-test('a confirmed rejoin is invalidated if the source moves before restart', async () => {
+test('a confirmed rejoin preserves accepted facts if the source moves before restart', async () => {
   const { hub, bob } = await setup()
   crashAt(bob, 'confirmed')
   await expect(bob.peer.recover()).rejects.toThrow()
@@ -533,20 +547,12 @@ test('a confirmed rejoin is invalidated if the source moves before restart', asy
       events.push(event)
     },
   })
-  await expect.poll(async () => (await again.control.load()).rejoin).toBeNull()
+  await again.peer.recover().catch(() => {})
+  expect((await again.control.load()).rejoin).toEqual(saved)
   expect(again.mls.epoch()).toBe(2)
   expect(await again.mls.getLedger()).toEqual(['new-source'])
   expect((await again.control.load()).applied).toEqual([])
-  await expect.poll(() => events.some((event) => event.phase === 'failed')).toBe(true)
-  expect(events).toContainEqual(
-    expect.objectContaining({
-      phase: 'failed',
-      reason: 'invalidated',
-      anchorRecovery: false,
-      blockingPosition: null,
-    }),
-  )
-  await new Promise((resolve) => setTimeout(resolve, 1100))
+  expect(events).toContainEqual(expect.objectContaining({ phase: 'failed', reason: 'error' }))
   expect(commits(hub)).toHaveLength(1)
 })
 
@@ -761,7 +767,7 @@ test('anchor recovery holds missing acceptance evidence before writing a rejoin 
   expect((await restarted.control.load()).commitOnce).toEqual(held.commitOnce)
 })
 
-test('anchor-gated recovery re-checks an unwalked source commit on every fresh candidate', async () => {
+test('anchor-gated recovery adopts the authenticated capture despite an unwalked source commit', async () => {
   const { hub, alice, bob } = await setup()
   const topicID = commitTopic(secret)
   const p0 = (
@@ -788,20 +794,20 @@ test('anchor-gated recovery re-checks an unwalked source commit on every fresh c
     .sequenceID
   await alice.peer.resync()
   expect(alice.mls.epoch()).toBe(2)
-  const built: Array<LegacyRejoinRecord> = []
+  const built: Array<CapturedRejoinRecord> = []
   const failures: Array<RecoveryEvent> = []
-  const confirmed: Array<LegacyRejoinRecord> = []
+  const confirmed: Array<CapturedRejoinRecord> = []
   const apply = bob.control.apply.bind(bob.control)
   vi.spyOn(bob.control, 'apply').mockImplementation(async (changes, id) => {
     if (
       changes.putRejoin != null &&
-      !('format' in changes.putRejoin) &&
+      'format' in changes.putRejoin &&
       changes.putRejoin.stage === 'built'
     )
       built.push(changes.putRejoin)
     if (
       changes.putRejoin != null &&
-      !('format' in changes.putRejoin) &&
+      'format' in changes.putRejoin &&
       changes.putRejoin.stage === 'confirmed'
     )
       confirmed.push(changes.putRejoin)
@@ -814,25 +820,15 @@ test('anchor-gated recovery re-checks an unwalked source commit on every fresh c
       if (event.phase === 'failed') failures.push(event)
     },
   })
-  await expect.poll(() => failures.length, { timeout: 4000 }).toBeGreaterThanOrEqual(2)
-  expect(built.length).toBeGreaterThanOrEqual(2)
-  expect(confirmed.length).toBeGreaterThanOrEqual(2)
+  await expect.poll(() => again.mls.epoch(), { timeout: 5000 }).toBe(3)
+  await expect.poll(async () => (await again.control.load()).rejoin).toBeNull()
+  expect(built).toHaveLength(1)
+  expect(confirmed).toHaveLength(1)
   expect(built[0]?.expectedHead).toBe(p1)
-  expect(built.every((record) => record.source.head === p0)).toBe(true)
-  for (const failure of failures) {
-    expect(failure).toMatchObject({
-      phase: 'failed',
-      reason: 'invalidated',
-      anchorRecovery: true,
-      blockingPosition: p1,
-      advisory: [],
-    })
-  }
-  expect(new Set(failures.map((event) => event.attemptID)).size).toBeGreaterThanOrEqual(2)
-  expect(again.mls.epoch()).toBe(1)
-  expect((await again.control.load()).applied).toEqual([])
-  expect((await again.control.load()).responses).toEqual([])
-  expect((await again.control.load()).rejoin).toBeNull()
+  expect(built[0]?.target.captureHead).toBe(p1)
+  expect(built[0]?.source.identity?.epoch).toBe(1)
+  expect(p0).not.toBe(p1)
+  expect(failures).not.toContainEqual(expect.objectContaining({ reason: 'invalidated' }))
 })
 
 test('an own-unmerged copy advances without creating a recovery attempt', async () => {
@@ -845,12 +841,12 @@ test('an own-unmerged copy advances without creating a recovery attempt', async 
   const tip = (await publishCommit({ hub, senderDID: 'dave', recoverySecret: secret, epoch: 1 }))
     .sequenceID
   await alice.peer.resync()
-  const built: Array<LegacyRejoinRecord> = []
+  const built: Array<CapturedRejoinRecord> = []
   const apply = bob.control.apply.bind(bob.control)
   vi.spyOn(bob.control, 'apply').mockImplementation(async (changes, id) => {
     if (
       changes.putRejoin != null &&
-      !('format' in changes.putRejoin) &&
+      'format' in changes.putRejoin &&
       changes.putRejoin.stage === 'built'
     )
       built.push(changes.putRejoin)
@@ -890,12 +886,12 @@ test.each([false, true])(
           })
         ).sequenceID
       : null
-    const built: Array<LegacyRejoinRecord> = []
+    const built: Array<CapturedRejoinRecord> = []
     const apply = bob.control.apply.bind(bob.control)
     vi.spyOn(bob.control, 'apply').mockImplementation(async (changes, id) => {
       if (
         changes.putRejoin != null &&
-        !('format' in changes.putRejoin) &&
+        'format' in changes.putRejoin &&
         changes.putRejoin.stage === 'built'
       )
         built.push(changes.putRejoin)
@@ -905,8 +901,9 @@ test.each([false, true])(
     await expect.poll(() => again.mls.epoch()).toBe(3)
     await expect.poll(async () => (await again.control.load()).rejoin).toBeNull()
     expect(built).toHaveLength(1)
-    expect(built[0]?.source.head).toBe(retained ?? removed)
-    expect(built[0]?.source.epoch).toBe(suffix ? 2 : 1)
+    expect(built[0]?.target.captureHead).toBe(retained ?? removed)
+    expect(built[0]?.target.groupInfoEpoch).toBe(2)
+    expect(built[0]?.source.identity?.epoch).toBe(suffix ? 2 : 1)
   },
 )
 
@@ -953,6 +950,9 @@ test.each(['binding', 'lapse', 'floor'] as const)(
       .mockImplementation(validate)
     // A short attempt can expire under load; its automatic retry must finish without another call.
     await bob.peer.recover()
+    await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
+    await alice.peer.resync()
+    expect(alice.mls.epoch()).toBe(2)
     await expect
       .poll(
         async () => ({
@@ -963,8 +963,15 @@ test.each(['binding', 'lapse', 'floor'] as const)(
         }),
         { timeout: 5000 },
       )
-      .toEqual({ renewals: 1, epoch: 2, responderEpoch: 2, rejoin: null })
-    expect(commits(hub).filter((row) => row.senderDID === 'bob')).toHaveLength(2)
+      .toEqual({ renewals: 1, epoch: 3, responderEpoch: 3, rejoin: null })
+    expect(
+      commits(hub).filter(
+        (row) =>
+          row.senderDID === 'bob' &&
+          decodeMemoryCommit(decodeCommitFrame(decodeHandshakeFrame(row.payload).payload).commit)
+            ?.external === true,
+      ),
+    ).toHaveLength(2)
   },
 )
 
@@ -1086,31 +1093,28 @@ test.each(['acceptance-unknown', 'unsupported-version'] as const)(
   },
 )
 
-test('a hold committed during confirmed source scan preserves the rejoin even if the scan has a gap', async () => {
+test('a hold committed while rereading confirmed capture preserves its bytes', async () => {
   const { hub, bob } = await setup()
-  const built = await buildLegacyRejoinRecord(bob)
-  const record: LegacyRejoinRecord = {
-    ...built,
-    stage: 'confirmed',
-    position: asLogPosition('001'),
-    verdict: new Uint8Array([1]),
-  }
-  await bob.control.apply({ putRejoin: record }, 'confirmed')
-  const fetch = hub.fetchTopic.bind(hub)
+  crashAt(bob, 'confirmed')
+  await expect(bob.peer.recover()).rejects.toThrow()
+  await bob.peer.dispose()
+  await bob.peer.drained()
+  const record = (await bob.control.load()).rejoin
+  const load = bob.control.load.bind(bob.control)
   let held = false
-  vi.spyOn(hub, 'fetchTopic').mockImplementation(async (params) => {
-    if (!held && params.topicID === commitTopic(secret) && params.subscriberDID === 'bob') {
+  vi.spyOn(bob.control, 'load').mockImplementation(async () => {
+    if (!held) {
       held = true
       await bob.control.apply(
         { controlHold: { reason: 'unsupported-version', position: asLogPosition('held') } },
-        'hold-during-scan',
+        'hold-during-reread',
       )
-      return { messages: [], head: record.position ?? null, oldest: null, gap: true }
     }
-    return fetch(params)
+    return await load()
   })
-  await bob.peer.replay()
+  const again = member(hub, 'bob', { restartOf: bob, control: bob.control })
+  await again.peer.replay()
   expect(held).toBe(true)
-  expect(bob.mls.epoch()).toBe(1)
-  expect((await bob.control.load()).rejoin).toEqual(record)
+  expect(again.mls.epoch()).toBe(1)
+  expect((await again.control.load()).rejoin).toEqual(record)
 })

@@ -241,7 +241,7 @@ export type ConformanceLegacyRejoinRecord<Position extends string = string> = {
   refusal?: ConformanceRecoveryRefusal
 }
 export type ConformanceRejoinRecord<Position extends string = string> =
-  ConformanceLegacyRejoinRecord<Position>
+  ConformanceCapturedRejoinRecord<Position>
 export type ConformanceRecoveryRefusal = 'binding' | 'lapse' | 'floor' | 'policy' | 'invalid'
 export type ConformanceWelcomeObligation = {
   opID: string
@@ -597,6 +597,60 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       const read = await (await params.reopen()).control.load()
       expect(read.recoveryEpochFloor).toBe(7)
       expect(read.rejoin).toBeNull()
+    })
+    test('leaf-absent discard retains its obligation union atomically across restart and later acceptance', async () => {
+      const host = await params.open()
+      const saved = records()
+      await host.control.apply(saved, 'before-discard')
+      const before = await host.control.load()
+      const row: ConformanceAcceptedRejoinSettlement = {
+        kind: 'not-accepted',
+        epoch: 7,
+        id: 'unconfirmed-X',
+        origin: {
+          sourceKey: { ...host.control.key },
+          target: {
+            targetID: 'hub',
+            topicID: 'commits',
+            groupInfoEpoch: 4,
+            groupInfoAuthenticator: new Uint8Array([1, 2]),
+            captureHead: null,
+          },
+          searchFrom: null,
+        },
+        ledgerBefore: ['owed-only-in-X', 'shared'],
+      }
+      const changes: ConformanceControlChanges = {
+        putSettledRejoins: [row],
+        deleteRejoin: true,
+        recoveryEpochFloor: 7,
+      }
+      params.injectFailure('mid-apply')
+      await expect(host.control.apply(changes, 'discard-rollback')).rejects.toThrow()
+      expect(await (await params.reopen()).control.load()).toEqual(before)
+      await host.control.apply(changes, 'discard-X')
+      const restarted = (await params.reopen()).control
+      const snapshot = await restarted.load()
+      expect(snapshot.rejoin).toBeNull()
+      expect(snapshot.recoveryEpochFloor).toBe(7)
+      expect(snapshot.settledRejoins).toEqual([row])
+      expect(snapshot.outcomes).toEqual(before.outcomes)
+      expect(snapshot.welcomes).toEqual(before.welcomes)
+      const accepted: ConformanceAcceptedRejoinSettlement = {
+        id: 'accepted-Y',
+        origin: row.origin,
+        kind: 'accepted-unadoptable',
+        acceptedEpoch: 9,
+        epochAfter: 8,
+        digest: 'commit-Y',
+        payloadDigest: 'payload-Y',
+        leafDigest: 'leaf-Y',
+        ledgerBefore: ['shared', 'owed-Y'],
+      }
+      await restarted.apply({ putSettledRejoins: [accepted], recoveryEpochFloor: 9 }, 'settle-Y')
+      expect((await (await params.reopen()).control.load()).settledRejoins).toEqual([
+        { ...accepted, ledgerBefore: ['owed-only-in-X', 'shared', 'owed-Y'] },
+      ])
     })
     test('settlements replace public provenance and retain cumulative owed tokens defensively', async () => {
       const host = await params.open()
@@ -1825,14 +1879,17 @@ export type ConformanceRecoveryOrigin<Position extends string = string> = {
   searchFrom: Position | null
 }
 export type ConformanceAcceptedRejoinSettlement<Position extends string = string> = {
-  kind: 'accepted-unadoptable'
   id: string
-  digest: string
-  payloadDigest: string
-  epochAfter: number
-  acceptedEpoch: number
   origin: ConformanceRecoveryOrigin<Position>
-  /** SHA-256/base64url of the exact wire-encoded fresh LeafNode. */
-  leafDigest: string
   ledgerBefore: Array<string>
-}
+} & (
+  | {
+      kind: 'accepted-unadoptable'
+      digest: string
+      payloadDigest: string
+      epochAfter: number
+      acceptedEpoch: number
+      leafDigest: string
+    }
+  | { kind: 'not-accepted'; epoch: number }
+)

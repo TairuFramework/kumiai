@@ -63,14 +63,18 @@ function cumulativeSettlements(
     const origin = copyRecoveryOrigin(row.origin)
     const key = JSON.stringify([origin.sourceKey.groupID, origin.sourceKey.incarnation])
     rows.set(key, {
-      kind: row.kind,
       id: row.id,
-      digest: row.digest,
-      payloadDigest: row.payloadDigest,
-      epochAfter: row.epochAfter,
-      acceptedEpoch: row.acceptedEpoch,
+      ...(row.kind === 'not-accepted'
+        ? { kind: 'not-accepted' as const, epoch: row.epoch }
+        : {
+            kind: 'accepted-unadoptable' as const,
+            digest: row.digest,
+            payloadDigest: row.payloadDigest,
+            epochAfter: row.epochAfter,
+            acceptedEpoch: row.acceptedEpoch,
+            leafDigest: row.leafDigest,
+          }),
       origin,
-      leafDigest: row.leafDigest,
       ledgerBefore: [...new Set([...(rows.get(key)?.ledgerBefore ?? []), ...row.ledgerBefore])],
     })
   }

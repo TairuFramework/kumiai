@@ -8,7 +8,7 @@ import type {
 } from '../../rpc-conformance/lib/registry-fixture.js'
 import { entryCapability } from '../src/entry-capability.js'
 import { createVerdictJudge } from '../src/recovery.js'
-import { decodeRecoveryCandidate } from '../src/recovery-codec.js'
+import { decodeCapturedRecoveryCandidate, decodeRecoveryCandidate } from '../src/recovery-codec.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { validateRegistryHandle } from '../src/registry/validation.js'
 import { deferred } from '../src/runtime.js'
@@ -617,7 +617,10 @@ for (const mode of ['real-mls', 'double'] as const) {
       const fixture = await create('seeded')
       try {
         const { candidate, record } = await fixture.confirmedRecovery(key)
-        const snapshot = decodeRecoveryCandidate(record.candidate, record.requestKey)
+        const snapshot =
+          'format' in record
+            ? decodeCapturedRecoveryCandidate(record.candidate, record.requestKey)
+            : decodeRecoveryCandidate(record.candidate, record.requestKey)
         expect(encodeClientState(candidate.state)).toEqual(encodeClientState(snapshot.state))
         if (record.verdict === undefined) throw new Error('Missing verdict')
         const opened = await openRecoveryVerdict({

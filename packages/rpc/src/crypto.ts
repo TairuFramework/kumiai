@@ -451,6 +451,8 @@ export type GroupMLS = {
   /** Dry-run the external commit on isolated current state. Faults and unavailable validation lack authority. */
   validateRecoveryCommit(commit: Uint8Array): Promise<RecoveryCommitValidation>
   capturedRecovery?: CapturedRecoveryPort
+  /** Retained public obligations, available without restoring private MLS state. */
+  getRecoveryLedger?(): Promise<Array<string>>
   /** Core incarnation-bound sink. Replays an existing hold synchronously and returns an unsubscribe. */
   onSafetyHold?: (latch: (reason: NonNullable<SafetyHold>) => void) => () => void
   /** Verify the signed ask without requiring its issuer to remain in the current tree. */

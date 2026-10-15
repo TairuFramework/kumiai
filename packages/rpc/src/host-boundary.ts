@@ -91,6 +91,7 @@ export const mlsHostMembers = {
   openSealedLedger: 'host',
   bootstrapLedger: 'host',
   getLedger: 'host',
+  getRecoveryLedger: 'host',
   exportRecoverySecret: 'host',
   capturedRecovery: 'port',
 } as const satisfies HostMembers<GroupMLS, 'ownCommitDigest'>
@@ -119,6 +120,9 @@ export const peerHostFields = {
   deliverWelcome: 'callback',
   recoveryOnly: 'data',
   onConfirmedRecovery: 'callback',
+  settleAcceptedRecovery: 'callback',
+  reconcileConfirmedRecovery: 'data',
+  reconcileAcceptedRecovery: 'callback',
   continuation: 'data',
   completion: 'callback',
   operationTimeoutMs: 'data',

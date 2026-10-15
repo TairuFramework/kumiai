@@ -1,15 +1,18 @@
 import type {
+  CapturedRecapture,
   CapturedRejoinRecord,
   ConfirmedRecoveryHandoff,
+  ControlStore,
   GroupMLS,
   GroupPeer,
   GroupProtocolDefinition,
   RecoveryCompletion,
   RecoveryContinuation,
   RecoveryContinuationPort,
+  RecoveryReconciliation,
   ResyncProof,
 } from '@kumiai/rpc'
-import { controlSafetyHeld } from '@kumiai/rpc'
+import { applyResolved, controlSafetyHeld } from '@kumiai/rpc'
 
 import { copyStoredValue, sameStoredValue } from './memory-incarnation-stores.js'
 import type { RecoveryRouting } from './mls.js'
@@ -21,7 +24,11 @@ import {
   RegistrySourceMovedError,
 } from './persistence-errors.js'
 import type { GroupKey, GroupTransaction } from './persistence-types.js'
-import { RecoveryCandidateError, restoreRecoveryCandidate } from './recovery.js'
+import {
+  RecoveryCandidateError,
+  reconcileRecoveryCapture,
+  restoreRecoveryCandidate,
+} from './recovery.js'
 import { validateCapturedRecoveryRecord } from './recovery-record.js'
 import { registryRecoveryCoordinator } from './registry/recovery-coordinator.js'
 import { RetainedTrustUnavailableError, registrySafety } from './registry/safety.js'
@@ -31,6 +38,7 @@ import type { RecoveryEnvironment } from './registry/validation.js'
 
 const SOURCE_RETIREMENT_TIMEOUT_MS = 5_000
 class PeerRetirementTimeoutError extends RegistryRetireHookError {}
+class AcceptedRecoveryOriginMovedError extends GroupStateConflictError {}
 
 function retirementTimedOut(cause: unknown): boolean {
   return (
@@ -45,6 +53,12 @@ export type RegistryPeerOptions = {
   recoveryOnly: boolean
   target: RecoveryRouting
   onConfirmedRecovery(handoff: ConfirmedRecoveryHandoff): void
+  settleAcceptedRecovery?: RegistryPeerParams['settleAcceptedRecovery']
+  reconcileConfirmedRecovery?: string
+  reconcileAcceptedRecovery?: (
+    record: CapturedRejoinRecord,
+    reply: CapturedRecapture,
+  ) => Promise<RecoveryReconciliation>
   continuation: RecoveryContinuation | null
   completion: RecoveryCompletion | null
 }
@@ -91,6 +105,64 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
   let unregister = () => {}
   const peers = new Set<Peer>()
   const pending = new Set<Promise<unknown>>()
+  let reconcileConfirmedRecovery: string | undefined
+  const settleAcceptedRecovery =
+    params.settleAcceptedRecovery ??
+    (async (record: CapturedRejoinRecord, epoch: number, leafDigest: string) => {
+      const sourceKey = record.source.key
+      const store: ControlStore = {
+        key: sourceKey,
+        load: () =>
+          capability.entry.read(sourceKey.groupID, (reads) => reads.control(sourceKey.incarnation)),
+        lastMutation: () =>
+          capability.entry.read(sourceKey.groupID, (reads) =>
+            reads.controlMutation(sourceKey.incarnation),
+          ),
+        apply: (changes, mutationID) =>
+          capability.entry.run(
+            { groupID: sourceKey.groupID, mutationID },
+            async (reads) => {
+              const snapshot = await reads.control(sourceKey.incarnation)
+              if (
+                !sameStoredValue(snapshot.rejoin, record) ||
+                controlSafetyHeld(snapshot) !== null ||
+                snapshot.controlHold !== null
+              )
+                throw new GroupStateConflictError('Accepted recovery moved before settlement')
+              return { expected: await reads.lifetime(), value: null }
+            },
+            async (stores) => {
+              const control = stores.incarnation(sourceKey.incarnation).control
+              if (!sameStoredValue((await control.load()).rejoin, record))
+                throw new GroupStateConflictError('Accepted recovery moved before settlement')
+              await control.apply(changes, mutationID)
+            },
+          ),
+      }
+      await applyResolved(
+        store,
+        {
+          deleteRejoin: true,
+          recoveryEpochFloor: epoch,
+          putSettledRejoins: [
+            {
+              kind: 'accepted-unadoptable',
+              id: record.id,
+              digest: record.digest,
+              payloadDigest: record.payloadDigest,
+              epochAfter: record.epochAfter,
+              acceptedEpoch: epoch,
+              leafDigest,
+              origin: { sourceKey, target: record.target, searchFrom: record.searchFrom },
+              ledgerBefore: record.ledgerBefore,
+            },
+          ],
+        },
+        crypto.randomUUID(),
+      )
+      record.requestKey.fill(0)
+      record.candidate.fill(0)
+    })
   let failure: unknown
   function track<T>(value: Promise<T>): Promise<T> {
     pending.add(value)
@@ -163,6 +235,32 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
           recoveryOnly: control.rejoin !== null || !mls.sendAdmission().admissible,
           target: { ...target },
           onConfirmedRecovery,
+          settleAcceptedRecovery,
+          reconcileAcceptedRecovery: async (record, reply) => {
+            const saved = await coordinator.readRecoveryRecord(key)
+            if (
+              reconcileConfirmedRecovery !== record.id ||
+              record.stage !== 'confirmed' ||
+              !sameStoredValue(saved, record)
+            )
+              throw new GroupStateConflictError('Accepted recovery changed before recapture')
+            const resolved = await coordinator.resolveRecoverySwitch(record)
+            if (resolved.kind !== 'rolled-back') return { kind: 'retry' }
+            // Installation already refused. Settlement authenticates X against its immutable public origin.
+            return await reconcileRecoveryCapture({
+              source: record.source as RegistryRecoverySource,
+              target,
+              record,
+              reply,
+              environment: {
+                ...params.recovery,
+                accept: async () => {
+                  throw new Error('Settlement cannot install recovery')
+                },
+              },
+            })
+          },
+          reconcileConfirmedRecovery,
           continuation,
           completion:
             continuation === null
@@ -211,7 +309,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
         record.source,
       )
     )
-      throw new GroupStateConflictError('Accepted recovery origin moved')
+      throw new AcceptedRecoveryOriginMovedError('Accepted recovery origin moved')
     if (record.position === undefined || record.verdict === undefined)
       throw new GroupStateConflictError('Confirmed recovery proof required')
     const proof: ResyncProof = {
@@ -313,7 +411,20 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
           record = await coordinator.readRecoveryRecord(key)
           if (record === null || !('format' in record) || record.stage !== 'confirmed')
             throw new GroupStateConflictError('Confirmed recovery moved after drainage')
-          await accept(record, source)
+          try {
+            await accept(record, source)
+          } catch (error) {
+            if (
+              !(
+                error instanceof AcceptedRecoveryOriginMovedError ||
+                error instanceof RegistryResyncRefusedError
+              )
+            )
+              throw error
+            reconcileConfirmedRecovery = record.id
+            await start(key)
+            return
+          }
           continue
         }
       } catch (error) {

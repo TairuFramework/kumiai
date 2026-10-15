@@ -42,17 +42,21 @@ export type RecoveryOrigin = {
   searchFrom: LogPosition | null
 }
 export type AcceptedRejoinSettlement = {
-  kind: 'accepted-unadoptable'
   id: string
-  digest: string
-  payloadDigest: string
-  epochAfter: number
-  acceptedEpoch: number
   origin: RecoveryOrigin
-  /** SHA-256/base64url of the exact wire-encoded fresh LeafNode. */
-  leafDigest: string
   ledgerBefore: Array<string>
-}
+} & (
+  | {
+      kind: 'accepted-unadoptable'
+      digest: string
+      payloadDigest: string
+      epochAfter: number
+      acceptedEpoch: number
+      /** SHA-256/base64url of the exact wire-encoded fresh LeafNode. */
+      leafDigest: string
+    }
+  | { kind: 'not-accepted'; epoch: number }
+)
 export type CapturedRecapture = {
   sealed: Uint8Array
   requestID: string

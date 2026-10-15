@@ -476,7 +476,10 @@ export function runGroupSafetyContract<THandle extends ConformanceRegistryHandle
             rejoinID: recovery.record.id,
             proof: recovery.proof,
             write: {
-              mutationID: crypto.randomUUID(),
+              mutationID:
+                'format' in recovery.record
+                  ? (recovery.record.switchMutationID ?? crypto.randomUUID())
+                  : crypto.randomUUID(),
               source: { rejoinID: recovery.record.id },
               destination: {
                 control: {

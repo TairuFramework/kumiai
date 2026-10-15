@@ -6,7 +6,6 @@ import type {
   ConformanceCapturedRejoinRecord,
   ConformanceControlChanges,
   ConformanceControlSnapshot,
-  ConformanceLegacyRejoinRecord,
   ConformanceRecoverySource,
   ConformanceRecoveryTargetCapture,
   ConformanceResyncProof,
@@ -21,12 +20,7 @@ import type {
   ConformanceRecoveryContinuationPort,
   ConformanceRecoveryReconciliation,
 } from '../../rpc-conformance/src/group-mls.js'
-import type {
-  ControlChanges,
-  ControlSnapshot,
-  LegacyRejoinRecord,
-  RejoinRecord,
-} from '../src/control/types.js'
+import type { ControlChanges, ControlSnapshot, RejoinRecord } from '../src/control/types.js'
 import type { GroupMLS } from '../src/crypto.js'
 import { asLogPosition, type LogPosition } from '../src/cursor.js'
 import {
@@ -91,8 +85,8 @@ test('portable contracts and independent mirrors remain mutually assignable', ()
   mutual<ConformanceRecoveryCompletion, RecoveryCompletion>()
   mutual<RecoveryContinuationPort, ConformanceRecoveryContinuationPort<LogPosition>>()
   mutual<ConformanceRecoveryContinuationPort<LogPosition>, RecoveryContinuationPort>()
-  expectTypeOf<RejoinRecord>().toEqualTypeOf<LegacyRejoinRecord>()
-  expectTypeOf<RejoinRecord>().toEqualTypeOf<ConformanceLegacyRejoinRecord<LogPosition>>()
+  expectTypeOf<RejoinRecord>().toEqualTypeOf<CapturedRejoinRecord>()
+  expectTypeOf<RejoinRecord>().toEqualTypeOf<ConformanceCapturedRejoinRecord<LogPosition>>()
   expectTypeOf<RecoverySource['trust']>().toEqualTypeOf<unknown>()
   expectTypeOf<RecoverySource<{ publicKey: Uint8Array }>>().toEqualTypeOf<
     ConformanceRecoverySource<{ publicKey: Uint8Array }>

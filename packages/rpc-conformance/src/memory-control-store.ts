@@ -82,13 +82,17 @@ function foldSettlements<Position extends string>(
       throw new TypeError('Invalid recovery capture head')
     const key = JSON.stringify([sourceKey.groupID, sourceKey.incarnation])
     rows.set(key, {
-      kind: value.kind,
       id: value.id,
-      digest: value.digest,
-      payloadDigest: value.payloadDigest,
-      epochAfter: value.epochAfter,
-      acceptedEpoch: value.acceptedEpoch,
-      leafDigest: value.leafDigest,
+      ...(value.kind === 'not-accepted'
+        ? { kind: 'not-accepted' as const, epoch: value.epoch }
+        : {
+            kind: 'accepted-unadoptable' as const,
+            digest: value.digest,
+            payloadDigest: value.payloadDigest,
+            epochAfter: value.epochAfter,
+            acceptedEpoch: value.acceptedEpoch,
+            leafDigest: value.leafDigest,
+          }),
       origin: {
         sourceKey: { groupID: sourceKey.groupID, incarnation: sourceKey.incarnation },
         target: {

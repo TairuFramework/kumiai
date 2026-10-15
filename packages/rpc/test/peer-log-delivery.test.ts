@@ -3,12 +3,17 @@ import type { HubFetchTopicResult } from '@kumiai/hub-tunnel'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { createAppOutboxAcceptance } from '../src/app-outbox.js'
+import { decodeCommitFrame } from '../src/commit-frame.js'
+import { asLogPosition } from '../src/cursor.js'
+import { decodeHandshakeFrame } from '../src/handshake.js'
 import { type AppOutboxCleared, createLogDelivery } from '../src/log-delivery.js'
 import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
 import { commitTopic, protocolTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
+import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { createMemoryGroupMLS, requireCapturedRecovery } from './fixtures/memory-group-mls.js'
 import { createMemoryAppOutbox } from './fixtures/outbox.js'
 import {
   buildLedgerCommit,
@@ -133,6 +138,32 @@ describe('recovery ordering', { concurrent: false }, () => {
     const result = makeMLSPeer(hub, did, secret, { members: ['alice', 'bob', 'carol'], ...options })
     cleanup.push(result)
     return result
+  }
+
+  async function returningResponder(
+    hub: FakeHub | DurableFakeHub,
+    epoch: number,
+    options: MakeMLSPeerOptions,
+  ) {
+    const row = hub.published.filter((message) => message.topicID === commitTopic(secret)).at(-1)
+    if (row === undefined) throw new Error('Missing applied baseline commit')
+    const providerCrypto = createFakeCrypto({ epoch: epoch - 1, localDID: 'alice' })
+    const mls = createMemoryGroupMLS({
+      storageID: 'alice',
+      localDID: 'alice',
+      recoverySecret: secret,
+      epoch: epoch - 1,
+      members: ['alice', 'bob', 'carol'],
+      onAdvance: (next) => providerCrypto.setEpoch(next),
+    })
+    await mls.adopt(decodeCommitFrame(decodeHandshakeFrame(row.payload).payload).commit)
+    await mls.database().saveState('alice', mls.serializeState(), {
+      mutationID: crypto.randomUUID(),
+      changes: { cursor: { position: asLogPosition(row.sequenceID), epoch } },
+    })
+    const responder = member(hub, 'alice', { ...options, mls, crypto: providerCrypto })
+    await responder.peer.replay()
+    return responder
   }
 
   test.each([false, true])(
@@ -811,7 +842,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
     hub.trim(commitTopic(secret), '999999999999')
     const received: Array<unknown> = []
-    member(hub, 'alice', {
+    await returningResponder(hub, 2, {
       epoch: 2,
       handlers: { 'chat/posted': (ctx: { data: unknown }) => received.push(ctx.data) },
       recovery: { timeoutMs: 25, deadlineMs: 400, getDelayMs: () => 0 },
@@ -898,13 +929,18 @@ describe('recovery ordering', { concurrent: false }, () => {
     }
     expect(await bob.appOutbox.list()).toMatchObject([{ lastAttempt: null }])
     const received: Array<unknown> = []
-    member(hub, 'alice', {
+    await returningResponder(hub, 3, {
       epoch: 3,
       recovery: { timeoutMs: 20, deadlineMs: 100, getDelayMs: () => 0 },
       handlers: { 'chat/posted': (ctx: { data: unknown }) => received.push(ctx.data) },
     })
     await drainUntil(() => true, 'responder start')
     expect(received).toEqual([])
+    await vi.advanceTimersByTimeAsync(1000)
+    await drainUntil(
+      () => events.some((event) => event.phase === 'succeeded'),
+      'recovery after the responder returns',
+    )
     await vi.advanceTimersByTimeAsync(1000)
     await drainUntil(() => received.length === 1, 'delivery after the recovery retry')
     expect(received).toEqual([{ text: 'retry' }])
@@ -1245,22 +1281,26 @@ describe('recovery ordering', { concurrent: false }, () => {
     })
     const bob = member(hub, 'bob')
     await flush()
-    const apply = bob.mls.applyRecovery.bind(bob.mls)
+    const apply = requireCapturedRecovery(bob.mls).applyRecovery.bind(
+      requireCapturedRecovery(bob.mls),
+    )
     let failed = false
-    vi.spyOn(bob.mls, 'applyRecovery').mockImplementation(async (...args) => {
-      const pending = await apply(...args)
-      if (pending == null || 'renewalRequired' in pending) return pending
-      return {
-        ...pending,
-        onAccepted: async (write) => {
-          await pending.onAccepted(write)
-          if (!failed) {
-            failed = true
-            throw new Error('persist failed after adoption')
-          }
-        },
-      }
-    })
+    vi.spyOn(requireCapturedRecovery(bob.mls), 'applyRecovery').mockImplementation(
+      async (...args) => {
+        const pending = await apply(...args)
+        if (pending == null || 'renewalRequired' in pending) return pending
+        return {
+          ...pending,
+          onAccepted: async (...acceptedArgs) => {
+            await pending.onAccepted(...acceptedArgs)
+            if (!failed) {
+              failed = true
+              throw new Error('persist failed after adoption')
+            }
+          },
+        }
+      },
+    )
     await expect(bob.peer.recover()).rejects.toThrow('persist failed after adoption')
     await bob.peer.replay()
     const wrap = bob.crypto.wrap.bind(bob.crypto)

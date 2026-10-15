@@ -3,13 +3,17 @@ import { describe, expect, test } from 'vitest'
 import type { AnchorSlot } from '../src/anchor.js'
 import { digestAppliedCommit } from '../src/classify.js'
 import { landedChanges } from '../src/control/operations.js'
-import type { PendingRecovery } from '../src/crypto.js'
+import type { CapturedPendingRecovery } from '../src/recovery-types.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { fakeEpochSecret } from './fixtures/fake-crypto.js'
-import { encodeMemoryCommit, memoryEntryID } from './fixtures/memory-group-mls.js'
+import {
+  encodeMemoryCommit,
+  memoryEntryID,
+  requireCapturedRecovery,
+} from './fixtures/memory-group-mls.js'
 import {
   buildInviteCommit,
   buildLedgerCommit,
@@ -176,8 +180,8 @@ describe('recovery ordering', { concurrent: false }, () => {
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 4, members, recovery })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { members, recovery })
     await Promise.all([alice.peer.replay(), bob.peer.replay()])
-    const apply = bob.mls.applyRecovery
-    let pendingRecovery: PendingRecovery | undefined
+    const apply = requireCapturedRecovery(bob.mls).applyRecovery
+    let pendingRecovery: CapturedPendingRecovery | undefined
     let captured = 0
     const exportSecret = bob.crypto.exportSecret
     bob.crypto.exportSecret = async (label) => {
@@ -191,14 +195,14 @@ describe('recovery ordering', { concurrent: false }, () => {
       await save(slot)
     }
     let throwOnce = true
-    bob.mls.applyRecovery = async (...args) => {
+    requireCapturedRecovery(bob.mls).applyRecovery = async (...args) => {
       const candidate = await apply(...args)
       if (candidate == null || 'renewalRequired' in candidate) return candidate
       pendingRecovery = candidate
       return {
         ...candidate,
-        onAccepted: async (write) => {
-          await candidate.onAccepted(write)
+        onAccepted: async (...acceptedArgs) => {
+          await candidate.onAccepted(...acceptedArgs)
           if (throwOnce) {
             throwOnce = false
             throw new Error('rejoin notification failed')

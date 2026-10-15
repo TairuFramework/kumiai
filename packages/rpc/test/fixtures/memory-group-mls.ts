@@ -45,6 +45,7 @@ import {
   type ResyncProof,
   validateCaptureHead,
 } from '../../src/recovery-types.js'
+import { commitTopic } from '../../src/topic.js'
 import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
 
 export type MemoryGroupMLS = GroupMLS & {
@@ -1074,7 +1075,51 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     }
   }
 
-  const capturedDependencies = options.capturedRecovery
+  const capturedDependencies =
+    options.capturedRecovery ??
+    (localDID === undefined
+      ? undefined
+      : {
+          target: { targetID: 'memory-hub', topicID: commitTopic(recoverySecret) },
+          async readSource(): Promise<RecoverySource> {
+            const saved = await hostDB.snapshot(storageID)
+            const state =
+              saved.state === null
+                ? null
+                : (JSON.parse(toUTF(saved.state)) as { slots: Array<[number, string]> })
+            if (state === null) throw new Error('Missing retained memory recovery source')
+            const trust = {
+              groupID,
+              ownerDID: localDID,
+              members: state.slots.map(([, did]) => did),
+            }
+            return {
+              key: { groupID, incarnation: 1 },
+              stateVersion: saved.version,
+              identity: decodeMemoryGroupIdentity(
+                saved.state as Uint8Array,
+                { groupID, incarnation: 1 },
+                recoverySecret,
+              ),
+              lifetimeRevision: saved.version,
+              trust,
+              trustDigest: toB64U(sha256(fromUTF(JSON.stringify(trust)))),
+            }
+          },
+          async accept(
+            pending: PendingRecovery,
+            _expected: RecoverySource,
+            _proof: ResyncProof,
+            write: AdoptionWriteFactory,
+          ) {
+            if (
+              capturedDependencies === undefined ||
+              !sameOrigin(await capturedDependencies.readSource(), _expected)
+            )
+              throw new TypeError('Memory captured origin mismatch')
+            await pending.onAccepted(write)
+          },
+        })
   function validateSource(source: RecoverySource): RecoverySource {
     const trust = source.trust as { groupID?: string; ownerDID?: string; members?: Array<string> }
     if (
@@ -1089,13 +1134,20 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       !Array.isArray(trust.members) ||
       !trust.members.includes(localDID ?? '') ||
       source.trustDigest !== toB64U(sha256(fromUTF(JSON.stringify(trust)))) ||
-      source.identity !== null
+      (source.identity !== null &&
+        (source.identity.groupID !== groupID || source.identity.incarnation !== 1))
     )
       throw new TypeError('Invalid memory recovery source')
     return copyRecoverySource(source)
   }
   function sameSource(left: RecoverySource, right: RecoverySource): boolean {
     return encodeData(validateSource(left)) === encodeData(validateSource(right))
+  }
+  function sameOrigin(left: RecoverySource, right: RecoverySource): boolean {
+    return sameSource(
+      { ...left, stateVersion: 0, lifetimeRevision: 0 },
+      { ...right, stateVersion: 0, lifetimeRevision: 0 },
+    )
   }
   function encodeData(value: unknown): string {
     return JSON.stringify(value, (_key, child: unknown) =>
@@ -1284,7 +1336,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   ): Promise<CapturedPendingRecovery> {
     if (capturedDependencies === undefined) throw new TypeError('Missing captured dependencies')
     const { snapshot, info, held } = readCaptured(candidate, requestKey)
-    if (!sameSource(await capturedDependencies.readSource(), snapshot.source))
+    if (!sameOrigin(await capturedDependencies.readSource(), snapshot.source))
       throw new TypeError('Memory captured origin mismatch')
     return wrapCaptured(
       snapshot,
@@ -1315,7 +1367,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             const source = validateSource(await capturedDependencies.readSource())
             const info = capturedInfo(sealed, requestID, requestKey, source)
             if (info === null) return null
-            await prepare()
+            if (!prepared) await prepare()
             if (binding !== undefined && !usable(preparedBinding)) return { renewalRequired: true }
             const target = {
               ...capturedDependencies.target,
@@ -1381,7 +1433,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
                 record.trigger !== 'automatic' ||
                 record.authorisationID !== null ||
                 !['built', 'published', 'confirmed', 'adopted', 'refused'].includes(record.stage) ||
-                !sameSource(source, saved.source) ||
+                !sameOrigin(source, saved.source) ||
                 !sameSource(record.source, saved.source) ||
                 encodeData(record.target) !== encodeData(saved.target) ||
                 record.captureHead !== saved.target.captureHead ||
@@ -1487,6 +1539,20 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   return {
     ...(options.onSafetyHold === undefined ? {} : { onSafetyHold: options.onSafetyHold }),
     capturedRecovery,
+    async getRecoveryLedger() {
+      const saved = await hostDB.loadState(storageID)
+      if (saved === null) throw new Error('Missing retained recovery ledger')
+      const state = JSON.parse(toUTF(saved)) as {
+        ledger: Array<string>
+        bodies: Array<[string, string]>
+      }
+      const held = new Map(state.bodies)
+      return state.ledger.map((id) => {
+        const token = held.get(id)
+        if (token === undefined) throw new Error('Missing retained recovery token')
+        return token
+      })
+    },
     database: () => hostDB,
     persistInitialState: () =>
       serialise(async () => {
@@ -2177,4 +2243,9 @@ export function decodeMemoryGroupIdentity(
         )
       : fromB64U(encoded)
   return { ...key, epoch: value.epoch, authenticator }
+}
+
+export function requireCapturedRecovery(mls: GroupMLS): CapturedRecoveryPort {
+  if (mls.capturedRecovery === undefined) throw new Error('Missing captured recovery fixture')
+  return mls.capturedRecovery
 }

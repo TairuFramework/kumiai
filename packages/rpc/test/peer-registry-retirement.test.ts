@@ -445,6 +445,7 @@ test.each([
   'ownCommitDigest',
   'sendAdmission',
   'exportRecoverySecret',
+  'getRecoveryLedger',
   'createRecoveryRequest',
   'signRecoveryConfirmation',
   'openRecoveryVerdict',
@@ -456,9 +457,9 @@ test.each([
   })
   try {
     const port = recoveryOnlyMLS(mls)
-    await expect(Promise.resolve().then(() => Reflect.apply(port[name], port, []))).rejects.toBe(
-      error,
-    )
+    const method = port[name]
+    if (method === undefined) throw new Error('Missing retained requester member')
+    await expect(Promise.resolve().then(() => Reflect.apply(method, port, []))).rejects.toBe(error)
     expect(host).toHaveBeenCalledOnce()
   } finally {
     host.mockRestore()

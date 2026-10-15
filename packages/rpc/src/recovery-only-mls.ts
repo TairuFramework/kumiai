@@ -11,6 +11,7 @@ export function recoveryOnlyMLS(port: GroupMLS): GroupMLS {
     onSafetyHold: port.onSafetyHold,
     sendAdmission: port.sendAdmission,
     exportRecoverySecret: port.exportRecoverySecret,
+    getRecoveryLedger: port.getRecoveryLedger,
     prepareRecovery: refuse,
     createRecoveryRequest: port.createRecoveryRequest,
     applyRecovery: refuse,

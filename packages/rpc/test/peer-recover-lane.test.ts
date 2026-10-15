@@ -382,7 +382,7 @@ describe('recover() is a compare-and-set loop of its own', { concurrent: false }
     // discarded WITH the GroupInfo, and the rejoin is rebuilt from a fresh one. A peer that
     // merely retried the commit would have published against the changed tree, adopted its own
     // handle, and believed it had rejoined a group that never took its leaf.
-    expect(recoveryRequests(hub, rs)).toHaveLength(2)
+    expect(recoveryRequests(hub, rs)).toHaveLength(3)
     // It landed FOR THE GROUP, which is the only place it counts: Bob applied the rejoin, so
     // the epoch moved past his own commit and Alice's tree and his are the same one. Asserting
     // that her own call merely resolved would pass against a peer that published a commit
@@ -399,7 +399,7 @@ describe('recover() is a compare-and-set loop of its own', { concurrent: false }
   })
 
   test('two peers healing at once both converge, and neither loses its entries', async () => {
-    controlRecoveryClock(5)
+    controlRecoveryClock(3 * recovery.timeoutMs)
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x54)
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 2, members, recovery })

@@ -56,7 +56,7 @@ function port(fixture: RegistryFixture) {
 
 for (const mode of ['real-mls', 'double'] as const) {
   describe(`retired recovery continuation -- ${mode}`, () => {
-    async function setup() {
+    async function setup(format: 'legacy' | 'captured' = 'captured') {
       const fixture = await createRegistryFixture({ mode, setup: 'seeded', groupID })
       await fixture.installRows({
         key: source,
@@ -65,13 +65,15 @@ for (const mode of ['real-mls', 'double'] as const) {
       const recovery = await fixture.confirmedRecovery(source, {
         confirm: true,
         missingLedger: true,
+        format,
       })
       await fixture.registry.switchIncarnation(recovery.candidate, {
         source: await fixture.registry.recoverySource(groupID),
         rejoinID: recovery.record.id,
         proof: recovery.proof,
         write: {
-          mutationID: 'switch',
+          mutationID:
+            'format' in recovery.record ? (recovery.record.switchMutationID ?? 'switch') : 'switch',
           source: { rejoinID: recovery.record.id },
           destination: {
             control: {
@@ -123,7 +125,11 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect(continuation).toEqual({
           source,
           destination,
-          record: { ...s.recovery.record, stage: 'adopted' },
+          record: {
+            ...s.recovery.record,
+            stage: 'adopted',
+            ...('format' in s.recovery.record ? { destinationKey: destination } : {}),
+          },
         })
         expect(await fixture.inspectRows()).toEqual(before)
         expect(fixture.restoreCount(groupID)).toBe(0)
@@ -209,7 +215,7 @@ for (const mode of ['real-mls', 'double'] as const) {
     test.each(['missing-proof', 'wrong-proof'] as const)(
       'legacy adopted record requires independent installation: %s',
       async (fault) => {
-        const s = await setup()
+        const s = await setup('legacy')
         try {
           if (fault === 'missing-proof')
             await s.fixture.mutateMetadata(destination, (value) => ({

@@ -243,10 +243,12 @@ test.each(['built', 'published', 'confirmed'] as const)(
         new Error('Pause adoption'),
       )
     await again.peer.outcomes()
-    expect((await again.control.load()).rejoin).toMatchObject({
-      stage: stage === 'built' ? 'published' : stage,
-      position: published.sequenceID,
-    })
+    await expect
+      .poll(async () => (await again.control.load()).rejoin)
+      .toMatchObject({
+        stage: stage === 'built' ? 'published' : stage,
+        position: published.sequenceID,
+      })
     expect((await again.control.load()).cursor).toBeNull()
     expect(strands).not.toHaveBeenCalled()
   },

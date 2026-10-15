@@ -8,7 +8,7 @@ import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { createMemoryGroupMLS, requireCapturedRecovery } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 
 const members = ['alice', 'bob', 'carol']
@@ -130,21 +130,25 @@ describe('delayed ledger bootstrap', () => {
     state.stopLying()
     const error = new Error('persist failed after adoption')
     let rejectionPending = true
-    const applyRecovery = alice.mls.applyRecovery.bind(alice.mls)
-    const spy = vi.spyOn(alice.mls, 'applyRecovery').mockImplementation(async (...args) => {
-      const pending = await applyRecovery(...args)
-      if (pending == null || 'renewalRequired' in pending) return pending
-      return {
-        ...pending,
-        onAccepted: async (write) => {
-          await pending.onAccepted(write)
-          if (rejectionPending) {
-            rejectionPending = false
-            throw error
-          }
-        },
-      }
-    })
+    const applyRecovery = requireCapturedRecovery(alice.mls).applyRecovery.bind(
+      requireCapturedRecovery(alice.mls),
+    )
+    const spy = vi
+      .spyOn(requireCapturedRecovery(alice.mls), 'applyRecovery')
+      .mockImplementation(async (...args) => {
+        const pending = await applyRecovery(...args)
+        if (pending == null || 'renewalRequired' in pending) return pending
+        return {
+          ...pending,
+          onAccepted: async (...acceptedArgs) => {
+            await pending.onAccepted(...acceptedArgs)
+            if (rejectionPending) {
+              rejectionPending = false
+              throw error
+            }
+          },
+        }
+      })
     await expect(alice.peer.recover()).rejects.toBe(error)
     spy.mockRestore()
     const requestsBefore = recoveryRequests()
@@ -176,21 +180,25 @@ describe('delayed ledger bootstrap', () => {
     state.stopLying()
     const error = new Error('persist failed after adoption')
     let rejectionPending = true
-    const applyRecovery = alice.mls.applyRecovery.bind(alice.mls)
-    vi.spyOn(alice.mls, 'applyRecovery').mockImplementation(async (...args) => {
-      const pending = await applyRecovery(...args)
-      if (pending == null || 'renewalRequired' in pending) return pending
-      return {
-        ...pending,
-        onAccepted: async (write) => {
-          await pending.onAccepted(write)
-          if (rejectionPending) {
-            rejectionPending = false
-            throw error
-          }
-        },
-      }
-    })
+    const applyRecovery = requireCapturedRecovery(alice.mls).applyRecovery.bind(
+      requireCapturedRecovery(alice.mls),
+    )
+    vi.spyOn(requireCapturedRecovery(alice.mls), 'applyRecovery').mockImplementation(
+      async (...args) => {
+        const pending = await applyRecovery(...args)
+        if (pending == null || 'renewalRequired' in pending) return pending
+        return {
+          ...pending,
+          onAccepted: async (...acceptedArgs) => {
+            await pending.onAccepted(...acceptedArgs)
+            if (rejectionPending) {
+              rejectionPending = false
+              throw error
+            }
+          },
+        }
+      },
+    )
 
     await expect(alice.peer.recover()).rejects.toBe(error)
     expect(alice.mls.epoch()).toBe(bob.mls.epoch())
@@ -268,21 +276,25 @@ describe('delayed ledger bootstrap', () => {
     const { alice, bob, events } = state
     state.stopLying()
     const error = new Error('transient epoch teardown')
-    const apply = alice.mls.applyRecovery.bind(alice.mls)
+    const apply = requireCapturedRecovery(alice.mls).applyRecovery.bind(
+      requireCapturedRecovery(alice.mls),
+    )
     let spy: MockInstance | undefined
-    vi.spyOn(alice.mls, 'applyRecovery').mockImplementation(async (...args) => {
-      const pending = await apply(...args)
-      if (pending == null || 'renewalRequired' in pending) return pending
-      return {
-        ...pending,
-        onAccepted: async (write) => {
-          spy ??= vi
-            .spyOn(BroadcastClient.prototype, 'dispose')
-            .mockImplementationOnce(() => Promise.reject(error))
-          await pending.onAccepted(write)
-        },
-      }
-    })
+    vi.spyOn(requireCapturedRecovery(alice.mls), 'applyRecovery').mockImplementation(
+      async (...args) => {
+        const pending = await apply(...args)
+        if (pending == null || 'renewalRequired' in pending) return pending
+        return {
+          ...pending,
+          onAccepted: async (...acceptedArgs) => {
+            spy ??= vi
+              .spyOn(BroadcastClient.prototype, 'dispose')
+              .mockImplementationOnce(() => Promise.reject(error))
+            await pending.onAccepted(...acceptedArgs)
+          },
+        }
+      },
+    )
 
     await expect(alice.peer.recover()).rejects.toMatchObject({
       message: 'Group epoch teardown failed',
