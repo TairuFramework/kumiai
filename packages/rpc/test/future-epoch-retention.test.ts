@@ -130,7 +130,7 @@ test('a peer expires a near-future occurrence without later commit or app traffi
   const seen = vi.fn()
   const bob = durableBob(hub, { handlers: { 'chat/posted': seen } })
   await bob.peer.protocol('chat').to('alice')
-  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
   try {
     const frame = await hub.publish({
       senderDID: 'alice',
@@ -185,7 +185,7 @@ test('an expiry gap observer can await resync without blocking later serial work
     onAppDeliveryResumed: () => notices.push('resumed'),
   })
   await bob.peer.protocol('chat').to('alice')
-  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
   try {
     const frame = await hub.publish({
       senderDID: 'alice',
@@ -280,7 +280,7 @@ test('a blocked retained handler applies backpressure across new batches and pub
   const bob = makeMLSPeer(hub, 'bob', secret, { handlers: { 'chat/posted': handler } })
   await bob.peer.protocol('chat').to('alice')
   hub.detach('bob')
-  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
   const writer = createFakeCrypto({ epoch: 1, localDID: 'alice' })
   const publish = async (count: number) => {
     for (let index = 0; index < count; index++) {
@@ -336,7 +336,7 @@ test('a peer starts hold age only when a paused commit walk catches up', async (
       { aad: encodeAppAAD({ topicID, intent: 'log' }) },
     ),
   })
-  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
   const bob = makeMLSPeer(hub, 'bob', secret, { restartOf: first })
   const entered = Promise.withResolvers<void>()
   const release = Promise.withResolvers<void>()
@@ -369,7 +369,7 @@ test('a local commit awaiting its publication acknowledgement suspends app expir
   const hub = new DurableFakeHub()
   const bob = durableBob(hub)
   await bob.peer.protocol('chat').to('alice')
-  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
   const entered = Promise.withResolvers<void>()
   const release = Promise.withResolvers<void>()
   let committing: Promise<unknown> | undefined
@@ -413,7 +413,7 @@ test('a local commit restores catch-up so a quiet future occurrence still expire
   const hub = new DurableFakeHub()
   const bob = durableBob(hub)
   await bob.peer.protocol('chat').to('alice')
-  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
   try {
     const frame = await hub.publish({
       senderDID: 'alice',
@@ -440,7 +440,7 @@ test('live unsupported outer app versions complete without decrypting or a handl
   const seen = vi.fn()
   const bob = durableBob(hub, { handlers: { 'chat/posted': seen } })
   await bob.peer.protocol('chat').to('alice')
-  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
   const opens = vi.spyOn(bob.crypto, 'unwrap')
   try {
     const aad = encodeAppAAD({ topicID, intent: 'log' })
@@ -476,10 +476,11 @@ async function futureLane(
     durable?: boolean
     caught?: boolean
     hint?: number
+    now?: () => number
     scheduleDrain?: (drain: () => Promise<void>) => Promise<void>
   } = {},
 ) {
-  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
   let caught = options.caught ?? true
   let workVersion = 0
   const rows = new Map<string, PendingAppFrame>()
@@ -524,6 +525,7 @@ async function futureLane(
       appCursorStore: cursor,
       anchor: () => anchor,
       groupID: () => 'group',
+      ...(options.now == null ? {} : { now: options.now }),
       ...{
         commitLaneCaughtUp: () => caught,
         commitWorkVersion: () => workVersion,
@@ -564,6 +566,50 @@ async function futureLane(
 }
 
 describe('caught-up future occurrence bounds', () => {
+  test('backwards wall-clock readings preserve the clamped expiry boundary', async () => {
+    const f = await futureLane()
+    const wallClock = vi.spyOn(Date, 'now').mockReturnValue(100_000)
+    await f.append(3)
+    await f.lane.deliver()
+    wallClock.mockReturnValue(120_000)
+    await f.lane.deliver()
+    wallClock.mockReturnValue(80_000)
+    await f.append(3)
+    await f.lane.deliver()
+    expect(f.cursor.stored(topicID)).toBeNull()
+    wallClock.mockReturnValue(129_999)
+    await f.lane.deliver()
+    expect(f.cursor.stored(topicID)).toBeNull()
+    wallClock.mockReturnValue(130_000)
+    await f.lane.deliver()
+    expect(f.cursor.stored(topicID)).toBe('000000000001')
+    wallClock.mockReturnValue(149_999)
+    await f.lane.deliver()
+    expect(f.cursor.stored(topicID)).toBe('000000000001')
+    wallClock.mockReturnValue(150_000)
+    await f.lane.deliver()
+    expect(f.cursor.stored(topicID)).toBe('000000000002')
+    expect(f.emit).not.toHaveBeenCalled()
+  })
+
+  test('an injected clock controls future occurrence age independently of wall time', async () => {
+    let time = 100
+    const now = vi.fn(() => time)
+    const f = await futureLane({ now })
+    await f.append(3)
+    await f.lane.deliver()
+    expect(now).toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(f.cursor.stored(topicID)).toBeNull()
+    time += 29_999
+    await f.lane.deliver()
+    expect(f.cursor.stored(topicID)).toBeNull()
+    time += 1
+    await f.lane.deliver()
+    expect(f.cursor.stored(topicID)).toBe('000000000001')
+    expect(f.emit).not.toHaveBeenCalled()
+  })
+
   test('reset cancels a queued drain before it can fetch the replacement segment', async () => {
     const release = Promise.withResolvers<void>()
     const settled = Promise.withResolvers<void>()

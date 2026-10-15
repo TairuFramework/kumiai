@@ -7,6 +7,7 @@ import { fromUTF, toB64U, toUTF } from '@sozai/codec'
 import type { Anchor } from './anchor.js'
 import { decodeAppAAD, encodeAppAAD } from './app-aad.js'
 import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
+import { createMonotoneClock } from './clock.js'
 import type { SafetyHold } from './control/safety.js'
 import {
   type GroupCrypto,
@@ -103,6 +104,8 @@ export type AppLaneParams = {
   commitLaneCaughtUp?: () => boolean
   /** Changes when new commit work invalidates a caught-up observation. */
   commitWorkVersion?: () => number
+  /** Local monotone milliseconds. Defaults to clamped wall time. */
+  now?: () => number
   /** Current safety hold. Defaults to null. */
   safetyHold?: () => SafetyHold
   /** Latch a held refusal. Defaults to a no-op. */
@@ -199,6 +202,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
     safetyHold = () => null,
     commitLaneCaughtUp = () => true,
     commitWorkVersion = () => 0,
+    now = createMonotoneClock(),
     onSafetyHeld = () => {},
     anchor,
     groupID,
@@ -465,7 +469,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
             frames,
             {
               position,
-              ...(commitLaneCaughtUp() ? { caughtUpAt: performance.now() } : {}),
+              ...(commitLaneCaughtUp() ? { caughtUpAt: now() } : {}),
               sealed:
                 restored == null
                   ? { state: 'sealed', bytes: message.payload }
@@ -637,7 +641,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
     const retryFrames = frames.filter((frame) => frame.sealed.state !== 'pending')
     // Preserve transitions even when a drain is already queued or awaiting a refetch.
     if (commitLaneCaughtUp()) {
-      const time = performance.now()
+      const time = now()
       for (const frame of retryFrames) {
         if (!caughtUpTimes.has(frame)) caughtUpTimes.set(frame, time)
       }
@@ -769,7 +773,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       topicID,
       frame: {
         position: asLogPosition(position),
-        ...(commitLaneCaughtUp() ? { caughtUpAt: performance.now() } : {}),
+        ...(commitLaneCaughtUp() ? { caughtUpAt: now() } : {}),
         sealed: ahead ? { state: 'sealed', bytes: message.payload } : { state: 'done' },
       },
     })
@@ -836,8 +840,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
           if (isFrameAhead(error)) {
             if (disposed || safetyHold() !== null) break
             if (caughtUpBefore && commitLaneCaughtUp() && workVersion === commitWorkVersion()) {
-              frame.caughtUpAt ??= performance.now()
-              const remaining = APP_FUTURE_HOLD_MS - (performance.now() - frame.caughtUpAt)
+              frame.caughtUpAt ??= now()
+              const remaining = APP_FUTURE_HOLD_MS - (now() - frame.caughtUpAt)
               if (
                 error.frameEpoch > error.handleEpoch + APP_FUTURE_EPOCH_WINDOW ||
                 remaining <= 0

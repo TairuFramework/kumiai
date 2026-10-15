@@ -11,6 +11,7 @@ import { decodeAppAAD } from './app-aad.js'
 import { type AppDeliveryResumed, type AppDeliveryStalled, createAppLane } from './app-lane.js'
 import { createAppOutboxAcceptance } from './app-outbox.js'
 import { classifyCommit, digestAppliedCommit } from './classify.js'
+import { createMonotoneClock } from './clock.js'
 import { RecoveryRequiredError } from './commit.js'
 import {
   type CommitFrame,
@@ -451,6 +452,7 @@ export function createGroupPeerWithControlWalk<
     safetyHold,
     commitLaneCaughtUp: () => commitLaneCaughtUp,
     commitWorkVersion: () => commitWorkVersion,
+    now: createMonotoneClock(),
     scheduleDrain: async (drain) => {
       await ready
       if (disposed) return
