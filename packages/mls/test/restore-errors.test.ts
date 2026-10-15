@@ -1,8 +1,8 @@
 import { randomIdentity } from '@kokuin/token'
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 
 import { GROUP_ANCHOR_EXTENSION_TYPE } from '../src/anchor.js'
-import { createGroup, restoreGroup } from '../src/group.js'
+import { createGroup, GroupHandle, restoreGroup } from '../src/group.js'
 
 test('restoration marks deterministic constructor refusal with its cause', async () => {
   const { group, credential } = await createGroup(randomIdentity(), 'restore-refusal')
@@ -37,4 +37,18 @@ test('restoration preserves provider construction error identity', async () => {
       },
     }),
   ).rejects.toBe(error)
+})
+
+test('restoration marks deterministic saved ledger refusal with its cause', async () => {
+  const { group, credential } = await createGroup(randomIdentity(), 'restore-ledger-refusal')
+  const error = new TypeError('Invalid saved ledger')
+  const apply = vi.spyOn(GroupHandle.prototype, 'applyLedgerEntries').mockRejectedValueOnce(error)
+  try {
+    await expect(restoreGroup({ state: group.state, credential })).rejects.toMatchObject({
+      name: 'GroupRestoreError',
+      cause: error,
+    })
+  } finally {
+    apply.mockRestore()
+  }
 })

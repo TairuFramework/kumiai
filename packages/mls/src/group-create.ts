@@ -174,11 +174,12 @@ export async function restoreGroup(params: RestoreGroupParams): Promise<GroupHan
       resolveLedgerEntries: params.options?.resolveLedgerEntries,
       onLedgerEntries: params.options?.onLedgerEntries,
     })
+    // Replaying saved tokens has no caller-supplied provider or storage effects.
+    await group.applyLedgerEntries(params.ledgerEntries ?? [])
   } catch (cause) {
     throw new GroupRestoreError(cause instanceof Error ? cause.message : 'Invalid restored group', {
       cause,
     })
   }
-  await group.applyLedgerEntries(params.ledgerEntries ?? [])
   return group
 }

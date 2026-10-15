@@ -13,7 +13,11 @@ import { describe, expect, test, vi } from 'vitest'
 
 import type { EntryReads } from '../src/entry-capability.js'
 import * as api from '../src/index.js'
-import { RecoveryCandidateError, restoreRecoveryCandidate } from '../src/recovery.js'
+import {
+  createVerdictJudge,
+  RecoveryCandidateError,
+  restoreRecoveryCandidate,
+} from '../src/recovery.js'
 import {
   decodeCapturedRecoveryCandidate,
   encodeCapturedRecoveryCandidate,
@@ -1177,6 +1181,10 @@ describe('registry peer recovery coordination', () => {
     'authentication',
     'authentication-refusal',
     'attestation-tree',
+    'authentication-lapse',
+    'authentication-revoke',
+    'ledger',
+    'confirmation-refusal',
   ] as const)('a saved candidate %s failure stops with unchanged persistence', async (fault) => {
     const s = await setup()
     let owner: api.RegistryPeer | undefined
@@ -1278,6 +1286,26 @@ describe('registry peer recovery coordination', () => {
           new mlsAPI.SealedGroupInfoError('unauthenticated', 'Saved attestation refused'),
         )
       }
+      if (fault === 'authentication-lapse') {
+        vi.spyOn(mlsAPI, 'authenticateRecoveryReply').mockRejectedValue(
+          new mlsAPI.LeafLapsedError('lapsed'),
+        )
+      }
+      if (fault === 'authentication-revoke') {
+        vi.spyOn(mlsAPI, 'authenticateRecoveryReply').mockRejectedValue(
+          new mlsAPI.RevokeProofError('generation-floor'),
+        )
+      }
+      if (fault === 'ledger') {
+        vi.spyOn(mlsAPI.GroupHandle.prototype, 'applyLedgerEntries').mockRejectedValue(
+          new TypeError('Invalid saved ledger'),
+        )
+      }
+      if (fault === 'confirmation-refusal') {
+        vi.spyOn(mlsAPI, 'confirmationKey').mockRejectedValue(
+          new mlsAPI.LeafBindingError('confirmation-invalid'),
+        )
+      }
       if (fault === 'attestation-tree') {
         vi.spyOn(publicRecovery, 'offeredTree').mockImplementation(() => {
           throw new TypeError('Invalid saved attestation tree')
@@ -1316,6 +1344,28 @@ describe('registry peer recovery coordination', () => {
     }
   })
 
+  test('saved verdict binding refuses a different confirmation tuple terminally', async () => {
+    const s = await setup()
+    try {
+      const snapshot = decodeCapturedRecoveryCandidate(
+        s.recovery.record.candidate,
+        s.recovery.record.requestKey,
+      )
+      const judge = createVerdictJudge({
+        group: s.recovery.candidate,
+        sourceTree: snapshot.sourceTree,
+        known: snapshot.knownRegistry,
+        requestID: snapshot.requestID,
+        boundCommit: snapshot.boundCommit,
+      })
+      await expect(
+        judge.confirmationKey('different-position', s.recovery.record.digest),
+      ).rejects.toBeInstanceOf(RecoveryCandidateError)
+    } finally {
+      await s.f.close()
+    }
+  })
+
   test('saved candidate source validation is terminal', async () => {
     const s = await setup()
     try {
@@ -1332,7 +1382,7 @@ describe('registry peer recovery coordination', () => {
     }
   })
 
-  test.each(['restore', 'authentication'] as const)(
+  test.each(['restore', 'authentication', 'confirmation'] as const)(
     'a provider error from saved candidate %s keeps identity and retries',
     async (phase) => {
       const s = await setup()
@@ -1342,7 +1392,9 @@ describe('registry peer recovery coordination', () => {
         const restore =
           phase === 'restore'
             ? vi.spyOn(mlsAPI, 'restoreGroup').mockRejectedValueOnce(error)
-            : vi.spyOn(mlsAPI, 'authenticateRecoveryReply').mockRejectedValueOnce(error)
+            : phase === 'authentication'
+              ? vi.spyOn(mlsAPI, 'authenticateRecoveryReply').mockRejectedValueOnce(error)
+              : vi.spyOn(mlsAPI, 'confirmationKey').mockRejectedValueOnce(error)
         await expect(
           restoreRecoveryCandidate({
             source: s.recovery.source,

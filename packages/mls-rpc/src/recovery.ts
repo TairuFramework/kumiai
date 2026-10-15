@@ -355,7 +355,7 @@ export function createVerdictJudge(params: VerdictJudgeParams) {
     boundCommit: () => (tuple == null ? undefined : { ...tuple }),
     async confirmationKey(position: string, commitDigest: string) {
       if (tuple != null && (tuple.position !== position || tuple.commitDigest !== commitDigest))
-        throw new Error('Pending recovery already bound to another commit')
+        throw new RecoveryCandidateError('Pending recovery already bound to another commit')
       tuple ??= { position, commitDigest }
       const key = await confirmationKey(group, position, commitDigest)
       tuple.tag = confirmationTag(key, requestID)
@@ -420,6 +420,15 @@ function assertOwner(
     throw new RecoveryCandidateError('Invalid captured recovery environment')
 }
 
+function candidateRefused(cause: unknown): boolean {
+  return (
+    cause instanceof SealedGroupInfoError ||
+    cause instanceof LeafBindingError ||
+    cause instanceof LeafLapsedError ||
+    cause instanceof RevokeProofError
+  )
+}
+
 async function authenticateSnapshot(
   snapshot: CapturedRecoverySnapshot,
   requestKey: Uint8Array,
@@ -435,7 +444,7 @@ async function authenticateSnapshot(
       options: environment.options,
     })
   } catch (cause) {
-    if (cause instanceof SealedGroupInfoError || cause instanceof LeafBindingError)
+    if (candidateRefused(cause))
       throw new RecoveryCandidateError('Saved recovery attestation refused', { cause })
     throw cause
   }
@@ -484,15 +493,26 @@ async function capturedPending(
     throw cause
   }
   const binding = capturedBindingState(environment)
-  const judge = createVerdictJudge({
-    group,
-    sourceTree: snapshot.sourceTree,
-    known: snapshot.knownRegistry,
-    requestID: snapshot.requestID,
-    boundCommit: snapshot.boundCommit,
-  })
+  let judge: ReturnType<typeof createVerdictJudge>
+  try {
+    judge = createVerdictJudge({
+      group,
+      sourceTree: snapshot.sourceTree,
+      known: snapshot.knownRegistry,
+      requestID: snapshot.requestID,
+      boundCommit: snapshot.boundCommit,
+    })
+  } catch (cause) {
+    throw new RecoveryCandidateError('Saved recovery verdict binding refused', { cause })
+  }
   if (snapshot.boundCommit?.tag !== undefined) {
-    await judge.confirmationKey(snapshot.boundCommit.position, snapshot.boundCommit.commitDigest)
+    try {
+      await judge.confirmationKey(snapshot.boundCommit.position, snapshot.boundCommit.commitDigest)
+    } catch (cause) {
+      if (candidateRefused(cause))
+        throw new RecoveryCandidateError('Saved recovery confirmation refused', { cause })
+      throw cause
+    }
     if (judge.boundCommit()?.tag !== snapshot.boundCommit.tag)
       throw new RecoveryCandidateError('Captured recovery confirmation tag mismatch')
   }

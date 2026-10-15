@@ -145,6 +145,7 @@ import {
   responseOutcome,
   waitForRecoveryConfirmation,
 } from './recovery-confirmation.js'
+import { recoveryOnlyMLS } from './recovery-only-mls.js'
 import type { StoredRejoinRecord } from './recovery-types.js'
 import { detectRosterChange } from './roster.js'
 import {
@@ -309,6 +310,7 @@ export function createGroupPeerWithControlWalk<
   const applyResolved: typeof applyControlResolved = (store, changes, mutationID) =>
     applyControlResolved(store, changes, mutationID, undefined, controlAbort.signal)
   const params = wrapPeerHost(boundary, input)
+  if (params.recoveryOnly && params.mls != null) params.mls = recoveryOnlyMLS(params.mls)
   const {
     hub,
     crypto,
@@ -4599,6 +4601,7 @@ export function createGroupPeerWithControlWalk<
     protocol: protocolMethod,
     retryAppDelivery: async (topicID) => {
       if (disposed) return
+      if (params.recoveryOnly) throw new SendNotAdmissibleError('stranded')
       appLane.retryDelivery(topicID)
       retryAppPull()
     },
