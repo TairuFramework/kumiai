@@ -141,6 +141,7 @@ type Discovery = {
   occurrence: LogPosition | null
   copyMismatch: boolean
   unexplainedOwn: boolean
+  latestOwnMatches: boolean | null
 }
 
 function sameBuild(left: BuiltCommit, right: BuiltCommit): boolean {
@@ -202,9 +203,10 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
       const unknown = async (
         position: LogPosition | null = null,
         reason: ControlHold['reason'] = 'acceptance-unknown',
+        retryHead?: LogPosition | null,
       ) => {
         if (!held()) await deps.hold({ reason, position })
-        return { kind: 'unknown' as const }
+        return { kind: 'unknown' as const, ...(retryHead === undefined ? {} : { retryHead }) }
       }
       if (held()) return stopped()
       const validation = await deps.validation.restoreValidation(built)
@@ -289,6 +291,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
         occurrence: null,
         copyMismatch: false,
         unexplainedOwn: false,
+        latestOwnMatches: null,
       }
       continuation = discovery
       const range = (): CertifiedControlRange | null =>
@@ -420,6 +423,8 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
               discovery.through = position
               continue
             }
+            const fullDigest = toB64U(sha256(frame.payload))
+            if (fullDigest === built.payloadDigest) discovery.latestOwnMatches = true
             let header: CommitHeader | null
             try {
               header = await validation.readCommitHeader(commit)
@@ -451,17 +456,20 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
               continue
             }
             if (held()) return stopped()
+            const commitDigest = digestAppliedCommit(commit)
+            if (commitDigest === built.digest)
+              discovery.latestOwnMatches = fullDigest === built.payloadDigest
             const result = await validation.validateFrame(frame, built, header)
             if (held()) return stopped()
             if (result.kind === 'unavailable') {
               if (
                 result.reason === 'unexplained-own' ||
                 (result.reason !== 'unsupported-version' &&
-                  digestAppliedCommit(commit) === built.digest &&
-                  toB64U(sha256(frame.payload)) !== built.payloadDigest)
+                  commitDigest === built.digest &&
+                  fullDigest !== built.payloadDigest)
               ) {
                 discovery.copyMismatch = true
-                discovery.unexplainedOwn ||= digestAppliedCommit(commit) !== built.digest
+                discovery.unexplainedOwn ||= commitDigest !== built.digest
                 discovery.through = position
                 continue
               }
@@ -474,18 +482,14 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
               )
             }
             discovery.through = position
-            const fullDigest = toB64U(sha256(frame.payload))
             if (result.kind === 'invalid') {
-              if (
-                digestAppliedCommit(commit) === built.digest &&
-                fullDigest !== built.payloadDigest
-              )
+              if (commitDigest === built.digest && fullDigest !== built.payloadDigest)
                 discovery.copyMismatch = true
               continue
             }
             if (result.own && fullDigest !== built.payloadDigest) {
               discovery.copyMismatch = true
-              discovery.unexplainedOwn ||= digestAppliedCommit(commit) !== built.digest
+              discovery.unexplainedOwn ||= commitDigest !== built.digest
               continue
             }
             if (discovery.winner === null) discovery.winner = frame
@@ -497,10 +501,21 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
           }
           discovery.complete = discovery.head === null || discovery.through === discovery.head
         }
-        if (discovery.copyMismatch) {
-          await deps.reconcileAbsent(discovery.head, null, work)
+        if (discovery.latestOwnMatches === true) {
           continuation = null
           return unknown(discovery.through)
+        }
+        if (discovery.copyMismatch) {
+          const reconciled = await deps.reconcileAbsent(discovery.head, null, work)
+          continuation = null
+          if (held()) return stopped()
+          return unknown(
+            discovery.through,
+            'acceptance-unknown',
+            reconciled && !discovery.unexplainedOwn && discovery.latestOwnMatches === false
+              ? discovery.head
+              : undefined,
+          )
         }
         if (discovery.winner !== null && !(await follow()))
           return unknown(discovery.winner.position)

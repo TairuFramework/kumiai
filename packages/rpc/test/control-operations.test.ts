@@ -2,6 +2,8 @@ import { expect, test, vi } from 'vitest'
 
 import { encodeControlFixtureState } from '../../rpc-conformance/src/control-store.js'
 import { createMemoryControlStore } from '../../rpc-conformance/src/memory-control-store.js'
+import { digestAppliedCommit } from '../src/classify.js'
+import { encodeCommitFrame } from '../src/commit-frame.js'
 import {
   enqueueOperation,
   landedChanges,
@@ -9,6 +11,7 @@ import {
   stepOperation,
 } from '../src/control/operations.js'
 import { forkEventID } from '../src/control/safety.js'
+import { type ControlSearchDeps, createControlSearch } from '../src/control/search.js'
 import { controlBuildRef } from '../src/control/slot.js'
 import type {
   ControlChanges,
@@ -20,6 +23,7 @@ import type {
   Outcome,
 } from '../src/control/types.js'
 import { asLogPosition, type LogPosition } from '../src/cursor.js'
+import { encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 
 const request: OperationRequest = {
   id: 'invite',
@@ -34,7 +38,7 @@ const payload = new TextEncoder().encode('abc')
 const payloadDigest = 'ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0'
 const publishID = 'fedcba9876543210fedcba9876543210'
 
-async function setup() {
+async function setup(framed?: { payload: Uint8Array; digest: string }) {
   const store = createMemoryControlStore<LogPosition>(key)
   let identity = { ...key, epoch: 4, authenticator: new Uint8Array([3]) }
   await store.saveState(encodeControlFixtureState(identity))
@@ -52,7 +56,7 @@ async function setup() {
     epoch: 4,
     authenticatorBefore: new Uint8Array([3]),
     incarnation: 1,
-    digest: 'commit-digest',
+    digest: framed?.digest ?? 'commit-digest',
   }
   const readEvidence = async () => {
     const snapshot = await store.load()
@@ -100,7 +104,7 @@ async function setup() {
         ...framed,
         opID: op.id,
         searchFrom: evidence.cursor?.position ?? null,
-        payloadDigest,
+        payloadDigest: framed === undefined ? payloadDigest : digestAppliedCommit(framed.payload),
       }
       const kind = await store.saveBuilt(op, slot, evidence.source, deps.newID())
       return {
@@ -108,7 +112,11 @@ async function setup() {
         operation: kind === 'saved' ? { ...op, stage: 'built', built: controlBuildRef(slot) } : op,
       }
     }),
-    frame: vi.fn(async () => ({ payload, publishID, expectedHead: head })),
+    frame: vi.fn(async () => ({
+      payload: framed?.payload ?? payload,
+      publishID,
+      expectedHead: head,
+    })),
     publish: vi.fn(async () => {
       published = position
       return { sequenceID: position }
@@ -163,6 +171,202 @@ async function setup() {
     },
   }
 }
+
+async function searchSetup() {
+  const frame = (commit: number, blob = new Uint8Array()) =>
+    encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(new Uint8Array([commit]), blob))
+  const h = await setup({ payload: frame(1), digest: digestAppliedCommit(new Uint8Array([1])) })
+  const op = await h.built()
+  const slot = (await h.store.load()).commitOnce
+  if (slot === null) throw new Error('expected saved build')
+  let observedHead = head
+  const rows: Array<{
+    sequenceID: LogPosition
+    payload: Uint8Array
+    senderDID: string
+    topicID: string
+    receivedAt: number
+  }> = []
+  const searchDeps: ControlSearchDeps = {
+    budget: { maxPasses: 2, maxFetches: 16, maxFrames: 256 },
+    fetch: async (after) => ({
+      messages: rows.filter(
+        (row) => (after === null || row.sequenceID > after) && row.sequenceID <= observedHead,
+      ),
+      head: observedHead,
+      oldest: rows[0]?.sequenceID ?? head,
+      gap: false,
+    }),
+    validation: {
+      restoreValidation: async () => ({
+        source: (await h.deps.readEvidence()).source,
+        readCommitHeader: async () => ({ epoch: slot.epoch }),
+        validateFrame: async () => ({ kind: 'invalid', reason: 'policy' }),
+        verifyOwn: async () => false,
+      }),
+    },
+    readEvidence: h.deps.readEvidence,
+    followWinner: async () => ({ kind: 'unavailable' }),
+    reconcileAbsent: async () => true,
+    hold: async (controlHold) => {
+      await h.store.apply({ controlHold }, h.deps.newID())
+    },
+    haltFork: h.deps.haltFork,
+    safetyHold: h.deps.safetyHold,
+  }
+  h.deps.searchLog = createControlSearch(searchDeps).searchLog
+  h.deps.readHead = async () => observedHead
+  const append = (sequenceID: LogPosition, payload: Uint8Array) => {
+    rows.push({ sequenceID, payload, senderDID: 'publisher', topicID: 'commits', receivedAt: 1 })
+    observedHead = sequenceID
+  }
+  return {
+    ...h,
+    op,
+    slot,
+    frame,
+    searchDeps,
+    append,
+    observe: (value: LogPosition) => {
+      observedHead = value
+    },
+  }
+}
+
+test.each(['fetch', 'frame'] as const)(
+  'repeated unknown from %s budget exhaustion publishes no extra copies',
+  async (budget) => {
+    const h = await searchSetup()
+    h.searchDeps.budget = {
+      maxPasses: 2,
+      maxFetches: budget === 'fetch' ? 1 : 16,
+      maxFrames: budget === 'frame' ? 1 : 256,
+    }
+    const fetch = h.searchDeps.fetch
+    if (budget === 'fetch') {
+      h.searchDeps.fetch = async (after) => {
+        const page = await fetch(after)
+        return { ...page, messages: page.messages.slice(0, 1) }
+      }
+    }
+    for (let value = 5; value < 105; value++) {
+      h.append(asLogPosition(String(value).padStart(3, '0')), new Uint8Array([0]))
+    }
+    for (let step = 0; step < 10; step++) {
+      expect(await stepOperation(h.deps, h.op)).toEqual(h.op)
+    }
+    expect(h.deps.publish).not.toHaveBeenCalled()
+    expect((await h.store.load()).commitOnce).toEqual(h.slot)
+    expect((await h.store.load()).outcomes).toEqual([])
+    expect(h.deps.prepareBuild).toHaveBeenCalledOnce()
+  },
+)
+
+test('a copy mismatch republishes once per distinct head and skips its landed head', async () => {
+  const h = await searchSetup()
+  h.append(position, h.frame(1, new Uint8Array([9])))
+  const landed = asLogPosition('006')
+  const fresh = asLogPosition('007')
+  h.deps.publish = vi.fn(async () => ({ sequenceID: landed }))
+  for (let step = 0; step < 5; step++) await stepOperation(h.deps, h.op)
+  expect(h.deps.publish).toHaveBeenCalledOnce()
+  h.append(landed, new Uint8Array([0]))
+  for (let step = 0; step < 5; step++) await stepOperation(h.deps, h.op)
+  expect(h.deps.publish).toHaveBeenCalledOnce()
+  h.append(fresh, h.frame(1, new Uint8Array([8])))
+  for (let step = 0; step < 5; step++) await stepOperation(h.deps, h.op)
+  expect(h.deps.publish).toHaveBeenCalledTimes(2)
+  h.observe(position)
+  await stepOperation(h.deps, h.op)
+  expect(h.deps.publish).toHaveBeenCalledTimes(2)
+  expect(h.deps.publish).toHaveBeenNthCalledWith(1, h.slot.payload, h.slot.publishID, position)
+  expect(h.deps.publish).toHaveBeenNthCalledWith(2, h.slot.payload, h.slot.publishID, fresh)
+  expect(h.deps.prepareBuild).toHaveBeenCalledOnce()
+  expect(h.deps.adopt).not.toHaveBeenCalled()
+  expect((await h.store.load()).outcomes).toEqual([])
+})
+
+test('an identical latest own copy prevents further republishing after reconstruction', async () => {
+  const h = await searchSetup()
+  h.append(position, h.frame(1, new Uint8Array([9])))
+  h.deps.publish = vi.fn(async () => {
+    const landed = asLogPosition('006')
+    h.append(landed, h.slot.payload)
+    return { sequenceID: landed }
+  })
+  await stepOperation(h.deps, h.op)
+  const restarted = {
+    ...h.deps,
+    control: { ...h.deps.control },
+    searchLog: createControlSearch(h.searchDeps).searchLog,
+  }
+  for (let step = 0; step < 10; step++) await stepOperation(restarted, h.op)
+  expect(h.deps.publish).toHaveBeenCalledOnce()
+  expect((await h.store.load()).controlHold?.reason).toBe('acceptance-unknown')
+  expect((await h.store.load()).outcomes).toEqual([])
+})
+
+test.each(['invalid', 'missing-header'] as const)(
+  'an identical own copy with %s validation never republishes',
+  async (fault) => {
+    const h = await searchSetup()
+    h.append(position, h.slot.payload)
+    if (fault === 'missing-header') {
+      const restore = h.searchDeps.validation.restoreValidation
+      h.searchDeps.validation.restoreValidation = async (built) => {
+        const validation = await restore(built)
+        return validation === null ? null : { ...validation, readCommitHeader: async () => null }
+      }
+    }
+    for (let step = 0; step < 10; step++) await stepOperation(h.deps, h.op)
+    expect(h.deps.publish).not.toHaveBeenCalled()
+    expect((await h.store.load()).commitOnce).toEqual(h.slot)
+    expect((await h.store.load()).outcomes).toEqual([])
+  },
+)
+
+test('unexplained own commits never republish the retained build', async () => {
+  const h = await searchSetup()
+  const restore = h.searchDeps.validation.restoreValidation
+  h.searchDeps.validation.restoreValidation = async (built) => {
+    const validation = await restore(built)
+    if (validation === null) throw new Error('expected validation')
+    return {
+      ...validation,
+      validateFrame: async () => ({ kind: 'unavailable', reason: 'unexplained-own' }),
+    }
+  }
+  h.append(position, h.frame(2))
+  for (let step = 0; step < 10; step++) await stepOperation(h.deps, h.op)
+  expect(h.deps.publish).not.toHaveBeenCalled()
+  expect((await h.store.load()).commitOnce).toEqual(h.slot)
+  expect((await h.store.load()).outcomes).toEqual([])
+  expect((await h.store.load()).forkHalt).toBeNull()
+})
+
+test.each(['missing-validation', 'header-error'] as const)(
+  '%s unknown never republishes the retained build',
+  async (fault) => {
+    const h = await searchSetup()
+    h.append(position, h.frame(1, new Uint8Array([9])))
+    const restore = h.searchDeps.validation.restoreValidation
+    h.searchDeps.validation.restoreValidation = async (built) => {
+      if (fault === 'missing-validation') return null
+      const validation = await restore(built)
+      if (validation === null) throw new Error('expected validation')
+      return {
+        ...validation,
+        readCommitHeader: async () => {
+          throw new Error('header unavailable')
+        },
+      }
+    }
+    for (let step = 0; step < 10; step++) await stepOperation(h.deps, h.op)
+    expect(h.deps.publish).not.toHaveBeenCalled()
+    expect((await h.store.load()).commitOnce).toEqual(h.slot)
+    expect((await h.store.load()).outcomes).toEqual([])
+  },
+)
 
 test('enqueue persists the selected absolute deadline', async () => {
   const h = await setup()
@@ -369,14 +573,14 @@ test('gap holds before deadline and settles unknown at deadline', async () => {
   expect((await h.store.load()).outcomes).toMatchObject([{ kind: 'unknown' }])
   await h.store.apply({ deleteOutcomes: [request.id] }, 'ack')
   expect((await h.store.load()).commitOnce).toEqual(slot)
-  expect(h.deps.publish).toHaveBeenCalledOnce()
+  expect(h.deps.publish).not.toHaveBeenCalled()
 })
 
 test('unknown copy retries the retained bytes at a fresh head and expires unknown', async () => {
   const h = await setup()
   const op = await h.built()
   const slot = (await h.store.load()).commitOnce
-  h.deps.searchLog = async () => ({ kind: 'unknown' })
+  h.deps.searchLog = async () => ({ kind: 'unknown', retryHead: position })
   h.deps.readHead = async () => position
   expect(await stepOperation(h.deps, op)).toEqual(op)
   expect(h.deps.publish).toHaveBeenCalledWith(payload, publishID, position)

@@ -22,7 +22,7 @@ export type CommitSearchResult =
   | { kind: 'first-valid'; proof: FirstValidCommit }
   | { kind: 'superseded'; winner: LogPosition }
   | { kind: 'absent' }
-  | { kind: 'unknown' }
+  | { kind: 'unknown'; retryHead?: LogPosition | null }
 export type ControlSearchPort = {
   searchLog(built: BuiltCommit, position?: LogPosition): Promise<CommitSearchResult>
 }

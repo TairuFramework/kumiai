@@ -654,7 +654,7 @@ test.each(['unavailable', 'invalid'] as const)(
         verifyOwn: async () => true,
       }),
     }
-    expect(await f.search.searchLog(built)).toEqual({ kind: 'unknown' })
+    expect(await f.search.searchLog(built)).toEqual({ kind: 'unknown', retryHead: position(101) })
     expect(f.reconcileAbsent).toHaveBeenCalledWith(position(101), null, expect.anything())
     expect(f.haltFork).not.toHaveBeenCalled()
   },

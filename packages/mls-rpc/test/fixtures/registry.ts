@@ -381,6 +381,15 @@ async function assemble(
             if (result === undefined) return { kind: 'unknown' }
             if (result.kind === 'superseded')
               return { ...result, winner: asLogPosition(result.winner) }
+            if (result.kind === 'unknown') {
+              const { retryHead, ...unknown } = result
+              return {
+                ...unknown,
+                ...(retryHead === undefined
+                  ? {}
+                  : { retryHead: retryHead === null ? null : asLogPosition(retryHead) }),
+              }
+            }
             if (result.kind !== 'first-valid') return result
             return {
               ...result,

@@ -7,6 +7,7 @@ import { applyResolved } from './store.js'
 import type {
   AppliedCommit,
   ControlAdoptionPort,
+  ControlBuildRef,
   ControlChanges,
   ControlSearchPort,
   ControlSnapshot,
@@ -17,6 +18,10 @@ import type {
 } from './types.js'
 
 const DEFAULT_OPERATION_TIMEOUT_MS = 30_000
+const publicationHeads = new WeakMap<
+  ControlStore,
+  { build: ControlBuildRef; heads: Set<LogPosition | null> }
+>()
 
 export function revokeHeld(snapshot: ControlSnapshot): boolean {
   return snapshot.operations.some((op) => op.revokes)
@@ -160,19 +165,28 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
     if (result.kind === 'expired') return finish('lost')
     return result.kind === 'saved' ? result.operation : op
   }
-  const discover = () =>
-    settleControlSlot({
+  let retryHead: LogPosition | null | undefined
+  const discover = () => {
+    retryHead = undefined
+    return settleControlSlot({
       control: deps.control,
       signal: deps.signal,
       haltFork: deps.haltFork,
       safetyHold: deps.safetyHold,
-      search: { searchLog: deps.searchLog },
+      search: {
+        searchLog: async (built, position) => {
+          const found = await deps.searchLog(built, position)
+          retryHead = found.kind === 'unknown' ? found.retryHead : undefined
+          return found
+        },
+      },
       adoption: { adopt: deps.adopt },
       readEvidence: deps.readEvidence,
       now: deps.now,
       newID: deps.newID,
       emit: deps.emit,
     })
+  }
   const resetIntent = async (): Promise<Operation | null> => {
     if (held()) return waiting()
     if (expired()) return finish('lost')
@@ -217,7 +231,7 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
   let result = await discover()
   if (result === 'landed' || result === 'superseded') return null
   if (held()) return waiting()
-  if (result === 'unknown' && (expired() || op.stage === 'accepted'))
+  if (result === 'unknown' && (expired() || op.stage === 'accepted' || retryHead === undefined))
     return expired() ? finish('unknown') : op
   const snapshot = await deps.control.load()
   if (held(snapshot)) return waiting()
@@ -286,6 +300,7 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
   if (held()) return waiting()
   const expectedHead = await deps.readHead()
   if (held()) return waiting()
+  if (result === 'unknown' && expectedHead !== retryHead) return waiting()
   const current = snapshot.operations.find((row) => row.id === op.id)
   if (current === undefined || snapshot.outcomes.some((row) => row.opID === op.id)) return null
   const pending = current.pendingPublish
@@ -298,6 +313,23 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
   const absentOutcome = () => finish(acceptanceUnknown || outstanding ? 'unknown' : 'lost')
   if (held()) return waiting()
   if (expired()) return absentOutcome()
+  let publications = publicationHeads.get(deps.control)
+  if (
+    publications === undefined ||
+    publications.build.incarnation !== op.built.incarnation ||
+    publications.build.epoch !== op.built.epoch ||
+    publications.build.publishID !== op.built.publishID ||
+    publications.build.payloadDigest !== op.built.payloadDigest
+  ) {
+    publications = { build: { ...op.built }, heads: new Set() }
+    publicationHeads.set(deps.control, publications)
+  }
+  // Pending copy retries survive restart; acknowledged heads also stay quiet in memory.
+  if (
+    (result === 'unknown' && pending?.expectedHead === expectedHead) ||
+    publications.heads.has(expectedHead)
+  )
+    return op
   const refreshed = { ...slot, expectedHead }
   await applyResolved(deps.control, { commitOnce: refreshed }, deps.newID(), undefined, deps.signal)
   if (held()) return waiting()
@@ -328,7 +360,8 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
       refreshed.publishID,
       refreshed.expectedHead,
     )
-    asLogPosition(published.sequenceID)
+    publications.heads.add(expectedHead)
+    publications.heads.add(asLogPosition(published.sequenceID))
   } catch (error) {
     deps.publishFailed?.(op.id, error)
     if (

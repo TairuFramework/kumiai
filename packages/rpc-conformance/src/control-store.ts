@@ -26,7 +26,7 @@ export type ConformanceCommitSearchResult<Position extends string = string> =
   | { kind: 'first-valid'; proof: ConformanceFirstValidCommit<Position> }
   | { kind: 'superseded'; winner: Position }
   | { kind: 'absent' }
-  | { kind: 'unknown' }
+  | { kind: 'unknown'; retryHead?: Position | null }
 export type ConformanceControlSearchPort<Position extends string = string> = {
   searchLog(
     built: ConformanceBuiltCommit<Position>,
