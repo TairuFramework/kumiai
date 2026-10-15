@@ -112,13 +112,13 @@ export type ConformanceRegistry<THandle> = {
     group: THandle,
     params: { replace?: boolean; packageUse: ConformancePackageUse | null },
   ): Promise<ConformanceGroupKey>
-  recoverySource(groupID: string): Promise<ConformanceLegacyRegistryRecoverySource>
+  recoverySource(groupID: string): Promise<ConformanceRegistryRecoverySource>
   switchIncarnation(
     candidate: THandle,
     params: {
-      source: ConformanceLegacyRegistryRecoverySource
+      source: ConformanceLegacyRegistryRecoverySource | ConformanceRegistryRecoverySource
       rejoinID: string
-      proof: ConformanceLegacyResyncProof
+      proof: ConformanceLegacyResyncProof | ConformanceRegistryResyncProof
       write: ConformanceRegistrySwitchWrite
     },
   ): Promise<ConformanceGroupKey>

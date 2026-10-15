@@ -12,11 +12,12 @@ import {
   type RecoveryVerdict,
   readGroupAnchorExtension,
 } from '@kumiai/mls'
-import { asLogPosition } from '@kumiai/rpc'
+import { asLogPosition, type CapturedRejoinRecord } from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
 import type { RegistryResyncRefusedError } from '../src/persistence-errors.js'
 import { decodeRecoveryCandidate, encodeRecoveryCandidate } from '../src/recovery-codec.js'
+import { recoveryTrustDigest } from '../src/recovery-trust-digest.js'
 import { registryOptions } from '../src/registry/validation.js'
 import { verifyRegistryResync } from '../src/registry/verdict.js'
 import { createRegistryRecovery } from './fixtures/registry-recovery.js'
@@ -69,6 +70,7 @@ async function setup(mode: 'real-mls' | 'double', bound = true) {
     responder.group = await registryHandle({ mode, handle: responder.group, options })
   const fixture = await createRegistryRecovery({
     mode,
+    format: 'legacy',
     identity,
     options,
     source,
@@ -98,6 +100,36 @@ function rewrite(
 
 for (const mode of ['real-mls', 'double'] as const) {
   describe(mode, () => {
+    test('malformed captured format refuses without modifying the saved record', async () => {
+      const s = await setup(mode)
+      const { source: _source, conflictEpoch: _conflict, ...common } = s.record
+      const record: CapturedRejoinRecord = {
+        ...common,
+        format: 2,
+        source: { ...s.source, identity: null, trustDigest: recoveryTrustDigest(s.source.trust) },
+        target: {
+          targetID: s.proof.targetID,
+          topicID: s.proof.topicID,
+          groupInfoEpoch: s.proof.groupInfoEpoch,
+          groupInfoAuthenticator: s.source.trust.installed.authenticator.slice(),
+          captureHead: s.proof.captureHead,
+        },
+        captureHead: s.proof.captureHead,
+        searchFrom: s.proof.captureHead,
+        trigger: 'automatic',
+        authorisationID: null,
+        switchMutationID: 'saved-switch',
+        destinationKey: null,
+        candidate: new Uint8Array([3]),
+      }
+      const before = structuredClone(record)
+      await expect(verifyRegistryResync({ ...s, record })).rejects.toMatchObject({
+        name: 'RegistryResyncRefusedError',
+        reason: 'malformed',
+      })
+      expect(record).toEqual(before)
+    })
+
     test('full bound confirmed verdict accepts', async () => {
       const s = await setup(mode)
       const before = encodeClientState(s.candidate.state)

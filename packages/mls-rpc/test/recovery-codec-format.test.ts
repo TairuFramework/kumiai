@@ -2,7 +2,7 @@ import { xchacha20poly1305 } from '@noble/ciphers/chacha.js'
 import { base64ToBytes, bytesToBase64 } from 'ts-mls'
 import { expect, test } from 'vitest'
 
-import { decodeRecoveryCandidate } from '../src/recovery-codec.js'
+import { decodeCapturedRecoveryCandidate, decodeRecoveryCandidate } from '../src/recovery-codec.js'
 import { createRealBoundRecovery } from './fixtures/real-group.js'
 
 const AAD = new TextEncoder().encode('kumiai/recovery-candidate/v2')
@@ -38,6 +38,13 @@ test('encrypted envelope contains complete v2 state and sourceState without a so
   expect(base64ToBytes(value.state)[0]).toBe(2)
   expect(base64ToBytes(value.sourceState)[0]).toBe(2)
   expect(decodeRecoveryCandidate(bytes, requestKey).requestID).toBe('format-request')
+  expect(() => decodeCapturedRecoveryCandidate(bytes, requestKey)).toThrow(
+    'Unsupported recovery candidate version 2',
+  )
+  // A version-byte rewrite cannot cross the candidate AAD boundary.
+  expect(() =>
+    decodeCapturedRecoveryCandidate(new Uint8Array([3, ...bytes.subarray(1)]), requestKey),
+  ).toThrow()
 })
 
 test('refuses malformed UTF-8 inside an authenticated JSON string', async () => {

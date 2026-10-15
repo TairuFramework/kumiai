@@ -108,7 +108,14 @@ export async function retireIncarnation<TTx extends GroupTransaction>(
     deleteOperations: control.operations.map(({ id }) => id),
   }
   if (rejoin !== null) {
-    if (switchedRejoinID !== undefined) changes.putRejoin = { ...rejoin, stage: 'adopted' }
+    if (switchedRejoinID !== undefined)
+      changes.putRejoin = {
+        ...rejoin,
+        stage: 'adopted',
+        ...('format' in rejoin
+          ? { destinationKey: { groupID: source.groupID, incarnation: nextIncarnation } }
+          : {}),
+      }
     else {
       changes.deleteRejoin = true
       outcomes.push({ id: rejoin.id, opID: null, at, kind: 'unknown' })

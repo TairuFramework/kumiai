@@ -49,6 +49,30 @@ async function assertPaused(path: string, invoke: (pause: Promise<void>) => unkn
 }
 
 describe('host invocation boundary', () => {
+  test('keeps core safety subscriptions live after host callbacks close', async () => {
+    const boundary = createHostBoundary()
+    const sinks = new Set<(reason: 'fork-halted') => void>()
+    const host = wrapPeerHost(boundary, {
+      mls: {
+        onSafetyHold(latch: (reason: 'fork-halted') => void) {
+          sinks.add(latch)
+          return () => {
+            sinks.delete(latch)
+          }
+        },
+      },
+    })
+    boundary.close()
+    await boundary.drained(Promise.resolve())
+    const held: Array<string> = []
+    const unsubscribe = host.mls.onSafetyHold((reason) => held.push(reason))
+    for (const sink of sinks) sink('fork-halted')
+    expect(held).toEqual(['fork-halted'])
+    unsubscribe()
+    for (const sink of sinks) sink('fork-halted')
+    expect(held).toEqual(['fork-halted'])
+  })
+
   test('waits for a paused method and refuses its later invocation', async () => {
     const output = vi.spyOn(stdout, 'write').mockImplementation(() => true)
     await assertPaused('host.write', async (pause) => {

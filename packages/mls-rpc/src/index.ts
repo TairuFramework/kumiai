@@ -60,9 +60,12 @@ export {
   createGroupMLS,
   createLedgerEntrySlot,
   deriveRecoverySecret,
+  type GroupMLSDependencies,
   type GroupMLSParams,
   type LedgerEntrySlot,
   RECOVERY_LABEL,
+  type RecoveryAdoptionDependencies,
+  type RecoveryRouting,
 } from './mls.js'
 export type {
   EntryKind,
@@ -87,6 +90,7 @@ export {
   OutboxReplacementError,
   PersistencePhaseError,
   ReentrantOwnershipError,
+  RegistrySourceMovedError,
   StorageOutcomeUnknownError,
 } from './persistence-errors.js'
 export type {
@@ -135,12 +139,20 @@ export type {
   TransactionalGroupEffects,
   TransactionHookSettlement,
 } from './persistence-types.js'
+export {
+  type AuthenticateRecoveryReplyParams,
+  authenticateRecoveryReply,
+  createRecoveryRequestFromTrust,
+  deriveRecoverySecretFromTrust,
+  openRecoveryVerdictFromTrust,
+} from './recovery.js'
 export { createGroupHandleRegistry } from './registry/registry.js'
 export {
   ackRetiredOutcome,
   listRetiredOutcomes,
   serveRetiredObligations,
 } from './registry/retired.js'
+export { createRecoverySwitchFactory, toRegistrySwitchWrite } from './registry/switch-write.js'
 export type {
   GroupEpochRuntime,
   GroupHandleRegistry,
@@ -150,9 +162,11 @@ export type {
   LegacyResyncProof,
   RegistryHandleAccess,
   RegistryRecoverySource,
+  RegistrySwitchWrite,
   ResyncProof,
 } from './registry/types.js'
 export type { RecoveryEnvironment } from './registry/validation.js'
+export { createRegistryGroupMLS, type RegistryGroupMLSParams } from './registry-group-mls.js'
 export { createRegistryHandleAccess } from './registry-handle-access.js'
 export {
   buildRevokeProofOnHandle,

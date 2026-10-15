@@ -1,12 +1,18 @@
 import { normalizeDID } from '@kokuin/token'
 import {
+  assertHeadMatches,
+  authenticateRecoveryReply,
   type ClientState,
+  computeHead,
   decodeGroupAnchor,
   encodeClientState,
   type GroupHandle,
+  ledgerEntryDigest,
   openRecoveryVerdict,
+  openRecoveryVerdictFromTrust,
   parseMLSCredentialIdentity,
   readGroupAnchorExtension,
+  readLedgerHead,
   verifyRecoveryRequest,
 } from '@kumiai/mls'
 import {
@@ -14,16 +20,33 @@ import {
   decodeHandshakeFrame,
   digestAppliedCommit,
   HANDSHAKE_KIND,
-  type RejoinRecord,
+  type ResyncProof,
+  type StoredRejoinRecord,
 } from '@kumiai/rpc'
+import {
+  createGroupInfoWithExternalPubAndRatchetTree,
+  decode,
+  defaultExtensionTypes,
+  mlsMessageDecoder,
+  wireformats,
+} from 'ts-mls'
 
 import {
   type RegistryResyncRefusalReason,
   RegistryResyncRefusedError,
 } from '../persistence-errors.js'
 import { createVerdictJudge, knownRecoveryRegistry } from '../recovery.js'
-import { decodeRecoveryCandidate } from '../recovery-codec.js'
-import type { LegacyRegistryRecoverySource, LegacyResyncProof } from './types.js'
+import {
+  decodeCapturedRecoveryCandidate,
+  decodeRecoveryCandidate,
+  validateRecoverySource,
+} from '../recovery-codec.js'
+import { validateCapturedRecoveryRecord } from '../recovery-record.js'
+import type {
+  LegacyRegistryRecoverySource,
+  LegacyResyncProof,
+  RegistryRecoverySource,
+} from './types.js'
 
 function requireMatch(condition: boolean, reason: RegistryResyncRefusalReason): asserts condition {
   if (!condition) throw new RegistryResyncRefusedError({ reason })
@@ -70,14 +93,42 @@ function ownCredential(state: ClientState) {
 }
 
 export async function verifyRegistryResync(params: {
-  source: LegacyRegistryRecoverySource
+  source: LegacyRegistryRecoverySource | RegistryRecoverySource
   candidate: GroupHandle
-  record: RejoinRecord
-  proof: LegacyResyncProof
+  record: StoredRejoinRecord
+  proof: LegacyResyncProof | ResyncProof
 }): Promise<void> {
-  const { source, candidate, record, proof } = params
+  const { candidate, record, proof } = params
+  let source = params.source
   let reason: RegistryResyncRefusalReason = 'malformed'
   try {
+    const captured = 'format' in record ? validateCapturedRecoveryRecord(record) : null
+    // Legacy records are non-executable; their proof target/topic/head remain unbound.
+    if (captured !== null) {
+      requireMatch(
+        captured.trigger === 'automatic' && captured.authorisationID === null,
+        'unaccepted',
+      )
+      const current = validateRecoverySource(source as RegistryRecoverySource)
+      source = current
+      requireMatch(
+        current.trustDigest === captured.source.trustDigest &&
+          sameValue(current.key, captured.source.key) &&
+          sameValue(current.identity, captured.source.identity),
+        'source',
+      )
+      requireMatch(
+        sameValue(captured.target, {
+          targetID: proof.targetID,
+          topicID: proof.topicID,
+          groupInfoEpoch: proof.groupInfoEpoch,
+          groupInfoAuthenticator:
+            'groupInfoAuthenticator' in proof ? proof.groupInfoAuthenticator : undefined,
+          captureHead: proof.captureHead,
+        }),
+        'tuple',
+      )
+    }
     requireMatch(
       proof != null &&
         typeof proof.targetID === 'string' &&
@@ -95,7 +146,6 @@ export async function verifyRegistryResync(params: {
         proof.verdict instanceof Uint8Array,
       'malformed',
     )
-    // Target/capture association is not persisted in this record; callers must authenticate it separately.
     requireMatch(record.stage === 'confirmed', 'unaccepted')
     requireMatch(
       record.position === proof.position &&
@@ -108,24 +158,67 @@ export async function verifyRegistryResync(params: {
     reason = 'source'
     const installed = source.trust.installed
     requireMatch(
-      source.identity !== null &&
+      (captured !== null || source.identity !== null) &&
         source.key.groupID === record.source.key.groupID &&
         source.key.incarnation === record.source.key.incarnation &&
         source.key.groupID === source.trust.groupID &&
         source.key.groupID === installed.groupID &&
         source.key.incarnation === installed.incarnation &&
-        source.identity.groupID === installed.groupID &&
-        source.identity.incarnation === installed.incarnation &&
-        source.identity.epoch === installed.epoch &&
-        sameBytes(source.identity.authenticator, installed.authenticator) &&
-        record.source.epoch === installed.epoch &&
-        sameBytes(record.source.authenticator, installed.authenticator) &&
-        sameValue(record.ledgerBefore, source.trust.ledger),
+        (source.identity === null ||
+          (source.identity.groupID === installed.groupID &&
+            source.identity.incarnation === installed.incarnation &&
+            source.identity.epoch === installed.epoch &&
+            sameBytes(source.identity.authenticator, installed.authenticator))) &&
+        ('format' in record ||
+          (record.source.epoch === installed.epoch &&
+            sameBytes(record.source.authenticator, installed.authenticator))) &&
+        (captured === null
+          ? sameValue(record.ledgerBefore, source.trust.ledger)
+          : source.trust.ledger.every((token) => record.ledgerBefore.includes(token))),
       'source',
     )
 
     reason = 'candidate'
-    const snapshot = decodeRecoveryCandidate(record.candidate, record.requestKey)
+    const capturedSnapshot =
+      captured === null
+        ? null
+        : decodeCapturedRecoveryCandidate(record.candidate, record.requestKey)
+    const snapshot =
+      capturedSnapshot ?? decodeRecoveryCandidate(record.candidate, record.requestKey)
+    if (capturedSnapshot !== null) {
+      const reply = await authenticateRecoveryReply({
+        trust: source.trust,
+        sealed: capturedSnapshot.attestedReply,
+        requestID: record.requestID,
+        requestKey: record.requestKey,
+        options: {},
+      })
+      requireMatch(
+        reply !== null &&
+          sameBytes(reply.groupInfo, snapshot.groupInfo) &&
+          sameValue(reply.ledger, snapshot.replyLedger) &&
+          normalizeDID(reply.signer) === normalizeDID(snapshot.signer) &&
+          reply.captureHead === capturedSnapshot.captureHead &&
+          sameBytes(reply.groupInfoAuthenticator, capturedSnapshot.target.groupInfoAuthenticator),
+        'candidate',
+      )
+      const offered = decode(mlsMessageDecoder, reply.groupInfo)
+      requireMatch(offered?.wireformat === wireformats.mls_group_info, 'candidate')
+      // Use the public MLS encoder for tree comparison without importing codec internals.
+      const encoded = await createGroupInfoWithExternalPubAndRatchetTree(
+        { ...snapshot.state, ratchetTree: snapshot.sourceTree },
+        [],
+        candidate.context.cipherSuite,
+      )
+      const tree = (extensions: typeof encoded.extensions) =>
+        extensions.find(
+          (extension) => extension.extensionType === defaultExtensionTypes.ratchet_tree,
+        )?.extensionData
+      requireMatch(
+        sameValue(tree(encoded.extensions), tree(offered.groupInfo.extensions)),
+        'candidate',
+      )
+    }
     const credential = ownCredential(snapshot.state)
     const binding = candidate.bindingOfDID(candidate.credential.id)
     const controller =
@@ -141,6 +234,7 @@ export async function verifyRegistryResync(params: {
     requireMatch(frame.kind === HANDSHAKE_KIND.commit, 'candidate')
     const anchor = readGroupAnchorExtension(candidate)?.extensionData
     requireMatch(anchor instanceof Uint8Array, 'candidate')
+    const standardCapture = captured !== null && decodeGroupAnchor(anchor)?.controller == null
     requireMatch(
       snapshot.requestID === record.requestID &&
         snapshot.epoch === record.epochAfter &&
@@ -153,24 +247,36 @@ export async function verifyRegistryResync(params: {
         normalizeDID(credential.id) === normalizeDID(candidate.credential.id) &&
         sameValue(credential.controller, controller) &&
         sameBytes(encodeClientState(snapshot.state), encodeClientState(candidate.state)) &&
-        sameValue(snapshot.replyLedger, candidate.ledgerTokens) &&
+        (standardCapture
+          ? snapshot.replyLedger.length === 0
+          : sameValue(snapshot.replyLedger, candidate.ledgerTokens)) &&
         digestAppliedCommit(snapshot.commit) === record.digest &&
         sameBytes(decodeCommitFrame(frame.payload).commit, snapshot.commit) &&
         digestAppliedCommit(record.payload) === record.payloadDigest &&
         sameBytes(anchor, source.trust.genesisAnchor),
       'candidate',
     )
+    if (standardCapture) {
+      // Standard replies omit tokens; the candidate's resolved ledger must reproduce its MLS head.
+      const head = readLedgerHead(candidate)
+      requireMatch(head !== null, 'candidate')
+      assertHeadMatches(
+        head.head,
+        computeHead(candidate.groupID, candidate.ledgerTokens.map(ledgerEntryDigest)),
+      )
+    }
 
     reason = 'source'
     requireMatch(normalizeDID(credential.id) === normalizeDID(source.trust.credential.id), 'source')
     // sourceState carries the candidate context/schedule: only its public tree belongs to the source.
-    requireMatch(
-      sameBytes(
-        encodeClientState({ ...snapshot.state, ratchetTree: snapshot.sourceTree }),
-        encodeClientState({ ...snapshot.state, ratchetTree: source.trust.signerTree }),
-      ),
-      'source',
-    )
+    if (captured === null)
+      requireMatch(
+        sameBytes(
+          encodeClientState({ ...snapshot.state, ratchetTree: snapshot.sourceTree }),
+          encodeClientState({ ...snapshot.state, ratchetTree: source.trust.signerTree }),
+        ),
+        'source',
+      )
     const sourceLeaf = snapshot.sourceTree.find((node) => {
       return (
         node?.nodeType === 1 &&
@@ -192,6 +298,7 @@ export async function verifyRegistryResync(params: {
     reason = 'candidate'
     const request = await verifyRecoveryRequest(
       new TextDecoder('utf-8', { fatal: true }).decode(record.request),
+      captured === null ? undefined : record.requestKey,
     )
     requireMatch(
       request.groupID === candidate.groupID &&
@@ -203,9 +310,7 @@ export async function verifyRegistryResync(params: {
     reason = 'tuple'
     const tuple = snapshot.boundCommit
     requireMatch(
-      tuple != null &&
-        tuple.position === proof.position &&
-        tuple.commitDigest === proof.payloadDigest,
+      tuple != null && tuple.position === proof.position && tuple.commitDigest === record.digest,
       'tuple',
     )
     const judge = createVerdictJudge({
@@ -215,20 +320,41 @@ export async function verifyRegistryResync(params: {
       requestID: record.requestID,
       boundCommit: tuple,
     })
-    await judge.confirmationKey(proof.position, proof.payloadDigest)
+    await judge.confirmationKey(proof.position, record.digest)
     requireMatch(tuple.tag === judge.boundCommit()?.tag, 'tuple')
 
     reason = 'malformed'
-    const opened = await openRecoveryVerdict({
-      group: candidate,
-      sealed: proof.verdict,
-      requestID: record.requestID,
-      ephemeralPrivateKey: record.requestKey,
-    })
+    const opened =
+      captured === null
+        ? await openRecoveryVerdict({
+            group: candidate,
+            sealed: proof.verdict,
+            requestID: record.requestID,
+            ephemeralPrivateKey: record.requestKey,
+          })
+        : await openRecoveryVerdictFromTrust({
+            trust: source.trust,
+            sealed: proof.verdict,
+            requestID: record.requestID,
+            requestKey: record.requestKey,
+            options: {},
+          })
     requireMatch(opened.verdict.verdict === 'confirmed', 'unaccepted')
     // The judge reads the mutable cached anchor, not the authenticated extension bytes.
     requireMatch(sameValue(candidate.anchor, decodeGroupAnchor(anchor)), 'candidate')
-    if (judge.judgeVerdict(opened) !== 'authoritative')
+    // Captured signer eligibility and floors were authenticated against origin trust above.
+    if (captured !== null)
+      requireMatch(
+        normalizeDID(opened.signer) !== normalizeDID(candidate.credential.id) &&
+          opened.verdict.groupID === candidate.groupID &&
+          opened.verdict.requestID === record.requestID &&
+          opened.verdict.position === tuple.position &&
+          opened.verdict.commitDigest === tuple.commitDigest &&
+          opened.verdict.epoch === Number(candidate.epoch) &&
+          opened.verdict.tag === judge.boundCommit()?.tag,
+        'tuple',
+      )
+    else if (judge.judgeVerdict(opened) !== 'authoritative')
       throw new RegistryResyncRefusedError({ reason: judge.verdictRefusal(opened) ?? 'tuple' })
   } catch (cause) {
     if (cause instanceof RegistryResyncRefusedError) throw cause

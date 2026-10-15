@@ -4,6 +4,7 @@ import type {
   AdoptionWrite,
   LogPosition,
   RecoverySource,
+  ResyncProof,
   SendAdmission,
 } from '@kumiai/rpc'
 
@@ -67,9 +68,9 @@ export type GroupHandleRegistry = {
   switchIncarnation(
     candidate: GroupHandle,
     params: {
-      source: LegacyRegistryRecoverySource
+      source: LegacyRegistryRecoverySource | RegistryRecoverySource
       rejoinID: string
-      proof: LegacyResyncProof
+      proof: LegacyResyncProof | ResyncProof
       write: RegistrySwitchWrite
     },
   ): Promise<GroupKey>
@@ -79,7 +80,7 @@ export type GroupHandleRegistry = {
     params: { replace?: boolean; packageUse: PackageUse | null },
   ): Promise<GroupKey>
   access(groupID: string): Promise<RegistryHandleAccess>
-  recoverySource(groupID: string): Promise<LegacyRegistryRecoverySource>
+  recoverySource(groupID: string): Promise<RegistryRecoverySource>
   delete(key: GroupKey): Promise<void>
   dispose(): Promise<void>
 }

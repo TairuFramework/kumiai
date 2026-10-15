@@ -16,28 +16,40 @@ import {
   joinGroupExternal,
   processWelcome,
   type RecoveryVerdict,
+  sealCapturedGroupInfo,
   sealRecoveryVerdict,
   signLedgerEntry,
 } from '@kumiai/mls'
 import {
   asLogPosition,
+  type CapturedRejoinRecord,
   digestAppliedCommit,
   encodeCommitFrame,
   encodeHandshakeFrame,
   HANDSHAKE_KIND,
   type LegacyRejoinRecord,
+  type ResyncProof,
 } from '@kumiai/rpc'
 
 import { createGroupCrypto } from '../../src/crypto.js'
 import type { GroupKey, GroupRecoveryTrust } from '../../src/persistence-types.js'
 import { createVerdictJudge } from '../../src/recovery.js'
-import { encodeRecoveryCandidate } from '../../src/recovery-codec.js'
+import {
+  decodeRecoveryCandidate,
+  encodeCapturedRecoveryCandidate,
+  encodeRecoveryCandidate,
+} from '../../src/recovery-codec.js'
+import { recoveryTrustDigest } from '../../src/recovery-trust-digest.js'
 import { recoveryTrustFor } from '../../src/registry/trust.js'
-import type { LegacyRegistryRecoverySource, LegacyResyncProof } from '../../src/registry/types.js'
+import type {
+  LegacyRegistryRecoverySource,
+  LegacyResyncProof,
+  RegistryRecoverySource,
+} from '../../src/registry/types.js'
 import { testHandleAccess } from './real-group.js'
 import { memoryModel, restoreMemoryControlHandle } from './sealed-memory-mls.js'
 
-export async function createRegistryRecovery(params: {
+type RecoveryFixtureParams = {
   mode: 'real-mls' | 'double'
   identity: OwnIdentity
   options: GroupOptions
@@ -46,7 +58,8 @@ export async function createRegistryRecovery(params: {
   sourceTrust?: GroupRecoveryTrust
   missingLedger?: boolean
   responder?: { identity: OwnIdentity; group: GroupHandle }
-}): Promise<{
+}
+type LegacyRecoveryFixture = {
   candidate: GroupHandle
   record: LegacyRejoinRecord
   source: LegacyRegistryRecoverySource
@@ -57,7 +70,74 @@ export async function createRegistryRecovery(params: {
     type?: string
     tamperSignature?: boolean
   }): Promise<Uint8Array>
-}> {
+}
+type CapturedRecoveryFixture = Omit<LegacyRecoveryFixture, 'record' | 'source' | 'proof'> & {
+  record: CapturedRejoinRecord
+  source: RegistryRecoverySource
+  proof: ResyncProof
+}
+
+export function createRegistryRecovery(
+  params: RecoveryFixtureParams & { format: 'captured' },
+): Promise<CapturedRecoveryFixture>
+export function createRegistryRecovery(
+  params: RecoveryFixtureParams & { format?: 'legacy' },
+): Promise<LegacyRecoveryFixture>
+export async function createRegistryRecovery(
+  params: RecoveryFixtureParams & { format?: 'legacy' | 'captured' },
+): Promise<LegacyRecoveryFixture | CapturedRecoveryFixture> {
+  if (params.format !== 'captured') return createLegacyRegistryRecovery(params)
+  if (params.responder == null) throw new Error('Captured fixture requires a known responder')
+  const legacy = await createLegacyRegistryRecovery({ ...params, mode: 'real-mls' })
+  const snapshot = decodeRecoveryCandidate(legacy.record.candidate, legacy.record.requestKey)
+  const trust = structuredClone(params.sourceTrust ?? legacy.source.trust)
+  const source = { ...legacy.source, trust, trustDigest: recoveryTrustDigest(trust) }
+  const captureHead = asLogPosition('captured-prefix')
+  const target = {
+    targetID: legacy.proof.targetID,
+    topicID: legacy.proof.topicID,
+    groupInfoEpoch: Number(params.responder.group.epoch),
+    groupInfoAuthenticator: params.responder.group.state.keySchedule.epochAuthenticator.slice(),
+    captureHead,
+  }
+  const { source: _source, conflictEpoch: _conflict, ...common } = legacy.record
+  const record: CapturedRejoinRecord = {
+    ...common,
+    format: 2,
+    source,
+    target,
+    captureHead,
+    searchFrom: captureHead,
+    expectedHead: captureHead,
+    trigger: 'automatic',
+    authorisationID: null,
+    switchMutationID: crypto.randomUUID(),
+    destinationKey: null,
+    candidate: encodeCapturedRecoveryCandidate(
+      {
+        ...snapshot,
+        replyLedger: params.source.anchor.controller == null ? [] : snapshot.replyLedger,
+        sourceTree: params.responder.group.state.ratchetTree,
+        source,
+        target,
+        captureHead,
+        searchFrom: captureHead,
+        attestedReply: await sealCapturedGroupInfo({
+          group: params.responder.group,
+          identity: params.responder.identity,
+          request: new TextDecoder().decode(common.request),
+          captureHead,
+        }),
+      },
+      common.requestKey,
+    ),
+  }
+  return { ...legacy, record, source, proof: { ...legacy.proof, ...target } }
+}
+
+async function createLegacyRegistryRecovery(
+  params: RecoveryFixtureParams,
+): Promise<LegacyRecoveryFixture> {
   const signer = params.responder?.identity ?? randomIdentity()
   const requestID = crypto.randomUUID()
   let candidate: GroupHandle
@@ -164,7 +244,7 @@ export async function createRegistryRecovery(params: {
     known: params.source.registry,
     requestID,
   })
-  const key = await judge.confirmationKey(position, payloadDigest)
+  const key = await judge.confirmationKey(position, digest)
   const verdict = await sealRecoveryVerdict({
     group: remote,
     identity: signer,
@@ -173,7 +253,7 @@ export async function createRegistryRecovery(params: {
       groupID: candidate.groupID,
       requestID,
       position,
-      commitDigest: payloadDigest,
+      commitDigest: digest,
       verdict: 'confirmed',
       epoch: Number(candidate.epoch),
       tag: confirmationTag(key, requestID),
@@ -220,7 +300,7 @@ export async function createRegistryRecovery(params: {
           groupID: candidate.groupID,
           requestID,
           position,
-          commitDigest: payloadDigest,
+          commitDigest: digest,
           verdict: 'confirmed',
           epoch: Number(candidate.epoch),
           tag: confirmationTag(key, requestID),

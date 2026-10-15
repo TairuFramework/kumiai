@@ -1,9 +1,26 @@
+import type { AdoptionExpected } from '@kumiai/rpc'
+
 import type { EntryReads, StateMetadata } from '../entry-capability.js'
 import { decodeStoredValue, encodeStoredValue, isStoredOpenFailure } from '../persistence-codec.js'
 import { GroupStateConflictError, GroupUnavailableError } from '../persistence-errors.js'
 import type { GroupLifetime, GroupRecoveryTrust } from '../persistence-types.js'
+import { recoveryTrustDigest } from '../recovery-trust-digest.js'
 import { readRetainedTrust } from './safety.js'
-import type { LegacyRegistryRecoverySource } from './types.js'
+import type { RegistryRecoverySource } from './types.js'
+
+export function recoverySourceIdentity(source: RegistryRecoverySource): AdoptionExpected {
+  return {
+    key: { ...source.key },
+    stateVersion: source.stateVersion,
+    identity:
+      source.identity === null
+        ? null
+        : {
+            ...source.identity,
+            authenticator: source.identity.authenticator.slice(),
+          },
+  }
+}
 
 function refuseUnreadable(cause: unknown): never {
   if (!isStoredOpenFailure(cause) && !(cause instanceof GroupStateConflictError)) throw cause
@@ -13,7 +30,7 @@ function refuseUnreadable(cause: unknown): never {
 export async function readRecoverySource(
   reads: EntryReads,
   groupID: string,
-): Promise<LegacyRegistryRecoverySource> {
+): Promise<RegistryRecoverySource> {
   let lifetime: GroupLifetime | null
   try {
     lifetime = await reads.lifetime()
@@ -59,6 +76,7 @@ export async function readRecoverySource(
       identity: { ...trust.installed, authenticator: trust.installed.authenticator.slice() },
       trust: decodeStoredValue(encodeStoredValue(trust)) as GroupRecoveryTrust,
       lifetimeRevision: lifetime.revision,
+      trustDigest: recoveryTrustDigest(trust),
     }
   } catch (cause) {
     // biome-ignore lint/style/useErrorCause: The constructor forwards params.cause to Error.

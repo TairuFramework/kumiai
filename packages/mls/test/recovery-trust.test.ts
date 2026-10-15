@@ -18,7 +18,7 @@ import {
 } from './fixtures/lifecycle-pipeline.js'
 import { captureFixture, signedCapture } from './fixtures/recovery-capture.js'
 
-test('controller-less origin refuses a different member as recovery signer', async () => {
+test('controller-less capture authenticates an origin member without controller eligibility', async () => {
   const fixture = await captureFixture({ standard: true })
   const signer = agent(52)
   const added = await rawAdd(fixture.group, signer)
@@ -33,7 +33,49 @@ test('controller-less origin refuses a different member as recovery signer', asy
     }),
   ).toBe(false)
   const sealed = await signedCapture({ fixture: { ...fixture, group: author, identity: signer } })
-  expect(await fixture.open(sealed, trust)).toBeNull()
+  expect((await fixture.open(sealed, trust))?.signer).toBe(signer.id)
+  expect(await fixture.open(sealed)).toBeNull()
+})
+
+test('controller-less verdicts leave confirmation authority to the tuple and require origin membership for refusals', async () => {
+  const fixture = await captureFixture({ standard: true })
+  const signer = agent(52)
+  const added = await rawAdd(fixture.group, signer)
+  const author = deriveGroup(fixture.group, added.result.newState)
+  const memberTrust = { ...fixture.trust, signerTree: structuredClone(author.state.ratchetTree) }
+  const signerGroup = (await mls.createGroup(signer, author.groupID)).group
+  const binding = {
+    groupID: author.groupID,
+    requestID: 'capture',
+    position: 'opaque',
+    commitDigest: 'digest',
+  }
+  for (const verdict of [
+    { ...binding, verdict: 'confirmed' as const, epoch: Number(author.epoch), tag: 'tuple-tag' },
+    { ...binding, verdict: 'refused' as const, reason: 'policy' as const },
+  ]) {
+    const sealed = await mls.sealRecoveryVerdict({
+      group: signerGroup,
+      identity: signer,
+      request: fixture.held.request,
+      verdict,
+    })
+    const params = {
+      trust: memberTrust,
+      sealed,
+      requestID: 'capture',
+      requestKey: fixture.held.requestKey,
+      options: {},
+    }
+    await expect(mls.openRecoveryVerdictFromTrust(params)).resolves.toEqual({
+      signer: signer.id,
+      verdict,
+    })
+    const absent = mls.openRecoveryVerdictFromTrust({ ...params, trust: fixture.trust })
+    if (verdict.verdict === 'confirmed')
+      await expect(absent).resolves.toEqual({ signer: signer.id, verdict })
+    else await expect(absent).rejects.toMatchObject({ reason: 'unauthenticated' })
+  }
 })
 
 test('retained authority checks a distinct signer and refuses malformed tree bindings', async () => {

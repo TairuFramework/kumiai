@@ -14,12 +14,12 @@ export type HostBoundary = {
   drained(teardown: Promise<unknown>): Promise<void>
 }
 
-type MemberKind = 'host' | 'data' | 'port'
+type MemberKind = 'host' | 'data' | 'port' | 'core'
 type HostMembers<TValue extends object, TCore extends keyof TValue = never> = {
   [TKey in keyof TValue]-?: TKey extends TCore
     ? 'data'
     : NonNullable<TValue[TKey]> extends (...args: Array<never>) => unknown
-      ? 'host'
+      ? 'host' | 'core'
       : 'data' | 'port'
 }
 
@@ -54,6 +54,7 @@ export const pendingFrameHostMembers = {
 export const mlsHostMembers = {
   ownCommitDigest: 'data',
   validateRecoveryCommit: 'host',
+  onSafetyHold: 'core',
   verifyRecoveryRequest: 'host',
   signRecoveryConfirmation: 'host',
   verifyRecoveryConfirmation: 'host',

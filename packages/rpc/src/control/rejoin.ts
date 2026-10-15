@@ -2,6 +2,7 @@ import { isHeadMismatch } from '../commit.js'
 import type { CommitHeader } from '../crypto.js'
 import { asLogPosition, type LogPosition } from '../cursor.js'
 import type { ConfirmationOutcome } from '../recovery-confirmation.js'
+import type { StoredRejoinRecord } from '../recovery-types.js'
 import type { PublishOutcome } from './operations.js'
 import { controlSafetyHeld } from './safety.js'
 import { applyResolved, pruneWindow } from './store.js'
@@ -9,11 +10,11 @@ import type {
   AdoptionWriteFactory,
   AppliedCommit,
   ControlStore,
+  LegacyRejoinRecord,
   Outcome,
-  RejoinRecord,
 } from './types.js'
 
-export type SourceScanIdentity = Omit<RejoinRecord['source'], 'head'>
+export type SourceScanIdentity = Omit<LegacyRejoinRecord['source'], 'head'>
 export type SourceScan = {
   current: SourceScanIdentity
   gap: boolean
@@ -25,7 +26,7 @@ export type SourceScan = {
   }>
 }
 
-export function rejoinBarrier(record: RejoinRecord | null): LogPosition | null {
+export function rejoinBarrier(record: StoredRejoinRecord | null): LogPosition | null {
   return record != null && (record.stage === 'published' || record.stage === 'confirmed')
     ? (record.position ?? null)
     : null
@@ -36,7 +37,7 @@ export type SourceRecheck =
   | { kind: 'fail'; blockingPosition: LogPosition | null }
 
 /** Only a possible source-epoch ratchet below the barrier invalidates the candidate. */
-export function sourceRecheck(scan: SourceScan, record: RejoinRecord): SourceRecheck {
+export function sourceRecheck(scan: SourceScan, record: LegacyRejoinRecord): SourceRecheck {
   const { current, gap, frames } = scan
   const source = record.source
   if (
@@ -73,11 +74,11 @@ export type RejoinDeps = {
     from: LogPosition | null,
     payloadDigest: string,
   ): Promise<{ found: LogPosition } | 'absent' | 'gap'>
-  confirm(record: RejoinRecord): Promise<ConfirmationOutcome>
+  confirm(record: LegacyRejoinRecord): Promise<ConfirmationOutcome>
   runSerial<T>(fn: () => Promise<T>): Promise<T>
-  scan(record: RejoinRecord): Promise<SourceScan>
+  scan(record: LegacyRejoinRecord): Promise<SourceScan>
   canAdopt?(): Promise<boolean>
-  adopt(record: RejoinRecord, write: AdoptionWriteFactory): Promise<void>
+  adopt(record: LegacyRejoinRecord, write: AdoptionWriteFactory): Promise<void>
   bootstrapLedger(): Promise<boolean>
   getLedger(): Promise<Array<string>>
   newID(): string
@@ -85,16 +86,16 @@ export type RejoinDeps = {
   emit(outcome: Outcome): void
   discarded(
     reason: 'absent' | 'gap' | 'invalidated' | 'renewal' | 'superseded' | 'unconfirmed',
-    record: RejoinRecord,
+    record: LegacyRejoinRecord,
     blockingPosition?: LogPosition | null,
   ): void
 }
 
 export async function stepRejoin(
   deps: RejoinDeps,
-  record: RejoinRecord,
-): Promise<RejoinRecord | null> {
-  const save = async (next: RejoinRecord): Promise<RejoinRecord> => {
+  record: LegacyRejoinRecord,
+): Promise<StoredRejoinRecord | null> {
+  const save = async (next: LegacyRejoinRecord): Promise<LegacyRejoinRecord> => {
     await applyResolved(deps.control, { putRejoin: next }, deps.newID(), undefined, deps.signal)
     return next
   }
@@ -126,14 +127,20 @@ export async function stepRejoin(
     const verdict = await deps.confirm(record)
     return await deps.runSerial(async () => {
       const current = (await deps.control.load()).rejoin
-      if (current?.id !== record.id || current.stage !== 'published') return current
+      if (
+        current == null ||
+        'format' in current ||
+        current.id !== record.id ||
+        current.stage !== 'published'
+      )
+        return current
       if (verdict.kind === 'confirmed')
         return await save({ ...record, stage: 'confirmed', verdict: verdict.sealed })
       if (verdict.kind === 'error') throw verdict.error
       if (verdict.kind === 'disposed') throw new Error('Recovery disposed')
       if (verdict.kind === 'refused') {
         if (['binding', 'lapse', 'floor'].includes(verdict.refusal)) return await discard('renewal')
-        const next: RejoinRecord = { ...record, stage: 'refused', refusal: verdict.refusal }
+        const next: LegacyRejoinRecord = { ...record, stage: 'refused', refusal: verdict.refusal }
         const outcome: Outcome = {
           id: record.id,
           opID: null,
@@ -180,7 +187,7 @@ export async function stepRejoin(
       opID: null,
       removed: false,
     }
-    const next: RejoinRecord = { ...record, stage: 'adopted' }
+    const next: LegacyRejoinRecord = { ...record, stage: 'adopted' }
     const deferred = snapshot.operations.filter((op) => op.stage === 'accepted')
     const settlement = {
       deleteOperations: deferred.map((op) => op.id),

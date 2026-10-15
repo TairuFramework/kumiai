@@ -4,8 +4,8 @@ import {
   type ControlSnapshot,
   controlSafetyHeld,
   type GroupKey,
-  type RejoinRecord,
   type SafetyHold,
+  type StoredRejoinRecord,
 } from '@kumiai/rpc'
 
 import type { EntryCapability } from '../entry-capability.js'
@@ -14,9 +14,11 @@ import {
   GroupStateConflictError,
   GroupStateUncertainError,
   RegistryResyncRefusedError,
+  RegistrySourceMovedError,
   StorageOutcomeUnknownError,
 } from '../persistence-errors.js'
 import type { GroupPersistence, GroupTransaction } from '../persistence-types.js'
+import { recoveryTrustDigest } from '../recovery-trust-digest.js'
 import { retireIncarnation } from './retired.js'
 import type { RegistryRetirement } from './retirement.js'
 import { readRecoverySource } from './source.js'
@@ -24,6 +26,7 @@ import { recoveryTrustFor } from './trust.js'
 import type {
   GroupHandleRegistry,
   LegacyRegistryRecoverySource,
+  RegistryRecoverySource,
   RegistrySwitchWrite,
 } from './types.js'
 import { type RecoveryEnvironment, validateRegistryHandle } from './validation.js'
@@ -62,24 +65,33 @@ function validateWrite(value: RegistrySwitchWrite): void {
     throw new TypeError('Invalid registry switch write')
 }
 
-function confirmedRecord(record: RejoinRecord | null, rejoinID: string): RejoinRecord {
+function confirmedRecord(record: StoredRejoinRecord | null, rejoinID: string): StoredRejoinRecord {
   if (record?.id !== rejoinID || record.stage !== 'confirmed')
     throw new RegistryResyncRefusedError({ reason: 'unaccepted' })
   return record
 }
 
 function matchSource(
-  actual: LegacyRegistryRecoverySource,
-  expected: LegacyRegistryRecoverySource,
+  actual: LegacyRegistryRecoverySource | RegistryRecoverySource,
+  expected: LegacyRegistryRecoverySource | RegistryRecoverySource,
 ): void {
+  const sameTrust =
+    'trustDigest' in expected
+      ? 'trustDigest' in actual &&
+        actual.trustDigest === expected.trustDigest &&
+        recoveryTrustDigest(expected.trust) === expected.trustDigest
+      : sameStoredValue(actual.trust, expected.trust)
   if (
     !sameStoredValue(actual.key, expected.key) ||
-    actual.stateVersion !== expected.stateVersion ||
-    actual.lifetimeRevision !== expected.lifetimeRevision ||
     !sameStoredValue(actual.identity, expected.identity) ||
-    !sameStoredValue(actual.trust, expected.trust)
+    !sameTrust
   )
     throw new GroupStateConflictError('Registry switch source moved')
+  if (
+    actual.stateVersion !== expected.stateVersion ||
+    actual.lifetimeRevision !== expected.lifetimeRevision
+  )
+    throw new RegistrySourceMovedError('Registry switch source moved')
 }
 
 export function createRegistrySwitch<TTx extends GroupTransaction>(environment: {
@@ -118,6 +130,8 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
     const replay = await capability.read(groupID, async (reads) => {
       const control = await reads.control(source.key.incarnation)
       const record = control.rejoin
+      if (record !== null && 'format' in record && record.switchMutationID !== write.mutationID)
+        throw new RegistryResyncRefusedError({ reason: 'tuple' })
       if (record?.stage === 'adopted') {
         if (record.id !== rejoinID) throw new RegistryResyncRefusedError({ reason: 'unaccepted' })
         // Durable adoption proves this semantic replay even after later markers or retirement.
@@ -144,6 +158,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
     // A losing attempt never obtains a settlement capable of lifting the winner's fence.
     const attempt = retirement.beginRetirement(source.key)
     let stopObservation = () => {}
+    let hooked = false
     function settle(outcome: 'committed' | 'rolled-back'): void {
       attempt.settle(outcome)
       stopObservation()
@@ -167,6 +182,8 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
             (await reads.control(source.key.incarnation)).rejoin,
             rejoinID,
           )
+          if ('format' in record && record.switchMutationID !== write.mutationID)
+            throw new RegistryResyncRefusedError({ reason: 'tuple' })
           await verifyRegistryResync({ source: current, candidate, record, proof })
           // Spent admission is independent of provider CAS and candidate epoch ordering.
           if (
@@ -221,8 +238,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
             metadata.deleted ||
             trust === null ||
             lifetime.activeIncarnation !== source.key.incarnation ||
-            lifetime.latestIncarnation !== source.key.incarnation ||
-            !sameStoredValue(lifetime, prepared.lifetime)
+            lifetime.latestIncarnation !== source.key.incarnation
           )
             throw new GroupStateConflictError('Registry switch source moved in work')
           const current = {
@@ -231,9 +247,12 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
             identity: trust.installed,
             lifetimeRevision: lifetime.revision,
             trust,
+            trustDigest: recoveryTrustDigest(trust),
           }
           matchSource(current, prepared.current)
           matchSource(current, source)
+          if (!sameStoredValue(lifetime, prepared.lifetime))
+            throw new GroupStateConflictError('Registry switch lifetime changed in work')
           const record = confirmedRecord(
             (await stores.incarnation(source.key.incarnation).control.load()).rejoin,
             rejoinID,
@@ -242,6 +261,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
             throw new GroupStateConflictError('Registry switch confirmed record moved')
           assertSafety(await stores.incarnation(source.key.incarnation).control.load())
           stores.tx.onRollback(() => settle('rolled-back'))
+          hooked = true
           await retireIncarnation(stores, {
             source: source.key,
             nextIncarnation: destination.incarnation,
@@ -267,11 +287,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
       )
     } catch (error) {
       // Outcome hooks own ambiguous settlement; a rejected host call does not prove rollback.
-      if (
-        !(error instanceof StorageOutcomeUnknownError) &&
-        !(error instanceof GroupStateUncertainError)
-      )
-        settle('rolled-back')
+      if (!(hooked && error instanceof StorageOutcomeUnknownError)) settle('rolled-back')
       throw error
     }
   }

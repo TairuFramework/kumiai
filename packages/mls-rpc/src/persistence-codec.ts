@@ -193,7 +193,7 @@ function objectValue(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>
 }
 
-function encodeTrust(value: unknown): unknown {
+export function encodeTrust(value: unknown): unknown {
   const trust = objectValue(value)
   const registry = objectValue(trust.registry)
   if (!(registry.devices instanceof Map) || !(registry.controllers instanceof Map)) {
@@ -202,7 +202,7 @@ function encodeTrust(value: unknown): unknown {
   return { ...trust, registry: encodeDeviceRegistry(registry as DeviceRegistry) }
 }
 
-function decodeTrust(value: unknown): unknown {
+export function decodeTrust(value: unknown): unknown {
   const trust = objectValue(value)
   if (!(trust.registry instanceof Uint8Array)) {
     throw new TypeError('Expected encoded device registry')

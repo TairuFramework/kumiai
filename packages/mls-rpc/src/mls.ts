@@ -22,43 +22,56 @@ import {
   readMessageEpoch,
   recoverySignerEligible,
   restoreGroup,
+  sealCapturedGroupInfo,
   sealGroupInfo,
   sealLedger,
   sealRecoveryVerdict,
   verifyRecoveryRequest,
 } from '@kumiai/mls'
 import type {
+  AdoptionExpected,
   AdoptionWriteFactory,
   AppliedRecovery,
   CommitContext,
   CommitHeader,
+  ControlStore,
   GroupMLS,
+  LogPosition,
   OpenedRecoveryVerdict,
   ProcessCommitResult,
   RecoveryConfirmationBinding,
   RecoveryRefusalReason,
   RecoveryVerdict,
+  ResyncProof,
   RosterEntry,
+  SafetyHold,
 } from '@kumiai/rpc'
 import { ControlWriteNotCommittedError } from '@kumiai/rpc'
 import { ciphersuites } from 'ts-mls'
 
-import type { HandleAccess } from './access.js'
+import type { ControlHandleAccess } from './access.js'
 import { applyCommit } from './apply-commit.js'
 import { validateRecoveryCommit } from './control-validation.js'
+import type { GroupRecoveryTrust } from './persistence-types.js'
 import {
   type BoundRecoveryCommit,
   createRecoveryBindingState,
+  createRecoveryRequestFromTrust,
   createVerdictJudge,
+  deriveRecoverySecretFromTrust,
   knownRecoveryRegistry,
+  openRecoveryVerdictFromTrust,
+  RECOVERY_LABEL,
   type RecoveryBinding,
   type RecoveryCandidate,
 } from './recovery.js'
 import { decodeRecoveryCandidate, encodeRecoveryCandidate } from './recovery-codec.js'
+import type { RegistryRecoverySource } from './registry/types.js'
+import type { RecoveryEnvironment } from './registry/validation.js'
 
-export const groupHandleAccess = new WeakMap<GroupMLS, HandleAccess>()
+export const groupHandleAccess = new WeakMap<GroupMLS, ControlHandleAccess>()
 
-const recoveryAcceptances = new WeakMap<HandleAccess, Map<string, Promise<void>>>()
+const recoveryAcceptances = new WeakMap<ControlHandleAccess, Map<string, Promise<void>>>()
 
 const utf8 = new TextEncoder()
 
@@ -72,7 +85,7 @@ const utf8 = new TextEncoder()
  * group's whole life, so a peer stranded at any epoch can still name the topic it heals on —
  * and a removed member keeps it for life by design.
  */
-export const RECOVERY_LABEL = 'kumiai/recovery/v1'
+export { RECOVERY_LABEL } from './recovery.js'
 
 /**
  * A per-commit ledger-entry resolver, installed at handle-construction time and swapped
@@ -111,8 +124,32 @@ export function createLedgerEntrySlot(): LedgerEntrySlot {
   }
 }
 
-export type GroupMLSParams = {
-  access: HandleAccess
+export type RecoveryRouting = { targetID: string; topicID: string }
+
+export type RecoveryAdoptionDependencies = {
+  target: RecoveryRouting
+  environment: RecoveryEnvironment
+  readRecoverySource(): Promise<RegistryRecoverySource>
+  accept(
+    candidate: GroupHandle,
+    params: {
+      source: RegistryRecoverySource
+      proof: ResyncProof
+      write: AdoptionWriteFactory
+    },
+  ): Promise<void>
+}
+
+export type GroupMLSDependencies = {
+  control: ControlStore
+  readRecoverySource(): Promise<AdoptionExpected>
+  recoveryAdoption?: RecoveryAdoptionDependencies
+  onSafetyHold?: (latch: (reason: NonNullable<SafetyHold>) => void) => () => void
+  recoverySecretFromTrust?: (trust: GroupRecoveryTrust) => Promise<Uint8Array>
+}
+
+export type GroupMLSParams = Partial<GroupMLSDependencies> & {
+  access: ControlHandleAccess
   /** This member's signing identity: recovery requests and attestations are signed with it. */
   identity: OwnIdentity
   /** The slot the handle was built with. See {@link LedgerEntrySlot}. */
@@ -245,8 +282,11 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
 
   const port: GroupMLS = {
     async signRecoveryConfirmation(binding: RecoveryConfirmationBinding) {
-      if (binding.groupID !== (await access.read((group) => group.groupID)))
-        throw new Error('Confirmation group mismatch')
+      const groupID =
+        params.readRecoverySource === undefined
+          ? await access.read((group) => group.groupID)
+          : (await params.readRecoverySource()).key.groupID
+      if (binding.groupID !== groupID) throw new Error('Confirmation group mismatch')
       return new TextEncoder().encode(
         stringifyToken(
           await identity.signToken(
@@ -270,7 +310,10 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           value.requestID === binding.requestID &&
           value.position === binding.position &&
           value.commitDigest === binding.commitDigest &&
-          value.groupID === (await access.read((group) => group.groupID))
+          value.groupID ===
+            (params.readRecoverySource === undefined
+              ? await access.read((group) => group.groupID)
+              : (await params.readRecoverySource()).key.groupID)
         )
       } catch {
         return false
@@ -279,6 +322,16 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
     async verifyRecoveryRequest(request: Uint8Array) {
       try {
         const verified = await verifyRecoveryRequest(new TextDecoder().decode(request))
+        if (params.readRecoverySource !== undefined) {
+          const source = await params.readRecoverySource()
+          return verified.groupID === source.key.groupID
+            ? {
+                groupID: verified.groupID,
+                requestID: verified.requestID,
+                requesterDID: verified.requesterDID,
+              }
+            : null
+        }
         return await access.read((group) =>
           verified.groupID === group.groupID
             ? {
@@ -314,6 +367,16 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       requestKey: Uint8Array,
     ): Promise<OpenedRecoveryVerdict | null> {
       try {
+        if (params.recoveryAdoption !== undefined) {
+          const { trust } = await params.recoveryAdoption.readRecoverySource()
+          return await openRecoveryVerdictFromTrust({
+            trust,
+            sealed,
+            requestID,
+            requestKey,
+            options: params.recoveryAdoption.environment.options,
+          })
+        }
         return await access.read((group) =>
           openRecoveryVerdict({ group, sealed, requestID, ephemeralPrivateKey: requestKey }),
         )
@@ -325,6 +388,16 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       return await access.read((group) => recovery.prepare(group))
     },
     async readRecoverySource() {
+      if (params.readRecoverySource !== undefined) {
+        const source = await params.readRecoverySource()
+        if (source.identity === null) throw new Error('Recovery source identity unavailable')
+        // Legacy callers still consume the flattened identity until captured activation.
+        return {
+          ...source,
+          epoch: source.identity.epoch,
+          authenticator: source.identity.authenticator.slice(),
+        }
+      }
       return await access.readControl(async ({ handle, source }) => ({
         ...source,
         epoch: Number(handle.epoch),
@@ -336,6 +409,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
     },
     sendAdmission: () => access.admission(),
     ownCommitDigest,
+    ...(params.onSafetyHold === undefined ? {} : { onSafetyHold: params.onSafetyHold }),
     async rosterEntries(): Promise<Array<RosterEntry>> {
       return await access.read((group) =>
         group.listMembers().map((member) => ({
@@ -461,7 +535,11 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       }
     },
 
-    async createRecoveryRequest(requestID: string, _deadlineMs?: number) {
+    async createRecoveryRequest(requestID: string, deadlineMs?: number) {
+      if (params.recoveryAdoption !== undefined) {
+        const { trust } = await params.recoveryAdoption.readRecoverySource()
+        return await createRecoveryRequestFromTrust({ trust, identity, requestID, deadlineMs })
+      }
       const { request, ephemeralPrivateKey } = await access.read((group) =>
         createRecoveryRequest({
           group,
@@ -472,7 +550,23 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       return { request: utf8.encode(request), requestKey: ephemeralPrivateKey }
     },
 
-    async sealGroupInfo(request: Uint8Array): Promise<Uint8Array> {
+    async sealGroupInfo(
+      request: Uint8Array,
+      captureHead?: LogPosition | null,
+    ): Promise<Uint8Array> {
+      if (captureHead !== undefined) {
+        return await access.readControl(async (scope) => {
+          const control = await scope.loadControl(params.control)
+          if ((control.cursor?.position ?? null) !== captureHead)
+            throw new Error('Capture head does not match the committed cursor')
+          return await sealCapturedGroupInfo({
+            group: scope.handle,
+            identity,
+            request: new TextDecoder().decode(request),
+            captureHead,
+          })
+        })
+      }
       // Throws for a request this member refuses — a removed requester holds no leaf in
       // this member's tree — and the peer stays silent. Roster-intrinsic, not a check here.
       return await access.read((group) =>
@@ -643,7 +737,14 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       // Epoch-INDEPENDENT by construction: the genesis anchor never changes, so a peer
       // stranded at any epoch derives the same rendezvous. See the class doc — this is not
       // a confidential value.
-      const secret = await access.read(params.recoverySecret ?? deriveRecoverySecret)
+      const secret =
+        params.recoveryAdoption === undefined
+          ? await access.read(params.recoverySecret ?? deriveRecoverySecret)
+          : await (
+              params.recoverySecretFromTrust ??
+              ((trust) =>
+                deriveRecoverySecretFromTrust(trust, params.recoveryAdoption?.environment.options))
+            )((await params.recoveryAdoption.readRecoverySource()).trust)
       if (!(secret instanceof Uint8Array) || secret.length < MIN_RECOVERY_SECRET_BYTES) {
         throw new Error(
           `recoverySecret: expected at least ${MIN_RECOVERY_SECRET_BYTES} bytes from the host`,

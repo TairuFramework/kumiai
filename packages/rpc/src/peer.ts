@@ -11,6 +11,7 @@ import { decodeAppAAD } from './app-aad.js'
 import { type AppDeliveryResumed, type AppDeliveryStalled, createAppLane } from './app-lane.js'
 import { createAppOutboxAcceptance } from './app-outbox.js'
 import { classifyCommit, digestAppliedCommit } from './classify.js'
+import { createMonotoneClock } from './clock.js'
 import { RecoveryRequiredError } from './commit.js'
 import {
   type CommitFrame,
@@ -52,10 +53,10 @@ import type {
   ControlSnapshot,
   ControlStore,
   ExternalResponse,
+  LegacyRejoinRecord,
   Operation,
   OperationRequest,
   Outcome,
-  RejoinRecord,
 } from './control/types.js'
 import { deliverObligations } from './control/welcome.js'
 import {
@@ -142,6 +143,7 @@ import {
   responseOutcome,
   waitForRecoveryConfirmation,
 } from './recovery-confirmation.js'
+import type { StoredRejoinRecord } from './recovery-types.js'
 import { detectRosterChange } from './roster.js'
 import {
   APP_TOPIC_LABEL,
@@ -460,6 +462,7 @@ export function createGroupPeerWithControlWalk<
     safetyHold,
     commitLaneCaughtUp: () => commitLaneCaughtUp,
     commitWorkVersion: () => commitWorkVersion,
+    now: createMonotoneClock(),
     scheduleDrain: async (drain) => {
       await ready
       if (disposed) return
@@ -3147,7 +3150,8 @@ export function createGroupPeerWithControlWalk<
     )
       return
     const record = (await control.load()).rejoin
-    if (safetyHold() !== null || record?.stage !== 'built') return
+    if (safetyHold() !== null || record == null || 'format' in record || record.stage !== 'built')
+      return
     await stepRejoin(rejoinDeps(Date.now() + recoveryDeadlineMs), record)
     await refreshControl()
   }
@@ -3259,6 +3263,7 @@ export function createGroupPeerWithControlWalk<
     const owed = entries.filter((token) => !held.has(token))
     const record = (await control?.load())?.rejoin
     if (safetyHold() !== null) return
+    if (record != null && 'format' in record) return
     if (record?.stage === 'adopted') {
       const deps = rejoinDeps(Date.now() + recoveryTimeoutMs)
       await stepRejoin({ ...deps, bootstrapLedger: async () => true }, record)
@@ -3503,7 +3508,12 @@ export function createGroupPeerWithControlWalk<
       }
       if (hardControlHeld()) return
       const record = (await control?.load())?.rejoin
-      if (record?.stage === 'confirmed' && activeRecovery == null) {
+      if (
+        record != null &&
+        !('format' in record) &&
+        record.stage === 'confirmed' &&
+        activeRecovery == null
+      ) {
         await stepRejoin(rejoinDeps(Date.now() + recoveryDeadlineMs), record)
         await refreshControl()
       }
@@ -3598,7 +3608,7 @@ export function createGroupPeerWithControlWalk<
    * mutex, so either nesting deadlocks. The re-enactment a heal owes is a SUBSEQUENT `commit()` the
    * host makes once this releases the lane.
    */
-  const scanRejoinSource = async (record: RejoinRecord): Promise<SourceScan> => {
+  const scanRejoinSource = async (record: LegacyRejoinRecord): Promise<SourceScan> => {
     if (mls == null || control == null || commitTopicID == null)
       throw new Error('Missing recovery ports')
     assertSafetyOpen()
@@ -3659,7 +3669,7 @@ export function createGroupPeerWithControlWalk<
     }
   }
 
-  const recoveryCandidate = async (record: RejoinRecord): Promise<PendingRecovery> => {
+  const recoveryCandidate = async (record: LegacyRejoinRecord): Promise<PendingRecovery> => {
     assertSafetyOpen()
     if (pendingRecovery?.commitDigest === record.digest) return pendingRecovery.pending
     if (mls == null) throw new Error('Missing recovery port')
@@ -3922,6 +3932,7 @@ export function createGroupPeerWithControlWalk<
         if (safetyHold() !== null || recoveryGeneration !== generation) return { advanced: false }
         let record = (await controlStore.load()).rejoin
         assertSafetyOpen()
+        if (record != null && 'format' in record) return { advanced: false }
         if (record?.stage === 'refused') return failed('refused', { refusal: record.refusal })
         if (record == null) {
           const built = await runSerial(async () => {
@@ -3985,7 +3996,7 @@ export function createGroupPeerWithControlWalk<
             assertSafetyOpen()
             const { payload } = await frameCommit(pending.commit, [], null)
             assertSafetyOpen()
-            const record: RejoinRecord = {
+            const record: LegacyRejoinRecord = {
               id: newPublishID(),
               stage: 'built',
               publishID: newPublishID(),
@@ -4033,10 +4044,10 @@ export function createGroupPeerWithControlWalk<
         }
         rejoinDiscarded = null
         rejoinFailureDetails = {}
-        const advanceRecord = async (): Promise<RejoinRecord | null> => {
+        const advanceRecord = async (): Promise<StoredRejoinRecord | null> => {
           const current = (await controlStore.load()).rejoin
           assertSafetyOpen()
-          return current?.id === record.id
+          return current != null && !('format' in current) && current.id === record.id
             ? await stepRejoin(rejoinDeps(deadline), current)
             : current
         }
@@ -4048,6 +4059,7 @@ export function createGroupPeerWithControlWalk<
         assertSafetyOpen()
         await runSerial(refreshControl)
         if (safetyHold() !== null || recoveryGeneration !== generation) return { advanced: false }
+        if (next != null && 'format' in next) return { advanced: false }
         if (next?.stage === 'adopted')
           awaitingBootstrap = { attemptID, trigger, entries: record.ledgerBefore }
         if (next?.stage === 'refused')
@@ -4133,7 +4145,7 @@ export function createGroupPeerWithControlWalk<
         assertSafetyOpen()
         const record = (await control.load()).rejoin
         assertSafetyOpen()
-        if (record?.stage === 'refused') {
+        if (record != null && !('format' in record) && record.stage === 'refused') {
           await applyResolved(control, { deleteRejoin: true }, newPublishID())
           await refreshControl()
         }

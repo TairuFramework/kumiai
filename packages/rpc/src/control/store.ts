@@ -42,6 +42,10 @@ function putRows<Row, Key>(
 function cloneControlValue<TValue>(value: TValue): TValue {
   if (value instanceof Uint8Array) return Uint8Array.from(value) as TValue
   if (Array.isArray(value)) return value.map(cloneControlValue) as TValue
+  if (value instanceof Map)
+    return new Map(
+      [...value].map(([key, child]) => [cloneControlValue(key), cloneControlValue(child)]),
+    ) as TValue
   if (value !== null && typeof value === 'object') {
     const copy: Record<string, unknown> = {}
     for (const [key, child] of Object.entries(value)) copy[key] = cloneControlValue(child)

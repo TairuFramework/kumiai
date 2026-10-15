@@ -3,6 +3,8 @@ import { commitTopic, rendezvousTopic } from '@kumiai/rpc'
 import { expect, test, vi } from 'vitest'
 
 import { createGroupMLS, deriveRecoverySecret } from '../src/mls.js'
+import * as recovery from '../src/recovery.js'
+import { recoveryTrustFor } from '../src/registry/trust.js'
 import { createRealGroup, testHandleAccess } from './fixtures/real-group.js'
 
 async function port(name: string, recoverySecret?: (handle: GroupHandle) => Promise<Uint8Array>) {
@@ -27,6 +29,21 @@ async function port(name: string, recoverySecret?: (handle: GroupHandle) => Prom
 test('without an override the recovery secret is the anchor KDF', async () => {
   const { member, mls } = await port('recovery-default')
   expect(await mls.exportRecoverySecret()).toEqual(await deriveRecoverySecret(member.handle))
+})
+
+test('retained trust derives identical live secret bytes and both topics', async () => {
+  const { member, mls } = await port('recovery-trust-secret')
+  const trust = recoveryTrustFor(
+    member.handle,
+    { groupID: member.handle.groupID, incarnation: 1 },
+    null,
+  )
+  const retained = await recovery.deriveRecoverySecretFromTrust(trust)
+  const live = await mls.exportRecoverySecret()
+  expect(retained).toHaveLength(32)
+  expect(retained).toEqual(live)
+  expect(commitTopic(retained)).toBe(commitTopic(live))
+  expect(rendezvousTopic(retained)).toBe(rendezvousTopic(live))
 })
 
 test('an override supplies the secret both topics derive from', async () => {

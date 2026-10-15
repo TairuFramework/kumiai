@@ -179,6 +179,7 @@ export type ConformanceRosterEntry = {
  */
 export type ConformanceGroupMLS<Position extends string = string> = {
   ownCommitDigest(commit: Uint8Array): string | null
+  onSafetyHold?: (latch: (reason: 'fork-halted' | 'recovery-unavailable') => void) => () => void
   capturedRecovery?: ConformanceCapturedRecoveryPort<Position>
   signRecoveryConfirmation: (binding: {
     groupID: string
@@ -223,7 +224,10 @@ export type ConformanceGroupMLS<Position extends string = string> = {
     requestID: string,
     deadlineMs?: number,
   ) => Promise<{ request: Uint8Array; requestKey: Uint8Array }>
-  sealGroupInfo: (request: Uint8Array) => Promise<Uint8Array>
+  sealGroupInfo: {
+    (request: Uint8Array): Promise<Uint8Array>
+    (request: Uint8Array, captureHead: Position | null): Promise<Uint8Array>
+  }
   applyRecovery: (
     sealed: Uint8Array,
     requestID: string,

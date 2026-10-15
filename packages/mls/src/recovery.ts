@@ -9,6 +9,7 @@ import {
   type VerifiedToken,
   verifyToken,
 } from '@kokuin/token'
+import { x25519 } from '@noble/curves/ed25519.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { fromB64U, toB64U } from '@sozai/codec'
 import {
@@ -350,8 +351,12 @@ function recoveryAAD(
  * rejected: `verifyToken` returns them unchecked, so their `iss` is
  * attacker-chosen. `embedLongForm` lets it verify offline — a responder needs no
  * DID resolver to answer.
+ * When supplied, requestKey also binds the token to the retained X25519 private key.
  */
-export async function verifyRecoveryRequest(token: string): Promise<VerifiedRecoveryRequest> {
+export async function verifyRecoveryRequest(
+  token: string,
+  requestKey?: Uint8Array,
+): Promise<VerifiedRecoveryRequest> {
   let verified: Awaited<ReturnType<typeof verifyToken<RecoveryRequest>>>
   try {
     verified = await verifyToken<RecoveryRequest>(token)
@@ -389,6 +394,18 @@ export async function verifyRecoveryRequest(token: string): Promise<VerifiedReco
       'malformed',
       `recovery request ephemeral key must be ${KEM_OUTPUT_LENGTH} bytes`,
     )
+  }
+
+  // Recovery supports only the X25519 KEM; this is the saved private key, not derivation material.
+  if (requestKey !== undefined) {
+    if (requestKey.length !== KEM_OUTPUT_LENGTH)
+      throw new RecoveryRequestError(
+        'malformed',
+        `saved recovery request key must be ${KEM_OUTPUT_LENGTH} bytes`,
+      )
+    const expected = x25519.getPublicKey(requestKey)
+    if (!expected.every((byte, index) => byte === ephemeralPublicKey[index]))
+      throw new RecoveryRequestError('malformed', 'recovery request does not match the saved key')
   }
 
   return { requesterDID: normalizeDID(iss), groupID, requestID, ephemeralPublicKey }

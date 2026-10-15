@@ -1,15 +1,27 @@
-import { confirmationTag, decodeClientState, encodeClientState } from '@kumiai/mls'
-import type { AdoptionWrite, AdoptionWriteFactory } from '@kumiai/rpc'
+import {
+  confirmationTag,
+  decodeClientState,
+  encodeClientState,
+  sealCapturedGroupInfo,
+} from '@kumiai/mls'
+import { type AdoptionWrite, type AdoptionWriteFactory, asLogPosition } from '@kumiai/rpc'
+import { xchacha20poly1305 } from '@noble/ciphers/chacha.js'
 import { defaultProposalTypes } from 'ts-mls'
 import { expect, expectTypeOf, test } from 'vitest'
 
 import { createGroupMLS } from '../src/mls.js'
+import { decodeStoredValue, encodeStoredValue } from '../src/persistence-codec.js'
 import type { RecoveryCandidate } from '../src/recovery.js'
 import {
+  type CapturedRecoverySnapshot,
+  decodeCapturedRecoveryCandidate,
   decodeRecoveryCandidate,
+  encodeCapturedRecoveryCandidate,
   encodeRecoveryCandidate,
   type RecoverySnapshot,
 } from '../src/recovery-codec.js'
+import { recoveryTrustDigest } from '../src/recovery-trust-digest.js'
+import { recoveryTrustFor } from '../src/registry/trust.js'
 import { buildRealCommit, createRealGroup, testHandleAccess } from './fixtures/real-group.js'
 import {
   createTransactionalAccess,
@@ -67,11 +79,96 @@ async function setup(differentTree = false) {
     sealed,
     pending,
     member,
+    responder,
     writes,
     signer: responder.identity.id,
     adoptions: () => adoptions,
   }
 }
+
+test.each([null, 'captured-position'])(
+  'captured v3 retains full sourceState and immutable origin (%s)',
+  async (captureHead) => {
+    const s = await setup(true)
+    const pending = s.pending as RecoveryCandidate
+    const head = captureHead === null ? null : asLogPosition(captureHead)
+    const trust = recoveryTrustFor(
+      s.member.handle,
+      { groupID: 'candidate-codec', incarnation: 1 },
+      null,
+    )
+    const attestedReply = await sealCapturedGroupInfo({
+      group: s.responder.handle,
+      identity: s.responder.identity,
+      request: new TextDecoder().decode(s.request),
+      captureHead: head,
+    })
+    const snapshot: CapturedRecoverySnapshot = {
+      ...decodeRecoveryCandidate(s.pending.serialize(), s.requestKey),
+      source: {
+        key: { groupID: trust.groupID, incarnation: 1 },
+        stateVersion: 1,
+        lifetimeRevision: 2,
+        identity: trust.installed,
+        trust,
+        trustDigest: recoveryTrustDigest(trust),
+      },
+      target: {
+        targetID: 'capture-hub',
+        topicID: 'capture-topic',
+        groupInfoEpoch: pending.epoch - 1,
+        groupInfoAuthenticator: s.responder.handle.state.keySchedule.epochAuthenticator.slice(),
+        captureHead: head,
+      },
+      captureHead: head,
+      searchFrom: head,
+      attestedReply,
+    }
+    const bytes = encodeCapturedRecoveryCandidate(snapshot, s.requestKey)
+    expect(bytes[0]).toBe(3)
+    const restored = decodeCapturedRecoveryCandidate(bytes, s.requestKey)
+    expect(restored.source).toEqual(snapshot.source)
+    expect(restored.target).toEqual(snapshot.target)
+    expect(restored.captureHead).toBe(head)
+    expect(restored.searchFrom).toBe(head)
+    expect(restored.attestedReply).toEqual(attestedReply)
+    expect(encodeClientState(restored.state)).toEqual(encodeClientState(snapshot.state))
+    expect(encodeClientState({ ...restored.state, ratchetTree: restored.sourceTree })).toEqual(
+      encodeClientState({ ...snapshot.state, ratchetTree: snapshot.sourceTree }),
+    )
+    expect(restored.sourceTree).not.toEqual(restored.state.ratchetTree)
+    for (const version of [1, 2]) {
+      expect(() =>
+        decodeCapturedRecoveryCandidate(
+          new Uint8Array([version, ...bytes.subarray(1)]),
+          s.requestKey,
+        ),
+      ).toThrow('Unsupported recovery candidate version')
+    }
+    expect(() => decodeCapturedRecoveryCandidate(s.pending.serialize(), s.requestKey)).toThrow()
+    expect(() => decodeRecoveryCandidate(bytes, s.requestKey)).toThrow()
+    expect(() => decodeCapturedRecoveryCandidate(bytes, new Uint8Array(32))).toThrow()
+    const tampered = bytes.slice()
+    tampered[tampered.length - 1] = (tampered[tampered.length - 1] ?? 0) ^ 1
+    expect(() => decodeCapturedRecoveryCandidate(tampered, s.requestKey)).toThrow()
+    const aad = new TextEncoder().encode('kumiai/recovery-candidate/v3')
+    const body = xchacha20poly1305(s.requestKey, bytes.subarray(1, 25), aad).decrypt(
+      bytes.subarray(25),
+    )
+    const value = decodeStoredValue(body) as Record<string, unknown>
+    const sourceState = decodeClientState(value.sourceState as Uint8Array)
+    if (sourceState == null) throw new Error('Missing complete source state')
+    sourceState.keySchedule.exporterSecret[0] = (sourceState.keySchedule.exporterSecret[0] ?? 0) ^ 1
+    const alteredBody = encodeStoredValue({ ...value, sourceState: encodeClientState(sourceState) })
+    const nonce = crypto.getRandomValues(new Uint8Array(24))
+    const altered = new Uint8Array([
+      3,
+      ...nonce,
+      ...xchacha20poly1305(s.requestKey, nonce, aad).encrypt(alteredBody),
+    ])
+    expect(() => decodeCapturedRecoveryCandidate(altered, s.requestKey)).toThrow('sourceState')
+  },
+)
 
 test.each(['empty', 'mixed'] as const)(
   'round trips a complete sourceState with a different tree and zero one absent senders (%s)',

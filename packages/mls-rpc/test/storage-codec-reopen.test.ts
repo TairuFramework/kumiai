@@ -2,6 +2,7 @@ import { decodeClientState, encodeClientState } from '@kumiai/mls'
 import { expect, test } from 'vitest'
 
 import { decodeRecoveryCandidate } from '../src/recovery-codec.js'
+import { decodeRecoveryRecord } from '../src/recovery-record.js'
 import { createCodecReopenFixture } from './fixtures/codec-reopen.js'
 
 test('reopens sealed real MLS pending zero sender and recovery candidate without plaintext state caches', async () => {
@@ -10,7 +11,7 @@ test('reopens sealed real MLS pending zero sender and recovery candidate without
     await createCodecReopenFixture(groupID)
   try {
     const before = (await fixture.ports.device.groups.ports(key).control.load()).rejoin
-    if (before == null) throw new Error('missing rejoin')
+    if (before == null || 'format' in before) throw new Error('missing legacy rejoin')
     const candidateBytes = before.candidate.slice()
     const reopened = await fixture.reopen()
     const stored = await reopened.device.groups.loadState(key)
@@ -20,7 +21,9 @@ test('reopens sealed real MLS pending zero sender and recovery candidate without
     expect(stored.state[0]).toBe(2)
     expect(decodeClientState(stored.state)?.unappliedProposals[zeroRef]?.senderLeafIndex).toBe(0)
     const rejoin = (await reopened.device.groups.ports(key).control.load()).rejoin
-    if (rejoin == null) throw new Error('missing rejoin')
+    if (rejoin == null || 'format' in rejoin) throw new Error('missing legacy rejoin')
+    const decoded = decodeRecoveryRecord(rejoin)
+    expect(decoded).toMatchObject({ kind: 'legacy', executable: false, record: rejoin })
     expect(rejoin.candidate[0]).toBe(2)
     const restored = await realPort.restoreRecovery(rejoin.candidate, rejoin.requestKey)
     expect(restored.judgeVerdict(boundVerdict)).toBe('authoritative')
@@ -76,7 +79,7 @@ test('reopens sealed real MLS pending zero sender and recovery candidate without
     if (saved == null || saved.deleted || saved.state == null) throw new Error('missing state')
     expect(encodeClientState(clone)).toEqual(saved.state)
     const savedRejoin = (await again.device.groups.ports(key).control.load()).rejoin
-    if (savedRejoin == null) throw new Error('missing rejoin')
+    if (savedRejoin == null || 'format' in savedRejoin) throw new Error('missing legacy rejoin')
     expect(
       (await realPort.restoreRecovery(savedRejoin.candidate, savedRejoin.requestKey)).judgeVerdict(
         boundVerdict,
