@@ -305,9 +305,17 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-async function futureLane(options: { durable?: boolean; caught?: boolean; hint?: number } = {}) {
+async function futureLane(
+  options: {
+    durable?: boolean
+    caught?: boolean
+    hint?: number
+    scheduleDrain?: (drain: () => Promise<void>) => Promise<void>
+  } = {},
+) {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
   let caught = options.caught ?? true
+  let workVersion = 0
   const rows = new Map<string, PendingAppFrame>()
   const reader = createFakeCrypto({
     epoch: 1,
@@ -349,7 +357,11 @@ async function futureLane(options: { durable?: boolean; caught?: boolean; hint?:
       appCursorStore: cursor,
       anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
       groupID: () => 'group',
-      ...{ commitLaneCaughtUp: () => caught },
+      ...{
+        commitLaneCaughtUp: () => caught,
+        commitWorkVersion: () => workVersion,
+        ...(options.scheduleDrain == null ? {} : { scheduleDrain: options.scheduleDrain }),
+      },
     })
     lanes.push(lane)
     return lane
@@ -375,14 +387,103 @@ async function futureLane(options: { durable?: boolean; caught?: boolean; hint?:
     messages,
     fetch,
     append,
-    setCaught(value: boolean) {
+    setCaught(value: boolean, retry = true) {
+      if (!value) workVersion += 1
       caught = value
-      if (caught) lane.retryDelivery()
+      if (caught && retry) lane.retryDelivery()
     },
   }
 }
 
 describe('caught-up future occurrence bounds', () => {
+  test.each(['expiry', 'ahead note'])(
+    '%s drain waits for an in-flight commit apply before opening',
+    async (trigger) => {
+      let commit = Promise.resolve()
+      const f = await futureLane({
+        durable: false,
+        scheduleDrain: (drain) => commit.then(drain),
+      })
+      const message = await f.append(trigger === 'expiry' ? 3 : 4)
+      if (trigger === 'expiry') await f.lane.deliver()
+      const release = Promise.withResolvers<void>()
+      commit = release.promise.then(() => f.reader.setEpoch(trigger === 'expiry' ? 3 : 4))
+      try {
+        if (trigger === 'ahead note') {
+          f.lane.note(
+            'chat',
+            topicID,
+            { ...message, logPosition: message.sequenceID } as never,
+            new FrameEpochError(4, 1),
+          )
+        }
+        await vi.advanceTimersByTimeAsync(30_000)
+        expect(f.cursor.stored(topicID)).toBeNull()
+        expect(f.emit).not.toHaveBeenCalled()
+      } finally {
+        release.resolve()
+        await commit
+      }
+      await vi.advanceTimersByTimeAsync(0)
+      expect(f.emit).toHaveBeenCalledOnce()
+      expect(f.cursor.stored(topicID)).toBe(message.sequenceID)
+    },
+  )
+
+  test.each([false, true])(
+    'catch-up changing during unwrap defers poison (initially caught=%s)',
+    async (caught) => {
+      const f = await futureLane({ caught })
+      await f.append(4)
+      const entered = Promise.withResolvers<void>()
+      const release = Promise.withResolvers<void>()
+      const unwrap = f.reader.unwrap.bind(f.reader)
+      vi.spyOn(f.reader, 'unwrap').mockImplementationOnce(async (...args) => {
+        try {
+          return await unwrap(...args)
+        } catch (error) {
+          entered.resolve()
+          await release.promise
+          throw error
+        }
+      })
+      const delivery = f.lane.deliver()
+      await entered.promise
+      f.setCaught(false, false)
+      f.reader.setEpoch(4)
+      f.setCaught(true, false)
+      release.resolve()
+      await delivery
+      expect(f.cursor.stored(topicID)).toBeNull()
+      expect(f.emit).not.toHaveBeenCalled()
+      await f.lane.deliver()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(f.emit).toHaveBeenCalledOnce()
+      expect(f.cursor.stored(topicID)).toBe('000000000001')
+    },
+  )
+
+  test.each(['fetch', 'cursor save'])(
+    'expiry retries one failed %s without traffic and never reopens completed poison',
+    async (failure) => {
+      const f = await futureLane()
+      const message = await f.append(3)
+      await f.lane.deliver()
+      if (failure === 'fetch') f.fetch.mockRejectedValueOnce(new Error('fetch unavailable'))
+      else vi.spyOn(f.cursor, 'save').mockRejectedValueOnce(new Error('cursor unavailable'))
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(f.cursor.stored(topicID)).toBeNull()
+      const opens = f.reader.starts.unwrap
+      await vi.advanceTimersByTimeAsync(999)
+      expect(f.cursor.stored(topicID)).toBeNull()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(f.cursor.stored(topicID)).toBe(message.sequenceID)
+      if (failure === 'cursor save') expect(f.reader.starts.unwrap).toBe(opens)
+      expect(f.emit).not.toHaveBeenCalled()
+      expect(f.rows.size).toBe(0)
+    },
+  )
+
   test.each([true, false])(
     '+2 holds until 30,000 ms without traffic (durable=%s)',
     async (durable) => {
@@ -423,7 +524,7 @@ describe('caught-up future occurrence bounds', () => {
     expect(f.cursor.stored(topicID)).toBe('000000000001')
   })
 
-  test('catch-up starts age before a delayed app refetch finishes', async () => {
+  test('catch-up starts age while a lagging retry is blocked in app refetch', async () => {
     const f = await futureLane({ caught: false })
     const message = await f.append(3)
     await f.lane.deliver()
@@ -434,8 +535,9 @@ describe('caught-up future occurrence bounds', () => {
       await release.promise
       return { messages: [], head: message.sequenceID, oldest: message.sequenceID, gap: false }
     })
-    f.setCaught(true)
+    f.lane.retryDelivery()
     await entered.promise
+    f.setCaught(true)
     await vi.advanceTimersByTimeAsync(20_000)
     release.resolve()
     await f.lane.deliver()

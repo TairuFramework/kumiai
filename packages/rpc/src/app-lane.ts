@@ -97,8 +97,12 @@ export type AppLaneParams = {
   onAppDeliveryResumed?: ((event: AppDeliveryResumed) => void) | undefined
   /** Start workers after the caller's serialization boundary; direct lanes start immediately. */
   scheduleDelivery?: ((start: () => void) => void) | undefined
+  /** Run autonomous drains while the caller holds the crypto handle still. */
+  scheduleDrain?: (drain: () => Promise<void>) => Promise<void>
   /** No applicable unapplied commit through the observed head. Direct lanes default to true. */
   commitLaneCaughtUp?: () => boolean
+  /** Changes when new commit work invalidates a caught-up observation. */
+  commitWorkVersion?: () => number
   /** Current safety hold. Defaults to null. */
   safetyHold?: () => SafetyHold
   /** Latch a held refusal. Defaults to a no-op. */
@@ -191,8 +195,10 @@ export function createAppLane(params: AppLaneParams): AppLane {
     onAppDeliveryStalled,
     onAppDeliveryResumed,
     scheduleDelivery = (start) => start(),
+    scheduleDrain = (drain) => drain(),
     safetyHold = () => null,
     commitLaneCaughtUp = () => true,
+    commitWorkVersion = () => 0,
     onSafetyHeld = () => {},
     anchor,
     groupID,
@@ -211,6 +217,16 @@ export function createAppLane(params: AppLaneParams): AppLane {
   let futureTimer: ReturnType<typeof setTimeout> | undefined
   let futureDeadline: number | undefined
   let retryScheduled = false
+  let retryRequested = false
+  let retryTimer: ReturnType<typeof setTimeout> | undefined
+  let retryBackoff = 1000
+  const caughtUpTimes = new Map<AppFrame, number>()
+  const applyCaughtUpTimes = (): void => {
+    for (const [frame, time] of caughtUpTimes) {
+      frame.caughtUpAt = Math.min(frame.caughtUpAt ?? time, time)
+    }
+    caughtUpTimes.clear()
+  }
   const reportedUnknown = new Map<string, AppDeliveryResumed>()
   let pendingNotices: Array<() => void> | undefined
   const notifyAppHost = <T>(callback: ((event: T) => void) | undefined, event: T): void => {
@@ -622,14 +638,36 @@ export function createAppLane(params: AppLaneParams): AppLane {
     if (disposed) return
     const frames = [...segment.values()].flat()
     for (const pushes of staged.values()) for (const push of pushes) frames.push(push.frame)
-    const sealed = frames.filter((frame) => frame.sealed.state === 'sealed')
-    if (!retryScheduled && safetyHold() === null && sealed.length > 0) {
+    const retryFrames = frames.filter((frame) => frame.sealed.state !== 'pending')
+    // Preserve transitions even when a drain is already queued or awaiting a refetch.
+    if (commitLaneCaughtUp()) {
+      const time = performance.now()
+      for (const frame of retryFrames) {
+        if (!caughtUpTimes.has(frame)) caughtUpTimes.set(frame, time)
+      }
+    }
+    if (safetyHold() === null && retryFrames.length > 0) retryRequested = true
+    if (!retryScheduled && retryRequested && safetyHold() === null) {
       retryScheduled = true
-      // A queued drain or a slow refetch must not postpone the catch-up age origin.
-      const caughtUpAt = commitLaneCaughtUp() ? performance.now() : undefined
-      void deliver(sealed, caughtUpAt).catch(() => {
-        // Failed storage keeps the completed prefix buffered for a later retry.
-      })
+      retryRequested = false
+      if (retryTimer != null) clearTimeout(retryTimer)
+      retryTimer = undefined
+      void scheduleDrain(deliver).then(
+        () => {
+          retryScheduled = false
+          retryBackoff = 1000
+          if (retryRequested) retryDelivery()
+        },
+        () => {
+          retryScheduled = false
+          if (disposed || safetyHold() !== null) return
+          retryTimer = setTimeout(() => {
+            retryTimer = undefined
+            retryDelivery()
+          }, retryBackoff)
+          retryBackoff = Math.min(retryBackoff * 2, 60_000)
+        },
+      )
     }
     const names = new Set([
       ...workers.keys(),
@@ -740,7 +778,9 @@ export function createAppLane(params: AppLaneParams): AppLane {
 
   const drain = async (): Promise<void> => {
     if (disposed) return
+    applyCaughtUpTimes()
     await loadSegment()
+    applyCaughtUpTimes()
     for (const [name, frames] of segment) {
       const events = appEventHandlers.get(name)
       const cursor = cursors.get(name)
@@ -776,6 +816,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
                 segment: anchor().epoch,
                 position: frame.position,
               }
+        const caughtUpBefore = commitLaneCaughtUp()
+        const workVersion = commitWorkVersion()
         let opened: GroupUnwrapResult
         try {
           // `crypto.unwrap` always returns the full result — `senderDID` is REQUIRED — so there is
@@ -792,7 +834,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
           }
           if (isFrameAhead(error)) {
             if (disposed || safetyHold() !== null) break
-            if (commitLaneCaughtUp()) {
+            if (caughtUpBefore && commitLaneCaughtUp() && workVersion === commitWorkVersion()) {
               frame.caughtUpAt ??= performance.now()
               const remaining = APP_FUTURE_HOLD_MS - (performance.now() - frame.caughtUpAt)
               if (
@@ -884,17 +926,9 @@ export function createAppLane(params: AppLaneParams): AppLane {
     }
   }
 
-  const deliver = async (retryFrames?: Array<AppFrame>, caughtUpAt?: number): Promise<void> => {
+  const deliver = async (): Promise<void> => {
     try {
-      await runAppLane(async () => {
-        if (retryFrames != null) {
-          retryScheduled = false
-          if (caughtUpAt != null) {
-            for (const frame of retryFrames) frame.caughtUpAt ??= caughtUpAt
-          }
-        }
-        await drain()
-      })
+      await runAppLane(drain)
     } finally {
       if (crypto.pending != null && !disposed) {
         for (const record of pendingRecords) reportUnknown(record)
@@ -987,12 +1021,19 @@ export function createAppLane(params: AppLaneParams): AppLane {
     dispose: (): void => {
       disposed = true
       if (futureTimer != null) clearTimeout(futureTimer)
+      if (retryTimer != null) clearTimeout(retryTimer)
+      caughtUpTimes.clear()
       for (const worker of workers.values()) {
         if (worker.timer != null) clearTimeout(worker.timer)
       }
     },
     reset: (): void => {
       if (futureTimer != null) clearTimeout(futureTimer)
+      if (retryTimer != null) clearTimeout(retryTimer)
+      retryTimer = undefined
+      retryBackoff = 1000
+      retryRequested = false
+      caughtUpTimes.clear()
       futureTimer = undefined
       futureDeadline = undefined
       const cleared = [...blockingFrames.values()]

@@ -450,6 +450,14 @@ export function createGroupPeerWithControlWalk<
     groupID: () => commitTopicID,
     safetyHold,
     commitLaneCaughtUp: () => commitLaneCaughtUp,
+    commitWorkVersion: () => commitWorkVersion,
+    scheduleDrain: async (drain) => {
+      await ready
+      if (disposed) return
+      await runSerial(async () => {
+        if (!disposed && safetyHold() === null) await drain()
+      })
+    },
     onSafetyHeld: latchSafetyHold,
     ...(appCursorStore != null ? { appCursorStore } : {}),
     ...(onAppWindowPruned != null ? { onAppWindowPruned } : {}),
