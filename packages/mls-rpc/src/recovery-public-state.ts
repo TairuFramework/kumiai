@@ -1,7 +1,6 @@
 import type { ClientState } from '@kumiai/mls'
 import {
   type CiphersuiteImpl,
-  CodecError,
   clientStateDecoder,
   clientStateEncoder,
   decode,
@@ -39,43 +38,44 @@ export async function verifyOfferedGroupInfo(
   suite: CiphersuiteImpl,
 ): Promise<boolean> {
   const info = message.groupInfo
-  if (info.groupContext.cipherSuite !== suite.id) return false
   let tree: ClientState['ratchetTree']
+  let bodies: Array<Uint8Array>
+  let signatureKey: Uint8Array
+  let signatureInput: Uint8Array
   try {
+    if (info.groupContext.cipherSuite !== suite.id) return false
     tree = offeredTree(state, encode(mlsMessageEncoder, message))
-  } catch (error) {
-    if (error instanceof TypeError || error instanceof CodecError) return false
-    throw error
+    if (
+      tree.some((node, index) => node !== undefined && node.nodeType !== (index % 2 === 0 ? 1 : 2))
+    )
+      return false
+    const signer = tree[info.signer * 2]
+    if (signer?.nodeType !== 1) return false
+    signatureKey = signer.leaf.signaturePublicKey
+    // MLSMessage adds two u16 fields. An empty signature adds one vector-length byte.
+    const unsigned = encode(mlsMessageEncoder, {
+      ...message,
+      groupInfo: { ...info, signature: new Uint8Array() },
+    }).subarray(4, -1)
+    signatureInput = new Uint8Array([
+      ...vector(new TextEncoder().encode('MLS 1.0 GroupInfoTBS')),
+      ...vector(unsigned),
+    ])
+    bodies = tree.map((node) => {
+      if (node === undefined) return new Uint8Array([0])
+      const encoded = publicTreeBytes({ ...state, ratchetTree: [node] }).tree
+      const prefix = 1 << ((encoded[0] ?? 0) >>> 6)
+      return new Uint8Array([1, ...encoded.subarray(prefix + 2)])
+    })
+  } catch {
+    // Attested tree bytes can trigger arbitrary decoder/shape failures, including InternalError.
+    return false
   }
-  if (tree.some((node, index) => node !== undefined && node.nodeType !== (index % 2 === 0 ? 1 : 2)))
-    return false
-  const signer = tree[info.signer * 2]
-  if (signer?.nodeType !== 1) return false
-  // MLSMessage adds two u16 fields. An empty signature adds one vector-length byte.
-  const unsigned = encode(mlsMessageEncoder, {
-    ...message,
-    groupInfo: { ...info, signature: new Uint8Array() },
-  }).subarray(4, -1)
-  if (
-    !(await suite.signature.verify(
-      signer.leaf.signaturePublicKey,
-      new Uint8Array([
-        ...vector(new TextEncoder().encode('MLS 1.0 GroupInfoTBS')),
-        ...vector(unsigned),
-      ]),
-      info.signature,
-    ))
-  )
-    return false
+  // Keep crypto implementation failures outside the malformed-input boundary.
+  if (!(await suite.signature.verify(signatureKey, signatureInput, info.signature))) return false
 
   const hash = async (index: number): Promise<Uint8Array> => {
-    const node = tree[index]
-    const encoded = publicTreeBytes({ ...state, ratchetTree: [node] }).tree
-    const prefix = 1 << ((encoded[0] ?? 0) >>> 6)
-    const body =
-      node === undefined
-        ? new Uint8Array([0])
-        : new Uint8Array([1, ...encoded.subarray(prefix + 2)])
+    const body = bodies[index] ?? new Uint8Array([0])
     if (index % 2 === 0) {
       return await suite.hash.digest(new Uint8Array([1, ...uint32(index / 2), ...body]))
     }

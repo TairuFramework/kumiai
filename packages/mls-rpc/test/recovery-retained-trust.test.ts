@@ -12,6 +12,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { toB64U } from '@sozai/codec'
 import {
   createGroupInfoWithExternalPubAndRatchetTree,
+  defaultExtensionTypes,
   encode,
   mlsMessageEncoder,
   wireformats,
@@ -285,6 +286,7 @@ test.each([
   ['tree', false],
   ['signature', true],
   ['signer', true],
+  ['malformed tree', true],
 ] as const)(
   'recapture refuses re-attested invalid MLS %s with exact leaf present %s',
   async (fault, applied) => {
@@ -313,6 +315,13 @@ test.each([
     if (fault === 'epoch') groupInfo.groupContext.epoch++
     if (fault === 'signature') groupInfo.signature[0] = (groupInfo.signature[0] ?? 0) ^ 1
     if (fault === 'signer') groupInfo.signer = state.ratchetTree.length + 1
+    if (fault === 'malformed tree') {
+      const tree = groupInfo.extensions.find(
+        (entry) => entry.extensionType === defaultExtensionTypes.ratchet_tree,
+      )
+      if (tree === undefined) throw new Error('Missing tree extension')
+      tree.extensionData = new Uint8Array([1, 0])
+    }
     const fresh = await s.port.createRecoveryRequest('fresh-invalid-mls')
     const sealed = await attestInfo(
       s,

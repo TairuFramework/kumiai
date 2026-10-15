@@ -1,12 +1,23 @@
 import { randomIdentity } from '@kokuin/token'
-import { type ClientState, createGroup, decodeClientState, encodeClientState } from '@kumiai/mls'
 import {
+  type ClientState,
+  createGroup,
+  createKeyPackageBundle,
+  decodeClientState,
+  encodeClientState,
+  removeMember,
+} from '@kumiai/mls'
+import {
+  type CiphersuiteImpl,
+  CodecError,
+  createCommit,
   createGroupInfoWithExternalPubAndRatchetTree,
   decode,
   defaultExtensionTypes,
   defaultProposalTypes,
   encode,
   generateKeyPackage,
+  joinGroup,
   keyPackageEncoder,
   mlsMessageDecoder,
   mlsMessageEncoder,
@@ -20,6 +31,141 @@ import {
   publicTreeBytes,
   verifyOfferedGroupInfo,
 } from '../src/recovery-public-state.js'
+import { createRealGroup } from './fixtures/real-group.js'
+
+async function genuineInfo(state: ClientState, suite: CiphersuiteImpl) {
+  return {
+    version: 1 as const,
+    wireformat: wireformats.mls_group_info,
+    groupInfo: await createGroupInfoWithExternalPubAndRatchetTree(state, [], suite),
+  }
+}
+
+test.each([9, 17])(
+  'public GroupInfo verification accepts genuine large trees: %s leaves',
+  async (leaves) => {
+    const s = await createRealGroup(leaves, `large-public-tree-${leaves}`)
+    let group = (await removeMember(s.committer.handle, leaves)).newGroup
+    const suite = group.context.cipherSuite
+    const verify = async (state: ClientState) => {
+      const info = await genuineInfo(state, suite)
+      expect(info.groupInfo.groupContext.treeHash).toEqual(state.groupContext.treeHash)
+      expect(await verifyOfferedGroupInfo(state, info, suite)).toBe(true)
+    }
+    expect(group.state.ratchetTree.filter((node) => node?.nodeType === 1)).toHaveLength(leaves)
+    expect(group.state.ratchetTree.length).toBeGreaterThan(leaves * 2)
+    expect(group.state.ratchetTree[leaves * 2]).toBeUndefined()
+    await verify(group.state)
+
+    const middle = Math.floor(leaves / 2)
+    group = (await removeMember(group, middle)).newGroup
+    expect(group.state.ratchetTree[middle * 2]).toBeUndefined()
+    expect(
+      group.state.ratchetTree.some((node, index) => index % 2 === 1 && node === undefined),
+    ).toBe(true)
+    await verify(group.state)
+
+    // An add-only ts-mls commit preserves existing parents and creates unmerged leaves.
+    const bundle = await createKeyPackageBundle(randomIdentity())
+    const branch = decodeClientState(encodeClientState(group.state))
+    if (branch === undefined) throw new Error('Missing branch state')
+    const added = await createCommit({
+      context: group.context,
+      state: branch,
+      extraProposals: [
+        { proposalType: defaultProposalTypes.add, add: { keyPackage: bundle.publicPackage } },
+      ],
+      ratchetTreeExtension: true,
+    })
+    if (added.welcome === undefined) throw new Error('Missing genuine Welcome')
+    const joined = await joinGroup({
+      context: group.context,
+      welcome: added.welcome.welcome,
+      keyPackage: bundle.publicPackage,
+      privateKeys: bundle.privatePackage,
+    })
+    expect(joined.groupContext.treeHash).toEqual(added.newState.groupContext.treeHash)
+    expect(
+      added.newState.ratchetTree.some(
+        (node) => node?.nodeType === 2 && node.parent.unmergedLeaves.includes(middle),
+      ),
+    ).toBe(true)
+    await verify(added.newState)
+    await verify(joined)
+  },
+)
+
+test.each(['suite', 'parent at leaf', 'leaf at parent'] as const)(
+  'public GroupInfo verification refuses invalid suite or node parity: %s',
+  async (fault) => {
+    const s = await createRealGroup(2, `invalid-public-tree-${fault}`)
+    const group = s.committer.handle
+    const state = decodeClientState(encodeClientState(group.state))
+    if (state === undefined) throw new Error('Missing state')
+    if (fault === 'parent at leaf') state.ratchetTree[2] = state.ratchetTree[1]
+    if (fault === 'leaf at parent') state.ratchetTree[1] = state.ratchetTree[2]
+    if (fault === 'suite') state.groupContext.cipherSuite++
+    const info = await genuineInfo(state, group.context.cipherSuite)
+    expect(await verifyOfferedGroupInfo(group.state, info, group.context.cipherSuite)).toBe(false)
+  },
+)
+
+test.each([
+  ['empty', new Uint8Array([0])],
+  ['trailing blank', new Uint8Array([1, 0])],
+  ['unknown node type', new Uint8Array([2, 1, 3])],
+] as const)(
+  'public GroupInfo verification refuses malformed tree parsing: %s',
+  async (_name, bytes) => {
+    const { group } = await createGroup(randomIdentity(), 'malformed-public-tree')
+    const info = await genuineInfo(group.state, group.context.cipherSuite)
+    const extension = info.groupInfo.extensions.find(
+      (entry) => entry.extensionType === defaultExtensionTypes.ratchet_tree,
+    )
+    if (extension === undefined) throw new Error('Missing tree extension')
+    extension.extensionData = bytes
+    await expect(
+      verifyOfferedGroupInfo(group.state, info, group.context.cipherSuite),
+    ).resolves.toBe(false)
+  },
+)
+
+test.each(['signature', 'hash'] as const)(
+  'public GroupInfo verification preserves %s implementation errors',
+  async (operation) => {
+    const { group } = await createGroup(randomIdentity(), 'public-tree-provider-errors')
+    const suite = group.context.cipherSuite
+    const info = await genuineInfo(group.state, suite)
+    for (const failure of [
+      new Error('Provider failure'),
+      new TypeError('Provider shape'),
+      new CodecError('Provider codec'),
+      new RangeError('Provider range'),
+    ]) {
+      const failingSuite = {
+        ...suite,
+        ...(operation === 'signature'
+          ? {
+              signature: {
+                ...suite.signature,
+                verify: async () => {
+                  throw failure
+                },
+              },
+            }
+          : {
+              hash: {
+                ...suite.hash,
+                digest: async () => {
+                  throw failure
+                },
+              },
+            }),
+      }
+      await expect(verifyOfferedGroupInfo(group.state, info, failingSuite)).rejects.toBe(failure)
+    }
+  },
+)
 
 test.each([0, 1, 4])(
   'public GroupInfo verification accepts genuine trees with %s invited members',
