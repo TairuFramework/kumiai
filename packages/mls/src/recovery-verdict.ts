@@ -35,7 +35,11 @@ export type RecoveryVerdict = {
 } & (
   | { verdict: 'confirmed'; epoch: number; tag: string }
   | { verdict: 'superseded' }
-  | { verdict: 'refused'; reason: RecoveryRefusalReason }
+  | {
+      verdict: 'refused'
+      reason: RecoveryRefusalReason
+      refusalAuthority?: 'authenticated-commit'
+    }
 )
 export type OpenedRecoveryVerdict = { signer: string; verdict: RecoveryVerdict }
 
@@ -157,7 +161,14 @@ export async function openRecoveryVerdict(
     token.payload.verdict === 'confirmed'
       ? { ...binding, verdict: 'confirmed', epoch: token.payload.epoch, tag: token.payload.tag }
       : token.payload.verdict === 'refused'
-        ? { ...binding, verdict: 'refused', reason: token.payload.reason }
+        ? {
+            ...binding,
+            verdict: 'refused',
+            reason: token.payload.reason,
+            ...(token.payload.refusalAuthority === 'authenticated-commit'
+              ? { refusalAuthority: 'authenticated-commit' as const }
+              : {}),
+          }
         : { ...binding, verdict: 'superseded' }
   return { signer: normalizeDID(token.payload.iss), verdict }
 }

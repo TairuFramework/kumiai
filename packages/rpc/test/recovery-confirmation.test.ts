@@ -1,17 +1,224 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
+import { createMemoryControlStore } from '../../rpc-conformance/src/memory-control-store.js'
 import type { RecoveryVerdict } from '../src/crypto.js'
 import { asLogPosition } from '../src/cursor.js'
+import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
+import { encodeRecoveryConfirmRequest } from '../src/recovery.js'
 import {
   confirmationTag,
   createRecoveryCache,
   responseOutcome,
   waitForRecoveryConfirmation,
 } from '../src/recovery-confirmation.js'
+import { rendezvousTopic } from '../src/topic.js'
+import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { makeMLSPeer } from './fixtures/peer.js'
 
 describe('recovery ordering', { concurrent: false }, () => {
   afterEach(() => vi.useRealTimers())
+
+  test('a delayed cached refusal rechecks the current persisted authority before publication', async () => {
+    const hub = new FakeHub()
+    const secret = new Uint8Array(32).fill(0x63)
+    const alice = makeMLSPeer(hub, 'alice', secret, {
+      members: ['alice', 'bob'],
+      recovery: { timeoutMs: 100, deadlineMs: 1000, getDelayMs: () => 50 },
+    })
+    try {
+      await alice.peer.replay()
+      const bob = createMemoryGroupMLS({ members: ['alice', 'bob'], localDID: 'bob' })
+      const requestID = 'cached-authority'
+      const { request, requestKey } = await bob.createRecoveryRequest(requestID)
+      const row = {
+        position: asLogPosition('accepted'),
+        epoch: 1,
+        digest: 'commit',
+        kind: 'refused' as const,
+        reason: 'policy' as const,
+      }
+      await alice.control.apply(
+        { putResponses: [{ ...row, refusalAuthority: 'authenticated-commit' }] },
+        'authoritative',
+      )
+      await alice.peer.ack('refresh')
+      const seal = vi.spyOn(alice.mls, 'sealRecoveryVerdict')
+      vi.useFakeTimers()
+      const ask = () =>
+        hub.publish({
+          topicID: rendezvousTopic(secret),
+          senderDID: 'bob',
+          retain: 'mailbox' as const,
+          payload: encodeHandshakeFrame(
+            HANDSHAKE_KIND.recoveryConfirmRequest,
+            encodeRecoveryConfirmRequest({
+              requestID,
+              request,
+              position: row.position,
+              commitDigest: row.digest,
+            }),
+          ),
+        })
+      await ask()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(seal).toHaveBeenCalledOnce()
+      const sealed = await seal.mock.results[0]?.value
+      if (sealed == null) throw new Error('Missing sealed refusal')
+      expect((await bob.openRecoveryVerdict(sealed, requestID, requestKey))?.verdict).toMatchObject(
+        {
+          verdict: 'refused',
+          reason: 'policy',
+          refusalAuthority: 'authenticated-commit',
+        },
+      )
+      await ask()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(seal).toHaveBeenCalledOnce()
+      await alice.control.apply({ putResponses: [row] }, 'legacy-copy-failure')
+      await alice.peer.ack('refresh')
+      await ask()
+      await vi.advanceTimersByTimeAsync(100)
+      expect(
+        hub.published.filter(
+          (message) =>
+            decodeHandshakeFrame(message.payload).kind === HANDSHAKE_KIND.recoveryVerdict,
+        ),
+      ).toEqual([])
+    } finally {
+      await alice.peer.dispose()
+      await alice.peer.drained()
+      vi.restoreAllMocks()
+    }
+  })
+
+  test.each(['refused', 'superseded'] as const)(
+    'legacy %s responses stay advisory through persistence replay and outcome cache',
+    async (kind) => {
+      const port = createMemoryGroupMLS({ epoch: 3, localDID: 'alice' })
+      const store = createMemoryControlStore({ groupID: 'advisory', incarnation: 1 })
+      await store.apply(
+        {
+          putResponses: [
+            {
+              position: asLogPosition('accepted-position'),
+              digest: 'accepted-commit',
+              epoch: 1,
+              kind,
+              ...(kind === 'refused' ? { reason: 'invalid' as const } : {}),
+            },
+          ],
+        },
+        'saved-copy-failure',
+      )
+      const cache = createRecoveryCache<Awaited<ReturnType<typeof responseOutcome>>>()
+      try {
+        for (let restart = 0; restart < 2; restart++) {
+          const row = (await store.load()).responses[0]
+          if (row == null) throw new Error('Missing response')
+          cache.set(
+            'attempt',
+            await responseOutcome(port, { ...row, position: asLogPosition(row.position) }),
+            Date.now() + 1000,
+          )
+          expect(cache.get('attempt')?.value).toBeUndefined()
+        }
+      } finally {
+        cache.clear()
+      }
+    },
+  )
+
+  test('authenticated refusal authority survives response replay', async () => {
+    const port = createMemoryGroupMLS({ epoch: 3, localDID: 'alice' })
+    const response = {
+      position: asLogPosition('refused-position'),
+      digest: 'refused-commit',
+      epoch: 1,
+      kind: 'refused' as const,
+      reason: 'policy' as const,
+      refusalAuthority: 'authenticated-commit' as const,
+    }
+    expect(await responseOutcome(port, response)).toEqual({
+      kind: 'refused',
+      commitDigest: 'refused-commit',
+      reason: 'policy',
+      refusalAuthority: 'authenticated-commit',
+    })
+  })
+
+  test.each(['refused', 'superseded'] as const)(
+    'a signed unproven %s cannot settle an accepted recovery after requester restart',
+    async (kind) => {
+      const options = { members: ['alice', 'bob', 'carol'], groupID: 'accepted-unknown', epoch: 1 }
+      const alice = createMemoryGroupMLS({ ...options, localDID: 'alice' })
+      const bob = createMemoryGroupMLS({ ...options, localDID: 'bob' })
+      const carol = createMemoryGroupMLS({ ...options, localDID: 'carol' })
+      const requestID = 'accepted-request'
+      const { request, requestKey } = await bob.createRecoveryRequest(requestID)
+      const pending = await bob.applyRecovery(
+        await alice.sealGroupInfo(request),
+        requestID,
+        requestKey,
+      )
+      if (pending == null || 'renewalRequired' in pending) throw new Error('Missing recovery')
+      expect(await carol.processCommit(pending.commit, {})).toMatchObject({
+        applied: true,
+        epochAfter: pending.epoch,
+      })
+      await pending.confirmationKey('accepted-position', 'accepted-digest')
+      const saved = pending.serialize()
+      const verdict: RecoveryVerdict = {
+        groupID: options.groupID,
+        requestID,
+        position: 'accepted-position',
+        commitDigest: 'accepted-digest',
+        ...(kind === 'refused'
+          ? { verdict: 'refused', reason: 'invalid' }
+          : { verdict: 'superseded' }),
+      }
+      const sealed = await alice.sealRecoveryVerdict(request, verdict)
+      vi.useFakeTimers()
+      for (const candidate of [
+        pending,
+        await bob.restoreRecovery(saved, requestKey),
+        { ...pending, judgeVerdict: () => 'authoritative' as const },
+      ]) {
+        const key = await candidate.confirmationKey('accepted-position', 'accepted-digest')
+        const waiters = new Map<
+          string,
+          { receive: (sealed: Uint8Array) => void; dispose: () => void }
+        >()
+        const result = waitForRecoveryConfirmation({
+          port: bob,
+          pending: candidate,
+          groupID: options.groupID,
+          requestID,
+          requestKey,
+          position: 'accepted-position',
+          commitDigest: 'accepted-digest',
+          key,
+          deadline: Date.now() + 100,
+          timeoutMs: 20,
+          send: async () => {},
+          waiters,
+        })
+        waiters.get(requestID)?.receive(sealed)
+        waiters.get(requestID)?.receive(sealed)
+        await vi.advanceTimersByTimeAsync(100)
+        expect(await result).toMatchObject({
+          kind: 'unconfirmed',
+          advisory: [{ signer: 'alice', verdict }],
+        })
+        const reopened = await bob.restoreRecovery(candidate.serialize(), requestKey)
+        expect(reopened.commit).toEqual(pending.commit)
+        expect(await reopened.confirmationKey('accepted-position', 'accepted-digest')).toEqual(
+          await pending.confirmationKey('accepted-position', 'accepted-digest'),
+        )
+        expect(bob.epoch()).toBe(1)
+      }
+    },
+  )
 
   test('outcome caches evict oldest records at the cap and release secrets on expiry', async () => {
     vi.useFakeTimers()
@@ -46,7 +253,7 @@ describe('recovery ordering', { concurrent: false }, () => {
   })
 
   test.each([false, true])(
-    'superseded outranks refusal during one settle round, and confirmation wins immediately: %s',
+    'authenticated refusal settles while unproven superseded is advisory and confirmation wins: %s',
     async (confirm) => {
       const options = { members: ['alice', 'bob'], groupID: 'precedence' }
       const alice = createMemoryGroupMLS({ ...options, localDID: 'alice' })
@@ -89,7 +296,12 @@ describe('recovery ordering', { concurrent: false }, () => {
         await vi.advanceTimersByTimeAsync(0)
       }
       const binding = { groupID: 'precedence', requestID, position, commitDigest }
-      await receive({ ...binding, verdict: 'refused', reason: 'floor' })
+      await receive({
+        ...binding,
+        verdict: 'refused',
+        reason: 'floor',
+        ...{ refusalAuthority: 'authenticated-commit' as const },
+      })
       await vi.advanceTimersByTimeAsync(20)
       await receive({ ...binding, verdict: 'superseded' })
       if (confirm) {
@@ -98,7 +310,7 @@ describe('recovery ordering', { concurrent: false }, () => {
         expect(vi.getTimerCount()).toBe(0)
       } else {
         await vi.advanceTimersByTimeAsync(80)
-        expect(await outcome).toEqual({ kind: 'superseded' })
+        expect(await outcome).toEqual({ kind: 'refused', refusal: 'floor', responder: 'alice' })
       }
       expect(waiters.size).toBe(0)
       expect(send).toHaveBeenCalledTimes(2)

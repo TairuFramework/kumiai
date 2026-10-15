@@ -213,6 +213,48 @@ async function fixture(
   return { group, member, built, source, state, port, frame }
 }
 
+test('authenticated external policy refusal carries authority but copy eligibility does not', async () => {
+  const f = await fixture({ commitPolicy: () => 'reject' })
+  const state = decodeClientState(f.state)
+  if (state === undefined) throw new Error('Missing state')
+  f.member.handle = await restoreGroup({
+    state,
+    credential: f.member.handle.credential,
+    ledgerEntries: f.member.handle.ledgerTokens,
+    options: { commitPolicy: () => 'reject' },
+  })
+  const commit = (
+    await joinGroupExternal({
+      identity: f.group.committer.identity,
+      groupInfo: (await exportGroupInfo({ group: f.group.committer.handle })).groupInfo,
+      credential: f.group.committer.handle.credential,
+      resync: true,
+    })
+  ).commitMessage
+  const live = createGroupMLS({
+    access: testHandleAccess({
+      handle: () => f.member.handle,
+      adopt: (next) => {
+        f.member.handle = next
+      },
+    }),
+    identity: f.member.identity,
+    entrySlot: f.member.slot,
+  })
+  expect(await live.processCommit(commit, {})).toMatchObject({
+    applied: false,
+    refusal: 'policy',
+    refusalAuthority: 'authenticated-commit',
+  })
+  const decoded = decode(mlsMessageDecoder, commit)
+  if (decoded?.wireformat !== wireformats.mls_public_message) throw new Error('Expected public')
+  decoded.publicMessage.auth.signature[0] = (decoded.publicMessage.auth.signature[0] ?? 0) ^ 1
+  const invalid = await live.processCommit(encode(mlsMessageEncoder, decoded), {})
+  expect(invalid).toMatchObject({ applied: false })
+  expect(invalid).not.toHaveProperty('refusalAuthority')
+  expect(encodeClientState(f.member.handle.state)).toEqual(f.state)
+})
+
 async function searchReal(
   f: Awaited<ReturnType<typeof fixture>>,
   competitor?: Uint8Array,
@@ -1313,6 +1355,7 @@ async function expectPolicyPoison(
     epochBefore: f.built.epoch,
     epochAfter: f.built.epoch,
     refusal: external ? 'policy' : 'binding',
+    ...(external ? { refusalAuthority: 'authenticated-commit' } : {}),
   })
   expect(encodeClientState(f.member.handle.state)).toEqual(f.state)
   expect(persisted).not.toHaveBeenCalled()

@@ -155,7 +155,11 @@ export type RecoveryVerdict = {
 } & (
   | { verdict: 'confirmed'; epoch: number; tag: string }
   | { verdict: 'superseded' }
-  | { verdict: 'refused'; reason: RecoveryRefusalReason }
+  | {
+      verdict: 'refused'
+      reason: RecoveryRefusalReason
+      refusalAuthority?: 'authenticated-commit'
+    }
 )
 export type OpenedRecoveryVerdict = { signer: string; verdict: RecoveryVerdict }
 export type ProcessCommitResult = {
@@ -165,6 +169,8 @@ export type ProcessCommitResult = {
   epochBefore: number
   epochAfter: number
   refusal?: RecoveryRefusalReason
+  /** Only authenticated commit refusal, never delivered-copy eligibility. */
+  refusalAuthority?: 'authenticated-commit'
   /** Unavailable requires no adoption, no advance and equal before/after epochs. */
   validation?: 'unavailable'
 }

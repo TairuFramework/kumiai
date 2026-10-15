@@ -905,7 +905,11 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
           return verdict.epoch === info.epoch + 1 && verdict.tag === tuple.tag
             ? 'authoritative'
             : 'advisory'
-        return info.members.includes(signer) ? 'authoritative' : 'advisory'
+        return verdict.verdict === 'refused' &&
+          verdict.refusalAuthority === 'authenticated-commit' &&
+          info.members.includes(signer)
+          ? 'authoritative'
+          : 'advisory'
       },
       onAccepted: (factory) => {
         if (typeof factory !== 'function') {
@@ -1346,6 +1350,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             epochBefore: epoch,
             epochAfter: epoch,
             refusal: 'policy' as const,
+            refusalAuthority: 'authenticated-commit' as const,
           }
         }
         const nextBodies = new Map(bodies)

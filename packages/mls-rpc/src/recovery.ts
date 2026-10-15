@@ -256,6 +256,12 @@ export function createVerdictJudge(params: VerdictJudgeParams) {
     },
     verdictRefusal,
     judgeVerdict(opened: OpenedRecoveryVerdict): 'authoritative' | 'advisory' {
+      const { verdict } = opened
+      if (
+        verdict.verdict === 'superseded' ||
+        (verdict.verdict === 'refused' && verdict.refusalAuthority !== 'authenticated-commit')
+      )
+        return 'advisory'
       return verdictRefusal(opened) === null ? 'authoritative' : 'advisory'
     },
   }

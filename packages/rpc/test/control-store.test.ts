@@ -25,6 +25,25 @@ import {
 } from '../src/errors.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
 
+test.each([undefined, 'authenticated-commit'] as const)(
+  'response persistence preserves refusal provenance without upgrading old rows: %s',
+  async (refusalAuthority) => {
+    const row = {
+      position: asLogPosition('refused'),
+      epoch: 1,
+      digest: 'commit',
+      kind: 'refused' as const,
+      reason: 'policy' as const,
+      ...(refusalAuthority === undefined ? {} : { refusalAuthority }),
+    }
+    const real = applyChanges(empty(), { putResponses: [row] })
+    const double = createMemoryControlStore({ groupID: 'group-A', incarnation: 1 })
+    await double.apply({ putResponses: [row] }, 'response')
+    expect(real.responses).toEqual([row])
+    expect((await double.load()).responses).toEqual([row])
+  },
+)
+
 const empty = (): ControlSnapshot => ({
   commitOnce: null,
   commitOnceAcceptance: null,

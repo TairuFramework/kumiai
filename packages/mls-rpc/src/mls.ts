@@ -344,6 +344,8 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         return {
           eligible: header?.committerDID !== undefined && frameEpoch === group.epoch,
           epoch: Number(group.epoch),
+          // Private headers authenticate sender data only.
+          authenticatedExternal: header?.external === true && header.committerDID !== undefined,
           refusal:
             header != null && frameEpoch === group.epoch && header.committerDID === undefined
               ? ('invalid' as const)
@@ -411,6 +413,9 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
             epochBefore: refusedEpoch,
             epochAfter: refusedEpoch,
             ...(refusal == null ? {} : { refusal }),
+            ...(refusal != null && eligible.authenticatedExternal && validation === undefined
+              ? { refusalAuthority: 'authenticated-commit' as const }
+              : {}),
             ...(validation === undefined ? {} : { validation }),
           }
         throw error

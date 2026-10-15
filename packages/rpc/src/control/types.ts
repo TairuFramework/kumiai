@@ -215,6 +215,7 @@ export type ExternalResponse = {
   kind: 'applied' | 'refused' | 'superseded'
   epoch: number
   reason?: RecoveryRefusal
+  refusalAuthority?: 'authenticated-commit'
   epochAfter?: number
 }
 export type CommitCursor = {

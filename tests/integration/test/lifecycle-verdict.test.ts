@@ -227,7 +227,12 @@ test('revocation in either registry is permanent in the union and stale refusals
     expect(
       judge.judgeVerdict({
         signer: s.bob.id,
-        verdict: { ...binding, verdict: 'refused', reason: 'policy' },
+        verdict: {
+          ...binding,
+          verdict: 'refused',
+          reason: 'policy',
+          refusalAuthority: 'authenticated-commit',
+        },
       }),
     ).toBe('advisory')
     expect(
@@ -376,13 +381,23 @@ test('outside lifecycle groups a valid confirmed tag needs no known leaf, while 
   expect(
     candidate.judgeVerdict({
       ...opened,
-      verdict: { ...binding, verdict: 'refused', reason: 'policy' },
+      verdict: {
+        ...binding,
+        verdict: 'refused',
+        reason: 'policy',
+        refusalAuthority: 'authenticated-commit',
+      },
     }),
   ).toBe('advisory')
   expect(
     candidate.judgeVerdict({
       signer: s.bob.id,
-      verdict: { ...binding, verdict: 'refused', reason: 'policy' },
+      verdict: {
+        ...binding,
+        verdict: 'refused',
+        reason: 'policy',
+        refusalAuthority: 'authenticated-commit',
+      },
     }),
   ).toBe('authoritative')
 })
@@ -405,6 +420,7 @@ test('the real commit port propagates binding and lapse refusals without advanci
       epochBefore: before,
       epochAfter: before,
       refusal,
+      refusalAuthority: 'authenticated-commit',
     })
     expect(await s.mls.readEpoch()).toBe(before)
   }

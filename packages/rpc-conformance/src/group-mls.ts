@@ -97,7 +97,11 @@ export type ConformanceRecoveryVerdict = {
 } & (
   | { verdict: 'confirmed'; epoch: number; tag: string }
   | { verdict: 'superseded' }
-  | { verdict: 'refused'; reason: ConformanceRecoveryRefusalReason }
+  | {
+      verdict: 'refused'
+      reason: ConformanceRecoveryRefusalReason
+      refusalAuthority?: 'authenticated-commit'
+    }
 )
 export type ConformanceOpenedRecoveryVerdict = {
   signer: string
@@ -129,6 +133,7 @@ export type ConformanceProcessCommitResult = {
   epochBefore: number
   epochAfter: number
   refusal?: ConformanceRecoveryRefusalReason
+  refusalAuthority?: 'authenticated-commit'
   validation?: 'unavailable'
 }
 export type ConformanceAppliedRecovery =
@@ -991,7 +996,12 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
                     tag: group.confirmationTag(key, requestID),
                   }
                 : kind === 'refused'
-                  ? { ...tuple, verdict: kind, reason: 'policy' }
+                  ? {
+                      ...tuple,
+                      verdict: kind,
+                      reason: 'policy',
+                      refusalAuthority: 'authenticated-commit',
+                    }
                   : { ...tuple, verdict: kind }
             const self = await bob.mls.openRecoveryVerdict(
               await bob.mls.sealRecoveryVerdict(request, verdict),
@@ -1007,7 +1017,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
             expect(self.signer).toBe(bob.did)
             const restored = await bob.mls.restoreRecovery(pending.serialize(), requestKey)
             for (const candidate of [pending, restored]) {
-              expect(candidate.judgeVerdict(other)).toBe('authoritative')
+              expect(candidate.judgeVerdict(other)).toBe(
+                kind === 'superseded' ? 'advisory' : 'authoritative',
+              )
               expect(candidate.judgeVerdict(self)).toBe('advisory')
             }
           })
@@ -1183,6 +1195,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
             commitDigest: 'digest',
             verdict: 'refused',
             reason: 'policy',
+            refusalAuthority: 'authenticated-commit',
           }
           const sealed = await alice.mls.sealRecoveryVerdict(request, verdict)
           const opened = await bob.mls.openRecoveryVerdict(sealed, 'restorable', requestKey)
@@ -1321,39 +1334,48 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           )
         })
       })
-      test('sealed verdicts retain request keys, separate domains and bind the complete tuple', async () => {
-        await withGroup(2, 'verdict-contract', async (group) => {
-          const alice = memberAt(group.members, 0)
-          const bob = memberAt(group.members, 1)
-          const { request, requestKey } = await bob.mls.createRecoveryRequest('verdict')
-          const reply = await alice.mls.sealGroupInfo(request)
-          const pending = await bob.mls.applyRecovery(reply, 'verdict', requestKey)
-          if (pending == null || 'renewalRequired' in pending)
-            throw new Error('No pending recovery')
-          await pending.confirmationKey('position', 'digest')
-          const verdict: ConformanceRecoveryVerdict = {
-            groupID: group.groupID,
-            requestID: 'verdict',
-            position: 'position',
-            commitDigest: 'digest',
-            verdict: 'refused',
-            reason: 'policy',
-          }
-          const sealed = await alice.mls.sealRecoveryVerdict(request, verdict)
-          const opened = await bob.mls.openRecoveryVerdict(sealed, 'verdict', requestKey)
-          expect(opened).toEqual({ signer: alice.did, verdict })
-          expect(await bob.mls.openRecoveryVerdict(sealed, 'verdict', requestKey)).toEqual(opened)
-          expect(await bob.mls.openRecoveryVerdict(sealed, 'other', requestKey)).toBeNull()
-          expect(await bob.mls.openRecoveryVerdict(reply, 'verdict', requestKey)).toBeNull()
-          expect(await bob.mls.openSealedLedger(sealed, 'verdict', requestKey)).toBeNull()
-          if (opened == null) throw new Error('No opened verdict')
-          expect(pending.judgeVerdict(opened)).toBe('authoritative')
-          expect(pending.judgeVerdict({ ...opened, signer: 'did:peer:unknown' })).toBe('advisory')
-          expect(
-            pending.judgeVerdict({ ...opened, verdict: { ...verdict, position: 'other' } }),
-          ).toBe('advisory')
-        })
-      })
+      test.each([undefined, 'authenticated-commit'] as const)(
+        'sealed verdicts bind the tuple and refusal authority through restoration: %s',
+        async (refusalAuthority) => {
+          await withGroup(2, 'verdict-contract', async (group) => {
+            const alice = memberAt(group.members, 0)
+            const bob = memberAt(group.members, 1)
+            const { request, requestKey } = await bob.mls.createRecoveryRequest('verdict')
+            const reply = await alice.mls.sealGroupInfo(request)
+            const pending = await bob.mls.applyRecovery(reply, 'verdict', requestKey)
+            if (pending == null || 'renewalRequired' in pending)
+              throw new Error('No pending recovery')
+            await pending.confirmationKey('position', 'digest')
+            const verdict: ConformanceRecoveryVerdict = {
+              groupID: group.groupID,
+              requestID: 'verdict',
+              position: 'position',
+              commitDigest: 'digest',
+              verdict: 'refused',
+              reason: 'policy',
+              ...(refusalAuthority === undefined ? {} : { refusalAuthority }),
+            }
+            const sealed = await alice.mls.sealRecoveryVerdict(request, verdict)
+            const opened = await bob.mls.openRecoveryVerdict(sealed, 'verdict', requestKey)
+            expect(opened).toEqual({ signer: alice.did, verdict })
+            expect(await bob.mls.openRecoveryVerdict(sealed, 'verdict', requestKey)).toEqual(opened)
+            expect(await bob.mls.openRecoveryVerdict(sealed, 'other', requestKey)).toBeNull()
+            expect(await bob.mls.openRecoveryVerdict(reply, 'verdict', requestKey)).toBeNull()
+            expect(await bob.mls.openSealedLedger(sealed, 'verdict', requestKey)).toBeNull()
+            if (opened == null) throw new Error('No opened verdict')
+            const restored = await bob.mls.restoreRecovery(pending.serialize(), requestKey)
+            for (const candidate of [pending, restored]) {
+              expect(candidate.judgeVerdict(opened)).toBe(
+                refusalAuthority === 'authenticated-commit' ? 'authoritative' : 'advisory',
+              )
+            }
+            expect(pending.judgeVerdict({ ...opened, signer: 'did:peer:unknown' })).toBe('advisory')
+            expect(
+              pending.judgeVerdict({ ...opened, verdict: { ...verdict, position: 'other' } }),
+            ).toBe('advisory')
+          })
+        },
+      )
 
       test.each([
         { verdict: 'unknown' },

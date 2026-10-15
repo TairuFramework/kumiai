@@ -14,8 +14,7 @@ import { GroupSafetyHeldError } from './errors.js'
 
 export type RecoveryCommitOutcome = { commitDigest: string } & (
   | { kind: 'applied'; epoch: number; key: Uint8Array }
-  | { kind: 'superseded' }
-  | { kind: 'refused'; reason: RecoveryRefusalReason }
+  | { kind: 'refused'; reason: RecoveryRefusalReason; refusalAuthority: 'authenticated-commit' }
 )
 
 /** An adopted response can be confirmed only at its saved epoch. */
@@ -26,9 +25,15 @@ export async function responseOutcome(
 ): Promise<RecoveryCommitOutcome | undefined> {
   if (safetyHold() !== null) return
   const commitDigest = response.digest
-  if (response.kind === 'superseded') return { kind: 'superseded', commitDigest }
+  if (response.kind === 'superseded') return
   if (response.kind === 'refused') {
-    return { kind: 'refused', commitDigest, reason: response.reason ?? 'invalid' }
+    if (response.refusalAuthority !== 'authenticated-commit') return
+    return {
+      kind: 'refused',
+      commitDigest,
+      reason: response.reason ?? 'invalid',
+      refusalAuthority: response.refusalAuthority,
+    }
   }
   if ((await port.readEpoch()) !== response.epochAfter) return
   if (safetyHold() !== null) return
@@ -191,7 +196,12 @@ export function waitForRecoveryConfirmation(
               (verdict.epoch !== pending.epoch || verdict.tag !== confirmationTag(key, requestID))
             )
               return
-            if (pending.judgeVerdict(opened) === 'advisory') {
+            if (
+              verdict.verdict === 'superseded' ||
+              (verdict.verdict === 'refused' &&
+                verdict.refusalAuthority !== 'authenticated-commit') ||
+              pending.judgeVerdict(opened) === 'advisory'
+            ) {
               advisory.set(JSON.stringify(opened), opened)
               if (advisory.size > 1024) {
                 const oldest = advisory.keys().next().value
@@ -203,8 +213,7 @@ export function waitForRecoveryConfirmation(
               finish({ kind: 'confirmed', position, epoch: pending.epoch, sealed })
               return
             }
-            if (verdict.verdict === 'superseded') best = { kind: 'superseded' }
-            else if (best == null)
+            if (best == null)
               best = { kind: 'refused', refusal: verdict.reason, responder: opened.signer }
             if (settle == null) {
               clearInterval(repeat)

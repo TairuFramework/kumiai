@@ -262,6 +262,7 @@ export type ConformanceExternalResponse<Position extends string = string> = {
   kind: 'applied' | 'refused' | 'superseded'
   epoch: number
   reason?: ConformanceRecoveryRefusal
+  refusalAuthority?: 'authenticated-commit'
   epochAfter?: number
 }
 export type ConformanceControlCommitCursor<Position extends string = string> = {
@@ -1563,6 +1564,23 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       await host.control.apply({ deleteRejoin: true }, 'clear-rejoin')
       expect((await host.control.load()).rejoin).toBeNull()
     })
+
+    test.each([undefined, 'authenticated-commit'] as const)(
+      'response refusal authority survives reopen without upgrading legacy rows: %s',
+      async (refusalAuthority) => {
+        const host = await params.open()
+        const row: ConformanceExternalResponse = {
+          position: 'refused',
+          epoch: 1,
+          digest: 'commit',
+          kind: 'refused',
+          reason: 'policy',
+          ...(refusalAuthority === undefined ? {} : { refusalAuthority }),
+        }
+        await host.control.apply({ putResponses: [row] }, 'save-refusal')
+        expect((await (await params.reopen()).control.load()).responses).toEqual([row])
+      },
+    )
 
     test('epoch range deletions precede puts in apply and adoption saves', async () => {
       const host = await params.open()

@@ -372,6 +372,7 @@ test('a responder floor refusal attempts renewal and invalidates the refused bin
     epochBefore: 1,
     epochAfter: 1,
     refusal: 'floor',
+    refusalAuthority: 'authenticated-commit',
   })
   try {
     await Promise.all([alice.resync(), bob.resync()])
@@ -417,6 +418,7 @@ test('expired binding then floor refusal can call the host twice in one recovery
     epochBefore: 1,
     epochAfter: 1,
     refusal: 'floor',
+    refusalAuthority: 'authenticated-commit',
   })
   try {
     await Promise.all([alice.resync(), bob.resync()])
@@ -463,6 +465,7 @@ test('an authoritative invalid refusal holds automatic recovery until explicit r
     epochBefore: 1,
     epochAfter: 1,
     refusal: 'invalid',
+    refusalAuthority: 'authenticated-commit',
   })
   const requests = vi.spyOn(s.mls, 'createRecoveryRequest')
   try {

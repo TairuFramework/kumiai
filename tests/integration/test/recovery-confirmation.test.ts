@@ -584,7 +584,12 @@ test('forged confirmations are ignored and an unknown signer refusal is advisory
   const seal = s.aliceMLS.sealRecoveryVerdict.bind(s.aliceMLS)
   vi.spyOn(s.aliceMLS, 'sealRecoveryVerdict').mockImplementation(async (request, verdict) => {
     if (verdict.verdict !== 'confirmed') return seal(request, verdict)
-    const refusal = { ...verdict, verdict: 'refused', reason: 'policy' }
+    const refusal = {
+      ...verdict,
+      verdict: 'refused',
+      reason: 'policy',
+      refusalAuthority: 'authenticated-commit',
+    }
     return sealRealRecoveryVerdict({ identity: outsider, handle: s.aliceGroup() }, request, refusal)
   })
   const publish = s.bobConnection.publish.bind(s.bobConnection)
@@ -719,6 +724,7 @@ test.each(['policy', 'invalid'] as const)(
         epochBefore: epoch,
         epochAfter: epoch,
         refusal: reason,
+        refusalAuthority: 'authenticated-commit',
       }
     })
     expect(await s.bob.recover()).toEqual({ advanced: false, reenact: [] })
@@ -774,6 +780,7 @@ test.each([false, true])(
             commitDigest: request.commitDigest,
             verdict: 'refused',
             reason: 'policy',
+            refusalAuthority: 'authenticated-commit',
           },
         )
         await s.aliceConnection.publish({

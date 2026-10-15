@@ -238,10 +238,13 @@ function verdictForOutcome(
         epoch: outcome.epoch,
         tag: confirmationTag(outcome.key, binding.requestID),
       }
-    case 'superseded':
-      return { ...binding, verdict: 'superseded' }
     case 'refused':
-      return { ...binding, verdict: 'refused', reason: outcome.reason }
+      return {
+        ...binding,
+        verdict: 'refused',
+        reason: outcome.reason,
+        refusalAuthority: outcome.refusalAuthority,
+      }
   }
 }
 
@@ -1243,12 +1246,21 @@ export function createGroupPeerWithControlWalk<
         record = commitOutcomes.get(request.position)
       }
       if (record == null || record.digest !== request.commitDigest) return
+      if (
+        record.kind === 'superseded' ||
+        (record.kind === 'refused' && record.refusalAuthority !== 'authenticated-commit')
+      )
+        return
       const cacheKey = JSON.stringify([
         verified.requesterDID,
         request.requestID,
         Array.from(request.request),
         request.position,
         request.commitDigest,
+        record.kind,
+        record.epochAfter,
+        record.reason,
+        record.refusalAuthority,
       ])
       let cached = verdictCache.get(cacheKey)
       if (cached == null) {
@@ -1278,9 +1290,22 @@ export function createGroupPeerWithControlWalk<
       const expiresAt = cached.expiresAt
       if (disposed || blocked() || expiresAt <= Date.now()) return
       const response = record
-      const confirmable = async () =>
-        !blocked() &&
-        (response.kind !== 'applied' || (await port.readEpoch()) === response.epochAfter)
+      const confirmable = async () => {
+        const current = commitOutcomes.get(request.position)
+        if (
+          blocked() ||
+          current == null ||
+          current.digest !== response.digest ||
+          current.kind !== response.kind
+        )
+          return false
+        return current.kind === 'applied'
+          ? current.epochAfter === response.epochAfter &&
+              (await port.readEpoch()) === current.epochAfter
+          : current.kind === 'refused' &&
+              current.refusalAuthority === 'authenticated-commit' &&
+              current.reason === response.reason
+      }
       if (!(await confirmable()) || blocked()) return
       const timer = setTimeout(
         () => {
@@ -1997,15 +2022,7 @@ export function createGroupPeerWithControlWalk<
               throw error
             }
             await resolveAnchorRotation({ port, knownUnlanded: true })
-            // The commit names ledger entries whose bodies will not resolve. POISON: drop, advance,
-            // do NOT heal. The bodies ride the commit sealed under its framed epoch, so a blob this
-            // peer cannot open is one no member at this epoch can — nobody applies it, and the next
-            // honest commit is framed at the same epoch and compare-and-sets behind it.
-            //
-            // Healing here would hand any member a group-wide recovery storm for one publish.
-            // Retrying only delays that. The one case where this peer really is the broken one
-            // announces itself later: the next commit is then framed AHEAD of this peer's, which
-            // heals it.
+            // Missing bodies describe this copy, never an authenticated commit refusal.
             await saveCommitCursor(
               position,
               header?.external
@@ -2061,6 +2078,9 @@ export function createGroupPeerWithControlWalk<
                     kind: 'refused',
                     epoch: framedEpoch,
                     reason: applied.refusal ?? 'invalid',
+                    ...(applied.refusalAuthority === 'authenticated-commit'
+                      ? { refusalAuthority: applied.refusalAuthority }
+                      : {}),
                   }
                 : undefined,
             )

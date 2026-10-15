@@ -17,6 +17,37 @@ import {
   sealRecoveryVerdict,
 } from '../src/recovery-verdict.js'
 
+test.each([undefined, 'authenticated-commit'] as const)(
+  'signed refusals preserve optional authority through repeated opening: %s',
+  async (refusalAuthority) => {
+    const identity = randomIdentity()
+    const { group } = await createGroup(identity, 'refusal-authority')
+    const held = await createRecoveryRequest({ group, identity, requestID: 'refusal' })
+    const verdict = {
+      groupID: group.groupID,
+      requestID: 'refusal',
+      position: 'accepted-position',
+      commitDigest: 'accepted-digest',
+      verdict: 'refused' as const,
+      reason: 'policy' as const,
+      ...(refusalAuthority === undefined ? {} : { refusalAuthority }),
+    }
+    const sealed = await sealRecoveryVerdict({ group, identity, request: held.request, verdict })
+    for (let replay = 0; replay < 2; replay++) {
+      expect(
+        (
+          await openRecoveryVerdict({
+            group,
+            sealed,
+            requestID: 'refusal',
+            ephemeralPrivateKey: held.ephemeralPrivateKey,
+          })
+        ).verdict,
+      ).toEqual(verdict)
+    }
+  },
+)
+
 test('verdicts authenticate the signer and bind the signed request without consuming its key', async () => {
   const identity = randomIdentity()
   const { group } = await createGroup(identity, 'verdict-crypto')
@@ -178,6 +209,28 @@ test('opening checks signature, token kind and signed bindings even inside a val
       }),
     ).rejects.toThrow()
   }
+  const advisory = stringifyToken(
+    await identity.signToken(
+      { ...base, refusalAuthority: 'delivered-copy' },
+      { embedLongForm: true },
+    ),
+  )
+  const advisorySeal = await sealToRequest({
+    kind,
+    group,
+    request: held.request,
+    plaintext: new TextEncoder().encode(advisory),
+  })
+  expect(
+    (
+      await openRecoveryVerdict({
+        group,
+        sealed: advisorySeal,
+        requestID: 'request',
+        ephemeralPrivateKey: held.ephemeralPrivateKey,
+      })
+    ).verdict,
+  ).not.toHaveProperty('refusalAuthority')
   const signed = stringifyToken(await identity.signToken(base, { embedLongForm: true }))
   const parts = signed.split('.')
   const signature = Buffer.from(parts[2] as string, 'base64url')

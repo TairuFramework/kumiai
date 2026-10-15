@@ -263,6 +263,7 @@ test.each(['policy', 'invalid'] as const)(
       epochBefore: 1,
       epochAfter: 1,
       refusal: reason,
+      refusalAuthority: 'authenticated-commit',
     }))
     expect((await bob.peer.recover()).advanced).toBe(false)
     const saved = (await bob.control.load()).rejoin
@@ -772,6 +773,7 @@ test.each(['binding', 'lapse', 'floor'] as const)(
         epochBefore: 1,
         epochAfter: 1,
         refusal: reason,
+        refusalAuthority: 'authenticated-commit',
       }))
       .mockImplementation(process)
     // A short attempt can expire under load; its automatic retry must finish without another call.
