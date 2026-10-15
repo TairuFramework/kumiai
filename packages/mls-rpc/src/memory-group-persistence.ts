@@ -44,7 +44,7 @@ import {
   ReentrantOwnershipError,
   StorageOutcomeUnknownError,
 } from './persistence-errors.js'
-import { assertStateTransition, assertTrustTransition } from './persistence-guards.js'
+import { assertStateTransition, assertTrustTransition, readState } from './persistence-guards.js'
 import type {
   AppStatusEvent,
   AtRestCodec,
@@ -278,6 +278,7 @@ export function createMemoryGroupCoordinator(params: {
           })
             .state(incarnation)
             .load()
+          if (value !== null && !value.deleted) readState(value)
           return value === null
             ? 'missing'
             : value.deleted
@@ -449,6 +450,13 @@ export function createMemoryGroupCoordinator(params: {
                 ? 'null'
                 : 'readable'
         terminal = state === null || state.deleted ? null : state.terminal
+        if (state !== null && !state.deleted) {
+          try {
+            readState(state)
+          } catch {
+            stateStatus = 'unreadable'
+          }
+        }
       }
       return {
         mutationID,

@@ -319,17 +319,17 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       requestID: string,
       requestKey: Uint8Array,
     ): Promise<OpenedRecoveryVerdict | null> {
+      if (params.recoveryAdoption !== undefined) {
+        const { trust } = await params.recoveryAdoption.readRecoverySource()
+        return await openRecoveryVerdictFromTrust({
+          trust,
+          sealed,
+          requestID,
+          requestKey,
+          options: params.recoveryAdoption.environment.options,
+        })
+      }
       try {
-        if (params.recoveryAdoption !== undefined) {
-          const { trust } = await params.recoveryAdoption.readRecoverySource()
-          return await openRecoveryVerdictFromTrust({
-            trust,
-            sealed,
-            requestID,
-            requestKey,
-            options: params.recoveryAdoption.environment.options,
-          })
-        }
         return await access.read((group) =>
           openRecoveryVerdict({ group, sealed, requestID, ephemeralPrivateKey: requestKey }),
         )
