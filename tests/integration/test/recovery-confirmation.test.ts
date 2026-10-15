@@ -38,6 +38,7 @@ import {
   createMemoryAppOutbox,
   createOperationHost,
   encodeJournal,
+  groupMLSDependencies,
   operationRequest,
   type Protocols,
 } from './app-lane-e2e.js'
@@ -155,12 +156,16 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
     },
   })
   const aliceMLS = createGroupMLS({
-    access: aliceAccess,
+    ...groupMLSDependencies(aliceAccess),
     identity: aliceID,
     entrySlot: createLedgerEntrySlot(),
   })
   const aliceHost = createOperationHost(aliceAccess, aliceID)
-  const bobMLS = createGroupMLS({ access: bobAccess, identity: bobID, entrySlot: bobSlot })
+  const bobMLS = createGroupMLS({
+    ...groupMLSDependencies(bobAccess),
+    identity: bobID,
+    entrySlot: bobSlot,
+  })
   const aliceConnection = hub.connect(aliceID)
   const bobConnection = hub.connect(bobID)
   const events: Array<RecoveryEvent> = []
@@ -227,7 +232,7 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
     carolAccess == null
       ? undefined
       : createGroupMLS({
-          access: carolAccess,
+          ...groupMLSDependencies(carolAccess),
           identity: carolID,
           entrySlot: createLedgerEntrySlot(),
         })
@@ -391,7 +396,9 @@ test('stale GroupInfo external commit is rejected while the survivor progresses'
   const s = await setup({ deadlineMs: 10_000 })
   const source = s.aliceGroup()
   const stalePort = createGroupMLS({
-    access: await createDurableHandleAccess({ handle: () => source, adopt: () => {} }),
+    ...groupMLSDependencies(
+      await createDurableHandleAccess({ handle: () => source, adopt: () => {} }),
+    ),
     identity: s.aliceID,
     entrySlot: createLedgerEntrySlot(),
   })

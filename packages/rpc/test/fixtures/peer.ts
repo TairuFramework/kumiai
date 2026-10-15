@@ -526,15 +526,17 @@ export function memoryControlPorts(
       if (Date.now() >= op.deadline) return { kind: 'expired' as const, operation: op }
       if (controlSafetyHeld(snapshot) !== null) return { kind: 'occupied' as const, operation: op }
       const source = await mls.readRecoverySource()
+      if (source.identity === null) return { kind: 'moved' as const, operation: op }
+      const identity = source.identity
       if (
         controlSafetyHeld(await control.load()) !== null ||
         snapshot.controlHold !== null ||
-        snapshot.commitOnce?.epoch === source.epoch
+        snapshot.commitOnce?.epoch === identity.epoch
       )
         return { kind: 'occupied' as const, operation: op }
       const sourceState = mls.serializeState()
       const retainedCrypto = crypto.restart()
-      retainedCrypto.setEpoch(source.epoch)
+      retainedCrypto.setEpoch(identity.epoch)
       try {
         const host = await build(op)
         const sameSource = async () => {
@@ -543,14 +545,15 @@ export function memoryControlPorts(
           return (
             current.key.groupID === source.key.groupID &&
             current.key.incarnation === source.key.incarnation &&
-            current.epoch === source.epoch &&
-            toB64U(current.authenticator) === toB64U(source.authenticator)
+            current.identity !== null &&
+            current.identity.epoch === identity.epoch &&
+            toB64U(current.identity.authenticator) === toB64U(identity.authenticator)
           )
         }
         if (
-          host.epoch !== source.epoch ||
+          host.epoch !== identity.epoch ||
           host.incarnation !== source.key.incarnation ||
-          toB64U(host.authenticatorBefore) !== toB64U(source.authenticator) ||
+          toB64U(host.authenticatorBefore) !== toB64U(identity.authenticator) ||
           !(await sameSource())
         )
           return { kind: 'moved' as const, operation: op }

@@ -17,6 +17,7 @@ import {
   createMemoryAppOutbox,
   createOperationHost,
   encodeJournal,
+  groupMLSDependencies,
   operationRequest,
   type Protocols,
 } from './app-lane-e2e.js'
@@ -78,7 +79,11 @@ test('a final frame one byte above the hub cap settles rejected before publishin
     },
   })
   const crypto = createGroupCrypto({ access })
-  const mls = createGroupMLS({ access, identity, entrySlot: createLedgerEntrySlot() })
+  const mls = createGroupMLS({
+    ...groupMLSDependencies(access),
+    identity,
+    entrySlot: createLedgerEntrySlot(),
+  })
   const connection = hub.connect(identity)
   const publish = vi.spyOn(connection, 'publish')
   const host = createOperationHost(access, identity)

@@ -20,7 +20,7 @@ depend on both.
 - `simpleHandleAccess({ handle, adopt, stateVersion, key, persist? })` — serialised access to a live handle; the
   `HandleAccess` type for a host that brings its own.
 - `createGroupCrypto({ access, entryLabel?, runtime?, pending? })` — `GroupCrypto` over that access.
-- `createGroupMLS({ access, identity, entrySlot, recoverySecret?, recoveryBinding? })` — `GroupMLS`
+- `createGroupMLS({ access, control, readRecoverySource, identity, entrySlot, recoverySecret?, recoveryBinding? })` — `GroupMLS`
   over the same access.
 - `createGroupSafety({ registry, persistence, mls, resolveTarget })` — incarnation safety reports,
   retained epoch authenticators and durable safety events over the registry's shared coordinator.
@@ -56,7 +56,13 @@ const access = simpleHandleAccess({
   persist: (current, write) => store.save(current, write),
 })
 const crypto = createGroupCrypto({ access, pending })
-const mls = createGroupMLS({ access, identity, entrySlot })
+const mls = createGroupMLS({
+  access,
+  control: store.control,
+  readRecoverySource: () => access.readControl(async ({ source }) => source),
+  identity,
+  entrySlot,
+})
 ```
 
 `store.save(current, write)` must use one root transaction to save the encoded MLS state and
@@ -71,6 +77,11 @@ An epoch is not a state version. Reopening loads the stored version. Reads and s
 The required `key: GroupKey` identifies the host's stored group incarnation and remains fixed for that access.
 Supply incarnation 1 explicitly only for a single-incarnation host.
 Simple access forwards this key to source reads and adoption writes.
+
+`createGroupMLS` requires the same keyed `control` store and an identity-only `readRecoverySource` callback.
+The callback returns `AdoptionExpected`, including a nullable identity, without trust or lifetime metadata.
+Use `createRegistryGroupMLS` for captured recovery with retained trust and registry adoption.
+Plain construction preserves ordinary operations and legacy recovery without `recoveryAdoption`.
 
 ### A host's own `HandleAccess`
 
@@ -178,6 +189,8 @@ const access = simpleHandleAccess({
 const crypto = createGroupCrypto({ access })
 const mls = createGroupMLS({
   access,
+  control: store.control,
+  readRecoverySource: () => access.readControl(async ({ source }) => source),
   identity,
   entrySlot,
 })

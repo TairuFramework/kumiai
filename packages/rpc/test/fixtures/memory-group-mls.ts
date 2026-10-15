@@ -1241,8 +1241,6 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
           key,
           stateVersion: await hostDB.loadVersion(storageID),
           identity: { ...key, epoch, authenticator: authenticator() },
-          epoch,
-          authenticator: authenticator(),
         }
       }),
     readEpoch: () => serialise(async () => epoch),

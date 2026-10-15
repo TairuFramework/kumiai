@@ -43,7 +43,12 @@ import { decodeRecoveryRecord, validateCapturedRecoveryRecord } from '../src/rec
 import { recoveryTrustDigest } from '../src/recovery-trust-digest.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
-import { createRealGroup, type RealMember, testHandleAccess } from './fixtures/real-group.js'
+import {
+  createRealGroup,
+  type RealMember,
+  testGroupMLSDependencies,
+  testHandleAccess,
+} from './fixtures/real-group.js'
 import { legacyRecoveryTrustDigest } from './fixtures/recovery-trust-digest-v1.js'
 
 let trust: GroupRecoveryTrust
@@ -166,12 +171,14 @@ async function recordFixture(members?: Array<RealMember>) {
   const requester = createGroupMLS({
     identity: member.identity,
     entrySlot: member.slot,
-    access: testHandleAccess({ handle: () => member.handle, adopt: () => {} }),
+    ...testGroupMLSDependencies(testHandleAccess({ handle: () => member.handle, adopt: () => {} })),
   })
   const remote = createGroupMLS({
     identity: responder.identity,
     entrySlot: responder.slot,
-    access: testHandleAccess({ handle: () => responder.handle, adopt: () => {} }),
+    ...testGroupMLSDependencies(
+      testHandleAccess({ handle: () => responder.handle, adopt: () => {} }),
+    ),
   })
   const requestID = 'captured-request'
   const { request, requestKey } = await requester.createRecoveryRequest(requestID)

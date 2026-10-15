@@ -35,7 +35,11 @@ import { encodeControlJournal } from '../src/control-journal.js'
 import { createControlValidationPort } from '../src/control-validation.js'
 import { deriveEntryKey, openEntries, sealEntries } from '../src/crypto.js'
 import { createGroupMLS } from '../src/mls.js'
-import { createRealGroup, testHandleAccess } from './fixtures/real-group.js'
+import {
+  createRealGroup,
+  testGroupMLSDependencies,
+  testHandleAccess,
+} from './fixtures/real-group.js'
 import { createTransactionalStore } from './fixtures/transactional-access.js'
 
 const recognition = vi.hoisted(() => ({ disabled: false }))
@@ -263,12 +267,14 @@ test.each([true, false])(
       const receiverMLS = createGroupMLS({
         identity: receiver.identity,
         entrySlot: receiver.slot,
-        access: testHandleAccess({
-          handle: () => receiver.handle,
-          adopt: (handle) => {
-            receiver.handle = handle
-          },
-        }),
+        ...testGroupMLSDependencies(
+          testHandleAccess({
+            handle: () => receiver.handle,
+            adopt: (handle) => {
+              receiver.handle = handle
+            },
+          }),
+        ),
       })
       expect(await receiverMLS.processCommit(f.prepared.commitMessage, {})).toMatchObject({
         applied: false,

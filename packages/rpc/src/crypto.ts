@@ -1,5 +1,5 @@
 import type { SafetyHold } from './control/safety.js'
-import type { AdoptionWriteFactory, ControlSource } from './control/types.js'
+import type { AdoptionExpected, AdoptionWriteFactory } from './control/types.js'
 import type { LogPosition } from './cursor.js'
 import type { CapturedRecoveryPort } from './recovery-types.js'
 
@@ -474,7 +474,7 @@ export type GroupMLS = {
   /** Read the current handle epoch under the host's handle lock. */
   readEpoch(): Promise<number>
   /** Read the source identity under the host handle lock. */
-  readRecoverySource(): Promise<ControlSource>
+  readRecoverySource(): Promise<AdoptionExpected>
   /**
    * The leaves this handle's ratchet tree currently holds, one {@link RosterEntry} per leaf, in
    * ascending `leafIndex` order. Purely local: reads no secret, advances nothing.

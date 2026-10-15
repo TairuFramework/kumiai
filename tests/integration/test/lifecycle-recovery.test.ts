@@ -40,6 +40,7 @@ import {
   createMemoryAppCursorStore,
   createMemoryAppOutbox,
   createOperationHost,
+  groupMLSDependencies,
   type Protocols,
 } from './app-lane-e2e.js'
 import { createWireHub, type WireHub } from './log-hub-over-wire.js'
@@ -122,7 +123,12 @@ async function setup(
       bobGroup = next
     },
   })
-  const mls = createGroupMLS({ access, identity: bob, entrySlot: slot, recoveryBinding: host })
+  const mls = createGroupMLS({
+    ...groupMLSDependencies(access),
+    identity: bob,
+    entrySlot: slot,
+    recoveryBinding: host,
+  })
   const aliceAccess = await createDurableHandleAccess({
     handle: () => aliceGroup,
     adopt: (next) => {
@@ -130,7 +136,7 @@ async function setup(
     },
   })
   const responder = createGroupMLS({
-    access: aliceAccess,
+    ...groupMLSDependencies(aliceAccess),
     identity: alice,
     entrySlot: createLedgerEntrySlot(),
   })
@@ -504,7 +510,7 @@ test('renewal-required suppresses subsequent automatic triggers and explicit rec
   const events: Array<RecoveryEvent> = []
   const aliceAccess = s.aliceAccess
   const aliceMLS = createGroupMLS({
-    access: aliceAccess,
+    ...groupMLSDependencies(aliceAccess),
     identity: s.alice,
     entrySlot: createLedgerEntrySlot(),
   })
@@ -625,7 +631,9 @@ test('standard group preparation never calls the lifecycle binding host', async 
   const group = (await createGroup(identity, 'standard-recovery')).group
   const host = vi.fn(async () => null)
   const mls = createGroupMLS({
-    access: await createDurableHandleAccess({ handle: () => group, adopt: () => {} }),
+    ...groupMLSDependencies(
+      await createDurableHandleAccess({ handle: () => group, adopt: () => {} }),
+    ),
     identity,
     entrySlot: createLedgerEntrySlot(),
     recoveryBinding: host,
@@ -738,7 +746,9 @@ test('a lifecycle GroupInfo reply requires a requester leaf in the responder tre
     })
   ).group
   const mls = createGroupMLS({
-    access: await createDurableHandleAccess({ handle: () => group, adopt: () => {} }),
+    ...groupMLSDependencies(
+      await createDurableHandleAccess({ handle: () => group, adopt: () => {} }),
+    ),
     identity: outsider,
     entrySlot: createLedgerEntrySlot(),
   })
@@ -770,7 +780,7 @@ test('a reply-ledger floor ends peer recovery without publication and holds late
     identity: s.alice,
     access: aliceAccess,
     mls: createGroupMLS({
-      access: aliceAccess,
+      ...groupMLSDependencies(aliceAccess),
       identity: s.alice,
       entrySlot: createLedgerEntrySlot(),
     }),
@@ -846,12 +856,14 @@ async function ineligibleReply(s: Setup, kind: 'leafless' | 'revoked' | 'issuer'
   return createGroupMLS({
     identity,
     entrySlot: createLedgerEntrySlot(),
-    access: await createDurableHandleAccess({
-      handle: () => handle,
-      adopt: () => {
-        throw new Error('Unexpected adoption')
-      },
-    }),
+    ...groupMLSDependencies(
+      await createDurableHandleAccess({
+        handle: () => handle,
+        adopt: () => {
+          throw new Error('Unexpected adoption')
+        },
+      }),
+    ),
   })
 }
 

@@ -148,7 +148,7 @@ export type GroupMLSDependencies = {
   recoverySecretFromTrust?: (trust: GroupRecoveryTrust) => Promise<Uint8Array>
 }
 
-export type GroupMLSParams = Partial<GroupMLSDependencies> & {
+export type GroupMLSParams = GroupMLSDependencies & {
   access: ControlHandleAccess
   /** This member's signing identity: recovery requests and attestations are signed with it. */
   identity: OwnIdentity
@@ -282,10 +282,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
 
   const port: GroupMLS = {
     async signRecoveryConfirmation(binding: RecoveryConfirmationBinding) {
-      const groupID =
-        params.readRecoverySource === undefined
-          ? await access.read((group) => group.groupID)
-          : (await params.readRecoverySource()).key.groupID
+      const groupID = (await params.readRecoverySource()).key.groupID
       if (binding.groupID !== groupID) throw new Error('Confirmation group mismatch')
       return new TextEncoder().encode(
         stringifyToken(
@@ -310,10 +307,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           value.requestID === binding.requestID &&
           value.position === binding.position &&
           value.commitDigest === binding.commitDigest &&
-          value.groupID ===
-            (params.readRecoverySource === undefined
-              ? await access.read((group) => group.groupID)
-              : (await params.readRecoverySource()).key.groupID)
+          value.groupID === (await params.readRecoverySource()).key.groupID
         )
       } catch {
         return false
@@ -322,25 +316,14 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
     async verifyRecoveryRequest(request: Uint8Array) {
       try {
         const verified = await verifyRecoveryRequest(new TextDecoder().decode(request))
-        if (params.readRecoverySource !== undefined) {
-          const source = await params.readRecoverySource()
-          return verified.groupID === source.key.groupID
-            ? {
-                groupID: verified.groupID,
-                requestID: verified.requestID,
-                requesterDID: verified.requesterDID,
-              }
-            : null
-        }
-        return await access.read((group) =>
-          verified.groupID === group.groupID
-            ? {
-                groupID: verified.groupID,
-                requestID: verified.requestID,
-                requesterDID: verified.requesterDID,
-              }
-            : null,
-        )
+        const source = await params.readRecoverySource()
+        return verified.groupID === source.key.groupID
+          ? {
+              groupID: verified.groupID,
+              requestID: verified.requestID,
+              requesterDID: verified.requesterDID,
+            }
+          : null
       } catch {
         return null
       }
@@ -387,23 +370,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
     async prepareRecovery(): Promise<'ready' | 'renewal-required'> {
       return await access.read((group) => recovery.prepare(group))
     },
-    async readRecoverySource() {
-      if (params.readRecoverySource !== undefined) {
-        const source = await params.readRecoverySource()
-        if (source.identity === null) throw new Error('Recovery source identity unavailable')
-        // Legacy callers still consume the flattened identity until captured activation.
-        return {
-          ...source,
-          epoch: source.identity.epoch,
-          authenticator: source.identity.authenticator.slice(),
-        }
-      }
-      return await access.readControl(async ({ handle, source }) => ({
-        ...source,
-        epoch: Number(handle.epoch),
-        authenticator: handle.state.keySchedule.epochAuthenticator.slice(),
-      }))
-    },
+    readRecoverySource: () => params.readRecoverySource(),
     async readEpoch(): Promise<number> {
       return await access.read((group) => Number(group.epoch))
     },

@@ -51,6 +51,7 @@ import type {
   AppliedCommit,
   CommitCursor,
   ControlSnapshot,
+  ControlSource,
   ControlStore,
   ExternalResponse,
   LegacyRejoinRecord,
@@ -3612,7 +3613,7 @@ export function createGroupPeerWithControlWalk<
     if (mls == null || control == null || commitTopicID == null)
       throw new Error('Missing recovery ports')
     assertSafetyOpen()
-    const current = await mls.readRecoverySource()
+    const current = await readLegacyRecoverySource(mls)
     assertSafetyOpen()
     const responses = (await control.load()).responses
     assertSafetyOpen()
@@ -3982,7 +3983,7 @@ export function createGroupPeerWithControlWalk<
             if (pending == null) return null
             if ('renewalRequired' in pending) return failed('renewal-required')
             pending = wrapPendingRecovery(boundary, pending)
-            const source = await port.readRecoverySource()
+            const source = await readLegacyRecoverySource(port)
             assertSafetyOpen()
             const ledgerBefore = [
               ...new Set([
@@ -4649,5 +4650,16 @@ export function createGroupPeerWithControlWalk<
       },
       head: () => commitLogHead,
     },
+  }
+}
+
+// Legacy records still persist a flattened identity until captured recovery becomes active.
+async function readLegacyRecoverySource(mls: GroupMLS): Promise<ControlSource> {
+  const source = await mls.readRecoverySource()
+  if (source.identity === null) throw new Error('Recovery source identity unavailable')
+  return {
+    ...source,
+    epoch: source.identity.epoch,
+    authenticator: source.identity.authenticator.slice(),
   }
 }

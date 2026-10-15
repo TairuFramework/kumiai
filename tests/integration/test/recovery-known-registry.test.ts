@@ -10,8 +10,10 @@ import {
   registrySeed,
   revokeWithProof,
 } from '@kumiai/mls'
-import { createGroupMLS, createLedgerEntrySlot, simpleHandleAccess } from '@kumiai/mls-rpc'
+import { createGroupMLS, createLedgerEntrySlot } from '@kumiai/mls-rpc'
 import { afterEach, expect, test, vi } from 'vitest'
+
+import { createDurableHandleAccess, groupMLSDependencies } from './app-lane-e2e.js'
 
 const fixture = (await import(
   new URL('../../../packages/mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
@@ -70,26 +72,26 @@ async function setup(
   const responder = createGroupMLS({
     identity: bob,
     entrySlot: createLedgerEntrySlot(),
-    access: simpleHandleAccess({
-      key: { groupID: responderGroup.groupID, incarnation: 1 },
-      stateVersion: () => 0,
-      handle: () => responderGroup,
-      adopt: () => {
-        throw new Error('Unexpected adoption')
-      },
-    }),
+    ...groupMLSDependencies(
+      await createDurableHandleAccess({
+        handle: () => responderGroup,
+        adopt: () => {
+          throw new Error('Unexpected adoption')
+        },
+      }),
+    ),
   })
   const mls = createGroupMLS({
     identity,
     entrySlot: createLedgerEntrySlot(),
-    access: simpleHandleAccess({
-      key: { groupID: group.groupID, incarnation: 1 },
-      stateVersion: () => 0,
-      handle: () => group,
-      adopt: (next: GroupHandle) => {
-        group = next
-      },
-    }),
+    ...groupMLSDependencies(
+      await createDurableHandleAccess({
+        handle: () => group,
+        adopt: (next: GroupHandle) => {
+          group = next
+        },
+      }),
+    ),
   })
   return {
     identity,
@@ -127,14 +129,14 @@ test('the adapter judge retains own-ledger revocations when the reply offers a s
   const malloryMLS = createGroupMLS({
     identity: mallory,
     entrySlot: createLedgerEntrySlot(),
-    access: simpleHandleAccess({
-      key: { groupID: malloryGroup.groupID, incarnation: 1 },
-      stateVersion: () => 0,
-      handle: () => malloryGroup,
-      adopt: () => {
-        throw new Error('Unexpected adoption')
-      },
-    }),
+    ...groupMLSDependencies(
+      await createDurableHandleAccess({
+        handle: () => malloryGroup,
+        adopt: () => {
+          throw new Error('Unexpected adoption')
+        },
+      }),
+    ),
   })
   s.install(added.newGroup)
   await s.responderGroup.processMessage(added.commitMessage)

@@ -15,7 +15,7 @@ import {
 import { createGroupMLS, createLedgerEntrySlot } from '@kumiai/mls-rpc'
 import { afterEach, expect, test, vi } from 'vitest'
 
-import { createDurableHandleAccess } from './app-lane-e2e.js'
+import { createDurableHandleAccess, groupMLSDependencies } from './app-lane-e2e.js'
 
 const fixture = (await import(
   new URL('../../../packages/mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
@@ -74,22 +74,26 @@ async function setup(
   const responder = createGroupMLS({
     identity: bob,
     entrySlot: createLedgerEntrySlot(),
-    access: await createDurableHandleAccess({
-      handle: () => responderGroup,
-      adopt: () => {
-        throw new Error('Unexpected adoption')
-      },
-    }),
+    ...groupMLSDependencies(
+      await createDurableHandleAccess({
+        handle: () => responderGroup,
+        adopt: () => {
+          throw new Error('Unexpected adoption')
+        },
+      }),
+    ),
   })
   const mls = createGroupMLS({
     identity,
     entrySlot: createLedgerEntrySlot(),
-    access: await createDurableHandleAccess({
-      handle: () => group,
-      adopt: (next: GroupHandle) => {
-        group = next
-      },
-    }),
+    ...groupMLSDependencies(
+      await createDurableHandleAccess({
+        handle: () => group,
+        adopt: (next: GroupHandle) => {
+          group = next
+        },
+      }),
+    ),
   })
   return { identity, mls, responder, responderGroup, bob, group: () => group }
 }
@@ -309,7 +313,11 @@ test('a lifecycle GroupInfo signer revoked in the known ledger is refused', asyn
       throw new Error('Unexpected adoption')
     },
   })
-  const mls = createGroupMLS({ identity: s.identity, access, entrySlot: createLedgerEntrySlot() })
+  const mls = createGroupMLS({
+    identity: s.identity,
+    ...groupMLSDependencies(access),
+    entrySlot: createLedgerEntrySlot(),
+  })
   const { request, requestKey } = await mls.createRecoveryRequest('revoked-attestation')
   expect(
     await mls.applyRecovery(
@@ -442,12 +450,14 @@ test('caller rejection and a replacement without a prior leaf propagate policy a
   const mls = createGroupMLS({
     identity: s.identity,
     entrySlot: createLedgerEntrySlot(),
-    access: await createDurableHandleAccess({
-      handle: () => rejector,
-      adopt: () => {
-        throw new Error('Unexpected adoption')
-      },
-    }),
+    ...groupMLSDependencies(
+      await createDurableHandleAccess({
+        handle: () => rejector,
+        adopt: () => {
+          throw new Error('Unexpected adoption')
+        },
+      }),
+    ),
   })
   const valid = await fixture.lowLevelExternal({
     group: s.group(),

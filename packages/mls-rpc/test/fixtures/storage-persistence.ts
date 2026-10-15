@@ -1010,12 +1010,7 @@ export async function createControlCrashHarness(mode: 'real-mls' | 'double', see
               if (property === 'readRecoverySource')
                 return async () => {
                   const value = await source()
-                  if (value.identity === null) throw new Error('Missing memory source identity')
-                  return {
-                    ...value,
-                    epoch: value.identity.epoch,
-                    authenticator: value.identity.authenticator,
-                  }
+                  return value
                 }
               const current = memoryModel(host.live())
               const value = Reflect.get(current, property)

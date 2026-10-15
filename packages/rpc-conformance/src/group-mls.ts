@@ -22,7 +22,6 @@ import type {
   ConformanceBuiltCommit,
   ConformanceCapturedRejoinRecord,
   ConformanceControlSnapshot,
-  ConformanceControlSource,
   ConformanceGroupKey,
   ConformanceRecoverySource,
   ConformanceRecoveryTargetCapture,
@@ -211,7 +210,7 @@ export type ConformanceGroupMLS<Position extends string = string> = {
     refusalAuthority?: 'authenticated-commit'
   }>
   readEpoch: () => Promise<number>
-  readRecoverySource: () => Promise<ConformanceControlSource>
+  readRecoverySource: () => Promise<ConformanceAdoptionExpected>
   rosterEntries: () => Promise<Array<ConformanceRosterEntry>>
   readCommitHeader: (commit: Uint8Array) => Promise<ConformanceCommitHeader | null>
   processCommit: (
@@ -376,15 +375,19 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         const source = await receiver.mls.readRecoverySource()
         const own = await group.buildExternalCommit({ rejoining: 0, forgeAs: receiver.did })
         expect(await receiver.mls.validateRecoveryCommit(own.genuine)).toEqual({
-          epoch: source.epoch,
+          epoch: sourceIdentity(source).epoch,
           refusal: 'policy',
           refusalAuthority: 'authenticated-commit',
         })
         for (const bytes of NOT_A_COMMIT)
-          expect(await receiver.mls.validateRecoveryCommit(bytes)).toEqual({ epoch: source.epoch })
-        expect(await receiver.mls.validateRecoveryCommit(forged)).toEqual({ epoch: source.epoch })
+          expect(await receiver.mls.validateRecoveryCommit(bytes)).toEqual({
+            epoch: sourceIdentity(source).epoch,
+          })
+        expect(await receiver.mls.validateRecoveryCommit(forged)).toEqual({
+          epoch: sourceIdentity(source).epoch,
+        })
         expect(await receiver.mls.validateRecoveryCommit(genuine)).toEqual({
-          epoch: source.epoch,
+          epoch: sourceIdentity(source).epoch,
           valid: true,
         })
         expect(await group.readEvidence(0)).toEqual(before)
@@ -393,7 +396,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           advanced: true,
         })
         expect(await receiver.mls.validateRecoveryCommit(genuine)).toEqual({
-          epoch: source.epoch + 1,
+          epoch: sourceIdentity(source).epoch + 1,
         })
       })
     })
@@ -432,8 +435,8 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           validation: 'unavailable',
           applied: false,
           advanced: false,
-          epochBefore: before.epoch,
-          epochAfter: before.epoch,
+          epochBefore: sourceIdentity(before).epoch,
+          epochAfter: sourceIdentity(before).epoch,
         })
         expect(await member.mls.readRecoverySource()).toEqual(before)
         expect(await member.mls.rosterEntries()).toEqual(roster)
@@ -463,7 +466,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         })
         expect(evidence.source.identity?.epoch).toBe(before.source.identity.epoch + 1)
         expect(evidence.source.stateVersion).toBeGreaterThan(before.source.stateVersion)
-        expect(evidence.source.identity?.authenticator).toEqual(source.authenticator)
+        expect(evidence.source.identity?.authenticator).toEqual(
+          sourceIdentity(source).authenticator,
+        )
         expect(evidence.applied).toEqual(before.applied)
         expect(evidence.cursor).toEqual(before.cursor)
         expect(evidence.terminal).toBe(false)
@@ -475,7 +480,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         const bob = memberAt(group.members, 1)
         const carol = memberAt(group.members, 2)
         const before = await bob.mls.readRecoverySource()
-        expect((await alice.mls.readRecoverySource()).authenticator).toEqual(before.authenticator)
+        expect(sourceIdentity(await alice.mls.readRecoverySource()).authenticator).toEqual(
+          sourceIdentity(before).authenticator,
+        )
         const roster = await bob.mls.rosterEntries()
         const ledger = await bob.mls.getLedger()
         const aliceCommit = await group.buildRotation(0)
@@ -494,20 +501,22 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
                 return { mutationID: crypto.randomUUID(), changes: {} }
               },
             }),
-          ).toMatchObject({ applied: true, epochAfter: before.epoch + 1 })
+          ).toMatchObject({ applied: true, epochAfter: sourceIdentity(before).epoch + 1 })
           expect(await member.mls.rosterEntries()).toEqual(roster)
           expect(await member.mls.getLedger()).toEqual(ledger)
         }
         const aliceSource = await alice.mls.readRecoverySource()
         const bobSource = await bob.mls.readRecoverySource()
-        expect(aliceSource.epoch).toBe(bobSource.epoch)
-        expect(aliceSource.authenticator).not.toEqual(bobSource.authenticator)
+        expect(sourceIdentity(aliceSource).epoch).toBe(sourceIdentity(bobSource).epoch)
+        expect(sourceIdentity(aliceSource).authenticator).not.toEqual(
+          sourceIdentity(bobSource).authenticator,
+        )
         const carolSource = await carol.mls.readRecoverySource()
         expect(carolSource).toEqual({ ...bobSource, stateVersion: carolSource.stateVersion })
         expect(stagedAuthenticators).toEqual([
-          aliceSource.authenticator,
-          bobSource.authenticator,
-          bobSource.authenticator,
+          sourceIdentity(aliceSource).authenticator,
+          sourceIdentity(bobSource).authenticator,
+          sourceIdentity(bobSource).authenticator,
         ])
       })
     })
@@ -515,19 +524,21 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
       await withGroup(1, 'recovery-source', async (group) => {
         const member = memberAt(group.members, 0)
         const source = await member.mls.readRecoverySource()
-        expect(source.epoch).toBe(await member.mls.readEpoch())
-        expect(source.authenticator.length).toBeGreaterThan(0)
+        expect(sourceIdentity(source).epoch).toBe(await member.mls.readEpoch())
+        expect(sourceIdentity(source).authenticator.length).toBeGreaterThan(0)
         expect(source.key.incarnation).toBeGreaterThanOrEqual(1)
         expect(source.stateVersion).toBeGreaterThanOrEqual(0)
-        expect(source).not.toHaveProperty('lineage')
-        const original = source.authenticator.slice()
-        source.authenticator.fill(0)
-        expect((await member.mls.readRecoverySource()).authenticator).toEqual(original)
+        expect(Object.keys(source).sort()).toEqual(['identity', 'key', 'stateVersion'])
+        const original = sourceIdentity(source).authenticator.slice()
+        sourceIdentity(source).authenticator.fill(0)
+        expect(sourceIdentity(await member.mls.readRecoverySource()).authenticator).toEqual(
+          original,
+        )
         const commit = await group.buildCommit()
         await member.mls.processCommit(commit.commit, commit.context)
         const next = await member.mls.readRecoverySource()
-        expect(next.epoch).toBe(source.epoch + 1)
-        expect(next.authenticator).not.toEqual(original)
+        expect(sourceIdentity(next).epoch).toBe(sourceIdentity(source).epoch + 1)
+        expect(sourceIdentity(next).authenticator).not.toEqual(original)
       })
     })
     test('adoption factories see the staged epoch and self-removal before saving', async () => {
@@ -1258,8 +1269,10 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
             await adoption
           }
           const source = await reading
-          expect(source.epoch).toBe(pending.epoch)
-          expect(source.authenticator).not.toEqual(before.authenticator)
+          expect(sourceIdentity(source).epoch).toBe(pending.epoch)
+          expect(sourceIdentity(source).authenticator).not.toEqual(
+            sourceIdentity(before).authenticator,
+          )
           expect(source).toEqual(await bob.mls.readRecoverySource())
         })
       })
@@ -1413,8 +1426,8 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
             changes: { deleteRejoin: true },
           }))
           expect(await bob.mls.readEpoch()).toBe(pending.epoch)
-          expect((await bob.mls.readRecoverySource()).authenticator).toEqual(
-            (await alice.mls.readRecoverySource()).authenticator,
+          expect(sourceIdentity(await bob.mls.readRecoverySource()).authenticator).toEqual(
+            sourceIdentity(await alice.mls.readRecoverySource()).authenticator,
           )
         })
       })
@@ -1762,4 +1775,9 @@ export type ConformanceRecoveryContinuationPort<Position extends string = string
     ledger: Array<string>
     mutationID: string
   }): Promise<void>
+}
+
+function sourceIdentity(source: ConformanceAdoptionExpected) {
+  if (source.identity === null) throw new Error('Missing fixture source identity')
+  return source.identity
 }

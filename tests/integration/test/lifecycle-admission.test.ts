@@ -11,6 +11,7 @@ import {
   createMemoryAppOutbox,
   createOperationHost,
   encodeJournal,
+  groupMLSDependencies,
   operationRequest,
   type Protocols,
 } from './app-lane-e2e.js'
@@ -31,7 +32,11 @@ test('real MLS publishes paired snapshots only after an awaited adoption callbac
     },
   })
   const crypto = createGroupCrypto({ access })
-  const mls = createGroupMLS({ access, identity, entrySlot: createLedgerEntrySlot() })
+  const mls = createGroupMLS({
+    ...groupMLSDependencies(access),
+    identity,
+    entrySlot: createLedgerEntrySlot(),
+  })
   const token = await signLedgerEntry(identity, {
     groupID: handle.groupID,
     type: 'note',
@@ -76,7 +81,11 @@ test('accepted adoption entries seal at the matching admission epoch once the de
     },
   })
   const crypto = createGroupCrypto({ access })
-  const mls = createGroupMLS({ access, identity, entrySlot: createLedgerEntrySlot() })
+  const mls = createGroupMLS({
+    ...groupMLSDependencies(access),
+    identity,
+    entrySlot: createLedgerEntrySlot(),
+  })
   const seals: Array<number> = []
   const wrap = crypto.wrap.bind(crypto)
   vi.spyOn(crypto, 'wrap').mockImplementation(async (bytes, opts) => {

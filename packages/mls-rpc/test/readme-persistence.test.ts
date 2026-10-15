@@ -1,11 +1,13 @@
 import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { encodeClientState, type GroupHandle } from '@kumiai/mls'
-import type { AdoptionWrite } from '@kumiai/rpc'
-import { expect, test } from 'vitest'
+import type { AdoptionWrite, GroupMLS } from '@kumiai/rpc'
+import ts from 'typescript'
+import { expect, expectTypeOf, test } from 'vitest'
 
 import { type SimpleHandleAccessParams, simpleHandleAccess } from '../src/access.js'
-import { createGroupMLS } from '../src/mls.js'
+import { createGroupMLS, type GroupMLSDependencies, type GroupMLSParams } from '../src/mls.js'
 import {
   buildRealCommit,
   createRealGroup,
@@ -23,6 +25,101 @@ const accessExamples = [
   ...readme.matchAll(/const access = (simpleHandleAccess\(\{[\s\S]*?^\}\))/gm),
 ].map((match) => match[1])
 if (accessExamples.length === 0) throw new Error('No documented simple access constructors')
+
+const mlsExamples = [...readme.matchAll(/const mls = (createGroupMLS\(\{[\s\S]*?^\}\))/gm)].map(
+  (match) => match[1],
+)
+if (mlsExamples.length === 0) throw new Error('No documented MLS constructors')
+
+test('documented MLS constructors typecheck with the required dependencies', () => {
+  const path = fileURLToPath(new URL('readme-constructors.ts', import.meta.url))
+  const source = `
+    import { createGroupMLS, type GroupMLSParams } from '../src/mls.js'
+    declare const access: GroupMLSParams['access']
+    declare const store: { control: GroupMLSParams['control'] }
+    declare const identity: GroupMLSParams['identity']
+    declare const entrySlot: GroupMLSParams['entrySlot']
+    ${mlsExamples.map((example) => `{ const mls = ${example} }`).join('\n')}
+  `
+  const options: ts.CompilerOptions = {
+    strict: true,
+    noEmit: true,
+    skipLibCheck: true,
+    target: ts.ScriptTarget.ESNext,
+    module: ts.ModuleKind.NodeNext,
+    types: ['node'],
+  }
+  const host = ts.createCompilerHost(options)
+  const getSourceFile = host.getSourceFile.bind(host)
+  host.getSourceFile = (name, languageVersion, onError, shouldCreateNewSourceFile) =>
+    name === path
+      ? ts.createSourceFile(name, source, languageVersion, true)
+      : getSourceFile(name, languageVersion, onError, shouldCreateNewSourceFile)
+  const program = ts.createProgram([path], options, host)
+  expect(
+    ts
+      .getPreEmitDiagnostics(program)
+      .map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')),
+  ).toEqual([])
+})
+
+test.each(mlsExamples)('documented MLS reads the stored identity (example %#)', async (example) => {
+  const group = await createRealGroup(1, 'readme-mls')
+  const member = group.members[0]
+  if (member === undefined) throw new Error('Missing member')
+  const stored = createTransactionalStore(member.handle)
+  const access = simpleHandleAccess({
+    key: stored.control.key,
+    handle: () => member.handle,
+    adopt: (next) => {
+      member.handle = next
+    },
+    stateVersion: () => stored.snapshot().revision,
+  })
+  const mls = runInNewContext(`(${example})`, {
+    createGroupMLS,
+    access,
+    store: { control: stored.control },
+    identity: member.identity,
+    entrySlot: member.slot,
+  }) as GroupMLS
+  expect(await mls.readRecoverySource()).toEqual(
+    await access.readControl(async ({ source }) => source),
+  )
+  const { request } = await mls.createRecoveryRequest('readme-capture')
+  const head = (await stored.control.load()).cursor?.position ?? null
+  expect(await mls.sealGroupInfo(request, head)).toBeInstanceOf(Uint8Array)
+})
+
+test('plain construction requires control and identity source dependencies', () => {
+  expectTypeOf<GroupMLSParams>().toExtend<GroupMLSDependencies>()
+})
+
+test.each([false, true])('ordinary source preserves nullable identity (%s)', async (lost) => {
+  const group = await createRealGroup(1, 'ordinary-source')
+  const member = group.members[0]
+  if (member === undefined) throw new Error('Missing member')
+  const stored = createTransactionalStore(member.handle)
+  const access = simpleHandleAccess({
+    key: stored.control.key,
+    handle: () => member.handle,
+    adopt: (next) => {
+      member.handle = next
+    },
+    stateVersion: () => stored.snapshot().revision,
+  })
+  const dependencies = testGroupMLSDependencies(access, stored.control)
+  const expected = await dependencies.readRecoverySource()
+  if (lost) expected.identity = null
+  const mls = createGroupMLS({
+    ...dependencies,
+    readRecoverySource: async () => expected,
+    identity: member.identity,
+    entrySlot: member.slot,
+  })
+  expect(await mls.readRecoverySource()).toEqual(expected)
+  expect(mls.capturedRecovery).toBeUndefined()
+})
 
 test.each(accessExamples)(
   'documented simple access uses the stored key (example %#)',

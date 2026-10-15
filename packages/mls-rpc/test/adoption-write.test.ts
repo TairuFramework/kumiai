@@ -91,21 +91,23 @@ test.each(['mutate', 'replace'] as const)(
       entrySlot: member.slot,
     })
     const source = await mls.readRecoverySource()
+    if (source.identity === null) throw new Error('Missing source identity')
     expect(source.key).toEqual({ groupID: 'group-A', incarnation: 7 })
     expect(source.stateVersion).toBe(await db.loadVersion('group-A'))
     expect(source.identity).toEqual({
       ...source.key,
-      epoch: source.epoch,
-      authenticator: source.authenticator,
+      epoch: Number(member.handle.epoch),
+      authenticator: member.handle.state.keySchedule.epochAuthenticator,
     })
-    expect(source.authenticator).toEqual(member.handle.state.keySchedule.epochAuthenticator)
+    expect(source.identity.authenticator).toEqual(
+      member.handle.state.keySchedule.epochAuthenticator,
+    )
     expect(source).not.toHaveProperty('lineage')
     key.incarnation = 8
     source.key.incarnation = 9
-    source.authenticator.fill(0)
-    source.identity?.authenticator.fill(0)
+    source.identity.authenticator.fill(0)
     expect((await mls.readRecoverySource()).key.incarnation).toBe(7)
-    expect((await mls.readRecoverySource()).authenticator).toEqual(
+    expect((await mls.readRecoverySource()).identity?.authenticator).toEqual(
       member.handle.state.keySchedule.epochAuthenticator,
     )
     await access.readControl(async (scope) => {

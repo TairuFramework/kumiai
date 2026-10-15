@@ -122,6 +122,8 @@ export async function createCodecReopenFixture(id: string): Promise<{
       (await createGroupCrypto({ access }).sealEntries(new TextEncoder().encode('[]'))).sealed,
     ),
   )
+  const legacySource = await requester.readRecoverySource()
+  if (legacySource.identity === null) throw new Error('Missing source identity')
   const record: LegacyRejoinRecord = {
     id: 'rejoin-1',
     stage: 'built',
@@ -133,7 +135,12 @@ export async function createCodecReopenFixture(id: string): Promise<{
     request,
     requestKey,
     candidate: pending.serialize(),
-    source: { ...(await requester.readRecoverySource()), head: null },
+    source: {
+      ...legacySource,
+      epoch: legacySource.identity.epoch,
+      authenticator: legacySource.identity.authenticator.slice(),
+      head: null,
+    },
     digest,
     epochAfter: pending.epoch,
     ledgerBefore: source.ledgerTokens,

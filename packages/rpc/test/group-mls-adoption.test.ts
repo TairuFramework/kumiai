@@ -21,6 +21,7 @@ test.each([false, true])(
     await bob.persistInitialState()
     await bob.persistInitialState()
     const source = await bob.readRecoverySource()
+    if (source.identity === null) throw new Error('Missing source identity')
 
     const before = bob.serializeState()
     const ownCommit = bob.buildCommit()
@@ -64,6 +65,7 @@ test('own rotation identity survives installation and idempotent replay after re
   const bob = createMemoryGroupMLS(options)
   await bob.persistInitialState()
   const source = await bob.readRecoverySource()
+  if (source.identity === null) throw new Error('Missing source identity')
 
   const before = bob.serializeState()
   bob.adopt(bob.buildCommit())
@@ -78,7 +80,7 @@ test('own rotation identity survives installation and idempotent replay after re
       deleteOperations: ['rotation'],
       putApplied: [
         {
-          epoch: source.epoch,
+          epoch: source.identity.epoch,
           digest: 'own',
           payloadDigest: 'payload',
           sequenceID: '001',
@@ -202,6 +204,7 @@ async function saveCandidate(
   before: Uint8Array,
   candidate: Uint8Array,
 ) {
+  if (source.identity === null) throw new Error('Missing source identity')
   const op: Operation & { stage: 'intent' } = {
     id: 'rotation',
     kind: 'rotation',
@@ -216,8 +219,8 @@ async function saveCandidate(
   const slot: ControlSlot = {
     opID: op.id,
     incarnation: 1,
-    epoch: source.epoch,
-    authenticatorBefore: source.authenticator,
+    epoch: source.identity.epoch,
+    authenticatorBefore: source.identity.authenticator,
     searchFrom: null,
     expectedHead: null,
     publishID: 'own',

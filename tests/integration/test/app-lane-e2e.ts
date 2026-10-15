@@ -30,6 +30,7 @@ import {
   createGroupMLS,
   createLedgerEntrySlot,
   deriveRecoverySecret,
+  type GroupMLSDependencies,
   type GroupMLSParams,
   type HandleAccess,
   type LedgerEntrySlot,
@@ -676,6 +677,14 @@ export function newIdentity(): OwnIdentity {
 
 const operationStores = new WeakMap<HandleAccess, StateStore>()
 
+export function groupMLSDependencies(
+  access: HandleAccess,
+): GroupMLSDependencies & { access: HandleAccess } {
+  const store = operationStores.get(access)
+  if (store === undefined) throw new Error('Missing durable control store')
+  return { ...testGroupMLSDependencies(access, store.control), access }
+}
+
 export async function createDurableHandleAccess(
   params: Pick<Parameters<typeof simpleHandleAccess>[0], 'handle' | 'adopt'>,
 ): Promise<HandleAccess> {
@@ -951,9 +960,10 @@ export async function runRealCommitOnceScenario(
                 ),
               })
               const source = await member.mls.readRecoverySource()
+              if (source.identity === null) return false
               return (
                 result.applied &&
-                source.authenticator.every(
+                source.identity.authenticator.every(
                   (byte, index) =>
                     byte === receiver.handle.state.keySchedule.epochAuthenticator[index],
                 )

@@ -418,19 +418,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       bobsGuesses.add(protocolTopic(bobSecretAsMember, epoch, 'chat'))
     }
     // ...nor the lifelong recovery secret, which really is his for life.
-    const recovery = await (async () => {
-      const { createGroupMLS, simpleHandleAccess } = await import('@kumiai/mls-rpc')
-      return await createGroupMLS({
-        access: simpleHandleAccess({
-          key: { groupID: bob.handle().groupID, incarnation: 1 },
-          stateVersion: () => 0,
-          handle: () => bob.handle(),
-          adopt: () => {},
-        }),
-        identity: bobID,
-        entrySlot: bobSlot,
-      }).exportRecoverySecret()
-    })()
+    const recovery = await bob.mls.exportRecoverySecret()
     for (let epoch = 0; epoch <= 8; epoch++) {
       bobsGuesses.add(protocolTopic(recovery, epoch, 'chat'))
     }

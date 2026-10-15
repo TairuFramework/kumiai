@@ -21,6 +21,7 @@ test.each(['key', 'epoch', 'position', 'payload'] as const)(
       members: ['alice', 'bob', 'carol'],
     })
     const source = await mls.readRecoverySource()
+    if (source.identity === null) throw new Error('Missing source identity')
     const winner = await publishCommit({ hub, senderDID: 'carol', recoverySecret: rs, epoch: 1 })
     const loser = await publishCommit({
       hub,
@@ -60,7 +61,11 @@ test.each(['key', 'epoch', 'position', 'payload'] as const)(
       if (row === undefined) throw new Error('missing loser')
       const range: CertifiedControlRange = {
         key: source.key,
-        source: { ...source.key, epoch: source.epoch, authenticator: source.authenticator },
+        source: {
+          ...source.key,
+          epoch: source.identity.epoch,
+          authenticator: source.identity.authenticator,
+        },
         from: null,
         through: asLogPosition(loser.sequenceID),
         winner: {

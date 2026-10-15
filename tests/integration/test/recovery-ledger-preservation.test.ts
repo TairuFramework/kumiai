@@ -30,6 +30,7 @@ import {
   createMemoryAppCursorStore,
   createMemoryAppOutbox,
   createOperationHost,
+  groupMLSDependencies,
   type Protocols,
 } from './app-lane-e2e.js'
 import { drainUntil } from './fixtures/drain.js'
@@ -100,7 +101,12 @@ async function setup(
       bobGroup = next
     },
   })
-  const mls = createGroupMLS({ access, identity: bob, entrySlot: slot, recoveryBinding: host })
+  const mls = createGroupMLS({
+    ...groupMLSDependencies(access),
+    identity: bob,
+    entrySlot: slot,
+    recoveryBinding: host,
+  })
   const aliceAccess = await createDurableHandleAccess({
     handle: () => aliceGroup,
     adopt: (next) => {
@@ -108,7 +114,7 @@ async function setup(
     },
   })
   const responder = createGroupMLS({
-    access: aliceAccess,
+    ...groupMLSDependencies(aliceAccess),
     identity: alice,
     entrySlot: createLedgerEntrySlot(),
   })
