@@ -6,7 +6,7 @@ import {
   publicMembershipFacts,
   signLedgerEntry,
 } from '@kumiai/mls'
-import { forkEventID, recoveryUnavailableEventID } from '@kumiai/rpc'
+import { forkEventID, recoveryUnavailableEventID, type SafetyHold } from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
 import {
@@ -16,6 +16,7 @@ import {
 } from '../src/entry-capability.js'
 import { createGroupHandleRegistry } from '../src/index.js'
 import type { GroupKey, GroupStores, MemoryTransaction } from '../src/persistence-types.js'
+import { registryConsumers } from '../src/registry/consumers.js'
 import * as registryRuntime from '../src/registry/runtime.js'
 import { createRegistryRuntime } from '../src/registry/runtime.js'
 import { publicRuntimeFacts } from '../src/registry/runtime-facts.js'
@@ -71,6 +72,42 @@ for (const mode of ['real-mls', 'double'] as const) {
     const groupID = `runtime-${mode}`
     const key = { groupID, incarnation: 1 }
     const create = () => createRegistryFixture({ mode, groupID, setup: 'seeded' })
+
+    test('saved safety pushes before host runtime notifications after release', async () => {
+      const fixture = await create()
+      try {
+        const owner = registry(fixture)
+        const access = await owner.access(groupID)
+        const consumers = registryConsumers({ registry: owner, persistence: fixture.device.groups })
+        const pushed: Array<SafetyHold> = []
+        consumers.onSafetyHold(key, (reason) => pushed.push(reason))
+        const roots: Array<Promise<unknown>> = []
+        const observed: Array<Array<SafetyHold>> = []
+        access.runtime.onEpochChanged(() => {
+          observed.push([...pushed])
+          roots.push(fixture.device.groups.load(groupID))
+        })
+        await fixture.installRows({
+          key,
+          control: {
+            recoveryUnavailable: {
+              ...key,
+              id: recoveryUnavailableEventID(key),
+              kind: 'group:recovery-unavailable',
+              reason: 'trust-unreadable',
+            },
+          },
+        })
+        expect(pushed).toEqual(['recovery-unavailable'])
+        expect(observed).toEqual([['recovery-unavailable']])
+        await Promise.all(roots)
+        const late: Array<SafetyHold> = []
+        consumers.onSafetyHold(key, (reason) => late.push(reason))
+        expect(late).toEqual(['recovery-unavailable'])
+      } finally {
+        await fixture.close()
+      }
+    })
 
     test('public facts match real and model handles without restoration', async () => {
       const fixture = await create()

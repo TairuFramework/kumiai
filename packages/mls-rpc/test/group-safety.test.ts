@@ -20,6 +20,7 @@ import {
   RegistryRetiringError,
 } from '../src/persistence-errors.js'
 import type { GroupKey } from '../src/persistence-types.js'
+import { registryConsumers } from '../src/registry/consumers.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { deferred } from '../src/runtime.js'
 import {
@@ -611,17 +612,29 @@ for (const mode of ['real-mls', 'double'] as const) {
       const fresh = await create()
       try {
         const access = await fresh.registry.access(groupID)
+        const consumers = registryConsumers({
+          registry: fresh.registry,
+          persistence: fresh.device.groups,
+        })
+        const pushed: Array<string> = []
+        const nextPushed: Array<string> = []
+        consumers.onSafetyHold(key, (reason) => pushed.push(reason))
+        consumers.onSafetyHold({ ...key, incarnation: 2 }, (reason) => nextPushed.push(reason))
         const api = await safety(fresh)
         fresh.armNextWorkFault('before-commit')
         await expect(
           api.reportFork(key, await authenticatorEvidence(fresh, key)),
         ).rejects.toBeDefined()
+        expect(pushed).toEqual(['fork-halted'])
         await (await move(fresh, key, 2))()
         expect(access.runtime.snapshot()).toBeNull()
         expect(access.admission).toThrow(
           new DisplacedGroupHandleError('Registry owner is no longer current'),
         )
         expect((await fresh.registry.access(groupID)).admission().admissible).toBe(true)
+        expect(nextPushed).toEqual([])
+        expect(consumers.safetyHold({ ...key, incarnation: 2 })).toBeNull()
+        expect(consumers.safetyHold(key)).toBe('fork-halted')
         expect(await api.epochAuthenticator(key)).toBeNull()
       } finally {
         await fresh.close()
@@ -637,6 +650,17 @@ for (const mode of ['real-mls', 'double'] as const) {
       })
       try {
         const params = await registryFixtureSafetyParams(fixture)
+        expect(() => registryConsumers({ ...params, registry: { ...params.registry } })).toThrow(
+          TypeError,
+        )
+        expect(() => registryConsumers({ ...params, persistence: foreign.device.groups })).toThrow(
+          TypeError,
+        )
+        expect(() =>
+          registryConsumers({ ...params, persistence: { ...params.persistence } }),
+        ).toThrow(TypeError)
+        const consumers = registryConsumers(params)
+        expect(consumers.safetyHold(key)).toBeNull()
         expect(() => createGroupSafety({ ...params, registry: { ...params.registry } })).toThrow(
           TypeError,
         )

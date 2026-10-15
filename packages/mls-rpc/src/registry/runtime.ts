@@ -1,4 +1,40 @@
+import type { SafetyHold } from '@kumiai/rpc'
+
 import type { GroupEpochRuntime, GroupRuntimeSnapshot } from './types.js'
+
+export function createRegistrySafetyLatch() {
+  let reason: SafetyHold = null
+  const sinks = new Set<(reason: NonNullable<SafetyHold>) => void>()
+  function supply(sink: (reason: NonNullable<SafetyHold>) => void): void {
+    if (reason === null) return
+    try {
+      sink(reason)
+    } catch {
+      // A broken core sink cannot change storage outcomes or suppress other sinks.
+    }
+  }
+  return {
+    held: (): SafetyHold => reason,
+    latch(next: NonNullable<SafetyHold>): void {
+      if (reason === 'fork-halted' || reason === next) return
+      reason = next
+      for (const sink of [...sinks]) {
+        if (sinks.has(sink)) supply(sink)
+      }
+    },
+    subscribe(sink: (reason: NonNullable<SafetyHold>) => void): () => void {
+      const registered = (value: NonNullable<SafetyHold>) => sink(value)
+      sinks.add(registered)
+      supply(registered)
+      return () => {
+        sinks.delete(registered)
+      }
+    },
+    dispose(): void {
+      sinks.clear()
+    },
+  }
+}
 
 export function copyRuntimeSnapshot(value: GroupRuntimeSnapshot): GroupRuntimeSnapshot {
   return { ...value, authenticator: value.authenticator.slice(), members: new Set(value.members) }

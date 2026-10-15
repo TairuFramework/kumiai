@@ -398,6 +398,10 @@ for (const mode of ['real-mls', 'double'] as const) {
           const hook = vi.fn(async () => {})
           access.onRetire(hook)
           const api = await registryFixtureSafety(fixture)
+          const pushed: Array<SafetyHold> = []
+          const unsubscribe = registrySafety(owner)?.onSafetyHold(key, (reason) =>
+            pushed.push(reason),
+          )
           fixture.armNextWorkFault('before-commit')
           await expect(
             api.reportFork(key, {
@@ -407,6 +411,8 @@ for (const mode of ['real-mls', 'double'] as const) {
               digest: 'fork',
             }),
           ).rejects.toThrow()
+          expect(pushed).toEqual(['fork-halted'])
+          unsubscribe?.()
           expect((await fixture.device.groups.ports(key).control.load()).forkHalt).toBeNull()
           expect(access.admission()).toMatchObject({ admissible: false, reason: 'fork-halted' })
           const before = await fixture.inspectRows()

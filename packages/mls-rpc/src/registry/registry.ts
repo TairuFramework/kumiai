@@ -23,7 +23,7 @@ import {
   createRegistryRetirement,
   type RetirementSlot,
 } from './retirement.js'
-import { createRegistryRuntime } from './runtime.js'
+import { createRegistryRuntime, createRegistrySafetyLatch } from './runtime.js'
 import { accountedRuntime } from './runtime-facts.js'
 import {
   bindRegistrySafety,
@@ -71,12 +71,22 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     restore: params.restore,
   }
   const slots = new Map<string, GroupSlot>()
-  const latches = new Map<string, NonNullable<SafetyHold>>()
+  const latches = new Map<string, ReturnType<typeof createRegistrySafetyLatch>>()
   const keyID = (key: GroupKey) => JSON.stringify([key.groupID, key.incarnation])
-  const held = (key: GroupKey): SafetyHold => latches.get(keyID(key)) ?? null
+  const held = (key: GroupKey): SafetyHold => latches.get(keyID(key))?.held() ?? null
+  function safetyLatch(key: GroupKey) {
+    const id = keyID(key)
+    let value = latches.get(id)
+    if (value === undefined) {
+      value = createRegistrySafetyLatch()
+      latches.set(id, value)
+    }
+    return value
+  }
   function latch(key: GroupKey, reason: NonNullable<SafetyHold>): void {
+    if (disposed) return
     groupSlot(key.groupID)
-    if (held(key) !== 'fork-halted') latches.set(keyID(key), reason)
+    safetyLatch(key).latch(reason)
   }
   const persistTrustUnavailable = trustUnavailableWriter({ entry: capability, latch })
   async function diagnoseFailure(error: unknown): Promise<void> {
@@ -121,6 +131,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   const observers = new Set<() => void>()
   const inflight = new Set<Promise<unknown>>()
   let closing = false
+  let disposed = false
   let disposal: Promise<void> | null = null
   let starting: Promise<void> | null = null
   let started = false
@@ -442,8 +453,10 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
             'Registry disposal failed',
           )
       } finally {
+        disposed = true
         for (const unsubscribe of observers) unsubscribe()
         observers.clear()
+        for (const value of latches.values()) value.dispose()
         for (const slot of slots.values()) {
           const previous = slot.owner
           invalidate(slot)
@@ -566,6 +579,30 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     latch,
     held,
     persistTrustUnavailable,
+    safetyHold: held,
+    onSafetyHold(key, sink) {
+      assertOpen()
+      groupSlot(key.groupID)
+      return safetyLatch(key).subscribe(sink)
+    },
+    onRetire(requestedKey, hook) {
+      assertOpen()
+      const key = { ...requestedKey }
+      retirement.assertAvailable(key.groupID)
+      const slot = groupSlot(key.groupID)
+      const current = slot.owner?.key ?? slot.hooks?.key
+      if (current !== undefined && current.incarnation !== key.incarnation)
+        throw new DisplacedGroupHandleError(
+          'Retirement subscription belongs to another incarnation',
+        )
+      slot.hooks ??= { key, callbacks: new Set() }
+      const hooks = slot.hooks.callbacks
+      const registered = () => hook()
+      hooks.add(registered)
+      return () => {
+        hooks.delete(registered)
+      }
+    },
   })
   bindRegistryRetirement(registry, retirement)
   liveRegistries.set(binding, registry)

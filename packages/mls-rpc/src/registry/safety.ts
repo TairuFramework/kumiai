@@ -9,10 +9,11 @@ import type { EntryCapability, EntryReads } from '../entry-capability.js'
 import { isStoredOpenFailure } from '../persistence-codec.js'
 import { GroupStateConflictError, GroupUnavailableError } from '../persistence-errors.js'
 import type { GroupKey, GroupRecoveryTrust, GroupTransaction } from '../persistence-types.js'
+import type { RegistryConsumers } from './consumers.js'
 import { assertRecoverySourceTrust } from './source-trust.js'
 import type { GroupHandleRegistry } from './types.js'
 
-export type RegistrySafetyCapability<TTx extends GroupTransaction> = {
+export type RegistrySafetyCapability<TTx extends GroupTransaction> = RegistryConsumers & {
   binding: object
   entry: EntryCapability<TTx>
   latch(key: GroupKey, reason: NonNullable<SafetyHold>): void
