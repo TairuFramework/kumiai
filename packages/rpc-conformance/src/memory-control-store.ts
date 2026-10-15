@@ -376,7 +376,14 @@ function mutateControl<Position extends string>(
   upsertRows(snapshot.outcomes, owned.putOutcomes, (row) => row.id)
   upsertRows(snapshot.welcomes, owned.putWelcomes, (row) => row.opID)
   upsertRows(snapshot.applied, owned.putApplied, (row) => row.epoch)
-  upsertRows(snapshot.responses, owned.putResponses, (row) => row.position)
+  for (const response of owned.putResponses ?? []) {
+    const index = snapshot.responses.findIndex(
+      (row) => row.position === response.position && row.digest === response.digest,
+    )
+    if (index >= 0) snapshot.responses[index] = response
+    else if (snapshot.responses.filter((row) => row.position === response.position).length < 64)
+      snapshot.responses.push(response)
+  }
   if (owned.putRejoin !== undefined) snapshot.rejoin = owned.putRejoin
   if (owned.commitOnce !== undefined) snapshot.commitOnce = owned.commitOnce
   snapshot.commitOnceAcceptance = proof

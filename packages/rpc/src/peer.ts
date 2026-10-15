@@ -1233,7 +1233,8 @@ export function createGroupPeerWithControlWalk<
         (rejoinPosition != null && request.position >= rejoinPosition) ||
         (pendingRecovery != null && request.position >= pendingRecovery.position)
       if (blocked()) return
-      let record = commitOutcomes.get(request.position)
+      const responseKey = JSON.stringify([request.position, request.commitDigest])
+      let record = commitOutcomes.get(responseKey)
       if (record == null) {
         await ready
         if (disposed || safetyHold() !== null) return
@@ -1243,7 +1244,7 @@ export function createGroupPeerWithControlWalk<
           await reconcileCommits()
         })
         if (disposed || blocked()) return
-        record = commitOutcomes.get(request.position)
+        record = commitOutcomes.get(responseKey)
       }
       if (record == null || record.digest !== request.commitDigest) return
       if (
@@ -1291,7 +1292,7 @@ export function createGroupPeerWithControlWalk<
       if (disposed || blocked() || expiresAt <= Date.now()) return
       const response = record
       const confirmable = async () => {
-        const current = commitOutcomes.get(request.position)
+        const current = commitOutcomes.get(responseKey)
         if (
           blocked() ||
           current == null ||
@@ -1773,16 +1774,6 @@ export function createGroupPeerWithControlWalk<
         const commitDigest = digestAppliedCommit(commitFrame.commit)
         if (pendingRecovery?.position === position && pendingRecovery.commitDigest === commitDigest)
           return advancedEpoch
-        const recorded = commitOutcomes.get(position)
-        // A hub-assigned position cannot transfer an authenticated outcome to another commit.
-        if (
-          recorded != null &&
-          recorded.digest !== commitDigest &&
-          (recorded.kind === 'applied' || recorded.refusalAuthority === 'authenticated-commit')
-        ) {
-          await saveCommitCursor(position)
-          continue
-        }
         // The commit's OWN epoch and committer, from the commit's own bytes. Never
         // `message.senderDID` — the hub's word about who handed it over, and the hub is not
         // trusted: it could stamp every recipient's own DID onto one poison frame and make the
@@ -2374,7 +2365,8 @@ export function createGroupPeerWithControlWalk<
     appliedByEpoch.clear()
     for (const [epoch, row] of appliedRows(snapshot)) appliedByEpoch.set(epoch, row)
     commitOutcomes.clear()
-    for (const response of snapshot.responses) commitOutcomes.set(response.position, response)
+    for (const response of snapshot.responses)
+      commitOutcomes.set(JSON.stringify([response.position, response.digest]), response)
     const cursor = snapshot.cursor
     durableCursor = cursor
     durableStrand = snapshot.strand

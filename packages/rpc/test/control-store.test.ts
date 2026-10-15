@@ -217,6 +217,7 @@ describe('control changes', () => {
       { opID: 'old', welcome: new Uint8Array([2]), recipients: ['alice'] },
     ])
     expect(result.responses).toEqual([
+      { position: asLogPosition('002'), epoch: 5, digest: 'old', kind: 'superseded' },
       { position: asLogPosition('002'), epoch: 5, digest: 'new', kind: 'applied', epochAfter: 6 },
     ])
     expect(result.cursor).toEqual(snapshot.cursor)

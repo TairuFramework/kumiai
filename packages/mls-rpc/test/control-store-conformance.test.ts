@@ -1,5 +1,6 @@
 import {
   type AdoptionWrite,
+  asLogPosition,
   type CommitOnceWriteContext,
   type ControlChanges,
   type ControlSlot,
@@ -249,7 +250,14 @@ test.each([undefined, 9])(
         ledgerBefore: ['owed'],
         conflictEpoch: 3,
       }
-      await control.apply({ putRejoin: rejoin }, 'legacy-record')
+      const response = {
+        position: asLogPosition('legacy-position'),
+        digest: 'legacy-digest',
+        epoch: 3,
+        kind: 'refused' as const,
+        reason: 'policy' as const,
+      }
+      await control.apply({ putRejoin: rejoin, putResponses: [response] }, 'legacy-record')
       const location = (await fixture.inspectRawBytes()).find(
         (row) => row.namespace === 'control' && row.groupID === key.groupID,
       )
@@ -277,11 +285,24 @@ test.each([undefined, 9])(
       const loaded = await reopened.device.groups.ports(key).control.load()
       expect(loaded).toEqual({ ...legacy, recoveryEpochFloor: floor ?? null, settledRejoins: [] })
       expect(loaded.rejoin).toEqual(rejoin)
+      expect(loaded.responses).toEqual([response])
       expect(await fixture.inspectRawBytes()).toEqual(raw)
       await reopened.device.groups.ports(key).control.apply({ deleteRejoin: true }, 'clear-legacy')
       expect((await reopened.device.groups.ports(key).control.load()).recoveryEpochFloor).toBe(
         floor ?? null,
       )
+      await reopened.device.groups.ports(key).control.apply(
+        {
+          putResponses: [
+            { ...response, digest: 'another-digest', refusalAuthority: 'authenticated-commit' },
+          ],
+        },
+        'add-response-tuple',
+      )
+      expect((await reopened.device.groups.ports(key).control.load()).responses).toEqual([
+        response,
+        { ...response, digest: 'another-digest', refusalAuthority: 'authenticated-commit' },
+      ])
     } finally {
       await fixture.close()
     }

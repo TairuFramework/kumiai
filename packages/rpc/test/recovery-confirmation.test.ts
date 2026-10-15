@@ -20,6 +20,137 @@ import { makeMLSPeer } from './fixtures/peer.js'
 describe('recovery ordering', { concurrent: false }, () => {
   afterEach(() => vi.useRealTimers())
 
+  test.each([
+    ['refused', false],
+    ['refused', true],
+    ['applied', false],
+    ['applied', true],
+  ] as const)(
+    '%s copy at a reused position permits a later applicable commit (restart %s)',
+    async (firstKind, restart) => {
+      const hub = new FakeHub()
+      const other = new FakeHub()
+      const secret = new Uint8Array(32).fill(0x65)
+      const wantedEpoch = firstKind === 'refused' ? 1 : 2
+      const { sequenceID: position } = await publishCommit({
+        hub,
+        senderDID: 'bob',
+        recoverySecret: secret,
+        epoch: wantedEpoch,
+        external: true,
+      })
+      await publishCommit({
+        hub: other,
+        senderDID: 'carol',
+        recoverySecret: secret,
+        epoch: 1,
+        external: true,
+      })
+      const target = hub.published[0]
+      const copy = other.published[0]
+      if (target == null || copy == null) throw new Error('Missing commits')
+      const digest = publishedCommitDigest(hub, position)
+      let deliverGenuine = false
+      const fetch = hub.fetchTopic.bind(hub)
+      vi.spyOn(hub, 'fetchTopic').mockImplementation(async (params) => {
+        if (params.topicID !== commitTopic(secret)) return fetch(params)
+        return {
+          messages: [
+            { ...(deliverGenuine ? target : copy), sequenceID: position, logPosition: position },
+          ],
+          head: position,
+          oldest: position,
+          gap: false,
+        }
+      })
+      const options = {
+        members: ['alice', 'bob', 'carol'],
+        acceptsCommitter: (did: string) => firstKind === 'applied' || did !== 'carol',
+        recovery: { timeoutMs: 100, deadlineMs: 1000, getDelayMs: () => 50 },
+      }
+      let alice = makeMLSPeer(hub, 'alice', secret, options)
+      try {
+        await alice.peer.replay()
+        const original = (await alice.control.load()).responses[0]
+        expect(original).toMatchObject({ position, kind: firstKind })
+        expect(alice.mls.epoch()).toBe(wantedEpoch)
+        if (restart) {
+          await alice.peer.dispose()
+          await alice.peer.drained()
+          alice = makeMLSPeer(hub, 'alice', secret, { ...options, restartOf: alice })
+          await alice.peer.replay()
+          expect((await alice.control.load()).responses).toContainEqual(original)
+        }
+        const process = vi.spyOn(alice.mls, 'processCommit')
+        deliverGenuine = true
+        vi.useFakeTimers()
+        await hub.publish({
+          topicID: commitTopic(secret),
+          senderDID: 'relay',
+          payload: new Uint8Array([0]),
+        })
+        await vi.advanceTimersByTimeAsync(0)
+        await alice.peer.ack('refresh')
+        expect(process).toHaveBeenCalled()
+        expect(alice.mls.epoch()).toBe(wantedEpoch + 1)
+        const responses = (await alice.control.load()).responses
+        expect(responses).toContainEqual(original)
+        expect(responses).toContainEqual({
+          position,
+          digest,
+          epoch: wantedEpoch,
+          kind: 'applied',
+          epochAfter: wantedEpoch + 1,
+        })
+        if (firstKind === 'refused' && original != null) {
+          const bob = createMemoryGroupMLS({ members: options.members, localDID: 'bob' })
+          const requestID = 'preserved-copy-refusal'
+          const { request, requestKey } = await bob.createRecoveryRequest(requestID)
+          await hub.publish({
+            topicID: rendezvousTopic(secret),
+            senderDID: 'bob',
+            retain: 'mailbox',
+            payload: encodeHandshakeFrame(
+              HANDSHAKE_KIND.recoveryConfirmRequest,
+              encodeRecoveryConfirmRequest({
+                requestID,
+                request,
+                position,
+                commitDigest: original.digest,
+              }),
+            ),
+          })
+          await vi.advanceTimersByTimeAsync(50)
+          const verdicts = hub.published.filter(
+            (row) =>
+              row.topicID === rendezvousTopic(secret) &&
+              decodeHandshakeFrame(row.payload).kind === HANDSHAKE_KIND.recoveryVerdict,
+          )
+          expect(verdicts).toHaveLength(1)
+          const verdict = verdicts[0]
+          if (verdict == null) throw new Error('Missing refusal')
+          expect(
+            (
+              await bob.openRecoveryVerdict(
+                decodeRecoveryVerdict(decodeHandshakeFrame(verdict.payload).payload).sealed,
+                requestID,
+                requestKey,
+              )
+            )?.verdict,
+          ).toMatchObject({
+            verdict: 'refused',
+            commitDigest: original.digest,
+            refusalAuthority: 'authenticated-commit',
+          })
+        }
+      } finally {
+        await alice.peer.dispose()
+        await alice.peer.drained()
+        vi.restoreAllMocks()
+      }
+    },
+  )
+
   test('a conflicting commit copy cannot replace an authenticated refusal across responder restart', async () => {
     const hub = new FakeHub()
     const secret = new Uint8Array(32).fill(0x64)
@@ -98,7 +229,10 @@ describe('recovery ordering', { concurrent: false }, () => {
       await vi.advanceTimersByTimeAsync(0)
       await alice.peer.ack('refresh')
       expect(replayCopy).toBe(false)
-      expect((await alice.control.load()).responses).toEqual([original])
+      const responses = (await alice.control.load()).responses
+      expect(responses).toHaveLength(2)
+      expect(responses).toContainEqual(original)
+      expect(responses).toContainEqual({ ...original, digest: copiedDigest })
       await vi.advanceTimersByTimeAsync(50)
       const verdicts = () =>
         hub.published.filter(
@@ -111,7 +245,7 @@ describe('recovery ordering', { concurrent: false }, () => {
       await alice.peer.drained()
       alice = makeMLSPeer(hub, 'alice', secret, { ...options, restartOf: alice })
       await alice.peer.replay()
-      expect((await alice.control.load()).responses).toEqual([original])
+      expect((await alice.control.load()).responses).toEqual(responses)
       await ask(digest)
       await vi.advanceTimersByTimeAsync(50)
       expect(verdicts()).toHaveLength(2)
@@ -132,7 +266,131 @@ describe('recovery ordering', { concurrent: false }, () => {
       }
       await ask(copiedDigest)
       await vi.advanceTimersByTimeAsync(100)
-      expect(verdicts()).toHaveLength(2)
+      expect(verdicts()).toHaveLength(3)
+      const copiedVerdict = verdicts()[2]
+      if (copiedVerdict == null) throw new Error('Missing copied-commit refusal')
+      expect(
+        (
+          await bob.openRecoveryVerdict(
+            decodeRecoveryVerdict(decodeHandshakeFrame(copiedVerdict.payload).payload).sealed,
+            requestID,
+            requestKey,
+          )
+        )?.verdict,
+      ).toMatchObject({
+        verdict: 'refused',
+        commitDigest: copiedDigest,
+        refusalAuthority: 'authenticated-commit',
+      })
+      await ask('unseen-digest')
+      await vi.advanceTimersByTimeAsync(100)
+      expect(verdicts()).toHaveLength(3)
+    } finally {
+      await alice.peer.dispose()
+      await alice.peer.drained()
+      vi.restoreAllMocks()
+    }
+  })
+
+  test('response saturation preserves an outstanding refusal and permits commit intake', async () => {
+    const hub = new FakeHub()
+    const secret = new Uint8Array(32).fill(0x66)
+    const { sequenceID: position } = await publishCommit({
+      hub,
+      senderDID: 'bob',
+      recoverySecret: secret,
+      epoch: 1,
+      external: true,
+    })
+    const genuine = hub.published[0]
+    if (genuine == null) throw new Error('Missing genuine commit')
+    const fetch = hub.fetchTopic.bind(hub)
+    let deliver = false
+    vi.spyOn(hub, 'fetchTopic').mockImplementation(async (params) => {
+      if (params.topicID !== commitTopic(secret)) return fetch(params)
+      return { messages: deliver ? [genuine] : [], head: null, oldest: null, gap: false }
+    })
+    const alice = makeMLSPeer(hub, 'alice', secret, {
+      members: ['alice', 'bob'],
+      recovery: { timeoutMs: 100, deadlineMs: 1000, getDelayMs: () => 50 },
+    })
+    try {
+      await alice.peer.replay()
+      const original = {
+        position: asLogPosition(position),
+        epoch: 1,
+        digest: 'retained-refusal',
+        kind: 'refused' as const,
+        reason: 'policy' as const,
+        refusalAuthority: 'authenticated-commit' as const,
+      }
+      await alice.control.apply({ putResponses: [original] }, 'refusal')
+      await alice.peer.ack('refresh')
+      const bob = createMemoryGroupMLS({ members: ['alice', 'bob'], localDID: 'bob' })
+      const requestID = 'saturated-response'
+      const { request, requestKey } = await bob.createRecoveryRequest(requestID)
+      vi.useFakeTimers()
+      const seal = vi.spyOn(alice.mls, 'sealRecoveryVerdict')
+      await hub.publish({
+        topicID: rendezvousTopic(secret),
+        senderDID: 'bob',
+        retain: 'mailbox',
+        payload: encodeHandshakeFrame(
+          HANDSHAKE_KIND.recoveryConfirmRequest,
+          encodeRecoveryConfirmRequest({
+            requestID,
+            request,
+            position,
+            commitDigest: original.digest,
+          }),
+        ),
+      })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(seal).toHaveBeenCalledOnce()
+      await alice.control.apply(
+        {
+          putResponses: Array.from({ length: 128 }, (_, index) => ({
+            ...original,
+            digest: `copy-${index}`,
+          })),
+        },
+        'flood',
+      )
+      deliver = true
+      await hub.publish({
+        topicID: commitTopic(secret),
+        senderDID: 'relay',
+        payload: new Uint8Array([0]),
+      })
+      await vi.advanceTimersByTimeAsync(0)
+      await alice.peer.ack('refresh')
+      expect(alice.mls.epoch()).toBe(2)
+      const rows = (await alice.control.load()).responses
+      expect(rows).toHaveLength(64)
+      expect(rows).toContainEqual(original)
+      expect(rows.some((row) => row.digest === publishedCommitDigest(hub, position))).toBe(false)
+      await vi.advanceTimersByTimeAsync(50)
+      const verdicts = hub.published.filter(
+        (row) =>
+          row.topicID === rendezvousTopic(secret) &&
+          decodeHandshakeFrame(row.payload).kind === HANDSHAKE_KIND.recoveryVerdict,
+      )
+      expect(verdicts).toHaveLength(1)
+      const verdict = verdicts[0]
+      if (verdict == null) throw new Error('Missing retained refusal')
+      expect(
+        (
+          await bob.openRecoveryVerdict(
+            decodeRecoveryVerdict(decodeHandshakeFrame(verdict.payload).payload).sealed,
+            requestID,
+            requestKey,
+          )
+        )?.verdict,
+      ).toMatchObject({
+        verdict: 'refused',
+        commitDigest: original.digest,
+        refusalAuthority: 'authenticated-commit',
+      })
     } finally {
       await alice.peer.dispose()
       await alice.peer.drained()

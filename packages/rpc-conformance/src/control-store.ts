@@ -95,7 +95,7 @@ export type ConformanceControlSnapshot<Position extends string = string> = {
   outcomes: Array<ConformanceOutcome<Position>>
   welcomes: Array<ConformanceWelcomeObligation>
   applied: Array<ConformanceAppliedCommit> // newest 64 epochs
-  responses: Array<ConformanceExternalResponse<Position>> // responder outcomes, newest 64 epochs
+  responses: Array<ConformanceExternalResponse<Position>> // newest 64 epochs, keyed by (position, digest)
   cursor: ConformanceControlCommitCursor<Position> | null // {position, epoch, stranded?}
 }
 export type ConformanceControlChanges<Position extends string = string> = {
@@ -117,6 +117,7 @@ export type ConformanceControlChanges<Position extends string = string> = {
   deleteWelcomes?: Array<string>
   putApplied?: Array<ConformanceAppliedCommit>
   deleteAppliedBelow?: number // drops rows at epoch < n, before puts
+  /** Upsert (position, digest). Retain the first 64 digests per position until epoch pruning. */
   putResponses?: Array<ConformanceExternalResponse<Position>>
   deleteResponsesBelow?: number // by `epoch`
   cursor?: ConformanceControlCommitCursor<Position> | null
@@ -1563,6 +1564,67 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       expect(snapshot.cursor).toBeNull()
       await host.control.apply({ deleteRejoin: true }, 'clear-rejoin')
       expect((await host.control.load()).rejoin).toBeNull()
+    })
+
+    test('response tuples survive same-position copies, exact-tuple updates and reopen', async () => {
+      const host = await params.open()
+      const refused: ConformanceExternalResponse = {
+        position: 'shared',
+        epoch: 1,
+        digest: 'refused',
+        kind: 'refused',
+        reason: 'policy',
+        refusalAuthority: 'authenticated-commit',
+      }
+      const accepted: ConformanceExternalResponse = {
+        position: 'shared',
+        epoch: 1,
+        digest: 'accepted',
+        kind: 'applied',
+        epochAfter: 2,
+      }
+      await host.control.apply({ putResponses: [refused] }, 'legacy-position-row')
+      const reopened = await params.reopen()
+      expect((await reopened.control.load()).responses).toEqual([refused])
+      await reopened.control.apply({ putResponses: [accepted] }, 'second-digest')
+      expect((await (await params.reopen()).control.load()).responses).toEqual([refused, accepted])
+      await reopened.saveState(new Uint8Array([2]), {
+        changes: { putResponses: [{ ...accepted, epochAfter: 3 }] },
+        mutationID: 'update-tuple',
+      })
+      expect((await (await params.reopen()).control.load()).responses).toEqual([
+        refused,
+        { ...accepted, epochAfter: 3 },
+      ])
+    })
+
+    test('response storage retains the first 64 digests per position without eviction', async () => {
+      const host = await params.open()
+      const row = (digest: string, position = 'shared'): ConformanceExternalResponse => ({
+        position,
+        epoch: 1,
+        digest,
+        kind: 'refused',
+        reason: 'policy',
+        refusalAuthority: 'authenticated-commit',
+      })
+      const retained = Array.from({ length: 64 }, (_, index) => row(String(index)))
+      await host.control.apply({ putResponses: retained }, 'fill-responses')
+      const reopened = await params.reopen()
+      await reopened.control.apply(
+        { putResponses: [row('overflow'), row('0', 'other'), { ...row('63'), reason: 'invalid' }] },
+        'bounded-responses',
+      )
+      expect((await (await params.reopen()).control.load()).responses).toEqual([
+        ...retained.slice(0, 63),
+        { ...row('63'), reason: 'invalid' },
+        row('0', 'other'),
+      ])
+      await reopened.control.apply(
+        { deleteResponsesBelow: 2, putResponses: [row('fresh')] },
+        'prune-responses',
+      )
+      expect((await (await params.reopen()).control.load()).responses).toEqual([row('fresh')])
     })
 
     test.each([undefined, 'authenticated-commit'] as const)(

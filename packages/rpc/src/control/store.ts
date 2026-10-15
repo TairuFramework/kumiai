@@ -21,6 +21,7 @@ import type {
   ControlSnapshot,
   ControlStore,
   EpochIdentity,
+  ExternalResponse,
   GroupKey,
   Outcome,
 } from './types.js'
@@ -37,6 +38,25 @@ function putRows<Row, Key>(
   const result = new Map(rows.map((row) => [key(row), row]))
   for (const row of puts ?? []) result.set(key(row), row)
   return [...result.values()]
+}
+
+function putResponses(
+  rows: Array<ExternalResponse>,
+  puts: Array<ExternalResponse> | undefined,
+): Array<ExternalResponse> {
+  const retained = new Map<string, ExternalResponse>()
+  const counts = new Map<LogPosition, number>()
+  for (const row of [...rows, ...(puts ?? [])]) {
+    const key = JSON.stringify([row.position, row.digest])
+    const count = counts.get(row.position) ?? 0
+    if (!retained.has(key)) {
+      // Saturation drops new tuples, never evidence a pending requester may need.
+      if (count >= 64) continue
+      counts.set(row.position, count + 1)
+    }
+    retained.set(key, row)
+  }
+  return [...retained.values()]
 }
 
 function cloneControlValue<TValue>(value: TValue): TValue {
@@ -383,12 +403,11 @@ export function applyChanges(
       changes.putApplied,
       (row) => row.epoch,
     ).sort((a, b) => a.epoch - b.epoch),
-    responses: putRows(
+    responses: putResponses(
       snapshot.responses.filter(
         (row) => changes.deleteResponsesBelow == null || row.epoch >= changes.deleteResponsesBelow,
       ),
       changes.putResponses,
-      (row) => row.position,
     ),
     cursor: changes.cursor === undefined ? snapshot.cursor : changes.cursor,
   })
