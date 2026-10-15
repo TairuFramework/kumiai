@@ -1072,6 +1072,9 @@ export type RecoveryAdoptionPort = {
 // A fresh registry Read checks that ID's proof marker, spent set, adopted source record and destination initial identity.
 // Classify saved-ID commit/rollback BEFORE movement: committed switch starts destination once, even after later movement; never discard/reinstall.
 // Explicit rolled-back proof permits only existing same-ID retry after origin/target checks. Missing/inconsistent proof stays pending or terminal.
+// r22: with the fence settled (or after process restart, which ends every prior transaction) a fresh Read showing the source record still
+// confirmed with that ID, no adopted record, no spent candidate and no destination initial identity IS rolled-back proof for that ID.
+// The same-ID switch is a CAS on the confirmed record, so retrying it can never apply twice. Any other inconsistent fact stays pending/terminal.
 // Pending/restart uses proof-first bounded 15-second retry. Local refusal preserves accepted X; R0 then permits leaf-replacing Y under normal admission.
 // Never turn rollback into remote non-acceptance. Duplicate/missing ambiguous identities refuse; actual removed devices require fresh invitation (r18:66,128).
 export type ControlAdoptionPort = {
