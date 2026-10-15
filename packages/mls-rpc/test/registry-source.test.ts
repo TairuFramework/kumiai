@@ -16,6 +16,7 @@ import {
   type ResyncProof,
 } from '../src/index.js'
 import type { GroupRecoveryTrust } from '../src/persistence-types.js'
+import { recoveryTrustDigest } from '../src/recovery-trust-digest.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import {
   createRegistryFixture,
@@ -94,11 +95,12 @@ for (const mode of ['real-mls', 'double'] as const) {
           const lifetime = await fixture.device.groups.load(groupID)
           if (trust === null || lifetime === null)
             throw new Error('Missing current administrative rows')
-          const expected: LegacyRegistryRecoverySource = {
+          const expected: RegistryRecoverySource = {
             key,
             stateVersion: 5,
             identity: trust.installed,
             trust,
+            trustDigest: recoveryTrustDigest(trust),
             lifetimeRevision: lifetime.revision,
           }
           expect(previous.identity?.epoch).toBe(3)
@@ -367,6 +369,19 @@ for (const mode of ['real-mls', 'double'] as const) {
         const { lifetime: _lifetime, ...publicLeaf } = node.leaf as typeof node.leaf & {
           lifetime?: unknown
         }
+        const inception = {
+          v: 1 as const,
+          t: 'icp' as const,
+          g: 0,
+          s: 0,
+          crit: true,
+          k: ['signing-key'],
+          ka: ['agreement-key'],
+          n: ['next-key'],
+          kt: 1,
+          nt: 1,
+          r: 'recovery-key',
+        }
         const trust: GroupRecoveryTrust = {
           ...retained,
           signerTree: [
@@ -390,7 +405,7 @@ for (const mode of ['real-mls', 'double'] as const) {
             id: 'controller',
             capability: 'capability',
             holderGrant: 'grant',
-            prefix: [{ event: { v: 1, t: 'icp', g: 0, s: 0, crit: true }, sigs: ['signature'] }],
+            prefix: [{ event: inception, sigs: ['signature'] }],
           },
           ledger: ['token'],
         }

@@ -95,7 +95,7 @@ for (const mode of ['real-mls', 'double'] as const) {
     }
 
     test.each(['confirmed', 'adopted', 'after-drain', 'work'] as const)(
-      'captured switch record is retained without legacy verification: %s',
+      'malformed captured switch record is retained on refusal or movement: %s',
       async (phase) => {
         const s = await setup()
         try {
@@ -145,9 +145,9 @@ for (const mode of ['real-mls', 'double'] as const) {
                   name: 'GroupStateConflictError',
                   message: 'Registry switch confirmed record moved',
                 }
-              : phase === 'after-drain'
-                ? { name: 'GroupStateConflictError', message: 'Registry switch source moved' }
-                : { reason: 'unaccepted' },
+              : phase === 'adopted'
+                ? { reason: 'malformed' }
+                : { name: 'RegistrySourceMovedError', message: 'Registry switch source moved' },
           )
           expect((await s.fixture.device.groups.ports(key).control.load()).rejoin).toEqual(
             phase === 'work' ? s.recovery.record : record,

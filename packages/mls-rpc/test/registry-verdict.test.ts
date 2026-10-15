@@ -70,6 +70,7 @@ async function setup(mode: 'real-mls' | 'double', bound = true) {
     responder.group = await registryHandle({ mode, handle: responder.group, options })
   const fixture = await createRegistryRecovery({
     mode,
+    format: 'legacy',
     identity,
     options,
     source,
@@ -99,7 +100,7 @@ function rewrite(
 
 for (const mode of ['real-mls', 'double'] as const) {
   describe(mode, () => {
-    test('captured format refuses before legacy source and candidate decoding', async () => {
+    test('malformed captured format refuses without modifying the saved record', async () => {
       const s = await setup(mode)
       const { source: _source, conflictEpoch: _conflict, ...common } = s.record
       const record: CapturedRejoinRecord = {
@@ -124,7 +125,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const before = structuredClone(record)
       await expect(verifyRegistryResync({ ...s, record })).rejects.toMatchObject({
         name: 'RegistryResyncRefusedError',
-        reason: 'unaccepted',
+        reason: 'malformed',
       })
       expect(record).toEqual(before)
     })

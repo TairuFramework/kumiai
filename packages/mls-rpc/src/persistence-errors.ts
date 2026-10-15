@@ -6,6 +6,10 @@ export class GroupStateConflictError extends Error {
   override name = 'GroupStateConflictError'
 }
 
+export class RegistrySourceMovedError extends GroupStateConflictError {
+  override name = 'RegistrySourceMovedError'
+}
+
 export class GroupStateUncertainError extends Error {
   override name = 'GroupStateUncertainError'
 }

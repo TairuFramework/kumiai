@@ -87,6 +87,7 @@ export {
   OutboxReplacementError,
   PersistencePhaseError,
   ReentrantOwnershipError,
+  RegistrySourceMovedError,
   StorageOutcomeUnknownError,
 } from './persistence-errors.js'
 export type {
@@ -141,6 +142,7 @@ export {
   listRetiredOutcomes,
   serveRetiredObligations,
 } from './registry/retired.js'
+export { createRecoverySwitchFactory, toRegistrySwitchWrite } from './registry/switch-write.js'
 export type {
   GroupEpochRuntime,
   GroupHandleRegistry,
@@ -150,6 +152,7 @@ export type {
   LegacyResyncProof,
   RegistryHandleAccess,
   RegistryRecoverySource,
+  RegistrySwitchWrite,
   ResyncProof,
 } from './registry/types.js'
 export type { RecoveryEnvironment } from './registry/validation.js'

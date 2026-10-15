@@ -588,7 +588,7 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
           }),
         )
         expect(workReached).toBe(true)
-        expect(outcome).toMatchObject({ error: { name: 'GroupStateConflictError' } })
+        expect(outcome).toMatchObject({ error: { name: 'RegistrySourceMovedError' } })
         expect(await fixture.device.groups.load(groupID)).toEqual(lifetime)
         expect(await fixture.device.groups.loadState(key)).toEqual(state)
         expect(await fixture.device.groups.loadTrust(groupID)).toEqual(trust)
