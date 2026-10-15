@@ -1,20 +1,82 @@
 import { normalizeDID, type OwnIdentity } from '@kokuin/token'
 import {
   assertRecoveryBinding,
+  authenticateRecoveryReply as authenticateTrustedReply,
+  type CapturedRecoveryGroupInfo,
   type ClientState,
   type ControllerBinding,
   confirmationKey,
   confirmationTag,
+  createRecoveryRequestFromTrust as createTrustedRequest,
   type DeviceRegistry,
   type GroupHandle,
+  type GroupOptions,
   joinGroupExternal,
   LeafBindingError,
   LeafLapsedError,
+  nobleCryptoProvider,
+  openRecoveryVerdictFromTrust as openTrustedVerdict,
   parseMLSCredentialIdentity,
   RevokeProofError,
   recoverySignerEligible,
 } from '@kumiai/mls'
 import type { OpenedRecoveryVerdict, PendingRecovery } from '@kumiai/rpc'
+import { type CiphersuiteName, getCiphersuiteImpl } from 'ts-mls'
+
+import type { GroupRecoveryTrust } from './persistence-types.js'
+import { recoveryTrustInputs } from './registry/trust.js'
+
+export const RECOVERY_LABEL = 'kumiai/recovery/v1'
+
+export async function deriveRecoverySecretFromTrust(
+  trust: GroupRecoveryTrust,
+  options: GroupOptions = {},
+): Promise<Uint8Array> {
+  const suite = await getCiphersuiteImpl(
+    trust.ciphersuiteName as CiphersuiteName,
+    options.cryptoProvider ?? nobleCryptoProvider,
+  )
+  const utf8 = new TextEncoder()
+  return await suite.kdf.expand(
+    await suite.kdf.extract(utf8.encode(trust.groupID), trust.genesisAnchor),
+    utf8.encode(RECOVERY_LABEL),
+    32,
+  )
+}
+
+export async function createRecoveryRequestFromTrust(params: {
+  trust: GroupRecoveryTrust
+  identity: OwnIdentity
+  requestID: string
+  deadlineMs?: number
+}): Promise<{ request: Uint8Array; requestKey: Uint8Array }> {
+  const result = await createTrustedRequest({ ...params, trust: recoveryTrustInputs(params.trust) })
+  return { ...result, request: new TextEncoder().encode(result.request) }
+}
+
+export type AuthenticateRecoveryReplyParams = {
+  trust: GroupRecoveryTrust
+  sealed: Uint8Array
+  requestID: string
+  requestKey: Uint8Array
+  options: GroupOptions
+}
+
+export async function authenticateRecoveryReply(
+  params: AuthenticateRecoveryReplyParams,
+): Promise<CapturedRecoveryGroupInfo | null> {
+  return await authenticateTrustedReply({ ...params, trust: recoveryTrustInputs(params.trust) })
+}
+
+export async function openRecoveryVerdictFromTrust(
+  params: AuthenticateRecoveryReplyParams,
+): Promise<OpenedRecoveryVerdict | null> {
+  try {
+    return await openTrustedVerdict({ ...params, trust: recoveryTrustInputs(params.trust) })
+  } catch {
+    return null
+  }
+}
 
 export type RecoveryBindingRequest = {
   groupID: string

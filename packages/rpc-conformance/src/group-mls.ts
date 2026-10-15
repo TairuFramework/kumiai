@@ -174,6 +174,7 @@ export type ConformanceRosterEntry = {
  * passing bytes between two instances, which is all the clauses below do.
  */
 export type ConformanceGroupMLS<Position extends string = string> = {
+  onSafetyHold?: (latch: (reason: 'fork-halted' | 'recovery-unavailable') => void) => () => void
   capturedRecovery?: ConformanceCapturedRecoveryPort<Position>
   verifyRecoveryRequest: (request: Uint8Array) => Promise<ConformanceVerifiedRecoveryRequest | null>
   confirmationKey: (position: string, commitDigest: string) => Promise<ConformanceConfirmationKey>
@@ -201,7 +202,10 @@ export type ConformanceGroupMLS<Position extends string = string> = {
     requestID: string,
     deadlineMs?: number,
   ) => Promise<{ request: Uint8Array; requestKey: Uint8Array }>
-  sealGroupInfo: (request: Uint8Array) => Promise<Uint8Array>
+  sealGroupInfo: {
+    (request: Uint8Array): Promise<Uint8Array>
+    (request: Uint8Array, captureHead: Position | null): Promise<Uint8Array>
+  }
   applyRecovery: (
     sealed: Uint8Array,
     requestID: string,

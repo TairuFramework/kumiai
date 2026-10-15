@@ -925,7 +925,12 @@ export function createRegistryGroupMLS(params: Omit<GroupMLSParams,
   'access' | 'control' | 'readRecoverySource' | 'recoveryAdoption' | 'onSafetyHold'> & {
   registry: GroupHandleRegistry; key: GroupKey; recovery: RecoveryEnvironment; target: RecoveryRouting
   onConfirmedRecovery(handoff: ConfirmedRecoveryHandoff): void
-}): GroupMLS
+}): Promise<GroupMLS>
+// r20: async because sendAdmission() is synchronous and registry.access() is async and restores private state.
+// Construction validates params (sink TypeError) before any await, then reads an initial cached SendAdmission from
+// registry entry/control/safety reads plus the persisted trust's installed epoch, never restoring private state.
+// Null/corrupt private state yields admissible:false with an existing reason. The cache follows access open,
+// safety subscriptions and access admission changes; sendAdmission() returns it synchronously.
 // Registry injects entry-bound control/identity/adoption/safety readers and separate trusted recovery reader, opening no old private handle.
 // Missing/invalid coordinator onConfirmedRecovery sink throws TypeError at registry GroupMLS construction, before requests.
 // target is stable host routing checked against the commit lane; GroupPeerMLSParams requires it.

@@ -1,5 +1,5 @@
 import { normalizeDID } from '@kokuin/token'
-import { type GroupHandle, readGroupAnchorExtension } from '@kumiai/mls'
+import { type GroupHandle, type RecoveryTrustInputs, readGroupAnchorExtension } from '@kumiai/mls'
 import { ciphersuites, leafNodeSources } from 'ts-mls'
 
 import { decodeStoredValue, encodeStoredValue } from '../persistence-codec.js'
@@ -7,6 +7,19 @@ import { GroupStateConflictError } from '../persistence-errors.js'
 import { assertTrustTransition } from '../persistence-guards.js'
 import type { GroupKey, GroupRecoveryTrust } from '../persistence-types.js'
 import { knownRecoveryRegistry } from '../recovery.js'
+
+export function recoveryTrustInputs(trust: GroupRecoveryTrust): RecoveryTrustInputs {
+  return {
+    groupID: trust.groupID,
+    genesisAnchor: trust.genesisAnchor,
+    signerTree: trust.signerTree,
+    registry: trust.registry,
+    credential: trust.credential,
+    binding: trust.binding,
+    ledger: trust.ledger,
+    ciphersuiteName: trust.ciphersuiteName,
+  }
+}
 
 export function recoveryTrustFor(
   handle: GroupHandle,

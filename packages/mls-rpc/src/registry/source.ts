@@ -1,3 +1,5 @@
+import type { AdoptionExpected } from '@kumiai/rpc'
+
 import type { EntryReads, StateMetadata } from '../entry-capability.js'
 import { decodeStoredValue, encodeStoredValue, isStoredOpenFailure } from '../persistence-codec.js'
 import { GroupStateConflictError, GroupUnavailableError } from '../persistence-errors.js'
@@ -5,6 +7,20 @@ import type { GroupLifetime, GroupRecoveryTrust } from '../persistence-types.js'
 import { recoveryTrustDigest } from '../recovery-trust-digest.js'
 import { readRetainedTrust } from './safety.js'
 import type { RegistryRecoverySource } from './types.js'
+
+export function recoverySourceIdentity(source: RegistryRecoverySource): AdoptionExpected {
+  return {
+    key: { ...source.key },
+    stateVersion: source.stateVersion,
+    identity:
+      source.identity === null
+        ? null
+        : {
+            ...source.identity,
+            authenticator: source.identity.authenticator.slice(),
+          },
+  }
+}
 
 function refuseUnreadable(cause: unknown): never {
   if (!isStoredOpenFailure(cause) && !(cause instanceof GroupStateConflictError)) throw cause

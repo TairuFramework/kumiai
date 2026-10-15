@@ -60,9 +60,12 @@ export {
   createGroupMLS,
   createLedgerEntrySlot,
   deriveRecoverySecret,
+  type GroupMLSDependencies,
   type GroupMLSParams,
   type LedgerEntrySlot,
   RECOVERY_LABEL,
+  type RecoveryAdoptionDependencies,
+  type RecoveryRouting,
 } from './mls.js'
 export type {
   EntryKind,
@@ -136,6 +139,13 @@ export type {
   TransactionalGroupEffects,
   TransactionHookSettlement,
 } from './persistence-types.js'
+export {
+  type AuthenticateRecoveryReplyParams,
+  authenticateRecoveryReply,
+  createRecoveryRequestFromTrust,
+  deriveRecoverySecretFromTrust,
+  openRecoveryVerdictFromTrust,
+} from './recovery.js'
 export { createGroupHandleRegistry } from './registry/registry.js'
 export {
   ackRetiredOutcome,
@@ -156,6 +166,7 @@ export type {
   ResyncProof,
 } from './registry/types.js'
 export type { RecoveryEnvironment } from './registry/validation.js'
+export { createRegistryGroupMLS, type RegistryGroupMLSParams } from './registry-group-mls.js'
 export { createRegistryHandleAccess } from './registry-handle-access.js'
 export {
   buildRevokeProofOnHandle,

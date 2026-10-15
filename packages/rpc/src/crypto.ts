@@ -1,4 +1,6 @@
+import type { SafetyHold } from './control/safety.js'
 import type { AdoptionWriteFactory, ControlSource } from './control/types.js'
+import type { LogPosition } from './cursor.js'
 import type { CapturedRecoveryPort } from './recovery-types.js'
 
 /**
@@ -427,6 +429,7 @@ export type RecoveryConfirmationKey = { epoch: number; key: Uint8Array }
  */
 export type GroupMLS = {
   capturedRecovery?: CapturedRecoveryPort
+  onSafetyHold?: (latch: (reason: NonNullable<SafetyHold>) => void) => () => void
   /** Verify the signed ask without requiring its issuer to remain in the current tree. */
   verifyRecoveryRequest(request: Uint8Array): Promise<VerifiedRecoveryRequest | null>
   confirmationKey(position: string, commitDigest: string): Promise<RecoveryConfirmationKey>
@@ -523,6 +526,7 @@ export type GroupMLS = {
    * applied its removal. Throws for a request it refuses; the peer stays silent.
    */
   sealGroupInfo(request: Uint8Array): Promise<Uint8Array>
+  sealGroupInfo(request: Uint8Array, captureHead: LogPosition | null): Promise<Uint8Array>
   /**
    * Open a sealed reply with the key minted for `requestID` and BUILD the external commit that
    * rejoins this peer. Non-mutating: the rejoined handle is adopted only in
