@@ -1,6 +1,6 @@
 import type { RecoveryRefusalReason } from '../crypto.js'
 import type { LogPosition } from '../cursor.js'
-import type { AcceptedRejoinSettlement } from '../recovery-types.js'
+import type { AcceptedRejoinSettlement, StoredRejoinRecord } from '../recovery-types.js'
 import type { ForkHalt, RecoveryUnavailableEvent } from './safety.js'
 import type { ControlHold } from './search.js'
 
@@ -46,7 +46,7 @@ export type ControlSnapshot = {
     reason: 'retention-gap' | 'unprocessable-gap' | 'lost-state' | 'ahead' | 'unsupported-version'
   } | null
   operations: Array<Operation> // FIFO by `seq`
-  rejoin: RejoinRecord | null
+  rejoin: StoredRejoinRecord | null
   recoveryEpochFloor: number | null
   settledRejoins: Array<AcceptedRejoinSettlement>
   outcomes: Array<Outcome>
@@ -64,7 +64,7 @@ export type ControlChanges = {
   strand?: ControlSnapshot['strand']
   putOperations?: Array<Operation>
   deleteOperations?: Array<string>
-  putRejoin?: RejoinRecord
+  putRejoin?: StoredRejoinRecord
   deleteRejoin?: true
   recoveryEpochFloor?: number | null
   putSettledRejoins?: Array<AcceptedRejoinSettlement>

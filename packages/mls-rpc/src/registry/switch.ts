@@ -4,8 +4,8 @@ import {
   type ControlSnapshot,
   controlSafetyHeld,
   type GroupKey,
-  type RejoinRecord,
   type SafetyHold,
+  type StoredRejoinRecord,
 } from '@kumiai/rpc'
 
 import type { EntryCapability } from '../entry-capability.js'
@@ -62,7 +62,7 @@ function validateWrite(value: RegistrySwitchWrite): void {
     throw new TypeError('Invalid registry switch write')
 }
 
-function confirmedRecord(record: RejoinRecord | null, rejoinID: string): RejoinRecord {
+function confirmedRecord(record: StoredRejoinRecord | null, rejoinID: string): StoredRejoinRecord {
   if (record?.id !== rejoinID || record.stage !== 'confirmed')
     throw new RegistryResyncRefusedError({ reason: 'unaccepted' })
   return record
@@ -132,7 +132,8 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
       if (resolved === 'committed')
         throw new GroupStateConflictError('Committed switch lacks matching adopted evidence')
       assertSafety(control)
-      confirmedRecord(record, rejoinID)
+      if ('format' in confirmedRecord(record, rejoinID))
+        throw new RegistryResyncRefusedError({ reason: 'unaccepted' })
       return false
     })
     if (replay) return destination

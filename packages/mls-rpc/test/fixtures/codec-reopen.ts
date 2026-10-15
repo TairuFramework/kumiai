@@ -11,8 +11,8 @@ import {
   encodeHandshakeFrame,
   type GroupMLS,
   HANDSHAKE_KIND,
+  type LegacyRejoinRecord,
   type OpenedRecoveryVerdict,
-  type RejoinRecord,
 } from '@kumiai/rpc'
 import type { StorageTestPorts } from '@kumiai/rpc-conformance'
 import { defaultProposalTypes } from 'ts-mls'
@@ -111,7 +111,7 @@ export async function createCodecReopenFixture(id: string): Promise<{
       (await createGroupCrypto({ access }).sealEntries(new TextEncoder().encode('[]'))).sealed,
     ),
   )
-  const record: RejoinRecord = {
+  const record: LegacyRejoinRecord = {
     id: 'rejoin-1',
     stage: 'built',
     publishID: 'publish-1',

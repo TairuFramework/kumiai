@@ -1,10 +1,16 @@
 import { afterEach, expect, test, vi } from 'vitest'
 
-import { type SourceScan, sourceRecheck } from '../src/control/rejoin.js'
-import type { RejoinRecord } from '../src/control/types.js'
+import {
+  type RejoinDeps,
+  type SourceScan,
+  sourceRecheck,
+  stepRejoin,
+} from '../src/control/rejoin.js'
+import type { LegacyRejoinRecord } from '../src/control/types.js'
 import { asLogPosition } from '../src/cursor.js'
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { RecoveryEvent } from '../src/peer-types.js'
+import type { CapturedRejoinRecord } from '../src/recovery-types.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { assertCommitPoison } from './fixtures/control-hold.js'
@@ -46,7 +52,7 @@ async function setup() {
 function commits(hub: FakeHub) {
   return hub.published.filter((row) => row.topicID === commitTopic(secret))
 }
-function crashAt(bob: TestPeer, stage: RejoinRecord['stage']) {
+function crashAt(bob: TestPeer, stage: LegacyRejoinRecord['stage']) {
   const apply = bob.control.apply.bind(bob.control)
   vi.spyOn(bob.control, 'apply').mockImplementation(async (changes, id) => {
     await apply(changes, id)
@@ -57,6 +63,110 @@ function crashAt(bob: TestPeer, stage: RejoinRecord['stage']) {
       void bob.peer.dispose()
     })
 }
+
+async function capturedRecord(bob: TestPeer): Promise<CapturedRejoinRecord> {
+  const { source, conflictEpoch: _conflict, ...common } = await buildRejoinRecord(bob)
+  return {
+    ...common,
+    format: 2,
+    source: {
+      key: source.key,
+      identity: { ...source.key, epoch: source.epoch, authenticator: source.authenticator },
+      stateVersion: 1,
+      lifetimeRevision: 1,
+      trust: { retained: new Uint8Array([1, 2, 3]) },
+      trustDigest: 'd'.repeat(43),
+    },
+    target: {
+      targetID: 'recovery-hub',
+      topicID: commitTopic(secret),
+      groupInfoEpoch: source.epoch,
+      groupInfoAuthenticator: source.authenticator.slice(),
+      captureHead: null,
+    },
+    captureHead: null,
+    searchFrom: null,
+    trigger: 'automatic',
+    authorisationID: null,
+    switchMutationID: null,
+    destinationKey: null,
+  }
+}
+
+test.each(['built', 'published', 'confirmed', 'adopted', 'refused'] as const)(
+  'saved captured %s records survive legacy peer replay and recovery',
+  async (stage) => {
+    const { hub, bob } = await setup()
+    await bob.peer.dispose()
+    await bob.peer.drained()
+    const captured = await capturedRecord(bob)
+    const record: CapturedRejoinRecord = {
+      ...captured,
+      stage,
+      position: asLogPosition('captured-position'),
+      verdict: new Uint8Array([128, 255]),
+      ...(stage === 'adopted'
+        ? { destinationKey: { ...captured.source.key, incarnation: 2 } }
+        : {}),
+      ...(stage === 'refused' ? { refusal: 'policy' } : {}),
+    }
+    await bob.control.apply({ putRejoin: record }, 'captured-save')
+    const before = await bob.control.load()
+    const again = member(hub, 'bob', { restartOf: bob })
+    const restore = vi.spyOn(again.mls, 'restoreRecovery')
+    await again.peer.replay()
+    expect(await again.peer.recover()).toEqual({ advanced: false, reenact: [] })
+    expect((await again.control.load()).rejoin).toEqual(before.rejoin)
+    expect((await again.control.load()).outcomes).toEqual(before.outcomes)
+    expect(again.mls.epoch()).toBe(1)
+    expect(commits(hub)).toEqual([])
+    expect(restore).not.toHaveBeenCalled()
+  },
+)
+
+test('legacy confirmation preserves a captured replacement from the stored reread', async () => {
+  const { bob } = await setup()
+  const legacy = {
+    ...(await buildRejoinRecord(bob)),
+    stage: 'published' as const,
+    position: asLogPosition('legacy-position'),
+  }
+  const replacement: CapturedRejoinRecord = {
+    ...(await capturedRecord(bob)),
+    id: legacy.id,
+    stage: 'published',
+    position: legacy.position,
+  }
+  await bob.control.apply({ putRejoin: legacy }, 'legacy-save')
+  const unreachable = async (): Promise<never> => {
+    throw new Error('Unexpected legacy step')
+  }
+  const deps: RejoinDeps = {
+    control: bob.control,
+    publish: unreachable,
+    searchLog: unreachable,
+    confirm: async () => {
+      await bob.control.apply({ putRejoin: replacement }, 'replace-during-confirm')
+      return {
+        kind: 'confirmed',
+        position: 'legacy-position',
+        epoch: 2,
+        sealed: new Uint8Array([9]),
+      }
+    },
+    runSerial: (fn) => fn(),
+    scan: unreachable,
+    adopt: unreachable,
+    bootstrapLedger: unreachable,
+    getLedger: unreachable,
+    newID: () => 'legacy-transition',
+    now: () => 1234,
+    emit: () => {},
+    discarded: () => {},
+  }
+  expect(await stepRejoin(deps, legacy)).toEqual(replacement)
+  expect((await bob.control.load()).rejoin).toEqual(replacement)
+})
 
 test('a hold committed while loading a saved rejoin prevents external handoff', async () => {
   const { hub, bob } = await setup()
@@ -500,7 +610,7 @@ test('concurrent replay of a confirmed rejoin durably settles reenact exactly on
   bob.mls.adopt(bob.mls.buildCommit(['discarded-branch']))
   await bob.database.saveState('bob', bob.mls.serializeState())
   const apply = bob.control.apply.bind(bob.control)
-  const writes: Array<RejoinRecord['stage'] | 'settled'> = []
+  const writes: Array<LegacyRejoinRecord['stage'] | 'settled'> = []
   vi.spyOn(bob.control, 'apply').mockImplementation(async (changes, id) => {
     await apply(changes, id)
     if (changes.putRejoin?.stage === 'confirmed') bob.database.failNext('mid-save')
@@ -640,13 +750,23 @@ test('anchor-gated recovery re-checks an unwalked source commit on every fresh c
     .sequenceID
   await alice.peer.resync()
   expect(alice.mls.epoch()).toBe(2)
-  const built: Array<RejoinRecord> = []
+  const built: Array<LegacyRejoinRecord> = []
   const failures: Array<RecoveryEvent> = []
-  const confirmed: Array<RejoinRecord> = []
+  const confirmed: Array<LegacyRejoinRecord> = []
   const apply = bob.control.apply.bind(bob.control)
   vi.spyOn(bob.control, 'apply').mockImplementation(async (changes, id) => {
-    if (changes.putRejoin?.stage === 'built') built.push(changes.putRejoin)
-    if (changes.putRejoin?.stage === 'confirmed') confirmed.push(changes.putRejoin)
+    if (
+      changes.putRejoin != null &&
+      !('format' in changes.putRejoin) &&
+      changes.putRejoin.stage === 'built'
+    )
+      built.push(changes.putRejoin)
+    if (
+      changes.putRejoin != null &&
+      !('format' in changes.putRejoin) &&
+      changes.putRejoin.stage === 'confirmed'
+    )
+      confirmed.push(changes.putRejoin)
     return apply(changes, id)
   })
   const again = member(hub, 'bob', {
@@ -687,10 +807,15 @@ test('an own-unmerged copy advances without creating a recovery attempt', async 
   const tip = (await publishCommit({ hub, senderDID: 'dave', recoverySecret: secret, epoch: 1 }))
     .sequenceID
   await alice.peer.resync()
-  const built: Array<RejoinRecord> = []
+  const built: Array<LegacyRejoinRecord> = []
   const apply = bob.control.apply.bind(bob.control)
   vi.spyOn(bob.control, 'apply').mockImplementation(async (changes, id) => {
-    if (changes.putRejoin?.stage === 'built') built.push(changes.putRejoin)
+    if (
+      changes.putRejoin != null &&
+      !('format' in changes.putRejoin) &&
+      changes.putRejoin.stage === 'built'
+    )
+      built.push(changes.putRejoin)
     return apply(changes, id)
   })
   const again = member(hub, 'bob', { restartOf: bob, control: bob.control })
@@ -727,10 +852,15 @@ test.each([false, true])(
           })
         ).sequenceID
       : null
-    const built: Array<RejoinRecord> = []
+    const built: Array<LegacyRejoinRecord> = []
     const apply = bob.control.apply.bind(bob.control)
     vi.spyOn(bob.control, 'apply').mockImplementation(async (changes, id) => {
-      if (changes.putRejoin?.stage === 'built') built.push(changes.putRejoin)
+      if (
+        changes.putRejoin != null &&
+        !('format' in changes.putRejoin) &&
+        changes.putRejoin.stage === 'built'
+      )
+        built.push(changes.putRejoin)
       return apply(changes, id)
     })
     const again = member(hub, 'bob', { restartOf: bob, control: bob.control })
@@ -794,7 +924,7 @@ test.each(['binding', 'lapse', 'floor'] as const)(
 test('confirmed rejoin replay retains its record under a freshly persisted strong hold', async () => {
   const { bob } = await setup()
   const built = await buildRejoinRecord(bob)
-  const record: RejoinRecord = {
+  const record: LegacyRejoinRecord = {
     ...built,
     stage: 'confirmed',
     position: asLogPosition('001'),
@@ -912,7 +1042,7 @@ test.each(['acceptance-unknown', 'unsupported-version'] as const)(
 test('a hold committed during confirmed source scan preserves the rejoin even if the scan has a gap', async () => {
   const { hub, bob } = await setup()
   const built = await buildRejoinRecord(bob)
-  const record: RejoinRecord = {
+  const record: LegacyRejoinRecord = {
     ...built,
     stage: 'confirmed',
     position: asLogPosition('001'),

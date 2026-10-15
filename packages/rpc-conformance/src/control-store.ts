@@ -89,7 +89,7 @@ export type ConformanceControlSnapshot<Position extends string = string> = {
     reason: 'retention-gap' | 'unprocessable-gap' | 'lost-state' | 'ahead' | 'unsupported-version'
   } | null
   operations: Array<ConformanceOperation<Position>> // FIFO by `seq`
-  rejoin: ConformanceRejoinRecord<Position> | null
+  rejoin: ConformanceStoredRejoinRecord<Position> | null
   recoveryEpochFloor: number | null
   settledRejoins: Array<ConformanceAcceptedRejoinSettlement<Position>>
   outcomes: Array<ConformanceOutcome<Position>>
@@ -107,7 +107,7 @@ export type ConformanceControlChanges<Position extends string = string> = {
   strand?: ConformanceControlSnapshot<Position>['strand']
   putOperations?: Array<ConformanceOperation<Position>>
   deleteOperations?: Array<string>
-  putRejoin?: ConformanceRejoinRecord<Position>
+  putRejoin?: ConformanceStoredRejoinRecord<Position>
   deleteRejoin?: true
   recoveryEpochFloor?: number | null
   putSettledRejoins?: Array<ConformanceAcceptedRejoinSettlement<Position>>
@@ -1378,6 +1378,92 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       expect(await reopened.control.load()).toEqual(before)
       expect(await reopened.control.lastMutation()).toBe('baseline')
     })
+
+    test.each(['built', 'published', 'confirmed', 'adopted', 'refused'] as const)(
+      'durable: both rejoin formats retain exact %s records and defensive copies',
+      async (stage) => {
+        const makeRecord = (format: 'legacy' | 'captured'): ConformanceStoredRejoinRecord => {
+          const legacy = records().putRejoin
+          if (legacy == null || 'format' in legacy) throw new Error('Missing legacy fixture')
+          if (format === 'legacy') return { ...legacy, stage }
+          const { source, conflictEpoch: _conflict, ...common } = legacy
+          return {
+            ...common,
+            stage,
+            format: 2,
+            source: {
+              key: source.key,
+              stateVersion: 3,
+              identity: { ...source.key, epoch: source.epoch, authenticator: source.authenticator },
+              lifetimeRevision: 4,
+              trustDigest: 'd'.repeat(43),
+              trust: {
+                registry: new Map([['signer', new Uint8Array([0, 128, 255])]]),
+                lifetime: 12345678901234567890n,
+              },
+            },
+            target: {
+              targetID: 'recovery-hub',
+              topicID: 'commit-topic',
+              groupInfoEpoch: source.epoch,
+              groupInfoAuthenticator: new Uint8Array([128, 255, 0]),
+              captureHead: 'captured-head',
+            },
+            captureHead: 'captured-head',
+            searchFrom: 'captured-head',
+            trigger: 'automatic',
+            authorisationID: null,
+            switchMutationID: 'saved-switch',
+            destinationKey: { ...source.key, incarnation: source.key.incarnation + 1 },
+          }
+        }
+        for (const format of ['legacy', 'captured'] as const) {
+          const host = await params.open()
+          const record = makeRecord(format)
+          const expected = makeRecord(format)
+          await host.control.apply({ putRejoin: record }, `save-${stage}`)
+          record.payload.fill(0)
+          record.request.fill(0)
+          record.requestKey.fill(0)
+          record.candidate.fill(0)
+          record.verdict?.fill(0)
+          record.ledgerBefore.push('changed-input')
+          if ('format' in record) {
+            record.source.identity?.authenticator.fill(0)
+            record.target.groupInfoAuthenticator.fill(0)
+            const trust = record.source.trust
+            if (trust == null || typeof trust !== 'object' || !('registry' in trust))
+              throw new Error('Missing captured trust')
+            if (!(trust.registry instanceof Map)) throw new Error('Missing trust registry')
+            const key = trust.registry.get('signer')
+            if (!(key instanceof Uint8Array)) throw new Error('Missing signer key')
+            key.fill(0)
+            trust.registry.clear()
+            record.source.trust = null
+          } else record.source.authenticator.fill(0)
+          const reopened = await params.reopen()
+          const loaded = (await reopened.control.load()).rejoin
+          expect(loaded).toEqual(expected)
+          if (loaded == null) throw new Error('Missing saved rejoin')
+          loaded.candidate.fill(0)
+          loaded.requestKey.fill(0)
+          loaded.ledgerBefore.push('changed-load')
+          if ('format' in loaded) {
+            loaded.target.groupInfoAuthenticator.fill(0)
+            loaded.source.identity?.authenticator.fill(0)
+            const trust = loaded.source.trust
+            if (trust == null || typeof trust !== 'object' || !('registry' in trust))
+              throw new Error('Missing captured trust')
+            if (!(trust.registry instanceof Map)) throw new Error('Missing trust registry')
+            const key = trust.registry.get('signer')
+            if (!(key instanceof Uint8Array)) throw new Error('Missing signer key')
+            key.fill(0)
+            trust.registry.clear()
+          } else loaded.source.authenticator.fill(0)
+          expect((await (await params.reopen()).control.load()).rejoin).toEqual(expected)
+        }
+      },
+    )
 
     test('durable: every record kind survives reopening', async () => {
       const host = await params.open()

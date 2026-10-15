@@ -9,10 +9,17 @@ import {
   processWelcome,
   signLedgerEntry,
 } from '@kumiai/mls'
-import { APP_TOPIC_LABEL, asLogPosition, type ControlChanges } from '@kumiai/rpc'
+import {
+  APP_TOPIC_LABEL,
+  asLogPosition,
+  type CapturedRejoinRecord,
+  type ControlChanges,
+} from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
+import { entryCapability } from '../src/entry-capability.js'
 import { decodeRecoveryCandidate, encodeRecoveryCandidate } from '../src/recovery-codec.js'
+import { recoveryTrustDigest } from '../src/recovery-trust-digest.js'
 import { createGroupHandleRegistry } from '../src/registry/registry.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import type { RegistrySwitchWrite } from '../src/registry/types.js'
@@ -86,6 +93,75 @@ for (const mode of ['real-mls', 'double'] as const) {
       expect(await s.fixture.inspectRows()).toEqual(before)
       expect(await s.access.read((handle) => handle.groupID)).toBe(groupID)
     }
+
+    test.each(['confirmed', 'adopted', 'after-drain', 'work'] as const)(
+      'captured switch record is retained without legacy verification: %s',
+      async (phase) => {
+        const s = await setup()
+        try {
+          const { source: _source, conflictEpoch: _conflict, ...common } = s.recovery.record
+          const record: CapturedRejoinRecord = {
+            ...common,
+            stage: phase === 'adopted' ? 'adopted' : 'confirmed',
+            format: 2,
+            source: {
+              ...s.recovery.source,
+              trustDigest: recoveryTrustDigest(s.recovery.source.trust),
+            },
+            target: {
+              targetID: s.recovery.proof.targetID,
+              topicID: s.recovery.proof.topicID,
+              groupInfoEpoch: s.recovery.proof.groupInfoEpoch,
+              groupInfoAuthenticator: s.recovery.source.trust.installed.authenticator.slice(),
+              captureHead: s.recovery.proof.captureHead,
+            },
+            captureHead: s.recovery.proof.captureHead,
+            searchFrom: s.recovery.proof.captureHead,
+            trigger: 'automatic',
+            authorisationID: null,
+            switchMutationID: s.params.write.mutationID,
+            destinationKey: phase === 'adopted' ? destination : null,
+          }
+          const save = () => s.fixture.installRows({ key, control: { putRejoin: record } })
+          if (phase === 'after-drain') s.access.onRetire(save)
+          else if (phase === 'work') {
+            const capability = entryCapability(s.fixture.device.groups)
+            if (capability === null) throw new Error('Missing entry capability')
+            const run = capability.run.bind(capability)
+            vi.spyOn(capability, 'run').mockImplementation((request, prepare, work) =>
+              run(request, prepare, async (stores, prepared) => {
+                if (request.mutationID === null) throw new Error('Missing switch mutation ID')
+                await stores
+                  .incarnation(key.incarnation)
+                  .control.apply({ putRejoin: record }, request.mutationID)
+                return work(stores, prepared)
+              }),
+            )
+          } else await save()
+          const before = await s.fixture.inspectRows()
+          await expect(run(s)).rejects.toMatchObject(
+            phase === 'work'
+              ? {
+                  name: 'GroupStateConflictError',
+                  message: 'Registry switch confirmed record moved',
+                }
+              : phase === 'after-drain'
+                ? { name: 'GroupStateConflictError', message: 'Registry switch source moved' }
+                : { reason: 'unaccepted' },
+          )
+          expect((await s.fixture.device.groups.ports(key).control.load()).rejoin).toEqual(
+            phase === 'work' ? s.recovery.record : record,
+          )
+          expect(await s.fixture.device.groups.load(groupID)).toMatchObject({
+            activeIncarnation: 1,
+          })
+          expect(await s.fixture.device.groups.loadState(destination)).toBeNull()
+          if (phase !== 'after-drain') expect(await s.fixture.inspectRows()).toEqual(before)
+        } finally {
+          await s.fixture.close()
+        }
+      },
+    )
 
     test.each(['device', 'group'] as const)(
       'switch refuses pending %s restore before retirement',

@@ -14,7 +14,7 @@ import {
   decodeHandshakeFrame,
   digestAppliedCommit,
   HANDSHAKE_KIND,
-  type RejoinRecord,
+  type StoredRejoinRecord,
 } from '@kumiai/rpc'
 
 import {
@@ -72,12 +72,13 @@ function ownCredential(state: ClientState) {
 export async function verifyRegistryResync(params: {
   source: LegacyRegistryRecoverySource
   candidate: GroupHandle
-  record: RejoinRecord
+  record: StoredRejoinRecord
   proof: LegacyResyncProof
 }): Promise<void> {
   const { source, candidate, record, proof } = params
   let reason: RegistryResyncRefusalReason = 'malformed'
   try {
+    requireMatch(!('format' in record), 'unaccepted')
     requireMatch(
       proof != null &&
         typeof proof.targetID === 'string' &&

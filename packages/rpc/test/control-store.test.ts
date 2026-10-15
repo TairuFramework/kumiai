@@ -8,7 +8,13 @@ import {
   createMemoryControlStore,
   type MemoryControlStore,
 } from '../../rpc-conformance/src/memory-control-store.js'
-import { applyChanges, applyResolved, controlSettled, pruneWindow } from '../src/control/store.js'
+import {
+  applyChanges,
+  applyResolved,
+  controlSettled,
+  pruneWindow,
+  readmissionChanges,
+} from '../src/control/store.js'
 import type {
   AppliedCommit,
   ControlSlot,
@@ -23,6 +29,7 @@ import {
   GroupControlUnsettledError,
   StorageOutcomeUnknownError,
 } from '../src/errors.js'
+import type { CapturedRejoinRecord } from '../src/recovery-types.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
 
 const empty = (): ControlSnapshot => ({
@@ -96,6 +103,53 @@ const rejoin: LegacyRejoinRecord = {
 }
 
 describe('control changes', () => {
+  test('captured trust maps survive control changes without sharing bytes', () => {
+    const { source, conflictEpoch: _conflict, ...common } = rejoin
+    const trust = new Map([['signer', new Uint8Array([128, 255])]])
+    const record: CapturedRejoinRecord = {
+      ...common,
+      format: 2,
+      source: {
+        key: source.key,
+        identity: null,
+        stateVersion: 1,
+        lifetimeRevision: 1,
+        trust,
+        trustDigest: 'd'.repeat(43),
+      },
+      target: {
+        targetID: 'recovery-hub',
+        topicID: 'commit-topic',
+        groupInfoEpoch: 1,
+        groupInfoAuthenticator: new Uint8Array([5]),
+        captureHead: null,
+      },
+      captureHead: null,
+      searchFrom: null,
+      trigger: 'automatic',
+      authorisationID: null,
+      switchMutationID: null,
+      destinationKey: null,
+    }
+    const expected = structuredClone(record)
+    const saved = applyChanges(empty(), { putRejoin: record })
+    trust.get('signer')?.fill(0)
+    expect(saved.rejoin).toEqual(expected)
+    expect(controlSettled(saved)).toBe(false)
+    const reset = applyChanges(saved, readmissionChanges(saved))
+    expect(reset.rejoin).toBeNull()
+    expect(reset.outcomes).toEqual([
+      expect.objectContaining({ id: record.id, opID: null, kind: 'unknown' }),
+    ])
+    const copied = applyChanges(saved, {})
+    expect(copied.rejoin).toEqual(expected)
+    const loaded = copied.rejoin
+    if (loaded == null || !('format' in loaded) || !(loaded.source.trust instanceof Map))
+      throw new Error('Missing captured trust')
+    loaded.source.trust.clear()
+    expect(saved.rejoin).toEqual(expected)
+  })
+
   test('slot survives operation deletion outcome acknowledgement and reopen', async () => {
     const db = createMemoryHostDatabase({
       readIdentity: (state) => decodeControlFixtureState(state),

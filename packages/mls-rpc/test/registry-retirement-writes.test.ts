@@ -1,5 +1,10 @@
 import { signLedgerEntry } from '@kumiai/mls'
-import { asLogPosition, type ControlChanges, controlSettled } from '@kumiai/rpc'
+import {
+  asLogPosition,
+  type CapturedRejoinRecord,
+  type ControlChanges,
+  controlSettled,
+} from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
 import { entryCapability } from '../src/entry-capability.js'
@@ -10,6 +15,7 @@ import type {
   MemoryTransaction,
   PersistenceEvent,
 } from '../src/persistence-types.js'
+import { recoveryTrustDigest } from '../src/recovery-trust-digest.js'
 import { createGroupHandleRegistry } from '../src/registry/registry.js'
 import { retireIncarnation } from '../src/registry/retired.js'
 import {
@@ -518,6 +524,52 @@ for (const mode of ['real-mls', 'double'] as const) {
         await expect(control.apply({ deleteRejoin: true }, 'delete-adopted')).rejects.toMatchObject(
           { name: 'DisplacedGroupHandleError' },
         )
+      } finally {
+        await fixture.close()
+      }
+    })
+
+    test('captured adopted continuation survives retirement transport cleanup and reopen', async () => {
+      let fixture = await create()
+      try {
+        const recovery = await fixture.confirmedRecovery(source)
+        const { source: _source, conflictEpoch: _conflict, ...common } = recovery.record
+        const record: CapturedRejoinRecord = {
+          ...common,
+          format: 2,
+          source: { ...recovery.source, trustDigest: recoveryTrustDigest(recovery.source.trust) },
+          target: {
+            targetID: recovery.proof.targetID,
+            topicID: recovery.proof.topicID,
+            groupInfoEpoch: recovery.proof.groupInfoEpoch,
+            groupInfoAuthenticator: recovery.source.trust.installed.authenticator.slice(),
+            captureHead: recovery.proof.captureHead,
+          },
+          captureHead: recovery.proof.captureHead,
+          searchFrom: recovery.proof.captureHead,
+          trigger: 'automatic',
+          authorisationID: null,
+          switchMutationID: mutationID,
+          destinationKey: { groupID, incarnation: 2 },
+          ledgerBefore: ['owed', ...common.ledgerBefore, 'owed'],
+        }
+        const expected = structuredClone({ ...record, stage: 'adopted' })
+        await fixture.installRows({ key: source, control: { putRejoin: record } })
+        await switchSource(fixture, record.id)
+        const groups = fixture.device.groups
+        await groups.transition(
+          await nextChange(groups, groupID, 'cleanup-captured'),
+          async (stores) => {
+            await stores.incarnation(1).clearTransport()
+          },
+        )
+        fixture = await fixture.reopen()
+        const control = fixture.device.groups.ports(source).control
+        const saved = await control.load()
+        expect(saved.rejoin).toEqual(expected)
+        expect(controlSettled(saved)).toBe(false)
+        saved.rejoin?.candidate.fill(0)
+        expect((await control.load()).rejoin).toEqual(expected)
       } finally {
         await fixture.close()
       }
