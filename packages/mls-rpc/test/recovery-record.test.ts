@@ -258,6 +258,7 @@ async function recordFixture(members?: Array<RealMember>) {
 
 describe('public trust JSON positions', () => {
   let record: CapturedRejoinRecord
+  let producerTrusts: Array<GroupRecoveryTrust>
 
   beforeAll(async () => {
     const lifecycle = (await import(
@@ -301,10 +302,33 @@ describe('public trust JSON positions', () => {
       { identity: responder, handle: joined.group, slot: createLedgerEntrySlot() },
     ])
     const held = fixture.snapshot.source.trust
-    Object.assign(held, { extra: { bytes: 'AQID', bigint: '100' } })
-    const leaf = held.signerTree.find((node) => node?.nodeType === 1)
-    if (leaf?.nodeType !== 1) throw new Error('Missing signer leaf')
-    Object.assign(leaf.leaf, { extra: { bytes: 'AQID', bigint: '100' } })
+    const retained = structuredClone(held)
+    retained.spentEpochAuthenticators.push(retained.installed.authenticator.slice())
+    const noSealIdentity = randomIdentity()
+    const noSealPrefix = [
+      lifecycle.inception,
+      createRotate({
+        seed: lifecycle.controllerSeed,
+        profile: 0,
+        did: lifecycle.controllerID,
+        prior: lifecycle.inception.event,
+        options: { keyPosition: { gen: 0, seq: 0 } },
+      }),
+    ]
+    const noSeal = await createGroup(noSealIdentity, 'trust-no-seal', {
+      controller: await lifecycle.bindingFor(noSealIdentity, noSealPrefix),
+    })
+    producerTrusts = [
+      structuredClone(held),
+      recoveryTrustFor(added.newGroup, fixture.record.source.key, retained),
+      recoveryTrustFor(noSeal.group, { groupID: 'trust-no-seal', incarnation: 1 }, null),
+    ]
+    held.registry.devices = new Map([
+      [identity.id, { controller: controller.id, status: 'active' }],
+    ])
+    held.registry.controllers = new Map([
+      [controller.id, { recordedLog: controller.prefix, genFloor: 0, timeFloor: 0 }],
+    ])
     const source = { ...fixture.snapshot.source, trustDigest: recoveryTrustDigest(held) }
     record = {
       ...fixture.record,
@@ -334,6 +358,9 @@ describe('public trust JSON positions', () => {
     event.event.i = undefined
     event.event.p = undefined
     expect(recoveryTrustDigest(sparse)).toBe(legacyRecoveryTrustDigest(sparse))
+    for (const produced of producerTrusts) {
+      expect(recoveryTrustDigest(produced)).toBe(legacyRecoveryTrustDigest(produced))
+    }
   })
 
   test.each(['k', 'ka', 'a'] as const)(
@@ -379,15 +406,212 @@ describe('public trust JSON positions', () => {
     const held = invalid.source.trust as GroupRecoveryTrust
     const leaf = held.signerTree.find((node) => node?.nodeType === 1)
     if (leaf?.nodeType !== 1) throw new Error('Missing signer leaf')
-    const owner = (position === 'root' ? held : leaf.leaf) as unknown as {
-      extra: Record<string, unknown>
-    }
-    owner.extra[kind] = value()
+    Object.assign(position === 'root' ? held : leaf.leaf, { [kind]: value() })
     expect(invalid.source.trustDigest).toBe(record.source.trustDigest)
     expect(invalid.candidate).toEqual(record.candidate)
     expect.soft(() => recoveryTrustDigest(held)).toThrow(GroupStateConflictError)
     expect.soft(() => validateCapturedRecoveryRecord(invalid)).toThrow(GroupStateConflictError)
     expect.soft(() => decodeRecoveryRecord(invalid)).toThrow(GroupStateConflictError)
+  })
+
+  const mutations: Array<[string, (held: GroupRecoveryTrust) => void]> = [
+    ...(['keys', 'ledger'] as const).flatMap((position) =>
+      invalidJSON.map(([kind, value]): [string, (held: GroupRecoveryTrust) => void] => [
+        `${position} array extra ${kind}`,
+        (held) => {
+          const event = held.binding?.prefix[0]?.event as unknown as Record<string, unknown>
+          Object.assign(position === 'keys' ? (event.k as object) : held.ledger, { extra: value() })
+        },
+      ]),
+    ),
+    [
+      'array subclass',
+      (held) => {
+        class Ledger extends Array<string> {}
+        held.ledger = new Ledger(...held.ledger)
+      },
+    ],
+    [
+      'symbol property',
+      (held) => {
+        Object.assign(held, { [Symbol('extra')]: 'hidden' })
+      },
+    ],
+    [
+      'non-enumerable property',
+      (held) => {
+        Object.defineProperty(held, 'extra', { value: 'hidden' })
+      },
+    ],
+    [
+      'root array',
+      (held) => {
+        Object.setPrototypeOf(held, Array.prototype)
+      },
+    ],
+    [
+      'root custom prototype',
+      (held) => {
+        Object.setPrototypeOf(held, {})
+      },
+    ],
+    [
+      'root null prototype',
+      (held) => {
+        Object.setPrototypeOf(held, null)
+      },
+    ],
+    [
+      'registry extra',
+      (held) => {
+        Object.assign(held.registry, { extra: new Uint8Array([1]) })
+      },
+    ],
+    [
+      'registry map extra',
+      (held) => {
+        Object.assign(held.registry.devices, { extra: 100n })
+      },
+    ],
+    [
+      'device entry object',
+      (held) => {
+        Object.assign(held.registry.devices.values().next().value ?? {}, {
+          extra: { '0': 1, '1': 2, '2': 3 },
+        })
+      },
+    ],
+    [
+      'device entry bytes',
+      (held) => {
+        Object.assign(held.registry.devices.values().next().value ?? {}, {
+          extra: new Uint8Array([1, 2, 3]),
+        })
+      },
+    ],
+    [
+      'device entry undefined',
+      (held) => {
+        Object.assign(held.registry.devices.values().next().value ?? {}, { extra: undefined })
+      },
+    ],
+    [
+      'controller entry undefined',
+      (held) => {
+        Object.assign(held.registry.controllers.values().next().value ?? {}, { extra: undefined })
+      },
+    ],
+    [
+      'event negative zero',
+      (held) => {
+        const event = held.binding?.prefix[0]?.event
+        if (event === undefined) throw new Error('Missing event')
+        expect(event.g).toBe(0)
+        event.g = -0
+      },
+    ],
+    [
+      'unknown negative zero',
+      (held) => {
+        Object.assign(held, { extra: -0 })
+      },
+    ],
+    [
+      'controller negative zero',
+      (held) => {
+        const controller = held.registry.controllers.values().next().value
+        if (controller === undefined) throw new Error('Missing controller')
+        expect(controller.genFloor).toBe(0)
+        controller.genFloor = -0
+      },
+    ],
+    [
+      'open event negative zero',
+      (held) => {
+        const event = held.binding?.prefix[0]?.event
+        Object.assign(event ?? {}, { t: 'future', extra: -0 })
+      },
+    ],
+    [
+      'known event extra',
+      (held) => {
+        Object.assign(held.binding?.prefix[0]?.event ?? {}, { extra: 'unexpected' })
+      },
+    ],
+    [
+      'byte extra',
+      (held) => {
+        Object.assign(held.genesisAnchor, { extra: 'hidden' })
+      },
+    ],
+    [
+      'cross-variant leaf field',
+      (held) => {
+        const leaf = held.signerTree.find(
+          (node) => node?.nodeType === 1 && node.leaf.leafNodeSource === 1,
+        )
+        if (leaf?.nodeType !== 1) throw new Error('Missing key package leaf')
+        Object.assign(leaf.leaf, { parentHash: new Uint8Array([1]) })
+      },
+    ],
+  ]
+
+  test.each(mutations)('%s refuses before using the saved candidate', (_name, mutate) => {
+    const invalid = structuredClone(record)
+    mutate(invalid.source.trust as GroupRecoveryTrust)
+    expect(invalid.source.trustDigest).toBe(record.source.trustDigest)
+    expect(invalid.candidate).toEqual(record.candidate)
+    expect
+      .soft(() => recoveryTrustDigest(invalid.source.trust as GroupRecoveryTrust))
+      .toThrow(GroupStateConflictError)
+    expect.soft(() => validateCapturedRecoveryRecord(invalid)).toThrow(GroupStateConflictError)
+    expect.soft(() => decodeRecoveryRecord(invalid)).toThrow(GroupStateConflictError)
+  })
+
+  test('an array with attached trust fields cannot replace the trust object', () => {
+    const invalid = structuredClone(record)
+    invalid.source.trust = Object.assign([], invalid.source.trust)
+    expect(invalid.candidate).toEqual(record.candidate)
+    expect
+      .soft(() => recoveryTrustDigest(invalid.source.trust as GroupRecoveryTrust))
+      .toThrow(GroupStateConflictError)
+    expect.soft(() => validateCapturedRecoveryRecord(invalid)).toThrow(GroupStateConflictError)
+    expect.soft(() => decodeRecoveryRecord(invalid)).toThrow(GroupStateConflictError)
+  })
+
+  test.each(['validated', 'decoded'] as const)('%s trust is a fresh public projection', (api) => {
+    const input = structuredClone(record)
+    const validated: unknown = validateCapturedRecoveryRecord(input)
+    const decoded = decodeRecoveryRecord(input)
+    const output = api === 'validated' ? validated : decoded.record
+    expect(output).toMatchObject({ source: { key: input.source.key } })
+    if (output === null || typeof output !== 'object' || !('source' in output))
+      throw new Error('Missing projected record')
+    const projected = (output as CapturedRejoinRecord).source.trust as GroupRecoveryTrust
+    const original = input.source.trust as GroupRecoveryTrust
+    expect(projected).toEqual(original)
+    const checkFresh = (left: unknown, right: unknown): void => {
+      if (left === null || typeof left !== 'object') return
+      expect(left).not.toBe(right)
+      expect(Reflect.ownKeys(left)).toEqual(
+        Reflect.ownKeys(right as object).filter((key) => {
+          return Array.isArray(right) || Reflect.get(right as object, key) !== undefined
+        }),
+      )
+      if (left instanceof Map && right instanceof Map) {
+        for (const [key, value] of left) checkFresh(value, right.get(key))
+      } else if (!(left instanceof Uint8Array)) {
+        for (const key of Object.keys(left)) {
+          checkFresh(
+            (left as Record<string, unknown>)[key],
+            (right as Record<string, unknown>)[key],
+          )
+        }
+      }
+    }
+    checkFresh(projected, original)
+    projected.genesisAnchor.fill(0)
+    expect(original.genesisAnchor.some((byte) => byte !== 0)).toBe(true)
   })
 })
 

@@ -8,7 +8,6 @@ import {
   encodeDeviceRegistry,
   GROUP_ANCHOR_EXTENSION_TYPE,
   parseMLSCredentialIdentity,
-  type RecoveryTrustInputs,
 } from '@kumiai/mls'
 import {
   copyRecoverySource,
@@ -28,6 +27,7 @@ import {
 } from './persistence-codec.js'
 import type { BoundRecoveryCommit } from './recovery.js'
 import { recoveryTrustDigest } from './recovery-trust-digest.js'
+import { projectRecoveryTrust } from './recovery-trust-projection.js'
 import type { RegistryRecoverySource } from './registry/types.js'
 
 export type RecoverySnapshot = {
@@ -147,8 +147,8 @@ function isBoundCommit(value: unknown): value is BoundRecoveryCommit {
   )
 }
 
-export function validateRecoverySource(source: RegistryRecoverySource): void {
-  const trust: RecoveryTrustInputs = source?.trust
+export function validateRecoverySource(source: RegistryRecoverySource): RegistryRecoverySource {
+  const trust = projectRecoveryTrust(source?.trust)
   if (
     source == null ||
     trust == null ||
@@ -160,20 +160,21 @@ export function validateRecoverySource(source: RegistryRecoverySource): void {
     source.stateVersion < 0 ||
     !Number.isSafeInteger(source.lifetimeRevision) ||
     source.lifetimeRevision < 0 ||
-    source.trust.installed?.incarnation !== source.key.incarnation
+    trust.installed.incarnation !== source.key.incarnation
   )
     throw new TypeError('Invalid recovery source')
-  if (source.trustDigest !== recoveryTrustDigest(source.trust))
+  if (source.trustDigest !== recoveryTrustDigest(trust))
     throw new TypeError('Recovery trust digest mismatch')
   if (
     source.identity !== null &&
     (source.identity?.groupID !== source.key.groupID ||
       source.identity.incarnation !== source.key.incarnation ||
-      source.identity.epoch !== source.trust.installed.epoch ||
+      source.identity.epoch !== trust.installed.epoch ||
       !(source.identity.authenticator instanceof Uint8Array) ||
-      !equalBytes(source.identity.authenticator, source.trust.installed.authenticator))
+      !equalBytes(source.identity.authenticator, trust.installed.authenticator))
   )
     throw new TypeError('Recovery source identity mismatch')
+  return { ...source, trust }
 }
 
 export function validateRecoveryCapture(value: {
@@ -202,8 +203,8 @@ function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length && left.every((byte, index) => byte === right[index])
 }
 
-function validateCapturedSnapshot(snapshot: CapturedRecoverySnapshot): void {
-  validateRecoverySource(snapshot.source)
+function validateCapturedSnapshot(input: CapturedRecoverySnapshot): CapturedRecoverySnapshot {
+  const snapshot = { ...input, source: validateRecoverySource(input.source) }
   validateRecoveryCapture(snapshot)
   const { state, source, target } = snapshot
   const leaf = state.ratchetTree[state.privatePath.leafIndex * 2]
@@ -240,13 +241,14 @@ function validateCapturedSnapshot(snapshot: CapturedRecoverySnapshot): void {
     (snapshot.boundCommit !== undefined && !isBoundCommit(snapshot.boundCommit))
   )
     throw new TypeError('Captured recovery candidate identity mismatch')
+  return snapshot
 }
 
 export function encodeCapturedRecoveryCandidate(
-  snapshot: CapturedRecoverySnapshot,
+  input: CapturedRecoverySnapshot,
   requestKey: Uint8Array,
 ): Uint8Array {
-  validateCapturedSnapshot(snapshot)
+  const snapshot = validateCapturedSnapshot(input)
   const { sourceTree, ...fields } = snapshot
   const body = encodeStoredValue({
     ...fields,
@@ -309,6 +311,5 @@ export function decodeCapturedRecoveryCandidate(
     requestID: value.requestID,
     ...(value.boundCommit === undefined ? {} : { boundCommit: value.boundCommit }),
   } as CapturedRecoverySnapshot
-  validateCapturedSnapshot(snapshot)
-  return snapshot
+  return validateCapturedSnapshot(snapshot)
 }

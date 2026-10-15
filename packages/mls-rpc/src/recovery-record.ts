@@ -72,11 +72,14 @@ function assertCommon(value: unknown): asserts value is LegacyRejoinRecord | Cap
     throw new TypeError('Malformed recovery record')
 }
 
-export function validateCapturedRecoveryRecord(record: CapturedRejoinRecord): void {
-  assertCommon(record)
-  if (record.format !== 2 || !object(record.source))
+export function validateCapturedRecoveryRecord(input: CapturedRejoinRecord): CapturedRejoinRecord {
+  assertCommon(input)
+  if (input.format !== 2 || !object(input.source))
     throw new TypeError('Invalid captured recovery record')
-  validateRecoverySource(record.source as RegistryRecoverySource)
+  const record = {
+    ...input,
+    source: validateRecoverySource(input.source as RegistryRecoverySource),
+  }
   validateRecoveryCapture(record)
   validateCaptureHead(record.expectedHead)
   if (
@@ -137,16 +140,17 @@ export function validateCapturedRecoveryRecord(record: CapturedRejoinRecord): vo
     )
       throw new TypeError('Captured recovery confirmation mismatch')
   }
+  return record
 }
 
 export function decodeRecoveryRecord(value: unknown): DecodedRecoveryRecord {
   assertCommon(value)
   if ('format' in value) {
     if (value.format !== 2) throw new TypeError('Unsupported recovery record format')
-    validateCapturedRecoveryRecord(value)
-    const record = decodeStoredValue(encodeStoredValue(value)) as CapturedRejoinRecord
-    record.source = copyRecoverySource(value.source)
-    record.target = copyRecoveryTargetCapture(value.target)
+    const validated = validateCapturedRecoveryRecord(value)
+    const record = decodeStoredValue(encodeStoredValue(validated)) as CapturedRejoinRecord
+    record.source = { ...copyRecoverySource(validated.source), trust: validated.source.trust }
+    record.target = copyRecoveryTargetCapture(validated.target)
     return { kind: 'captured', executable: record.trigger === 'automatic', record }
   }
   if (
