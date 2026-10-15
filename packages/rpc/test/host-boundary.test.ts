@@ -416,3 +416,84 @@ test('validation host methods drain and refuse after dispose', async () => {
   expect(() => restored.validateFrame()).toThrow(PeerDisposedError)
   expect(() => restored.verifyOwn()).toThrow(PeerDisposedError)
 })
+
+test('captured authentication and returned acceptance are drained and preserve caller errors', async () => {
+  const boundary = createHostBoundary()
+  const pause = gate()
+  const failure = new Error('capture reader failed')
+  const captured = {
+    async applyRecovery() {
+      await pause.promise
+      throw failure
+    },
+    async restoreRecovery() {
+      throw failure
+    },
+    async reconcileCapture() {
+      throw failure
+    },
+    async sealGroupInfo() {
+      throw failure
+    },
+  }
+  const selected = wrapPeerHost(boundary, { mls: { capturedRecovery: captured } })
+  const work = selected.mls.capturedRecovery.applyRecovery()
+  boundary.close()
+  let drained = false
+  const draining = boundary.drained(Promise.resolve()).then(() => {
+    drained = true
+  })
+  await Promise.resolve()
+  expect(drained).toBe(false)
+  pause.release()
+  await expect(work).rejects.toBe(failure)
+  await draining
+  expect(drained).toBe(true)
+  expect(() => selected.mls.capturedRecovery.reconcileCapture()).toThrow(PeerDisposedError)
+})
+
+test('captured returned callbacks drain acceptance and expose source as data', async () => {
+  const boundary = createHostBoundary()
+  const pause = gate()
+  const source = Object.freeze({ key: { groupID: 'g', incarnation: 1 } })
+  const target = Object.freeze({ targetID: 'hub' })
+  const pending = {
+    source,
+    target,
+    epoch: 1,
+    commit: new Uint8Array([1]),
+    serialize: () => new Uint8Array(),
+    markBindingUnusable() {},
+    confirmationKey: async () => new Uint8Array(),
+    judgeVerdict: () => 'advisory',
+    async onAccepted() {
+      await pause.promise
+    },
+  }
+  const selected = wrapPeerHost(boundary, {
+    mls: {
+      capturedRecovery: {
+        applyRecovery: async () => pending,
+        restoreRecovery: async () => pending,
+        reconcileCapture: async () => ({ kind: 'retry' }),
+        sealGroupInfo: async () => new Uint8Array(),
+      },
+    },
+  })
+  const restored = await selected.mls.capturedRecovery.restoreRecovery()
+  expect(restored.source).toBe(source)
+  expect(restored.target).toBe(target)
+  const accepting = restored.onAccepted()
+  boundary.close()
+  let drained = false
+  const draining = boundary.drained(Promise.resolve()).then(() => {
+    drained = true
+  })
+  await Promise.resolve()
+  expect(drained).toBe(false)
+  pause.release()
+  await accepting
+  await draining
+  expect(() => restored.serialize()).toThrow(PeerDisposedError)
+  expect(() => restored.onAccepted()).toThrow(PeerDisposedError)
+})

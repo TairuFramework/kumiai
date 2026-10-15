@@ -6,6 +6,7 @@ import type { GroupCrypto, GroupMLS, PendingAppFrames, PendingRecovery } from '.
 import { PeerDisposedError } from './errors.js'
 import type { GroupPeerMLSParams, GroupPeerParams } from './peer-types.js'
 import type { GroupProtocolDefinition } from './protocol.js'
+import type { CapturedPendingRecovery, CapturedRecoveryPort } from './recovery-types.js'
 
 type Callable = (...args: Array<unknown>) => unknown
 export type HostBoundary = {
@@ -33,6 +34,19 @@ export const pendingRecoveryHostMembers = {
   commit: 'data',
   onAccepted: 'host',
 } as const satisfies HostMembers<PendingRecovery>
+
+export const capturedPendingRecoveryHostMembers = {
+  ...pendingRecoveryHostMembers,
+  source: 'data',
+  target: 'data',
+} as const satisfies HostMembers<CapturedPendingRecovery>
+
+export const capturedRecoveryHostMembers = {
+  applyRecovery: 'host',
+  restoreRecovery: 'host',
+  reconcileCapture: 'host',
+  sealGroupInfo: 'host',
+} as const satisfies HostMembers<CapturedRecoveryPort>
 
 export const cryptoHostMembers = {
   epoch: 'host',
@@ -333,9 +347,36 @@ export function wrapPeerHost<TParams extends object>(
       }
     } else if (key === 'anchorStore')
       selected = selectHostMembers(boundary, value as AnchorStore, anchorStoreHostMembers)
-    else if (kind === 'mls')
-      selected = selectHostMembers(boundary, value as GroupMLS, mlsHostMembers)
-    else if (kind === 'handlers') {
+    else if (kind === 'mls') {
+      const mls = value as GroupMLS
+      selected = selectHostMembers(boundary, mls, mlsHostMembers)
+      if (mls.capturedRecovery !== undefined) {
+        const captured = selectHostMembers(
+          boundary,
+          mls.capturedRecovery,
+          capturedRecoveryHostMembers,
+        )
+        Object.defineProperty(selected, 'capturedRecovery', {
+          enumerable: true,
+          value: {
+            ...captured,
+            async applyRecovery(...args: Parameters<CapturedRecoveryPort['applyRecovery']>) {
+              const pending = await captured.applyRecovery(...args)
+              return pending === null || 'renewalRequired' in pending
+                ? pending
+                : selectHostMembers(boundary, pending, capturedPendingRecoveryHostMembers)
+            },
+            async restoreRecovery(...args: Parameters<CapturedRecoveryPort['restoreRecovery']>) {
+              return selectHostMembers(
+                boundary,
+                await captured.restoreRecovery(...args),
+                capturedPendingRecoveryHostMembers,
+              )
+            },
+          },
+        })
+      }
+    } else if (kind === 'handlers') {
       selected = Object.fromEntries(
         Object.entries(value as Record<string, object>).map(([name, handlers]) => [
           name,

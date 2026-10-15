@@ -16,6 +16,7 @@ import {
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { encodeSignedRecoveryConfirmation, publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { createCapturedMemoryRecovery } from './fixtures/memory-captured-recovery.js'
 import { createMemoryGroupMLS, encodeMemoryCommit } from './fixtures/memory-group-mls.js'
 import { makeMLSPeer } from './fixtures/peer.js'
 
@@ -969,3 +970,138 @@ describe('recovery ordering', { concurrent: false }, () => {
     },
   )
 })
+
+test('memory captured port requires authenticated capture and preserves its source on restore', async () => {
+  const { createMemoryGroupMLS } = await import('./fixtures/memory-group-mls.js')
+  const { sha256 } = await import('@noble/hashes/sha2.js')
+  const { fromUTF, toB64U } = await import('@sozai/codec')
+  const trust = { groupID: 'memory-capture', ownerDID: 'alice', members: ['alice', 'bob'] }
+  const source = {
+    key: { groupID: trust.groupID, incarnation: 1 },
+    stateVersion: 1,
+    identity: null,
+    lifetimeRevision: 1,
+    trust,
+    trustDigest: toB64U(sha256(fromUTF(JSON.stringify(trust)))),
+  }
+  const target = { targetID: 'hub', topicID: 'topic' }
+  let accepted = 0
+  const requester = createMemoryGroupMLS({
+    groupID: trust.groupID,
+    localDID: 'alice',
+    members: trust.members,
+    capturedRecovery: {
+      target,
+      readSource: async () => source,
+      accept: async () => {
+        accepted++
+      },
+    },
+  })
+  const responder = createMemoryGroupMLS({
+    groupID: trust.groupID,
+    localDID: 'bob',
+    members: trust.members,
+  })
+  expect(requester.capturedRecovery).toBeDefined()
+  const requestID = 'memory-X'
+  const { request, requestKey } = await requester.createRecoveryRequest(requestID)
+  const captured = requester.capturedRecovery
+  if (captured === undefined) throw new Error('Missing captured port')
+  const legacy = await responder.sealGroupInfo(request)
+  expect(await captured.applyRecovery(legacy, requestID, requestKey)).toBeNull()
+  const reply = await responder.sealGroupInfo(request, null)
+  expect(await captured.applyRecovery(reply, 'wrong', requestKey)).toBeNull()
+  const pending = await captured.applyRecovery(reply, requestID, requestKey)
+  if (pending == null || 'renewalRequired' in pending)
+    throw new Error('Expected captured memory recovery')
+  expect(pending.source).toEqual(source)
+  expect(pending.target).toMatchObject({ ...target, captureHead: null })
+  const digest = digestAppliedCommit(pending.commit)
+  const key = await pending.confirmationKey('position', digest)
+  const restored = await captured.restoreRecovery(pending.serialize(), requestKey)
+  expect(restored.source).toEqual(source)
+  expect(restored.commit).toEqual(pending.commit)
+  expect(await restored.confirmationKey('position', digest)).toEqual(key)
+  const verdict = await responder.sealRecoveryVerdict(request, {
+    groupID: trust.groupID,
+    requestID,
+    position: 'position',
+    commitDigest: digest,
+    verdict: 'confirmed',
+    epoch: pending.epoch,
+    tag: confirmationTag(key, requestID),
+  })
+  const proof = {
+    ...restored.target,
+    position: asLogPosition('position'),
+    payloadDigest: digestAppliedCommit(
+      encodeHandshakeFrame(
+        HANDSHAKE_KIND.commit,
+        encodeCommitFrame(pending.commit, new Uint8Array()),
+      ),
+    ),
+    verdict,
+  }
+  await expect(
+    restored.onAccepted({ ...source, trustDigest: 'wrong' }, proof, () => ({
+      mutationID: 'm',
+      changes: {},
+    })),
+  ).rejects.toThrow()
+  await restored.onAccepted(source, proof, () => ({ mutationID: 'm', changes: {} }))
+  expect(accepted).toBe(1)
+})
+
+test.each(['held', 'missing trust', 'transient'] as const)(
+  'memory recapture classifies %s without changing saved X',
+  async (row) => {
+    const s = await createCapturedMemoryRecovery()
+    const captured = s.requester.capturedRecovery
+    if (captured === undefined) throw new Error('Missing captured port')
+    const held = await s.requester.createRecoveryRequest('X')
+    const pending = await captured.applyRecovery(
+      await s.responder.sealGroupInfo(held.request, null),
+      'X',
+      held.requestKey,
+    )
+    if (pending === null || 'renewalRequired' in pending) throw new Error('Missing candidate')
+    const record = s.record(pending, held.request, held.requestKey, 'X')
+    const before = record.candidate.slice()
+    const fresh = await s.requester.createRecoveryRequest('fresh')
+    const sealed = await s.responder.sealGroupInfo(fresh.request, null)
+    if (row === 'held') {
+      const { recoveryUnavailableEventID } = await import('../src/control/safety.js')
+      const control = s.requester.control()
+      await control.apply(
+        {
+          recoveryUnavailable: {
+            ...control.key,
+            id: recoveryUnavailableEventID(control.key),
+            kind: 'group:recovery-unavailable',
+            reason: 'trust-unreadable',
+          },
+        },
+        'held',
+      )
+    } else {
+      s.failSource(
+        row === 'missing trust'
+          ? Object.assign(new Error('Missing retained trust'), {
+              name: 'GroupUnavailableError',
+              reason: 'recovery-unavailable',
+            })
+          : new Error('Transient provider failure'),
+      )
+    }
+    expect(
+      await captured.reconcileCapture(record, {
+        sealed,
+        requestID: 'fresh',
+        requestKey: fresh.requestKey,
+        epochFloor: null,
+      }),
+    ).toEqual({ kind: row === 'transient' ? 'retry' : 'held' })
+    expect(record.candidate).toEqual(before)
+  },
+)

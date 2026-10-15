@@ -46,15 +46,17 @@ import type {
   RosterEntry,
   SafetyHold,
 } from '@kumiai/rpc'
-import { ControlWriteNotCommittedError } from '@kumiai/rpc'
+import { ControlWriteNotCommittedError, controlSafetyHeld } from '@kumiai/rpc'
 import { ciphersuites } from 'ts-mls'
 
 import type { ControlHandleAccess } from './access.js'
 import { applyCommit } from './apply-commit.js'
 import { validateRecoveryCommit } from './control-validation.js'
+import { GroupUnavailableError } from './persistence-errors.js'
 import type { GroupRecoveryTrust } from './persistence-types.js'
 import {
   type BoundRecoveryCommit,
+  buildRecoveryCandidate,
   createRecoveryBindingState,
   createRecoveryRequestFromTrust,
   createVerdictJudge,
@@ -64,6 +66,8 @@ import {
   RECOVERY_LABEL,
   type RecoveryBinding,
   type RecoveryCandidate,
+  reconcileRecoveryCapture,
+  restoreRecoveryCandidate,
 } from './recovery.js'
 import { decodeRecoveryCandidate, encodeRecoveryCandidate } from './recovery-codec.js'
 import type { RegistryRecoverySource } from './registry/types.js'
@@ -280,7 +284,60 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
     }
   }
 
+  const captured = params.recoveryAdoption
+  const capturedEnvironment =
+    captured === undefined
+      ? undefined
+      : {
+          ...captured.environment,
+          accept: captured.accept,
+          recoveryBinding: captured.environment.recoveryBinding ?? params.recoveryBinding,
+        }
   const port: GroupMLS = {
+    capturedRecovery:
+      captured === undefined || capturedEnvironment === undefined
+        ? undefined
+        : {
+            async applyRecovery(sealed, requestID, requestKey) {
+              if (controlSafetyHeld(await params.control.load()) !== null) return null
+              return await buildRecoveryCandidate({
+                source: await captured.readRecoverySource(),
+                sealed,
+                requestID,
+                requestKey,
+                target: captured.target,
+                environment: capturedEnvironment,
+              })
+            },
+            async restoreRecovery(candidate, requestKey) {
+              return await restoreRecoveryCandidate({
+                source: await captured.readRecoverySource(),
+                candidate,
+                requestKey,
+                environment: capturedEnvironment,
+              })
+            },
+            async reconcileCapture(record, reply) {
+              try {
+                if (controlSafetyHeld(await params.control.load()) !== null) return { kind: 'held' }
+                return await reconcileRecoveryCapture({
+                  source: await captured.readRecoverySource(),
+                  target: captured.target,
+                  record,
+                  reply,
+                  environment: capturedEnvironment,
+                })
+              } catch (error) {
+                if (
+                  error instanceof GroupUnavailableError &&
+                  error.reason === 'recovery-unavailable'
+                )
+                  return { kind: 'held' }
+                return { kind: 'retry' }
+              }
+            },
+            sealGroupInfo: (request, captureHead) => port.sealGroupInfo(request, captureHead),
+          },
     async signRecoveryConfirmation(binding: RecoveryConfirmationBinding) {
       const groupID = (await params.readRecoverySource()).key.groupID
       if (binding.groupID !== groupID) throw new Error('Confirmation group mismatch')

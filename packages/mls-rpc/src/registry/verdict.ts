@@ -256,8 +256,8 @@ export async function verifyRegistryResync(params: {
         sameBytes(anchor, source.trust.genesisAnchor),
       'candidate',
     )
-    if (standardCapture) {
-      // Standard replies omit tokens; the candidate's resolved ledger must reproduce its MLS head.
+    if (standardCapture && candidate.ledgerTokens.length > 0) {
+      // Empty standard candidates bootstrap through the destination after switching.
       const head = readLedgerHead(candidate)
       requireMatch(head !== null, 'candidate')
       assertHeadMatches(

@@ -19,6 +19,7 @@ import { expect } from 'vitest'
 
 import { createGroupCrypto } from '../src/crypto.js'
 import { createGroupMLS } from '../src/mls.js'
+import { createCapturedRealRecovery } from './fixtures/captured-recovery.js'
 import {
   buildRealCommit,
   buildRealExternalCommit,
@@ -206,6 +207,7 @@ testPendingGroupCryptoConformance({
 })
 
 testGroupMLSConformance({
+  createCapturedRecovery: () => createCapturedRealRecovery(),
   label: 'createGroupMLS over a real GroupHandle',
   createBoundRecovery: createRealBoundRecovery,
   createGroup: async (size, id) => {

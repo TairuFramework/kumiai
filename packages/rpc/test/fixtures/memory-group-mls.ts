@@ -6,12 +6,15 @@ import { concatBytes } from '@noble/hashes/utils.js'
 import { fromB64U, fromUTF, toB64U, toUTF } from '@sozai/codec'
 
 import type { AnchorStore } from '../../src/anchor.js'
+import { digestAppliedCommit } from '../../src/classify.js'
+import { encodeCommitFrame } from '../../src/commit-frame.js'
 import type { SaveControlBuild } from '../../src/control/build.js'
 import { controlSafetyHeld } from '../../src/control/safety.js'
 import type { ControlEvidenceSnapshot } from '../../src/control/search.js'
 import type {
   AdoptionExpected,
   AdoptionWrite,
+  AdoptionWriteFactory,
   ControlAdoptionPort,
   ControlStore,
   EpochIdentity,
@@ -26,7 +29,18 @@ import type {
   RecoveryVerdict,
   RosterEntry,
 } from '../../src/crypto.js'
+import type { LogPosition } from '../../src/cursor.js'
 import { ControlWriteNotCommittedError } from '../../src/errors.js'
+import { encodeHandshakeFrame, HANDSHAKE_KIND } from '../../src/handshake.js'
+import {
+  type CapturedPendingRecovery,
+  type CapturedRecoveryPort,
+  copyRecoverySource,
+  copyRecoveryTargetCapture,
+  type RecoverySource,
+  type ResyncProof,
+  validateCaptureHead,
+} from '../../src/recovery-types.js'
 import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
 
 export type MemoryGroupMLS = GroupMLS & {
@@ -156,6 +170,16 @@ export type MemoryRecoveryBinding = {
   holderGrant?: string
 }
 export type MemoryGroupMLSOptions = {
+  capturedRecovery?: {
+    target: { targetID: string; topicID: string }
+    readSource(): Promise<RecoverySource>
+    accept(
+      pending: PendingRecovery,
+      expected: RecoverySource,
+      proof: ResyncProof,
+      write: AdoptionWriteFactory,
+    ): Promise<void>
+  }
   storageID?: string
   hostDB?: MemoryHostDatabase
   binding?: MemoryRecoveryBinding
@@ -370,6 +394,10 @@ type MemoryGroupInfo = {
   epoch: number
   head: string
   members: Array<string>
+  captureHead?: string | null
+  signer?: string
+  leafTokens?: Array<[string, string]>
+  attestation?: string
 }
 
 const confirmationKeys = new Map<string, Uint8Array>()
@@ -609,6 +637,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       release()
     }
   }
+  let freshLeaves = new Map<string, string>()
   let failRecoveryAdopt = false
   let binding = options.binding
   let preparedBinding = binding
@@ -761,10 +790,14 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       slotRemoveDID(parsed.committerDID)
       slotAdd(parsed.committerDID)
     }
+    for (const did of [...(parsed.removes ?? []), ...(parsed.adds ?? [])]) freshLeaves.delete(did)
+    if (parsed.external && parsed.branch !== undefined)
+      freshLeaves.set(parsed.committerDID, parsed.branch)
     epochIdentity = nextIdentity
   }
 
   const durableState = (value: { epoch: number } & Record<string, unknown>): Uint8Array => {
+    const { freshLeaves: nextFreshLeaves, ...fields } = value
     const history = new Map(receiveHistory)
     if (value.epoch === epoch + 1 && receiveState !== undefined) {
       history.set(epoch, { identity: toB64U(authenticator()), state: receiveState })
@@ -772,12 +805,13 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     }
     return fromUTF(
       JSON.stringify({
-        ...value,
+        ...fields,
         groupID,
         ownerDID: localDID,
         receiveState: value.epoch === epoch ? receiveState : undefined,
         receiveHistory: [...history],
         binding: value.binding ?? binding,
+        freshLeaves: nextFreshLeaves ?? [...freshLeaves],
         ...(value.receiveHistory === undefined ? {} : { receiveHistory: value.receiveHistory }),
       }),
     )
@@ -807,6 +841,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       bodies: Array<[string, string]>
       recoveryAuthenticator?: string
       epochIdentity?: string
+      freshLeaves?: Array<[string, string]>
     }
     if (value.groupID !== undefined && value.groupID !== groupID)
       throw new Error('Memory state group mismatch')
@@ -826,6 +861,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     receiveState = value.receiveState
     receiveHistory = new Map(value.receiveHistory ?? [])
     binding = value.binding
+    freshLeaves = new Map(value.freshLeaves ?? [])
   }
   const authenticator = (): Uint8Array => {
     const identity = recoveryAuthenticator ?? epochIdentity
@@ -852,6 +888,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     requestKey: Uint8Array,
     candidateBinding?: MemoryRecoveryBinding,
     boundCommit?: { position: string; commitDigest: string; tag: string },
+    freshLeaf = requestID,
   ): PendingRecovery {
     const candidateBindingID = candidateBinding == null ? undefined : bindingID(candidateBinding)
     let accepted: Promise<void> | undefined
@@ -865,7 +902,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       head: info.head,
       external: true,
       // Model a fresh MLS leaf per attempt, preserving bytes on candidate restore.
-      branch: requestID,
+      branch: freshLeaf,
     })
     return {
       serialize: () =>
@@ -873,7 +910,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
           // Hash before X25519 clamps bits, so every persisted key byte matters.
           x25519.getPublicKey(sha256(requestKey)),
           sealContext('candidate', groupID, localDID ?? '', groupID),
-          fromUTF(JSON.stringify({ info, requestID, candidateBinding, tuple })),
+          fromUTF(JSON.stringify({ info, requestID, candidateBinding, tuple, freshLeaf })),
         ),
       commit,
       epoch: info.epoch + 1,
@@ -932,6 +969,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
               ledgerHead: string
               bodies: Array<[string, string]>
               recoveryAuthenticator?: string
+              freshLeaves?: Array<[string, string]>
             }
             // This marker is saved only together with the adoption write in one transaction.
             if (value.recoveryAuthenticator === toB64U(authenticator)) {
@@ -944,6 +982,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
               receiveHistory.clear()
               receiveState = undefined
               binding = candidateBinding
+              freshLeaves = new Map(value.freshLeaves ?? [])
               return
             }
           }
@@ -952,9 +991,11 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             throw new Error('the process died in the acceptance window')
           }
           const nextSlots = new Map(info.members.map((did, index) => [index, did]))
+          const nextFreshLeaves = new Map(info.leafTokens ?? [])
           if (localDID != null) {
             slotRemoveDID(localDID, nextSlots)
             slotAdd(localDID, nextSlots)
+            nextFreshLeaves.set(localDID, freshLeaf)
           }
           const write = factory({
             incarnation: 1,
@@ -971,6 +1012,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             ledgerHead: info.head,
             bodies: [...bodies],
             recoveryAuthenticator: toB64U(authenticator),
+            freshLeaves: [...nextFreshLeaves],
           })
           try {
             await hostDB.saveState(storageID, state, write)
@@ -991,6 +1033,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
           receiveHistory.clear()
           receiveState = undefined
           binding = candidateBinding
+          freshLeaves = nextFreshLeaves
         }).catch((error: unknown) => {
           accepted = undefined
           throw error
@@ -1000,7 +1043,371 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     }
   }
 
+  const capturedDependencies = options.capturedRecovery
+  function validateSource(source: RecoverySource): RecoverySource {
+    const trust = source.trust as { groupID?: string; ownerDID?: string; members?: Array<string> }
+    if (
+      source.key.groupID !== groupID ||
+      source.key.incarnation !== 1 ||
+      !Number.isSafeInteger(source.stateVersion) ||
+      !Number.isSafeInteger(source.lifetimeRevision) ||
+      source.stateVersion < 0 ||
+      source.lifetimeRevision < 0 ||
+      trust?.groupID !== groupID ||
+      trust.ownerDID !== localDID ||
+      !Array.isArray(trust.members) ||
+      !trust.members.includes(localDID ?? '') ||
+      source.trustDigest !== toB64U(sha256(fromUTF(JSON.stringify(trust)))) ||
+      source.identity !== null
+    )
+      throw new TypeError('Invalid memory recovery source')
+    return copyRecoverySource(source)
+  }
+  function sameSource(left: RecoverySource, right: RecoverySource): boolean {
+    return encodeData(validateSource(left)) === encodeData(validateSource(right))
+  }
+  function encodeData(value: unknown): string {
+    return JSON.stringify(value, (_key, child: unknown) =>
+      child instanceof Uint8Array ? { bytes: toB64U(child) } : child,
+    )
+  }
+  function decodeData<TValue>(bytes: Uint8Array): TValue {
+    return JSON.parse(toUTF(bytes), (_key, child: unknown) => {
+      if (
+        child !== null &&
+        typeof child === 'object' &&
+        'bytes' in child &&
+        typeof child.bytes === 'string'
+      )
+        return fromB64U(child.bytes)
+      return child
+    }) as TValue
+  }
+  function capturedInfo(
+    sealed: Uint8Array,
+    requestID: string,
+    requestKey: Uint8Array,
+    source: RecoverySource,
+  ): MemoryGroupInfo | null {
+    const info = open(sealed, requestID, requestKey)
+    if (
+      info === null ||
+      info.captureHead === undefined ||
+      info.signer === undefined ||
+      info.attestation === undefined ||
+      !Number.isSafeInteger(info.epoch) ||
+      info.epoch < 0 ||
+      !Array.isArray(info.leafTokens) ||
+      !/^[A-Za-z0-9_-]{43}$/.test(info.authenticator) ||
+      fromB64U(info.authenticator).length !== 32 ||
+      toB64U(fromB64U(info.authenticator)) !== info.authenticator
+    )
+      return null
+    validateCaptureHead(info.captureHead)
+    const { attestation, ...body } = info
+    const trust = source.trust as { members: Array<string> }
+    if (
+      !trust.members.includes(info.signer) ||
+      !info.members.includes(localDID ?? '') ||
+      attestation !== toB64U(hmac(sha256, recoverySecret, fromUTF(JSON.stringify(body))))
+    )
+      return null
+    return info
+  }
+  type CapturedSnapshot = {
+    source: RecoverySource
+    target: CapturedPendingRecovery['target']
+    sealed: Uint8Array
+    requestID: string
+    inner: Uint8Array
+  }
+  function wrapCaptured(
+    snapshot: CapturedSnapshot,
+    requestKey: Uint8Array,
+    pending: PendingRecovery,
+  ): CapturedPendingRecovery {
+    return {
+      ...pending,
+      get source() {
+        return copyRecoverySource(snapshot.source)
+      },
+      get target() {
+        return copyRecoveryTargetCapture(snapshot.target)
+      },
+      serialize: () =>
+        sealToKey(
+          x25519.getPublicKey(sha256(requestKey)),
+          sealContext('candidate-v3', groupID, localDID ?? '', groupID),
+          fromUTF(encodeData({ ...snapshot, inner: pending.serialize() })),
+        ),
+      async onAccepted(expected, proof, write) {
+        if (
+          capturedDependencies === undefined ||
+          !sameSource(snapshot.source, expected) ||
+          typeof write !== 'function' ||
+          proof.targetID !== snapshot.target.targetID ||
+          proof.topicID !== snapshot.target.topicID ||
+          proof.captureHead !== snapshot.target.captureHead ||
+          proof.groupInfoEpoch !== snapshot.target.groupInfoEpoch ||
+          toB64U(proof.groupInfoAuthenticator) !== toB64U(snapshot.target.groupInfoAuthenticator) ||
+          proof.payloadDigest !==
+            digestAppliedCommit(
+              encodeHandshakeFrame(
+                HANDSHAKE_KIND.commit,
+                encodeCommitFrame(pending.commit, new Uint8Array()),
+              ),
+            )
+        )
+          throw new TypeError('Invalid memory captured acceptance')
+        const opened = openReply(SEAL_DOMAIN.verdict, proof.verdict, snapshot.requestID, requestKey)
+        const verdict =
+          opened === null ? null : (JSON.parse(toUTF(opened)) as OpenedRecoveryVerdict)
+        if (
+          verdict === null ||
+          verdict.verdict.verdict !== 'confirmed' ||
+          verdict.verdict.position !== proof.position ||
+          verdict.verdict.commitDigest !== digestAppliedCommit(pending.commit) ||
+          pending.judgeVerdict(verdict) !== 'authoritative'
+        )
+          throw new TypeError('Unconfirmed memory captured acceptance')
+        await capturedDependencies.accept(pending, copyRecoverySource(expected), proof, write)
+      },
+    }
+  }
+  function readCaptured(candidate: Uint8Array, requestKey: Uint8Array) {
+    if (capturedDependencies === undefined) throw new TypeError('Missing captured dependencies')
+    const opened = openWithKey(
+      sha256(requestKey),
+      sealContext('candidate-v3', groupID, localDID ?? '', groupID),
+      candidate,
+    )
+    if (opened === null) throw new TypeError('Invalid memory captured candidate')
+    const snapshot = decodeData<CapturedSnapshot>(opened)
+    if (
+      snapshot.target.targetID !== capturedDependencies.target.targetID ||
+      snapshot.target.topicID !== capturedDependencies.target.topicID
+    )
+      throw new TypeError('Memory captured origin mismatch')
+    const info = capturedInfo(snapshot.sealed, snapshot.requestID, requestKey, snapshot.source)
+    if (
+      info === null ||
+      snapshot.target.groupInfoEpoch !== info.epoch ||
+      snapshot.target.captureHead !== info.captureHead ||
+      toB64U(snapshot.target.groupInfoAuthenticator) !== info.authenticator
+    )
+      throw new TypeError('Memory capture mismatch')
+    const inner = openWithKey(
+      sha256(requestKey),
+      sealContext('candidate', groupID, localDID ?? '', groupID),
+      snapshot.inner,
+    )
+    if (inner === null) throw new TypeError('Invalid memory recovery candidate')
+    const held = JSON.parse(toUTF(inner)) as {
+      info: MemoryGroupInfo
+      requestID: string
+      candidateBinding?: MemoryRecoveryBinding
+      tuple?: { position: string; commitDigest: string; tag: string }
+      freshLeaf: string
+    }
+    if (
+      held.requestID !== snapshot.requestID ||
+      JSON.stringify(held.info) !== JSON.stringify(info) ||
+      !/^[A-Za-z0-9_-]{43}$/.test(held.freshLeaf) ||
+      (held.tuple !== undefined &&
+        held.tuple.tag !==
+          tagFor(
+            confirmationKeyAt(info.epoch + 1, held.tuple.position, held.tuple.commitDigest),
+            held.requestID,
+          ))
+    )
+      throw new TypeError('Memory candidate association mismatch')
+    return { snapshot, info, held }
+  }
+  async function restoreCaptured(
+    candidate: Uint8Array,
+    requestKey: Uint8Array,
+  ): Promise<CapturedPendingRecovery> {
+    if (capturedDependencies === undefined) throw new TypeError('Missing captured dependencies')
+    const { snapshot, info, held } = readCaptured(candidate, requestKey)
+    if (!sameSource(await capturedDependencies.readSource(), snapshot.source))
+      throw new TypeError('Memory captured origin mismatch')
+    return wrapCaptured(
+      snapshot,
+      requestKey,
+      makePending(
+        info,
+        held.requestID,
+        requestKey,
+        held.candidateBinding,
+        held.tuple,
+        held.freshLeaf,
+      ),
+    )
+  }
+  const capturedRecovery: CapturedRecoveryPort | undefined =
+    capturedDependencies === undefined
+      ? undefined
+      : {
+          async applyRecovery(sealed, requestID, requestKey) {
+            if (
+              controlSafetyHeld(
+                await hostDB.control(storageID, { groupID, incarnation: 1 }).load(),
+              ) !== null
+            )
+              return null
+            const source = validateSource(await capturedDependencies.readSource())
+            const info = capturedInfo(sealed, requestID, requestKey, source)
+            if (info === null) return null
+            await prepare()
+            if (binding !== undefined && !usable(preparedBinding)) return { renewalRequired: true }
+            const target = {
+              ...capturedDependencies.target,
+              groupInfoEpoch: info.epoch,
+              groupInfoAuthenticator: fromB64U(info.authenticator),
+              captureHead: validateCaptureHead(info.captureHead),
+            }
+            const pending = makePending(
+              info,
+              requestID,
+              requestKey,
+              preparedBinding,
+              undefined,
+              toB64U(globalThis.crypto.getRandomValues(new Uint8Array(32))),
+            )
+            return wrapCaptured(
+              { source, target, sealed: sealed.slice(), requestID, inner: pending.serialize() },
+              requestKey.slice(),
+              pending,
+            )
+          },
+          restoreRecovery: restoreCaptured,
+          async reconcileCapture(record, reply) {
+            try {
+              if (
+                controlSafetyHeld(
+                  await hostDB.control(storageID, { groupID, incarnation: 1 }).load(),
+                ) !== null
+              )
+                return { kind: 'held' }
+              const { snapshot: saved, held } = readCaptured(record.candidate, record.requestKey)
+              const source = validateSource(await capturedDependencies.readSource())
+              const commit = encodeMemoryCommit(held.info.epoch, localDID ?? '', [], {
+                head: held.info.head,
+                external: true,
+                branch: held.freshLeaf,
+              })
+              const payload = encodeHandshakeFrame(
+                HANDSHAKE_KIND.commit,
+                encodeCommitFrame(commit, new Uint8Array()),
+              )
+              const text = (value: unknown): value is string =>
+                typeof value === 'string' && value.length > 0
+              validateCaptureHead(record.expectedHead)
+              if (
+                record.format !== 2 ||
+                !text(record.id) ||
+                !text(record.publishID) ||
+                !(record.request instanceof Uint8Array) ||
+                record.request.length === 0 ||
+                !Array.isArray(record.ledgerBefore) ||
+                !record.ledgerBefore.every((token) => typeof token === 'string') ||
+                (record.position !== undefined && !text(record.position)) ||
+                (record.verdict !== undefined &&
+                  (!(record.verdict instanceof Uint8Array) || record.verdict.length === 0)) ||
+                (record.refusal !== undefined &&
+                  !['binding', 'lapse', 'floor', 'policy', 'invalid'].includes(record.refusal)) ||
+                (record.switchMutationID !== null && !text(record.switchMutationID)) ||
+                (record.destinationKey !== null &&
+                  (record.destinationKey.groupID !== source.key.groupID ||
+                    record.destinationKey.incarnation !== source.key.incarnation + 1)) ||
+                (record.stage === 'adopted' && record.destinationKey === null) ||
+                record.trigger !== 'automatic' ||
+                record.authorisationID !== null ||
+                !['built', 'published', 'confirmed', 'adopted', 'refused'].includes(record.stage) ||
+                !sameSource(source, saved.source) ||
+                !sameSource(record.source, saved.source) ||
+                encodeData(record.target) !== encodeData(saved.target) ||
+                record.captureHead !== saved.target.captureHead ||
+                record.searchFrom !== saved.target.captureHead ||
+                record.epochAfter !== held.info.epoch + 1 ||
+                record.digest !== digestAppliedCommit(commit) ||
+                record.payloadDigest !== digestAppliedCommit(record.payload) ||
+                toB64U(record.payload) !== toB64U(payload) ||
+                ((record.stage === 'confirmed' || record.stage === 'adopted') &&
+                  (record.position !== held.tuple?.position ||
+                    record.digest !== held.tuple?.commitDigest ||
+                    !held.tuple?.tag ||
+                    !(record.verdict instanceof Uint8Array))) ||
+                record.requestID !== saved.requestID ||
+                capturedInfo(saved.sealed, saved.requestID, record.requestKey, source) === null
+              )
+                return { kind: 'retry' }
+              const info = capturedInfo(reply.sealed, reply.requestID, reply.requestKey, source)
+              if (
+                info === null ||
+                info.epoch < saved.target.groupInfoEpoch ||
+                (reply.epochFloor !== null && info.epoch < reply.epochFloor)
+              )
+                return { kind: 'retry' }
+              if (info.epoch === saved.target.groupInfoEpoch)
+                return info.authenticator === toB64U(saved.target.groupInfoAuthenticator)
+                  ? {
+                      kind: 'head-only',
+                      head: validateCaptureHead(info.captureHead),
+                    }
+                  : { kind: 'retry' }
+              return info.leafTokens?.some(
+                ([did, leaf]) => did === localDID && leaf === held.freshLeaf,
+              )
+                ? {
+                    kind: 'accepted',
+                    epoch: info.epoch,
+                    leafDigest: toB64U(sha256(fromUTF(JSON.stringify([localDID, held.freshLeaf])))),
+                  }
+                : { kind: 'unapplied-later', epoch: info.epoch }
+            } catch (error) {
+              if (
+                error instanceof Error &&
+                error.name === 'GroupUnavailableError' &&
+                'reason' in error &&
+                error.reason === 'recovery-unavailable'
+              )
+                return { kind: 'held' }
+              return { kind: 'retry' }
+            }
+          },
+          sealGroupInfo: (request, head) => sealInfo(request, head),
+        }
+  async function sealInfo(
+    request: Uint8Array,
+    captureHead?: LogPosition | null,
+  ): Promise<Uint8Array> {
+    if (captureHead !== undefined) {
+      validateCaptureHead(captureHead)
+      const control = await hostDB.control(storageID, { groupID, incarnation: 1 }).load()
+      if ((control.cursor?.position ?? null) !== captureHead)
+        throw new Error('Capture head does not match the committed cursor')
+    }
+    const to = authorize(request, 'sealGroupInfo')
+    const info: MemoryGroupInfo = {
+      authenticator: toB64U(authenticator()),
+      to: to.requesterDID,
+      requestID: to.requestID,
+      groupID,
+      epoch,
+      members: occupiedDIDs(),
+      head: ledgerHead,
+      ...(captureHead === undefined
+        ? {}
+        : { captureHead, signer: localDID, leafTokens: [...freshLeaves] }),
+    }
+    if (captureHead !== undefined)
+      info.attestation = toB64U(hmac(sha256, recoverySecret, fromUTF(JSON.stringify(info))))
+    return sealReply(SEAL_DOMAIN.groupInfo, to, fromUTF(JSON.stringify(info)))
+  }
+
   return {
+    capturedRecovery,
     database: () => hostDB,
     persistInitialState: () =>
       serialise(async () => {
@@ -1447,6 +1854,11 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         )
         const nextLedger = [...ledger, ...parsed.entryIDs]
         const nextHead = parsed.head ?? ledgerHead
+        const nextFreshLeaves = new Map(freshLeaves)
+        for (const did of [...(parsed.removes ?? []), ...(parsed.adds ?? [])])
+          nextFreshLeaves.delete(did)
+        if (parsed.external && parsed.branch !== undefined)
+          nextFreshLeaves.set(parsed.committerDID, parsed.branch)
         const state = durableState({
           epoch: epochAfter,
           slots: [...nextSlots],
@@ -1455,6 +1867,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
           bodies: [...nextBodies],
           terminal: removed,
           epochIdentity: nextIdentity,
+          freshLeaves: [...nextFreshLeaves],
         })
         const write = context.adoption?.({
           incarnation: 1,
@@ -1486,6 +1899,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         ledgerHead = nextHead
         commits += 1
         epochIdentity = nextIdentity
+        freshLeaves = nextFreshLeaves
         return { applied: true, advanced: !removed, epochBefore, epochAfter }
       }),
     async isLedgerComplete() {
@@ -1578,27 +1992,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         return null
       }
     },
-    async sealGroupInfo(request: Uint8Array) {
-      const to = authorize(request, 'sealGroupInfo')
-      return sealReply(
-        SEAL_DOMAIN.groupInfo,
-        to,
-        fromUTF(
-          JSON.stringify({
-            authenticator: toB64U(authenticator()),
-            to: to.requesterDID,
-            requestID: to.requestID,
-            groupID,
-            epoch,
-            members: occupiedDIDs(),
-            // The AUTHENTICATED head, and no ledger with it. This is what the rejoined handle
-            // will hold, and why its empty ledger reads incomplete rather than
-            // complete-and-empty.
-            head: ledgerHead,
-          } satisfies MemoryGroupInfo),
-        ),
-      )
-    },
+    sealGroupInfo: sealInfo,
     async sealLedger(request: Uint8Array) {
       // The same roster check, and it is the whole authorization: the ledger is the group's
       // authority state, and the topic it goes out on is public. A responder that sealed

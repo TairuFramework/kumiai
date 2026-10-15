@@ -24,6 +24,7 @@ import {
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
+import { createCapturedMemoryRecovery } from './fixtures/memory-captured-recovery.js'
 import {
   createMemoryGroupMLS,
   encodeMemoryCommit,
@@ -140,6 +141,7 @@ testPendingGroupCryptoConformance({
 const COMMITTER_DID = 'did:key:committer'
 
 testGroupMLSConformance({
+  createCapturedRecovery: createCapturedMemoryRecovery,
   label: 'createMemoryGroupMLS',
   createBoundRecovery: async () => {
     const binding = { id: 'controller', prefix: [], capability: 'initial-capability' }

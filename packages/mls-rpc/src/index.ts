@@ -142,9 +142,12 @@ export type {
 export {
   type AuthenticateRecoveryReplyParams,
   authenticateRecoveryReply,
+  buildRecoveryCandidate,
+  type CapturedRecoveryEnvironment,
   createRecoveryRequestFromTrust,
   deriveRecoverySecretFromTrust,
   openRecoveryVerdictFromTrust,
+  restoreRecoveryCandidate,
 } from './recovery.js'
 export { createGroupHandleRegistry } from './registry/registry.js'
 export {

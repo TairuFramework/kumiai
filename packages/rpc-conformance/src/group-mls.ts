@@ -327,6 +327,21 @@ export type GroupMLSConformanceParams = {
   /** A fresh group of `size` ports plus an outside committer. `id` is unique per case. */
   createGroup: (size: number, id: string) => Promise<ConformanceMLSGroup>
   createBoundRecovery: () => Promise<ConformanceBoundRecovery>
+  createCapturedRecovery: () => Promise<ConformanceCapturedRecoveryFixture>
+}
+
+export type ConformanceCapturedRecoveryFixture = {
+  requester: ConformanceGroupMLS
+  responder: ConformanceGroupMLS
+  restartResponder(): Promise<ConformanceGroupMLS>
+  record(
+    pending: ConformanceCapturedPendingRecovery,
+    request: Uint8Array,
+    requestKey: Uint8Array,
+    requestID: string,
+  ): ConformanceCapturedRejoinRecord
+  confirmationTag(key: Uint8Array, requestID: string): string
+  accepted(): number
 }
 
 /** The member at `index`, with the assertion the suite would otherwise repeat everywhere. */
@@ -363,6 +378,188 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
   }
 
   describe(`GroupMLS conformance — ${label}`, () => {
+    test('captured recapture distinguishes exact fresh leaves with the same DID and request ID', async () => {
+      const s = await params.createCapturedRecovery()
+      const port = s.requester.capturedRecovery
+      if (port === undefined) throw new Error('Missing captured port')
+      const held = await s.requester.createRecoveryRequest('captured-X')
+      const sealed = await s.responder.sealGroupInfo(held.request, null)
+      const first = await port.applyRecovery(sealed, 'captured-X', held.requestKey)
+      const other = await port.applyRecovery(sealed, 'captured-X', held.requestKey)
+      if (
+        first === null ||
+        other === null ||
+        'renewalRequired' in first ||
+        'renewalRequired' in other
+      )
+        throw new Error('Missing captured candidates')
+      expect(first.commit).not.toEqual(other.commit)
+      const record = s.record(first, held.request, held.requestKey, 'captured-X')
+      expect((await s.responder.processCommit(other.commit, {})).advanced).toBe(true)
+      const restarted = await s.restartResponder()
+      const fresh = await s.requester.createRecoveryRequest('recapture')
+      expect(
+        await port.reconcileCapture(record, {
+          sealed: await restarted.sealGroupInfo(fresh.request, null),
+          requestID: 'recapture',
+          requestKey: fresh.requestKey,
+          epochFloor: null,
+        }),
+      ).toEqual({ kind: 'unapplied-later', epoch: first.epoch })
+    })
+    test.each([
+      'digest',
+      'payload',
+      'epoch',
+      'request',
+      'key',
+      'origin',
+      'target',
+      'authenticator',
+      'head',
+      'search',
+      'expected head',
+      'stage',
+      'destination',
+      'mutation',
+      'ledger',
+      'id',
+    ] as const)(
+      'captured recapture refuses changed saved-record association: %s',
+      async (field) => {
+        const s = await params.createCapturedRecovery()
+        const port = s.requester.capturedRecovery
+        if (port === undefined) throw new Error('Missing captured port')
+        const held = await s.requester.createRecoveryRequest('captured-X')
+        const pending = await port.applyRecovery(
+          await s.responder.sealGroupInfo(held.request, null),
+          'captured-X',
+          held.requestKey,
+        )
+        if (pending === null || 'renewalRequired' in pending)
+          throw new Error('Missing captured candidate')
+        const record = s.record(pending, held.request, held.requestKey, 'captured-X')
+        if (field === 'digest') record.digest = 'other'
+        if (field === 'payload') record.payload = new Uint8Array([1])
+        if (field === 'epoch') record.epochAfter++
+        if (field === 'request') record.requestID = 'other'
+        if (field === 'key') record.requestKey = new Uint8Array(32)
+        if (field === 'origin') record.source.stateVersion++
+        if (field === 'target') record.target.topicID = 'other'
+        if (field === 'authenticator') record.target.groupInfoAuthenticator.fill(0)
+        if (field === 'head') record.captureHead = 'other'
+        if (field === 'search') record.searchFrom = 'other'
+        if (field === 'expected head') record.expectedHead = ''
+        if (field === 'stage') record.stage = 'adopted'
+        if (field === 'destination')
+          record.destinationKey = {
+            ...record.source.key,
+            incarnation: record.source.key.incarnation + 2,
+          }
+        if (field === 'mutation') record.switchMutationID = ''
+        if (field === 'ledger') Reflect.set(record, 'ledgerBefore', [42])
+        if (field === 'id') record.id = ''
+        const fresh = await s.requester.createRecoveryRequest('recapture')
+        expect(
+          await port.reconcileCapture(record, {
+            sealed: await s.responder.sealGroupInfo(fresh.request, null),
+            requestID: 'recapture',
+            requestKey: fresh.requestKey,
+            epochFloor: null,
+          }),
+        ).toEqual({ kind: 'retry' })
+        expect(s.accepted()).toBe(0)
+        expect(await s.requester.readEpoch()).toBe(pending.epoch - 1)
+      },
+    )
+    test('captured recovery authenticates, restores, reconciles exact leaves after restart and narrows acceptance', async () => {
+      const s = await params.createCapturedRecovery()
+      const captured = s.requester.capturedRecovery
+      if (captured === undefined) throw new Error('Missing captured recovery port')
+      const requestID = 'captured-X'
+      const { request, requestKey } = await s.requester.createRecoveryRequest(requestID)
+      const legacy = await s.responder.sealGroupInfo(request)
+      expect(await captured.applyRecovery(legacy, requestID, requestKey)).toBeNull()
+      const sealed = await s.responder.sealGroupInfo(request, null)
+      expect(await captured.applyRecovery(sealed, 'wrong', requestKey)).toBeNull()
+      const pending = await captured.applyRecovery(sealed, requestID, requestKey)
+      if (pending === null || 'renewalRequired' in pending)
+        throw new Error('Missing captured candidate')
+      const source = pending.source
+      const target = pending.target
+      pending.source.trustDigest = 'changed'
+      pending.target.groupInfoAuthenticator.fill(0)
+      expect(pending.source).toEqual(source)
+      expect(pending.target).toEqual(target)
+      const record = s.record(pending, request, requestKey, requestID)
+      const key = await pending.confirmationKey('accepted-X', record.digest)
+      const restored = await captured.restoreRecovery(pending.serialize(), requestKey)
+      expect(restored.commit).toEqual(pending.commit)
+      expect(restored.source).toEqual(source)
+      expect(restored.target).toEqual(target)
+      expect(await restored.confirmationKey('accepted-X', record.digest)).toEqual(key)
+      await expect(restored.confirmationKey('different', record.digest)).rejects.toThrow()
+      await expect(
+        captured.restoreRecovery(pending.serialize(), new Uint8Array(32)),
+      ).rejects.toThrow()
+      const fresh = await s.requester.createRecoveryRequest('recapture')
+      const recapture = {
+        sealed: await s.responder.sealGroupInfo(fresh.request, null),
+        requestID: 'recapture',
+        requestKey: fresh.requestKey,
+        epochFloor: null,
+      }
+      const before = record.candidate.slice()
+      expect(await captured.reconcileCapture(record, recapture)).toEqual({
+        kind: 'head-only',
+        head: null,
+      })
+      expect(
+        await captured.reconcileCapture(record, { ...recapture, epochFloor: pending.epoch }),
+      ).toEqual({ kind: 'retry' })
+      for (const changed of [
+        { ...record, digest: 'wrong' },
+        { ...record, payloadDigest: 'wrong' },
+        { ...record, epochAfter: record.epochAfter + 1 },
+        { ...record, captureHead: 'wrong' },
+        { ...record, searchFrom: 'wrong' },
+        {
+          ...record,
+          target: { ...record.target, groupInfoEpoch: record.target.groupInfoEpoch + 1 },
+        },
+        { ...record, target: { ...record.target, groupInfoAuthenticator: new Uint8Array(32) } },
+        { ...record, source: { ...record.source, stateVersion: record.source.stateVersion + 1 } },
+      ])
+        expect(await captured.reconcileCapture(changed, recapture)).toEqual({ kind: 'retry' })
+      const verdict = await s.responder.sealRecoveryVerdict(request, {
+        groupID: source.key.groupID,
+        requestID,
+        position: 'accepted-X',
+        commitDigest: record.digest,
+        verdict: 'confirmed',
+        epoch: pending.epoch,
+        tag: s.confirmationTag(key, requestID),
+      })
+      const proof = {
+        ...target,
+        position: 'accepted-X',
+        payloadDigest: record.payloadDigest,
+        verdict,
+      }
+      const write = () => ({ mutationID: 'captured-switch', changes: {} })
+      await expect(restored.onAccepted({ ...source, trust: {} }, proof, write)).rejects.toThrow()
+      expect(s.accepted()).toBe(0)
+      await restored.onAccepted(source, proof, write)
+      expect(s.accepted()).toBe(1)
+      expect((await s.responder.processCommit(pending.commit, {})).advanced).toBe(true)
+      const restarted = await s.restartResponder()
+      const later = await restarted.sealGroupInfo(fresh.request, null)
+      const accepted = await captured.reconcileCapture(record, { ...recapture, sealed: later })
+      expect(accepted).toMatchObject({ kind: 'accepted', epoch: pending.epoch })
+      if (accepted.kind === 'accepted') expect(accepted.leafDigest).toMatch(/^[A-Za-z0-9_-]{43}$/)
+      expect(record.candidate).toEqual(before)
+      expect(record.requestKey).toEqual(requestKey)
+    })
     test('recovery dry-run authenticates external refusals without changing state', async () => {
       await withGroup(2, 'recovery-dry-run', async (group) => {
         if (group.buildExternalCommit === undefined) return

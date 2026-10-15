@@ -10,6 +10,7 @@ import { nodeTypes } from 'ts-mls'
 import type { HandleAccess } from '../src/access.js'
 import { createGroupCrypto } from '../src/crypto.js'
 import { createGroupMLS } from '../src/mls.js'
+import { createCapturedRealRecovery } from './fixtures/captured-recovery.js'
 import {
   buildRealCommit,
   buildRealExternalCommit,
@@ -161,6 +162,7 @@ testPendingGroupCryptoConformance({
 })
 
 testGroupMLSConformance({
+  createCapturedRecovery: () => createCapturedRealRecovery(true),
   createBoundRecovery: () =>
     createRealBoundRecovery(async (member) => {
       const store = createTransactionalStore(member.handle)
