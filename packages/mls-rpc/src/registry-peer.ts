@@ -21,13 +21,16 @@ import {
   RegistrySourceMovedError,
 } from './persistence-errors.js'
 import type { GroupKey, GroupTransaction } from './persistence-types.js'
-import { restoreRecoveryCandidate } from './recovery.js'
+import { RecoveryCandidateError, restoreRecoveryCandidate } from './recovery.js'
 import { validateCapturedRecoveryRecord } from './recovery-record.js'
 import { registryRecoveryCoordinator } from './registry/recovery-coordinator.js'
 import { RetainedTrustUnavailableError, registrySafety } from './registry/safety.js'
 import { createRecoverySwitchFactory, toRegistrySwitchWrite } from './registry/switch-write.js'
 import type { GroupHandleRegistry, RegistryRecoverySource } from './registry/types.js'
 import type { RecoveryEnvironment } from './registry/validation.js'
+
+const SOURCE_RETIREMENT_TIMEOUT_MS = 5_000
+class PeerRetirementTimeoutError extends RegistryRetireHookError {}
 
 type Peer = GroupPeer<Record<string, GroupProtocolDefinition>>
 export type RegistryPeerOptions = {
@@ -102,8 +105,26 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
     // Retirement waits source work only. A switch worker must never wait on itself.
     unregister = capability.onRetire(requested, async () => {
       retirementGeneration++
-      const source = creating === null ? current : await creating
-      if (source !== null) await stopPeer(source)
+      let timeout: ReturnType<typeof setTimeout> | undefined
+      const drain = track(
+        (async () => {
+          const source = creating === null ? current : await creating
+          if (source !== null) await stopPeer(source)
+        })(),
+      )
+      try {
+        await Promise.race([
+          drain,
+          new Promise<never>((_resolve, reject) => {
+            timeout = setTimeout(
+              () => reject(new PeerRetirementTimeoutError('Source retirement timed out')),
+              SOURCE_RETIREMENT_TIMEOUT_MS,
+            )
+          }),
+        ])
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout)
+      }
     })
   }
   async function start(requested: GroupKey): Promise<void> {
@@ -122,33 +143,43 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
     retire(requested)
     const generation = retirementGeneration
     const mls = await params.createMLS({ ...requested }, onConfirmedRecovery)
-    if (disposed || generation !== retirementGeneration) return
-    const continuation = await params.continuation.loadRecoveryContinuation(requested)
-    if (disposed || generation !== retirementGeneration) return
-    creating = params.createPeer(
-      { ...requested },
-      {
-        mls,
-        recoveryOnly: control.rejoin !== null || !mls.sendAdmission().admissible,
-        target: { ...target },
-        onConfirmedRecovery,
-        continuation,
-        completion:
-          continuation === null
-            ? null
-            : (input) => params.continuation.finishRecoveryContinuation({ ...input, continuation }),
-      },
-    )
-    let peer: Peer
+    let peer: Peer | undefined
+    let installed = false
     try {
-      peer = await creating
+      if (disposed || generation !== retirementGeneration) return
+      const continuation = await params.continuation.loadRecoveryContinuation(requested)
+      if (disposed || generation !== retirementGeneration) return
+      creating = params.createPeer(
+        { ...requested },
+        {
+          mls,
+          recoveryOnly: control.rejoin !== null || !mls.sendAdmission().admissible,
+          target: { ...target },
+          onConfirmedRecovery,
+          continuation,
+          completion:
+            continuation === null
+              ? null
+              : (input) =>
+                  params.continuation.finishRecoveryContinuation({ ...input, continuation }),
+        },
+      )
+      try {
+        peer = await creating
+      } finally {
+        creating = null
+      }
+      peers.add(peer)
+      if (disposed || generation !== retirementGeneration) return
+      installed = true
     } finally {
-      creating = null
-    }
-    peers.add(peer)
-    if (disposed || generation !== retirementGeneration) {
-      await stopPeer(peer)
-      return
+      if (!installed) {
+        try {
+          if (peer !== undefined) await stopPeer(peer)
+        } finally {
+          if ('dispose' in mls && typeof mls.dispose === 'function') await mls.dispose()
+        }
+      }
     }
     key = { ...requested }
     current = peer
@@ -290,7 +321,9 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
           !(error instanceof RegistrySourceMovedError) &&
           (error instanceof GroupStateConflictError ||
             error instanceof RegistryResyncRefusedError ||
-            error instanceof RegistryRetireHookError ||
+            (error instanceof RegistryRetireHookError &&
+              !(error.cause instanceof PeerRetirementTimeoutError)) ||
+            error instanceof RecoveryCandidateError ||
             error instanceof GroupUnavailableError)
         )
           throw error
@@ -321,7 +354,9 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
       })
   }
   const ready = track(Promise.resolve().then(resume))
-  void ready.catch(() => {})
+  void ready.catch((error: unknown) => {
+    failure = error
+  })
   return {
     peer: () => current,
     installedKey: () => ({ ...key }),

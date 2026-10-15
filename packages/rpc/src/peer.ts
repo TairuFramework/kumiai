@@ -1244,6 +1244,7 @@ export function createGroupPeerWithControlWalk<
 
   const handleRecoveryConfirmRequest = (request: RecoveryConfirmRequest): void => {
     if (
+      params.recoveryOnly === true ||
       mls == null ||
       rendezvousTopicID == null ||
       disposed ||

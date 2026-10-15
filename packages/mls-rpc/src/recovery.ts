@@ -64,6 +64,10 @@ import { recoveryTrustInputs } from './registry/trust.js'
 import type { RegistryRecoverySource } from './registry/types.js'
 import type { RecoveryEnvironment } from './registry/validation.js'
 
+export class RecoveryCandidateError extends TypeError {
+  override name = 'RecoveryCandidateError'
+}
+
 export const RECOVERY_LABEL = 'kumiai/recovery/v1'
 
 export async function deriveRecoverySecretFromTrust(
@@ -443,7 +447,7 @@ async function authenticateSnapshot(
       publicTreeBytes({ ...snapshot.state, ratchetTree: snapshot.sourceTree }).tree,
     )
   )
-    throw new TypeError('Captured recovery attestation mismatch')
+    throw new RecoveryCandidateError('Captured recovery attestation mismatch')
 }
 
 async function capturedPending(
@@ -471,7 +475,7 @@ async function capturedPending(
   if (snapshot.boundCommit?.tag !== undefined) {
     await judge.confirmationKey(snapshot.boundCommit.position, snapshot.boundCommit.commitDigest)
     if (judge.boundCommit()?.tag !== snapshot.boundCommit.tag)
-      throw new TypeError('Captured recovery confirmation tag mismatch')
+      throw new RecoveryCandidateError('Captured recovery confirmation tag mismatch')
   }
   return {
     get source() {
@@ -615,7 +619,8 @@ export async function restoreRecoveryCandidate(params: {
   const source = validateRecoverySource(params.source)
   assertOwner(source, params.environment)
   const snapshot = decodeCapturedRecoveryCandidate(params.candidate, params.requestKey)
-  if (!sameOrigin(source, snapshot.source)) throw new TypeError('Captured recovery origin mismatch')
+  if (!sameOrigin(source, snapshot.source))
+    throw new RecoveryCandidateError('Captured recovery origin mismatch')
   await authenticateSnapshot(snapshot, params.requestKey, params.environment)
   return await capturedPending(snapshot, params.requestKey, params.environment)
 }

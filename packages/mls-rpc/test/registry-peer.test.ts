@@ -10,8 +10,15 @@ import {
 import type { ConfirmedRecoveryHandoff, GroupPeer, GroupProtocolDefinition } from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
+import type { EntryReads } from '../src/entry-capability.js'
 import * as api from '../src/index.js'
+import {
+  decodeCapturedRecoveryCandidate,
+  encodeCapturedRecoveryCandidate,
+} from '../src/recovery-codec.js'
+import { validateCapturedRecoveryRecord } from '../src/recovery-record.js'
 import { registryRecoveryCoordinator } from '../src/registry/recovery-coordinator.js'
+import { registryRetirement } from '../src/registry/retirement.js'
 import { registrySafety } from '../src/registry/safety.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { deferred } from '../src/runtime.js'
@@ -307,7 +314,7 @@ describe('registry peer recovery coordination', () => {
       expect(owner.peer()).toBeNull()
     } finally {
       owner?.dispose()
-      await owner?.drained()
+      await owner?.drained().catch(() => {})
       await s.f.close()
     }
   })
@@ -328,7 +335,7 @@ describe('registry peer recovery coordination', () => {
         expect(registrySafety(s.f.registry)?.held(source)).toBe('recovery-unavailable')
       } finally {
         owner?.dispose()
-        await owner?.drained()
+        await owner?.drained().catch(() => {})
         await s.f.close()
       }
     },
@@ -379,7 +386,7 @@ describe('registry peer recovery coordination', () => {
         expect(s.created).toEqual([])
       } finally {
         owner?.dispose()
-        await owner?.drained()
+        await owner?.drained().catch(() => {})
         await s.f.close()
       }
     },
@@ -591,7 +598,7 @@ describe('registry peer recovery coordination', () => {
       expect(s.created).toEqual([])
     } finally {
       owner?.dispose()
-      await owner?.drained()
+      await owner?.drained().catch(() => {})
       await s.f.close().catch(() => {})
     }
   })
@@ -606,11 +613,19 @@ describe('registry peer recovery coordination', () => {
     const write = vi.spyOn(s.f.registry, 'switchIncarnation')
     try {
       vi.useFakeTimers()
+      const delays: Array<number> = []
       owner = await s.start()
       for (let round = 0; round < 12; round++) {
-        await vi.waitFor(() => expect(resolve.mock.calls.length).toBe(round + 1))
+        await vi.advanceTimersByTimeAsync(0)
+        expect(resolve.mock.calls.length).toBe(round + 1)
+        expect(vi.getTimerCount()).toBe(1)
+        const before = Date.now()
         await vi.advanceTimersToNextTimerAsync()
+        delays.push(Date.now() - before)
       }
+      expect(delays).toEqual([
+        100, 200, 400, 800, 1600, 3200, 6400, 12800, 15000, 15000, 15000, 15000,
+      ])
       expect(write).not.toHaveBeenCalled()
       expect(s.created).toEqual([])
       expect(
@@ -679,7 +694,7 @@ describe('registry peer recovery coordination', () => {
       expect(await fixture.device.groups.ports(source).control.load()).toEqual(before)
       expect(await fixture.device.groups.loadState(destination)).toBeNull()
       owner.dispose()
-      await owner.drained()
+      await expect(owner.drained()).rejects.toThrow('Accepted recovery origin moved')
       owner = undefined
       fixture = await fixture.reopen()
       const createMLS = vi.fn(() => {
@@ -700,10 +715,436 @@ describe('registry peer recovery coordination', () => {
       expect(await fixture.device.groups.loadState(destination)).toBeNull()
     } finally {
       owner?.dispose()
-      await owner?.drained()
+      await owner?.drained().catch(() => {})
       await fixture.close()
     }
   })
+
+  test.each([
+    'destination-row',
+    'initial-identity',
+    'spent-candidate',
+    'missing-trust',
+    'adopted-uninstalled',
+    'adopted-unspent',
+  ] as const)(
+    'inconsistent switch evidence %s cannot authorise replay or release',
+    async (kind) => {
+      const s = await setup()
+      const safety = registrySafety(s.f.registry)
+      if (safety === null) throw new Error('Missing capability')
+      const read = safety.entry.read.bind(safety.entry)
+      try {
+        const adopted = kind.startsWith('adopted-')
+        if (adopted) {
+          const owner = await s.start()
+          await owner.ready
+          owner.dispose()
+          await owner.drained()
+        }
+        const metadata = await read(groupID, (reads) => reads.metadata(adopted ? 2 : 1))
+        if (metadata === null) throw new Error('Missing metadata')
+        const authenticator = s.recovery.candidate.state.keySchedule.epochAuthenticator
+        const override = (reads: EntryReads): EntryReads => ({
+          ...reads,
+          metadata: async (incarnation) => {
+            if (incarnation !== 2) return reads.metadata(incarnation)
+            if (kind === 'destination-row')
+              return { ...metadata, ...destination, initialIdentity: null }
+            if (kind === 'initial-identity')
+              return {
+                ...metadata,
+                ...destination,
+                initialIdentity: {
+                  ...destination,
+                  epoch: s.recovery.record.epochAfter,
+                  authenticator,
+                },
+              }
+            if (kind === 'adopted-uninstalled') return null
+            return reads.metadata(incarnation)
+          },
+          trust: async () => {
+            const trust = await reads.trust()
+            if (trust === null) throw new Error('Missing trust')
+            if (kind === 'missing-trust') return null
+            if (kind === 'spent-candidate')
+              return {
+                ...trust,
+                spentEpochAuthenticators: [...trust.spentEpochAuthenticators, authenticator],
+              }
+            if (kind === 'adopted-unspent')
+              return {
+                ...trust,
+                spentEpochAuthenticators: trust.spentEpochAuthenticators.filter(
+                  (value) => !value.every((byte, index) => byte === authenticator[index]),
+                ),
+              }
+            return trust
+          },
+        })
+        vi.spyOn(safety.entry, 'read').mockImplementation((id, fn) =>
+          read(id, (reads) => fn(override(reads))),
+        )
+        const resolving = registryRecoveryCoordinator(s.f.registry).resolveRecoverySwitch(
+          s.recovery.record,
+        )
+        if (kind === 'missing-trust')
+          await expect(resolving).rejects.toMatchObject({ reason: 'recovery-unavailable' })
+        else await expect(resolving).resolves.toEqual({ kind: 'pending' })
+      } finally {
+        vi.restoreAllMocks()
+        await s.f.close()
+      }
+    },
+  )
+
+  test('concurrent switch ID assignment preserves the first committed ID', async () => {
+    const s = await setup(false)
+    try {
+      const record = { ...s.recovery.record, switchMutationID: null }
+      await s.f.installRows({ key: source, control: { putRejoin: record } })
+      const coordinator = registryRecoveryCoordinator(s.f.registry)
+      const results = await Promise.allSettled([
+        coordinator.assignSwitchID(record),
+        coordinator.assignSwitchID(record),
+      ])
+      expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+      expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1)
+      const saved = await coordinator.readRecoveryRecord(source)
+      expect(saved).toMatchObject({ ...record, switchMutationID: expect.any(String) })
+      await expect(coordinator.assignSwitchID(record)).rejects.toBeInstanceOf(
+        api.GroupStateConflictError,
+      )
+      if (saved === null || !('format' in saved)) throw new Error('Missing captured record')
+      await expect(coordinator.assignSwitchID(saved)).rejects.toBeInstanceOf(
+        api.GroupStateConflictError,
+      )
+      expect(await coordinator.readRecoveryRecord(source)).toEqual(saved)
+    } finally {
+      await s.f.close()
+    }
+  })
+
+  test('rereads a record removed after proof resolution before accepting', async () => {
+    const s = await setup()
+    let owner: api.RegistryPeer | undefined
+    try {
+      const coordinator = registryRecoveryCoordinator(s.f.registry)
+      const resolve = coordinator.resolveRecoverySwitch.bind(coordinator)
+      vi.spyOn(coordinator, 'resolveRecoverySwitch').mockImplementation(async (record) => {
+        const result = await resolve(record)
+        await s.f.installRows({ key: source, control: { deleteRejoin: true } })
+        return result
+      })
+      const write = vi.spyOn(s.f.registry, 'switchIncarnation')
+      owner = await s.start()
+      const error = await owner.ready.then(
+        () => null,
+        (error: unknown) => error,
+      )
+      expect(write).not.toHaveBeenCalled()
+      expect(error).toBeInstanceOf(api.GroupStateConflictError)
+      expect(error).toMatchObject({ message: 'Confirmed recovery moved after drainage' })
+      expect(await coordinator.readRecoveryRecord(source)).toBeNull()
+    } finally {
+      owner?.dispose()
+      await owner?.drained().catch(() => {})
+      await s.f.close()
+    }
+  })
+
+  test.each([
+    ['MLS', 'retirement'],
+    ['continuation', 'retirement'],
+    ['peer', 'retirement'],
+    ['MLS', 'dispose'],
+    ['continuation', 'dispose'],
+    ['peer', 'dispose'],
+  ] as const)(
+    'a %s factory completion after %s cannot install a stale peer',
+    async (stage, invalidation) => {
+      const s = await setup(false)
+      const entered = deferred<void>()
+      const release = deferred<void>()
+      let owner: api.RegistryPeer | undefined
+      let releasedMLS = false
+      let releasedPeer = false
+      let madePeer = false
+      let loadedContinuation = false
+      try {
+        const load = s.continuation.loadRecoveryContinuation.bind(s.continuation)
+        vi.spyOn(s.continuation, 'loadRecoveryContinuation').mockImplementation(async (key) => {
+          loadedContinuation = true
+          if (stage === 'continuation') {
+            entered.resolve()
+            await release.promise
+          }
+          return load(key)
+        })
+        owner = await s.start({
+          createMLS: async (key, sink) => {
+            const mls = await api.createRegistryGroupMLS({
+              registry: s.f.registry,
+              key,
+              recovery: s.f.environment,
+              target,
+              identity: s.f.identity,
+              entrySlot: api.createLedgerEntrySlot(),
+              onConfirmedRecovery: sink,
+            })
+            if (stage === 'MLS') {
+              entered.resolve()
+              await release.promise
+            }
+            return {
+              ...mls,
+              dispose: async () => {
+                releasedMLS = true
+              },
+            }
+          },
+          createPeer: async () => {
+            madePeer = true
+            if (stage === 'peer') {
+              entered.resolve()
+              await release.promise
+            }
+            return peerDouble(async () => {
+              releasedPeer = true
+            })
+          },
+        })
+        await entered.promise
+        let retiring: Promise<void> | undefined
+        let attempt:
+          | ReturnType<ReturnType<typeof registryRetirement>['beginRetirement']>
+          | undefined
+        if (invalidation === 'dispose') owner.dispose()
+        else {
+          const hook = deferred<void>()
+          registrySafety(s.f.registry)?.onRetire(source, async () => {
+            hook.resolve()
+          })
+          attempt = registryRetirement(s.f.registry).beginRetirement(source)
+          retiring = attempt.drain()
+          await hook.promise
+        }
+        release.resolve()
+        await retiring
+        attempt?.settle('rolled-back')
+        await owner.ready
+        expect(owner.peer()).toBeNull()
+        expect(releasedMLS).toBe(true)
+        expect(loadedContinuation).toBe(stage !== 'MLS')
+        expect(madePeer).toBe(stage === 'peer')
+        expect(releasedPeer).toBe(stage === 'peer')
+      } finally {
+        release.resolve()
+        owner?.dispose()
+        await owner?.drained().catch(() => {})
+        await s.f.close()
+      }
+    },
+  )
+
+  test.each(['wrong-key', 'duplicate', 'disposed'] as const)(
+    'ignores a %s handoff without switching',
+    async (kind) => {
+      const s = await setup(false)
+      const completion = deferred<void>()
+      let owner: api.RegistryPeer | undefined
+      try {
+        owner = await s.start()
+        await owner.ready
+        await s.f.installRows({ key: source, control: { putRejoin: s.recovery.record } })
+        const read = vi.spyOn(registryRecoveryCoordinator(s.f.registry), 'readRecoveryRecord')
+        const write = vi.spyOn(s.f.registry, 'switchIncarnation')
+        if (kind === 'disposed') owner.dispose()
+        if (kind === 'duplicate')
+          s.handoff()({ record: s.recovery.record, completion: completion.promise })
+        s.handoff()({
+          record:
+            kind === 'wrong-key'
+              ? { ...s.recovery.record, source: { ...s.recovery.record.source, key: destination } }
+              : s.recovery.record,
+          completion: Promise.resolve(),
+        })
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        expect(read).not.toHaveBeenCalled()
+        expect(write).not.toHaveBeenCalled()
+      } finally {
+        owner?.dispose()
+        completion.resolve()
+        await owner?.drained().catch(() => {})
+        await s.f.close()
+      }
+    },
+  )
+
+  test.each(['drain', 'construction'] as const)(
+    'a hanging source %s releases retirement without writes and the coordinator retries',
+    async (phase) => {
+      const s = await setup(false)
+      const entered = deferred<void>()
+      const release = deferred<void>()
+      let sourceOwner: api.RegistryPeer | undefined
+      let switchOwner: api.RegistryPeer | undefined
+      try {
+        sourceOwner = await s.start({
+          createPeer: async () => {
+            if (phase === 'construction') {
+              entered.resolve()
+              await release.promise
+            }
+            return peerDouble(async () => {
+              if (phase === 'drain') {
+                entered.resolve()
+                await release.promise
+              }
+            })
+          },
+        })
+        if (phase === 'drain') await sourceOwner.ready
+        else await entered.promise
+        await s.f.installRows({ key: source, control: { putRejoin: s.recovery.record } })
+        const before = await s.f.inspectRows()
+        const calls = vi.spyOn(s.f.registry, 'switchIncarnation')
+        vi.useFakeTimers()
+        switchOwner = await s.start()
+        await vi.waitFor(() => expect(calls).toHaveBeenCalledTimes(1))
+        await entered.promise
+        await vi.advanceTimersByTimeAsync(5_000)
+        await expect(s.f.registry.access(groupID)).resolves.toMatchObject({ key: source })
+        expect(await s.f.inspectRows()).toEqual(before)
+        expect(calls).toHaveBeenCalledTimes(1)
+        release.resolve()
+        await vi.advanceTimersByTimeAsync(100)
+        await switchOwner.ready
+        expect(switchOwner.installedKey()).toEqual(destination)
+        expect(calls).toHaveBeenCalledTimes(2)
+        expect(calls.mock.calls.map(([, input]) => input.write.mutationID)).toEqual([
+          s.recovery.record.switchMutationID,
+          s.recovery.record.switchMutationID,
+        ])
+      } finally {
+        release.resolve()
+        sourceOwner?.dispose()
+        switchOwner?.dispose()
+        await sourceOwner?.drained().catch(() => {})
+        await switchOwner?.drained().catch(() => {})
+        vi.useRealTimers()
+        await s.f.close()
+      }
+    },
+  )
+
+  test.each(['continuation', 'peer-factory'] as const)(
+    'a failed %s start releases its owned MLS adapter',
+    async (phase) => {
+      const s = await setup(false)
+      let owner: api.RegistryPeer | undefined
+      let disposed = false
+      try {
+        const makeMLS = async (
+          key: api.GroupKey,
+          sink: (handoff: ConfirmedRecoveryHandoff) => void,
+        ) => {
+          const mls = await api.createRegistryGroupMLS({
+            registry: s.f.registry,
+            key,
+            recovery: s.f.environment,
+            target,
+            identity: s.f.identity,
+            entrySlot: api.createLedgerEntrySlot(),
+            onConfirmedRecovery: sink,
+          })
+          return {
+            ...mls,
+            dispose: async () => {
+              disposed = true
+            },
+          }
+        }
+        if (phase === 'continuation')
+          vi.spyOn(s.continuation, 'loadRecoveryContinuation').mockRejectedValue(
+            new api.GroupStateConflictError('Cannot start'),
+          )
+        owner = await s.start({
+          createMLS: makeMLS,
+          ...(phase === 'peer-factory'
+            ? {
+                createPeer: async () => {
+                  throw new api.GroupStateConflictError('Cannot start')
+                },
+              }
+            : {}),
+        })
+        await expect(owner.ready).rejects.toThrow('Cannot start')
+        expect(disposed).toBe(true)
+        expect(owner.peer()).toBeNull()
+      } finally {
+        owner?.dispose()
+        await owner?.drained().catch(() => {})
+        await s.f.close()
+      }
+    },
+  )
+
+  test.each(['startup', 'handoff'] as const)(
+    'a locally invalid bound tag stops %s with a diagnostic and preserves the attempt',
+    async (path) => {
+      const s = await setup(false)
+      let owner: api.RegistryPeer | undefined
+      try {
+        const snapshot = decodeCapturedRecoveryCandidate(
+          s.recovery.record.candidate,
+          s.recovery.record.requestKey,
+        )
+        if (snapshot.boundCommit === undefined) throw new Error('Missing bound commit')
+        const tag = snapshot.boundCommit.tag
+        if (tag === undefined) throw new Error('Missing tag')
+        const candidate = encodeCapturedRecoveryCandidate(
+          {
+            ...snapshot,
+            boundCommit: {
+              ...snapshot.boundCommit,
+              tag: `${tag[0] === 'A' ? 'B' : 'A'}${tag.slice(1)}`,
+            },
+          },
+          s.recovery.record.requestKey,
+        )
+        const record = { ...s.recovery.record, candidate }
+        expect(() => validateCapturedRecoveryRecord(record)).not.toThrow()
+        const write = vi.spyOn(s.f.registry, 'switchIncarnation')
+        const resolve = vi.spyOn(registryRecoveryCoordinator(s.f.registry), 'resolveRecoverySwitch')
+        if (path === 'handoff') {
+          owner = await s.start()
+          await owner.ready
+        }
+        await s.f.installRows({ key: source, control: { putRejoin: record } })
+        const before = await s.f.inspectRows()
+        if (path === 'startup') {
+          owner = await s.start()
+          await expect(owner.ready).rejects.toThrow('confirmation tag mismatch')
+        } else {
+          s.handoff()({ record, completion: Promise.resolve() })
+          await vi.waitFor(() => expect(resolve).toHaveBeenCalled())
+          await new Promise((resolve) => setTimeout(resolve, 100))
+        }
+        if (owner === undefined) throw new Error('Missing owner')
+        owner.dispose()
+        await expect(owner.drained()).rejects.toThrow('confirmation tag mismatch')
+        expect(write).not.toHaveBeenCalled()
+        expect(resolve).toHaveBeenCalledTimes(1)
+        expect(await s.f.inspectRows()).toEqual(before)
+      } finally {
+        owner?.dispose()
+        await owner?.drained().catch(() => {})
+        await s.f.close()
+      }
+    },
+  )
 
   test('a transient provider TypeError retains the saved attempt and retries through resolution', async () => {
     const s = await setup()
