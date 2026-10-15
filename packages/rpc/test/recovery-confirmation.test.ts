@@ -292,6 +292,141 @@ describe('recovery ordering', { concurrent: false }, () => {
     }
   })
 
+  test('one refused commit relayed at fresh positions retains one response across restart', async () => {
+    const hub = new FakeHub()
+    const origin = new FakeHub()
+    const secret = new Uint8Array(32).fill(0x7a)
+    await publishCommit({
+      hub: origin,
+      senderDID: 'carol',
+      recoverySecret: secret,
+      epoch: 1,
+      external: true,
+    })
+    const genuine = origin.published[0]
+    if (genuine == null) throw new Error('Missing genuine commit')
+    let page: typeof origin.published = []
+    const fetch = hub.fetchTopic.bind(hub)
+    vi.spyOn(hub, 'fetchTopic').mockImplementation(async (params) => {
+      if (params.topicID !== commitTopic(secret)) return fetch(params)
+      return {
+        messages: page,
+        head: page.at(-1)?.sequenceID ?? null,
+        oldest: page[0]?.sequenceID ?? null,
+        gap: false,
+      }
+    })
+    const options = { members: ['alice', 'bob', 'carol'], acceptsCommitter: () => false }
+    let alice = makeMLSPeer(hub, 'alice', secret, options)
+    try {
+      await alice.peer.replay()
+      vi.useFakeTimers()
+      for (let batch = 0; batch < 3; batch++) {
+        page = Array.from({ length: 80 }, (_, index) => {
+          const position = String(batch * 80 + index + 1).padStart(12, '0')
+          return { ...genuine, sequenceID: position, logPosition: position }
+        })
+        await hub.publish({
+          topicID: commitTopic(secret),
+          senderDID: 'relay',
+          payload: new Uint8Array([0]),
+        })
+        await vi.advanceTimersByTimeAsync(0)
+        await alice.peer.ack('refresh')
+        expect((await alice.control.load()).responses).toEqual([
+          {
+            position: '000000000001',
+            epoch: 1,
+            digest: publishedCommitDigest(origin, genuine.sequenceID),
+            kind: 'refused',
+            reason: 'policy',
+            refusalAuthority: 'authenticated-commit',
+          },
+        ])
+        expect((await alice.control.load()).cursor?.position).toBe(page.at(-1)?.sequenceID)
+        expect(alice.mls.epoch()).toBe(1)
+      }
+      await alice.peer.dispose()
+      await alice.peer.drained()
+      alice = makeMLSPeer(hub, 'alice', secret, { ...options, restartOf: alice })
+      await alice.peer.replay()
+      expect((await alice.control.load()).responses).toHaveLength(1)
+      expect((await alice.control.load()).responses[0]?.position).toBe('000000000001')
+    } finally {
+      await alice.peer.dispose()
+      await alice.peer.drained()
+      vi.restoreAllMocks()
+    }
+  })
+
+  test('distinct authenticated refusals fill the total budget while overflow commits still apply', async () => {
+    const hub = new FakeHub()
+    const secret = new Uint8Array(32).fill(0x7b)
+    const carols = Array.from({ length: 280 }, (_, index) => `carol-${index}`)
+    for (const senderDID of carols) {
+      await publishCommit({ hub, senderDID, recoverySecret: secret, epoch: 1, external: true })
+    }
+    const { sequenceID: position } = await publishCommit({
+      hub,
+      senderDID: 'bob',
+      recoverySecret: secret,
+      epoch: 1,
+      external: true,
+    })
+    const digest = publishedCommitDigest(hub, position)
+    const options = {
+      members: ['alice', 'bob', ...carols],
+      acceptsCommitter: (did: string) => did === 'bob',
+      recovery: { timeoutMs: 100, deadlineMs: 1000, getDelayMs: () => 0 },
+    }
+    let alice = makeMLSPeer(hub, 'alice', secret, options)
+    try {
+      await alice.peer.replay()
+      const snapshot = await alice.control.load()
+      expect(alice.mls.epoch()).toBe(2)
+      expect(snapshot.applied.some((row) => row.digest === digest)).toBe(true)
+      expect(snapshot.responses).toHaveLength(256)
+      expect(snapshot.responses.map((row) => row.digest)).toEqual(
+        hub.published.slice(0, 256).map((row) => publishedCommitDigest(hub, row.sequenceID)),
+      )
+      expect(
+        snapshot.responses.every(
+          (row) => row.kind === 'refused' && row.refusalAuthority === 'authenticated-commit',
+        ),
+      ).toBe(true)
+      await alice.peer.dispose()
+      await alice.peer.drained()
+      alice = makeMLSPeer(hub, 'alice', secret, { ...options, restartOf: alice })
+      await alice.peer.replay()
+      expect((await alice.control.load()).responses).toEqual(snapshot.responses)
+      const bob = createMemoryGroupMLS({ members: options.members, localDID: 'bob' })
+      const requestID = 'overflow-total-budget'
+      const { request } = await bob.createRecoveryRequest(requestID)
+      vi.useFakeTimers()
+      await hub.publish({
+        topicID: rendezvousTopic(secret),
+        senderDID: 'bob',
+        retain: 'mailbox',
+        payload: encodeHandshakeFrame(
+          HANDSHAKE_KIND.recoveryConfirmRequest,
+          encodeRecoveryConfirmRequest({ requestID, request, position, commitDigest: digest }),
+        ),
+      })
+      await vi.advanceTimersByTimeAsync(100)
+      expect(
+        hub.published.filter(
+          (row) =>
+            row.topicID === rendezvousTopic(secret) &&
+            decodeHandshakeFrame(row.payload).kind === HANDSHAKE_KIND.recoveryVerdict,
+        ),
+      ).toHaveLength(0)
+    } finally {
+      await alice.peer.dispose()
+      await alice.peer.drained()
+      vi.restoreAllMocks()
+    }
+  })
+
   test('response saturation preserves an outstanding refusal and permits commit intake', async () => {
     const hub = new FakeHub()
     const secret = new Uint8Array(32).fill(0x66)

@@ -82,6 +82,7 @@ export {
   controlSettled,
   pruneWindow,
   readmissionChanges,
+  retainResponses,
 } from './control/store.js'
 export type {
   AdoptionExpected,

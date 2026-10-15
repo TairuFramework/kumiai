@@ -40,20 +40,27 @@ function putRows<Row, Key>(
   return [...result.values()]
 }
 
-function putResponses(
+const RESPONSE_LIMIT = 256
+const RESPONSES_PER_POSITION = 64
+
+export function retainResponses(
   rows: Array<ExternalResponse>,
-  puts: Array<ExternalResponse> | undefined,
+  puts?: Array<ExternalResponse>,
 ): Array<ExternalResponse> {
   const retained = new Map<string, ExternalResponse>()
   const counts = new Map<LogPosition, number>()
   for (const row of [...rows, ...(puts ?? [])]) {
-    const key = JSON.stringify([row.position, row.digest])
-    const count = counts.get(row.position) ?? 0
-    if (!retained.has(key)) {
-      // Saturation drops new tuples, never evidence a pending requester may need.
-      if (count >= 64) continue
-      counts.set(row.position, count + 1)
+    const key = JSON.stringify([row.epoch, row.digest])
+    const previous = retained.get(key)
+    if (previous != null) {
+      // A relabelled copy cannot change the original response or its authority.
+      if (previous.position === row.position) retained.set(key, row)
+      continue
     }
+    const count = counts.get(row.position) ?? 0
+    // Saturation drops new rows, never evidence a pending requester may need.
+    if (retained.size >= RESPONSE_LIMIT || count >= RESPONSES_PER_POSITION) continue
+    counts.set(row.position, count + 1)
     retained.set(key, row)
   }
   return [...retained.values()]
@@ -403,7 +410,7 @@ export function applyChanges(
       changes.putApplied,
       (row) => row.epoch,
     ).sort((a, b) => a.epoch - b.epoch),
-    responses: putResponses(
+    responses: retainResponses(
       snapshot.responses.filter(
         (row) => changes.deleteResponsesBelow == null || row.epoch >= changes.deleteResponsesBelow,
       ),

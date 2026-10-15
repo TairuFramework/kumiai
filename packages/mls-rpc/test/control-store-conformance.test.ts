@@ -308,3 +308,67 @@ test.each([undefined, 9])(
     }
   },
 )
+
+test.each([undefined, 'authenticated-commit'] as const)(
+  'legacy response arrays reopen within the digest and total budgets without upgrading authority: %s',
+  async (refusalAuthority) => {
+    const fixture = await createStorageFixture({ id: key.groupID, mode: 'double' })
+    try {
+      const control = fixture.ports.device.groups.ports(key).control
+      const first = {
+        position: asLogPosition('original'),
+        epoch: 3,
+        digest: 'same-commit',
+        kind: 'refused' as const,
+        reason: 'policy' as const,
+        ...(refusalAuthority === undefined ? {} : { refusalAuthority }),
+      }
+      await control.apply({ putResponses: [first] }, 'legacy-response')
+      const location = (await fixture.inspectRawBytes()).find(
+        (row) => row.namespace === 'control' && row.groupID === key.groupID,
+      )
+      if (location === undefined) throw new Error('Missing control row')
+      const aad = recordAAD(location)
+      const record = decodeStoredValue(await atRest.open(location.bytes, aad)) as ControlRecord
+      const other = { ...first, digest: 'other-commit' }
+      const distinct = Array.from({ length: 280 }, (_, index) => ({
+        ...first,
+        position: asLogPosition(`flood-${index}`),
+        digest: `distinct-${index}`,
+      }))
+      const legacy = [
+        first,
+        {
+          ...first,
+          position: asLogPosition('relayed'),
+          refusalAuthority: 'authenticated-commit' as const,
+        },
+        other,
+        ...distinct,
+      ]
+      const encoded = await atRest.seal(
+        encodeStoredValue({ ...record, snapshot: { ...record.snapshot, responses: legacy } }),
+        aad,
+      )
+      await fixture.mutateStoredRecord('control', location.key, () => encoded)
+      const raw = await fixture.inspectRawBytes()
+      const reopened = await fixture.reopen()
+      const reopenedControl = reopened.device.groups.ports(key).control
+      const expected = [first, other, ...distinct.slice(0, 254)]
+      expect((await reopenedControl.load()).responses).toEqual(expected)
+      expect(await fixture.inspectRawBytes()).toEqual(raw)
+      await reopenedControl.apply({ cursor: null }, 'compact-legacy-responses')
+      expect((await reopenedControl.load()).responses).toEqual(expected)
+      const stored = (await fixture.inspectRawBytes()).find(
+        (row) => row.namespace === 'control' && row.key === location.key,
+      )
+      if (stored === undefined) throw new Error('Missing compacted control row')
+      expect(
+        (decodeStoredValue(await atRest.open(stored.bytes, aad)) as ControlRecord).snapshot
+          .responses,
+      ).toEqual(expected)
+    } finally {
+      await fixture.close()
+    }
+  },
+)

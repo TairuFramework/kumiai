@@ -862,6 +862,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     const commit = encodeMemoryCommit(info.epoch, localDID ?? '', [], {
       head: info.head,
       external: true,
+      // Model a fresh MLS leaf per attempt, preserving bytes on candidate restore.
+      branch: requestID,
     })
     return {
       serialize: () =>

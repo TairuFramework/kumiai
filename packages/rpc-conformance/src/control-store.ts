@@ -95,7 +95,7 @@ export type ConformanceControlSnapshot<Position extends string = string> = {
   outcomes: Array<ConformanceOutcome<Position>>
   welcomes: Array<ConformanceWelcomeObligation>
   applied: Array<ConformanceAppliedCommit> // newest 64 epochs
-  responses: Array<ConformanceExternalResponse<Position>> // newest 64 epochs, keyed by (position, digest)
+  responses: Array<ConformanceExternalResponse<Position>> // newest 64 epochs, one per (epoch, digest), at most 256 total
   cursor: ConformanceControlCommitCursor<Position> | null // {position, epoch, stranded?}
 }
 export type ConformanceControlChanges<Position extends string = string> = {
@@ -117,7 +117,10 @@ export type ConformanceControlChanges<Position extends string = string> = {
   deleteWelcomes?: Array<string>
   putApplied?: Array<ConformanceAppliedCommit>
   deleteAppliedBelow?: number // drops rows at epoch < n, before puts
-  /** Upsert (position, digest). Retain the first 64 digests per position until epoch pruning. */
+  /**
+   * Retain one row per (epoch, digest) at its first position. Only that position can update it.
+   * First 256 rows overall, at most 64 per position. Overflow omits new rows without eviction.
+   */
   putResponses?: Array<ConformanceExternalResponse<Position>>
   deleteResponsesBelow?: number // by `epoch`
   cursor?: ConformanceControlCommitCursor<Position> | null
@@ -1612,19 +1615,90 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       await host.control.apply({ putResponses: retained }, 'fill-responses')
       const reopened = await params.reopen()
       await reopened.control.apply(
-        { putResponses: [row('overflow'), row('0', 'other'), { ...row('63'), reason: 'invalid' }] },
+        {
+          putResponses: [
+            row('overflow'),
+            row('other-digest', 'other'),
+            { ...row('63'), reason: 'invalid' },
+          ],
+        },
         'bounded-responses',
       )
       expect((await (await params.reopen()).control.load()).responses).toEqual([
         ...retained.slice(0, 63),
         { ...row('63'), reason: 'invalid' },
-        row('0', 'other'),
+        row('other-digest', 'other'),
       ])
       await reopened.control.apply(
         { deleteResponsesBelow: 2, putResponses: [row('fresh')] },
         'prune-responses',
       )
       expect((await (await params.reopen()).control.load()).responses).toEqual([row('fresh')])
+    })
+
+    test('response digest relays retain their first position per epoch through adoption and reopen', async () => {
+      const host = await params.open()
+      const original: ConformanceExternalResponse = {
+        position: 'original',
+        epoch: 1,
+        digest: 'same-commit',
+        kind: 'refused',
+        reason: 'policy',
+        refusalAuthority: 'authenticated-commit',
+      }
+      await host.control.apply({ putResponses: [original] }, 'original-response')
+      const reopened = await params.reopen()
+      await reopened.control.apply({ putResponses: [{ ...original, position: 'relay' }] }, 'relay')
+      expect((await reopened.control.load()).responses).toEqual([original])
+      const nextEpoch = { ...original, epoch: 2, position: 'next-epoch' }
+      await reopened.saveState(new Uint8Array([2]), {
+        changes: { putResponses: [{ ...original, position: 'adoption-relay' }, nextEpoch] },
+        mutationID: 'adoption-relay',
+      })
+      expect((await (await params.reopen()).control.load()).responses).toEqual([
+        original,
+        nextEpoch,
+      ])
+      await reopened.control.apply(
+        { putResponses: [{ ...original, reason: 'invalid' }] },
+        'exact-update',
+      )
+      expect((await (await params.reopen()).control.load()).responses).toEqual([
+        { ...original, reason: 'invalid' },
+        nextEpoch,
+      ])
+    })
+
+    test('response total budget spans positions and epochs without evicting retained evidence', async () => {
+      const host = await params.open()
+      const row = (index: number): ConformanceExternalResponse => ({
+        position: `position-${index}`,
+        epoch: (index % 2) + 1,
+        digest: `digest-${index}`,
+        kind: 'refused',
+        reason: 'policy',
+        refusalAuthority: 'authenticated-commit',
+      })
+      const retained = Array.from({ length: 256 }, (_, index) => row(index))
+      await host.control.apply({ putResponses: retained }, 'total-budget')
+      const reopened = await params.reopen()
+      await reopened.control.apply(
+        { putResponses: [row(256), { ...row(255), reason: 'invalid' }] },
+        'overflow',
+      )
+      const expected = [...retained.slice(0, 255), { ...row(255), reason: 'invalid' }]
+      expect((await (await params.reopen()).control.load()).responses).toEqual(expected)
+      await reopened.saveState(new Uint8Array([2]), {
+        changes: { putResponses: [row(257)] },
+        mutationID: 'adoption-overflow',
+      })
+      expect((await (await params.reopen()).control.load()).responses).toEqual(expected)
+      const fresh = Array.from({ length: 129 }, (_, index) => ({ ...row(index + 300), epoch: 3 }))
+      await reopened.control.apply({ deleteResponsesBelow: 2, putResponses: fresh }, 'prune-budget')
+      expect((await (await params.reopen()).control.load()).responses).toEqual([
+        ...expected.filter((response) => response.epoch === 2),
+        ...fresh.slice(0, 128),
+      ])
     })
 
     test.each([undefined, 'authenticated-commit'] as const)(
