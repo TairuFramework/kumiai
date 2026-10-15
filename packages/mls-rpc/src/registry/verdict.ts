@@ -99,6 +99,7 @@ export async function verifyRegistryResync(params: {
   let reason: RegistryResyncRefusalReason = 'malformed'
   try {
     const captured = 'format' in record ? validateCapturedRecoveryRecord(record) : null
+    // Legacy records are non-executable; their proof target/topic/head remain unbound.
     if (captured !== null) {
       requireMatch(
         captured.trigger === 'automatic' && captured.authorisationID === null,
@@ -181,10 +182,9 @@ export async function verifyRegistryResync(params: {
     const snapshot =
       capturedSnapshot ?? decodeRecoveryCandidate(record.candidate, record.requestKey)
     if (capturedSnapshot !== null) {
-      const snapshot = capturedSnapshot
       const reply = await authenticateRecoveryReply({
         trust: source.trust,
-        sealed: snapshot.attestedReply,
+        sealed: capturedSnapshot.attestedReply,
         requestID: record.requestID,
         requestKey: record.requestKey,
         options: {},
@@ -194,8 +194,8 @@ export async function verifyRegistryResync(params: {
           sameBytes(reply.groupInfo, snapshot.groupInfo) &&
           sameValue(reply.ledger, snapshot.replyLedger) &&
           normalizeDID(reply.signer) === normalizeDID(snapshot.signer) &&
-          reply.captureHead === snapshot.captureHead &&
-          sameBytes(reply.groupInfoAuthenticator, snapshot.target.groupInfoAuthenticator),
+          reply.captureHead === capturedSnapshot.captureHead &&
+          sameBytes(reply.groupInfoAuthenticator, capturedSnapshot.target.groupInfoAuthenticator),
         'candidate',
       )
       const offered = decode(mlsMessageDecoder, reply.groupInfo)
@@ -282,6 +282,7 @@ export async function verifyRegistryResync(params: {
     reason = 'candidate'
     const request = await verifyRecoveryRequest(
       new TextDecoder('utf-8', { fatal: true }).decode(record.request),
+      captured === null ? undefined : record.requestKey,
     )
     requireMatch(
       request.groupID === candidate.groupID &&
@@ -325,7 +326,19 @@ export async function verifyRegistryResync(params: {
     requireMatch(opened.verdict.verdict === 'confirmed', 'unaccepted')
     // The judge reads the mutable cached anchor, not the authenticated extension bytes.
     requireMatch(sameValue(candidate.anchor, decodeGroupAnchor(anchor)), 'candidate')
-    if (judge.judgeVerdict(opened) !== 'authoritative')
+    // Captured signer eligibility and floors were authenticated against origin trust above.
+    if (captured !== null)
+      requireMatch(
+        normalizeDID(opened.signer) !== normalizeDID(candidate.credential.id) &&
+          opened.verdict.groupID === candidate.groupID &&
+          opened.verdict.requestID === record.requestID &&
+          opened.verdict.position === tuple.position &&
+          opened.verdict.commitDigest === tuple.commitDigest &&
+          opened.verdict.epoch === Number(candidate.epoch) &&
+          opened.verdict.tag === judge.boundCommit()?.tag,
+        'tuple',
+      )
+    else if (judge.judgeVerdict(opened) !== 'authoritative')
       throw new RegistryResyncRefusedError({ reason: judge.verdictRefusal(opened) ?? 'tuple' })
   } catch (cause) {
     if (cause instanceof RegistryResyncRefusedError) throw cause

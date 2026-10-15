@@ -22,8 +22,28 @@ import {
   SealedGroupInfoError,
   sealCapturedGroupInfo,
   sealGroupInfo,
+  verifyRecoveryRequest,
 } from '../src/recovery.js'
 import type { Invite } from '../src/types.js'
+
+test('signed recovery request binds the retained ephemeral private key', async () => {
+  const identity = randomIdentity()
+  const { group } = await createGroup(identity, 'request-key-binding')
+  const params = { group, identity, requestID: 'same-request' }
+  const first = await createRecoveryRequest(params)
+  const second = await createRecoveryRequest(params)
+  await expect(
+    verifyRecoveryRequest(first.request, first.ephemeralPrivateKey),
+  ).resolves.toMatchObject({
+    ephemeralPublicKey: first.ephemeralPublicKey,
+  })
+  await expect(
+    verifyRecoveryRequest(second.request, first.ephemeralPrivateKey),
+  ).rejects.toMatchObject({
+    name: 'RecoveryRequestError',
+    reason: 'malformed',
+  })
+})
 
 // ---------------------------------------------------------------------------
 // Fixtures

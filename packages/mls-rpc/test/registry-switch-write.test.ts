@@ -1,21 +1,34 @@
 import { normalizeDID, type OwnIdentity, randomIdentity } from '@kokuin/token'
 import {
+  authenticateRecoveryReply,
   type ControllerBinding,
   commitInvite,
   commitKeyRotation,
   createGroup,
   createInvite,
   createKeyPackageBundle,
+  createRecoveryRequest,
   decodeClientState,
   encodeClientState,
+  exportGroupInfo,
+  GroupHandle,
+  openRecoveryVerdictFromTrust,
   processWelcome,
+  sealCapturedGroupInfo,
+  signLedgerEntry,
+  verifyRecoveryRequest,
 } from '@kumiai/mls'
 import type { StagedAdoption } from '@kumiai/rpc'
+import { createCommit, defaultProposalTypes } from 'ts-mls'
 import { describe, expect, test, vi } from 'vitest'
 
 import { entryCapability } from '../src/entry-capability.js'
 import { createRecoverySwitchFactory, toRegistrySwitchWrite } from '../src/index.js'
-import { GroupStateUncertainError, StorageOutcomeUnknownError } from '../src/persistence-errors.js'
+import {
+  GroupStateUncertainError,
+  RegistryResyncRefusedError,
+  StorageOutcomeUnknownError,
+} from '../src/persistence-errors.js'
 import {
   decodeCapturedRecoveryCandidate,
   encodeCapturedRecoveryCandidate,
@@ -38,8 +51,31 @@ const lifecycle = (await import(
 const groupID = 'captured-switch'
 const key = { groupID, incarnation: 1 }
 const destination = { groupID, incarnation: 2 }
+const tamperReasons = {
+  target: 'tuple',
+  topic: 'tuple',
+  epoch: 'tuple',
+  authenticator: 'tuple',
+  head: 'tuple',
+  reply: 'candidate',
+  'source tree': 'candidate',
+  candidate: 'malformed',
+  request: 'candidate',
+  'request key': 'malformed',
+  digest: 'malformed',
+  'payload digest': 'malformed',
+  position: 'tuple',
+  verdict: 'tuple',
+  'mutation ID': 'tuple',
+  'origin digest': 'malformed',
+  manual: 'unaccepted',
+} as const
 
-async function setup(mode: 'real-mls' | 'double', advanced = false, trustMaps = false) {
+async function setup(
+  mode: 'real-mls' | 'double',
+  advanced: boolean | 'remove-signer' = false,
+  trustMaps = false,
+) {
   const identity = randomIdentity()
   const signer = randomIdentity()
   const fixture = await createRegistryFixture({
@@ -66,7 +102,47 @@ async function setup(mode: 'real-mls' | 'double', advanced = false, trustMaps = 
       options,
     })
   ).group
-  if (advanced) {
+  let responder = signer
+  if (advanced === 'remove-signer') {
+    const survivor = randomIdentity()
+    const packageBundle = await createKeyPackageBundle(survivor, {
+      controller: await lifecycle.bindingFor(survivor),
+    })
+    const offered = await createInvite({
+      group: remote,
+      identity: signer,
+      recipientDID: survivor.id,
+    })
+    const joined = await commitInvite(remote, packageBundle.publicPackage, offered.invite)
+    await source.processMessage(joined.commitMessage)
+    remote = (
+      await processWelcome({
+        identity: survivor,
+        invite: offered.invite,
+        welcome: joined.welcomeMessage,
+        keyPackageBundle: packageBundle,
+        options,
+      })
+    ).group
+    const removed = remote.listMembers().find((member) => member.id === signer.id)?.leafIndex
+    if (removed == null) throw new Error('Missing origin signer')
+    // Native Remove isolates attestation authority from application removal policy.
+    const result = await createCommit({
+      context: remote.context,
+      state: remote.state,
+      ratchetTreeExtension: true,
+      extraProposals: [{ proposalType: defaultProposalTypes.remove, remove: { removed } }],
+    })
+    const ledger = remote.ledgerTokens
+    remote = new GroupHandle({
+      state: result.newState,
+      context: remote.context,
+      credential: remote.credential,
+      ...options,
+    })
+    await remote.bootstrapLedger(ledger)
+    responder = survivor
+  } else if (advanced) {
     const outsider = randomIdentity()
     const packageBundle = await createKeyPackageBundle(outsider, {
       controller: await lifecycle.bindingFor(outsider),
@@ -114,7 +190,7 @@ async function setup(mode: 'real-mls' | 'double', advanced = false, trustMaps = 
     source,
     sourceKey: key,
     sourceTrust: trust,
-    responder: { identity: signer, group: remote },
+    responder: { identity: responder, group: remote },
   })
   await fixture.installRows({ key, control: { putRejoin: recovery.record } })
   const owner = createGroupHandleRegistry({
@@ -150,10 +226,244 @@ async function setup(mode: 'real-mls' | 'double', advanced = false, trustMaps = 
     removed: false,
     epochAuthenticator: recovery.candidate.state.keySchedule.epochAuthenticator.slice(),
   }
-  return { ...recovery, recovery, fixture, owner, write, run, staged }
+  return {
+    ...recovery,
+    recovery,
+    fixture,
+    owner,
+    write,
+    run,
+    staged,
+    sourceGroup: source,
+    responderGroup: remote,
+    responder,
+    originSigner: signer,
+  }
 }
 for (const mode of ['real-mls', 'double'] as const) {
   describe(`captured restricted switch -- ${mode}`, () => {
+    test('origin signer removed from the offered tree retains confirmation authority', async () => {
+      const s = await setup(mode, 'remove-signer')
+      try {
+        expect(s.sourceGroup.bindingOfDID(s.originSigner.id)).toBeDefined()
+        expect(s.candidate.bindingOfDID(s.originSigner.id)).toBeFalsy()
+        s.record.verdict = s.proof.verdict = await s.sealVerdict({ identity: s.originSigner })
+        expect(
+          (
+            await openRecoveryVerdictFromTrust({
+              trust: s.source.trust,
+              sealed: s.proof.verdict,
+              requestID: s.record.requestID,
+              requestKey: s.record.requestKey,
+              options: {},
+            })
+          ).signer,
+        ).toBe(normalizeDID(s.originSigner.id))
+        await s.fixture.installRows({ key, control: { putRejoin: s.record } })
+        s.recovery.source = await s.owner.recoverySource(groupID)
+        await expect(verifyRegistryResync(s)).resolves.toBeUndefined()
+        await expect(s.run()).resolves.toEqual(destination)
+      } finally {
+        await s.fixture.close()
+      }
+    })
+
+    test.each(['generation', 'time'] as const)(
+      'offered %s floor cannot override origin confirmation authority',
+      async (floor) => {
+        const s = await setup(mode)
+        try {
+          const snapshot = decodeCapturedRecoveryCandidate(s.record.candidate, s.record.requestKey)
+          const controller = s.candidate.anchor.controller
+          if (controller == null) throw new Error('Missing controller')
+          snapshot.knownRegistry.controllers = new Map([
+            [
+              normalizeDID(controller),
+              {
+                recordedLog: [],
+                genFloor: floor === 'generation' ? 1 : 0,
+                timeFloor: floor === 'time' ? Math.ceil(Date.now() / 1000) + 7200 : 0,
+              },
+            ],
+          ])
+          expect(snapshot.knownRegistry.controllers).not.toEqual(
+            s.source.trust.registry.controllers,
+          )
+          s.record.candidate = encodeCapturedRecoveryCandidate(snapshot, s.record.requestKey)
+          await s.fixture.installRows({ key, control: { putRejoin: s.record } })
+          s.recovery.source = await s.owner.recoverySource(groupID)
+          await expect(verifyRegistryResync(s)).resolves.toBeUndefined()
+          await expect(s.run()).resolves.toEqual(destination)
+        } finally {
+          await s.fixture.close()
+        }
+      },
+    )
+
+    test('valid signed replacement request with another ephemeral key performs zero writes', async () => {
+      const s = await setup(mode)
+      try {
+        const original = await verifyRecoveryRequest(new TextDecoder().decode(s.record.request))
+        const replacement = await createRecoveryRequest({
+          group: s.sourceGroup,
+          identity: s.fixture.identity,
+          requestID: s.record.requestID,
+        })
+        const verified = await verifyRecoveryRequest(replacement.request)
+        expect(verified).toMatchObject({
+          requesterDID: original.requesterDID,
+          groupID: original.groupID,
+          requestID: original.requestID,
+        })
+        expect(verified.ephemeralPublicKey).not.toEqual(original.ephemeralPublicKey)
+        s.record.request = new TextEncoder().encode(replacement.request)
+        await s.fixture.installRows({ key, control: { putRejoin: s.record } })
+        s.recovery.source = await s.owner.recoverySource(groupID)
+        const before = await s.fixture.inspectRows()
+        await expect(verifyRegistryResync(s)).rejects.toEqual(
+          new RegistryResyncRefusedError({ reason: 'candidate' }),
+        )
+        await expect(s.run()).rejects.toEqual(
+          new RegistryResyncRefusedError({ reason: 'candidate' }),
+        )
+        expect(await s.fixture.inspectRows()).toEqual(before)
+        expect(await s.fixture.device.groups.loadState(destination)).toBeNull()
+      } finally {
+        await s.fixture.close()
+      }
+    })
+
+    test('stored trust drift after capture performs zero writes with a freshly read source', async () => {
+      const s = await setup(mode)
+      try {
+        const saved = structuredClone(s.record)
+        const trust = structuredClone(s.source.trust)
+        trust.spentEpochAuthenticators.push(crypto.getRandomValues(new Uint8Array(32)))
+        await s.fixture.installRows({ key, trust })
+        s.recovery.source = await s.owner.recoverySource(groupID)
+        expect(s.recovery.source.trustDigest).not.toBe(saved.source.trustDigest)
+        const before = await s.fixture.inspectRows()
+        await expect(verifyRegistryResync({ ...s, source: s.recovery.source })).rejects.toEqual(
+          new RegistryResyncRefusedError({ reason: 'source' }),
+        )
+        await expect(s.run()).rejects.toEqual(new RegistryResyncRefusedError({ reason: 'source' }))
+        expect(await s.fixture.inspectRows()).toEqual(before)
+        expect((await s.fixture.device.groups.ports(key).control.load()).rejoin).toEqual(saved)
+        expect(await s.fixture.device.groups.loadState(destination)).toBeNull()
+      } finally {
+        await s.fixture.close()
+      }
+    })
+
+    test.each(['group', 'request', 'position', 'digest', 'epoch', 'tag', 'self signer'] as const)(
+      'origin-authenticated verdict still binds candidate %s',
+      async (field) => {
+        const s = await setup(mode)
+        try {
+          const verdict =
+            field === 'group'
+              ? { groupID: 'another-group' }
+              : field === 'request'
+                ? { requestID: 'another-request' }
+                : field === 'position'
+                  ? { position: 'another-position' }
+                  : field === 'digest'
+                    ? { commitDigest: s.record.payloadDigest }
+                    : field === 'epoch'
+                      ? { epoch: s.record.epochAfter + 1 }
+                      : field === 'tag'
+                        ? { tag: 'another-tag' }
+                        : {}
+          s.record.verdict = s.proof.verdict = await s.sealVerdict({
+            verdict,
+            ...(field === 'self signer' ? { identity: s.fixture.identity } : {}),
+          })
+          await s.fixture.installRows({ key, control: { putRejoin: s.record } })
+          s.recovery.source = await s.owner.recoverySource(groupID)
+          const before = await s.fixture.inspectRows()
+          const reason = field === 'group' || field === 'request' ? 'malformed' : 'tuple'
+          await expect(s.run()).rejects.toEqual(new RegistryResyncRefusedError({ reason }))
+          expect(await s.fixture.inspectRows()).toEqual(before)
+          expect(await s.fixture.device.groups.loadState(destination)).toBeNull()
+        } finally {
+          await s.fixture.close()
+        }
+      },
+    )
+
+    test.each([
+      'groupInfo',
+      'ledger',
+      'signer',
+      'captureHead',
+      'authenticator',
+      'genuine reply',
+    ] as const)('authenticated reply %s substitution performs zero writes', async (field) => {
+      const s = await setup(mode)
+      try {
+        const snapshot = decodeCapturedRecoveryCandidate(s.record.candidate, s.record.requestKey)
+        const open = (sealed: Uint8Array) =>
+          authenticateRecoveryReply({
+            trust: s.source.trust,
+            sealed,
+            requestID: s.record.requestID,
+            requestKey: s.record.requestKey,
+            options: {},
+          })
+        expect(await open(snapshot.attestedReply)).not.toBeNull()
+        if (field === 'groupInfo') {
+          const alternate = await exportGroupInfo({ group: s.sourceGroup })
+          expect(alternate.groupInfo).not.toEqual(snapshot.groupInfo)
+          snapshot.groupInfo = alternate.groupInfo
+        }
+        if (field === 'ledger') {
+          const token = await signLedgerEntry(s.fixture.identity, {
+            type: 'kumiai.role',
+            groupID,
+            subject: s.responder.id,
+            value: 'member',
+          })
+          await s.candidate.applyLedgerEntries([token])
+          snapshot.replyLedger = s.candidate.ledgerTokens
+        }
+        if (field === 'signer') snapshot.signer = s.fixture.identity.id
+        if (field === 'captureHead') {
+          const head = 'another-captured-head' as typeof snapshot.captureHead
+          snapshot.captureHead = snapshot.searchFrom = snapshot.target.captureHead = head
+          s.record.captureHead = s.record.searchFrom = s.record.expectedHead = head
+          s.record.target.captureHead = s.proof.captureHead = head
+        }
+        if (field === 'authenticator') {
+          const authenticator = crypto.getRandomValues(new Uint8Array(32))
+          snapshot.target.groupInfoAuthenticator = authenticator
+          s.record.target.groupInfoAuthenticator = s.proof.groupInfoAuthenticator = authenticator
+        }
+        if (field === 'genuine reply') {
+          snapshot.attestedReply = await sealCapturedGroupInfo({
+            group: s.responderGroup,
+            identity: s.responder,
+            request: new TextDecoder().decode(s.record.request),
+            captureHead: 'another-genuine-head',
+          })
+          expect(await open(snapshot.attestedReply)).not.toBeNull()
+        }
+        s.record.candidate = encodeCapturedRecoveryCandidate(snapshot, s.record.requestKey)
+        await s.fixture.installRows({ key, control: { putRejoin: s.record } })
+        s.recovery.source = await s.owner.recoverySource(groupID)
+        const before = await s.fixture.inspectRows()
+        await expect(verifyRegistryResync(s)).rejects.toEqual(
+          new RegistryResyncRefusedError({ reason: 'candidate' }),
+        )
+        await expect(s.run()).rejects.toEqual(
+          new RegistryResyncRefusedError({ reason: 'candidate' }),
+        )
+        expect(await s.fixture.inspectRows()).toEqual(before)
+        expect(await s.fixture.device.groups.loadState(destination)).toBeNull()
+      } finally {
+        await s.fixture.close()
+      }
+    })
+
     test('offered membership and path advance from origin before installing once', async () => {
       const s = await setup(mode, true)
       try {
@@ -219,7 +529,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         if (fault === 'target') s.proof.targetID = 'different-hub'
         if (fault === 'topic') s.proof.topicID = 'different-topic'
         if (fault === 'epoch') s.proof.groupInfoEpoch++
-        if (fault === 'authenticator') s.proof.groupInfoAuthenticator.fill(0)
+        if (fault === 'authenticator') s.proof.groupInfoAuthenticator = new Uint8Array(32)
         if (fault === 'head') s.proof.captureHead = null
         if (fault === 'reply' || fault === 'source tree') {
           const snapshot = decodeCapturedRecoveryCandidate(s.record.candidate, s.record.requestKey)
@@ -246,8 +556,11 @@ for (const mode of ['real-mls', 'double'] as const) {
           s.record.authorisationID = 'manual-authorisation'
         }
         await s.fixture.installRows({ key, control: { putRejoin: s.record } })
+        s.recovery.source = await s.owner.recoverySource(groupID)
         const before = await s.fixture.inspectRows()
-        await expect(s.run()).rejects.toThrow()
+        await expect(s.run()).rejects.toEqual(
+          new RegistryResyncRefusedError({ reason: tamperReasons[fault] }),
+        )
         expect(await s.fixture.inspectRows()).toEqual(before)
         expect(await s.fixture.device.groups.loadState(destination)).toBeNull()
       } finally {
