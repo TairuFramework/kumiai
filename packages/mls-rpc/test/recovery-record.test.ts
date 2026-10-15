@@ -9,7 +9,8 @@ import {
   HANDSHAKE_KIND,
   type LegacyRejoinRecord,
 } from '@kumiai/rpc'
-import { beforeAll, expect, test } from 'vitest'
+import { toB64U } from '@sozai/codec'
+import { beforeAll, describe, expect, test } from 'vitest'
 
 import { createGroupMLS } from '../src/mls.js'
 import {
@@ -19,6 +20,7 @@ import {
   openRecord,
   sealRecord,
 } from '../src/persistence-codec.js'
+import { GroupStateConflictError } from '../src/persistence-errors.js'
 import type { GroupRecoveryTrust } from '../src/persistence-types.js'
 import {
   type CapturedRecoverySnapshot,
@@ -241,6 +243,116 @@ async function recordFixture() {
   }
   return { record, legacy, snapshot: captured }
 }
+
+describe('public trust field types', () => {
+  let record: CapturedRejoinRecord
+
+  beforeAll(async () => {
+    const fixture = await recordFixture()
+    const held = structuredClone(fixture.snapshot.source.trust)
+    held.spentEpochAuthenticators.push(held.installed.authenticator.slice())
+    const signer = held.signerTree.find(
+      (node) => node?.nodeType === 1 && node.leaf.leafNodeSource === 1,
+    )
+    const parent = held.signerTree.find((node) => node?.nodeType === 2)
+    if (signer?.nodeType !== 1 || signer.leaf.leafNodeSource !== 1 || parent?.nodeType !== 2)
+      throw new Error('Missing public signer fields')
+    const { lifetime: _lifetime, ...leaf } = signer.leaf
+    held.signerTree = [
+      {
+        ...signer,
+        leaf: {
+          ...signer.leaf,
+          extensions: [{ extensionType: 1, extensionData: new Uint8Array([1, 2, 3]) }],
+        },
+      },
+      parent,
+      { nodeType: 1, leaf: { ...leaf, leafNodeSource: 2 } },
+      { nodeType: 1, leaf: { ...leaf, leafNodeSource: 3, parentHash: parent.parent.parentHash } },
+      {
+        nodeType: 1,
+        leaf: {
+          ...signer.leaf,
+          credential: { credentialType: 2, certificates: [new Uint8Array([4])] },
+        },
+      },
+      {
+        nodeType: 1,
+        leaf: {
+          ...signer.leaf,
+          credential: { credentialType: 0xff00, data: new Uint8Array([5]) },
+        },
+      },
+    ]
+    const source = {
+      ...fixture.snapshot.source,
+      trust: held,
+      trustDigest: recoveryTrustDigest(held),
+    }
+    record = {
+      ...fixture.record,
+      source,
+      candidate: encodeCapturedRecoveryCandidate(
+        { ...fixture.snapshot, source },
+        fixture.record.requestKey,
+      ),
+    }
+    expect(() => validateCapturedRecoveryRecord(record)).not.toThrow()
+  })
+
+  const byteFields: Array<[string, Array<string | number>]> = [
+    ['genesis anchor', ['genesisAnchor']],
+    ['installed authenticator', ['installed', 'authenticator']],
+    ['spent authenticator', ['spentEpochAuthenticators', 0]],
+    ['leaf HPKE key', ['signerTree', 0, 'leaf', 'hpkePublicKey']],
+    ['leaf signature key', ['signerTree', 0, 'leaf', 'signaturePublicKey']],
+    ['leaf signature', ['signerTree', 0, 'leaf', 'signature']],
+    ['basic credential identity', ['signerTree', 0, 'leaf', 'credential', 'identity']],
+    ['leaf extension data', ['signerTree', 0, 'leaf', 'extensions', 0, 'extensionData']],
+    ['parent HPKE key', ['signerTree', 1, 'parent', 'hpkePublicKey']],
+    ['parent hash', ['signerTree', 1, 'parent', 'parentHash']],
+    ['update leaf HPKE key', ['signerTree', 2, 'leaf', 'hpkePublicKey']],
+    ['commit leaf parent hash', ['signerTree', 3, 'leaf', 'parentHash']],
+    ['X509 certificate', ['signerTree', 4, 'leaf', 'credential', 'certificates', 0]],
+    ['custom credential data', ['signerTree', 5, 'leaf', 'credential', 'data']],
+  ]
+  const bigintFields: Array<[string, Array<string | number>]> = [
+    ['lifetime start', ['signerTree', 0, 'leaf', 'lifetime', 'notBefore']],
+    ['lifetime end', ['signerTree', 0, 'leaf', 'lifetime', 'notAfter']],
+  ]
+  const cases = [
+    ...byteFields.map(([name, path]) => ({ name, path, representation: 'base64url' as const })),
+    ...bigintFields.flatMap(([name, path]) => [
+      { name: `${name} string`, path, representation: 'decimal' as const },
+      { name: `${name} number`, path, representation: 'number' as const },
+    ]),
+  ]
+
+  test.each(cases)(
+    '$name refuses an erased-type replacement before returning a record',
+    (entry) => {
+      const invalid = structuredClone(record)
+      let owner = invalid.source.trust as Record<string | number, unknown>
+      for (const key of entry.path.slice(0, -1)) owner = owner[key] as typeof owner
+      const key = entry.path.at(-1)
+      if (key === undefined) throw new Error('Missing field path')
+      const original = owner[key]
+      if (entry.representation === 'base64url') {
+        expect(original).toBeInstanceOf(Uint8Array)
+        owner[key] = toB64U(original as Uint8Array)
+      } else {
+        expect(typeof original).toBe('bigint')
+        owner[key] = entry.representation === 'decimal' ? String(original) : Number(original)
+      }
+      expect(invalid.source.trustDigest).toBe(record.source.trustDigest)
+      expect
+        .soft(() => recoveryTrustDigest(invalid.source.trust as GroupRecoveryTrust))
+        .toThrow(GroupStateConflictError)
+      expect.soft(() => validateCapturedRecoveryRecord(invalid)).toThrow(GroupStateConflictError)
+      expect.soft(() => decodeRecoveryRecord(invalid)).toThrow(GroupStateConflictError)
+    },
+  )
+})
 
 test('full sealed record reopens origin and accounts for duplicated trust and sourceState', async () => {
   const { record, snapshot } = await recordFixture()

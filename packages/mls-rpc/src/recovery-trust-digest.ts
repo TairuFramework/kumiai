@@ -1,9 +1,9 @@
-import { decodeDeviceRegistry, encodeDeviceRegistry } from '@kumiai/mls'
+import { encodeDeviceRegistry } from '@kumiai/mls'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { toB64U } from '@sozai/codec'
 
-import { assertTrustTransition } from './persistence-guards.js'
 import type { GroupRecoveryTrust } from './persistence-types.js'
+import { assertRecoverySourceTrust } from './registry/source-trust.js'
 
 function canonical(value: unknown): unknown {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value
@@ -28,18 +28,8 @@ function canonical(value: unknown): unknown {
 }
 
 export function recoveryTrustDigest(trust: GroupRecoveryTrust): string {
-  assertTrustTransition(null, trust)
-  if (
-    typeof trust.credential.id !== 'string' ||
-    !trust.ledger.every((token) => typeof token === 'string') ||
-    (trust.binding !== null &&
-      (typeof trust.binding?.id !== 'string' ||
-        typeof trust.binding.capability !== 'string' ||
-        !Array.isArray(trust.binding.prefix)))
-  )
-    throw new TypeError('Malformed public recovery trust')
+  assertRecoverySourceTrust(trust)
   const registry = encodeDeviceRegistry(trust.registry)
-  decodeDeviceRegistry(registry)
   const encoder = new TextEncoder()
   const domain = encoder.encode('kumiai/recovery-trust/v1')
   const body = encoder.encode(JSON.stringify(canonical({ ...trust, registry })))
