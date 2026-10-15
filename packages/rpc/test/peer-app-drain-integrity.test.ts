@@ -1,6 +1,6 @@
 import { encodeEventFrame } from '@kumiai/broadcast'
 import type { HubFetchTopicParams, HubFetchTopicResult } from '@kumiai/hub-tunnel'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import { encodeAppAAD } from '../src/app-aad.js'
 import type { AppWindowPruned } from '../src/app-cursor.js'
@@ -43,10 +43,9 @@ class FlakyFetchHub extends DurableFakeHub {
  */
 describe('the drain retains future claims and passes no epoch it failed to read', () => {
   /**
-   * A future claim retains its position even if the commit log omits the matching commit.
-   * An operator can explicitly release a forged claim that the group will never reach.
+   * A caught-up peer completes a far-future claim without an operator drop.
    */
-  test('a far-future claim blocks the cursor', async () => {
+  test('a caught-up far-future claim completes poison', async () => {
     const hub = new DurableFakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x91)
     const seen: Array<unknown> = []
@@ -56,12 +55,14 @@ describe('the drain retains future claims and passes no epoch it failed to read'
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
-    await flush()
+    await Promise.all([alice.peer.replay(), bob.peer.replay()])
     await bob.peer.dispose()
     hub.detach('bob')
 
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch one' } })
-    await flush()
+    await vi.waitFor(() =>
+      expect(hub.published.filter((item) => item.topicID === topicID)).toHaveLength(1),
+    )
     // The injected frame claims epoch 65535 while the group is still at epoch 1.
     const forged = createFakeCrypto({ epoch: 65535, localDID: 'mallory' })
     await hub.publish({
@@ -70,7 +71,6 @@ describe('the drain retains future claims and passes no epoch it failed to read'
       retain: 'log',
       payload: await forged.wrap(encodeEventFrame('chat/posted', { text: 'from nowhere' })),
     })
-    await flush()
 
     const restarted = makeMLSPeer(hub, 'bob', recoverySecret, {
       restartOf: bob,
@@ -78,14 +78,19 @@ describe('the drain retains future claims and passes no epoch it failed to read'
       onAppWindowPruned: (event) => void pruned.push(event),
     })
     hub.reattach('bob')
-    await flush()
+    await restarted.peer.replay()
+    await vi.waitFor(() =>
+      expect(restarted.appCursorStore.stored(topicID)).toBe(
+        hub.published.filter((item) => item.topicID === topicID).at(-1)?.sequenceID,
+      ),
+    )
 
     expect(seen).toEqual([{ text: 'at epoch one' }])
 
-    // The forged frame is not marked done. The durable operator drop is tested separately.
+    // The forged frame completes without reaching the host.
     const posted = hub.published.filter((m) => m.topicID === topicID)
     expect(posted).toHaveLength(2)
-    expect(bob.appCursorStore.stored(topicID)).toBe(posted[0]?.sequenceID)
+    expect(bob.appCursorStore.stored(topicID)).toBe(posted[1]?.sequenceID)
     expect(pruned).toEqual([])
 
     await alice.peer.dispose()
@@ -93,9 +98,9 @@ describe('the drain retains future claims and passes no epoch it failed to read'
   })
 
   /**
-   * A frame sealed two epochs ahead keeps its bytes and place until the walk reaches that epoch.
+   * A frame sealed more than two epochs ahead keeps its bytes and place until the walk reaches that epoch.
    */
-  test('a frame the commit log justifies keeps its place, and the cursor passes it only on delivery', async () => {
+  test('honest lag beyond two epochs delivers every frame after catch-up in cursor order', async () => {
     const hub = new DurableFakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x92)
     const seen: Array<unknown> = []
@@ -104,30 +109,32 @@ describe('the drain retains future claims and passes no epoch it failed to read'
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
-    await flush()
+    await Promise.all([alice.peer.replay(), bob.peer.replay()])
     await bob.peer.dispose()
     hub.detach('bob')
 
-    // One frame at epoch 1, then two commits carrying the group to epoch 3 — no roster change, so
-    // one anchor and one topic throughout — and a frame sealed at 3. Bob is still at 1.
+    // One frame at epoch 1, then three commits carrying the group to epoch 4 — no roster change, so
+    // one anchor and one topic throughout — and a frame sealed at 4. Bob is still at 1.
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch one' } })
-    await flush()
+    await vi.waitFor(() =>
+      expect(hub.published.filter((item) => item.topicID === topicID)).toHaveLength(1),
+    )
     await alice.peer.commit(buildLedgerCommit(alice, []))
-    await flush()
     await alice.peer.commit(buildLedgerCommit(alice, []))
-    await flush()
-    expect(alice.mls.epoch()).toBe(3)
+    await alice.peer.commit(buildLedgerCommit(alice, []))
+    expect(alice.mls.epoch()).toBe(4)
     expect(alice.peer.anchorEpoch()).toBe(1)
-    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch three' } })
-    await flush()
-    await flush()
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch four' } })
+    await vi.waitFor(() =>
+      expect(hub.published.filter((item) => item.topicID === topicID)).toHaveLength(2),
+    )
 
     const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
     hub.reattach('bob')
-    await flush()
 
-    expect(restarted.mls.epoch()).toBe(3)
-    expect(seen).toEqual([{ text: 'at epoch one' }, { text: 'at epoch three' }])
+    await vi.waitFor(() => expect(restarted.mls.epoch()).toBe(4))
+    await vi.waitFor(() => expect(seen).toHaveLength(2))
+    expect(seen).toEqual([{ text: 'at epoch one' }, { text: 'at epoch four' }])
 
     // Every position the store was ever told about, in order: the walk stopped behind the ahead
     // frame first and only passed it once its epoch arrived. A cursor that had gone straight to

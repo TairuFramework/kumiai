@@ -24,10 +24,13 @@ import { retentionOf } from './protocol.js'
 import { protocolTopic } from './topic.js'
 
 const APP_FETCH_LIMIT = 100
+export const APP_FUTURE_EPOCH_WINDOW = 2
+export const APP_FUTURE_HOLD_MS = 30_000
 
 /** The position outlives sealed bytes until the cursor can pass a run of done frames. */
 export type AppFrame = {
   position: LogPosition
+  caughtUpAt?: number
   sealed:
     | { state: 'sealed'; bytes: Uint8Array }
     | { state: 'pending'; id: string }
@@ -94,6 +97,8 @@ export type AppLaneParams = {
   onAppDeliveryResumed?: ((event: AppDeliveryResumed) => void) | undefined
   /** Start workers after the caller's serialization boundary; direct lanes start immediately. */
   scheduleDelivery?: ((start: () => void) => void) | undefined
+  /** No applicable unapplied commit through the observed head. Direct lanes default to true. */
+  commitLaneCaughtUp?: () => boolean
   /** Current safety hold. Defaults to null. */
   safetyHold?: () => SafetyHold
   /** Latch a held refusal. Defaults to a no-op. */
@@ -141,8 +146,8 @@ export type AppLane = {
  * Take one frame into the buffer at its place in the log, or reconcile it with the copy already
  * there. The ONE way a frame enters the buffer, from either deliverer.
  *
- * A POSITION IS TAKEN ONCE. In durable mode, pending wins over every duplicate and sealed wins
- * over done. Without durable delivery, a live done observation still wins as before.
+ * A POSITION IS TAKEN ONCE. In durable mode, pending and completed occurrences survive duplicates.
+ * Without durable delivery, a live done observation still wins as before.
  *
  * Kept in log order by insertion, not append, since the two deliverers do not arrive in one order:
  * a pull runs from behind the live stream and returns frames the pushes already brought.
@@ -156,10 +161,8 @@ function takeAppFrame(frames: Array<AppFrame>, incoming: AppFrame, durable: bool
       if (incoming.sealed.state === 'done') existing.sealed = incoming.sealed
       return
     }
-    if (existing.sealed.state === 'pending') return
+    if (existing.sealed.state === 'pending' || existing.sealed.state === 'done') return
     if (incoming.sealed.state === 'pending') {
-      existing.sealed = incoming.sealed
-    } else if (existing.sealed.state === 'done') {
       existing.sealed = incoming.sealed
     }
     return
@@ -189,6 +192,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
     onAppDeliveryResumed,
     scheduleDelivery = (start) => start(),
     safetyHold = () => null,
+    commitLaneCaughtUp = () => true,
     onSafetyHeld = () => {},
     anchor,
     groupID,
@@ -204,6 +208,9 @@ export function createAppLane(params: AppLaneParams): AppLane {
   const reportedPruned = new Map<string, Set<string>>()
   const blockingFrames = new Map<string, AppDeliveryResumed>()
   let disposed = false
+  let futureTimer: ReturnType<typeof setTimeout> | undefined
+  let futureDeadline: number | undefined
+  let retryScheduled = false
   const reportedUnknown = new Map<string, AppDeliveryResumed>()
   let pendingNotices: Array<() => void> | undefined
   const notifyAppHost = <T>(callback: ((event: T) => void) | undefined, event: T): void => {
@@ -280,6 +287,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       requested: boolean
       retryNow: boolean
       backoff: number
+      delayed: boolean
       timer?: ReturnType<typeof setTimeout>
     }
   >()
@@ -445,6 +453,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
             frames,
             {
               position,
+              ...(commitLaneCaughtUp() ? { caughtUpAt: performance.now() } : {}),
               sealed:
                 restored == null
                   ? { state: 'sealed', bytes: message.payload }
@@ -484,10 +493,10 @@ export function createAppLane(params: AppLaneParams): AppLane {
       position = (frames[passed] as AppFrame).position
       passed += 1
     }
-    if (passed > 0) frames.splice(0, passed)
     if (position == null || position === cursor.position) return
-    cursor.position = position
     await appCursorStore?.save(cursor.topicID, position)
+    cursor.position = position
+    frames.splice(0, passed)
   }
 
   const orderedRecords = (name: string): Array<PendingAppFrame> =>
@@ -561,11 +570,12 @@ export function createAppLane(params: AppLaneParams): AppLane {
     if (disposed || crypto.pending == null) return
     let worker = workers.get(name)
     if (worker == null) {
-      worker = { running: false, requested: false, retryNow: false, backoff: 1000 }
+      worker = { running: false, requested: false, retryNow: false, backoff: 1000, delayed: false }
       workers.set(name, worker)
     }
     worker.requested = true
     if (worker.running || worker.timer != null) return
+    worker.delayed = delay > 0
     worker.timer = setTimeout(() => {
       if (disposed) return
       worker.timer = undefined
@@ -610,6 +620,17 @@ export function createAppLane(params: AppLaneParams): AppLane {
 
   const retryDelivery = (topicID?: string): void => {
     if (disposed) return
+    const frames = [...segment.values()].flat()
+    for (const pushes of staged.values()) for (const push of pushes) frames.push(push.frame)
+    const sealed = frames.filter((frame) => frame.sealed.state === 'sealed')
+    if (!retryScheduled && safetyHold() === null && sealed.length > 0) {
+      retryScheduled = true
+      // A queued drain or a slow refetch must not postpone the catch-up age origin.
+      const caughtUpAt = commitLaneCaughtUp() ? performance.now() : undefined
+      void deliver(sealed, caughtUpAt).catch(() => {
+        // Failed storage keeps the completed prefix buffered for a later retry.
+      })
+    }
     const names = new Set([
       ...workers.keys(),
       ...pendingRecords.map((record) => record.frame.protocol),
@@ -627,7 +648,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       if (worker != null) {
         worker.backoff = 1000
         worker.retryNow = worker.running
-        if (worker.timer != null) {
+        if (worker.timer != null && worker.delayed) {
           clearTimeout(worker.timer)
           worker.timer = undefined
         }
@@ -709,13 +730,16 @@ export function createAppLane(params: AppLaneParams): AppLane {
       topicID,
       frame: {
         position: asLogPosition(position),
+        ...(commitLaneCaughtUp() ? { caughtUpAt: performance.now() } : {}),
         sealed: ahead ? { state: 'sealed', bytes: message.payload } : { state: 'done' },
       },
     })
     scheduleSync()
+    if (ahead) retryDelivery()
   }
 
   const drain = async (): Promise<void> => {
+    if (disposed) return
     await loadSegment()
     for (const [name, frames] of segment) {
       const events = appEventHandlers.get(name)
@@ -725,7 +749,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       }
       for (const frame of frames) {
         if (frame.sealed.state !== 'sealed') continue
-        if (safetyHold() !== null) break
+        if (disposed || safetyHold() !== null) break
         const sealed = frame.sealed.bytes
         // Unreadable bytes are dead. Past and future are the open's locked answer, below.
         if (crypto.frameEpoch(sealed) == null) {
@@ -733,8 +757,9 @@ export function createAppLane(params: AppLaneParams): AppLane {
           resumeBlocked(cursor.topicID, frame.position)
           continue
         }
-        if (crypto.pending != null) {
-          const decoded = decodeAppAAD(crypto.frameAAD(sealed) ?? new Uint8Array())
+        const aad = crypto.frameAAD(sealed)
+        const decoded = aad == null ? null : decodeAppAAD(aad)
+        if ((aad != null && decoded == null) || crypto.pending != null) {
           if (decoded?.topicID !== cursor.topicID || decoded.intent !== 'log') {
             frame.sealed = { state: 'done' }
             resumeBlocked(cursor.topicID, frame.position)
@@ -766,7 +791,29 @@ export function createAppLane(params: AppLaneParams): AppLane {
             break
           }
           if (isFrameAhead(error)) {
-            // A future claim keeps its bytes and position even when the hub omits its commit.
+            if (disposed || safetyHold() !== null) break
+            if (commitLaneCaughtUp()) {
+              frame.caughtUpAt ??= performance.now()
+              const remaining = APP_FUTURE_HOLD_MS - (performance.now() - frame.caughtUpAt)
+              if (
+                error.frameEpoch > error.handleEpoch + APP_FUTURE_EPOCH_WINDOW ||
+                remaining <= 0
+              ) {
+                frame.sealed = { state: 'done' }
+                resumeBlocked(cursor.topicID, frame.position)
+                continue
+              }
+              const deadline = frame.caughtUpAt + APP_FUTURE_HOLD_MS
+              if (futureDeadline == null || deadline < futureDeadline) {
+                if (futureTimer != null) clearTimeout(futureTimer)
+                futureDeadline = deadline
+                futureTimer = setTimeout(() => {
+                  futureTimer = undefined
+                  futureDeadline = undefined
+                  if (!disposed && safetyHold() === null && commitLaneCaughtUp()) retryDelivery()
+                }, remaining)
+              }
+            }
             if (crypto.pending != null) {
               reportBlocked(
                 name,
@@ -837,6 +884,27 @@ export function createAppLane(params: AppLaneParams): AppLane {
     }
   }
 
+  const deliver = async (retryFrames?: Array<AppFrame>, caughtUpAt?: number): Promise<void> => {
+    try {
+      await runAppLane(async () => {
+        if (retryFrames != null) {
+          retryScheduled = false
+          if (caughtUpAt != null) {
+            for (const frame of retryFrames) frame.caughtUpAt ??= caughtUpAt
+          }
+        }
+        await drain()
+      })
+    } finally {
+      if (crypto.pending != null && !disposed) {
+        for (const record of pendingRecords) reportUnknown(record)
+        for (const name of new Set(pendingRecords.map((record) => record.frame.protocol))) {
+          scheduleDelivery(() => scheduleWorker(name))
+        }
+      }
+    }
+  }
+
   return {
     dropFrame: (topicID, position) =>
       runAppLane(async () => {
@@ -875,8 +943,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
      * every epoch inside a segment is dispensed as the walk passes through it.
      *
      * Which frames are this epoch's is the open's own answer: `unwrap` refuses another epoch with
-     * `FrameEpochError` before decrypting, and only its "ahead" answer keeps a frame. A forged
-     * future-epoch claim can hold the cursor until an operator drops it.
+     * `FrameEpochError` before decrypting, and only its "ahead" answer keeps a frame. Future
+     * claims are bounded once the commit lane catches up.
      *
      * The buffer is walked whole, not stopped at the first frame that is not this epoch's, since
      * the front can still hold a frame from an epoch the handle already passed (a journal replay
@@ -899,18 +967,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
      *
      * The peer starts workers after its commit operation releases; direct lanes start them here.
      */
-    deliver: async (): Promise<void> => {
-      try {
-        await runAppLane(drain)
-      } finally {
-        if (crypto.pending != null && !disposed) {
-          for (const record of pendingRecords) reportUnknown(record)
-          for (const name of new Set(pendingRecords.map((record) => record.frame.protocol))) {
-            scheduleDelivery(() => scheduleWorker(name))
-          }
-        }
-      }
-    },
+    deliver,
     note,
     pendingRecords: () => [...pendingRecords],
     restore: async (records): Promise<void> => {
@@ -929,11 +986,15 @@ export function createAppLane(params: AppLaneParams): AppLane {
     },
     dispose: (): void => {
       disposed = true
+      if (futureTimer != null) clearTimeout(futureTimer)
       for (const worker of workers.values()) {
         if (worker.timer != null) clearTimeout(worker.timer)
       }
     },
     reset: (): void => {
+      if (futureTimer != null) clearTimeout(futureTimer)
+      futureTimer = undefined
+      futureDeadline = undefined
       const cleared = [...blockingFrames.values()]
       blockingFrames.clear()
       if (!disposed) for (const event of cleared) notifyAppHost(onAppDeliveryResumed, event)

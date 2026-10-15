@@ -7,6 +7,7 @@ import { toB64U } from '@sozai/codec'
 import { createRuntime } from '@sozai/runtime'
 
 import type { Anchor, AnchorSlot } from './anchor.js'
+import { decodeAppAAD } from './app-aad.js'
 import { type AppDeliveryResumed, type AppDeliveryStalled, createAppLane } from './app-lane.js'
 import { createAppOutboxAcceptance } from './app-outbox.js'
 import { classifyCommit, digestAppliedCommit } from './classify.js'
@@ -430,6 +431,8 @@ export function createGroupPeerWithControlWalk<
     epoch: crypto.epoch(),
   }
   let appNoticeInSerial = false
+  let commitLaneCaughtUp = mls == null
+  let commitWorkVersion = 0
 
   /**
    * The peer's app lane: the retained-frame buffer, its durable read position, and the drain. It
@@ -446,6 +449,7 @@ export function createGroupPeerWithControlWalk<
     anchor: () => anchor,
     groupID: () => commitTopicID,
     safetyHold,
+    commitLaneCaughtUp: () => commitLaneCaughtUp,
     onSafetyHeld: latchSafetyHold,
     ...(appCursorStore != null ? { appCursorStore } : {}),
     ...(onAppWindowPruned != null ? { onAppWindowPruned } : {}),
@@ -470,7 +474,8 @@ export function createGroupPeerWithControlWalk<
         }
       : {}),
     scheduleDelivery: (start) => {
-      hostOutbox.push(start)
+      if (appNoticeInSerial) hostOutbox.push(start)
+      else queueMicrotask(start)
     },
   })
 
@@ -684,6 +689,10 @@ export function createGroupPeerWithControlWalk<
       },
       unwrap: async (...args) => {
         try {
+          const aad = crypto.frameAAD(args[0])
+          if (crypto.frameEpoch(args[0]) == null || (aad != null && decodeAppAAD(aad) == null)) {
+            throw new Error('unreadable app frame')
+          }
           return await crypto.unwrap(...args)
         } catch (error) {
           safetyRefusal(error)
@@ -701,7 +710,10 @@ export function createGroupPeerWithControlWalk<
     sealBarrier: () => sealBarrier,
     sealError: () => sealError,
     isDisposed: () => disposed,
-    note: (name, topicID, message, failure) => appLane.note(name, topicID, message, failure),
+    note: (name, topicID, message, failure) => {
+      appLane.note(name, topicID, message, failure)
+      if (crypto.pending != null && message.logPosition != null) requestAppPull()
+    },
     requestAppPull,
     safetyHold,
   })
@@ -1408,6 +1420,7 @@ export function createGroupPeerWithControlWalk<
   /** Read the departing epoch's frames and persist its rotation record before ratcheting. */
   const advanceHandle = async <TResult>(params: AdvanceHandleParams<TResult>): Promise<TResult> => {
     const { port, ratchet, identity, floorPosition } = params
+    commitLaneCaughtUp = false
     assertSafetyOpen()
     await resolveAnchorRotation({ port })
     assertLive()
@@ -1511,6 +1524,8 @@ export function createGroupPeerWithControlWalk<
     topicID: string,
     search?: ControlWalkRequest,
   ): Promise<boolean> => {
+    commitLaneCaughtUp = false
+    const workVersion = commitWorkVersion
     if (
       safetyHold() !== null ||
       anchorRecoveryPending ||
@@ -1545,6 +1560,18 @@ export function createGroupPeerWithControlWalk<
     const takeHead = (head: string | null): void => {
       if (safetyHold() !== null) return
       commitLogHead = head == null ? null : asLogPosition(head)
+      if (
+        search === undefined &&
+        covered &&
+        !stranded &&
+        !locallyRemoved &&
+        floor.covered &&
+        workVersion === commitWorkVersion &&
+        !commitLaneCaughtUp
+      ) {
+        commitLaneCaughtUp = true
+        appLane.retryDelivery()
+      }
       if (
         search !== undefined &&
         search.through !== null &&
@@ -2031,6 +2058,7 @@ export function createGroupPeerWithControlWalk<
    * epoch (or whose log held no commits at all) would otherwise never read a thing.
    */
   const pullCommits = async (): Promise<boolean> => {
+    commitLaneCaughtUp = mls == null
     if (disposed || safetyHold() !== null || locallyRemoved) return false
     if (!controlReplayed) {
       throw new Error(
@@ -2090,6 +2118,8 @@ export function createGroupPeerWithControlWalk<
    * never become the cursor.
    */
   const onCommitDelivery = (_message: StoredMessage, ack: () => void): void => {
+    commitLaneCaughtUp = false
+    commitWorkVersion += 1
     ack()
     scheduleControlSlotRetry(0)
     void ready
@@ -2776,6 +2806,7 @@ export function createGroupPeerWithControlWalk<
         if (adoptionResult.value === 'installed') {
           reconciledHead = expected.acceptance.position
           commitLogHead = expected.acceptance.position
+          requestAppPull()
         }
         return adoptionResult.value
       },
@@ -2821,6 +2852,7 @@ export function createGroupPeerWithControlWalk<
           throw new RecoveryRequiredError('Control source moved before publication')
         const safety = safetyHold()
         if (safety !== null) throw new GroupSafetyHeldError(safety)
+        commitLaneCaughtUp = false
         return mux.publish({ topicID, payload, publishID, expectedHead, retain: 'log' })
       },
       publishFailed: (opID, error) => {

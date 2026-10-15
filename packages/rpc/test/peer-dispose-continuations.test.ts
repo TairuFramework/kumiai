@@ -287,7 +287,7 @@ describe('work resumed after disposal', () => {
     await bob.peer.protocol('chat').to('alice')
     await bob.peer.dispose()
     hub.detach('bob')
-    const forged = createFakeCrypto({ epoch: 65535, localDID: 'mallory' })
+    const forged = createFakeCrypto({ epoch: 2, localDID: 'mallory' })
     const blocked = await hub.publish({
       senderDID: 'mallory',
       topicID,

@@ -1,4 +1,5 @@
-import { APP_TOPIC_LABEL, protocolTopic } from '@kumiai/rpc'
+import { encodeEventFrame } from '@kumiai/broadcast'
+import { APP_TOPIC_LABEL, encodeAppAAD, protocolTopic } from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
 import {
@@ -29,6 +30,136 @@ const flush = (ms = 120) => new Promise((resolve) => setTimeout(resolve, ms))
  * removed member cannot NAME the group's next topic. Here it can be real.
  */
 describe('app-lane delivery across a roster rotation, end to end', () => {
+  test('honest app history beyond two epochs delivers before catch-up completes', async () => {
+    const hub = createWireHub()
+    const bodies = createEntryBodies()
+    const { createLedgerEntrySlot } = await import('@kumiai/mls-rpc')
+    const { commitInvite } = await import('@kumiai/mls')
+    const aliceID = newIdentity()
+    const bobID = newIdentity()
+    const aliceSlot = createLedgerEntrySlot()
+    const bobSlot = createLedgerEntrySlot()
+    for (const slot of [aliceSlot, bobSlot]) {
+      slot.install(async (ids) =>
+        ids.map((id) => {
+          const token = bodies.get(id)
+          if (token == null) throw new Error(`unknown ledger entry ${id}`)
+          return token
+        }),
+      )
+    }
+    const founding = await createFoundingGroup(aliceID, 'honest-app-lag', aliceSlot)
+    const invite = await mintInvite({
+      admin: founding,
+      adminIdentity: aliceID,
+      invitee: bobID,
+      bodies,
+    })
+    const added = await commitInvite(founding, invite.bundle.publicPackage, invite.invite)
+    const bobHandle = await joinFromWelcome({
+      identity: bobID,
+      invite: invite.invite,
+      welcome: added.welcomeMessage,
+      bundle: invite.bundle,
+      ratchetTree: added.newGroup.state.ratchetTree,
+      entrySlot: bobSlot,
+    })
+    const alice = makeMember({
+      hub,
+      identity: aliceID,
+      group: added.newGroup,
+      entrySlot: aliceSlot,
+    })
+    await alice.peer.replay()
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'epoch one' } })
+    for (let index = 0; index < 3; index++) {
+      await alice.peer.commit(buildLedgerCommit(alice, aliceID, `did:key:lag-${index}`, 'member'))
+    }
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'epoch four' } })
+    const observerID = newIdentity()
+    const observer = hub.connect(observerID)
+    const anchor = (await alice.anchorStore.load())?.anchor
+    if (anchor == null) throw new Error('missing saved anchor')
+    const topicID = protocolTopic(anchor.secret, anchor.epoch, 'chat')
+    await observer.subscribe(observerID.id, topicID)
+    await vi.waitFor(async () => {
+      const result = await observer.fetchTopic({ subscriberDID: observerID.id, topicID })
+      expect(result.messages).toHaveLength(2)
+    })
+    const seen: Array<unknown> = []
+    const bob = makeMember({
+      hub,
+      identity: bobID,
+      group: bobHandle,
+      entrySlot: bobSlot,
+      durablePending: true,
+      handlers: { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) },
+    })
+    try {
+      await bob.peer.replay()
+      await vi.waitFor(() => expect(seen).toEqual([{ text: 'epoch one' }, { text: 'epoch four' }]))
+      expect(bob.handle().epoch).toBe(4n)
+      const result = await observer.fetchTopic({ subscriberDID: observerID.id, topicID })
+      await vi.waitFor(() =>
+        expect(bob.appCursorStore.stored(topicID)).toBe(result.messages.at(-1)?.sequenceID),
+      )
+    } finally {
+      await alice.peer.dispose()
+      await bob.peer.dispose()
+      await hub.dispose()
+    }
+  })
+
+  test('a live unsupported MLS app version completes its cursor without decrypting', async () => {
+    const hub = createWireHub()
+    const { createLedgerEntrySlot } = await import('@kumiai/mls-rpc')
+    const { readMessageEpoch } = await import('@kumiai/mls')
+    const identity = newIdentity()
+    const slot = createLedgerEntrySlot()
+    const handle = await createFoundingGroup(identity, 'unknown-app-version', slot)
+    const seen = vi.fn()
+    const member = makeMember({
+      hub,
+      identity,
+      group: handle,
+      entrySlot: slot,
+      durablePending: true,
+      handlers: { 'chat/posted': seen },
+    })
+    try {
+      await member.peer.replay()
+      const anchor = (await member.anchorStore.load())?.anchor
+      if (anchor == null) throw new Error('missing saved anchor')
+      const topicID = protocolTopic(anchor.secret, anchor.epoch, 'chat')
+      const sealed = await member.crypto.wrap(encodeEventFrame('chat/posted', {}), {
+        aad: encodeAppAAD({ topicID, intent: 'log' }),
+      })
+      expect(readMessageEpoch(sealed)).toBe(0n)
+      sealed[0] = 255
+      sealed[1] = 255
+      expect(readMessageEpoch(sealed)).toBeUndefined()
+      const opens = vi.spyOn(member.crypto, 'unwrap')
+      const observerID = newIdentity()
+      const observer = hub.connect(observerID)
+      await observer.subscribe(observerID.id, topicID)
+      const sent = await observer.publish({
+        senderDID: observerID.id,
+        topicID,
+        payload: sealed,
+        retain: 'log',
+      })
+      await vi.waitFor(() => expect(member.appCursorStore.stored(topicID)).toBe(sent.sequenceID))
+      expect(opens).not.toHaveBeenCalled()
+      expect(member.pendingStore?.size).toBe(0)
+      expect(seen).not.toHaveBeenCalled()
+      expect((await member.control.load()).controlHold).toBeNull()
+      expect((await member.control.load()).forkHalt).toBeNull()
+    } finally {
+      await member.peer.dispose()
+      await hub.dispose()
+    }
+  })
+
   /**
    * The whole thesis in one scenario: a member is away while the group both talks and changes
    * its roster twice — an add AND a remove, so the anchor rotates for both reasons — and comes

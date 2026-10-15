@@ -277,10 +277,9 @@ describe('durable storage stall', () => {
 
   test('dropping a sealed frame resumes even when cursor save rejects', async () => {
     const position = '000000000001'
-    const sealed = await createFakeCrypto({ epoch: 65535, localDID: 'alice' }).wrap(
-      fromUTF('future'),
-      { aad: encodeAppAAD({ topicID, intent: 'log' }) },
-    )
+    const sealed = await createFakeCrypto({ epoch: 2, localDID: 'alice' }).wrap(fromUTF('future'), {
+      aad: encodeAppAAD({ topicID, intent: 'log' }),
+    })
     const stalled = vi.fn()
     const resumed = vi.fn()
     const save = vi.fn(async () => {
@@ -339,10 +338,9 @@ describe('durable storage stall', () => {
 
   test('a resume observer reset cannot skip the cursor save for a dropped frame', async () => {
     const position = '000000000001'
-    const sealed = await createFakeCrypto({ epoch: 65535, localDID: 'alice' }).wrap(
-      fromUTF('future'),
-      { aad: encodeAppAAD({ topicID, intent: 'log' }) },
-    )
+    const sealed = await createFakeCrypto({ epoch: 2, localDID: 'alice' }).wrap(fromUTF('future'), {
+      aad: encodeAppAAD({ topicID, intent: 'log' }),
+    })
     const cursor = createMemoryAppCursorStore()
     const stalled = vi.fn()
     let lane: ReturnType<typeof createAppLane>
@@ -513,10 +511,9 @@ describe('durable storage stall', () => {
 
   test('a direct lane contains throwing stall and resume observers across reset and drop', async () => {
     const position = '000000000001'
-    const sealed = await createFakeCrypto({ epoch: 65535, localDID: 'alice' }).wrap(
-      fromUTF('future'),
-      { aad: encodeAppAAD({ topicID, intent: 'log' }) },
-    )
+    const sealed = await createFakeCrypto({ epoch: 2, localDID: 'alice' }).wrap(fromUTF('future'), {
+      aad: encodeAppAAD({ topicID, intent: 'log' }),
+    })
     const stalled = vi.fn(() => {
       throw new Error('stall observer failed')
     })
@@ -573,10 +570,9 @@ describe('durable storage stall', () => {
 
   test('disposing with an uncleared stall emits no resume', async () => {
     const position = '000000000001'
-    const sealed = await createFakeCrypto({ epoch: 65535, localDID: 'alice' }).wrap(
-      fromUTF('future'),
-      { aad: encodeAppAAD({ topicID, intent: 'log' }) },
-    )
+    const sealed = await createFakeCrypto({ epoch: 2, localDID: 'alice' }).wrap(fromUTF('future'), {
+      aad: encodeAppAAD({ topicID, intent: 'log' }),
+    })
     const stalled = vi.fn()
     const resumed = vi.fn()
     const lane = createAppLane({
@@ -617,7 +613,7 @@ describe('durable storage stall', () => {
     expect(resumed).not.toHaveBeenCalled()
   })
 
-  test('a far-future frame reports a stall until dropped', async () => {
+  test('a far-future frame completes without a durable stall', async () => {
     const sender = createFakeCrypto({ epoch: 65535, localDID: 'mallory' })
     const sealed = await sender.wrap(fromUTF('future'), {
       aad: encodeAppAAD({ topicID, intent: 'log' }),
@@ -661,21 +657,9 @@ describe('durable storage stall', () => {
     expect(resumed).not.toHaveBeenCalled()
     await lane.deliver()
     await lane.deliver()
-    expect(notices).toHaveBeenCalledTimes(1)
-    expect(notices).toHaveBeenCalledWith(
-      expect.objectContaining({ reason: 'future-epoch', position: '000000000001' }),
-    )
-    await lane.dropFrame(topicID, '000000000001')
+    expect(notices).not.toHaveBeenCalled()
+    expect(resumed).not.toHaveBeenCalled()
     expect(cursor.stored(topicID)).toBe('000000000001')
-    expect(resumed).toHaveBeenCalledExactlyOnceWith({
-      groupID: 'group',
-      protocol: 'chat',
-      topicID,
-      position: '000000000001',
-      reason: 'future-epoch',
-    })
-    await lane.deliver()
-    expect(resumed).toHaveBeenCalledTimes(1)
     lane.dispose()
   })
 
@@ -907,7 +891,7 @@ describe('durable storage stall', () => {
     })
     await bob.peer.protocol('chat').to('alice')
     hub.detach('bob')
-    await publish(hub, createFakeCrypto({ epoch: 65535, localDID: 'alice' }), 'future')
+    await publish(hub, createFakeCrypto({ epoch: 2, localDID: 'alice' }), 'future')
 
     let enterBuild: (() => void) | undefined
     const building = new Promise<void>((resolve) => {

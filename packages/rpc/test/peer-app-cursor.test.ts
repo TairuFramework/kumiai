@@ -1,5 +1,5 @@
 import { encodeEventFrame } from '@kumiai/broadcast'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import { encodeAppAAD } from '../src/app-aad.js'
 import type { AppWindowPruned } from '../src/app-cursor.js'
@@ -87,10 +87,10 @@ describe('the app-lane drain reads from a durable position and reports what aged
 
     // Only the current frame can spend its message key.
     const atOne = createFakeCrypto({ epoch: 1, localDID: 'alice' })
-    const atFour = createFakeCrypto({ epoch: 4, localDID: 'alice' })
+    const atThree = createFakeCrypto({ epoch: 3, localDID: 'alice' })
     for (const [crypto, text] of [
       [atOne, 'at epoch one'],
-      [atFour, 'from epoch four'],
+      [atThree, 'from epoch three'],
     ] as const) {
       await hub.publish({
         senderDID: 'alice',
@@ -105,7 +105,7 @@ describe('the app-lane drain reads from a durable position and reports what aged
     expect(posted).toHaveLength(2)
 
     const first = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers, recovery })
-    await flush(300)
+    await vi.waitFor(() => expect(first.appCursorStore.stored(topicID)).toBe(posted[0]?.sequenceID))
     expect(first.mls.epoch()).toBe(1)
 
     expect(first.controlWalk.safetyHold()).toBeNull()
@@ -125,7 +125,7 @@ describe('the app-lane drain reads from a durable position and reports what aged
         handlers,
         recovery,
       })
-      await flush(300)
+      await next.peer.replay()
       expect(next.mls.epoch()).toBe(1)
       expect(next.controlWalk.safetyHold()).toBeNull()
       expect((await next.control.load()).cursor?.position).toBe(own.sequenceID)
