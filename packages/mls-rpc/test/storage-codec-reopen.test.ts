@@ -2,6 +2,7 @@ import { decodeClientState, encodeClientState } from '@kumiai/mls'
 import { expect, test } from 'vitest'
 
 import { decodeRecoveryCandidate } from '../src/recovery-codec.js'
+import { decodeRecoveryRecord } from '../src/recovery-record.js'
 import { createCodecReopenFixture } from './fixtures/codec-reopen.js'
 
 test('reopens sealed real MLS pending zero sender and recovery candidate without plaintext state caches', async () => {
@@ -21,6 +22,8 @@ test('reopens sealed real MLS pending zero sender and recovery candidate without
     expect(decodeClientState(stored.state)?.unappliedProposals[zeroRef]?.senderLeafIndex).toBe(0)
     const rejoin = (await reopened.device.groups.ports(key).control.load()).rejoin
     if (rejoin == null) throw new Error('missing rejoin')
+    const decoded = decodeRecoveryRecord(rejoin)
+    expect(decoded).toMatchObject({ kind: 'legacy', executable: false, record: rejoin })
     expect(rejoin.candidate[0]).toBe(2)
     const restored = await realPort.restoreRecovery(rejoin.candidate, rejoin.requestKey)
     expect(restored.judgeVerdict(boundVerdict)).toBe('authoritative')
