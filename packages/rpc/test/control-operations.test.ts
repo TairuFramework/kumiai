@@ -369,7 +369,56 @@ test('gap holds before deadline and settles unknown at deadline', async () => {
   expect((await h.store.load()).outcomes).toMatchObject([{ kind: 'unknown' }])
   await h.store.apply({ deleteOutcomes: [request.id] }, 'ack')
   expect((await h.store.load()).commitOnce).toEqual(slot)
-  expect(h.deps.publish).not.toHaveBeenCalled()
+  expect(h.deps.publish).toHaveBeenCalledOnce()
+})
+
+test('unknown copy retries the retained bytes at a fresh head and expires unknown', async () => {
+  const h = await setup()
+  const op = await h.built()
+  const slot = (await h.store.load()).commitOnce
+  h.deps.searchLog = async () => ({ kind: 'unknown' })
+  h.deps.readHead = async () => position
+  expect(await stepOperation(h.deps, op)).toEqual(op)
+  expect(h.deps.publish).toHaveBeenCalledWith(payload, publishID, position)
+  expect((await h.store.load()).commitOnce).toEqual({ ...slot, expectedHead: position })
+  expect(h.deps.prepareBuild).toHaveBeenCalledOnce()
+  expect(h.deps.adopt).not.toHaveBeenCalled()
+  h.tick(op.deadline)
+  expect(await stepOperation({ ...h.deps }, op)).toBeNull()
+  expect((await h.store.load()).outcomes).toMatchObject([{ kind: 'unknown' }])
+  expect((await h.store.load()).commitOnce).toEqual({ ...slot, expectedHead: position })
+})
+
+test('an absence hint after a copy mismatch cannot erase unknown acceptance on restart', async () => {
+  const h = await setup()
+  const op = await h.built()
+  const slot = (await h.store.load()).commitOnce
+  const owed = { id: 'owed-outcome', opID: 'prior-invite', at: 1, kind: 'unknown' as const }
+  const welcome = {
+    opID: 'prior-invite',
+    welcome: new Uint8Array([8]),
+    recipients: ['carol'],
+    committed: true as const,
+  }
+  await h.store.apply(
+    {
+      controlHold: { reason: 'acceptance-unknown', position },
+      putOutcomes: [owed],
+      putWelcomes: [welcome],
+    },
+    'copy-mismatch',
+  )
+  h.deps.searchLog = async () => ({ kind: 'unknown' })
+  h.mismatch()
+  expect(await stepOperation(h.deps, op)).toEqual(op)
+  h.deps.searchLog = async () => ({ kind: 'absent' })
+  h.tick(op.deadline)
+  expect(await stepOperation({ ...h.deps }, op)).toBeNull()
+  const after = await h.store.load()
+  expect(after.outcomes).toEqual([owed, expect.objectContaining({ opID: op.id, kind: 'unknown' })])
+  expect(after.welcomes).toEqual([welcome])
+  expect(after.commitOnce).toEqual(slot)
+  expect(h.deps.prepareBuild).toHaveBeenCalledOnce()
 })
 
 test('transport failure retries before expiry and never hands off after expiry', async () => {

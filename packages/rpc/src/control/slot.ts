@@ -70,23 +70,13 @@ export async function settleControlSlot(
   const evidence = await deps.readEvidence()
   if (held()) return 'unknown'
   if (mismatch && operation !== undefined) {
-    const row = evidence.applied.find((row) => row.epoch === operation.built.epoch)
-    if (row !== undefined && row.payloadDigest !== operation.built.payloadDigest)
-      await deps.haltFork({
-        kind: 'digest-divergence',
-        epoch: row.epoch,
-        position: row.sequenceID,
-        localDigest: row.payloadDigest,
-        remoteDigest: operation.built.payloadDigest,
-      })
-    else
-      await applyResolved(
-        deps.control,
-        { controlHold: { reason: 'acceptance-unknown', position: null } },
-        deps.newID(),
-        undefined,
-        deps.signal,
-      )
+    await applyResolved(
+      deps.control,
+      { controlHold: { reason: 'acceptance-unknown', position: null } },
+      deps.newID(),
+      undefined,
+      deps.signal,
+    )
     return 'unknown'
   }
   const identity = evidence.source.identity

@@ -216,7 +216,7 @@ test('one pre-adoption Welcome is delivered across moved retries and eventual in
 })
 
 test.each([true, false])(
-  'an op slot mismatch labels divergence only for differing digests: %s',
+  'an op slot mismatch preserves unknown work without a halt: %s',
   async (sameDigest) => {
     const f = await fixture()
     const operation = (await f.store.load()).operations[0]
@@ -240,15 +240,13 @@ test.each([true, false])(
       'mismatch',
     )
     expect(await settleControlSlot(f.deps)).toBe('unknown')
-    if (sameDigest) expect((await f.store.load()).controlHold?.reason).toBe('acceptance-unknown')
-    else
-      expect((await f.store.load()).forkHalt?.evidence).toEqual({
-        kind: 'digest-divergence',
-        epoch: f.slot.epoch,
-        position: f.proof.position,
-        localDigest: 'different-payload',
-        remoteDigest: f.slot.payloadDigest,
-      })
+    const after = await f.store.load()
+    expect(after.forkHalt).toBeNull()
+    expect(after.controlHold?.reason).toBe('acceptance-unknown')
+    expect(after.commitOnce).toEqual(f.slot)
+    expect(after.operations).toHaveLength(1)
+    expect(after.outcomes).toEqual([])
+    expect(f.deps.adoption.adopt).not.toHaveBeenCalled()
   },
 )
 

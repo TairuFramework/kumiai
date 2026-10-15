@@ -139,6 +139,8 @@ type Discovery = {
   winner: ControlLogFrame | null
   losers: CertifiedControlRange['losers']
   occurrence: LogPosition | null
+  copyMismatch: boolean
+  unexplainedOwn: boolean
 }
 
 function sameBuild(left: BuiltCommit, right: BuiltCommit): boolean {
@@ -205,10 +207,6 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
         return { kind: 'unknown' as const }
       }
       if (held()) return stopped()
-      const forkUnknown = async (value: GroupForkEvidence) => {
-        await holdFork(value)
-        return stopped()
-      }
       const validation = await deps.validation.restoreValidation(built)
       if (held()) return stopped()
       const retained = validation?.source.identity
@@ -289,6 +287,8 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
         winner: null,
         losers: [],
         occurrence: null,
+        copyMismatch: false,
+        unexplainedOwn: false,
       }
       continuation = discovery
       const range = (): CertifiedControlRange | null =>
@@ -331,14 +331,6 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
           row.digest !== winnerDigest
         ) {
           continuation = null
-          await holdFork({
-            kind: 'digest-divergence',
-            epoch: retained.epoch,
-            position: winner.position,
-            localDigest: row.payloadDigest === winnerPayloadDigest ? row.digest : row.payloadDigest,
-            remoteDigest:
-              row.payloadDigest === winnerPayloadDigest ? winnerDigest : winnerPayloadDigest,
-          })
           return false
         }
         return true
@@ -354,6 +346,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
       }
       const settleOccurrence = async () => {
         if (held()) return stopped()
+        if (discovery.unexplainedOwn) return unknown(discovery.through)
         if (discovery.winner === null || discovery.occurrence === null)
           return unknown(discovery.through)
         if (toB64U(sha256(discovery.winner.payload)) === built.payloadDigest) {
@@ -461,14 +454,18 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
             const result = await validation.validateFrame(frame, built, header)
             if (held()) return stopped()
             if (result.kind === 'unavailable') {
+              if (
+                result.reason === 'unexplained-own' ||
+                (result.reason !== 'unsupported-version' &&
+                  digestAppliedCommit(commit) === built.digest &&
+                  toB64U(sha256(frame.payload)) !== built.payloadDigest)
+              ) {
+                discovery.copyMismatch = true
+                discovery.unexplainedOwn ||= digestAppliedCommit(commit) !== built.digest
+                discovery.through = position
+                continue
+              }
               continuation = null
-              if (result.reason === 'unexplained-own')
-                return await forkUnknown({
-                  kind: 'unexplained-own-commit',
-                  epoch: retained.epoch,
-                  position,
-                  digest: digestAppliedCommit(commit),
-                })
               return unknown(
                 position,
                 result.reason === 'unsupported-version'
@@ -477,25 +474,33 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
               )
             }
             discovery.through = position
-            if (result.kind === 'invalid') continue
             const fullDigest = toB64U(sha256(frame.payload))
+            if (result.kind === 'invalid') {
+              if (
+                digestAppliedCommit(commit) === built.digest &&
+                fullDigest !== built.payloadDigest
+              )
+                discovery.copyMismatch = true
+              continue
+            }
+            if (result.own && fullDigest !== built.payloadDigest) {
+              discovery.copyMismatch = true
+              discovery.unexplainedOwn ||= digestAppliedCommit(commit) !== built.digest
+              continue
+            }
             if (discovery.winner === null) discovery.winner = frame
             else discovery.losers.push({ position, payloadDigest: fullDigest })
-            if (result.own && fullDigest !== built.payloadDigest) {
-              continuation = null
-              return await forkUnknown({
-                kind: 'unexplained-own-commit',
-                epoch: retained.epoch,
-                position,
-                digest: digestAppliedCommit(commit),
-              })
-            }
             if (fullDigest === built.payloadDigest && result.own) {
               discovery.occurrence = position
               return settleOccurrence()
             }
           }
           discovery.complete = discovery.head === null || discovery.through === discovery.head
+        }
+        if (discovery.copyMismatch) {
+          await deps.reconcileAbsent(discovery.head, null, work)
+          continuation = null
+          return unknown(discovery.through)
         }
         if (discovery.winner !== null && !(await follow()))
           return unknown(discovery.winner.position)

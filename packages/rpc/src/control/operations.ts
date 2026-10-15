@@ -217,10 +217,21 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
   let result = await discover()
   if (result === 'landed' || result === 'superseded') return null
   if (held()) return waiting()
-  if (result === 'unknown') return expired() ? finish('unknown') : op
+  if (result === 'unknown' && (expired() || op.stage === 'accepted'))
+    return expired() ? finish('unknown') : op
   const snapshot = await deps.control.load()
   if (held(snapshot)) return waiting()
   const slot = snapshot.commitOnce
+  if (
+    result === 'unknown' &&
+    (slot === null ||
+      slot.incarnation !== op.built.incarnation ||
+      slot.epoch !== op.built.epoch ||
+      slot.publishID !== op.built.publishID ||
+      slot.payloadDigest !== op.built.payloadDigest ||
+      (snapshot.controlHold !== null && snapshot.controlHold.reason !== 'acceptance-unknown'))
+  )
+    return expired() ? finish('unknown') : op
   if (slot === null || slot.publishID !== op.built.publishID) {
     if (held()) return waiting()
     const evidence = await deps.readEvidence()
@@ -264,9 +275,14 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
     evidence.source.key.incarnation !== slot.incarnation
   )
     return expired() ? finish('unknown') : op
-  if (identity.epoch > slot.epoch) return resetIntent()
-  if (snapshot.controlHold?.reason === 'acceptance-unknown')
-    await applyResolved(deps.control, { controlHold: null }, deps.newID(), undefined, deps.signal)
+  if (identity.epoch > slot.epoch)
+    return result === 'unknown' ? (expired() ? finish('unknown') : op) : resetIntent()
+  if (
+    identity.epoch !== slot.epoch ||
+    identity.authenticator.length !== slot.authenticatorBefore.length ||
+    identity.authenticator.some((byte, index) => byte !== slot.authenticatorBefore[index])
+  )
+    return expired() ? finish('unknown') : op
   if (held()) return waiting()
   const expectedHead = await deps.readHead()
   if (held()) return waiting()
@@ -277,7 +293,9 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
     pending !== undefined &&
     (expectedHead === null ||
       (pending.expectedHead !== null && expectedHead <= pending.expectedHead))
-  const absentOutcome = () => finish(outstanding ? 'unknown' : 'lost')
+  const acceptanceUnknown =
+    result === 'unknown' || snapshot.controlHold?.reason === 'acceptance-unknown'
+  const absentOutcome = () => finish(acceptanceUnknown || outstanding ? 'unknown' : 'lost')
   if (held()) return waiting()
   if (expired()) return absentOutcome()
   const refreshed = { ...slot, expectedHead }
@@ -334,7 +352,7 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
   if (result === 'absent' && (await deps.control.load()).commitOnce === null) return advanceAbsent()
   if (held()) return waiting()
   if (expired()) {
-    if (result !== 'absent') return finish('unknown')
+    if (result !== 'absent' || acceptanceUnknown) return finish('unknown')
     const finalSnapshot = await deps.control.load()
     if (held(finalSnapshot)) return waiting()
     const after = finalSnapshot.operations.find((row) => row.id === op.id)

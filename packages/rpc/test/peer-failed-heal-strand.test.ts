@@ -4,7 +4,6 @@ import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { RecoveryEvent } from '../src/peer.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
-import { assertDurableForkHalt } from './fixtures/control-hold.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { encodeMemoryCommit, memoryEntryID } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
@@ -64,7 +63,7 @@ type Arm = (hub: FakeHub, rs: Uint8Array, withResponder: boolean) => Promise<Arm
 /**
  * Bob meets his OWN un-merged commit: the hub accepted it, the group moved on it, and his
  * process died before he adopted it — with no journal to repair him. He can never apply the
- * frame that is his own commit, so the cursor stops on it and he heals.
+ * frame that is his own commit, so the walker skips the copy.
  */
 const armOwnUnmerged: Arm = async (hub, rs, withResponder) => {
   const occurrence = await publishCommit({ hub, senderDID: 'bob', recoverySecret: rs, epoch: 1 })
@@ -84,11 +83,9 @@ const armOwnUnmerged: Arm = async (hub, rs, withResponder) => {
       events.push(event)
     },
   })
-  await vi.waitFor(async () =>
-    expect((await bob.control.load()).forkHalt).toMatchObject({
-      evidence: { kind: 'unexplained-own-commit', epoch: 1, position: occurrence.sequenceID },
-    }),
-  )
+  await bob.peer.replay()
+  expect((await bob.control.load()).cursor?.position).toBe(occurrence.sequenceID)
+  expect((await bob.control.load()).forkHalt).toBeNull()
   expect(events).toEqual([])
   return { bob, responder, staleEpoch: 1 }
 }
@@ -219,7 +216,7 @@ describe('heal strand', { concurrent: false }, () => {
 
   describe('a heal trigger under a failed heal', () => {
     for (const trigger of triggers) {
-      test(`${trigger.name}: no responder -- ${trigger.arm === armForkLosing ? 'ordinary work still lands' : 'nothing lands'}`, async () => {
+      test(`${trigger.name}: no responder -- ${trigger.arm !== armAhead ? 'ordinary work still lands' : 'nothing lands'}`, async () => {
         const hub = new FakeHub()
         const rs = new Uint8Array(32).fill(0x61)
         const { bob, staleEpoch } = await trigger.arm(hub, rs, false)
@@ -229,7 +226,7 @@ describe('heal strand', { concurrent: false }, () => {
         const framesBefore = commitFrames(hub, rs)
 
         const request = buildLedgerCommit(bob, ['role:zoe=admin'])
-        if (trigger.arm === armForkLosing) {
+        if (trigger.arm !== armAhead) {
           const before = await bob.control.load()
           await bob.peer.commit(request)
           expect(bob.mls.epoch()).toBe(staleEpoch + 1)
@@ -243,62 +240,30 @@ describe('heal strand', { concurrent: false }, () => {
           await bob.peer.dispose()
           return
         }
-        if (trigger.arm === armAhead) {
-          await bob.peer.enqueue(request)
-          expect((await bob.control.load()).operations[0]?.stage).toBe('intent')
-        } else {
-          await expect(bob.peer.enqueue(request)).rejects.toMatchObject({
-            name: 'GroupSafetyHeldError',
-            reason: 'fork-halted',
-          })
-          expect((await bob.control.load()).operations).toEqual([])
-        }
+        await bob.peer.enqueue(request)
+        expect((await bob.control.load()).operations[0]?.stage).toBe('intent')
 
         // The stored intent cannot publish or advance the group while stranded.
         expect(commitFrames(hub, rs)).toBe(framesBefore)
         expect(hub.head(commitTopic(rs))).toBe(headBefore)
         expect(bob.mls.epoch()).toBe(staleEpoch)
 
-        if (trigger.arm !== armAhead)
-          await assertDurableForkHalt(bob, hub, rs, 'bob', {
-            evidence: {
-              kind: trigger.arm === armOwnUnmerged ? 'unexplained-own-commit' : 'digest-divergence',
-            },
-          })
         await bob.peer.dispose()
       })
 
-      test(`${trigger.name}: a responder answers — ${trigger.arm === armForkLosing ? 'ordinary work still lands' : trigger.arm !== armAhead ? 'the durable halt still blocks control' : 'the peer heals, then commits'}`, async () => {
+      test(`${trigger.name}: a responder answers -- ${trigger.arm !== armAhead ? 'ordinary work still lands' : 'the peer heals, then commits'}`, async () => {
         const hub = new FakeHub()
         const rs = new Uint8Array(32).fill(0x62)
         const { bob, responder, staleEpoch } = await trigger.arm(hub, rs, true)
 
         expect(responder).toBeDefined()
         const carol = responder as TestPeer
-        if (trigger.arm === armForkLosing) {
+        if (trigger.arm !== armAhead) {
           expect(bob.mls.epoch()).toBe(staleEpoch)
           await bob.peer.commit(buildLedgerCommit(bob, ['role:zoe=admin']))
           expect(bob.mls.fold().get('role:zoe')).toBe('admin')
           expect(bob.controlWalk.safetyHold()).toBeNull()
           await bob.peer.dispose()
-          await carol.peer.dispose()
-          return
-        }
-        if (trigger.arm !== armAhead) {
-          expect(bob.mls.epoch()).toBe(staleEpoch)
-          expect(carol.mls.epoch()).toBe(2)
-          await expect(
-            bob.peer.enqueue(buildLedgerCommit(bob, ['role:zoe=admin'])),
-          ).rejects.toMatchObject({
-            name: 'GroupSafetyHeldError',
-            reason: 'fork-halted',
-          })
-          expect((await bob.control.load()).operations).toEqual([])
-          await assertDurableForkHalt(bob, hub, rs, 'bob', {
-            evidence: {
-              kind: trigger.arm === armOwnUnmerged ? 'unexplained-own-commit' : 'digest-divergence',
-            },
-          })
           await carol.peer.dispose()
           return
         }

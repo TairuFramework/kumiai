@@ -3,7 +3,7 @@ import { describe, expect, test } from 'vitest'
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
-import { assertDurableForkHalt } from './fixtures/control-hold.js'
+import { assertCommitPoison } from './fixtures/control-hold.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { encodeMemoryCommit, memoryEntryID } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
@@ -50,7 +50,7 @@ const fastRecovery = { timeoutMs: 100, getDelayMs: () => 5, deadlineMs: 300 }
 const members = ['alice', 'bob', 'carol']
 
 describe('a peer that meets its own un-merged commit', { concurrent: false }, () => {
-  test('persists unexplained own evidence with no journal to repair it', async () => {
+  test('skips an orphaned own copy across restart without a journal', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x41)
     const occurrence = await publishCommit({
@@ -62,9 +62,7 @@ describe('a peer that meets its own un-merged commit', { concurrent: false }, ()
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: fastRecovery })
     await waitFor(() => bob.mls.epoch() === 2, 'Bob applies the orphaned commit')
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery: fastRecovery })
-    await assertDurableForkHalt(alice, hub, rs, 'alice', {
-      evidence: { kind: 'unexplained-own-commit', epoch: 1, position: occurrence.sequenceID },
-    })
+    await assertCommitPoison(alice, hub, rs, 'alice', occurrence.sequenceID)
     expect(alice.mls.epoch()).toBe(1)
     expect(bob.mls.epoch()).toBe(2)
     expect(heals(hub, rs)).toEqual([])
@@ -73,7 +71,7 @@ describe('a peer that meets its own un-merged commit', { concurrent: false }, ()
     await bob.peer.dispose()
   })
 
-  test('an unexplained own hold prevents walking later commits', async () => {
+  test('an orphaned own copy permits a later valid commit', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x42)
     const occurrence = await publishCommit({
@@ -84,17 +82,13 @@ describe('a peer that meets its own un-merged commit', { concurrent: false }, ()
     })
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: fastRecovery })
     await waitFor(() => bob.mls.epoch() === 2, 'Bob applies the orphaned commit')
-    const token = 'signed-token: bob enacted this while alice was dead'
-    await bob.peer.commit(buildLedgerCommit(bob, [token]))
-    expect(bob.mls.epoch()).toBe(3)
+    const token = 'signed-token: a valid commit after the own copy'
+    await publishCommit({ hub, senderDID: 'carol', recoverySecret: rs, epoch: 1, entries: [token] })
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery: fastRecovery })
-    await assertDurableForkHalt(alice, hub, rs, 'alice', {
-      evidence: { kind: 'unexplained-own-commit', epoch: 1, position: occurrence.sequenceID },
-    })
-    expect(alice.mls.epoch()).toBe(1)
-    expect(alice.mls.seen()).toBe(0)
-    expect(alice.mls.commits()).toBe(0)
-    expect(alice.mls.ledgerIDs()).toEqual([])
+    await assertCommitPoison(alice, hub, rs, 'alice', occurrence.sequenceID)
+    expect(alice.mls.epoch()).toBe(2)
+    expect(alice.mls.commits()).toBe(1)
+    expect(alice.mls.ledgerIDs()).toEqual([memoryEntryID(token)])
     expect(heals(hub, rs)).toEqual([])
     await bob.peer.dispose()
   })
@@ -354,12 +348,11 @@ describe('a hostile commit cannot make an honest peer do expensive work', {
 })
 
 describe('a peer that must recover before it can commit', { concurrent: false }, () => {
-  test('refuses an operation after halting on an orphaned own commit', async () => {
+  test('lands an operation after skipping an orphaned own copy', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x48)
 
-    // Alice's orphaned commit at epoch 1, and no other member alive to answer a rendezvous —
-    // so her heal cannot land, and she stays holding a frame she can never apply.
+    // An orphaned copy cannot block a later ordinary operation.
     await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 1 })
     const alice = makeMLSPeer(hub, 'alice', rs, {
       epoch: 1,
@@ -368,13 +361,10 @@ describe('a peer that must recover before it can commit', { concurrent: false },
     await flush(120)
     expect(alice.mls.epoch()).toBe(1)
 
-    await expect(
-      alice.peer.enqueue(buildLedgerCommit(alice, ['signed-token: a'])),
-    ).rejects.toMatchObject({
-      name: 'GroupSafetyHeldError',
-      reason: 'fork-halted',
-    })
-    expect(hub.published.filter((m) => m.topicID === commitTopic(rs))).toHaveLength(1)
+    await alice.peer.commit(buildLedgerCommit(alice, ['signed-token: a']))
+    expect(alice.controlWalk.safetyHold()).toBeNull()
+    expect(alice.mls.epoch()).toBe(2)
+    expect(hub.published.filter((m) => m.topicID === commitTopic(rs))).toHaveLength(2)
     expect((await alice.control.load()).operations).toEqual([])
 
     await alice.peer.dispose()

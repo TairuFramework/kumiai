@@ -1,9 +1,11 @@
 import { afterEach, expect, test, vi } from 'vitest'
 
 import { digestAppliedCommit } from '../src/classify.js'
+import { decodeCommitFrame, encodeCommitFrame } from '../src/commit-frame.js'
 import type { ControlSnapshot } from '../src/control/types.js'
 import { PeerDisposedError } from '../src/errors.js'
 import { FrameTooLargeError } from '../src/frame-size.js'
+import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { APP_TOPIC_LABEL, commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
@@ -259,7 +261,7 @@ test('a post-adoption host failure resolves commit from its co-committed landed 
   expect((await member.control.load()).operations).toEqual([])
 })
 
-test('a commit refuses after an orphaned own commit halts the peer', async () => {
+test('a commit lands after skipping an orphaned own copy', async () => {
   const hub = new FakeHub()
   await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
   const member = makeMLSPeer(hub, 'bob', secret, {
@@ -268,13 +270,90 @@ test('a commit refuses after an orphaned own commit halts the peer', async () =>
   peers.push(member)
   await member.peer.replay()
   const request = buildLedgerCommit(member, ['wait-for-recovery'])
-  await expect(member.peer.commit(request)).rejects.toMatchObject({
-    name: 'GroupSafetyHeldError',
-    reason: 'fork-halted',
-  })
+  await member.peer.commit(request)
+  expect(member.controlWalk.safetyHold()).toBeNull()
+  expect(member.mls.epoch()).toBe(2)
   expect((await member.control.load()).operations).toEqual([])
   await member.peer.dispose()
 })
+
+test.each([false, true])(
+  'tampered own named-entry copy preserves identical retry and receiver application (restart=%s)',
+  async (restart) => {
+    const hub = new FakeHub()
+    const receiver = makeMLSPeer(hub, 'bob', secret)
+    const author = makeMLSPeer(hub, 'alice', secret)
+    peers.push(receiver, author)
+    await Promise.all([receiver.peer.replay(), author.peer.replay()])
+    const publish = hub.publish.bind(hub)
+    let allow = false
+    let poison: string | undefined
+    const handoffs: Array<{ payload: Uint8Array; publishID?: string }> = []
+    vi.spyOn(hub, 'publish').mockImplementation(async (params) => {
+      if (params.topicID !== commitTopic(secret) || params.senderDID !== 'alice')
+        return publish(params)
+      handoffs.push({ payload: params.payload.slice(), publishID: params.publishID })
+      if (poison === undefined) {
+        const frame = decodeCommitFrame(decodeHandshakeFrame(params.payload).payload)
+        expect(frame.sealedEntries.length).toBeGreaterThan(0)
+        const last = frame.sealedEntries.length - 1
+        frame.sealedEntries[last] = (frame.sealedEntries[last] ?? 0) ^ 1
+        poison = (
+          await publish({
+            ...params,
+            publishID: 'tampered-copy',
+            payload: encodeHandshakeFrame(
+              HANDSHAKE_KIND.commit,
+              encodeCommitFrame(frame.commit, frame.sealedEntries),
+            ),
+          })
+        ).sequenceID
+      }
+      if (!allow)
+        throw Object.assign(new Error('copy changed the head'), { name: 'HeadMismatchError' })
+      return publish(params)
+    })
+    const build = vi.fn()
+    const request = buildLedgerCommit(author, ['saved-named-entry'], { onBuild: build })
+    await author.peer.enqueue(request)
+    await vi.waitFor(async () => {
+      expect(poison).toBeDefined()
+      expect((await author.control.load()).cursor?.position).toBe(poison)
+      expect((await receiver.control.load()).cursor?.position).toBe(poison)
+    })
+    const saved = await author.control.load()
+    expect(saved.commitOnce).not.toBeNull()
+    expect(saved.operations[0]?.stage).toBe('built')
+    expect(saved.forkHalt).toBeNull()
+    expect(saved.outcomes).toEqual([])
+    expect(receiver.mls.epoch()).toBe(1)
+    let runner = author
+    if (restart) {
+      await author.peer.dispose()
+      await author.peer.drained()
+      runner = makeMLSPeer(hub, 'alice', secret, { restartOf: author })
+      peers.push(runner)
+    }
+    allow = true
+    await vi.waitFor(async () => {
+      await runner.peer.resync()
+      await receiver.peer.resync()
+      expect(runner.mls.epoch()).toBe(2)
+      expect(receiver.mls.epoch()).toBe(2)
+    })
+    expect(await receiver.mls.getLedger()).toEqual(['saved-named-entry'])
+    expect(await runner.peer.outcomes()).toEqual([
+      expect.objectContaining({ opID: request.id, kind: 'landed' }),
+    ])
+    expect(handoffs.length).toBeGreaterThanOrEqual(2)
+    for (const handoff of handoffs) {
+      expect(handoff.payload).toEqual(saved.commitOnce?.payload)
+      expect(handoff.publishID).toBe(saved.commitOnce?.publishID)
+    }
+    expect(build).toHaveBeenCalledOnce()
+    expect((await runner.control.load()).forkHalt).toBeNull()
+  },
+)
 
 test.each(['backoff', 'read'] as const)(
   'disposal cancels ambiguous intent %s and preserves it for restart',

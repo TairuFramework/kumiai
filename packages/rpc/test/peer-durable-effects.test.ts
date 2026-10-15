@@ -558,7 +558,7 @@ test('a moved accepted own slot rechecks proof and lands on restart', async () =
   expect((await again.control.load()).cursor?.position).toBe(asLogPosition(result.sequenceID))
 })
 
-test('a moved acceptance with rewrapped payload stays accepted and strands the peer', async () => {
+test('a moved acceptance with rewrapped payload stays unknown without a safety halt', async () => {
   const hub = new FakeHub()
   const bob = member(hub, { adopt: async () => 'moved' })
   await bob.peer.replay()
@@ -577,22 +577,13 @@ test('a moved acceptance with rewrapped payload stays accepted and strands the p
     operations: [accepted],
     outcomes: [],
     applied: snapshot.applied,
-    forkHalt: {
-      evidence: {
-        kind: 'digest-divergence',
-        epoch: 1,
-        position: row.sequenceID,
-        localDigest: row.payloadDigest,
-        remoteDigest: accepted.built.payloadDigest,
-      },
-    },
+    forkHalt: null,
+    controlHold: { reason: 'acceptance-unknown' },
     strand: snapshot.strand,
     cursor: snapshot.cursor,
   })
-  await expect(bob.peer.enqueue(buildLedgerCommit(bob, []))).rejects.toMatchObject({
-    name: 'GroupSafetyHeldError',
-    reason: 'fork-halted',
-  })
+  await bob.peer.enqueue(buildLedgerCommit(bob, []))
+  expect(bob.controlWalk.safetyHold()).toBeNull()
   const held = await bob.control.load()
   const recoveryRequests = () =>
     hub.published.filter(

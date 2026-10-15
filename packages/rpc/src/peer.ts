@@ -1490,14 +1490,13 @@ export function createGroupPeerWithControlWalk<
    * port is asked, and the peer must heal.
    *
    * The cursor advances over a frame the peer is DONE with — applied, walked as history, or
-   * stepped over as poison. It does NOT advance over its own un-merged commit, which stops the
-   * drain. A throw (port broke its contract) leaves the cursor put and the next pull re-reads it.
+   * stepped over as poison. Unrecognised own copies preserve the saved slot and skip.
+   * A throw (port broke its contract) leaves the cursor put and the next pull re-reads it.
    *
    * Also the only place the log's tip is learned, from the store's OWN reply, never inferred from
    * the cursor — recorded ONLY on a complete drain, since a tip ahead of the frames it covers
-   * would let the next `commit()` win a compare-and-set at an epoch it had not caught up to. Only
-   * `own-unmerged` stops early and takes no tip; `ahead` steps over its frame and drains to the
-   * end, so it DOES record one — the `stranded` flag, not a withheld tip, then stops `commit()`.
+   * would let the next `commit()` win a compare-and-set at an epoch it had not caught up to.
+   * `ahead` steps over its frame and drains to the end. Its strand stops publication.
    */
   const walkCommits = async (
     port: GroupMLS,
@@ -1786,21 +1785,18 @@ export function createGroupPeerWithControlWalk<
               }
               return advancedEpoch
             }
-            await haltFork({
-              kind: 'unexplained-own-commit',
-              epoch: localEpoch,
-              position,
-              digest: commitDigest,
-            })
-            observeStrand({
-              position,
-              commitDigest,
-              localEpoch,
-              claimedEpoch: header?.epoch ?? null,
-              kind: 'own-unmerged',
-              confidence: 'authenticated',
-            })
-            return advancedEpoch
+            await saveCommitCursor(position)
+            if (commitTopicID != null)
+              emitStrand({
+                groupID: commitTopicID,
+                position,
+                commitDigest,
+                localEpoch,
+                claimedEpoch: header?.epoch ?? null,
+                kind: 'own-unmerged',
+                confidence: 'claimed',
+              })
+            break
           }
           if (disposition.row === 'ahead') {
             // The group advanced at an epoch this peer did not. Step over the frame — the heal
@@ -2778,7 +2774,7 @@ export function createGroupPeerWithControlWalk<
           Date.now() >= operation.deadline ||
           safetyHold() !== null ||
           controlSafetyHeld(snapshot) !== null ||
-          snapshot.controlHold !== null ||
+          (snapshot.controlHold !== null && snapshot.controlHold.reason !== 'acceptance-unknown') ||
           stranded ||
           snapshot.strand !== null ||
           snapshot.cursor?.stranded === true

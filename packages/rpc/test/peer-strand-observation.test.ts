@@ -10,7 +10,7 @@ import {
 import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
 import { commitTopic } from '../src/topic.js'
 import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
-import { assertDurableForkHalt } from './fixtures/control-hold.js'
+import { assertCommitPoison } from './fixtures/control-hold.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import {
   createMemoryGroupMLS,
@@ -172,7 +172,7 @@ describe('commit strand observations', () => {
     },
   )
 
-  test('own unmerged commit reports authenticated evidence once across pulls', async () => {
+  test('own unmerged copy reports a claimed diagnostic once across pulls', async () => {
     const hub = new FakeHub()
     const rs = secret(0x91)
     const { sequenceID } = await publishCommit({
@@ -201,7 +201,7 @@ describe('commit strand observations', () => {
       localEpoch: 1,
       claimedEpoch: 1,
       kind: 'own-unmerged',
-      confidence: 'authenticated',
+      confidence: 'claimed',
     })
     for (let wake = 0; wake < 2; wake++) {
       await hub.publish({
@@ -213,13 +213,7 @@ describe('commit strand observations', () => {
     }
     expect(recoveries).toEqual([])
     expect(observations).toHaveLength(1)
-    await assertDurableForkHalt(bob, hub, rs, 'bob', {
-      evidence: {
-        kind: 'unexplained-own-commit',
-        position: sequenceID,
-        digest: publishedCommitDigest(hub, sequenceID),
-      },
-    })
+    await assertCommitPoison(bob, hub, rs, 'bob', sequenceID)
     await bob.peer.dispose()
   })
 

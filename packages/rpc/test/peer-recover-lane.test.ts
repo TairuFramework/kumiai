@@ -16,7 +16,7 @@ import {
 import { decodeRecoveryReply, encodeRecoveryReply, encodeRecoveryRequest } from '../src/recovery.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
-import { assertDurableForkHalt } from './fixtures/control-hold.js'
+import { assertCommitPoison } from './fixtures/control-hold.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
@@ -488,20 +488,14 @@ describe('the lane is never re-entered', { concurrent: false }, () => {
 })
 
 describe("a crash in recover()'s own acceptance window", { concurrent: false }, () => {
-  test('unexplained own bytes hold before recovery can create an external attempt', async () => {
+  test('unexplained own bytes skip without creating an external attempt', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x56)
     const own = await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
     await bob.peer.resync()
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery })
-    await assertDurableForkHalt(alice, hub, rs, 'alice', {
-      evidence: {
-        kind: 'unexplained-own-commit',
-        position: own.sequenceID,
-        digest: publishedCommitDigest(hub, own.sequenceID),
-      },
-    })
+    await assertCommitPoison(alice, hub, rs, 'alice', own.sequenceID)
     expect(alice.mls.epoch()).toBe(1)
     expect(bob.mls.leaves().filter((did) => did === 'alice')).toHaveLength(1)
     expect(rejoins(hub, rs)).toHaveLength(1)

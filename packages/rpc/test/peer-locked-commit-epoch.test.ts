@@ -10,7 +10,7 @@ import {
 import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
 import { commitTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
-import { assertDurableControlHold, assertDurableForkHalt } from './fixtures/control-hold.js'
+import { assertCommitPoison, assertDurableControlHold } from './fixtures/control-hold.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
@@ -71,7 +71,7 @@ async function runCase(kind: Case, offset: number) {
   }
   const fetchesBeforeWake = fetch.mock.calls.length
   await hub.publish({ senderDID: 'zoe', topicID, payload: new Uint8Array([0]) })
-  const held = kind === 'own' || kind.startsWith('unknown')
+  const held = kind.startsWith('unknown')
   if (!held)
     await vi.waitFor(() => expect(fetch.mock.calls.length).toBeGreaterThan(fetchesBeforeWake))
   const cursor =
@@ -86,10 +86,7 @@ async function runCase(kind: Case, offset: number) {
     repairStarted: recoveries.some((event) => event.phase === 'started'),
     repairFailed: recoveries.some((event) => event.phase === 'failed'),
   }
-  if (kind === 'own')
-    await assertDurableForkHalt(bob, hub, secret, 'bob', {
-      evidence: { kind: 'unexplained-own-commit', position: sequenceID },
-    })
+  if (kind === 'own') await assertCommitPoison(bob, hub, secret, 'bob', sequenceID)
   else if (held)
     await assertDurableControlHold(bob, hub, secret, 'bob', {
       reason: 'unsupported-version',
@@ -113,7 +110,7 @@ describe('commit decisions use the handle epoch', { concurrent: false }, () => {
         expect(honest.result.epoch).toBe(3)
         expect(honest.result.cursor).toBe(honest.sequenceID)
       }
-      if (kind === 'own') expect(honest.result.cursor).toBeNull()
+      if (kind === 'own') expect(honest.result.cursor).toBe(honest.sequenceID)
     },
   )
 

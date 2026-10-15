@@ -7,6 +7,43 @@ import { commitTopic, rendezvousTopic } from '../../src/topic.js'
 import type { FakeHub } from './fake-hub.js'
 import { buildLedgerCommit, makeMLSPeer, type TestPeer } from './peer.js'
 
+export async function assertCommitPoison(
+  member: TestPeer,
+  hub: FakeHub,
+  secret: Uint8Array,
+  did: string,
+  position: string,
+): Promise<void> {
+  await member.peer.replay()
+  const before = await member.control.load()
+  expect(before.cursor?.position != null && before.cursor.position >= position).toBe(true)
+  expect(before.forkHalt).toBeNull()
+  expect(before.controlHold).toBeNull()
+  expect(before.strand).toBeNull()
+  expect(member.controlWalk.safetyHold()).toBeNull()
+  const epoch = member.mls.epoch()
+  await member.peer.dispose()
+  await member.peer.drained()
+  const restarted = makeMLSPeer(hub, did, secret, { restartOf: member })
+  try {
+    await restarted.peer.replay()
+    const after = await restarted.control.load()
+    expect(after.forkHalt).toBeNull()
+    expect(after.controlHold).toBeNull()
+    expect(after.strand).toBeNull()
+    expect(after.cursor).toEqual(before.cursor)
+    expect(after.applied).toEqual(before.applied)
+    expect(after.commitOnce).toEqual(before.commitOnce)
+    expect(after.operations).toEqual(before.operations)
+    expect(after.outcomes).toEqual(before.outcomes)
+    expect(after.welcomes).toEqual(before.welcomes)
+    expect(restarted.mls.epoch()).toBe(epoch)
+  } finally {
+    await restarted.peer.dispose()
+    await restarted.peer.drained()
+  }
+}
+
 export async function assertDurableControlHold(
   member: TestPeer,
   hub: FakeHub,

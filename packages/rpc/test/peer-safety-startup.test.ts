@@ -11,7 +11,6 @@ import * as muxModule from '../src/hub-mux.js'
 import type { EpochRuntime, EpochRuntimeParams } from '../src/peer-epoch.js'
 import * as epochModule from '../src/peer-epoch.js'
 import { commitTopic } from '../src/topic.js'
-import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
@@ -276,7 +275,6 @@ test.each(['enqueue', 'request', 'gather', 'to', 'resync'] as const)(
   '%s refuses before ready while a startup fork halt write keeps failing',
   async (entry) => {
     const hub = new FakeHub()
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
     const mls = createMemoryGroupMLS({ localDID: 'alice', recoverySecret: secret, epoch: 1 })
     const apply = mls.control().apply
     const haltWrites = vi.fn()
@@ -290,9 +288,27 @@ test.each(['enqueue', 'request', 'gather', 'to', 'resync'] as const)(
         return apply(changes, mutationID)
       },
     }
+    const release = Promise.withResolvers<void>()
+    const crypto = createFakeCrypto({
+      localDID: 'alice',
+      pending: {
+        persistOpened: async () => {},
+        list: async () => {
+          await release.promise
+          return []
+        },
+        complete: async () => {},
+      },
+    })
     vi.useFakeTimers()
-    const member = makePeer(hub, { mls, control })
+    const member = makePeer(hub, { mls, control, crypto })
     peers.push(member)
+    const halting = member.controlWalk.haltFork({
+      kind: 'epoch-authenticator',
+      epoch: 1,
+      local: new Uint8Array([1]),
+      remote: new Uint8Array([2]),
+    })
     let readySettled = false
     const ready = member.peer
       .outcomes()
@@ -329,6 +345,8 @@ test.each(['enqueue', 'request', 'gather', 'to', 'resync'] as const)(
     } finally {
       clearTimeout(deadline)
       await member.peer.dispose()
+      release.resolve()
+      await halting
       await ready
     }
   },

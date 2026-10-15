@@ -6,8 +6,8 @@ import { asLogPosition } from '../src/cursor.js'
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { RecoveryEvent } from '../src/peer-types.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
-import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
-import { assertDurableForkHalt } from './fixtures/control-hold.js'
+import { publishCommit } from './fixtures/commits.js'
+import { assertCommitPoison } from './fixtures/control-hold.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
@@ -677,7 +677,7 @@ test('anchor-gated recovery re-checks an unwalked source commit on every fresh c
   expect((await again.control.load()).rejoin).toBeNull()
 })
 
-test('a classified own-unmerged strand persists evidence without a recovery bypass', async () => {
+test('an own-unmerged copy advances without creating a recovery attempt', async () => {
   const { hub, alice, bob } = await setup()
   await bob.peer.dispose()
   await bob.peer.drained()
@@ -687,17 +687,6 @@ test('a classified own-unmerged strand persists evidence without a recovery bypa
   const tip = (await publishCommit({ hub, senderDID: 'dave', recoverySecret: secret, epoch: 1 }))
     .sequenceID
   await alice.peer.resync()
-  await alice.controlWalk.haltFork({
-    kind: 'digest-divergence',
-    epoch: 1,
-    position: tip,
-    localDigest: publishedCommitDigest(hub, examined),
-    remoteDigest: publishedCommitDigest(hub, tip),
-  })
-  await expect(alice.peer.resync()).rejects.toMatchObject({
-    name: 'GroupSafetyHeldError',
-    reason: 'fork-halted',
-  })
   const built: Array<RejoinRecord> = []
   const apply = bob.control.apply.bind(bob.control)
   vi.spyOn(bob.control, 'apply').mockImplementation(async (changes, id) => {
@@ -705,15 +694,8 @@ test('a classified own-unmerged strand persists evidence without a recovery bypa
     return apply(changes, id)
   })
   const again = member(hub, 'bob', { restartOf: bob, control: bob.control })
-  await assertDurableForkHalt(again, hub, secret, 'bob', {
-    evidence: {
-      kind: 'unexplained-own-commit',
-      epoch: 1,
-      position: examined,
-      digest: publishedCommitDigest(hub, examined),
-    },
-  })
-  expect(again.mls.epoch()).toBe(1)
+  await assertCommitPoison(again, hub, secret, 'bob', examined)
+  expect(again.mls.epoch()).toBe(2)
   expect(built).toEqual([])
   expect(examined < tip).toBe(true)
 })

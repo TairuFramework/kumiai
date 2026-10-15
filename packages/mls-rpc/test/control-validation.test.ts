@@ -890,7 +890,7 @@ test('typed unavailable reason survives a message without diagnostic keywords', 
   })
 })
 
-test('an authenticated alternate own commit retains fork evidence', async () => {
+test('an authenticated alternate own copy preserves unknown acceptance', async () => {
   const f = await fixture()
   const other = (await commitKeyRotation(f.member.handle)).commitMessage
   const validation = await f.port.restoreValidation(f.built)
@@ -900,9 +900,7 @@ test('an authenticated alternate own commit retains fork evidence', async () => 
   })
   const searched = await searchReal(f, other)
   expect(searched.result).toEqual({ kind: 'unknown' })
-  expect(searched.haltFork).toHaveBeenLastCalledWith(
-    expect.objectContaining({ kind: 'unexplained-own-commit' }),
-  )
+  expect(searched.haltFork).not.toHaveBeenCalled()
   expect(searched.persisted).not.toHaveBeenCalled()
 })
 
@@ -1033,7 +1031,7 @@ test('already adopted own build requires committed full payload evidence after r
   if (committed === undefined) throw new Error('missing applied row')
   applied = [{ ...committed, payloadDigest: 'conflicting-full-bytes' }]
   expect(await createControlSearch(deps).searchLog(f.built)).toEqual({ kind: 'unknown' })
-  expect(deps.haltFork).toHaveBeenCalledWith(expect.objectContaining({ kind: 'digest-divergence' }))
+  expect(deps.haltFork).not.toHaveBeenCalled()
   expect(followWinner).not.toHaveBeenCalled()
 })
 

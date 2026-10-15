@@ -125,7 +125,7 @@ test.each(['advancement', 'retirement', 'disposal', 'hard-hold'] as const)(
     const bob = member(hub)
     await bob.peer.replay()
     const restore = vi.spyOn(bob.validation, 'restoreValidation').mockResolvedValue(null)
-    await bob.peer.enqueue(buildLedgerCommit(bob, ['retained']))
+    await seedBuiltOperation(bob, buildLedgerCommit(bob, ['retained']))
     await vi.waitFor(async () => expect((await bob.control.load()).commitOnce).not.toBeNull())
     await bob.peer.abandon()
     for (const outcome of await bob.peer.outcomes()) await bob.peer.ack(outcome.id)

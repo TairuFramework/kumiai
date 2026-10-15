@@ -254,7 +254,7 @@ test('committed own evidence must also match the commit digest', async () => {
     }),
   })
   expect(await f.search.searchLog(built)).toEqual({ kind: 'unknown' })
-  expect(f.haltFork).toHaveBeenCalledWith(expect.objectContaining({ kind: 'digest-divergence' }))
+  expect(f.haltFork).not.toHaveBeenCalled()
 })
 
 test('conflicting committed evidence discards a budget continuation before resuming', async () => {
@@ -283,7 +283,7 @@ test('conflicting committed evidence discards a budget continuation before resum
   })
   expect(await f.search.searchLog(built)).toEqual({ kind: 'unknown' })
   expect(f.fetch).toHaveBeenCalledTimes(1)
-  expect(f.haltFork).toHaveBeenCalledWith(expect.objectContaining({ kind: 'digest-divergence' }))
+  expect(f.haltFork).not.toHaveBeenCalled()
 })
 
 test.each(['gap', 'backward head'] as const)(
@@ -583,13 +583,7 @@ test.each(['unsupported-version', 'unexplained-own'] as const)(
     expect(await f.search.searchLog(built)).toEqual({ kind: 'unknown' })
     if (reason === 'unsupported-version')
       expect(f.hold).toHaveBeenLastCalledWith({ reason, position: position(101) })
-    else
-      expect(f.haltFork).toHaveBeenLastCalledWith({
-        kind: 'unexplained-own-commit',
-        epoch: 65,
-        position: position(101),
-        digest: digest(new Uint8Array([1])),
-      })
+    else expect(f.haltFork).not.toHaveBeenCalled()
     expect(f.followWinner).not.toHaveBeenCalled()
   },
 )
@@ -607,6 +601,64 @@ test('same-epoch authenticator divergence holds as fork evidence', async () => {
   expect(f.haltFork).toHaveBeenCalledWith(expect.objectContaining({ kind: 'epoch-authenticator' }))
   expect(f.fetch).not.toHaveBeenCalled()
 })
+
+test('a validated own copy with different bytes cannot certify absence or supersession', async () => {
+  const f = fixture([{ id: 101, value: 1 }])
+  f.deps.validation = {
+    restoreValidation: async () => ({
+      source,
+      readCommitHeader: async () => ({ epoch: 65, committerDID: 'own' }),
+      validateFrame: async () => ({
+        kind: 'valid',
+        header: { epoch: 65, committerDID: 'own' },
+        own: true,
+        advanced: true,
+        removed: false,
+      }),
+      verifyOwn: async () => true,
+    }),
+  }
+  for (const search of [f.search, createControlSearch(f.deps)]) {
+    expect(await search.searchLog(built)).toEqual({ kind: 'unknown' })
+    expect(f.haltFork).not.toHaveBeenCalled()
+    expect(f.followWinner).not.toHaveBeenCalled()
+    expect(f.reconcileAbsent).toHaveBeenCalledWith(position(101), null, expect.anything())
+  }
+})
+
+test.each(['unavailable', 'invalid'] as const)(
+  'a %s changed blob advances without certifying absence',
+  async (kind) => {
+    const f = fixture([{ id: 101, value: 2 }])
+    f.deps.fetch = async (after) => {
+      const page = await f.fetch(after)
+      return {
+        ...page,
+        messages: page.messages.map((row) => ({
+          ...row,
+          payload: encodeHandshakeFrame(
+            HANDSHAKE_KIND.commit,
+            encodeCommitFrame(new Uint8Array([2]), new Uint8Array([9])),
+          ),
+        })),
+      }
+    }
+    f.deps.validation = {
+      restoreValidation: async () => ({
+        source,
+        readCommitHeader: async () => ({ epoch: 65 }),
+        validateFrame: async () =>
+          kind === 'unavailable'
+            ? { kind: 'unavailable', reason: 'resolver' }
+            : { kind: 'invalid', reason: 'policy' },
+        verifyOwn: async () => true,
+      }),
+    }
+    expect(await f.search.searchLog(built)).toEqual({ kind: 'unknown' })
+    expect(f.reconcileAbsent).toHaveBeenCalledWith(position(101), null, expect.anything())
+    expect(f.haltFork).not.toHaveBeenCalled()
+  },
+)
 
 test('a conflicting committed branch holds as evidence', async () => {
   const f = fixture([{ id: 101, value: 2 }], {
@@ -627,9 +679,7 @@ test('a conflicting committed branch holds as evidence', async () => {
     }),
   })
   expect(await f.search.searchLog(built)).toEqual({ kind: 'unknown' })
-  expect(f.haltFork).toHaveBeenLastCalledWith(
-    expect.objectContaining({ kind: 'digest-divergence' }),
-  )
+  expect(f.haltFork).not.toHaveBeenCalled()
 })
 
 test('certification excludes only listed loser bytes', () => {

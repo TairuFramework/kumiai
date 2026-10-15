@@ -73,8 +73,7 @@ describe('the app-lane drain reads from a durable position and reports what aged
     await second.peer.dispose()
   })
 
-  // An orphaned own commit halts before the app drain can spend either frame's key.
-  test('a halted peer leaves current and future frames unopened across restarts', async () => {
+  test('own-copy poison permits current app delivery and retains a future frame across restarts', async () => {
     const hub = new DurableFakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x82)
     const seen: Array<unknown> = []
@@ -84,15 +83,9 @@ describe('the app-lane drain reads from a durable position and reports what aged
 
     // Bob's own commit, accepted by the hub at epoch 1, with his process dead before he adopted it
     // and no journal to repair him. He can never apply the frame that is his own commit.
-    await publishCommit({ hub, senderDID: 'bob', recoverySecret, epoch: 1 })
-    // The group applied it and carried on without him: commits framed at 2 and 3 leave it at epoch
-    // 4. The commit history confirms the frame's epoch — but none of it is reachable by bob, whose
-    // walk stops at his own commit before it ever reads these.
-    await publishCommit({ hub, senderDID: 'zoe', recoverySecret, epoch: 2 })
-    await publishCommit({ hub, senderDID: 'zoe', recoverySecret, epoch: 3 })
+    const own = await publishCommit({ hub, senderDID: 'bob', recoverySecret, epoch: 1 })
 
-    // Two app frames on the segment's topic — the anchor never moves, since no commit here touches
-    // a leaf. One at bob's own epoch, one at the epoch the group reached.
+    // Only the current frame can spend its message key.
     const atOne = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const atFour = createFakeCrypto({ epoch: 4, localDID: 'alice' })
     for (const [crypto, text] of [
@@ -115,13 +108,15 @@ describe('the app-lane drain reads from a durable position and reports what aged
     await flush(300)
     expect(first.mls.epoch()).toBe(1)
 
-    expect(first.controlWalk.safetyHold()).toBe('fork-halted')
-    expect(seen).toEqual([])
-    expect(first.appCursorStore.stored(topicID)).toBeNull()
+    expect(first.controlWalk.safetyHold()).toBeNull()
+    expect((await first.control.load()).cursor?.position).toBe(own.sequenceID)
+    expect(seen).toEqual([{ text: 'at epoch one' }])
+    expect(first.appCursorStore.stored(topicID)).toBe(posted[0]?.sequenceID)
+    expect(JSON.parse(new TextDecoder().decode(first.crypto.saveState()))).toMatchObject({
+      spent: ['1:alice:0'],
+    })
 
-    // Restart after restart over the same durable state changes nothing and loses nothing. The
-    // frame is neither delivered nor gone, and the position never moves past it — which is the only
-    // reason a later epoch could still open it.
+    // Restarts retain the future frame without re-opening the delivered frame.
     let previous = first
     for (let restart = 0; restart < 2; restart++) {
       await previous.peer.dispose()
@@ -132,13 +127,17 @@ describe('the app-lane drain reads from a durable position and reports what aged
       })
       await flush(300)
       expect(next.mls.epoch()).toBe(1)
-      expect(next.controlWalk.safetyHold()).toBe('fork-halted')
-      expect(seen).toEqual([])
-      expect(next.appCursorStore.stored(topicID)).toBeNull()
+      expect(next.controlWalk.safetyHold()).toBeNull()
+      expect((await next.control.load()).cursor?.position).toBe(own.sequenceID)
+      expect(seen).toEqual([{ text: 'at epoch one' }])
+      expect(next.appCursorStore.stored(topicID)).toBe(posted[0]?.sequenceID)
+      expect(JSON.parse(new TextDecoder().decode(next.crypto.saveState()))).toMatchObject({
+        spent: ['1:alice:0'],
+      })
       previous = next
     }
 
-    // And the frame is still on the hub, still sealed, still waiting: nothing consumed it.
+    // The future frame remains available.
     expect(hub.published.filter((m) => m.topicID === topicID)).toHaveLength(2)
 
     await previous.peer.dispose()

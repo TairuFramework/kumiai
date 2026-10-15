@@ -336,7 +336,7 @@ describe('durable fork halts', () => {
   })
 
   test.each(['live', 'restart'] as const)(
-    'a moved acceptance with a matching digest but different payload persists fork evidence on %s',
+    'a moved acceptance with different payload preserves unknown work on %s',
     async (mode) => {
       const hub = new FakeHub()
       const bob = member(hub, { adopt: async () => 'moved' })
@@ -373,15 +373,8 @@ describe('durable fork halts', () => {
         ],
         outcomes: [],
         applied: snapshot.applied,
-        forkHalt: {
-          evidence: {
-            kind: 'digest-divergence',
-            epoch: 1,
-            position: row.sequenceID,
-            localDigest: row.payloadDigest,
-            remoteDigest: accepted.built.payloadDigest,
-          },
-        },
+        forkHalt: null,
+        controlHold: { reason: 'acceptance-unknown' },
         strand: snapshot.strand,
         cursor: snapshot.cursor,
       })
