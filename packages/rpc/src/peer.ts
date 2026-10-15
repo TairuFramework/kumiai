@@ -292,6 +292,8 @@ export function createGroupPeerWithControlWalk<
     searchLog: OperationDeps['searchLog']
   }
 } {
+  if (input.recoveryOnly && input.mls == null)
+    throw new TypeError('Recovery-only peer requires MLS')
   if ((input.continuation == null) !== (input.completion == null))
     throw new TypeError('Recovery continuation and completion must be supplied together')
   if (
@@ -458,7 +460,7 @@ export function createGroupPeerWithControlWalk<
   // Placeholder until `ready` restores or captures the anchor; nothing derives a topic before.
   let anchor: Anchor = {
     secret: new Uint8Array(),
-    epoch: crypto.epoch(),
+    epoch: params.recoveryOnly && mls != null ? mls.sendAdmission().epoch : crypto.epoch(),
   }
   let appNoticeInSerial = false
   let commitLaneCaughtUp = mls == null
@@ -792,14 +794,14 @@ export function createGroupPeerWithControlWalk<
           limit: params.appOutboxLimit,
           admissionReady: () => safetyReady,
           admission: () => {
-            const reason = safetyHold()
+            const reason = safetyHold() ?? (params.recoveryOnly ? 'stranded' : null)
             return reason === null
               ? mls.sendAdmission()
               : { admissible: false, reason, epoch: mls.sendAdmission().epoch }
           },
         })
 
-  let floor: EpochFloor = { epoch: crypto.epoch(), position: null, covered: true }
+  let floor: EpochFloor = { epoch: anchor.epoch, position: null, covered: true }
   let locallyRemoved = false
   const logDelivery =
     appOutboxAcceptance == null || mls == null
@@ -1433,6 +1435,7 @@ export function createGroupPeerWithControlWalk<
   // ephemeral key inside the signed request — unless another responder's reply has already
   // been observed (storm-collapse), in which case the scheduled reply is cancelled.
   const handleRecoveryRequest = (request: { requestID: string; request: Uint8Array }): void => {
+    if (params.recoveryOnly) return
     const { requestID } = request
     if (
       mls == null ||
@@ -1518,6 +1521,7 @@ export function createGroupPeerWithControlWalk<
    * fails the head check, and the requester needs a second answer to fall through to.
    */
   const handleLedgerRequest = (request: { requestID: string; request: Uint8Array }): void => {
+    if (params.recoveryOnly) return
     if (mls == null || rendezvousTopicID == null || disposed || safetyHold() !== null) return
     const port = mls
     const topicID = rendezvousTopicID
@@ -2330,6 +2334,10 @@ export function createGroupPeerWithControlWalk<
    * never become the cursor.
    */
   const onCommitDelivery = (_message: StoredMessage, ack: () => void): void => {
+    if (params.recoveryOnly) {
+      ack()
+      return
+    }
     commitLaneCaughtUp = false
     commitWorkVersion += 1
     ack()
@@ -2478,8 +2486,9 @@ export function createGroupPeerWithControlWalk<
       stranded = true
       healRequested = false
     }
-    const currentEpoch = safetyHold() !== null ? undefined : await mls?.readEpoch()
-    if (snapshot.commitOnce === null || hardControlHeld()) {
+    const currentEpoch =
+      safetyHold() !== null || params.recoveryOnly ? undefined : await mls?.readEpoch()
+    if (params.recoveryOnly || snapshot.commitOnce === null || hardControlHeld()) {
       unresolvedControlSlot = false
       slotEvidenceStamp = null
       cancelControlSlotRetry()
@@ -3177,7 +3186,7 @@ export function createGroupPeerWithControlWalk<
     controlSlotBackoff = 1_000
   }
   function scheduleControlSlotRetry(delay = controlSlotBackoff): void {
-    if (disposed || hardControlHeld() || !unresolvedControlSlot) return
+    if (disposed || params.recoveryOnly || hardControlHeld() || !unresolvedControlSlot) return
     if (delay === 0) {
       controlSlotBackoff = 1_000
       if (controlSlotTimer !== undefined) clearTimeout(controlSlotTimer)
@@ -3277,6 +3286,7 @@ export function createGroupPeerWithControlWalk<
       disposed ||
       locallyRemoved ||
       control == null ||
+      params.recoveryOnly ||
       (!hasOperations && !storageServicePending) ||
       (rejoinHeld && safetyHold() === null) ||
       operationTimer != null ||
@@ -3520,6 +3530,7 @@ export function createGroupPeerWithControlWalk<
   }
 
   const enqueue = async (request: OperationRequest): Promise<void> => {
+    if (params.recoveryOnly) throw new SendNotAdmissibleError('stranded')
     assertSafetyOpen()
     await ready
     assertLive()
@@ -3619,6 +3630,11 @@ export function createGroupPeerWithControlWalk<
     }
   }
   const replay = async (): Promise<{ reenact?: Array<string> }> => {
+    if (params.recoveryOnly) {
+      await ready
+      assertLive()
+      return {}
+    }
     await ready
     assertLive()
     if (locallyRemoved) return {}
@@ -4261,6 +4277,7 @@ export function createGroupPeerWithControlWalk<
     assertSafetyOpen()
     renewalRequiredEpoch = null
     await ready
+    if (params.recoveryOnly) return { advanced: false, reenact: [] }
     assertSafetyOpen()
     if (control != null && (await control.load()).rejoin?.stage === 'refused') {
       await runSerial(async () => {
@@ -4292,6 +4309,7 @@ export function createGroupPeerWithControlWalk<
       disposed ||
       locallyRemoved ||
       hardControlHeld() ||
+      params.recoveryOnly ||
       !healRequested ||
       activeRecovery != null ||
       renewalHeld() ||
@@ -4359,6 +4377,11 @@ export function createGroupPeerWithControlWalk<
     const stopped = () => disposed || safetyHold() !== null
     try {
       if (stopped()) return
+      if (params.recoveryOnly) {
+        mux.start()
+        await initControlLanes()
+        return
+      }
       if (continuation !== null) {
         const source = await mls?.readRecoverySource()
         if (
@@ -4492,7 +4515,7 @@ export function createGroupPeerWithControlWalk<
     )
     .catch(() => {})
   const withReady = async <T>(fn: () => T | Promise<T>): Promise<T> => {
-    const safety = safetyHold()
+    const safety = safetyHold() ?? (params.recoveryOnly ? 'stranded' : null)
     if (safety !== null) throw new SendNotAdmissibleError(safety)
     await ready
     assertLive()
@@ -4537,6 +4560,7 @@ export function createGroupPeerWithControlWalk<
   // TypeScript's instantiation-depth limit (TS2589).
   const protocolMethod: GroupPeer<Protocols>['protocol'] = (name) => {
     const key = String(name)
+    if (params.recoveryOnly) throw new SendNotAdmissibleError('stranded')
     return {
       dispatch: async (prc, config) => {
         assertLive()
@@ -4598,6 +4622,7 @@ export function createGroupPeerWithControlWalk<
     replay,
     recover,
     resync: async () => {
+      if (params.recoveryOnly) throw new SendNotAdmissibleError('stranded')
       assertSafetyOpen()
       await ready
       // Refuse a disposed peer BEFORE `rebuildEpoch`: its `buildEpoch` half re-registers every
@@ -4634,7 +4659,7 @@ export function createGroupPeerWithControlWalk<
     drained: () => {
       if (disposePromise == null)
         return Promise.reject(new Error('Call dispose() before drained()'))
-      return boundary.drained(disposePromise)
+      return boundary.drained(disposePromise).then(() => commitTail)
     },
     dispose: () => {
       if (disposePromise != null) return disposePromise

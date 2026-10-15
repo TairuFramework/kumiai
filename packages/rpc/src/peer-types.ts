@@ -78,6 +78,7 @@ export const DEFAULT_COMMIT_DEADLINE_MS = 30_000
 
 /** MLS lifecycle and the host stores used by the durable control and app lanes. */
 export type GroupPeerMLSParams = {
+  recoveryOnly?: boolean
   onConfirmedRecovery?: (handoff: ConfirmedRecoveryHandoff) => void
   continuation?: RecoveryContinuation | null
   completion?: RecoveryCompletion | null
@@ -252,6 +253,7 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
   | GroupPeerMLSParams
   | {
       mls?: undefined
+      recoveryOnly?: undefined
       onConfirmedRecovery?: undefined
       continuation?: undefined
       completion?: undefined

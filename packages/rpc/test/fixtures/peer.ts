@@ -117,6 +117,7 @@ export async function rollBackForkHalt(member: TestPeer): Promise<{ settled: Pro
 }
 
 export type MakeMLSPeerOptions = {
+  recoveryOnly?: boolean
   continuation?: RecoveryContinuation | null
   completion?: RecoveryCompletion | null
   appOutbox?: AppOutbox
@@ -247,6 +248,7 @@ export function makeMLSPeer(
     crypto,
     mls,
     control,
+    recoveryOnly: options.recoveryOnly,
     continuation: options.continuation,
     completion: options.completion,
     ...ports,

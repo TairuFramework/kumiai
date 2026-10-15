@@ -173,6 +173,12 @@ export type { RecoveryEnvironment } from './registry/validation.js'
 export { createRegistryGroupMLS, type RegistryGroupMLSParams } from './registry-group-mls.js'
 export { createRegistryHandleAccess } from './registry-handle-access.js'
 export {
+  createRegistryPeer,
+  type RegistryPeer,
+  type RegistryPeerOptions,
+  type RegistryPeerParams,
+} from './registry-peer.js'
+export {
   buildRevokeProofOnHandle,
   buildRevokeProofOperation,
   type PublishRevokeProofParams,

@@ -17,6 +17,7 @@ import {
 import type { GroupKey, GroupTransaction } from '../persistence-types.js'
 import { createRegistryAccess, type RegistryOwner } from './access.js'
 import { admissionFor, type ColdEnvironment, loadValidatedGroup } from './cold.js'
+import { bindRegistryRecoveryCoordinator } from './recovery-coordinator.js'
 import { deleteIncarnations } from './retired.js'
 import {
   bindRegistryRetirement,
@@ -604,6 +605,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       }
     },
   })
+  bindRegistryRecoveryCoordinator({ registry, entry: capability, persistence: persistence.groups })
   bindRegistryRetirement(registry, retirement)
   liveRegistries.set(binding, registry)
   return registry
