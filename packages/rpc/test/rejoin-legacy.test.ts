@@ -1,9 +1,17 @@
 import { afterEach, expect, test, vi } from 'vitest'
 
+import { digestAppliedCommit } from '../src/classify.js'
 import { asLogPosition } from '../src/cursor.js'
+import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { RecoveryContinuation } from '../src/recovery-types.js'
+import { rendezvousTopic } from '../src/topic.js'
+import { encodeSignedRecoveryConfirmation, publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import {
+  createMemoryGroupMLS,
+  encodeMemoryCommit,
+  type MemoryGroupMLS,
+} from './fixtures/memory-group-mls.js'
 import { buildRejoinRecord, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
 
 const secret = new Uint8Array(32).fill(41)
@@ -11,6 +19,7 @@ const peers: Array<TestPeer> = []
 afterEach(async () => {
   await Promise.all(peers.map(({ peer }) => peer.dispose()))
   await Promise.all(peers.splice(0).map(({ peer }) => peer.drained()))
+  vi.useRealTimers()
   vi.restoreAllMocks()
 })
 
@@ -152,6 +161,128 @@ test('destination head-verifies a gathered ledger before completing the retired 
   expect(ledgers).toEqual([['present']])
   expect(await destination.peer.replay()).toEqual({})
   expect((await destination.control.load()).operations).toEqual([])
+})
+
+test('destination defers signed confirmation judgment and memoization until head-verified bootstrap', async () => {
+  const s = await setup()
+  const tokens = ['carol=member']
+  const mls: MemoryGroupMLS = createMemoryGroupMLS({
+    recoverySecret: secret,
+    localDID: 'bob',
+    members: ['bob', 'carol'],
+    epoch: 1,
+    ledgerEntries: tokens,
+    acceptsCommitter: (did) => mls.fold().get(did) === 'member',
+  })
+  const state = JSON.parse(new TextDecoder().decode(mls.serializeState())) as Record<
+    string,
+    unknown
+  >
+  mls.restoreState(new TextEncoder().encode(JSON.stringify({ ...state, ledger: [], bodies: [] })))
+  const readSource = mls.readRecoverySource.bind(mls)
+  vi.spyOn(mls, 'readRecoverySource').mockImplementation(async () => ({
+    ...(await readSource()),
+    key: s.continuation.destination,
+  }))
+  const validate = vi.spyOn(mls, 'validateRecoveryCommit')
+  const seal = vi.spyOn(mls, 'sealRecoveryVerdict')
+  const destination = makeMLSPeer(s.hub, 'bob', secret, {
+    mls,
+    continuation: s.continuation,
+    completion: async () => {},
+    recovery: { timeoutMs: 10, deadlineMs: 30, getDelayMs: () => 0 },
+  })
+  peers.push(destination)
+  await destination.peer.replay()
+  expect(await mls.isLedgerComplete()).toBe(false)
+  expect(mls.fold().has('carol')).toBe(false)
+  const carol = createMemoryGroupMLS({ localDID: 'carol', members: ['bob', 'carol'] })
+  const requestID = 'deferred-confirmation'
+  const { request } = await carol.createRecoveryRequest(requestID)
+  const commit = encodeMemoryCommit(1, 'carol', [], { external: true })
+  const payload = encodeHandshakeFrame(
+    HANDSHAKE_KIND.recoveryConfirmRequest,
+    await encodeSignedRecoveryConfirmation(carol, {
+      requestID,
+      request,
+      position: 'confirmation-position',
+      commitDigest: digestAppliedCommit(commit),
+      commit,
+    }),
+  )
+  const verdicts = () =>
+    s.hub.published.filter(
+      (row) => decodeHandshakeFrame(row.payload).kind === HANDSHAKE_KIND.recoveryVerdict,
+    )
+  vi.useFakeTimers()
+  const ask = async () => {
+    await s.hub.publish({ senderDID: 'carol', topicID: rendezvousTopic(secret), payload })
+    await vi.advanceTimersByTimeAsync(5)
+  }
+  await ask()
+  await ask()
+  expect.soft(validate.mock.calls.length).toBe(0)
+  expect.soft(seal.mock.calls.length).toBe(0)
+  expect.soft(verdicts().length).toBe(0)
+  await mls.bootstrapLedger(tokens)
+  expect(await mls.isLedgerComplete()).toBe(true)
+  expect(mls.fold().get('carol')).toBe('member')
+  await destination.peer.replay()
+  await ask()
+  expect(validate).toHaveBeenCalledTimes(1)
+  await expect(validate.mock.results[0]?.value).resolves.toEqual({ epoch: 1, valid: true })
+  await ask()
+  expect(validate).toHaveBeenCalledTimes(1)
+  expect(seal).not.toHaveBeenCalled()
+  expect(verdicts()).toEqual([])
+})
+
+test('destination bounded commit walks wait for a complete ledger', async () => {
+  const s = await setup()
+  const published = await publishCommit({
+    hub: s.hub,
+    senderDID: 'carol',
+    recoverySecret: secret,
+    epoch: 1,
+  })
+  const mls = createMemoryGroupMLS({
+    recoverySecret: secret,
+    localDID: 'bob',
+    members: ['bob', 'carol'],
+    epoch: 1,
+    ledgerEntries: ['carol=member'],
+  })
+  const state = JSON.parse(new TextDecoder().decode(mls.serializeState())) as Record<
+    string,
+    unknown
+  >
+  mls.restoreState(new TextEncoder().encode(JSON.stringify({ ...state, ledger: [] })))
+  const readSource = mls.readRecoverySource.bind(mls)
+  vi.spyOn(mls, 'readRecoverySource').mockImplementation(async () => ({
+    ...(await readSource()),
+    key: s.continuation.destination,
+  }))
+  const destination = makeMLSPeer(s.hub, 'bob', secret, {
+    mls,
+    continuation: s.continuation,
+    completion: async () => {},
+    recovery: { timeoutMs: 10, deadlineMs: 30, getDelayMs: () => 0 },
+  })
+  peers.push(destination)
+  await destination.peer.replay()
+  const header = vi.spyOn(mls, 'readCommitHeader')
+  const process = vi.spyOn(mls, 'processCommit')
+  const roster = vi.spyOn(mls, 'rosterEntries')
+  const fetch = vi.spyOn(s.hub, 'fetchTopic')
+  await destination.controlWalk.walkCommits({
+    through: asLogPosition(published.sequenceID),
+    range: null,
+    work: { takeFetch: () => true, takeFrame: () => true },
+  })
+  expect(header).not.toHaveBeenCalled()
+  expect(process).not.toHaveBeenCalled()
+  expect(roster).not.toHaveBeenCalled()
+  expect(fetch).not.toHaveBeenCalled()
 })
 
 test('disposal during source completion emits no bootstrap notice', async () => {

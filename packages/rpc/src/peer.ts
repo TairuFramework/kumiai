@@ -1300,7 +1300,7 @@ export function createGroupPeerWithControlWalk<
           if (evaluation == null) {
             if (confirmationEvaluations.size >= maxPendingConfirmations) return
             evaluation = runSerial(async () => {
-              if (disposed || blocked()) return { epoch }
+              if (disposed || blocked() || !(await port.isLedgerComplete())) return { epoch }
               await settleOperations()
               await reconcileCommits()
               if (disposed || blocked() || (await port.readEpoch()) !== epoch) return { epoch }
@@ -1327,7 +1327,7 @@ export function createGroupPeerWithControlWalk<
         }
         record = commitOutcomes.get(responseKey)
       }
-      if (disposed || blocked()) return
+      if (disposed || blocked() || !(await port.isLedgerComplete())) return
       let outcome: RecoveryCommitOutcome | undefined
       let refusedEpoch: number | undefined
       if (record?.kind === 'applied' && record.digest === request.commitDigest) {
@@ -1383,7 +1383,7 @@ export function createGroupPeerWithControlWalk<
       if (disposed || blocked() || expiresAt <= Date.now()) return
       const response = record
       const confirmable = async () => {
-        if (blocked()) return false
+        if (blocked() || !(await port.isLedgerComplete())) return false
         if (refusedEpoch !== undefined) return (await port.readEpoch()) === refusedEpoch
         const current = commitOutcomes.get(responseKey)
         return (
@@ -1560,6 +1560,8 @@ export function createGroupPeerWithControlWalk<
     const { port, ratchet, identity, floorPosition } = params
     commitLaneCaughtUp = false
     assertSafetyOpen()
+    if (continuation !== null && !(await port.isLedgerComplete()))
+      throw new RecoveryRequiredError('destination ledger requires bootstrap')
     await resolveAnchorRotation({ port })
     assertLive()
     assertSafetyOpen()
@@ -1672,6 +1674,7 @@ export function createGroupPeerWithControlWalk<
       (controlHold !== null && controlHold.reason !== 'acceptance-unknown')
     )
       return false
+    if (continuation !== null && !(await port.isLedgerComplete())) return false
     let advancedEpoch = false
     const started = logDelivery?.beginWalk() ?? 0
     const unprocessable = async (
@@ -2970,6 +2973,8 @@ export function createGroupPeerWithControlWalk<
   const searchControlLog: OperationDeps['searchLog'] = async (built, position) => {
     checkedWelcome = null
     if (controlSearch === null) return { kind: 'unknown' }
+    if (continuation !== null && mls != null && !(await mls.isLedgerComplete()))
+      return { kind: 'unknown' }
     controlSearchActive = true
     try {
       const result = await controlSearch.searchLog(built, position)
