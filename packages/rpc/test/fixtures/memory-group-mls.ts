@@ -372,6 +372,8 @@ type MemoryGroupInfo = {
   members: Array<string>
 }
 
+const confirmationKeys = new Map<string, Uint8Array>()
+
 /**
  * The request a peer publishes to ask the group for its state. The requester's DID and the
  * ephemeral PUBLIC key its reply must be sealed to ride inside it — modelling the signed
@@ -1245,6 +1247,42 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       }),
     readEpoch: () => serialise(async () => epoch),
     prepareRecovery: prepare,
+    async signRecoveryConfirmation(binding) {
+      if (binding.groupID !== groupID || localDID == null)
+        throw new Error('Confirmation identity mismatch')
+      const signer = normalizeDID(localDID)
+      let key = confirmationKeys.get(signer)
+      if (key == null) {
+        key = x25519.utils.randomSecretKey()
+        confirmationKeys.set(signer, key)
+      }
+      const body = JSON.stringify([
+        binding.groupID,
+        binding.requestID,
+        binding.position,
+        binding.commitDigest,
+        signer,
+      ])
+      return fromUTF(JSON.stringify({ body, tag: toB64U(hmac(sha256, key, fromUTF(body))) }))
+    },
+    async verifyRecoveryConfirmation(binding, signature, requesterDID) {
+      try {
+        const signer = normalizeDID(requesterDID)
+        const key = confirmationKeys.get(signer)
+        if (key == null || binding.groupID !== groupID) return false
+        const body = JSON.stringify([
+          binding.groupID,
+          binding.requestID,
+          binding.position,
+          binding.commitDigest,
+          signer,
+        ])
+        const value = JSON.parse(toUTF(signature))
+        return value.body === body && value.tag === toB64U(hmac(sha256, key, fromUTF(body)))
+      } catch {
+        return false
+      }
+    },
     async verifyRecoveryRequest(request) {
       try {
         const verified = authorize(request, 'verifyRecoveryRequest', false)
@@ -1319,7 +1357,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         } catch {
           return { epoch }
         }
-        return { epoch }
+        return { epoch, valid: true }
       }),
     processCommit: (commit: Uint8Array, context: CommitContext) =>
       serialise(async () => {
@@ -1378,7 +1416,6 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             epochBefore: epoch,
             epochAfter: epoch,
             refusal: 'policy' as const,
-            refusalAuthority: 'authenticated-commit' as const,
           }
         }
         const nextBodies = new Map(bodies)

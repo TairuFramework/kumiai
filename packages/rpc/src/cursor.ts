@@ -53,3 +53,14 @@ export function assertForwardPage(
 export function asDeliveryPosition(sequenceID: string): DeliveryPosition {
   return sequenceID as DeliveryPosition
 }
+
+export class InvalidLogPositionError extends Error {
+  override name = 'InvalidLogPositionError'
+}
+
+/** Fetched metadata shares the pushed log-position bound. */
+export function assertLogPosition(value: unknown): asserts value is LogPosition {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 64) {
+    throw new InvalidLogPositionError('Invalid fetched log position')
+  }
+}

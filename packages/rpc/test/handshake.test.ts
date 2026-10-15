@@ -84,3 +84,11 @@ describe('handshake frame codec', () => {
     ).toThrow(/kind/)
   })
 })
+
+test('oversized inbound handshake frames fail before payload decoding', () => {
+  for (const kind of Object.values(HANDSHAKE_KIND)) {
+    const raw = new Uint8Array(1024 * 1024)
+    raw.set([0x45, 0x4b, 1, kind])
+    expect(() => decodeHandshakeFrame(raw)).toThrow()
+  }
+})

@@ -2,8 +2,10 @@ import type { HubPublishParams } from '@kumiai/hub-tunnel'
 
 import { digestAppliedCommit } from '../../src/classify.js'
 import { decodeCommitFrame, encodeCommitFrame } from '../../src/commit-frame.js'
+import type { GroupMLS } from '../../src/crypto.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../../src/handshake.js'
 import { encodeLedgerEntries } from '../../src/ledger-entries.js'
+import { encodeRecoveryConfirmRequest, type RecoveryConfirmRequest } from '../../src/recovery.js'
 import { commitTopic } from '../../src/topic.js'
 import { createFakeCrypto } from './fake-crypto.js'
 import { encodeMemoryCommit, memoryEntryID, memoryLedgerHead } from './memory-group-mls.js'
@@ -113,4 +115,19 @@ export function publishedCommitBytes(
   const message = hub.published.find((row) => row.sequenceID === sequenceID)
   if (message == null) throw new Error(`no published frame at ${sequenceID}`)
   return decodeCommitFrame(decodeHandshakeFrame(message.payload).payload).commit
+}
+
+export async function encodeSignedRecoveryConfirmation(
+  port: Pick<GroupMLS, 'verifyRecoveryRequest' | 'signRecoveryConfirmation'>,
+  value: Omit<RecoveryConfirmRequest, 'signature'>,
+): Promise<Uint8Array> {
+  const verified = await port.verifyRecoveryRequest(value.request)
+  if (verified == null) throw new Error('Invalid fixture request')
+  const signature = await port.signRecoveryConfirmation({
+    groupID: verified.groupID,
+    requestID: value.requestID,
+    position: value.position,
+    commitDigest: value.commitDigest,
+  })
+  return encodeRecoveryConfirmRequest({ ...value, signature })
 }

@@ -414,13 +414,17 @@ test('the real commit port propagates binding and lapse refusals without advanci
       identity: s.bob,
       binding,
     })
+    expect(await s.mls.validateRecoveryCommit(commit)).toEqual({
+      epoch: before,
+      refusal,
+      refusalAuthority: 'authenticated-commit',
+    })
     expect(await s.mls.processCommit(commit, {})).toEqual({
       applied: false,
       advanced: false,
       epochBefore: before,
       epochAfter: before,
       refusal,
-      refusalAuthority: 'authenticated-commit',
     })
     expect(await s.mls.readEpoch()).toBe(before)
   }

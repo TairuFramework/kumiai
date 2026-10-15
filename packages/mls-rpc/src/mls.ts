@@ -1,4 +1,10 @@
-import { normalizeDID, type OwnIdentity } from '@kokuin/token'
+import {
+  isVerifiedToken,
+  normalizeDID,
+  type OwnIdentity,
+  stringifyToken,
+  verifyToken,
+} from '@kokuin/token'
 import {
   CommitValidationUnavailableError,
   confirmationKey,
@@ -29,6 +35,7 @@ import type {
   GroupMLS,
   OpenedRecoveryVerdict,
   ProcessCommitResult,
+  RecoveryConfirmationBinding,
   RecoveryRefusalReason,
   RecoveryVerdict,
   RosterEntry,
@@ -237,6 +244,38 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
   }
 
   const port: GroupMLS = {
+    async signRecoveryConfirmation(binding: RecoveryConfirmationBinding) {
+      if (binding.groupID !== (await access.read((group) => group.groupID)))
+        throw new Error('Confirmation group mismatch')
+      return new TextEncoder().encode(
+        stringifyToken(
+          await identity.signToken(
+            { ...binding, type: 'kumiai/recovery-confirmation/v1' },
+            { embedLongForm: true },
+          ),
+        ),
+      )
+    },
+    async verifyRecoveryConfirmation(binding, signature, requesterDID) {
+      try {
+        const token = await verifyToken<RecoveryConfirmationBinding & { type: string }>(
+          new TextDecoder().decode(signature),
+        )
+        if (!isVerifiedToken(token)) return false
+        const value = token.payload
+        return (
+          value.type === 'kumiai/recovery-confirmation/v1' &&
+          normalizeDID(value.iss) === normalizeDID(requesterDID) &&
+          value.groupID === binding.groupID &&
+          value.requestID === binding.requestID &&
+          value.position === binding.position &&
+          value.commitDigest === binding.commitDigest &&
+          value.groupID === (await access.read((group) => group.groupID))
+        )
+      } catch {
+        return false
+      }
+    },
     async verifyRecoveryRequest(request: Uint8Array) {
       try {
         const verified = await verifyRecoveryRequest(new TextDecoder().decode(request))
@@ -349,8 +388,6 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         return {
           eligible: header?.committerDID !== undefined && frameEpoch === group.epoch,
           epoch: Number(group.epoch),
-          // Private headers authenticate sender data only.
-          authenticatedExternal: header?.external === true && header.committerDID !== undefined,
           refusal:
             header != null && frameEpoch === group.epoch && header.committerDID === undefined
               ? ('invalid' as const)
@@ -374,7 +411,6 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       const ignored = Symbol('ignored commit')
       let refusedEpoch: number | undefined
       let refusal: RecoveryRefusalReason | undefined
-      let refusalAuthority: ProcessCommitResult['refusalAuthority']
       let validation: 'unavailable' | undefined
       try {
         return await access.mutate(async (group, persist) => {
@@ -400,7 +436,6 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           if (!result.applied) {
             refusedEpoch = result.epochBefore
             refusal = result.refusal
-            refusalAuthority = result.refusalAuthority
             validation = result.validation
             throw ignored
           }
@@ -420,11 +455,6 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
             epochBefore: refusedEpoch,
             epochAfter: refusedEpoch,
             ...(refusal == null ? {} : { refusal }),
-            ...(refusalAuthority != null &&
-            eligible.authenticatedExternal &&
-            validation === undefined
-              ? { refusalAuthority }
-              : {}),
             ...(validation === undefined ? {} : { validation }),
           }
         throw error

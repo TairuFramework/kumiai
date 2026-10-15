@@ -16,6 +16,7 @@ import {
 
 test('confirmation requests and verdicts round trip with fixed handshake kinds', () => {
   const request = {
+    signature: new Uint8Array([5, 6]),
     requestID: 'request',
     request: new Uint8Array([1, 2]),
     position: 'position',

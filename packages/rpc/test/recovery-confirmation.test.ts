@@ -4,7 +4,7 @@ import { createMemoryControlStore } from '../../rpc-conformance/src/memory-contr
 import { digestAppliedCommit } from '../src/classify.js'
 import { encodeCommitFrame } from '../src/commit-frame.js'
 import type { RecoveryVerdict } from '../src/crypto.js'
-import { asLogPosition } from '../src/cursor.js'
+import { asLogPosition, type LogPosition } from '../src/cursor.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { decodeRecoveryVerdict, encodeRecoveryConfirmRequest } from '../src/recovery.js'
 import {
@@ -14,7 +14,7 @@ import {
   waitForRecoveryConfirmation,
 } from '../src/recovery-confirmation.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
-import { publishCommit } from './fixtures/commits.js'
+import { encodeSignedRecoveryConfirmation, publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS, encodeMemoryCommit } from './fixtures/memory-group-mls.js'
 import { makeMLSPeer } from './fixtures/peer.js'
@@ -124,7 +124,7 @@ describe('recovery ordering', { concurrent: false }, () => {
           retain: 'mailbox',
           payload: encodeHandshakeFrame(
             HANDSHAKE_KIND.recoveryConfirmRequest,
-            encodeRecoveryConfirmRequest({
+            await encodeSignedRecoveryConfirmation(bob, {
               requestID,
               request,
               position: 'substituted',
@@ -252,7 +252,7 @@ describe('recovery ordering', { concurrent: false }, () => {
             senderDID: 'bob',
             payload: encodeHandshakeFrame(
               HANDSHAKE_KIND.recoveryConfirmRequest,
-              encodeRecoveryConfirmRequest({
+              await encodeSignedRecoveryConfirmation(bob, {
                 requestID,
                 request,
                 position: 'requested-alias',
@@ -284,11 +284,15 @@ describe('recovery ordering', { concurrent: false }, () => {
         }
         await ask()
         expect((await alice.control.load()).responses).toEqual([])
+        if (mode === 'long-position')
+          expect((await alice.control.load()).cursor?.position ?? null).toBeNull()
         expect(alice.mls.epoch()).toBe(1)
         await alice.peer.dispose()
         await alice.peer.drained()
         alice = makeMLSPeer(hub, 'alice', secret, { ...options, restartOf: alice })
         await alice.peer.replay()
+        if (mode === 'long-position')
+          expect((await alice.control.load()).cursor?.position ?? null).toBeNull()
         await ask()
         genuine = true
         await hub.publish({
@@ -345,7 +349,7 @@ describe('recovery ordering', { concurrent: false }, () => {
           senderDID: 'bob',
           payload: encodeHandshakeFrame(
             HANDSHAKE_KIND.recoveryConfirmRequest,
-            encodeRecoveryConfirmRequest({
+            await encodeSignedRecoveryConfirmation(bob, {
               requestID,
               request,
               position,
@@ -358,7 +362,7 @@ describe('recovery ordering', { concurrent: false }, () => {
       }
       await ask(commit(0), digestAppliedCommit(commit(1)))
       expect(verdicts()).toHaveLength(0)
-      expect(verify).not.toHaveBeenCalled()
+      expect(verify).toHaveBeenCalled()
       expect(validate).not.toHaveBeenCalled()
       await ask(commit(0))
       await ask(commit(0), undefined, 'alias')
@@ -415,7 +419,7 @@ describe('recovery ordering', { concurrent: false }, () => {
           senderDID: 'bob',
           payload: encodeHandshakeFrame(
             HANDSHAKE_KIND.recoveryConfirmRequest,
-            encodeRecoveryConfirmRequest({
+            await encodeSignedRecoveryConfirmation(bob, {
               requestID,
               request,
               position: 'arbitrary',
@@ -441,6 +445,302 @@ describe('recovery ordering', { concurrent: false }, () => {
       }
     },
   )
+
+  test('unsigned digest substitutions never reach validation', async () => {
+    const hub = new FakeHub()
+    const secret = new Uint8Array(32).fill(0x69)
+    const alice = makeMLSPeer(hub, 'alice', secret, { members: ['alice', 'bob'] })
+    try {
+      await alice.peer.replay()
+      const bob = createMemoryGroupMLS({ localDID: 'bob', members: ['alice', 'bob'] })
+      const requestID = 'captured-ask'
+      const { request } = await bob.createRecoveryRequest(requestID)
+      const validate = vi.spyOn(alice.mls, 'validateRecoveryCommit')
+      const signature = await bob.signRecoveryConfirmation({
+        groupID: 'memory-group',
+        requestID,
+        position: 'p',
+        commitDigest: digestAppliedCommit(
+          encodeMemoryCommit(1, 'bob', [], { external: true, branch: 'original' }),
+        ),
+      })
+      vi.useFakeTimers()
+      for (let index = 0; index < 70; index++) {
+        const commit = encodeMemoryCommit(1, 'bob', [], { external: true, branch: String(index) })
+        await hub.publish({
+          senderDID: 'relay',
+          topicID: rendezvousTopic(secret),
+          payload: encodeHandshakeFrame(
+            HANDSHAKE_KIND.recoveryConfirmRequest,
+            encodeRecoveryConfirmRequest({
+              requestID,
+              request,
+              position: 'p',
+              commitDigest: digestAppliedCommit(commit),
+              commit,
+              signature,
+            }),
+          ),
+        })
+      }
+      await vi.advanceTimersByTimeAsync(100)
+      expect(validate).not.toHaveBeenCalled()
+    } finally {
+      await alice.peer.dispose()
+      await alice.peer.drained()
+      vi.restoreAllMocks()
+    }
+  })
+
+  test('confirmation admission bounds pending work and shares duplicate evaluations', async () => {
+    const hub = new FakeHub()
+    const secret = new Uint8Array(32).fill(0x6b)
+    const alice = makeMLSPeer(hub, 'alice', secret, {
+      members: ['alice', 'bob'],
+      recovery: { getDelayMs: () => 0 },
+    })
+    const gate = Promise.withResolvers<void>()
+    try {
+      await alice.peer.replay()
+      const bob = createMemoryGroupMLS({ localDID: 'bob', members: ['alice', 'bob'] })
+      const requestID = 'burst'
+      const { request } = await bob.createRecoveryRequest(requestID)
+      const fetch = vi.spyOn(hub, 'fetchTopic')
+      const validate = vi
+        .spyOn(alice.mls, 'validateRecoveryCommit')
+        .mockImplementation(async () => {
+          await gate.promise
+          return { epoch: 1, refusal: 'policy', refusalAuthority: 'authenticated-commit' }
+        })
+      const send = async (index: number) => {
+        const commit = encodeMemoryCommit(1, 'bob', [], { external: true, branch: String(index) })
+        const value = {
+          requestID,
+          request,
+          position: 'p',
+          commitDigest: digestAppliedCommit(commit),
+          commit,
+        }
+        const signature = await bob.signRecoveryConfirmation({
+          groupID: (await bob.verifyRecoveryRequest(request))?.groupID ?? 'missing',
+          ...value,
+        })
+        return hub.publish({
+          senderDID: 'bob',
+          topicID: rendezvousTopic(secret),
+          payload: encodeHandshakeFrame(
+            HANDSHAKE_KIND.recoveryConfirmRequest,
+            encodeRecoveryConfirmRequest({ ...value, signature }),
+          ),
+        })
+      }
+      vi.useFakeTimers()
+      for (let index = 0; index < 4; index++) await send(0)
+      for (let index = 1; index < 70; index++) await send(index)
+      await vi.advanceTimersByTimeAsync(10)
+      expect(validate).toHaveBeenCalledTimes(1)
+      gate.resolve()
+      await vi.advanceTimersByTimeAsync(100)
+      expect(validate.mock.calls.length).toBeLessThanOrEqual(8)
+      const calls = fetch.mock.calls.length
+      await send(0)
+      await vi.advanceTimersByTimeAsync(10)
+      expect(fetch.mock.calls.length).toBe(calls)
+      expect(validate.mock.calls.length).toBeLessThanOrEqual(8)
+      const secondGate = Promise.withResolvers<void>()
+      const before = validate.mock.calls.length
+      validate.mockImplementation(async () => {
+        await secondGate.promise
+        return { epoch: 1, refusal: 'policy', refusalAuthority: 'authenticated-commit' }
+      })
+      try {
+        for (let index = 70; index < 140; index++) await send(index)
+        await vi.advanceTimersByTimeAsync(10)
+      } finally {
+        secondGate.resolve()
+      }
+      await vi.advanceTimersByTimeAsync(100)
+      expect(validate.mock.calls.length - before).toBeLessThanOrEqual(8)
+    } finally {
+      gate.resolve()
+      await alice.peer.dispose()
+      await alice.peer.drained()
+      vi.restoreAllMocks()
+    }
+  })
+
+  test.each(['valid', 'fault', 'unavailable'] as const)(
+    'memo retains conclusive results and retries %s validation correctly',
+    async (kind) => {
+      const hub = new FakeHub()
+      const secret = new Uint8Array(32).fill(0x6c)
+      const members = ['alice', 'bob']
+      const alice = makeMLSPeer(hub, 'alice', secret, {
+        members,
+        acceptsCommitter: () => false,
+        recovery: { getDelayMs: () => 0 },
+      })
+      try {
+        await alice.peer.replay()
+        const bob = createMemoryGroupMLS({ localDID: 'bob', members })
+        const { request } = await bob.createRecoveryRequest('retry-validation')
+        const commit = encodeMemoryCommit(1, 'bob', [], { external: true })
+        const validate = vi.spyOn(alice.mls, 'validateRecoveryCommit')
+        if (kind === 'fault') validate.mockRejectedValueOnce(new Error('transient'))
+        else if (kind === 'unavailable') validate.mockResolvedValueOnce({ epoch: 1 })
+        else validate.mockResolvedValue({ epoch: 1, valid: true })
+        const payload = encodeHandshakeFrame(
+          HANDSHAKE_KIND.recoveryConfirmRequest,
+          await encodeSignedRecoveryConfirmation(bob, {
+            requestID: 'retry-validation',
+            request,
+            position: 'p',
+            commitDigest: digestAppliedCommit(commit),
+            commit,
+          }),
+        )
+        vi.useFakeTimers()
+        await hub.publish({ senderDID: 'bob', topicID: rendezvousTopic(secret), payload })
+        await vi.advanceTimersByTimeAsync(10)
+        await hub.publish({ senderDID: 'bob', topicID: rendezvousTopic(secret), payload })
+        await vi.advanceTimersByTimeAsync(10)
+        expect(validate).toHaveBeenCalledTimes(kind === 'valid' ? 1 : 2)
+        expect(
+          hub.published.filter(
+            (row) => decodeHandshakeFrame(row.payload).kind === HANDSHAKE_KIND.recoveryVerdict,
+          ),
+        ).toHaveLength(kind === 'valid' ? 0 : 1)
+      } finally {
+        await alice.peer.dispose()
+        await alice.peer.drained()
+        vi.restoreAllMocks()
+      }
+    },
+  )
+
+  test('a validation completing after disposal creates no cache timer or verdict', async () => {
+    const hub = new FakeHub()
+    const secret = new Uint8Array(32).fill(0x6d)
+    const members = ['alice', 'bob']
+    const alice = makeMLSPeer(hub, 'alice', secret, { members })
+    const gate = Promise.withResolvers<void>()
+    try {
+      await alice.peer.replay()
+      const bob = createMemoryGroupMLS({ localDID: 'bob', members })
+      const { request } = await bob.createRecoveryRequest('late-validation')
+      const commit = encodeMemoryCommit(1, 'bob', [], { external: true })
+      const validate = vi
+        .spyOn(alice.mls, 'validateRecoveryCommit')
+        .mockImplementation(async () => {
+          await gate.promise
+          return { epoch: 1, refusal: 'policy', refusalAuthority: 'authenticated-commit' }
+        })
+      vi.useFakeTimers()
+      await hub.publish({
+        senderDID: 'bob',
+        topicID: rendezvousTopic(secret),
+        payload: encodeHandshakeFrame(
+          HANDSHAKE_KIND.recoveryConfirmRequest,
+          await encodeSignedRecoveryConfirmation(bob, {
+            requestID: 'late-validation',
+            request,
+            position: 'p',
+            commitDigest: digestAppliedCommit(commit),
+            commit,
+          }),
+        ),
+      })
+      await vi.advanceTimersByTimeAsync(1)
+      expect(validate).toHaveBeenCalledTimes(1)
+      const disposing = alice.peer.dispose()
+      gate.resolve()
+      await disposing
+      await alice.peer.drained()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(vi.getTimerCount()).toBe(0)
+      expect(
+        hub.published.filter(
+          (row) => decodeHandshakeFrame(row.payload).kind === HANDSHAKE_KIND.recoveryVerdict,
+        ),
+      ).toHaveLength(0)
+    } finally {
+      gate.resolve()
+      await alice.peer.dispose()
+      await alice.peer.drained()
+      vi.restoreAllMocks()
+    }
+  })
+
+  test('legacy negative epochs cannot prune applied evidence', async () => {
+    const hub = new FakeHub()
+    const secret = new Uint8Array(32).fill(0x6a)
+    const base = createMemoryControlStore<LogPosition>({ groupID: 'memory-group', incarnation: 1 })
+    await base.apply(
+      {
+        putApplied: [
+          {
+            epoch: 1,
+            digest: 'accepted',
+            sequenceID: 'a',
+            payloadDigest: 'accepted-payload',
+            opID: null,
+            removed: false,
+          },
+        ],
+        putResponses: [
+          {
+            kind: 'applied',
+            epoch: 1,
+            epochAfter: 2,
+            digest: 'accepted',
+            position: asLogPosition('a'),
+          },
+        ],
+      },
+      'seed',
+    )
+    const load = base.load.bind(base)
+    vi.spyOn(base, 'load').mockImplementation(async () => ({
+      ...(await load()),
+      responses: [
+        ...(await load()).responses,
+        {
+          kind: 'refused',
+          epoch: 1000000,
+          digest: 'legacy',
+          position: asLogPosition('old'),
+          refusal: 'policy',
+        },
+      ],
+    }))
+    const alice = makeMLSPeer(hub, 'alice', secret, { control: base })
+    try {
+      await alice.peer.replay()
+      await publishCommit({
+        hub,
+        senderDID: 'relay',
+        recoverySecret: secret,
+        epoch: 1,
+        commit: new Uint8Array([0]),
+      })
+      await alice.peer.ack('refresh')
+      expect((await load()).applied).toEqual([
+        {
+          epoch: 1,
+          digest: 'accepted',
+          sequenceID: 'a',
+          payloadDigest: 'accepted-payload',
+          opID: null,
+          removed: false,
+        },
+      ])
+      expect((await load()).responses).toHaveLength(1)
+    } finally {
+      await alice.peer.dispose()
+      await alice.peer.drained()
+      vi.restoreAllMocks()
+    }
+  })
 
   test.each(['refused', 'superseded'] as const)(
     'legacy %s responses stay advisory through persistence replay and outcome cache',

@@ -372,7 +372,6 @@ test('a responder floor refusal attempts renewal and invalidates the refused bin
     epochBefore: 1,
     epochAfter: 1,
     refusal: 'floor',
-    refusalAuthority: 'authenticated-commit',
   })
   vi.spyOn(s.responder, 'validateRecoveryCommit').mockResolvedValue({
     epoch: 1,
@@ -423,7 +422,6 @@ test('expired binding then floor refusal can call the host twice in one recovery
     epochBefore: 1,
     epochAfter: 1,
     refusal: 'floor',
-    refusalAuthority: 'authenticated-commit',
   })
   vi.spyOn(s.responder, 'validateRecoveryCommit').mockResolvedValue({
     epoch: 1,
@@ -475,7 +473,6 @@ test('an authoritative invalid refusal holds automatic recovery until explicit r
     epochBefore: 1,
     epochAfter: 1,
     refusal: 'invalid',
-    refusalAuthority: 'authenticated-commit',
   })
   const validation = vi
     .spyOn(s.responder, 'validateRecoveryCommit')

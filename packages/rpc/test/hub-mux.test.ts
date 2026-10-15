@@ -134,3 +134,57 @@ describe('createHubMux', () => {
     await mux.dispose()
   })
 })
+
+test.each(['sequenceID', 'head', 'oldest'] as const)(
+  'fetched %s metadata must fit the log position bound',
+  async (field) => {
+    const hub = new FakeHub()
+    const original = hub.fetchTopic.bind(hub)
+    hub.fetchTopic = async (params) => {
+      const page = await original(params)
+      return field === 'sequenceID'
+        ? {
+            ...page,
+            messages: [
+              {
+                sequenceID: 'p'.repeat(1024 * 1024),
+                topicID: params.topicID,
+                senderDID: 'relay',
+                payload: new Uint8Array(),
+              },
+            ],
+          }
+        : { ...page, [field]: 'p'.repeat(1024 * 1024) }
+    }
+    const mux = createHubMux({ hub, localDID: 'bob' })
+    mux.retainTopic('topic:bounded')
+    try {
+      await expect(mux.fetchTopic({ topicID: 'topic:bounded' })).rejects.toThrow(
+        'Invalid fetched log position',
+      )
+      hub.fetchTopic = original
+      await expect(mux.fetchTopic({ topicID: 'topic:bounded' })).resolves.toEqual({
+        messages: [],
+        head: null,
+        oldest: null,
+        gap: false,
+      })
+    } finally {
+      await mux.dispose()
+    }
+  },
+)
+
+test('an oversized log acknowledgement cannot become an applied position', async () => {
+  const hub = new FakeHub()
+  hub.publish = async () => ({ sequenceID: 'p'.repeat(1024 * 1024) })
+  const mux = createHubMux({ hub, localDID: 'bob' })
+  mux.retainTopic('topic:bounded')
+  try {
+    await expect(
+      mux.publish({ topicID: 'topic:bounded', payload: new Uint8Array(), retain: 'log' }),
+    ).rejects.toThrow('Invalid fetched log position')
+  } finally {
+    await mux.dispose()
+  }
+})

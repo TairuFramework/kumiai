@@ -130,14 +130,19 @@ export type RecoveryConfirmRequest = {
   position: string
   commitDigest: string
   commit: Uint8Array
+  signature: Uint8Array
 }
 
 export function encodeRecoveryConfirmRequest(value: RecoveryConfirmRequest): Uint8Array {
   const label = 'recovery confirmation'
-  const body = new Uint8Array(4 + value.request.length + value.commit.length)
+  const body = new Uint8Array(
+    8 + value.request.length + value.signature.length + value.commit.length,
+  )
   new DataView(body.buffer).setUint32(0, value.request.length, true)
-  body.set(value.request, 4)
-  body.set(value.commit, 4 + value.request.length)
+  new DataView(body.buffer).setUint32(4, value.signature.length, true)
+  body.set(value.request, 8)
+  body.set(value.signature, 8 + value.request.length)
+  body.set(value.commit, 8 + value.request.length + value.signature.length)
   const digestPrefixed = encodeWithRequestID({
     requestID: value.commitDigest,
     payload: body,
@@ -165,20 +170,26 @@ export function decodeRecoveryConfirmRequest(payload: Uint8Array): RecoveryConfi
     'recovery confirmation',
     MAX_CONFIRMATION_FIELD_BYTES,
   )
-  if (digest.rest.length < 4) throw new Error('recovery confirmation is truncated')
+  if (digest.rest.length < 8) throw new Error('recovery confirmation is truncated')
   const length = new DataView(
     digest.rest.buffer,
     digest.rest.byteOffset,
     digest.rest.byteLength,
   ).getUint32(0, true)
-  if (length === 0 || 4 + length >= digest.rest.length)
+  const signatureLength = new DataView(
+    digest.rest.buffer,
+    digest.rest.byteOffset,
+    digest.rest.byteLength,
+  ).getUint32(4, true)
+  if (length === 0 || signatureLength === 0 || 8 + length + signatureLength >= digest.rest.length)
     throw new Error('recovery confirmation has no request or commit')
   return {
     requestID: outer.requestID,
     position: position.requestID,
     commitDigest: digest.requestID,
-    request: digest.rest.subarray(4, 4 + length),
-    commit: digest.rest.subarray(4 + length),
+    request: digest.rest.subarray(8, 8 + length),
+    signature: digest.rest.subarray(8 + length, 8 + length + signatureLength),
+    commit: digest.rest.subarray(8 + length + signatureLength),
   }
 }
 

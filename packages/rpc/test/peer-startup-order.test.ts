@@ -2,9 +2,14 @@ import { afterEach, expect, test, vi } from 'vitest'
 
 import { asLogPosition } from '../src/cursor.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
-import { decodeRecoveryVerdict, encodeRecoveryConfirmRequest } from '../src/recovery.js'
+import { decodeRecoveryVerdict } from '../src/recovery.js'
 import { APP_TOPIC_LABEL, commitTopic, rendezvousTopic } from '../src/topic.js'
-import { publishCommit, publishedCommitBytes, publishedCommitDigest } from './fixtures/commits.js'
+import {
+  encodeSignedRecoveryConfirmation,
+  publishCommit,
+  publishedCommitBytes,
+  publishedCommitDigest,
+} from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import {
   buildLedgerCommit,
@@ -310,7 +315,7 @@ test.each(['published', 'confirmed'] as const)(
         topicID: rendezvousTopic(secret),
         payload: encodeHandshakeFrame(
           HANDSHAKE_KIND.recoveryConfirmRequest,
-          encodeRecoveryConfirmRequest({
+          await encodeSignedRecoveryConfirmation(requester.mls, {
             requestID,
             request,
             position: response.position,

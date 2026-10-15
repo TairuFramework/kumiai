@@ -133,6 +133,7 @@ export {
   type PendingRecovery,
   type ProcessCommitResult,
   type RecoveryCommitValidation,
+  type RecoveryConfirmationBinding,
   type RecoveryConfirmationKey,
   type RecoveryRefusalReason,
   type RecoveryVerdict,

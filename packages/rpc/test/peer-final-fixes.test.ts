@@ -6,11 +6,11 @@ import { forkEventID } from '../src/control/safety.js'
 import { asLogPosition } from '../src/cursor.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
-import { encodeRecoveryConfirmRequest } from '../src/recovery.js'
 import { APP_TOPIC_LABEL, commitTopic, rendezvousTopic } from '../src/topic.js'
-import { publishCommit } from './fixtures/commits.js'
+import { encodeSignedRecoveryConfirmation, publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
+import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import {
   buildLedgerCommit,
   type MakeMLSPeerOptions,
@@ -450,10 +450,11 @@ test('a walker without an applied epoch record stays silent for an external hist
   const bob = member(hub, { epoch: 2, members: ['alice', 'bob'] })
   await bob.peer.resync()
   const verdict = vi.spyOn(bob.mls, 'sealRecoveryVerdict')
-  const request = new TextEncoder().encode('signed-request')
+  const requester = createMemoryGroupMLS({ localDID: 'alice', members: ['alice', 'bob'] })
+  const { request } = await requester.createRecoveryRequest('history')
   const verify = vi
     .spyOn(bob.mls, 'verifyRecoveryRequest')
-    .mockResolvedValue({ groupID: 'group', requestID: 'history', requesterDID: 'alice' })
+    .mockImplementation(requester.verifyRecoveryRequest)
   const message = hub.published[0]
   if (message == null) throw new Error('Missing published commit')
   const framed = decodeHandshakeFrame(message.payload)
@@ -464,7 +465,7 @@ test('a walker without an applied epoch record stays silent for an external hist
     topicID: rendezvousTopic(secret),
     payload: encodeHandshakeFrame(
       HANDSHAKE_KIND.recoveryConfirmRequest,
-      encodeRecoveryConfirmRequest({
+      await encodeSignedRecoveryConfirmation(requester, {
         requestID: 'history',
         request,
         position: published.sequenceID,

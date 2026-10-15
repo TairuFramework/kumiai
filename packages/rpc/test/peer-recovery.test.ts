@@ -2,13 +2,14 @@ import { setImmediate } from 'node:timers/promises'
 import { describe, expect, test, vi } from 'vitest'
 
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
-import {
-  decodeRecoveryConfirmRequest,
-  decodeRecoveryVerdict,
-  encodeRecoveryConfirmRequest,
-} from '../src/recovery.js'
+import { decodeRecoveryConfirmRequest, decodeRecoveryVerdict } from '../src/recovery.js'
 import { APP_TOPIC_LABEL, commitTopic, protocolTopic, rendezvousTopic } from '../src/topic.js'
-import { publishCommit, publishedCommitBytes, publishedCommitDigest } from './fixtures/commits.js'
+import {
+  encodeSignedRecoveryConfirmation,
+  publishCommit,
+  publishedCommitBytes,
+  publishedCommitDigest,
+} from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
@@ -70,7 +71,7 @@ describe('recovery rendezvous', { concurrent: false }, () => {
         topicID: rendezvousTopic(secret),
         payload: encodeHandshakeFrame(
           HANDSHAKE_KIND.recoveryConfirmRequest,
-          encodeRecoveryConfirmRequest({
+          await encodeSignedRecoveryConfirmation(bob, {
             requestID,
             request,
             position: external.sequenceID,
@@ -167,7 +168,7 @@ describe('recovery rendezvous', { concurrent: false }, () => {
         topicID: rendezvousTopic(secret),
         payload: encodeHandshakeFrame(
           HANDSHAKE_KIND.recoveryConfirmRequest,
-          encodeRecoveryConfirmRequest({ ...original, requestID, request }),
+          await encodeSignedRecoveryConfirmation(bob.mls, { ...original, requestID, request }),
         ),
       })
       await drainUntil(() => verify.mock.calls.length > 0, 'historical request verification')

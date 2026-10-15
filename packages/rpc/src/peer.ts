@@ -66,9 +66,15 @@ import {
   type PendingAppFrame,
   type PendingRecovery,
   type ProcessCommitResult,
+  type RecoveryCommitValidation,
   type RecoveryVerdict,
 } from './crypto.js'
-import { asLogPosition, assertForwardPage, type LogPosition } from './cursor.js'
+import {
+  asLogPosition,
+  assertForwardPage,
+  InvalidLogPositionError,
+  type LogPosition,
+} from './cursor.js'
 import {
   ControlSafetyImmutableError,
   GroupSafetyHeldError,
@@ -969,7 +975,7 @@ export function createGroupPeerWithControlWalk<
             Math.max(
               response?.epoch ?? 0,
               ...snapshot.applied.map((row) => row.epoch),
-              ...snapshot.responses.map((row) => row.epoch),
+              ...snapshot.responses.filter((row) => row.kind === 'applied').map((row) => row.epoch),
             ),
           ),
           cursor,
@@ -1194,10 +1200,11 @@ export function createGroupPeerWithControlWalk<
   const confirmationWaiters = new Map<string, ConfirmationWaiter>()
   const commitOutcomes = new Map<string, ExternalResponse>()
   const verdictCache = createRecoveryCache<Promise<Uint8Array>>()
-  const refusalMemo = createRecoveryCache<ReturnType<GroupMLS['validateRecoveryCommit']>>(
-    () => {},
-    64,
-  )
+  const confirmationMemo = createRecoveryCache<RecoveryCommitValidation>(() => {}, 64)
+  const confirmationEvaluations = new Map<string, Promise<RecoveryCommitValidation>>()
+  // Admission includes signature checks and work waiting for the commit lane.
+  let pendingConfirmations = 0
+  const maxPendingConfirmations = 8
   const verdictTimers = new Set<ReturnType<typeof setTimeout>>()
   /**
    * Ledger-gather waiters, keyed by requestID. Called for EVERY reply, not just the first: a
@@ -1209,7 +1216,6 @@ export function createGroupPeerWithControlWalk<
   const pendingLedgerReplies = new Set<ReturnType<typeof setTimeout>>()
 
   const handleRecoveryConfirmRequest = (request: RecoveryConfirmRequest): void => {
-    if (digestAppliedCommit(request.commit) !== request.commitDigest) return
     if (
       mls == null ||
       rendezvousTopicID == null ||
@@ -1219,6 +1225,8 @@ export function createGroupPeerWithControlWalk<
       locallyRemoved
     )
       return
+    if (pendingConfirmations >= maxPendingConfirmations) return
+    pendingConfirmations++
     const port = mls
     const topicID = rendezvousTopicID
     void (async () => {
@@ -1231,6 +1239,20 @@ export function createGroupPeerWithControlWalk<
         normalizeDID(verified.requesterDID) === localDID
       )
         return
+      if (
+        !(await port.verifyRecoveryConfirmation(
+          {
+            groupID: verified.groupID,
+            requestID: request.requestID,
+            position: request.position,
+            commitDigest: request.commitDigest,
+          },
+          request.signature,
+          verified.requesterDID,
+        ))
+      )
+        return
+      if (disposed || digestAppliedCommit(request.commit) !== request.commitDigest) return
       const blocked = () =>
         safetyHold() !== null ||
         stranded ||
@@ -1239,53 +1261,66 @@ export function createGroupPeerWithControlWalk<
         (pendingRecovery != null && request.position >= pendingRecovery.position)
       if (blocked()) return
       const responseKey = request.position
+      await ready
+      if (disposed || blocked()) return
       let record = commitOutcomes.get(responseKey)
-      if (record == null) {
-        await ready
-        if (disposed || safetyHold() !== null) return
-        await runSerial(async () => {
-          if (disposed || safetyHold() !== null) return
-          await settleOperations()
-          await reconcileCommits()
-        })
+      let validation: RecoveryCommitValidation | undefined
+      if (record?.digest !== request.commitDigest) {
+        const epoch = await port.readEpoch()
         if (disposed || blocked()) return
+        const memoKey = JSON.stringify([epoch, request.commitDigest])
+        validation = confirmationMemo.get(memoKey)?.value
+        if (validation == null) {
+          let evaluation = confirmationEvaluations.get(memoKey)
+          if (evaluation == null) {
+            if (confirmationEvaluations.size >= maxPendingConfirmations) return
+            evaluation = runSerial(async () => {
+              if (disposed || blocked()) return { epoch }
+              await settleOperations()
+              await reconcileCommits()
+              if (disposed || blocked() || (await port.readEpoch()) !== epoch) return { epoch }
+              return await port.validateRecoveryCommit(request.commit)
+            }).catch(() => ({ epoch }))
+            confirmationEvaluations.set(memoKey, evaluation)
+            void evaluation
+              .then((result) => {
+                if (
+                  !disposed &&
+                  result.epoch === epoch &&
+                  (result.valid === true ||
+                    (result.refusalAuthority === 'authenticated-commit' && result.refusal != null))
+                ) {
+                  confirmationMemo.set(memoKey, result, Date.now() + 30000)
+                }
+              })
+              .finally(() => {
+                if (confirmationEvaluations.get(memoKey) === evaluation)
+                  confirmationEvaluations.delete(memoKey)
+              })
+          }
+          validation = await evaluation
+        }
         record = commitOutcomes.get(responseKey)
       }
+      if (disposed || blocked()) return
       let outcome: RecoveryCommitOutcome | undefined
       let refusedEpoch: number | undefined
       if (record?.kind === 'applied' && record.digest === request.commitDigest) {
         outcome = await responseOutcome(port, record, safetyHold)
-      } else {
-        await runSerial(async () => {
-          if (disposed || blocked()) return
-          const epoch = await port.readEpoch()
-          const memoKey = JSON.stringify([epoch, request.commitDigest])
-          let memo = refusalMemo.get(memoKey)
-          if (memo == null) {
-            const value = port
-              .validateRecoveryCommit(request.commit)
-              .catch(() => ({ epoch, refusal: undefined, refusalAuthority: undefined }))
-            const expiresAt = Date.now() + 30000
-            refusalMemo.set(memoKey, value, expiresAt)
-            memo = { value, expiresAt }
-          }
-          const validation = await memo.value
-          if (validation.epoch !== epoch || (await port.readEpoch()) !== epoch || blocked()) return
-          if (
-            validation.refusalAuthority === 'authenticated-commit' &&
-            validation.refusal != null
-          ) {
-            refusedEpoch = epoch
-            outcome = {
-              kind: 'refused',
-              commitDigest: request.commitDigest,
-              reason: validation.refusal,
-              refusalAuthority: 'authenticated-commit',
-            }
-          }
-        })
+      } else if (
+        validation?.refusalAuthority === 'authenticated-commit' &&
+        validation.refusal != null &&
+        (await port.readEpoch()) === validation.epoch
+      ) {
+        refusedEpoch = validation.epoch
+        outcome = {
+          kind: 'refused',
+          commitDigest: request.commitDigest,
+          reason: validation.refusal,
+          refusalAuthority: 'authenticated-commit',
+        }
       }
-      if (outcome == null || blocked()) return
+      if (disposed || outcome == null || blocked()) return
       const cacheKey = JSON.stringify([
         verified.requesterDID,
         request.requestID,
@@ -1333,10 +1368,10 @@ export function createGroupPeerWithControlWalk<
           (await port.readEpoch()) === current.epochAfter
         )
       }
-      if (!(await confirmable()) || blocked()) return
+      if (disposed || !(await confirmable()) || disposed || blocked()) return
+      if (verdictTimers.size >= maxPendingConfirmations) return
       const timer = setTimeout(
         () => {
-          verdictTimers.delete(timer)
           void (async () => {
             if (
               disposed ||
@@ -1353,12 +1388,20 @@ export function createGroupPeerWithControlWalk<
                 encodeRecoveryVerdict(request.requestID, sealed),
               ),
             })
-          })().catch(safetyRefusal)
+          })()
+            .catch(safetyRefusal)
+            .finally(() => {
+              verdictTimers.delete(timer)
+            })
         },
         Math.max(0, Math.min(getReplyDelayMs(), recoveryTimeoutMs, expiresAt - Date.now())),
       )
       verdictTimers.add(timer)
-    })().catch(safetyRefusal)
+    })()
+      .catch(safetyRefusal)
+      .finally(() => {
+        pendingConfirmations--
+      })
   }
 
   // Responder: after a jitter delay, answer a recovery request with GroupInfo sealed to the
@@ -1665,15 +1708,21 @@ export function createGroupPeerWithControlWalk<
         )
           return advancedEpoch
       }
-      const result = checkedFetchResult(
-        await mux.fetchTopic({
-          topicID,
-          // From the cursor. With no cursor (fresh member, trimmed backlog, just rejoined) read
-          // from the OLDEST retained frame — seeding from the topic's `head` would be a guess.
-          ...(reconciledHead != null ? { after: reconciledHead } : {}),
-          limit: COMMIT_FETCH_LIMIT,
-        }),
-      )
+      let result: ReturnType<typeof checkedFetchResult>
+      try {
+        result = checkedFetchResult(
+          await mux.fetchTopic({
+            topicID,
+            // From the cursor. With no cursor (fresh member, trimmed backlog, just rejoined) read
+            // from the OLDEST retained frame — seeding from the topic's `head` would be a guess.
+            ...(reconciledHead != null ? { after: reconciledHead } : {}),
+            limit: COMMIT_FETCH_LIMIT,
+          }),
+        )
+      } catch (error) {
+        if (error instanceof InvalidLogPositionError) return advancedEpoch
+        throw error
+      }
       if (disposed) return false
       if (safetyHold() !== null) return false
       const gap =
@@ -3595,7 +3644,10 @@ export function createGroupPeerWithControlWalk<
           header,
           digest,
           responded: responses.some(
-            (response) => response.position === position && response.digest === digest,
+            (response) =>
+              response.kind === 'applied' &&
+              response.position === position &&
+              response.digest === digest,
           ),
         })
       }
@@ -3722,6 +3774,12 @@ export function createGroupPeerWithControlWalk<
                 encodeRecoveryConfirmRequest({
                   requestID: record.requestID,
                   request: record.request,
+                  signature: await port.signRecoveryConfirmation({
+                    groupID: verified.groupID,
+                    requestID: record.requestID,
+                    position,
+                    commitDigest: record.digest,
+                  }),
                   position,
                   commitDigest: record.digest,
                   commit: decodeCommitFrame(decodeHandshakeFrame(record.payload).payload).commit,
@@ -4469,7 +4527,7 @@ export function createGroupPeerWithControlWalk<
       for (const waiter of confirmationWaiters.values()) waiter.dispose()
       commitOutcomes.clear()
       verdictCache.clear()
-      refusalMemo.clear()
+      confirmationMemo.clear()
       for (const timer of verdictTimers) clearTimeout(timer)
       verdictTimers.clear()
       disposePromise = (async () => {

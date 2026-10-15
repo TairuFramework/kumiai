@@ -14,6 +14,7 @@ import {
   MissingLedgerEntriesError,
   ownCommitDigest,
   readCommitEntryIDs,
+  readMessageEpoch,
   restoreGroup,
   verifyLedgerEntry,
 } from '@kumiai/mls'
@@ -95,6 +96,14 @@ export async function validateRecoveryCommit(
 ): Promise<RecoveryCommitValidation> {
   const epoch = Number(group.epoch)
   try {
+    if (readMessageEpoch(commit) !== group.epoch) return { epoch }
+    const header = await group.readCommitHeader(commit)
+    if (
+      header?.external !== true ||
+      header.epoch !== group.epoch ||
+      header.committerDID === undefined
+    )
+      return { epoch }
     const state = decodeClientState(encodeClientState(group.state))
     if (state === undefined) return { epoch }
     const working = new GroupHandle({
@@ -103,13 +112,6 @@ export async function validateRecoveryCommit(
       context: { ...group.context },
       ledger: decodeStoredValue(encodeStoredValue(group.ledger)) as typeof group.ledger,
     })
-    const header = await working.readCommitHeader(commit)
-    if (
-      header?.external !== true ||
-      header.epoch !== group.epoch ||
-      header.committerDID === undefined
-    )
-      return { epoch }
     if (normalizeDID(header.committerDID) === normalizeDID(ownDID))
       return { epoch, refusal: 'policy', refusalAuthority: 'authenticated-commit' }
     let policyFault = false
@@ -130,6 +132,7 @@ export async function validateRecoveryCommit(
               },
             },
       )
+      return { epoch, valid: true }
     } catch (error) {
       if (policyFault) return { epoch }
       const result = diagnostic(error)

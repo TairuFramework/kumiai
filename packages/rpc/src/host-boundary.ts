@@ -55,6 +55,8 @@ export const mlsHostMembers = {
   ownCommitDigest: 'data',
   validateRecoveryCommit: 'host',
   verifyRecoveryRequest: 'host',
+  signRecoveryConfirmation: 'host',
+  verifyRecoveryConfirmation: 'host',
   confirmationKey: 'host',
   sealRecoveryVerdict: 'host',
   openRecoveryVerdict: 'host',

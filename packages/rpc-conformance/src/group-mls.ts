@@ -133,7 +133,6 @@ export type ConformanceProcessCommitResult = {
   epochBefore: number
   epochAfter: number
   refusal?: ConformanceRecoveryRefusalReason
-  refusalAuthority?: 'authenticated-commit'
   validation?: 'unavailable'
 }
 export type ConformanceAppliedRecovery =
@@ -181,6 +180,17 @@ export type ConformanceRosterEntry = {
 export type ConformanceGroupMLS<Position extends string = string> = {
   ownCommitDigest(commit: Uint8Array): string | null
   capturedRecovery?: ConformanceCapturedRecoveryPort<Position>
+  signRecoveryConfirmation: (binding: {
+    groupID: string
+    requestID: string
+    position: string
+    commitDigest: string
+  }) => Promise<Uint8Array>
+  verifyRecoveryConfirmation: (
+    binding: { groupID: string; requestID: string; position: string; commitDigest: string },
+    signature: Uint8Array,
+    requesterDID: string,
+  ) => Promise<boolean>
   verifyRecoveryRequest: (request: Uint8Array) => Promise<ConformanceVerifiedRecoveryRequest | null>
   confirmationKey: (position: string, commitDigest: string) => Promise<ConformanceConfirmationKey>
   sealRecoveryVerdict: (
@@ -195,6 +205,7 @@ export type ConformanceGroupMLS<Position extends string = string> = {
   sendAdmission: () => ConformanceSendAdmission
   validateRecoveryCommit: (commit: Uint8Array) => Promise<{
     epoch: number
+    valid?: true
     refusal?: ConformanceRecoveryRefusalReason
     refusalAuthority?: 'authenticated-commit'
   }>
@@ -368,7 +379,10 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         for (const bytes of NOT_A_COMMIT)
           expect(await receiver.mls.validateRecoveryCommit(bytes)).toEqual({ epoch: source.epoch })
         expect(await receiver.mls.validateRecoveryCommit(forged)).toEqual({ epoch: source.epoch })
-        expect(await receiver.mls.validateRecoveryCommit(genuine)).toEqual({ epoch: source.epoch })
+        expect(await receiver.mls.validateRecoveryCommit(genuine)).toEqual({
+          epoch: source.epoch,
+          valid: true,
+        })
         expect(await group.readEvidence(0)).toEqual(before)
         expect(await receiver.mls.processCommit(genuine, {})).toMatchObject({
           applied: true,
@@ -1071,6 +1085,37 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
             requesterDID: bob.did,
           })
           expect(await alice.mls.verifyRecoveryRequest(new Uint8Array([0]))).toBeNull()
+        })
+      })
+      test('confirmation asks bind the tuple and the original requester identity', async () => {
+        await withGroup(2, 'confirmation-ask', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+          const tuple = {
+            groupID: group.groupID,
+            requestID: 'ask',
+            position: 'p',
+            commitDigest: 'digest',
+          }
+          const signature = await bob.mls.signRecoveryConfirmation(tuple)
+          expect(await alice.mls.verifyRecoveryConfirmation(tuple, signature, bob.did)).toBe(true)
+          for (const field of ['groupID', 'requestID', 'position', 'commitDigest'] as const) {
+            expect(
+              await alice.mls.verifyRecoveryConfirmation(
+                { ...tuple, [field]: 'changed' },
+                signature,
+                bob.did,
+              ),
+            ).toBe(false)
+          }
+          expect(await alice.mls.verifyRecoveryConfirmation(tuple, signature, alice.did)).toBe(
+            false,
+          )
+          expect(
+            await alice.mls.verifyRecoveryConfirmation(tuple, new Uint8Array([0]), bob.did),
+          ).toBe(false)
+          const other = await group.otherGroupMember(1)
+          expect(await other.mls.verifyRecoveryConfirmation(tuple, signature, bob.did)).toBe(false)
         })
       })
       test('recovery replies cannot be opened by the same identity in another group', async () => {

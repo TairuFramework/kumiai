@@ -13,7 +13,7 @@ import type {
 } from '@kumiai/hub-tunnel'
 import { getReporter } from '@sozai/log'
 
-import { asDeliveryPosition, type DeliveryPosition } from './cursor.js'
+import { asDeliveryPosition, assertLogPosition, type DeliveryPosition } from './cursor.js'
 import { PeerDisposedError } from './errors.js'
 import { assertFrameFits } from './frame-size.js'
 
@@ -797,7 +797,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
     if (publishSuspended) throw new PeerDisposedError('mux: publish after dispose')
     assertSubscribable(params.topicID)
     assertFrameFits(params.payload)
-    return await Promise.resolve(
+    const result = await Promise.resolve(
       hub.publish({
         senderDID: localDID,
         topicID: params.topicID,
@@ -810,6 +810,8 @@ export function createHubMux(params: HubMuxParams): HubMux {
         ...(params.publishID != null ? { publishID: params.publishID } : {}),
       }),
     )
+    if (params.retain === 'log') assertLogPosition(result.sequenceID)
+    return result
   }
 
   const fetchTopic = async (params: MuxFetchTopicParams): Promise<HubFetchTopicResult> => {
@@ -819,7 +821,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
     assertSubscribable(params.topicID)
     // Called on `hub`, not through a detached reference: a LogHub is often a class, and
     // an unbound method loses its receiver.
-    return await Promise.resolve(
+    const result = await Promise.resolve(
       hub.fetchTopic({
         subscriberDID: localDID,
         topicID: params.topicID,
@@ -827,6 +829,10 @@ export function createHubMux(params: HubMuxParams): HubMux {
         ...(params.limit != null ? { limit: params.limit } : {}),
       }),
     )
+    for (const message of result.messages) assertLogPosition(message.sequenceID)
+    if (result.head !== null) assertLogPosition(result.head)
+    if (result.oldest !== null) assertLogPosition(result.oldest)
+    return result
   }
 
   if (!params.deferredStart) start()

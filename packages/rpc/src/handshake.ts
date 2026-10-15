@@ -102,6 +102,7 @@ export function decodeHandshakeFrame(frame: Uint8Array): {
   kind: HandshakeKind
   payload: Uint8Array
 } {
+  assertFrameFits(frame)
   if (frame.length < HEADER_LENGTH) {
     throw new Error('handshake frame is too short')
   }

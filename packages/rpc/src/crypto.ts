@@ -147,6 +147,13 @@ export type AppFrameRef = {
 export type ExportSecretResult = { secret: Uint8Array; epoch: number }
 export type SealEntriesResult = { sealed: Uint8Array; epoch: number }
 export type RecoveryRefusalReason = 'binding' | 'lapse' | 'floor' | 'policy' | 'invalid'
+export type RecoveryConfirmationBinding = {
+  groupID: string
+  requestID: string
+  position: string
+  commitDigest: string
+}
+
 export type RecoveryVerdict = {
   groupID: string
   requestID: string
@@ -164,6 +171,8 @@ export type RecoveryVerdict = {
 export type OpenedRecoveryVerdict = { signer: string; verdict: RecoveryVerdict }
 export type RecoveryCommitValidation = {
   epoch: number
+  /** A completed dry-run, safe to memoise within this epoch. */
+  valid?: true
   refusal?: RecoveryRefusalReason
   refusalAuthority?: 'authenticated-commit'
 }
@@ -174,8 +183,6 @@ export type ProcessCommitResult = {
   epochBefore: number
   epochAfter: number
   refusal?: RecoveryRefusalReason
-  /** Only authenticated commit refusal, never delivered-copy eligibility. */
-  refusalAuthority?: 'authenticated-commit'
   /** Unavailable requires no adoption, no advance and equal before/after epochs. */
   validation?: 'unavailable'
 }
@@ -443,6 +450,14 @@ export type GroupMLS = {
   validateRecoveryCommit(commit: Uint8Array): Promise<RecoveryCommitValidation>
   capturedRecovery?: CapturedRecoveryPort
   /** Verify the signed ask without requiring its issuer to remain in the current tree. */
+  /** Sign the saved publication tuple with the requester's identity key. */
+  signRecoveryConfirmation(binding: RecoveryConfirmationBinding): Promise<Uint8Array>
+  /** Verify the tuple and require the original signed request's issuer. */
+  verifyRecoveryConfirmation(
+    binding: RecoveryConfirmationBinding,
+    signature: Uint8Array,
+    requesterDID: string,
+  ): Promise<boolean>
   verifyRecoveryRequest(request: Uint8Array): Promise<VerifiedRecoveryRequest | null>
   confirmationKey(position: string, commitDigest: string): Promise<RecoveryConfirmationKey>
   sealRecoveryVerdict(request: Uint8Array, verdict: RecoveryVerdict): Promise<Uint8Array>

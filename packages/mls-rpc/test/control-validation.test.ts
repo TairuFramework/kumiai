@@ -213,6 +213,24 @@ async function fixture(
   return { group, member, built, source, state, port, frame }
 }
 
+test('wrong-epoch recovery bytes are rejected before copying state', async () => {
+  const f = await fixture()
+  const live = createGroupMLS({
+    access: testHandleAccess({ handle: () => f.member.handle, adopt: () => {} }),
+    identity: f.member.identity,
+    entrySlot: f.member.slot,
+  })
+  const commit = (await commitKeyRotation(f.member.handle)).commitMessage
+  await f.member.handle.processMessage(
+    (await commitKeyRotation(f.group.committer.handle)).commitMessage,
+  )
+  const state = vi.spyOn(f.member.handle, 'state', 'get')
+  expect(await live.validateRecoveryCommit(commit)).toEqual({
+    epoch: Number(f.member.handle.epoch),
+  })
+  expect(state).not.toHaveBeenCalled()
+})
+
 test.each(['accept', 'reject', 'throw'] as const)(
   'request dry-run policy %s leaves state and receive keys unchanged',
   async (decision) => {
@@ -257,7 +275,10 @@ test.each(['accept', 'reject', 'throw'] as const)(
             refusal: 'policy',
             refusalAuthority: 'authenticated-commit',
           }
-        : { epoch: Number(f.member.handle.epoch) },
+        : {
+            epoch: Number(f.member.handle.epoch),
+            ...(decision === 'accept' ? { valid: true } : {}),
+          },
     )
     expect(encodeClientState(f.member.handle.state)).toEqual(before)
     const applied = await live.processCommit(commit, {})
@@ -266,7 +287,7 @@ test.each(['accept', 'reject', 'throw'] as const)(
   },
 )
 
-test('authenticated external policy refusal carries authority but copy eligibility does not', async () => {
+test('request dry-run carries refusal authority and ordinary intake remains advisory', async () => {
   const f = await fixture({ commitPolicy: () => 'reject' })
   const state = decodeClientState(f.state)
   if (state === undefined) throw new Error('Missing state')
@@ -294,11 +315,13 @@ test('authenticated external policy refusal carries authority but copy eligibili
     identity: f.member.identity,
     entrySlot: f.member.slot,
   })
-  expect(await live.processCommit(commit, {})).toMatchObject({
-    applied: false,
+  expect(await live.validateRecoveryCommit(commit)).toMatchObject({
     refusal: 'policy',
     refusalAuthority: 'authenticated-commit',
   })
+  const intake = await live.processCommit(commit, {})
+  expect(intake).toMatchObject({ applied: false, refusal: 'policy' })
+  expect(intake).not.toHaveProperty('refusalAuthority')
   const decoded = decode(mlsMessageDecoder, commit)
   if (decoded?.wireformat !== wireformats.mls_public_message) throw new Error('Expected public')
   decoded.publicMessage.auth.signature[0] = (decoded.publicMessage.auth.signature[0] ?? 0) ^ 1
@@ -1453,7 +1476,6 @@ async function expectPolicyPoison(
     epochBefore: f.built.epoch,
     epochAfter: f.built.epoch,
     refusal: external ? 'policy' : 'binding',
-    ...(external ? { refusalAuthority: 'authenticated-commit' } : {}),
   })
   expect(encodeClientState(f.member.handle.state)).toEqual(f.state)
   expect(persisted).not.toHaveBeenCalled()

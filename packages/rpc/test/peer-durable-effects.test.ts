@@ -5,9 +5,13 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { asLogPosition } from '../src/cursor.js'
 import { GroupControlUnsettledError } from '../src/errors.js'
 import { encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
-import { encodeRecoveryConfirmRequest } from '../src/recovery.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
-import { publishCommit, publishedCommitBytes, publishedCommitDigest } from './fixtures/commits.js'
+import {
+  encodeSignedRecoveryConfirmation,
+  publishCommit,
+  publishedCommitBytes,
+  publishedCommitDigest,
+} from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { encodeMemoryCommit, memoryEntryID } from './fixtures/memory-group-mls.js'
 import {
@@ -148,7 +152,7 @@ test('an adopted external response survives restart and answers confirmation', a
     topicID: rendezvousTopic(secret),
     payload: encodeHandshakeFrame(
       HANDSHAKE_KIND.recoveryConfirmRequest,
-      encodeRecoveryConfirmRequest({
+      await encodeSignedRecoveryConfirmation(requester.mls, {
         requestID: 'durable-confirmation',
         request,
         position: result.sequenceID,
