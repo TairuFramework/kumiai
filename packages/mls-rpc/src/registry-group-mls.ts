@@ -152,6 +152,11 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
         return createRegistryHandleAccess({ access: value })
       })().catch((error: unknown) => {
         opening = undefined
+        cache({
+          epoch: admission.epoch,
+          admissible: false,
+          reason: admission.admissible ? 'stranded' : admission.reason,
+        })
         throw error
       })
     }

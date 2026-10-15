@@ -118,7 +118,7 @@ export type RegistryFixtureBase = {
   ): ReturnType<typeof createRegistryRecovery>
   installRows(rows: RegistryRowSetup): Promise<void>
   inspectRows(): Promise<MemoryStoreRows>
-  corruptState(key: GroupKey): Promise<void>
+  corruptState(key: GroupKey, damage?: 'unreadable' | 'client-state' | 'identity'): Promise<void>
   removeStateBytes(key: GroupKey): Promise<void>
   corruptTrust(groupID: string, damage?: 'unreadable' | 'empty-spent'): Promise<void>
   removeTrust(groupID: string): Promise<void>
@@ -511,8 +511,22 @@ async function assemble(
       })
     },
     inspectRows: storage.inspectRows,
-    async corruptState(target) {
-      await corrupt(storage, 'state', target)
+    async corruptState(target, damage = 'unreadable') {
+      if (damage === 'unreadable') {
+        await corrupt(storage, 'state', target)
+        return
+      }
+      const record = await fixture.device.groups.loadState(target)
+      if (record === null || record.deleted || record.state === null)
+        throw new Error('Missing fixture state')
+      const client = decodeClientState(record.state)
+      if (client === undefined) throw new Error('Invalid fixture state')
+      client.groupContext.epoch += 1n
+      const state = damage === 'client-state' ? new Uint8Array([0]) : encodeClientState(client)
+      const location = { ...target, namespace: 'state', recordID: 'current' }
+      const codec = createDeterministicAtRestCodec({ key: new Uint8Array(32).fill(98) })
+      const bytes = await sealRecord(codec, location, { ...record, state })
+      await storage.mutateStoredRecord('state', physicalRecordKey(location), () => bytes)
     },
     async removeStateBytes(target) {
       await storage.deleteCommittedRow(

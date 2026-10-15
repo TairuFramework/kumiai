@@ -19,6 +19,7 @@ import {
   parseMLSCredentialIdentity,
   RevokeProofError,
   recoverySignerEligible,
+  SealedGroupInfoError,
 } from '@kumiai/mls'
 import type { OpenedRecoveryVerdict, PendingRecovery } from '@kumiai/rpc'
 import { type CiphersuiteName, getCiphersuiteImpl } from 'ts-mls'
@@ -73,8 +74,9 @@ export async function openRecoveryVerdictFromTrust(
 ): Promise<OpenedRecoveryVerdict | null> {
   try {
     return await openTrustedVerdict({ ...params, trust: recoveryTrustInputs(params.trust) })
-  } catch {
-    return null
+  } catch (error) {
+    if (error instanceof SealedGroupInfoError || error instanceof LeafBindingError) return null
+    throw error
   }
 }
 

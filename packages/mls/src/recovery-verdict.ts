@@ -19,6 +19,7 @@ import {
   type OpenSealedReplyParams,
   openSealedReply,
   recoveryLeafForDID,
+  SealedGroupInfoError,
   type SealedReplyKind,
   sealToRequest,
   verifyRecoveryRequest,
@@ -136,8 +137,14 @@ export async function openRecoveryVerdict(
   params: Omit<OpenSealedReplyParams, 'kind'> & { retainedTrust?: boolean },
 ): Promise<OpenedRecoveryVerdict> {
   const { group, sealed, requestID, ephemeralPrivateKey } = params
+  const kind: SealedReplyKind = params.retainedTrust
+    ? {
+        ...VERDICT_REPLY,
+        fail: (reason, message, options) => new SealedGroupInfoError(reason, message, options),
+      }
+    : VERDICT_REPLY
   const plaintext = await openSealedReply({
-    kind: VERDICT_REPLY,
+    kind,
     group,
     sealed,
     requestID,
@@ -154,7 +161,9 @@ export async function openRecoveryVerdict(
     token.payload.groupID !== group.groupID ||
     token.payload.requestID !== requestID
   )
-    throw new Error('Unauthenticated recovery verdict')
+    throw params.retainedTrust
+      ? new SealedGroupInfoError('unauthenticated', 'Unauthenticated recovery verdict')
+      : new Error('Unauthenticated recovery verdict')
   const { groupID, position, commitDigest } = token.payload
   const binding = { groupID, requestID, position, commitDigest }
   const verdict: RecoveryVerdict =

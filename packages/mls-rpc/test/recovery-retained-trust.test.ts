@@ -56,7 +56,61 @@ test('retained trust requests are UTF-8 and captured replies authenticate withou
       sealed: await sealRecoveryVerdict({ group, identity, request, verdict }),
     }),
   ).toEqual({ signer: identity.id, verdict })
+  expect(
+    await recovery.openRecoveryVerdictFromTrust({ ...params, sealed: new Uint8Array([0]) }),
+  ).toBeNull()
 })
+
+for (const fault of ['provider', 'trusted-reader'] as const) {
+  test(`retained verdict authentication preserves ${fault} errors`, async () => {
+    const { identity, group, trust } = await fixture()
+    const held = await recovery.createRecoveryRequestFromTrust({
+      trust,
+      identity,
+      requestID: 'errors',
+    })
+    const sealed = await sealRecoveryVerdict({
+      group,
+      identity,
+      request: new TextDecoder().decode(held.request),
+      verdict: {
+        groupID: group.groupID,
+        requestID: 'errors',
+        position: 'position',
+        commitDigest: 'digest',
+        verdict: 'superseded',
+      },
+    })
+    const failure = new Error(`Retained ${fault} unavailable`)
+    const params = { trust, sealed, requestID: 'errors', requestKey: held.requestKey, options: {} }
+    if (fault === 'provider') {
+      await expect(
+        recovery.openRecoveryVerdictFromTrust({
+          ...params,
+          options: {
+            cryptoProvider: {
+              async getCiphersuiteImpl() {
+                throw failure
+              },
+            },
+          },
+        }),
+      ).rejects.toBe(failure)
+    } else {
+      await expect(
+        recovery.openRecoveryVerdictFromTrust({
+          ...params,
+          trust: {
+            ...trust,
+            get registry(): typeof trust.registry {
+              throw failure
+            },
+          },
+        }),
+      ).rejects.toBe(failure)
+    }
+  })
+}
 
 test('retained authentication refuses wrong group, anchor, binding, signer and floors', async () => {
   const { identity, group, trust } = await fixture()

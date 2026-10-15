@@ -15,7 +15,7 @@ function validCounter(value: number, minimum: number): boolean {
   return Number.isSafeInteger(value) && value >= minimum
 }
 
-function readState(record: GroupStateRecord & { deleted: false }): ClientState | null {
+export function readState(record: GroupStateRecord & { deleted: false }): ClientState | null {
   if (record.state === null) return null
   let client: ClientState | undefined
   let groupID: string | undefined

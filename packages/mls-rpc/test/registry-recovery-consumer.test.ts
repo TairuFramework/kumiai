@@ -13,7 +13,7 @@ import { registrySafety } from '../src/registry/safety.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { createRegistryFixture } from './fixtures/registry.js'
 
-for (const damage of ['null', 'corrupt'] as const) {
+for (const damage of ['null', 'unreadable', 'client-state', 'identity'] as const) {
   test(`registry requests and authentication never restore ${damage} private state`, async () => {
     const groupID = `retained-consumer-${damage}`
     const f = await createRegistryFixture({ mode: 'real-mls', setup: 'seeded', groupID })
@@ -22,7 +22,7 @@ for (const damage of ['null', 'corrupt'] as const) {
       const responder = await (await f.registry.access(groupID)).read((handle) => handle)
       const secret = await api.deriveRecoverySecret(responder)
       const target = { targetID: 'hub', topicID: commitTopic(secret) }
-      if (damage === 'corrupt') await f.corruptState(key)
+      if (damage !== 'null') await f.corruptState(key, damage)
       else {
         const state = await f.device.groups.loadState(key)
         if (state === null || state.deleted) throw new Error('Missing state')
@@ -122,6 +122,35 @@ for (const damage of ['null', 'corrupt'] as const) {
   })
 }
 
+for (const damage of ['client-state', 'identity'] as const) {
+  test(`registry admission observes ${damage} damage without restoring private state`, async () => {
+    const groupID = `consumer-observed-${damage}`
+    const f = await createRegistryFixture({ mode: 'real-mls', setup: 'seeded', groupID })
+    try {
+      const key = { groupID, incarnation: 1 }
+      const restores = f.restoreCount(groupID)
+      const access = vi.spyOn(f.registry, 'access')
+      const mls = await api.createRegistryGroupMLS({
+        registry: f.registry,
+        key,
+        recovery: f.environment,
+        target: { targetID: 'hub', topicID: 'commit' },
+        identity: f.identity,
+        entrySlot: api.createLedgerEntrySlot(),
+        onConfirmedRecovery: () => {},
+      })
+      expect(mls.sendAdmission()).toEqual({ epoch: 0, admissible: true })
+      await f.corruptState(key, damage)
+      await f.device.groups.ports(key).control.apply({ strand: null }, 'observe-damage')
+      expect(mls.sendAdmission()).toEqual({ epoch: 0, admissible: false, reason: 'stranded' })
+      expect(f.restoreCount(groupID)).toBe(restores)
+      expect(access).not.toHaveBeenCalled()
+    } finally {
+      await f.close()
+    }
+  })
+}
+
 test('registry constructor requires a coordinator sink and custom trust derivation before I/O', async () => {
   const groupID = 'consumer-config'
   const f = await createRegistryFixture({ mode: 'real-mls', setup: 'seeded', groupID })
@@ -167,6 +196,42 @@ test('registry constructor requires a coordinator sink and custom trust derivati
     await f.close()
   }
 })
+
+for (const fault of ['provider', 'trusted-reader'] as const) {
+  test(`registry verdict authentication preserves ${fault} errors`, async () => {
+    const groupID = `consumer-verdict-${fault}`
+    const f = await createRegistryFixture({ mode: 'real-mls', setup: 'seeded', groupID })
+    try {
+      const key = { groupID, incarnation: 1 }
+      const mls = await api.createRegistryGroupMLS({
+        registry: f.registry,
+        key,
+        recovery: f.environment,
+        target: { targetID: 'hub', topicID: 'commit' },
+        identity: f.identity,
+        entrySlot: api.createLedgerEntrySlot(),
+        onConfirmedRecovery: () => {},
+      })
+      const held = await mls.createRecoveryRequest('errors')
+      const failure = new Error(`Registry ${fault} unavailable`)
+      if (fault === 'provider') {
+        f.environment.options.cryptoProvider = {
+          async getCiphersuiteImpl() {
+            throw failure
+          },
+        }
+      } else f.failTrustReads(failure)
+      const before = await f.inspectRows()
+      await expect(
+        mls.openRecoveryVerdict(new Uint8Array([0]), 'errors', held.requestKey),
+      ).rejects.toBe(failure)
+      expect(f.restoreCount(groupID)).toBe(0)
+      expect(await f.inspectRows()).toEqual(before)
+    } finally {
+      await f.close()
+    }
+  })
+}
 
 test('registry sealing binds the actual cursor and safety subscriptions use the real key', async () => {
   const groupID = 'consumer-sealing'
@@ -377,28 +442,31 @@ test('registry admission preserves terminal state when private bytes are null', 
   }
 })
 
-test('registry access failure updates admission without masking the storage diagnosis', async () => {
-  const groupID = 'consumer-access-failure'
-  const f = await createRegistryFixture({ mode: 'real-mls', setup: 'seeded', groupID })
-  try {
-    const key = { groupID, incarnation: 1 }
-    const mls = await api.createRegistryGroupMLS({
-      registry: f.registry,
-      key,
-      recovery: f.environment,
-      target: { targetID: 'hub', topicID: 'commit' },
-      identity: f.identity,
-      entrySlot: api.createLedgerEntrySlot(),
-      onConfirmedRecovery: () => {},
-    })
-    expect(await mls.readEpoch()).toBe(0)
-    await f.corruptState(key)
-    await expect(mls.readEpoch()).rejects.toMatchObject({
-      name: 'GroupUnavailableError',
-      reason: 'state-unreadable',
-    })
-    expect(mls.sendAdmission()).toEqual({ epoch: 0, admissible: false, reason: 'stranded' })
-  } finally {
-    await f.close()
-  }
-})
+for (const opened of [false, true]) {
+  test(`registry ${opened ? 'opened' : 'first'} access failure updates admission without masking the storage diagnosis`, async () => {
+    const groupID = `consumer-access-failure-${opened}`
+    const f = await createRegistryFixture({ mode: 'real-mls', setup: 'seeded', groupID })
+    try {
+      const key = { groupID, incarnation: 1 }
+      const mls = await api.createRegistryGroupMLS({
+        registry: f.registry,
+        key,
+        recovery: f.environment,
+        target: { targetID: 'hub', topicID: 'commit' },
+        identity: f.identity,
+        entrySlot: api.createLedgerEntrySlot(),
+        onConfirmedRecovery: () => {},
+      })
+      if (opened) expect(await mls.readEpoch()).toBe(0)
+      expect(mls.sendAdmission()).toEqual({ epoch: 0, admissible: true })
+      await f.corruptState(key)
+      await expect(mls.readEpoch()).rejects.toMatchObject({
+        name: 'GroupUnavailableError',
+        reason: 'state-unreadable',
+      })
+      expect(mls.sendAdmission()).toEqual({ epoch: 0, admissible: false, reason: 'stranded' })
+    } finally {
+      await f.close()
+    }
+  })
+}
