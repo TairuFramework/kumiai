@@ -324,9 +324,14 @@ describe('commit strand observations', () => {
         localEpoch: 1,
         claimedEpoch: null,
         kind: 'unknown-version',
+        diagnostic: 'upgrade-required',
         confidence: 'claimed',
       })
-      await bob.peer.dispose()
+      const second = await publishUnreadable(hub, rs, layer)
+      await bob.peer.replay()
+      expect(observations).toHaveLength(2)
+      expect(observations[1]?.position).toBe(second)
+      await assertCommitPoison(bob, hub, rs, 'bob', second)
     },
   )
 

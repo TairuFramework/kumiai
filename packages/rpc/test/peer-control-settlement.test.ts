@@ -17,13 +17,12 @@ import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import {
   buildInviteCommit,
   buildLedgerCommit,
-  buildRejoinRecord,
   makeMLSPeer,
   seedBuiltOperation,
   type TestPeer,
 } from './fixtures/peer.js'
 
-test('failed hold persistence keeps the runtime barrier across later control refreshes', async () => {
+test('unsupported delivery never attempts a hold write even when that write would fail', async () => {
   const hub = new FakeHub()
   const database = createMemoryHostDatabase()
   const control = database.control('bob', { groupID: 'memory-group', incarnation: 1 })
@@ -44,29 +43,20 @@ test('failed hold persistence keeps the runtime barrier across later control ref
   await bob.peer.replay()
   const frame = encodeHandshakeFrame(HANDSHAKE_KIND.commit, new Uint8Array([1]))
   frame[HANDSHAKE_MAGIC.length] = HANDSHAKE_VERSION + 1
-  await hub.publish({
+  const { sequenceID } = await hub.publish({
     senderDID: 'alice',
     topicID: commitTopic(secret),
     payload: frame,
     retain: 'log',
   })
-  await vi.waitFor(() => expect(failures).toBeGreaterThan(0))
-  await bob.peer.enqueue(buildLedgerCommit(bob, ['held']))
-  expect((await control.load()).controlHold).toBeNull()
-  await expect(
-    bob.peer.protocol('chat').dispatch('chat/changed', { data: {} }),
-  ).rejects.toMatchObject({ name: 'RecoveryRequiredError' })
-  const built = await buildRejoinRecord(bob)
-  const confirmed = {
-    ...built,
-    stage: 'confirmed' as const,
-    position: asLogPosition('001'),
-    verdict: new Uint8Array([1]),
-  }
-  await control.apply({ putRejoin: confirmed }, 'confirmed-runtime-held')
   await bob.peer.replay()
-  expect(bob.mls.epoch()).toBe(1)
-  expect((await control.load()).rejoin).toEqual(confirmed)
+  expect((await control.load()).cursor?.position).toBe(sequenceID)
+  expect(failures).toBe(0)
+  await bob.peer.ack('refresh-after-poison')
+  expect((await control.load()).controlHold).toBeNull()
+  expect((await control.load()).strand).toBeNull()
+  await expect(bob.peer.commit(buildLedgerCommit(bob, ['progress']))).resolves.toBeDefined()
+  expect(bob.mls.epoch()).toBe(2)
 })
 
 test('uncommitted Welcome delivery refuses a strong hold detected during adoption', async () => {
@@ -985,17 +975,14 @@ test('a hard hold preserves applied history and keeps the first hard reason', as
     { cursor: { position: null, epoch: 1 }, putApplied: [applied] },
     'history-before-hold',
   )
-  const frame = encodeHandshakeFrame(HANDSHAKE_KIND.commit, new Uint8Array([1]))
-  frame[HANDSHAKE_MAGIC.length] = HANDSHAKE_VERSION + 1
-  await hub.publish({
-    senderDID: 'alice',
-    topicID: commitTopic(secret),
-    payload: frame,
-    retain: 'log',
-  })
-  await vi.waitFor(async () =>
-    expect((await bob.control.load()).controlHold?.reason).toBe('unsupported-version'),
+  await bob.control.apply(
+    {
+      controlHold: { reason: 'unsupported-version', position: null },
+      strand: { reason: 'unsupported-version' },
+    },
+    'saved-version-hold',
   )
+  await bob.peer.ack('refresh-saved-hold')
   expect((await bob.control.load()).applied).toEqual([applied])
   await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
   await bob.peer.replay()

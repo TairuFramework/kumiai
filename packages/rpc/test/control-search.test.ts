@@ -4,7 +4,7 @@ import { toB64U } from '@sozai/codec'
 import { expect, test, vi } from 'vitest'
 
 import { classifyCommit } from '../src/classify.js'
-import { encodeCommitFrame } from '../src/commit-frame.js'
+import { COMMIT_FRAME_VERSION, encodeCommitFrame } from '../src/commit-frame.js'
 import {
   type CertifiedControlRange,
   type ControlLogFrame,
@@ -15,7 +15,12 @@ import {
 } from '../src/control/search.js'
 import type { AdoptionExpected, BuiltCommit } from '../src/control/types.js'
 import { asLogPosition, type LogPosition } from '../src/cursor.js'
-import { encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
+import {
+  encodeHandshakeFrame,
+  HANDSHAKE_KIND,
+  HANDSHAKE_MAGIC,
+  HANDSHAKE_VERSION,
+} from '../src/handshake.js'
 
 const position = (value: number) => asLogPosition(String(value).padStart(6, '0'))
 const digest = (bytes: Uint8Array) => toB64U(sha256(bytes))
@@ -566,7 +571,7 @@ test('unavailable header cannot hide an earlier winner', async () => {
 })
 
 test.each(['unsupported-version', 'unexplained-own'] as const)(
-  'unsupported semantics and alternate own bytes retain a diagnostic hold: %s',
+  'unavailable copies preserve unknown acceptance without a hard hold: %s',
   async (reason) => {
     const f = fixture([
       { id: 101, value: 1 },
@@ -581,9 +586,11 @@ test.each(['unsupported-version', 'unexplained-own'] as const)(
       }),
     }
     expect(await f.search.searchLog(built)).toEqual({ kind: 'unknown' })
-    if (reason === 'unsupported-version')
-      expect(f.hold).toHaveBeenLastCalledWith({ reason, position: position(101) })
-    else expect(f.haltFork).not.toHaveBeenCalled()
+    expect(f.hold.mock.calls).not.toContainEqual([
+      { reason: 'unsupported-version', position: position(101) },
+    ])
+    expect(f.haltFork).not.toHaveBeenCalled()
+    expect(f.fetch).toHaveBeenCalledTimes(1)
     expect(f.followWinner).not.toHaveBeenCalled()
   },
 )
@@ -927,3 +934,79 @@ test.each([null, position(100)])(
     expect(read).toHaveBeenCalledTimes(calls)
   },
 )
+
+test.each(['handshake', 'commit-frame', 'sealed-entries'] as const)(
+  'an unsupported %s copy is skipped before a later exact saved occurrence',
+  async (layer) => {
+    const onUnsupportedVersion = vi.fn()
+    const f = fixture([
+      { id: 101, value: 1 },
+      { id: 102, value: 2 },
+    ])
+    f.deps.onUnsupportedVersion = onUnsupportedVersion
+    if (layer === 'sealed-entries') {
+      f.deps.validation = {
+        restoreValidation: async () => ({
+          source,
+          readCommitHeader: async () => ({ epoch: 65 }),
+          validateFrame: async (frame) =>
+            frame.position === position(101)
+              ? { kind: 'unavailable', reason: 'unsupported-version' }
+              : { kind: 'valid', header: { epoch: 65 }, own: true, advanced: true, removed: false },
+          verifyOwn: async () => true,
+        }),
+      }
+    } else {
+      const fetch = f.deps.fetch
+      f.deps.fetch = async (after) => {
+        const page = await fetch(after)
+        const first = page.messages[0]
+        if (first?.sequenceID === position(101)) {
+          if (layer === 'handshake') first.payload[HANDSHAKE_MAGIC.length] = HANDSHAKE_VERSION + 1
+          else first.payload[HANDSHAKE_MAGIC.length + 2] = COMMIT_FRAME_VERSION + 1
+        }
+        return page
+      }
+    }
+    expect(await f.search.searchLog(built)).toMatchObject({
+      kind: 'first-valid',
+      proof: { position: position(102) },
+    })
+    expect(f.hold).not.toHaveBeenCalled()
+    expect(f.haltFork).not.toHaveBeenCalled()
+    expect(onUnsupportedVersion).toHaveBeenCalledWith(
+      expect.objectContaining({ position: position(101) }),
+      65,
+    )
+  },
+)
+
+test('unsupported-version poison never grants retryHead alongside an own copy mismatch', async () => {
+  const f = fixture([
+    { id: 101, value: 1 },
+    { id: 102, value: 2 },
+  ])
+  const fetch = f.deps.fetch
+  f.deps.fetch = async (after) => {
+    const page = await fetch(after)
+    const own = page.messages.find((row) => row.sequenceID === position(102))
+    if (own !== undefined) own.payload = new Uint8Array([...own.payload, 9])
+    return page
+  }
+  f.deps.validation = {
+    restoreValidation: async () => ({
+      source,
+      readCommitHeader: async () => ({ epoch: 65 }),
+      validateFrame: async (frame) =>
+        frame.position === position(101)
+          ? { kind: 'unavailable', reason: 'unsupported-version' }
+          : { kind: 'invalid', reason: 'authentication' },
+      verifyOwn: async () => true,
+    }),
+  }
+  expect(await f.search.searchLog(built)).toEqual({ kind: 'unknown' })
+  expect(f.hold.mock.calls).not.toContainEqual([
+    { reason: 'unsupported-version', position: position(101) },
+  ])
+  expect(f.fetch).toHaveBeenCalledTimes(1)
+})

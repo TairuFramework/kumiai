@@ -242,8 +242,8 @@ describe('the cursor table', () => {
     ).toEqual({ row: 'poison' })
   })
 
-  test('a frame in a wire version this build cannot read requires an unsupported-version hold', () => {
-    // Unsupported semantics must hold before cursor advancement.
+  test('an unreadable wire version is distinguished for an upgrade diagnostic', () => {
+    // No header fields can be interpreted under unknown semantics.
     expect(
       classifyCommit({
         header: UNKNOWN_FRAME_VERSION,

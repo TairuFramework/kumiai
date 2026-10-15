@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from 'vitest'
 
+import { asLogPosition } from '../src/cursor.js'
 import {
   decodeHandshakeFrame,
   encodeHandshakeFrame,
@@ -10,7 +11,7 @@ import {
 import { decodeRecoveryRequest, encodeRecoveryReply } from '../src/recovery.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
-import { assertDurableControlHold } from './fixtures/control-hold.js'
+import { assertCommitPoison, assertDurableControlHold } from './fixtures/control-hold.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
@@ -81,7 +82,7 @@ function bobsRecoveryRequest(
 
 describe('a frame whose handshake version this build does not know', () => {
   test.each([false, true])(
-    'unsupported outer version persists a hold (unknown kind: %s)',
+    'unsupported outer version advances across restart (unknown kind: %s)',
     async (unknownKind) => {
       const hub = new FakeHub()
       const rs = new Uint8Array(32).fill(0x75)
@@ -94,32 +95,42 @@ describe('a frame whose handshake version this build does not know', () => {
         retain: 'log',
       })
       const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-      await assertDurableControlHold(bob, hub, rs, 'bob', {
-        reason: 'unsupported-version',
-        position: sequenceID,
-      })
+      await assertCommitPoison(bob, hub, rs, 'bob', sequenceID)
+      expect(healsBy(hub, rs, 'bob')).toEqual([])
     },
   )
 
-  test('the cursor does not step over an unsupported frame and private control stays pending', async () => {
+  test('private control completes after an unsupported handshake frame', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x72)
-    const { sequenceID } = await publishFutureFrame(hub, rs)
+    await publishFutureFrame(hub, rs)
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-    await vi.waitFor(async () =>
-      expect((await bob.control.load()).controlHold?.reason).toBe('unsupported-version'),
-    )
-    const headBefore = hub.head(commitTopic(rs))
+    await bob.peer.replay()
     const framesBefore = commitFrames(hub, rs)
-    await bob.peer.enqueue(buildLedgerCommit(bob, ['role:zoe=admin']))
-    expect(commitFrames(hub, rs)).toBe(framesBefore)
-    expect(hub.head(commitTopic(rs))).toBe(headBefore)
-    expect(bob.mls.epoch()).toBe(1)
-    expect((await bob.control.load()).operations[0]?.stage).toBe('intent')
-    await assertDurableControlHold(bob, hub, rs, 'bob', {
-      reason: 'unsupported-version',
-      position: sequenceID,
-    })
+    await expect(bob.peer.commit(buildLedgerCommit(bob, ['role:zoe=admin']))).resolves.toBeDefined()
+    expect(commitFrames(hub, rs)).toBe(framesBefore + 1)
+    expect(bob.mls.epoch()).toBe(2)
+    expect((await bob.control.load()).controlHold).toBeNull()
+    expect(healsBy(hub, rs, 'bob')).toEqual([])
+    await bob.peer.dispose()
+  })
+
+  test('a saved unsupported-version hold remains immutable across reconstruction', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x76)
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
+    await bob.peer.replay()
+    const position = '000000000001'
+    await bob.control.apply(
+      {
+        controlHold: { reason: 'unsupported-version', position: asLogPosition(position) },
+        strand: { reason: 'unsupported-version' },
+        cursor: { position: null, epoch: 1, stranded: true },
+      },
+      'saved-legacy-hold',
+    )
+    await bob.peer.ack('refresh-saved-hold')
+    await assertDurableControlHold(bob, hub, rs, 'bob', { reason: 'unsupported-version', position })
   })
 
   test('on the rendezvous topic: a well-formed reply is dropped, not routed to the heal', async () => {

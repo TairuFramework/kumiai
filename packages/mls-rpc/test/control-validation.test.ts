@@ -652,7 +652,7 @@ test.each(['malformed-list', 'not-sealed'] as const)(
     const ledger = await publicLedger(f)
     const key = await deriveEntryKey(f.member.handle)
     const sealed =
-      kind === 'malformed-list' ? sealEntries(key, new Uint8Array([1])) : new Uint8Array([0])
+      kind === 'malformed-list' ? sealEntries(key, new Uint8Array([1])) : new Uint8Array([1])
     key.fill(0)
     const frame = {
       ...ledger.frame,
@@ -1770,3 +1770,143 @@ function safetyCallbacks() {
     }),
   }
 }
+
+test.each(['outer', 'inner'] as const)(
+  'real sealed-entry %s version poison advances the peer and preserves saved work',
+  async (layer) => {
+    const f = await fixture()
+    const ledger = await publicLedger(f)
+    const key = await deriveEntryKey(f.member.handle)
+    const entries = encodeLedgerEntries([ledger.token])
+    if (layer === 'inner') entries[0] = 2
+    const sealed = sealEntries(key, entries)
+    key.fill(0)
+    if (layer === 'outer') sealed[0] = 2
+    const payload = encodeHandshakeFrame(
+      HANDSHAKE_KIND.commit,
+      encodeCommitFrame(ledger.commit, sealed),
+    )
+    const validation = await f.port.restoreValidation(f.built)
+    expect(await validation?.validateFrame({ ...ledger.frame, payload }, f.built)).toEqual({
+      kind: 'unavailable',
+      reason: 'unsupported-version',
+    })
+    const searched = await searchReal(f, ledger.commit, f.port, payload)
+    expect(searched.result).toMatchObject({
+      kind: 'first-valid',
+      proof: { position: asLogPosition('000102') },
+    })
+    expect(searched.hold).not.toHaveBeenCalled()
+    const store = searched.store
+    const operation = (await store.control.load()).operations[0]
+    if (operation === undefined) throw new Error('missing saved operation')
+    const now = Date.now()
+    await store.control.apply(
+      {
+        putOperations: [{ ...operation, enqueuedAt: now, deadline: now + 30000 }],
+        putOutcomes: [{ id: 'owed-outcome', opID: null, at: 1, kind: 'unknown' }],
+        putWelcomes: [
+          { opID: 'owed-welcome', welcome: new Uint8Array([7]), recipients: ['invitee'] },
+        ],
+      },
+      'owed-work',
+    )
+    const before = await store.control.load()
+    expect(before.commitOnce).not.toBeNull()
+    expect(before.operations).toHaveLength(1)
+    const loadFixture = (name: string) =>
+      import(new URL(`../../rpc/test/fixtures/${name}.ts`, import.meta.url).href)
+    const { FakeHub } = (await loadFixture('fake-hub')) as {
+      FakeHub: new () => GroupPeerParams<Record<string, never>>['hub']
+    }
+    const { createMemoryAnchorStore } = (await loadFixture('anchor')) as {
+      createMemoryAnchorStore(): AnchorStore
+    }
+    const { createMemoryAppCursorStore } = (await loadFixture('app-cursor')) as {
+      createMemoryAppCursorStore(): AppCursorStore
+    }
+    const { createMemoryAppOutbox } = (await loadFixture('outbox')) as {
+      createMemoryAppOutbox(): AppOutbox
+    }
+    const hub = new FakeHub()
+    vi.spyOn(hub, 'fetchTopic').mockImplementation(async (request) => ({
+      gap: false,
+      head: '000101',
+      oldest: '000101',
+      messages:
+        request.after != null && request.after >= '000101'
+          ? []
+          : [
+              {
+                topicID: request.topicID,
+                sequenceID: '000101',
+                senderDID: 'relay',
+                payload,
+                receivedAt: 1,
+              },
+            ],
+    }))
+    const access = testHandleAccess({
+      handle: () => f.member.handle,
+      adopt: () => {
+        throw new Error('poison must not adopt')
+      },
+      persist: async () => {
+        throw new Error('poison must not persist MLS')
+      },
+    })
+    const mls = createGroupMLS({ access, identity: f.member.identity, entrySlot: f.member.slot })
+    const onStrand = vi.fn()
+    const onRecovery = vi.fn()
+    const deliverWelcome = vi.fn(async () => {})
+    const peer = createGroupPeer({
+      hub,
+      crypto: createGroupCrypto({ access }),
+      mls,
+      control: store.control,
+      prepareBuild: async () => {
+        throw new Error('must retain the saved slot')
+      },
+      validation: f.port,
+      readEvidence: store.readEvidence,
+      adopt: async () => 'moved',
+      deliverWelcome,
+      anchorStore: createMemoryAnchorStore(),
+      appCursorStore: createMemoryAppCursorStore(),
+      appOutbox: createMemoryAppOutbox(),
+      appOutboxLimit: 16,
+      localDID: f.member.identity.id,
+      protocols: {},
+      handlers: {},
+      onStrand,
+      onRecovery,
+    })
+    try {
+      await peer.replay()
+      const after = await store.control.load()
+      expect(after.cursor).toMatchObject({ position: '000101', epoch: f.built.epoch })
+      expect(after.cursor?.stranded).toBeUndefined()
+      expect(after.strand).toBeNull()
+      expect(after.forkHalt).toBeNull()
+      expect(after.controlHold?.reason).not.toBe('unsupported-version')
+      expect(after.commitOnce).toEqual(before.commitOnce)
+      expect(after.operations).toEqual(before.operations)
+      expect(after.outcomes).toEqual(before.outcomes)
+      expect(after.welcomes).toEqual(before.welcomes)
+      expect(after.applied).toEqual(before.applied)
+      expect(after.responses).toEqual(before.responses)
+      expect(onStrand).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: 'unknown-version',
+          confidence: 'claimed',
+          diagnostic: 'upgrade-required',
+        }),
+      )
+      expect(onRecovery).not.toHaveBeenCalled()
+      expect(deliverWelcome).not.toHaveBeenCalled()
+      expect(encodeClientState(f.member.handle.state)).toEqual(f.state)
+    } finally {
+      await peer.dispose()
+    }
+  },
+)

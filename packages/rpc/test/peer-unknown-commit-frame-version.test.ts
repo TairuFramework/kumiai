@@ -1,9 +1,9 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import { COMMIT_FRAME_VERSION, encodeCommitFrame } from '../src/commit-frame.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
-import { assertDurableControlHold } from './fixtures/control-hold.js'
+import { assertCommitPoison } from './fixtures/control-hold.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 
@@ -60,48 +60,42 @@ function healsBy(hub: FakeHub, rs: Uint8Array, did: string): Array<unknown> {
 const commitFrames = (hub: FakeHub, rs: Uint8Array): number =>
   hub.published.filter((m) => m.topicID === commitTopic(rs)).length
 
-/**
- * The commit frame's version byte is the SECOND place a version bump can strand a peer, and the
- * more dangerous of the two: it is read before the commit bytes are extracted, so — unlike the
- * sealed ledger-entry blob, whose failure lands after the commit has been read — there is no next
- * frame to heal from. Dropping it as malformed means that after a `COMMIT_FRAME_VERSION` bump the
- * peer steps over the group's entire future, drains to an empty page, records the live tip, and
- * reports itself fully reconciled at an epoch nobody else is at. Silent, and no restart fixes it.
- *
- * A unit test on `decodeCommitFrame` cannot see any of that: it proves only that the throw
- * happens, and the throw happened all along. These are lane-level for that reason.
- */
 describe('a frame whose commit-frame version this build does not know', {
   concurrent: false,
 }, () => {
-  test('unsupported inner version persists a hold across reconstruction', async () => {
+  test('unsupported inner version advances durably without a hold or heal', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x81)
     const { sequenceID } = await publish(hub, rs, futureCommitFrame())
-    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-    await assertDurableControlHold(bob, hub, rs, 'bob', {
-      reason: 'unsupported-version',
-      position: sequenceID,
-    })
+    const onStrand = vi.fn()
+    const onRecovery = vi.fn()
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery, onStrand, onRecovery })
+    await bob.peer.replay()
+    expect(onStrand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        position: sequenceID,
+        kind: 'unknown-version',
+        confidence: 'claimed',
+      }),
+    )
+    expect(onRecovery).not.toHaveBeenCalled()
+    expect(healsBy(hub, rs, 'bob')).toEqual([])
+    await assertCommitPoison(bob, hub, rs, 'bob', sequenceID)
   })
 
-  test('the cursor preserves its position and private control stays pending', async () => {
+  test('private control completes after an unsupported commit frame', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x82)
-    const { sequenceID } = await publish(hub, rs, futureCommitFrame())
+    await publish(hub, rs, futureCommitFrame())
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-    await flush(220)
-    const headBefore = hub.head(commitTopic(rs))
+    await bob.peer.replay()
     const framesBefore = commitFrames(hub, rs)
-    await bob.peer.enqueue(buildLedgerCommit(bob, ['role:zoe=admin']))
-    expect(commitFrames(hub, rs)).toBe(framesBefore)
-    expect(hub.head(commitTopic(rs))).toBe(headBefore)
-    expect(bob.mls.epoch()).toBe(1)
-    expect((await bob.control.load()).operations[0]?.stage).toBe('intent')
-    await assertDurableControlHold(bob, hub, rs, 'bob', {
-      reason: 'unsupported-version',
-      position: sequenceID,
-    })
+    await expect(bob.peer.commit(buildLedgerCommit(bob, ['role:zoe=admin']))).resolves.toBeDefined()
+    expect(commitFrames(hub, rs)).toBe(framesBefore + 1)
+    expect(bob.mls.epoch()).toBe(2)
+    expect((await bob.control.load()).controlHold).toBeNull()
+    expect(healsBy(hub, rs, 'bob')).toEqual([])
+    await bob.peer.dispose()
   })
 
   test('bytes that are not a commit frame at all are still dropped, not healed from', async () => {
@@ -112,9 +106,6 @@ describe('a frame whose commit-frame version this build does not know', {
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
     await flush(220)
 
-    // The distinction the fix rests on: "a frame from the future" heals, "not a frame" does not.
-    // Collapsing the two the other way would let anything able to publish two junk bytes here
-    // strand every member of the group.
     expect(healsBy(hub, rs, 'bob')).toHaveLength(0)
     expect(bob.mls.epoch()).toBe(1)
     await expect(bob.peer.commit(buildLedgerCommit(bob, ['role:zoe=admin']))).resolves.toBeDefined()

@@ -87,7 +87,11 @@ import {
 import { createHostBoundary, wrapPeerHost, wrapPendingRecovery } from './host-boundary.js'
 import { notifyHost } from './host-notice.js'
 import { createHubMux, type HubMux } from './hub-mux.js'
-import { createLedgerEntryResolver, encodeLedgerEntries } from './ledger-entries.js'
+import {
+  createLedgerEntryResolver,
+  encodeLedgerEntries,
+  UnsupportedLedgerEntriesVersionError,
+} from './ledger-entries.js'
 import { checkedFetchResult, createLogDelivery, type EpochFloor } from './log-delivery.js'
 import { createEpochRuntime } from './peer-epoch.js'
 import {
@@ -1056,7 +1060,11 @@ export function createGroupPeerWithControlWalk<
   let hostOutbox: Array<() => void> = []
   let recoveryNotices: Array<() => void> = []
   const emitStrand = (observation: StrandObservation): void => {
-    hostOutbox.push(() => notifyHost((value) => params.onStrand?.(value), observation))
+    const notice: StrandObservation =
+      observation.kind === 'unknown-version'
+        ? { ...observation, diagnostic: 'upgrade-required' }
+        : observation
+    hostOutbox.push(() => notifyHost((value) => params.onStrand?.(value), notice))
   }
   const emitRecovery = (event: RecoveryEvent): void => {
     recoveryNotices.push(() => notifyHost((value) => params.onRecovery?.(value), event))
@@ -1570,26 +1578,7 @@ export function createGroupPeerWithControlWalk<
         }),
       )
       if (disposed) return false
-      if (safetyHold() !== null) {
-        // Unsupported-version holds remain storage-only service after a suspended fetch.
-        for (const message of result.messages) {
-          let unsupported = false
-          try {
-            const frame = decodeHandshakeFrame(message.payload)
-            unsupported = frame.version !== HANDSHAKE_VERSION
-            if (!unsupported && frame.kind === HANDSHAKE_KIND.commit)
-              decodeCommitFrame(frame.payload)
-          } catch (error) {
-            unsupported = isUnsupportedCommitFrameVersion(error)
-          }
-          if (unsupported)
-            await holdControl({
-              reason: 'unsupported-version',
-              position: asLogPosition(message.sequenceID),
-            })
-        }
-        return false
-      }
+      if (safetyHold() !== null) return false
       const gap =
         result.gap ||
         (result.messages.length === 0 &&
@@ -1654,23 +1643,23 @@ export function createGroupPeerWithControlWalk<
           await saveCommitCursor(position) // malformed: dropped, and the cursor still steps over it
           continue
         }
-        // A wire version this build does not know, settled BEFORE the kind byte: nothing behind
-        // the magic means what this build thinks under an unknown version. On the commit topic —
-        // and only here — that is evidence in itself, so it goes to the classifier, not dropped.
+        // Unknown outer semantics include the kind byte.
         if (frame.version !== HANDSHAKE_VERSION) {
           if (safetyHold() !== null) return advancedEpoch
           const localEpoch = await port.readEpoch()
           if (safetyHold() !== null) return advancedEpoch
-          await holdControl({ reason: 'unsupported-version', position })
-          observeStrand({
-            position,
-            commitDigest: null,
-            localEpoch,
-            claimedEpoch: null,
-            kind: 'unknown-version',
-            confidence: 'claimed',
-          })
-          return advancedEpoch
+          await saveCommitCursor(position)
+          if (commitTopicID != null)
+            emitStrand({
+              groupID: commitTopicID,
+              position,
+              commitDigest: null,
+              localEpoch,
+              claimedEpoch: null,
+              kind: 'unknown-version',
+              confidence: 'claimed',
+            })
+          continue
         }
         if (frame.kind !== HANDSHAKE_KIND.commit) {
           await saveCommitCursor(position) // the commit lane carries commits, and nothing else
@@ -1683,23 +1672,22 @@ export function createGroupPeerWithControlWalk<
         try {
           commitFrame = decodeCommitFrame(frame.payload)
         } catch (error) {
-          // Same split as the handshake version above, one layer down: an unknown COMMIT-FRAME
-          // version fails BEFORE the commit bytes are extracted, so there is no next frame to
-          // heal from — dropping it would step over the group's whole future. To the classifier.
           if (isUnsupportedCommitFrameVersion(error)) {
             if (safetyHold() !== null) return advancedEpoch
             const localEpoch = await port.readEpoch()
             if (safetyHold() !== null) return advancedEpoch
-            await holdControl({ reason: 'unsupported-version', position })
-            observeStrand({
-              position,
-              commitDigest: null,
-              localEpoch,
-              claimedEpoch: null,
-              kind: 'unknown-version',
-              confidence: 'claimed',
-            })
-            return advancedEpoch
+            await saveCommitCursor(position)
+            if (commitTopicID != null)
+              emitStrand({
+                groupID: commitTopicID,
+                position,
+                commitDigest: null,
+                localEpoch,
+                claimedEpoch: null,
+                kind: 'unknown-version',
+                confidence: 'claimed',
+              })
+            continue
           }
           // Too short, or a commit length running past the end: genuinely not a frame, and
           // nothing a future build would have written. Dropped, and the cursor steps over it.
@@ -1862,6 +1850,7 @@ export function createGroupPeerWithControlWalk<
                 })
           let applied: ProcessCommitResult
           let resolverFailed = false
+          let unsupportedEntries = false
           try {
             // Through the seam, like every other site that ratchets the handle: it reads this
             // epoch's app frames ahead of the apply and takes the anchor if the roster moved.
@@ -1894,6 +1883,7 @@ export function createGroupPeerWithControlWalk<
                       )(ids)
                     } catch (error) {
                       resolverFailed = true
+                      unsupportedEntries = error instanceof UnsupportedLedgerEntriesVersionError
                       throw error
                     }
                   },
@@ -1913,6 +1903,21 @@ export function createGroupPeerWithControlWalk<
           } catch (error) {
             if (safetyRefusal(error) || safetyHold() !== null) return advancedEpoch
             if (disposed || safetyHold() !== null) return false
+            if (unsupportedEntries) {
+              await resolveAnchorRotation({ port, knownUnlanded: true })
+              await saveCommitCursor(position)
+              if (commitTopicID != null)
+                emitStrand({
+                  groupID: commitTopicID,
+                  position,
+                  commitDigest,
+                  localEpoch: framedEpoch,
+                  claimedEpoch: header?.epoch ?? null,
+                  kind: 'unknown-version',
+                  confidence: 'claimed',
+                })
+              break
+            }
             if (
               resolverFailed ||
               (error instanceof Error && error.name === 'CommitValidationUnavailableError')
@@ -2666,6 +2671,18 @@ export function createGroupPeerWithControlWalk<
             )
           },
           hold: holdControl,
+          onUnsupportedVersion: (frame, epoch) => {
+            if (safetyHold() !== null || commitTopicID == null) return
+            emitStrand({
+              groupID: commitTopicID,
+              position: frame.position,
+              commitDigest: null,
+              localEpoch: epoch,
+              claimedEpoch: null,
+              kind: 'unknown-version',
+              confidence: 'claimed',
+            })
+          },
           haltFork,
           safetyHold,
           followWinner: async (frame, range, work) => {

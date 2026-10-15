@@ -133,6 +133,8 @@ export type StrandObservation = {
   localEpoch: number
   claimedEpoch: number | null
   kind: StrandKind
+  /** Informational only; delivered versions never create a safety hold. */
+  diagnostic?: 'upgrade-required'
   confidence: StrandConfidence
 }
 

@@ -20,6 +20,7 @@ export async function assertCommitPoison(
   expect(before.forkHalt).toBeNull()
   expect(before.controlHold).toBeNull()
   expect(before.strand).toBeNull()
+  expect(before.cursor?.stranded).toBeUndefined()
   expect(member.controlWalk.safetyHold()).toBeNull()
   const epoch = member.mls.epoch()
   await member.peer.dispose()
@@ -37,6 +38,8 @@ export async function assertCommitPoison(
     expect(after.operations).toEqual(before.operations)
     expect(after.outcomes).toEqual(before.outcomes)
     expect(after.welcomes).toEqual(before.welcomes)
+    expect(after.responses).toEqual(before.responses)
+    expect(after.commitOnceAcceptance).toEqual(before.commitOnceAcceptance)
     expect(restarted.mls.epoch()).toBe(epoch)
   } finally {
     await restarted.peer.dispose()

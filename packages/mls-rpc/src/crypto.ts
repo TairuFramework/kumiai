@@ -42,11 +42,6 @@ const ENTRY_NONCE_BYTES = 24
 /**
  * Sealed blob format version, first byte, in the clear: [ VERSION(1) | NONCE(24) | CIPHERTEXT ]
  *
- * Inside the blob, not the frame header: an unknown blob version fails only the OPEN, which a
- * peer survives (commit filed as poison, stepped over). An unknown FRAME version would fail the
- * decode before the frame is ever classified, so the peer never learns the group moved past it.
- * See `rpc/src/handshake.ts`.
- *
  * Unauthenticated by necessity — read to decide how to open, so it can't be under the seal; a
  * hub that rewrites it only changes which error is reported. Buys diagnosis, not compatibility:
  * no v1 peer can read a v2 blob regardless, but the failure reads as "unsupported version"
@@ -74,13 +69,13 @@ export function sealEntries(
 }
 
 function assertSealedEntryBlob(sealed: Uint8Array): void {
-  if (sealed.length <= 1 + ENTRY_NONCE_BYTES)
-    throw new LedgerEntryRefusedError('openEntries: not a sealed blob', { reason: 'malformed' })
-  if (sealed[0] !== ENTRY_VERSION) {
+  if (sealed.length !== 0 && sealed[0] !== ENTRY_VERSION) {
     throw new UnsupportedLedgerEntriesVersionError(
       `openEntries: unsupported blob version ${sealed[0]}`,
     )
   }
+  if (sealed.length <= 1 + ENTRY_NONCE_BYTES)
+    throw new LedgerEntryRefusedError('openEntries: not a sealed blob', { reason: 'malformed' })
 }
 
 export function openEntries(key: Uint8Array, sealed: Uint8Array): Uint8Array {

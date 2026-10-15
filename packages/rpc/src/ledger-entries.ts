@@ -67,15 +67,13 @@ export function encodeLedgerEntries(tokens: Array<string>): Uint8Array {
  * on a version this build does not know.
  */
 export function decodeLedgerEntries(bytes: Uint8Array): Array<string> {
-  if (bytes.length < HEADER_BYTES) {
-    throw new Error('ledger entry blob is too short')
-  }
   const version = bytes[0]
-  if (version !== LEDGER_ENTRIES_VERSION) {
+  if (version !== undefined && version !== LEDGER_ENTRIES_VERSION) {
     throw new UnsupportedLedgerEntriesVersionError(
       `unsupported ledger entry blob version: ${version}`,
     )
   }
+  if (bytes.length < HEADER_BYTES) throw new Error('ledger entry blob is too short')
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const count = view.getUint16(VERSION_BYTES, true)
   const tokens: Array<string> = []

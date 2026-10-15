@@ -10,13 +10,13 @@ import type { CommitHeader } from './crypto.js'
  *
  * | Frame | Cursor |
  * |---|---|
- * | A wire version this build cannot read at all | preserve cursor; persist an unsupported-version hold |
+ * | A wire version this build cannot read at all | advance; diagnostic poison requiring an upgrade |
  * | Not a commit at all (no header) | advance (poison — never retry, never heal); settled first, before any epoch question |
  * | Framed at an epoch AHEAD of this peer's | advance; heal — the group moved on without it |
  * | Below this peer's epoch, with no record — or a record naming THIS SAME commit | advance, no fork check, no unwrap attempt |
  * | Below this peer's epoch, with a record naming a DIFFERENT commit | advance; claimed diagnostic poison |
  * | At this peer's current epoch, with no authenticated committer | advance (poison — never retry, never heal) |
- * | At this peer's current epoch, committed by THIS peer | settle a matching retained slot or preserve cursor and hold unexplained own evidence |
+ * | At this peer's current epoch, committed by THIS peer | settle a matching retained slot or advance with a claimed diagnostic |
  * | At this peer's current epoch, committed by another — handed to the port | applied: advance and record this epoch -> the applied commit (digest and position) for history and divergence diagnostics; refused by policy or entries unresolvable: advance (poison — never retry, never heal) |
  *
  * Classification reads bytes and decrypts nothing. Only a frame at this peer's epoch authored
@@ -64,6 +64,7 @@ export type CommitDisposition =
    * the frame is stepped over before the heal fires and is never re-read.
    */
   | { row: 'ahead' }
+  /** Diagnostic poison: advance and report an upgrade requirement without a hold. */
   | { row: 'unsupported-version' }
   /**
    * A frame from an epoch BELOW this peer's with no applied-commit record: pre-join,
@@ -126,15 +127,7 @@ export type CommitDisposition =
    */
   | { row: 'poison' }
 
-/**
- * A frame on the commit topic whose handshake version this build does not know: unreadable, in
- * the one place where being unreadable is itself evidence.
- *
- * Passed to {@link classifyCommit} in the header's place, because there IS no header — the bytes
- * behind the version byte are a format this build has never seen, and reading them would be
- * guessing. It is not a `null` header: `null` means "readable bytes that are not a commit", which
- * is poison. This means "the group is speaking a language I do not have", which requires an `unsupported-version` hold.
- */
+/** Unknown wire semantics: skip without interpreting the header, and diagnose the version. */
 export const UNKNOWN_FRAME_VERSION = 'unknown-frame-version'
 
 /**
@@ -225,7 +218,7 @@ export function classifyCommit({
   commitDigest,
   state,
 }: ClassifyCommitParams): CommitDisposition {
-  // Unknown semantics preserve the cursor and require a durable hold before any recovery.
+  // The distinct poison row lets the walker report an upgrade requirement.
   if (header === UNKNOWN_FRAME_VERSION) return { row: 'unsupported-version' }
 
   // Bytes that are not a commit can't be asked the epoch questions below, so settle next.

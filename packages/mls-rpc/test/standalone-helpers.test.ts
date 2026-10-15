@@ -53,9 +53,9 @@ test('standalone entry helpers preserve the factory blob format in both directio
   expect(await crypto.openEntries(sealEntries(key, entries, runtime))).toEqual(entries)
 })
 
-test('standalone open keeps the existing errors', () => {
+test('standalone open distinguishes malformed blobs from unsupported versions', () => {
   const key = new Uint8Array(32)
-  expect(() => openEntries(key, new Uint8Array(25))).toThrow('openEntries: not a sealed blob')
+  expect(() => openEntries(key, new Uint8Array([1]))).toThrow('openEntries: not a sealed blob')
   const future = new Uint8Array(26)
   future[0] = 2
   expect(() => openEntries(key, future)).toThrow('openEntries: unsupported blob version 2')

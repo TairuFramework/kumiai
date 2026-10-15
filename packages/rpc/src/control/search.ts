@@ -87,6 +87,7 @@ export type ControlSearchDeps = {
   hold(value: ControlHold): Promise<void>
   haltFork(evidence: GroupForkEvidence): Promise<void>
   safetyHold(): SafetyHold
+  onUnsupportedVersion?(frame: ControlLogFrame, epoch: number): void
 }
 
 export const CONTROL_SEARCH_BUDGET: ControlSearchBudget = {
@@ -140,6 +141,7 @@ type Discovery = {
   losers: CertifiedControlRange['losers']
   occurrence: LogPosition | null
   copyMismatch: boolean
+  unsupportedVersion: boolean
   unexplainedOwn: boolean
   latestOwnMatches: boolean | null
 }
@@ -290,6 +292,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
         losers: [],
         occurrence: null,
         copyMismatch: false,
+        unsupportedVersion: false,
         unexplainedOwn: false,
         latestOwnMatches: null,
       }
@@ -407,8 +410,10 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
             try {
               const handshake = decodeHandshakeFrame(frame.payload)
               if (handshake.version !== HANDSHAKE_VERSION) {
-                continuation = null
-                return unknown(position, 'unsupported-version')
+                discovery.unsupportedVersion = true
+                discovery.through = position
+                deps.onUnsupportedVersion?.(frame, retained.epoch)
+                continue
               }
               if (handshake.kind !== HANDSHAKE_KIND.commit) {
                 discovery.through = position
@@ -417,8 +422,10 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
               commit = decodeCommitFrame(handshake.payload).commit
             } catch (error) {
               if (isUnsupportedCommitFrameVersion(error)) {
-                continuation = null
-                return unknown(position, 'unsupported-version')
+                discovery.unsupportedVersion = true
+                discovery.through = position
+                deps.onUnsupportedVersion?.(frame, retained.epoch)
+                continue
               }
               discovery.through = position
               continue
@@ -463,23 +470,22 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
             if (held()) return stopped()
             if (result.kind === 'unavailable') {
               if (
+                result.reason === 'unsupported-version' ||
                 result.reason === 'unexplained-own' ||
-                (result.reason !== 'unsupported-version' &&
-                  commitDigest === built.digest &&
-                  fullDigest !== built.payloadDigest)
+                (commitDigest === built.digest && fullDigest !== built.payloadDigest)
               ) {
-                discovery.copyMismatch = true
-                discovery.unexplainedOwn ||= commitDigest !== built.digest
+                if (result.reason === 'unsupported-version') {
+                  discovery.unsupportedVersion = true
+                  deps.onUnsupportedVersion?.(frame, retained.epoch)
+                } else {
+                  discovery.copyMismatch = true
+                  discovery.unexplainedOwn ||= commitDigest !== built.digest
+                }
                 discovery.through = position
                 continue
               }
               continuation = null
-              return unknown(
-                position,
-                result.reason === 'unsupported-version'
-                  ? 'unsupported-version'
-                  : 'acceptance-unknown',
-              )
+              return unknown(position)
             }
             discovery.through = position
             if (result.kind === 'invalid') {
@@ -502,6 +508,10 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
           discovery.complete = discovery.head === null || discovery.through === discovery.head
         }
         if (discovery.latestOwnMatches === true) {
+          continuation = null
+          return unknown(discovery.through)
+        }
+        if (discovery.unsupportedVersion) {
           continuation = null
           return unknown(discovery.through)
         }

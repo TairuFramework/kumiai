@@ -392,7 +392,7 @@ test.each(['fork-halted', 'recovery-unavailable'] as const)(
   },
 )
 
-test('a late unsupported-version hold persists alongside the safety latch', async () => {
+test('an unsupported version fetched after a host halt preserves the safety latch', async () => {
   const { member, hub } = await fixture()
   const entered = Promise.withResolvers<void>()
   const release = Promise.withResolvers<void>()
@@ -424,12 +424,8 @@ test('a late unsupported-version hold persists alongside the safety latch', asyn
   await walking
   await halting
   const after = await member.control.load()
-  // Exclude the incoming frame classifier's epoch read before hold persistence.
-  expect(
-    epoch.mock.calls.slice(1),
-    'ControlHold persistence must not read MLS after safety latches',
-  ).toHaveLength(0)
-  expect(after.controlHold).toEqual({ reason: 'unsupported-version', position })
+  expect(epoch).not.toHaveBeenCalled()
+  expect(after.controlHold).toEqual(before.controlHold)
   expect(after.forkHalt).toEqual(before.forkHalt)
   expect(after.cursor).toEqual(before.cursor)
   expect(after.strand).toEqual(before.strand)
