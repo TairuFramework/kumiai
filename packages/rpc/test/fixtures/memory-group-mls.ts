@@ -30,7 +30,11 @@ import type {
   RosterEntry,
 } from '../../src/crypto.js'
 import type { LogPosition } from '../../src/cursor.js'
-import { ControlWriteNotCommittedError, StorageOutcomeUnknownError } from '../../src/errors.js'
+import {
+  ControlWriteNotCommittedError,
+  GroupSafetyHeldError,
+  StorageOutcomeUnknownError,
+} from '../../src/errors.js'
 import { encodeHandshakeFrame, HANDSHAKE_KIND } from '../../src/handshake.js'
 import {
   type CapturedPendingRecovery,
@@ -1442,25 +1446,35 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     request: Uint8Array,
     captureHead?: LogPosition | null,
   ): Promise<Uint8Array> {
-    if (captureHead !== undefined) {
-      validateCaptureHead(captureHead)
-      const control = await hostDB.control(storageID, { groupID, incarnation: 1 }).load()
-      if ((control.cursor?.position ?? null) !== captureHead)
-        throw new Error('Capture head does not match the committed cursor')
-    }
-    const to = authorize(request, 'sealGroupInfo')
-    const info: MemoryGroupInfo = {
-      authenticator: toB64U(authenticator()),
-      to: to.requesterDID,
-      requestID: to.requestID,
-      groupID,
-      epoch,
-      members: occupiedDIDs(),
-      head: ledgerHead,
-      ...(captureHead === undefined
-        ? {}
-        : { captureHead, signer: localDID, leafTokens: [...freshLeaves] }),
-    }
+    const { to, info } = await serialise(async () => {
+      if (captureHead !== undefined) {
+        validateCaptureHead(captureHead)
+        const control = (await hostDB.snapshot(storageID)).control
+        const safety = controlSafetyHeld(control)
+        if (safety !== null) throw new GroupSafetyHeldError(safety)
+        if (
+          (control.cursor?.position ?? null) !== captureHead ||
+          (control.cursor !== null && control.cursor.epoch !== epoch) ||
+          control.cursor?.stranded === true ||
+          control.strand !== null
+        )
+          throw new Error('Capture head does not match a complete committed cursor')
+      }
+      const to = authorize(request, 'sealGroupInfo')
+      const info: MemoryGroupInfo = {
+        authenticator: toB64U(authenticator()),
+        to: to.requesterDID,
+        requestID: to.requestID,
+        groupID,
+        epoch,
+        members: occupiedDIDs(),
+        head: ledgerHead,
+        ...(captureHead === undefined
+          ? {}
+          : { captureHead, signer: localDID, leafTokens: [...freshLeaves] }),
+      }
+      return { to, info }
+    })
     if (captureHead !== undefined) {
       info.stateSignature = signCapturedState(info)
       info.attestation = toB64U(hmac(sha256, recoverySecret, fromUTF(JSON.stringify(info))))

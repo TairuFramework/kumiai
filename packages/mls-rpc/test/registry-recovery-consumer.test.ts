@@ -285,6 +285,107 @@ test('registry sealing binds the actual cursor and safety subscriptions use the 
   }
 })
 
+test.each(['epoch', 'stranded', 'strand'] as const)(
+  'captured sealing refuses an incomplete committed cursor (%s)',
+  async (fault) => {
+    const groupID = `consumer-capture-${fault}`
+    const f = await createRegistryFixture({ mode: 'real-mls', setup: 'seeded', groupID })
+    try {
+      const key = { groupID, incarnation: 1 }
+      const mls = await api.createRegistryGroupMLS({
+        registry: f.registry,
+        key,
+        recovery: f.environment,
+        target: { targetID: 'hub', topicID: 'commit' },
+        identity: f.identity,
+        entrySlot: api.createLedgerEntrySlot(),
+        onConfirmedRecovery: () => {},
+      })
+      const { request } = await mls.createRecoveryRequest('incomplete-capture')
+      const control = f.device.groups.ports(key).control
+      await control.apply(
+        {
+          cursor: {
+            epoch: fault === 'epoch' ? 1 : 0,
+            position: asLogPosition('head'),
+            ...(fault === 'stranded' ? { stranded: true } : {}),
+          },
+          ...(fault === 'strand' ? { strand: { reason: 'retention-gap' as const } } : {}),
+        },
+        'incomplete',
+      )
+      await expect(
+        mls.capturedRecovery?.sealGroupInfo(request, asLogPosition('head')),
+      ).rejects.toThrow()
+    } finally {
+      await f.close()
+    }
+  },
+)
+
+test('captured sealing releases ownership before signing and retains the captured snapshot', async () => {
+  const groupID = 'consumer-capture-release'
+  const f = await createRegistryFixture({ mode: 'real-mls', setup: 'seeded', groupID })
+  const release = Promise.withResolvers<void>()
+  let signing: Promise<Uint8Array> | undefined
+  try {
+    const key = { groupID, incarnation: 1 }
+    const mls = await api.createRegistryGroupMLS({
+      registry: f.registry,
+      key,
+      recovery: f.environment,
+      target: { targetID: 'hub', topicID: 'commit' },
+      identity: f.identity,
+      entrySlot: api.createLedgerEntrySlot(),
+      onConfirmedRecovery: () => {},
+    })
+    const held = await mls.createRecoveryRequest('release-capture')
+    const access = await f.registry.access(groupID)
+    const authenticator = (await f.registry.recoverySource(groupID)).trust.installed.authenticator
+    const entered = Promise.withResolvers<void>()
+    const sign = f.identity.signToken.bind(f.identity)
+    const spy = vi.spyOn(f.identity, 'signToken').mockImplementationOnce(async (...args) => {
+      entered.resolve()
+      await release.promise
+      return await sign(...args)
+    })
+    signing = mls.sealGroupInfo(held.request, null)
+    await entered.promise
+    let readCompleted = false
+    const reading = access.read(() => {
+      readCompleted = true
+    })
+    try {
+      await vi.waitFor(() => expect(readCompleted).toBe(true), { timeout: 200 })
+      await reading
+      const ordinary = await f.acceptedOrdinary(access, { accepted: true })
+      expect(await access.adopt(ordinary.candidate, ordinary.expected, ordinary.write)).toBe(
+        'installed',
+      )
+    } finally {
+      release.resolve()
+      await reading
+      spy.mockRestore()
+    }
+    const source = await f.registry.recoverySource(groupID)
+    const reply = await recovery.authenticateRecoveryReply({
+      trust: source.trust,
+      sealed: await signing,
+      requestID: 'release-capture',
+      requestKey: held.requestKey,
+      options: f.environment.options,
+    })
+    expect(reply?.captureHead).toBeNull()
+    expect(reply?.groupInfoAuthenticator).toEqual(authenticator)
+    expect(source.trust.installed.authenticator).not.toEqual(authenticator)
+    await expect(mls.sealGroupInfo(held.request, null)).rejects.toThrow()
+  } finally {
+    release.resolve()
+    await signing?.catch(() => {})
+    await f.close()
+  }
+})
+
 test('registry admission follows cold control changes, access opening and external epoch changes', async () => {
   const groupID = 'consumer-admission'
   const f = await createRegistryFixture({ mode: 'real-mls', setup: 'empty', groupID })

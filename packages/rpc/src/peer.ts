@@ -136,6 +136,7 @@ import {
   encodeRecoveryVerdict,
   type RecoveryConfirmRequest,
 } from './recovery.js'
+import { type CommitPrefix, replyWithReconciledGroupInfo } from './recovery-capture.js'
 import {
   type ConfirmationWaiter,
   confirmationTag,
@@ -277,6 +278,11 @@ export function createGroupPeerWithControlWalk<
 ): {
   peer: GroupPeer<Protocols>
   controlWalk: {
+    reconcileCommitPrefix(): Promise<CommitPrefix>
+    replyWithCapturedGroupInfo(request: {
+      requestID: string
+      request: Uint8Array
+    }): Promise<boolean>
     walkCommits(search: ControlWalkRequest): Promise<boolean>
     head(): LogPosition | null
     haltFork(evidence: GroupForkEvidence): Promise<void>
@@ -1640,6 +1646,7 @@ export function createGroupPeerWithControlWalk<
     port: GroupMLS,
     topicID: string,
     search?: ControlWalkRequest,
+    requireCompletePrefix = false,
   ): Promise<boolean> => {
     commitLaneCaughtUp = false
     const workVersion = commitWorkVersion
@@ -1680,6 +1687,7 @@ export function createGroupPeerWithControlWalk<
       if (
         search === undefined &&
         covered &&
+        (!requireCompletePrefix || reconciledHead === commitLogHead) &&
         !stranded &&
         !locallyRemoved &&
         floor.covered &&
@@ -1735,12 +1743,15 @@ export function createGroupPeerWithControlWalk<
           result.head != null &&
           pageAfter != null &&
           result.head > pageAfter)
+      if (requireCompletePrefix && gap) covered = false
       // With no cursor the hub flags ANY log removal as a gap, so an unflagged read from the
       // oldest frame holds the whole log: a fresh member's floor stays covered, and its first
       // publication must not request a heal.
       if (pageAfter == null && result.gap) {
         covered = false
         floor = { ...floor, covered: false }
+      } else if (requireCompletePrefix && pageAfter === null && !gap) {
+        floor = { ...floor, covered: true }
       } else if (pageAfter != null && gap) {
         floor = { ...floor, covered: false }
         stranded = true
@@ -1763,8 +1774,9 @@ export function createGroupPeerWithControlWalk<
         assertForwardPage(pageAfter, result.messages)
       }
       if (result.messages.length === 0) {
-        // An empty gap ends at head; retained frames still require classification.
-        if (gap && result.head != null) reconciledHead = asLogPosition(result.head)
+        // Legacy search retains its sampled head until captured recovery is activated.
+        if (!requireCompletePrefix && gap && result.head != null)
+          reconciledHead = asLogPosition(result.head)
         // Drained. The tip an EMPTY page reports is not redundant: a topic keeps its head when
         // its frames age out, so anchoring on the cursor here would compare-and-set against
         // `null` on a topic whose head is real, and lose forever.
@@ -2161,7 +2173,7 @@ export function createGroupPeerWithControlWalk<
    * nothing further is coming to prompt them, so a peer whose backlog is entirely at its current
    * epoch (or whose log held no commits at all) would otherwise never read a thing.
    */
-  const pullCommits = async (): Promise<boolean> => {
+  const pullCommits = async (requireCompletePrefix = false): Promise<boolean> => {
     commitLaneCaughtUp = mls == null
     if (disposed || safetyHold() !== null || locallyRemoved) return false
     if (!controlReplayed) {
@@ -2180,7 +2192,7 @@ export function createGroupPeerWithControlWalk<
     if (disposed) return false
     const anchorBefore = anchor
     try {
-      const advanced = await walkCommits(mls, commitTopicID)
+      const advanced = await walkCommits(mls, commitTopicID, undefined, requireCompletePrefix)
       if (disposed) return false
       await appLane.deliver()
       if (disposed) return false
@@ -2210,9 +2222,78 @@ export function createGroupPeerWithControlWalk<
   }
 
   /** Pull the commit log, and rebuild the app lane if the pull moved the epoch. */
-  const reconcileCommits = async (): Promise<void> => {
-    const advanced = await pullCommits()
+  const reconcileCommits = async (requireCompletePrefix = false): Promise<void> => {
+    const advanced = await pullCommits(requireCompletePrefix)
     if (!disposed && advanced) await rebuildEpoch()
+  }
+
+  const reconcileCommitPrefix = async (): Promise<CommitPrefix> => {
+    await ready
+    assertLive()
+    return await runSerial(async () => {
+      if (safetyHold() !== null) return { kind: 'held' }
+      if (mls == null || params.readEvidence === undefined) return { kind: 'incomplete' }
+      await settleOperations()
+      // Legacy gap search may have sampled an unprocessed head. Capture starts at durable work.
+      reconciledHead = durableCursor?.position ?? null
+      await reconcileCommits(true)
+      if (safetyHold() !== null) return { kind: 'held' }
+      if (
+        disposed ||
+        !commitLaneCaughtUp ||
+        stranded ||
+        locallyRemoved ||
+        rejoinHeld ||
+        anchorRecoveryPending ||
+        hardControlHeld()
+      )
+        return { kind: 'incomplete' }
+      const workVersion = commitWorkVersion
+      const evidence = await params.readEvidence()
+      if (safetyHold() !== null) return { kind: 'held' }
+      const { source, cursor } = evidence
+      const identity = source.identity
+      if (
+        disposed ||
+        workVersion !== commitWorkVersion ||
+        identity === null ||
+        evidence.terminal ||
+        cursor?.stranded === true ||
+        (cursor !== null && cursor.epoch !== identity.epoch) ||
+        (cursor?.position ?? null) !== commitLogHead ||
+        reconciledHead !== commitLogHead
+      )
+        return { kind: 'incomplete' }
+      return {
+        kind: 'complete',
+        key: { ...source.key },
+        identity: { ...identity, authenticator: identity.authenticator.slice() },
+        stateVersion: source.stateVersion,
+        head: commitLogHead,
+      }
+    })
+  }
+
+  const replyWithCapturedGroupInfo = async (request: {
+    requestID: string
+    request: Uint8Array
+  }): Promise<boolean> => {
+    if (mls == null || rendezvousTopicID == null) return false
+    const port = mls
+    const topicID = rendezvousTopicID
+    return await replyWithReconciledGroupInfo({
+      reconcileCommitPrefix,
+      sealGroupInfo: (head) => port.sealGroupInfo(request.request, head),
+      blocked: () => disposed || safetyHold() !== null || pendingRecovery != null,
+      publish: (groupInfo) =>
+        mux.publish({
+          topicID,
+          payload: encodeHandshakeFrame(
+            HANDSHAKE_KIND.recoveryReply,
+            encodeRecoveryReply(request.requestID, groupInfo),
+          ),
+        }),
+    })
   }
 
   /**
@@ -4596,6 +4677,8 @@ export function createGroupPeerWithControlWalk<
   return {
     peer,
     controlWalk: {
+      reconcileCommitPrefix,
+      replyWithCapturedGroupInfo,
       haltFork: (evidence) => {
         const halting = haltFork(evidence)
         return halting.then(() => runSerial(async () => {}))

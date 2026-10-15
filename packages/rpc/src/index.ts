@@ -223,6 +223,7 @@ export {
   type RecoveryConfirmRequest,
   type RecoveryVerdictFrame,
 } from './recovery.js'
+export type { CommitPrefix } from './recovery-capture.js'
 export {
   type AcceptedRejoinSettlement,
   assignRecoverySwitchMutationID,

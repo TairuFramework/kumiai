@@ -556,6 +556,7 @@ export type GroupMLS = {
    * applied its removal. Throws for a request it refuses; the peer stays silent.
    */
   sealGroupInfo(request: Uint8Array): Promise<Uint8Array>
+  /** Requires a complete reconciled prefix. Captures its committed cursor/identity atomically. */
   sealGroupInfo(request: Uint8Array, captureHead: LogPosition | null): Promise<Uint8Array>
   /**
    * Open a sealed reply with the key minted for `requestID` and BUILD the external commit that

@@ -378,6 +378,38 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
   }
 
   describe(`GroupMLS conformance — ${label}`, () => {
+    test.each(['complete', 'epoch', 'stranded', 'strand'] as const)(
+      'captured sealing requires a complete committed cursor (%s)',
+      async (fault) => {
+        await withGroup(2, `capture-cursor-${fault}`, async (group) => {
+          const responder = memberAt(group.members, 0).mls
+          const requester = memberAt(group.members, 1).mls
+          const { request } = await requester.createRecoveryRequest('capture-cursor')
+          const commit = await group.buildCommit()
+          expect(
+            await responder.processCommit(commit.commit, {
+              ...commit.context,
+              adoption: (staged) => ({
+                mutationID: 'capture-cursor',
+                changes: {
+                  cursor: {
+                    epoch: staged.epochAfter + (fault === 'epoch' ? 1 : 0),
+                    position: null,
+                    ...(fault === 'stranded' ? { stranded: true } : {}),
+                  },
+                  ...(fault === 'strand' ? { strand: { reason: 'retention-gap' } } : {}),
+                },
+              }),
+            }),
+          ).toMatchObject({ applied: true, advanced: true })
+          await expect(responder.sealGroupInfo(request, 'sampled-head')).rejects.toThrow()
+          if (fault === 'complete')
+            expect((await responder.sealGroupInfo(request, null)).length).toBeGreaterThan(0)
+          else await expect(responder.sealGroupInfo(request, null)).rejects.toThrow()
+          expect((await responder.sealGroupInfo(request)).length).toBeGreaterThan(0)
+        })
+      },
+    )
     test('captured recapture distinguishes exact fresh leaves with the same DID and request ID', async () => {
       const s = await params.createCapturedRecovery()
       const port = s.requester.capturedRecovery

@@ -9,6 +9,8 @@ import {
   CommitValidationUnavailableError,
   confirmationKey,
   createRecoveryRequest,
+  decodeClientState,
+  encodeClientState,
   encodeGroupAnchor,
   type GroupHandle,
   ledgerEntryDigest,
@@ -49,6 +51,7 @@ import type {
 import {
   ControlWriteNotCommittedError,
   controlSafetyHeld,
+  GroupSafetyHeldError,
   StorageOutcomeUnknownError,
 } from '@kumiai/rpc'
 import { ciphersuites } from 'ts-mls'
@@ -588,16 +591,44 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       captureHead?: LogPosition | null,
     ): Promise<Uint8Array> {
       if (captureHead !== undefined) {
-        return await access.readControl(async (scope) => {
+        const snapshot = await access.readControl(async (scope) => {
           const control = await scope.loadControl(params.control)
-          if ((control.cursor?.position ?? null) !== captureHead)
-            throw new Error('Capture head does not match the committed cursor')
-          return await sealCapturedGroupInfo({
-            group: scope.handle,
-            identity,
-            request: new TextDecoder().decode(request),
-            captureHead,
-          })
+          const safety = controlSafetyHeld(control)
+          if (safety !== null) throw new GroupSafetyHeldError(safety)
+          const { handle, source } = scope
+          if (
+            source.identity === null ||
+            (control.cursor?.position ?? null) !== captureHead ||
+            (control.cursor !== null && control.cursor.epoch !== source.identity.epoch) ||
+            control.cursor?.stranded === true ||
+            control.strand !== null
+          )
+            throw new Error('Capture head does not match a complete committed cursor')
+          return {
+            state: encodeClientState(handle.state),
+            credential: { ...handle.credential },
+            ledgerEntries: handle.ledgerTokens,
+            cipherSuite: handle.context.cipherSuite,
+          }
+        })
+        const state = decodeClientState(snapshot.state)
+        if (state == null) throw new Error('Invalid captured state')
+        const group = await restoreGroup({
+          state,
+          credential: snapshot.credential,
+          ledgerEntries: snapshot.ledgerEntries,
+          options: {
+            ciphersuiteName: Object.keys(ciphersuites).find(
+              (name) => ciphersuites[name as keyof typeof ciphersuites] === snapshot.cipherSuite.id,
+            ),
+            cryptoProvider: { getCiphersuiteImpl: async () => snapshot.cipherSuite },
+          },
+        })
+        return await sealCapturedGroupInfo({
+          group,
+          identity,
+          request: new TextDecoder().decode(request),
+          captureHead,
         })
       }
       // Throws for a request this member refuses — a removed requester holds no leaf in
