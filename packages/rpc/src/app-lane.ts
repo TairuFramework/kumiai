@@ -210,7 +210,9 @@ export function createAppLane(params: AppLaneParams): AppLane {
    * (below) and dispensed epoch by epoch as the commit walk passes through it.
    */
   let segment = new Map<string, Array<AppFrame>>()
+  let segmentGeneration = 0
   const pendingRecords: Array<PendingAppFrame> = []
+  const eventTails = new Map<string, Promise<void>>()
   const reportedPruned = new Map<string, Set<string>>()
   const blockingFrames = new Map<string, AppDeliveryResumed>()
   let disposed = false
@@ -360,7 +362,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
   }
 
   /** Tell the host once when a fetch with a cursor confirms unread frames were removed. */
-  const reportPrunedWindow = async (report: ReportPrunedWindowParams): Promise<void> => {
+  const reportPrunedWindow = (report: ReportPrunedWindowParams): void => {
     const { name, topicID, cursor, oldest } = report
     const group = groupID()
     if (onAppWindowPruned == null || group == null) return
@@ -371,12 +373,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
     }
     if (positions.has(cursor)) return
     positions.add(cursor)
-    try {
-      await onAppWindowPruned({ groupID: group, protocol: name, cursor, oldest })
-    } catch {
-      // The host's notice is the host's problem. The frames that survived are still to be
-      // delivered below, and a throwing subscriber must not cost a returning member those too.
-    }
+    notifyAppHost(onAppWindowPruned, { groupID: group, protocol: name, cursor, oldest })
   }
 
   /**
@@ -456,7 +453,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
         })
         assertForwardPage(after, result.messages)
         if (after != null && result.gap)
-          await reportPrunedWindow({ name, topicID, cursor: after, oldest: result.oldest })
+          reportPrunedWindow({ name, topicID, cursor: after, oldest: result.oldest })
         for (const message of result.messages) {
           const position = asLogPosition(message.sequenceID)
           const restored = pendingRecords.find(
@@ -652,13 +649,18 @@ export function createAppLane(params: AppLaneParams): AppLane {
       retryRequested = false
       if (retryTimer != null) clearTimeout(retryTimer)
       retryTimer = undefined
-      void scheduleDrain(deliver).then(
+      const generation = segmentGeneration
+      void scheduleDrain(async () => {
+        if (generation === segmentGeneration && !disposed) await deliver(generation)
+      }).then(
         () => {
+          if (generation !== segmentGeneration) return
           retryScheduled = false
           retryBackoff = 1000
           if (retryRequested) retryDelivery()
         },
         () => {
+          if (generation !== segmentGeneration) return
           retryScheduled = false
           if (disposed || safetyHold() !== null) return
           retryTimer = setTimeout(() => {
@@ -913,24 +915,32 @@ export function createAppLane(params: AppLaneParams): AppLane {
         const protocol = protocols[name]
         if (protocol === undefined) continue
         if (retentionOf(protocol, prc) !== 'log') continue
-        try {
-          // Same door as the live push: emit the retained frame's plaintext into the
-          // per-protocol emitter the live bus is also built from. No listener → no-op.
-          await events.emit(prc, { data: message.payload.data ?? {}, senderDID })
-        } catch {
-          // A host listener that threw has been delivered to. Re-delivering on the next pull
-          // would retry the host's own bug at it, so the frame is consumed.
-        }
+        // Non-durable handlers consume the frame regardless of their outcome and may re-enter.
+        notifyAppHost(
+          (event) => {
+            scheduleDelivery(() => {
+              const delivery = (eventTails.get(name) ?? Promise.resolve())
+                .then(async () => {
+                  if (!disposed) await events.emit(prc, event)
+                })
+                .catch(() => {})
+              eventTails.set(name, delivery)
+            })
+          },
+          { data: message.payload.data ?? {}, senderDID },
+        )
       }
       await advanceCursor(name, frames)
     }
   }
 
-  const deliver = async (): Promise<void> => {
+  const deliver = async (generation = segmentGeneration): Promise<void> => {
     try {
-      await runAppLane(drain)
+      await runAppLane(async () => {
+        if (generation === segmentGeneration) await drain()
+      })
     } finally {
-      if (crypto.pending != null && !disposed) {
+      if (generation === segmentGeneration && crypto.pending != null && !disposed) {
         for (const record of pendingRecords) reportUnknown(record)
         for (const name of new Set(pendingRecords.map((record) => record.frame.protocol))) {
           scheduleDelivery(() => scheduleWorker(name))
@@ -1028,10 +1038,12 @@ export function createAppLane(params: AppLaneParams): AppLane {
       }
     },
     reset: (): void => {
+      segmentGeneration += 1
       if (futureTimer != null) clearTimeout(futureTimer)
       if (retryTimer != null) clearTimeout(retryTimer)
       retryTimer = undefined
       retryBackoff = 1000
+      retryScheduled = false
       retryRequested = false
       caughtUpTimes.clear()
       futureTimer = undefined

@@ -460,7 +460,17 @@ export function createGroupPeerWithControlWalk<
     },
     onSafetyHeld: latchSafetyHold,
     ...(appCursorStore != null ? { appCursorStore } : {}),
-    ...(onAppWindowPruned != null ? { onAppWindowPruned } : {}),
+    ...(onAppWindowPruned != null
+      ? {
+          onAppWindowPruned: (event) => {
+            const notify = () => {
+              if (!disposed) notifyHost(onAppWindowPruned, event)
+            }
+            if (appNoticeInSerial) hostOutbox.push(notify)
+            else queueMicrotask(notify)
+          },
+        }
+      : {}),
     ...(params.onAppDeliveryStalled != null
       ? {
           onAppDeliveryStalled: (event: AppDeliveryStalled) => {

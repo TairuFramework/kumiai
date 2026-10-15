@@ -290,30 +290,29 @@ describe('the drain retains future claims and passes no epoch it failed to read'
     await flush()
     expect(alice.mls.epoch()).toBe(2)
 
-    // The mid-walk publish, hung off the delivery of the epoch-1 frame: at that moment bob's walk
-    // has pulled the segment and has not yet applied the commit that leaves epoch 1. Published
-    // while he is not listening — the live lane must not be what saves this.
-    let injected = false
     const handlers = {
-      'chat/posted': async (ctx: { data: unknown }) => {
+      'chat/posted': (ctx: { data: unknown }) => {
         seen.push(ctx.data)
-        if (injected) return
-        injected = true
-        const atTwo = createFakeCrypto({ epoch: 2, localDID: 'alice' })
-        hub.detach('bob')
-        await hub.publish({
-          senderDID: 'alice',
-          topicID,
-          retain: 'log',
-          payload: await atTwo.wrap(encodeEventFrame('chat/posted', { text: 'mid-walk, at two' }), {
-            aad: encodeAppAAD({ topicID, intent: 'log' }),
-          }),
-        })
-        hub.reattach('bob')
       },
     }
 
     const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
+    // Inject after the epoch-1 drain, before apply. Host handlers run after the walk releases.
+    const processCommit = restarted.mls.processCommit.bind(restarted.mls)
+    vi.spyOn(restarted.mls, 'processCommit').mockImplementationOnce(async (...args) => {
+      const atTwo = createFakeCrypto({ epoch: 2, localDID: 'alice' })
+      hub.detach('bob')
+      await hub.publish({
+        senderDID: 'alice',
+        topicID,
+        retain: 'log',
+        payload: await atTwo.wrap(encodeEventFrame('chat/posted', { text: 'mid-walk, at two' }), {
+          aad: encodeAppAAD({ topicID, intent: 'log' }),
+        }),
+      })
+      hub.reattach('bob')
+      return processCommit(...args)
+    })
     hub.reattach('bob')
     await flush()
 

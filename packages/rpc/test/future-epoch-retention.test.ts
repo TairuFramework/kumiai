@@ -154,6 +154,124 @@ test('a peer expires a near-future occurrence without later commit or app traffi
   }
 })
 
+async function expectCompletion(operation: Promise<unknown>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const outcome = Promise.race([
+    operation.then(() => 'completed'),
+    new Promise<string>((resolve) => {
+      timer = setTimeout(() => resolve('timed out'), 100)
+    }),
+  ])
+  try {
+    await vi.advanceTimersByTimeAsync(100)
+    expect(await outcome).toBe('completed')
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+test('an expiry gap observer can await resync without blocking later serial work', async () => {
+  const hub = new DurableFakeHub()
+  const observed = Promise.withResolvers<void>()
+  const notices: Array<string> = []
+  const pruned = vi.fn(async () => {
+    notices.push('pruned')
+    await bob.peer.resync()
+    observed.resolve()
+  })
+  const bob = durableBob(hub, {
+    onAppWindowPruned: pruned,
+    onAppDeliveryStalled: () => notices.push('stalled'),
+    onAppDeliveryResumed: () => notices.push('resumed'),
+  })
+  await bob.peer.protocol('chat').to('alice')
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  try {
+    const frame = await hub.publish({
+      senderDID: 'alice',
+      topicID,
+      retain: 'log',
+      payload: await createFakeCrypto({ epoch: 3, localDID: 'alice' }).wrap(
+        encodeEventFrame('chat/posted', {}),
+        { aad: encodeAppAAD({ topicID, intent: 'log' }) },
+      ),
+    })
+    await bob.peer.replay()
+    await vi.advanceTimersByTimeAsync(0)
+    const fetch = hub.fetchTopic.bind(hub)
+    vi.spyOn(hub, 'fetchTopic').mockImplementation(async (params) => {
+      const result = await fetch(params)
+      return params.topicID === topicID ? { ...result, gap: true } : result
+    })
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(pruned).toHaveBeenCalledExactlyOnceWith({
+      groupID: commitTopic(secret),
+      protocol: 'chat',
+      cursor: frame.sequenceID,
+      oldest: frame.sequenceID,
+    })
+    await expectCompletion(Promise.all([observed.promise, bob.peer.resync()]))
+    expect(notices).toEqual(['stalled', 'pruned', 'resumed'])
+    expect(bob.appCursorStore.stored(topicID)).toBe(frame.sequenceID)
+  } finally {
+    await bob.peer.dispose()
+  }
+})
+
+test('a non-durable handler reached by expiry can await resync', async () => {
+  const hub = new DurableFakeHub()
+  const observed = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  const handler = vi.fn(async ({ data }: { data: { text: string } }) => {
+    if (data.text === 'first') await release.promise
+    await bob.peer.resync()
+    if (data.text === 'second') observed.resolve()
+  })
+  const bob = makeMLSPeer(hub, 'bob', secret, { handlers: { 'chat/posted': handler } })
+  await bob.peer.protocol('chat').to('alice')
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  try {
+    await hub.publish({
+      senderDID: 'alice',
+      topicID,
+      retain: 'log',
+      payload: await createFakeCrypto({ epoch: 3, localDID: 'alice' }).wrap(
+        encodeEventFrame('chat/posted', {}),
+        { aad: encodeAppAAD({ topicID, intent: 'log' }) },
+      ),
+    })
+    await bob.peer.replay()
+    await vi.advanceTimersByTimeAsync(0)
+    hub.detach('bob')
+    const writer = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+    await hub.publish({
+      senderDID: 'alice',
+      topicID,
+      retain: 'log',
+      payload: await writer.wrap(encodeEventFrame('chat/posted', { text: 'first' }), {
+        aad: encodeAppAAD({ topicID, intent: 'log' }),
+      }),
+    })
+    const frame = await hub.publish({
+      senderDID: 'alice',
+      topicID,
+      retain: 'log',
+      payload: await writer.wrap(encodeEventFrame('chat/posted', { text: 'second' }), {
+        aad: encodeAppAAD({ topicID, intent: 'log' }),
+      }),
+    })
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(handler).toHaveBeenCalledOnce()
+    release.resolve()
+    await expectCompletion(Promise.all([observed.promise, bob.peer.resync()]))
+    expect(handler.mock.calls.map(([ctx]) => ctx.data.text)).toEqual(['first', 'second'])
+    expect(bob.appCursorStore.stored(topicID)).toBe(frame.sequenceID)
+  } finally {
+    release.resolve()
+    await bob.peer.dispose()
+  }
+})
+
 test('a peer starts hold age only when a paused commit walk catches up', async () => {
   const hub = new DurableFakeHub()
   const first = durableBob(hub)
@@ -338,6 +456,7 @@ async function futureLane(
   })
   if (options.hint != null) reader.epoch = () => options.hint as number
   const cursor = createMemoryAppCursorStore()
+  const anchor = { epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }
   const emit = vi.fn(async () => {})
   const messages: Array<{ sequenceID: string; payload: Uint8Array }> = []
   const fetch = vi.fn(async ({ after }: { after?: string }) => ({
@@ -355,7 +474,7 @@ async function futureLane(
       eventHandlers: new Map([['chat', { emit }]]) as never,
       retentionSeconds: 60,
       appCursorStore: cursor,
-      anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
+      anchor: () => anchor,
       groupID: () => 'group',
       ...{
         commitLaneCaughtUp: () => caught,
@@ -382,6 +501,7 @@ async function futureLane(
     create,
     reader,
     cursor,
+    anchor,
     emit,
     rows,
     messages,
@@ -396,6 +516,89 @@ async function futureLane(
 }
 
 describe('caught-up future occurrence bounds', () => {
+  test('reset cancels a queued drain before it can fetch the replacement segment', async () => {
+    const release = Promise.withResolvers<void>()
+    const settled = Promise.withResolvers<void>()
+    const f = await futureLane({
+      scheduleDrain: async (drain) => {
+        await release.promise
+        try {
+          await drain()
+        } finally {
+          settled.resolve()
+        }
+      },
+    })
+    await f.append(3)
+    await f.lane.deliver()
+    f.lane.retryDelivery()
+    f.lane.reset()
+    f.anchor.epoch = 2
+    f.anchor.secret = fakeEpochSecret(2, APP_TOPIC_LABEL)
+    f.fetch.mockClear().mockRejectedValue(new Error('replacement segment unavailable'))
+    release.resolve()
+    await settled.promise
+    await vi.advanceTimersByTimeAsync(0)
+    expect(f.fetch).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  test('reset prevents an in-flight drain rejection from arming backoff', async () => {
+    const f = await futureLane()
+    await f.append(3)
+    await f.lane.deliver()
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    f.fetch.mockImplementationOnce(async () => {
+      entered.resolve()
+      await release.promise
+      throw new Error('old segment unavailable')
+    })
+    f.lane.retryDelivery()
+    await entered.promise
+    f.lane.reset()
+    release.resolve()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  test.each(['resolve', 'reject'])(
+    'new segment retries proceed while an old queued drain awaits %s',
+    async (outcome) => {
+      const release = Promise.withResolvers<void>()
+      let scheduled = 0
+      const f = await futureLane({
+        scheduleDrain: async (drain) => {
+          scheduled += 1
+          if (scheduled === 1) {
+            await release.promise
+            if (outcome === 'reject') throw new Error('old scheduler failed')
+          }
+          await drain()
+        },
+      })
+      await f.append(3)
+      await f.lane.deliver()
+      f.lane.retryDelivery()
+      f.lane.reset()
+      await f.lane.deliver()
+      const fetches = f.fetch.mock.calls.length
+      try {
+        f.lane.retryDelivery()
+        await vi.advanceTimersByTimeAsync(0)
+        expect(f.fetch.mock.calls.length).toBe(fetches + 1)
+        release.resolve()
+        await vi.advanceTimersByTimeAsync(0)
+        expect(vi.getTimerCount()).toBe(1)
+        await vi.advanceTimersByTimeAsync(30_000)
+        expect(f.cursor.stored(topicID)).toBe('000000000001')
+        expect(vi.getTimerCount()).toBe(0)
+      } finally {
+        release.resolve()
+      }
+    },
+  )
+
   test.each(['expiry', 'ahead note'])(
     '%s drain waits for an in-flight commit apply before opening',
     async (trigger) => {
