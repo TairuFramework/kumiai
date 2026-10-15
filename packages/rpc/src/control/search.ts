@@ -4,7 +4,7 @@ import { toB64U } from '@sozai/codec'
 
 import { digestAppliedCommit } from '../classify.js'
 import { decodeCommitFrame, isUnsupportedCommitFrameVersion } from '../commit-frame.js'
-import type { CommitHeader } from '../crypto.js'
+import type { CommitHeader, GroupMLS } from '../crypto.js'
 import { asLogPosition, type LogPosition } from '../cursor.js'
 import { decodeHandshakeFrame, HANDSHAKE_KIND, HANDSHAKE_VERSION } from '../handshake.js'
 import type { GroupForkEvidence, SafetyHold } from './safety.js'
@@ -20,6 +20,7 @@ import type {
 
 export type ControlLogFrame = { position: LogPosition; payload: Uint8Array; senderDID: string }
 export type ControlFrameValidation =
+  // Own means receiver-eligible recognition of the saved work, not just local authorship.
   | { kind: 'valid'; header: CommitHeader; own: boolean; advanced: boolean; removed: boolean }
   | { kind: 'invalid'; reason: 'non-commit' | 'malformed' | 'authentication' | 'policy' }
   | {
@@ -70,6 +71,8 @@ export type ControlHold = {
 export type ControlSearchBudget = { maxPasses: number; maxFetches: number; maxFrames: number }
 export type ControlSearchWork = { takeFetch(): boolean; takeFrame(): boolean }
 export type ControlSearchDeps = {
+  /** Without the helper, changed encodings conservatively retain unknown acceptance. */
+  ownCommitDigest?: GroupMLS['ownCommitDigest']
   budget: ControlSearchBudget
   fetch(after: LogPosition | null): Promise<HubFetchTopicResult>
   validation: ControlValidationPort
@@ -138,6 +141,7 @@ type Discovery = {
   captured: boolean
   complete: boolean
   winner: ControlLogFrame | null
+  winnerOwn: boolean
   losers: CertifiedControlRange['losers']
   occurrence: LogPosition | null
   copyMismatch: boolean
@@ -226,6 +230,16 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
         continuation = null
         return unknown()
       }
+      let savedRecognition: string | null = null
+      if (deps.ownCommitDigest !== undefined) {
+        try {
+          savedRecognition = deps.ownCommitDigest(
+            decodeCommitFrame(decodeHandshakeFrame(built.payload).payload).commit,
+          )
+        } catch {
+          return unknown()
+        }
+      }
       let evidence = await deps.readEvidence()
       if (held()) return stopped()
       if (evidence.cursor?.stranded === true) {
@@ -289,6 +303,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
         captured: false,
         complete: false,
         winner: null,
+        winnerOwn: false,
         losers: [],
         occurrence: null,
         copyMismatch: false,
@@ -327,10 +342,14 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
           continuation = null
           return false
         }
-        const winnerDigest = digestAppliedCommit(
-          decodeCommitFrame(decodeHandshakeFrame(winner.payload).payload).commit,
-        )
-        const winnerPayloadDigest = toB64U(sha256(winner.payload))
+        const winnerDigest = discovery.winnerOwn
+          ? built.digest
+          : digestAppliedCommit(
+              decodeCommitFrame(decodeHandshakeFrame(winner.payload).payload).commit,
+            )
+        const winnerPayloadDigest = discovery.winnerOwn
+          ? built.payloadDigest
+          : toB64U(sha256(winner.payload))
         if (
           row.sequenceID !== winner.position ||
           row.payloadDigest !== winnerPayloadDigest ||
@@ -360,7 +379,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
         if (discovery.unexplainedOwn) return unknown(discovery.through)
         if (discovery.winner === null || discovery.occurrence === null)
           return unknown(discovery.through)
-        if (toB64U(sha256(discovery.winner.payload)) === built.payloadDigest) {
+        if (discovery.winnerOwn) {
           if (!(await validation.verifyOwn(built)) || !(await committedWinner()))
             return unknown(discovery.winner.position)
           if (held()) return stopped()
@@ -469,22 +488,27 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
             }
             if (held()) return stopped()
             const commitDigest = digestAppliedCommit(commit)
-            if (commitDigest === built.digest)
-              discovery.latestOwnMatches = fullDigest === built.payloadDigest
+            const deliveredRecognition = deps.ownCommitDigest?.(commit) ?? null
+            const sameCommit =
+              commitDigest === built.digest ||
+              (savedRecognition !== null &&
+                deliveredRecognition !== null &&
+                savedRecognition === deliveredRecognition)
+            if (sameCommit) discovery.latestOwnMatches = fullDigest === built.payloadDigest
             const result = await validation.validateFrame(frame, built, header)
             if (held()) return stopped()
             if (result.kind === 'unavailable') {
               if (
                 result.reason === 'unsupported-version' ||
                 result.reason === 'unexplained-own' ||
-                (commitDigest === built.digest && fullDigest !== built.payloadDigest)
+                (sameCommit && fullDigest !== built.payloadDigest)
               ) {
                 if (result.reason === 'unsupported-version') {
                   discovery.unsupportedVersion = true
                   deps.onUnsupportedVersion?.(frame, retained.epoch)
                 } else {
                   discovery.copyMismatch = true
-                  discovery.unexplainedOwn ||= commitDigest !== built.digest
+                  discovery.unexplainedOwn ||= !sameCommit
                 }
                 discovery.through = position
                 continue
@@ -494,18 +518,14 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
             }
             discovery.through = position
             if (result.kind === 'invalid') {
-              if (commitDigest === built.digest && fullDigest !== built.payloadDigest)
-                discovery.copyMismatch = true
+              if (sameCommit && fullDigest !== built.payloadDigest) discovery.copyMismatch = true
               continue
             }
-            if (result.own && fullDigest !== built.payloadDigest) {
-              discovery.copyMismatch = true
-              discovery.unexplainedOwn ||= commitDigest !== built.digest
-              continue
-            }
-            if (discovery.winner === null) discovery.winner = frame
-            else discovery.losers.push({ position, payloadDigest: fullDigest })
-            if (fullDigest === built.payloadDigest && result.own) {
+            if (discovery.winner === null) {
+              discovery.winner = frame
+              discovery.winnerOwn = result.own
+            } else discovery.losers.push({ position, payloadDigest: fullDigest })
+            if (result.own) {
               discovery.occurrence = position
               return settleOccurrence()
             }

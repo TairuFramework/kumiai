@@ -2018,7 +2018,7 @@ test.each([
       'resolver-malformed': { kind: 'invalid', reason: 'malformed' },
       'resolver-missing': { kind: 'unavailable', reason: 'resolver' },
       'own-copy': { kind: 'unavailable', reason: 'unexplained-own' },
-      'own-blob-version': { kind: 'unavailable', reason: 'unexplained-own' },
+      'own-blob-version': { kind: 'valid', own: true },
     }[kind]
     if (kind === 'malformed') payload = new Uint8Array()
     else if (kind === 'handshake-version') payload[2] = 99
@@ -2051,7 +2051,9 @@ test.each([
       )
     }
     const validation = await f.port.restoreValidation(f.built)
-    expect(await validation?.validateFrame({ ...ledger.frame, payload }, f.built)).toEqual(expected)
+    expect(await validation?.validateFrame({ ...ledger.frame, payload }, f.built)).toMatchObject(
+      expected,
+    )
     const searched = await searchReal(f, ledger.commit, f.port, payload)
     if (kind === 'handshake-version' || kind === 'commit-version')
       expect(searched.result).toEqual({ kind: 'unknown' })

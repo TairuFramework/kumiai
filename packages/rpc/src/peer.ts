@@ -1803,10 +1803,23 @@ export function createGroupPeerWithControlWalk<
           if (disposition.row === 'own-unmerged') {
             const slot = (await control?.load())?.commitOnce
             if (safetyHold() !== null) return advancedEpoch
+            const exactOwn = slot?.payloadDigest === toB64U(sha256(message.payload))
+            const savedCommit =
+              slot == null
+                ? null
+                : decodeCommitFrame(decodeHandshakeFrame(slot.payload).payload).commit
+            const savedRecognition =
+              savedCommit === null ? null : (mls?.ownCommitDigest(savedCommit) ?? null)
+            const deliveredRecognition = mls?.ownCommitDigest(commitFrame.commit) ?? null
+            // A search's prefix walk must not start another settlement search.
             if (
+              !controlSearchActive &&
               slot !== null &&
               slot !== undefined &&
-              slot.payloadDigest === toB64U(sha256(message.payload))
+              (exactOwn ||
+                (savedRecognition !== null &&
+                  deliveredRecognition !== null &&
+                  savedRecognition === deliveredRecognition))
             ) {
               const settled = await settleRetainedControlSlot({
                 position,
@@ -1818,7 +1831,7 @@ export function createGroupPeerWithControlWalk<
                 await saveCommitCursor(position)
                 break
               }
-              return advancedEpoch
+              if (exactOwn) return advancedEpoch
             }
             await saveCommitCursor(position)
             if (commitTopicID != null)
@@ -2511,6 +2524,7 @@ export function createGroupPeerWithControlWalk<
   }
   let welcomeTimer: ReturnType<typeof setTimeout> | undefined
   let welcomeBackoff = 1000
+  let controlSearchActive = false
   let checkedWelcome: {
     publishID: string
     proof: NonNullable<ControlSnapshot['commitOnceAcceptance']>
@@ -2709,6 +2723,7 @@ export function createGroupPeerWithControlWalk<
       ? null
       : createControlSearch({
           budget: CONTROL_SEARCH_BUDGET,
+          ownCommitDigest: (commit) => mls.ownCommitDigest(commit),
           validation,
           readEvidence: params.readEvidence,
           fetch: async (after) => {
@@ -2773,10 +2788,15 @@ export function createGroupPeerWithControlWalk<
   const searchControlLog: OperationDeps['searchLog'] = async (built, position) => {
     checkedWelcome = null
     if (controlSearch === null) return { kind: 'unknown' }
-    const result = await controlSearch.searchLog(built, position)
-    if (result.kind === 'first-valid')
-      checkedWelcome = { publishID: built.publishID, proof: result.proof }
-    return result
+    controlSearchActive = true
+    try {
+      const result = await controlSearch.searchLog(built, position)
+      if (result.kind === 'first-valid')
+        checkedWelcome = { publishID: built.publishID, proof: result.proof }
+      return result
+    } finally {
+      controlSearchActive = false
+    }
   }
 
   const operationDeps = (): OperationDeps => {

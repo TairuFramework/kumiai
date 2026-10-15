@@ -15,6 +15,13 @@ test('transient body resolver faults remain diagnostic', async () => {
   await expect(resolve(['entry'])).rejects.toBe(fault)
 })
 
+test('no-entry commits ignore even unsupported nonempty blobs', async () => {
+  const resolve = createLedgerEntryResolver(new Uint8Array([99]), async () => {
+    throw new UnsupportedLedgerEntriesVersionError('unused blob')
+  })
+  await expect(resolve([])).resolves.toEqual([])
+})
+
 test('malformed body lists are conclusive refusal', async () => {
   const resolve = createLedgerEntryResolver(new Uint8Array([1]), async () => new Uint8Array([1]))
   await expect(resolve(['entry'])).resolves.toEqual([])

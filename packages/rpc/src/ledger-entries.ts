@@ -99,7 +99,8 @@ export function createLedgerEntryResolver(
   sealedEntries: Uint8Array,
   openEntries: GroupCrypto['openEntries'],
 ): (ids: Array<string>) => Promise<Array<string>> {
-  return async (_ids: Array<string>): Promise<Array<string>> => {
+  return async (ids: Array<string>): Promise<Array<string>> => {
+    if (ids.length === 0) return []
     let opened: Uint8Array
     try {
       opened = await openEntries(sealedEntries)

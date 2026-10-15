@@ -10,14 +10,19 @@ import {
   isConclusiveCommitError,
   isTransientVerificationError,
   LeafBindingError,
+  ledgerEntryDigest,
   MissingLedgerEntriesError,
+  ownCommitDigest,
+  readCommitEntryIDs,
   restoreGroup,
+  verifyLedgerEntry,
 } from '@kumiai/mls'
 import {
   type BuiltCommit,
   type CommitHeader,
   type ControlFrameValidation,
   type ControlValidationPort,
+  createLedgerEntryResolver,
   decodeCommitFrame,
   decodeHandshakeFrame,
   decodeLedgerEntries,
@@ -253,7 +258,16 @@ export function createControlValidationPort(params: {
             header.external !== true &&
             normalizeDID(header.committerDID) === normalizeDID(params.identity.id)
           if (claimsOwn) {
-            if (!sameBytes(frame.payload, value.payload)) {
+            const savedCommit = decodeCommitFrame(
+              decodeHandshakeFrame(value.payload).payload,
+            ).commit
+            const savedRecognition = ownCommitDigest(savedCommit)
+            const deliveredRecognition = ownCommitDigest(commit)
+            if (
+              savedRecognition === null ||
+              deliveredRecognition === null ||
+              savedRecognition !== deliveredRecognition
+            ) {
               try {
                 if (!(await working.verifyCommitSignature(commit)))
                   return { kind: 'invalid', reason: 'authentication' }
@@ -262,15 +276,43 @@ export function createControlValidationPort(params: {
               }
               return { kind: 'unavailable', reason: 'unexplained-own' }
             }
-            return (await verifyOwn(value, restored, header))
-              ? {
-                  kind: 'valid',
-                  header: { ...header, epoch: Number(header.epoch) },
-                  own: true,
-                  advanced: true,
-                  removed: false,
-                }
-              : { kind: 'unavailable', reason: 'unexplained-own' }
+            if (!(await verifyOwn(value, restored, header)))
+              return { kind: 'unavailable', reason: 'unexplained-own' }
+            // Own receive keys cannot apply the saved commit. Its candidate proves MLS validation;
+            // resolve only references absent from the same retained pre-state as a receiver.
+            const held = new Set(journal.sourceLedger.map(ledgerEntryDigest))
+            const missing = readCommitEntryIDs(commit).filter((id) => !held.has(id))
+            const key =
+              missing.length === 0 ? null : await deriveEntryKey(working, params.entryLabel)
+            try {
+              const resolve = createLedgerEntryResolver(sealedEntries, async (blob) => {
+                if (key === null) throw new Error('Unexpected no-entry resolution')
+                return openEntries(key, blob)
+              })
+              const resolved = new Set<string>()
+              for (const token of await resolve(missing)) {
+                const id = ledgerEntryDigest(token)
+                if (
+                  missing.includes(id) &&
+                  !resolved.has(id) &&
+                  (await verifyLedgerEntry(token)) !== null
+                )
+                  resolved.add(id)
+              }
+              if (missing.some((id) => !resolved.has(id)))
+                return { kind: 'unavailable', reason: 'unexplained-own' }
+            } catch {
+              return { kind: 'unavailable', reason: 'unexplained-own' }
+            } finally {
+              key?.fill(0)
+            }
+            return {
+              kind: 'valid',
+              header: { ...header, epoch: Number(header.epoch) },
+              own: true,
+              advanced: true,
+              removed: false,
+            }
           }
           let resolverError: unknown
           let localFailure: { error: unknown } | undefined

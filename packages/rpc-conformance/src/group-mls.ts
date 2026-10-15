@@ -174,6 +174,7 @@ export type ConformanceRosterEntry = {
  * passing bytes between two instances, which is all the clauses below do.
  */
 export type ConformanceGroupMLS<Position extends string = string> = {
+  ownCommitDigest(commit: Uint8Array): string | null
   capturedRecovery?: ConformanceCapturedRecoveryPort<Position>
   verifyRecoveryRequest: (request: Uint8Array) => Promise<ConformanceVerifiedRecoveryRequest | null>
   confirmationKey: (position: string, commitDigest: string) => Promise<ConformanceConfirmationKey>
@@ -338,6 +339,23 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
   }
 
   describe(`GroupMLS conformance — ${label}`, () => {
+    test('own recognition is total, non-mutating and distinguishes complete commits', async () => {
+      await withGroup(1, 'own-recognition', async (group) => {
+        const member = memberAt(group.members, 0)
+        const before = await member.mls.readRecoverySource()
+        const first = await group.buildCommit()
+        const saved = first.commit.slice()
+        const digest = member.mls.ownCommitDigest(first.commit)
+        expect(typeof digest).toBe('string')
+        expect(digest).not.toBe('')
+        expect(member.mls.ownCommitDigest(first.commit.slice())).toBe(digest)
+        for (const bytes of NOT_A_COMMIT) expect(member.mls.ownCommitDigest(bytes)).toBeNull()
+        const second = await group.buildCommit()
+        expect(member.mls.ownCommitDigest(second.commit)).not.toBe(digest)
+        expect(first.commit).toEqual(saved)
+        expect(await member.mls.readRecoverySource()).toEqual(before)
+      })
+    })
     test('unavailable validation never applies, advances, or invokes adoption', async () => {
       await withGroup(1, 'unavailable-validation', async (group) => {
         const member = memberAt(group.members, 0)

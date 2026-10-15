@@ -3,7 +3,7 @@ import { expect, test, vi } from 'vitest'
 import { encodeControlFixtureState } from '../../rpc-conformance/src/control-store.js'
 import { createMemoryControlStore } from '../../rpc-conformance/src/memory-control-store.js'
 import { digestAppliedCommit } from '../src/classify.js'
-import { encodeCommitFrame } from '../src/commit-frame.js'
+import { decodeCommitFrame, encodeCommitFrame } from '../src/commit-frame.js'
 import {
   enqueueOperation,
   landedChanges,
@@ -23,7 +23,10 @@ import type {
   Outcome,
 } from '../src/control/types.js'
 import { asLogPosition, type LogPosition } from '../src/cursor.js'
-import { encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
+import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
+import { commitTopic } from '../src/topic.js'
+import { FakeHub } from './fixtures/fake-hub.js'
+import { buildLedgerCommit, makeMLSPeer, seedBuiltOperation } from './fixtures/peer.js'
 
 const request: OperationRequest = {
   id: 'invite',
@@ -37,6 +40,55 @@ const position = asLogPosition('005')
 const payload = new TextEncoder().encode('abc')
 const payloadDigest = 'ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0'
 const publishID = 'fedcba9876543210fedcba9876543210'
+
+test('own-copy reconciliation advances its cursor without re-entering settlement', async () => {
+  const secret = new Uint8Array(32).fill(0xa3)
+  const hub = new FakeHub()
+  const member = makeMLSPeer(hub, 'alice', secret)
+  let restoreFetch = () => {}
+  let restorePublish = () => {}
+  try {
+    await member.peer.replay()
+    const op = await seedBuiltOperation(member, buildLedgerCommit(member, ['saved-own-body']))
+    const frame = decodeCommitFrame(decodeHandshakeFrame(op.slot.payload).payload)
+    const bad = frame.sealedEntries.slice()
+    bad[bad.length - 1] = (bad[bad.length - 1] ?? 0) ^ 1
+    const poison = await hub.publish({
+      senderDID: 'replayer',
+      topicID: commitTopic(secret),
+      retain: 'log',
+      payload: encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(frame.commit, bad)),
+    })
+    const fetch = hub.fetchTopic.bind(hub)
+    let fetches = 0
+    const fetching = vi.spyOn(hub, 'fetchTopic').mockImplementation(async (params) => {
+      if (params.topicID === commitTopic(secret) && ++fetches > 12)
+        throw new Error('Recursive own-copy reconciliation')
+      return fetch(params)
+    })
+    restoreFetch = () => fetching.mockRestore()
+    const publish = hub.publish.bind(hub)
+    const publishing = vi.spyOn(hub, 'publish').mockImplementation(async (params) => {
+      if (params.senderDID === 'alice' && params.topicID === commitTopic(secret))
+        throw Object.assign(new Error('Retry remains undelivered'), { name: 'HeadMismatchError' })
+      return publish(params)
+    })
+    restorePublish = () => publishing.mockRestore()
+    await expect(member.peer.replay()).resolves.toEqual({})
+    const snapshot = await member.control.load()
+    expect(snapshot.cursor?.position).toBe(poison.sequenceID)
+    expect(snapshot.commitOnce?.payload).toEqual(op.slot.payload)
+    expect(snapshot.commitOnce?.publishID).toBe(op.slot.publishID)
+    expect(snapshot.commitOnceAcceptance).toBeNull()
+    expect(snapshot.outcomes).toEqual([])
+    expect(snapshot.forkHalt).toBeNull()
+  } finally {
+    await member.peer.dispose()
+    await member.peer.drained()
+    restoreFetch()
+    restorePublish()
+  }
+})
 
 async function setup(framed?: { payload: Uint8Array; digest: string }) {
   const store = createMemoryControlStore<LogPosition>(key)

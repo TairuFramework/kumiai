@@ -426,6 +426,8 @@ export type RecoveryConfirmationKey = { epoch: number; key: Uint8Array }
  * until the suite was made to cover the shape rather than a sample of it.
  */
 export type GroupMLS = {
+  /** Total recognition digest of the re-encoded MLS commit, excluding its entry blob. */
+  ownCommitDigest(commit: Uint8Array): string | null
   capturedRecovery?: CapturedRecoveryPort
   /** Verify the signed ask without requiring its issuer to remain in the current tree. */
   verifyRecoveryRequest(request: Uint8Array): Promise<VerifiedRecoveryRequest | null>

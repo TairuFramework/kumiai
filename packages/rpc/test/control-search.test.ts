@@ -141,6 +141,41 @@ test('first-valid lands on a trimmed log from its checkpoint', async () => {
   expect(f.followWinner).not.toHaveBeenCalled()
 })
 
+test('receiver-recognised changed copies keep the saved payload digest in first-valid proof', async () => {
+  const f = fixture([{ id: 101, value: 2 }])
+  const fetch = f.deps.fetch
+  f.deps.fetch = async (after) => {
+    const page = await fetch(after)
+    return {
+      ...page,
+      messages: page.messages.map((row) => ({
+        ...row,
+        payload: encodeHandshakeFrame(
+          HANDSHAKE_KIND.commit,
+          encodeCommitFrame(new Uint8Array([2]), new Uint8Array([99])),
+        ),
+      })),
+    }
+  }
+  f.validateFrame.mockImplementation(async () => ({
+    kind: 'valid',
+    header: { epoch: 65, committerDID: 'own' },
+    own: true,
+    advanced: true,
+    removed: false,
+  }))
+  expect(await f.search.searchLog(built)).toEqual({
+    kind: 'first-valid',
+    proof: {
+      source,
+      from: built.searchFrom,
+      position: position(101),
+      payloadDigest: built.payloadDigest,
+    },
+  })
+  expect(f.followWinner).not.toHaveBeenCalled()
+})
+
 test.each([
   'suffix gap',
   'matching-page gap',
@@ -609,18 +644,15 @@ test('same-epoch authenticator divergence holds as fork evidence', async () => {
   expect(f.fetch).not.toHaveBeenCalled()
 })
 
-test('a validated own copy with different bytes cannot certify absence or supersession', async () => {
+test('an unrecognised own copy cannot certify absence or supersession', async () => {
   const f = fixture([{ id: 101, value: 1 }])
   f.deps.validation = {
     restoreValidation: async () => ({
       source,
       readCommitHeader: async () => ({ epoch: 65, committerDID: 'own' }),
       validateFrame: async () => ({
-        kind: 'valid',
-        header: { epoch: 65, committerDID: 'own' },
-        own: true,
-        advanced: true,
-        removed: false,
+        kind: 'unavailable',
+        reason: 'unexplained-own',
       }),
       verifyOwn: async () => true,
     }),

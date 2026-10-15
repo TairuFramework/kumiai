@@ -10,6 +10,7 @@ import {
   openRecoveryGroupInfo,
   openRecoveryVerdict,
   openSealedLedger,
+  ownCommitDigest,
   type RecoveryGroupInfo,
   readCommitEntryIDs,
   readMessageEpoch,
@@ -294,6 +295,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       return await access.read((group) => Number(group.epoch))
     },
     sendAdmission: () => access.admission(),
+    ownCommitDigest,
     async rosterEntries(): Promise<Array<RosterEntry>> {
       return await access.read((group) =>
         group.listMembers().map((member) => ({

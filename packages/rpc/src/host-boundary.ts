@@ -15,10 +15,12 @@ export type HostBoundary = {
 }
 
 type MemberKind = 'host' | 'data' | 'port'
-type HostMembers<TValue extends object> = {
-  [TKey in keyof TValue]-?: NonNullable<TValue[TKey]> extends (...args: Array<never>) => unknown
-    ? 'host'
-    : 'data' | 'port'
+type HostMembers<TValue extends object, TCore extends keyof TValue = never> = {
+  [TKey in keyof TValue]-?: TKey extends TCore
+    ? 'data'
+    : NonNullable<TValue[TKey]> extends (...args: Array<never>) => unknown
+      ? 'host'
+      : 'data' | 'port'
 }
 
 // New recovery methods must be classified alongside the existing acceptance callback.
@@ -50,6 +52,7 @@ export const pendingFrameHostMembers = {
 } as const satisfies HostMembers<PendingAppFrames>
 
 export const mlsHostMembers = {
+  ownCommitDigest: 'data',
   verifyRecoveryRequest: 'host',
   confirmationKey: 'host',
   sealRecoveryVerdict: 'host',
@@ -72,7 +75,7 @@ export const mlsHostMembers = {
   getLedger: 'host',
   exportRecoverySecret: 'host',
   capturedRecovery: 'port',
-} as const satisfies HostMembers<GroupMLS>
+} as const satisfies HostMembers<GroupMLS, 'ownCommitDigest'>
 
 type Params = GroupPeerParams<Record<string, GroupProtocolDefinition>>
 type ParamKind =

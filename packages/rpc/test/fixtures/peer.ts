@@ -465,6 +465,13 @@ export function memoryControlPorts(
           const commit = decodeCommitFrame(decodeHandshakeFrame(frame.payload).payload).commit
           const parsed = decodeMemoryCommit(commit)
           if (parsed === null) return { kind: 'invalid', reason: 'malformed' }
+          if (!parsed.external && parsed.committerDID === mls.credentialDID()) {
+            const saved = decodeCommitFrame(decodeHandshakeFrame(built.payload).payload).commit
+            const savedDigest = mls.ownCommitDigest(saved)
+            const deliveredDigest = mls.ownCommitDigest(commit)
+            if (savedDigest === null || deliveredDigest === null || savedDigest !== deliveredDigest)
+              return { kind: 'unavailable', reason: 'unexplained-own' }
+          }
           if (parsed.missingProposal) return { kind: 'unavailable', reason: 'missing-proposal' }
           if (
             parsed.invalidContent ||

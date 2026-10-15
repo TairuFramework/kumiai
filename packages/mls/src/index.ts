@@ -191,6 +191,7 @@ export {
   type PublicRuntimeFacts,
   publicMembershipFacts,
 } from './lifecycle.js'
+export { ownCommitDigest } from './own-commit-digest.js'
 export {
   type CommitPolicyContext,
   defaultCommitPolicy,

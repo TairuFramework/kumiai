@@ -1132,6 +1132,12 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         return 'installed'
       }),
     epoch: () => epoch,
+    ownCommitDigest: (commit) => {
+      const parsed = decodeMemoryCommit(commit)
+      if (parsed === null) return null
+      // This double's authenticator binds exact JSON bytes, so recognition stays stricter.
+      return toB64U(sha256(commit))
+    },
     commits: () => commits,
     seen: () => seen,
     lastSender: () => lastSender,
