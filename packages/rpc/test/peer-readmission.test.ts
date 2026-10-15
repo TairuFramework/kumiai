@@ -114,7 +114,13 @@ function unsettled(): ControlSnapshot {
       },
     ],
     responses: [
-      { position: asLogPosition('003'), digest: 'refused-rejoin', kind: 'refused', epoch: 1 },
+      {
+        position: asLogPosition('003'),
+        digest: 'applied-rejoin',
+        kind: 'applied',
+        epoch: 1,
+        epochAfter: 2,
+      },
     ],
     cursor: {
       position: asLogPosition('001'),

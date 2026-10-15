@@ -374,6 +374,11 @@ test('a responder floor refusal attempts renewal and invalidates the refused bin
     refusal: 'floor',
     refusalAuthority: 'authenticated-commit',
   })
+  vi.spyOn(s.responder, 'validateRecoveryCommit').mockResolvedValue({
+    epoch: 1,
+    refusal: 'floor',
+    refusalAuthority: 'authenticated-commit',
+  })
   try {
     await Promise.all([alice.resync(), bob.resync()])
     expect((await bob.recover()).advanced).toBe(false)
@@ -417,6 +422,11 @@ test('expired binding then floor refusal can call the host twice in one recovery
     advanced: false,
     epochBefore: 1,
     epochAfter: 1,
+    refusal: 'floor',
+    refusalAuthority: 'authenticated-commit',
+  })
+  vi.spyOn(s.responder, 'validateRecoveryCommit').mockResolvedValue({
+    epoch: 1,
     refusal: 'floor',
     refusalAuthority: 'authenticated-commit',
   })
@@ -467,6 +477,9 @@ test('an authoritative invalid refusal holds automatic recovery until explicit r
     refusal: 'invalid',
     refusalAuthority: 'authenticated-commit',
   })
+  const validation = vi
+    .spyOn(s.responder, 'validateRecoveryCommit')
+    .mockResolvedValue({ epoch: 1, refusal: 'invalid', refusalAuthority: 'authenticated-commit' })
   const requests = vi.spyOn(s.mls, 'createRecoveryRequest')
   try {
     await Promise.all([alice.resync(), bob.resync()])
@@ -478,6 +491,7 @@ test('an authoritative invalid refusal holds automatic recovery until explicit r
     await bob.resync()
     expect(requests).toHaveBeenCalledTimes(count)
     process.mockRestore()
+    validation.mockRestore()
     expect((await bob.recover()).advanced).toBe(true)
   } finally {
     await Promise.all([alice.dispose(), bob.dispose()])

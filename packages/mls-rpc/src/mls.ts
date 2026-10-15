@@ -38,6 +38,7 @@ import { ciphersuites } from 'ts-mls'
 
 import type { HandleAccess } from './access.js'
 import { applyCommit } from './apply-commit.js'
+import { validateRecoveryCommit } from './control-validation.js'
 import {
   type BoundRecoveryCommit,
   createRecoveryBindingState,
@@ -324,6 +325,10 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         ...(header.committerDID != null && { committerDID: header.committerDID }),
         ...(header.external === true && { external: true }),
       }
+    },
+
+    validateRecoveryCommit(commit) {
+      return access.read((group) => validateRecoveryCommit(group, commit, identity.id))
     },
 
     async processCommit(commit: Uint8Array, context: CommitContext): Promise<ProcessCommitResult> {

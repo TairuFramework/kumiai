@@ -26,7 +26,7 @@ import {
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
 
 test.each([undefined, 'authenticated-commit'] as const)(
-  'response persistence preserves refusal provenance without upgrading old rows: %s',
+  'response persistence omits negative rows: %s',
   async (refusalAuthority) => {
     const row = {
       position: asLogPosition('refused'),
@@ -39,10 +39,29 @@ test.each([undefined, 'authenticated-commit'] as const)(
     const real = applyChanges(empty(), { putResponses: [row] })
     const double = createMemoryControlStore({ groupID: 'group-A', incarnation: 1 })
     await double.apply({ putResponses: [row] }, 'response')
-    expect(real.responses).toEqual([row])
-    expect((await double.load()).responses).toEqual([row])
+    expect(real.responses).toEqual([])
+    expect((await double.load()).responses).toEqual([])
   },
 )
+
+test('legacy negative aliases cannot erase an applied response during compaction', () => {
+  const accepted = {
+    position: asLogPosition('shared'),
+    epoch: 1,
+    digest: 'accepted',
+    kind: 'applied' as const,
+    epochAfter: 2,
+  }
+  const negative = {
+    position: accepted.position,
+    epoch: 1,
+    digest: 'refused',
+    kind: 'refused' as const,
+  }
+  expect(
+    applyChanges({ ...empty(), responses: [accepted, negative] }, { cursor: null }).responses,
+  ).toEqual([accepted])
+})
 
 const empty = (): ControlSnapshot => ({
   commitOnce: null,
@@ -217,7 +236,6 @@ describe('control changes', () => {
       { opID: 'old', welcome: new Uint8Array([2]), recipients: ['alice'] },
     ])
     expect(result.responses).toEqual([
-      { position: asLogPosition('002'), epoch: 5, digest: 'old', kind: 'superseded' },
       { position: asLogPosition('002'), epoch: 5, digest: 'new', kind: 'applied', epochAfter: 6 },
     ])
     expect(result.cursor).toEqual(snapshot.cursor)
@@ -247,9 +265,9 @@ describe('control changes', () => {
       ...empty(),
       applied: Array.from({ length: 65 }, (_, epoch) => applied(epoch)),
       responses: [
-        { position: asLogPosition('old'), epoch: 0, digest: 'old', kind: 'refused' as const },
-        { position: asLogPosition('one'), epoch: 1, digest: 'one', kind: 'refused' as const },
-        { position: asLogPosition('two'), epoch: 1, digest: 'two', kind: 'refused' as const },
+        { position: asLogPosition('old'), epoch: 0, digest: 'old', kind: 'applied' as const },
+        { position: asLogPosition('one'), epoch: 1, digest: 'one', kind: 'applied' as const },
+        { position: asLogPosition('two'), epoch: 1, digest: 'two', kind: 'applied' as const },
       ],
     }
     const changes = pruneWindow(snapshot, 64)

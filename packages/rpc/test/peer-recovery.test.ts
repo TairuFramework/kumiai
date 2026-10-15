@@ -8,7 +8,7 @@ import {
   encodeRecoveryConfirmRequest,
 } from '../src/recovery.js'
 import { APP_TOPIC_LABEL, commitTopic, protocolTopic, rendezvousTopic } from '../src/topic.js'
-import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
+import { publishCommit, publishedCommitBytes, publishedCommitDigest } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
@@ -75,6 +75,7 @@ describe('recovery rendezvous', { concurrent: false }, () => {
             request,
             position: external.sequenceID,
             commitDigest: publishedCommitDigest(hub, external.sequenceID),
+            commit: publishedCommitBytes(hub, external.sequenceID),
           }),
         ),
       })

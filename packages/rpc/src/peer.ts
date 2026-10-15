@@ -1194,6 +1194,10 @@ export function createGroupPeerWithControlWalk<
   const confirmationWaiters = new Map<string, ConfirmationWaiter>()
   const commitOutcomes = new Map<string, ExternalResponse>()
   const verdictCache = createRecoveryCache<Promise<Uint8Array>>()
+  const refusalMemo = createRecoveryCache<ReturnType<GroupMLS['validateRecoveryCommit']>>(
+    () => {},
+    64,
+  )
   const verdictTimers = new Set<ReturnType<typeof setTimeout>>()
   /**
    * Ledger-gather waiters, keyed by requestID. Called for EVERY reply, not just the first: a
@@ -1205,6 +1209,7 @@ export function createGroupPeerWithControlWalk<
   const pendingLedgerReplies = new Set<ReturnType<typeof setTimeout>>()
 
   const handleRecoveryConfirmRequest = (request: RecoveryConfirmRequest): void => {
+    if (digestAppliedCommit(request.commit) !== request.commitDigest) return
     if (
       mls == null ||
       rendezvousTopicID == null ||
@@ -1233,7 +1238,7 @@ export function createGroupPeerWithControlWalk<
         (rejoinPosition != null && request.position >= rejoinPosition) ||
         (pendingRecovery != null && request.position >= pendingRecovery.position)
       if (blocked()) return
-      const responseKey = JSON.stringify([request.position, request.commitDigest])
+      const responseKey = request.position
       let record = commitOutcomes.get(responseKey)
       if (record == null) {
         await ready
@@ -1246,27 +1251,53 @@ export function createGroupPeerWithControlWalk<
         if (disposed || blocked()) return
         record = commitOutcomes.get(responseKey)
       }
-      if (record == null || record.digest !== request.commitDigest) return
-      if (
-        record.kind === 'superseded' ||
-        (record.kind === 'refused' && record.refusalAuthority !== 'authenticated-commit')
-      )
-        return
+      let outcome: RecoveryCommitOutcome | undefined
+      let refusedEpoch: number | undefined
+      if (record?.kind === 'applied' && record.digest === request.commitDigest) {
+        outcome = await responseOutcome(port, record, safetyHold)
+      } else {
+        await runSerial(async () => {
+          if (disposed || blocked()) return
+          const epoch = await port.readEpoch()
+          const memoKey = JSON.stringify([epoch, request.commitDigest])
+          let memo = refusalMemo.get(memoKey)
+          if (memo == null) {
+            const value = port
+              .validateRecoveryCommit(request.commit)
+              .catch(() => ({ epoch, refusal: undefined, refusalAuthority: undefined }))
+            const expiresAt = Date.now() + 30000
+            refusalMemo.set(memoKey, value, expiresAt)
+            memo = { value, expiresAt }
+          }
+          const validation = await memo.value
+          if (validation.epoch !== epoch || (await port.readEpoch()) !== epoch || blocked()) return
+          if (
+            validation.refusalAuthority === 'authenticated-commit' &&
+            validation.refusal != null
+          ) {
+            refusedEpoch = epoch
+            outcome = {
+              kind: 'refused',
+              commitDigest: request.commitDigest,
+              reason: validation.refusal,
+              refusalAuthority: 'authenticated-commit',
+            }
+          }
+        })
+      }
+      if (outcome == null || blocked()) return
       const cacheKey = JSON.stringify([
         verified.requesterDID,
         request.requestID,
         Array.from(request.request),
         request.position,
         request.commitDigest,
-        record.kind,
-        record.epochAfter,
-        record.reason,
-        record.refusalAuthority,
+        outcome.kind,
+        outcome.kind === 'applied' ? outcome.epoch : refusedEpoch,
+        outcome.kind === 'refused' ? outcome.reason : null,
       ])
       let cached = verdictCache.get(cacheKey)
       if (cached == null) {
-        const outcome = await responseOutcome(port, record, safetyHold)
-        if (outcome == null || blocked()) return
         const verdict = verdictForOutcome(
           {
             groupID: verified.groupID,
@@ -1276,7 +1307,6 @@ export function createGroupPeerWithControlWalk<
           },
           outcome,
         )
-        if (outcome.kind === 'applied') outcome.key.fill(0)
         const sealed = port
           .sealRecoveryVerdict(request.request, verdict)
           .catch((error: unknown) => {
@@ -1287,25 +1317,21 @@ export function createGroupPeerWithControlWalk<
         verdictCache.set(cacheKey, sealed, expiresAt)
         cached = { value: sealed, expiresAt }
       }
+      if (outcome.kind === 'applied') outcome.key.fill(0)
       const sealed = await cached.value
       const expiresAt = cached.expiresAt
       if (disposed || blocked() || expiresAt <= Date.now()) return
       const response = record
       const confirmable = async () => {
+        if (blocked()) return false
+        if (refusedEpoch !== undefined) return (await port.readEpoch()) === refusedEpoch
         const current = commitOutcomes.get(responseKey)
-        if (
-          blocked() ||
-          current == null ||
-          current.digest !== response.digest ||
-          current.kind !== response.kind
+        return (
+          current?.kind === 'applied' &&
+          current.digest === response?.digest &&
+          current.epochAfter === response.epochAfter &&
+          (await port.readEpoch()) === current.epochAfter
         )
-          return false
-        return current.kind === 'applied'
-          ? current.epochAfter === response.epochAfter &&
-              (await port.readEpoch()) === current.epochAfter
-          : current.kind === 'refused' &&
-              current.refusalAuthority === 'authenticated-commit' &&
-              current.reason === response.reason
       }
       if (!(await confirmable()) || blocked()) return
       const timer = setTimeout(
@@ -2024,18 +2050,7 @@ export function createGroupPeerWithControlWalk<
             }
             await resolveAnchorRotation({ port, knownUnlanded: true })
             // Missing bodies describe this copy, never an authenticated commit refusal.
-            await saveCommitCursor(
-              position,
-              header?.external
-                ? {
-                    position,
-                    digest: commitDigest,
-                    epoch: framedEpoch,
-                    kind: 'refused',
-                    reason: 'invalid',
-                  }
-                : undefined,
-            )
+            await saveCommitCursor(position)
             break
           }
           if (disposed) return false
@@ -2069,23 +2084,7 @@ export function createGroupPeerWithControlWalk<
           }
           // `{ advanced: false }` here is the port REFUSING a well-formed commit at this peer's own
           // epoch from another member: poison on the same terms as an unresolvable one.
-          if (!applied.applied) {
-            await saveCommitCursor(
-              position,
-              header?.external
-                ? {
-                    position,
-                    digest: commitDigest,
-                    kind: 'refused',
-                    epoch: framedEpoch,
-                    reason: applied.refusal ?? 'invalid',
-                    ...(applied.refusalAuthority === 'authenticated-commit'
-                      ? { refusalAuthority: applied.refusalAuthority }
-                      : {}),
-                  }
-                : undefined,
-            )
-          }
+          if (!applied.applied) await saveCommitCursor(position)
           if (applied.applied && (reconciledHead == null || reconciledHead < position))
             reconciledHead = position
           if (locallyRemoved) return advancedEpoch
@@ -2365,8 +2364,9 @@ export function createGroupPeerWithControlWalk<
     appliedByEpoch.clear()
     for (const [epoch, row] of appliedRows(snapshot)) appliedByEpoch.set(epoch, row)
     commitOutcomes.clear()
-    for (const response of snapshot.responses)
-      commitOutcomes.set(JSON.stringify([response.position, response.digest]), response)
+    for (const response of snapshot.responses) {
+      if (response.kind === 'applied') commitOutcomes.set(response.position, response)
+    }
     const cursor = snapshot.cursor
     durableCursor = cursor
     durableStrand = snapshot.strand
@@ -3724,6 +3724,7 @@ export function createGroupPeerWithControlWalk<
                   request: record.request,
                   position,
                   commitDigest: record.digest,
+                  commit: decodeCommitFrame(decodeHandshakeFrame(record.payload).payload).commit,
                 }),
               ),
             })
@@ -4468,6 +4469,7 @@ export function createGroupPeerWithControlWalk<
       for (const waiter of confirmationWaiters.values()) waiter.dispose()
       commitOutcomes.clear()
       verdictCache.clear()
+      refusalMemo.clear()
       for (const timer of verdictTimers) clearTimeout(timer)
       verdictTimers.clear()
       disposePromise = (async () => {

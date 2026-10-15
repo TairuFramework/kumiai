@@ -25,16 +25,7 @@ export async function responseOutcome(
 ): Promise<RecoveryCommitOutcome | undefined> {
   if (safetyHold() !== null) return
   const commitDigest = response.digest
-  if (response.kind === 'superseded') return
-  if (response.kind === 'refused') {
-    if (response.refusalAuthority !== 'authenticated-commit') return
-    return {
-      kind: 'refused',
-      commitDigest,
-      reason: response.reason ?? 'invalid',
-      refusalAuthority: response.refusalAuthority,
-    }
-  }
+  if (response.kind !== 'applied') return
   if ((await port.readEpoch()) !== response.epochAfter) return
   if (safetyHold() !== null) return
   const derived = await port.confirmationKey(response.position, response.digest)
@@ -52,7 +43,10 @@ export function confirmationTag(key: Uint8Array, requestID: string): string {
 export type RecoveryCacheEntry<TValue> = { value: TValue; expiresAt: number }
 
 /** Expiry releases exporter keys even when the peer receives no further traffic. */
-export function createRecoveryCache<TValue>(release: (value: TValue) => void = () => {}) {
+export function createRecoveryCache<TValue>(
+  release: (value: TValue) => void = () => {},
+  maxEntries = 1024,
+) {
   const entries = new Map<
     string,
     RecoveryCacheEntry<TValue> & { timer: ReturnType<typeof setTimeout> }
@@ -85,7 +79,7 @@ export function createRecoveryCache<TValue>(release: (value: TValue) => void = (
         expiresAt,
         timer: setTimeout(() => remove(key), expiresAt - Date.now()),
       })
-      while (entries.size > 1024) {
+      while (entries.size > maxEntries) {
         const oldest = entries.keys().next().value
         if (oldest != null) remove(oldest)
       }

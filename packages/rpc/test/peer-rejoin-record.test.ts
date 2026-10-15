@@ -265,6 +265,9 @@ test.each(['policy', 'invalid'] as const)(
       refusal: reason,
       refusalAuthority: 'authenticated-commit',
     }))
+    const validation = vi
+      .spyOn(alice.mls, 'validateRecoveryCommit')
+      .mockResolvedValue({ epoch: 1, refusal: reason, refusalAuthority: 'authenticated-commit' })
     expect((await bob.peer.recover()).advanced).toBe(false)
     const saved = (await bob.control.load()).rejoin
     expect(saved).toMatchObject({ stage: 'refused', refusal: reason })
@@ -282,6 +285,7 @@ test.each(['policy', 'invalid'] as const)(
     expect((await again.control.load()).rejoin).toEqual(saved)
     expect(commits(hub)).toHaveLength(count)
     vi.spyOn(alice.mls, 'processCommit').mockImplementation(process)
+    validation.mockRestore()
     expect((await again.peer.recover()).advanced).toBe(true)
     expect((await again.control.load()).rejoin).toBeNull()
   },
@@ -776,6 +780,14 @@ test.each(['binding', 'lapse', 'floor'] as const)(
         refusalAuthority: 'authenticated-commit',
       }))
       .mockImplementation(process)
+    const validate = alice.mls.validateRecoveryCommit.bind(alice.mls)
+    vi.spyOn(alice.mls, 'validateRecoveryCommit')
+      .mockResolvedValueOnce({
+        epoch: 1,
+        refusal: reason,
+        refusalAuthority: 'authenticated-commit',
+      })
+      .mockImplementation(validate)
     // A short attempt can expire under load; its automatic retry must finish without another call.
     await bob.peer.recover()
     await expect

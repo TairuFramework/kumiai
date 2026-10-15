@@ -21,7 +21,6 @@ import type {
   ControlSnapshot,
   ControlStore,
   EpochIdentity,
-  ExternalResponse,
   GroupKey,
   Outcome,
 } from './types.js'
@@ -38,32 +37,6 @@ function putRows<Row, Key>(
   const result = new Map(rows.map((row) => [key(row), row]))
   for (const row of puts ?? []) result.set(key(row), row)
   return [...result.values()]
-}
-
-const RESPONSE_LIMIT = 256
-const RESPONSES_PER_POSITION = 64
-
-export function retainResponses(
-  rows: Array<ExternalResponse>,
-  puts?: Array<ExternalResponse>,
-): Array<ExternalResponse> {
-  const retained = new Map<string, ExternalResponse>()
-  const counts = new Map<LogPosition, number>()
-  for (const row of [...rows, ...(puts ?? [])]) {
-    const key = JSON.stringify([row.epoch, row.digest])
-    const previous = retained.get(key)
-    if (previous != null) {
-      // A relabelled copy cannot change the original response or its authority.
-      if (previous.position === row.position) retained.set(key, row)
-      continue
-    }
-    const count = counts.get(row.position) ?? 0
-    // Saturation drops new rows, never evidence a pending requester may need.
-    if (retained.size >= RESPONSE_LIMIT || count >= RESPONSES_PER_POSITION) continue
-    counts.set(row.position, count + 1)
-    retained.set(key, row)
-  }
-  return [...retained.values()]
 }
 
 function cloneControlValue<TValue>(value: TValue): TValue {
@@ -410,11 +383,14 @@ export function applyChanges(
       changes.putApplied,
       (row) => row.epoch,
     ).sort((a, b) => a.epoch - b.epoch),
-    responses: retainResponses(
+    responses: putRows(
       snapshot.responses.filter(
-        (row) => changes.deleteResponsesBelow == null || row.epoch >= changes.deleteResponsesBelow,
+        (row) =>
+          row.kind === 'applied' &&
+          (changes.deleteResponsesBelow == null || row.epoch >= changes.deleteResponsesBelow),
       ),
-      changes.putResponses,
+      changes.putResponses?.filter((row) => row.kind === 'applied'),
+      (row) => row.position,
     ),
     cursor: changes.cursor === undefined ? snapshot.cursor : changes.cursor,
   })

@@ -162,6 +162,11 @@ export type RecoveryVerdict = {
     }
 )
 export type OpenedRecoveryVerdict = { signer: string; verdict: RecoveryVerdict }
+export type RecoveryCommitValidation = {
+  epoch: number
+  refusal?: RecoveryRefusalReason
+  refusalAuthority?: 'authenticated-commit'
+}
 export type ProcessCommitResult = {
   /** The state was adopted and saved, including self-removal without an epoch advance. */
   applied: boolean
@@ -434,6 +439,8 @@ export type RecoveryConfirmationKey = { epoch: number; key: Uint8Array }
 export type GroupMLS = {
   /** Total recognition digest of the re-encoded MLS commit, excluding its entry blob. */
   ownCommitDigest(commit: Uint8Array): string | null
+  /** Dry-run the external commit on isolated current state. Faults and unavailable validation lack authority. */
+  validateRecoveryCommit(commit: Uint8Array): Promise<RecoveryCommitValidation>
   capturedRecovery?: CapturedRecoveryPort
   /** Verify the signed ask without requiring its issuer to remain in the current tree. */
   verifyRecoveryRequest(request: Uint8Array): Promise<VerifiedRecoveryRequest | null>

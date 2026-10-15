@@ -274,6 +274,7 @@ test.each([undefined, 9])(
           ...record,
           snapshot: {
             ...legacy,
+            responses: [response],
             ...(floor === undefined ? {} : { recoveryEpochFloor: floor }),
           },
         }),
@@ -283,7 +284,12 @@ test.each([undefined, 9])(
       const raw = await fixture.inspectRawBytes()
       const reopened = await fixture.reopen()
       const loaded = await reopened.device.groups.ports(key).control.load()
-      expect(loaded).toEqual({ ...legacy, recoveryEpochFloor: floor ?? null, settledRejoins: [] })
+      expect(loaded).toEqual({
+        ...legacy,
+        responses: [response],
+        recoveryEpochFloor: floor ?? null,
+        settledRejoins: [],
+      })
       expect(loaded.rejoin).toEqual(rejoin)
       expect(loaded.responses).toEqual([response])
       expect(await fixture.inspectRawBytes()).toEqual(raw)
@@ -299,10 +305,7 @@ test.each([undefined, 9])(
         },
         'add-response-tuple',
       )
-      expect((await reopened.device.groups.ports(key).control.load()).responses).toEqual([
-        response,
-        { ...response, digest: 'another-digest', refusalAuthority: 'authenticated-commit' },
-      ])
+      expect((await reopened.device.groups.ports(key).control.load()).responses).toEqual([])
     } finally {
       await fixture.close()
     }
@@ -310,7 +313,7 @@ test.each([undefined, 9])(
 )
 
 test.each([undefined, 'authenticated-commit'] as const)(
-  'legacy response arrays reopen within the digest and total budgets without upgrading authority: %s',
+  'legacy negative arrays stay readable until an ordinary write drops them: %s',
   async (refusalAuthority) => {
     const fixture = await createStorageFixture({ id: key.groupID, mode: 'double' })
     try {
@@ -354,11 +357,11 @@ test.each([undefined, 'authenticated-commit'] as const)(
       const raw = await fixture.inspectRawBytes()
       const reopened = await fixture.reopen()
       const reopenedControl = reopened.device.groups.ports(key).control
-      const expected = [first, other, ...distinct.slice(0, 254)]
+      const expected = legacy
       expect((await reopenedControl.load()).responses).toEqual(expected)
       expect(await fixture.inspectRawBytes()).toEqual(raw)
       await reopenedControl.apply({ cursor: null }, 'compact-legacy-responses')
-      expect((await reopenedControl.load()).responses).toEqual(expected)
+      expect((await reopenedControl.load()).responses).toEqual([])
       const stored = (await fixture.inspectRawBytes()).find(
         (row) => row.namespace === 'control' && row.key === location.key,
       )
@@ -366,7 +369,7 @@ test.each([undefined, 'authenticated-commit'] as const)(
       expect(
         (decodeStoredValue(await atRest.open(stored.bytes, aad)) as ControlRecord).snapshot
           .responses,
-      ).toEqual(expected)
+      ).toEqual([])
     } finally {
       await fixture.close()
     }

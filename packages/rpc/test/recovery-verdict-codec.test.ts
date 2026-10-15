@@ -20,6 +20,7 @@ test('confirmation requests and verdicts round trip with fixed handshake kinds',
     request: new Uint8Array([1, 2]),
     position: 'position',
     commitDigest: 'digest',
+    commit: new Uint8Array([3, 4]),
   }
   expect(decodeRecoveryConfirmRequest(encodeRecoveryConfirmRequest(request))).toEqual(request)
   const longPosition = { ...request, position: 'p'.repeat(512) }
@@ -49,7 +50,7 @@ test('confirmation requests and verdicts round trip with fixed handshake kinds',
     ),
   ).toThrow(FrameTooLargeError)
   const payload = encodeRecoveryConfirmRequest(request)
-  for (let length = 0; length < payload.length - request.request.length; length++) {
+  for (let length = 0; length < payload.length - request.commit.length + 1; length++) {
     expect(() => decodeRecoveryConfirmRequest(payload.subarray(0, length))).toThrow()
   }
 })

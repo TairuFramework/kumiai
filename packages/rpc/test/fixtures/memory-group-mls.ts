@@ -1295,6 +1295,32 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         ...(isExternal ? { external: true } : {}),
       }
     },
+    validateRecoveryCommit: (commit) =>
+      serialise(async () => {
+        const parsed = decodeMemoryCommit(commit)
+        if (
+          parsed == null ||
+          parsed.epoch !== epoch ||
+          parsed.external !== true ||
+          parsed.invalidContent === true ||
+          parsed.missingProposal === true ||
+          (parsed.signerDID ?? parsed.committerDID) !== parsed.committerDID
+        )
+          return { epoch }
+        try {
+          if (parsed.committerDID === localDID || !acceptsCommitter(parsed.committerDID))
+            return {
+              epoch,
+              refusal: 'policy' as const,
+              refusalAuthority: 'authenticated-commit' as const,
+            }
+          if (parsed.entryIDs.some((id) => !bodies.has(id))) return { epoch }
+          await validateEnactment(parsed, new Map(bodies))
+        } catch {
+          return { epoch }
+        }
+        return { epoch }
+      }),
     processCommit: (commit: Uint8Array, context: CommitContext) =>
       serialise(async () => {
         lastSender = context.senderDID

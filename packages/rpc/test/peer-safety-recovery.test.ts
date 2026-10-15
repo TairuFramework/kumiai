@@ -21,7 +21,7 @@ import {
   waitForRecoveryConfirmation,
 } from '../src/recovery-confirmation.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
-import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
+import { publishCommit, publishedCommitBytes, publishedCommitDigest } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import { buildRejoinRecord, latchPeerSafety, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
@@ -86,7 +86,13 @@ async function responderRequest(
           )
         : encodeHandshakeFrame(
             HANDSHAKE_KIND.recoveryConfirmRequest,
-            encodeRecoveryConfirmRequest({ requestID, request, position, commitDigest: digest }),
+            encodeRecoveryConfirmRequest({
+              requestID,
+              request,
+              position,
+              commitDigest: digest,
+              commit: publishedCommitBytes(hub, position),
+            }),
           )
   return () => hub.publish({ senderDID: 'alice', topicID: rendezvousTopic(secret), payload })
 }

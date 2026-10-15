@@ -53,6 +53,7 @@ export const pendingFrameHostMembers = {
 
 export const mlsHostMembers = {
   ownCommitDigest: 'data',
+  validateRecoveryCommit: 'host',
   verifyRecoveryRequest: 'host',
   confirmationKey: 'host',
   sealRecoveryVerdict: 'host',

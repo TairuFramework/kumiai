@@ -5,7 +5,7 @@ import {
   commitValidationReason,
   decodeClientState,
   encodeClientState,
-  type GroupHandle,
+  GroupHandle,
   type GroupOptions,
   isConclusiveCommitError,
   isTransientVerificationError,
@@ -31,6 +31,7 @@ import {
   HANDSHAKE_VERSION,
   isUnsupportedCommitFrameVersion,
   LedgerEntryRefusedError,
+  type RecoveryCommitValidation,
   UnsupportedLedgerEntriesVersionError,
 } from '@kumiai/rpc'
 import { sha256 } from '@noble/hashes/sha2.js'
@@ -85,6 +86,64 @@ function diagnostic(error: unknown): Exclude<ControlFrameValidation, { kind: 'va
   return policyRefused
     ? { kind: 'invalid', reason: 'policy' }
     : { kind: 'unavailable', reason: 'unrecognised' }
+}
+
+export async function validateRecoveryCommit(
+  group: GroupHandle,
+  commit: Uint8Array,
+  ownDID: string,
+): Promise<RecoveryCommitValidation> {
+  const epoch = Number(group.epoch)
+  try {
+    const state = decodeClientState(encodeClientState(group.state))
+    if (state === undefined) return { epoch }
+    const working = new GroupHandle({
+      state,
+      credential: decodeStoredValue(encodeStoredValue(group.credential)) as typeof group.credential,
+      context: { ...group.context },
+      ledger: decodeStoredValue(encodeStoredValue(group.ledger)) as typeof group.ledger,
+    })
+    const header = await working.readCommitHeader(commit)
+    if (
+      header?.external !== true ||
+      header.epoch !== group.epoch ||
+      header.committerDID === undefined
+    )
+      return { epoch }
+    if (normalizeDID(header.committerDID) === normalizeDID(ownDID))
+      return { epoch, refusal: 'policy', refusalAuthority: 'authenticated-commit' }
+    let policyFault = false
+    try {
+      const policy = group.commitPolicy
+      await working.processMessage(
+        commit,
+        policy === undefined
+          ? undefined
+          : {
+              commitPolicy: (incoming) => {
+                try {
+                  return policy(incoming)
+                } catch (error) {
+                  policyFault = true
+                  throw error
+                }
+              },
+            },
+      )
+    } catch (error) {
+      if (policyFault) return { epoch }
+      const result = diagnostic(error)
+      if (result.kind === 'invalid' && result.reason === 'policy')
+        return {
+          epoch,
+          refusal: error instanceof CommitRejectedError ? error.reason : 'policy',
+          refusalAuthority: 'authenticated-commit',
+        }
+    }
+  } catch {
+    // Authentication, framing and local validation faults supply no refusal authority.
+  }
+  return { epoch }
 }
 
 export function createControlValidationPort(params: {

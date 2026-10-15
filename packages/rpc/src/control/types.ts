@@ -52,7 +52,7 @@ export type ControlSnapshot = {
   outcomes: Array<Outcome>
   welcomes: Array<WelcomeObligation>
   applied: Array<AppliedCommit> // newest 64 epochs
-  responses: Array<ExternalResponse> // newest 64 epochs, one per (epoch, digest), at most 256 total
+  responses: Array<ExternalResponse> // applied only, newest 64 epochs; legacy negatives are advisory
   cursor: CommitCursor | null // {position, epoch, stranded?}
 }
 export type ControlChanges = {
@@ -74,10 +74,7 @@ export type ControlChanges = {
   deleteWelcomes?: Array<string>
   putApplied?: Array<AppliedCommit>
   deleteAppliedBelow?: number // drops rows at epoch < n, before puts
-  /**
-   * Retain one row per (epoch, digest) at its first position. Only that position can update it.
-   * First 256 rows overall, at most 64 per position. Overflow omits new rows without eviction.
-   */
+  /** Upsert applied responses by position; negative puts are ignored and legacy negatives dropped. */
   putResponses?: Array<ExternalResponse>
   deleteResponsesBelow?: number // by `epoch`
   cursor?: CommitCursor | null

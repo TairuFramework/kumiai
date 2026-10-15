@@ -362,7 +362,7 @@ export type GroupHandleParams = {
    *  derived from another (commitInvite/removeMember) inherits the parent's, so the
    *  roster it folds does not revert to the anchor alone. */
   ledger?: ReadonlyArray<LedgerLogEntry>
-  /** Default commit policy applied by processMessage. */
+  /** Pure deterministic policy of (state, incoming), identical on every member; throws are local faults. */
   commitPolicy?: IncomingMessageCallback
   /** Fetch control-ledger entry bodies the local ledger lacks (commit pre-pass). */
   resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>

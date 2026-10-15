@@ -4,7 +4,7 @@ import { asLogPosition } from '../src/cursor.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { decodeRecoveryVerdict, encodeRecoveryConfirmRequest } from '../src/recovery.js'
 import { APP_TOPIC_LABEL, commitTopic, rendezvousTopic } from '../src/topic.js'
-import { publishCommit } from './fixtures/commits.js'
+import { publishCommit, publishedCommitBytes, publishedCommitDigest } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import {
   buildLedgerCommit,
@@ -244,7 +244,7 @@ test.each(['built', 'published', 'confirmed'] as const)(
 )
 
 test.each(['published', 'confirmed'] as const)(
-  'restart gates saved confirmation responses at and beyond a %s rejoin barrier',
+  'restart gates request-computed refusals at and beyond a %s rejoin barrier',
   async (stage) => {
     const hub = new FakeHub()
     const seed = makeMLSPeer(hub, 'bob', secret, {
@@ -253,8 +253,9 @@ test.each(['published', 'confirmed'] as const)(
     })
     peers.push(seed)
     await seed.peer.replay()
+    const responses: Array<{ position: string; digest: string }> = []
     for (let index = 0; index < 3; index++) {
-      await publishCommit({
+      const row = await publishCommit({
         hub,
         senderDID: 'carol',
         recoverySecret: secret,
@@ -262,22 +263,37 @@ test.each(['published', 'confirmed'] as const)(
         external: true,
         adds: [`member-${index}`],
       })
+      responses.push({
+        position: row.sequenceID,
+        digest: publishedCommitDigest(hub, row.sequenceID),
+      })
     }
-    await vi.waitFor(async () => expect((await seed.control.load()).responses).toHaveLength(3))
-    const responses = (await seed.control.load()).responses
+    await vi.waitFor(async () =>
+      expect((await seed.control.load()).cursor?.position).toBe(responses[2]?.position),
+    )
+    expect((await seed.control.load()).responses).toEqual([])
     const barrier = responses[1]
-    if (barrier == null) throw new Error('Missing barrier position')
+    const first = responses[0]
+    if (first == null || barrier == null) throw new Error('Missing barrier position')
     const rejoin = await buildRejoinRecord(seed)
     await seed.peer.dispose()
     await seed.peer.drained()
     await seed.control.apply(
-      { putRejoin: { ...rejoin, stage, position: barrier.position } },
+      {
+        putRejoin: {
+          ...rejoin,
+          stage,
+          position: asLogPosition(barrier.position),
+          source: { ...rejoin.source, head: asLogPosition(first.position) },
+        },
+      },
       'responder-rejoin-barrier',
     )
     vi.useFakeTimers()
     const again = makeMLSPeer(hub, 'bob', secret, {
       restartOf: seed,
       members: ['bob', 'carol'],
+      acceptsCommitter: () => false,
       recovery: { getDelayMs: () => 0 },
     })
     peers.push(again)
@@ -299,6 +315,7 @@ test.each(['published', 'confirmed'] as const)(
             request,
             position: response.position,
             commitDigest: response.digest,
+            commit: publishedCommitBytes(hub, response.position),
           }),
         ),
       })

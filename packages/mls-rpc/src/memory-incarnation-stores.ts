@@ -4,7 +4,6 @@ import {
   type ControlChanges,
   type ControlSnapshot,
   forkEventID,
-  retainResponses,
 } from '@kumiai/rpc'
 
 import { controlBuildContexts } from './control-write-context.js'
@@ -330,7 +329,6 @@ export function createUnlockedIncarnationStores(params: {
         const snapshot = (await control.load('current'))?.snapshot ?? emptyControl()
         return {
           ...snapshot,
-          responses: retainResponses(snapshot.responses),
           recoveryEpochFloor: snapshot.recoveryEpochFloor ?? null,
           settledRejoins: snapshot.settledRejoins ?? [],
         }

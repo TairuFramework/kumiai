@@ -7,7 +7,7 @@ import { GroupControlUnsettledError } from '../src/errors.js'
 import { encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { encodeRecoveryConfirmRequest } from '../src/recovery.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
-import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
+import { publishCommit, publishedCommitBytes, publishedCommitDigest } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { encodeMemoryCommit, memoryEntryID } from './fixtures/memory-group-mls.js'
 import {
@@ -153,6 +153,7 @@ test('an adopted external response survives restart and answers confirmation', a
         request,
         position: result.sequenceID,
         commitDigest: digest,
+        commit: publishedCommitBytes(hub, result.sequenceID),
       }),
     ),
   })
@@ -164,7 +165,7 @@ test('an adopted external response survives restart and answers confirmation', a
   )
 })
 
-test('responder refusal and cursor skip commit in one apply', async () => {
+test('responder refusal commits cursor progress without a response row', async () => {
   const hub = new FakeHub()
   const bob = member(hub, { acceptsCommitter: () => false })
   await bob.peer.replay()
@@ -184,14 +185,14 @@ test('responder refusal and cursor skip commit in one apply', async () => {
   expect(await bob.control.load()).toMatchObject({
     applied: [],
     cursor: { position: result.sequenceID, epoch: 1 },
-    responses: [{ position: result.sequenceID, epoch: 1, kind: 'refused', reason: 'policy' }],
+    responses: [],
   })
   const again = member(hub, { restartOf: bob })
   await again.peer.replay()
   expect(again.mls.seen()).toBe(0)
 })
 
-test('an unresolvable external commit records refusal with its cursor skip', async () => {
+test('an unresolvable external commit saves cursor progress without a response row', async () => {
   const hub = new FakeHub()
   const bob = member(hub)
   await bob.peer.replay()
@@ -211,7 +212,7 @@ test('an unresolvable external commit records refusal with its cursor skip', asy
   expect(await bob.control.load()).toMatchObject({
     applied: [],
     cursor: { position: result.sequenceID, epoch: 1 },
-    responses: [{ position: result.sequenceID, epoch: 1, kind: 'refused', reason: 'invalid' }],
+    responses: [],
   })
 })
 

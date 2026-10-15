@@ -727,6 +727,13 @@ test.each(['policy', 'invalid'] as const)(
         refusalAuthority: 'authenticated-commit',
       }
     })
+    const validation = vi
+      .spyOn(s.aliceMLS, 'validateRecoveryCommit')
+      .mockImplementation(async () => ({
+        epoch: await s.aliceMLS.readEpoch(),
+        refusal: reason,
+        refusalAuthority: 'authenticated-commit',
+      }))
     expect(await s.bob.recover()).toEqual({ advanced: false, reenact: [] })
     expect(s.bobGroup()).toBe(s.initial)
     expect(s.events).toContainEqual(
@@ -743,6 +750,7 @@ test.each(['policy', 'invalid'] as const)(
       requests,
     )
     vi.spyOn(s.aliceMLS, 'processCommit').mockImplementation(process)
+    validation.mockRestore()
     expect((await s.bob.recover()).advanced).toBe(true)
   },
 )

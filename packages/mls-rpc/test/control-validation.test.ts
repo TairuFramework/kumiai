@@ -213,6 +213,59 @@ async function fixture(
   return { group, member, built, source, state, port, frame }
 }
 
+test.each(['accept', 'reject', 'throw'] as const)(
+  'request dry-run policy %s leaves state and receive keys unchanged',
+  async (decision) => {
+    const f = await fixture()
+    const state = decodeClientState(f.state)
+    if (state === undefined) throw new Error('Missing state')
+    f.member.handle = await restoreGroup({
+      state,
+      credential: f.member.handle.credential,
+      ledgerEntries: f.member.handle.ledgerTokens,
+      options: {
+        commitPolicy: () => {
+          if (decision === 'throw') throw new Error('local fault')
+          return decision
+        },
+      },
+    })
+    const commit = (
+      await joinGroupExternal({
+        identity: f.group.committer.identity,
+        groupInfo: (await exportGroupInfo({ group: f.group.committer.handle })).groupInfo,
+        credential: f.group.committer.handle.credential,
+        resync: true,
+      })
+    ).commitMessage
+    const live = createGroupMLS({
+      access: testHandleAccess({
+        handle: () => f.member.handle,
+        adopt: (next) => {
+          f.member.handle = next
+        },
+      }),
+      identity: f.member.identity,
+      entrySlot: f.member.slot,
+    })
+    const before = encodeClientState(f.member.handle.state)
+    const result = await live.validateRecoveryCommit(commit)
+    expect(result).toEqual(
+      decision === 'reject'
+        ? {
+            epoch: Number(f.member.handle.epoch),
+            refusal: 'policy',
+            refusalAuthority: 'authenticated-commit',
+          }
+        : { epoch: Number(f.member.handle.epoch) },
+    )
+    expect(encodeClientState(f.member.handle.state)).toEqual(before)
+    const applied = await live.processCommit(commit, {})
+    expect(applied.applied).toBe(decision === 'accept')
+    if (decision === 'accept') expect(applied.advanced).toBe(true)
+  },
+)
+
 test('authenticated external policy refusal carries authority but copy eligibility does not', async () => {
   const f = await fixture({ commitPolicy: () => 'reject' })
   const state = decodeClientState(f.state)

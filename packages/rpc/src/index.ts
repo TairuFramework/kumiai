@@ -82,7 +82,6 @@ export {
   controlSettled,
   pruneWindow,
   readmissionChanges,
-  retainResponses,
 } from './control/store.js'
 export type {
   AdoptionExpected,
@@ -133,6 +132,7 @@ export {
   type PendingAppFrames,
   type PendingRecovery,
   type ProcessCommitResult,
+  type RecoveryCommitValidation,
   type RecoveryConfirmationKey,
   type RecoveryRefusalReason,
   type RecoveryVerdict,

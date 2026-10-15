@@ -469,6 +469,7 @@ test('a walker without an applied epoch record stays silent for an external hist
         request,
         position: published.sequenceID,
         commitDigest: digestAppliedCommit(commit),
+        commit,
       }),
     ),
   })

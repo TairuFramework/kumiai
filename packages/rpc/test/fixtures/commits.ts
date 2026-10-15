@@ -105,3 +105,12 @@ export function publishedCommitDigest(
   const commitFrame = decodeCommitFrame(decodeHandshakeFrame(message.payload).payload)
   return digestAppliedCommit(commitFrame.commit)
 }
+
+export function publishedCommitBytes(
+  hub: { published: Array<{ sequenceID: string; payload: Uint8Array }> },
+  sequenceID: string,
+): Uint8Array {
+  const message = hub.published.find((row) => row.sequenceID === sequenceID)
+  if (message == null) throw new Error(`no published frame at ${sequenceID}`)
+  return decodeCommitFrame(decodeHandshakeFrame(message.payload).payload).commit
+}

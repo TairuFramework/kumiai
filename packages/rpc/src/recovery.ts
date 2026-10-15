@@ -129,13 +129,18 @@ export type RecoveryConfirmRequest = {
   request: Uint8Array
   position: string
   commitDigest: string
+  commit: Uint8Array
 }
 
 export function encodeRecoveryConfirmRequest(value: RecoveryConfirmRequest): Uint8Array {
   const label = 'recovery confirmation'
+  const body = new Uint8Array(4 + value.request.length + value.commit.length)
+  new DataView(body.buffer).setUint32(0, value.request.length, true)
+  body.set(value.request, 4)
+  body.set(value.commit, 4 + value.request.length)
   const digestPrefixed = encodeWithRequestID({
     requestID: value.commitDigest,
-    payload: value.request,
+    payload: body,
     label,
     maxBytes: MAX_CONFIRMATION_FIELD_BYTES,
   })
@@ -160,12 +165,20 @@ export function decodeRecoveryConfirmRequest(payload: Uint8Array): RecoveryConfi
     'recovery confirmation',
     MAX_CONFIRMATION_FIELD_BYTES,
   )
-  if (digest.rest.length === 0) throw new Error('recovery confirmation has no signed request')
+  if (digest.rest.length < 4) throw new Error('recovery confirmation is truncated')
+  const length = new DataView(
+    digest.rest.buffer,
+    digest.rest.byteOffset,
+    digest.rest.byteLength,
+  ).getUint32(0, true)
+  if (length === 0 || 4 + length >= digest.rest.length)
+    throw new Error('recovery confirmation has no request or commit')
   return {
     requestID: outer.requestID,
     position: position.requestID,
     commitDigest: digest.requestID,
-    request: digest.rest,
+    request: digest.rest.subarray(4, 4 + length),
+    commit: digest.rest.subarray(4 + length),
   }
 }
 

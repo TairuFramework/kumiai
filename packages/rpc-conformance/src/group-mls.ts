@@ -193,6 +193,11 @@ export type ConformanceGroupMLS<Position extends string = string> = {
     requestKey: Uint8Array,
   ) => Promise<ConformanceOpenedRecoveryVerdict | null>
   sendAdmission: () => ConformanceSendAdmission
+  validateRecoveryCommit: (commit: Uint8Array) => Promise<{
+    epoch: number
+    refusal?: ConformanceRecoveryRefusalReason
+    refusalAuthority?: 'authenticated-commit'
+  }>
   readEpoch: () => Promise<number>
   readRecoverySource: () => Promise<ConformanceControlSource>
   rosterEntries: () => Promise<Array<ConformanceRosterEntry>>
@@ -344,6 +349,36 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
   }
 
   describe(`GroupMLS conformance — ${label}`, () => {
+    test('recovery dry-run authenticates external refusals without changing state', async () => {
+      await withGroup(2, 'recovery-dry-run', async (group) => {
+        if (group.buildExternalCommit === undefined) return
+        const receiver = memberAt(group.members, 0)
+        const { genuine, forged } = await group.buildExternalCommit({
+          rejoining: 1,
+          forgeAs: receiver.did,
+        })
+        const before = await group.readEvidence(0)
+        const source = await receiver.mls.readRecoverySource()
+        const own = await group.buildExternalCommit({ rejoining: 0, forgeAs: receiver.did })
+        expect(await receiver.mls.validateRecoveryCommit(own.genuine)).toEqual({
+          epoch: source.epoch,
+          refusal: 'policy',
+          refusalAuthority: 'authenticated-commit',
+        })
+        for (const bytes of NOT_A_COMMIT)
+          expect(await receiver.mls.validateRecoveryCommit(bytes)).toEqual({ epoch: source.epoch })
+        expect(await receiver.mls.validateRecoveryCommit(forged)).toEqual({ epoch: source.epoch })
+        expect(await receiver.mls.validateRecoveryCommit(genuine)).toEqual({ epoch: source.epoch })
+        expect(await group.readEvidence(0)).toEqual(before)
+        expect(await receiver.mls.processCommit(genuine, {})).toMatchObject({
+          applied: true,
+          advanced: true,
+        })
+        expect(await receiver.mls.validateRecoveryCommit(genuine)).toEqual({
+          epoch: source.epoch + 1,
+        })
+      })
+    })
     test('own recognition is total, non-mutating and distinguishes complete commits', async () => {
       await withGroup(1, 'own-recognition', async (group) => {
         const member = memberAt(group.members, 0)

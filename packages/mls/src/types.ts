@@ -38,6 +38,9 @@ export type GroupOptions = {
    * 'reject' to refuse it (the handle stays at its pre-commit epoch and
    * processMessage throws CommitRejectedError). Overridable per call.
    *
+   * Must be pure and deterministic in (group state, incoming), identical on every member.
+   * A throw is a local fault, never refusal authority.
+   *
    * Replaces the default role rules after mandatory credential and lifecycle gates accept.
    * A caller policy cannot admit a change rejected by those gates. To extend the default
    * role rules, call defaultCommitPolicy from the callback.
