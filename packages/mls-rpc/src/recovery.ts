@@ -53,7 +53,12 @@ import {
   encodeCapturedRecoveryCandidate,
   validateRecoverySource,
 } from './recovery-codec.js'
-import { leafBytes, offeredTree, publicTreeBytes } from './recovery-public-state.js'
+import {
+  leafBytes,
+  offeredTree,
+  publicTreeBytes,
+  verifyOfferedGroupInfo,
+} from './recovery-public-state.js'
 import { validateCapturedRecoveryRecord } from './recovery-record.js'
 import { recoveryTrustInputs } from './registry/trust.js'
 import type { RegistryRecoverySource } from './registry/types.js'
@@ -632,7 +637,7 @@ export async function reconcileRecoveryCapture(params: {
     record.target.targetID !== params.target.targetID ||
     record.target.topicID !== params.target.topicID
   )
-    return { kind: 'retry' }
+    throw new TypeError('Captured recovery origin or target mismatch')
   await authenticateSnapshot(snapshot, record.requestKey, environment)
   const recaptured = await authenticateRecoveryReply({
     trust: snapshot.source.trust,
@@ -644,6 +649,11 @@ export async function reconcileRecoveryCapture(params: {
   if (recaptured === null) return { kind: 'retry' }
   const info = decode(mlsMessageDecoder, recaptured.groupInfo)
   if (info?.wireformat !== wireformats.mls_group_info) return { kind: 'retry' }
+  const suite = await getCiphersuiteImpl(
+    source.trust.ciphersuiteName as CiphersuiteName,
+    environment.options.cryptoProvider ?? nobleCryptoProvider,
+  )
+  if (!(await verifyOfferedGroupInfo(snapshot.state, info, suite))) return { kind: 'retry' }
   const epoch = Number(info.groupInfo.groupContext.epoch)
   if (
     !Number.isSafeInteger(epoch) ||

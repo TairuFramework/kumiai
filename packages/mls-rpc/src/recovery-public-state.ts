@@ -1,14 +1,97 @@
 import type { ClientState } from '@kumiai/mls'
 import {
+  type CiphersuiteImpl,
+  CodecError,
   clientStateDecoder,
   clientStateEncoder,
   decode,
   defaultExtensionTypes,
   encode,
   groupStateEncoder,
+  type MlsGroupInfo,
   mlsMessageDecoder,
+  mlsMessageEncoder,
   wireformats,
 } from 'ts-mls'
+
+function vector(bytes: Uint8Array): Uint8Array {
+  const length = bytes.length
+  if (length >= 0x40000000) throw new TypeError('MLS vector too large')
+  const width = length < 64 ? 1 : length < 16384 ? 2 : 4
+  const encoded = new Uint8Array(width + length)
+  if (width === 1) encoded[0] = length
+  else if (width === 2) new DataView(encoded.buffer).setUint16(0, length | 0x4000)
+  else new DataView(encoded.buffer).setUint32(0, length | 0x80000000)
+  encoded.set(bytes, width)
+  return encoded
+}
+
+function uint32(value: number): Uint8Array {
+  const bytes = new Uint8Array(4)
+  new DataView(bytes.buffer).setUint32(0, value)
+  return bytes
+}
+
+// RFC 9420 tree hashes and GroupInfoTBS signatures. ts-mls keeps their encoders private.
+export async function verifyOfferedGroupInfo(
+  state: ClientState,
+  message: MlsGroupInfo,
+  suite: CiphersuiteImpl,
+): Promise<boolean> {
+  const info = message.groupInfo
+  if (info.groupContext.cipherSuite !== suite.id) return false
+  let tree: ClientState['ratchetTree']
+  try {
+    tree = offeredTree(state, encode(mlsMessageEncoder, message))
+  } catch (error) {
+    if (error instanceof TypeError || error instanceof CodecError) return false
+    throw error
+  }
+  if (tree.some((node, index) => node !== undefined && node.nodeType !== (index % 2 === 0 ? 1 : 2)))
+    return false
+  const signer = tree[info.signer * 2]
+  if (signer?.nodeType !== 1) return false
+  // MLSMessage adds two u16 fields. An empty signature adds one vector-length byte.
+  const unsigned = encode(mlsMessageEncoder, {
+    ...message,
+    groupInfo: { ...info, signature: new Uint8Array() },
+  }).subarray(4, -1)
+  if (
+    !(await suite.signature.verify(
+      signer.leaf.signaturePublicKey,
+      new Uint8Array([
+        ...vector(new TextEncoder().encode('MLS 1.0 GroupInfoTBS')),
+        ...vector(unsigned),
+      ]),
+      info.signature,
+    ))
+  )
+    return false
+
+  const hash = async (index: number): Promise<Uint8Array> => {
+    const node = tree[index]
+    const encoded = publicTreeBytes({ ...state, ratchetTree: [node] }).tree
+    const prefix = 1 << ((encoded[0] ?? 0) >>> 6)
+    const body =
+      node === undefined
+        ? new Uint8Array([0])
+        : new Uint8Array([1, ...encoded.subarray(prefix + 2)])
+    if (index % 2 === 0) {
+      return await suite.hash.digest(new Uint8Array([1, ...uint32(index / 2), ...body]))
+    }
+    let level = 0
+    while (((index >>> level) & 1) === 1) level++
+    const left = await hash(index ^ (1 << (level - 1)))
+    const right = await hash(index ^ (3 << (level - 1)))
+    return await suite.hash.digest(new Uint8Array([2, ...body, ...vector(left), ...vector(right)]))
+  }
+  const root = 2 ** Math.floor(Math.log2(tree.length)) - 1
+  const digest = await hash(root)
+  return (
+    digest.length === info.groupContext.treeHash.length &&
+    digest.every((byte, index) => byte === info.groupContext.treeHash[index])
+  )
+}
 
 // ts-mls exposes the complete state codecs, but not its tree/leaf codecs. Isolate the
 // public tree between the encoded context and the independently encoded private suffix.

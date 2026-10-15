@@ -45,7 +45,9 @@ export function memoryCapturedRecord(
   }
 }
 
-export async function createCapturedMemoryRecovery() {
+export async function createCapturedMemoryRecovery(
+  target = { targetID: 'hub', topicID: 'commits' },
+) {
   const trust = { groupID: 'memory-capture', ownerDID: 'alice', members: ['alice', 'bob'] }
   const source = {
     key: { groupID: trust.groupID, incarnation: 1 },
@@ -62,7 +64,7 @@ export async function createCapturedMemoryRecovery() {
     ...options,
     localDID: 'alice',
     capturedRecovery: {
-      target: { targetID: 'hub', topicID: 'commits' },
+      target,
       readSource: async () => {
         if (sourceError !== null) throw sourceError
         return source

@@ -1,4 +1,4 @@
-import type { OwnIdentity } from '@kokuin/token'
+import { encodeMultibase, normalizeDID, type OwnIdentity, stringifyToken } from '@kokuin/token'
 import * as Mls from '@kumiai/mls'
 import {
   type ControllerBinding,
@@ -8,6 +8,14 @@ import {
   sealRecoveryVerdict,
   verifyRecoveryRequest,
 } from '@kumiai/mls'
+import { sha256 } from '@noble/hashes/sha2.js'
+import { toB64U } from '@sozai/codec'
+import {
+  createGroupInfoWithExternalPubAndRatchetTree,
+  encode,
+  mlsMessageEncoder,
+  wireformats,
+} from 'ts-mls'
 import { expect, test, vi } from 'vitest'
 
 import * as recovery from '../src/recovery.js'
@@ -148,7 +156,7 @@ test('retained authentication refuses wrong group, anchor, binding, signer and f
   expect(await recovery.authenticateRecoveryReply({ ...params, requestID: 'other' })).toBeNull()
 })
 
-async function capturedFixture() {
+async function capturedFixture(options: Mls.GroupOptions = {}) {
   const { createRealGroup, testHandleAccess, testGroupMLSDependencies } = await import(
     './fixtures/real-group.js'
   )
@@ -183,7 +191,7 @@ async function capturedFixture() {
   const target = { targetID: 'hub', topicID: 'commits' }
   const environment = {
     identity: member.identity,
-    options: {},
+    options,
     accept: async (...args: Array<unknown>) => {
       accepted.push(args)
     },
@@ -225,6 +233,152 @@ async function capturedFixture() {
     ...held,
   }
 }
+
+async function attestInfo(
+  s: Awaited<ReturnType<typeof capturedFixture>>,
+  request: Uint8Array,
+  groupInfo: Uint8Array,
+): Promise<Uint8Array> {
+  const verified = await verifyRecoveryRequest(new TextDecoder().decode(request))
+  const token = new TextEncoder().encode(
+    stringifyToken(
+      await s.responder.identity.signToken(
+        {
+          type: 'kumiai.recovery-groupinfo',
+          groupID: s.source.key.groupID,
+          requestID: verified.requestID,
+          groupInfoDigest: encodeMultibase(sha256(groupInfo)),
+          groupInfoAuthenticator: toB64U(s.responder.handle.state.keySchedule.epochAuthenticator),
+          captureHead: null,
+        },
+        { embedLongForm: true },
+      ),
+    ),
+  )
+  const field = (bytes: Uint8Array) => {
+    const framed = new Uint8Array(4 + bytes.length)
+    new DataView(framed.buffer).setUint32(0, bytes.length)
+    framed.set(bytes, 4)
+    return framed
+  }
+  const utf8 = new TextEncoder()
+  const plaintext = new Uint8Array([...field(token), ...groupInfo])
+  const hpke = s.responder.handle.context.cipherSuite.hpke
+  const { enc, ct } = await hpke.seal(
+    await hpke.importPublicKey(verified.ephemeralPublicKey),
+    plaintext,
+    utf8.encode('kumiai/mls/recovery/v2'),
+    new Uint8Array([
+      ...utf8.encode('kumiai/mls/recovery-aad/v2'),
+      ...field(utf8.encode(verified.groupID)),
+      ...field(utf8.encode(normalizeDID(verified.requesterDID))),
+      ...field(utf8.encode(verified.requestID)),
+    ]),
+  )
+  return new Uint8Array([2, ...enc, ...ct])
+}
+
+test.each([
+  ['epoch', true],
+  ['epoch', false],
+  ['tree', true],
+  ['tree', false],
+  ['signature', true],
+  ['signer', true],
+] as const)(
+  'recapture refuses re-attested invalid MLS %s with exact leaf present %s',
+  async (fault, applied) => {
+    const s = await capturedFixture()
+    const captured = s.port.capturedRecovery
+    if (captured === undefined) throw new Error('Missing captured port')
+    const pending = await captured.applyRecovery(s.sealed, s.requestID, s.requestKey)
+    if (pending === null || 'renewalRequired' in pending) throw new Error('Missing candidate')
+    const { capturedRecord } = await import('./fixtures/captured-recovery.js')
+    const record = capturedRecord(pending, s.request, s.requestKey, s.requestID)
+    const before = record.candidate.slice()
+    if (applied) await s.responder.handle.processMessage(pending.commit)
+    else s.responder.handle = (await Mls.commitKeyRotation(s.responder.handle)).newGroup
+    const state = Mls.decodeClientState(Mls.encodeClientState(s.responder.handle.state))
+    if (state === undefined) throw new Error('Missing public-state fixture')
+    if (fault === 'tree') {
+      const node = state.ratchetTree.find((node) => node?.nodeType === 2)
+      if (node?.nodeType !== 2) throw new Error('Missing parent node')
+      node.parent.hpkePublicKey[0] = (node.parent.hpkePublicKey[0] ?? 0) ^ 1
+    }
+    const groupInfo = await createGroupInfoWithExternalPubAndRatchetTree(
+      state,
+      [],
+      s.responder.handle.context.cipherSuite,
+    )
+    if (fault === 'epoch') groupInfo.groupContext.epoch++
+    if (fault === 'signature') groupInfo.signature[0] = (groupInfo.signature[0] ?? 0) ^ 1
+    if (fault === 'signer') groupInfo.signer = state.ratchetTree.length + 1
+    const fresh = await s.port.createRecoveryRequest('fresh-invalid-mls')
+    const sealed = await attestInfo(
+      s,
+      fresh.request,
+      encode(mlsMessageEncoder, {
+        version: 1,
+        wireformat: wireformats.mls_group_info,
+        groupInfo,
+      }),
+    )
+    expect(
+      await recovery.authenticateRecoveryReply({
+        trust: s.source.trust,
+        sealed,
+        requestID: 'fresh-invalid-mls',
+        requestKey: fresh.requestKey,
+        options: {},
+      }),
+    ).not.toBeNull()
+    const builds = vi.spyOn(Mls, 'joinGroupExternal')
+    try {
+      expect(
+        await captured.reconcileCapture(record, {
+          sealed,
+          requestID: 'fresh-invalid-mls',
+          requestKey: fresh.requestKey,
+          epochFloor: null,
+        }),
+      ).toEqual({ kind: 'retry' })
+      expect(builds).not.toHaveBeenCalled()
+      expect(record.candidate).toEqual(before)
+    } finally {
+      builds.mockRestore()
+    }
+  },
+)
+
+test.each(['source', 'control', 'crypto'] as const)(
+  'recapture preserves unexpected provider error identity: %s',
+  async (provider) => {
+    const s = await capturedFixture()
+    const captured = s.port.capturedRecovery
+    if (captured === undefined) throw new Error('Missing captured port')
+    const pending = await captured.applyRecovery(s.sealed, s.requestID, s.requestKey)
+    if (pending === null || 'renewalRequired' in pending) throw new Error('Missing candidate')
+    const { capturedRecord } = await import('./fixtures/captured-recovery.js')
+    const record = capturedRecord(pending, s.request, s.requestKey, s.requestID)
+    const failure = new Error(`Unexpected ${provider} failure`)
+    if (provider === 'source') s.readSource.mockRejectedValue(failure)
+    if (provider === 'control') vi.spyOn(s.control, 'load').mockRejectedValue(failure)
+    if (provider === 'crypto')
+      s.environment.options.cryptoProvider = {
+        async getCiphersuiteImpl() {
+          throw failure
+        },
+      }
+    await expect(
+      captured.reconcileCapture(record, {
+        sealed: s.sealed,
+        requestID: s.requestID,
+        requestKey: s.requestKey,
+        epochFloor: null,
+      }),
+    ).rejects.toBe(failure)
+  },
+)
 
 test('captured preparation and restoration preserve attestation, origin, tuple and portable acceptance without old state', async () => {
   const s = await capturedFixture()
@@ -333,12 +487,12 @@ test('captured recapture authenticates and classifies saved X without another bu
   expect(await captured.reconcileCapture(record, { ...recapture, requestID: 'wrong' })).toEqual({
     kind: 'retry',
   })
-  expect(
-    await captured.reconcileCapture(
+  await expect(
+    captured.reconcileCapture(
       { ...record, target: { ...record.target, topicID: 'wrong' } },
       recapture,
     ),
-  ).toEqual({ kind: 'retry' })
+  ).rejects.toThrow('association')
   await s.responder.handle.processMessage(pending.commit)
   const later = await sealCapturedGroupInfo({
     group: s.responder.handle,
@@ -396,6 +550,122 @@ test('factories bind source, owner and attested bytes before restoring and rejec
       ),
     ),
   ).rejects.toThrow('tag')
+})
+
+test.each(['identity', 'incarnation', 'trust'] as const)(
+  'captured restoration and acceptance refuse a different valid source origin: %s',
+  async (field) => {
+    const s = await capturedFixture()
+    const pending = await recovery.buildRecoveryCandidate(s)
+    if (pending === null || 'renewalRequired' in pending) throw new Error('Missing candidate')
+    const { validateRecoverySource } = await import('../src/recovery-codec.js')
+    const { recoveryTrustDigest } = await import('../src/recovery-trust-digest.js')
+    const changed = {
+      ...s.source,
+      key: { ...s.source.key },
+      identity: field === 'identity' ? s.source.trust.installed : null,
+      trust: { ...s.source.trust, installed: { ...s.source.trust.installed } },
+    }
+    if (field === 'incarnation') {
+      changed.key.incarnation++
+      changed.trust.installed.incarnation++
+    }
+    if (field === 'trust') changed.trust.installed.epoch++
+    changed.trustDigest = recoveryTrustDigest(changed.trust)
+    expect(validateRecoverySource(changed)).toEqual(changed)
+    await expect(
+      recovery.restoreRecoveryCandidate({
+        source: changed,
+        candidate: pending.serialize(),
+        requestKey: s.requestKey,
+        environment: s.environment,
+      }),
+    ).rejects.toThrow('origin mismatch')
+    const { asLogPosition } = await import('@kumiai/rpc')
+    await expect(
+      pending.onAccepted(
+        changed,
+        {
+          ...pending.target,
+          position: asLogPosition('p'),
+          payloadDigest: 'payload',
+          verdict: new Uint8Array([1]),
+        },
+        () => ({ mutationID: 'switch', changes: {} }),
+      ),
+    ).rejects.toThrow('source mismatch')
+    expect(s.accepted).toHaveLength(0)
+  },
+)
+
+test('captured preparation under a local safety hold returns null without building', async () => {
+  const s = await capturedFixture()
+  s.readSource.mockClear()
+  const { recoveryUnavailableEventID } = await import('@kumiai/rpc')
+  await s.control.apply(
+    {
+      recoveryUnavailable: {
+        ...s.control.key,
+        id: recoveryUnavailableEventID(s.control.key),
+        kind: 'group:recovery-unavailable',
+        reason: 'trust-unreadable',
+      },
+    },
+    'held-apply',
+  )
+  const builds = vi.spyOn(Mls, 'joinGroupExternal')
+  try {
+    expect(
+      await s.port.capturedRecovery?.applyRecovery(s.sealed, s.requestID, s.requestKey),
+    ).toBeNull()
+    expect(builds).not.toHaveBeenCalled()
+    expect(s.readSource).not.toHaveBeenCalled()
+  } finally {
+    builds.mockRestore()
+  }
+})
+
+test.each(['targetID', 'topicID'] as const)(
+  'captured preparation refuses an empty %s before building',
+  async (field) => {
+    const s = await capturedFixture()
+    const builds = vi.spyOn(Mls, 'joinGroupExternal')
+    try {
+      await expect(
+        recovery.buildRecoveryCandidate({
+          ...s,
+          target: { ...s.target, [field]: '' },
+        }),
+      ).rejects.toThrow('Invalid recovery target')
+      expect(builds).not.toHaveBeenCalled()
+    } finally {
+      builds.mockRestore()
+    }
+  },
+)
+
+test('captured preparation refuses a sealed non-GroupInfo reply before building', async () => {
+  const s = await capturedFixture()
+  const pending = await recovery.buildRecoveryCandidate(s)
+  if (pending === null || 'renewalRequired' in pending) throw new Error('Missing candidate')
+  const sealed = await attestInfo(s, s.request, pending.commit)
+  expect(await recovery.buildRecoveryCandidate({ ...s, sealed })).toBeNull()
+  // Exercise the factory's own wireformat check independently of the authenticator's precheck.
+  const authenticated = vi.spyOn(Mls, 'authenticateRecoveryReply').mockResolvedValue({
+    groupInfo: pending.commit,
+    ledger: [],
+    signer: s.responder.identity.id,
+    captureHead: null,
+    groupInfoAuthenticator: s.responder.handle.state.keySchedule.epochAuthenticator,
+  })
+  const builds = vi.spyOn(Mls, 'joinGroupExternal')
+  try {
+    expect(await recovery.buildRecoveryCandidate({ ...s, sealed })).toBeNull()
+    expect(builds).not.toHaveBeenCalled()
+  } finally {
+    builds.mockRestore()
+    authenticated.mockRestore()
+  }
 })
 
 test.each([
@@ -507,12 +777,29 @@ test.each([
     s.readSource.mockRejectedValue(new GroupUnavailableError({ reason: 'recovery-unavailable' }))
     expected = { kind: 'held' }
   }
-  if (row === 'transient')
-    s.readSource.mockRejectedValue(new Error('Provider temporarily unavailable'))
-  if (row === 'control transient')
-    vi.spyOn(s.control, 'load').mockRejectedValue(new Error('Control temporarily unavailable'))
+  if (row === 'transient') {
+    const { GroupUnavailableError } = await import('../src/persistence-errors.js')
+    s.readSource.mockRejectedValue(new GroupUnavailableError({ reason: 'restore-pending' }))
+  }
+  if (row === 'control transient') {
+    const { StorageOutcomeUnknownError } = await import('@kumiai/rpc')
+    vi.spyOn(s.control, 'load').mockRejectedValue(
+      new StorageOutcomeUnknownError('Control unavailable'),
+    )
+  }
   const builds = vi.spyOn(Mls, 'joinGroupExternal')
   try {
+    if (row === 'origin') {
+      await expect(
+        captured.reconcileCapture(record, {
+          sealed,
+          requestID: 'recapture',
+          requestKey: fresh.requestKey,
+          epochFloor: null,
+        }),
+      ).rejects.toThrow('association')
+      return
+    }
     expect(
       await captured.reconcileCapture(record, {
         sealed,
@@ -599,7 +886,7 @@ test.each(['built', 'restored'] as const)(
   },
 )
 
-test.each(['empty', 'complete', 'partial', 'stale'] as const)(
+test.each(['empty', 'complete', 'partial', 'stale', 'missing head'] as const)(
   'controllerless captured switch accepts empty or complete ledgers and refuses others: %s',
   async (ledger) => {
     const s = await capturedFixture()
@@ -725,7 +1012,7 @@ test.each(['empty', 'complete', 'partial', 'stale'] as const)(
       expect(await args[0].isLedgerComplete()).toBe(false)
       const tokens = s.responder.handle.ledgerTokens
       const selected =
-        ledger === 'complete'
+        ledger === 'complete' || ledger === 'missing head'
           ? tokens
           : ledger === 'partial'
             ? tokens.slice(1)
@@ -738,6 +1025,20 @@ test.each(['empty', 'complete', 'partial', 'stale'] as const)(
         ledgerEntries: selected,
         options: fixture.environment.options,
       })
+      if (ledger === 'missing head') {
+        const { decodeCapturedRecoveryCandidate, encodeCapturedRecoveryCandidate } = await import(
+          '../src/recovery-codec.js'
+        )
+        candidate.state.groupContext.extensions = candidate.state.groupContext.extensions.filter(
+          (extension) => extension.extensionType !== Mls.LEDGER_HEAD_EXTENSION_TYPE,
+        )
+        const snapshot = decodeCapturedRecoveryCandidate(record.candidate, s.requestKey)
+        record.candidate = encodeCapturedRecoveryCandidate(
+          { ...snapshot, state: candidate.state },
+          s.requestKey,
+        )
+        expect(Mls.readLedgerHead(candidate)).toBeNull()
+      }
       await fixture.installRows({ key: s.source.key, control: { putRejoin: record } })
       const before = await fixture.inspectRows()
       let writes = 0
@@ -754,7 +1055,7 @@ test.each(['empty', 'complete', 'partial', 'stale'] as const)(
           destination: { control: { cursor: { position, epoch: pending.epoch } } },
         },
       })
-      if (ledger === 'partial' || ledger === 'stale') {
+      if (ledger === 'partial' || ledger === 'stale' || ledger === 'missing head') {
         await expect(switched).rejects.toMatchObject({ reason: 'candidate' })
         expect(writes).toBe(0)
         expect(await fixture.inspectRows()).toEqual(before)

@@ -30,7 +30,7 @@ import type {
   RosterEntry,
 } from '../../src/crypto.js'
 import type { LogPosition } from '../../src/cursor.js'
-import { ControlWriteNotCommittedError } from '../../src/errors.js'
+import { ControlWriteNotCommittedError, StorageOutcomeUnknownError } from '../../src/errors.js'
 import { encodeHandshakeFrame, HANDSHAKE_KIND } from '../../src/handshake.js'
 import {
   type CapturedPendingRecovery,
@@ -397,6 +397,7 @@ type MemoryGroupInfo = {
   captureHead?: string | null
   signer?: string
   leafTokens?: Array<[string, string]>
+  stateSignature?: string
   attestation?: string
 }
 
@@ -458,6 +459,31 @@ export function sealMemoryRecoveryVerdict(
     sealContext(SEAL_DOMAIN.verdict, to.groupID, to.requesterDID, to.requestID),
     fromUTF(JSON.stringify({ signer, verdict })),
   )
+}
+
+/** Re-attest changed public bytes while retaining the original applied-state signature. */
+export function reattestMemoryCapture(params: {
+  request: Uint8Array
+  requestKey: Uint8Array
+  sealed: Uint8Array
+  change: (info: Record<string, unknown>) => void
+  recoverySecret?: Uint8Array
+}): Uint8Array {
+  const to = JSON.parse(toUTF(params.request)) as MemoryRecoveryRequest
+  const context = sealContext(SEAL_DOMAIN.groupInfo, to.groupID, to.requesterDID, to.requestID)
+  const bytes = openWithKey(params.requestKey, context, params.sealed)
+  if (bytes === null) throw new Error('Cannot open captured fixture')
+  const info = JSON.parse(toUTF(bytes)) as Record<string, unknown>
+  delete info.attestation
+  params.change(info)
+  info.attestation = toB64U(
+    hmac(
+      sha256,
+      params.recoverySecret ?? new Uint8Array(32).fill(0x33),
+      fromUTF(JSON.stringify(info)),
+    ),
+  )
+  return sealToKey(fromB64U(to.ephemeralKey), context, fromUTF(JSON.stringify(info)))
 }
 
 /** enc(32) + tag(16): the shortest well-formed sealed reply. */
@@ -1103,16 +1129,40 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       toB64U(fromB64U(info.authenticator)) !== info.authenticator
     )
       return null
-    validateCaptureHead(info.captureHead)
+    try {
+      validateCaptureHead(info.captureHead)
+    } catch {
+      return null
+    }
     const { attestation, ...body } = info
     const trust = source.trust as { members: Array<string> }
     if (
+      info.stateSignature !== signCapturedState(info) ||
       !trust.members.includes(info.signer) ||
       !info.members.includes(localDID ?? '') ||
       attestation !== toB64U(hmac(sha256, recoverySecret, fromUTF(JSON.stringify(body))))
     )
       return null
     return info
+  }
+  function signCapturedState(info: MemoryGroupInfo): string {
+    return toB64U(
+      hmac(
+        sha256,
+        recoverySecret,
+        fromUTF(
+          JSON.stringify([
+            'mls-applied-state',
+            info.groupID,
+            info.epoch,
+            info.authenticator,
+            info.head,
+            info.members,
+            info.leafTokens,
+          ]),
+        ),
+      ),
+    )
   }
   type CapturedSnapshot = {
     source: RecoverySource
@@ -1255,6 +1305,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
               ) !== null
             )
               return null
+            if (!capturedDependencies.target.targetID || !capturedDependencies.target.topicID)
+              throw new TypeError('Invalid recovery target')
             const source = validateSource(await capturedDependencies.readSource())
             const info = capturedInfo(sealed, requestID, requestKey, source)
             if (info === null) return null
@@ -1341,7 +1393,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
                 record.requestID !== saved.requestID ||
                 capturedInfo(saved.sealed, saved.requestID, record.requestKey, source) === null
               )
-                return { kind: 'retry' }
+                throw new TypeError('Captured recovery record association mismatch')
               const info = capturedInfo(reply.sealed, reply.requestID, reply.requestKey, source)
               if (
                 info === null ||
@@ -1373,7 +1425,15 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
                 error.reason === 'recovery-unavailable'
               )
                 return { kind: 'held' }
-              return { kind: 'retry' }
+              if (
+                error instanceof StorageOutcomeUnknownError ||
+                (error instanceof Error &&
+                  error.name === 'GroupUnavailableError' &&
+                  'reason' in error &&
+                  error.reason === 'restore-pending')
+              )
+                return { kind: 'retry' }
+              throw error
             }
           },
           sealGroupInfo: (request, head) => sealInfo(request, head),
@@ -1401,8 +1461,10 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         ? {}
         : { captureHead, signer: localDID, leafTokens: [...freshLeaves] }),
     }
-    if (captureHead !== undefined)
+    if (captureHead !== undefined) {
+      info.stateSignature = signCapturedState(info)
       info.attestation = toB64U(hmac(sha256, recoverySecret, fromUTF(JSON.stringify(info))))
+    }
     return sealReply(SEAL_DOMAIN.groupInfo, to, fromUTF(JSON.stringify(info)))
   }
 

@@ -46,7 +46,11 @@ import type {
   RosterEntry,
   SafetyHold,
 } from '@kumiai/rpc'
-import { ControlWriteNotCommittedError, controlSafetyHeld } from '@kumiai/rpc'
+import {
+  ControlWriteNotCommittedError,
+  controlSafetyHeld,
+  StorageOutcomeUnknownError,
+} from '@kumiai/rpc'
 import { ciphersuites } from 'ts-mls'
 
 import type { ControlHandleAccess } from './access.js'
@@ -333,7 +337,12 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
                   error.reason === 'recovery-unavailable'
                 )
                   return { kind: 'held' }
-                return { kind: 'retry' }
+                if (
+                  error instanceof StorageOutcomeUnknownError ||
+                  (error instanceof GroupUnavailableError && error.reason === 'restore-pending')
+                )
+                  return { kind: 'retry' }
+                throw error
               }
             },
             sealGroupInfo: (request, captureHead) => port.sealGroupInfo(request, captureHead),

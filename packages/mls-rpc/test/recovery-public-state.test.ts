@@ -2,17 +2,46 @@ import { randomIdentity } from '@kokuin/token'
 import { type ClientState, createGroup, decodeClientState, encodeClientState } from '@kumiai/mls'
 import {
   createGroupInfoWithExternalPubAndRatchetTree,
+  decode,
   defaultExtensionTypes,
   defaultProposalTypes,
   encode,
   generateKeyPackage,
   keyPackageEncoder,
+  mlsMessageDecoder,
   mlsMessageEncoder,
   wireformats,
 } from 'ts-mls'
 import { expect, test } from 'vitest'
 
-import { leafBytes, offeredTree, publicTreeBytes } from '../src/recovery-public-state.js'
+import {
+  leafBytes,
+  offeredTree,
+  publicTreeBytes,
+  verifyOfferedGroupInfo,
+} from '../src/recovery-public-state.js'
+
+test.each([0, 1, 4])(
+  'public GroupInfo verification accepts genuine trees with %s invited members',
+  async (size) => {
+    const { createRealGroup } = await import('./fixtures/real-group.js')
+    const { exportGroupInfo, removeMember } = await import('@kumiai/mls')
+    const s = await createRealGroup(size, `verified-public-tree-${size}`)
+    let group = s.committer.handle
+    if (size > 1) {
+      const member = s.members[0]
+      if (member === undefined) throw new Error('Missing member')
+      const index = group.findMemberLeafIndex(member.identity.id)
+      if (index === undefined) throw new Error('Missing member leaf')
+      group = (await removeMember(group, index)).newGroup
+    }
+    const info = decode(mlsMessageDecoder, (await exportGroupInfo({ group })).groupInfo)
+    if (info?.wireformat !== wireformats.mls_group_info) throw new Error('Missing GroupInfo')
+    expect(await verifyOfferedGroupInfo(group.state, info, group.context.cipherSuite)).toBe(true)
+    info.groupInfo.signature[0] = (info.groupInfo.signature[0] ?? 0) ^ 1
+    expect(await verifyOfferedGroupInfo(group.state, info, group.context.cipherSuite)).toBe(false)
+  },
+)
 
 test.each(['empty', 'zero-one-absent'] as const)(
   'public-state adapter isolates the exact tree across variable private suffixes: %s',

@@ -407,12 +407,48 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         }),
       ).toEqual({ kind: 'unapplied-later', epoch: first.epoch })
     })
+    test('captured recapture refuses a genuine reply older than the saved capture epoch', async () => {
+      const s = await params.createCapturedRecovery()
+      const port = s.requester.capturedRecovery
+      if (port === undefined) throw new Error('Missing captured port')
+      const fresh = await s.requester.createRecoveryRequest('old-recapture')
+      const older = await s.responder.sealGroupInfo(fresh.request, null)
+      const first = await s.requester.createRecoveryRequest('prior')
+      const prior = await port.applyRecovery(
+        await s.responder.sealGroupInfo(first.request, null),
+        'prior',
+        first.requestKey,
+      )
+      if (prior === null || 'renewalRequired' in prior) throw new Error('Missing prior candidate')
+      expect((await s.responder.processCommit(prior.commit, {})).advanced).toBe(true)
+      const held = await s.requester.createRecoveryRequest('X')
+      const pending = await port.applyRecovery(
+        await s.responder.sealGroupInfo(held.request, null),
+        'X',
+        held.requestKey,
+      )
+      if (pending === null || 'renewalRequired' in pending) throw new Error('Missing candidate')
+      const record = s.record(pending, held.request, held.requestKey, 'X')
+      expect(record.target.groupInfoEpoch).toBe(prior.epoch)
+      const before = record.candidate.slice()
+      expect(
+        await port.reconcileCapture(record, {
+          sealed: older,
+          requestID: 'old-recapture',
+          requestKey: fresh.requestKey,
+          epochFloor: null,
+        }),
+      ).toEqual({ kind: 'retry' })
+      expect(record.candidate).toEqual(before)
+      expect(s.accepted()).toBe(0)
+    })
     test.each([
       'digest',
       'payload',
       'epoch',
       'request',
       'key',
+      'candidate',
       'origin',
       'target',
       'authenticator',
@@ -444,6 +480,10 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         if (field === 'epoch') record.epochAfter++
         if (field === 'request') record.requestID = 'other'
         if (field === 'key') record.requestKey = new Uint8Array(32)
+        if (field === 'candidate') {
+          const last = record.candidate.length - 1
+          record.candidate[last] = (record.candidate[last] ?? 0) ^ 1
+        }
         if (field === 'origin') record.source.stateVersion++
         if (field === 'target') record.target.topicID = 'other'
         if (field === 'authenticator') record.target.groupInfoAuthenticator.fill(0)
@@ -460,14 +500,14 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         if (field === 'ledger') Reflect.set(record, 'ledgerBefore', [42])
         if (field === 'id') record.id = ''
         const fresh = await s.requester.createRecoveryRequest('recapture')
-        expect(
-          await port.reconcileCapture(record, {
+        await expect(
+          port.reconcileCapture(record, {
             sealed: await s.responder.sealGroupInfo(fresh.request, null),
             requestID: 'recapture',
             requestKey: fresh.requestKey,
             epochFloor: null,
           }),
-        ).toEqual({ kind: 'retry' })
+        ).rejects.toThrow()
         expect(s.accepted()).toBe(0)
         expect(await s.requester.readEpoch()).toBe(pending.epoch - 1)
       },
@@ -530,7 +570,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         { ...record, target: { ...record.target, groupInfoAuthenticator: new Uint8Array(32) } },
         { ...record, source: { ...record.source, stateVersion: record.source.stateVersion + 1 } },
       ])
-        expect(await captured.reconcileCapture(changed, recapture)).toEqual({ kind: 'retry' })
+        await expect(captured.reconcileCapture(changed, recapture)).rejects.toThrow()
       const verdict = await s.responder.sealRecoveryVerdict(request, {
         groupID: source.key.groupID,
         requestID,
