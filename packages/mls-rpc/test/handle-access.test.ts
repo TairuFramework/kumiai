@@ -79,6 +79,7 @@ test.each(['simple', 'transactional'] as const)(
     ).toMatchObject({ applied: true, advanced: true })
     const current = await dependencies.readRecoverySource()
     expect(current.identity?.epoch).toBe(source.identity.epoch + 1)
+    expect(current.stateVersion).toBeGreaterThan(source.stateVersion)
     expect(current).toEqual(await access.readControl(async (scope) => scope.source))
     if (mode === 'transactional') expect(current.stateVersion).toBe(store.snapshot().revision)
   },

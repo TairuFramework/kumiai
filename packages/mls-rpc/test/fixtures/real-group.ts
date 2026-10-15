@@ -397,10 +397,20 @@ export function testHandleAccess(
   },
 ): HandleAccess {
   let version = 0
+  let state = params.handle().state
   const access = simpleHandleAccess({
     key: { groupID: params.handle().groupID, incarnation: 1 },
     ...params,
-    stateVersion: params.stateVersion ?? (() => version),
+    stateVersion:
+      params.stateVersion ??
+      (() => {
+        const current = params.handle().state
+        if (params.persist == null && current !== state) {
+          state = current
+          version += 1
+        }
+        return version
+      }),
     persist:
       params.persist == null
         ? undefined
