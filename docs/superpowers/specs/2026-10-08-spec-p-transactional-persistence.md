@@ -1,7 +1,7 @@
 # Spec P: transactional persistence — design
 
 Date: 2026-10-08
-Status: draft r19 (2026-10-14)
+Status: draft r20 (2026-10-15)
 Parent: [client host, messaging protocol and multi-device e2e](2026-10-08-client-messaging-e2e-design.md)
 Control baseline: [Spec P2a](2026-10-08-spec-p2a-crash-safe-control-design.md), superseded where amended here.
 
@@ -99,7 +99,9 @@ A different blob that passes that predicate can recognise saved work. Failed ver
 Normal first-valid proof still gates own adoption/Welcome release. Saved payloadDigest binds saved work after recognition, without schema migration.
 No canonical intake gate, identity-version migration, equivalence taxonomy or competitor-authentication API is introduced.
 Only refusal of the authenticated commit itself authorises terminal negative verdicts.
-Transport/blob/framing/unsigned-field/copy-eligibility failures remain advisory, including persisted response replay and verdict caches.
+Transport/blob/framing/unsigned-field/copy-eligibility failures remain advisory, including verdict caches.
+Refusals are computed on request, never persisted (r20 decision). A refusal does not advance state, so a stored refusal keyed by hub-assigned
+position is hub-controlled data: its count, keys and position strings are unbounded. Applied responses stay stored; they advance the epoch and are bounded by it.
 Unproven superseded verdicts never authorise recovery discard. Applied-state settlement authority independently decides later-epoch non-acceptance.
 Confirmed verdicts retain saved request, digest/position and candidate-derived tag binding.
 Origin-authorised signers removed after origin retain attestation authority, including signed floor inflation. This residual lies outside the hub threat model.
@@ -164,8 +166,14 @@ Later epoch without X's leaf permits policy-gated discard/build. Never build a s
 Unsupported delivered frame/blob versions skip with upgrade-required diagnostics. Legacy control-record holds retain their separate policy.
 Keep bound confirmation and normal MLS validation under applied-state settlement authority.
 Only refusal of the authenticated commit itself authorises terminal negative settlement. Transport/blob/framing/copy-eligibility failures never do.
-New negative response rows and signed verdicts carry refusalAuthority: 'authenticated-commit' only after authenticated MLS/policy refusal.
-Replay/caches and requester judgement treat missing or copy-derived provenance as advisory. Legacy negative rows remain readable without terminal replay.
+Requests carry the saved external commit bytes; the responder checks their commit digest against the request.
+A responder still at the commit's epoch dry-run validates them on retained state and signs refusalAuthority: 'authenticated-commit' only after
+authenticated MLS/policy refusal. A responder past that epoch answers only from applied state. No negative response row is written.
+An in-memory, bounded, non-durable memo may rate-limit repeat evaluation. Requester judgement treats missing provenance as advisory.
+Legacy negative rows remain readable as advisory only and are never replayed terminally.
+Host commitPolicy MUST be a pure, deterministic function of (group state, incoming) and identical on every member, like MLS validation itself.
+A divergent policy already forks the group on member commits; under this contract any member's authenticated refusal is the group's refusal.
+A policy throw is a local fault: advisory, never refusal authority.
 A responder verdict never chooses a fork or authorises replacement of X in place.
 Remove P2a's separate lower-epoch candidate-admission/source-prefix algorithm.
 Persisted accepted/confirmed stages replay the same attempt; an adopted stage never reinstalls its candidate.
