@@ -299,8 +299,9 @@ function equal(left: unknown, right: unknown): boolean {
 }
 
 export function projectRecoveryTrust(trust: unknown): GroupRecoveryTrust {
-  const projected = project(trust, trustShape, new Set()) as GroupRecoveryTrust
+  let projected: GroupRecoveryTrust
   try {
+    projected = project(trust, trustShape, new Set()) as GroupRecoveryTrust
     assertRecoverySourceTrust(projected)
     if (!equal(projected.registry, decodeDeviceRegistry(encodeDeviceRegistry(projected.registry))))
       return invalid()

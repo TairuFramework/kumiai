@@ -902,3 +902,19 @@ test('candidate identity cannot be replaced by another source owner', async () =
     }),
   ).toThrow()
 })
+
+test('exceptional projection operations refuse as group state conflicts', () => {
+  const revoked = Proxy.revocable({}, {})
+  revoked.revoke()
+  const throwingKeys = new Proxy(
+    {},
+    {
+      ownKeys() {
+        throw new Error('ownKeys trap failed')
+      },
+    },
+  )
+  for (const trust of [revoked.proxy, throwingKeys]) {
+    expect(() => recoveryTrustDigest(trust as GroupRecoveryTrust)).toThrow(GroupStateConflictError)
+  }
+})
