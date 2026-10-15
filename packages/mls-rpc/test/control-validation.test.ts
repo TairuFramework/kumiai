@@ -33,6 +33,7 @@ import {
   asLogPosition,
   type BuiltCommit,
   type CertifiedControlRange,
+  type ControlHold,
   type ControlLogFrame,
   type ControlSearchWork,
   type ControlValidationPort,
@@ -284,7 +285,7 @@ async function searchReal(
     oldest: rows[0]?.position ?? null,
     gap: false,
   }))
-  const hold = vi.fn(async () => {})
+  const hold = vi.fn(async (_value: ControlHold) => {})
   const followWinner = vi.fn(
     async (frame: ControlLogFrame, _range: CertifiedControlRange, work: ControlSearchWork) => {
       if (competitor === undefined) throw new Error('missing competitor')
@@ -2058,8 +2059,8 @@ test.each([
       expect(searched.result.kind).toBe('unknown')
     else expect(searched.result.kind).toBe('first-valid')
     const control = await searched.store.control.load()
-    expect(searched.hold).not.toHaveBeenCalledWith(
-      expect.objectContaining({ reason: 'unsupported-version' }),
+    expect(searched.hold.mock.calls.every(([value]) => value.reason === 'acceptance-unknown')).toBe(
+      true,
     )
     expect(searched.haltFork).not.toHaveBeenCalled()
     expect(control.forkHalt).toBeNull()
