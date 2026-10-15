@@ -7,6 +7,7 @@ import {
 } from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
+import { openEntries, sealEntries } from '../src/crypto.js'
 import {
   bindEntryCapability,
   coordinatorBinding,
@@ -920,6 +921,39 @@ for (const mode of ['real-mls', 'double'] as const) {
           await expect(work).rejects.toMatchObject({ reason: 'recovery-unavailable' })
           expect(callback).not.toHaveBeenCalled()
           await durableDiagnosis(fixture, key)
+        } finally {
+          await fixture.close()
+        }
+      },
+    )
+    test.each(['authentication', 'version', 'malformed'] as const)(
+      'delivered resolver %s failure cannot diagnose retained trust loss',
+      async (kind) => {
+        const fixture = await create()
+        try {
+          const access = await fixture.registry.access(groupID)
+          await fixture.acceptedOrdinary(access)
+          const before = await fixture.inspectRows()
+          const trust = await fixture.device.groups.loadTrust(groupID)
+          const keyBytes = new Uint8Array(32).fill(17)
+          const sealed = sealEntries(keyBytes, new Uint8Array([1, 0, 0, 0, 0]))
+          if (kind === 'version') sealed[0] = 99
+          if (kind === 'authentication')
+            sealed[sealed.length - 1] = (sealed[sealed.length - 1] ?? 0) ^ 1
+          await expect(
+            access.mutate(async () => {
+              openEntries(keyBytes, kind === 'malformed' ? new Uint8Array([1]) : sealed)
+            }),
+          ).rejects.toMatchObject({
+            name:
+              kind === 'version'
+                ? 'UnsupportedLedgerEntriesVersionError'
+                : 'LedgerEntryRefusedError',
+          })
+          expect(registrySafety(fixture.registry)?.held(key)).toBeNull()
+          expect(access.admission()).toMatchObject({ admissible: true })
+          expect(await fixture.device.groups.loadTrust(groupID)).toEqual(trust)
+          expect(await fixture.inspectRows()).toEqual(before)
         } finally {
           await fixture.close()
         }

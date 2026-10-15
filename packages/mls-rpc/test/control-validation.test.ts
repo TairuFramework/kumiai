@@ -39,6 +39,8 @@ import {
   commitTopic,
   createControlSearch,
   createGroupPeer,
+  decodeCommitFrame,
+  decodeHandshakeFrame,
   digestAppliedCommit,
   encodeCommitFrame,
   encodeHandshakeFrame,
@@ -215,8 +217,8 @@ async function searchReal(
   competitor?: Uint8Array,
   validation: ControlValidationPort = f.port,
   competitorPayload?: Uint8Array,
+  store = createTransactionalStore(f.member.handle),
 ) {
-  const store = createTransactionalStore(f.member.handle)
   const intent: Operation & { stage: 'intent' } = {
     id: 'own',
     kind: 'rotation',
@@ -1708,6 +1710,19 @@ test.each(['external-authentication', 'body-resolver'] as const)(
             })
           ).commitMessage
         : (await publicLedger(f)).commit
+    if (seam === 'body-resolver') {
+      const store = createTransactionalStore(f.member.handle)
+      await expect(searchReal(f, competitor, f.port, undefined, store)).rejects.toBe(fault)
+      const saved = await store.control.load()
+      expect(saved.cursor?.position).toBe(f.built.searchFrom)
+      expect(saved.commitOnce?.payloadDigest).toBe(f.built.payloadDigest)
+      expect(saved.welcomes).toEqual([])
+      expect(saved.applied).toEqual([])
+      expect(saved.forkHalt).toBeNull()
+      expect(saved.recoveryUnavailable).toBeNull()
+      expect(encodeClientState(f.member.handle.state)).toEqual(f.state)
+      return
+    }
     const result = await searchReal(f, competitor)
     expect(result.result).toEqual({ kind: 'unknown' })
     expect(result.followWinner).not.toHaveBeenCalled()
@@ -1906,5 +1921,177 @@ test.each(['outer', 'inner'] as const)(
     } finally {
       await peer.dispose()
     }
+  },
+)
+
+test.each(['ordinary', 'validation-shaped'] as const)(
+  'provider construction errors preserve identity during direct validation: %s',
+  async (kind) => {
+    const fault =
+      kind === 'ordinary' ? new Error('provider offline') : new ValidationError('Invalid signature')
+    const f = await fixture({
+      cryptoProvider: {
+        getCiphersuiteImpl: async () => {
+          throw fault
+        },
+      },
+    })
+    const validation = await f.port.restoreValidation(f.built)
+    if (validation === null) throw new Error('missing validation')
+    await expect(
+      validation.validateFrame({ ...f.frame(f.built.payload), payload: f.built.payload }, f.built),
+    ).rejects.toBe(fault)
+    await expect(validation.verifyOwn(f.built)).rejects.toBe(fault)
+    expect(encodeClientState(f.member.handle.state)).toEqual(f.state)
+  },
+)
+
+test.each(['ordinary', 'validation-shaped'] as const)(
+  'entry-key provider errors preserve identity instead of becoming copy poison: %s',
+  async (kind) => {
+    const fault =
+      kind === 'ordinary' ? new Error('exporter offline') : new ValidationError('Invalid signature')
+    const f = await fixture({
+      cryptoProvider: {
+        getCiphersuiteImpl: async (id) => {
+          const suite = await nobleCryptoProvider.getCiphersuiteImpl(id)
+          return {
+            ...suite,
+            kdf: {
+              ...suite.kdf,
+              expand: async (secret, info, length) => {
+                if (new TextDecoder().decode(info).includes('kumiai/ledger-entries/v1')) throw fault
+                return suite.kdf.expand(secret, info, length)
+              },
+            },
+          }
+        },
+      },
+    })
+    const ledger = await publicLedger(f)
+    const validation = await f.port.restoreValidation(f.built)
+    if (validation === null) throw new Error('missing validation')
+    await expect(validation.validateFrame(ledger.frame, f.built)).rejects.toBe(fault)
+    expect(encodeClientState(f.member.handle.state)).toEqual(f.state)
+  },
+)
+
+test('own candidate provider errors escape without manufacturing an own-copy failure', async () => {
+  const f = await fixture()
+  const fault = new Error('candidate storage offline')
+  const port = createControlValidationPort({
+    identity: f.member.identity,
+    options: {},
+    restoreCandidate: async () => {
+      throw fault
+    },
+  })
+  const validation = await port.restoreValidation(f.built)
+  if (validation === null) throw new Error('missing validation')
+  await expect(
+    validation.validateFrame({ ...f.frame(f.built.payload), payload: f.built.payload }, f.built),
+  ).rejects.toBe(fault)
+  expect(encodeClientState(f.member.handle.state)).toEqual(f.state)
+})
+
+test.each([
+  'malformed',
+  'handshake-version',
+  'commit-version',
+  'resolver-authentication',
+  'resolver-malformed',
+  'resolver-missing',
+  'own-copy',
+  'own-blob-version',
+] as const)(
+  'direct delivered %s diagnostic preserves saved work without a safety sink',
+  async (kind) => {
+    const f = await fixture()
+    const ledger = await publicLedger(f)
+    let payload: Uint8Array = ledger.frame.payload.slice()
+    const expected = {
+      malformed: { kind: 'invalid', reason: 'malformed' },
+      'handshake-version': { kind: 'unavailable', reason: 'unsupported-version' },
+      'commit-version': { kind: 'unavailable', reason: 'unsupported-version' },
+      'resolver-authentication': { kind: 'invalid', reason: 'authentication' },
+      'resolver-malformed': { kind: 'invalid', reason: 'malformed' },
+      'resolver-missing': { kind: 'unavailable', reason: 'resolver' },
+      'own-copy': { kind: 'unavailable', reason: 'unexplained-own' },
+      'own-blob-version': { kind: 'unavailable', reason: 'unexplained-own' },
+    }[kind]
+    if (kind === 'malformed') payload = new Uint8Array()
+    else if (kind === 'handshake-version') payload[2] = 99
+    else if (kind === 'commit-version') {
+      const commitFrame = encodeCommitFrame(ledger.commit, new Uint8Array())
+      commitFrame[0] = 99
+      payload = encodeHandshakeFrame(HANDSHAKE_KIND.commit, commitFrame)
+    } else if (kind === 'own-blob-version') {
+      const commit = decodeCommitFrame(decodeHandshakeFrame(f.built.payload).payload).commit
+      payload = encodeHandshakeFrame(
+        HANDSHAKE_KIND.commit,
+        encodeCommitFrame(commit, new Uint8Array([99])),
+      )
+    } else if (kind === 'own-copy') {
+      const own = (await commitKeyRotation(f.member.handle)).commitMessage
+      payload = f.frame(own).payload
+    } else {
+      const key = await deriveEntryKey(f.member.handle)
+      const entries =
+        kind === 'resolver-malformed'
+          ? new Uint8Array([1])
+          : encodeLedgerEntries(kind === 'resolver-missing' ? [] : [ledger.token])
+      const sealed = sealEntries(key, entries)
+      key.fill(0)
+      if (kind === 'resolver-authentication')
+        sealed[sealed.length - 1] = (sealed[sealed.length - 1] ?? 0) ^ 1
+      payload = encodeHandshakeFrame(
+        HANDSHAKE_KIND.commit,
+        encodeCommitFrame(ledger.commit, sealed),
+      )
+    }
+    const validation = await f.port.restoreValidation(f.built)
+    expect(await validation?.validateFrame({ ...ledger.frame, payload }, f.built)).toEqual(expected)
+    const searched = await searchReal(f, ledger.commit, f.port, payload)
+    if (kind === 'handshake-version' || kind === 'commit-version')
+      expect(searched.result).toEqual({ kind: 'unknown' })
+    else if (kind === 'own-copy' || kind === 'resolver-missing')
+      expect(searched.result.kind).toBe('unknown')
+    else expect(searched.result.kind).toBe('first-valid')
+    const control = await searched.store.control.load()
+    expect(searched.hold).not.toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'unsupported-version' }),
+    )
+    expect(searched.haltFork).not.toHaveBeenCalled()
+    expect(control.forkHalt).toBeNull()
+    expect(control.recoveryUnavailable).toBeNull()
+    expect(
+      control.controlHold === null || control.controlHold.reason === 'acceptance-unknown',
+    ).toBe(true)
+    expect(control.commitOnce?.payload).toEqual(f.built.payload)
+    expect(control.commitOnce?.journal).toEqual(f.built.journal)
+    expect(control.operations).toHaveLength(1)
+    expect(control.applied).toEqual([])
+    expect(control.responses).toEqual([])
+    expect(encodeClientState(f.member.handle.state)).toEqual(f.state)
+  },
+)
+
+test.each(['ordinary', 'validation-shaped'] as const)(
+  'host policy errors propagate with their identity: %s',
+  async (kind) => {
+    const fault =
+      kind === 'ordinary'
+        ? new Error('policy store offline')
+        : new ValidationError('Invalid signature')
+    const f = await fixture({
+      commitPolicy: () => {
+        throw fault
+      },
+    })
+    const competitor = (await commitKeyRotation(f.group.committer.handle)).commitMessage
+    const validation = await f.port.restoreValidation(f.built)
+    if (validation === null) throw new Error('missing validation')
+    await expect(validation.validateFrame(f.frame(competitor), f.built)).rejects.toBe(fault)
+    expect(encodeClientState(f.member.handle.state)).toEqual(f.state)
   },
 )

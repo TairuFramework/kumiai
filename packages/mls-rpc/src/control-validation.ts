@@ -156,13 +156,13 @@ export function createControlValidationPort(params: {
         )
           return false
         ownVerification ??= (async () => {
+          const { group: source } = restored ?? (await restore())
           try {
             const handshake = decodeHandshakeFrame(value.payload)
             if (handshake.version !== HANDSHAKE_VERSION || handshake.kind !== HANDSHAKE_KIND.commit)
               return false
             const commit = decodeCommitFrame(handshake.payload).commit
             if (digestAppliedCommit(commit) !== value.digest) return false
-            const { group: source } = restored ?? (await restore())
             const header = readHeader ?? (await source.readCommitHeader(commit))
             if (
               header?.epoch !== BigInt(identity.epoch) ||
@@ -173,27 +173,27 @@ export function createControlValidationPort(params: {
               !(await source.verifyCommitSignature(commit))
             )
               return false
-            const candidate = await params.restoreCandidate(journal.candidate.slice())
-            const history = candidate.state.historicalReceiverData.get(BigInt(identity.epoch))
-            return (
-              candidate.groupID === identity.groupID &&
-              candidate.epoch === BigInt(identity.epoch + 1) &&
-              normalizeDID(candidate.credential.id) === normalizeDID(params.identity.id) &&
-              history !== undefined &&
-              sameBytes(history.resumptionPsk, source.state.keySchedule.resumptionPsk) &&
-              sameBytes(history.senderDataSecret, source.state.keySchedule.senderDataSecret) &&
-              sameBytes(
-                encodeClientState({
-                  ...source.state,
-                  groupContext: history.groupContext,
-                  ratchetTree: history.ratchetTree,
-                }),
-                encodeClientState(source.state),
-              )
-            )
           } catch {
             return false
           }
+          const candidate = await params.restoreCandidate(journal.candidate.slice())
+          const history = candidate.state.historicalReceiverData.get(BigInt(identity.epoch))
+          return (
+            candidate.groupID === identity.groupID &&
+            candidate.epoch === BigInt(identity.epoch + 1) &&
+            normalizeDID(candidate.credential.id) === normalizeDID(params.identity.id) &&
+            history !== undefined &&
+            sameBytes(history.resumptionPsk, source.state.keySchedule.resumptionPsk) &&
+            sameBytes(history.senderDataSecret, source.state.keySchedule.senderDataSecret) &&
+            sameBytes(
+              encodeClientState({
+                ...source.state,
+                groupContext: history.groupContext,
+                ratchetTree: history.ratchetTree,
+              }),
+              encodeClientState(source.state),
+            )
+          )
         })()
         return ownVerification
       }
@@ -225,16 +225,11 @@ export function createControlValidationPort(params: {
               ? { kind: 'unavailable', reason: 'unsupported-version' }
               : { kind: 'invalid', reason: 'malformed' }
           }
-          let restored: Awaited<ReturnType<typeof restore>>
           const read = readHeader == null ? undefined : reads.get(readHeader)
           const retainedRead =
             read !== undefined && sameBytes(read.commit, commit) ? read : undefined
           if (readHeader != null) reads.delete(readHeader)
-          try {
-            restored = retainedRead?.restored ?? (await restore())
-          } catch (error) {
-            return diagnostic(error)
-          }
+          const restored = retainedRead?.restored ?? (await restore())
           const { group: working, slot } = restored
           let header: Awaited<ReturnType<GroupHandle['readCommitHeader']>>
           try {
@@ -278,12 +273,13 @@ export function createControlValidationPort(params: {
               : { kind: 'unavailable', reason: 'unexplained-own' }
           }
           let resolverError: unknown
+          let localFailure: { error: unknown } | undefined
           slot.install(async () => {
             let key: Uint8Array
             try {
               key = await deriveEntryKey(working, params.entryLabel)
             } catch (error) {
-              resolverError = error
+              localFailure = { error }
               throw error
             }
             try {
@@ -306,7 +302,22 @@ export function createControlValidationPort(params: {
           })
           try {
             const before = working.epoch
-            await working.processMessage(commit)
+            const policy = params.options.commitPolicy
+            await working.processMessage(
+              commit,
+              policy === undefined
+                ? undefined
+                : {
+                    commitPolicy: (incoming) => {
+                      try {
+                        return policy(incoming)
+                      } catch (error) {
+                        localFailure = { error }
+                        throw error
+                      }
+                    },
+                  },
+            )
             return {
               kind: 'valid',
               header: { ...header, epoch: Number(header.epoch) },
@@ -315,6 +326,7 @@ export function createControlValidationPort(params: {
               removed: working.state.groupActiveState.kind === 'removedFromGroup',
             }
           } catch (error) {
+            if (localFailure !== undefined) throw localFailure.error
             if (resolverError !== undefined) {
               const result = diagnostic(resolverError)
               return result.kind === 'unavailable' && result.reason === 'unrecognised'
