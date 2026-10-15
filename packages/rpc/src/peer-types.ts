@@ -110,6 +110,8 @@ export type GroupPeerMLSParams = {
 
 export type StrandKind =
   | 'own-unmerged'
+  /** Claimed diagnostic only. Does not open a recovery episode. */
+  | 'past-epoch-divergence'
   | 'fork-losing'
   | 'fork-winning'
   | 'ahead'

@@ -63,21 +63,23 @@ async function refuseWork(f: ForkFixture) {
 }
 
 test.each(['losing', 'winning'] as const)(
-  'real %s divergence halts with exact commit digests and retained history',
+  'real %s past divergence preserves history and permits survivor progress',
   async (branch) => {
     const f = await setup()
     const fork = await f.competing(branch)
     const before = await f.member.control.load()
-    const head = f.member.controlWalk.head()
-    const work = observeForkWork(f)
-    expect(await fork.reveal()).toBe(false)
+    expect(await fork.reveal({ following: false })).toBe(false)
     const after = await f.member.control.load()
-    expect(after.forkHalt?.evidence).toEqual(fork.evidence)
+    expect(after.forkHalt).toBeNull()
     expect(after.applied).toEqual(before.applied)
-    expect(after.cursor).toEqual(before.cursor)
+    expect(after.cursor?.position).toBe(
+      fork.appliedPosition > fork.evidence.position ? fork.appliedPosition : fork.evidence.position,
+    )
     expect(after.responses).toEqual(before.responses)
+    expect(after.outcomes).toEqual(before.outcomes)
+    expect(after.welcomes).toEqual(before.welcomes)
     expect(after.strand).toEqual(before.strand)
-    expect(f.member.controlWalk.head()).toBe(head)
+    expect(f.member.controlWalk.safetyHold()).toBeNull()
     expect(f.member.access.epoch()).toBe(fork.evidence.epoch + 1)
     expect(f.onStrand).toHaveBeenCalledExactlyOnceWith({
       groupID: f.topic,
@@ -85,18 +87,23 @@ test.each(['losing', 'winning'] as const)(
       commitDigest: fork.evidence.remoteDigest,
       localEpoch: fork.evidence.epoch + 1,
       claimedEpoch: fork.evidence.epoch,
-      kind: `fork-${branch}`,
-      confidence: 'observed',
+      kind: 'past-epoch-divergence',
+      confidence: 'claimed',
     })
-    expect(await f.safety().events(f.key)).toEqual([
-      { ...f.key, id: forkEventID(f.key), kind: 'group:fork', halt: after.forkHalt },
-    ])
-    work.epoch.mockClear()
-    work.evidence.mockClear()
-    await refuseWork(f)
-    for (const [name, counter] of Object.entries(work)) expect(counter, name).not.toHaveBeenCalled()
+    expect(await f.safety().events(f.key)).toEqual([])
+    expect(f.onSafetyEvent).not.toHaveBeenCalled()
     expect(f.onRecovery).not.toHaveBeenCalled()
-    expect(f.onSafetyEvent).toHaveBeenCalledOnce()
+    await f.restart()
+    expect((await f.member.control.load()).applied).toEqual(before.applied)
+    expect(f.member.controlWalk.safetyHold()).toBeNull()
+    expect(await fork.reveal()).toBe(true)
+    expect(f.member.access.epoch()).toBe(fork.evidence.epoch + 2)
+    expect((await f.member.control.load()).applied.slice(0, before.applied.length)).toEqual(
+      before.applied,
+    )
+    await expect(
+      f.member.peer.protocol('chat').dispatch('chat/changed', { data: {} }),
+    ).resolves.toBeUndefined()
   },
 )
 
@@ -264,41 +271,34 @@ test.each(['commit', 'rollback'] as const)(
   },
 )
 
-test('one-shot below-cursor rollback retries retained body using storage alone', async () => {
+test('one-shot host halt rollback retries retained body using storage alone', async () => {
   const f = await setup()
-  const fork = await f.competing('losing')
+  const evidence = await f.authenticatorEvidence()
   const before = await f.member.control.load()
   const fault = f.registry.armNextWorkFault('pending')
   const apply = f.member.control.apply.bind(f.member.control)
   const attempts = vi.spyOn(f.member.control, 'apply').mockImplementation(apply)
-  const revealing = fork.reveal()
+  const halting = f.member.controlWalk.haltFork(evidence)
   await fault.rejected
   expect(f.onSafetyEvent).not.toHaveBeenCalled()
-  // The forged prefix is absent on every subsequent read, including after a crash.
-  const page = await f.hub.fetchTopic({
-    subscriberDID: f.identity.id,
-    topicID: f.topic,
-    after: before.cursor?.position ?? undefined,
-  })
-  expect(page.messages.map((message) => message.sequenceID)).not.toContain(fork.evidence.position)
   const network = observeStartup(f.hub)
   await fault.finish('rollback')
-  expect(await revealing).toBe(false)
+  await halting
   const bodies = attempts.mock.calls.filter(([changes]) => changes.forkHalt !== undefined)
   expect(bodies).toHaveLength(2)
   expect(bodies[1]?.[0].forkHalt).toEqual(bodies[0]?.[0].forkHalt)
-  expect((await f.member.control.load()).forkHalt?.evidence).toEqual(fork.evidence)
+  expect((await f.member.control.load()).forkHalt?.evidence).toEqual(evidence)
   expect((await f.member.control.load()).applied).toEqual(before.applied)
   expect((await f.member.control.load()).cursor).toEqual(before.cursor)
   for (const [name, counter] of Object.entries(network))
     expect(counter, name).not.toHaveBeenCalled()
 })
 
-test('crash before a one-shot halt commits cannot reconstruct the vanished evidence', async () => {
+test('crash before a host halt commits cannot reconstruct the volatile evidence', async () => {
   const f = await setup()
-  const fork = await f.competing('losing')
+  const evidence = await f.authenticatorEvidence()
   const fault = f.registry.armNextWorkFault('pending')
-  const revealing = fork.reveal()
+  const halting = f.member.controlWalk.haltFork(evidence)
   await fault.rejected
   expect(f.member.controlWalk.safetyHold()).toBe('fork-halted')
   expect(f.onSafetyEvent).not.toHaveBeenCalled()
@@ -324,9 +324,9 @@ test('crash before a one-shot halt commits cannot reconstruct the vanished evide
   }
   await stopping
   await f.member.peer.drained()
-  await revealing
+  await halting
   await f.restart()
-  // The crash loses the volatile body. Storage cannot recreate an observation the hub withholds.
+  // The crash loses the volatile body. Storage cannot recreate an uncommitted host report.
   expect((await f.member.control.load()).forkHalt).toBeNull()
   expect(await f.safety().events(f.key)).toEqual([])
   expect(f.member.controlWalk.safetyHold()).toBeNull()

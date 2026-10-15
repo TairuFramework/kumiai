@@ -14,10 +14,10 @@ import type { CommitHeader } from './crypto.js'
  * | Not a commit at all (no header) | advance (poison — never retry, never heal); settled first, before any epoch question |
  * | Framed at an epoch AHEAD of this peer's | advance; heal — the group moved on without it |
  * | Below this peer's epoch, with no record — or a record naming THIS SAME commit | advance, no fork check, no unwrap attempt |
- * | Below this peer's epoch, with a record naming a DIFFERENT commit | advance; the fork trigger |
+ * | Below this peer's epoch, with a record naming a DIFFERENT commit | advance; claimed diagnostic poison |
  * | At this peer's current epoch, with no authenticated committer | advance (poison — never retry, never heal) |
  * | At this peer's current epoch, committed by THIS peer | settle a matching retained slot or preserve cursor and hold unexplained own evidence |
- * | At this peer's current epoch, committed by another — handed to the port | applied: advance and record this epoch -> the applied commit (digest and position) for the fork check; refused by policy or entries unresolvable: advance (poison — never retry, never heal) |
+ * | At this peer's current epoch, committed by another — handed to the port | applied: advance and record this epoch -> the applied commit (digest and position) for history and divergence diagnostics; refused by policy or entries unresolvable: advance (poison — never retry, never heal) |
  *
  * Seven rows are decided here, reading bytes and decrypting nothing; only the last — a frame at
  * this peer's epoch authored by someone else — is handed to the MLS port, whose answer is the
@@ -28,8 +28,8 @@ import type { CommitHeader } from './crypto.js'
  * **The header carries two facts with different trust.** The epoch is cleartext and only the
  * publisher's word. The committer is MLS-authenticated but recoverable only for a commit framed
  * at this peer's OWN epoch — reading it needs that epoch's key material. So `ahead`, `history`
- * and `fork` are all REACHED on the EPOCH ALONE (they're about frames this peer holds no key
- * for) — though `fork` is then SETTLED on the commit, once two records at that epoch disagree —
+ * and `past-epoch-divergence` are reached on the epoch alone (this peer holds no key
+ * for them). Different bytes supply diagnostic evidence only,
  * while every row at this peer's own epoch requires the AUTHENTICATED committer and refuses to
  * fire without it. A classifier that demanded a committer before reading an epoch could never
  * classify the one frame that says a peer fell behind.
@@ -81,16 +81,9 @@ export type CommitDisposition =
    * bytes rather than by where it sits is what makes that true in any order the hub serves.
    */
   | { row: 'history' }
-  /**
-   * Two different commits at one epoch: this peer applied `appliedSequenceID`, the log now
-   * carries another. Reached on the epoch alone and settled on the COMMITS: two records of the
-   * same bytes are the same commit, at any position. Only once they genuinely differ do
-   * sequenceIDs decide which side stands — the hub's own chaining, not the commit's word, and the
-   * committer is neither read nor available here.
-   * The hub accepted both — only possible by serving different logs to different members.
-   * Advance, and heal if on the losing branch: the branch whose commit carries the HIGHER
-   * sequenceID, a tiebreak both sides evaluate alone once they see both.
-   */
+  /** Past bytes can be a refused CAS loser or a forged copy. Skip without safety action. */
+  | { row: 'past-epoch-divergence' }
+  /** Legacy classification shape, retained for compatibility. Never emitted. */
   | { row: 'fork'; appliedSequenceID: string; branch: 'winning' | 'losing' }
   /**
    * This peer's OWN commit, framed at the epoch it is STILL at. MLS MERGES a pending commit,
@@ -156,9 +149,8 @@ export type CommitFrameEvidence = CommitHeader | null | typeof UNKNOWN_FRAME_VER
 /**
  * What this peer enacted at one epoch: the commit itself, by digest, and where the log carried it.
  *
- * The digest is what the `fork` row actually asks about — "two different commits at one epoch" —
- * and the position is only the tiebreak between two that genuinely differ. One record rather than
- * two maps, deliberately: a position recorded without its digest re-opens the replay this closes,
+ * The digest distinguishes history from diagnostic divergence. A position alone cannot identify bytes.
+ * One record rather than two maps, deliberately: a position recorded without its digest re-opens the replay this closes,
  * and a type that cannot express one without the other cannot drift.
  */
 export type AppliedCommit = {
@@ -173,7 +165,7 @@ export type AppliedCommit = {
  *
  * Over the COMMIT alone, never the frame around it: the sealed entry blob riding a commit frame is
  * derived, and re-sealing it is legal, so a frame-wide digest would make a legitimate re-seal look
- * like a different commit and fork the group on it.
+ * like different commit bytes.
  *
  * Not a security boundary. This is a peer recognising bytes it already applied, and the only way to
  * abuse a collision is a different Commit that MLS accepts at the same epoch — a far stronger break
@@ -191,8 +183,7 @@ export type CommitClassifierState = {
   epoch: number
   /**
    * The commit this peer enacted at each epoch it has passed — by digest, with the sequenceID the
-   * log carried it at. The digest is the fork test; the sequenceID is only the tiebreak between two
-   * commits that genuinely differ.
+   * log carried it at. Different digests provide a claimed diagnostic, without choosing a branch.
    *
    * Rebuilt from the ControlStore's retained window on restart. An absent row is history.
    */
@@ -233,7 +224,6 @@ export type ClassifyCommitParams = {
  */
 export function classifyCommit({
   header,
-  sequenceID,
   commitDigest,
   state,
 }: ClassifyCommitParams): CommitDisposition {
@@ -262,19 +252,9 @@ export function classifyCommit({
     // makes a peer read its OWN applied commit as the losing branch and heal the whole group
     // off it — one rejoin and one anchor rotation per replay.
     if (commitDigest != null && commitDigest === applied.digest) return { row: 'history' }
-    // No digest to compare against: the same kind of missing evidence as `applied == null`
-    // above, and judged the same way, for the same reason — a frame whose commit bytes were
-    // never extracted cannot be told apart from the one this peer already enacted, so it must
-    // not be told apart from it. Unreachable today (the only null-digest calls pass
-    // UNKNOWN_FRAME_VERSION, settled at `unsupported-version` above); kept unconditional, rather than falling
-    // through to a position comparison, so a direct caller reaching this some other way still
-    // gets the safe direction: it can MISS a fork on absent evidence, but can never INVENT one.
+    // Missing bytes cannot distinguish a replay from a competitor.
     if (commitDigest == null) return { row: 'history' }
-    return {
-      row: 'fork',
-      appliedSequenceID: applied.sequenceID,
-      branch: sequenceID < applied.sequenceID ? 'losing' : 'winning',
-    }
+    return { row: 'past-epoch-divergence' }
   }
 
   // At this peer's epoch — the only place the committer is both required and available (see

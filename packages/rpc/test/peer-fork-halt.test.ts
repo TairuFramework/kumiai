@@ -18,7 +18,6 @@ import {
 import * as logDeliveryModule from '../src/log-delivery.js'
 import { commitTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
-import { assertDurableForkHalt } from './fixtures/control-hold.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import {
   buildInviteCommit,
@@ -685,37 +684,33 @@ async function observedFork(branch: 'losing' | 'winning') {
   }
 }
 
-test.each(['losing', 'winning'] as const)('%s branch halts without advancing', async (branch) => {
-  const { member, hub, reveal, expected, certify, onStrand, onSafetyEvent } =
-    await observedFork(branch)
-  const before = await member.control.load()
-  const head = member.controlWalk.head()
-  const published = hub.published.length
-  const process = vi.spyOn(member.mls, 'processCommit')
-  expect(await reveal()).toBe(false)
-  const after = await member.control.load()
-  expect(after.forkHalt?.evidence).toEqual(expected)
-  expect(member.controlWalk.safetyHold()).toBe('fork-halted')
-  expect(after.cursor).toEqual(before.cursor)
-  expect(member.controlWalk.head()).toBe(head)
-  expect(after.strand).toEqual(before.strand)
-  expect(after.applied).toEqual(before.applied)
-  expect(after.outcomes).toEqual(before.outcomes)
-  expect(after.responses).toEqual(before.responses)
-  expect(hub.published).toHaveLength(published)
-  expect(certify).not.toHaveBeenCalled()
-  expect(process).not.toHaveBeenCalled()
-  expect(onStrand).toHaveBeenCalledExactlyOnceWith({
-    groupID: commitTopic(secret),
-    position: expected.position,
-    commitDigest: expected.remoteDigest,
-    localEpoch: 2,
-    claimedEpoch: 1,
-    kind: branch === 'losing' ? 'fork-losing' : 'fork-winning',
-    confidence: 'observed',
-  })
-  expect(onSafetyEvent).toHaveBeenCalledOnce()
-})
+test.each(['losing', 'winning'] as const)(
+  '%s past divergence permits following commits',
+  async (branch) => {
+    const { member, hub, reveal, expected, onStrand, onSafetyEvent } = await observedFork(branch)
+    const before = await member.control.load()
+    expect(await reveal()).toBe(true)
+    const after = await member.control.load()
+    expect(after.forkHalt).toBeNull()
+    expect(member.controlWalk.safetyHold()).toBeNull()
+    expect(after.cursor?.epoch).toBe(3)
+    expect(member.mls.epoch()).toBe(3)
+    expect(after.applied.slice(0, before.applied.length)).toEqual(before.applied)
+    expect(after.outcomes).toEqual(before.outcomes)
+    expect(after.strand).toBeNull()
+    expect(hub.published).toHaveLength(3)
+    expect(onStrand).toHaveBeenCalledExactlyOnceWith({
+      groupID: commitTopic(secret),
+      position: expected.position,
+      commitDigest: expected.remoteDigest,
+      localEpoch: 2,
+      claimedEpoch: 1,
+      kind: 'past-epoch-divergence',
+      confidence: 'claimed',
+    })
+    expect(onSafetyEvent).not.toHaveBeenCalled()
+  },
+)
 
 test.each(['losing', 'winning'] as const)(
   '%s branch never heals after delayed retries',
@@ -741,11 +736,20 @@ test.each(['losing', 'winning'] as const)(
 )
 
 test.each(['losing', 'winning'] as const)(
-  '%s divergence stays held after restart',
+  '%s divergence preserves progress after restart',
   async (branch) => {
-    const { member, hub, reveal, expected } = await observedFork(branch)
+    const { member, hub, reveal } = await observedFork(branch)
     await reveal()
-    await assertDurableForkHalt(member, hub, secret, 'alice', { evidence: expected })
+    const before = await member.control.load()
+    await member.peer.dispose()
+    await member.peer.drained()
+    const again = makeMLSPeer(hub, 'alice', secret, { restartOf: member })
+    peers.push(again)
+    await again.peer.replay()
+    expect((await again.control.load()).applied).toEqual(before.applied)
+    expect((await again.control.load()).cursor).toEqual(before.cursor)
+    expect(again.controlWalk.safetyHold()).toBeNull()
+    expect(again.mls.epoch()).toBe(3)
   },
 )
 

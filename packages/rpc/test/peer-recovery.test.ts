@@ -25,7 +25,7 @@ function recoveryReplyCount(hub: FakeHub, recoverySecret: Uint8Array): number {
 }
 
 describe('recovery rendezvous', { concurrent: false }, () => {
-  test('a losing fork halts before a later external commit or confirmation', async () => {
+  test('past divergence permits a later external commit and confirmation', async () => {
     const hub = new FakeHub()
     const secret = new Uint8Array(32).fill(0x45)
     const winning = await publishCommit({
@@ -58,9 +58,11 @@ describe('recovery rendezvous', { concurrent: false }, () => {
         epoch: 2,
         external: true,
       })
-      await vi.waitFor(async () => expect((await alice.control.load()).forkHalt).not.toBeNull())
-      expect(alice.mls.epoch()).toBe(2)
-      expect((await alice.control.load()).responses).toEqual([])
+      await vi.waitFor(() => expect(alice.mls.epoch()).toBe(3))
+      expect((await alice.control.load()).forkHalt).toBeNull()
+      expect((await alice.control.load()).responses).toMatchObject([
+        { position: external.sequenceID, kind: 'applied' },
+      ])
       const requestID = 'stranded-confirm'
       const { request } = await bob.createRecoveryRequest(requestID)
       await hub.publish({
@@ -77,14 +79,14 @@ describe('recovery rendezvous', { concurrent: false }, () => {
         ),
       })
       await flush(100)
-      expect(key).not.toHaveBeenCalled()
-      expect(seal).not.toHaveBeenCalled()
+      expect(key).toHaveBeenCalled()
+      expect(seal).toHaveBeenCalled()
       expect(
         hub.published.filter(
           (message) =>
             decodeHandshakeFrame(message.payload).kind === HANDSHAKE_KIND.recoveryVerdict,
         ),
-      ).toHaveLength(0)
+      ).toHaveLength(1)
     } finally {
       await alice.peer.dispose()
     }

@@ -671,7 +671,7 @@ test('certification excludes only listed loser bytes', () => {
           ]),
         },
       }),
-    ).toMatchObject({ row: 'fork' })
+    ).toMatchObject({ row: 'past-epoch-divergence' })
   }
   expect(
     isCertifiedControlLoser(range, { ...source.key, incarnation: 2 }, 65, position(102), 'loser'),

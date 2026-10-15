@@ -2,10 +2,8 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { toB64U } from '@sozai/codec'
 import { expect, test, vi } from 'vitest'
 
-import { decodeCommitFrame } from '../src/commit-frame.js'
 import type { CertifiedControlRange } from '../src/control/search.js'
 import { asLogPosition } from '../src/cursor.js'
-import { decodeHandshakeFrame } from '../src/handshake.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
@@ -103,28 +101,18 @@ test.each(['key', 'epoch', 'position', 'payload'] as const)(
         ],
       }
       const before = await bob.control.load()
-      const head = bob.controlWalk.head()
       await bob.controlWalk.walkCommits({
         through: asLogPosition(divergent.sequenceID),
         range: nextRange,
         work,
       })
       const after = await bob.control.load()
-      expect(after.forkHalt?.evidence).toEqual({
-        kind: 'digest-divergence',
-        epoch: 1,
-        position: divergent.sequenceID,
-        localDigest: toB64U(
-          sha256(decodeCommitFrame(decodeHandshakeFrame(winnerRow.payload).payload).commit),
-        ),
-        remoteDigest: toB64U(
-          sha256(decodeCommitFrame(decodeHandshakeFrame(divergentRow.payload).payload).commit),
-        ),
-      })
-      expect(after.cursor).toEqual(before.cursor)
+      expect(after.forkHalt).toBeNull()
+      expect(bob.controlWalk.safetyHold()).toBeNull()
+      expect(after.cursor).toEqual({ position: divergent.sequenceID, epoch: 2 })
       expect(after.applied).toEqual(before.applied)
       expect(after.responses).toEqual(before.responses)
-      expect(bob.controlWalk.head()).toBe(head)
+      expect(bob.controlWalk.head()).toBe(divergent.sequenceID)
       expect(headers).toHaveBeenCalledTimes(2)
     } finally {
       await bob.peer.dispose()

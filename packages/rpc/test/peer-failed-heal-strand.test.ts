@@ -129,7 +129,7 @@ const armAhead: Arm = async (hub, rs, withResponder) => {
 
 /**
  * A hub forked the log, and Bob is on the losing branch — the one whose commit carries the
- * HIGHER sequenceID. Shown the competing branch, he halts at epoch 2.
+ * HIGHER sequenceID. The competing bytes remain diagnostic at epoch 2.
  */
 const armForkLosing: Arm = async (hub, rs, withResponder) => {
   hub.acceptAtAnyHead()
@@ -172,7 +172,9 @@ const armForkLosing: Arm = async (hub, rs, withResponder) => {
   // Bob applied the loser branch (the winner was hidden). Now show him the branch he lost.
   hub.revealTo('bob', winnerSeq)
   await wakeLane(hub, rs)
-  await drainUntil(async () => (await bob.control.load()).forkHalt !== null, 'fork halt')
+  await bob.peer.replay()
+  expect((await bob.control.load()).forkHalt).toBeNull()
+  expect(bob.controlWalk.safetyHold()).toBeNull()
   expect(events).toEqual([])
   return { bob, responder, staleEpoch: 2 }
 }
@@ -208,7 +210,7 @@ describe('heal strand', { concurrent: false }, () => {
 
   describe('a heal trigger under a failed heal', () => {
     for (const trigger of triggers) {
-      test(`${trigger.name}: no responder -- nothing lands`, async () => {
+      test(`${trigger.name}: no responder -- ${trigger.arm === armForkLosing ? 'ordinary work still lands' : 'nothing lands'}`, async () => {
         const hub = new FakeHub()
         const rs = new Uint8Array(32).fill(0x61)
         const { bob, staleEpoch } = await trigger.arm(hub, rs, false)
@@ -218,6 +220,16 @@ describe('heal strand', { concurrent: false }, () => {
         const framesBefore = commitFrames(hub, rs)
 
         const request = buildLedgerCommit(bob, ['role:zoe=admin'])
+        if (trigger.arm === armForkLosing) {
+          const before = await bob.control.load()
+          await bob.peer.commit(request)
+          expect(bob.mls.epoch()).toBe(staleEpoch + 1)
+          expect((await bob.control.load()).applied.slice(0, before.applied.length)).toEqual(
+            before.applied,
+          )
+          await bob.peer.dispose()
+          return
+        }
         if (trigger.arm === armAhead) {
           await bob.peer.enqueue(request)
           expect((await bob.control.load()).operations[0]?.stage).toBe('intent')
@@ -243,13 +255,22 @@ describe('heal strand', { concurrent: false }, () => {
         await bob.peer.dispose()
       })
 
-      test(`${trigger.name}: a responder answers — ${trigger.arm !== armAhead ? 'the durable halt still blocks control' : 'the peer heals, then commits'}`, async () => {
+      test(`${trigger.name}: a responder answers — ${trigger.arm === armForkLosing ? 'ordinary work still lands' : trigger.arm !== armAhead ? 'the durable halt still blocks control' : 'the peer heals, then commits'}`, async () => {
         const hub = new FakeHub()
         const rs = new Uint8Array(32).fill(0x62)
         const { bob, responder, staleEpoch } = await trigger.arm(hub, rs, true)
 
         expect(responder).toBeDefined()
         const carol = responder as TestPeer
+        if (trigger.arm === armForkLosing) {
+          expect(bob.mls.epoch()).toBe(staleEpoch)
+          await bob.peer.commit(buildLedgerCommit(bob, ['role:zoe=admin']))
+          expect(bob.mls.fold().get('role:zoe')).toBe('admin')
+          expect(bob.controlWalk.safetyHold()).toBeNull()
+          await bob.peer.dispose()
+          await carol.peer.dispose()
+          return
+        }
         if (trigger.arm !== armAhead) {
           expect(bob.mls.epoch()).toBe(staleEpoch)
           expect(carol.mls.epoch()).toBe(2)

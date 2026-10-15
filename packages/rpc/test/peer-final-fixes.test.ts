@@ -8,7 +8,7 @@ import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../s
 import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
 import { encodeRecoveryConfirmRequest } from '../src/recovery.js'
 import { APP_TOPIC_LABEL, commitTopic, rendezvousTopic } from '../src/topic.js'
-import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
+import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
 import {
@@ -99,7 +99,7 @@ test('a restart at the same epoch rediscovers a strand the durable cursor never 
   expect(restarted[0]).toMatchObject({ position: ahead.sequenceID, kind: 'ahead' })
 })
 
-test('a losing fork halt survives restart without changing the durable cursor', async () => {
+test('past divergence advances the durable cursor and preserves history across restart', async () => {
   const hub = new FakeHub()
   hub.acceptAtAnyHead()
   const members = ['alice', 'bob', 'carol']
@@ -139,16 +139,12 @@ test('a losing fork halt survives restart without changing the durable cursor', 
     topicID: commitTopic(secret),
     payload: new Uint8Array([0]),
   })
-  await vi.waitFor(() => expect(strands.map((strand) => strand.kind)).toEqual(['fork-losing']))
-  expect((await store.load()).cursor).toEqual(before.cursor)
+  await vi.waitFor(() =>
+    expect(strands.map((strand) => strand.kind)).toEqual(['past-epoch-divergence']),
+  )
+  expect((await store.load()).cursor).toEqual({ position: loser.sequenceID, epoch: 2 })
   expect((await store.load()).strand).toBeNull()
-  expect((await store.load()).forkHalt?.evidence).toEqual({
-    kind: 'digest-divergence',
-    epoch: 1,
-    position: winner.sequenceID,
-    localDigest: publishedCommitDigest(hub, loser.sequenceID),
-    remoteDigest: publishedCommitDigest(hub, winner.sequenceID),
-  })
+  expect((await store.load()).forkHalt).toBeNull()
   await bob.peer.dispose()
   await bob.peer.drained()
   peers.splice(peers.indexOf(bob), 1)
@@ -163,9 +159,9 @@ test('a losing fork halt survives restart without changing the durable cursor', 
   })
   await again.peer.replay()
   expect(recoveries).toEqual([])
-  expect((await again.control.load()).cursor).toEqual(before.cursor)
+  expect((await again.control.load()).cursor).toEqual({ position: loser.sequenceID, epoch: 2 })
   expect((await again.control.load()).applied).toEqual(before.applied)
-  expect(again.controlWalk.safetyHold()).toBe('fork-halted')
+  expect(again.controlWalk.safetyHold()).toBeNull()
 })
 
 test('a stored fork halt keeps the epoch and cursor despite an available responder', async () => {

@@ -271,11 +271,11 @@ describe('a hub that forked the log', { concurrent: false }, () => {
     return { winner, loser, winnerSeq, loserSeq }
   }
 
-  test('the losing branch halts and retains its entries without reenactment', async () => {
+  test('past divergence retains branch entries without reenactment', async () => {
     controlRecoveryClock(5)
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x58)
-    const { loser, winnerSeq } = await setUpFork(hub, rs)
+    const { loser, winnerSeq, loserSeq } = await setUpFork(hub, rs)
     const carol = makeMLSPeer(hub, 'carol', rs, { epoch: 1, members, recovery })
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
     await carol.peer.replay()
@@ -284,23 +284,23 @@ describe('a hub that forked the log', { concurrent: false }, () => {
     expect(bob.mls.ledgerIDs()).toEqual([memoryEntryID(loser)])
     hub.revealTo('bob', winnerSeq)
     await wakeLane(hub, rs)
-    await drainUntil(async () => (await bob.control.load()).forkHalt !== null, 'fork halt')
+    await bob.peer.replay()
     expect((await bob.peer.replay()).reenact ?? []).toEqual([])
     const after = await bob.control.load()
-    expect(after.cursor).toEqual(before.cursor)
+    expect(after.cursor?.position).toBe(loserSeq)
     expect(after.applied).toEqual(before.applied)
     expect(after.outcomes).toEqual(before.outcomes)
     expect(bob.mls.epoch()).toBe(2)
     expect(bob.mls.ledgerIDs()).toEqual([memoryEntryID(loser)])
     expect(bob.mls.fold().get('role:carol')).toBeUndefined()
     expect(recoveryRequests(hub, rs)).toEqual([])
-    await assertDurableForkHalt(bob, hub, rs, 'bob', {
-      evidence: { kind: 'digest-divergence', epoch: 1, position: winnerSeq },
-    })
+    expect(after.forkHalt).toBeNull()
+    expect(bob.controlWalk.safetyHold()).toBeNull()
+    await bob.peer.dispose()
     await carol.peer.dispose()
   })
 
-  test('the winning branch halts on the same fork without advancing', async () => {
+  test('past divergence advances the cursor without changing the applied branch', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x59)
     const { winner, winnerSeq, loserSeq } = await setUpFork(hub, rs)
@@ -333,14 +333,14 @@ describe('a hub that forked the log', { concurrent: false }, () => {
           ]),
         },
       }),
-    ).toEqual({ row: 'fork', appliedSequenceID: winnerSeq, branch: 'winning' })
+    ).toEqual({ row: 'past-epoch-divergence' })
 
     const after = await carol.control.load()
-    expect(after.cursor).toEqual(before.cursor)
+    expect(after.cursor).toEqual({ position: loserSeq, epoch: 2 })
     expect(after.applied).toEqual(before.applied)
-    await assertDurableForkHalt(carol, hub, rs, 'carol', {
-      evidence: { kind: 'digest-divergence', epoch: 1, position: loserSeq },
-    })
+    expect(after.forkHalt).toBeNull()
+    expect(carol.controlWalk.safetyHold()).toBeNull()
+    await carol.peer.dispose()
   })
 })
 

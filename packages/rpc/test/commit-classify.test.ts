@@ -83,7 +83,7 @@ describe('the cursor table', () => {
     })
   })
 
-  test('a second, different commit at an epoch this peer enacted is a fork', () => {
+  test('different past bytes are diagnostic poison in both position orderings', () => {
     // Hub CAS compares positions, not epochs. A later stale commit can diverge even on one log.
     expect(
       classifyCommit({
@@ -93,12 +93,9 @@ describe('the cursor table', () => {
         state: bob(),
       }),
     ).toEqual({
-      row: 'fork',
-      appliedSequenceID: 's3',
-      // This peer's own branch carries the LOWER sequenceID, so it is the one that stands.
-      branch: 'winning',
+      row: 'past-epoch-divergence',
     })
-    // Both observed branches halt. Classification retains which position was applied.
+    // Position ordering cannot establish acceptance.
     expect(
       classifyCommit({
         header: { epoch: 3, committerDID: 'alice' },
@@ -107,9 +104,7 @@ describe('the cursor table', () => {
         state: bob(),
       }),
     ).toEqual({
-      row: 'fork',
-      appliedSequenceID: 's3',
-      branch: 'losing',
+      row: 'past-epoch-divergence',
     })
   })
 
@@ -153,14 +148,8 @@ describe('the cursor table', () => {
     })
   })
 
-  test('the SAME position naming a DIFFERENT commit still forks — the digest is the test, not the position', () => {
-    // Pinned because the rewrite changed this verdict silently: before, `applied === sequenceID`
-    // returned `history` unconditionally, so an equal sequenceID short-circuited the digest
-    // entirely. Now the digest decides first, and an equal sequenceID with a mismatched digest
-    // falls through to `fork` — a sequenceID collision that isn't a byte collision is still two
-    // different commits at one epoch, which is exactly the row this whole task widened `history`
-    // out of. The `fork` row's doc says "at any position"; this is the position it shares with
-    // the record, which the position-only check could never have produced this way.
+  test('different past bytes at the same position are diagnostic poison', () => {
+    // A position collision cannot authenticate delivered bytes.
     expect(
       classifyCommit({
         header: { epoch: 3, committerDID: 'alice' },
@@ -169,14 +158,12 @@ describe('the cursor table', () => {
         state: bob(),
       }),
     ).toEqual({
-      row: 'fork',
-      appliedSequenceID: 's3',
-      branch: 'winning',
+      row: 'past-epoch-divergence',
     })
   })
 
-  test('a genuinely different commit still forks, at a position either side of the record', () => {
-    // Different bytes at an applied epoch halt on either side. Position CAS does not prevent this.
+  test('different past bytes diagnose at positions either side of the record', () => {
+    // A refused commit can be delivered before or after the applied commit.
     const other = digestAppliedCommit(otherCommit)
     expect(
       classifyCommit({
@@ -186,9 +173,7 @@ describe('the cursor table', () => {
         state: bob(),
       }),
     ).toEqual({
-      row: 'fork',
-      appliedSequenceID: 's3',
-      branch: 'winning',
+      row: 'past-epoch-divergence',
     })
     expect(
       classifyCommit({
@@ -198,9 +183,7 @@ describe('the cursor table', () => {
         state: bob(),
       }),
     ).toEqual({
-      row: 'fork',
-      appliedSequenceID: 's3',
-      branch: 'losing',
+      row: 'past-epoch-divergence',
     })
   })
 
@@ -326,12 +309,8 @@ describe('the cursor table', () => {
       ).toEqual({ row: 'history' })
     })
 
-    test('the fork check runs on the epoch and the commit, and never on the committer', () => {
-      // The fork detector is reached through the below-epoch branch, so it only ever sees frames
-      // whose committer is unavailable — it MUST NOT need one. It settles on this peer's own
-      // applied-commit record — the commit's bytes, with the hub's chaining as the tiebreak — and
-      // a fork that required an authenticated author would be a fork detector that never fires
-      // against a real port.
+    test('past divergence is claimed even when the committer is unavailable', () => {
+      // Past-epoch headers cannot authenticate the supplied content.
       expect(
         classifyCommit({
           header: { epoch: 3 },
@@ -340,9 +319,7 @@ describe('the cursor table', () => {
           state: bob(),
         }),
       ).toEqual({
-        row: 'fork',
-        appliedSequenceID: 's3',
-        branch: 'winning',
+        row: 'past-epoch-divergence',
       })
       expect(
         classifyCommit({
@@ -352,9 +329,7 @@ describe('the cursor table', () => {
           state: bob(),
         }),
       ).toEqual({
-        row: 'fork',
-        appliedSequenceID: 's3',
-        branch: 'losing',
+        row: 'past-epoch-divergence',
       })
     })
 
@@ -454,7 +429,7 @@ describe('the cursor table', () => {
       ).toEqual({
         row: 'history',
       })
-      // And its own commit at an epoch it enacted a DIFFERENT commit at is a fork, not a heal.
+      // Different past own bytes remain diagnostic poison.
       expect(
         classifyCommit({
           header: { epoch: 3, committerDID: 'bob' },
@@ -463,9 +438,7 @@ describe('the cursor table', () => {
           state: bob(),
         }),
       ).toEqual({
-        row: 'fork',
-        appliedSequenceID: 's3',
-        branch: 'winning',
+        row: 'past-epoch-divergence',
       })
     })
 

@@ -117,7 +117,7 @@ describe('commit strand observations', () => {
   )
 
   test.each(['losing', 'winning'] as const)(
-    '%s fork halts with observed confidence',
+    '%s past divergence reports claimed confidence',
     async (branch) => {
       const hub = new FakeHub()
       hub.acceptAtAnyHead()
@@ -160,14 +160,14 @@ describe('commit strand observations', () => {
         commitDigest: publishedCommitDigest(hub, hidden.sequenceID),
         localEpoch: 2,
         claimedEpoch: 1,
-        kind: branch === 'losing' ? 'fork-losing' : 'fork-winning',
-        confidence: 'observed',
+        kind: 'past-epoch-divergence',
+        confidence: 'claimed',
       })
-      expect((await bob.control.load()).forkHalt?.evidence).toMatchObject({
-        kind: 'digest-divergence',
-        epoch: 1,
-        position: hidden.sequenceID,
-      })
+      expect((await bob.control.load()).forkHalt).toBeNull()
+      expect(bob.controlWalk.safetyHold()).toBeNull()
+      expect((await bob.control.load()).strand).toBeNull()
+      await bob.peer.replay()
+      expect((await bob.control.load()).cursor?.position).toBe(loser.sequenceID)
       await bob.peer.dispose()
     },
   )

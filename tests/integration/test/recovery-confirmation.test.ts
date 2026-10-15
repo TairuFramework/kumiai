@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import {
   commitInvite,
+  commitKeyRotation,
   confirmationTag,
   createGroup,
   createInvite,
@@ -385,8 +386,7 @@ test('simultaneous recovery releases both lanes while a third member confirms', 
   await vi.waitFor(() => expect(s.received).toContain('both confirmed'))
 })
 
-// Spec :1125 (r15 captureHead, 2.2d) will refuse this race at publish. Rewrite this row then.
-test('stale GroupInfo external commit after an applied invite halts the survivor as fork evidence', async () => {
+test('stale GroupInfo external commit is rejected while the survivor progresses', async () => {
   controlRecoveryClock()
   const s = await setup({ deadlineMs: 10_000 })
   const source = s.aliceGroup()
@@ -424,7 +424,7 @@ test('stale GroupInfo external commit after an applied invite halts the survivor
   })
   await s.alice.commit(request)
   const alicePublished = vi.spyOn(s.aliceConnection, 'publish')
-  let staleCommit: { position: string; digest: string } | undefined
+  let staleCommit: { position: string; digest: string; commit: Uint8Array } | undefined
   const publish = s.bobConnection.publish.bind(s.bobConnection)
   vi.spyOn(s.bobConnection, 'publish').mockImplementation(async (value) => {
     const frame = decodeHandshakeFrame(value.payload)
@@ -432,6 +432,7 @@ test('stale GroupInfo external commit after an applied invite halts the survivor
     if (frame.kind === HANDSHAKE_KIND.commit) {
       staleCommit = {
         position: result.sequenceID,
+        commit: decodeCommitFrame(frame.payload).commit,
         digest: createHash('sha256')
           .update(decodeCommitFrame(frame.payload).commit)
           .digest('base64url'),
@@ -463,34 +464,44 @@ test('stale GroupInfo external commit after an applied invite halts the survivor
   expect(localDigest).toBeTypeOf('string')
   expect(staleCommit).toBeDefined()
   expect(staleCommit?.digest).not.toBe(localDigest)
-  await expect
-    .poll(async () => (await s.aliceHost.control.load()).forkHalt?.evidence, {
-      timeout: 1000,
-    })
-    .toEqual({
-      kind: 'digest-divergence',
-      epoch: 1,
-      position: staleCommit?.position,
-      localDigest,
-      remoteDigest: staleCommit?.digest,
-    })
-  const sentAtHalt = alicePublished.mock.calls.length
-  const confirmsAtHalt = s.published.filter(
-    (kind) => kind === HANDSHAKE_KIND.recoveryConfirmRequest,
-  ).length
+  await s.alice.resync()
+  const before = await s.aliceHost.control.load()
+  expect(before.forkHalt).toBeNull()
+  expect(s.aliceGroup().epoch).toBe(2n)
+  expect(before.applied).toHaveLength(1)
+  expect(before.applied[0]?.digest).toBe(localDigest)
+  if (staleCommit === undefined) throw new Error('Missing stale external commit')
+  await expect(s.aliceGroup().processMessage(staleCommit.commit)).rejects.toThrow()
+  expect(s.aliceGroup().epoch).toBe(2n)
+  expect((await s.aliceHost.control.load()).applied).toEqual(before.applied)
   await vi.advanceTimersByTimeAsync(60)
-  await drainUntil(
-    () =>
-      s.published.filter((kind) => kind === HANDSHAKE_KIND.recoveryConfirmRequest).length >
-      confirmsAtHalt,
-    'post-halt confirmation retry',
-    1000,
-  )
   await s.alice.outcomes()
-  expect(alicePublished).toHaveBeenCalledTimes(sentAtHalt)
   expect(supersededOpened).toBe(false)
   expect(adopted).not.toContain(2)
-  expect(s.published.filter((kind) => kind === HANDSHAKE_KIND.commit)).toHaveLength(1)
+  const next = operationRequest('rotation', {})
+  host.builders.set(next.id, async () => {
+    const group = s.aliceGroup()
+    const rotated = await commitKeyRotation(group)
+    return {
+      commit: rotated.commitMessage,
+      bodies: [],
+      welcome: null,
+      epoch: Number(group.epoch),
+      authenticatorBefore: group.state.keySchedule.epochAuthenticator.slice(),
+      incarnation: 1,
+      digest: digestAppliedCommit(rotated.commitMessage),
+      journal: encodeJournal(rotated.newGroup),
+    }
+  })
+  await s.alice.commit(next)
+  expect(s.aliceGroup().epoch).toBe(3n)
+  const after = await s.aliceHost.control.load()
+  expect(after.forkHalt).toBeNull()
+  expect(after.applied[0]).toEqual(before.applied[0])
+  expect(alicePublished).toHaveBeenCalled()
+  await expect(
+    s.alice.protocol('chat').dispatch('chat/changed', { data: {} }),
+  ).resolves.toBeUndefined()
   await s.bob.dispose()
   await expect(recovery).rejects.toBeInstanceOf(PeerDisposedError)
 })

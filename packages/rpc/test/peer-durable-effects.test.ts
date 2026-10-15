@@ -83,17 +83,14 @@ test.each([false, true])(
       external: true,
       adds: ['dave'],
     })
-    await vi.waitFor(async () => expect((await observer.control.load()).forkHalt).not.toBeNull())
+    await vi.waitFor(async () =>
+      expect((await observer.control.load()).cursor?.position).toBe(conflict.sequenceID),
+    )
     const after = await observer.control.load()
-    expect(after.forkHalt?.evidence).toEqual({
-      kind: 'digest-divergence',
-      epoch: 1,
-      position: conflict.sequenceID,
-      localDigest: publishedCommitDigest(hub, result.sequenceID),
-      remoteDigest: publishedCommitDigest(hub, conflict.sequenceID),
-    })
+    expect(after.forkHalt).toBeNull()
+    expect(observer.controlWalk.safetyHold()).toBeNull()
     expect(after.responses).toEqual(before.responses)
-    expect(after.cursor).toEqual(before.cursor)
+    expect(after.cursor).toEqual({ position: conflict.sequenceID, epoch: 2 })
     expect(after.applied).toEqual(before.applied)
   },
 )
@@ -454,15 +451,14 @@ test('adoptions retain exactly the newest 64 epochs of rows and responses', asyn
     external: true,
     adds: ['conflict'],
   })
-  await vi.waitFor(async () => expect((await again.control.load()).forkHalt).not.toBeNull())
-  const halted = await again.control.load()
-  expect(halted.forkHalt?.evidence).toMatchObject({
-    kind: 'digest-divergence',
-    epoch: 2,
-    position: conflict.sequenceID,
-  })
-  expect(halted.responses).toEqual(snapshot.responses)
-  expect(halted.cursor).toEqual({ position: old.sequenceID, epoch: 66 })
+  await vi.waitFor(async () =>
+    expect((await again.control.load()).cursor?.position).toBe(conflict.sequenceID),
+  )
+  const after = await again.control.load()
+  expect(after.forkHalt).toBeNull()
+  expect(again.controlWalk.safetyHold()).toBeNull()
+  expect(after.responses).toEqual(snapshot.responses)
+  expect(after.cursor).toEqual({ position: conflict.sequenceID, epoch: 66 })
   expect((await again.control.load()).applied).toEqual(snapshot.applied)
 })
 

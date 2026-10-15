@@ -10,7 +10,7 @@ import type { AppliedCommit, ControlSnapshot, Operation, Outcome } from '../src/
 import { asLogPosition, type LogPosition } from '../src/cursor.js'
 import type { StrandObservation } from '../src/peer.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
-import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
+import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
 import { memoryEntryID } from './fixtures/memory-group-mls.js'
@@ -132,7 +132,7 @@ describe('fork history preservation', () => {
         commitDigest: 'commit-winning-invite',
         state: { localDID: 'bob', epoch: 3, appliedByEpoch: appliedRows(snapshot) },
       }),
-    ).toMatchObject({ row: 'fork', branch: 'losing' })
+    ).toMatchObject({ row: 'past-epoch-divergence' })
     expect(snapshot.outcomes).toEqual([])
     expect(snapshot.applied).toEqual([applied(2)])
   })
@@ -231,80 +231,62 @@ afterEach(async () => {
 })
 
 describe('durable fork halts', () => {
-  test('a fork loser persists a halt after restart without changing its cursor', async () => {
+  test('past divergence preserves history after a cursor-write crash and restart', async () => {
     const hub = new FakeHub()
-    await publishCommit({
-      hub,
-      senderDID: 'alice',
-      recoverySecret: secret,
-      epoch: 1,
-    })
-    const winner = await publishCommit({
+    await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+    const hidden = await publishCommit({
       hub,
       senderDID: 'alice',
       recoverySecret: secret,
       epoch: 2,
     })
-    const loser = await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 2 })
-    hub.hideFrom('bob', winner.sequenceID)
+    const applied = await publishCommit({
+      hub,
+      senderDID: 'carol',
+      recoverySecret: secret,
+      epoch: 2,
+    })
+    hub.hideFrom('bob', hidden.sequenceID)
     const seed = member(hub)
     await seed.peer.replay()
-    expect(seed.mls.epoch()).toBe(3)
     await seed.peer.dispose()
     await seed.peer.drained()
     const again = member(hub, { restartOf: seed })
     await again.peer.replay()
-    const cursor = (await again.control.load()).cursor
+    const before = await again.control.load()
     again.database.seam('after-apply', () => {
       void again.peer.dispose()
     })
-    hub.revealTo('bob', winner.sequenceID)
+    hub.revealTo('bob', hidden.sequenceID)
     await hub.publish({
       senderDID: 'alice',
       topicID: commitTopic(secret),
       payload: new Uint8Array([0]),
     })
-    await expect.poll(async () => (await again.control.load()).forkHalt).not.toBeNull()
+    await again.peer.replay().catch((error: unknown) => {
+      expect(error).toMatchObject({ name: 'PeerDisposedError' })
+    })
     await again.peer.dispose()
     await again.peer.drained()
-    const evidence = {
-      kind: 'digest-divergence' as const,
-      epoch: 2,
-      position: winner.sequenceID,
-      localDigest: publishedCommitDigest(hub, loser.sequenceID),
-      remoteDigest: publishedCommitDigest(hub, winner.sequenceID),
-    }
-    expect(await again.control.load()).toMatchObject({
-      rejoin: null,
-      recoveryEpochFloor: null,
-      settledRejoins: [],
-      outcomes: [],
-      cursor,
-      strand: null,
-      forkHalt: { evidence },
-    })
-    expect(hub.published.filter((row) => row.topicID === rendezvousTopic(secret))).toEqual([])
-    hub.hideFrom('bob', winner.sequenceID)
+    const snapshot = await again.control.load()
+    expect(snapshot.forkHalt).toBeNull()
+    expect(snapshot.applied).toEqual(before.applied)
+    expect(snapshot.outcomes).toEqual(before.outcomes)
+    expect(snapshot.strand).toBeNull()
+    expect(snapshot.cursor?.position).toBe(applied.sequenceID)
     const restarted = member(hub, { restartOf: again })
     await restarted.peer.replay()
-    expect((await restarted.control.load()).cursor).toEqual(cursor)
-    expect(restarted.controlWalk.safetyHold()).toBe('fork-halted')
+    expect((await restarted.control.load()).applied).toEqual(before.applied)
+    expect(restarted.controlWalk.safetyHold()).toBeNull()
     expect(hub.published.filter((row) => row.topicID === rendezvousTopic(secret))).toEqual([])
-    await expect(restarted.peer.enqueue(buildLedgerCommit(restarted, []))).rejects.toMatchObject({
-      name: 'GroupSafetyHeldError',
-      reason: 'fork-halted',
-    })
+    await restarted.peer.commit(buildLedgerCommit(restarted, []))
+    expect(restarted.mls.epoch()).toBe(4)
   })
 
-  test('later fork reveals leave the first halt and all applied history unchanged', async () => {
+  test('later past divergence leaves all applied history unchanged', async () => {
     const hub = new FakeHub()
-    await publishCommit({
-      hub,
-      senderDID: 'alice',
-      recoverySecret: secret,
-      epoch: 1,
-    })
-    const winner = await publishCommit({
+    await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+    const hidden = await publishCommit({
       hub,
       senderDID: 'alice',
       recoverySecret: secret,
@@ -312,8 +294,8 @@ describe('durable fork halts', () => {
     })
     await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 2 })
     const later = await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 3 })
-    await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 3 })
-    hub.hideFrom('bob', winner.sequenceID)
+    const last = await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 3 })
+    hub.hideFrom('bob', hidden.sequenceID)
     hub.hideFrom('bob', later.sequenceID)
     const observations: Array<StrandObservation> = []
     const bob = member(hub, {
@@ -322,31 +304,29 @@ describe('durable fork halts', () => {
       },
     })
     await bob.peer.replay()
-    expect(bob.mls.epoch()).toBe(4)
-    const cursor = (await bob.control.load()).cursor
-    hub.revealTo('bob', winner.sequenceID)
+    const before = await bob.control.load()
+    hub.revealTo('bob', hidden.sequenceID)
     hub.revealTo('bob', later.sequenceID)
     await hub.publish({
       senderDID: 'alice',
       topicID: commitTopic(secret),
       payload: new Uint8Array([0]),
     })
-    await expect
-      .poll(() => observations.map((observation) => observation.claimedEpoch))
-      .toEqual([2])
-    const held = await bob.control.load()
-    expect(held.cursor).toEqual(cursor)
-    expect(held.strand).toBeNull()
-    expect(held.forkHalt?.evidence).toMatchObject({
-      kind: 'digest-divergence',
-      epoch: 2,
-      position: winner.sequenceID,
-      remoteDigest: publishedCommitDigest(hub, winner.sequenceID),
-    })
     await bob.peer.replay()
-    expect((await bob.control.load()).forkHalt).toEqual(held.forkHalt)
-    expect((await bob.control.load()).applied).toEqual(held.applied)
-    expect(observations).toHaveLength(1)
+    const after = await bob.control.load()
+    expect(after.cursor?.position).toBe(last.sequenceID)
+    expect(after.strand).toBeNull()
+    expect(after.forkHalt).toBeNull()
+    expect(after.applied).toEqual(before.applied)
+    expect(bob.controlWalk.safetyHold()).toBeNull()
+    expect(observations.length).toBeGreaterThan(0)
+    expect(
+      observations.every(
+        (row) => row.kind === 'past-epoch-divergence' && row.confidence === 'claimed',
+      ),
+    ).toBe(true)
+    await bob.peer.replay()
+    expect((await bob.control.load()).applied).toEqual(before.applied)
   })
 
   test.each(['live', 'restart'] as const)(

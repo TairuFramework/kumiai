@@ -35,7 +35,7 @@ import {
   type RecoveryEvent,
   type StrandObservation,
 } from '@kumiai/rpc'
-import { vi } from 'vitest'
+import { expect, vi } from 'vitest'
 
 import { entryCapability } from '../../../../packages/mls-rpc/src/entry-capability.js'
 import {
@@ -229,11 +229,12 @@ export async function createForkFixture() {
   const extraRegistries: Array<RegistryFixture> = []
   await member.peer.replay()
 
-  async function publish(commit: Uint8Array, source: GroupHandle) {
+  async function publish(commit: Uint8Array, source: GroupHandle, expectedHead?: string | null) {
     return hub.publish({
       topicID: topic,
       senderDID: real.committer.identity.id,
       retain: 'log',
+      ...(expectedHead === undefined ? {} : { expectedHead }),
       payload: encodeHandshakeFrame(
         HANDSHAKE_KIND.commit,
         encodeCommitFrame(
@@ -281,7 +282,10 @@ export async function createForkFixture() {
       const source = real.committer.handle
       const first = await commitKeyRotation(source)
       const second = await commitKeyRotation(source)
-      const firstRow = await publish(first.commitMessage, source)
+      const firstRow = await publish(first.commitMessage, source, null)
+      await expect(publish(second.commitMessage, source, null)).rejects.toMatchObject({
+        name: 'HeadMismatchError',
+      })
       const secondRow = await publish(second.commitMessage, source)
       const applied = branch === 'losing' ? secondRow : firstRow
       const remote = branch === 'losing' ? firstRow : secondRow
@@ -291,7 +295,7 @@ export async function createForkFixture() {
       hub.hideFrom(receiver.identity.id, nextRow.sequenceID)
       const localCommit = branch === 'losing' ? second.commitMessage : first.commitMessage
       const remoteCommit = branch === 'losing' ? first.commitMessage : second.commitMessage
-      // These bytes and positions model an equivocating hub, not a conforming CAS append.
+      // Even a signed CAS loser remains safe to deliver at any log position.
       hub.hideFrom(receiver.identity.id, remote.sequenceID)
       let revealing = false
       const fetch = hub.fetchTopic.bind(hub)
@@ -313,6 +317,7 @@ export async function createForkFixture() {
         throw new Error('Real commit was not applied')
       return {
         evidence,
+        appliedPosition: applied.sequenceID,
         async certify(): Promise<CertifiedControlRange> {
           if (branch !== 'winning') throw new Error('Certification requires the first valid winner')
           const built = await commitKeyRotation(receiver.handle)

@@ -1826,25 +1826,20 @@ export function createGroupPeerWithControlWalk<
             await saveCommitCursor(position)
             break
           }
-          if (disposition.row === 'fork') {
-            const applied = header == null ? undefined : appliedByEpoch.get(header.epoch)
-            if (header == null || applied == null) throw new Error('Missing applied fork history')
-            await haltFork({
-              kind: 'digest-divergence',
-              epoch: header.epoch,
-              position,
-              localDigest: applied.digest,
-              remoteDigest: commitDigest,
-            })
-            observeStrand({
-              position,
-              commitDigest,
-              localEpoch,
-              claimedEpoch: header.epoch,
-              kind: disposition.branch === 'losing' ? 'fork-losing' : 'fork-winning',
-              confidence: 'observed',
-            })
-            return advancedEpoch
+          if (disposition.row === 'past-epoch-divergence' || disposition.row === 'fork') {
+            // Delivered bytes cannot establish acceptance or local safety failure.
+            await saveCommitCursor(position)
+            if (commitTopicID != null)
+              emitStrand({
+                groupID: commitTopicID,
+                position,
+                commitDigest,
+                localEpoch,
+                claimedEpoch: header?.epoch ?? null,
+                kind: 'past-epoch-divergence',
+                confidence: 'claimed',
+              })
+            break
           }
           if (disposition.row === 'poison') {
             await saveCommitCursor(position) // not a commit at all: stepped over, and never retried

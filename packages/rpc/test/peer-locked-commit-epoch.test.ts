@@ -9,7 +9,7 @@ import {
 } from '../src/handshake.js'
 import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
 import { commitTopic } from '../src/topic.js'
-import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
+import { publishCommit } from './fixtures/commits.js'
 import { assertDurableControlHold, assertDurableForkHalt } from './fixtures/control-hold.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
@@ -118,7 +118,7 @@ describe('commit decisions use the handle epoch', { concurrent: false }, () => {
   )
 
   test.each([-1, 0, 1])(
-    'fork evidence uses the locked epoch with hint offset %i',
+    'past divergence uses the locked epoch with hint offset %i',
     async (offset) => {
       const hub = new FakeHub()
       hub.acceptAtAnyHead()
@@ -158,19 +158,17 @@ describe('commit decisions use the handle epoch', { concurrent: false }, () => {
         payload: new Uint8Array([0]),
       })
       await vi.waitFor(() =>
-        expect(observations.map((observation) => observation.kind)).toContain('fork-losing'),
+        expect(observations.map((observation) => observation.kind)).toContain(
+          'past-epoch-divergence',
+        ),
       )
       expect(observations.at(-1)?.localEpoch).toBe(2)
       expect(bob.mls.commits()).toBe(1)
       const after = await bob.control.load()
-      expect(after.cursor).toEqual(before.cursor)
-      expect(after.forkHalt?.evidence).toEqual({
-        kind: 'digest-divergence',
-        epoch: 1,
-        position: winner.sequenceID,
-        localDigest: publishedCommitDigest(hub, loser.sequenceID),
-        remoteDigest: publishedCommitDigest(hub, winner.sequenceID),
-      })
+      expect(after.cursor?.position).toBe(loser.sequenceID)
+      expect(after.forkHalt).toBeNull()
+      expect(after.applied).toEqual(before.applied)
+      expect(bob.controlWalk.safetyHold()).toBeNull()
       await bob.peer.dispose()
     },
   )

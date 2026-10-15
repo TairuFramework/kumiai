@@ -4,7 +4,6 @@ import { classifyCommit } from '../src/classify.js'
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
-import { assertDurableForkHalt } from './fixtures/control-hold.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { encodeMemoryCommit } from './fixtures/memory-group-mls.js'
 import { makeMLSPeer } from './fixtures/peer.js'
@@ -280,7 +279,7 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     await alice.peer.dispose()
   })
 
-  test('two different commits at one epoch halt on a below-cursor reveal', async () => {
+  test('two different past commits advance on a below-cursor reveal', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x84)
 
@@ -323,11 +322,10 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     await wakeLane(hub, rs)
     await alice.peer.replay()
     expect(recoveryRequests(hub, rs)).toEqual([])
-    expect((await alice.control.load()).cursor).toEqual(before.cursor)
+    expect((await alice.control.load()).cursor?.position).toBe(winnerSeq)
     expect((await alice.control.load()).applied).toEqual(before.applied)
-    await assertDurableForkHalt(alice, hub, rs, 'alice', {
-      evidence: { kind: 'digest-divergence', epoch: 1, position: loserSeq },
-    })
+    expect((await alice.control.load()).forkHalt).toBeNull()
+    expect(alice.controlWalk.safetyHold()).toBeNull()
 
     expect(
       classifyCommit({
@@ -342,7 +340,7 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
           ]),
         },
       }),
-    ).toEqual({ row: 'fork', appliedSequenceID: winnerSeq, branch: 'losing' })
+    ).toEqual({ row: 'past-epoch-divergence' })
 
     await alice.peer.dispose()
   })
