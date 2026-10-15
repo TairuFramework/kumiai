@@ -70,6 +70,8 @@ Fast path: known position from publish ack/exact-byte hit, and an authenticated 
 Otherwise settle X as accepted-unadoptable in ONE ControlStore transition: save compact public X facts/cumulative ledgerBefore in settledRejoins, clear active rejoin and raise recoveryEpochFloor.
 Omit request/requestKey/candidate/payload from settled storage. Zeroise owned secret buffers only after settlement commit proof.
 Keep at most one cumulative settlement row per source incarnation. Later settlements replace public provenance and union prior obligations.
+r23: D1 leaf-absent discard of unconfirmed X uses the same settledRejoins row in ONE transition: provenance `{kind:'not-accepted', epoch}` (authenticated recapture
+epoch, no accepted facts), cumulative ledgerBefore unioned, active rejoin cleared, recoveryEpochFloor raised. Y's first save unions every settled obligation.
 Carry ledgerBefore forward, as HEAD packages/rpc/src/peer.ts:3533 does. Restart retains settled X and its owed obligations before constructing Y.
 Build fresh Y at the recaptured epoch. Y's Remove targets X's sole same-identity leaf under normal replacement admission.
 X is frameCommit(pending.commit, [], null) (peer.ts:3823), enacting nothing. Reenact tokens are computed only after Y bootstrap (control/rejoin.ts:217-223).
