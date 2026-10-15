@@ -378,7 +378,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
   }
 
   describe(`GroupMLS conformance — ${label}`, () => {
-    test.each(['complete', 'epoch', 'stranded', 'strand'] as const)(
+    test.each(['complete', 'epoch', 'stranded', 'strand', 'incomplete'] as const)(
       'captured sealing requires a complete committed cursor (%s)',
       async (fault) => {
         await withGroup(2, `capture-cursor-${fault}`, async (group) => {
@@ -396,6 +396,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
                     epoch: staged.epochAfter + (fault === 'epoch' ? 1 : 0),
                     position: null,
                     ...(fault === 'stranded' ? { stranded: true } : {}),
+                    ...(fault === 'incomplete' ? { incomplete: true } : {}),
                   },
                   ...(fault === 'strand' ? { strand: { reason: 'retention-gap' } } : {}),
                 },

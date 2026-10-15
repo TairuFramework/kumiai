@@ -949,6 +949,7 @@ export function createGroupPeerWithControlWalk<
       position: durableCursor?.epoch === epoch ? durableCursor.position : null,
       epoch,
       stranded: true,
+      ...(durableCursor?.incomplete === true ? { incomplete: true } : {}),
     }
     await applyResolved(control, { cursor, strand: { reason } }, newPublishID())
     durableCursor = cursor
@@ -975,6 +976,7 @@ export function createGroupPeerWithControlWalk<
                 : position,
             epoch,
           }
+      if (durableCursor?.incomplete === true) cursor.incomplete = true
       const snapshot = await control.load()
       if (safetyHold() !== null) return
       await applyResolved(
@@ -1750,6 +1752,14 @@ export function createGroupPeerWithControlWalk<
       if (pageAfter == null && result.gap) {
         covered = false
         floor = { ...floor, covered: false }
+        // A skipped suffix must not make a later empty read certify the missing prefix.
+        if (result.messages.length > 0 && control != null && !durableCursor?.incomplete) {
+          const epoch = await port.readEpoch()
+          if (safetyHold() !== null) return advancedEpoch
+          const cursor: CommitCursor = { position: null, epoch, incomplete: true }
+          await applyResolved(control, { cursor }, newPublishID())
+          durableCursor = cursor
+        }
       } else if (requireCompletePrefix && pageAfter === null && !gap) {
         floor = { ...floor, covered: true }
       } else if (pageAfter != null && gap) {
@@ -2259,6 +2269,7 @@ export function createGroupPeerWithControlWalk<
         identity === null ||
         evidence.terminal ||
         cursor?.stranded === true ||
+        cursor?.incomplete === true ||
         (cursor !== null && cursor.epoch !== identity.epoch) ||
         (cursor?.position ?? null) !== commitLogHead ||
         reconciledHead !== commitLogHead

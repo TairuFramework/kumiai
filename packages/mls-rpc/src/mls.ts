@@ -601,6 +601,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
             (control.cursor?.position ?? null) !== captureHead ||
             (control.cursor !== null && control.cursor.epoch !== source.identity.epoch) ||
             control.cursor?.stranded === true ||
+            control.cursor?.incomplete === true ||
             control.strand !== null
           )
             throw new Error('Capture head does not match a complete committed cursor')

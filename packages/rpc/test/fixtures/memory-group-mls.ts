@@ -1456,6 +1456,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
           (control.cursor?.position ?? null) !== captureHead ||
           (control.cursor !== null && control.cursor.epoch !== epoch) ||
           control.cursor?.stranded === true ||
+          control.cursor?.incomplete === true ||
           control.strand !== null
         )
           throw new Error('Capture head does not match a complete committed cursor')

@@ -217,6 +217,81 @@ test('an empty gap waits without inventing a cursor and a fresh complete read pe
   expect(replies).toHaveLength(1)
 })
 
+async function retainedGap() {
+  const f = await fixture()
+  vi.useFakeTimers()
+  const topicID = commitTopic(secret)
+  const poison = encodeHandshakeFrame(HANDSHAKE_KIND.commit, new Uint8Array())
+  await f.hub.publish({ senderDID: 'bob', topicID, payload: poison, retain: 'log' })
+  const { sequenceID } = await f.hub.publish({
+    senderDID: 'bob',
+    topicID,
+    payload: poison,
+    retain: 'log',
+  })
+  f.hub.trim(topicID, sequenceID)
+  expect(await f.ask()).toBe(false)
+  expect(f.replies()).toEqual([])
+  expect((await f.member.control.load()).cursor?.position).toBe(sequenceID)
+  expect(
+    await f.hub.fetchTopic({ topicID, subscriberDID: 'bob', after: sequenceID }),
+  ).toMatchObject({
+    messages: [],
+    gap: false,
+    head: sequenceID,
+  })
+  return f
+}
+
+test.each([false, true])(
+  'a retained suffix cannot certify an uncovered prefix on an empty read (restart=%s)',
+  async (restart) => {
+    const f = await retainedGap()
+    let member = f.member
+    if (restart) {
+      await member.peer.dispose()
+      await member.peer.drained()
+      member = makeMLSPeer(f.hub, 'bob', secret, {
+        restartOf: member,
+        recovery: { getDelayMs: () => 0 },
+      })
+      peers.push(member)
+      await member.peer.replay()
+    } else {
+      await member.peer.resync()
+    }
+    expect(
+      await member.controlWalk.replyWithCapturedGroupInfo({
+        requestID: f.requestID,
+        request: f.request,
+      }),
+    ).toBe(false)
+    expect(await member.controlWalk.reconcileCommitPrefix()).toEqual({ kind: 'incomplete' })
+    expect(f.replies()).toEqual([])
+    expect((await member.control.load()).strand).toBeNull()
+  },
+)
+
+test('authenticated progress repairs capture coverage after a retained gap', async () => {
+  const f = await retainedGap()
+  expect(await f.ask()).toBe(false)
+  await publishCommit({
+    hub: f.hub,
+    senderDID: 'bob',
+    committerDID: 'alice',
+    recoverySecret: secret,
+    epoch: 1,
+  })
+  expect(await f.ask()).toBe(true)
+  expect(f.member.mls.epoch()).toBe(2)
+  expect(await f.member.controlWalk.reconcileCommitPrefix()).toMatchObject({
+    kind: 'complete',
+    head: f.hub.head(commitTopic(secret)),
+    identity: { epoch: 2 },
+  })
+  expect(f.replies()).toHaveLength(1)
+})
+
 test.each(['fork-halted', 'recovery-unavailable'] as const)(
   'suspended captured sealing hands off nothing after a local safety latch (%s)',
   async (reason) => {

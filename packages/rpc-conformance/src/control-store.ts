@@ -270,6 +270,7 @@ export type ConformanceControlCommitCursor<Position extends string = string> = {
   position: Position | null
   epoch: number
   stranded?: true
+  incomplete?: true
 }
 
 export type ConformanceSaveControlBuild<Position extends string = string> = (
@@ -1356,6 +1357,17 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       const reopened = await params.reopen()
       expect((await reopened.control.load()).cursor).toEqual(cursor)
       expect(await reopened.control.lastMutation()).toBe('initial-strand')
+    })
+    test('incomplete capture coverage survives unrelated writes and reopen', async () => {
+      const host = await params.open()
+      const cursor = { position: '002', epoch: 4, incomplete: true as const }
+      await host.control.apply({ cursor }, 'uncovered-suffix')
+      await host.control.apply({ recoveryEpochFloor: 4 }, 'unrelated')
+      const reopened = await params.reopen()
+      expect((await reopened.control.load()).cursor).toEqual(cursor)
+      const read = await reopened.control.load()
+      if (read.cursor !== null) read.cursor.position = 'mutated'
+      expect((await reopened.control.load()).cursor).toEqual(cursor)
     })
     test('all or nothing: a failed apply leaves every record and mutation unchanged after reopen', async () => {
       const host = await params.open()

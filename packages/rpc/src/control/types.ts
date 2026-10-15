@@ -223,6 +223,8 @@ export type CommitCursor = {
   position: LogPosition | null
   epoch: number
   stranded?: true
+  /** Skipped suffix behind a gap; only authenticated epoch advancement repairs capture coverage. */
+  incomplete?: true
 }
 
 export type StagedAdoption = {
