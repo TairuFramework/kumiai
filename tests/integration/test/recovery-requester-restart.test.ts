@@ -83,13 +83,20 @@ test.each(['built', 'published', 'confirmed', 'adopted'] as const)(
     await bob.peer.dispose()
     await bob.peer.drained()
     const record = (await bob.control.load()).rejoin
-    if (record != null && 'format' in record) throw new Error('Expected legacy rejoin')
+    const sourceEpoch =
+      record == null
+        ? undefined
+        : 'format' in record
+          ? record.source.identity?.epoch
+          : record.source.epoch
+    if (record != null && 'format' in record) {
+      expect(record.source.key.groupID).toBe(bobGroup.handle.groupID)
+      expect(record.target.groupInfoEpoch + 1).toBe(record.epochAfter)
+    }
     expect(record?.stage).toBe(stage)
     vi.mocked(bob.control.apply).mockRestore()
     const restored = await restoreMemberHandle(bob, bob.entrySlot)
-    expect(Number(restored.epoch)).toBe(
-      stage === 'adopted' ? record?.epochAfter : record?.source.epoch,
-    )
+    expect(Number(restored.epoch)).toBe(stage === 'adopted' ? record?.epochAfter : sourceEpoch)
     const again = makeMember({
       hub,
       identity: bob.identity,

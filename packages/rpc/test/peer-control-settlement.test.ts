@@ -1,6 +1,7 @@
 import { HeadMismatchError } from '@kumiai/hub-protocol'
 import { afterEach, expect, test, vi } from 'vitest'
 
+import { controlSettled, readmissionChanges } from '../src/control/store.js'
 import type { Outcome } from '../src/control/types.js'
 import { asLogPosition } from '../src/cursor.js'
 import {
@@ -17,10 +18,27 @@ import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import {
   buildInviteCommit,
   buildLedgerCommit,
+  buildRejoinRecord,
   makeMLSPeer,
+  rejoinSourceEpoch,
   seedBuiltOperation,
   type TestPeer,
 } from './fixtures/peer.js'
+
+test('saved recovery remains unsettled until readmission preserves its unknown outcome', async () => {
+  const bob = member(new FakeHub())
+  await bob.peer.replay()
+  const record = await buildRejoinRecord(bob)
+  expect(rejoinSourceEpoch(record)).toBe(bob.mls.epoch())
+  await bob.control.apply({ putRejoin: record }, 'settlement-rejoin')
+  const snapshot = await bob.control.load()
+  expect(controlSettled(snapshot)).toBe(false)
+  await bob.control.apply(readmissionChanges(snapshot), 'readmission')
+  expect((await bob.control.load()).rejoin).toBeNull()
+  expect((await bob.control.load()).outcomes).toContainEqual(
+    expect.objectContaining({ id: record.id, kind: 'unknown' }),
+  )
+})
 
 test('unsupported delivery never attempts a hold write even when that write would fail', async () => {
   const hub = new FakeHub()

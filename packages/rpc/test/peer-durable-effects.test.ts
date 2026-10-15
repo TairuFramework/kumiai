@@ -18,6 +18,7 @@ import {
   buildLedgerCommit,
   buildRejoinRecord,
   makeMLSPeer,
+  rejoinSourceEpoch,
   seedBuiltOperation,
   type TestPeer,
 } from './fixtures/peer.js'
@@ -337,6 +338,7 @@ test('host deletion is refused until abandon and outcome acknowledgement', async
   await bob.peer.replay()
   const request = buildLedgerCommit(bob, [])
   const rejoin = await buildRejoinRecord(bob)
+  expect(rejoinSourceEpoch(rejoin)).toBe(bob.mls.epoch())
   await bob.control.apply(
     {
       putRejoin: rejoin,
@@ -474,6 +476,7 @@ test.each([false, true])(
     const bob = member(hub)
     await bob.peer.replay()
     const rejoin = await buildRejoinRecord(bob)
+    expect(rejoinSourceEpoch(rejoin)).toBe(bob.mls.epoch())
     await bob.peer.dispose()
     await bob.peer.drained()
     await bob.control.apply(

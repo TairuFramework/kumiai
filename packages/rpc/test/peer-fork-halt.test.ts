@@ -776,6 +776,10 @@ test.each(['losing', 'winning'] as const)(
     vi.useFakeTimers()
     const request = vi.spyOn(member.mls, 'createRecoveryRequest')
     const rejoin = vi.spyOn(member.mls, 'applyRecovery')
+    const captured =
+      member.mls.capturedRecovery === undefined
+        ? undefined
+        : vi.spyOn(member.mls.capturedRecovery, 'applyRecovery')
     const prepare = vi.spyOn(member.mls, 'prepareRecovery')
     await reveal()
     const published = hub.published.length
@@ -784,6 +788,7 @@ test.each(['losing', 'winning'] as const)(
     await vi.advanceTimersByTimeAsync(60_000)
     expect(request).not.toHaveBeenCalled()
     expect(rejoin).not.toHaveBeenCalled()
+    if (captured !== undefined) expect(captured).not.toHaveBeenCalled()
     expect(prepare).not.toHaveBeenCalled()
     expect(onRecovery).not.toHaveBeenCalled()
     expect(hub.published).toHaveLength(published)

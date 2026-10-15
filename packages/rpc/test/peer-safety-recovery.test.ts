@@ -28,7 +28,13 @@ import {
 } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
-import { buildRejoinRecord, latchPeerSafety, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
+import {
+  buildRejoinRecord,
+  latchPeerSafety,
+  makeMLSPeer,
+  rejoinSourceEpoch,
+  type TestPeer,
+} from './fixtures/peer.js'
 
 const secret = new Uint8Array(32).fill(51)
 const reasons = ['fork-halted', 'recovery-unavailable'] as const
@@ -156,6 +162,13 @@ test.each(reasons)('held confirmation refusal latches after abandon (%s)', async
     'sealRecoveryVerdict',
   ] as const
   const starts = methods.map((method) => vi.spyOn(member.mls, method).mockClear())
+  const captured = member.mls.capturedRecovery
+  const capturedStarts =
+    captured === undefined
+      ? []
+      : (['applyRecovery', 'restoreRecovery', 'reconcileCapture', 'sealGroupInfo'] as const).map(
+          (method) => vi.spyOn(captured, method).mockClear(),
+        )
   const cryptoStarts = member.crypto.starts
   release.reject(new GroupSafetyHeldError(reason))
   const error = await recovering
@@ -171,7 +184,7 @@ test.each(reasons)('held confirmation refusal latches after abandon (%s)', async
   await expect(member.peer.recover()).rejects.toEqual(new GroupSafetyHeldError(reason))
   expect(fetch).not.toHaveBeenCalled()
   expect(handoff).not.toHaveBeenCalled()
-  for (const start of starts) expect(start).not.toHaveBeenCalled()
+  for (const start of [...starts, ...capturedStarts]) expect(start).not.toHaveBeenCalled()
   expect(member.crypto.starts).toEqual(cryptoStarts)
 })
 
@@ -337,7 +350,7 @@ test.each(reasons)(
       await release.promise
       return request
     })
-    const apply = vi.spyOn(member.mls, 'applyRecovery')
+    const apply = vi.spyOn(member.mls.capturedRecovery ?? member.mls, 'applyRecovery')
     await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 3 })
     await entered.promise
     latchPeerSafety(member, reason)
@@ -354,6 +367,7 @@ test.each(reasons)(
   async (reason) => {
     const { member, hub } = await fixture()
     const record = await buildRejoinRecord(member)
+    expect(rejoinSourceEpoch(record)).toBe(member.mls.epoch())
     await member.control.apply({ putRejoin: record }, 'saved-rejoin')
     latchPeerSafety(member, reason)
     await member.control.apply(
@@ -480,8 +494,8 @@ test.each(reasons)('automatic recovery stops after a reply wait (%s)', async (re
   })
   const reply = await alice.sealGroupInfo(request)
   latchPeerSafety(member, reason)
-  const apply = vi.spyOn(member.mls, 'applyRecovery')
-  const restore = vi.spyOn(member.mls, 'restoreRecovery')
+  const apply = vi.spyOn(member.mls.capturedRecovery ?? member.mls, 'applyRecovery')
+  const restore = vi.spyOn(member.mls.capturedRecovery ?? member.mls, 'restoreRecovery')
   const published = hub.published.filter((row) => row.senderDID === 'bob').length
   await hub.publish({
     senderDID: 'alice',
@@ -623,8 +637,8 @@ test.each(reasons)(
       }
       return result
     })
-    const apply = vi.spyOn(member.mls, 'applyRecovery')
-    const restore = vi.spyOn(member.mls, 'restoreRecovery')
+    const apply = vi.spyOn(member.mls.capturedRecovery ?? member.mls, 'applyRecovery')
+    const restore = vi.spyOn(member.mls.capturedRecovery ?? member.mls, 'restoreRecovery')
     await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 3 })
     await entered.promise
     latchPeerSafety(member, reason)

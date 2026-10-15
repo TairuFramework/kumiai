@@ -18,7 +18,7 @@ import {
   signLedgerEntry,
   verifyRecoveryRequest,
 } from '@kumiai/mls'
-import type { StagedAdoption } from '@kumiai/rpc'
+import { asLogPosition, type StagedAdoption } from '@kumiai/rpc'
 import { createCommit, defaultProposalTypes } from 'ts-mls'
 import { describe, expect, test, vi } from 'vitest'
 
@@ -39,7 +39,11 @@ import { recoveryTrustFor } from '../src/registry/trust.js'
 import type { RegistrySwitchWrite } from '../src/registry/types.js'
 import { verifyRegistryResync } from '../src/registry/verdict.js'
 import { deferred } from '../src/runtime.js'
-import { createRegistryFixture, registryFixtureRestore } from './fixtures/registry.js'
+import {
+  createRegistryFixture,
+  registryFixtureRecoverySource,
+  registryFixtureRestore,
+} from './fixtures/registry.js'
 import { createRegistryRecovery } from './fixtures/registry-recovery.js'
 import { registryHandle } from './fixtures/registry-welcome.js'
 
@@ -191,6 +195,7 @@ async function setup(
   })
   const recovery = await createRegistryRecovery({
     format: 'captured',
+    recoverySource: await registryFixtureRecoverySource(fixture, key),
     mode,
     identity,
     options,
@@ -604,7 +609,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         if (fault === 'topic') s.proof.topicID = 'different-topic'
         if (fault === 'epoch') s.proof.groupInfoEpoch++
         if (fault === 'authenticator') s.proof.groupInfoAuthenticator = new Uint8Array(32)
-        if (fault === 'head') s.proof.captureHead = null
+        if (fault === 'head') s.proof.captureHead = asLogPosition('wrong-capture-head')
         if (fault === 'reply' || fault === 'source tree') {
           const snapshot = decodeCapturedRecoveryCandidate(s.record.candidate, s.record.requestKey)
           if (fault === 'reply')

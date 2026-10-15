@@ -18,7 +18,11 @@ import {
 import { describe, expect, test, vi } from 'vitest'
 
 import { entryCapability } from '../src/entry-capability.js'
-import { decodeRecoveryCandidate, encodeRecoveryCandidate } from '../src/recovery-codec.js'
+import {
+  decodeCapturedRecoveryCandidate,
+  decodeRecoveryCandidate,
+  encodeRecoveryCandidate,
+} from '../src/recovery-codec.js'
 import { recoveryTrustDigest } from '../src/recovery-trust-digest.js'
 import { createRecoveryContinuationPort } from '../src/registry/continuation.js'
 import { createGroupHandleRegistry } from '../src/registry/registry.js'
@@ -28,6 +32,7 @@ import { deferred } from '../src/runtime.js'
 import {
   createRegistryFixture,
   type RegistryFixtureBase,
+  registryFixtureCapturedRecovery,
   registryFixtureRestore,
   registryFixtureRetirement,
 } from './fixtures/registry.js'
@@ -94,6 +99,69 @@ for (const mode of ['real-mls', 'double'] as const) {
       expect(await s.fixture.inspectRows()).toEqual(before)
       expect(await s.access.read((handle) => handle.groupID)).toBe(groupID)
     }
+
+    test.each(['legacy', 'captured'] as const)(
+      '%s fixture preserves origin and exact bytes through a confirmed switch',
+      async (format) => {
+        const fixture = await createRegistryFixture({ mode, setup: 'seeded', groupID })
+        try {
+          const stored = await fixture.device.groups.loadState(key)
+          if (stored === null || stored.deleted) throw new Error('Missing fixture source')
+          const recovery =
+            format === 'captured'
+              ? await registryFixtureCapturedRecovery(fixture, key, { confirm: true })
+              : await fixture.confirmedRecovery(key, { confirm: true })
+          const before = structuredClone(recovery.record)
+          if ('format' in recovery.record) {
+            expect(recovery.record.source.identity?.epoch).toBe(stored.epoch)
+            expect(recovery.record.source.stateVersion).toBe(stored.version)
+            const snapshot = decodeCapturedRecoveryCandidate(
+              recovery.record.candidate,
+              recovery.record.requestKey,
+            )
+            expect(snapshot.source).toEqual(recovery.record.source)
+            expect(snapshot.target).toEqual(recovery.record.target)
+            expect(snapshot.attestedReply.length).toBeGreaterThan(0)
+            expect(recovery.record.expectedHead).toBe(recovery.record.captureHead)
+            expect(recovery.record.searchFrom).toBe(recovery.record.captureHead)
+          } else {
+            expect(recovery.record.source.epoch).toBe(stored.epoch)
+          }
+          const owner = registry(fixture)
+          if ('format' in recovery.record && recovery.record.switchMutationID === null)
+            throw new Error('Missing switch ID')
+          await owner.switchIncarnation(recovery.candidate, {
+            source: recovery.source,
+            rejoinID: recovery.record.id,
+            proof: recovery.proof,
+            write: {
+              mutationID:
+                'format' in recovery.record && recovery.record.switchMutationID !== null
+                  ? recovery.record.switchMutationID
+                  : crypto.randomUUID(),
+              source: { rejoinID: recovery.record.id },
+              destination: {
+                control: {
+                  cursor: { position: recovery.proof.position, epoch: recovery.record.epochAfter },
+                },
+              },
+            },
+          })
+          expect((await fixture.device.groups.ports(key).control.load()).rejoin).toEqual({
+            ...before,
+            stage: 'adopted',
+            ...('format' in before ? { destinationKey: destination } : {}),
+          })
+          const installed = await fixture.device.groups.loadState(destination)
+          if (installed === null || installed.deleted) throw new Error('Missing destination')
+          expect(installed.epoch).toBe(before.epochAfter)
+          expect(before.epochAfter).toBeGreaterThan(stored.epoch)
+          expect(recovery.record).toEqual(before)
+        } finally {
+          await fixture.close()
+        }
+      },
+    )
 
     test.each(['confirmed', 'adopted', 'after-drain', 'work'] as const)(
       'malformed captured switch record is retained on refusal or movement: %s',

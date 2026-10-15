@@ -65,7 +65,7 @@ import { deferred } from '../../src/runtime.js'
 import { createGroupSafety, type GroupSafety } from '../../src/safety.js'
 import { createDeterministicAtRestCodec } from './at-rest.js'
 import { testGroupMLSDependencies, testHandleAccess } from './real-group.js'
-import { createRegistryRecovery } from './registry-recovery.js'
+import { type CapturedRecoveryFixture, createRegistryRecovery } from './registry-recovery.js'
 import { createRegistryWelcomeHistory, registryHandle } from './registry-welcome.js'
 import { memoryModel, restoreMemoryControlHandle } from './sealed-memory-mls.js'
 import { createStorageFixture, type RegistryStorageFixture } from './storage-persistence.js'
@@ -177,6 +177,41 @@ const markerWriters = new WeakMap<RegistryFixtureBase, RegistryStorageFixture['f
 const rowRemovers = new WeakMap<RegistryFixtureBase, RegistryStorageFixture['deleteCommittedRow']>()
 
 const controlCorrupters = new WeakMap<RegistryFixtureBase, (key: GroupKey) => Promise<void>>()
+
+export async function registryFixtureCapturedRecovery(
+  fixture: RegistryFixtureBase,
+  sourceKey: GroupKey,
+  options?: { confirm?: boolean; missingLedger?: boolean },
+): Promise<CapturedRecoveryFixture> {
+  const stored = await fixture.device.groups.loadState(sourceKey)
+  if (stored === null || stored.deleted || stored.state === null)
+    throw new Error('Missing recovery source')
+  const result = await createRegistryRecovery({
+    mode: 'real-mls',
+    format: 'captured',
+    identity: fixture.identity,
+    options: fixture.environment.options,
+    source: await registryFixtureRestore(fixture)({ ...stored, state: stored.state }),
+    sourceKey,
+    recoverySource: await registryFixtureRecoverySource(fixture, sourceKey),
+    missingLedger: options?.missingLedger,
+  })
+  if (options?.confirm) {
+    await fixture.installRows({ key: sourceKey, control: { putRejoin: result.record } })
+    return { ...result, source: await registryFixtureRecoverySource(fixture, sourceKey) }
+  }
+  return result
+}
+
+export async function registryFixtureRecoverySource(fixture: RegistryFixtureBase, key: GroupKey) {
+  const capability = entryCapability(fixture.device.groups)
+  if (capability === null) throw new Error('Missing registry capability')
+  const source = await capability.read(key.groupID, (reads) =>
+    readRecoverySource(reads, key.groupID),
+  )
+  if (source.key.incarnation !== key.incarnation) throw new Error('Displaced fixture source')
+  return source
+}
 
 export async function registryFixtureCorruptControl(fixture: RegistryFixtureBase, key: GroupKey) {
   const corrupt = controlCorrupters.get(fixture)

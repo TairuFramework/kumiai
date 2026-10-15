@@ -22,7 +22,7 @@ import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS, encodeMemoryCommit } from './fixtures/memory-group-mls.js'
 import type { Protocols, TestPeer } from './fixtures/peer.js'
-import { buildRejoinRecord, makeMLSPeer } from './fixtures/peer.js'
+import { buildLegacyRejoinRecord, makeMLSPeer } from './fixtures/peer.js'
 
 test('recovery-only startup never reads lost private state or opens application work', async () => {
   const hub = new FakeHub()
@@ -165,7 +165,7 @@ test.each(['dropAppFrame', 'reconcileCommitPrefix', 'abandon'] as const)(
     })
     try {
       await member.peer.replay()
-      const { source, conflictEpoch: _conflict, ...saved } = await buildRejoinRecord(member)
+      const { source, conflictEpoch: _conflict, ...saved } = await buildLegacyRejoinRecord(member)
       const record: CapturedRejoinRecord = {
         ...saved,
         format: 2,

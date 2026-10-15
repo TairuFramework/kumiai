@@ -26,6 +26,7 @@ import { deferred } from '../src/runtime.js'
 import {
   createRegistryFixture,
   type RegistryFixtureBase,
+  registryFixtureCapturedRecovery,
   registryFixtureForceOwnerMarker,
   registryFixtureRestore,
 } from './fixtures/registry.js'
@@ -93,6 +94,27 @@ function overrideCapability(fixture: RegistryFixtureBase, value: ReturnType<type
 for (const mode of ['real-mls', 'double'] as const) {
   describe(`registry deletion and disposal -- ${mode}`, () => {
     const create = () => createRegistryFixture({ mode, setup: 'seeded', groupID })
+    test.each(['legacy', 'captured'] as const)(
+      '%s recovery remains unsettled through reopen and deletion refusal',
+      async (format) => {
+        let fixture = await create()
+        try {
+          const recovery =
+            format === 'captured'
+              ? await registryFixtureCapturedRecovery(fixture, key, { confirm: true })
+              : await fixture.confirmedRecovery(key, { confirm: true })
+          const expected = structuredClone(recovery.record)
+          fixture = await fixture.reopen()
+          expect((await fixture.device.groups.ports(key).control.load()).rejoin).toEqual(expected)
+          const owner = registry(fixture)
+          await expect(owner.delete(key)).rejects.toBeInstanceOf(GroupControlUnsettledError)
+          expect((await fixture.device.groups.ports(key).control.load()).rejoin).toEqual(expected)
+        } finally {
+          await fixture.close()
+        }
+      },
+    )
+
     async function mutationCall(
       fixture: RegistryFixtureBase,
       owner: GroupHandleRegistry,

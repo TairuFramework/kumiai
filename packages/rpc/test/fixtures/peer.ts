@@ -22,12 +22,14 @@ import { controlBuildRef } from '../../src/control/slot.js'
 import type {
   ControlSlot,
   ControlStore,
+  LegacyRejoinRecord,
   Operation,
   OperationRequest,
   Outcome,
-  RejoinRecord,
   WelcomeObligation,
 } from '../../src/control/types.js'
+import type { GroupMLS } from '../../src/crypto.js'
+import type { LogPosition } from '../../src/cursor.js'
 import { asLogPosition } from '../../src/cursor.js'
 import { OperationRejectedError } from '../../src/errors.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../../src/handshake.js'
@@ -36,13 +38,19 @@ import { createLedgerEntryResolver, encodeLedgerEntries } from '../../src/ledger
 import type { AppOutboxCleared } from '../../src/log-delivery.js'
 import type { GroupPeer, RecoveryEvent, StrandObservation } from '../../src/peer.js'
 import type { GroupProtocolDefinition } from '../../src/protocol.js'
-import type { RecoveryCompletion, RecoveryContinuation } from '../../src/recovery-types.js'
+import type {
+  CapturedRejoinRecord,
+  RecoveryCompletion,
+  RecoveryContinuation,
+  StoredRejoinRecord,
+} from '../../src/recovery-types.js'
 import { commitTopic } from '../../src/topic.js'
 import { createMemoryAnchorStore, type MemoryAnchorStore } from './anchor.js'
 import { createMemoryAppCursorStore, type MemoryAppCursorStore } from './app-cursor.js'
 import { createFakeCrypto, type FakeCrypto } from './fake-crypto.js'
 import { FakeHub } from './fake-hub.js'
 import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
+import { memoryCapturedRecord } from './memory-captured-recovery.js'
 import {
   createMemoryGroupMLS,
   decodeMemoryCommit,
@@ -665,7 +673,38 @@ export async function seedBuiltOperation(
   return Object.defineProperty(row, 'slot', { value: slot }) as Operation & { slot: ControlSlot }
 }
 
-export async function buildRejoinRecord(member: TestPeer): Promise<RejoinRecord> {
+export function rejoinSourceEpoch(record: StoredRejoinRecord): number {
+  if (!('format' in record)) return record.source.epoch
+  if (record.source.identity === null) throw new Error('Missing fixture source identity')
+  return record.source.identity.epoch
+}
+
+export async function buildRejoinRecord(member: TestPeer): Promise<StoredRejoinRecord> {
+  if (member.mls.capturedRecovery === undefined) return await buildLegacyRejoinRecord(member)
+  const prefix = await member.controlWalk.reconcileCommitPrefix()
+  if (prefix.kind !== 'complete') throw new Error('Incomplete recovery capture prefix')
+  return await buildCapturedRejoinRecord(member.mls, prefix.head)
+}
+
+export async function buildCapturedRejoinRecord(
+  mls: GroupMLS,
+  captureHead: LogPosition | null,
+): Promise<CapturedRejoinRecord> {
+  const captured = mls.capturedRecovery
+  if (captured === undefined) throw new Error('Missing captured recovery port')
+  const requestID = crypto.randomUUID()
+  const { request, requestKey } = await mls.createRecoveryRequest(requestID)
+  const sealed = await captured.sealGroupInfo(request, captureHead)
+  const pending = await captured.applyRecovery(sealed, requestID, requestKey)
+  if (pending === null || 'renewalRequired' in pending)
+    throw new Error('Missing captured candidate')
+  return {
+    ...memoryCapturedRecord(pending, request, requestKey, requestID),
+    ledgerBefore: await mls.getLedger(),
+  }
+}
+
+export async function buildLegacyRejoinRecord(member: TestPeer): Promise<LegacyRejoinRecord> {
   const id = crypto.randomUUID()
   const { request, requestKey } = await member.mls.createRecoveryRequest(id)
   const pending = await member.mls.applyRecovery(

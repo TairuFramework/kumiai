@@ -19,7 +19,7 @@ import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import {
   buildLedgerCommit,
-  buildRejoinRecord,
+  buildLegacyRejoinRecord,
   makeMLSPeer,
   seedBuiltOperation,
   type TestPeer,
@@ -65,7 +65,7 @@ function crashAt(bob: TestPeer, stage: LegacyRejoinRecord['stage']) {
 }
 
 async function capturedRecord(bob: TestPeer): Promise<CapturedRejoinRecord> {
-  const { source, conflictEpoch: _conflict, ...common } = await buildRejoinRecord(bob)
+  const { source, conflictEpoch: _conflict, ...common } = await buildLegacyRejoinRecord(bob)
   return {
     ...common,
     format: 2,
@@ -127,7 +127,7 @@ test.each(['built', 'published', 'confirmed', 'adopted', 'refused'] as const)(
 test('legacy confirmation preserves a captured replacement from the stored reread', async () => {
   const { bob } = await setup()
   const legacy = {
-    ...(await buildRejoinRecord(bob)),
+    ...(await buildLegacyRejoinRecord(bob)),
     stage: 'published' as const,
     position: asLogPosition('legacy-position'),
   }
@@ -172,7 +172,7 @@ test('adopted legacy completion retains incomplete capture evidence', async () =
   const { bob } = await setup()
   await bob.peer.dispose()
   await bob.peer.drained()
-  const record = { ...(await buildRejoinRecord(bob)), stage: 'adopted' as const }
+  const record = { ...(await buildLegacyRejoinRecord(bob)), stage: 'adopted' as const }
   const cursor = {
     position: asLogPosition('incomplete-prefix'),
     epoch: 1,
@@ -203,7 +203,7 @@ test('adopted legacy completion retains incomplete capture evidence', async () =
 
 test('a hold committed while loading a saved rejoin prevents external handoff', async () => {
   const { hub, bob } = await setup()
-  const record = await buildRejoinRecord(bob)
+  const record = await buildLegacyRejoinRecord(bob)
   await bob.control.apply({ putRejoin: record }, 'saved-external')
   await bob.peer.ack('absent')
   const load = bob.control.load.bind(bob.control)
@@ -469,7 +469,7 @@ test.each([
   },
 ])('source re-check: $name', async ({ expected, frame, digest }) => {
   const { bob } = await setup()
-  const record = await buildRejoinRecord(bob)
+  const record = await buildLegacyRejoinRecord(bob)
   record.position = asLogPosition('000000000003')
   const scan: SourceScan = {
     current: record.source,
@@ -505,7 +505,7 @@ test.each(['gap', 'epoch', 'authenticator', 'incarnation', 'groupID'] as const)(
   'source re-check rejects changed %s',
   async (changed) => {
     const { bob } = await setup()
-    const record = await buildRejoinRecord(bob)
+    const record = await buildLegacyRejoinRecord(bob)
     const scan: SourceScan = { current: structuredClone(record.source), gap: false, frames: [] }
     if (changed === 'gap') scan.gap = true
     else if (changed === 'authenticator')
@@ -970,7 +970,7 @@ test.each(['binding', 'lapse', 'floor'] as const)(
 
 test('confirmed rejoin replay retains its record under a freshly persisted strong hold', async () => {
   const { bob } = await setup()
-  const built = await buildRejoinRecord(bob)
+  const built = await buildLegacyRejoinRecord(bob)
   const record: LegacyRejoinRecord = {
     ...built,
     stage: 'confirmed',
@@ -1088,7 +1088,7 @@ test.each(['acceptance-unknown', 'unsupported-version'] as const)(
 
 test('a hold committed during confirmed source scan preserves the rejoin even if the scan has a gap', async () => {
   const { hub, bob } = await setup()
-  const built = await buildRejoinRecord(bob)
+  const built = await buildLegacyRejoinRecord(bob)
   const record: LegacyRejoinRecord = {
     ...built,
     stage: 'confirmed',

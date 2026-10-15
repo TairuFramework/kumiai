@@ -29,7 +29,7 @@ import { registryRetirement } from '../src/registry/retirement.js'
 import { registrySafety } from '../src/registry/safety.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { deferred } from '../src/runtime.js'
-import { createRegistryFixture } from './fixtures/registry.js'
+import { createRegistryFixture, registryFixtureRecoverySource } from './fixtures/registry.js'
 import { createRegistryRecovery } from './fixtures/registry-recovery.js'
 
 const groupID = 'registry-peer'
@@ -107,6 +107,7 @@ async function setup(confirmed = true) {
   })
   const recovery = await createRegistryRecovery({
     format: 'captured',
+    recoverySource: await registryFixtureRecoverySource(f, source),
     mode: 'real-mls',
     identity: f.identity,
     options: f.environment.options,

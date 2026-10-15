@@ -15,6 +15,7 @@ import {
   buildLedgerCommit,
   buildRejoinRecord,
   makeMLSPeer,
+  rejoinSourceEpoch,
   seedBuiltOperation,
   type TestPeer,
 } from './fixtures/peer.js'
@@ -213,6 +214,7 @@ test.each(['built', 'published', 'confirmed'] as const)(
     peers.push(seed)
     await seed.peer.replay()
     const rejoin = await buildRejoinRecord(seed)
+    expect(rejoinSourceEpoch(rejoin)).toBe(seed.mls.epoch())
     await seed.peer.dispose()
     await seed.peer.drained()
     const published = await hub.publish({
@@ -237,7 +239,9 @@ test.each(['built', 'published', 'confirmed'] as const)(
     const again = makeMLSPeer(hub, 'bob', secret, { restartOf: seed, onStrand: strands })
     peers.push(again)
     if (stage === 'confirmed')
-      vi.spyOn(again.mls, 'restoreRecovery').mockRejectedValue(new Error('Pause adoption'))
+      vi.spyOn(again.mls.capturedRecovery ?? again.mls, 'restoreRecovery').mockRejectedValue(
+        new Error('Pause adoption'),
+      )
     await again.peer.outcomes()
     expect((await again.control.load()).rejoin).toMatchObject({
       stage: stage === 'built' ? 'published' : stage,
@@ -281,15 +285,20 @@ test.each(['published', 'confirmed'] as const)(
     const first = responses[0]
     if (first == null || barrier == null) throw new Error('Missing barrier position')
     const rejoin = await buildRejoinRecord(seed)
+    expect(rejoinSourceEpoch(rejoin)).toBe(seed.mls.epoch())
     await seed.peer.dispose()
     await seed.peer.drained()
     await seed.control.apply(
       {
         putRejoin: {
-          ...rejoin,
+          ...('format' in rejoin
+            ? rejoin
+            : {
+                ...rejoin,
+                source: { ...rejoin.source, head: asLogPosition(first.position) },
+              }),
           stage,
           position: asLogPosition(barrier.position),
-          source: { ...rejoin.source, head: asLogPosition(first.position) },
         },
       },
       'responder-rejoin-barrier',
@@ -303,7 +312,9 @@ test.each(['published', 'confirmed'] as const)(
     })
     peers.push(again)
     if (stage === 'confirmed')
-      vi.spyOn(again.mls, 'restoreRecovery').mockRejectedValue(new Error('Pause adoption'))
+      vi.spyOn(again.mls.capturedRecovery ?? again.mls, 'restoreRecovery').mockRejectedValue(
+        new Error('Pause adoption'),
+      )
     await again.peer.outcomes()
     const requester = makeMLSPeer(hub, 'carol', secret, { members: ['bob', 'carol'] })
     peers.push(requester)

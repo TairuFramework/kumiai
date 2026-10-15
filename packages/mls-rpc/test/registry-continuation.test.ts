@@ -5,7 +5,11 @@ import { describe, expect, test } from 'vitest'
 import * as MlsRPC from '../src/index.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { createRealGroup } from './fixtures/real-group.js'
-import { createRegistryFixture, type RegistryFixture } from './fixtures/registry.js'
+import {
+  createRegistryFixture,
+  type RegistryFixture,
+  registryFixtureRecoverySource,
+} from './fixtures/registry.js'
 import { createRegistryRecovery } from './fixtures/registry-recovery.js'
 
 const groupID = 'registry-continuation'
@@ -296,6 +300,7 @@ test('captured switch resumes its empty destination ledger and preserves settled
     const recovery = await createRegistryRecovery({
       mode: 'real-mls',
       format: 'captured',
+      recoverySource: await registryFixtureRecoverySource(fixture, source),
       identity: requester.identity,
       options: fixture.environment.options,
       source: handle,

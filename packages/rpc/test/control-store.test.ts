@@ -30,7 +30,9 @@ import {
   StorageOutcomeUnknownError,
 } from '../src/errors.js'
 import type { CapturedRejoinRecord } from '../src/recovery-types.js'
+import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
+import { buildRejoinRecord, makeMLSPeer, rejoinSourceEpoch } from './fixtures/peer.js'
 
 test.each([undefined, 'authenticated-commit'] as const)(
   'response persistence omits negative rows: %s',
@@ -139,6 +141,31 @@ const rejoin: LegacyRejoinRecord = {
   ledgerBefore: [],
   conflictEpoch: null,
 }
+
+test('a prepared live recovery record preserves bytes through reset and defensive reads', async () => {
+  const member = makeMLSPeer(new FakeHub(), 'bob', new Uint8Array(32).fill(23))
+  try {
+    await member.peer.replay()
+    const record = await buildRejoinRecord(member)
+    expect(rejoinSourceEpoch(record)).toBe(member.mls.epoch())
+    const expected = structuredClone(record)
+    await member.control.apply({ putRejoin: record }, 'prepared-rejoin')
+    record.candidate.fill(0)
+    record.requestKey.fill(0)
+    record.payload.fill(0)
+    expect((await member.control.load()).rejoin).toEqual(expected)
+    const snapshot = applyChanges(await member.control.load(), {})
+    expect(snapshot.rejoin).toEqual(expected)
+    const reset = applyChanges(snapshot, readmissionChanges(snapshot))
+    expect(reset.rejoin).toBeNull()
+    expect(reset.outcomes).toContainEqual(
+      expect.objectContaining({ id: expected.id, kind: 'unknown' }),
+    )
+  } finally {
+    await member.peer.dispose()
+    await member.peer.drained()
+  }
+})
 
 describe('control changes', () => {
   test('captured trust maps survive control changes without sharing bytes', () => {

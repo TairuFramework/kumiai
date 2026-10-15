@@ -439,7 +439,14 @@ test.each([false, true])(
       let confirmed = false
       const apply = bob.control.apply.bind(bob.control)
       vi.spyOn(bob.control, 'apply').mockImplementation(async (changes, id) => {
-        if (changes.putRejoin?.stage === 'confirmed') confirmed = true
+        if (changes.putRejoin?.stage === 'confirmed') {
+          confirmed = true
+          const record = changes.putRejoin
+          expect('format' in record ? record.source.identity?.epoch : record.source.epoch).toBe(
+            Number(bob.handle().epoch),
+          )
+          if ('format' in record) expect(record.target.groupInfoEpoch + 1).toBe(record.epochAfter)
+        }
         await apply(changes, id)
       })
       await alice.peer.commit(buildLedgerCommit(alice, alice.identity, bob.identity.id, 'member'))

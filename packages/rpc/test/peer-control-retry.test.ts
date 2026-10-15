@@ -10,7 +10,12 @@ import { APP_TOPIC_LABEL, commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
-import { buildLedgerCommit, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
+import {
+  buildLedgerCommit,
+  makeMLSPeer,
+  rejoinSourceEpoch,
+  type TestPeer,
+} from './fixtures/peer.js'
 
 const secret = new Uint8Array(32).fill(0xa3)
 const peers: Array<TestPeer> = []
@@ -133,7 +138,10 @@ test('the FIFO writer leaves successors as intents while guarded adoption has mo
         await control.apply(changes, mutationID)
         const snapshot = await control.load()
         snapshots.push(snapshot)
-        if (snapshot.rejoin?.stage === 'built') void seed.peer.dispose()
+        if (snapshot.rejoin?.stage === 'built') {
+          expect(rejoinSourceEpoch(snapshot.rejoin)).toBe(seed.mls.epoch())
+          void seed.peer.dispose()
+        }
       },
     },
   })
