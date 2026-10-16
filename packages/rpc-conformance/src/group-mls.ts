@@ -333,6 +333,7 @@ export type GroupMLSConformanceParams = {
 }
 
 export type ConformanceCapturedRecoveryFixture = {
+  invalidateRetainedSigner(kind: 'missing' | 'wrong-controller' | 'revoked'): void
   requester: ConformanceGroupMLS
   responder: ConformanceGroupMLS
   restartResponder(): Promise<ConformanceGroupMLS>
@@ -380,6 +381,21 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
   }
 
   describe(`GroupMLS conformance — ${label}`, () => {
+    test.each(['missing', 'wrong-controller', 'revoked'] as const)(
+      'ineligible retained recovery signer is refused: %s',
+      async (kind) => {
+        const fixture = await params.createCapturedRecovery()
+        const port = fixture.requester.capturedRecovery
+        if (port === undefined) throw new Error('Missing captured ports')
+        const requestID = `ineligible-signer-${kind}`
+        const { request, requestKey } = await fixture.requester.createRecoveryRequest(requestID)
+        const sealed = await fixture.responder.sealGroupInfo(request, null)
+        fixture.invalidateRetainedSigner(kind)
+        expect(await port.applyRecovery(sealed, requestID, requestKey)).toBeNull()
+        expect(fixture.accepted()).toBe(0)
+      },
+    )
+
     test.each(['complete', 'epoch', 'stranded', 'strand', 'incomplete'] as const)(
       'captured sealing requires a complete committed cursor (%s)',
       async (fault) => {

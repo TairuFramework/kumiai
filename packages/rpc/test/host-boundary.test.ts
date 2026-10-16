@@ -5,6 +5,7 @@ import { afterEach, describe, expect, expectTypeOf, test, vi } from 'vitest'
 import type { PendingRecovery } from '../src/crypto.js'
 import { PeerDisposedError } from '../src/errors.js'
 import {
+  checkpointHostMembers,
   createHostBoundary,
   peerHostFields,
   pendingRecoveryHostMembers,
@@ -497,3 +498,10 @@ test('captured returned callbacks drain acceptance and expose source as data', a
   expect(() => restored.serialize()).toThrow(PeerDisposedError)
   expect(() => restored.onAccepted()).toThrow(PeerDisposedError)
 })
+
+test.each(Object.keys(checkpointHostMembers))(
+  'checkpoint %s drains before disposal',
+  async (method) => {
+    await assertPaused(`checkpoints.${method}`, (pause) => pause)
+  },
+)

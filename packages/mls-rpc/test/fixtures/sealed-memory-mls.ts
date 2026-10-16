@@ -65,9 +65,10 @@ type MemoryMLS = GroupMLS & {
   adopt(commit: Uint8Array): void | Promise<void>
 }
 
-const { createMemoryGroupMLS } = (await import(
+const { createMemoryGroupMLS, memoryCheckpointFrame } = (await import(
   new URL('../../../rpc/test/fixtures/memory-group-mls.ts', import.meta.url).href
 )) as {
+  memoryCheckpointFrame(body: Record<string, unknown>, secret: Uint8Array): Uint8Array
   createMemoryGroupMLS(params: {
     groupID: string
     localDID?: string
@@ -618,3 +619,5 @@ export function sealedMemoryValidation(): ControlValidationPort {
     },
   }
 }
+
+export const independentCheckpointFrame = memoryCheckpointFrame

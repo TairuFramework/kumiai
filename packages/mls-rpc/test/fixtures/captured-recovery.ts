@@ -1,4 +1,16 @@
-import { confirmationTag, decodeClientState, restoreGroup } from '@kumiai/mls'
+import { normalizeDID, type OwnIdentity, randomIdentity } from '@kokuin/token'
+import {
+  type ControllerBinding,
+  commitInvite,
+  confirmationTag,
+  createGroup,
+  createInvite,
+  createKeyPackageBundle,
+  decodeClientState,
+  parseMLSCredentialIdentity,
+  processWelcome,
+  restoreGroup,
+} from '@kumiai/mls'
 import {
   type CapturedPendingRecovery,
   type CapturedRejoinRecord,
@@ -8,15 +20,10 @@ import {
   HANDSHAKE_KIND,
 } from '@kumiai/rpc'
 
-import { createGroupMLS } from '../../src/mls.js'
+import { createGroupMLS, createLedgerEntrySlot } from '../../src/mls.js'
 import { recoveryTrustDigest } from '../../src/recovery-trust-digest.js'
 import { recoveryTrustFor } from '../../src/registry/trust.js'
-import {
-  createRealGroup,
-  persistedTestAccess,
-  type RealMember,
-  testGroupMLSDependencies,
-} from './real-group.js'
+import { persistedTestAccess, type RealMember, testGroupMLSDependencies } from './real-group.js'
 import {
   createTransactionalAccess,
   createTransactionalStore,
@@ -60,7 +67,7 @@ export function capturedRecord(
 }
 
 export async function createCapturedRealRecovery(transactional = false) {
-  const real = await createRealGroup(2, `captured-contract-${crypto.randomUUID()}`)
+  const real = await boundCapturedGroup()
   const requester = real.members[0]
   const responder = real.members[1]
   if (requester === undefined || responder === undefined)
@@ -111,6 +118,47 @@ export async function createCapturedRealRecovery(transactional = false) {
   }
   const responderStore = createTransactionalStore(responder.handle)
   return {
+    invalidateRetainedSigner(kind: 'missing' | 'wrong-controller' | 'revoked') {
+      if (kind === 'missing' || kind === 'wrong-controller') {
+        trust.signerTree = trust.signerTree.map((node) => {
+          if (
+            node?.nodeType !== 1 ||
+            !node.leaf.signaturePublicKey.every(
+              (value, index) => value === responder.identity.publicKey[index],
+            )
+          )
+            return node
+          if (kind === 'missing') return undefined
+          const credential = node.leaf.credential
+          if (!('identity' in credential)) throw new Error('Missing signer credential')
+          const parsed = parseMLSCredentialIdentity(credential.identity)
+          if (parsed.controller === undefined) throw new Error('Missing signer controller')
+          return {
+            ...node,
+            leaf: {
+              ...node.leaf,
+              credential: {
+                ...credential,
+                identity: new TextEncoder().encode(
+                  JSON.stringify({
+                    ...parsed,
+                    controller: { ...parsed.controller, id: randomIdentity().id },
+                  }),
+                ),
+              },
+            },
+          }
+        })
+      } else
+        trust.registry.devices = new Map(trust.registry.devices).set(
+          normalizeDID(responder.identity.id),
+          {
+            controller: responder.handle.anchor.controller ?? responder.identity.id,
+            status: 'revoked',
+          },
+        )
+      source.trustDigest = recoveryTrustDigest(trust)
+    },
     requester: await make(requester, createTransactionalStore(requester.handle), true),
     responder: await make(responder, responderStore, false),
     async restartResponder() {
@@ -132,5 +180,43 @@ export async function createCapturedRealRecovery(transactional = false) {
     record: capturedRecord,
     confirmationTag,
     accepted: () => accepted,
+  }
+}
+
+async function boundCapturedGroup() {
+  const lifecycle = (await import(
+    new URL('../../../mls/test/fixtures/lifecycle-ledger.ts', import.meta.url).href
+  )) as {
+    bindingFor(
+      identity: OwnIdentity,
+      prefix?: ControllerBinding['prefix'],
+      issuer?: { identity: OwnIdentity; parent: string },
+    ): Promise<ControllerBinding>
+    trustedGrant(identity: OwnIdentity): Promise<string>
+  }
+  const identity = randomIdentity()
+  const responder = randomIdentity()
+  const controller = await lifecycle.bindingFor(identity)
+  const source = (
+    await createGroup(identity, `captured-contract-${crypto.randomUUID()}`, { controller })
+  ).group
+  const binding = await lifecycle.bindingFor(responder, undefined, {
+    identity,
+    parent: await lifecycle.trustedGrant(identity),
+  })
+  const bundle = await createKeyPackageBundle(responder, { controller: binding })
+  const { invite } = await createInvite({ group: source, identity, recipientDID: responder.id })
+  const added = await commitInvite(source, bundle.publicPackage, invite)
+  const joined = await processWelcome({
+    identity: responder,
+    invite,
+    welcome: added.welcomeMessage,
+    keyPackageBundle: bundle,
+  })
+  return {
+    members: [
+      { identity, handle: added.newGroup, slot: createLedgerEntrySlot() },
+      { identity: responder, handle: joined.group, slot: createLedgerEntrySlot() },
+    ],
   }
 }

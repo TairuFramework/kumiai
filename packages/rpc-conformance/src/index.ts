@@ -31,6 +31,8 @@ export {
   testAppOutboxConformance,
 } from './app-outbox.js'
 export {
+  type CheckpointComparisonFixture,
+  type CheckpointPortFixture,
   type CheckpointStorageConformanceParams,
   type ConformanceCheckpointComparison,
   type ConformanceCheckpointCoverage,
@@ -38,6 +40,10 @@ export {
   type ConformanceCheckpointPort,
   type ConformanceCheckpointRecord,
   type ConformanceCheckpointStore,
+  malformedCheckpointBodies,
+  testCheckpointComparisonConformance,
+  testCheckpointCoverageConformance,
+  testCheckpointPortConformance,
   testCheckpointStorageConformance,
 } from './checkpoint.js'
 export {

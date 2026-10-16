@@ -1,6 +1,7 @@
 import type { GatherOptions } from '@kumiai/broadcast'
 
 import type { AnchorStore } from './anchor.js'
+import type { CheckpointPort } from './checkpoint-types.js'
 import type { ControlValidation, ControlValidationPort } from './control/search.js'
 import type { GroupCrypto, GroupMLS, PendingAppFrames, PendingRecovery } from './crypto.js'
 import { PeerDisposedError } from './errors.js'
@@ -23,6 +24,14 @@ type HostMembers<TValue extends object, TCore extends keyof TValue = never> = {
       ? 'host' | 'core'
       : 'data' | 'port'
 }
+
+export const checkpointHostMembers = {
+  signInstalled: 'host',
+  compare: 'host',
+  exportCheckpoints: 'host',
+  checkpointFact: 'host',
+  checkpointCoverage: 'host',
+} as const satisfies HostMembers<CheckpointPort>
 
 // New recovery methods must be classified alongside the existing acceptance callback.
 export const pendingRecoveryHostMembers = {

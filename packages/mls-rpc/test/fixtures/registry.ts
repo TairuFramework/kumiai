@@ -871,7 +871,7 @@ async function acceptedOrdinary(
     await fixture.installRows({ key: access.key, control: { commitOnceAcceptance: proof } })
   const expected = await access.readControl(async ({ source }) => source)
   const write: AdoptionWrite = {
-    mutationID: 'ordinary-adoption',
+    mutationID: crypto.randomUUID(),
     expected: { ...expected, acceptance: proof, journal },
     anchorLanded: slot.digest,
     changes: {

@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import { storageChange } from './group-storage.js'
 import type {
@@ -576,4 +576,205 @@ export function testCheckpointStorageConformance<TTx extends ConformanceGroupTra
       }
     })
   })
+}
+
+export type CheckpointPortFixture = {
+  port: ConformanceCheckpointPort
+  key: ConformanceGroupKey
+  installed(): Promise<{ id: string; epoch: number }>
+  advance(): Promise<void>
+  generations(): Promise<unknown>
+  unproven(kind: 'speculative' | 'rolled-back' | 'foreign-key' | 'fabricated-fact'): Promise<string>
+  retire(): Promise<void>
+  decodeEpoch(frame: Uint8Array): number
+  close(): Promise<void>
+}
+
+export function testCheckpointPortConformance(params: {
+  label: string
+  createFixture(): Promise<CheckpointPortFixture>
+}): void {
+  describe(`CheckpointPort: ${params.label}`, () => {
+    test.each(['speculative', 'rolled-back', 'foreign-key', 'fabricated-fact'] as const)(
+      'signing requires proven installed fact: %s',
+      async (kind) => {
+        const fixture = await params.createFixture()
+        try {
+          expect(await fixture.port.signInstalled(await fixture.unproven(kind))).toBeNull()
+          expect(await fixture.port.signInstalled((await fixture.installed()).id)).not.toBeNull()
+        } finally {
+          await fixture.close()
+        }
+      },
+    )
+    test('rapid advances sign the captured installation', async () => {
+      const fixture = await params.createFixture()
+      try {
+        const captured = await fixture.installed()
+        const capturedEpoch = captured.epoch
+        await fixture.advance()
+        await fixture.advance()
+        const generationsBeforeSigning = await fixture.generations()
+        const frame = await fixture.port.signInstalled(captured.id)
+        if (frame === null) throw new Error('Missing captured checkpoint')
+        const decoded = { epoch: fixture.decodeEpoch(frame) }
+        expect(decoded.epoch).toBe(capturedEpoch)
+        const generationsAfterSigning = await fixture.generations()
+        expect(generationsAfterSigning).toEqual(generationsBeforeSigning)
+        expect(await fixture.port.signInstalled(captured.id)).toEqual(frame)
+        expect(await fixture.port.signInstalled((await fixture.installed()).id)).not.toBeNull()
+        expect(await fixture.port.exportCheckpoints(fixture.key)).toHaveLength(2)
+        expect(await fixture.port.exportCheckpoints(fixture.key, [capturedEpoch])).toEqual([frame])
+        const snapshot = frame.slice()
+        frame.fill(0)
+        expect(await fixture.port.exportCheckpoints(fixture.key, [capturedEpoch])).toEqual([
+          snapshot,
+        ])
+        expect(await fixture.port.checkpointFact(fixture.key, capturedEpoch)).not.toBeNull()
+        expect(
+          await fixture.port.checkpointFact({ ...fixture.key, incarnation: 999 }, capturedEpoch),
+        ).toBeNull()
+      } finally {
+        await fixture.close()
+      }
+    })
+    test('retired workers cannot sign for replacement', async () => {
+      const fixture = await params.createFixture()
+      try {
+        const captured = await fixture.installed()
+        await fixture.retire()
+        await expect(fixture.port.signInstalled(captured.id)).rejects.toThrow()
+      } finally {
+        await fixture.close()
+      }
+    })
+  })
+}
+
+export type CheckpointComparisonFixture = {
+  port: ConformanceCheckpointPort
+  key: ConformanceGroupKey
+  sharedRosterDID: string
+  frame: Uint8Array
+  wrongKeyFrame: Uint8Array
+  wrongBindingFrame: Uint8Array
+  malformedFrames: Array<Uint8Array>
+  close(): Promise<void>
+}
+export function testCheckpointComparisonConformance(params: {
+  label: string
+  createFixture(): Promise<CheckpointComparisonFixture>
+}): void {
+  describe(`checkpoint comparison: ${params.label}`, () => {
+    test('shared roster controls eligibility after divergent membership', async () => {
+      const fixture = await params.createFixture()
+      try {
+        const comparison = await fixture.port.compare(fixture.key, fixture.frame)
+        expect(comparison.kind).toBe('conflict')
+        if (comparison.kind !== 'conflict') throw new Error('Missing conflict')
+        const sharedRosterDID = fixture.sharedRosterDID
+        expect(comparison.signerDID).toBe(sharedRosterDID)
+        expect(await fixture.port.compare(fixture.key, fixture.wrongKeyFrame)).toEqual({
+          kind: 'coverage-gap',
+        })
+        expect(await fixture.port.compare(fixture.key, fixture.wrongBindingFrame)).toEqual({
+          kind: 'invalid',
+        })
+        for (const frame of fixture.malformedFrames)
+          expect(await fixture.port.compare(fixture.key, frame)).toEqual({ kind: 'invalid' })
+        const damaged = fixture.frame.slice()
+        damaged[damaged.length - 1] = (damaged[damaged.length - 1] ?? 0) ^ 1
+        expect(await fixture.port.compare(fixture.key, damaged)).toEqual({ kind: 'invalid' })
+        expect(
+          await fixture.port.compare(
+            { ...fixture.key, incarnation: fixture.key.incarnation + 1 },
+            fixture.frame,
+          ),
+        ).toEqual({ kind: 'coverage-gap' })
+      } finally {
+        await fixture.close()
+      }
+    })
+  })
+}
+
+export function testCheckpointCoverageConformance(params: {
+  label: string
+  createFixture(): Promise<{
+    groupID: string
+    port(): ConformanceCheckpointPort
+    install(incarnation: number, epoch: number): Promise<void>
+    restart(): Promise<void>
+    prune(): Promise<void>
+    close(): Promise<void>
+  }>
+}): void {
+  test(`public comparison coverage survives pruning and restart: ${params.label}`, async () => {
+    const fixture = await params.createFixture()
+    const start = Date.now()
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(start)
+    try {
+      await fixture.install(1, 3)
+      await fixture.install(1, 6)
+      for (let epoch = 7; epoch <= 261; epoch++) await fixture.install(epoch < 130 ? 1 : 2, epoch)
+      const key = { groupID: fixture.groupID, incarnation: 2 }
+      const before = await fixture.port().checkpointCoverage(fixture.groupID)
+      expect(before).toMatchObject({
+        current: { key, epoch: 261 },
+        effectiveFloor: 6,
+        retained: [
+          { key: { ...key, incarnation: 1 }, from: 6, through: 129 },
+          { key, from: 130, through: 261 },
+        ],
+        gaps: expect.arrayContaining([
+          { key: { ...key, incarnation: 1 }, from: 0, through: 2, reason: 'pre-join' },
+          { key: { ...key, incarnation: 1 }, from: 3, through: 3, reason: 'expired' },
+          { key: { ...key, incarnation: 1 }, from: 4, through: 5, reason: 'skipped' },
+          { key, from: 0, through: 129, reason: 'pre-join' },
+        ]),
+      })
+      clock.mockReturnValue(start + 604800000 - 1)
+      expect(await fixture.port().checkpointCoverage(fixture.groupID)).toEqual(before)
+      await fixture.restart()
+      expect(await fixture.port().checkpointCoverage(fixture.groupID)).toEqual(before)
+      clock.mockReturnValue(start + 604800000)
+      const expired = await fixture.port().checkpointCoverage(fixture.groupID)
+      expect(expired).toMatchObject({
+        current: { key, epoch: 261 },
+        effectiveFloor: 261,
+        retained: [{ key, from: 261, through: 261 }],
+        gaps: expect.arrayContaining([{ key, from: 130, through: 260, reason: 'expired' }]),
+      })
+      expect(await fixture.port().checkpointFact({ ...key, incarnation: 1 }, 6)).toBeNull()
+      await fixture.prune()
+      await fixture.restart()
+      expect(await fixture.port().checkpointCoverage(fixture.groupID)).toEqual(expired)
+      expect(await fixture.port().checkpointFact({ ...key, incarnation: 1 }, 6)).toBeNull()
+    } finally {
+      clock.mockRestore()
+      await fixture.close()
+    }
+  }, 60000)
+}
+
+export function malformedCheckpointBodies(
+  body: Record<string, unknown>,
+): Array<Record<string, unknown>> {
+  return [
+    { extra: true },
+    { v: 2 },
+    { type: 'other' },
+    { ciphersuite: 99 },
+    { epoch: -1 },
+    { epoch: 0.5 },
+    { epoch: Number.MAX_SAFE_INTEGER + 1 },
+    { leafIndex: -1 },
+    { leafIndex: 0x100000000 },
+    { groupID: '' },
+    { groupID: '\ud800' },
+    { authHash: 'invalid' },
+    { genesisHash: 'invalid' },
+    { keyHash: 'invalid' },
+    { parentAuthHash: 'invalid' },
+  ].map((patch) => ({ ...body, ...patch }))
 }

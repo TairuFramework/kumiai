@@ -48,7 +48,14 @@ export function memoryCapturedRecord(
 export async function createCapturedMemoryRecovery(
   target = { targetID: 'hub', topicID: 'commits' },
 ) {
-  const trust = { groupID: 'memory-capture', ownerDID: 'alice', members: ['alice', 'bob'] }
+  const trust = {
+    groupID: 'memory-capture',
+    ownerDID: 'alice',
+    members: ['alice', 'bob'],
+    controller: 'controller',
+    signerControllers: { alice: 'controller', bob: 'controller' },
+    revoked: [] as Array<string>,
+  }
   const source = {
     key: { groupID: trust.groupID, incarnation: 1 },
     stateVersion: 1,
@@ -59,7 +66,11 @@ export async function createCapturedMemoryRecovery(
   }
   let accepted = 0
   let sourceError: Error | null = null
-  const options = { groupID: trust.groupID, members: trust.members }
+  const options = {
+    groupID: trust.groupID,
+    members: trust.members,
+    binding: { id: 'controller', prefix: [], capability: 'captured-capability' },
+  }
   const requester = createMemoryGroupMLS({
     ...options,
     localDID: 'alice',
@@ -76,6 +87,12 @@ export async function createCapturedMemoryRecovery(
   })
   const responder = createMemoryGroupMLS({ ...options, localDID: 'bob' })
   return {
+    invalidateRetainedSigner(kind: 'missing' | 'wrong-controller' | 'revoked') {
+      if (kind === 'missing') trust.members = trust.members.filter((did) => did !== 'bob')
+      else if (kind === 'wrong-controller') trust.signerControllers.bob = 'foreign-controller'
+      else trust.revoked.push('bob')
+      source.trustDigest = toB64U(sha256(fromUTF(JSON.stringify(trust))))
+    },
     requester,
     responder,
     failSource: (error: Error) => {

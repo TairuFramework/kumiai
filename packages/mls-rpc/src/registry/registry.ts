@@ -1,6 +1,7 @@
 import { normalizeDID } from '@kokuin/token'
 import { controlSafetyHeld, type SafetyHold } from '@kumiai/rpc'
 
+import { bindRegistryCheckpoint } from '../checkpoint.js'
 import {
   type AccountedGroupObservation,
   coordinatorBinding,
@@ -604,6 +605,13 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         hooks.delete(registered)
       }
     },
+  })
+  bindRegistryCheckpoint({
+    registry,
+    entry: capability,
+    identity: params.recovery.identity,
+    assertOpen,
+    track,
   })
   bindRegistryRecoveryCoordinator({ registry, entry: capability, persistence: persistence.groups })
   bindRegistryRetirement(registry, retirement)

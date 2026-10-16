@@ -911,9 +911,18 @@ test.each(['binding', 'lapse', 'floor'] as const)(
   'a %s refusal refreshes the binding and retries without another recover call',
   async (reason) => {
     const hub = new FakeHub()
-    const alice = member(hub, 'alice')
-    const crypto = createFakeCrypto({ epoch: 1, localDID: 'bob' })
     const binding = { id: 'controller', prefix: [], capability: 'original' }
+    const aliceCrypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+    const aliceMLS = createMemoryGroupMLS({
+      recoverySecret: secret,
+      localDID: 'alice',
+      epoch: 1,
+      members: ['alice', 'bob'],
+      binding,
+      onAdvance: (epoch) => aliceCrypto.setEpoch(epoch),
+    })
+    const alice = member(hub, 'alice', { mls: aliceMLS, crypto: aliceCrypto })
+    const crypto = createFakeCrypto({ epoch: 1, localDID: 'bob' })
     let renewals = 0
     const mls = createMemoryGroupMLS({
       recoverySecret: secret,

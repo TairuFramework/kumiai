@@ -1,11 +1,12 @@
-import { encodeMultibase, normalizeDID } from '@kokuin/token'
-import { x25519 } from '@noble/curves/ed25519.js'
+import { encodeMultibase, normalizeDID, type OwnIdentity } from '@kokuin/token'
+import { ed25519, x25519 } from '@noble/curves/ed25519.js'
 import { hmac } from '@noble/hashes/hmac.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { concatBytes } from '@noble/hashes/utils.js'
-import { fromB64U, fromUTF, toB64U, toUTF } from '@sozai/codec'
+import { canonicalStringify, fromB64U, fromUTF, toB64U, toUTF } from '@sozai/codec'
 
 import type { AnchorStore } from '../../src/anchor.js'
+import type { CheckpointCoverage, CheckpointPort } from '../../src/checkpoint-types.js'
 import { digestAppliedCommit } from '../../src/classify.js'
 import { encodeCommitFrame } from '../../src/commit-frame.js'
 import type { SaveControlBuild } from '../../src/control/build.js'
@@ -402,6 +403,7 @@ type MemoryGroupInfo = {
   members: Array<string>
   captureHead?: string | null
   signer?: string
+  signerController?: string
   leafTokens?: Array<[string, string]>
   stateSignature?: string
   attestation?: string
@@ -775,6 +777,12 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     }
     if (typeof info?.to !== 'string' || typeof info?.epoch !== 'number') return null
     if (info.groupID !== groupID || info.to !== (localDID ?? '') || info.requestID !== requestID)
+      return null
+    if (
+      info.signer === undefined ||
+      !info.members.includes(info.signer) ||
+      (binding !== undefined && info.signerController !== binding.id)
+    )
       return null
     return info
   }
@@ -1192,10 +1200,18 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       return null
     }
     const { attestation, ...body } = info
-    const trust = source.trust as { members: Array<string> }
+    const trust = source.trust as {
+      members: Array<string>
+      controller?: string
+      signerControllers?: Record<string, string>
+      revoked?: Array<string>
+    }
     if (
       info.stateSignature !== signCapturedState(info) ||
       !trust.members.includes(info.signer) ||
+      trust.revoked?.includes(info.signer) === true ||
+      (trust.controller !== undefined &&
+        trust.signerControllers?.[info.signer] !== trust.controller) ||
       !info.members.includes(localDID ?? '') ||
       attestation !== toB64U(hmac(sha256, recoverySecret, fromUTF(JSON.stringify(body))))
     )
@@ -1527,6 +1543,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         epoch,
         members: occupiedDIDs(),
         head: ledgerHead,
+        signer: localDID,
+        signerController: binding?.id,
         ...(captureHead === undefined
           ? {}
           : { captureHead, signer: localDID, leafTokens: [...freshLeaves] }),
@@ -2252,4 +2270,264 @@ export function decodeMemoryGroupIdentity(
 export function requireCapturedRecovery(mls: GroupMLS): CapturedRecoveryPort {
   if (mls.capturedRecovery === undefined) throw new Error('Missing captured recovery fixture')
   return mls.capturedRecovery
+}
+
+export type MemoryCheckpointFact = {
+  id: string
+  key: GroupKey
+  epoch: number
+  authHash: string
+  genesisHash: string
+  ciphersuite: number
+  parentAuthHash: string | null
+  members: Array<{
+    signerDID: string
+    keyHash: string
+    signaturePublicKey: string
+    leafIndex: number
+  }>
+  supersededAt: number | null
+}
+export type MemoryCheckpointDatabase = {
+  activeIncarnation: number
+  facts: Array<MemoryCheckpointFact>
+  frames: Map<string, Uint8Array>
+  gaps: CheckpointCoverage['gaps']
+}
+
+// The independent model owns its installation list; ordinary rows never enter it.
+export function createMemoryCheckpointPort(params: {
+  key: GroupKey
+  identity: OwnIdentity
+  database: MemoryCheckpointDatabase
+}): CheckpointPort {
+  const { database: db, identity } = params
+  const key = { ...params.key }
+  const facts = () =>
+    db.facts
+      .filter(
+        (fact) =>
+          fact.key.groupID === key.groupID &&
+          (fact.supersededAt === null || Date.now() - fact.supersededAt < 604800000),
+      )
+      .slice(-256)
+  const find = (requested: GroupKey, epoch: number) =>
+    facts().find(
+      (fact) =>
+        fact.key.groupID === requested.groupID &&
+        fact.key.incarnation === requested.incarnation &&
+        fact.epoch === epoch,
+    )
+  return {
+    async signInstalled(id) {
+      if (db.activeIncarnation !== key.incarnation) throw new Error('Retired checkpoint worker')
+      const fact = facts().find(
+        (fact) => fact.id === id && fact.key.incarnation === key.incarnation,
+      )
+      const member = fact?.members.find(
+        (member) =>
+          member.signerDID === identity.id &&
+          member.signaturePublicKey === toB64U(identity.publicKey),
+      )
+      if (fact === undefined || member === undefined) return null
+      const saved = db.frames.get(id)
+      if (saved !== undefined) return saved.slice()
+      const body = {
+        v: 1,
+        type: 'kumiai/checkpoint/v1',
+        groupID: key.groupID,
+        genesisHash: fact.genesisHash,
+        ciphersuite: fact.ciphersuite,
+        epoch: fact.epoch,
+        authHash: fact.authHash,
+        parentAuthHash: fact.parentAuthHash,
+        keyHash: member.keyHash,
+        leafIndex: member.leafIndex,
+      }
+      const bytes = memoryCheckpointFrame(body, identity.privateKey)
+      db.frames.set(id, bytes)
+      return bytes.slice()
+    },
+    async compare(requested, frame) {
+      try {
+        if (frame.length < 74 || frame.length > 4096 || frame[0] !== 1 || frame[1] !== 1)
+          return { kind: 'invalid' }
+        const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
+        if (view.getUint32(2) !== frame.length - 6 || view.getUint32(6) !== frame.length - 74)
+          return { kind: 'invalid' }
+        const bytes = frame.slice(10, -64)
+        const body = JSON.parse(toUTF(bytes)) as MemoryCheckpointBody
+        if (canonicalStringify(body) !== toUTF(bytes) || !validMemoryCheckpointBody(body))
+          return { kind: 'invalid' }
+        const fact = find(requested, body.epoch)
+        if (fact === undefined) return { kind: 'coverage-gap' }
+        if (
+          body.v !== 1 ||
+          body.type !== 'kumiai/checkpoint/v1' ||
+          body.groupID !== requested.groupID ||
+          body.genesisHash !== fact.genesisHash ||
+          body.ciphersuite !== fact.ciphersuite
+        )
+          return { kind: 'invalid' }
+        const roster = find(requested, body.epoch - 1) ?? fact
+        const members = roster.members.filter((member) => member.keyHash === body.keyHash)
+        const member = members[0]
+        if (members.length > 1) return { kind: 'invalid' }
+        if (member === undefined) return { kind: 'coverage-gap' }
+        if (
+          !ed25519.verify(
+            frame.slice(-64),
+            memoryCheckpointSignatureInput(body),
+            fromB64U(member.signaturePublicKey),
+            { zip215: false },
+          )
+        )
+          return { kind: 'invalid' }
+        const signer = { epoch: body.epoch, signerDID: member.signerDID, keyHash: body.keyHash }
+        return body.authHash === fact.authHash
+          ? { kind: 'agreement', ...signer }
+          : {
+              kind: 'conflict',
+              ...signer,
+              localAuthHash: fact.authHash,
+              remoteAuthHash: body.authHash,
+              parentAuthHash: body.parentAuthHash,
+            }
+      } catch {
+        return { kind: 'invalid' }
+      }
+    },
+    async exportCheckpoints(requested, epochs) {
+      return facts()
+        .filter(
+          (fact) =>
+            fact.key.groupID === requested.groupID &&
+            fact.key.incarnation === requested.incarnation &&
+            (epochs === undefined || epochs.includes(fact.epoch)),
+        )
+        .flatMap((fact) => {
+          const frame = db.frames.get(fact.id)
+          return frame === undefined ? [] : [frame.slice()]
+        })
+    },
+    async checkpointFact(requested, epoch) {
+      const fact = find(requested, epoch)
+      return fact === undefined ? null : fromUTF(canonicalStringify(fact))
+    },
+    async checkpointCoverage(groupID) {
+      if (groupID !== key.groupID)
+        return { groupID, current: null, retained: [], effectiveFloor: null, gaps: [] }
+      const retained: CheckpointCoverage['retained'] = []
+      for (const fact of facts()) {
+        const last = retained.at(-1)
+        if (last?.key.incarnation === fact.key.incarnation && last.through + 1 === fact.epoch)
+          last.through++
+        else retained.push({ key: { ...fact.key }, from: fact.epoch, through: fact.epoch })
+      }
+      const current = db.facts.at(-1)
+      return {
+        groupID,
+        current: current === undefined ? null : { key: { ...current.key }, epoch: current.epoch },
+        retained,
+        effectiveFloor:
+          facts().length === 0 ? null : Math.min(...facts().map((fact) => fact.epoch)),
+        gaps: memoryCheckpointGaps([
+          ...db.gaps,
+          ...db.facts
+            .filter((fact) => !facts().includes(fact))
+            .map((fact) => ({
+              key: fact.key,
+              from: fact.epoch,
+              through: fact.epoch,
+              reason: 'expired' as const,
+            })),
+        ]),
+      }
+    },
+  }
+}
+
+type MemoryCheckpointBody = {
+  v: number
+  type: string
+  groupID: string
+  genesisHash: string
+  ciphersuite: number
+  epoch: number
+  authHash: string
+  parentAuthHash: string | null
+  keyHash: string
+  leafIndex: number
+}
+function memoryCheckpointSignatureInput(body: MemoryCheckpointBody): Uint8Array {
+  const bytes = fromUTF(canonicalStringify(body))
+  const length = new Uint8Array(4)
+  new DataView(length.buffer).setUint32(0, bytes.length)
+  return concatBytes(fromUTF('kumiai/checkpoint-signature/v1'), new Uint8Array([0]), length, bytes)
+}
+export function memoryCheckpointFrame(body: MemoryCheckpointBody, secret: Uint8Array): Uint8Array {
+  const bytes = fromUTF(canonicalStringify(body))
+  const frame = new Uint8Array(bytes.length + 74)
+  frame.set([1, 1])
+  const view = new DataView(frame.buffer)
+  view.setUint32(2, frame.length - 6)
+  view.setUint32(6, bytes.length)
+  frame.set(bytes, 10)
+  frame.set(ed25519.sign(memoryCheckpointSignatureInput(body), secret), bytes.length + 10)
+  return frame
+}
+
+function memoryCheckpointGaps(gaps: CheckpointCoverage['gaps']): CheckpointCoverage['gaps'] {
+  const result: CheckpointCoverage['gaps'] = []
+  for (const gap of [...gaps].sort(
+    (a, b) => a.key.incarnation - b.key.incarnation || a.from - b.from,
+  )) {
+    const last = result.at(-1)
+    if (
+      last?.key.incarnation === gap.key.incarnation &&
+      last.reason === gap.reason &&
+      gap.from <= last.through + 1
+    )
+      last.through = Math.max(last.through, gap.through)
+    else result.push({ ...gap, key: { ...gap.key } })
+  }
+  return result
+}
+
+function validMemoryCheckpointBody(body: MemoryCheckpointBody): boolean {
+  const fields = [
+    'v',
+    'type',
+    'groupID',
+    'genesisHash',
+    'ciphersuite',
+    'epoch',
+    'authHash',
+    'parentAuthHash',
+    'keyHash',
+    'leafIndex',
+  ]
+  const hash = (value: unknown) =>
+    typeof value === 'string' &&
+    /^[A-Za-z0-9_-]{43}$/.test(value) &&
+    toB64U(fromB64U(value)) === value
+  return (
+    Object.keys(body).length === fields.length &&
+    Object.keys(body).every((field) => fields.includes(field)) &&
+    body.v === 1 &&
+    body.type === 'kumiai/checkpoint/v1' &&
+    (body.ciphersuite === 1 || body.ciphersuite === 3) &&
+    typeof body.groupID === 'string' &&
+    body.groupID.length > 0 &&
+    toUTF(fromUTF(body.groupID)) === body.groupID &&
+    Number.isSafeInteger(body.epoch) &&
+    body.epoch >= 0 &&
+    Number.isSafeInteger(body.leafIndex) &&
+    body.leafIndex >= 0 &&
+    body.leafIndex <= 0xffffffff &&
+    hash(body.genesisHash) &&
+    hash(body.authHash) &&
+    hash(body.keyHash) &&
+    (body.parentAuthHash === null || hash(body.parentAuthHash))
+  )
 }
