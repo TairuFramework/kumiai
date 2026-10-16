@@ -14,10 +14,28 @@ import { applyResolved, pruneWindow } from './store.js'
 import type {
   AdoptionWriteFactory,
   AppliedCommit,
+  ControlSnapshot,
   ControlStore,
+  GroupKey,
   LegacyRejoinRecord,
   Outcome,
 } from './types.js'
+
+export function effectiveRecoveryEpochFloor(
+  snapshot: ControlSnapshot,
+  attempt: { id: string; source: GroupKey },
+): number | null {
+  const bound = snapshot.forkRecoveryAttempt
+  return bound != null &&
+    bound.id === attempt.id &&
+    bound.forkRecovery.attemptID === attempt.id &&
+    bound.source.groupID === attempt.source.groupID &&
+    bound.source.incarnation === attempt.source.incarnation &&
+    bound.forkRecovery.source.groupID === attempt.source.groupID &&
+    bound.forkRecovery.source.incarnation === attempt.source.incarnation
+    ? bound.forkRecovery.splitEpoch
+    : snapshot.recoveryEpochFloor
+}
 
 export type SourceScanIdentity = Omit<LegacyRejoinRecord['source'], 'head'>
 export type SourceScan = {
@@ -263,7 +281,7 @@ export type RejoinDeps = Omit<LegacyRejoinDeps, 'confirm' | 'scan' | 'adopt' | '
     record: CapturedRejoinRecord,
     acceptedEpoch: number,
     leafDigest: string,
-    recoveryEpochFloor?: number,
+    recoveryEpochFloor: number | null,
   ) => Promise<void>
   discarded(reason: 'unapplied-later' | 'accepted', record: CapturedRejoinRecord): void
 }
@@ -309,7 +327,12 @@ export async function stepRejoin(
         const acceptedEpoch =
           result.kind === 'unapplied-later' && confirmed ? current.epochAfter : result.epoch
         if (accepted && deps.settleAcceptedRecovery !== undefined)
-          await deps.settleAcceptedRecovery(current, acceptedEpoch, result.leafDigest, result.epoch)
+          await deps.settleAcceptedRecovery(
+            current,
+            acceptedEpoch,
+            result.leafDigest,
+            current.forkRecovery === undefined ? result.epoch : snapshot.recoveryEpochFloor,
+          )
         else
           await settleRecovery({
             control: deps.control,
@@ -322,7 +345,8 @@ export async function stepRejoin(
                 }
               : { kind: 'not-accepted', epoch: result.epoch },
             mutationID: deps.newID(),
-            recoveryEpochFloor: result.epoch,
+            recoveryEpochFloor:
+              current.forkRecovery === undefined ? result.epoch : snapshot.recoveryEpochFloor,
             signal: deps.signal,
           })
         record.requestKey.fill(0)

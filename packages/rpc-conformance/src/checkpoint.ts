@@ -1,6 +1,10 @@
 import { describe, expect, test, vi } from 'vitest'
 
-import type { ConformanceGroupConditionEvent } from './control-store.js'
+import type {
+  ConformanceCapturedRejoinRecord,
+  ConformanceForkRecoveryAuthorisation,
+  ConformanceGroupConditionEvent,
+} from './control-store.js'
 import type { ConformanceForkNotice, ConformanceForkNoticeEvent } from './fork-notice.js'
 import { storageChange } from './group-storage.js'
 import type {
@@ -13,7 +17,14 @@ import type {
   StorageTestPorts,
 } from './persistence-fixture.js'
 
-export type ConformanceCheckpointRecord =
+export type ConformanceCheckpointRecord<Position extends string = string> =
+  | {
+      kind: 'superseded-rejoin'
+      id: string
+      key: ConformanceGroupKey
+      record: ConformanceCapturedRejoinRecord<Position>
+      authorisation: ConformanceForkRecoveryAuthorisation
+    }
   | {
       kind: 'condition'
       id: string
@@ -122,10 +133,10 @@ export type ConformanceCheckpointPort = {
   checkpointCoverage(groupID: string): Promise<ConformanceCheckpointCoverage>
 }
 
-export type ConformanceCheckpointStore = {
-  load(id: string): Promise<ConformanceCheckpointRecord | null>
-  list(): Promise<Array<ConformanceCheckpointRecord>>
-  put(record: ConformanceCheckpointRecord): Promise<void>
+export type ConformanceCheckpointStore<Position extends string = string> = {
+  load(id: string): Promise<ConformanceCheckpointRecord<Position> | null>
+  list(): Promise<Array<ConformanceCheckpointRecord<Position>>>
+  put(record: ConformanceCheckpointRecord<Position>): Promise<void>
   remove(ids: Array<string>): Promise<void>
 }
 
@@ -969,14 +980,15 @@ export function malformedCheckpointBodies(
   ].map((patch) => ({ ...body, ...patch }))
 }
 
-export type ConformanceCheckpointService = ConformanceCheckpointPort & {
-  importCheckpoint(key: ConformanceGroupKey, frame: Uint8Array): Promise<void>
-  forkNotices(groupID: string): Promise<Array<ConformanceForkNotice>>
-  ackForkNotice(groupID: string, id: string, revision: number): Promise<void>
-  events(groupID: string): Promise<Array<ConformanceForkNoticeEvent>>
-  readRecords(): Promise<Array<ConformanceCheckpointRecord>>
-  updateRecords(change: {
-    put?: Array<ConformanceCheckpointRecord>
-    remove?: Array<string>
-  }): Promise<void>
-}
+export type ConformanceCheckpointService<Position extends string = string> =
+  ConformanceCheckpointPort & {
+    importCheckpoint(key: ConformanceGroupKey, frame: Uint8Array): Promise<void>
+    forkNotices(groupID: string): Promise<Array<ConformanceForkNotice>>
+    ackForkNotice(groupID: string, id: string, revision: number): Promise<void>
+    events(groupID: string): Promise<Array<ConformanceForkNoticeEvent>>
+    readRecords(): Promise<Array<ConformanceCheckpointRecord<Position>>>
+    updateRecords(change: {
+      put?: Array<ConformanceCheckpointRecord<Position>>
+      remove?: Array<string>
+    }): Promise<void>
+  }

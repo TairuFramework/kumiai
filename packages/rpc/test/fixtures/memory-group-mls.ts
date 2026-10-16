@@ -34,15 +34,21 @@ import type { LogPosition } from '../../src/cursor.js'
 import {
   ControlWriteNotCommittedError,
   GroupSafetyHeldError,
+  RecoveryTargetBehindError,
   StorageOutcomeUnknownError,
 } from '../../src/errors.js'
 import { encodeHandshakeFrame, HANDSHAKE_KIND } from '../../src/handshake.js'
 import {
   type AuthenticatedRosterAbsence,
   type CapturedPendingRecovery,
+  type CapturedRecapture,
   type CapturedRecoveryPort,
+  type CapturedRejoinRecord,
   copyRecoverySource,
   copyRecoveryTargetCapture,
+  type ForkRecoveryAttempt,
+  type ForkRecoveryAuthorisation,
+  type RecoveryReconciliation,
   type RecoverySource,
   type ResyncProof,
   validateCaptureHead,
@@ -179,6 +185,20 @@ export type MemoryRecoveryBinding = {
 export type MemoryGroupMLSOptions = {
   onSafetyHold?: GroupMLS['onSafetyHold']
   capturedRecovery?: {
+    authoriseForkRecovery?: (
+      reply: CapturedRecapture,
+      noticeID: string,
+      info: MemoryGroupInfo,
+    ) => Promise<ForkRecoveryAuthorisation | null>
+    checkForkRecoveryCapture?: (
+      attempt: ForkRecoveryAttempt,
+      info: MemoryGroupInfo,
+    ) => Promise<boolean>
+    settleForkRecoveryCapture?: (
+      record: CapturedRejoinRecord,
+      result: RecoveryReconciliation,
+    ) => Promise<void>
+    readForkRecoveryAttempt?: () => Promise<ForkRecoveryAttempt | null>
     target: { targetID: string; topicID: string }
     readSource(): Promise<RecoverySource>
     accept(
@@ -394,7 +414,16 @@ export function decodeMemoryCommit(commit: Uint8Array): MemoryCommit | null {
 
 /** The sealed GroupInfo, modelled. It carries the group's epoch and its AUTHENTICATED
  *  ledger head — and no ledger, which is the whole reason bootstrap exists. */
-type MemoryGroupInfo = {
+export type MemoryGroupInfo = {
+  version?: 2 | 3
+  lineage?: Array<{
+    epoch: number
+    authHash: string
+    parentAuthHash: string | null
+    keyHash: string
+    signature: string
+  }>
+  confirmedTranscriptHash?: string
   authenticator: string
   groupID: string
   to: string
@@ -1172,7 +1201,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     const trust = source.trust as { groupID?: string; ownerDID?: string; members?: Array<string> }
     if (
       source.key.groupID !== groupID ||
-      source.key.incarnation !== 1 ||
+      !Number.isSafeInteger(source.key.incarnation) ||
+      source.key.incarnation < 1 ||
       !Number.isSafeInteger(source.stateVersion) ||
       !Number.isSafeInteger(source.lifetimeRevision) ||
       source.stateVersion < 0 ||
@@ -1183,7 +1213,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       !trust.members.includes(localDID ?? '') ||
       source.trustDigest !== toB64U(sha256(fromUTF(JSON.stringify(trust)))) ||
       (source.identity !== null &&
-        (source.identity.groupID !== groupID || source.identity.incarnation !== 1))
+        (source.identity.groupID !== groupID ||
+          source.identity.incarnation !== source.key.incarnation))
     )
       throw new TypeError('Invalid memory recovery source')
     return copyRecoverySource(source)
@@ -1256,6 +1287,29 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       attestation !== toB64U(hmac(sha256, recoverySecret, fromUTF(JSON.stringify(body))))
     )
       return null
+    if (info.version === 3) {
+      const lineage = info.lineage
+      if (
+        lineage === undefined ||
+        lineage.length === 0 ||
+        lineage.length > 256 ||
+        lineage.at(-1)?.epoch !== info.epoch ||
+        lineage.at(-1)?.authHash !== info.authenticator
+      )
+        return null
+      for (const [index, { signature, ...body }] of lineage.entries()) {
+        const previous = lineage[index - 1]
+        if (
+          signature !== rosterMAC(body) ||
+          body.keyHash !== identityKeyHash(info.signer) ||
+          (index > 0 &&
+            (previous === undefined ||
+              body.epoch !== previous.epoch + 1 ||
+              body.parentAuthHash !== previous.authHash))
+        )
+          return null
+      }
+    }
     return info
   }
   function signCapturedState(info: MemoryGroupInfo): string {
@@ -1392,6 +1446,9 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   ): Promise<CapturedPendingRecovery> {
     if (capturedDependencies === undefined) throw new TypeError('Missing captured dependencies')
     const { snapshot, info, held } = readCaptured(candidate, requestKey)
+    const attempt = await capturedDependencies.readForkRecoveryAttempt?.()
+    if (attempt != null && !(await capturedDependencies.checkForkRecoveryCapture?.(attempt, info)))
+      throw new RecoveryTargetBehindError('Fork recovery capture is target-behind')
     if (!sameOrigin(await capturedDependencies.readSource(), snapshot.source))
       throw new TypeError('Memory captured origin mismatch')
     return wrapCaptured(
@@ -1411,6 +1468,14 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     capturedDependencies === undefined
       ? undefined
       : {
+          async authoriseForkRecovery(reply, noticeID) {
+            const source = validateSource(await capturedDependencies.readSource())
+            const info = capturedInfo(reply.sealed, reply.requestID, reply.requestKey, source)
+            if (info?.version !== 3 || info.lineage === undefined) return null
+            return (
+              (await capturedDependencies.authoriseForkRecovery?.(reply, noticeID, info)) ?? null
+            )
+          },
           async applyRecovery(sealed, requestID, requestKey) {
             if (
               controlSafetyHeld(
@@ -1423,6 +1488,12 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             const source = validateSource(await capturedDependencies.readSource())
             const info = capturedInfo(sealed, requestID, requestKey, source)
             if (info === null) return null
+            const attempt = await capturedDependencies.readForkRecoveryAttempt?.()
+            if (
+              attempt != null &&
+              !(await capturedDependencies.checkForkRecoveryCapture?.(attempt, info))
+            )
+              return null
             if (!prepared) await prepare()
             if (binding !== undefined && !usable(preparedBinding)) return { renewalRequired: true }
             const target = {
@@ -1509,9 +1580,30 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
                 throw new TypeError('Captured recovery record association mismatch')
               const info = capturedInfo(reply.sealed, reply.requestID, reply.requestKey, source)
               if (info === null) return { kind: 'retry' }
+              const intent = await capturedDependencies.readForkRecoveryAttempt?.()
+              if (
+                record.forkRecovery === undefined &&
+                intent != null &&
+                record.id !== intent.id &&
+                (await capturedDependencies.checkForkRecoveryCapture?.(intent, info))
+              )
+                return {
+                  kind: 'superseded-branch',
+                  epoch: intent.forkRecovery.splitEpoch,
+                  authorisation: intent.forkRecovery,
+                }
+              if (
+                record.forkRecovery !== undefined &&
+                !(await capturedDependencies.checkForkRecoveryCapture?.(
+                  { id: record.id, source: record.source.key, forkRecovery: record.forkRecovery },
+                  info,
+                ))
+              )
+                return { kind: 'retry', reason: 'target-behind' }
               if (
                 info.epoch < saved.target.groupInfoEpoch ||
-                (reply.epochFloor !== null && info.epoch < reply.epochFloor)
+                ((record.forkRecovery?.splitEpoch ?? reply.epochFloor) !== null &&
+                  info.epoch < (record.forkRecovery?.splitEpoch ?? reply.epochFloor ?? 0))
               )
                 return { kind: 'retry', reason: 'target-behind' }
               if (info.epoch === saved.target.groupInfoEpoch)
@@ -1521,7 +1613,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
                       head: validateCaptureHead(info.captureHead),
                     }
                   : { kind: 'retry', reason: 'capture-authenticator-disagreement' }
-              return info.leafTokens?.some(
+              const result: RecoveryReconciliation = info.leafTokens?.some(
                 ([did, leaf]) => did === localDID && leaf === held.freshLeaf,
               )
                 ? {
@@ -1534,6 +1626,9 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
                     epoch: info.epoch,
                     leafDigest: toB64U(sha256(fromUTF(JSON.stringify([localDID, held.freshLeaf])))),
                   }
+              if (record.forkRecovery !== undefined)
+                await capturedDependencies.settleForkRecoveryCapture?.(record, result)
+              return result
             } catch (error) {
               if (
                 error instanceof Error &&
@@ -1696,7 +1791,36 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         signerController: binding?.id,
         ...(captureHead === undefined
           ? {}
+          : { version: 2 as const, confirmedTranscriptHash: toB64U(authenticator()) }),
+        ...(captureHead === undefined
+          ? {}
           : { captureHead, signer: localDID, leafTokens: [...freshLeaves] }),
+      }
+      if (captureHead !== undefined && to.comparisonEpoch !== undefined) {
+        const history = (
+          JSON.parse(toUTF(serializeState())) as { rosterHistory: Array<RosterFact> }
+        ).rosterHistory.filter(
+          (fact) => fact.epoch >= (to.comparisonEpoch ?? 0) && fact.epoch <= epoch,
+        )
+        if (
+          history[0]?.epoch === to.comparisonEpoch &&
+          history.at(-1)?.epoch === epoch &&
+          history.every((fact, index) => {
+            const previous = history[index - 1]
+            return index === 0 || (previous !== undefined && fact.epoch === previous.epoch + 1)
+          })
+        ) {
+          info.version = 3
+          info.lineage = history.map((fact, index) => {
+            const body = {
+              epoch: fact.epoch,
+              authHash: fact.authHash,
+              parentAuthHash: history[index - 1]?.authHash ?? null,
+              keyHash: identityKeyHash(localDID ?? ''),
+            }
+            return { ...body, signature: rosterMAC(body) }
+          })
+        }
       }
       return { to, info }
     })

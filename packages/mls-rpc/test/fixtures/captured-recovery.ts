@@ -10,22 +10,30 @@ import {
   createInvite,
   createKeyPackageBundle,
   decodeClientState,
+  decodeEpochCheckpoint,
   decodeEpochRosterFact,
   encodeClientState,
   encodeEpochCheckpoint,
+  type GroupHandle,
   parseMLSCredentialIdentity,
   processWelcome,
   proposeSelfRemoval,
   restoreGroup,
   sealCapturedGroupInfo,
+  sealRecoveryVerdict,
   verifyRecoveryRequest,
 } from '@kumiai/mls'
 import {
+  asLogPosition,
   type CapturedPendingRecovery,
   type CapturedRejoinRecord,
+  type CheckpointRecord,
+  commitTopic,
   digestAppliedCommit,
   encodeCommitFrame,
   encodeHandshakeFrame,
+  type ForkNotice,
+  type ForkRecoveryAuthorisation,
   HANDSHAKE_KIND,
 } from '@kumiai/rpc'
 import type { RosterAbsenceFixture, RosterAbsenceScenario } from '@kumiai/rpc-conformance'
@@ -34,10 +42,12 @@ import { vi } from 'vitest'
 
 import { createCheckpointPort } from '../../src/checkpoint.js'
 import { prepareCheckpointInstallation } from '../../src/checkpoint-capture.js'
+import { provenCheckpointFacts } from '../../src/checkpoint-store.js'
 import { entryCapability } from '../../src/entry-capability.js'
 import { createGroupMLS, createLedgerEntrySlot } from '../../src/mls.js'
 import { recoveryTrustDigest } from '../../src/recovery-trust-digest.js'
 import { recoveryTrustFor } from '../../src/registry/trust.js'
+import { registryOptions } from '../../src/registry/validation.js'
 import { createRegistryGroupMLS } from '../../src/registry-group-mls.js'
 import { createAsyncLocalOwnershipContext } from './ownership-context.js'
 import { persistedTestAccess, type RealMember, testGroupMLSDependencies } from './real-group.js'
@@ -529,5 +539,626 @@ export async function createRosterAbsenceRealFixture(
   } catch (error) {
     await fixture.close()
     throw error
+  }
+}
+
+export async function createForkRecoveryRealFixture(
+  transactional = false,
+  params: { holes?: Array<number>; ownership?: 'supplied' | 'absent'; noticeEpoch?: number } = {},
+) {
+  const real = await boundCapturedGroup()
+  const own = real.members[0]
+  const peer = real.members[1]
+  if (own === undefined || peer === undefined) throw new Error('Missing branch members')
+  const clone = async (handle: GroupHandle) => {
+    const state = decodeClientState(encodeClientState(handle.state))
+    if (state === undefined) throw new Error('Missing branch state')
+    return restoreGroup({
+      state,
+      credential: handle.credential,
+      ledgerEntries: handle.ledgerTokens,
+      options: registryOptions({}),
+    })
+  }
+  while (Number(peer.handle.epoch) < 9) {
+    const rotation = await commitKeyRotation(peer.handle)
+    peer.handle = rotation.newGroup
+    await own.handle.processMessage(rotation.commitMessage)
+  }
+  const groupID = own.handle.groupID
+  const ownerDID = own.identity.id
+  const ownerIdentity = own.identity
+  const signerIdentity = peer.identity
+  const responderSlot = peer.slot
+  const makeRegistry = (identity: OwnIdentity) =>
+    createRegistryFixture({
+      mode: 'real-mls',
+      setup: 'empty',
+      groupID,
+      identity,
+      ownershipContext:
+        params.ownership === 'supplied' ? createAsyncLocalOwnershipContext() : undefined,
+    })
+  let local = await makeRegistry(own.identity)
+  const remote = await makeRegistry(peer.identity)
+  const original = await makeRegistry(peer.identity)
+  let key = await local.registry.seed(await clone(own.handle), {
+    packageUse: { sourceID: 'fork', ref: 'local', kind: 'ordinary' },
+  })
+  const remoteKey = await remote.registry.seed(await clone(peer.handle), {
+    packageUse: { sourceID: 'fork', ref: 'remote', kind: 'ordinary' },
+  })
+  const originalKey = await original.registry.seed(await clone(peer.handle), {
+    packageUse: { sourceID: 'fork', ref: 'original', kind: 'ordinary' },
+  })
+  async function install(fixture: typeof local, key: typeof remoteKey, handle: GroupHandle) {
+    const previous = await fixture.device.groups.loadState(key)
+    if (previous === null || previous.deleted) throw new Error('Missing branch installation')
+    await fixture.installRows({
+      key,
+      state: {
+        ...previous,
+        version: previous.version + 1,
+        state: encodeClientState(handle.state),
+        credential: handle.credential,
+        ledger: handle.ledgerTokens,
+        epoch: Number(handle.epoch),
+        epochAuthenticator: handle.state.keySchedule.epochAuthenticator.slice(),
+      },
+      trust: recoveryTrustFor(handle, key, await fixture.device.groups.loadTrust(key.groupID)),
+    })
+  }
+  const ownResponder = await clone(peer.handle)
+  const ownHeads = new Map<number, GroupHandle>([[9, await clone(ownResponder)]])
+  const otherHeads = new Map<number, GroupHandle>([[9, await clone(peer.handle)]])
+  while (Number(own.handle.epoch) < 20) {
+    const rotation = await commitKeyRotation(own.handle)
+    own.handle = rotation.newGroup
+    await ownResponder.processMessage(rotation.commitMessage)
+    ownHeads.set(Number(ownResponder.epoch), await clone(ownResponder))
+    if (!params.holes?.includes(Number(own.handle.epoch))) await install(local, key, own.handle)
+    await install(original, originalKey, ownResponder)
+  }
+  while (Number(peer.handle.epoch) < 21) {
+    peer.handle = (await commitKeyRotation(peer.handle)).newGroup
+    otherHeads.set(Number(peer.handle.epoch), await clone(peer.handle))
+    if (Number(peer.handle.epoch) <= 12) await install(remote, remoteKey, peer.handle)
+  }
+  const { createCheckpointService } = await import('../../src/checkpoint.js')
+  const serviceFor = (fixture: typeof local, installedKey: typeof key) =>
+    createCheckpointService({
+      registry: fixture.registry,
+      key: installedKey,
+      identity: fixture.identity,
+    })
+  for (const [fixture, installedKey] of [
+    [local, key],
+    [remote, remoteKey],
+    [original, originalKey],
+  ] as const) {
+    const service = serviceFor(fixture, installedKey)
+    for (const row of await service.readRecords())
+      if (row.kind === 'fact') await service.signInstalled(row.id)
+  }
+  const { deriveRecoverySecretFromTrust } = await import('../../src/recovery.js')
+  const target = {
+    targetID: 'repaired-hub',
+    topicID: commitTopic(
+      await deriveRecoverySecretFromTrust((await local.registry.recoverySource(groupID)).trust),
+    ),
+  }
+  let builds = 0
+  const makeMLS = async () => {
+    if (transactional)
+      return createRegistryGroupMLS({
+        registry: local.registry,
+        key,
+        identity: own.identity,
+        entrySlot: own.slot,
+        recovery: local.environment,
+        target,
+      })
+    const { createRegistryHandleAccess } = await import('../../src/registry-handle-access.js')
+    const { registryRecoveryCoordinator } = await import(
+      '../../src/registry/recovery-coordinator.js'
+    )
+    const { toRegistrySwitchWrite } = await import('../../src/registry/switch-write.js')
+    const coordinator = registryRecoveryCoordinator(local.registry)
+    const entry = entryCapability(local.device.groups)
+    if (entry === null) throw new Error('Missing branch coordinator')
+    const underlying = createRegistryHandleAccess({
+      access: await local.registry.access(key.groupID),
+    })
+    let reading: Array<CheckpointRecord> = []
+    const access = {
+      ...underlying,
+      readControl: <T>(fn: Parameters<typeof underlying.readControl<T>>[0]) =>
+        underlying.readControl(async (scope) => {
+          reading = (await scope.loadCheckpoints?.()) ?? []
+          try {
+            return await fn(scope)
+          } finally {
+            reading = []
+          }
+        }),
+    }
+    return createGroupMLS({
+      access,
+      readInstalledRecoveryLineage: async ({ comparisonEpoch, throughEpoch }) => {
+        const facts = provenCheckpointFacts(reading, groupID)
+          .filter(
+            (fact) =>
+              fact.key.incarnation === key.incarnation &&
+              fact.epoch >= comparisonEpoch &&
+              fact.epoch <= throughEpoch,
+          )
+          .sort((a, b) => a.epoch - b.epoch)
+        return facts.flatMap((fact) =>
+          reading.flatMap((row) =>
+            row.kind === 'publication' && row.factID === fact.id && row.frame !== null
+              ? [row.frame]
+              : [],
+          ),
+        )
+      },
+      control: local.device.groups.ports(key).control,
+      readRecoverySource: () => local.registry.recoverySource(key.groupID),
+      identity: own.identity,
+      entrySlot: own.slot,
+      settleForkRecoveryCapture: (input) =>
+        coordinator.settleForkRecoveryCapture(input, local.environment),
+      authoriseForkRecovery: (reply, noticeID) =>
+        coordinator.authoriseForkRecovery(key, reply, noticeID, local.environment),
+      checkForkRecoveryCapture: (input) =>
+        coordinator.checkForkRecoveryCapture(input, local.environment),
+      recoveryAdoption: {
+        target,
+        environment: local.environment,
+        readRecoverySource: () => local.registry.recoverySource(key.groupID),
+        async accept(candidate, { source, proof, write }) {
+          const record = (await local.device.groups.ports(key).control.load()).rejoin
+          if (record === null || !('format' in record)) throw new Error('Missing branch record')
+          const staged = {
+            incarnation: key.incarnation + 1,
+            epochAfter: Number(candidate.epoch),
+            removed: false,
+            epochAuthenticator: candidate.state.keySchedule.epochAuthenticator,
+          }
+          await local.registry.switchIncarnation(candidate, {
+            source,
+            proof,
+            rejoinID: record.id,
+            write: toRegistrySwitchWrite({ record, staged, write: write(staged) }),
+          })
+        },
+      },
+    })
+  }
+  let requester = await makeMLS()
+  let service = serviceFor(local, key)
+  const otherFrame = (
+    await serviceFor(remote, remoteKey).exportCheckpoints(remoteKey, [params.noticeEpoch ?? 10])
+  )[0]
+  if (otherFrame === undefined) throw new Error('Missing other branch frame')
+  await service.importCheckpoint(key, otherFrame)
+  const notices = await service.forkNotices(key.groupID)
+  const notice = notices.find((value) => value.closedAt === null)
+  if (notice === undefined) throw new Error('Missing open branch notice')
+  async function reply(epoch = 12, branch: 'own' | 'other' = 'other', legacy = false) {
+    const requestID = crypto.randomUUID()
+    const held = await requester.createRecoveryRequest(requestID, undefined, 10)
+    const fixture = branch === 'other' ? remote : original
+    const installedKey = branch === 'other' ? remoteKey : originalKey
+    const handle = (branch === 'other' ? otherHeads : ownHeads).get(epoch)
+    if (handle === undefined) throw new Error('Missing reply head')
+    const state = await clone(handle)
+    if (branch === 'other' || !legacy) {
+      const current = await remote.device.groups.loadState(remoteKey)
+      if (current === null || current.deleted) throw new Error('Missing responder')
+      for (let next = current.epoch + 1; next <= epoch; next++) {
+        const head = otherHeads.get(next)
+        if (head === undefined) throw new Error('Missing continuation head')
+        await install(remote, remoteKey, await clone(head))
+      }
+      const signing = serviceFor(remote, remoteKey)
+      for (const row of await signing.readRecords())
+        if (row.kind === 'fact') await signing.signInstalled(row.id)
+    }
+    const records = await serviceFor(fixture, installedKey).readRecords()
+    let lineage = records
+      .flatMap((row) => (row.kind === 'publication' && row.frame !== null ? [row.frame] : []))
+      .filter((frame) => {
+        const body = decodeEpochCheckpoint(frame).body
+        return body.epoch >= 10 && body.epoch <= epoch
+      })
+      .sort((a, b) => decodeEpochCheckpoint(a).body.epoch - decodeEpochCheckpoint(b).body.epoch)
+    if (branch === 'own' && !legacy) {
+      const ownEnd = lineage.map(decodeEpochCheckpoint).find(({ body }) => body.epoch === epoch)
+      const otherFrames = await serviceFor(remote, remoteKey).exportCheckpoints(remoteKey)
+      lineage = otherFrames
+        .filter((frame) => {
+          const body = decodeEpochCheckpoint(frame).body
+          return body.epoch >= 10 && body.epoch <= epoch
+        })
+        .sort((a, b) => decodeEpochCheckpoint(a).body.epoch - decodeEpochCheckpoint(b).body.epoch)
+      const last = lineage.at(-1)
+      if (ownEnd !== undefined && last !== undefined) {
+        const body = { ...decodeEpochCheckpoint(last).body, authHash: ownEnd.body.authHash }
+        lineage[lineage.length - 1] = encodeEpochCheckpoint(
+          body,
+          ed25519.sign(checkpointSignatureInput(body), signerIdentity.privateKey),
+        )
+      }
+    }
+    const installedRemote = await remote.device.groups.loadState(remoteKey)
+    let sealed: Uint8Array
+    if (
+      !legacy &&
+      branch === 'other' &&
+      installedRemote !== null &&
+      !installedRemote.deleted &&
+      installedRemote.epoch === epoch
+    ) {
+      const responder = await createRegistryGroupMLS({
+        registry: remote.registry,
+        key: remoteKey,
+        identity: signerIdentity,
+        entrySlot: responderSlot,
+        recovery: remote.environment,
+        target,
+      })
+      const captured = responder.capturedRecovery
+      if (captured === undefined) throw new Error('Missing real responder')
+      sealed = await captured.sealGroupInfo(held.request, null)
+    } else
+      sealed = await sealCapturedGroupInfo({
+        group: state,
+        identity: signerIdentity,
+        request: new TextDecoder().decode(held.request),
+        captureHead: null,
+        ...(legacy ? {} : { lineage }),
+      })
+    return { sealed, requestID, requestKey: held.requestKey, request: held.request, epochFloor: 20 }
+  }
+  return {
+    get key() {
+      return { ...key }
+    },
+    noticeID: notice.id,
+    target,
+    remote: () => remote,
+    ownerIdentity: own.identity,
+    responderIdentity: signerIdentity,
+    requester: () => requester,
+    local: () => local,
+    service: () => service,
+    builds: () => builds,
+    reply,
+    async inspect(capture: Awaited<ReturnType<typeof reply>>) {
+      const { authenticateRecoveryReply } = await import('../../src/recovery.js')
+      return authenticateRecoveryReply({
+        ...capture,
+        trust: (await local.registry.recoverySource(key.groupID)).trust,
+        options: local.environment.options,
+      })
+    },
+    async rewriteNotice(update: (notice: ForkNotice) => void) {
+      const entry = entryCapability(local.device.groups)
+      if (entry === null) throw new Error('Missing notice entry')
+      const mutationID = crypto.randomUUID()
+      await entry.run(
+        { groupID, mutationID },
+        async (reads) => {
+          const row = (await reads.checkpoints()).find(
+            (row) => row.kind === 'notice' && row.id === notice.id,
+          )
+          if (row?.kind !== 'notice') throw new Error('Missing notice')
+          update(row.notice)
+          return { expected: await reads.lifetime(), value: row }
+        },
+        async (stores, row) => {
+          await stores.checkpoints.put(row)
+        },
+      )
+    },
+    async equivocationOnly() {
+      const remoteFrame = (
+        await serviceFor(remote, remoteKey).exportCheckpoints(remoteKey, [10])
+      )[0]
+      const localFact = await service.checkpointFact(key, 10)
+      if (remoteFrame === undefined || localFact === null)
+        throw new Error('Missing equivocation inputs')
+      const member = decodeEpochRosterFact(localFact).members.find(
+        (member) => member.signerDID === ownerDID,
+      )
+      if (member === undefined) throw new Error('Missing installed owner')
+      const body = {
+        ...decodeEpochCheckpoint(remoteFrame).body,
+        keyHash: member.keyHash,
+        leafIndex: member.leafIndex,
+      }
+      await service.importCheckpoint(
+        key,
+        encodeEpochCheckpoint(
+          body,
+          ed25519.sign(checkpointSignatureInput(body), ownerIdentity.privateKey),
+        ),
+      )
+      const entry = entryCapability(local.device.groups)
+      if (entry === null) throw new Error('Missing notice entry')
+      const mutationID = crypto.randomUUID()
+      await entry.run(
+        { groupID, mutationID },
+        async (reads) => {
+          const row = (await reads.checkpoints()).find(
+            (row) => row.kind === 'notice' && row.id === notice.id,
+          )
+          if (row?.kind !== 'notice') throw new Error('Missing notice')
+          for (const branch of row.notice.branches)
+            branch.signers = branch.signers.filter((signer) => signer.signerDID === ownerDID)
+          row.notice.equivocations = []
+          return { expected: await reads.lifetime(), value: row }
+        },
+        async (stores, row) => {
+          await stores.checkpoints.put(row)
+        },
+      )
+    },
+    async moveNoticeEarlier() {
+      const frame = (await serviceFor(remote, remoteKey).exportCheckpoints(remoteKey, [10]))[0]
+      const fact = await service.checkpointFact(key, 10)
+      const prior = await service.checkpointFact(key, 9)
+      if (frame === undefined || fact === null || prior === null)
+        throw new Error('Missing earlier split inputs')
+      const remoteHash = decodeEpochCheckpoint(frame).body.authHash
+      const localHash = decodeEpochRosterFact(fact).authHash
+      const entry = entryCapability(local.device.groups)
+      if (entry === null) throw new Error('Missing notice entry')
+      const mutationID = crypto.randomUUID()
+      await entry.run(
+        { groupID, mutationID },
+        async (reads) => {
+          const row = (await reads.checkpoints()).find(
+            (row) => row.kind === 'notice' && row.id === notice.id,
+          )
+          if (row?.kind !== 'notice') throw new Error('Missing notice')
+          row.notice.splitEpoch = 10
+          row.notice.deviceAuthHash = localHash
+          for (const branch of row.notice.branches)
+            branch.authHash = branch.signers.some(
+              (member) => member.signerDID === signerIdentity.id,
+            )
+              ? remoteHash
+              : localHash
+          return { expected: await reads.lifetime(), value: row }
+        },
+        async (stores, row) => {
+          await stores.checkpoints.put(row)
+          await stores.checkpoints.put({
+            kind: 'evidence',
+            id: 'earlier-split-evidence',
+            key,
+            noticeID: notice.id,
+            first: frame,
+            second: frame,
+            localRosterFact: fact,
+            eligibilityRosterFact: prior,
+          })
+        },
+      )
+    },
+    async importEarlier() {
+      const frame = (await serviceFor(remote, remoteKey).exportCheckpoints(remoteKey, [10]))[0]
+      if (frame === undefined) throw new Error('Missing earlier witness')
+      await service.importCheckpoint(key, frame)
+    },
+    async seedOwnY(authority: ForkRecoveryAuthorisation, stage: 'built' | 'published') {
+      const capture = await reply(13, 'own')
+      const { buildRecoveryCandidate } = await import('../../src/recovery.js')
+      const pending = await buildRecoveryCandidate({
+        ...capture,
+        source: await local.registry.recoverySource(groupID),
+        target,
+        environment: {
+          ...local.environment,
+          accept: async () => {
+            throw new Error('Invalid branch cannot install')
+          },
+        },
+      })
+      if (pending === null || 'renewalRequired' in pending)
+        throw new Error('Missing hostile saved capture')
+      const record = {
+        ...capturedRecord(pending, capture.request, capture.requestKey, capture.requestID),
+        id: authority.attemptID,
+        forkRecovery: authority,
+        stage,
+        ...(stage === 'published' ? { position: asLogPosition('001') } : {}),
+      }
+      await local.installRows({ key, control: { putRejoin: record } })
+      return record
+    },
+    async expireEvidence() {
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 604800000)
+      try {
+        await local.installRows({ key, control: {} })
+        await service.readRecords()
+      } finally {
+        clock.mockRestore()
+      }
+    },
+    snapshot: () => local.device.groups.ports(key).control.load(),
+    async ordinaryWrite(kind: 'delete' | 'unrelated' | 'wrong-source') {
+      const control = local.device.groups.ports(key).control
+      const record = (await control.load()).rejoin
+      if (record === null || !('format' in record)) throw new Error('Missing bound Y')
+      await control.apply(
+        kind === 'delete'
+          ? { deleteRejoin: true }
+          : {
+              putRejoin:
+                kind === 'unrelated'
+                  ? { ...record, id: 'unrelated-Z', forkRecovery: undefined }
+                  : {
+                      ...record,
+                      source: {
+                        ...record.source,
+                        key: {
+                          ...record.source.key,
+                          incarnation: record.source.key.incarnation + 1,
+                        },
+                      },
+                    },
+            },
+        crypto.randomUUID(),
+      )
+    },
+
+    async saveX(stage: 'built' | 'published' | 'confirmed' | 'adopted' = 'built') {
+      const capture = await reply(20, 'own', true)
+      const pending = await requester.capturedRecovery?.applyRecovery(
+        capture.sealed,
+        capture.requestID,
+        capture.requestKey,
+      )
+      if (pending == null || 'renewalRequired' in pending) throw new Error('Missing saved X')
+      const record = capturedRecord(pending, capture.request, capture.requestKey, capture.requestID)
+      record.ledgerBefore = ['owed-X', 'shared']
+      if (stage !== 'built') {
+        record.stage = stage === 'adopted' ? 'confirmed' : stage
+        record.position = '001' as typeof record.position
+      }
+      if (stage === 'confirmed' || stage === 'adopted') {
+        await pending.confirmationKey('001', record.digest)
+        record.candidate = pending.serialize()
+        const ownHead = ownHeads.get(20)
+        if (ownHead === undefined) throw new Error('Missing own head')
+        const confirming = await clone(ownHead)
+        await confirming.processMessage(pending.commit)
+        const confirmation = await pending.confirmationKey('001', record.digest)
+        record.verdict = await sealRecoveryVerdict({
+          group: confirming,
+          identity: signerIdentity,
+          request: new TextDecoder().decode(capture.request),
+          verdict: {
+            groupID,
+            requestID: capture.requestID,
+            position: '001',
+            commitDigest: record.digest,
+            verdict: 'confirmed',
+            epoch: pending.epoch,
+            tag: confirmationTag(confirmation, capture.requestID),
+          },
+        })
+        record.switchMutationID = crypto.randomUUID()
+      }
+      await local.installRows({ key, control: { putRejoin: record, recoveryEpochFloor: 20 } })
+      const sourceKey = { ...key }
+      if (stage === 'adopted') {
+        if (record.verdict === undefined) throw new Error('Missing confirmed X verdict')
+        const { createRecoverySwitchFactory } = await import('../../src/registry/switch-write.js')
+        await pending.onAccepted(
+          await local.registry.recoverySource(groupID),
+          {
+            ...record.target,
+            position: asLogPosition('001'),
+            payloadDigest: record.payloadDigest,
+            verdict: record.verdict,
+          },
+          createRecoverySwitchFactory(record),
+        )
+        key = (await local.registry.recoverySource(groupID)).key
+        requester = await makeMLS()
+        service = serviceFor(local, key)
+      }
+      const saved = (await local.device.groups.ports(sourceKey).control.load()).rejoin
+      if (saved === null || !('format' in saved)) throw new Error('Missing saved branch record')
+      return saved
+    },
+    async installY(
+      y: { record: CapturedRejoinRecord; pending: CapturedPendingRecovery },
+      publish?: (record: CapturedRejoinRecord) => Promise<string>,
+    ) {
+      const { record, pending } = y
+      const position = asLogPosition((await publish?.(record)) ?? 'repair-position')
+      const responder = await createRegistryGroupMLS({
+        registry: remote.registry,
+        key: remoteKey,
+        identity: signerIdentity,
+        entrySlot: responderSlot,
+        recovery: remote.environment,
+        target,
+      })
+      const applied = await responder.processCommit(pending.commit, { senderDID: ownerDID })
+      if (!applied.advanced) throw new Error('Repaired hub refused external commit')
+      const confirmation = await pending.confirmationKey(position, record.digest)
+      const verdict = await responder.sealRecoveryVerdict(record.request, {
+        groupID,
+        requestID: record.requestID,
+        position,
+        commitDigest: record.digest,
+        verdict: 'confirmed',
+        epoch: pending.epoch,
+        tag: confirmationTag(confirmation, record.requestID),
+      })
+      const confirmed: CapturedRejoinRecord = {
+        ...record,
+        stage: 'confirmed',
+        position,
+        verdict,
+        candidate: pending.serialize(),
+        switchMutationID: crypto.randomUUID(),
+      }
+      await local.installRows({ key, control: { putRejoin: confirmed } })
+      const { createRecoverySwitchFactory } = await import('../../src/registry/switch-write.js')
+      await pending.onAccepted(
+        await local.registry.recoverySource(groupID),
+        { ...record.target, position, payloadDigest: record.payloadDigest, verdict },
+        createRecoverySwitchFactory(confirmed),
+      )
+      const sourceKey = { ...key }
+      key = (await local.registry.recoverySource(groupID)).key
+      return {
+        sourceKey,
+        destination: { ...key },
+        applied,
+        responderEpoch: responder.sendAdmission().epoch,
+        ordinaryFloor: (await local.device.groups.ports(sourceKey).control.load())
+          .recoveryEpochFloor,
+      }
+    },
+    async build(
+      authorisation: ForkRecoveryAuthorisation,
+      capture: Awaited<ReturnType<typeof reply>>,
+    ) {
+      const pending = await requester.capturedRecovery?.applyRecovery(
+        capture.sealed,
+        capture.requestID,
+        capture.requestKey,
+      )
+      if (pending == null || 'renewalRequired' in pending) return null
+      builds++
+      const record = {
+        ...capturedRecord(pending, capture.request, capture.requestKey, capture.requestID),
+        id: authorisation.attemptID,
+        forkRecovery: authorisation,
+        ledgerBefore: (await local.device.groups.ports(key).control.load()).settledRejoins.flatMap(
+          (row) => row.ledgerBefore,
+        ),
+      }
+      await local.installRows({ key, control: { putRejoin: record } })
+      return { record, pending }
+    },
+    async restart() {
+      const reopened = await local.reopen()
+      local = reopened
+      requester = await makeMLS()
+      service = serviceFor(local, key)
+    },
+    async close() {
+      await local.close()
+      await remote.close()
+      await original.close()
+    },
   }
 }

@@ -128,3 +128,7 @@ export class SendNotAdmissibleError extends Error {
     return this.#reason
   }
 }
+
+export class RecoveryTargetBehindError extends Error {
+  override name = 'RecoveryTargetBehindError'
+}

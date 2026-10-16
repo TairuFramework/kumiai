@@ -29,6 +29,7 @@ import {
   stepOperation,
 } from './control/operations.js'
 import {
+  effectiveRecoveryEpochFloor,
   type LegacyRejoinDeps,
   type RejoinDeps,
   rejoinBarrier,
@@ -92,6 +93,7 @@ import {
   OperationOutcomeError,
   PeerDisposedError,
   PeerRemovedError,
+  RecoveryTargetBehindError,
   SendNotAdmissibleError,
 } from './errors.js'
 import { assertFrameFits } from './frame-size.js'
@@ -159,6 +161,8 @@ import type {
   AuthenticatedRosterAbsence,
   CapturedAppliedRecovery,
   CapturedPendingRecovery,
+  CapturedRecapture,
+  CapturedRecoveryPort,
   CapturedRejoinRecord,
   StoredRejoinRecord,
 } from './recovery-types.js'
@@ -2645,7 +2649,8 @@ export function createGroupPeerWithControlWalk<
     operationDeadline = snapshot.operations[0]?.deadline ?? null
     hasOperations = snapshot.operations.length > 0
     revokeHold = revokeHeld(snapshot)
-    rejoinHeld = snapshot.rejoin != null || continuation !== null
+    rejoinHeld =
+      snapshot.rejoin != null || snapshot.forkRecoveryAttempt != null || continuation !== null
     rejoinPosition = rejoinBarrier(snapshot.rejoin)
     refusalHeld =
       snapshot.rejoin?.stage === 'refused' &&
@@ -3854,10 +3859,10 @@ export function createGroupPeerWithControlWalk<
       .flatMap((row) => (row.kind === 'notice' ? [row.notice.splitEpoch] : []))
     if (split.length > 0) return Math.min(...split)
     const coverage = await params.checkpoints.checkpointCoverage(control.key.groupID)
-    const epochs = coverage.retained.map((range) => range.from)
-    return epochs.length === 0 ? undefined : Math.min(...epochs)
+    const epochs = coverage.retained.map((range) => range.through)
+    return epochs.length === 0 ? undefined : Math.max(...epochs)
   }
-  let recoveryPendingReason: 'no-reply' | 'no-eligible-responder' = 'no-reply'
+  let recoveryPendingReason: 'no-reply' | 'no-eligible-responder' | 'target-behind' = 'no-reply'
   const diagnoseAbsence = async (
     port: GroupMLS,
     sealed: Uint8Array,
@@ -4213,6 +4218,21 @@ export function createGroupPeerWithControlWalk<
     }
   }
 
+  const authoriseForkReply = async (captured: CapturedRecoveryPort, reply: CapturedRecapture) => {
+    if (captured.authoriseForkRecovery === undefined || params.checkpoints === undefined)
+      return null
+    const records = await params.checkpoints.readRecords()
+    const notices = records
+      .flatMap((row) => (row.kind === 'notice' && row.notice.closedAt === null ? [row.notice] : []))
+      .sort((a, b) => a.splitEpoch - b.splitEpoch)
+    for (const notice of notices) {
+      const authority = await captured.authoriseForkRecovery(reply, notice.id)
+      if (authority !== null) return authority
+    }
+    if (notices.length > 0) recoveryPendingReason = 'target-behind'
+    return null
+  }
+
   const capturedRejoinDeps = (deadline: number): RejoinDeps => {
     if (
       control === undefined ||
@@ -4301,7 +4321,14 @@ export function createGroupPeerWithControlWalk<
             sealed: outcome.sealed,
             requestID,
             requestKey,
-            epochFloor: (await store.load()).recoveryEpochFloor,
+            epochFloor: effectiveRecoveryEpochFloor(await store.load(), {
+              id: record.id,
+              source: record.source.key,
+            }),
+          }
+          if (record.forkRecovery === undefined) {
+            const authorisation = await authoriseForkReply(captured, reply)
+            if (authorisation !== null) return await captured.reconcileCapture(record, reply)
           }
           return params.reconcileConfirmedRecovery === record.id &&
             params.reconcileAcceptedRecovery !== undefined
@@ -4521,12 +4548,20 @@ export function createGroupPeerWithControlWalk<
           await runSerial(refreshControl)
           assertLive()
           assertSafetyOpen()
+          const authorisation = await authoriseForkReply(captured, {
+            sealed: outcome.sealed,
+            requestID,
+            requestKey,
+            epochFloor: (await store.load()).recoveryEpochFloor,
+          })
           const pending: CapturedAppliedRecovery = await captured.applyRecovery(
             outcome.sealed,
             requestID,
             requestKey,
           )
           if (pending === null) {
+            if (authorisation !== null || (await store.load()).forkRecoveryAttempt != null)
+              recoveryPendingReason = 'target-behind'
             await diagnoseAbsence(port, outcome.sealed, requestID, requestKey)
             retryRecovery()
             emitRecovery({
@@ -4552,17 +4587,20 @@ export function createGroupPeerWithControlWalk<
             return { advanced: false }
           }
           const snapshot = await store.load()
-          if (
-            snapshot.recoveryEpochFloor !== null &&
-            pending.target.groupInfoEpoch < snapshot.recoveryEpochFloor
-          ) {
+          const attemptID = snapshot.forkRecoveryAttempt?.id ?? newPublishID()
+          const floor = effectiveRecoveryEpochFloor(snapshot, {
+            id: attemptID,
+            source: pending.source.key,
+          })
+          if (floor !== null && pending.target.groupInfoEpoch < floor) {
             retryRecovery()
             emitRecovery({
               groupID: commits,
               attemptID: currentRecoveryAttemptID ?? requestID,
               trigger,
               phase: 'failed',
-              reason: 'below-epoch-floor',
+              reason: 'target-behind',
+              pendingReason: 'target-behind',
             })
             return { advanced: false }
           }
@@ -4580,7 +4618,10 @@ export function createGroupPeerWithControlWalk<
           const { payload } = await frameCommit(pending.commit, [], null)
           record = {
             format: 2,
-            id: newPublishID(),
+            id: attemptID,
+            ...(snapshot.forkRecoveryAttempt == null
+              ? {}
+              : { forkRecovery: snapshot.forkRecoveryAttempt.forkRecovery }),
             stage: 'built',
             publishID: newPublishID(),
             expectedHead: pending.target.captureHead,
@@ -4604,7 +4645,12 @@ export function createGroupPeerWithControlWalk<
           }
           await applyResolved(
             store,
-            { putRejoin: record, recoveryEpochFloor: record.target.groupInfoEpoch },
+            {
+              putRejoin: record,
+              ...(record.forkRecovery === undefined
+                ? { recoveryEpochFloor: record.target.groupInfoEpoch }
+                : {}),
+            },
             newPublishID(),
           )
           requestKeySaved = true
@@ -4669,7 +4715,10 @@ export function createGroupPeerWithControlWalk<
           reconcileCapture: async (saved) => {
             const result = await deps.reconcileCapture(saved)
             recaptured = result.kind
-            if (result.kind === 'retry') recaptureReason = result.reason
+            if (result.kind === 'retry') {
+              recaptureReason = result.reason
+              if (result.reason === 'target-behind') recoveryPendingReason = 'target-behind'
+            }
             return result
           },
         },
@@ -4944,6 +4993,19 @@ export function createGroupPeerWithControlWalk<
         return { advanced: false }
       }
       retryRecovery()
+      if (
+        error instanceof RecoveryTargetBehindError ||
+        (error instanceof Error && error.name === 'RecoveryTargetBehindError')
+      ) {
+        recoveryPendingReason = 'target-behind'
+        emitRecovery({
+          ...base,
+          phase: 'failed',
+          reason: 'target-behind',
+          pendingReason: 'target-behind',
+        })
+        return { advanced: false }
+      }
       emitRecovery({ ...base, phase: 'failed', reason: 'error', error })
       throw error
     }
@@ -5262,7 +5324,11 @@ export function createGroupPeerWithControlWalk<
         await runSerial(deliverPendingWelcomes)
         if (disposed || locallyRemoved) return
         logDelivery?.trigger()
-        if ((await control?.load())?.rejoin != null && !refusalHeld)
+        const recoverySnapshot = await control?.load()
+        if (
+          (recoverySnapshot?.rejoin != null || recoverySnapshot?.forkRecoveryAttempt != null) &&
+          !refusalHeld
+        )
           healRequested = safetyHold() === null
         scheduleOperations()
         scheduleControlSlotRetry()

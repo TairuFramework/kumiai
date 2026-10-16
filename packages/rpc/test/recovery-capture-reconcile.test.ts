@@ -1,7 +1,7 @@
 import { expect, test, vi } from 'vitest'
 
 import { createMemoryControlStore } from '../../rpc-conformance/src/memory-control-store.js'
-import { stepRejoin } from '../src/control/rejoin.js'
+import { effectiveRecoveryEpochFloor, stepRejoin } from '../src/control/rejoin.js'
 import type { AdoptionWriteFactory, Outcome } from '../src/control/types.js'
 import { asLogPosition, type LogPosition } from '../src/cursor.js'
 import type { ConfirmationOutcome } from '../src/recovery-confirmation.js'
@@ -298,7 +298,7 @@ test.each([
                   saved: CapturedRejoinRecord,
                   epoch: number,
                   leafDigest: string,
-                  recoveryEpochFloor?: number,
+                  recoveryEpochFloor: number | null,
                 ) => {
                   expect(epoch).toBe(record.epochAfter)
                   expect(leafDigest).toBe('saved-X-leaf')
@@ -765,7 +765,7 @@ test.each(['floor', 'legacy', 'legacy-refused'] as const)(
         expect(events).toContainEqual(
           expect.objectContaining({
             phase: 'failed',
-            reason: row === 'floor' ? 'below-epoch-floor' : 'legacy-recovery-record',
+            reason: row === 'floor' ? 'target-behind' : 'legacy-recovery-record',
           }),
         )
         expect((await bob.control.load()).rejoin).toEqual(before.rejoin)
@@ -863,3 +863,89 @@ test.each(['lower', 'equal-different', 'no-reply', 'ineligible-reply'] as const)
     }
   },
 )
+
+test('only the persisted bound fork attempt receives the effective floor', async () => {
+  const s = await setup()
+  const snapshot = await s.control.load()
+  const source = s.record.source.key
+  const forkRecovery = {
+    attemptID: 'fresh-Y',
+    noticeID: 'open-notice',
+    splitEpoch: 10,
+    otherAuthHash: 'other-authenticator',
+    responderKeyHash: 'reply-key',
+    source,
+    evidence: new Uint8Array([1]),
+  }
+  const bound = {
+    ...snapshot,
+    recoveryEpochFloor: 20,
+    forkRecoveryAttempt: {
+      id: 'fresh-Y',
+      source,
+      forkRecovery,
+    },
+  }
+  expect(effectiveRecoveryEpochFloor(bound, { id: 'fresh-Y', source })).toBe(10)
+  expect(effectiveRecoveryEpochFloor(bound, { id: 'unrelated-Z', source })).toBe(20)
+  expect(
+    effectiveRecoveryEpochFloor(bound, {
+      id: 'fresh-Y',
+      source: { ...source, incarnation: source.incarnation + 1 },
+    }),
+  ).toBe(20)
+  const otherSource = { ...source, incarnation: source.incarnation + 1 }
+  for (const malformed of [
+    { ...bound.forkRecoveryAttempt, id: 'unrelated-Z' },
+    { ...bound.forkRecoveryAttempt, source: otherSource },
+    { ...bound.forkRecoveryAttempt, forkRecovery: { ...forkRecovery, attemptID: 'unrelated-Z' } },
+    { ...bound.forkRecoveryAttempt, forkRecovery: { ...forkRecovery, source: otherSource } },
+  ])
+    expect(
+      effectiveRecoveryEpochFloor(
+        { ...bound, forkRecoveryAttempt: malformed },
+        { id: 'fresh-Y', source },
+      ),
+    ).toBe(20)
+  expect(
+    effectiveRecoveryEpochFloor(
+      { ...bound, forkRecoveryAttempt: null },
+      {
+        id: 'fresh-Y',
+        source,
+      },
+    ),
+  ).toBe(20)
+  expect(
+    effectiveRecoveryEpochFloor(
+      { ...bound, recoveryEpochFloor: null, forkRecoveryAttempt: null },
+      {
+        id: 'unrelated-Z',
+        source,
+      },
+    ),
+  ).toBeNull()
+})
+
+test.each([null, 20])('fork settlement forwards the unchanged ordinary floor %s', async (floor) => {
+  const s = await setup()
+  s.record.forkRecovery = {
+    attemptID: s.record.id,
+    noticeID: 'open-notice',
+    splitEpoch: 0,
+    otherAuthHash: 'other-authenticator',
+    responderKeyHash: 'reply-key',
+    source: s.record.source.key,
+    evidence: new Uint8Array([1]),
+  }
+  const load = s.control.load.bind(s.control)
+  vi.spyOn(s.control, 'load').mockImplementation(async () => ({
+    ...(await load()),
+    rejoin: s.record,
+    recoveryEpochFloor: floor,
+  }))
+  s.reconcile({ kind: 'accepted', epoch: 2, leafDigest: 'accepted-leaf' })
+  const settleAcceptedRecovery = vi.fn(async () => {})
+  await stepRejoin({ ...s.deps, settleAcceptedRecovery }, s.record)
+  expect(settleAcceptedRecovery).toHaveBeenCalledWith(s.record, 2, 'accepted-leaf', floor)
+})

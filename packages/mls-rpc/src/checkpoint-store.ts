@@ -18,8 +18,10 @@ import { copyStoredValue, memoryRecordTable, sameStoredValue } from './memory-in
 import { physicalRecordKey } from './persistence-codec.js'
 import { GroupStateConflictError } from './persistence-errors.js'
 import type { AtRestCodec, MemoryTransaction } from './persistence-types.js'
+import { supersededRejoinPrepared } from './registry/recovery-coordinator.js'
 import { conditionPreparation } from './safety-conditions.js'
 
+const histories = new WeakMap<object, Array<CheckpointRecord>>()
 const conditionCaptures = new WeakMap<object, Map<string, CheckpointRecord>>()
 const captures = new WeakMap<object, Map<string, Uint8Array>>()
 
@@ -31,6 +33,18 @@ export function assertCheckpointUpdates(
   const entry = tx === undefined ? undefined : memoryTransactionEntry(tx.rows)
   const authorised = entry === undefined ? undefined : conditionCaptures.get(entry)
   for (const row of [...before, ...after]) {
+    if (row.kind === 'superseded-rejoin') {
+      const next = after.find((value) => value.id === row.id)
+      const previous = before.find((value) => value.id === row.id)
+      if (
+        !sameStoredValue(previous, next) &&
+        !(
+          entry !== undefined &&
+          histories.get(entry)?.some((prepared) => sameStoredValue(prepared, next)) === true
+        )
+      )
+        throw new GroupStateConflictError('Rejoin history requires coordinator authority')
+    }
     if (row.kind !== 'condition') continue
     const next = after.find((value) => value.id === row.id)
     const previous = before.find((value) => value.id === row.id)
@@ -87,6 +101,7 @@ function validate(record: CheckpointRecord, groupID: string, id: string): void {
     record.key.incarnation < 1 ||
     ![
       'fact',
+      'superseded-rejoin',
       'condition',
       'publication',
       'cursor',
@@ -196,10 +211,14 @@ export function createCheckpointStore(
     load: memoryOperation(tx, store.load),
     list: memoryOperation(tx, store.list),
     put(record) {
+      const history =
+        record.kind === 'superseded-rejoin' && supersededRejoinPrepared(record) ? record : undefined
       const condition = record.kind === 'condition' ? conditionPreparation(record) : undefined
       const canonical = record.kind === 'fact' ? checkpointPreparation(record) : undefined
       const result = put(record)
       const entry = memoryTransactionEntry(tx.rows)
+      if (history !== undefined && entry !== undefined)
+        histories.set(entry, [...(histories.get(entry) ?? []), copyStoredValue(history)])
       if (condition !== undefined && entry !== undefined) {
         const prepared = conditionCaptures.get(entry) ?? new Map<string, CheckpointRecord>()
         prepared.set(record.id, condition)

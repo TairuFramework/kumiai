@@ -20,6 +20,7 @@ import {
   asLogPosition,
   type ControlChanges,
   type ControlSlot,
+  type LogPosition,
   type WelcomeObligation,
 } from '@kumiai/rpc'
 import type { ConformanceControlSearchPort, ForkNoticeFixture } from '@kumiai/rpc-conformance'
@@ -905,7 +906,7 @@ export async function createForkNoticeFixture(params: {
   mode: 'real-mls' | 'double'
   ownershipContext?: OwnershipContextPort
   deferSplit?: boolean
-}): Promise<ForkNoticeFixture & { installSplit(): Promise<void> }> {
+}): Promise<ForkNoticeFixture<LogPosition> & { installSplit(): Promise<void> }> {
   const real = await createRealGroup(1, `fork-notice-${crypto.randomUUID()}`)
   const member = real.members[0]
   if (member === undefined) throw new Error('Missing fork member')

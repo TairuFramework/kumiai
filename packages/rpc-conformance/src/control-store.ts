@@ -108,6 +108,7 @@ export type ConformanceControlSnapshot<Position extends string = string> = {
     reason: 'retention-gap' | 'unprocessable-gap' | 'lost-state' | 'ahead' | 'unsupported-version'
   } | null
   operations: Array<ConformanceOperation<Position>> // FIFO by `seq`
+  forkRecoveryAttempt?: ConformanceForkRecoveryAttempt | null
   rejoin: ConformanceStoredRejoinRecord<Position> | null
   recoveryEpochFloor: number | null
   settledRejoins: Array<ConformanceAcceptedRejoinSettlement<Position>>
@@ -604,6 +605,7 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       const host = await params.open()
       const snapshot = await host.control.load()
       expect(snapshot.recoveryEpochFloor).toBeNull()
+      expect(snapshot.forkRecoveryAttempt).toBeNull()
       expect(snapshot.settledRejoins).toEqual([])
     })
     test('recovery floor survives deletion, lower writes, null writes and reopen', async () => {
@@ -1552,6 +1554,39 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       },
     )
 
+    test('bare changes cannot manufacture a fork intent or branch settlement', async () => {
+      const host = await params.open()
+      const before = await host.control.load()
+      expect(before.forkRecoveryAttempt ?? null).toBeNull()
+      await expect(
+        host.control.apply(
+          { forkRecoveryAttempt: null } as ConformanceControlChanges,
+          'clear-fork',
+        ),
+      ).rejects.toThrow('authority')
+      const settled: ConformanceAcceptedRejoinSettlement = {
+        kind: 'superseded-branch',
+        id: 'unproven-X',
+        epoch: 10,
+        origin: {
+          sourceKey: host.control.key,
+          target: {
+            targetID: 'unproven',
+            topicID: 'unproven',
+            groupInfoEpoch: 12,
+            groupInfoAuthenticator: new Uint8Array(32),
+            captureHead: null,
+          },
+          searchFrom: null,
+        },
+        ledgerBefore: ['owed'],
+      }
+      await expect(
+        host.control.apply({ putSettledRejoins: [settled] }, 'forged-settlement'),
+      ).rejects.toThrow('authority')
+      expect(await host.control.load()).toEqual(before)
+    })
+
     test('durable: every record kind survives reopening', async () => {
       const host = await params.open()
       const changes = records()
@@ -1567,6 +1602,7 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
         operations: changes.putOperations,
         rejoin: changes.putRejoin,
         recoveryEpochFloor: null,
+        forkRecoveryAttempt: null,
         settledRejoins: [],
         outcomes: changes.putOutcomes,
         welcomes: changes.putWelcomes,
@@ -1880,6 +1916,7 @@ export type ConformanceCapturedRejoinRecord<Position extends string = string> = 
   'source' | 'conflictEpoch'
 > & {
   format: 2
+  forkRecovery?: ConformanceForkRecoveryAuthorisation
   source: ConformanceRecoverySource
   target: ConformanceRecoveryTargetCapture<Position>
   captureHead: Position | null
@@ -1911,4 +1948,20 @@ export type ConformanceAcceptedRejoinSettlement<Position extends string = string
       leafDigest: string
     }
   | { kind: 'not-accepted'; epoch: number }
+  | { kind: 'superseded-branch'; epoch: number }
 )
+
+export type ConformanceForkRecoveryAuthorisation = {
+  attemptID: string
+  noticeID: string
+  splitEpoch: number
+  otherAuthHash: string
+  responderKeyHash: string
+  source: ConformanceGroupKey
+  evidence: Uint8Array
+}
+export type ConformanceForkRecoveryAttempt = {
+  id: string
+  source: ConformanceGroupKey
+  forkRecovery: ConformanceForkRecoveryAuthorisation
+}

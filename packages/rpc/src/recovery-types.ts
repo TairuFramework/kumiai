@@ -24,8 +24,23 @@ export type ResyncProof = RecoveryTargetCapture & {
   payloadDigest: string
   verdict: Uint8Array
 }
+export type ForkRecoveryAuthorisation = {
+  attemptID: string
+  noticeID: string
+  splitEpoch: number
+  otherAuthHash: string
+  responderKeyHash: string
+  source: GroupKey
+  evidence: Uint8Array
+}
+export type ForkRecoveryAttempt = {
+  id: string
+  source: GroupKey
+  forkRecovery: ForkRecoveryAuthorisation
+}
 export type CapturedRejoinRecord = Omit<LegacyRejoinRecord, 'source' | 'conflictEpoch'> & {
   format: 2
+  forkRecovery?: ForkRecoveryAuthorisation
   source: RecoverySource
   target: RecoveryTargetCapture
   captureHead: LogPosition | null
@@ -56,6 +71,7 @@ export type AcceptedRejoinSettlement = {
       leafDigest: string
     }
   | { kind: 'not-accepted'; epoch: number }
+  | { kind: 'superseded-branch'; epoch: number }
 )
 export type CapturedRecapture = {
   sealed: Uint8Array
@@ -64,6 +80,7 @@ export type CapturedRecapture = {
   epochFloor: number | null
 }
 export type RecoveryReconciliation =
+  | { kind: 'superseded-branch'; epoch: number; authorisation: ForkRecoveryAuthorisation }
   | { kind: 'accepted'; epoch: number; leafDigest: string }
   | { kind: 'head-only'; head: LogPosition | null }
   | { kind: 'unapplied-later'; epoch: number; leafDigest: string }
@@ -93,6 +110,10 @@ export type AuthenticatedRosterAbsence = {
   evidence: Uint8Array
 }
 export type CapturedRecoveryPort = {
+  authoriseForkRecovery?(
+    reply: CapturedRecapture,
+    noticeID: string,
+  ): Promise<ForkRecoveryAuthorisation | null>
   checkRosterAbsence?(
     evidence: Uint8Array,
     requestID: string,

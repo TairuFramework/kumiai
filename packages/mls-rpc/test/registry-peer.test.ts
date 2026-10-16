@@ -45,7 +45,11 @@ import { registryRetirement } from '../src/registry/retirement.js'
 import { registrySafety } from '../src/registry/safety.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { deferred } from '../src/runtime.js'
-import { createRegistryFixture, registryFixtureRecoverySource } from './fixtures/registry.js'
+import {
+  createNotMemberFixture,
+  createRegistryFixture,
+  registryFixtureRecoverySource,
+} from './fixtures/registry.js'
 import { createRegistryRecovery } from './fixtures/registry-recovery.js'
 
 const groupID = 'registry-peer'
@@ -1898,5 +1902,48 @@ test('recovery retains the current ledger when private MLS state is unavailable'
     expect(s.f.restoreCount(groupID)).toBe(restores)
   } finally {
     await s.f.close()
+  }
+})
+
+test('not member retains target behind reason', async () => {
+  const f = await createNotMemberFixture()
+  let owner: api.RegistryPeer | undefined
+  let recovery: ((event: RecoveryEvent) => void | Promise<void>) | undefined
+  try {
+    await f.diagnose(await f.proof())
+    owner = await api.createRegistryPeer({
+      registry: f.local().registry,
+      key: f.key,
+      recovery: f.local().environment,
+      target: { targetID: 'diagnostic-hub', topicID: 'diagnostic-commits' },
+      continuation: api.createRecoveryContinuationPort({
+        registry: f.local().registry,
+        persistence: f.local().device.groups,
+      }),
+      createMLS: async () => f.mls(),
+      createPeer: async (_key, options) => {
+        recovery = options.onRecovery
+        return peerDouble()
+      },
+    })
+    await owner.ready
+    expect(owner.status()).toMatchObject({ kind: 'not-member', retrying: true })
+    await recovery?.({
+      groupID: f.key.groupID,
+      attemptID: 'retry',
+      trigger: 'automatic',
+      phase: 'failed',
+      reason: 'target-behind',
+      pendingReason: 'target-behind',
+    })
+    expect(owner.status()).toMatchObject({
+      kind: 'not-member',
+      retrying: true,
+      pendingReason: 'target-behind',
+    })
+  } finally {
+    owner?.dispose()
+    await owner?.drained()
+    await f.close()
   }
 })

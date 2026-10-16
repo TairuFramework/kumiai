@@ -10,10 +10,11 @@ import {
   type ControlStore,
   controlSafetyHeld,
   type GroupMLS,
+  RecoveryTargetBehindError,
   type SendAdmission,
 } from '@kumiai/rpc'
 
-import type { ControlHandleAccess } from './access.js'
+import type { ControlHandleAccess, ControlReadScope } from './access.js'
 import { provenCheckpointFacts } from './checkpoint-store.js'
 import type { AccountedGroupObservation, EntryReads } from './entry-capability.js'
 import {
@@ -25,6 +26,10 @@ import {
 import { DisplacedGroupHandleError, GroupUnavailableError } from './persistence-errors.js'
 import type { GroupKey, GroupTransaction } from './persistence-types.js'
 import { reconcileRecoveryCapture } from './recovery.js'
+import {
+  checkForkRecoveryCaptureInReads,
+  registryRecoveryCoordinator,
+} from './registry/recovery-coordinator.js'
 import { accountedRuntime } from './registry/runtime-facts.js'
 import { registrySafety } from './registry/safety.js'
 import { readRecoverySource, recoverySourceIdentity } from './registry/source.js'
@@ -36,7 +41,15 @@ import { clearGroupCondition } from './safety-conditions.js'
 
 export type RegistryGroupMLSParams = Omit<
   GroupMLSParams,
-  'access' | 'control' | 'readRecoverySource' | 'recoveryAdoption' | 'onSafetyHold'
+  | 'access'
+  | 'control'
+  | 'readRecoverySource'
+  | 'recoveryAdoption'
+  | 'onSafetyHold'
+  | 'authoriseForkRecovery'
+  | 'readInstalledRecoveryLineage'
+  | 'checkForkRecoveryCapture'
+  | 'settleForkRecoveryCapture'
 > & {
   registry: GroupHandleRegistry
   key: GroupKey
@@ -181,6 +194,7 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
       cache({ epoch: admission.epoch, admissible: false, reason: 'stranded' })
     }
   }
+  let lineageScope: ControlReadScope | undefined
   const lazy: ControlHandleAccess = {
     epoch: () => admission.epoch,
     admission: () => ({ ...admission }),
@@ -195,7 +209,14 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
     async readControl(fn) {
       const value = await access()
       try {
-        return await value.readControl(fn)
+        return await value.readControl(async (scope) => {
+          lineageScope = scope
+          try {
+            return await fn(scope)
+          } finally {
+            lineageScope = undefined
+          }
+        })
       } finally {
         refreshAdmission(value)
       }
@@ -290,6 +311,42 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
     ...params,
     access: lazy,
     control,
+    settleForkRecoveryCapture: (input) =>
+      registryRecoveryCoordinator(registry).settleForkRecoveryCapture(input, params.recovery),
+    authoriseForkRecovery: (reply, noticeID) =>
+      registryRecoveryCoordinator(registry).authoriseForkRecovery(
+        key,
+        reply,
+        noticeID,
+        params.recovery,
+      ),
+    checkForkRecoveryCapture: (input) =>
+      registryRecoveryCoordinator(registry).checkForkRecoveryCapture(input, params.recovery),
+    readInstalledRecoveryLineage: async ({ comparisonEpoch, throughEpoch }) => {
+      const scope = lineageScope
+      if (
+        scope?.loadCheckpoints === undefined ||
+        scope.source.identity?.epoch !== throughEpoch ||
+        scope.source.key.incarnation !== key.incarnation
+      )
+        return []
+      const records = await scope.loadCheckpoints()
+      const facts = provenCheckpointFacts(records, key.groupID)
+        .filter(
+          (fact) =>
+            fact.key.incarnation === key.incarnation &&
+            fact.epoch >= comparisonEpoch &&
+            fact.epoch <= throughEpoch,
+        )
+        .sort((a, b) => a.epoch - b.epoch)
+      return facts.flatMap((fact) =>
+        records.flatMap((row) =>
+          row.kind === 'publication' && row.factID === fact.id && row.frame !== null
+            ? [row.frame.slice()]
+            : [],
+        ),
+      )
+    },
     readRecoverySource: () =>
       capability.entry.read(key.groupID, async (reads) =>
         recoverySourceIdentity(await readSource(reads)),
@@ -330,6 +387,15 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
         { groupID: key.groupID, mutationID: crypto.randomUUID() },
         async (reads) => {
           const source = await readSource(reads)
+          if (record.forkRecovery !== undefined) {
+            const attempt = (await reads.control(key.incarnation)).forkRecoveryAttempt
+            if (
+              attempt == null ||
+              attempt.id !== record.id ||
+              !(await checkForkRecoveryCaptureInReads(reads, attempt, reply, params.recovery))
+            )
+              throw new RecoveryTargetBehindError('Fork recovery capture is target-behind')
+          }
           const verified = await reconcileRecoveryCapture({
             source,
             target,

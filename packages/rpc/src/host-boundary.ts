@@ -63,6 +63,7 @@ export const capturedRecoveryHostMembers = {
   applyRecovery: 'host',
   restoreRecovery: 'host',
   reconcileCapture: 'host',
+  authoriseForkRecovery: 'host',
   sealGroupInfo: 'host',
 } as const satisfies HostMembers<CapturedRecoveryPort>
 

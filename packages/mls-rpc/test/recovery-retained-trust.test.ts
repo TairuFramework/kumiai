@@ -20,6 +20,7 @@ import {
 import { expect, test, vi } from 'vitest'
 
 import * as recovery from '../src/recovery.js'
+import { forkCaptureTranscriptPermitted } from '../src/registry/recovery-coordinator.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { createCapturedFormerMember } from './fixtures/captured-recovery.js'
 
@@ -1190,5 +1191,44 @@ test.each(['empty', 'complete', 'partial', 'stale', 'missing head'] as const)(
       await owner.dispose()
       await fixture.close()
     }
+  },
+)
+
+test('capture below oldest retained fact stays target-behind', () => {
+  const facts = Array.from({ length: 8 }, (_, index) => ({
+    epoch: index + 13,
+    confirmedTranscriptHash: `own-${index + 13}`,
+  }))
+  expect(
+    forkCaptureTranscriptPermitted({
+      splitEpoch: 10,
+      epoch: 12,
+      confirmedTranscriptHash: 'continuing-12',
+      facts,
+    }),
+  ).toBe(false)
+})
+
+test.each([
+  { epoch: 9, splitEpoch: 10, transcript: 'other-9', allowed: false },
+  { epoch: 12, splitEpoch: 10, transcript: 'other-12', allowed: false },
+  { epoch: 13, splitEpoch: 10, transcript: 'own-13', allowed: false },
+  { epoch: 13, splitEpoch: 10, transcript: 'other-13', allowed: true },
+  { epoch: 21, splitEpoch: 10, transcript: 'other-21', allowed: true },
+])(
+  'authenticated capture boundary: $epoch/$transcript',
+  ({ epoch, splitEpoch, transcript, allowed }) => {
+    const facts = [9, 10, 11, 13, 20].map((epoch) => ({
+      epoch,
+      confirmedTranscriptHash: `own-${epoch}`,
+    }))
+    expect(
+      forkCaptureTranscriptPermitted({
+        splitEpoch,
+        epoch,
+        confirmedTranscriptHash: transcript,
+        facts,
+      }),
+    ).toBe(allowed)
   },
 )

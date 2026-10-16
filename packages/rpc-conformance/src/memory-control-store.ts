@@ -3,12 +3,14 @@ import type {
   ConformanceAcceptedRejoinSettlement,
   ConformanceAdoptionExpected,
   ConformanceAdoptionWrite,
+  ConformanceCapturedRejoinRecord,
   ConformanceControlChanges,
   ConformanceControlSlot,
   ConformanceControlSnapshot,
   ConformanceControlStore,
   ConformanceEpochIdentity,
   ConformanceForkHalt,
+  ConformanceForkRecoveryAttempt,
   ConformanceGroupCondition,
   ConformanceGroupKey,
   ConformanceRecoveryUnavailableEvent,
@@ -16,9 +18,18 @@ import type {
   ConformanceSaveControlBuild,
 } from './control-store.js'
 import { decodeControlFixtureState } from './control-store.js'
+import type { ConformanceRecoveryReconciliation } from './group-mls.js'
 
 export type MemoryControlStore<Position extends string = string> =
   ConformanceControlStore<Position> & {
+    retainForkContinuation(snapshot: ConformanceControlSnapshot<Position>): Promise<void>
+    authoriseFork(attempt: ConformanceForkRecoveryAttempt): Promise<void>
+    forkHistory(): Promise<Array<ConformanceCapturedRejoinRecord<Position>>>
+    abandonFork(): Promise<void>
+    settleFork(
+      record: ConformanceCapturedRejoinRecord<Position>,
+      result: ConformanceRecoveryReconciliation<Position>,
+    ): Promise<void>
     saveBuilt: ConformanceSaveControlBuild<Position>
     loadVersion(): Promise<number>
     anchor: ConformanceAnchorStore
@@ -84,8 +95,8 @@ function foldSettlements<Position extends string>(
     const key = JSON.stringify([sourceKey.groupID, sourceKey.incarnation])
     rows.set(key, {
       id: value.id,
-      ...(value.kind === 'not-accepted'
-        ? { kind: 'not-accepted' as const, epoch: value.epoch }
+      ...(value.kind === 'not-accepted' || value.kind === 'superseded-branch'
+        ? { kind: value.kind, epoch: value.epoch }
         : {
             kind: 'accepted-unadoptable' as const,
             digest: value.digest,
@@ -314,6 +325,32 @@ function mutateControl<Position extends string>(
   context: Context | null = null,
   key: ConformanceGroupKey | null = null,
 ): void {
+  if (
+    'forkRecoveryAttempt' in changes ||
+    changes.putSettledRejoins?.some((row) => row.kind === 'superseded-branch')
+  )
+    throw new TypeError('Fork recovery requires coordinator authority')
+  if (
+    changes.putRejoin !== undefined &&
+    'format' in changes.putRejoin &&
+    changes.putRejoin.forkRecovery !== undefined &&
+    (snapshot.forkRecoveryAttempt == null ||
+      changes.putRejoin.id !== snapshot.forkRecoveryAttempt.id ||
+      !equal(changes.putRejoin.source.key, snapshot.forkRecoveryAttempt.source) ||
+      !equal(changes.putRejoin.forkRecovery, snapshot.forkRecoveryAttempt.forkRecovery))
+  )
+    throw new TypeError('Fork recovery record requires its bound intent')
+  const intent = snapshot.forkRecoveryAttempt ?? null
+  if (
+    intent !== null &&
+    changes.putRejoin !== undefined &&
+    (!('format' in changes.putRejoin) ||
+      changes.putRejoin.id !== intent.id ||
+      !equal(changes.putRejoin.forkRecovery, intent.forkRecovery))
+  )
+    throw new TypeError('Fork recovery record requires its bound intent')
+  if (intent !== null && changes.deleteRejoin && snapshot.rejoin?.id === intent.id)
+    throw new TypeError('Fork recovery settlement requires coordinator authority')
   const { forkHalt, recoveryUnavailable, recoveryEpochFloor, putSettledRejoins, ...ordinary } =
     changes
   const safety: Pick<ConformanceControlChanges, 'forkHalt' | 'recoveryUnavailable'> = {}
@@ -415,6 +452,8 @@ export function createMemoryControlStore<Position extends string = string>(
 ): MemoryControlStore<Position> {
   const fixedKey = { ...key }
   let record: {
+    forkContinuation: ConformanceControlSnapshot<Position> | null
+    forkHistory: Array<ConformanceCapturedRejoinRecord<Position>>
     state: Uint8Array | null
     initialIdentity: ConformanceEpochIdentity | null
     version: number
@@ -422,6 +461,8 @@ export function createMemoryControlStore<Position extends string = string>(
     control: ConformanceControlSnapshot<Position>
     mutationID: string | null
   } = {
+    forkContinuation: null,
+    forkHistory: [],
     state: null,
     initialIdentity: null,
     version: 0,
@@ -437,6 +478,7 @@ export function createMemoryControlStore<Position extends string = string>(
       operations: [],
       rejoin: null,
       recoveryEpochFloor: null,
+      forkRecoveryAttempt: null,
       settledRejoins: [],
       outcomes: [],
       welcomes: [],
@@ -461,10 +503,108 @@ export function createMemoryControlStore<Position extends string = string>(
     }
   }
   return {
+    async retainForkContinuation(snapshot) {
+      const saved = snapshot.rejoin
+      if (
+        saved === null ||
+        !('format' in saved) ||
+        saved.stage !== 'adopted' ||
+        !equal(saved.destinationKey, fixedKey)
+      )
+        throw new TypeError('Proven adopted continuation required')
+      const next = cloneValue(record)
+      next.forkContinuation = cloneValue(snapshot)
+      finish(next, 'apply')
+    },
+    async authoriseFork(attempt) {
+      if (
+        !equal(attempt.source, fixedKey) ||
+        attempt.id !== attempt.forkRecovery.attemptID ||
+        !equal(attempt.source, attempt.forkRecovery.source)
+      )
+        throw new TypeError('Fork intent source mismatch')
+      if (record.control.forkRecoveryAttempt != null) {
+        if (!equal(record.control.forkRecoveryAttempt, attempt))
+          throw new TypeError('Fork intent already bound')
+        return
+      }
+      const next = cloneValue(record)
+      const saved = next.control.rejoin ?? next.forkContinuation?.rejoin ?? null
+      if (saved !== null) {
+        if (!('format' in saved) || saved.forkRecovery !== undefined)
+          throw new TypeError('Invalid branch attempt')
+        next.forkHistory.push(saved)
+        next.control.settledRejoins = foldSettlements(next.control.settledRejoins, [
+          {
+            id: saved.id,
+            kind: 'superseded-branch',
+            epoch: attempt.forkRecovery.splitEpoch,
+            origin: {
+              sourceKey: saved.source.key,
+              target: saved.target,
+              searchFrom: saved.searchFrom,
+            },
+            ledgerBefore: [
+              ...new Set([
+                ...next.control.settledRejoins.flatMap((row) => row.ledgerBefore),
+                ...saved.ledgerBefore,
+              ]),
+            ],
+          },
+        ])
+      }
+      next.control.rejoin = null
+      if (next.forkContinuation !== null) next.forkContinuation.rejoin = null
+      next.control.forkRecoveryAttempt = cloneValue(attempt)
+      next.mutationID = attempt.id
+      finish(next, 'apply')
+    },
+    forkHistory: async () => cloneValue(record.forkHistory),
+    async settleFork(saved, result) {
+      if (
+        (result.kind !== 'accepted' && result.kind !== 'unapplied-later') ||
+        record.control.forkRecoveryAttempt?.id !== saved.id ||
+        !equal(record.control.rejoin, saved)
+      )
+        throw new TypeError('Unbound fork settlement')
+      const next = cloneValue(record)
+      const common = {
+        id: saved.id,
+        origin: { sourceKey: saved.source.key, target: saved.target, searchFrom: saved.searchFrom },
+        ledgerBefore: saved.ledgerBefore,
+      }
+      const accepted =
+        result.kind === 'accepted' || saved.stage === 'confirmed' || saved.stage === 'adopted'
+      next.control.settledRejoins = foldSettlements(next.control.settledRejoins, [
+        accepted
+          ? {
+              ...common,
+              kind: 'accepted-unadoptable',
+              digest: saved.digest,
+              payloadDigest: saved.payloadDigest,
+              epochAfter: saved.epochAfter,
+              acceptedEpoch: result.kind === 'unapplied-later' ? saved.epochAfter : result.epoch,
+              leafDigest: result.leafDigest,
+            }
+          : { ...common, kind: 'not-accepted', epoch: result.epoch },
+      ])
+      next.control.forkRecoveryAttempt = null
+      next.control.rejoin = null
+      finish(next, 'apply')
+    },
+    async abandonFork() {
+      const next = cloneValue(record)
+      next.control.forkRecoveryAttempt = null
+      next.control.rejoin = null
+      finish(next, 'apply')
+    },
     get key() {
       return { ...fixedKey }
     },
-    load: async () => cloneValue(record.control),
+    load: async () => ({
+      ...cloneValue(record.control),
+      forkRecoveryAttempt: cloneValue(record.control.forkRecoveryAttempt ?? null),
+    }),
     lastMutation: async () => record.mutationID,
     apply: async (changes, mutationID) => {
       const next = cloneValue(record)

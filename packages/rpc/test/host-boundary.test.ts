@@ -35,8 +35,8 @@ test('recovery comparison epoch crosses the host boundary as data', async () => 
   expect(createRecoveryRequest).toHaveBeenCalledWith('comparison', 30000, 12)
 })
 
-test.each(['checkRosterAbsence', 'sealRosterAbsence'] as const)(
-  'roster absence host operation drains and fences disposal: %s',
+test.each(['checkRosterAbsence', 'sealRosterAbsence', 'authoriseForkRecovery'] as const)(
+  'captured recovery host operation drains and fences disposal: %s',
   async (name) => {
     expect(capturedRecoveryHostMembers).toHaveProperty(name, 'host')
     const boundary = createHostBoundary()

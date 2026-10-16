@@ -40,9 +40,9 @@ export type ConformanceForkNoticeEvent = {
   mergedFrom?: Array<string>
   notice: ConformanceForkNotice
 }
-export type ForkNoticeFixture = {
+export type ForkNoticeFixture<Position extends string = string> = {
   key: ConformanceGroupKey
-  service(): ConformanceCheckpointService
+  service(): ConformanceCheckpointService<Position>
   frame: Uint8Array
   nextSignerFrame: Uint8Array
   mergeFrames(): Promise<{

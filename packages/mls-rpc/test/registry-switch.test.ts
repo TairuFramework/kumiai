@@ -423,6 +423,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           commitOnceAcceptance: null,
           controlHold: null,
           forkHalt: null,
+          forkRecoveryAttempt: null,
           recoveryUnavailable: null,
           strand: null,
           operations: [],

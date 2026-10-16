@@ -14,6 +14,7 @@ import {
   type GroupOptions,
   signLedgerEntry,
 } from '@kumiai/mls'
+import type { ConformanceCheckpointRecord } from '@kumiai/rpc-conformance'
 
 import {
   currentCheckpointFact,
@@ -222,7 +223,12 @@ export function storageTranscript(state: Uint8Array | null): Uint8Array {
 }
 
 export async function writeInstallationCheckpoint(
-  stores: Pick<GroupStores<MemoryTransaction>, 'checkpoints' | 'trust'>,
+  stores: Pick<GroupStores<MemoryTransaction>, 'trust'> & {
+    checkpoints: {
+      list(): Promise<Array<ConformanceCheckpointRecord>>
+      put(record: ConformanceCheckpointRecord): Promise<void>
+    }
+  },
   params: { key: GroupKey; mutationID: string; stateVersion: number } & (
     | { handle: GroupHandle }
     | { confirmedTranscriptHash: Uint8Array }
@@ -230,7 +236,9 @@ export async function writeInstallationCheckpoint(
 ): Promise<void> {
   const trust = await stores.trust.load()
   if (trust === null) throw new Error('Missing installed trust')
-  const previous = currentCheckpointFact(await stores.checkpoints.list())
+  const previous = currentCheckpointFact(
+    (await stores.checkpoints.list()).filter((row) => row.kind !== 'superseded-rejoin'),
+  )
   const prior = previous === null ? null : decodeEpochRosterFact(previous.canonical)
   if (
     prior !== null &&

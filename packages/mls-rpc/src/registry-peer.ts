@@ -15,7 +15,12 @@ import type {
   RecoveryReconciliation,
   ResyncProof,
 } from '@kumiai/rpc'
-import { applyResolved, controlSafetyHeld, isHardControlHold } from '@kumiai/rpc'
+import {
+  applyResolved,
+  controlSafetyHeld,
+  isHardControlHold,
+  RecoveryTargetBehindError,
+} from '@kumiai/rpc'
 
 import { createRegistryCheckpointService } from './checkpoint.js'
 import { copyStoredValue, sameStoredValue } from './memory-incarnation-stores.js'
@@ -33,6 +38,8 @@ import {
   reconcileRecoveryCapture,
   restoreRecoveryCandidate,
 } from './recovery.js'
+import { decodeCapturedRecoveryCandidate } from './recovery-codec.js'
+import { recoveryCompletionContexts } from './recovery-completion-context.js'
 import { validateCapturedRecoveryRecord } from './recovery-record.js'
 import { registryRecoveryCoordinator } from './registry/recovery-coordinator.js'
 import { RetainedTrustUnavailableError, registrySafety } from './registry/safety.js'
@@ -57,7 +64,7 @@ function retirementTimedOut(cause: unknown): boolean {
 }
 
 type Peer = GroupPeer<Record<string, GroupProtocolDefinition>>
-export type RecoveryPendingReason = 'no-reply' | 'no-eligible-responder'
+export type RecoveryPendingReason = 'no-reply' | 'no-eligible-responder' | 'target-behind'
 export type RegistryPeerOptions = {
   onNotMember?: (params: {
     evidence: Uint8Array
@@ -109,7 +116,7 @@ export type RegistryPeerParams = {
     record: CapturedRejoinRecord,
     epoch: number,
     leafDigest: string,
-    recoveryEpochFloor?: number,
+    recoveryEpochFloor: number | null,
   ) => Promise<void>
   createMLS(
     key: GroupKey,
@@ -143,7 +150,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
       record: CapturedRejoinRecord,
       epoch: number,
       leafDigest: string,
-      recoveryEpochFloor = epoch,
+      recoveryEpochFloor: number | null,
     ) => {
       const sourceKey = record.source.key
       const store: ControlStore = {
@@ -176,15 +183,23 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
                 isHardControlHold(snapshot.controlHold)
               )
                 throw new GroupStateConflictError('Accepted recovery moved before settlement')
-              await control.apply(
-                {
-                  ...changes,
-                  ...(snapshot.controlHold?.reason === 'acceptance-unknown'
-                    ? { controlHold: null }
-                    : {}),
-                },
-                mutationID,
-              )
+              const settled = {
+                ...changes,
+                ...(snapshot.controlHold?.reason === 'acceptance-unknown'
+                  ? { controlHold: null }
+                  : {}),
+              }
+              if (snapshot.forkRecoveryAttempt?.id === record.id)
+                recoveryCompletionContexts.set(stores.tx, {
+                  key: sourceKey,
+                  changes: settled,
+                  forkRecovery: { attempt: null },
+                })
+              try {
+                await control.apply(settled, mutationID)
+              } finally {
+                recoveryCompletionContexts.delete(stores.tx)
+              }
             },
           ),
       }
@@ -364,7 +379,10 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
         {
           mls,
           checkpoints: createRegistryCheckpointService(registry, requested),
-          recoveryOnly: control.rejoin !== null || !mls.sendAdmission().admissible,
+          recoveryOnly:
+            control.rejoin !== null ||
+            control.forkRecoveryAttempt != null ||
+            !mls.sendAdmission().admissible,
           target: { ...target },
           onConfirmedRecovery,
           onRecovery,
@@ -393,6 +411,23 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
               throw new GroupStateConflictError('Accepted recovery changed before recapture')
             const resolved = await coordinator.resolveRecoverySwitch(record)
             if (resolved.kind !== 'rolled-back') return { kind: 'retry' }
+            if (record.forkRecovery !== undefined) {
+              if (
+                !(await coordinator.checkForkRecoveryCapture(
+                  {
+                    attempt: {
+                      id: record.id,
+                      source: record.source.key,
+                      forkRecovery: record.forkRecovery,
+                    },
+                    reply,
+                  },
+                  params.recovery,
+                ))
+              )
+                return { kind: 'retry', reason: 'target-behind' }
+              return await coordinator.settleForkRecoveryCapture({ record, reply }, params.recovery)
+            }
             // Installation already refused. Settlement authenticates X against its immutable public origin.
             return await reconcileRecoveryCapture({
               source: record.source as RegistryRecoverySource,
@@ -468,6 +503,28 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
       verdict: record.verdict.slice(),
     }
     const write = createRecoverySwitchFactory(record)
+    if (record.forkRecovery !== undefined) {
+      const saved = decodeCapturedRecoveryCandidate(record.candidate, record.requestKey)
+      if (
+        !(await coordinator.checkForkRecoveryCapture(
+          {
+            attempt: {
+              id: record.id,
+              source: record.source.key,
+              forkRecovery: record.forkRecovery,
+            },
+            reply: {
+              sealed: saved.attestedReply,
+              requestID: saved.requestID,
+              requestKey: record.requestKey,
+              epochFloor: null,
+            },
+          },
+          params.recovery,
+        ))
+      )
+        throw new RegistryResyncRefusedError({ reason: 'tuple' })
+    }
     const pending = await restoreRecoveryCandidate({
       source,
       candidate: record.candidate,
@@ -568,7 +625,8 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
             if (
               !(
                 error instanceof AcceptedRecoveryOriginMovedError ||
-                error instanceof RegistryResyncRefusedError
+                error instanceof RegistryResyncRefusedError ||
+                error instanceof RecoveryTargetBehindError
               )
             )
               throw error

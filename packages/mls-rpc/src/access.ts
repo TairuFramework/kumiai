@@ -3,6 +3,7 @@ import {
   type AdoptionExpected,
   type AdoptionWrite,
   type AdoptionWriteFactory,
+  type CheckpointRecord,
   type ControlSnapshot,
   type ControlStore,
   ControlWriteNotCommittedError,
@@ -19,6 +20,7 @@ export type ControlRead = { handle: GroupHandle; source: AdoptionExpected }
 export type ControlReadScope = ControlRead & {
   refresh(): Promise<ControlRead>
   loadControl(control?: ControlStore): Promise<ControlSnapshot>
+  loadCheckpoints?(): Promise<Array<CheckpointRecord>>
 }
 
 export type ControlHandleAccess = Pick<

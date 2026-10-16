@@ -1,7 +1,16 @@
 import { encodeMultibase, type OwnIdentity, randomIdentity } from '@kokuin/token'
+import { ed25519 } from '@noble/curves/ed25519.js'
 import { type ClientState, nodeTypes } from 'ts-mls'
 import { describe, expect, test } from 'vitest'
 
+import { readGroupAnchorExtension } from '../src/anchor.js'
+import {
+  checkpointAuthHash,
+  checkpointGenesisHash,
+  checkpointKeyHash,
+  checkpointSignatureInput,
+  encodeEpochCheckpoint,
+} from '../src/checkpoint-codec.js'
 import {
   commitInvite,
   createGroup,
@@ -17,6 +26,7 @@ import {
 import { ledgerEntryDigest } from '../src/ledger.js'
 import {
   createRecoveryRequest,
+  openRecoveryGroupInfoFromPublic,
   openSealedGroupInfo,
   RecoveryRequestError,
   SealedGroupInfoError,
@@ -708,4 +718,77 @@ test('legacy GroupInfo consumers continue to open v1 and refuse captured v2', as
   await expect(openSealedGroupInfo({ ...params, sealed: captured })).rejects.toMatchObject({
     reason: 'malformed',
   })
+})
+
+test('v3 lineage cannot escape reply size bound and v2 remains readable', async () => {
+  const identity = randomIdentity()
+  const { group } = await createGroup(identity, 'bounded-recovery-lineage')
+  const extension = readGroupAnchorExtension(group)
+  if (!(extension?.extensionData instanceof Uint8Array)) throw new Error('Missing anchor')
+  const genesisHash = checkpointGenesisHash(extension.extensionData)
+  const body = {
+    v: 1 as const,
+    type: 'kumiai/checkpoint/v1' as const,
+    groupID: group.groupID,
+    genesisHash,
+    ciphersuite: group.context.cipherSuite.id,
+    epoch: Number(group.epoch),
+    authHash: checkpointAuthHash({
+      groupID: group.groupID,
+      genesisHash,
+      epoch: Number(group.epoch),
+      epochAuthenticator: group.state.keySchedule.epochAuthenticator,
+    }),
+    parentAuthHash: null,
+    keyHash: checkpointKeyHash(identity.publicKey),
+    leafIndex: group.state.privatePath.leafIndex,
+  }
+  const frame = encodeEpochCheckpoint(
+    body,
+    ed25519.sign(checkpointSignatureInput(body), identity.privateKey),
+  )
+  const held = await createRecoveryRequest({
+    group,
+    identity,
+    requestID: 'bounded-lineage',
+    comparisonEpoch: Number(group.epoch),
+  })
+  const params = { group, identity, request: held.request, captureHead: null }
+  const sealed = await sealCapturedGroupInfo({ ...params, lineage: [frame] })
+  expect(sealed[0]).toBe(3)
+  expect(sealed.byteLength).toBeLessThanOrEqual(786432)
+  const publicGroup = {
+    groupID: group.groupID,
+    credential: group.credential,
+    context: group.context,
+    anchor: group.anchor,
+    genesisAnchor: extension.extensionData,
+    signerTree: group.state.ratchetTree,
+  }
+  const open = (bytes: Uint8Array) =>
+    openRecoveryGroupInfoFromPublic({
+      group: publicGroup,
+      sealed: bytes,
+      requestID: 'bounded-lineage',
+      ephemeralPrivateKey: held.ephemeralPrivateKey,
+      captured: true,
+    })
+  expect(await open(sealed)).toMatchObject({ version: 3, lineage: [frame] })
+  const retagged = sealed.slice()
+  retagged[0] = 2
+  await expect(open(retagged)).rejects.toMatchObject({ reason: 'not-for-me' })
+  const mismatched: OwnIdentity = {
+    ...identity,
+    signToken: (payload, options) =>
+      identity.signToken({ ...payload, lineageDigest: 'mismatched-lineage' }, options),
+  }
+  const spliced = await sealCapturedGroupInfo({ ...params, identity: mismatched, lineage: [frame] })
+  await expect(open(spliced)).rejects.toMatchObject({ reason: 'unauthenticated' })
+
+  await expect(
+    sealCapturedGroupInfo({ ...params, lineage: Array.from({ length: 257 }, () => frame) }),
+  ).rejects.toThrow('bound')
+  await expect(open(new Uint8Array(786433))).rejects.toThrow('bound')
+  const ordinary = await sealCapturedGroupInfo(params)
+  expect(await open(ordinary)).toMatchObject({ version: 2 })
 })

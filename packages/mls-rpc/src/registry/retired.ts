@@ -23,6 +23,7 @@ import type {
   GroupStores,
   GroupTransaction,
 } from '../persistence-types.js'
+import { recoveryCompletionContexts } from '../recovery-completion-context.js'
 
 /** All incarnations must be settled before clearing any transport. */
 export async function deleteIncarnations<TTx extends GroupTransaction>(
@@ -129,7 +130,17 @@ export async function retireIncarnation<TTx extends GroupTransaction>(
   }
   // Owed outcomes survive unchanged, including their original timestamps.
   changes.putOutcomes = outcomes.filter(({ id }) => !control.outcomes.some((row) => row.id === id))
-  await rows.control.apply(changes, mutationID)
+  if (control.forkRecoveryAttempt != null)
+    recoveryCompletionContexts.set(stores.tx, {
+      key: source,
+      changes,
+      forkRecovery: { attempt: null },
+    })
+  try {
+    await rows.control.apply(changes, mutationID)
+  } finally {
+    recoveryCompletionContexts.delete(stores.tx)
+  }
 
   for (const entry of await rows.outbox.list()) {
     if ((await rows.meta.loadSettlement(entry.seq)) !== null) continue

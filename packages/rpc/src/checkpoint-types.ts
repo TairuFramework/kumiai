@@ -1,6 +1,7 @@
 import type { GroupConditionEvent } from './control/safety.js'
 import type { GroupKey } from './control/types.js'
 import type { ForkNotice, ForkNoticeEvent } from './fork-notice.js'
+import type { CapturedRejoinRecord, ForkRecoveryAuthorisation } from './recovery-types.js'
 
 export type CheckpointComparison =
   | { kind: 'agreement'; epoch: number; signerDID: string; keyHash: string }
@@ -46,6 +47,13 @@ export type CheckpointService = CheckpointPort & {
 }
 
 export type CheckpointRecord =
+  | {
+      kind: 'superseded-rejoin'
+      id: string
+      key: GroupKey
+      record: CapturedRejoinRecord
+      authorisation: ForkRecoveryAuthorisation
+    }
   | {
       kind: 'condition'
       id: string

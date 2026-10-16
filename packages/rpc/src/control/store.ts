@@ -9,6 +9,7 @@ import {
 import {
   type AcceptedRejoinSettlement,
   copyRecoveryOrigin,
+  type ForkRecoveryAttempt,
   raiseRecoveryEpochFloor,
 } from '../recovery-types.js'
 import type { ForkHalt, RecoveryUnavailableEvent } from './safety.js'
@@ -64,8 +65,8 @@ function cumulativeSettlements(
     const key = JSON.stringify([origin.sourceKey.groupID, origin.sourceKey.incarnation])
     rows.set(key, {
       id: row.id,
-      ...(row.kind === 'not-accepted'
-        ? { kind: 'not-accepted' as const, epoch: row.epoch }
+      ...(row.kind === 'not-accepted' || row.kind === 'superseded-branch'
+        ? { kind: row.kind, epoch: row.epoch }
         : {
             kind: 'accepted-unadoptable' as const,
             digest: row.digest,
@@ -300,7 +301,48 @@ export function applyChanges(
   changes: ControlChanges,
   context: CommitOnceWriteContext | null = null,
   key: GroupKey | null = null,
+  forkRecovery?: { attempt: ForkRecoveryAttempt | null; supersededID?: string },
 ): ControlSnapshot {
+  if ('forkRecoveryAttempt' in changes)
+    throw new ControlStoreInvariantError('Fork recovery intent requires coordinator authority')
+  if (
+    changes.putSettledRejoins?.some(
+      (row) => row.kind === 'superseded-branch' && row.id !== forkRecovery?.supersededID,
+    )
+  )
+    throw new ControlStoreInvariantError('Branch settlement requires coordinator authority')
+  const intent = snapshot.forkRecoveryAttempt ?? null
+  if (
+    changes.putRejoin !== undefined &&
+    'format' in changes.putRejoin &&
+    changes.putRejoin.forkRecovery !== undefined
+  ) {
+    const record = changes.putRejoin
+    const authority = record.forkRecovery
+    if (
+      intent === null ||
+      record.id !== intent.id ||
+      !sameValue(record.source.key, intent.source) ||
+      !sameValue(authority, intent.forkRecovery)
+    )
+      throw new ControlStoreInvariantError('Fork recovery record requires its bound intent')
+  }
+  if (
+    intent !== null &&
+    changes.putRejoin !== undefined &&
+    forkRecovery === undefined &&
+    (!('format' in changes.putRejoin) ||
+      changes.putRejoin.id !== intent.id ||
+      !sameValue(changes.putRejoin.forkRecovery, intent.forkRecovery))
+  )
+    throw new ControlStoreInvariantError('Fork recovery record requires its bound intent')
+  if (
+    intent !== null &&
+    changes.deleteRejoin &&
+    snapshot.rejoin?.id === intent.id &&
+    forkRecovery === undefined
+  )
+    throw new ControlStoreInvariantError('Fork recovery settlement requires coordinator authority')
   const safety: Pick<ControlChanges, 'forkHalt' | 'recoveryUnavailable'> = {}
   const fields = ['forkHalt', 'recoveryUnavailable'] as const
   if ('forkHalt' in changes) {
@@ -368,6 +410,7 @@ export function applyChanges(
       changes.putOperations,
       (row) => row.id,
     ).sort((a, b) => a.seq - b.seq),
+    forkRecoveryAttempt: forkRecovery === undefined ? intent : forkRecovery.attempt,
     rejoin: changes.putRejoin ?? (changes.deleteRejoin ? null : snapshot.rejoin),
     recoveryEpochFloor:
       changes.recoveryEpochFloor == null

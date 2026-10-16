@@ -79,6 +79,7 @@ function emptyRecord(): GroupRecord {
       operations: [],
       rejoin: null,
       recoveryEpochFloor: null,
+      forkRecoveryAttempt: null,
       settledRejoins: [],
       outcomes: [],
       welcomes: [],
@@ -138,7 +139,10 @@ export function createMemoryHostDatabase(
         get key() {
           return { ...fixedKey }
         },
-        load: async () => structuredClone(read(storageID).control),
+        load: async () => ({
+          ...structuredClone(read(storageID).control),
+          forkRecoveryAttempt: structuredClone(read(storageID).control.forkRecoveryAttempt ?? null),
+        }),
         lastMutation: async () => read(storageID).mutationID,
         apply: async (changes, mutationID) => {
           const { forkHalt, recoveryUnavailable, ...ordinary } = changes

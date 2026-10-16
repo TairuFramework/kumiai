@@ -140,7 +140,15 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
           return value
         }
         try {
-          return await fn({ ...(await refresh()), refresh, loadControl })
+          return await fn({
+            ...(await refresh()),
+            refresh,
+            loadControl,
+            loadCheckpoints: () => {
+              if (!active) throw new Error('Control read scope has ended')
+              return reads.checkpoints()
+            },
+          })
         } finally {
           active = false
         }

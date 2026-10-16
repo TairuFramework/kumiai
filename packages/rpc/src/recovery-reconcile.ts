@@ -15,7 +15,7 @@ export async function settleRecovery(params: {
     | { kind: 'not-accepted'; epoch: number }
     | { kind: 'accepted-unadoptable'; epoch: number; leafDigest: string }
   mutationID: string
-  recoveryEpochFloor?: number
+  recoveryEpochFloor?: number | null
   signal?: AbortSignal
 }): Promise<void> {
   const { control, record, provenance } = params
@@ -49,7 +49,8 @@ export async function settleRecovery(params: {
     {
       putSettledRejoins: [settlement],
       deleteRejoin: true,
-      recoveryEpochFloor: params.recoveryEpochFloor ?? provenance.epoch,
+      recoveryEpochFloor:
+        params.recoveryEpochFloor === undefined ? provenance.epoch : params.recoveryEpochFloor,
     },
     params.mutationID,
     undefined,

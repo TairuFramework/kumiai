@@ -35,15 +35,20 @@ import type {
   AdoptionWriteFactory,
   AppliedRecovery,
   AuthenticatedRosterAbsence,
+  CapturedRecapture,
   CapturedRecoveryPort,
+  CapturedRejoinRecord,
   CommitContext,
   CommitHeader,
   ControlStore,
+  ForkRecoveryAttempt,
+  ForkRecoveryAuthorisation,
   GroupMLS,
   LogPosition,
   OpenedRecoveryVerdict,
   ProcessCommitResult,
   RecoveryConfirmationBinding,
+  RecoveryReconciliation,
   RecoveryRefusalReason,
   RecoveryVerdict,
   ResyncProof,
@@ -54,9 +59,10 @@ import {
   ControlWriteNotCommittedError,
   controlSafetyHeld,
   GroupSafetyHeldError,
+  RecoveryTargetBehindError,
   StorageOutcomeUnknownError,
 } from '@kumiai/rpc'
-import { ciphersuites } from 'ts-mls'
+import { ciphersuites, decode, mlsMessageDecoder, wireformats } from 'ts-mls'
 
 import type { ControlHandleAccess } from './access.js'
 import { applyCommit } from './apply-commit.js'
@@ -64,6 +70,7 @@ import { validateRecoveryCommit } from './control-validation.js'
 import { GroupUnavailableError } from './persistence-errors.js'
 import type { GroupRecoveryTrust } from './persistence-types.js'
 import {
+  authenticateRecoveryReply,
   type BoundRecoveryCommit,
   buildRecoveryCandidate,
   createRecoveryBindingState,
@@ -79,7 +86,11 @@ import {
   restoreRecoveryCandidate,
   verifyRosterAbsence,
 } from './recovery.js'
-import { decodeRecoveryCandidate, encodeRecoveryCandidate } from './recovery-codec.js'
+import {
+  decodeCapturedRecoveryCandidate,
+  decodeRecoveryCandidate,
+  encodeRecoveryCandidate,
+} from './recovery-codec.js'
 import type { RegistryRecoverySource } from './registry/types.js'
 import type { RecoveryEnvironment } from './registry/validation.js'
 
@@ -161,6 +172,22 @@ export type RecoveryAdoptionDependencies = {
 }
 
 export type GroupMLSDependencies = {
+  settleForkRecoveryCapture?: (params: {
+    record: CapturedRejoinRecord
+    reply: CapturedRecapture
+  }) => Promise<RecoveryReconciliation>
+  authoriseForkRecovery?: (
+    reply: CapturedRecapture,
+    noticeID: string,
+  ) => Promise<ForkRecoveryAuthorisation | null>
+  readInstalledRecoveryLineage?: (params: {
+    comparisonEpoch: number
+    throughEpoch: number
+  }) => Promise<Array<Uint8Array>>
+  checkForkRecoveryCapture?: (params: {
+    attempt: ForkRecoveryAttempt
+    reply: CapturedRecapture
+  }) => Promise<boolean>
   control: ControlStore
   readRecoverySource(): Promise<AdoptionExpected>
   recoveryAdoption?: RecoveryAdoptionDependencies
@@ -318,6 +345,8 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       captured === undefined || capturedEnvironment === undefined
         ? undefined
         : {
+            authoriseForkRecovery: async (reply, noticeID) =>
+              (await params.authoriseForkRecovery?.(reply, noticeID)) ?? null,
             async checkRosterAbsence(
               evidence,
               requestID,
@@ -336,9 +365,45 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
               return (await registryRosterSealers.get(access)?.(request, captureHead)) ?? null
             },
             async applyRecovery(sealed, requestID, requestKey) {
-              if (controlSafetyHeld(await params.control.load()) !== null) return null
+              const snapshot = await params.control.load()
+              if (controlSafetyHeld(snapshot) !== null) return null
+              const source = await captured.readRecoverySource()
+              if (snapshot.forkRecoveryAttempt == null) {
+                const verified = await authenticateRecoveryReply({
+                  trust: source.trust,
+                  sealed,
+                  requestID,
+                  requestKey,
+                  options: capturedEnvironment.options,
+                })
+                if (verified === null) return null
+                const info = decode(mlsMessageDecoder, verified.groupInfo)
+                if (info?.wireformat !== wireformats.mls_group_info) return null
+                const epoch = Number(info.groupInfo.groupContext.epoch)
+                const floor = Math.max(
+                  snapshot.recoveryEpochFloor ?? 0,
+                  source.identity?.epoch ?? 0,
+                )
+                if (
+                  epoch < floor ||
+                  (source.identity !== null &&
+                    epoch === source.identity.epoch &&
+                    !verified.groupInfoAuthenticator.every(
+                      (byte, index) => byte === source.identity?.authenticator[index],
+                    ))
+                )
+                  return null
+              }
+              if (
+                snapshot.forkRecoveryAttempt != null &&
+                !(await params.checkForkRecoveryCapture?.({
+                  attempt: snapshot.forkRecoveryAttempt,
+                  reply: { sealed, requestID, requestKey, epochFloor: snapshot.recoveryEpochFloor },
+                }))
+              )
+                return null
               return await buildRecoveryCandidate({
-                source: await captured.readRecoverySource(),
+                source,
                 sealed,
                 requestID,
                 requestKey,
@@ -347,6 +412,28 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
               })
             },
             async restoreRecovery(candidate, requestKey) {
+              const control = await params.control.load()
+              const saved = control.rejoin
+              const attempt = control.forkRecoveryAttempt
+              if (
+                attempt != null ||
+                (saved !== null && 'format' in saved && saved.forkRecovery !== undefined)
+              ) {
+                const snapshot = decodeCapturedRecoveryCandidate(candidate, requestKey)
+                if (
+                  attempt == null ||
+                  !(await params.checkForkRecoveryCapture?.({
+                    attempt,
+                    reply: {
+                      sealed: snapshot.attestedReply,
+                      requestID: snapshot.requestID,
+                      requestKey,
+                      epochFloor: control.recoveryEpochFloor,
+                    },
+                  }))
+                )
+                  throw new RecoveryTargetBehindError('Fork recovery capture is target-behind')
+              }
               return await restoreRecoveryCandidate({
                 source: await captured.readRecoverySource(),
                 candidate,
@@ -356,11 +443,41 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
             },
             async reconcileCapture(record, reply) {
               try {
-                if (controlSafetyHeld(await params.control.load()) !== null) return { kind: 'held' }
+                const control = await params.control.load()
+                if (controlSafetyHeld(control) !== null) return { kind: 'held' }
+                const intent = control.forkRecoveryAttempt
+                const superseded =
+                  record.forkRecovery === undefined &&
+                  intent != null &&
+                  control.settledRejoins.some(
+                    (row) => row.id === record.id && row.kind === 'superseded-branch',
+                  ) &&
+                  (await params.checkForkRecoveryCapture?.({ attempt: intent, reply }))
+
+                if (
+                  record.forkRecovery !== undefined &&
+                  !(await params.checkForkRecoveryCapture?.({
+                    attempt: {
+                      id: record.id,
+                      source: record.source.key,
+                      forkRecovery: record.forkRecovery,
+                    },
+                    reply,
+                  }))
+                )
+                  return { kind: 'retry', reason: 'target-behind' }
+                if (
+                  record.forkRecovery !== undefined &&
+                  params.settleForkRecoveryCapture !== undefined
+                )
+                  return await params.settleForkRecoveryCapture({ record, reply })
                 return await reconcileRecoveryCapture({
                   source: await captured.readRecoverySource(),
                   target: captured.target,
                   record,
+                  ...(superseded && intent != null
+                    ? { forkAuthorisation: intent.forkRecovery }
+                    : {}),
                   reply,
                   environment: capturedEnvironment,
                 })
@@ -628,6 +745,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       captureHead?: LogPosition | null,
     ): Promise<Uint8Array> {
       if (captureHead !== undefined) {
+        const verifiedRequest = await verifyRecoveryRequest(new TextDecoder().decode(request))
         const snapshot = await access.readControl(async (scope) => {
           const control = await scope.loadControl(params.control)
           const safety = controlSafetyHeld(control)
@@ -643,6 +761,14 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           )
             throw new Error('Capture head does not match a complete committed cursor')
           return {
+            lineage:
+              verifiedRequest.comparisonEpoch === undefined ||
+              params.readInstalledRecoveryLineage === undefined
+                ? undefined
+                : await params.readInstalledRecoveryLineage({
+                    comparisonEpoch: verifiedRequest.comparisonEpoch,
+                    throughEpoch: Number(handle.epoch),
+                  }),
             state: encodeClientState(handle.state),
             credential: { ...handle.credential },
             ledgerEntries: handle.ledgerTokens,
@@ -667,6 +793,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           identity,
           request: new TextDecoder().decode(request),
           captureHead,
+          lineage: snapshot.lineage,
         })
       }
       // Throws for a request this member refuses — a removed requester holds no leaf in

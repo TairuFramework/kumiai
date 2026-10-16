@@ -33,6 +33,7 @@ import {
   type CapturedRejoinRecord,
   copyRecoverySource,
   copyRecoveryTargetCapture,
+  type ForkRecoveryAuthorisation,
   type OpenedRecoveryVerdict,
   type PendingRecovery,
   type RecoveryReconciliation,
@@ -682,6 +683,7 @@ export async function reconcileRecoveryCapture(params: {
   source: RegistryRecoverySource
   target: RecoveryRouting
   record: CapturedRejoinRecord
+  forkAuthorisation?: ForkRecoveryAuthorisation
   reply: CapturedRecapture
   environment: CapturedRecoveryEnvironment
 }): Promise<RecoveryReconciliation> {
@@ -714,6 +716,17 @@ export async function reconcileRecoveryCapture(params: {
   if (!(await verifyOfferedGroupInfo(snapshot.state, info, suite))) return { kind: 'retry' }
   const epoch = Number(info.groupInfo.groupContext.epoch)
   if (!Number.isSafeInteger(epoch)) return { kind: 'retry' }
+  if (params.forkAuthorisation !== undefined) {
+    const authorisation = params.forkAuthorisation
+    if (
+      authorisation.attemptID === record.id ||
+      authorisation.source.groupID !== source.key.groupID ||
+      authorisation.source.incarnation !== source.key.incarnation ||
+      epoch < authorisation.splitEpoch
+    )
+      return { kind: 'retry', reason: 'target-behind' }
+    return { kind: 'superseded-branch', epoch: authorisation.splitEpoch, authorisation }
+  }
   if (
     epoch < record.target.groupInfoEpoch ||
     (reply.epochFloor !== null && epoch < reply.epochFloor)

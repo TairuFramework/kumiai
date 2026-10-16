@@ -3,8 +3,10 @@ import {
   APP_TOPIC_LABEL,
   type ControlSnapshot,
   controlSafetyHeld,
+  effectiveRecoveryEpochFloor,
   type GroupKey,
   isHardControlHold,
+  RecoveryTargetBehindError,
   type SafetyHold,
   type StoredRejoinRecord,
 } from '@kumiai/rpc'
@@ -20,8 +22,10 @@ import {
   StorageOutcomeUnknownError,
 } from '../persistence-errors.js'
 import type { GroupPersistence, GroupTransaction } from '../persistence-types.js'
+import { decodeCapturedRecoveryCandidate } from '../recovery-codec.js'
 import { recoveryTrustDigest } from '../recovery-trust-digest.js'
 import { clearGroupCondition } from '../safety-conditions.js'
+import { checkForkRecoveryCaptureInReads } from './recovery-coordinator.js'
 import { retireIncarnation } from './retired.js'
 import type { RegistryRetirement } from './retirement.js'
 import { readRecoverySource } from './source.js'
@@ -187,6 +191,37 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
             (await reads.control(source.key.incarnation)).rejoin,
             rejoinID,
           )
+          if ('format' in record) {
+            const snapshot = await reads.control(source.key.incarnation)
+            const floor = effectiveRecoveryEpochFloor(snapshot, {
+              id: record.id,
+              source: source.key,
+            })
+            if (record.forkRecovery !== undefined) {
+              const attempt = snapshot.forkRecoveryAttempt
+              const captured = decodeCapturedRecoveryCandidate(record.candidate, record.requestKey)
+              if (
+                attempt == null ||
+                attempt.id !== record.id ||
+                !sameStoredValue(attempt.forkRecovery, record.forkRecovery) ||
+                !(await checkForkRecoveryCaptureInReads(
+                  reads,
+                  attempt,
+                  {
+                    sealed: captured.attestedReply,
+                    requestID: captured.requestID,
+                    requestKey: record.requestKey,
+                    epochFloor: floor,
+                  },
+                  environment.recovery,
+                ))
+              )
+                throw new RecoveryTargetBehindError('Fork recovery capture is target-behind')
+            } else if (
+              record.target.groupInfoEpoch < Math.max(floor ?? 0, current.identity?.epoch ?? 0)
+            )
+              throw new RecoveryTargetBehindError('Recovery capture is target-behind')
+          }
           if ('format' in record && record.switchMutationID !== write.mutationID)
             throw new RegistryResyncRefusedError({ reason: 'tuple' })
           await verifyRegistryResync({ source: current, candidate, record, proof })
@@ -231,6 +266,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
             },
             value: {
               current,
+              recoveryEpochFloor: (await reads.control(source.key.incarnation)).recoveryEpochFloor,
               lifetime,
               record,
               state,
@@ -312,7 +348,10 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
               accepted: false,
               nextHeartbeatAt: null,
             })
-          await rows.control.apply({ cursor }, write.mutationID)
+          await rows.control.apply(
+            { cursor, recoveryEpochFloor: prepared.recoveryEpochFloor },
+            write.mutationID,
+          )
           await rows.anchor.save(prepared.anchor)
           return destination
         },

@@ -28,7 +28,10 @@ import type {
 } from './persistence-fixture.js'
 import type { ConformanceGroupSafety } from './safety.js'
 
-export type ConformanceRecoveryPendingReason = 'no-reply' | 'no-eligible-responder'
+export type ConformanceRecoveryPendingReason =
+  | 'no-reply'
+  | 'no-eligible-responder'
+  | 'target-behind'
 export type ConformanceRegistryPeerStatus =
   | { kind: 'starting' | 'running' | 'switching' | 'disposed' }
   | { kind: 'pending'; reason?: ConformanceRecoveryPendingReason }

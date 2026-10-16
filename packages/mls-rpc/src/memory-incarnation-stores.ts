@@ -175,6 +175,7 @@ const emptyControl = (): ControlSnapshot => ({
   strand: null,
   operations: [],
   rejoin: null,
+  forkRecoveryAttempt: null,
   recoveryEpochFloor: null,
   settledRejoins: [],
   outcomes: [],
@@ -330,6 +331,7 @@ export function createUnlockedIncarnationStores(params: {
         const snapshot = (await control.load('current'))?.snapshot ?? emptyControl()
         return {
           ...snapshot,
+          forkRecoveryAttempt: snapshot.forkRecoveryAttempt ?? null,
           recoveryEpochFloor: snapshot.recoveryEpochFloor ?? null,
           settledRejoins: snapshot.settledRejoins ?? [],
         }
@@ -372,7 +374,13 @@ export function createUnlockedIncarnationStores(params: {
           !(slotOnly && context?.kind === 'retirement' && sameStoredValue(context.key, key))
         )
           await active()
-        const snapshot = applyChanges(previous, owned, context, key)
+        const snapshot = applyChanges(
+          previous,
+          owned,
+          context,
+          key,
+          completing ? completion.forkRecovery : undefined,
+        )
         if (previous.forkHalt === null && snapshot.forkHalt !== null)
           await putEvent({
             ...key,
@@ -512,6 +520,7 @@ export function createUnlockedIncarnationStores(params: {
             forkHalt: previous.snapshot.forkHalt,
             recoveryUnavailable: previous.snapshot.recoveryUnavailable,
             strand: previous.snapshot.strand,
+            forkRecoveryAttempt: previous.snapshot.forkRecoveryAttempt ?? null,
             recoveryEpochFloor: previous.snapshot.recoveryEpochFloor ?? null,
             settledRejoins: previous.snapshot.settledRejoins ?? [],
             outcomes: previous.snapshot.outcomes,

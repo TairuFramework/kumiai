@@ -1,3 +1,5 @@
+export { effectiveRecoveryEpochFloor } from './control/rejoin.js'
+export { RecoveryTargetBehindError } from './errors.js'
 /**
  * High-level MLS-aware group RPC for Enkaku.
  *
@@ -266,6 +268,8 @@ export {
   copyRecoveryOrigin,
   copyRecoverySource,
   copyRecoveryTargetCapture,
+  type ForkRecoveryAttempt,
+  type ForkRecoveryAuthorisation,
   type RecoveryCompletion,
   type RecoveryContinuation,
   type RecoveryContinuationPort,

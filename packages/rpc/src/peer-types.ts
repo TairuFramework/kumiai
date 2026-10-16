@@ -88,7 +88,7 @@ export type GroupPeerMLSParams = {
     record: CapturedRejoinRecord,
     acceptedEpoch: number,
     leafDigest: string,
-    recoveryEpochFloor?: number,
+    recoveryEpochFloor: number | null,
   ) => Promise<void>
   reconcileAcceptedRecovery?: (
     record: CapturedRejoinRecord,
@@ -193,7 +193,7 @@ export type RecoveryEvent =
 
 /** What a failed recovery learned from its responders, when it learned anything. */
 export type RecoveryFailureDetails = {
-  pendingReason?: 'no-reply' | 'no-eligible-responder'
+  pendingReason?: 'no-reply' | 'no-eligible-responder' | 'target-behind'
   refusal?: RecoveryRefusalReason
   responder?: string
   advisory?: Array<OpenedRecoveryVerdict>

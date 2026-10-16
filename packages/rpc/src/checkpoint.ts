@@ -22,6 +22,10 @@ export const checkpointServiceHostMembers = {
 export function copyCheckpointValue<TValue>(value: TValue): TValue {
   if (value instanceof Uint8Array) return Uint8Array.from(value) as TValue
   if (Array.isArray(value)) return value.map(copyCheckpointValue) as TValue
+  if (value instanceof Map)
+    return new Map(
+      [...value].map(([key, child]) => [copyCheckpointValue(key), copyCheckpointValue(child)]),
+    ) as TValue
   if (value !== null && typeof value === 'object')
     return Object.fromEntries(
       Object.entries(value).map(([key, child]) => [key, copyCheckpointValue(child)]),

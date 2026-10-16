@@ -5,6 +5,7 @@ import {
   type ConformanceMLSMember,
   testAnchorStoreConformance,
   testAppOutboxConformance,
+  testForkRecoveryConformance,
   testGroupCryptoConformance,
   testGroupMLSConformance,
   testPendingGroupCryptoConformance,
@@ -24,7 +25,10 @@ import {
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
-import { createCapturedMemoryRecovery } from './fixtures/memory-captured-recovery.js'
+import {
+  createCapturedMemoryRecovery,
+  createForkRecoveryMemoryFixture,
+} from './fixtures/memory-captured-recovery.js'
 import {
   createMemoryGroupMLS,
   encodeMemoryCommit,
@@ -452,4 +456,9 @@ test('a failed bootstrap save leaves the live and durable ledger incomplete unti
   expect(await restarted.isLedgerComplete()).toBe(true)
   expect(await restarted.getLedger()).toEqual(['persisted-ledger'])
   expect(await restarted.readRecoverySource()).toEqual(await requester.readRecoverySource())
+})
+
+testForkRecoveryConformance({
+  label: 'independent memory double',
+  createFixture: createForkRecoveryMemoryFixture,
 })

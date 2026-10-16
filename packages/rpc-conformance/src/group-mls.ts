@@ -1,3 +1,4 @@
+import type { ConformanceCheckpointRecord } from './checkpoint.js'
 /**
  * Conformance suite for the `GroupMLS` consumer port of `@kumiai/rpc`.
  *
@@ -22,6 +23,7 @@ import type {
   ConformanceBuiltCommit,
   ConformanceCapturedRejoinRecord,
   ConformanceControlSnapshot,
+  ConformanceForkRecoveryAuthorisation,
   ConformanceGroupKey,
   ConformanceRecoverySource,
   ConformanceRecoveryTargetCapture,
@@ -2009,6 +2011,11 @@ export type ConformanceCapturedRecapture = {
   epochFloor: number | null
 }
 export type ConformanceRecoveryReconciliation<Position extends string = string> =
+  | {
+      kind: 'superseded-branch'
+      epoch: number
+      authorisation: ConformanceForkRecoveryAuthorisation
+    }
   | { kind: 'accepted'; epoch: number; leafDigest: string }
   | { kind: 'head-only'; head: Position | null }
   | { kind: 'unapplied-later'; epoch: number; leafDigest: string }
@@ -2044,6 +2051,10 @@ export type ConformanceAuthenticatedRosterAbsence = {
   evidence: Uint8Array
 }
 export type ConformanceCapturedRecoveryPort<Position extends string = string> = {
+  authoriseForkRecovery?(
+    reply: ConformanceCapturedRecapture,
+    noticeID: string,
+  ): Promise<ConformanceForkRecoveryAuthorisation | null>
   applyRecovery(
     sealed: Uint8Array,
     requestID: string,
@@ -2092,4 +2103,258 @@ export type ConformanceRecoveryContinuationPort<Position extends string = string
 function sourceIdentity(source: ConformanceAdoptionExpected) {
   if (source.identity === null) throw new Error('Missing fixture source identity')
   return source.identity
+}
+
+export type ForkRecoveryFixture = {
+  key: ConformanceGroupKey
+  noticeID: string
+  requester(): ConformanceGroupMLS
+  snapshot(): Promise<ConformanceControlSnapshot>
+  service(): { readRecords(): Promise<Array<ConformanceCheckpointRecord>> }
+  builds(): number
+  ordinaryWrite(kind: 'delete' | 'unrelated' | 'wrong-source'): Promise<void>
+  reply(
+    epoch?: number,
+    branch?: 'own' | 'other',
+    legacy?: boolean,
+  ): Promise<ConformanceCapturedRecapture & { request: Uint8Array }>
+  saveX(
+    stage?: 'built' | 'published' | 'confirmed' | 'adopted',
+  ): Promise<ConformanceCapturedRejoinRecord>
+  build(
+    authority: ConformanceForkRecoveryAuthorisation,
+    reply: ConformanceCapturedRecapture & { request: Uint8Array },
+  ): Promise<{ record: ConformanceCapturedRejoinRecord } | null>
+  restart(): Promise<void>
+  close(): Promise<void>
+}
+
+export function testForkRecoveryConformance(params: {
+  label: string
+  createFixture(): Promise<ForkRecoveryFixture>
+}): void {
+  describe(`bound fork recovery / ${params.label}`, () => {
+    async function run(fn: (fixture: ForkRecoveryFixture) => Promise<void>) {
+      const fixture = await params.createFixture()
+      try {
+        await fn(fixture)
+      } finally {
+        await fixture.close()
+      }
+    }
+    test.each(['built', 'published', 'confirmed', 'adopted'] as const)(
+      'every saved X stage settles superseded branch before fresh Y: %s',
+      (stage) =>
+        run(async (f) => {
+          const exactX = await f.saveX(stage)
+          const before = await f.snapshot()
+          const capture = await f.reply()
+          const port = f.requester().capturedRecovery
+          expect(typeof port?.authoriseForkRecovery).toBe('function')
+          const authority = await port?.authoriseForkRecovery?.(capture, f.noticeID)
+          if (authority == null) throw new Error('Missing branch authority')
+          const after = await f.snapshot()
+          expect(after.recoveryEpochFloor).toBe(before.recoveryEpochFloor)
+          expect(after.rejoin).toBeNull()
+          expect(after.forkRecoveryAttempt).toMatchObject({
+            id: authority.attemptID,
+            source: f.key,
+            forkRecovery: authority,
+          })
+          expect(after.settledRejoins).toContainEqual(
+            expect.objectContaining({
+              kind: 'superseded-branch',
+              epoch: 10,
+              ledgerBefore: exactX.ledgerBefore,
+            }),
+          )
+          const history = (await f.service().readRecords()).find(
+            (row) => row.kind === 'superseded-rejoin',
+          )
+          if (history?.kind !== 'superseded-rejoin') throw new Error('Missing exact saved history')
+          expect(history.record).toEqual(exactX)
+          exactX.requestKey.fill(0)
+          exactX.candidate.fill(0)
+          await f.restart()
+          expect((await f.snapshot()).forkRecoveryAttempt).toEqual(after.forkRecoveryAttempt)
+          const reopened = (await f.service().readRecords()).find(
+            (row) => row.kind === 'superseded-rejoin',
+          )
+          expect(reopened).toEqual(history)
+          const y = await f.build(authority, await f.reply())
+          expect(y?.record.id).toBe(authority.attemptID)
+          expect((await f.snapshot()).recoveryEpochFloor).toBe(20)
+        }),
+    )
+    test('ahead device without X requires bound branch reply', () =>
+      run(async (f) => {
+        const before = await f.snapshot()
+        const port = f.requester().capturedRecovery
+        expect(await port?.authoriseForkRecovery?.(await f.reply(12, 'own'), f.noticeID)).toBeNull()
+        expect(await f.snapshot()).toEqual(before)
+        expect(await port?.authoriseForkRecovery?.(await f.reply(), f.noticeID)).toMatchObject({
+          splitEpoch: 10,
+        })
+        expect((await f.snapshot()).settledRejoins).toEqual([])
+        expect((await f.snapshot()).recoveryEpochFloor).toBe(before.recoveryEpochFloor)
+      }))
+    test.each([false, true])(
+      'retry after settlement cannot accept own lineage capture above E after restart before Y: %s',
+      (restart) =>
+        run(async (f) => {
+          await f.saveX()
+          const authority = await f
+            .requester()
+            .capturedRecovery?.authoriseForkRecovery?.(await f.reply(), f.noticeID)
+          if (authority == null) throw new Error('Missing branch authority')
+          const before = await f.snapshot()
+          if (restart) await f.restart()
+          expect(await f.build(authority, await f.reply(13, 'own'))).toBeNull()
+          expect(await f.snapshot()).toEqual(before)
+          expect(f.builds()).toBe(0)
+        }),
+    )
+    test('v2 or missing real authority preserves X and ordinary floor', () =>
+      run(async (f) => {
+        await f.saveX()
+        const before = await f.snapshot()
+        expect(
+          await f
+            .requester()
+            .capturedRecovery?.authoriseForkRecovery?.(
+              await f.reply(12, 'other', true),
+              f.noticeID,
+            ),
+        ).toBeNull()
+        expect(await f.snapshot()).toEqual(before)
+      }))
+    test('own-lineage stale capture refused by transcript hash', () =>
+      run(async (f) => {
+        await f.saveX()
+        const before = await f.snapshot()
+        expect(
+          await f
+            .requester()
+            .capturedRecovery?.authoriseForkRecovery?.(await f.reply(12, 'own'), f.noticeID),
+        ).toBeNull()
+        expect(await f.snapshot()).toEqual(before)
+        expect(f.builds()).toBe(0)
+      }))
+    test('saved v2 X restores after lineage reply activation', () =>
+      run(async (f) => {
+        const record = await f.saveX()
+        const before = await f.snapshot()
+        const restored = await f
+          .requester()
+          .capturedRecovery?.restoreRecovery(record.candidate, record.requestKey)
+        expect(restored?.target).toEqual(record.target)
+        expect(restored?.source).toEqual(record.source)
+        expect(await f.snapshot()).toEqual(before)
+      }))
+    test('two member fork recovery needs no distinct witness DID', () =>
+      run(async (f) => {
+        expect(
+          await f
+            .requester()
+            .capturedRecovery?.authoriseForkRecovery?.(await f.reply(), f.noticeID),
+        ).toMatchObject({ splitEpoch: 10 })
+      }))
+    test('offered head above newest retained fact needs valid E lineage', () =>
+      run(async (f) => {
+        await f.saveX()
+        expect(
+          await f
+            .requester()
+            .capturedRecovery?.authoriseForkRecovery?.(await f.reply(21), f.noticeID),
+        ).toMatchObject({ splitEpoch: 10 })
+      }))
+    test('equal-number different authenticator capture gets a fresh bound Y', () =>
+      run(async (f) => {
+        const record = await f.saveX()
+        const capture = await f.reply(20)
+        const authority = await f
+          .requester()
+          .capturedRecovery?.authoriseForkRecovery?.(capture, f.noticeID)
+        if (authority == null) throw new Error('Missing equal-epoch branch authority')
+        const y = await f.build(authority, capture)
+        expect(y?.record.id).not.toBe(record.id)
+        expect(y?.record.target.groupInfoEpoch).toBe(20)
+        expect(y?.record.target.groupInfoAuthenticator).not.toEqual(
+          record.target.groupInfoAuthenticator,
+        )
+      }))
+    test('retry after settlement cannot accept own lineage capture above E with Y built', () =>
+      run(async (f) => {
+        await f.saveX()
+        const authority = await f
+          .requester()
+          .capturedRecovery?.authoriseForkRecovery?.(await f.reply(), f.noticeID)
+        if (authority == null) throw new Error('Missing authority')
+        const y = await f.build(authority, await f.reply())
+        if (y === null) throw new Error('Missing Y')
+        const before = await f.snapshot()
+        expect(
+          await f
+            .requester()
+            .capturedRecovery?.reconcileCapture(y.record, await f.reply(13, 'own')),
+        ).toEqual({ kind: 'retry', reason: 'target-behind' })
+        expect(await f.snapshot()).toEqual(before)
+      }))
+    test('capture below split stays target behind', () =>
+      run(async (f) => {
+        await f.saveX()
+        const before = await f.snapshot()
+        expect(
+          await f
+            .requester()
+            .capturedRecovery?.authoriseForkRecovery?.(await f.reply(9), f.noticeID),
+        ).toBeNull()
+        expect(await f.snapshot()).toEqual(before)
+      }))
+    test('Y recapture settlement preserves ordinary floor and removes its exception', () =>
+      run(async (f) => {
+        await f.saveX()
+        const authority = await f
+          .requester()
+          .capturedRecovery?.authoriseForkRecovery?.(await f.reply(), f.noticeID)
+        if (authority == null) throw new Error('Missing authority')
+        const y = await f.build(authority, await f.reply())
+        if (y === null) throw new Error('Missing bound Y')
+        const result = await f
+          .requester()
+          .capturedRecovery?.reconcileCapture(y.record, await f.reply(13))
+        expect(result).toMatchObject({ kind: 'unapplied-later', epoch: 13 })
+        const after = await f.snapshot()
+        expect(after.recoveryEpochFloor).toBe(20)
+        expect(after.forkRecoveryAttempt).toBeNull()
+        expect(after.rejoin).toBeNull()
+        expect(after.settledRejoins[0]?.ledgerBefore).toEqual(['owed-X', 'shared'])
+      }))
+    test.each(['delete', 'unrelated', 'wrong-source'] as const)(
+      'ordinary writes cannot detach a bound Y: %s',
+      (kind) =>
+        run(async (f) => {
+          await f.saveX()
+          const capture = await f.reply()
+          const authority = await f
+            .requester()
+            .capturedRecovery?.authoriseForkRecovery?.(capture, f.noticeID)
+          if (authority == null) throw new Error('Missing authority')
+          expect(await f.build(authority, capture)).not.toBeNull()
+          const before = await f.snapshot()
+          await expect(f.ordinaryWrite(kind)).rejects.toThrow()
+          expect(await f.snapshot()).toEqual(before)
+        }),
+    )
+    test('existing Y intent makes authorisation idempotent', () =>
+      run(async (f) => {
+        await f.saveX()
+        const port = f.requester().capturedRecovery
+        const first = await port?.authoriseForkRecovery?.(await f.reply(), f.noticeID)
+        expect(first).not.toBeNull()
+        const before = await f.snapshot()
+        expect(await port?.authoriseForkRecovery?.(await f.reply(), f.noticeID)).toEqual(first)
+        expect(await f.snapshot()).toEqual(before)
+      }))
+  })
 }

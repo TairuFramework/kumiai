@@ -78,6 +78,8 @@ export {
   type ConformanceExternalResponse,
   type ConformanceFirstValidCommit,
   type ConformanceForkHalt,
+  type ConformanceForkRecoveryAttempt,
+  type ConformanceForkRecoveryAuthorisation,
   type ConformanceGroupCondition,
   type ConformanceGroupConditionEvent,
   type ConformanceGroupForkEvidence,
@@ -141,7 +143,9 @@ export {
   type ConformanceRecoveryContinuation,
   type ConformanceRecoveryContinuationPort,
   type ConformanceRecoveryReconciliation,
+  type ForkRecoveryFixture,
   type GroupMLSConformanceParams,
+  testForkRecoveryConformance,
   testGroupMLSConformance,
 } from './group-mls.js'
 export {

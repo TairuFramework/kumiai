@@ -238,7 +238,7 @@ export type ConformanceGroupStores<
   Position extends string = string,
 > = {
   tx: TTx
-  checkpoints: ConformanceCheckpointStore
+  checkpoints: ConformanceCheckpointStore<Position>
   lifetime: {
     load(): Promise<ConformanceGroupLifetime | null>
     save(value: ConformanceGroupLifetime): Promise<void>
@@ -278,7 +278,7 @@ export type ConformanceAccountedGroupObservation<Position extends string = strin
   terminal: boolean | null
 }
 export type ConformanceEntryReads<Position extends string = string> = {
-  checkpoints(): Promise<Array<ConformanceCheckpointRecord>>
+  checkpoints(): Promise<Array<ConformanceCheckpointRecord<Position>>>
   lifetime(): Promise<ConformanceGroupLifetime | null>
   trust(): Promise<ConformanceGroupRecoveryTrust | null>
   metadata(incarnation: number): Promise<ConformanceStateMetadata | null>

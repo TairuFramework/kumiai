@@ -24,7 +24,7 @@ import {
 } from 'ts-mls'
 
 import { type GroupAnchor, LEDGER_HEAD_EXTENSION_TYPE, readGroupAnchorExtension } from './anchor.js'
-import { checkpointKeyHash } from './checkpoint-codec.js'
+import { checkpointKeyHash, decodeEpochCheckpoint } from './checkpoint-codec.js'
 import { didFromCredential, parseMLSCredentialIdentity } from './credential.js'
 import {
   exportGroupInfo,
@@ -48,6 +48,8 @@ export const RECOVERY_GROUPINFO_TYPE = 'kumiai.recovery-groupinfo'
 /** Legacy handle-based replies remain available during coordinated activation. */
 export const SEALED_GROUP_INFO_VERSION = 1
 export const SEALED_CAPTURED_GROUP_INFO_VERSION = 2
+export const SEALED_LINEAGE_GROUP_INFO_VERSION = 3
+const MAX_RECOVERY_REPLY = 786432
 
 /** The sealed ledger reply shares the frame — `[version][enc][ct]` — and nothing
  *  else: see {@link LEDGER_REPLY}. */
@@ -98,6 +100,13 @@ const CAPTURED_GROUP_INFO_REPLY: SealedReplyKind = {
   hpkeInfo: utf8.encode('kumiai/mls/recovery/v2'),
   aadDomain: utf8.encode('kumiai/mls/recovery-aad/v2'),
   version: SEALED_CAPTURED_GROUP_INFO_VERSION,
+  fail: (reason, message, options) => new SealedGroupInfoError(reason, message, options),
+}
+
+const LINEAGE_GROUP_INFO_REPLY: SealedReplyKind = {
+  hpkeInfo: utf8.encode('kumiai/mls/recovery/v3'),
+  aadDomain: utf8.encode('kumiai/mls/recovery-aad/v3'),
+  version: SEALED_LINEAGE_GROUP_INFO_VERSION,
   fail: (reason, message, options) => new SealedGroupInfoError(reason, message, options),
 }
 
@@ -281,6 +290,7 @@ type ResponderAttestation = {
   requestID: string
   /** Multibase-encoded SHA-256 of the framed GroupInfo bytes. */
   groupInfoDigest: string
+  lineageDigest?: string
   ledgerDigest?: string
   captureHead?: string | null
   groupInfoAuthenticator?: string
@@ -616,10 +626,10 @@ export async function sealGroupInfo(params: SealGroupInfoParams): Promise<Uint8A
 }
 
 export async function sealCapturedGroupInfo(
-  params: SealGroupInfoParams & { captureHead: string | null },
+  params: SealGroupInfoParams & { captureHead: string | null; lineage?: Array<Uint8Array> },
 ): Promise<Uint8Array> {
   if (!isCaptureHead(params.captureHead)) throw new TypeError('Invalid capture head')
-  return sealGroupInfoReply(params, params.captureHead)
+  return sealGroupInfoReply(params, params.captureHead, params.lineage)
 }
 
 function isCaptureHead(value: unknown): value is string | null {
@@ -629,6 +639,7 @@ function isCaptureHead(value: unknown): value is string | null {
 async function sealGroupInfoReply(
   params: SealGroupInfoParams,
   captureHead?: string | null,
+  suppliedLineage?: Array<Uint8Array>,
 ): Promise<Uint8Array> {
   const { group, identity, request } = params
   if (normalizeDID(identity.id) !== normalizeDID(group.credential.id)) {
@@ -638,6 +649,34 @@ async function sealGroupInfoReply(
   }
 
   const verified = await verifyRecoveryRequest(request)
+  let lineage: Uint8Array | undefined
+  if (suppliedLineage !== undefined) {
+    const frames = suppliedLineage.map((frame) => ({
+      frame,
+      body: decodeEpochCheckpoint(frame).body,
+    }))
+    if (
+      frames.length > 256 ||
+      suppliedLineage.reduce((n, frame) => n + frame.length + 4, 4) > MAX_RECOVERY_REPLY
+    )
+      throw new SealedGroupInfoError('malformed', 'Recovery lineage exceeds reply bound')
+    const selected = frames.filter(
+      ({ body }) =>
+        verified.comparisonEpoch !== undefined &&
+        body.epoch >= verified.comparisonEpoch &&
+        body.epoch <= Number(group.epoch),
+    )
+    if (
+      selected.length > 0 &&
+      selected[0]?.body.epoch === verified.comparisonEpoch &&
+      selected.at(-1)?.body.epoch === Number(group.epoch) &&
+      selected.every(({ body }, i) => {
+        const previous = selected[i - 1]
+        return i === 0 || (previous !== undefined && body.epoch === previous.body.epoch + 1)
+      })
+    )
+      lineage = encodeRecoveryCheckpoints(selected.map(({ frame }) => frame))
+  }
   const authenticator =
     captureHead === undefined ? undefined : group.state.keySchedule.epochAuthenticator.slice()
   if (authenticator != null && authenticator.length !== group.context.cipherSuite.kdf.size)
@@ -654,13 +693,16 @@ async function sealGroupInfoReply(
   const { groupInfo } = await exportGroupInfo({ group })
   const ledger =
     group.anchor.controller == null
-      ? undefined
+      ? lineage === undefined
+        ? undefined
+        : new Uint8Array()
       : encodeLedgerTokens(ledgerTokens ?? (await group.getLedger()))
 
   const signed = await identity.signToken<ResponderAttestation>(
     {
       type: RECOVERY_GROUPINFO_TYPE,
       ...capture,
+      ...(lineage === undefined ? {} : { lineageDigest: encodeMultibase(sha256(lineage)) }),
       groupID: verified.groupID,
       requestID: verified.requestID,
       groupInfoDigest: encodeMultibase(sha256(groupInfo)),
@@ -671,9 +713,24 @@ async function sealGroupInfoReply(
     { embedLongForm: true },
   )
 
-  const plaintext = frameAttestedGroupInfo(stringifyToken(signed), groupInfo, ledger)
+  const plaintext =
+    lineage === undefined
+      ? frameAttestedGroupInfo(stringifyToken(signed), groupInfo, ledger)
+      : frameLineageGroupInfo(
+          stringifyToken(signed),
+          groupInfo,
+          ledger ?? new Uint8Array(),
+          lineage,
+        )
+  if (plaintext.length + 49 > MAX_RECOVERY_REPLY)
+    throw new SealedGroupInfoError('malformed', 'Recovery reply exceeds size bound')
   return await sealToRequest({
-    kind: capture == null ? GROUP_INFO_REPLY : CAPTURED_GROUP_INFO_REPLY,
+    kind:
+      capture == null
+        ? GROUP_INFO_REPLY
+        : lineage === undefined
+          ? CAPTURED_GROUP_INFO_REPLY
+          : LINEAGE_GROUP_INFO_REPLY,
     group,
     request,
     plaintext,
@@ -729,6 +786,7 @@ type AssertResponderIsMemberParams = {
  */
 async function assertResponderIsMember(params: AssertResponderIsMemberParams): Promise<{
   signer: string
+  responderKeyHash: string
   capture?: { captureHead: string | null; groupInfoAuthenticator: Uint8Array }
 }> {
   const { attestation, group, requestID, groupInfo, ledger } = params
@@ -810,7 +868,21 @@ async function assertResponderIsMember(params: AssertResponderIsMemberParams): P
       "responder holds no leaf in the requester's last-known ratchet tree",
     )
   }
-  return { signer: normalizeDID(iss), capture }
+  if (params.captured) {
+    const eligibleKey = group.signerTree.some(
+      (node) =>
+        node?.nodeType === 1 &&
+        didFromCredential(node.leaf.credential) === normalizeDID(iss) &&
+        bytesEqual(node.leaf.signaturePublicKey, verified.verifiedPublicKey),
+    )
+    if (!eligibleKey)
+      throw new SealedGroupInfoError('unauthenticated', 'Recovery key differs from retained signer')
+  }
+  return {
+    signer: normalizeDID(iss),
+    responderKeyHash: checkpointKeyHash(verified.verifiedPublicKey),
+    capture,
+  }
 }
 
 /**
@@ -870,6 +942,9 @@ export type CapturedRecoveryGroupInfo = Omit<
 > & {
   captureHead: string | null
   groupInfoAuthenticator: Uint8Array
+  version?: 2 | 3
+  responderKeyHash?: string
+  lineage?: Array<Uint8Array>
 }
 
 export type RecoveryGroupInfo = LegacyRecoveryGroupInfo | CapturedRecoveryGroupInfo
@@ -913,8 +988,11 @@ export async function openRecoveryGroupInfoFromPublic(
   },
 ): Promise<RecoveryGroupInfo> {
   const { group, sealed, requestID, ephemeralPrivateKey, captured } = params
+  if (sealed.length > MAX_RECOVERY_REPLY)
+    throw new SealedGroupInfoError('malformed', 'Recovery reply exceeds size bound')
+  const v3 = captured && sealed[0] === SEALED_LINEAGE_GROUP_INFO_VERSION
   const plaintext = await openSealedReply({
-    kind: captured ? CAPTURED_GROUP_INFO_REPLY : GROUP_INFO_REPLY,
+    kind: captured ? (v3 ? LINEAGE_GROUP_INFO_REPLY : CAPTURED_GROUP_INFO_REPLY) : GROUP_INFO_REPLY,
     group,
     sealed,
     requestID,
@@ -924,11 +1002,14 @@ export async function openRecoveryGroupInfoFromPublic(
   let attestation: string
   let groupInfo: Uint8Array
   let ledger: Uint8Array | undefined
+  let lineageBytes: Uint8Array | undefined
   try {
-    ;({ attestation, groupInfo, ledger } = unframeAttestedGroupInfo(
-      plaintext,
-      group.anchor.controller != null,
-    ))
+    if (v3) ({ attestation, groupInfo, ledger, lineageBytes } = unframeLineageGroupInfo(plaintext))
+    else
+      ({ attestation, groupInfo, ledger } = unframeAttestedGroupInfo(
+        plaintext,
+        group.anchor.controller != null,
+      ))
   } catch (cause) {
     // biome-ignore lint/style/useErrorCause: cause IS passed; the rule only reads argument 1, and these take (reason, message, options).
     throw new SealedGroupInfoError(
@@ -951,7 +1032,7 @@ export async function openRecoveryGroupInfoFromPublic(
   }
 
   // Authenticate the responder, then bind the GroupInfo to this group.
-  const { signer, capture } = await assertResponderIsMember({
+  const { signer, capture, responderKeyHash } = await assertResponderIsMember({
     captured,
     requireKnownSigner: captured,
     attestation,
@@ -961,10 +1042,27 @@ export async function openRecoveryGroupInfoFromPublic(
     ledger,
   })
   assertGroupInfoBoundToGroup(groupInfo, group)
-  if (ledger == null)
+  let lineage: Array<Uint8Array> | undefined
+  if (lineageBytes !== undefined) {
+    const token = await verifyRecoveryToken<ResponderAttestation>(attestation, group.context)
+    if (
+      !isVerifiedToken(token) ||
+      token.payload.lineageDigest !== encodeMultibase(sha256(lineageBytes))
+    )
+      throw new SealedGroupInfoError('unauthenticated', 'Recovery lineage digest mismatch')
+    lineage = decodeRecoveryCheckpoints(lineageBytes)
+  }
+  const extra = captured
+    ? {
+        version: v3 ? (3 as const) : (2 as const),
+        responderKeyHash,
+        ...(lineage === undefined ? {} : { lineage }),
+      }
+    : {}
+  if (ledger == null || (v3 && group.anchor.controller == null && ledger.length === 0))
     return capture == null
       ? { groupInfo, ledger: [], signer }
-      : { groupInfo, ledger: [], signer, ...capture }
+      : { groupInfo, ledger: [], signer, ...capture, ...extra }
 
   let tokens: Array<string>
   try {
@@ -990,7 +1088,7 @@ export async function openRecoveryGroupInfoFromPublic(
   }
   return capture == null
     ? { groupInfo, ledger: tokens, signer }
-    : { groupInfo, ledger: tokens, signer, ...capture }
+    : { groupInfo, ledger: tokens, signer, ...capture, ...extra }
 }
 
 /**
@@ -1181,4 +1279,58 @@ export function recoveryLeafForDID(
     if (normalizeDID(parsed.id) === normalizeDID(did)) return node.leaf
   }
   return undefined
+}
+
+function lengthField(bytes: Uint8Array): Uint8Array {
+  const size = new Uint8Array(4)
+  new DataView(size.buffer).setUint32(0, bytes.length)
+  return concat([size, bytes])
+}
+function encodeRecoveryCheckpoints(frames: Array<Uint8Array>): Uint8Array {
+  const count = new Uint8Array(4)
+  new DataView(count.buffer).setUint32(0, frames.length)
+  return concat([count, ...frames.map(lengthField)])
+}
+function readRecoveryField(bytes: Uint8Array, offset: number): { bytes: Uint8Array; end: number } {
+  if (offset + 4 > bytes.length) throw new Error('Truncated recovery field')
+  const size = new DataView(bytes.buffer, bytes.byteOffset + offset, 4).getUint32(0)
+  const end = offset + 4 + size
+  if (end > bytes.length) throw new Error('Truncated recovery field')
+  return { bytes: bytes.slice(offset + 4, end), end }
+}
+function decodeRecoveryCheckpoints(bytes: Uint8Array): Array<Uint8Array> {
+  if (bytes.length < 4) throw new SealedGroupInfoError('malformed', 'Truncated recovery lineage')
+  const count = new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0)
+  if (count < 1 || count > 256)
+    throw new SealedGroupInfoError('malformed', 'Invalid recovery lineage count')
+  let offset = 4
+  const frames: Array<Uint8Array> = []
+  for (let i = 0; i < count; i++) {
+    const field = readRecoveryField(bytes, offset)
+    decodeEpochCheckpoint(field.bytes)
+    frames.push(field.bytes)
+    offset = field.end
+  }
+  if (offset !== bytes.length)
+    throw new SealedGroupInfoError('malformed', 'Trailing recovery lineage')
+  return frames
+}
+function frameLineageGroupInfo(
+  token: string,
+  info: Uint8Array,
+  ledger: Uint8Array,
+  lineage: Uint8Array,
+): Uint8Array {
+  return concat([lengthField(utf8.encode(token)), lengthField(info), lengthField(ledger), lineage])
+}
+function unframeLineageGroupInfo(bytes: Uint8Array) {
+  const token = readRecoveryField(bytes, 0)
+  const info = readRecoveryField(bytes, token.end)
+  const ledger = readRecoveryField(bytes, info.end)
+  return {
+    attestation: new TextDecoder().decode(token.bytes),
+    groupInfo: info.bytes,
+    ledger: ledger.bytes,
+    lineageBytes: bytes.slice(ledger.end),
+  }
 }

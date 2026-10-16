@@ -1,13 +1,24 @@
 import { encodeMultibase } from '@kokuin/token'
-import type { RosterAbsenceFixture, RosterAbsenceScenario } from '@kumiai/rpc-conformance'
+import type {
+  ForkRecoveryFixture,
+  RosterAbsenceFixture,
+  RosterAbsenceScenario,
+} from '@kumiai/rpc-conformance'
 import { hmac } from '@noble/hashes/hmac.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { fromUTF, toB64U, toUTF } from '@sozai/codec'
 
 import { digestAppliedCommit } from '../../src/classify.js'
 import { encodeCommitFrame } from '../../src/commit-frame.js'
+import { asLogPosition, type LogPosition } from '../../src/cursor.js'
 import { encodeHandshakeFrame, HANDSHAKE_KIND } from '../../src/handshake.js'
-import type { CapturedPendingRecovery, CapturedRejoinRecord } from '../../src/recovery-types.js'
+import type {
+  CapturedPendingRecovery,
+  CapturedRejoinRecord,
+  ForkRecoveryAttempt,
+  ForkRecoveryAuthorisation,
+} from '../../src/recovery-types.js'
+import type { MemoryGroupInfo } from './memory-group-mls.js'
 import { createMemoryGroupMLS, encodeMemoryCommit } from './memory-group-mls.js'
 
 export function memoryCapturedRecord(
@@ -250,4 +261,301 @@ export async function createRosterAbsenceMemoryFixture(
     }),
     close: async () => {},
   }
+}
+
+export async function createForkRecoveryMemoryFixture(): Promise<ForkRecoveryFixture> {
+  const groupID = `fork-model-${crypto.randomUUID()}`
+  let key = { groupID, incarnation: 1 }
+  const options = { groupID, members: ['alice', 'bob'] }
+  const own = createMemoryGroupMLS({ ...options, localDID: 'alice' })
+  const other = createMemoryGroupMLS({ ...options, localDID: 'bob' })
+  await own.persistInitialState()
+  await other.persistInitialState()
+  for (let epoch = 0; epoch < 9; epoch++) {
+    const commit = encodeMemoryCommit(epoch, 'bob', [], { branch: `common-${epoch}` })
+    const result = await own.processCommit(commit, {})
+    if (!result.advanced) throw new Error(`Model common commit refused: ${JSON.stringify(result)}`)
+    other.adopt(commit)
+  }
+  const original = createMemoryGroupMLS({ ...options, localDID: 'bob' })
+  original.restoreState(other.serializeState())
+  const ownHeads = new Map<number, Uint8Array>([[9, original.serializeState()]])
+  const otherHeads = new Map<number, Uint8Array>([[9, other.serializeState()]])
+  for (let epoch = 9; epoch < 20; epoch++) {
+    const commit = encodeMemoryCommit(epoch, 'alice', [], { branch: `own-${epoch}` })
+    own.adopt(commit)
+    await original.processCommit(commit, {})
+    ownHeads.set(epoch + 1, original.serializeState())
+  }
+  for (let epoch = 9; epoch < 21; epoch++) {
+    await other.processCommit(
+      encodeMemoryCommit(epoch, 'alice', [], { branch: `other-${epoch}` }),
+      {},
+    )
+    otherHeads.set(epoch + 1, other.serializeState())
+  }
+  const { createMemoryControlStore } = await import(
+    '../../../rpc-conformance/src/memory-control-store.js'
+  )
+  let store = createMemoryControlStore<LogPosition>(key)
+  const trust = { groupID, ownerDID: 'alice', members: ['alice', 'bob'] }
+  const source = {
+    key,
+    identity: null,
+    stateVersion: 1,
+    lifetimeRevision: 1,
+    trust,
+    trustDigest: toB64U(sha256(fromUTF(JSON.stringify(trust)))),
+  }
+  type ModelFact = {
+    epoch: number
+    authHash: string
+    members: Array<{ did: string; keyHash: string }>
+  }
+  const facts = (
+    JSON.parse(toUTF(original.serializeState())) as { rosterHistory: Array<ModelFact> }
+  ).rosterHistory
+  const splitState = otherHeads.get(10)
+  if (splitState === undefined) throw new Error('Missing model split state')
+  const branchFact = (
+    JSON.parse(toUTF(splitState)) as { rosterHistory: Array<ModelFact> }
+  ).rosterHistory.find((fact) => fact.epoch === 10)
+  if (branchFact === undefined) throw new Error('Missing model fork')
+  const noticeID = 'open-branch-notice'
+  const check = async (attempt: ForkRecoveryAttempt, info: MemoryGroupInfo) => {
+    const auth = attempt.forkRecovery
+    const snapshot = await store.load()
+    if (
+      snapshot.forkHalt !== null ||
+      snapshot.recoveryUnavailable !== null ||
+      (snapshot.controlHold !== null && snapshot.controlHold.reason !== 'acceptance-unknown') ||
+      attempt.id !== auth.attemptID ||
+      attempt.source.groupID !== key.groupID ||
+      attempt.source.incarnation !== key.incarnation ||
+      auth.source.groupID !== key.groupID ||
+      auth.source.incarnation !== key.incarnation
+    )
+      return false
+    const offered = facts.find((fact) => fact.epoch === info.epoch)
+    return (
+      auth.noticeID === noticeID &&
+      auth.splitEpoch === 10 &&
+      info.epoch >= 10 &&
+      info.signer === 'bob' &&
+      auth.responderKeyHash === toB64U(sha256(fromUTF('bob'))) &&
+      facts.find((fact) => fact.epoch === 9)?.members.some((member) => member.did === 'bob') ===
+        true &&
+      info.lineage?.some(
+        (frame) => frame.epoch === 10 && frame.authHash === branchFact.authHash,
+      ) === true &&
+      (info.epoch > 20 ||
+        (offered !== undefined && offered.authHash !== info.confirmedTranscriptHash))
+    )
+  }
+  let adopting: CapturedRejoinRecord | undefined
+  let builds = 0
+  const make = () =>
+    createMemoryGroupMLS({
+      ...options,
+      localDID: 'alice',
+      capturedRecovery: {
+        target: { targetID: 'repaired-hub', topicID: 'repaired-commits' },
+        readSource: async () => source,
+        accept: async () => {
+          if (adopting === undefined || adopting.stage !== 'confirmed')
+            throw new Error('Unconfirmed model recovery')
+          const before = await store.load()
+          key = { ...key, incarnation: key.incarnation + 1 }
+          const adopted = { ...adopting, stage: 'adopted' as const, destinationKey: { ...key } }
+          store = createMemoryControlStore<LogPosition>(key)
+          await store.apply({ recoveryEpochFloor: before.recoveryEpochFloor }, 'installed-X')
+          await store.retainForkContinuation({ ...before, rejoin: adopted })
+          source.key = key
+          source.lifetimeRevision++
+          adopting = undefined
+        },
+        readForkRecoveryAttempt: async () => (await store.load()).forkRecoveryAttempt ?? null,
+        checkForkRecoveryCapture: check,
+        settleForkRecoveryCapture: (record, result) => store.settleFork(record, result),
+        async authoriseForkRecovery(reply, requestedNotice, info) {
+          if (requestedNotice !== noticeID) return null
+          const previous = (await store.load()).forkRecoveryAttempt
+          if (previous != null) return (await check(previous, info)) ? previous.forkRecovery : null
+          const id = crypto.randomUUID()
+          const auth = {
+            attemptID: id,
+            noticeID,
+            splitEpoch: 10,
+            otherAuthHash: branchFact.authHash,
+            responderKeyHash: toB64U(sha256(fromUTF('bob'))),
+            source: key,
+            evidence: reply.sealed.slice(),
+          }
+          const attempt = { id, source: key, forkRecovery: auth }
+          if (!(await check(attempt, info))) return null
+          await store.authoriseFork(attempt)
+          return auth
+        },
+      },
+    })
+  let requester = make()
+  const fixture: ForkRecoveryFixture = {
+    get key() {
+      return { ...key }
+    },
+    noticeID,
+    requester: () => requester,
+    builds: () => builds,
+    snapshot: () => store.load(),
+    async ordinaryWrite(kind: 'delete' | 'unrelated' | 'wrong-source') {
+      const control = store
+      const record = (await control.load()).rejoin
+      if (record === null || !('format' in record)) throw new Error('Missing bound Y')
+      await control.apply(
+        kind === 'delete'
+          ? { deleteRejoin: true }
+          : {
+              putRejoin:
+                kind === 'unrelated'
+                  ? { ...record, id: 'unrelated-Z', forkRecovery: undefined }
+                  : {
+                      ...record,
+                      source: {
+                        ...record.source,
+                        key: {
+                          ...record.source.key,
+                          incarnation: record.source.key.incarnation + 1,
+                        },
+                      },
+                    },
+            },
+        crypto.randomUUID(),
+      )
+    },
+
+    service: () => ({
+      readRecords: async () => {
+        const intent = (await store.load()).forkRecoveryAttempt
+        if (intent == null) return []
+        return (await store.forkHistory()).map((record) => ({
+          kind: 'superseded-rejoin' as const,
+          id: record.id,
+          key: record.source.key,
+          record,
+          authorisation: intent.forkRecovery,
+        }))
+      },
+    }),
+    async reply(epoch = 12, branch: 'own' | 'other' = 'other', legacy = false) {
+      const state = (branch === 'own' ? ownHeads : otherHeads).get(epoch)
+      if (state === undefined) throw new Error('Missing model head')
+      const responder = createMemoryGroupMLS({ ...options, localDID: 'bob' })
+      if (branch === 'own' && !legacy) {
+        const body = JSON.parse(toUTF(state)) as { rosterHistory: Array<ModelFact> }
+        const otherState = otherHeads.get(epoch)
+        if (otherState !== undefined) {
+          const otherFacts = (JSON.parse(toUTF(otherState)) as { rosterHistory: Array<ModelFact> })
+            .rosterHistory
+          body.rosterHistory = [
+            ...otherFacts.filter((fact) => fact.epoch < epoch),
+            ...body.rosterHistory.filter((fact) => fact.epoch === epoch),
+          ]
+        }
+        responder.restoreState(fromUTF(JSON.stringify(body)))
+      } else responder.restoreState(state)
+      const requestID = crypto.randomUUID()
+      const held = await requester.createRecoveryRequest(
+        requestID,
+        undefined,
+        legacy ? undefined : 10,
+      )
+      const sealed = await responder.sealGroupInfo(held.request, null)
+      return { ...held, sealed, requestID, epochFloor: 20 }
+    },
+    async saveX(stage: 'built' | 'published' | 'confirmed' | 'adopted' = 'built') {
+      const capture = await fixture.reply(20, 'own', true)
+      const pending = await requester.capturedRecovery?.applyRecovery(
+        capture.sealed,
+        capture.requestID,
+        capture.requestKey,
+      )
+      if (pending == null || 'renewalRequired' in pending) throw new Error('Missing model X')
+      const record = memoryCapturedRecord(
+        pending,
+        capture.request,
+        capture.requestKey,
+        capture.requestID,
+      )
+      record.stage = stage === 'adopted' ? 'confirmed' : stage
+      record.ledgerBefore = ['owed-X', 'shared']
+      if (stage !== 'built') record.position = asLogPosition('001')
+      if (stage === 'confirmed' || stage === 'adopted') {
+        const confirmation = await pending.confirmationKey('001', record.digest)
+        record.candidate = pending.serialize()
+        const state = ownHeads.get(20)
+        if (state === undefined) throw new Error('Missing confirming state')
+        const confirming = createMemoryGroupMLS({ ...options, localDID: 'bob' })
+        confirming.restoreState(state)
+        await confirming.processCommit(pending.commit, {})
+        record.verdict = await confirming.sealRecoveryVerdict(capture.request, {
+          groupID,
+          requestID: capture.requestID,
+          position: '001',
+          commitDigest: record.digest,
+          verdict: 'confirmed',
+          epoch: pending.epoch,
+          tag: encodeMultibase(hmac(sha256, confirmation, fromUTF(capture.requestID))),
+        })
+        record.switchMutationID = crypto.randomUUID()
+      }
+      await store.apply({ putRejoin: record, recoveryEpochFloor: 20 }, 'save-X')
+      if (stage === 'adopted') {
+        if (record.verdict === undefined) throw new Error('Missing confirmed verdict')
+        adopting = record
+        await pending.onAccepted(
+          record.source,
+          {
+            ...record.target,
+            position: asLogPosition('001'),
+            payloadDigest: record.payloadDigest,
+            verdict: record.verdict,
+          },
+          () => ({ mutationID: 'model-install-X', changes: {} }),
+        )
+        requester = make()
+        return { ...record, stage: 'adopted', destinationKey: { ...key } }
+      }
+      return record
+    },
+    async build(
+      authorisation: ForkRecoveryAuthorisation,
+      capture: {
+        sealed: Uint8Array
+        requestID: string
+        request: Uint8Array
+        requestKey: Uint8Array
+      },
+    ) {
+      const pending = await requester.capturedRecovery?.applyRecovery(
+        capture.sealed,
+        capture.requestID,
+        capture.requestKey,
+      )
+      if (pending == null || 'renewalRequired' in pending) return null
+      builds++
+      const record = {
+        ...memoryCapturedRecord(pending, capture.request, capture.requestKey, capture.requestID),
+        id: authorisation.attemptID,
+        forkRecovery: authorisation,
+        ledgerBefore: (await store.load()).settledRejoins.flatMap((row) => row.ledgerBefore),
+      }
+      await store.apply({ putRejoin: record }, crypto.randomUUID())
+      return { record, pending }
+    },
+    async restart() {
+      requester = make()
+    },
+    close: async () => {},
+  }
+  return fixture
 }

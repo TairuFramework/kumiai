@@ -262,7 +262,10 @@ type FixtureDeviceStores<TPorts> = TPorts extends {
   ? TStores
   : never
 
-type FixtureEntryReads<TPorts> = Omit<EntryReads, 'control'> & {
+type FixtureEntryReads<TPorts> = Omit<EntryReads, 'control' | 'checkpoints'> & {
+  checkpoints(): FixtureGroupStores<TPorts> extends { checkpoints: { list(): infer TResult } }
+    ? TResult
+    : never
   control(incarnation: number): FixtureGroupStores<TPorts> extends {
     incarnation(incarnation: number): { control: { load(): infer TResult } }
   }

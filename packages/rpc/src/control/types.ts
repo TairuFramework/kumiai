@@ -3,6 +3,7 @@ import type { LogPosition } from '../cursor.js'
 import type {
   AcceptedRejoinSettlement,
   CapturedRejoinRecord,
+  ForkRecoveryAttempt,
   StoredRejoinRecord,
 } from '../recovery-types.js'
 import type { ForkHalt, RecoveryUnavailableEvent } from './safety.js'
@@ -50,6 +51,7 @@ export type ControlSnapshot = {
     reason: 'retention-gap' | 'unprocessable-gap' | 'lost-state' | 'ahead' | 'unsupported-version'
   } | null
   operations: Array<Operation> // FIFO by `seq`
+  forkRecoveryAttempt?: ForkRecoveryAttempt | null
   rejoin: StoredRejoinRecord | null
   recoveryEpochFloor: number | null
   settledRejoins: Array<AcceptedRejoinSettlement>
