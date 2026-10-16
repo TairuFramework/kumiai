@@ -849,7 +849,27 @@ describe('recovery ordering', { concurrent: false }, () => {
     })
     const events: Array<RecoveryEvent> = []
     const strands: Array<StrandObservation> = []
+    const baseline = hub.published.find((message) => message.topicID === commitTopic(secret))
+    if (baseline === undefined) throw new Error('Missing joined baseline')
+    const joinedCrypto = createFakeCrypto({ epoch: 1, localDID: 'bob' })
+    const joined = createMemoryGroupMLS({
+      localDID: 'bob',
+      storageID: 'bob',
+      recoverySecret: secret,
+      epoch: 1,
+      members: ['alice', 'bob', 'carol'],
+      onAdvance: (epoch) => joinedCrypto.setEpoch(epoch),
+    })
+    await joined.persistInitialState()
+    expect(
+      await joined.processCommit(
+        decodeCommitFrame(decodeHandshakeFrame(baseline.payload).payload).commit,
+        {},
+      ),
+    ).toMatchObject({ advanced: true, epochAfter: 2 })
     const bob = member(hub, 'bob', {
+      mls: joined,
+      crypto: joinedCrypto,
       epoch: 2,
       onRecovery: (event) => {
         events.push(event)
@@ -861,6 +881,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     })
     await flush()
     expect(events).toEqual([])
+    expect((await bob.control.load()).applied).toEqual([])
     await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'fresh' } })
     await vi.waitFor(async () => expect(await bob.appOutbox.list()).toEqual([]), { timeout: 1200 })
     expect(events.map((event) => event.phase)).toEqual(['started', 'succeeded'])

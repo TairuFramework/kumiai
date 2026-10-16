@@ -301,7 +301,7 @@ export async function createForkRecoveryMemoryFixture(): Promise<ForkRecoveryFix
   const trust = { groupID, ownerDID: 'alice', members: ['alice', 'bob'] }
   const source = {
     key,
-    identity: null,
+    identity: { ...key, epoch: 20, authenticator: own.authenticator() },
     stateVersion: 1,
     lifetimeRevision: 1,
     trust,
@@ -361,7 +361,7 @@ export async function createForkRecoveryMemoryFixture(): Promise<ForkRecoveryFix
       capturedRecovery: {
         target: { targetID: 'repaired-hub', topicID: 'repaired-commits' },
         readSource: async () => source,
-        accept: async () => {
+        accept: async (candidate) => {
           if (adopting === undefined || adopting.stage !== 'confirmed')
             throw new Error('Unconfirmed model recovery')
           const before = await store.load()
@@ -371,10 +371,18 @@ export async function createForkRecoveryMemoryFixture(): Promise<ForkRecoveryFix
           await store.apply({ recoveryEpochFloor: before.recoveryEpochFloor }, 'installed-X')
           await store.retainForkContinuation({ ...before, rejoin: adopted })
           source.key = key
+          source.identity = {
+            ...key,
+            epoch: adopting.epochAfter,
+            authenticator: sha256(
+              new Uint8Array([...adopting.target.groupInfoAuthenticator, ...candidate.commit]),
+            ),
+          }
           source.lifetimeRevision++
           adopting = undefined
         },
         readForkRecoveryAttempt: async () => (await store.load()).forkRecoveryAttempt ?? null,
+        readRecoveryEpochFloor: async () => (await store.load()).recoveryEpochFloor,
         checkForkRecoveryCapture: check,
         settleForkRecoveryCapture: (record, result) => store.settleFork(record, result),
         async authoriseForkRecovery(reply, requestedNotice, info) {
@@ -407,6 +415,27 @@ export async function createForkRecoveryMemoryFixture(): Promise<ForkRecoveryFix
     requester: () => requester,
     builds: () => builds,
     snapshot: () => store.load(),
+    async setOrdinaryFloor(epoch) {
+      await store.apply({ recoveryEpochFloor: epoch }, crypto.randomUUID())
+    },
+    async seedEarlierSettlement() {
+      const record = (await store.load()).rejoin
+      if (record === null || !('format' in record)) throw new Error('Missing saved X')
+      await store.apply(
+        {
+          putSettledRejoins: [
+            {
+              id: 'earlier-settlement',
+              kind: 'not-accepted',
+              epoch: 20,
+              origin: { sourceKey: key, target: record.target, searchFrom: record.searchFrom },
+              ledgerBefore: ['earlier-owed', 'shared'],
+            },
+          ],
+        },
+        crypto.randomUUID(),
+      )
+    },
     async ordinaryWrite(kind: 'delete' | 'unrelated' | 'wrong-source') {
       const control = store
       const record = (await control.load()).rejoin

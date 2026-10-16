@@ -98,6 +98,7 @@ function unsettled(): ControlSnapshot {
       verdict: new Uint8Array([9]),
     },
     recoveryEpochFloor: null,
+    forkRecoveryAttempt: null,
     settledRejoins: [],
     outcomes: [{ id: 'settled', opID: 'settled', at: 50, kind: 'lost' }],
     welcomes: [

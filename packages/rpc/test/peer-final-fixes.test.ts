@@ -193,13 +193,13 @@ test('a stored fork halt keeps the epoch and cursor despite an available respond
 })
 
 test.each(['retention-gap', 'unprocessable-gap'] as const)(
-  'a persisted %s strand heals on restart and clears at the same epoch number',
+  'a persisted %s strand heals on restart and clears on the eligible branch',
   async (reason) => {
     controlRecoveryClock(5)
     const hub = new FakeHub()
     const members = ['alice', 'bob', 'carol']
     const recovery = { timeoutMs: 60, deadlineMs: 250, getDelayMs: () => 5 }
-    const carol = makeMLSPeer(hub, 'carol', secret, { epoch: 2, members, recovery })
+    const carol = makeMLSPeer(hub, 'carol', secret, { epoch: 3, members, recovery })
     peers.push(carol)
     await carol.peer.resync()
     const bob = member(hub, { epoch: 3, members, recovery })
@@ -226,11 +226,11 @@ test.each(['retention-gap', 'unprocessable-gap'] as const)(
       ).toBe(true)
     })
     await drainUntil(() => events.some((event) => event.phase === 'succeeded'), 'rejoin')
-    expect(await again.mls.readEpoch()).toBe(3)
+    expect(await again.mls.readEpoch()).toBe(4)
     expect((await again.control.load()).cursor?.stranded).toBeUndefined()
     expect((await again.control.load()).strand).toBeNull()
     await again.peer.commit(buildLedgerCommit(again, []))
-    expect(await again.mls.readEpoch()).toBe(4)
+    expect(await again.mls.readEpoch()).toBe(5)
   },
 )
 
@@ -317,20 +317,19 @@ test.each(['fork-losing', 'fork-winning'] as const)(
   },
 )
 
-test('a rejoin that lands on the same epoch number captures a new app anchor', async () => {
+test('an ordinary rejoin captures a new app anchor', async () => {
   controlRecoveryClock(5)
   const hub = new FakeHub()
   const members = ['alice', 'bob', 'carol']
   const recovery = { timeoutMs: 60, deadlineMs: 250, getDelayMs: () => 5 }
-  const carol = makeMLSPeer(hub, 'carol', secret, { epoch: 2, members, recovery })
+  const carol = makeMLSPeer(hub, 'carol', secret, { epoch: 3, members, recovery })
   peers.push(carol)
   await carol.peer.resync()
   const bob = member(hub, { epoch: 3, members, recovery })
   await bob.peer.resync()
   const exportSecret = vi.spyOn(bob.crypto, 'exportSecret')
   expect((await bob.peer.recover()).advanced).toBe(true)
-  expect(await bob.mls.readEpoch()).toBe(3)
-  // The forced rotation landed on the same number: the app anchor is captured again, not kept.
+  expect(await bob.mls.readEpoch()).toBe(4)
   expect(exportSecret).toHaveBeenCalledWith(APP_TOPIC_LABEL)
 })
 

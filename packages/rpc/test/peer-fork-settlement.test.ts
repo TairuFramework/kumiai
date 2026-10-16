@@ -31,6 +31,7 @@ const empty = (): ControlSnapshot => ({
   operations: [],
   rejoin: null,
   recoveryEpochFloor: null,
+  forkRecoveryAttempt: null,
   settledRejoins: [],
   outcomes: [],
   welcomes: [],

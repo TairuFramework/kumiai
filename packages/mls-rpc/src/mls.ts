@@ -392,7 +392,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
                       (byte, index) => byte === source.identity?.authenticator[index],
                     ))
                 )
-                  return null
+                  throw new RecoveryTargetBehindError('Recovery capture is target-behind')
               }
               if (
                 snapshot.forkRecoveryAttempt != null &&

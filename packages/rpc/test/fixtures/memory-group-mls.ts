@@ -199,6 +199,7 @@ export type MemoryGroupMLSOptions = {
       result: RecoveryReconciliation,
     ) => Promise<void>
     readForkRecoveryAttempt?: () => Promise<ForkRecoveryAttempt | null>
+    readRecoveryEpochFloor?: () => Promise<number | null>
     target: { targetID: string; topicID: string }
     readSource(): Promise<RecoverySource>
     accept(
@@ -1477,18 +1478,28 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             )
           },
           async applyRecovery(sealed, requestID, requestKey) {
-            if (
-              controlSafetyHeld(
-                await hostDB.control(storageID, { groupID, incarnation: 1 }).load(),
-              ) !== null
-            )
-              return null
+            const control = await hostDB.control(storageID, { groupID, incarnation: 1 }).load()
+            if (controlSafetyHeld(control) !== null) return null
             if (!capturedDependencies.target.targetID || !capturedDependencies.target.topicID)
               throw new TypeError('Invalid recovery target')
             const source = validateSource(await capturedDependencies.readSource())
             const info = capturedInfo(sealed, requestID, requestKey, source)
             if (info === null) return null
             const attempt = await capturedDependencies.readForkRecoveryAttempt?.()
+            if (attempt == null) {
+              const ordinaryFloor =
+                capturedDependencies.readRecoveryEpochFloor === undefined
+                  ? control.recoveryEpochFloor
+                  : await capturedDependencies.readRecoveryEpochFloor()
+              const floor = Math.max(ordinaryFloor ?? 0, source.identity?.epoch ?? 0)
+              if (
+                info.epoch < floor ||
+                (source.identity !== null &&
+                  info.epoch === source.identity.epoch &&
+                  info.authenticator !== toB64U(source.identity.authenticator))
+              )
+                throw new RecoveryTargetBehindError('Recovery capture is target-behind')
+            }
             if (
               attempt != null &&
               !(await capturedDependencies.checkForkRecoveryCapture?.(attempt, info))

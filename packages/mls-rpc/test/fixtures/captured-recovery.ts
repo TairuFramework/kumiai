@@ -987,6 +987,27 @@ export async function createForkRecoveryRealFixture(
       }
     },
     snapshot: () => local.device.groups.ports(key).control.load(),
+    async setOrdinaryFloor(epoch: number) {
+      await local.installRows({ key, control: { recoveryEpochFloor: epoch } })
+    },
+    async seedEarlierSettlement() {
+      const record = (await local.device.groups.ports(key).control.load()).rejoin
+      if (record === null || !('format' in record)) throw new Error('Missing saved X')
+      await local.installRows({
+        key,
+        control: {
+          putSettledRejoins: [
+            {
+              id: 'earlier-settlement',
+              kind: 'not-accepted',
+              epoch: 20,
+              origin: { sourceKey: key, target: record.target, searchFrom: record.searchFrom },
+              ledgerBefore: ['earlier-owed', 'shared'],
+            },
+          ],
+        },
+      })
+    },
     async ordinaryWrite(kind: 'delete' | 'unrelated' | 'wrong-source') {
       const control = local.device.groups.ports(key).control
       const record = (await control.load()).rejoin

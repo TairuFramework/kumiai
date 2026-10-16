@@ -541,11 +541,11 @@ test('fork floor expires with its attempt', async () => {
     expect(snapshot.forkRecoveryAttempt).toBeNull()
     expect(snapshot.recoveryEpochFloor).toBe(20)
     const lower = await f.reply()
-    expect(
-      await f
+    await expect(
+      f
         .requester()
         .capturedRecovery?.applyRecovery(lower.sealed, lower.requestID, lower.requestKey),
-    ).toBeNull()
+    ).rejects.toMatchObject({ name: 'RecoveryTargetBehindError' })
   } finally {
     await f.close()
   }

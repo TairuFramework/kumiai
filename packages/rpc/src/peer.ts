@@ -3859,8 +3859,8 @@ export function createGroupPeerWithControlWalk<
       .flatMap((row) => (row.kind === 'notice' ? [row.notice.splitEpoch] : []))
     if (split.length > 0) return Math.min(...split)
     const coverage = await params.checkpoints.checkpointCoverage(control.key.groupID)
-    const epochs = coverage.retained.map((range) => range.through)
-    return epochs.length === 0 ? undefined : Math.max(...epochs)
+    const epochs = coverage.retained.map((range) => range.from)
+    return epochs.length === 0 ? undefined : Math.min(...epochs)
   }
   let recoveryPendingReason: 'no-reply' | 'no-eligible-responder' | 'target-behind' = 'no-reply'
   const diagnoseAbsence = async (
@@ -4229,7 +4229,6 @@ export function createGroupPeerWithControlWalk<
       const authority = await captured.authoriseForkRecovery(reply, notice.id)
       if (authority !== null) return authority
     }
-    if (notices.length > 0) recoveryPendingReason = 'target-behind'
     return null
   }
 

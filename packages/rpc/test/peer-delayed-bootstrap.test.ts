@@ -31,6 +31,10 @@ async function setup(byte: number, onStrand?: (observation: StrandObservation) =
   const recovery = { timeoutMs: 400, deadlineMs: 1200, getDelayMs: () => 10 }
   const bob = makeMLSPeer(hub, 'bob', rs, { mls: bobMLS, crypto: bobCrypto, members, recovery })
   await bob.peer.commit(buildLedgerCommit(bob, ['circle:x=Bob']))
+  await bob.peer.commit(buildLedgerCommit(bob, []))
+  const rotation = hub.published.filter((row) => row.topicID === commitTopic(rs)).at(-1)
+  if (rotation === undefined) throw new Error('Missing continuing rotation')
+  hub.hideFrom('alice', rotation.sequenceID)
 
   const aliceCrypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
   const aliceMLS = createMemoryGroupMLS({
@@ -300,7 +304,7 @@ describe('delayed ledger bootstrap', () => {
     expect(recoveryRequests()).toBe(requestsBefore)
     expect((await alice.control.load()).forkHalt).toBeNull()
     expect(alice.controlWalk.safetyHold()).toBeNull()
-    expect((await alice.control.load()).applied.some((row) => row.epoch === 2)).toBe(true)
+    expect((await alice.control.load()).applied.some((row) => row.epoch === 3)).toBe(true)
     expect(events.some((event) => event.phase === 'bootstrapped')).toBe(true)
     await alice.peer.dispose()
     await bob.peer.dispose()
@@ -358,8 +362,6 @@ describe('delayed ledger bootstrap', () => {
       }
       return save(anchor)
     })
-    bob.mls.adopt(bob.mls.buildCommit([]))
-    await bob.database.saveState('bob', bob.mls.serializeState())
     await publishCommit({
       hub: state.hub,
       senderDID: 'alice',

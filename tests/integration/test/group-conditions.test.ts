@@ -492,12 +492,35 @@ test.each([
     const captured = port.capturedRecovery
     if (responder === undefined || captured === undefined) throw new Error('Missing captured ports')
     const requestID = crypto.randomUUID()
-    const held = await port.createRecoveryRequest(requestID, undefined, 10)
-    const pending = await captured.applyRecovery(
-      await responder.sealGroupInfo(held.request, null),
+    const held = await port.createRecoveryRequest(
       requestID,
-      held.requestKey,
+      undefined,
+      outcome === 'different-authenticator' ? undefined : 10,
     )
+    const sealed = await responder.sealGroupInfo(held.request, null)
+    let pending: Awaited<ReturnType<typeof captured.applyRecovery>>
+    if (outcome === 'different-authenticator') {
+      await expect(
+        captured.applyRecovery(sealed, requestID, held.requestKey),
+      ).rejects.toMatchObject({
+        name: 'RecoveryTargetBehindError',
+      })
+      // Retained v2 X predates the ordinary construction guard.
+      const { buildRecoveryCandidate } = await import('../../../packages/mls-rpc/src/recovery.js')
+      pending = await buildRecoveryCandidate({
+        source: await f.local().registry.recoverySource(f.key.groupID),
+        sealed,
+        requestID,
+        requestKey: held.requestKey,
+        target: { targetID: 'diagnostic-hub', topicID: 'diagnostic-commits' },
+        environment: {
+          ...f.local().environment,
+          accept: async () => {
+            throw new Error('Re-anchor cannot install')
+          },
+        },
+      })
+    } else pending = await captured.applyRecovery(sealed, requestID, held.requestKey)
     if (pending === null || 'renewalRequired' in pending) throw new Error('Missing saved X')
     const record = capturedRecord(pending, held.request, held.requestKey, requestID)
     await f

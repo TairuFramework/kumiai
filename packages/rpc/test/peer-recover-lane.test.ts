@@ -191,6 +191,10 @@ describe('a heal re-enacts by ledger membership', { concurrent: false }, () => {
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
     await bob.peer.resync()
     await bob.peer.commit(buildLedgerCommit(bob, ['circle:x=Bob']))
+    await bob.peer.commit(buildLedgerCommit(bob, []))
+    const rotation = hub.published.filter((row) => row.topicID === commitTopic(rs)).at(-1)
+    if (rotation === undefined) throw new Error('Missing continuing rotation')
+    hub.hideFrom('alice', rotation.sequenceID)
     await bob.peer.resync()
 
     const alice = makeMLSPeer(hub, 'alice', rs, {
@@ -402,7 +406,7 @@ describe('recover() is a compare-and-set loop of its own', { concurrent: false }
     controlRecoveryClock(3 * recovery.timeoutMs)
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x54)
-    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 2, members, recovery })
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 3, members, recovery })
 
     const strand = (did: string, token: string): TestPeer => {
       const crypto = createFakeCrypto({ epoch: 1, localDID: did })

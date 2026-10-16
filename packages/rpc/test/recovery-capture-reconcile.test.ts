@@ -635,7 +635,7 @@ test.each([false, true])(
       epoch: 2,
       recovery: { timeoutMs: 100, deadlineMs: 1000, getDelayMs: () => 0 },
     }
-    const alice = makeMLSPeer(hub, 'alice', secret, options)
+    const alice = makeMLSPeer(hub, 'alice', secret, { ...options, epoch: 3 })
     const publish = hub.publish.bind(hub)
     let dropped = false
     vi.spyOn(hub, 'publish').mockImplementation((value) => {
@@ -700,7 +700,7 @@ test.each([false, true])(
       expect(privateReads).toBe(0)
       expect(privateEpoch).not.toHaveBeenCalled()
       expect(bob.mls.epoch()).toBe(2)
-      expect(alice.mls.epoch()).toBe(3)
+      expect(alice.mls.epoch()).toBe(4)
     } finally {
       await Promise.all([alice.peer.dispose(), bob.peer.dispose()])
       await Promise.all([alice.peer.drained(), bob.peer.drained()])

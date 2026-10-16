@@ -2112,6 +2112,8 @@ export type ForkRecoveryFixture = {
   snapshot(): Promise<ConformanceControlSnapshot>
   service(): { readRecords(): Promise<Array<ConformanceCheckpointRecord>> }
   builds(): number
+  setOrdinaryFloor(epoch: number): Promise<void>
+  seedEarlierSettlement(): Promise<void>
   ordinaryWrite(kind: 'delete' | 'unrelated' | 'wrong-source'): Promise<void>
   reply(
     epoch?: number,
@@ -2344,6 +2346,103 @@ export function testForkRecoveryConformance(params: {
           const before = await f.snapshot()
           await expect(f.ordinaryWrite(kind)).rejects.toThrow()
           expect(await f.snapshot()).toEqual(before)
+        }),
+    )
+    test.each([
+      { epoch: 12, floor: 0, branch: 'other' as const },
+      { epoch: 12, floor: 20, branch: 'other' as const },
+      { epoch: 20, floor: 20, branch: 'other' as const },
+      { epoch: 21, floor: 30, branch: 'other' as const },
+    ])('ordinary capture respects source identity and control floor: $epoch / $floor', (row) =>
+      run(async (f) => {
+        await f.setOrdinaryFloor(row.floor)
+        const before = await f.snapshot()
+        const capture = await f.reply(row.epoch, row.branch)
+        const port = f.requester().capturedRecovery
+        if (port === undefined) throw new Error('Missing captured recovery')
+        await expect(
+          port.applyRecovery(capture.sealed, capture.requestID, capture.requestKey),
+        ).rejects.toMatchObject({ name: 'RecoveryTargetBehindError' })
+        expect(await f.snapshot()).toEqual(before)
+        expect(f.builds()).toBe(0)
+      }),
+    )
+    test('same-number external rejoin requires bound fork evidence', () =>
+      run(async (f) => {
+        await f.saveX()
+        const port = f.requester().capturedRecovery
+        if (port === undefined) throw new Error('Missing captured recovery')
+        const capture = await f.reply(19)
+        const before = await f.snapshot()
+        await expect(
+          port.applyRecovery(capture.sealed, capture.requestID, capture.requestKey),
+        ).rejects.toMatchObject({ name: 'RecoveryTargetBehindError' })
+        expect(await f.snapshot()).toEqual(before)
+        const authority = await port.authoriseForkRecovery?.(capture, f.noticeID)
+        if (authority == null) throw new Error('Missing authority')
+        const y = await f.build(authority, capture)
+        expect(y?.record.source.identity?.epoch).toBe(20)
+        expect(y?.record.target.groupInfoEpoch).toBe(19)
+        expect(y?.record.epochAfter).toBe(20)
+        expect((await f.snapshot()).recoveryEpochFloor).toBe(20)
+      }))
+    test('ordinary capture cannot reuse a settled Y floor exception', () =>
+      run(async (f) => {
+        await f.saveX()
+        const port = f.requester().capturedRecovery
+        if (port === undefined) throw new Error('Missing captured recovery')
+        const capture = await f.reply()
+        const authority = await port.authoriseForkRecovery?.(capture, f.noticeID)
+        if (authority == null) throw new Error('Missing authority')
+        const y = await f.build(authority, capture)
+        if (y === null) throw new Error('Missing bound Y')
+        expect(await port.reconcileCapture(y.record, await f.reply(13))).toMatchObject({
+          kind: 'unapplied-later',
+          epoch: 13,
+        })
+        const before = await f.snapshot()
+        expect(before.forkRecoveryAttempt).toBeNull()
+        expect(before.recoveryEpochFloor).toBe(20)
+        await f.restart()
+        const lower = await f.reply()
+        const restarted = f.requester().capturedRecovery
+        if (restarted === undefined) throw new Error('Missing restarted captured recovery')
+        await expect(
+          restarted.applyRecovery(lower.sealed, lower.requestID, lower.requestKey),
+        ).rejects.toMatchObject({ name: 'RecoveryTargetBehindError' })
+        expect(await f.snapshot()).toEqual(before)
+      }))
+    test.each(['built', 'adopted'] as const)(
+      'superseding X unions earlier source obligations into settlement and Y: %s',
+      (stage) =>
+        run(async (f) => {
+          await f.saveX()
+          await f.seedEarlierSettlement()
+          const exactX =
+            stage === 'adopted' ? await f.saveX('adopted') : (await f.snapshot()).rejoin
+          if (exactX == null || !('format' in exactX)) throw new Error('Missing saved X')
+          expect(exactX.ledgerBefore).not.toContain('earlier-owed')
+          const capture = await f.reply()
+          const authority = await f
+            .requester()
+            .capturedRecovery?.authoriseForkRecovery?.(capture, f.noticeID)
+          if (authority == null) throw new Error('Missing authority')
+          const after = await f.snapshot()
+          const settlement = after.settledRejoins.find((row) => row.id === exactX.id)
+          expect(settlement).toMatchObject({ kind: 'superseded-branch', epoch: 10 })
+          expect(new Set(settlement?.ledgerBefore)).toEqual(
+            new Set(['earlier-owed', 'shared', 'owed-X']),
+          )
+          const history = (await f.service().readRecords()).find(
+            (row) => row.kind === 'superseded-rejoin' && row.record.id === exactX.id,
+          )
+          expect(history?.kind === 'superseded-rejoin' ? history.record : null).toEqual(exactX)
+          expect(after.recoveryEpochFloor).toBe(20)
+          await f.restart()
+          const y = await f.build(authority, await f.reply())
+          expect(new Set(y?.record.ledgerBefore)).toEqual(
+            new Set(['earlier-owed', 'shared', 'owed-X']),
+          )
         }),
     )
     test('existing Y intent makes authorisation idempotent', () =>

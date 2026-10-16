@@ -78,7 +78,7 @@ import * as epochModule from '../../../../packages/rpc/src/peer-epoch.js'
 import { FakeHub } from '../../../../packages/rpc/test/fixtures/fake-hub.js'
 import { chat, type Protocols } from '../app-lane-e2e.js'
 
-export async function createCapturedRecoveryFixture() {
+export async function createCapturedRecoveryFixture(params: { timeoutMs?: number } = {}) {
   const real = await createRealGroup(2, `captured-recovery-${crypto.randomUUID()}`)
   const admin = real.members[0]
   if (admin === undefined) throw new Error('Missing recovery administrator')
@@ -256,7 +256,11 @@ export async function createCapturedRecoveryFixture() {
             deliverWelcome: async () => {
               throw new Error('Unexpected Welcome delivery')
             },
-            recovery: { timeoutMs: 100, deadlineMs: 10_000, getDelayMs: () => 0 },
+            recovery: {
+              timeoutMs: params.timeoutMs ?? 100,
+              deadlineMs: 10_000,
+              getDelayMs: () => 0,
+            },
           }).peer
           currentPeer = peer
           return peer

@@ -28,7 +28,7 @@ afterEach(async () => {
 })
 
 async function setup() {
-  const fixture = await createCapturedRecoveryFixture()
+  const fixture = await createCapturedRecoveryFixture({ timeoutMs: 1000 })
   cleanup.push(() => fixture.close())
   return fixture
 }

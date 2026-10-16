@@ -557,10 +557,10 @@ test('a confirmed rejoin preserves accepted facts if the source moves before res
 })
 
 test.each(['landed', 'failed-save', 'successor'] as const)(
-  'same-number rejoin restart: %s',
+  'ordinary rejoin restart: %s',
   async (seam) => {
     const hub = new FakeHub()
-    const alice = member(hub, 'alice')
+    const alice = member(hub, 'alice', { epoch: 2 })
     const bob = member(hub, 'bob', { epoch: 2 })
     await alice.peer.replay()
     await bob.peer.replay()
@@ -583,7 +583,7 @@ test.each(['landed', 'failed-save', 'successor'] as const)(
           hub,
           senderDID: 'alice',
           recoverySecret: secret,
-          epoch: 2,
+          epoch: 3,
           external: true,
         })
       ).sequenceID
@@ -601,8 +601,8 @@ test.each(['landed', 'failed-save', 'successor'] as const)(
         { timeout: 5000 },
       )
       .toEqual({
-        epoch: seam === 'successor' ? 3 : 2,
-        anchorEpoch: seam === 'successor' ? 3 : 2,
+        epoch: seam === 'successor' ? 4 : 3,
+        anchorEpoch: seam === 'successor' ? 4 : 3,
         position: successor ?? saved?.position,
       })
     expect(commits(hub)).toHaveLength(seam === 'successor' ? 2 : 1)
@@ -611,7 +611,7 @@ test.each(['landed', 'failed-save', 'successor'] as const)(
 
 test('ledger bootstrap before the final apply survives restart and emits reenact once', async () => {
   const hub = new FakeHub()
-  const alice = member(hub, 'alice', { epoch: 2 })
+  const alice = member(hub, 'alice', { epoch: 3 })
   const bob = member(hub, 'bob')
   await alice.peer.replay()
   await bob.peer.replay()
@@ -645,7 +645,7 @@ test('ledger bootstrap before the final apply survives restart and emits reenact
 
 test('concurrent replay of a confirmed rejoin durably settles reenact exactly once', async () => {
   const hub = new FakeHub()
-  const alice = member(hub, 'alice', { epoch: 2 })
+  const alice = member(hub, 'alice', { epoch: 3 })
   const bob = member(hub, 'bob', {
     recovery: { timeoutMs: 200, deadlineMs: 2000, getDelayMs: () => 60_000 },
   })

@@ -5,9 +5,8 @@ import {
   decodeHandshakeFrame,
   digestAppliedCommit,
 } from '@kumiai/rpc'
-import { expect, test } from 'vitest'
+import { expect, type MockInstance, test, vi } from 'vitest'
 
-import { createCheckpointService } from '../../../packages/mls-rpc/src/checkpoint.js'
 import {
   createControlAdoptionPort,
   createControlValidationPort,
@@ -104,55 +103,6 @@ test('unproven branch exception stays visibly target behind', async () => {
   }
 })
 
-async function resumeCheckpointPrefix(
-  f: Awaited<ReturnType<typeof createForkRecoveryRealFixture>>,
-  hub: FakeHub,
-) {
-  const topicID = checkpointTopic(await f.requester().exportRecoverySecret())
-  const services = [
-    f.service(),
-    createCheckpointService({
-      registry: f.remote().registry,
-      key: f.key,
-      identity: f.responderIdentity,
-    }),
-  ]
-  let position: string | null = null
-  for (const service of services) {
-    const rows = await service.readRecords()
-    const fact = rows.find((row) => row.kind === 'fact' && row.epoch === 9)
-    const debt = rows.find((row) => row.kind === 'publication' && row.factID === fact?.id)
-    if (debt?.kind !== 'publication' || debt.frame === null)
-      throw new Error('Missing signed common-prefix checkpoint')
-    expect(await service.compare(f.key, debt.frame)).toMatchObject({ kind: 'agreement', epoch: 9 })
-    position = (
-      await hub.publish({
-        senderDID: 'checkpoint-prefix',
-        topicID,
-        payload: debt.frame,
-        publishID: debt.publishID ?? debt.id,
-        retain: 'log',
-      })
-    ).sequenceID
-    await service.updateRecords({
-      put: [{ ...debt, accepted: true, nextHeartbeatAt: Date.now() + 1800000 }],
-    })
-  }
-  // The common prefix was received before the fork; resume after those accepted publications.
-  for (const service of services)
-    await service.updateRecords({
-      put: [
-        {
-          kind: 'cursor',
-          id: `checkpoint-cursor:${f.key.incarnation}:${topicID}`,
-          key: f.key,
-          topicID,
-          position,
-        },
-      ],
-    })
-}
-
 async function startPeerOwner(
   fixture: RegistryFixture,
   hub: FakeHub,
@@ -235,32 +185,42 @@ async function startPeerOwner(
         deliverWelcome: async () => {
           throw new Error('No Welcome is owed')
         },
-        recovery: { timeoutMs: 1000, deadlineMs: 15000, getDelayMs: () => 0 },
+        recovery: { timeoutMs: 3000, deadlineMs: 15000, getDelayMs: () => 0 },
       }).peer
     },
   })
 }
 
-test.each([false, true])(
-  'real peer heals advanced branch and preserves ordinary floor after reconstruction: saved X %s',
-  async (saved) => {
+test.each([
+  { saved: false, offeredEpoch: 12 },
+  { saved: true, offeredEpoch: 12 },
+  { saved: false, offeredEpoch: 19 },
+  { saved: true, offeredEpoch: 19 },
+])(
+  'real peer heals advanced branch and preserves ordinary floor after reconstruction: saved X $saved / F=$offeredEpoch',
+  async ({ saved, offeredEpoch }) => {
     const f = await createForkRecoveryRealFixture(true)
     const hub = new FakeHub()
     let local: RegistryPeer | undefined
     let remote: RegistryPeer | undefined
     try {
       if (saved) await f.saveX()
+      if (offeredEpoch !== 12) await f.reply(offeredEpoch)
       const before = await f.snapshot()
-      await resumeCheckpointPrefix(f, hub)
       remote = await startPeerOwner(f.remote(), hub, f.target, f.key.groupID)
       await remote.ready
       await remote.peer()?.replay()
       local = await startPeerOwner(f.local(), hub, f.target, f.key.groupID)
       await local.ready
       await local.peer()?.recover()
-      await expect.poll(() => local?.installedKey().incarnation, { timeout: 15000 }).toBe(2)
+      await expect.poll(() => local?.installedKey().incarnation, { timeout: 20000 }).toBe(2)
       const installed = await f.local().device.groups.loadState(local.installedKey())
-      expect(installed).toMatchObject({ epoch: 13, terminal: false })
+      expect(installed).toMatchObject({ epoch: offeredEpoch + 1, terminal: false })
+      expect(await f.local().device.groups.ports(local.installedKey()).anchor.load()).toMatchObject(
+        {
+          anchor: { epoch: offeredEpoch + 1, secret: expect.any(Uint8Array) },
+        },
+      )
       expect(
         (await f.local().device.groups.ports(local.installedKey()).control.load())
           .recoveryEpochFloor,
@@ -273,6 +233,100 @@ test.each([false, true])(
       local?.dispose()
       remote?.dispose()
       await Promise.all([local?.drained(), remote?.drained()])
+      await f.close()
+    }
+  },
+)
+
+test('real peer without X or open notice keeps stale capture target behind', async () => {
+  const f = await createForkRecoveryRealFixture(true)
+  const hub = new FakeHub()
+  const checkpointSink = new FakeHub()
+  let local: RegistryPeer | undefined
+  let remote: RegistryPeer | undefined
+  let timers: MockInstance<typeof setTimeout> | undefined
+  let publish: MockInstance<FakeHub['publish']> | undefined
+  try {
+    await f.rewriteNotice((notice) => {
+      notice.closedAt = Date.now()
+    })
+    await f.local().installRows({ key: f.key, control: { recoveryEpochFloor: 20 } })
+    const topic = checkpointTopic(await f.requester().exportRecoverySecret())
+    const send = hub.publish.bind(hub)
+    // Blind non-delivery leaves recovery with no checkpoint authority.
+    publish = vi
+      .spyOn(hub, 'publish')
+      .mockImplementation((params) =>
+        params.topicID === topic ? checkpointSink.publish(params) : send(params),
+      )
+    remote = await startPeerOwner(f.remote(), hub, f.target, f.key.groupID)
+    await remote.ready
+    await remote.peer()?.replay()
+    local = await startPeerOwner(f.local(), hub, f.target, f.key.groupID)
+    await local.ready
+    await local.peer()?.replay()
+    const before = await f.snapshot()
+    const state = await f.local().device.groups.loadState(f.key)
+    expect(before.rejoin).toBeNull()
+    expect(before.forkRecoveryAttempt).toBeNull()
+    expect(before.recoveryEpochFloor).toBe(20)
+    expect(
+      (await f.service().readRecords()).filter(
+        (row) => row.kind === 'notice' && row.notice.closedAt === null,
+      ),
+    ).toEqual([])
+    timers = vi.spyOn(globalThis, 'setTimeout')
+    for (let round = 0; round < 8; round++) {
+      expect(await local.peer()?.recover()).toEqual({ advanced: false, reenact: [] })
+      expect(local.status()).toMatchObject({ kind: 'pending', reason: 'target-behind' })
+      expect(local.installedKey()).toEqual(f.key)
+      expect(await f.snapshot()).toEqual(before)
+      expect(await f.local().device.groups.loadState(f.key)).toEqual(state)
+    }
+    expect(timers.mock.calls.filter(([, delay]) => delay === 15000).length).toBeGreaterThan(1)
+    expect(timers.mock.calls.some(([, delay]) => delay === 60000)).toBe(false)
+    expect(hub.published.filter((frame) => frame.topicID === f.target.topicID)).toEqual([])
+  } finally {
+    local?.dispose()
+    remote?.dispose()
+    await Promise.all([local?.drained(), remote?.drained()])
+    timers?.mockRestore()
+    publish?.mockRestore()
+    await f.close()
+  }
+})
+
+test.each([false, true])(
+  'bound same-number rejoin installs and survives restart: %s',
+  async (transactional) => {
+    const f = await createForkRecoveryRealFixture(transactional)
+    try {
+      const exactX = await f.saveX()
+      const capture = await f.reply(19)
+      const authority = await f
+        .requester()
+        .capturedRecovery?.authoriseForkRecovery?.(capture, f.noticeID)
+      if (authority == null) throw new Error('Missing bound branch reply')
+      const y = await f.build(authority, capture)
+      if (y === null) throw new Error('Missing bound candidate')
+      expect(y.record.source.identity?.epoch).toBe(20)
+      expect(y.record.epochAfter).toBe(20)
+      const result = await f.installY(y)
+      expect(result.applied).toMatchObject({ applied: true, advanced: true, epochAfter: 20 })
+      expect(result.responderEpoch).toBe(20)
+      expect(result.destination.incarnation).toBe(result.sourceKey.incarnation + 1)
+      await f.restart()
+      expect(await f.local().device.groups.loadState(f.key)).toMatchObject({
+        epoch: 20,
+        terminal: false,
+      })
+      expect((await f.snapshot()).recoveryEpochFloor).toBe(20)
+      expect((await f.snapshot()).forkRecoveryAttempt).toBeNull()
+      const history = (await f.service().readRecords()).find(
+        (row) => row.kind === 'superseded-rejoin',
+      )
+      expect(history?.kind === 'superseded-rejoin' ? history.record : null).toEqual(exactX)
+    } finally {
       await f.close()
     }
   },

@@ -5,7 +5,7 @@ import { PeerDisposedError } from '../src/errors.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { RecoveryEvent } from '../src/peer.js'
 import { decodeLedgerReply, encodeLedgerRequest } from '../src/recovery.js'
-import { rendezvousTopic } from '../src/topic.js'
+import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS, memoryEntryID } from './fixtures/memory-group-mls.js'
@@ -143,6 +143,10 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
     const timing = { timeoutMs: 80, getDelayMs: () => 0, deadlineMs: 250 }
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: timing })
     await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin']))
+    await bob.peer.commit(buildLedgerCommit(bob, []))
+    const rotation = hub.published.filter((row) => row.topicID === commitTopic(rs)).at(-1)
+    if (rotation === undefined) throw new Error('Missing continuing rotation')
+    hub.hideFrom('alice', rotation.sequenceID)
     const owed = 'circle:x=Alice'
     const aliceCrypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const aliceMLS = createMemoryGroupMLS({

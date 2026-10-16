@@ -547,6 +547,7 @@ export function createMemoryControlStore<Position extends string = string>(
             ledgerBefore: [
               ...new Set([
                 ...next.control.settledRejoins.flatMap((row) => row.ledgerBefore),
+                ...(next.forkContinuation?.settledRejoins.flatMap((row) => row.ledgerBefore) ?? []),
                 ...saved.ledgerBefore,
               ]),
             ],
