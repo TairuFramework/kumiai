@@ -23,7 +23,7 @@ import {
   mlsMessageEncoder,
   wireformats,
 } from 'ts-mls'
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 
 import {
   leafBytes,
@@ -186,6 +186,73 @@ test.each([0, 1, 4])(
     expect(await verifyOfferedGroupInfo(group.state, info, group.context.cipherSuite)).toBe(true)
     info.groupInfo.signature[0] = (info.groupInfo.signature[0] ?? 0) ^ 1
     expect(await verifyOfferedGroupInfo(group.state, info, group.context.cipherSuite)).toBe(false)
+  },
+)
+
+test.each([
+  { field: 'signature', length: 0 },
+  { field: 'signature', length: 1 },
+  { field: 'signature', length: 63 },
+  { field: 'signature', length: 65 },
+  { field: 'signer key', length: 0 },
+  { field: 'signer key', length: 1 },
+  { field: 'signer key', length: 31 },
+  { field: 'signer key', length: 33 },
+])(
+  'public GroupInfo verification refuses malformed $field length $length before crypto',
+  async ({ field, length }) => {
+    const { group } = await createGroup(randomIdentity(), 'public-tree-signature-shape')
+    const suite = group.context.cipherSuite
+    const state = decodeClientState(encodeClientState(group.state))
+    if (state === undefined) throw new Error('Missing state')
+    if (field === 'signer key') {
+      const signer = state.ratchetTree[0]
+      if (signer?.nodeType !== 1) throw new Error('Missing signer leaf')
+      signer.leaf.signaturePublicKey = new Uint8Array(length)
+    }
+    const info = await genuineInfo(state, suite)
+    if (field === 'signature') info.groupInfo.signature = new Uint8Array(length)
+    const verify = vi.fn(suite.signature.verify)
+    await expect(
+      verifyOfferedGroupInfo(group.state, info, {
+        ...suite,
+        signature: { ...suite.signature, verify },
+      }),
+    ).resolves.toBe(false)
+    expect(verify).not.toHaveBeenCalled()
+  },
+)
+
+test.each([
+  { id: 1, signatureLength: 64, keyLength: 32, calls: 1 },
+  { id: 3, signatureLength: 64, keyLength: 32, calls: 1 },
+  { id: 4, signatureLength: 114, keyLength: 57, calls: 1 },
+  { id: 6, signatureLength: 114, keyLength: 57, calls: 1 },
+  { id: 4, signatureLength: 64, keyLength: 57, calls: 0 },
+  { id: 4, signatureLength: 114, keyLength: 32, calls: 0 },
+  { id: 65535, signatureLength: 64, keyLength: 32, calls: 0 },
+])(
+  'public GroupInfo shape validation uses suite $id: signature $signatureLength, key $keyLength',
+  async ({ id, signatureLength, keyLength, calls }) => {
+    const { group } = await createGroup(randomIdentity(), 'public-tree-suite-shape')
+    const state = decodeClientState(encodeClientState(group.state))
+    if (state === undefined) throw new Error('Missing state')
+    const signer = state.ratchetTree[0]
+    if (signer?.nodeType !== 1) throw new Error('Missing signer leaf')
+    signer.leaf.signaturePublicKey = new Uint8Array(keyLength)
+    state.groupContext.cipherSuite = id
+    const info = await genuineInfo(state, group.context.cipherSuite)
+    info.groupInfo.signature = new Uint8Array(signatureLength)
+    // Isolate shape admission from algorithm verification and tree hashing.
+    const verify = vi.fn(async () => false)
+    expect(
+      await verifyOfferedGroupInfo(group.state, info, {
+        ...group.context.cipherSuite,
+        id,
+        signature: { ...group.context.cipherSuite.signature, verify },
+      }),
+    ).toBe(false)
+    expect(verify).toHaveBeenCalledTimes(calls)
   },
 )
 

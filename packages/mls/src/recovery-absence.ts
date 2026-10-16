@@ -10,6 +10,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { fromB64U, toB64U } from '@sozai/codec'
 import {
   type ClientState,
+  ciphersuites,
   defaultExtensionTypes,
   encode,
   type LeafNodeInfoOmitted,
@@ -264,6 +265,15 @@ export async function verifyRecoveryPublicGroupInfo(
     const signer = publicTree.tree[message.groupInfo.signer * 2]
     if (signer?.nodeType !== 1) return false
     signatureKey = signer.leaf.signaturePublicKey
+    const suiteName = Object.entries(ciphersuites).find(([, id]) => id === suite.id)?.[0]
+    const shape = suiteName?.endsWith('_Ed25519')
+      ? [64, 32]
+      : suiteName?.endsWith('_Ed448')
+        ? [114, 57]
+        : undefined
+    if (shape == null) return false
+    if (message.groupInfo.signature.length !== shape[0]) return false
+    if (signatureKey.length !== shape[1]) return false
     const unsigned = encode(mlsMessageEncoder, {
       ...message,
       groupInfo: { ...message.groupInfo, signature: new Uint8Array() },

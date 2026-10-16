@@ -1168,6 +1168,24 @@ test.each([
   },
 )
 
+test.each([0, 1, 63, 65])(
+  'public roster authentication refuses a coherently attested GroupInfo signature length %s',
+  async (length) => {
+    const s = await fixture()
+    const evidence = await s.seal()
+    if (evidence === null) throw new Error('Missing roster')
+    expect(await s.verify(evidence)).not.toBeNull()
+    const changed = await rewrite(s, evidence, (parts, payload) => {
+      const info = decode(mlsMessageDecoder, parts.groupInfo)
+      if (info?.wireformat !== wireformats.mls_group_info) throw new Error('Missing GroupInfo')
+      info.groupInfo.signature = new Uint8Array(length)
+      parts.groupInfo = encode(mlsMessageEncoder, info)
+      payload.groupInfoDigest = encodeMultibase(sha256(parts.groupInfo))
+    })
+    await expect(s.verify(changed)).resolves.toBeNull()
+  },
+)
+
 test('large group roster reply fits requested lineage span', async () => {
   const s = await fixture()
   let group = s.group
