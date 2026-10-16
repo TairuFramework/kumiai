@@ -11,7 +11,6 @@ import {
 } from '@kumiai/mls'
 import type {
   CheckpointComparison,
-  CheckpointFactRecord,
   CheckpointPort,
   CheckpointRecord,
   CheckpointService,
@@ -22,7 +21,7 @@ import { foldForkNotices, forkNoticeEmissions, retainForkEvidence } from '@kumia
 import { sha256 } from '@noble/hashes/sha2.js'
 import { toB64U } from '@sozai/codec'
 
-import { readCheckpointCoverage } from './checkpoint-store.js'
+import { provenCheckpointFacts, readCheckpointCoverage } from './checkpoint-store.js'
 import type { EntryCapability } from './entry-capability.js'
 import { copyStoredValue, sameStoredValue } from './memory-incarnation-stores.js'
 import { GroupStateConflictError } from './persistence-errors.js'
@@ -47,28 +46,8 @@ export function bindRegistryCheckpoint<TTx extends GroupTransaction>(params: {
   bindings.set(params.registry, params)
 }
 
-function proven(records: Array<CheckpointRecord>, groupID: string): Array<CheckpointFactRecord> {
-  const coverage = readCheckpointCoverage(groupID, records)
-  const metadata = records.find((row) => row.kind === 'coverage' && row.id === 'coverage')
-  const ids = new Set(
-    metadata?.kind === 'coverage' ? metadata.installations.map((row) => row.id) : [],
-  )
-  return records.filter(
-    (row): row is CheckpointFactRecord =>
-      row.kind === 'fact' &&
-      row.key.groupID === groupID &&
-      ids.has(row.id) &&
-      coverage.retained.some(
-        (range) =>
-          range.key.incarnation === row.key.incarnation &&
-          range.from <= row.epoch &&
-          range.through >= row.epoch,
-      ),
-  )
-}
-
 function retainedFactAt(records: Array<CheckpointRecord>, requestedKey: GroupKey, epoch: number) {
-  return proven(records, requestedKey.groupID).find(
+  return provenCheckpointFacts(records, requestedKey.groupID).find(
     (row) => row.key.incarnation === requestedKey.incarnation && row.epoch === epoch,
   )
 }
@@ -144,7 +123,7 @@ export function createCheckpointPort(params: {
     return run(() => entry.read(key.groupID, async (reads) => fn(await reads.checkpoints())))
   }
   function factAt(records: Array<CheckpointRecord>, requestedKey: GroupKey, epoch: number) {
-    return proven(records, key.groupID).find(
+    return provenCheckpointFacts(records, key.groupID).find(
       (row) =>
         row.key.groupID === requestedKey.groupID &&
         row.key.incarnation === requestedKey.incarnation &&
@@ -163,7 +142,7 @@ export function createCheckpointPort(params: {
             if (lifetime?.activeIncarnation !== key.incarnation)
               throw new GroupStateConflictError('Checkpoint worker is retired')
             const records = await reads.checkpoints()
-            const record = proven(records, key.groupID).find(
+            const record = provenCheckpointFacts(records, key.groupID).find(
               (row) => row.id === factID && sameKey(row.key),
             )
             const debt = records.find(
@@ -233,7 +212,7 @@ export function createCheckpointPort(params: {
     },
     exportCheckpoints(requestedKey, epochs) {
       return read((records) => {
-        const facts = proven(records, key.groupID).filter(
+        const facts = provenCheckpointFacts(records, key.groupID).filter(
           (row) =>
             row.key.groupID === requestedKey.groupID &&
             row.key.incarnation === requestedKey.incarnation &&
@@ -304,7 +283,7 @@ export function createCheckpointService(params: CheckpointServiceParams): Checkp
           const now = Date.now()
           const lifetime = await reads.lifetime()
           const before = await reads.checkpoints()
-          const facts = proven(before, key.groupID)
+          const facts = provenCheckpointFacts(before, key.groupID)
           let records = retainForkEvidence(before, facts, now)
           if (action.kind === 'update') {
             if (lifetime?.activeIncarnation !== key.incarnation)

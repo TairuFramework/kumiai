@@ -7,7 +7,6 @@ import {
   sealRosterAbsenceReply,
 } from '@kumiai/mls'
 import {
-  type CheckpointFactRecord,
   type ControlStore,
   controlSafetyHeld,
   type GroupMLS,
@@ -15,7 +14,7 @@ import {
 } from '@kumiai/rpc'
 
 import type { ControlHandleAccess } from './access.js'
-import { readCheckpointCoverage } from './checkpoint-store.js'
+import { provenCheckpointFacts } from './checkpoint-store.js'
 import type { AccountedGroupObservation, EntryReads } from './entry-capability.js'
 import {
   createGroupMLS,
@@ -261,24 +260,7 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
       const state = decodeClientState(record.state)
       if (state == null) return null
       const records = await reads.checkpoints()
-      const coverage = readCheckpointCoverage(key.groupID, records)
-      const metadata = records.find((row) => row.kind === 'coverage' && row.id === 'coverage')
-      const ids = new Set(
-        metadata?.kind === 'coverage' ? metadata.installations.map((row) => row.id) : [],
-      )
-      const facts = records
-        .filter(
-          (row): row is CheckpointFactRecord =>
-            row.kind === 'fact' &&
-            ids.has(row.id) &&
-            coverage.retained.some(
-              (range) =>
-                range.key.incarnation === row.key.incarnation &&
-                range.from <= row.epoch &&
-                range.through >= row.epoch,
-            ),
-        )
-        .sort((a, b) => a.epoch - b.epoch)
+      const facts = provenCheckpointFacts(records, key.groupID).sort((a, b) => a.epoch - b.epoch)
       const lineage = facts
         .filter((fact) => fact.key.incarnation === key.incarnation)
         .flatMap((fact) =>

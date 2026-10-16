@@ -229,6 +229,29 @@ function ranges(facts: Array<CheckpointFactRecord>): CheckpointCoverage['retaine
   return result
 }
 
+export function provenCheckpointFacts(
+  records: Array<CheckpointRecord>,
+  groupID: string,
+): Array<CheckpointFactRecord> {
+  const coverage = readCheckpointCoverage(groupID, records)
+  const metadata = records.find((row) => row.kind === 'coverage' && row.id === 'coverage')
+  const ids = new Set(
+    metadata?.kind === 'coverage' ? metadata.installations.map((row) => row.id) : [],
+  )
+  return records.filter(
+    (row): row is CheckpointFactRecord =>
+      row.kind === 'fact' &&
+      row.key.groupID === groupID &&
+      ids.has(row.id) &&
+      coverage.retained.some(
+        (range) =>
+          range.key.incarnation === row.key.incarnation &&
+          range.from <= row.epoch &&
+          range.through >= row.epoch,
+      ),
+  )
+}
+
 export function readCheckpointCoverage(
   groupID: string,
   records: Array<CheckpointRecord>,
