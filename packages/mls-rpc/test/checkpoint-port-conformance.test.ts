@@ -13,6 +13,7 @@ import type { CheckpointPort } from '@kumiai/rpc'
 import type { ConformanceCheckpointPort } from '@kumiai/rpc-conformance'
 import {
   malformedCheckpointBodies,
+  testCheckpointCacheConformance,
   testCheckpointComparisonConformance,
   testCheckpointCoverageConformance,
   testCheckpointPortConformance,
@@ -189,6 +190,78 @@ for (const mode of ['real-mls', 'double'] as const) {
             await expect(port.signInstalled(next.id)).rejects.toThrow()
           },
           decodeEpoch: (frame) => decodeEpochCheckpoint(frame).body.epoch,
+          close: fixture.close,
+        }
+      },
+    })
+    testCheckpointCacheConformance({
+      label: `${mode}, ${ownership} ownership context`,
+      createFixture: async () => {
+        const real = await createRealGroup(1, `${groupID}-cached-signers`)
+        const local = real.members[0]
+        if (local === undefined) throw new Error('Missing local member')
+        const fixture = await createRegistryFixture({
+          groupID: local.handle.groupID,
+          mode,
+          setup: 'empty',
+          identity: local.identity,
+          options: { resolveLedgerEntries: real.resolveLedgerEntries },
+          ownershipContext:
+            ownership === 'supplied' ? createAsyncLocalOwnershipContext() : undefined,
+        })
+        const handle = await registryHandle({
+          mode,
+          options: fixture.environment.options,
+          handle: await restoreGroup({
+            state: local.handle.state,
+            credential: local.handle.credential,
+            ledgerEntries: local.handle.ledgerTokens,
+            options: fixture.environment.options,
+          }),
+        })
+        const key = await fixture.registry.seed(handle, {
+          packageUse: { sourceID: 'cached-signers', ref: 'local-package', kind: 'ordinary' },
+        })
+        const port = createCheckpointPort({
+          registry: fixture.registry,
+          key,
+          identity: fixture.identity,
+        })
+        const entry = entryCapability(fixture.device.groups)
+        if (entry === null) throw new Error('Missing coordinator')
+        const records = () => entry.read(key.groupID, (reads) => reads.checkpoints())
+        return {
+          port,
+          key,
+          async installed() {
+            const rows = await records()
+            const coverage = rows.find((row) => row.kind === 'coverage')
+            const id = coverage?.kind === 'coverage' ? coverage.installations.at(-1)?.id : undefined
+            const fact = rows.find((row) => row.kind === 'fact' && row.id === id)
+            if (fact?.kind !== 'fact') throw new Error('Missing installation')
+            return fact
+          },
+          async advance() {
+            const access = await fixture.registry.access(key.groupID)
+            const accepted = await fixture.acceptedOrdinary(access)
+            await access.adopt(accepted.candidate, accepted.expected, accepted.write)
+          },
+          async saveFrame(factID, frame) {
+            const debt = (await records()).find(
+              (row) => row.kind === 'publication' && row.factID === factID,
+            )
+            if (debt?.kind !== 'publication') throw new Error('Missing publication')
+            await fixture.device.groups.transition(
+              await nextChange(fixture.device.groups, key.groupID, crypto.randomUUID()),
+              (stores) => stores.checkpoints.put({ ...debt, frame }),
+            )
+          },
+          signBody: (body, otherSigner) =>
+            independentCheckpointFrame(
+              body,
+              (otherSigner ? real.committer.identity : fixture.identity).privateKey,
+            ),
+          otherKeyHash: checkpointKeyHash(real.committer.identity.publicKey),
           close: fixture.close,
         }
       },
@@ -407,117 +480,6 @@ for (const mode of ['real-mls', 'double'] as const) {
           await pending.finish('rollback')
           expect(await signing).toBeInstanceOf(Error)
           expect(await records()).toEqual(before)
-        } finally {
-          await fixture.close()
-        }
-      })
-      test.each(['leaf', 'parent', 'hash', 'signature'] as const)(
-        'cached own statement preserves %s binding',
-        async (kind) => {
-          const { fixture, port, installed, records } = await setup()
-          try {
-            const fact = await installed()
-            const original = await port.signInstalled(fact.id)
-            if (original === null) throw new Error('Missing signed checkpoint')
-            const body = decodeEpochCheckpoint(original).body
-            if (kind === 'leaf') body.leafIndex++
-            else if (kind === 'parent') body.parentAuthHash = toB64U(new Uint8Array(32).fill(7))
-            else if (kind === 'hash') body.authHash = toB64U(new Uint8Array(32).fill(8))
-            const frame = encodeEpochCheckpoint(
-              body,
-              ed25519.sign(checkpointSignatureInput(body), fixture.identity.privateKey),
-            )
-            if (kind === 'signature') frame[frame.length - 1] = (frame[frame.length - 1] ?? 0) ^ 1
-            const debt = (await records()).find(
-              (row) => row.kind === 'publication' && row.factID === fact.id,
-            )
-            if (debt?.kind !== 'publication') throw new Error('Missing publication')
-            await fixture.device.groups.transition(
-              await nextChange(fixture.device.groups, groupID, crypto.randomUUID()),
-              (stores) => stores.checkpoints.put({ ...debt, frame }),
-            )
-            await expect(port.signInstalled(fact.id)).rejects.toThrow()
-          } finally {
-            await fixture.close()
-          }
-        },
-      )
-      test('cached own statement cannot use another eligible signer', async () => {
-        const real = await createRealGroup(1, `${groupID}-cached-signers`)
-        const local = real.members[0]
-        if (local === undefined) throw new Error('Missing local member')
-        const fixture = await createRegistryFixture({
-          groupID: local.handle.groupID,
-          mode,
-          setup: 'empty',
-          identity: local.identity,
-          options: { resolveLedgerEntries: real.resolveLedgerEntries },
-          ownershipContext:
-            ownership === 'supplied' ? createAsyncLocalOwnershipContext() : undefined,
-        })
-        try {
-          const handle = await registryHandle({
-            mode,
-            options: fixture.environment.options,
-            handle: await restoreGroup({
-              state: local.handle.state,
-              credential: local.handle.credential,
-              ledgerEntries: local.handle.ledgerTokens,
-              options: fixture.environment.options,
-            }),
-          })
-          const key = await fixture.registry.seed(handle, {
-            packageUse: { sourceID: 'cached-signers', ref: 'local-package', kind: 'ordinary' },
-          })
-          const port = createCheckpointPort({
-            registry: fixture.registry,
-            key,
-            identity: fixture.identity,
-          })
-          const entry = entryCapability(fixture.device.groups)
-          if (entry === null) throw new Error('Missing coordinator')
-          const rows = await entry.read(key.groupID, (reads) => reads.checkpoints())
-          const fact = rows.find((row) => row.kind === 'fact')
-          const debt = rows.find((row) => row.kind === 'publication')
-          if (fact?.kind !== 'fact' || debt?.kind !== 'publication')
-            throw new Error('Missing installation')
-          const original = await port.signInstalled(fact.id)
-          if (original === null) throw new Error('Missing signed checkpoint')
-          const body = {
-            ...decodeEpochCheckpoint(original).body,
-            keyHash: checkpointKeyHash(real.committer.identity.publicKey),
-          }
-          const frame = encodeEpochCheckpoint(
-            body,
-            ed25519.sign(checkpointSignatureInput(body), real.committer.identity.privateKey),
-          )
-          await fixture.device.groups.transition(
-            await nextChange(fixture.device.groups, key.groupID, crypto.randomUUID()),
-            (stores) => stores.checkpoints.put({ ...debt, frame }),
-          )
-          await expect(port.signInstalled(fact.id)).rejects.toThrow()
-        } finally {
-          await fixture.close()
-        }
-      })
-      test('saved publication cannot substitute another installation', async () => {
-        const { fixture, port, installed, records } = await setup()
-        try {
-          const first = await installed()
-          const frame = await port.signInstalled(first.id)
-          const access = await fixture.registry.access(groupID)
-          const accepted = await fixture.acceptedOrdinary(access)
-          await access.adopt(accepted.candidate, accepted.expected, accepted.write)
-          const current = await installed()
-          const debt = (await records()).find(
-            (row) => row.kind === 'publication' && row.factID === current.id,
-          )
-          if (debt?.kind !== 'publication') throw new Error('Missing publication')
-          await fixture.device.groups.transition(
-            await nextChange(fixture.device.groups, groupID, crypto.randomUUID()),
-            (stores) => stores.checkpoints.put({ ...debt, frame }),
-          )
-          await expect(port.signInstalled(current.id)).rejects.toThrow()
         } finally {
           await fixture.close()
         }

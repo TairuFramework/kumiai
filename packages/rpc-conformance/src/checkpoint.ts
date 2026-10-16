@@ -671,6 +671,112 @@ export function testCheckpointPortConformance(params: {
   })
 }
 
+export function testCheckpointCacheConformance(params: {
+  label: string
+  createFixture(): Promise<{
+    port: ConformanceCheckpointPort
+    key: ConformanceGroupKey
+    installed(): Promise<{ id: string; epoch: number }>
+    advance(): Promise<void>
+    saveFrame(factID: string, frame: Uint8Array): Promise<void>
+    signBody(body: Record<string, unknown>, otherSigner?: boolean): Uint8Array
+    otherKeyHash: string
+    close(): Promise<void>
+  }>
+}): void {
+  describe(`checkpoint cache: ${params.label}`, () => {
+    test('saved publication cannot substitute another installation', async () => {
+      const fixture = await params.createFixture()
+      try {
+        const first = await fixture.installed()
+        const frame = await fixture.port.signInstalled(first.id)
+        if (frame === null) throw new Error('Missing signed checkpoint')
+        await fixture.advance()
+        const current = await fixture.installed()
+        expect(current.epoch).toBeGreaterThan(first.epoch)
+        await fixture.saveFrame(current.id, frame)
+        await expect(fixture.port.signInstalled(current.id)).rejects.toThrow()
+      } finally {
+        await fixture.close()
+      }
+    })
+    test.each([
+      'v',
+      'type',
+      'groupID',
+      'genesisHash',
+      'ciphersuite',
+      'epoch',
+      'authHash',
+      'parentAuthHash',
+      'keyHash',
+      'leafIndex',
+      'extra',
+      'other-signer',
+      'signature',
+      'noncanonical',
+      'version',
+      'kind',
+      'length',
+      'body-length',
+      'truncated',
+      'oversized',
+    ] as const)('cached own statement preserves %s binding', async (kind) => {
+      const fixture = await params.createFixture()
+      try {
+        const fact = await fixture.installed()
+        const original = await fixture.port.signInstalled(fact.id)
+        if (original === null) throw new Error('Missing signed checkpoint')
+        expect(await fixture.port.signInstalled(fact.id)).toEqual(original)
+        const body = JSON.parse(
+          new TextDecoder('utf-8', { fatal: true }).decode(original.slice(10, -64)),
+        ) as Record<string, unknown>
+        const hash = 'BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc'
+        const changes: Record<string, unknown> = {
+          v: 2,
+          type: 'other',
+          groupID: 'another-group',
+          genesisHash: hash,
+          ciphersuite: body.ciphersuite === 1 ? 3 : 1,
+          epoch: fact.epoch + 1,
+          authHash: hash,
+          parentAuthHash: body.parentAuthHash === null ? hash : null,
+          keyHash: hash,
+          leafIndex: Number(body.leafIndex) + 1,
+          extra: true,
+        }
+        let frame: Uint8Array = original.slice()
+        if (Object.hasOwn(changes, kind))
+          frame = fixture.signBody({ ...body, [kind]: changes[kind] })
+        else if (kind === 'other-signer')
+          frame = fixture.signBody({ ...body, keyHash: fixture.otherKeyHash }, true)
+        else if (kind === 'signature') frame[frame.length - 1] = (frame[frame.length - 1] ?? 0) ^ 1
+        else if (kind === 'noncanonical') {
+          frame = new Uint8Array(original.length + 1)
+          frame.set(original.slice(0, 10))
+          frame[10] = 32
+          frame.set(original.slice(10), 11)
+          const view = new DataView(frame.buffer)
+          view.setUint32(2, frame.length - 6)
+          view.setUint32(6, frame.length - 74)
+        } else if (kind === 'version') frame[0] = 2
+        else if (kind === 'kind') frame[1] = 2
+        else if (kind === 'length') new DataView(frame.buffer).setUint32(2, frame.length - 7)
+        else if (kind === 'body-length') new DataView(frame.buffer).setUint32(6, frame.length - 75)
+        else if (kind === 'truncated') frame = frame.slice(0, 73)
+        else if (kind === 'oversized') frame = new Uint8Array(4097)
+        expect(frame).not.toEqual(original)
+        if (kind === 'other-signer')
+          expect((await fixture.port.compare(fixture.key, frame)).kind).toBe('agreement')
+        await fixture.saveFrame(fact.id, frame)
+        await expect(fixture.port.signInstalled(fact.id)).rejects.toThrow()
+      } finally {
+        await fixture.close()
+      }
+    })
+  })
+}
+
 export type CheckpointComparisonFixture = {
   port: ConformanceCheckpointPort
   key: ConformanceGroupKey

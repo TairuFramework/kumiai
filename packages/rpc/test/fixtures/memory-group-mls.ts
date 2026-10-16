@@ -2331,7 +2331,6 @@ export function createMemoryCheckpointPort(params: {
       )
       if (fact === undefined || member === undefined) return null
       const saved = db.frames.get(id)
-      if (saved !== undefined) return saved.slice()
       const body = {
         v: 1,
         type: 'kumiai/checkpoint/v1',
@@ -2344,21 +2343,27 @@ export function createMemoryCheckpointPort(params: {
         keyHash: member.keyHash,
         leafIndex: member.leafIndex,
       }
+      if (saved !== undefined) {
+        const decoded = decodeMemoryCheckpointFrame(saved)
+        if (
+          canonicalStringify(decoded) !== canonicalStringify(body) ||
+          !ed25519.verify(
+            saved.slice(-64),
+            memoryCheckpointSignatureInput(decoded),
+            identity.publicKey,
+            { zip215: false },
+          )
+        )
+          throw new Error('Saved checkpoint does not match installation')
+        return saved.slice()
+      }
       const bytes = memoryCheckpointFrame(body, identity.privateKey)
       db.frames.set(id, bytes)
       return bytes.slice()
     },
     async compare(requested, frame) {
       try {
-        if (frame.length < 74 || frame.length > 4096 || frame[0] !== 1 || frame[1] !== 1)
-          return { kind: 'invalid' }
-        const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
-        if (view.getUint32(2) !== frame.length - 6 || view.getUint32(6) !== frame.length - 74)
-          return { kind: 'invalid' }
-        const bytes = frame.slice(10, -64)
-        const body = JSON.parse(toUTF(bytes)) as MemoryCheckpointBody
-        if (canonicalStringify(body) !== toUTF(bytes) || !validMemoryCheckpointBody(body))
-          return { kind: 'invalid' }
+        const body = decodeMemoryCheckpointFrame(frame)
         const fact = find(requested, body.epoch)
         if (fact === undefined) return { kind: 'coverage-gap' }
         if (
@@ -2458,6 +2463,18 @@ type MemoryCheckpointBody = {
   parentAuthHash: string | null
   keyHash: string
   leafIndex: number
+}
+function decodeMemoryCheckpointFrame(frame: Uint8Array): MemoryCheckpointBody {
+  if (frame.length < 74 || frame.length > 4096 || frame[0] !== 1 || frame[1] !== 1)
+    throw new Error('Invalid checkpoint frame')
+  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
+  if (view.getUint32(2) !== frame.length - 6 || view.getUint32(6) !== frame.length - 74)
+    throw new Error('Invalid checkpoint frame lengths')
+  const bytes = frame.slice(10, -64)
+  const body = JSON.parse(toUTF(bytes)) as MemoryCheckpointBody
+  if (canonicalStringify(body) !== toUTF(bytes) || !validMemoryCheckpointBody(body))
+    throw new Error('Invalid checkpoint body')
+  return body
 }
 function memoryCheckpointSignatureInput(body: MemoryCheckpointBody): Uint8Array {
   const bytes = fromUTF(canonicalStringify(body))

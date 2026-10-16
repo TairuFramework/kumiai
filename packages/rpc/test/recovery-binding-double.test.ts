@@ -1,6 +1,7 @@
 import { randomIdentity } from '@kokuin/token'
 import {
   malformedCheckpointBodies,
+  testCheckpointCacheConformance,
   testCheckpointComparisonConformance,
   testCheckpointCoverageConformance,
   testCheckpointPortConformance,
@@ -173,6 +174,34 @@ testCheckpointPortConformance({
         fixture.db.activeIncarnation = 2
       },
       decodeEpoch: (frame) => (JSON.parse(toUTF(frame.slice(10, -64))) as { epoch: number }).epoch,
+      close: async () => {},
+    }
+  },
+})
+
+testCheckpointCacheConformance({
+  label: 'independent rpc model',
+  createFixture: async () => {
+    const fixture = checkpointFixture()
+    const other = randomIdentity()
+    const members = [fixture.member(), { ...fixture.member(other), leafIndex: 1 }]
+    let current = fixture.install(1, 0, members)
+    return {
+      port: fixture.port(),
+      key: fixture.key,
+      installed: async () => current,
+      advance: async () => {
+        current = fixture.install(1, current.epoch + 1, members)
+      },
+      saveFrame: async (factID, frame) => {
+        fixture.db.frames.set(factID, frame.slice())
+      },
+      signBody: (body, otherSigner) =>
+        memoryCheckpointFrame(
+          body as Parameters<typeof memoryCheckpointFrame>[0],
+          (otherSigner ? other : fixture.identity).privateKey,
+        ),
+      otherKeyHash: fixture.member(other).keyHash,
       close: async () => {},
     }
   },

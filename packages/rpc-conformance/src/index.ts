@@ -42,6 +42,7 @@ export {
   type ConformanceCheckpointService,
   type ConformanceCheckpointStore,
   malformedCheckpointBodies,
+  testCheckpointCacheConformance,
   testCheckpointComparisonConformance,
   testCheckpointCoverageConformance,
   testCheckpointPortConformance,
