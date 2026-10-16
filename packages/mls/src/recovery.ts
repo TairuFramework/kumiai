@@ -24,6 +24,7 @@ import {
 } from 'ts-mls'
 
 import { type GroupAnchor, LEDGER_HEAD_EXTENSION_TYPE, readGroupAnchorExtension } from './anchor.js'
+import { checkpointKeyHash } from './checkpoint-codec.js'
 import { didFromCredential, parseMLSCredentialIdentity } from './credential.js'
 import {
   exportGroupInfo,
@@ -120,6 +121,8 @@ export type RecoveryRequest = {
   requestID: string
   /** Multibase-encoded X25519 public key, minted per request. */
   ephemeralKey: string
+  /** Lower bound: the open split, otherwise the oldest locally retained epoch. */
+  comparisonEpoch?: number
 }
 
 /** A recovery request whose signature verified and whose fields parsed. */
@@ -129,6 +132,9 @@ export type VerifiedRecoveryRequest = {
   groupID: string
   requestID: string
   ephemeralPublicKey: Uint8Array
+  /** Hash of the verified request-signing key, including non-primary DID keys. */
+  requesterKeyHash: string
+  comparisonEpoch?: number
 }
 
 /**
@@ -370,12 +376,14 @@ export async function verifyRecoveryRequest(
     throw new RecoveryRequestError('unverified', 'recovery request is not signed')
   }
 
-  const { iss, type, groupID, requestID, ephemeralKey } = verified.payload
+  const { iss, type, groupID, requestID, ephemeralKey, comparisonEpoch } = verified.payload
   if (
     type !== RECOVERY_REQUEST_TYPE ||
     typeof groupID !== 'string' ||
     typeof requestID !== 'string' ||
-    typeof ephemeralKey !== 'string'
+    typeof ephemeralKey !== 'string' ||
+    (comparisonEpoch !== undefined &&
+      (!Number.isSafeInteger(comparisonEpoch) || comparisonEpoch < 0))
   ) {
     throw new RecoveryRequestError('malformed', 'recovery request payload is malformed')
   }
@@ -408,7 +416,14 @@ export async function verifyRecoveryRequest(
       throw new RecoveryRequestError('malformed', 'recovery request does not match the saved key')
   }
 
-  return { requesterDID: normalizeDID(iss), groupID, requestID, ephemeralPublicKey }
+  return {
+    requesterDID: normalizeDID(iss),
+    groupID,
+    requestID,
+    ephemeralPublicKey,
+    requesterKeyHash: checkpointKeyHash(verified.verifiedPublicKey),
+    ...(comparisonEpoch === undefined ? {} : { comparisonEpoch }),
+  }
 }
 
 export type CreateRecoveryRequestParams = {
@@ -419,6 +434,7 @@ export type CreateRecoveryRequestParams = {
   /** Correlation id, minted per recover() call. Not authorization — the signature
    *  and the responder's roster check carry that. */
   requestID: string
+  comparisonEpoch?: number
 }
 
 export type CreateRecoveryRequestResult = {
@@ -441,6 +457,11 @@ export async function createRecoveryRequest(
   params: CreateRecoveryRequestParams,
 ): Promise<CreateRecoveryRequestResult> {
   const { group, identity, requestID } = params
+  if (
+    params.comparisonEpoch !== undefined &&
+    (!Number.isSafeInteger(params.comparisonEpoch) || params.comparisonEpoch < 0)
+  )
+    throw new TypeError('Invalid recovery comparison epoch')
   if (normalizeDID(identity.id) !== normalizeDID(group.credential.id)) {
     throw new Error(
       `createRecoveryRequest: identity.id (${identity.id}) must match the handle credential (${group.credential.id})`,
@@ -458,6 +479,7 @@ export async function createRecoveryRequest(
       groupID: group.groupID,
       requestID,
       ephemeralKey: encodeMultibase(ephemeralPublicKey),
+      ...(params.comparisonEpoch === undefined ? {} : { comparisonEpoch: params.comparisonEpoch }),
     },
     // Self-verifying offline: a responder must not need a DID resolver to check
     // the signature of a peer it has never resolved.
@@ -977,7 +999,7 @@ export async function openRecoveryGroupInfoFromPublic(
  * same tokens reordered fold to a different head and the requester rejects them — a
  * list, never a set or map.
  */
-function encodeLedgerTokens(tokens: Array<string>): Uint8Array {
+export function encodeLedgerTokens(tokens: Array<string>): Uint8Array {
   const encoded = tokens.map((token) => utf8.encode(token))
   const size = encoded.reduce((total, bytes) => total + 4 + bytes.length, 4)
   const out = new Uint8Array(size)
@@ -992,7 +1014,7 @@ function encodeLedgerTokens(tokens: Array<string>): Uint8Array {
   return out
 }
 
-function decodeLedgerTokens(bytes: Uint8Array): Array<string> {
+export function decodeLedgerTokens(bytes: Uint8Array): Array<string> {
   if (bytes.length < 4) throw new Error('sealed ledger is too short')
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const count = view.getUint32(0, false)

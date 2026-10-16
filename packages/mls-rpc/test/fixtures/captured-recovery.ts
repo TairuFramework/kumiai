@@ -1,14 +1,19 @@
 import { normalizeDID, type OwnIdentity, randomIdentity } from '@kokuin/token'
 import {
   type ControllerBinding,
+  checkpointSignatureInput,
   commitInvite,
+  commitSelfRemovals,
   confirmationTag,
   createGroup,
   createInvite,
   createKeyPackageBundle,
   decodeClientState,
+  decodeEpochRosterFact,
+  encodeEpochCheckpoint,
   parseMLSCredentialIdentity,
   processWelcome,
+  proposeSelfRemoval,
   restoreGroup,
 } from '@kumiai/mls'
 import {
@@ -19,7 +24,9 @@ import {
   encodeHandshakeFrame,
   HANDSHAKE_KIND,
 } from '@kumiai/rpc'
+import { ed25519 } from '@noble/curves/ed25519.js'
 
+import { prepareCheckpointInstallation } from '../../src/checkpoint-capture.js'
 import { createGroupMLS, createLedgerEntrySlot } from '../../src/mls.js'
 import { recoveryTrustDigest } from '../../src/recovery-trust-digest.js'
 import { recoveryTrustFor } from '../../src/registry/trust.js'
@@ -219,4 +226,57 @@ async function boundCapturedGroup() {
       { identity: responder, handle: joined.group, slot: createLedgerEntrySlot() },
     ],
   }
+}
+
+export async function createCapturedFormerMember() {
+  const real = await boundCapturedGroup()
+  const responder = real.members[0]
+  const requester = real.members[1]
+  if (responder === undefined || requester === undefined) throw new Error('Missing bound members')
+  const key = { groupID: responder.handle.groupID, incarnation: 1 }
+  const trust = recoveryTrustFor(requester.handle, key, null)
+  const earlier = await prepareCheckpointInstallation({
+    key,
+    handle: responder.handle,
+    mutationID: 'former-member',
+    stateVersion: 1,
+    previousFact: null,
+  })
+  const index = responder.handle.findMemberLeafIndex(requester.identity.id)
+  if (index === undefined) throw new Error('Missing requester')
+  const removal = await proposeSelfRemoval(requester.handle)
+  await responder.handle.processMessage(removal.frame)
+  const removed = await commitSelfRemovals(responder.handle)
+  if (removed === null) throw new Error('Missing authenticated self-removal')
+  responder.handle = removed.newGroup
+  const current = await prepareCheckpointInstallation({
+    key,
+    handle: responder.handle,
+    mutationID: 'removed-member',
+    stateVersion: 2,
+    previousFact: earlier.canonical,
+  })
+  const retainedRosterFacts = [earlier.canonical, current.canonical]
+  const lineage = retainedRosterFacts.map((bytes) => {
+    const fact = decodeEpochRosterFact(bytes)
+    const own = fact.members.find((member) => member.signerDID === responder.identity.id)
+    if (own === undefined) throw new Error('Missing responder')
+    const body = {
+      v: 1 as const,
+      type: 'kumiai/checkpoint/v1' as const,
+      groupID: key.groupID,
+      genesisHash: fact.genesisHash,
+      ciphersuite: fact.ciphersuite,
+      epoch: fact.epoch,
+      authHash: fact.authHash,
+      parentAuthHash: fact.parentAuthHash,
+      keyHash: own.keyHash,
+      leafIndex: own.leafIndex,
+    }
+    return encodeEpochCheckpoint(
+      body,
+      ed25519.sign(checkpointSignatureInput(body), responder.identity.privateKey),
+    )
+  })
+  return { requester, responder, trust, retainedRosterFacts, lineage }
 }

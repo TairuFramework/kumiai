@@ -1,5 +1,6 @@
 import { normalizeDID, type OwnIdentity } from '@kokuin/token'
 import {
+  type AuthenticatedRosterAbsence,
   assertRecoveryBinding,
   authenticateRecoveryReply as authenticateTrustedReply,
   type CapturedRecoveryGroupInfo,
@@ -23,6 +24,7 @@ import {
   recoverySignerEligible,
   restoreGroup,
   SealedGroupInfoError,
+  verifyRosterAbsence as verifyTrustedRosterAbsence,
 } from '@kumiai/mls'
 import {
   type CapturedAppliedRecovery,
@@ -91,6 +93,7 @@ export async function createRecoveryRequestFromTrust(params: {
   identity: OwnIdentity
   requestID: string
   deadlineMs?: number
+  comparisonEpoch?: number
 }): Promise<{ request: Uint8Array; requestKey: Uint8Array }> {
   const result = await createTrustedRequest({ ...params, trust: recoveryTrustInputs(params.trust) })
   return { ...result, request: new TextEncoder().encode(result.request) }
@@ -108,6 +111,12 @@ export async function authenticateRecoveryReply(
   params: AuthenticateRecoveryReplyParams,
 ): Promise<CapturedRecoveryGroupInfo | null> {
   return await authenticateTrustedReply({ ...params, trust: recoveryTrustInputs(params.trust) })
+}
+
+export async function verifyRosterAbsence(
+  params: Omit<AuthenticateRecoveryReplyParams, 'sealed'> & { evidence: Uint8Array },
+): Promise<AuthenticatedRosterAbsence | null> {
+  return await verifyTrustedRosterAbsence({ ...params, trust: recoveryTrustInputs(params.trust) })
 }
 
 export async function openRecoveryVerdictFromTrust(

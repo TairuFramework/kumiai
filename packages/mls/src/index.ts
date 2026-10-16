@@ -249,6 +249,14 @@ export {
   verifyRecoveryRequest,
 } from './recovery.js'
 export {
+  type AuthenticatedRosterAbsence,
+  readRecoveryPublicTree,
+  sealRosterAbsenceReply,
+  verifyRecoveryLineage,
+  verifyRecoveryPublicGroupInfo,
+  verifyRosterAbsence,
+} from './recovery-absence.js'
+export {
   type AuthenticateRecoveryReplyParams,
   authenticateRecoveryReply,
   type CreateRecoveryRequestFromTrustParams,

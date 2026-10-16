@@ -6,6 +6,7 @@ import { decodeGroupAnchor } from './anchor.js'
 import { verifyLeafCredential } from './authentication.js'
 import {
   type ControllerBinding,
+  didFromCredential,
   type MemberCredential,
   parseMLSCredentialIdentity,
 } from './credential.js'
@@ -43,6 +44,7 @@ export type CreateRecoveryRequestFromTrustParams = {
   identity: OwnIdentity
   requestID: string
   deadlineMs?: number
+  comparisonEpoch?: number
 }
 
 export type AuthenticateRecoveryReplyParams = {
@@ -53,7 +55,7 @@ export type AuthenticateRecoveryReplyParams = {
   options: GroupOptions
 }
 
-async function publicGroup(
+export async function publicRecoveryGroup(
   trust: RecoveryTrustInputs,
   options: GroupOptions,
 ): Promise<PublicRecoveryGroup> {
@@ -100,7 +102,7 @@ async function assertTrustedMember(
   })
 }
 
-async function assertTrustedOwner(
+export async function assertTrustedRecoveryOwner(
   group: PublicRecoveryGroup,
   trust: RecoveryTrustInputs,
 ): Promise<void> {
@@ -118,17 +120,41 @@ async function assertTrustedOwner(
   await assertTrustedMember(group, trust, trust.credential.id)
 }
 
-async function assertTrustedSigner(
+export async function assertTrustedRecoverySigner(
   group: PublicRecoveryGroup,
   trust: RecoveryTrustInputs,
   signer: string,
+  publicKey?: Uint8Array,
 ): Promise<void> {
-  await assertTrustedMember(group, trust, signer)
+  let signerGroup = group
+  if (publicKey !== undefined) {
+    const member = recoveryLeafForDID(group.signerTree, signer)
+    const first = group.signerTree.findIndex((node) => node?.nodeType === 1 && node.leaf === member)
+    const selected = group.signerTree.findIndex(
+      (node) =>
+        node?.nodeType === 1 &&
+        didFromCredential(node.leaf.credential) === normalizeDID(signer) &&
+        publicKey.length === node.leaf.signaturePublicKey.length &&
+        publicKey.every((byte, index) => byte === node.leaf.signaturePublicKey[index]),
+    )
+    if (first < 0 || selected < 0)
+      throw new SealedGroupInfoError(
+        'unauthenticated',
+        'Recovery signing key is absent from retained tree',
+      )
+    if (first !== selected) {
+      // DID-based authority checks must select this key while retaining every member's time floor.
+      const signerTree = group.signerTree.slice()
+      ;[signerTree[first], signerTree[selected]] = [signerTree[selected], signerTree[first]]
+      signerGroup = { ...group, signerTree }
+    }
+  }
+  await assertTrustedMember(signerGroup, trust, signer)
   if (
-    group.anchor.controller != null &&
+    signerGroup.anchor.controller != null &&
     !recoverySignerEligibleFromPublic({
-      tree: group.signerTree,
-      anchor: group.anchor,
+      tree: signerGroup.signerTree,
+      anchor: signerGroup.anchor,
       known: trust.registry,
       signer,
     })
@@ -140,8 +166,13 @@ export async function createRecoveryRequestFromTrust(
   params: CreateRecoveryRequestFromTrustParams,
 ): Promise<{ request: string; requestKey: Uint8Array }> {
   const { trust, identity, requestID } = params
-  const group = await publicGroup(trust, {})
-  const held = await createRecoveryRequest({ group, identity, requestID })
+  const group = await publicRecoveryGroup(trust, {})
+  const held = await createRecoveryRequest({
+    group,
+    identity,
+    requestID,
+    comparisonEpoch: params.comparisonEpoch,
+  })
   return { request: held.request, requestKey: held.ephemeralPrivateKey }
 }
 
@@ -152,8 +183,8 @@ export async function authenticateRecoveryReply(
   // Provider construction and local key faults must not become wire refusals.
   if (requestKey.length !== 32) throw new Error('Invalid retained recovery request key length')
   try {
-    const group = await publicGroup(trust, options)
-    await assertTrustedOwner(group, trust)
+    const group = await publicRecoveryGroup(trust, options)
+    await assertTrustedRecoveryOwner(group, trust)
     const reply = await openRecoveryGroupInfoFromPublic({
       group,
       sealed,
@@ -161,7 +192,7 @@ export async function authenticateRecoveryReply(
       ephemeralPrivateKey: requestKey,
       captured: true,
     })
-    await assertTrustedSigner(group, trust, reply.signer)
+    await assertTrustedRecoverySigner(group, trust, reply.signer)
     return reply
   } catch (error) {
     if (error instanceof SealedGroupInfoError || error instanceof LeafBindingError) return null
@@ -173,8 +204,8 @@ export async function openRecoveryVerdictFromTrust(
   params: AuthenticateRecoveryReplyParams,
 ): Promise<OpenedRecoveryVerdict> {
   const { trust, sealed, requestID, requestKey, options } = params
-  const group = await publicGroup(trust, options)
-  await assertTrustedOwner(group, trust)
+  const group = await publicRecoveryGroup(trust, options)
+  await assertTrustedRecoveryOwner(group, trust)
   const opened = await openRecoveryVerdict({
     group,
     sealed,
@@ -184,6 +215,6 @@ export async function openRecoveryVerdictFromTrust(
   })
   // Controller-less confirmations gain authority from the caller's candidate-derived tuple/tag check.
   if (group.anchor.controller != null || opened.verdict.verdict !== 'confirmed')
-    await assertTrustedSigner(group, trust, opened.signer)
+    await assertTrustedRecoverySigner(group, trust, opened.signer)
   return opened
 }

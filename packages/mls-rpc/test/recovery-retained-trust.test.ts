@@ -21,6 +21,68 @@ import { expect, test, vi } from 'vitest'
 
 import * as recovery from '../src/recovery.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
+import { createCapturedFormerMember } from './fixtures/captured-recovery.js'
+
+test('retained former-member proof authenticates through the public trust adapter', async () => {
+  const s = await createCapturedFormerMember()
+  const held = await recovery.createRecoveryRequestFromTrust({
+    trust: s.trust,
+    identity: s.requester.identity,
+    requestID: 'former',
+    comparisonEpoch: 1,
+  })
+  const request = new TextDecoder().decode(held.request)
+  expect((await Mls.verifyRecoveryRequest(request)).comparisonEpoch).toBe(1)
+  const evidence = await Mls.sealRosterAbsenceReply({
+    group: s.responder.handle,
+    identity: s.responder.identity,
+    request,
+    captureHead: 'head',
+    retainedRosterFacts: s.retainedRosterFacts,
+    lineage: s.lineage,
+  })
+  if (evidence === null) throw new Error('Missing former-member reply')
+  const params = {
+    trust: s.trust,
+    requestID: 'former',
+    requestKey: held.requestKey,
+    evidence,
+    options: {},
+  }
+  expect(await recovery.verifyRosterAbsence(params)).toMatchObject({
+    requesterDID: s.requester.identity.id,
+    responderDID: s.responder.identity.id,
+    epoch: 2,
+    captureHead: 'head',
+    confirmedTranscriptHash: toB64U(s.responder.handle.state.groupContext.confirmedTranscriptHash),
+    lineage: [{ epoch: 1 }, { epoch: 2 }],
+  })
+  expect(await recovery.authenticateRecoveryReply({ ...params, sealed: evidence })).toBeNull()
+  const denied = {
+    ...s.trust,
+    registry: {
+      ...s.trust.registry,
+      devices: new Map(s.trust.registry.devices).set(s.responder.identity.id, {
+        controller: s.responder.handle.anchor.controller ?? s.responder.identity.id,
+        status: 'revoked' as const,
+      }),
+    },
+  }
+  expect(await recovery.verifyRosterAbsence({ ...params, trust: denied })).toBeNull()
+  const failure = new TypeError('Signature provider unavailable')
+  await expect(
+    recovery.verifyRosterAbsence({
+      ...params,
+      options: {
+        cryptoProvider: {
+          async getCiphersuiteImpl() {
+            throw failure
+          },
+        },
+      },
+    }),
+  ).rejects.toBe(failure)
+})
 
 const lifecycle = (await import(
   new URL('../../mls/test/fixtures/lifecycle-ledger.ts', import.meta.url).href
