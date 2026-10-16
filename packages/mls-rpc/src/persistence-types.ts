@@ -26,6 +26,8 @@ export type OwnershipContextPort = {
 export type {
   EpochIdentity,
   ForkHalt,
+  ForkNotice,
+  ForkNoticeEvent,
   GroupForkEvidence,
   GroupKey,
   GroupSafetyEvent,

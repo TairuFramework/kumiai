@@ -1,9 +1,14 @@
 import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import {
+  checkpointAuthHash,
+  checkpointKeyHash,
+  checkpointSignatureInput,
   commitKeyRotation,
   createGroup,
   decodeClientState,
+  decodeEpochRosterFact,
   encodeClientState,
+  encodeEpochCheckpoint,
   type GroupHandle,
   type GroupOptions,
   restoreGroup,
@@ -16,9 +21,11 @@ import {
   type ControlSlot,
   type WelcomeObligation,
 } from '@kumiai/rpc'
-import type { ConformanceControlSearchPort } from '@kumiai/rpc-conformance'
+import type { ConformanceControlSearchPort, ForkNoticeFixture } from '@kumiai/rpc-conformance'
+import { ed25519 } from '@noble/curves/ed25519.js'
 import { createApplicationMessage } from 'ts-mls'
 
+import { createCheckpointService } from '../../src/checkpoint.js'
 import { encodeControlJournal } from '../../src/control-journal.js'
 import { controlBuildContexts } from '../../src/control-write-context.js'
 import {
@@ -64,7 +71,7 @@ import { type RecoveryEnvironment, registryOptions } from '../../src/registry/va
 import { deferred } from '../../src/runtime.js'
 import { createGroupSafety, type GroupSafety } from '../../src/safety.js'
 import { createDeterministicAtRestCodec } from './at-rest.js'
-import { testGroupMLSDependencies, testHandleAccess } from './real-group.js'
+import { createRealGroup, testGroupMLSDependencies, testHandleAccess } from './real-group.js'
 import {
   type CapturedRecoveryFixture,
   createRegistryRecovery,
@@ -891,4 +898,217 @@ async function acceptedOrdinary(
     },
   }
   return { candidate, alternate, write, expected }
+}
+
+export async function createForkNoticeFixture(params: {
+  mode: 'real-mls' | 'double'
+  ownershipContext?: OwnershipContextPort
+}): Promise<ForkNoticeFixture> {
+  const real = await createRealGroup(1, `fork-notice-${crypto.randomUUID()}`)
+  const member = real.members[0]
+  if (member === undefined) throw new Error('Missing fork member')
+  let signingReads = 0
+  const identity = {
+    ...real.committer.identity,
+    get privateKey() {
+      signingReads++
+      return real.committer.identity.privateKey
+    },
+  }
+  let fixture = await createRegistryFixture({
+    groupID: member.handle.groupID,
+    mode: params.mode,
+    setup: 'empty',
+    identity,
+    ownershipContext: params.ownershipContext,
+    options: { resolveLedgerEntries: real.resolveLedgerEntries },
+  })
+  const wrap = async (handle: GroupHandle) =>
+    registryHandle({
+      mode: params.mode,
+      handle: await restoreGroup({
+        state: handle.state,
+        credential: handle.credential,
+        ledgerEntries: handle.ledgerTokens,
+        options: fixture.environment.options,
+      }),
+      options: fixture.environment.options,
+    })
+  const key = await fixture.registry.seed(await wrap(real.committer.handle), {
+    packageUse: { sourceID: 'fork-notice', ref: 'member-package', kind: 'ordinary' },
+  })
+  let local = (await commitKeyRotation(real.committer.handle)).newGroup
+  const remote = (await commitKeyRotation(member.handle)).newGroup
+  async function install() {
+    const before = await fixture.device.groups.loadState(key)
+    if (before === null || before.deleted) throw new Error('Missing fork installation')
+    const handle = await wrap(local)
+    await fixture.installRows({
+      key,
+      state: {
+        ...before,
+        version: before.version + 1,
+        epoch: Number(handle.epoch),
+        state: encodeClientState(handle.state),
+        epochAuthenticator: handle.state.keySchedule.epochAuthenticator.slice(),
+        ledger: handle.ledgerTokens,
+      },
+      trust: recoveryTrustFor(handle, key, await fixture.device.groups.loadTrust(key.groupID)),
+    })
+  }
+  await install()
+  const emitted: ForkNoticeFixture['emitted'] = []
+  let serviceKey = key
+  const create = () =>
+    createCheckpointService({
+      registry: fixture.registry,
+      key: serviceKey,
+      identity: fixture.identity,
+      onForkNotice: (event) => emitted.push(event),
+    })
+  let service = create()
+  const factBytes = await service.checkpointFact(key, Number(local.epoch))
+  if (factBytes === null) throw new Error('Missing split fact')
+  const fact = decodeEpochRosterFact(factBytes)
+  const remoteHash = checkpointAuthHash({
+    groupID: key.groupID,
+    genesisHash: fact.genesisHash,
+    epoch: Number(remote.epoch),
+    epochAuthenticator: remote.state.keySchedule.epochAuthenticator,
+  })
+  function sign(identity: OwnIdentity) {
+    const body = {
+      v: 1 as const,
+      type: 'kumiai/checkpoint/v1' as const,
+      groupID: key.groupID,
+      genesisHash: fact.genesisHash,
+      ciphersuite: fact.ciphersuite,
+      epoch: Number(remote.epoch),
+      authHash: remoteHash,
+      parentAuthHash: fact.parentAuthHash,
+      keyHash: checkpointKeyHash(identity.publicKey),
+      leafIndex: remote.state.privatePath.leafIndex,
+    }
+    return encodeEpochCheckpoint(
+      body,
+      ed25519.sign(checkpointSignatureInput(body), identity.privateKey),
+    )
+  }
+  return {
+    key,
+    service: () => service,
+    signingReads: () => signingReads,
+    holdProof: () => fixture.armNextWorkFault('pending'),
+    async raw() {
+      const rows = await fixture.inspectRows()
+      return [...(rows.checkpoints ?? new Map<string, unknown>())].map(([id, bytes]) => {
+        const address = JSON.parse(id)
+        if (!(bytes instanceof Uint8Array)) throw new Error('Unsealed checkpoint')
+        return { namespace: 'checkpoints', incarnation: address[1], bytes }
+      })
+    },
+    frame: sign(member.identity),
+    nextSignerFrame: sign(real.committer.identity),
+    async mergeFrames() {
+      let branch = remote
+      let parentAuthHash = remoteHash
+      const frames = new Map<number, Uint8Array>()
+      let update: Uint8Array | undefined
+      while (Number(local.epoch) < 6) {
+        local = (await commitKeyRotation(local)).newGroup
+        await install()
+        branch = (await commitKeyRotation(branch)).newGroup
+        const epoch = Number(branch.epoch)
+        const authHash = checkpointAuthHash({
+          groupID: key.groupID,
+          genesisHash: fact.genesisHash,
+          epoch,
+          epochAuthenticator: branch.state.keySchedule.epochAuthenticator,
+        })
+        const body = {
+          v: 1 as const,
+          type: 'kumiai/checkpoint/v1' as const,
+          groupID: key.groupID,
+          genesisHash: fact.genesisHash,
+          ciphersuite: fact.ciphersuite,
+          epoch,
+          authHash,
+          parentAuthHash,
+          keyHash: checkpointKeyHash(member.identity.publicKey),
+          leafIndex: branch.state.privatePath.leafIndex,
+        }
+        frames.set(
+          epoch,
+          encodeEpochCheckpoint(
+            body,
+            ed25519.sign(checkpointSignatureInput(body), member.identity.privateKey),
+          ),
+        )
+        if (epoch === 6) {
+          const updated = { ...body, keyHash: checkpointKeyHash(real.committer.identity.publicKey) }
+          update = encodeEpochCheckpoint(
+            updated,
+            ed25519.sign(checkpointSignatureInput(updated), real.committer.identity.privateKey),
+          )
+        }
+        parentAuthHash = authHash
+      }
+      const later = frames.get(6)
+      const earlier = frames.get(4)
+      const link = frames.get(5)
+      if (
+        later === undefined ||
+        earlier === undefined ||
+        link === undefined ||
+        update === undefined
+      )
+        throw new Error('Missing fork lineage')
+      return { later, earlier, link, update }
+    },
+    emitted,
+    async snapshot() {
+      return {
+        state: await fixture.device.groups.loadState(key),
+        trust: await fixture.device.groups.loadTrust(key.groupID),
+        control: await fixture.device.groups.ports(key).control.load(),
+        anchor: await fixture.device.groups.ports(key).anchor.load(),
+        events: await fixture.safety().events(key),
+      }
+    },
+    installedRecords: () => service.readRecords(),
+    async restart() {
+      fixture = await fixture.reopen()
+      service = create()
+    },
+    async advance(count) {
+      for (let i = 0; i < count; i++) {
+        local = (await commitKeyRotation(local)).newGroup
+        await install()
+      }
+    },
+    async retire() {
+      const recovery = await fixture.confirmedRecovery(key, { confirm: true })
+      if (!('format' in recovery.record) || recovery.record.switchMutationID === null)
+        throw new Error('Missing captured switch')
+      serviceKey = await fixture.registry.switchIncarnation(recovery.candidate, {
+        source: recovery.source,
+        rejoinID: recovery.record.id,
+        proof: recovery.proof,
+        write: {
+          mutationID: recovery.record.switchMutationID,
+          source: { rejoinID: recovery.record.id },
+          destination: {
+            control: {
+              cursor: {
+                position: recovery.proof.position,
+                epoch: Number(recovery.candidate.epoch),
+              },
+            },
+          },
+        },
+      })
+      service = create()
+    },
+    close: () => fixture.close(),
+  }
 }

@@ -1,4 +1,5 @@
 import type { GroupKey } from './control/types.js'
+import type { ForkNotice, ForkNoticeEvent } from './fork-notice.js'
 
 export type CheckpointComparison =
   | { kind: 'agreement'; epoch: number; signerDID: string; keyHash: string }
@@ -34,7 +35,35 @@ export type CheckpointPort = {
   checkpointCoverage(groupID: string): Promise<CheckpointCoverage>
 }
 
+export type CheckpointService = CheckpointPort & {
+  importCheckpoint(key: GroupKey, frame: Uint8Array): Promise<void>
+  forkNotices(groupID: string): Promise<Array<ForkNotice>>
+  ackForkNotice(groupID: string, id: string, revision: number): Promise<void>
+  events(groupID: string): Promise<Array<ForkNoticeEvent>>
+  readRecords(): Promise<Array<CheckpointRecord>>
+  updateRecords(change: { put?: Array<CheckpointRecord>; remove?: Array<string> }): Promise<void>
+}
+
 export type CheckpointRecord =
+  | { kind: 'notice'; id: string; key: GroupKey; notice: ForkNotice }
+  | {
+      kind: 'evidence'
+      id: string
+      key: GroupKey
+      noticeID: string
+      first: Uint8Array
+      second: Uint8Array
+      localRosterFact: Uint8Array
+      eligibilityRosterFact: Uint8Array | null
+    }
+  | {
+      kind: 'notice-event'
+      id: string
+      key: GroupKey
+      event: ForkNoticeEvent
+      emitAt: number
+      acknowledged: boolean
+    }
   | {
       kind: 'fact'
       id: string

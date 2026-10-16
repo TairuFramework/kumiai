@@ -4,6 +4,7 @@ import type {
   CheckpointRecord,
   CheckpointStore,
 } from '@kumiai/rpc'
+import { retainForkEvidence } from '@kumiai/rpc'
 
 import { checkpointPreparation } from './checkpoint-capture.js'
 import {
@@ -69,7 +70,9 @@ function validate(record: CheckpointRecord, groupID: string, id: string): void {
     record.id !== id ||
     !Number.isSafeInteger(record.key.incarnation) ||
     record.key.incarnation < 1 ||
-    !['fact', 'publication', 'cursor', 'coverage'].includes(record.kind)
+    !['fact', 'publication', 'cursor', 'coverage', 'notice', 'evidence', 'notice-event'].includes(
+      record.kind,
+    )
   ) {
     throw new GroupStateConflictError('Checkpoint record binding mismatch')
   }
@@ -318,4 +321,21 @@ export async function retainCheckpointInstallations(
     gaps: mergeGaps(gaps),
     installations: retained.map(({ id, key, epoch }) => ({ id, key, epoch })),
   })
+  if (!records.some((row) => row.kind === 'evidence' || row.kind === 'notice')) return
+  const beforeEvidence = await store.list()
+  const afterEvidence = retainForkEvidence(beforeEvidence, retained, now)
+  await store.remove(
+    beforeEvidence
+      .filter((row) => !afterEvidence.some((next) => next.id === row.id))
+      .map((row) => row.id),
+  )
+  for (const row of afterEvidence) {
+    if (
+      !sameStoredValue(
+        beforeEvidence.find((before) => before.id === row.id),
+        row,
+      )
+    )
+      await store.put(row)
+  }
 }

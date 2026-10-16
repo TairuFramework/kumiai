@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from 'vitest'
 
+import type { ConformanceForkNotice, ConformanceForkNoticeEvent } from './fork-notice.js'
 import { storageChange } from './group-storage.js'
 import type {
   ConformanceCheckpointFactRecord,
@@ -12,6 +13,25 @@ import type {
 } from './persistence-fixture.js'
 
 export type ConformanceCheckpointRecord =
+  | { kind: 'notice'; id: string; key: ConformanceGroupKey; notice: ConformanceForkNotice }
+  | {
+      kind: 'evidence'
+      id: string
+      key: ConformanceGroupKey
+      noticeID: string
+      first: Uint8Array
+      second: Uint8Array
+      localRosterFact: Uint8Array
+      eligibilityRosterFact: Uint8Array | null
+    }
+  | {
+      kind: 'notice-event'
+      id: string
+      key: ConformanceGroupKey
+      event: ConformanceForkNoticeEvent
+      emitAt: number
+      acknowledged: boolean
+    }
   | ConformanceCheckpointFactRecord
   | {
       kind: 'coverage'
@@ -777,4 +797,16 @@ export function malformedCheckpointBodies(
     { keyHash: 'invalid' },
     { parentAuthHash: 'invalid' },
   ].map((patch) => ({ ...body, ...patch }))
+}
+
+export type ConformanceCheckpointService = ConformanceCheckpointPort & {
+  importCheckpoint(key: ConformanceGroupKey, frame: Uint8Array): Promise<void>
+  forkNotices(groupID: string): Promise<Array<ConformanceForkNotice>>
+  ackForkNotice(groupID: string, id: string, revision: number): Promise<void>
+  events(groupID: string): Promise<Array<ConformanceForkNoticeEvent>>
+  readRecords(): Promise<Array<ConformanceCheckpointRecord>>
+  updateRecords(change: {
+    put?: Array<ConformanceCheckpointRecord>
+    remove?: Array<string>
+  }): Promise<void>
 }

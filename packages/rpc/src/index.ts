@@ -6,6 +6,12 @@ export type { LogHub, MailboxHub } from '@kumiai/hub-tunnel'
  * @module rpc
  */
 
+/**
+ * High-level MLS-aware group RPC for Enkaku.
+ *
+ * @module rpc
+ */
+
 export type { Anchor, AnchorSlot, AnchorStore } from './anchor.js'
 export { type AppAAD, decodeAppAAD, encodeAppAAD } from './app-aad.js'
 export type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
@@ -15,12 +21,14 @@ export {
   type AppOutboxEntry,
   MAX_APP_ENTRY_BYTES,
 } from './app-outbox.js'
+export { checkpointServiceHostMembers, retainForkEvidence } from './checkpoint.js'
 export type {
   CheckpointComparison,
   CheckpointCoverage,
   CheckpointFactRecord,
   CheckpointPort,
   CheckpointRecord,
+  CheckpointService,
   CheckpointStore,
 } from './checkpoint-types.js'
 export {
@@ -174,6 +182,17 @@ export {
   SendNotAdmissibleError,
   StorageOutcomeUnknownError,
 } from './errors.js'
+export {
+  type CheckpointStatement,
+  type CoverageGapReason,
+  type ForkBranch,
+  type ForkNotice,
+  type ForkNoticeEvent,
+  foldForkNotices,
+  forkNoticeEmissions,
+  type OwnBranchMessage,
+  type ReportCoverage,
+} from './fork-notice.js'
 export { assertFrameFits, FrameTooLargeError } from './frame-size.js'
 export type { GroupProcedureHandlers } from './handlers.js'
 export {

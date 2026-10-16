@@ -39,6 +39,7 @@ export {
   type ConformanceCheckpointFactRecord,
   type ConformanceCheckpointPort,
   type ConformanceCheckpointRecord,
+  type ConformanceCheckpointService,
   type ConformanceCheckpointStore,
   malformedCheckpointBodies,
   testCheckpointComparisonConformance,
@@ -100,6 +101,12 @@ export {
   testControlStoreConformance,
 } from './control-store.js'
 export { testDeviceStorageConformance } from './device-storage.js'
+export {
+  type ConformanceForkNotice,
+  type ConformanceForkNoticeEvent,
+  type ForkNoticeFixture,
+  testForkNoticeConformance,
+} from './fork-notice.js'
 export {
   type ConformanceCryptoGroup,
   type ConformanceCryptoMember,
