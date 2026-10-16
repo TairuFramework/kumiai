@@ -77,11 +77,20 @@ function setup(count = 1) {
     events: vi.fn(async () => []),
     readRecords: vi.fn(async () => copyCheckpointValue(records)),
     updateRecords: vi.fn(async (change: Parameters<CheckpointService['updateRecords']>[0]) => {
+      for (const row of change.put ?? []) {
+        if (row.kind === 'cursor' && row.intake !== undefined)
+          await service.importCheckpoint(row.key, row.intake)
+      }
       records = records.filter(
         (row) =>
           !change.remove?.includes(row.id) && !change.put?.some((next) => next.id === row.id),
       )
-      records.push(...copyCheckpointValue(change.put ?? []))
+      records.push(
+        ...copyCheckpointValue(change.put ?? []).map((row) => {
+          if (row.kind === 'cursor') delete row.intake
+          return row
+        }),
+      )
     }),
   }
   const create = () => {

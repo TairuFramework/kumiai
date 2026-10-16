@@ -99,6 +99,8 @@ export type CheckpointRecord =
       key: GroupKey
       topicID: string
       position: string | null
+      /** Compare these bytes atomically with the cursor write, then omit them from storage. */
+      intake?: Uint8Array
       schedule?: {
         clock: number
         tokens: number

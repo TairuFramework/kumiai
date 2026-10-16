@@ -37,6 +37,7 @@ export function createCheckpointWorker(params: Params): {
   let receivePending = true
   let nextWakeAt = params.now() + 1000
   const seen = new Set<string>()
+  let comparisonContext: string | undefined
   const live = () => !disposed && params.networkAllowed()
   const sameKey = (row: CheckpointRecord) =>
     row.key.groupID === key.groupID && row.key.incarnation === key.incarnation
@@ -193,6 +194,17 @@ export function createCheckpointWorker(params: Params): {
     }
 
     if (!live() || !receivePending || now < schedule.receiveAt) return
+    const context = JSON.stringify(
+      records
+        .flatMap((row) =>
+          row.kind === 'fact' ? [row.id] : row.kind === 'coverage' ? [JSON.stringify(row)] : [],
+        )
+        .sort(),
+    )
+    if (context !== comparisonContext) {
+      seen.clear()
+      comparisonContext = context
+    }
     receivePending = false
     // Persist the work turn before fetching. Reconnect wakeups cannot bypass it.
     schedule.receiveAt = now + 1
@@ -214,22 +226,26 @@ export function createCheckpointWorker(params: Params): {
         if (cursor.position !== null && message.sequenceID <= cursor.position)
           throw new Error('Non-increasing checkpoint position')
         frames++
+        let hash: string | undefined
         if (message.payload.length <= 4096) {
-          const hash = toB64U(sha256(message.payload))
-          if (!seen.has(hash)) {
-            await checkpoints.importCheckpoint(key, message.payload.slice())
-            if (!live()) return
-            seen.add(hash)
-            if (seen.size > 256) seen.delete(seen.values().next().value as string)
-          }
+          hash = toB64U(sha256(message.payload))
+          if (!seen.has(hash)) cursor.intake = message.payload.slice()
         }
-        cursor.position = message.sequenceID
-        await saveCursor()
+        const next = { ...cursor, position: message.sequenceID }
+        await checkpoints.updateRecords({ put: [next] })
+        if (!live()) return
+        cursor.position = next.position
+        delete cursor.intake
+        if (hash !== undefined) {
+          seen.add(hash)
+          if (seen.size > 256) seen.delete(seen.values().next().value as string)
+        }
       }
       schedule.retryDelay = 1000
       receivePending ||= page.messages.length >= 32
       await saveCursor()
     } catch {
+      delete cursor.intake
       receivePending = true
       schedule.receiveAt = now + schedule.retryDelay
       schedule.retryDelay = Math.min(15000, schedule.retryDelay * 2)

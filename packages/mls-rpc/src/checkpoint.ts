@@ -306,6 +306,52 @@ export function createCheckpointService(params: CheckpointServiceParams): Checkp
           const before = await reads.checkpoints()
           const facts = proven(before, key.groupID)
           let records = retainForkEvidence(before, facts, now)
+          if (action.kind === 'update') {
+            if (lifetime?.activeIncarnation !== key.incarnation)
+              throw new GroupStateConflictError('Checkpoint worker is retired')
+            const writable = (row: CheckpointRecord) =>
+              row.kind === 'cursor' || row.kind === 'publication'
+            for (const row of action.put) {
+              const previous = records.find((record) => record.id === row.id)
+              if (
+                !sameKey(row.key) ||
+                !writable(row) ||
+                (row.kind === 'cursor' &&
+                  row.position !== null &&
+                  (row.position.length === 0 || row.position.length > 64)) ||
+                (row.kind === 'cursor' &&
+                  row.intake !== undefined &&
+                  (row.position === null || row.intake.length > 4096)) ||
+                (previous !== undefined && !writable(previous)) ||
+                (row.kind === 'publication' &&
+                  (previous?.kind !== 'publication' ||
+                    previous.factID !== row.factID ||
+                    !sameStoredValue(previous.key, row.key) ||
+                    !sameStoredValue(previous.frame, row.frame)))
+              )
+                throw new GroupStateConflictError(
+                  'Checkpoint update requires coordinator authority',
+                )
+            }
+            for (const id of action.remove) {
+              const row = records.find((record) => record.id === id)
+              if (row !== undefined && row.kind !== 'cursor')
+                throw new GroupStateConflictError(
+                  'Checkpoint removal requires coordinator authority',
+                )
+            }
+          }
+          const intakes =
+            action.kind === 'update'
+              ? action.put.flatMap((row) =>
+                  row.kind === 'cursor' && row.intake !== undefined
+                    ? [{ key: row.key, frame: row.intake }]
+                    : [],
+                )
+              : []
+          if (intakes.length > 1)
+            throw new GroupStateConflictError('One checkpoint intake per update')
+          const intake = action.kind === 'import' ? action : intakes[0]
           const statements: Array<CheckpointStatement> = []
           const lineage = facts.map((row) => decodeEpochRosterFact(row.canonical))
           const links = lineage.map(({ epoch, authHash, parentAuthHash }) => ({
@@ -319,10 +365,10 @@ export function createCheckpointService(params: CheckpointServiceParams): Checkp
               links.push(body)
             }
           }
-          if (action.kind === 'import') {
-            if (action.key.groupID !== key.groupID)
+          if (intake !== undefined) {
+            if (intake.key.groupID !== key.groupID)
               throw new GroupStateConflictError('Checkpoint import binding mismatch')
-            const hash = toB64U(sha256(action.frame))
+            const hash = toB64U(sha256(intake.frame))
             const tombstoned = records.some(
               (row) =>
                 row.kind === 'notice-tombstone' &&
@@ -331,10 +377,10 @@ export function createCheckpointService(params: CheckpointServiceParams): Checkp
             )
             const comparison = tombstoned
               ? { kind: 'invalid' as const }
-              : await compareRecords(records, action.key, action.frame)
+              : await compareRecords(records, intake.key, intake.frame)
             if (comparison.kind === 'agreement' || comparison.kind === 'conflict') {
-              const { body } = decodeEpochCheckpoint(action.frame)
-              const fact = retainedFactAt(records, action.key, body.epoch)
+              const { body } = decodeEpochCheckpoint(intake.frame)
+              const fact = retainedFactAt(records, intake.key, body.epoch)
               if (fact === undefined) throw new GroupStateConflictError('Missing checkpoint fact')
               const frameID = `evidence:${hash}`
               statements.push({
@@ -348,13 +394,13 @@ export function createCheckpointService(params: CheckpointServiceParams): Checkp
           }
           const folded = foldForkNotices({ key, records, statements, lineage: links, now })
           records = folded.records
-          if (action.kind === 'import' && statements[0] !== undefined) {
+          if (intake !== undefined && statements[0] !== undefined) {
             const statement = statements[0]
             const notice = folded.notices.find(
               (notice) => notice.id === folded.assignments.get(statement.frameID),
             )
             if (notice !== undefined) {
-              const fact = retainedFactAt(records, action.key, statement.epoch)
+              const fact = retainedFactAt(records, intake.key, statement.epoch)
               if (fact === undefined) throw new GroupStateConflictError('Missing checkpoint fact')
               let tombstone = records.find(
                 (row) => row.kind === 'notice-tombstone' && row.noticeID === notice.id,
@@ -373,7 +419,7 @@ export function createCheckpointService(params: CheckpointServiceParams): Checkp
               }
               if (tombstone.kind !== 'notice-tombstone')
                 throw new GroupStateConflictError('Invalid notice tombstone')
-              const hash = toB64U(sha256(action.frame))
+              const hash = toB64U(sha256(intake.frame))
               if (!tombstone.frames.some((frame) => frame.hash === hash)) {
                 tombstone.frames.push({ hash, installationID: fact.id })
                 tombstone.frames.sort((a, b) => (a.hash < b.hash ? -1 : a.hash > b.hash ? 1 : 0))
@@ -390,21 +436,21 @@ export function createCheckpointService(params: CheckpointServiceParams): Checkp
                 )) &&
               !records.some((row) => row.id === statement.frameID)
             ) {
-              const fact = retainedFactAt(records, action.key, statement.epoch)
-              const prior = retainedFactAt(records, action.key, statement.epoch - 1)
+              const fact = retainedFactAt(records, intake.key, statement.epoch)
+              const prior = retainedFactAt(records, intake.key, statement.epoch - 1)
               if (fact === undefined) throw new GroupStateConflictError('Missing checkpoint fact')
               records.push({
                 kind: 'evidence',
                 id: statement.frameID,
-                key: { ...action.key },
+                key: { ...intake.key },
                 noticeID: notice.id,
-                first: action.frame.slice(),
+                first: intake.frame.slice(),
                 second:
                   records.flatMap((row) =>
                     row.kind === 'publication' && row.factID === fact.id && row.frame !== null
                       ? [row.frame.slice()]
                       : [],
-                  )[0] ?? action.frame.slice(),
+                  )[0] ?? intake.frame.slice(),
                 localRosterFact: fact.canonical.slice(),
                 eligibilityRosterFact: prior?.canonical.slice() ?? null,
               })
@@ -441,41 +487,17 @@ export function createCheckpointService(params: CheckpointServiceParams): Checkp
             }
           }
           if (action.kind === 'update') {
-            if (lifetime?.activeIncarnation !== key.incarnation)
-              throw new GroupStateConflictError('Checkpoint worker is retired')
-            const writable = (row: CheckpointRecord) =>
-              row.kind === 'cursor' || row.kind === 'publication'
-            for (const row of action.put) {
-              const previous = records.find((record) => record.id === row.id)
-              if (
-                !sameKey(row.key) ||
-                !writable(row) ||
-                (row.kind === 'cursor' &&
-                  row.position !== null &&
-                  (row.position.length === 0 || row.position.length > 64)) ||
-                (previous !== undefined && !writable(previous)) ||
-                (row.kind === 'publication' &&
-                  (previous?.kind !== 'publication' ||
-                    previous.factID !== row.factID ||
-                    !sameStoredValue(previous.key, row.key) ||
-                    !sameStoredValue(previous.frame, row.frame)))
-              )
-                throw new GroupStateConflictError(
-                  'Checkpoint update requires coordinator authority',
-                )
-            }
-            for (const id of action.remove) {
-              const row = records.find((record) => record.id === id)
-              if (row !== undefined && row.kind !== 'cursor')
-                throw new GroupStateConflictError(
-                  'Checkpoint removal requires coordinator authority',
-                )
-            }
             records = records.filter(
               (row) =>
                 !action.remove.includes(row.id) && !action.put.some((next) => next.id === row.id),
             )
-            records.push(...action.put)
+            records.push(
+              ...action.put.map((row) => {
+                if (row.kind !== 'cursor') return row
+                const { intake: _intake, ...saved } = row
+                return saved
+              }),
+            )
           }
           return { expected: lifetime, value: { before, records } }
         },
@@ -522,20 +544,23 @@ export function createCheckpointService(params: CheckpointServiceParams): Checkp
     return result
   }
   function schedule(delay: number) {
-    timer = setTimeout(() => {
-      timer = undefined
-      void act({ kind: 'refresh' }).catch(() => {
-        // Owner fail-stop remains authoritative. Only live owners retry transient failures.
-        try {
-          binding.assertOpen()
-        } catch {
-          return
-        }
-        if (timer !== undefined) return
-        schedule(retryDelay)
-        retryDelay = Math.min(retryDelay * 2, 600000)
-      })
-    }, delay)
+    timer = setTimeout(
+      () => {
+        timer = undefined
+        void act({ kind: 'refresh' }).catch(() => {
+          // Owner fail-stop remains authoritative. Only live owners retry transient failures.
+          try {
+            binding.assertOpen()
+          } catch {
+            return
+          }
+          if (timer !== undefined) return
+          schedule(retryDelay)
+          retryDelay = Math.min(retryDelay * 2, 600000)
+        })
+      },
+      Math.min(2147483647, Math.max(0, delay)),
+    )
   }
   return {
     ...port,

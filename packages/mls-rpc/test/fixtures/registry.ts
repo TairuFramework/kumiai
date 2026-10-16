@@ -903,7 +903,8 @@ async function acceptedOrdinary(
 export async function createForkNoticeFixture(params: {
   mode: 'real-mls' | 'double'
   ownershipContext?: OwnershipContextPort
-}): Promise<ForkNoticeFixture> {
+  deferSplit?: boolean
+}): Promise<ForkNoticeFixture & { installSplit(): Promise<void> }> {
   const real = await createRealGroup(1, `fork-notice-${crypto.randomUUID()}`)
   const member = real.members[0]
   if (member === undefined) throw new Error('Missing fork member')
@@ -956,7 +957,7 @@ export async function createForkNoticeFixture(params: {
       trust: recoveryTrustFor(handle, key, await fixture.device.groups.loadTrust(key.groupID)),
     })
   }
-  await install()
+  if (!params.deferSplit) await install()
   const emitted: ForkNoticeFixture['emitted'] = []
   let serviceKey = key
   const create = () =>
@@ -967,7 +968,10 @@ export async function createForkNoticeFixture(params: {
       onForkNotice: (event) => emitted.push(event),
     })
   let service = create()
-  const factBytes = await service.checkpointFact(key, Number(local.epoch))
+  const factBytes = await service.checkpointFact(
+    key,
+    Number(local.epoch) - (params.deferSplit ? 1 : 0),
+  )
   if (factBytes === null) throw new Error('Missing split fact')
   const fact = decodeEpochRosterFact(factBytes)
   const remoteHash = checkpointAuthHash({
@@ -985,7 +989,7 @@ export async function createForkNoticeFixture(params: {
       ciphersuite: fact.ciphersuite,
       epoch: Number(remote.epoch),
       authHash: remoteHash,
-      parentAuthHash: fact.parentAuthHash,
+      parentAuthHash: params.deferSplit ? fact.authHash : fact.parentAuthHash,
       keyHash: checkpointKeyHash(identity.publicKey),
       leafIndex: remote.state.privatePath.leafIndex,
     }
@@ -998,6 +1002,7 @@ export async function createForkNoticeFixture(params: {
     key,
     service: () => service,
     signingReads: () => signingReads,
+    installSplit: install,
     holdProof: () => fixture.armNextWorkFault('pending'),
     async raw() {
       const rows = await fixture.inspectRows()

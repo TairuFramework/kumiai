@@ -294,6 +294,42 @@ export function testForkNoticeConformance(params: {
         await fixture.close()
       }
     })
+    test('cursor intake is bounded and retains only authenticated evidence', async () => {
+      const fixture = await params.createFixture()
+      try {
+        const service = fixture.service()
+        const cursor = {
+          kind: 'cursor' as const,
+          id: 'bounded-intake',
+          key: fixture.key,
+          topicID: 'checkpoint-topic',
+          position: '0001',
+          intake: fixture.frame.slice(),
+        }
+        for (const put of [
+          [{ ...cursor, intake: new Uint8Array(4097) }],
+          [{ ...cursor, position: null }],
+          [cursor, { ...cursor, id: 'second-intake' }],
+        ]) {
+          await expect(service.updateRecords({ put })).rejects.toThrow()
+          expect(await service.forkNotices(fixture.key.groupID)).toEqual([])
+          expect((await service.readRecords()).some((row) => row.kind === 'cursor')).toBe(false)
+        }
+        await service.updateRecords({ put: [cursor] })
+        cursor.intake.fill(0)
+        const records = await service.readRecords()
+        const saved = required(records.find((row) => row.kind === 'cursor'))
+        expect(saved).toMatchObject({ position: '0001' })
+        expect(saved).not.toHaveProperty('intake')
+        expect(records.filter((row) => row.kind === 'evidence')).toMatchObject([
+          { first: fixture.frame },
+        ])
+        expect(await service.forkNotices(fixture.key.groupID)).toHaveLength(1)
+        expect(fixture.emitted).toHaveLength(1)
+      } finally {
+        await fixture.close()
+      }
+    })
     test('material updates emit at the saved deadline under fake timers', async () => {
       const fixture = await params.createFixture()
       vi.useFakeTimers()
@@ -310,6 +346,36 @@ export function testForkNoticeConformance(params: {
         await vi.waitFor(() => expect(fixture.emitted).toHaveLength(2), { interval: 0 })
         expect(fixture.emitted[1]?.notice.revision).toBe(2)
       } finally {
+        vi.useRealTimers()
+        await fixture.close()
+      }
+    })
+    test('a clock rewind chunks distant event deadlines without early emission', async () => {
+      const fixture = await params.createFixture()
+      vi.useFakeTimers()
+      vi.setSystemTime(3000000000)
+      const timeout = vi.spyOn(globalThis, 'setTimeout')
+      try {
+        const service = fixture.service()
+        await service.importCheckpoint(fixture.key, fixture.frame)
+        await service.importCheckpoint(fixture.key, fixture.nextSignerFrame)
+        expect(fixture.emitted).toHaveLength(1)
+        vi.setSystemTime(100000)
+        timeout.mockClear()
+        await service.readRecords()
+        const delays = timeout.mock.calls.map(([, delay]) => delay)
+        expect(delays.length).toBeGreaterThan(0)
+        expect(delays.every((delay) => delay !== undefined && delay <= 2147483647)).toBe(true)
+        await vi.advanceTimersByTimeAsync(2147483647)
+        await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1), { interval: 0 })
+        expect(fixture.emitted).toHaveLength(1)
+        await vi.advanceTimersByTimeAsync(852446352)
+        expect(fixture.emitted).toHaveLength(1)
+        await vi.advanceTimersByTimeAsync(1)
+        await vi.waitFor(() => expect(fixture.emitted).toHaveLength(2), { interval: 0 })
+        expect(fixture.emitted[1]?.notice.revision).toBe(2)
+      } finally {
+        timeout.mockRestore()
         vi.useRealTimers()
         await fixture.close()
       }

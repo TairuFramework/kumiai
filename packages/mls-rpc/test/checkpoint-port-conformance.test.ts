@@ -149,7 +149,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         })
         const verify = vi.mocked(ed25519.verify)
         verify.mockClear()
-        const imported = vi.spyOn(service, 'importCheckpoint')
+        const updates = vi.spyOn(service, 'updateRecords')
         worker = createCheckpointWorker({
           key,
           checkpoints: service,
@@ -164,12 +164,15 @@ for (const mode of ['real-mls', 'double'] as const) {
           random: () => 0.5,
         })
         await worker.start()
-        expect(imported).toHaveBeenCalledTimes(32)
+        const imported = updates.mock.calls.flatMap(([change]) =>
+          (change.put ?? []).flatMap((row) =>
+            row.kind === 'cursor' && row.intake !== undefined ? [row.intake] : [],
+          ),
+        )
+        expect(imported).toHaveLength(32)
         expect(verify.mock.calls.length).toBeGreaterThan(0)
         expect(verify.mock.calls.length).toBeLessThanOrEqual(64)
-        expect(
-          imported.mock.calls.reduce((sum, [, bytes]) => sum + bytes.length, 0),
-        ).toBeLessThanOrEqual(131072)
+        expect(imported.reduce((sum, bytes) => sum + bytes.length, 0)).toBeLessThanOrEqual(131072)
       } finally {
         await worker?.dispose()
         vi.restoreAllMocks()

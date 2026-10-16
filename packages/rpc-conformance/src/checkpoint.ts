@@ -69,6 +69,7 @@ export type ConformanceCheckpointRecord =
       key: ConformanceGroupKey
       topicID: string
       position: string | null
+      intake?: Uint8Array
       schedule?: {
         clock: number
         tokens: number
