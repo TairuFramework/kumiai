@@ -1,24 +1,30 @@
 # Spec P: transactional persistence — design
 
 Date: 2026-10-08
-Status: draft r20 (2026-10-15)
+Status: draft r24 (2026-10-16)
 Parent: [client host, messaging protocol and multi-device e2e](2026-10-08-client-messaging-e2e-design.md)
 Control baseline: [Spec P2a](2026-10-08-spec-p2a-crash-safe-control-design.md), superseded where amended here.
 
 ## Model
 
-**Trust (r19 decision).** Trust hub compare-and-set ordering, never confidentiality or MLS authenticity. Denial of service is the main concern.
+**Trust (r24 decision).** The hub is blind: one append-only log per topic, CAS on head, opaque bytes.
+It may withhold, delay, reorder, replay or selectively deliver bytes. Non-delivery is accepted and undetectable in-band.
+Peers are trusted in intent but may be buggy. No single peer may roll the group back or steer it.
+The continuing branch is whatever log the hub keeps. Checkpoints supply no continuation authority.
 The hub cannot forge MLS content. Drop, delay, reorder, replay, byte tampering, junk and unknown frame versions mean non-delivery.
 Skip or diagnose such frames. Never derive a durable halt/hold, discard, rebuild, owed-work deletion or permanent stranding from them.
-Peers cannot prove non-delivery in-band. Fork detection is deferred to later out-of-band peer checkpoints.
+Detection-only in-band checkpoints reveal attributed conflicting views within retained coverage. They never select a winner, halt or switch.
+Full partition, withholding and expired comparison history can prevent detection. Local export/import/verification supports later out-of-band comparison.
 Host reportFork/authenticator comparison and genuinely local storage invariants retain their halt contracts.
 See [RFC 9750 §5.2–5.2.1](https://www.rfc-editor.org/rfc/rfc9750.html#section-5.2).
 
 1. **Incarnation monotonicity (r14 decision).** Key local state by `(groupID, incarnation)`.
    Epochs never decrease or change same-number authenticator; recovery atomically installs `n+1` and tombstones `n`.
-   This removes in-place rollback, lineage/floors, recovery progress merges and anchor ordinals.
+   This removes in-place rollback, recovery progress merges and anchor ordinals.
+   Recovery lineage and the attempt-scoped floor exception below never change an installed incarnation in place.
 2. **Commit-once (r14 decision).** Durably save exact control bytes, publishID and candidate before publication.
-   Head-only retries reuse them. Build again only after the epoch changes.
+   Head-only retries reuse them. Ordinary builds resume only after epoch change.
+   Restricted different-branch recovery creates a new bound attempt, never an in-place rebuild.
    This removes handshake reservations, burn budgets, baseline readers and staging-clone rules.
 3. **One transaction per transition (r14 decision).** All affected group namespaces share one provider transaction.
    Bounded adaptive batches amortise commits and release the group scope between batches.
@@ -29,7 +35,7 @@ phase 3 supplies database providers. P2a remains the control stage machine, with
 
 ## Decisions
 
-### D1. Detection, durable halt and recovery
+### D1. Detection, durable halt and recovery (r24)
 
 Keep `onStrand` observations and their confidence. Classify evidence before selecting recovery:
 
@@ -41,7 +47,10 @@ Keep `onStrand` observations and their confidence. Classify evidence before sele
 | `ahead`, retention gap or unprocessable gap, without a local safety hold | catch up or use authenticated resync with bounded retry; a delivery fault never permanently strands the device |
 | Unknown/unsupported commit-frame or handshake-header version | diagnostic poison plus `upgrade-required` host diagnostic; skip, never create a durable hold |
 | Lost MLS state, retained recovery trust readable | stranded; automatic resync (r16 decision) |
-| Recovery trust also missing/unreadable | durable halt + `group:recovery-unavailable`; manual re-invite (r16 decision) |
+| Recovery trust also missing/unreadable | retain `recovery-unavailable`; no automatic reconstruction; manual fresh invitation or admitted successor |
+| Eligible unequal checkpoint testimony | detection-only fork notice; never halt, discard, rebuild, strand or switch |
+| Request-bound authenticated roster absence | non-terminal `not-member`; existing admission rules and capped-backoff recovery continue |
+| Successfully decoded trust envelope with missing/malformed spent set | durable `spent-set-corrupt`; refuse admission, never substitute an empty set |
 
 **Delivery faults (r19 decision, Q0/Q1).** Competing past-epoch commits, including refused signed CAS losers, are diagnostic poison on both classifier branches.
 Skip with claimed `past-epoch-divergence` observation. Advance the skipped cursor without applied rewrite, fork event/latch or frame-triggered resync.
@@ -54,7 +63,8 @@ Audit peer/classify, control search/slot/operations/store, mls-rpc control-valid
 Only host reports/authenticator comparisons and genuine local storage inconsistency can produce new durable safety halts.
 slot.ts:94-110 and search.ts:242-252 compare trusted local committed identities. Retain these local-invariant halts.
 Fresh responder authenticator disagreement is a diagnostic retry, not a local-invariant halt.
-Existing persisted halts/unsupported-version holds remain readable and immutable. Legacy control-record version holds retain their separate policy.
+Existing persisted halts/unsupported-version holds remain readable. Evidence stays immutable.
+Only the provenance-restricted clearHold or completed manual retirement below can release applicable holds. Legacy control-record version holds retain their separate policy.
 Unsupported sealed-entries outer/inner versions propagate through crypto/resolver/walker as poison plus upgrade-required diagnostics, advancing cursor without strand/heal.
 HEAD packages/mls-rpc/src/crypto.ts:76-84,200-209 -> packages/rpc/src/ledger-entries.ts:104-117 -> packages/rpc/src/peer.ts:1897-1930.
 Tasks 5a-5e own complete HEAD behavioural closures. Each unit changes implementation and conflicting assertions together, preserving restart/history/outcomes/Welcomes.
@@ -68,7 +78,8 @@ Authenticate responder GroupInfo and its signed epoch/authenticator/tree. Compar
 Later epoch with X's exact wire-encoded fresh LeafNode present means accepted -> settled. Adopt X only with existing bound confirmation.
 Fast path: known position from publish ack/exact-byte hit, and an authenticated responder still at epochAfter, permits bound confirmation/adoption of X.
 Otherwise settle X as accepted-unadoptable in ONE ControlStore transition: save compact public X facts/cumulative ledgerBefore in settledRejoins, clear active rejoin and raise recoveryEpochFloor.
-Omit request/requestKey/candidate/payload from settled storage. Zeroise owned secret buffers only after settlement commit proof.
+Ordinary settlement omits request/requestKey/candidate/payload. Superseded-branch settlement instead retains sealed exact-X history as specified below.
+Zeroise owned secret buffers only after settlement commit proof, respecting retained history ownership.
 Keep at most one cumulative settlement row per source incarnation. Later settlements replace public provenance and union prior obligations.
 r23: D1 leaf-absent discard of unconfirmed X uses the same settledRejoins row in ONE transition: provenance `{kind:'not-accepted', epoch}` (authenticated recapture
 epoch, no accepted facts), cumulative ledgerBefore unioned, active rejoin cleared, recoveryEpochFloor raised. Y's first save unions every settled obligation.
@@ -87,9 +98,11 @@ Hub-assigned head strings may regress or be inflated. Head regression is diagnos
 Same epoch/authenticator retries at fresh authenticated captureHead even when lower. Null denotes the captured empty prefix.
 Persist a monotone recoveryEpochFloor independently of X. First save of X co-writes its authenticated capture epoch.
 Leaf-absent discard and R0 settlement raise it to the authenticated recaptured epoch in their pointer transition. Restart preserves the stored maximum.
-Task 14b tests each write/restart point separately. Reject lower epochs without deleting X.
+Reject lower epochs without deleting X, except through the bound forkRecovery authorisation below.
+The ordinary stored floor stays monotone even while one attempt has an effective floor E.
 Busy groups may repeatedly accept X then advance before confirmation, causing accepted-unadoptable churn. This non-hub liveness residual remains explicit.
-Never build a second external attempt at one capture epoch.
+Never build a second external attempt at one capture epoch on the same lineage.
+The restricted different-branch forkRecovery predicates below permit lower/equal-number captures without rebuilding saved X.
 
 **Own-commit recognition (r19 decision, Q2/P1).** Keep existing digest fields, payloadDigest, stored shapes and frame version.
 Exact bytes provide positive evidence. A mismatch means nothing learned, never absence, supersession, refusal or permission to rebuild.
@@ -108,8 +121,9 @@ Unproven superseded verdicts never authorise recovery discard. Applied-state set
 Confirmed verdicts retain saved request, digest/position and candidate-derived tag binding.
 Origin-authorised signers removed after origin retain attestation authority, including signed floor inflation. This residual lies outside the hub threat model.
 
-**Fork halt (r14 decision).** Immediately hold the runtime while committing the halt, evidence and a stable-ID
+**Fork halt (r24 provenance amendment).** Immediately hold the runtime while committing the halt, evidence and a stable-ID
 machine-readable `group:fork` event in one group transaction. Failure/ambiguity keeps the runtime held.
+New ForkHalt records carry `producer: 'app-report' | 'internal'`. Event IDs never imply ownership.
 After proven commit emit the event; replay until acknowledged. Event acknowledgement never clears the halt.
 Block durable and ephemeral sends, new opens, control enqueue/build/adoption/publication and automatic recovery, live and after restart.
 Already opened handlers may finish; storage-only outcomes/events and certified settlement remain serviceable.
@@ -131,7 +145,7 @@ credential, binding, ordered ledger, cipher suite, installed identity and spent-
 Request creation, reply authentication and candidate restoration take this record plus host identity/policy, never a fabricated GroupHandle.
 The tree and anchor supply the checks at `packages/mls/src/recovery.ts:658`, `:675`; lifecycle signer judgement retains registry floors/denials.
 Unreadable state alone permits automatic resync. Missing/unreadable trust forbids it: persist a hold and stable `group:recovery-unavailable` event.
-Safety-only transitions can write the hold/event without opening state/trust. No automatic reconstruction from untrusted GroupInfo exists. Recovery requires manual re-invite; event ack cannot lift the hold. Backup restore remains subject to its declaration.
+Safety-only transitions can write the hold/event without opening state/trust. No automatic reconstruction from untrusted GroupInfo exists. Recovery requires manual fresh invitation or retirement to an already admitted successor. Event ack cannot lift the hold. Backup restore remains subject to its declaration.
 
 **GroupInfo capture head (r15 decision).** The responder reconciles a complete commit-log prefix before capturing its reply. Under its group owner gate, capture the
 committed MLS snapshot and that prefix's cursor together. `captureHead: string | null` names the reconciled commit prefix where GroupInfo is current; null means
@@ -145,7 +159,9 @@ Framing: `u32(tokenLength) || UTF8(token) || GroupInfo`, or lifecycle `u32(token
 Lengths are big-endian. The signature binds captureHead, captured epoch authenticator, group, request and exact GroupInfo digest.
 HPKE seals that signed token using the existing group/member/request authentication boundary (`packages/mls/src/recovery.ts:261`, `:566`, `:618`).
 This recovery-reply wire change stays within the 0.x band and requires coordinated producer/consumer updates.
-Use GroupInfo reply version 2 and HPKE info/AAD domains `kumiai/mls/recovery/v2` / `kumiai/mls/recovery-aad/v2`.
+Ordinary GroupInfo reply v2 uses HPKE info/AAD domains `kumiai/mls/recovery/v2` / `kumiai/mls/recovery-aad/v2`.
+Lineage-bearing replies use v3 and `kumiai/mls/recovery/v3` / `kumiai/mls/recovery-aad/v3`, with signed lineageDigest.
+V2 remains readable/restorable for ordinary saved attempts but grants no forkRecovery exception authority.
 The outer frame remains `u8(version) || enc(32 bytes) || ciphertext`. Ledger-only replies keep their existing format.
 Refuse v1, missing/wrong-type `captureHead` or `groupInfoAuthenticator`, invalid positions/authenticators and failed attestation verification before building any external attempt.
 A capture position is explicit null or a nonempty opaque string of at most 64 JavaScript characters. Preserve its exact value; impose no decimal-position grammar.
@@ -164,7 +180,8 @@ Fresh recapture keys remain separate. Head regression only diagnoses; member-sig
 Equal epoch/authenticator means responder prefix lacks X and retries SAME bytes at fresh head, including lower heads.
 Equal epoch/different authenticator diagnoses and recaptures without a durable hold.
 Later epoch with exact X leaf means accepted -> settled, adopting X only with bound confirmation; otherwise build fresh leaf-replacing Y after durable settlement.
-Later epoch without X's leaf permits policy-gated discard/build. Never build a second attempt at X's capture epoch. Backoff is bounded at 15 seconds.
+Later epoch without X's leaf permits policy-gated discard/build. No second same-lineage attempt at X's capture epoch is permitted.
+Only the restricted forkRecovery predicates below permit different-branch captures. Backoff is bounded at 15 seconds.
 Unsupported delivered frame/blob versions skip with upgrade-required diagnostics. Legacy control-record holds retain their separate policy.
 Keep bound confirmation and normal MLS validation under applied-state settlement authority.
 Only refusal of the authenticated commit itself authorises terminal negative settlement. Transport/blob/framing/copy-eligibility failures never do.
@@ -178,7 +195,8 @@ A divergent policy already forks the group on member commits; under this contrac
 A policy throw is a local fault: advisory, never refusal authority.
 A responder verdict never chooses a fork or authorises replacement of X in place.
 Remove P2a's separate lower-epoch candidate-admission/source-prefix algorithm.
-Persisted accepted/confirmed stages replay the same attempt; an adopted stage never reinstalls its candidate.
+Ordinary accepted/confirmed stages replay the same attempt. Restricted forkRecovery may supersede X while preserving its exact history.
+An adopted stage never reinstalls its candidate.
 Policy refusal remains durable until host action; transport/no-responder failures retry with backoff while stranded.
 
 **Total database loss (r15 decision).** Losing the spent set is safe only when all prior Welcome-decryption material is also lost. KeyPackage init/HPKE private keys
@@ -212,13 +230,212 @@ An undeclared backup restore is outside the model: rolled-back spent sets and ra
 They can admit old Welcomes or reuse keys/generations. This rollback rule applies
 [RFC 9750 §6.6's state-loss reinitialisation guidance](https://www.rfc-editor.org/rfc/rfc9750.html#section-6.6).
 
-**Manual fork recovery (r14 decision).** Only a host invocation authorises resync onto a chosen hub/commit topic,
-or retirement in favour of an already admitted successor group. Persist that authorisation/target so restart can resume
-only the selected attempt. Failed/refused recovery leaves the old halt intact. Same-group success uses D2's incarnation switch.
-For a successor, the application first creates/joins it through normal admission, then retires the halted source in its own group
-transaction; these are separate group transitions. Copy no epoch state or messages between groups.
-The application coordinates routing and membership; kumiai neither chooses a destination nor migrates peers automatically.
-[RFC 9420 ReInit](https://www.rfc-editor.org/rfc/rfc9420.html#section-12.1.5) carries no hub/topic routing.
+**Installed checkpoints and notices (r24).** The only transport worker uses
+`deriveTopicID(configuredRecoverySecret, 0, 'kumiai/checkpoint/v1')`, with empty scope.
+The hub `authorize` hook gates the checkpoint topic exactly like the commit topic.
+Publish unconditionally with `retain: 'log'`, without `expectedHead`. Subscribe before draining and request seven days.
+Live pushes wake bounded retained fetches. Only fetched positions advance the separate persisted checkpoint cursor.
+The worker owns its receive channel and releases ownership before network work and notifications.
+
+Define `LP(x) = u32be(byteLength(x)) || x` and
+`H(label, ...parts) = SHA256(UTF8(label) || 0x00 || LP(part1) || ...)`.
+Canonical UTF-8 JSON uses `@sozai/codec.canonicalStringify` and the EpochCheckpointBodyV1 shape below.
+`genesisHash = H('kumiai/checkpoint-genesis/v1', exactGenesisAnchorExtensionBytes)`.
+`authHash = H('kumiai/checkpoint-authenticator/v1', UTF8(groupID), genesisHashBytes, u64be(epoch), epochAuthenticatorBytes)`.
+`keyHash = H('kumiai/checkpoint-key/v1', signaturePublicKeyBytes)`.
+Sign `UTF8('kumiai/checkpoint-signature/v1') || 0x00 || LP(canonicalBodyBytes)` with the device's Ed25519 MLS signature key.
+Verification uses strict Ed25519 (`zip215: false`). Other signature algorithms require a new checkpoint version.
+Frame: `u8(1) || u8(1) || u32be(length) || LP(canonicalBodyBytes) || signature[64]`.
+Length counts the complete payload after its length field. Maximum complete frame: 4,096 raw bytes.
+Require exact lengths/full consumption, canonical 32-byte unpadded base64url hashes, recognised suites and valid UTF-8.
+Reject duplicate/unknown fields, noncanonical JSON/base64 and lone surrogates. Epochs are nonnegative safe integers. Leaves are unsigned 32-bit integers.
+
+The body carries keyHash and leafIndex, never signerDID, raw authenticator, incarnation, timestamp, position, publishID or hub identity.
+`parentAuthHash` is our epoch-1 authHash, or null when that epoch was not installed.
+Retained local facts include installed GroupContext.confirmedTranscriptHash, canonical unpadded base64url of its bytes.
+The empty genesis transcript encodes as the empty string. Checkpoints never publish that field or substitute authHash for it.
+Facts contain the complete authenticated roster with DID, keyHash, leafIndex and canonical 32-byte Ed25519 public key.
+Sort members by DID/key/leaf. Reject duplicate DID/key pairs or leaves and keys that do not hash to keyHash.
+Facts contain no credentials, registry export, ledger, private tree or MLS secret.
+
+Genesis, Welcome, own/received commit and confirmed resync atomically capture facts and publication debt with installed state/trust.
+Installation provenance is mutationID/stateVersion, established by the private coordinator. Progress saves preserve immutable facts.
+Speculative builds, refused commits, offered GroupInfo, imported frames and hub acknowledgements never create installed facts.
+Self-removal retains its fact but publishes no checkpoint under the removed identity.
+Signing resolves a proven installed factID, outside the provider transaction. It accepts no arbitrary candidate or authenticator.
+Save exact signed bytes/publication work before network handoff. Rollback/uncertainty releases nothing. Crash-before-sign resumes the captured fact.
+Rapid advances cannot substitute a newer installation. Signing consumes no MLS generation. Stale incarnation workers cannot sign for their replacement.
+
+Publish once for every eligible installation. Drain at one checkpoint/second, burst eight, without coalescing retained unsent installations.
+An eligible online member republishes its exact current checkpoint every 30 minutes with ±20% jitter and a fresh heartbeat publishID.
+Persist sampled deadlines and in-flight IDs across restart/reconnect. Ambiguous publication retries exact bytes/ID.
+Overdue timers produce one heartbeat, never catch-up bursts. Reschedule from actual handoff.
+Retry exponentially, capped at 15 seconds, within the same rate budget. Remote input never induces new signing.
+Transport failure never holds ordinary MLS sends. Offline/suspended periods give no cadence guarantee.
+Receive at most 32 frames, 128 KiB and 64 signature checks per turn. Release the owner gate between turns.
+Reject oversized input before JSON/crypto. Deduplicate by `H('kumiai/checkpoint-id/v1', exactFrameBytes)`.
+
+Current counts towards the newest 256 installations across the group, including retired incarnations.
+Superseded facts expire seven days after local supersession or outside those newest 256 installations, whichever occurs first.
+Prune associated unsent work. Replays never refresh installation identities or supersession clocks.
+No fixed history byte cap silently truncates rosters. Storage exhaustion follows provider failure semantics.
+Absent retained data exposes lost coverage rather than fabricated completeness.
+Checkpoint retention is independent of applied rows, MLS secrets and the spent set.
+Seal group-level `checkpoints` records with null incarnation in AAD and GroupKey inside the value.
+Facts, publications, cursor, notices/evidence, conditions, journal, superseded history and manual records use distinct record identities.
+Only the D8 coordinator establishes installation provenance or writes restricted recovery authority. Ordinary store callers cannot fabricate either.
+
+Comparison binds the compared epoch/hash to our retained local fact.
+Signer eligibility uses DID and key hash in our pre-split roster, falling back to the compared-epoch roster only when the earlier fact is unavailable.
+Resolve DID locally from keyHash. Foreign leaf numbers need not match local leaf numbers. Count signers once per DID.
+At least one compared hash matches our retained fact. Same-key unequal statements identify equivocation.
+Missing epochs/bindings, unsupported versions and ineligible signatures yield invalid/coverage-gap, never adverse recovery authority.
+A malicious eligible signer can invent testimony and cause a spurious notice. Checkpoints never choose a winner, halt or switch.
+
+One durable ForkNotice represents each detected split, with the best-known split epoch, branch hashes/signers and this device's branch.
+Use local detectedAt/lastEvidenceAt/firstSeenAt/lastCheckpointAt, never hub timestamps.
+`fork-detected` replays until acknowledged. Material changes emit `fork-updated`, coalesced by forkNoticeMinInterval, default 30 seconds.
+Material changes are a new branch/signer, an earlier split epoch or a changed device branch. Unchanged heartbeats never notify.
+Close after only one branch receives checkpoints for forkNoticeQuietInterval, default 24 hours, or after this device switches branch.
+Closing does not prove which branch survived. Acknowledgement affects notification, never admission or safety.
+Evidence, even unacknowledged, obeys the ordinary 256-installation/seven-day supersession bounds.
+Closed evidence expires at the earlier of acknowledgement-plus-604800000 ms and its checkpoint bounds.
+This explicitly supersedes DN3's unbounded unacknowledged-evidence pinning exception.
+Keep replayable unacknowledged summaries with partial coverage after evidence pruning. Late acknowledgement never extends retention.
+App/internal halt evidence remains separate immutable history, retained under its halt/tombstone contract.
+Public checkpointCoverage exposes the effective comparison floor, incarnation-specific retained ranges and pre-join/skipped/expired holes, including after restart.
+Summary-only epochs never count as comparable facts. Full withholding, absent shared signers and expired epochs can prevent detection.
+
+**Roster absence (r24 controller departure, R1/R6/R8/R9).** This replaces approved design Goal 3 and section 4's terminal not-member/stop-retrying rule.
+A signed roster authenticates a responder's view. It cannot prove that the hub kept that branch.
+not-member is diagnostic only. Admission retains existing stranded/hold rules. No admission path refuses solely because of this diagnostic.
+Ordinary candidate admission remains unchanged. An absent device still requires normal invitation when replacement policy cannot admit it.
+
+A separate former-member roster reply discloses only signed public tree, authenticated role-ledger head/entries and responder lineage, never secrets or messages.
+The requester must be absent now, with its DID AND requesting key hash in the responder's retained earlier roster.
+A never-seen or expired DID/key pair gets no reply. Hosts/imported facts cannot supply disclosure authority.
+Dedupe replies per responder/requestID and reuse bounded per-group recovery admission/suppression budgets.
+Hard-held responders never serve recovery replies.
+
+Verify request binding, eligible signing, head/tree/ledger and absence of our own DID, irrespective of leaf/key changes.
+Capture public tree, complete ledger, reconciled prefix/head and retained signed lineage under one responder owner snapshot.
+Freshness is lineage-relative: same lineage at the newest common retained epoch requires reply epoch > our latest installed epoch.
+Different lineage at any retained epoch needs no epoch-number condition. Unequal authenticated authHash or confirmedTranscriptHash establishes that difference.
+Absent comparable authenticated evidence grants no not-member claim. Older/equal same-lineage replies cannot prove fresh absence.
+Surface responder keyHash, epoch, local observedAt and distinct responder DIDs/count.
+Emit once per new evidence, with notice-style coalescing. Preserve optional pendingReason in status.
+Recovery continues at capped backoff. Any successful install, head-only reconcile or re-anchor clears the active condition and preserves history.
+Failure or pending proof never clears it. No roster reply supplies terminal continuation authority.
+Advise apps against disposal/deletion on first evidence. Another responder DID or persistence can inform app policy.
+App policy owns disposal, deletion and re-invitation. Neither silence nor an ineligible reply proves removal.
+Use 'no-reply' when nothing was received and 'no-eligible-responder' when replies arrived but none was eligible.
+
+Recovery requests sign comparisonEpoch: the open split E for fork recovery, otherwise the newest retained epoch.
+Return only signed lineage frames from that epoch through offered F, inclusively. Never append older frames or silently truncate required evidence.
+Keep complete replies within 786432 bytes. If F < comparisonEpoch or required frames are unavailable, no lineage exception is authorised.
+Rendezvous disclosure includes DID, ephemeral key and comparisonEpoch. comparisonEpoch is cleartext, visible to the hub and subscribers.
+Legacy requests without comparisonEpoch retain ordinary recovery, without lineage-exception authority.
+
+**Restricted fork recovery (r24, R2/R7/R9/R10).** Checkpoint intake alone never executes a recovery transition.
+Automatic floor lowering requires an open notice with other-branch hash at its best-known split E, attested by an eligible, non-equivocating signer.
+Equivocation-only notices grant nothing. The reply carries its signing key's signed checkpoint at E, matching that other hash and differing from our E fact.
+That reply signer occurs in our pre-E roster. The authenticated reply lineage binds the E checkpoint to offered state.
+Checkpoint testimony alone grants no exception. Verify the offered MLS GroupInfo and its public transcript binding as well.
+
+Require offered GroupInfo epoch F >= E, using the notice's best-known split.
+Within our retained range, GroupContext.confirmedTranscriptHash must differ from our retained fact at F.
+Below the oldest retained fact, or in a hole within that range, refuse with 'target-behind'.
+A continuing head F in a retained-range hole, including epochs crossed by external commit, waits until a retained epoch or beyond our newest.
+If F is above our newest retained fact, the E-lineage binding still applies. Missing facts never manufacture transcript inequality.
+An earlier-moving notice can re-enable authorisation: a head in [S, E) is refused until the best-known split moves from E to S.
+Manual resync supplies the exit otherwise. After evidence expiry, automatic healing stays target-behind; explicit manual resync supplies the exit.
+
+Recheck E-lineage and MLS transcript binding for every capture while Y carries forkRecovery, including build, restore, retries and restart.
+The real MLS adapters use registry-owned installed lineage and private authorisation/checking dependencies.
+Owner-bound facts/frames reach ordinary sealing with the captured state/head/ledger snapshot. Hosts cannot inject signing, disclosure or floor authority.
+The real captured port delegates authoriseForkRecovery to the private coordinator. Missing authority/checker refuses the exception.
+Ordinary v2/missing-lineage recovery keeps X and its floor unchanged when an exception would be required.
+
+If X exists at built, published, confirmed or adopted-incomplete stage, settle it as `{kind:'superseded-branch', epoch:E}` in the cumulative row.
+Union every obligation. Preserve unknown/accepted outcomes and sealed exact-X history, including request/key/candidate/payload and existing confirmation facts.
+This overrides r23's compact-settlement omission rule only for superseded-branch provenance. Never infer not-accepted from a branch switch.
+Atomically settle X/history, clear its active/unfinished continuation pointer and persist Y's bound forkRecoveryAttempt intent.
+No-X recovery persists the same bound Y intent without inventing an X settlement.
+Intent ID equals authorisation.attemptID and the later Y record ID. Bind source and destination when retiring an adopted-incomplete continuation.
+Prove this transition before constructing Y. Retrying an existing intent is idempotent and never settles Y as X.
+
+Only that bound attempt gets effective floor E. Keep the ordinary control recoveryEpochFloor unchanged.
+Settlement or abandonment of Y removes its exception. Ordinary floor raising and cumulative settlement rules remain monotone.
+Permit lower/equal-number different-branch captures only under all these predicates. No distinct-DID threshold applies, preserving two-member healing.
+Without all predicates, preserve X/floor and retry with 'target-behind'. Never discard saved work merely to create another attempt.
+Deliberately forged coherent GroupInfo plus checkpoint chains remain an accepted insider residual outside the intent-trusted model.
+Their effect stays within the attacker's fake state. Honest members never confirm fake Y.
+Every rejoin installation still requires bound external confirmation. Notice testimony never substitutes for acceptance proof.
+
+**Abandonment reporting (r24, DN3/R4).** Existing authenticated recovery decides switches, never notices or reporting coverage.
+Journal own-send IDs/epoch/authHash prospectively, without plaintext. Store only per-epoch counts for others, never per-received-message rows or plaintext.
+Ephemeral sends remain unpersisted and uncovered. Retain journal metadata only within its supporting installation bounds.
+On non-descendant switch emit branch-abandoned with abandoned range, optional notice link, own IDs, others' counts and branch-only membership changes.
+If sent plaintext is not retained, report message IDs and the app resends from its copy. Never resend others' messages.
+Reports declare complete/partial coverage separately for ancestry, own messages, others seen, membership and ephemeral traffic.
+Partial coverage names pre-journal-history, retention-gap, unknown-ancestry or ephemeral-uncovered reasons. Counts describe observed metadata only.
+Unknown ancestry reports range 'unknown' and partial coverage without delaying or changing the established switch.
+Missing history never fabricates zero counts or exact branch-only deltas.
+
+**Manual recovery and hub migration (r24, DN1/R3).** Only host invocation authorises a selected target or admitted successor.
+Resync accepts registered targetID or call-time `target: {targetID, hub, commitTopicID}`.
+Persist only targetID and sealed commitTopicID, with explicit allowOpenFork and attempt authority. Never serialise hub methods.
+The unchanged resolveTarget(targetID) must reconstruct that exact ID/topic binding after restart.
+Resolution failure/mismatch leaves the same attempt visibly paused as target-unresolved, without fallback or dropped authority.
+Persist the chosen action before execution. Failure leaves the prior state and any halt intact.
+A committed authorisation supplies a restricted manualRecoveryControl overlay for only rejoin/floor/settled rows.
+Keep ordinary X byte-identical during manual save/retry/rollback. Carry cumulative obligations into independently saved manual candidates.
+Bind each nested attempt to source, selected target and authorisationID. Only the provider-scoped capability grants the manual floor exception.
+This explicit manual authority supplies the exit from signed floor inflation or expired fork evidence, without lowering the ordinary floor.
+Keep ordinary holds/operations untouched and ordinary lanes closed. Manual authority never permits held responders to answer.
+At successful retirement, preserve exact ordinary X history, unknown/accepted outcomes and obligations. Never infer remote non-acceptance.
+Persist the manual adopted destination/continuation identity atomically. Restart selects that authorised record and never fabricates legacy metadata.
+Switch-proof resolution remains unbounded with visible pending until proof. Only proven commits release routing or destination peers.
+
+A current move keeps GroupKey, MLS state, authenticator, generations and holds.
+Require readable state, complete ledger/walk, no known lag/slot/operation/unresolved publication or settlement and zero pending owner work.
+Require no hard hold, condition, open notice or active ordinary/manual rejoin.
+A pending forkRecoveryAttempt counts as active rejoin, including the no-slot/rejoin/operation checks.
+Persisted `allowOpenFork: true` overrides only the open-notice predicate. Every other exclusion remains mandatory.
+Same-key movement refuses while held. Otherwise rejoin through responders already on the selected destination, checked against retained trust.
+Authorised manual recovery abandons Y's pending forkRecovery intent in the same transition that persists the manual attempt, removing Y's exception.
+A completed rejoin creates a fresh incarnation without source holds. Source holds/evidence remain history.
+Hard-held responders never answer recovery requests. If every device is halted, successor mode supplies the exit.
+
+Commit/rendezvous/checkpoint transport moves to the chosen hub. Rendezvous/checkpoint topic derivation retains the configured recovery secret.
+Partial migration can create an undetectable cross-hub split. kumiai never chooses destinations or automatically migrates members.
+An ahead arrival at a migrated topic stays pending with 'target-behind' unless the restricted forkRecovery predicates apply.
+An empty target supplies no responder proof for a held/diagnosed device. Its current-move exclusions remain mandatory.
+
+Successor mode validates an already normally admitted/available successor before retiring the source, without holding both group gates.
+Retire/tombstone the source and record failures, routing retirement and chosen-action completion atomically after draining source work.
+The successor tombstone blocks every old Welcome, including newer/unspent Welcomes and empty private state after restart.
+Nothing is copied. The app may clear the tombstone explicitly. Spent checks still refuse replay after clearing.
+Application code owns successor creation, admission, routing and member migration. These are separate group transitions.
+
+**clearHold (r24, DN4).** Clear only a matching app-report halt, established by stored producer provenance.
+Match GroupKey, eventID and reportMutationID under private attempt authority. Co-write exact halt history and clearance before releasing the latch.
+Legacy halts without provenance stay uncleareable through clearHold. Completed manual rejoin or successor retirement supplies their exit.
+Internal safety latches, spent-set-corrupt, not-member and unsupported-version holds cannot be cleared through this API.
+Clear durably, retain reported evidence as history, and resume the ordinary commit walk. If stranded, ordinary recovery takes over.
+No forced resync. Ack never clears holds. Gated transport retention defers rather than dropping its reference while a clearable hold remains.
+Resume only demanded subscriptions after proven release. A holder released before clearance never subscribes.
+A newer internal latch survives clearance of an older app incident.
+
+**Spent diagnosis (r24, DN5).** Unreadable combined trust envelopes remain recovery-unavailable.
+Only successful envelope decoding with a missing/malformed spent set produces spent-set-corrupt, with event, typed error and status.
+An empty decoded set in a surviving installed group is malformed. It cannot omit that installed authenticator.
+Refuse admission as before. Never initialise an empty set in a surviving store. Warm observation persists diagnosis across restart.
+Projection precedence is hard safety holds > spent-set-corrupt > not-member > recovery-unavailable > pending.
+Keep lower-precedence records/evidence intact. Precedence never makes not-member terminal, adds its own admission refusal or cancels recovery.
+Total database loss with all Welcome-decryption material lost permits plain fresh invitation into the same group.
+An already admitted successor remains an explicit exit. Documentation must not claim total loss forbids successor retirement.
+Undeclared backup restore remains outside the model. No spent-corruption repair helper or implicit safety reset exists.
 
 ### D2. Incarnations, admission and local order
 
@@ -236,7 +453,8 @@ mutation replay resolves its marker, not candidate admission. No silent empty-se
 After the spent check: absent lifetime joins incarnation 1; a live incarnation at/above the Welcome epoch returns
 `alreadyJoined`; a strictly newer authenticated Welcome may explicitly readmit after peer stop/drain; a tombstone may
 admit any unspent valid Welcome into `latestIncarnation+1`. No highest-ever epoch floor exists.
-A fork-halted group refuses ordinary readmission; only manual recovery can retire its halt.
+A fork-halted group refuses ordinary readmission until provenance-authorised clearHold or completed manual recovery releases the applicable hold.
+Successor tombstones independently refuse readmission until explicitly cleared. All spent checks remain mandatory.
 Seed rechecks lifetime/revision/admission inside the transaction. Genesis requires absent lifetime, epoch zero and null package use.
 **Package exclusion (r16 decision).** Welcome install atomically writes group namespaces/trust and consumes the ordinary device-pool record/private key.
 Recheck the prepared package reference and presence under the package-row lock; an existing receipt or absent private key refuses admission.
@@ -259,8 +477,8 @@ Certified settlements publish with original occurrence/topicID. Host history sur
 not a local counter. Positions compare numerically only within that topic. This extra epoch component is necessary because different anchor topics have independent
 position spaces. Keep/restore preserves anchorEpoch; one epoch has one capture identity. Resync starts a new incarnation; late frames retain original epoch, retired
 opens refuse. Host message dedup is `(groupID, author, id)`; the first occurrence keeps its order and persisted topicID. Local read watermarks include incarnation;
-peer receipts remain `(authenticated topicID, position)` with no local incarnation on wire. Different topics' receipt positions are incomparable. No lineage,
-admissionFloor, ordinal counter or topic-to-ordinal map remains.
+peer receipts remain `(authenticated topicID, position)` with no local incarnation on wire. Different topics' receipt positions are incomparable. No ordering lineage,
+admissionFloor, ordinal counter or topic-to-ordinal map remains. Checkpoint lineage does not change lane ordering.
 
 ### D3. Group transactions, adaptive batching and handlers
 
@@ -377,9 +595,10 @@ Recovery candidate v3 uses AAD `kumiai/recovery-candidate/v3` and complete
 Decode it separately; never splice private-state bytes by envelope offsets. Refuse v1/v2 candidates for new adoption.
 Keep requestKey, binding/holder evidence, exact-external-commit confirmation tuple, authenticated reply, immutable source/target/captureHead and original search origin.
 Legacy unadopted records lacking capture metadata, including non-null conflictEpoch, retain bytes/stage under unsupported-version hold.
-They never fabricate metadata, publish/adopt or silently settle. Their stop until manual recovery in 2.2e is an accepted compatibility cost.
+They never fabricate metadata, publish/adopt or silently settle. Authorised manual recovery supplies their exit while preserving saved history.
 Legacy adopted work finishes only with proof of its existing installation.
-Candidate v3 retains existing full sourceState. This revision adds no journal format or additional secret-retention policy.
+Candidate v3 retains existing full sourceState and its codec. The separate prospective metadata journal retains no plaintext.
+Only superseded-branch provenance requires the additional sealed exact-X history described in D1.
 **Registry.** Await shared cold load/restore/configuration validation before access. Validate groupID, epoch, credential and authenticator;
 missing/tombstoned/invalid records expose no fabricated handle. Host supplies context/policy/resolvers and ordered tokens including repeats.
 Only proven commits install runtime snapshots/notifications. Snapshots contain incarnation, epoch/authenticator, version, membership and
@@ -435,7 +654,7 @@ Device package/receipt/cleanup/restore-work rows and group recovery trust also r
 Queryable group/incarnation/sequence keys, revisions/locks/mutation markers may remain clear.
 Topic locator is a digest; actual topicID exists only inside sealed values.
 AAD is UTF-8 JSON of `['kumiai/at-rest/v1', groupID, incarnationOrNull, namespace, recordID]`:
-lifetime/trust use null; state/control/anchor use fixed slots; pending uses frame ID; cursor uses topic digest;
+lifetime/trust/checkpoints use null; checkpoint values include GroupKey; state/control/anchor use fixed slots; pending uses frame ID; cursor uses topic digest;
 outbox uses String(seq); metadata/event IDs use tagged tuples. Physical duplicates retain logical AAD identity.
 Device-scoped records use ownerDID, null incarnation, distinct namespaces and sourceID/ref or work ID (r16 decision).
 Seal failure rolls back the whole transition; open failure exposes no handle/payload or plaintext fallback.
@@ -745,7 +964,7 @@ export type GroupRuntimeSnapshot = EpochIdentity & { stateVersion: number; membe
 export type GroupEpochRuntime = { snapshot(): GroupRuntimeSnapshot | null; onEpochChanged(listener: (value: GroupRuntimeSnapshot | null) => void): () => void }
 export type SendAdmission =
   | { epoch: number; admissible: true }
-  | { epoch: number; admissible: false; reason: 'lapsed' | 'rotation-required' | 'stranded' | 'fork-halted' | 'terminal' | 'backup-restored' | 'recovery-unavailable' }
+  | { epoch: number; admissible: false; reason: 'lapsed' | 'rotation-required' | 'stranded' | 'fork-halted' | 'terminal' | 'backup-restored' | 'spent-set-corrupt' | 'recovery-unavailable' }
 export type RegistryHandleAccess = {
   key: GroupKey; runtime: GroupEpochRuntime
   epoch(): number; stateVersion(): number; admission(): SendAdmission
@@ -838,37 +1057,40 @@ Authenticated captureHead/searchFrom never change. Only authenticated head-only 
 Persist authenticated reply with candidate for restored target verification. CapturedPendingRecovery exposes immutable source and target/capture without fabricated trust.
 CapturedRecoveryPort supplies initial preparation/restoration and authentication/classification of recapture against saved X WITHOUT building.
 MLS/mls-rpc owns LeafNode/tree verification. rpc receives typed reconciliation and never decodes candidates or inspects opaque trust.
-Captured sealing requires the committed cursor and complete prefix. Keep the full live legacy producer/caller path until captured activation.
+Captured sealing requires the committed cursor and complete prefix. Unsupported legacy records cannot enter captured execution.
 Drop conflictEpoch/source-prefix scan for new attempts. Preserve payloadDigest/digest, exact bytes/requestKey/candidate and bound verdict stages.
-Task 14a prepares genuine dual fixtures. Task 14b activates production callers/mirrors/behavioural fixtures only after Tasks 15/16 provide continuation/coordinator. Preserve acceptance/convergence assertions.
-Legacy unadopted records then stop without fabricated metadata until 2.2e, an accepted compatibility cost. Proven adopted continuations finish without reinstalling.
+Legacy unadopted records stop without fabricated metadata until authorised manual recovery. Proven adopted continuations finish without reinstalling.
 Write switchMutationID atomically with confirmed. Defensive confirmed+null startup assigns before coordinator work.
 Adopted source continuations bind destinationKey. Retirement preserves history, owed work, accepted settlements and immutable safety evidence.
-RejoinRecord adds `trigger: 'automatic' | 'manual'` and `authorisationID: string | null`; manual attempts require matching durable authorisation. Current 2.2d construction supports automatic/null-authorisation only. Authorised manual construction is deferred to 2.2e, not forbidden by the permanent record invariant. Structurally valid manual records decode, but execution holds as unsupported until that phase.
+RejoinRecord adds `trigger: 'automatic' | 'manual'` and `authorisationID: string | null`; manual attempts require matching durable authorisation. Authorised manual construction uses the persisted selected-target record. Legacy records without supported provenance retain their compatibility stop.
 `StagedAdoption` adds incarnation. Control adapters, applied rows/responses/cursor and outcomes bind GroupKey.
 ControlSnapshot adds `commitOnce: BuiltCommit | null`, `forkHalt: ForkHalt | null`, `recoveryUnavailable: RecoveryUnavailableEvent | null` (r16 decision), and
-`strand: {reason: StrandedReason | 'unsupported-version'} | null`, and `manualRecovery: ManualRecoveryRecord | null`.
+`strand: {reason: StrandedReason | 'unsupported-version'} | null`, `manualRecovery: ManualRecoveryRecord | null`, and
+`forkRecoveryAttempt: ForkRecoveryAttempt | null` (legacy missing intent normalises to null).
+Group-level checkpoint records retain active conditions, notices and immutable evidence separately from hard holds.
 The strand/ControlHold 'unsupported-version' reason is legacy/read-only for hub-delivered frames; new frame-version faults diagnose/skip.
 Legacy local control-record version stops retain their compatibility policy, independently of delivered frame diagnostics.
 ControlChanges carries optional values for these fields; halt evidence is immutable on retirement.
 The commit-once slot survives operation outcome/ack. `deleteAppliedFrom` fork repair is removed; prune only within the incarnation.
 searchFrom is immutable. Accepted operations retain existing FirstValidCommit. expectedHead updates never change payload/ID.
 ControlSnapshot adds recoveryEpochFloor: number | null and settledRejoins: Array<AcceptedRejoinSettlement>, with matching ControlChanges recoveryEpochFloor/putSettledRejoins.
-AcceptedRejoinSettlement contains kind/id/digest/payloadDigest/epochAfter/acceptedEpoch, public origin, exact LeafNode digest and ledgerBefore.
+AcceptedRejoinSettlement always contains kind/id/public origin and cumulative ledgerBefore.
+Accepted-unadoptable provenance adds digest/payloadDigest/epochAfter/acceptedEpoch and exact LeafNode digest.
+Not-accepted and superseded-branch provenance carry epoch, without inventing accepted facts. Superseded-branch preserves prior accepted facts in exact-X history.
 Public origin contains sourceKey, target/capture and original searchFrom, never opaque trust or private state.
 Store at most one cumulative row per source incarnation, idempotently by id. Later settlements replace public provenance and union every prior owed token.
-Request/requestKey/candidate/payload are omitted durably at settlement. Zeroise owned buffers only after proof of committed settlement.
+Ordinary settlement omits request/requestKey/candidate/payload. Superseded-branch provenance preserves sealed exact-X history in checkpoints.
+Zeroise owned buffers only after proof of committed settlement, respecting retained history ownership.
 R0 settlement folds that row, deletes the active rejoin and raises the floor in one transition. Never delete outcomes/Welcomes or accepted facts through movement.
-Fresh snapshots and old persisted snapshots normalise missing floor/settlements to null/[] without changing saved record bytes.
-Task 1b owns packages/mls-rpc/src/memory-incarnation-stores.ts:168-182,326-327, real/double fixtures and required snapshot-field promotion.
-Its 16-file closure includes rpc peer-readmission.test.ts:20-122 null/[] fields and expectReset:125 against normalised load. Record semantics remain Task 14b.
-Task 1a keeps new fields optional, RejoinRecord aliased to legacy, and legacy source/proof overloads live. Each unit has a green gate and a closure below approximately 25 files.
-Task 1b creates a real persistence ControlStore conformance runner, reusing the contract and testing legacy snapshot loads. Run real/double Control and repo-wide types.
-Persist the monotone authenticated epoch floor independently of rejoin deletion. First save of X uses capture epoch.
+Fresh snapshots and old persisted snapshots normalise missing floor/settlements/intent to null/[]/null without changing saved record bytes.
+Persist the ordinary monotone authenticated epoch floor independently of rejoin deletion. First ordinary save uses capture epoch.
+Only effectiveRecoveryEpochFloor for the privately authorised, source/ID-bound forkRecovery attempt returns E.
+Bare ControlStore.apply cannot mint this authority, lower the ordinary floor or clear safety records.
 Leaf-absent discard and R0 settlement raise it to authenticated recapture epoch atomically. Restart preserves it, normalising missing legacy values only.
 Task 14b tests all four write/restart points. Task 3 also runs Control. Task 1a uses the explicit pre-runner command in the plan.
 Preserve HEAD peer.ts:3813-3821 ledgerBefore: de-duplicated inFlightEntries ?? awaitingBootstrap.entries, current ledger and conditional commitOnce bodies.
-Carry that union into Y. RecoveryCompletion exclusively settles source accepted operations to stable unknown outcomes, atomically/idempotently, matching control/rejoin.ts:184-212.
+Carry that union into Y. settleAcceptedRecovery takes the ordinary recoveryEpochFloor as its fourth argument.
+Never write Y's temporary effective E into the ordinary floor. RecoveryCompletion exclusively settles source accepted operations to stable unknown outcomes, atomically/idempotently, matching control/rejoin.ts:184-212.
 Compute reenact after destination bootstrap. No automatic enqueue or ledgerBefore mapping removes owed tokens.
 No private builder exports a handshake reservation API or generation budget.
 
@@ -962,31 +1184,37 @@ export type CapturedRejoinRecord = Omit<LegacyRejoinRecord, 'source' | 'conflict
   captureHead: LogPosition | null; searchFrom: LogPosition | null
   trigger: 'automatic' | 'manual'; authorisationID: string | null
   switchMutationID: string | null; destinationKey: GroupKey | null
+  forkRecovery?: ForkRecoveryAuthorisation
 }
 export type RejoinRecord = CapturedRejoinRecord
 export type StoredRejoinRecord = LegacyRejoinRecord | CapturedRejoinRecord
-// Task 1a preserves the live RejoinRecord legacy alias. Task 14b promotes it to CapturedRejoinRecord.
-// Task 6b widens ControlSnapshot.rejoin/ControlChanges.putRejoin and real/mirrored ControlStore load/apply to StoredRejoinRecord before Task 7.
-// Its HEAD-grepped 17-file closure covers rpc store/rejoin/peer, conformance control-store/memory double and mls-rpc registry switch/verdict/retired plus memory storage/readers.
-// switch.ts confirmedRecord:61 and saved reads:113-128,159-162,230-233 discriminate format:2 versus legacy before proof/source/codec access.
-// Legacy orchestration/verification/acceptance remain live. Captured storage never enters legacy steps; Task 7 supplies captured switching, Task 15 continuation.
-// Task 6b runs real/double Control/full Port and repo-wide build/types GREEN. Type activation in 14b selects production, promotes the public alias and applies legacy stops.
-// Transitional APIs retain exact legacy shapes and genuine ControlSource through a private reader until captured activation.
-// Keep LegacyPendingRecovery.onAccepted(write) isolated and live until activation; captured acceptance consumes portable RecoverySource<unknown>.
-// Activation gates old records only after captured lifecycle works. Portable mirrors use RecoverySource<unknown>; mls-rpc alone narrows trust.
-export type AcceptedRejoinSettlement = {
-  kind: 'accepted-unadoptable'; id: string; digest: string; payloadDigest: string
-  epochAfter: number; acceptedEpoch: number
-  origin: { sourceKey: GroupKey; target: RecoveryTargetCapture; searchFrom: LogPosition | null }
-  leafDigest: string; ledgerBefore: Array<string>
+// Legacy records decode separately and retain their unsupported-provenance stop until authorised manual recovery.
+// Captured records never enter legacy execution. Proven adopted legacy continuations never reinstall.
+// Portable mirrors use RecoverySource<unknown>; mls-rpc alone narrows trust.
+export type ForkRecoveryAuthorisation = {
+  attemptID: string; noticeID: string; splitEpoch: number; otherAuthHash: string
+  responderKeyHash: string; source: GroupKey; evidence: Uint8Array
 }
-// leafDigest is SHA-256/base64url of the exact wire-encoded fresh LeafNode, supplied by MLS after authenticated matching.
-// No request/requestKey/candidate/payload or opaque trust. At most one cumulative settlement row per incarnation.
+export type ForkRecoveryAttempt = { id: string; source: GroupKey; forkRecovery: ForkRecoveryAuthorisation }
+export type AcceptedRejoinSettlement = {
+  id: string; origin: { sourceKey: GroupKey; target: RecoveryTargetCapture; searchFrom: LogPosition | null }
+  ledgerBefore: Array<string>
+} & (
+  | { kind: 'accepted-unadoptable'; digest: string; payloadDigest: string
+      epochAfter: number; acceptedEpoch: number; leafDigest: string }
+  | { kind: 'not-accepted'; epoch: number }
+  | { kind: 'superseded-branch'; epoch: number }
+)
+// Ordinary settlements omit secret work. Superseded-branch retains exact X in sealed checkpoint history.
+export function effectiveRecoveryEpochFloor(snapshot: ControlSnapshot,
+  attempt: { id: string; source: GroupKey }): number | null
+// E only for the privately authorised Y binding. Otherwise return the ordinary stored floor.
 export type CapturedRecapture = { sealed: Uint8Array; requestID: string; requestKey: Uint8Array; epochFloor: number | null }
 export type RecoveryReconciliation =
   | { kind: 'accepted'; epoch: number; leafDigest: string }
   | { kind: 'head-only'; head: LogPosition | null }
   | { kind: 'unapplied-later'; epoch: number }
+  | { kind: 'superseded-branch'; epoch: number; authorisation: ForkRecoveryAuthorisation }
   | { kind: 'retry' | 'held' }
 // held = local safety/missing retained trust only. retry = different authenticator, below-floor capture or transient failure.
 export type LegacyPendingRecovery = Pick<PendingRecovery, 'epoch' | 'markBindingUnusable' | 'confirmationKey' | 'judgeVerdict' | 'commit' | 'serialize'> & {
@@ -1002,17 +1230,16 @@ export type CapturedRecoveryPort = {
   restoreRecovery(candidate: Uint8Array, requestKey: Uint8Array): Promise<CapturedPendingRecovery>
   reconcileCapture(record: CapturedRejoinRecord, reply: CapturedRecapture): Promise<RecoveryReconciliation>
   sealGroupInfo(request: Uint8Array, captureHead: LogPosition | null): Promise<Uint8Array>
+  checkRosterAbsence?(evidence: Uint8Array, requestID: string, requestKey: Uint8Array): Promise<AuthenticatedRosterAbsence | null>
+  sealRosterAbsence?(request: Uint8Array, captureHead: LogPosition | null): Promise<Uint8Array | null>
+  authoriseForkRecovery?(reply: CapturedRecapture, noticeID: string): Promise<ForkRecoveryAuthorisation | null>
 }
-// GroupMLS.capturedRecovery?: CapturedRecoveryPort is additive until Task 14b selects it for production recovery.
-// Task 1a: rpc declarations, crypto/host-boundary, registry types/barrels and independent GroupMLS mirror/memory fixture.
-// Task 12: real MLS/mls-rpc implementation, host-boundary classification/wrappers and strict independent mirror/double.
+// GroupMLS.capturedRecovery supplies production captured recovery; legacy direct factories may omit optional authority.
 // Initial apply returns genuine immutable source. reconcileCapture authenticates request/group/target/origin/floor and exact LeafNode against saved X without building.
 // Leaf/tree checks stay in MLS/mls-rpc. rpc sees typed reconciliation, never opaque trust internals. Fresh keys never overwrite X's original tuple.
-// Task 9 owns sealGroupInfo declaration/overload. Task 12 owns port delegation to its genuine snapshot/cursor pair.
-// Task 13 owns complete-prefix enforcement before activation. Task 17 owns exact real/mirror/host-boundary sink facades listed in the plan.
-// Same-epoch recapture, including lost private state, must make zero extra candidate builds.
+// Same-lineage recapture, including lost private state, makes zero extra candidate builds. A different-branch Y needs private forkRecovery authority.
 export type RegistrySwitchWrite = {
-  mutationID: string; source: { rejoinID: string }
+  mutationID: string; source: { rejoinID: string; authorisationID?: string }
   destination: { control: { cursor: { position: LogPosition; epoch: number } } }
 }
 export type ConfirmedRecoveryHandoff = { record: CapturedRejoinRecord; completion: Promise<void> }
@@ -1110,7 +1337,129 @@ Stale key/version/identity/lifetime revision refuses adoption/switch unchanged. 
 Functions remain default at-least-once registrations. Transactional policy is valid only for log events; mixed listener policies refuse registration.
 `completion.transact` reloads uncompleted IDs, runs the registered effect and co-writes completion/cursor once; completed IDs invoke nothing.
 
-### Safety and manual recovery (r14 decision)
+### Checkpoint, condition and reporting contracts (r24)
+
+```ts
+type EpochCheckpointBodyV1 = {
+  v: 1; type: 'kumiai/checkpoint/v1'; groupID: string; genesisHash: string
+  ciphersuite: number; epoch: number; authHash: string; parentAuthHash: string | null
+  keyHash: string; leafIndex: number
+}
+type CheckpointMember = {
+  signerDID: string; keyHash: string; leafIndex: number; signaturePublicKey: string
+}
+type EpochRosterFactV1 = {
+  v: 1; key: GroupKey; genesisHash: string; ciphersuite: number
+  epoch: number; authHash: string; parentAuthHash: string | null; confirmedTranscriptHash: string
+  members: Array<CheckpointMember>; installation: { mutationID: string; stateVersion: number }
+}
+type CheckpointComparison =
+  | { kind: 'agreement'; epoch: number; signerDID: string; keyHash: string }
+  | { kind: 'conflict'; epoch: number; signerDID: string; keyHash: string;
+      localAuthHash: string; remoteAuthHash: string; parentAuthHash: string | null }
+  | { kind: 'invalid' | 'coverage-gap' }
+type CheckpointCoverage = {
+  groupID: string; current: { key: GroupKey; epoch: number } | null
+  retained: Array<{ key: GroupKey; from: number; through: number }>
+  effectiveFloor: number | null
+  gaps: Array<{ key: GroupKey; from: number; through: number; reason: 'pre-join' | 'skipped' | 'expired' }>
+}
+type CheckpointPort = {
+  signInstalled(factID: string): Promise<Uint8Array | null>
+  compare(key: GroupKey, frame: Uint8Array): Promise<CheckpointComparison>
+  exportCheckpoints(key: GroupKey, epochs?: Array<number>): Promise<Array<Uint8Array>>
+  checkpointFact(key: GroupKey, epoch: number): Promise<Uint8Array | null>
+  checkpointCoverage(groupID: string): Promise<CheckpointCoverage>
+}
+type OwnBranchMessage = { id: string; epoch: number; authHash: string }
+type CoverageGapReason =
+  | 'pre-journal-history' | 'retention-gap' | 'unknown-ancestry' | 'ephemeral-uncovered'
+type ReportCoverage = { kind: 'complete' } | { kind: 'partial'; reasons: Array<CoverageGapReason> }
+type BranchReportCoverage = {
+  ancestry: ReportCoverage; ownMessages: ReportCoverage; othersSeen: ReportCoverage
+  membership: ReportCoverage; ephemeral: ReportCoverage
+}
+type AbandonedEpochRange = { from: number; through: number } | 'unknown'
+type ForkBranch = {
+  authHash: string; signers: Array<{ signerDID: string; keyHash: string }>
+  firstSeenAt: number; lastCheckpointAt: number
+}
+type ForkNotice = {
+  id: string; groupID: string; splitEpoch: number; branches: Array<ForkBranch>
+  deviceAuthHash: string; detectedAt: number; lastEvidenceAt: number
+  atRisk: Array<OwnBranchMessage>; revision: number; acknowledgedRevision: number
+  acknowledgedAt: number | null
+  coverage: { evidence: ReportCoverage; ownMessages: ReportCoverage; ephemeral: ReportCoverage }
+  closedAt: number | null; equivocations: Array<{ signerDID: string; keyHash: string }>
+}
+type ForkNoticeEvent = { id: string; kind: 'fork-detected' | 'fork-updated'; notice: ForkNotice }
+export type BranchAbandonedEvent = GroupKey & {
+  id: string; kind: 'branch-abandoned'; noticeID: string | null; epochs: AbandonedEpochRange
+  ownMessages: Array<OwnBranchMessage>; othersSeen: number
+  membersAdded: Array<string>; membersRemoved: Array<string>; coverage: BranchReportCoverage
+}
+export type GroupCondition = 'not-member' | 'spent-set-corrupt'
+export type NotMemberEvidence = {
+  responderKeyHash: string; epoch: number; authHash: string; observedAt: number
+  responderDIDs: Array<string>; responderCount: number
+}
+export type GroupConditionEvent = GroupKey & {
+  id: string; kind: GroupCondition; detectedAt: number; evidence: NotMemberEvidence | null
+}
+export type RecoveryPendingReason = 'no-reply' | 'no-eligible-responder' | 'target-behind' | 'target-unresolved'
+// RegistryPeerStatus includes this diagnostic arm and uses the same reasons in its pending arm.
+export type NotMemberStatus = {
+  kind: 'not-member'; eventID: string; evidence: NotMemberEvidence
+  retrying: true; pendingReason?: RecoveryPendingReason
+}
+export type AuthenticatedRosterAbsence = {
+  groupID: string; requesterDID: string; requestID: string; epoch: number
+  captureHead: string | null; groupInfoAuthenticator: Uint8Array; confirmedTranscriptHash: string
+  responderDID: string; responderKeyHash: string
+  lineage: Array<{ epoch: number; authHash: string }>; evidence: Uint8Array
+}
+```
+
+MLS exports equivalent structural checkpoint/proof results without importing rpc. Independent conformance mirrors import no implementation helpers.
+Partial coverage requires at least one reason. Ephemeral coverage is always `{kind:'partial', reasons:['ephemeral-uncovered']}`.
+`effectiveFloor` is the earliest ordinary comparable epoch, or null without facts. Ranges remain incarnation-specific.
+Coverage watermarks survive pruning/restart without retaining expired rosters. Evidence summaries never imply comparable facts.
+`importCheckpoint(key, frame)` uses stored-fact validation, identical to hub intake, and never accepts supplied roster provenance.
+Standalone `verifyCheckpointPair({first, second, localRosterFact, eligibilityRosterFact?})` trusts the caller's independently authenticated local facts.
+The compared local fact always binds epoch/hash. The optional prior eligibility fact never replaces that binding.
+Exports and fact/coverage access return defensive copies, including retained retired evidence. No extra transport worker exists.
+
+`GroupMLS.createRecoveryRequest(requestID, deadlineMs?, comparisonEpoch?)` forwards signed comparisonEpoch through real and retained-trust request creation.
+Validate comparisonEpoch as a nonnegative safe integer. Missing retained comparison facts leave ordinary requests available without exception authority.
+`GroupNotMemberError` and `SpentSetCorruptError` take `{key:GroupKey;cause?:unknown}` and expose defensive keys.
+GroupNotMemberError is diagnostic only. Only spent-set-corrupt adds a SendAdmission/SafetyHold restriction.
+
+Roster replies use token type `kumiai.recovery-roster`, frame version 1 and HPKE info/AAD domains
+`kumiai/mls/recovery-roster/v1` / `kumiai/mls/recovery-roster-aad/v1`.
+Reuse signed-request ephemeral-key sealing and group/requester/requestID AAD framing.
+Sign group/request/head/authenticator/tree/ledger/lineage digests. Refold the authenticated complete role ledger from genesis.
+Payload: `u32(tokenLength) || UTF8(token) || u32(GroupInfoLength) || GroupInfo || u32(ledgerLength) || encodedLedgerTokens || encodedCheckpointList`.
+The checkpoint list is `u32(count)` followed by `u32(length) || frame`, at most 256 frames of at most 4096 bytes each.
+Require full consumption, contiguous parentAuthHash links and the reply's signing key/current offered authenticator binding.
+The complete frame, including sealing overhead, stays within 786432 bytes. Overflow/missing lineage grants no qualifying absence proof or exception.
+Extract confirmedTranscriptHash only from verified GroupInfo.groupContext, never an unsigned field or checkpoint assertion.
+Roster replies cannot enter candidate-building GroupInfo, ledger-only or confirmation consumers. Transmit no historical roster facts.
+A present DID with a changed leaf is not absent. An obsolete incarnation with that DID can remain pending.
+
+Real GroupMLS adapter dependencies privately bind authoriseForkRecovery, readInstalledRecoveryLineage and checkForkRecoveryCapture to the registered coordinator.
+The lineage reader takes `{comparisonEpoch, throughEpoch}` and reads installed signed frames under the bound owner snapshot.
+Ordinary sealCapturedGroupInfo receives those frames alongside public state/head/ledger. No reply causes signing.
+`checkForkRecoveryCapture({attempt, reply})` enforces E-lineage and transcript checks before settlement and every Y apply/restore/recapture.
+Registry construction supplies these dependencies and excludes them from host parameters. Hosts cannot replace private authority through object fields.
+Legacy direct factories may omit them and emit ordinary v2. Both real port runners bind real registry authority without replacing capabilities in tests.
+New port methods are host operations at the exhaustive boundary. comparisonEpoch is host data. Condition callbacks drain before disposal.
+
+Checkpoint storage includes sealed `{kind:'superseded-rejoin', id, key, record, authorisation}` with exact CapturedRejoinRecord X.
+Condition rows carry `{kind:'condition', id, key, event, active, sealedProof}`. Notice evidence retains exact frames and complete local facts within its bounds.
+Own-message rows, per-epoch seen counters and coverage-start markers share supporting installation retention.
+Manual-recovery and successor-tombstone rows are group-level records. Generic callers cannot clear conditions/holds or fabricate forkRecovery intent.
+
+### Safety and manual recovery (r24)
 
 ```ts
 export type StrandedReason = 'retention-gap' | 'unprocessable-gap' | 'lost-state' | 'ahead'
@@ -1120,10 +1469,11 @@ export type GroupForkEvidence =
   | { kind: 'digest-divergence'; epoch: number; position: string; localDigest: string; remoteDigest: string }
   | { kind: 'epoch-authenticator'; epoch: number; local: Uint8Array; remote: Uint8Array }
   | { kind: 'unexplained-own-commit'; epoch: number; position: string; digest: string }
-export type ForkHalt = { eventID: string; evidence: GroupForkEvidence; detectedAt: number }
+export type ForkHalt = { eventID: string; evidence: GroupForkEvidence; detectedAt: number; producer?: 'app-report' | 'internal' }
+// Every new record supplies producer. Optionality reads legacy records only; never invent provenance.
 export type GroupSafetyEvent = GroupKey & { id: string; kind: 'group:fork'; halt: ForkHalt }
 export type RecoveryUnavailableEvent = GroupKey & { id: string; kind: 'group:recovery-unavailable'; reason: 'trust-unreadable' }
-export type PersistenceEvent = AppStatusEvent | GroupSafetyEvent | RecoveryUnavailableEvent
+export type PersistenceEvent = AppStatusEvent | GroupSafetyEvent | RecoveryUnavailableEvent | GroupConditionEvent | ForkNoticeEvent | BranchAbandonedEvent
 export type RecoveryTarget = { id: string; commitTopicID: string; hub: LogHub & MailboxHub }
 export type FirstValidCommit = {
   source: AdoptionExpected; from: LogPosition | null; position: LogPosition; payloadDigest: string
@@ -1138,13 +1488,41 @@ export type ResyncProof = {
   captureHead: LogPosition | null // authenticated reply's immutable head
   position: LogPosition; payloadDigest: string; verdict: Uint8Array
 }
-export type ManualRecovery = { mode: 'resync'; targetID: string } | { mode: 'successor'; successor: GroupKey }
-export type ManualRecoveryRecord = { id: string; source: GroupKey; choice: ManualRecovery; stage: 'authorised' | 'completed' }
+export type ManualRecovery =
+  | { mode: 'resync'; targetID: string; allowOpenFork?: boolean }
+  | { mode: 'resync'; target: { targetID: string; hub: LogHub & MailboxHub; commitTopicID: string }; allowOpenFork?: boolean }
+  | { mode: 'successor'; successor: GroupKey }
+export type PersistedManualRecovery =
+  | { mode: 'resync'; targetID: string; commitTopicID: string; allowOpenFork: boolean }
+  | { mode: 'successor'; successor: GroupKey }
+export type ManualRecoveryRecord = {
+  id: string; source: GroupKey; choice: PersistedManualRecovery; stage: 'authorised' | 'completed'
+  pauseReason: 'target-unresolved' | null; destination: GroupKey | null; attempt: CapturedRejoinRecord | null
+  epochFloor: number | null; settlements: Array<AcceptedRejoinSettlement>; mutationID: string
+}
+export type ManualRecoveryStatus = { id: string; kind: 'pending' | 'paused' | 'completed'; reason: 'target-unresolved' | null }
+export type SuccessorTombstone = {
+  kind: 'successor-tombstone'; id: string; source: GroupKey; successor: GroupKey
+  authorisationID: string; retiredAt: number; clearedAt: number | null
+}
+export function canMoveCurrent(params: {
+  control: ControlSnapshot; activity: { pending: number }; stateReadable: boolean
+  ledgerComplete: boolean; walkComplete: boolean; outboxUnresolved: boolean; settlementUnresolved: boolean
+  hardHold: SafetyHold; condition: GroupCondition | null; openForkNotice: boolean
+  activeRejoin: boolean; allowOpenFork: boolean
+}): boolean
 export type GroupSafety = {
   epochAuthenticator(key: GroupKey): Promise<EpochIdentity | null>
   reportFork(key: GroupKey, evidence: GroupForkEvidence): Promise<void>
   recover(key: GroupKey, choice: ManualRecovery): Promise<GroupKey>
-  events(key: GroupKey): Promise<Array<GroupSafetyEvent | RecoveryUnavailableEvent>>
+  clearHold(key: GroupKey): Promise<void>
+  onSafetyChanged(key: GroupKey, sink: (reason: SafetyHold) => void): () => void
+  clearTombstone(groupID: string): Promise<void>
+  status(key: GroupKey): Promise<{
+    hold: SafetyHold; condition: GroupCondition | null; evidence: NotMemberEvidence | null
+    manualRecovery: ManualRecoveryStatus | null
+  }>
+  events(key: GroupKey): Promise<Array<GroupSafetyEvent | RecoveryUnavailableEvent | GroupConditionEvent | ForkNoticeEvent | BranchAbandonedEvent>>
   ackEvent(key: GroupKey, id: string): Promise<void>
 }
 export function createGroupSafety<TTx extends GroupTransaction>(params: {
@@ -1156,7 +1534,13 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
 `recover` validates the source key, durably authorises only this choice, then returns the installed/successor key after completion.
 A successor must already be normally admitted/available; resolve it before retiring the source, without acquiring both group gates.
 The application owns target registration, URLs, topic selection and successor creation/admission; GroupMLS supplies configured identity/policy. Persist opaque target ID and sealed topicID;
-resolve transport objects again on restart. Acknowledgement never lifts a halt. No public clear-halt/reset flag exists.
+resolve transport objects again on restart, requiring exact ID/topic equality. Unresolved attempts remain visibly paused without fallback.
+Acknowledgement never lifts a halt. clearHold requires matching app-report provenance and preserves immutable evidence.
+canMoveCurrent receives activeRejoin=true for a pending forkRecoveryAttempt. allowOpenFork bypasses only its open-notice predicate.
+RegistrySwitchWrite.source.authorisationID selects the matching committed manual record rather than ordinary control.rejoin.
+The peer/MLS manualRecovery data binds authorisationID/source, never an unchecked override boolean. Recheck authority before publication/installation.
+GroupMLS adds optional onSafetyChanged(sink), carrying nullable releases alongside the existing non-null onSafetyHold subscription.
+HubMux.resume retries deferred demanded subscriptions and resumes its receive drain after proven release, preserving stale-owner fencing.
 ResyncProof verifies exact external application under bound-verdict rules, never arbitrary candidate approval.
 The proof binds targetID/topicID/groupInfoEpoch/groupInfoAuthenticator/captureHead to the authenticated saved reply and exact confirmed external candidate.
 Origin trust supplies signer authority/floors/owner/anchor. Authenticated offered GroupInfo and exact external commit bind sourceTree/candidate.
@@ -1167,7 +1551,7 @@ Accepted-unadoptable settlement adds no proof arm, nullable cursor, exporter tag
 Keep existing fields/digests. A delivered-copy mismatch means nothing learned. It never authorises discard or invalidates confirmed work.
 ledgerBefore is the immutable local obligation union, not merely source.trust.ledger. Task 7 preserves in-flight/awaitingBootstrap tokens while authenticating origin.
 Recovery switch factory uses record.switchMutationID, including rollback/resolved-rolled-back; null-ID selection remains ordinary adoption only.
-Frame-driven contradictions never produce fork halt evidence under the interim rule. Host reportFork retains the existing evidence API.
+Frame-driven contradictions never produce fork halt evidence. Checkpoints produce separate detection-only notices. Host reportFork retains the existing evidence API.
 Preserve all existing durable halt bodies/events without reinterpretation, including historical frame-derived evidence.
 
 ### Welcome, outbox and host effects
@@ -1392,6 +1776,16 @@ Phase 6 kills children. After means proven transaction commit, never callback co
 
 | Seam | Recovery assertion |
 |---|---|
+| Installed state/fact/publication debt committed, before signing | restart signs that exact proven installation; progress-only saves create no fact; rollback releases nothing |
+| Exact checkpoint frame saved, before publish or after ambiguous handoff | retry identical bytes/publishID; persist heartbeat deadline/ID; stale workers never follow a replacement incarnation |
+| Notice/condition/event committed, before notification or after acknowledgement | replay/coalesce material evidence, not heartbeats; checkpoint input never creates a hold or recovery transition |
+| Checkpoint expiry before restart or late acknowledgement | group-wide 256/seven-day bounds prune evidence even unacknowledged; summary/coverage exposes holes without clock refresh |
+| Superseded X/history cleared to bound Y intent, before construction or after restart | exact X and obligations survive for every saved stage; ordinary floor unchanged; only the same Y gets E; every capture rechecks lineage/transcript |
+| Authorised manual attempt replaces pending forkRecovery intent | abandonment removes Y's exception atomically; pending intents count as active rejoin before replacement |
+| Manual target persisted, before resolver/move/rejoin proof | resume exact ID/topic/override only; mismatch pauses visibly without fallback; source/routing/holds remain until proof |
+| clearHold before/after proven commit, including ambiguity | keep hold before proof; clear only matching app provenance; retain exact evidence/history and unrelated conditions |
+| Successor retirement/tombstone committed, before routing notification | source stays retired, old Welcome refuses across restart; no state/messages copied; owed work remains serviceable |
+| Decrypted missing/malformed spent set observed by warm or cold registry | persist spent-set-corrupt through safety-only writes; unreadable envelopes remain recovery-unavailable; precedence survives restart |
 | Inside a group transition/batch, after its first logical write | all affected namespaces and transactional effects commit together or remain unchanged |
 | Built-save/manual authorisation committed, before publish or after remote acceptance | only the selected recovery target resumes; exact saved bytes/ID/candidate survive; discover acceptance before own-log adoption |
 | Open batch committed, before default handler; default effect before completion commit | every opened frame redelivers with the same key until completion; no cursor-only loss |
@@ -1407,17 +1801,39 @@ Phase 6 kills children. After means proven transaction commit, never callback co
 
 There is no pending-complete/cursor seam, state/control/anchor split seam or handshake-reservation seam.
 Remaining external P2a publish/confirm/bootstrap/Welcome seams use its stage replay. Frame-driven past divergence becomes diagnostic poison.
-Host-reported forks retain durable halt/manual recovery. Existing durable halts remain immutable.
+Host-reported forks retain durable halt/manual recovery and provenance-restricted clearHold. Existing evidence remains immutable.
 
 ## Conformance
 
 Run both contract suites against real implementations and every affected double.
+Each changed port/restart seam enumerates real-MLS/double fixtures and supplied/absent ownership-context modes where applicable.
+Behavioural tasks own their real witnesses, conflicting assertion migrations and exhaustive host-boundary classifications.
+Checkpoint core includes the real split witness. Absence and floor contracts immediately follow it.
+Both real MLS port runners exercise registry authority and transcript checks through ordinary adapters, without capability replacement.
 Keep each meaningful existing case. Replace cases tied solely to removed mechanisms with the equivalent invariant below.
 
 | Suite / phase | Case | Required assertion |
 |---|---|---|
 | codec / 2 | lossless sender | zero/one/absent clone/save/reopen, malformed sidecar and v1 refusal. Zero regression fails against current codec. |
 | recovery codec / 2 | complete sourceState and captured origin | differing source/candidate trees, empty proposals and zero/one/absent senders. Persisted v3 candidate/key restores bound verdict and immutable authenticated source/target/capture/search origin. V1/v2 adoption refuses. Legacy unadopted/conflictEpoch records hold without mutation or fabricated metadata; proven adopted continuations never reinstall. |
+| checkpoints / 2,3 | canonical installed-only authority | Strict Ed25519/canonical bytes/4096-byte bound, exact hashes/parents and immutable provenance. Speculative/rolled-back/fabricated facts cannot sign. Every installation site captures transcript/roster/debt, progress never does. Fence stale workers. Real MLS and independent double, supplied/absent ownership context. |
+| | real split view and refused loser | Independently install valid divergent states under shared signers. Exchange only checkpoints, withholding competing commits. Both sides notify without halt/switch/stranding. CAS loser/re-encoding cannot manufacture installation facts. Lone fabricated testimony only notifies. |
+| | eligibility and comparison coverage | DID+key pre-split eligibility with compared-epoch fallback, leaf differences and equivocation attribution. Expose group-wide effectiveFloor/ranges/holes after skipped/pre-join/expired epochs and restart. Summary-only epochs never restore coverage. |
+| | bounded transport/storage | Separate checkpoint/commit heads and cursors, identical authorize gates, subscribe-before-drain, retained fetch, exact retry, deadlines/jitter and rate/receive budgets. Current included in 256; supersession age and count prune even unacknowledged evidence. No roster truncation or replay clock refresh. |
+| | notices and journal reports | Material-only coalescing/quiet close, local clocks, ack/history and partial summaries. Prospective own IDs/other counters, zero ephemeral rows. Unknown ancestry reports unknown/partial without delaying authenticated switch. Real/double report and retirement seams. |
+| roster absence / 2,3 | disclosure and complete proof | Historical DID AND key gate, never-seen/expired silence, bounded requestID dedupe/budgets. Bind request/head/tree/complete ledger/lineage. Changed leaf with present DID is never absence. No secret/message or historical roster disclosure. Real/double and restart rows. |
+| | bounded signed span | Reject comparisonEpoch tampering/unsafe values and cross-domain/spliced replies. Exact inclusive requested span, total reply <=786432 bytes including overhead, never silent truncation. Large-group six-frame reply fits while full history exceeds bound. |
+| | lineage-relative diagnosis | Advanced losing device at 20, continuing branch at 12, split 10: verified unequal lineage permits not-member. Older/equal same-lineage proof refuses. Fresh losing-branch absence only diagnoses, retries continue; later install/head-only/re-anchor clears active condition and preserves evidence. No new admission refusal. |
+| | status and app policy | Defensive responder keyHash/epoch/observedAt/DIDs/count; retrying:true with optional pendingReason. Distinguish no-reply/no-eligible-responder. Events coalesce per new evidence. Disposal/deletion remains app policy, never terminal continuation authority. |
+| fork recovery / 2,3 | saved X and no-X | Eligible non-equivocating open E testimony plus same reply key's matching E checkpoint/pre-E roster and MLS lineage/transcript. Settle built/published/confirmed/adopted-incomplete X to superseded-branch with exact sealed history, never not-accepted. Union obligations and persist bound Y intent atomically, or no-X intent without invented settlement. |
+| | every capture and restart | Real adapter apply/restore/recapture rechecks E-lineage and transcript for Y, including restart after settlement. Own-lineage stale capture refuses even above E. Ordinary floor unchanged; settlement/abandonment removes only Y's exception. Two-member healing needs no second DID. |
+| | coverage and best-known split | F >= best-known E. Below oldest or retained-range hole stays target-behind. Earlier-moving notice re-enables authorisation for head in [S,E). Hole waits for a retained epoch or beyond newest; evidence expiry stays target-behind. Manual resync exits. |
+| | real adapter authority | Both real port runners exercise no-X and saved-X healing through original adapters. Registry facts reach ordinary v3 sealing; host injection cannot supply private authority/disclosure/floor inputs. V2/missing authority preserves X/floor and retries. |
+| manual recovery / 2,3 | current move restrictions | Require freshness/readability/complete ledger/walk and no lag/slot/operation/unresolved publications/settlements/pending owner work. Reject every hard hold/condition/open notice/active rejoin, including pending forkRecoveryAttempt. allowOpenFork overrides only open notice. Real/double and restart rows. |
+| | selected-target rejoin | Call-time/registered exact ID/topic/override persists. Resolver mismatch visibly pauses without fallback. Same-key move preserves holds. Rejoin needs bound external confirmation and creates hold-free n+1. Failed/pending proof preserves source/routing/holds. Hard-held responders stay silent; all-held exit is successor. |
+| | intent abandonment and partial migration | Manual authorisation atomically abandons pending forkRecovery intent. Partial migration may split hubs undetectably; ahead arrival stays target-behind absent restricted authority. Empty targets never bypass current-move exclusions. |
+| | successor and scoped clear | Already admitted successor retires source atomically with tombstone/failures/routing; never copies state/messages. Newer unspent old Welcome still refuses, including restart. Explicit clearTombstone preserves spent checks. Matching app-report clearHold preserves history, refuses internal/legacy/unrelated holds, and resumes ordinary walk without forced resync. |
+| spent diagnosis / 2,3 | cold/warm/restore paths | Successfully decoded missing/malformed sets yield typed spent-set-corrupt/event/status; unreadable envelopes retain recovery-unavailable. No empty fallback. Warm observation persists across restart. Preserve precedence/evidence and ordinary admission. Total-loss fresh invitation and already admitted successor remain available. |
 | recovery reply / 2 | authenticated captureHead (r15 decision) | Responder exports a complete reconciled snapshot/cursor pair; empty gap or moved snapshot never certifies a head. String/null and captured authenticator round-trip in attestation; missing/wrong-type/tampered/invalid fields and v1 refuse before build. Restart retains original captureHead/target/search origin and initial CAS head. |
 | persistence / 2,3 | CAS and monotonicity | Stale revision/version, tombstone-as-absent, lower epoch, same-number different authenticator or same-identity progress/ceiling regression reject unchanged. Non-root factories refuse. |
 | | incarnation switch atomicity/isolation | Source A4 in n to accepted external-resync state in n+1. Mid-write rollback changes neither record. Commit tombstones n and installs n+1 with fresh progress/anchor/cursors/control. Old applied rows cannot mask new-incarnation self-removal. |
@@ -1455,17 +1871,17 @@ Keep each meaningful existing case. Replace cases tied solely to removed mechani
 | | real database integration | Per provider, the D8 provider-evidence cases (a)-(g) with fault milestones, second-connection visibility, hook-queue and connection-identity assertions. SQLite, PostgreSQL, Expo (or explicit blocked reason) in 3. |
 | control / 2,3 | delayed own replay (r19 decision) | Competitor wins CAS at E, saved own message later appears under another publishID. Receiver validation plus complete first-valid prefix proves supersession. Missing coverage or byte mismatch preserves slot/unknown acceptance, never a halt or rebuild. |
 | | commit-once poison head | refused/poison frame changes head without epoch move. Retry has identical payload/ID/handshake generation. Real receiver processes the poison prefix then applies the saved commit and matches candidate authenticator. Extra pending proposal is omitted, missing referenced proposal refuses. |
-| | commit-once restart | reconstruct after built-save/mismatch and after remote acceptance. Saved bytes/candidate survive. Refresh expectedHead only. No same-epoch build after deadline/outcome ack or from a second queued intent. |
-| | epoch move/deadline | Own settlement requires authenticated applied state/normal first-valid proof. Recovery follows applied-state settlement authority. Recognition after deadline may land once. Copy mismatches/gaps preserve unknown work and owed outcomes/Welcomes. No same-epoch rebuild. |
-| | adoption/removal/resync | full-payload poison, moved, accepted-before-walk, refusal/holder evidence, exact-external-commit confirmation, revoke-hold/two-revoke and Welcome cases remain; source guard is incarnation/version. Remove automatic fork healing/source-prefix/row-retirement assertions. |
-| safety / 2,3 | host fork halt live/restart | Host reportFork/authenticator comparison co-writes halt/evidence/event. Live peers latch before proof, including failed writes. Ack never clears halt. Existing persisted halts remain immutable. |
+| | commit-once restart (ordinary lane) | reconstruct after built-save/mismatch and after remote acceptance. Saved bytes/candidate survive. Refresh expectedHead only. No same-epoch build after deadline/outcome ack or from a second queued intent. |
+| | epoch move/deadline (ordinary lane) | Own settlement requires authenticated applied state/normal first-valid proof. Recovery follows applied-state settlement authority. Recognition after deadline may land once. Copy mismatches/gaps preserve unknown work and owed outcomes/Welcomes. No same-epoch rebuild. |
+| | adoption/removal/resync | full-payload poison, moved, accepted-before-walk, refusal/holder evidence, exact-external-commit confirmation, revoke-hold/two-revoke and Welcome cases remain; source guard is incarnation/version. Replace obsolete checkpoint-halt/source-prefix assertions with detection-only notices and authenticated, attempt-scoped forkRecovery assertions. |
+| safety / 2,3 | host fork halt live/restart | Host reportFork/authenticator comparison co-writes halt/evidence/event and new producer provenance. Live peers latch before proof, including failed writes. Ack never clears halt. Matching app-report clearHold preserves evidence. Legacy/internal holds refuse clearing. |
 | | hub-fault audit | Both past divergence branches, signed CAS losers, own-slot/search contradictions, tampering, junk and unknown versions skip/diagnose. Advance skipped cursor, keep saved work, no new durable hold/halt, discard/rebuild or owed-work deletion. Host/local-storage invariant paths retain their contracts. |
 | | own recognition and recovery progress | Re-encoded/blob-changed own no-entry commit recognises with the helper. Named entries use the receiver resolver/verification predicate. Failed copies preserve unknown acceptance. Search results never block authenticated recapture. Provider errors retain their identity. |
 | | strand signals / detection limits | Ahead/gap/own-unmerged retain claimed confidence. Missing/identical applied history proves no fork. Current victim-spoof rejection still requires own-signature validation. Host comparisons of exposed authenticators remain available. |
-| | retained recovery trust (r16 decision) | State bytes unreadable, trust intact: request/authenticate/restore without GroupHandle and automatic resync. Both unreadable: durable halt/event, no automatic request/adoption, manual re-invite only. Every installing transaction refreshes trust atomically. |
+| | retained recovery trust (r16 decision) | State bytes unreadable, trust intact: request/authenticate/restore without GroupHandle and automatic resync. Unreadable envelope: recovery-unavailable, no automatic reconstruction, manual fresh invitation or admitted successor. Decoded missing/malformed spent data: spent-set-corrupt. Every installing transaction refreshes trust atomically. |
 | | stranded automatic resync | Retention gap/lost MLS state with no safety hold uses retained trust and authenticated GroupInfo. Remove+ExternalInit yields one matching fresh leaf, generation 0 and n+1 after restart. Unknown commit-frame/header versions skip with upgrade-required diagnostics, never new durable holds. Existing persisted unsupported-version holds remain immutable; legacy control-record holds retain their policy. |
 | | stale GroupInfo (r19 decision) | Recapture signed applied state: later epoch with X's exact leaf means accepted -> settled. Adopt X only with known position/current-epoch bound confirmation; otherwise atomically preserve accepted-unadoptable X/floor/ledger and build fresh Y removing X's sole identity leaf. Delayed advanced reply, pruned occurrence and settled restart succeed. Wrong leaf/request/group refuse. Later leaf absent includes applied-then-removed and obeys admission/removal policy. Mutation-check leaf matching in Task 14b. |
-| | capture-head retry (r19 decision) | Search mismatch/gap/junk never strands X or decides discard. Fresh recapture keys remain separate. Equal epoch/authenticator means responder prefix lacks X; retry SAME bytes at authenticated head even if lower/inflated previously. Only epoch floor refuses regression and survives settlement/discard/restart. Leaf present means accepted -> settled, adopting X only with bound confirmation; otherwise fresh leaf-replacing Y. Blob-derived negatives remain advisory through wire/replay/cache. Same-epoch lost-state recapture makes zero extra builds. |
+| | capture-head retry (r19 decision) | Search mismatch/gap/junk never strands X or decides discard. Fresh recapture keys remain separate. Equal epoch/authenticator means responder prefix lacks X; retry SAME bytes at authenticated head even if lower/inflated previously. Ordinary epoch floor refuses regression and survives settlement/discard/restart. Only bound forkRecovery grants its temporary effective-floor exception. Leaf present means accepted -> settled, adopting X only with bound confirmation; otherwise fresh leaf-replacing Y. Blob-derived negatives remain advisory through wire/replay/cache. Same-epoch lost-state recapture makes zero extra builds. |
 | | manual recovery | no automatic action while halted; chosen target/authorisation reopens across restart, validated resync switches once, refused attempt preserves halt. Already admitted successor permits source retirement without copying state or coordinating routing. |
 | registry / 2 | cold access/leases | concurrent cold load validated before access. Lease reserve/restart/failed seal never reuse generation. Lapsed/removed/suspended/proposals defer burn without blocking control. |
 | | rotation/retention | 500 bound, rejection/hold/resume, non-admin empty rotation, 1000 retention/window through every constructor/derive/recovery. Real/double forward-window parity. Ordinary adoption preserves sender/receive history, no evicted epoch resurrection. |
@@ -1485,7 +1901,7 @@ Keep each meaningful existing case. Replace cases tied solely to removed mechani
 
 | Phase | Deliverable / gate |
 |---|---|
-| 2 | ClientState codec v2 and recovery candidate v3 codecs first. D8 owner queue/phases with memory as reference provider and the ownership-phases suite. Memory group coordinator, registry/incarnations/spent admission, durable fork halt/manual recovery and automatic stranded resync with authenticated captureHead, commit-once runner, fair adaptive batching and handler metadata/policies. DevicePersistence/package adapters, atomic Welcome burn, retained recovery trust and durable restore-work (r16 decision). Application leases/rotation, encrypted namespaces, durable settlements/events and mutation/side-row/fault fixtures. hub-client lifts and mls-rpc encryptor. Both contract suites on real MLS and doubles. Real HTTP smoke with injected DID. |
+| 2 | ClientState codec v2 and recovery candidate v3 codecs first. D8 owner queue/phases with memory as reference provider and the ownership-phases suite. Memory group coordinator, registry/incarnations/spent admission, detection-only in-band checkpoints/notices, non-terminal absence evidence, attempt-scoped forkRecovery, manual target recovery/current movement/successor tombstones, provenance-restricted clearHold, spent diagnosis and automatic stranded resync with authenticated captureHead, commit-once runner, fair adaptive batching and handler metadata/policies. DevicePersistence/package adapters, atomic Welcome burn, retained recovery trust and durable restore-work (r16 decision). Application leases/rotation, encrypted namespaces, durable settlements/events and mutation/side-row/fault fixtures. hub-client lifts and mls-rpc encryptor. Both contract suites on real MLS and doubles. Real HTTP smoke with injected DID. |
 | 3 | rpc-store sqlite/postgres providers and Expo support or explicit blocked reason. Each provider implements D8 primitives and passes ownership-phases plus its real-database integration row. Group/device-package transaction scope, root discriminator and outcome-aware Hozon hooks (including deferred rollback-hook settlement) are prerequisites. Provider CAS/barrier/late-COMMIT/raw-encryption/side-row tests. SQLite device reconstruction. |
 | 4 | client ownership, identity/Spec I, Spec H/hub policy, inventory/device cleanup, lifecycle and rotation scheduling. |
 | 5 | messaging protocols/MessageStore, transactional or idempotent handlers, durable status events, programmatic failed-send retry and per-anchor receipts. Expo bundle CI. |
@@ -1495,6 +1911,8 @@ Phase 2 creates no client/messaging/MessageStore/Hozon provider/child driver; us
 Run affected package/integration tests and `pnpm turbo run test:types`. Provider isolation/failure evidence belongs to phase 3.
 
 ## History
+
+Historical entries describe superseded contracts. The r24 decisions and interfaces above govern conflicts.
 
 - r1: adoptable journal, proof versus acknowledgement, application leases and coordinated status.
 - r2: current-record CAS, retention/rotation, publication positions and mutation markers.
@@ -1522,3 +1940,18 @@ ambiguity/external seams and automatic non-fork stranded resync remain.
 - r17 (r17 decision): D8 single ownership model — per-device/per-group FIFO owner queues, typed entries (Transition, Combined, never-ambiguous Read), strict phases with phase-derived store capabilities, proof inside the retained entry with a conflicted outcome that fail-stops the factory, drain-before-slot deletion, post-effects account step, reentrancy refusal and per-provider primitives including absent-owner upsert barriers and quarantined-connection completion; ownership-phases conformance and real-database integration evidence for every provider. Replaces layered barrier/store-lock/gate/fence mechanisms after recurring deadlock, post-validation write and retained-read findings.
 - r18 (r18 decision): D8 runtime-neutral — per-entry operation lock over each operation's whole read-modify-write with nesting forbidden by construction (replaces inline nested sequencing after sibling deadlocks and lost writes); fatal operation failures make the transition rollback-only; operations bound to entry, transaction and attempt; coordinator authority is a private writer object, not ambient context (after codec and accessor callbacks inherited it); internal bindings explicit; reentrancy detection needs no runtime async-context API, with an optional opaque-token `ownershipContext` port for detection after `await`. Retires `GroupMutationGate`.
 - r19 (r19 decision): 2.2d captured recovery treats hub faults as non-delivery. Reply v2/candidate v3 preserve immutable origin and existing bound proof. Authenticated applied state settles acceptance. R0 adopts X only with bound confirmation, otherwise atomically preserves accepted-unadoptable X/floor/ledger and builds leaf-replacing Y. Regressing heads diagnose only. Portable non-building recapture and additive APIs precede serial lifecycle/activation stages. RecoveryCompletion settles source operations once. Local switch rollback never deletes accepted X. Existing local/historical safety and legacy-record stops remain. Fork detection stays deferred out-of-band; manual recovery/full registry crypto remain 2.2e/2.3.
+
+- r20: on-demand refusals replace unbounded persisted negative rows. Legacy negatives remain advisory.
+- r23 baseline: cumulative accepted/non-accepted settlement preserves obligations and the ordinary recovery epoch floor. Ordinary settled work omits secrets.
+- r24 (2026-10-16, DN1-DN5, R1-R10 and A1-A4): detection-only in-band checkpoints replace out-of-band deferral and checkpoint halts.
+  R1 explicitly departs from approved design Goal 3/section 4: not-member is non-terminal. R6 makes freshness lineage-relative.
+  R8 preserves admission and clears diagnosis on install/head-only reconcile/re-anchor. R9 adds evidence counts/pendingReason and signed bounded comparison spans.
+  R2 adds superseded-branch cumulative settlement and sealed exact-X history. R7 scopes effective E to bound Y and checks every capture's MLS transcript.
+  R10 requires registry-owned lineage/private authority through real adapters. R5 requires real/double witnesses, restart rows and exhaustive host boundaries.
+  DN1/R3 persist exact targets and notice overrides, restrict current moves, preserve holds and add successor retirement/tombstones.
+  DN2/R4 gate public former-member disclosure by retained DID AND key, with bounded dedupe/budgets and distinct no-reply hints.
+  DN3/R4 journal own IDs/other counts, expose partial coverage and unknown ancestry, and bound even unacknowledged evidence.
+  DN4 adds producer provenance and app-report-only clearHold. DN5 separates envelope loss from spent corruption and defines projection precedence.
+  A1 refuses retained-range holes. A2 uses the best-known split and permits earlier-moving notices to re-enable authorisation.
+  A3 treats pending fork intents as active rejoin and atomically abandons them on manual authorisation. A4 discloses cleartext comparisonEpoch.
+  Manual resync remains the exit after evidence expiry or unavailable coverage. Phase 2.3 application crypto and phase 3 providers stay excluded here.
