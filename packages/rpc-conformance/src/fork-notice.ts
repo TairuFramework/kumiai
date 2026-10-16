@@ -44,6 +44,7 @@ export type ForkNoticeFixture<Position extends string = string> = {
   key: ConformanceGroupKey
   service(): ConformanceCheckpointService<Position>
   frame: Uint8Array
+  agreeingPredecessorFrame: Uint8Array
   nextSignerFrame: Uint8Array
   mergeFrames(): Promise<{
     later: Uint8Array
@@ -73,6 +74,38 @@ export function testForkNoticeConformance(params: {
   createFixture(): Promise<ForkNoticeFixture>
 }): void {
   describe(`Fork notice: ${params.label}`, () => {
+    test('an agreeing predecessor preserves an open split without equivocation across restart', async () => {
+      const fixture = await params.createFixture()
+      try {
+        let service = fixture.service()
+        await service.importCheckpoint(fixture.key, fixture.agreeingPredecessorFrame)
+        expect(await service.forkNotices(fixture.key.groupID)).toEqual([])
+        await service.importCheckpoint(fixture.key, fixture.frame)
+        const opened = required((await service.forkNotices(fixture.key.groupID))[0])
+        expect(opened).toMatchObject({ equivocations: [], revision: 1, closedAt: null })
+        await service.ackForkNotice(fixture.key.groupID, opened.id, opened.revision)
+        const notices = await service.forkNotices(fixture.key.groupID)
+        expect(notices).toHaveLength(1)
+        const records = await service.readRecords()
+        const emitted = fixture.emitted.length
+        const snapshot = await fixture.snapshot()
+        const signingReads = fixture.signingReads()
+        await service.importCheckpoint(fixture.key, fixture.agreeingPredecessorFrame)
+        expect(await service.forkNotices(fixture.key.groupID)).toEqual(notices)
+        expect(await service.readRecords()).toEqual(records)
+        expect(fixture.emitted).toHaveLength(emitted)
+        expect(await fixture.snapshot()).toEqual(snapshot)
+        expect(fixture.signingReads()).toBe(signingReads)
+        await fixture.restart()
+        service = fixture.service()
+        await service.importCheckpoint(fixture.key, fixture.agreeingPredecessorFrame)
+        expect(await service.forkNotices(fixture.key.groupID)).toEqual(notices)
+        expect(await service.readRecords()).toEqual(records)
+        expect(fixture.emitted).toHaveLength(emitted)
+      } finally {
+        await fixture.close()
+      }
+    })
     test('lone unequal statement only notifies', async () => {
       const fixture = await params.createFixture()
       try {

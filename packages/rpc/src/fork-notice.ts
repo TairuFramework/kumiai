@@ -117,6 +117,7 @@ export function foldForkNotices(params: {
         ancestor(branch.authHash, notice.splitEpoch, statement.epoch),
       )
       return (
+        statement.authHash !== statement.localAuthHash &&
         roots.every((root) => root !== null) &&
         roots.includes(statement.localAuthHash) &&
         roots.includes(statement.authHash)

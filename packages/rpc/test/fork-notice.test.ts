@@ -171,6 +171,50 @@ test('device branch changes increment revision', () => {
   expect(next.notices[0]).toMatchObject({ deviceAuthHash: 'remote', revision: 2, closedAt: 1 })
 })
 
+test.each([true, false])(
+  'an agreeing predecessor cannot move a split or imply equivocation with retained links: %s',
+  (linked) => {
+    const first = foldForkNotices({
+      key,
+      records: [],
+      statements: [
+        statement({
+          epoch: 10,
+          authHash: 'remote-10',
+          localAuthHash: 'local-10',
+          parentAuthHash: 'shared-9',
+        }),
+      ],
+      now: 0,
+    })
+    const result = foldForkNotices({
+      key,
+      records: first.records,
+      statements: [
+        statement({
+          epoch: 9,
+          authHash: 'shared-9',
+          localAuthHash: 'shared-9',
+          parentAuthHash: 'shared-8',
+          frameID: 'agreeing-frame',
+        }),
+      ],
+      lineage: linked
+        ? [
+            { epoch: 10, authHash: 'local-10', parentAuthHash: 'shared-9' },
+            { epoch: 10, authHash: 'remote-10', parentAuthHash: 'shared-9' },
+          ]
+        : [],
+      now: 1,
+    })
+    expect(result.notices).toHaveLength(1)
+    expect(result.notices[0]).toMatchObject({ splitEpoch: 10, equivocations: [], revision: 1 })
+    expect(result.notices).toEqual(first.notices)
+    expect(result.records).toEqual(first.records)
+    expect(result.assignments.size).toBe(0)
+  },
+)
+
 test('closed evidence obeys ack and retention bounds', async () => {
   const first = start()
   const notice = required(first.notices[0])
@@ -252,26 +296,23 @@ function disconnectedNotices() {
   return { later, disconnected }
 }
 
-function connectNotices(
-  records: ReturnType<typeof start>['records'],
-  now = 2,
-  localAuthHash = 'local-5',
-) {
+function connectNotices(records: ReturnType<typeof start>['records'], now = 2, switched = false) {
   return foldForkNotices({
     key,
     records,
     statements: [
       statement({
         epoch: 5,
-        authHash: 'remote-5',
-        localAuthHash,
-        parentAuthHash: 'remote',
+        authHash: switched ? 'local-5' : 'remote-5',
+        localAuthHash: switched ? 'remote-5' : 'local-5',
+        parentAuthHash: switched ? 'local' : 'remote',
       }),
     ],
     lineage: [
       { epoch: 6, authHash: 'local-6', parentAuthHash: 'local-5' },
       { epoch: 5, authHash: 'local-5', parentAuthHash: 'local' },
       { epoch: 6, authHash: 'remote-6', parentAuthHash: 'remote-5' },
+      { epoch: 5, authHash: 'remote-5', parentAuthHash: 'remote' },
     ],
     now,
   })
@@ -508,7 +549,7 @@ test('notice folding copies nested records and evidence bytes', () => {
 
 test('merging notices does not hide a device branch switch', () => {
   const { later, disconnected } = disconnectedNotices()
-  const connected = connectNotices(disconnected.records, 2, 'remote-5')
+  const connected = connectNotices(disconnected.records, 2, true)
   expect(
     connected.notices.find((notice) => notice.id === required(later.notices[0]).id),
   ).toMatchObject({

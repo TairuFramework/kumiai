@@ -976,6 +976,25 @@ export async function createForkNoticeFixture(params: {
   )
   if (factBytes === null) throw new Error('Missing split fact')
   const fact = decodeEpochRosterFact(factBytes)
+  const predecessorBytes = await service.checkpointFact(key, Number(remote.epoch) - 1)
+  if (predecessorBytes === null) throw new Error('Missing common predecessor fact')
+  const predecessor = decodeEpochRosterFact(predecessorBytes)
+  const agreeingBody = {
+    v: 1 as const,
+    type: 'kumiai/checkpoint/v1' as const,
+    groupID: key.groupID,
+    genesisHash: predecessor.genesisHash,
+    ciphersuite: predecessor.ciphersuite,
+    epoch: predecessor.epoch,
+    authHash: predecessor.authHash,
+    parentAuthHash: predecessor.parentAuthHash,
+    keyHash: checkpointKeyHash(member.identity.publicKey),
+    leafIndex: member.handle.state.privatePath.leafIndex,
+  }
+  const agreeingPredecessorFrame = encodeEpochCheckpoint(
+    agreeingBody,
+    ed25519.sign(checkpointSignatureInput(agreeingBody), member.identity.privateKey),
+  )
   const remoteHash = checkpointAuthHash({
     groupID: key.groupID,
     genesisHash: fact.genesisHash,
@@ -1015,6 +1034,7 @@ export async function createForkNoticeFixture(params: {
       })
     },
     frame: sign(member.identity),
+    agreeingPredecessorFrame,
     nextSignerFrame: sign(real.committer.identity),
     async mergeFrames() {
       let branch = remote
