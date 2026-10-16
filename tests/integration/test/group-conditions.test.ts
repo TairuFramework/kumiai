@@ -1,3 +1,4 @@
+import { verifyRecoveryRequest } from '@kumiai/mls'
 import {
   checkpointTopic,
   commitTopic,
@@ -25,6 +26,8 @@ import {
   createRegistryPeer,
   type RegistryPeerOptions,
 } from '../../../packages/mls-rpc/src/index.js'
+import { capturedRecord } from '../../../packages/mls-rpc/test/fixtures/captured-recovery.js'
+import { createAsyncLocalOwnershipContext } from '../../../packages/mls-rpc/test/fixtures/ownership-context.js'
 import {
   createNotMemberFixture,
   type RegistryFixture,
@@ -134,8 +137,8 @@ async function start(
   return { owner, created, target }
 }
 
-async function setup() {
-  const f = await createNotMemberFixture()
+async function setup(openNotice = true, params: Parameters<typeof createNotMemberFixture>[0] = {}) {
+  const f = await createNotMemberFixture(params)
   cleanup.push(() => f.close())
   const hub = new FakeHub()
   const remoteService = createCheckpointService({
@@ -155,10 +158,12 @@ async function setup() {
   )
   for (const row of await localService.readRecords())
     if (row.kind === 'fact') await localService.signInstalled(row.id)
-  await localService.importCheckpoint(f.key, splitFrame)
-  expect(await localService.forkNotices(f.key.groupID)).toEqual(
-    expect.arrayContaining([expect.objectContaining({ splitEpoch: 10, closedAt: null })]),
-  )
+  if (openNotice) {
+    await localService.importCheckpoint(f.key, splitFrame)
+    expect(await localService.forkNotices(f.key.groupID)).toEqual(
+      expect.arrayContaining([expect.objectContaining({ splitEpoch: 10, closedAt: null })]),
+    )
+  }
   return { f, hub }
 }
 
@@ -202,6 +207,99 @@ test('advanced losing device removed on continuing branch surfaces not-member', 
   await expect.poll(() => events.length, { timeout: 5000 }).toBeGreaterThan(count)
   expect(remote.owner.status().kind).toBe('running')
 })
+
+test.each([
+  { mode: 'real-mls', context: 'supplied' },
+  { mode: 'real-mls', context: 'absent' },
+  { mode: 'double', context: 'supplied' },
+  { mode: 'double', context: 'absent' },
+] as const)(
+  'no open notice signs oldest retained comparison and diagnoses requester 20 responder 12 / $mode / $context',
+  async ({ mode, context }) => {
+    const { f, hub } = await setup(false, {
+      mode,
+      ownershipContext: context === 'supplied' ? createAsyncLocalOwnershipContext() : undefined,
+    })
+    const checkpointID = checkpointTopic(await f.mls().exportRecoverySecret())
+    const publish = hub.publish.bind(hub)
+    let blockedTopic: string | undefined
+    vi.spyOn(hub, 'publish').mockImplementation(async (params) => {
+      if (params.topicID === checkpointID) throw new Error('Checkpoint delivery unavailable')
+      if (
+        params.topicID === blockedTopic &&
+        params.senderDID === f.local().identity.id &&
+        params.retain === 'log'
+      )
+        throw new Error('Commit delivery temporarily unavailable')
+      return await publish(params)
+    })
+    const continuing = await start(await f.continuing(), hub)
+    const events: Array<RecoveryEvent> = []
+    const comparisons: Array<number | undefined> = []
+    const local = await start(f.local(), hub, events, (options) => {
+      const create = options.mls.createRecoveryRequest
+      options.mls.createRecoveryRequest = async (...args) => {
+        const held = await create(...args)
+        comparisons.push(
+          (await verifyRecoveryRequest(new TextDecoder().decode(held.request))).comparisonEpoch,
+        )
+        return held
+      }
+    })
+    blockedTopic = local.target.topicID
+    await expect(local.owner.peer()?.recover()).rejects.toThrow(
+      'Commit delivery temporarily unavailable',
+    )
+    const saved = await f.local().device.groups.ports(f.key).control.load()
+    expect(saved.rejoin).toMatchObject({ format: 2, stage: 'built' })
+    expect(saved.recoveryEpochFloor).toBe(20)
+    expect(comparisons.every((epoch) => epoch === 9)).toBe(true)
+    continuing.owner.dispose()
+    await continuing.owner.drained()
+    blockedTopic = undefined
+    await start(f.remote, hub)
+    expect(await f.service().forkNotices(f.key.groupID)).toEqual([])
+    expect((await f.service().checkpointCoverage(f.key.groupID)).effectiveFloor).toBe(9)
+    await local.owner.peer()?.recover()
+    await expect
+      .poll(() => local.owner.status())
+      .toMatchObject({ kind: 'not-member', evidence: { epoch: 12 }, retrying: true })
+    expect(comparisons).toEqual(expect.arrayContaining([9]))
+    expect(comparisons.every((epoch) => epoch === 9)).toBe(true)
+    const count = comparisons.length
+    await expect.poll(() => comparisons.length, { timeout: 5000 }).toBeGreaterThan(count)
+    const after = await f.local().device.groups.ports(f.key).control.load()
+    expect(after.rejoin).toEqual(saved.rejoin)
+    expect(after.recoveryEpochFloor).toBe(20)
+    expect(await f.service().forkNotices(f.key.groupID)).toEqual([])
+    local.owner.dispose()
+    await local.owner.drained()
+    await f.restart()
+    const restarted = await start(f.local(), hub, events, (options) => {
+      const create = options.mls.createRecoveryRequest
+      options.mls.createRecoveryRequest = async (...args) => {
+        const held = await create(...args)
+        comparisons.push(
+          (await verifyRecoveryRequest(new TextDecoder().decode(held.request))).comparisonEpoch,
+        )
+        return held
+      }
+    })
+    const restartRequests = comparisons.length
+    await restarted.owner.peer()?.recover()
+    await expect.poll(() => comparisons.length, { timeout: 5000 }).toBeGreaterThan(restartRequests)
+    expect(comparisons.every((epoch) => epoch === 9)).toBe(true)
+    expect(restarted.owner.status()).toMatchObject({
+      kind: 'not-member',
+      evidence: { epoch: 12 },
+      retrying: true,
+    })
+    const reopened = await f.local().device.groups.ports(f.key).control.load()
+    expect(reopened.rejoin).toEqual(saved.rejoin)
+    expect(reopened.recoveryEpochFloor).toBe(20)
+    expect(await f.service().forkNotices(f.key.groupID)).toEqual([])
+  },
+)
 
 test('hub withholding from one responder leaves requester pending', async () => {
   const { f, hub } = await setup()
@@ -277,7 +375,6 @@ test.each([
     outcome: 'install',
   },
   { name: 'head-only recovery clears not-member', outcome: 'head-only' },
-  { name: 'successful re-anchor clears not-member', outcome: 're-anchor' },
 ] as const)('$name', async ({ outcome }) => {
   const f = await createNotMemberFixture({ localEpoch: 12, remoteEpoch: 13 })
   cleanup.push(() => f.close())
@@ -348,7 +445,9 @@ test.each([
     })
     expect(port.sendAdmission()).toEqual(admission)
     expect(local.owner.installedKey().incarnation).toBe(1)
-    expect((await f.local().device.groups.ports(f.key).control.load()).rejoin).toEqual(saved.rejoin)
+    const after = await f.local().device.groups.ports(f.key).control.load()
+    expect(after.rejoin).toEqual(saved.rejoin)
+    expect(after.cursor).toEqual(saved.cursor)
     return
   }
   blockCommit = false
@@ -359,6 +458,215 @@ test.each([
     (await f.local().safety().events(f.key)).some((event) => event.kind === 'not-member'),
   ).toBe(true)
 })
+
+test.each([
+  'success',
+  'rollback',
+  'pending-rollback',
+  'pending-commit',
+  'different-epoch',
+  'different-authenticator',
+  'missing-state',
+  'nonforward',
+  'held-before-proof',
+  'stranded',
+] as const)(
+  'successful re-anchor clears not-member only after cursor proof: %s',
+  async (outcome) => {
+    const f = await createNotMemberFixture({
+      localEpoch: 12,
+      remoteEpoch: outcome === 'different-authenticator' ? 12 : 13,
+    })
+    cleanup.push(() => f.close())
+    const hub = new FakeHub()
+    const otherBranch = outcome === 'different-epoch' || outcome === 'different-authenticator'
+    const continuing = await start(
+      await f.continuing({
+        divergent: otherBranch,
+        epoch: outcome === 'different-epoch' ? 13 : 12,
+      }),
+      hub,
+    )
+    const responder = continuing.created[0]?.mls
+    const port = f.mls()
+    const captured = port.capturedRecovery
+    if (responder === undefined || captured === undefined) throw new Error('Missing captured ports')
+    const requestID = crypto.randomUUID()
+    const held = await port.createRecoveryRequest(requestID, undefined, 10)
+    const pending = await captured.applyRecovery(
+      await responder.sealGroupInfo(held.request, null),
+      requestID,
+      held.requestKey,
+    )
+    if (pending === null || 'renewalRequired' in pending) throw new Error('Missing saved X')
+    const record = capturedRecord(pending, held.request, held.requestKey, requestID)
+    await f
+      .local()
+      .installRows({ key: f.key, control: { putRejoin: record, recoveryEpochFloor: 12 } })
+    await f.diagnose(await f.proof())
+    const beforeStatus = await f.local().safety().status(f.key)
+    expect(beforeStatus.condition).toBe('not-member')
+    let beforeControl = await f.local().device.groups.ports(f.key).control.load()
+    let beforeState = await f.local().device.groups.loadState(f.key)
+    const beforeFacts = (await f.service().readRecords()).filter((row) => row.kind === 'fact')
+    const published = await hub.publish({
+      topicID: continuing.target.topicID,
+      senderDID: f.local().identity.id,
+      payload: new Uint8Array([0]),
+      retain: 'log',
+    })
+    await continuing.owner.peer()?.replay()
+    const head = (
+      await hub.fetchTopic({
+        topicID: continuing.target.topicID,
+        subscriberDID: f.remote.identity.id,
+      })
+    ).head
+    expect(head).toBe(published.sequenceID)
+    if (head === null) throw new Error('Missing retained head')
+    const { asLogPosition } = await import('@kumiai/rpc')
+    const freshID = crypto.randomUUID()
+    const fresh = await port.createRecoveryRequest(freshID, undefined, 10)
+    const reply = {
+      sealed: await responder.sealGroupInfo(fresh.request, asLogPosition(head)),
+      requestID: freshID,
+      requestKey: fresh.requestKey,
+      epochFloor: 12,
+    }
+    if (outcome === 'missing-state') {
+      await f.local().removeStateBytes(f.key)
+      beforeState = null
+    }
+    if (outcome === 'nonforward') {
+      const later = await hub.publish({
+        topicID: continuing.target.topicID,
+        senderDID: f.local().identity.id,
+        payload: new Uint8Array([0]),
+        retain: 'log',
+      })
+      await f.local().installRows({
+        key: f.key,
+        control: { cursor: { position: asLogPosition(later.sequenceID), epoch: 12 } },
+      })
+      beforeControl = await f.local().device.groups.ports(f.key).control.load()
+      beforeState = await f.local().device.groups.loadState(f.key)
+    }
+    if (outcome === 'stranded') {
+      await f.local().installRows({
+        key: f.key,
+        control: {
+          cursor: { position: null, epoch: 12, stranded: true },
+          strand: { reason: 'lost-state' },
+        },
+      })
+      beforeControl = await f.local().device.groups.ports(f.key).control.load()
+      beforeState = await f.local().device.groups.loadState(f.key)
+    }
+    const beforeAdmission = port.sendAdmission()
+    if (outcome === 'held-before-proof') {
+      const recovery = await import('../../../packages/mls-rpc/src/recovery.js')
+      const original = recovery.reconcileRecoveryCapture
+      let calls = 0
+      vi.spyOn(recovery, 'reconcileRecoveryCapture').mockImplementation(async (params) => {
+        const result = await original(params)
+        if (++calls === 1)
+          await f.local().installRows({
+            key: f.key,
+            control: {
+              forkHalt: {
+                eventID: 'held-during-capture',
+                detectedAt: Date.now(),
+                evidence: {
+                  kind: 'unexplained-own-commit',
+                  epoch: 12,
+                  position: head,
+                  digest: record.digest,
+                },
+              },
+            },
+          })
+        return result
+      })
+    }
+    const beforeRows = await f.local().inspectRows()
+    const fault = outcome.startsWith('pending') ? f.local().armNextWorkFault('pending') : undefined
+    if (outcome === 'rollback') f.local().armNextWorkFault('before-commit')
+    const attempt = captured.reconcileCapture(record, reply)
+    void attempt.catch(() => {})
+    if (fault !== undefined) {
+      await Promise.race([
+        fault.rejected,
+        attempt.then(() => {
+          throw new Error('Proof fault was not reached')
+        }),
+      ])
+      expect(await f.local().inspectRows()).toEqual(beforeRows)
+      let observed = false
+      const reading = f
+        .local()
+        .safety()
+        .status(f.key)
+        .then((value) => {
+          observed = true
+          return value
+        })
+      await Promise.resolve()
+      expect(observed).toBe(false)
+      await fault.finish(outcome === 'pending-commit' ? 'commit' : 'rollback')
+      if (outcome === 'pending-rollback') {
+        await expect(attempt).rejects.toThrow()
+        expect(await reading).toEqual(beforeStatus)
+      } else {
+        await expect(attempt).resolves.toEqual({ kind: 'head-only', head })
+        expect(await reading).toMatchObject({ condition: null, evidence: null })
+      }
+    } else if (outcome === 'rollback' || outcome === 'held-before-proof')
+      await expect(attempt).rejects.toThrow()
+    else await expect(attempt).resolves.toEqual({ kind: 'head-only', head })
+    const afterControl = await f.local().device.groups.ports(f.key).control.load()
+    if (outcome === 'success' || outcome === 'pending-commit' || outcome === 'stranded') {
+      expect(beforeControl.cursor?.position ?? null).toBeNull()
+      expect(afterControl.cursor).toEqual({ ...beforeControl.cursor, position: head, epoch: 12 })
+      expect(await f.local().safety().status(f.key)).toMatchObject({
+        condition: null,
+        evidence: null,
+      })
+    } else if (outcome === 'rollback' || outcome === 'pending-rollback') {
+      expect(afterControl).toEqual(beforeControl)
+      expect(await f.local().safety().status(f.key)).toEqual(beforeStatus)
+    } else if (outcome === 'held-before-proof') {
+      expect(afterControl.cursor).toEqual(beforeControl.cursor)
+      expect(await f.local().safety().status(f.key)).toMatchObject({
+        condition: beforeStatus.condition,
+        evidence: beforeStatus.evidence,
+      })
+    } else {
+      expect(afterControl.cursor).toEqual(beforeControl.cursor)
+      expect(await f.local().safety().status(f.key)).toMatchObject({
+        condition: null,
+        evidence: null,
+      })
+    }
+    if (outcome === 'stranded') {
+      expect(port.sendAdmission()).toEqual(beforeAdmission)
+      expect(afterControl.strand).toEqual(beforeControl.strand)
+    }
+    expect(afterControl.rejoin).toEqual(beforeControl.rejoin)
+    expect(afterControl.recoveryEpochFloor).toBe(12)
+    const afterState = await f.local().device.groups.loadState(f.key)
+    if (beforeState === null) expect(afterState).toBeNull()
+    else {
+      expect(afterState).toEqual({ ...beforeState, version: afterState?.version })
+    }
+    expect((await f.service().readRecords()).filter((row) => row.kind === 'fact')).toEqual(
+      beforeFacts,
+    )
+    expect((await f.local().device.groups.load(f.key.groupID))?.activeIncarnation).toBe(1)
+    expect(
+      (await f.local().safety().events(f.key)).some((event) => event.kind === 'not-member'),
+    ).toBe(true)
+  },
+)
 
 test('roster reply flood shares bounded group admission', async () => {
   const { f, hub } = await setup()

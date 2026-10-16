@@ -1,4 +1,4 @@
-import { type OwnIdentity, randomIdentity } from '@kokuin/token'
+import { createIdentity, type OwnIdentity, randomIdentity } from '@kokuin/token'
 import {
   type ControllerBinding,
   checkpointAuthHash,
@@ -1143,6 +1143,7 @@ export async function createForkNoticeFixture(params: {
 export async function createNotMemberFixture(
   params: {
     additionalResponder?: boolean
+    sameDIDResponder?: boolean
     localEpoch?: number
     remoteEpoch?: number
     splitEpoch?: number
@@ -1153,7 +1154,26 @@ export async function createNotMemberFixture(
   const { createCapturedFormerMember } = await import('./captured-recovery.js')
   const { createRegistryGroupMLS } = await import('../../src/registry-group-mls.js')
   const { createNotMemberHandler } = await import('../../src/safety-conditions.js')
-  const base = await createCapturedFormerMember(true)
+  const multiKey = params.sameDIDResponder
+    ? await createIdentity({
+        keys: [
+          { purpose: 'sig', alg: 'EdDSA' },
+          { purpose: 'sig', alg: 'EdDSA' },
+        ],
+      })
+    : undefined
+  const base = await createCapturedFormerMember(true, multiKey)
+  const alternateKey = multiKey?.keys[1]
+  const alternate: OwnIdentity | undefined =
+    multiKey === undefined || alternateKey === undefined
+      ? undefined
+      : {
+          ...multiKey,
+          publicKey: alternateKey.publicKey,
+          privateKey: alternateKey.privateKey,
+          signToken: (payload) =>
+            multiKey.signToken(payload, { kid: alternateKey.fragment, embedLongForm: true }),
+        }
   const splitEpoch = params.splitEpoch ?? 10
   const localEpoch = params.localEpoch ?? 20
   const remoteEpoch = params.remoteEpoch ?? 12
@@ -1169,10 +1189,15 @@ export async function createNotMemberFixture(
   }
   let common = await clone(base.earlierGroup)
   let own = await clone(base.requester.handle)
-  let additional:
-    | { identity: OwnIdentity; handle: GroupHandle; fixture: RegistryFixture | null }
-    | undefined
-  if (params.additionalResponder) {
+  const additionals: Array<{
+    identity: OwnIdentity
+    handle: GroupHandle
+    fixture: RegistryFixture | null
+  }> = []
+  for (const identity of [
+    ...(alternate === undefined ? [] : [alternate]),
+    ...(params.additionalResponder ? [randomIdentity()] : []),
+  ]) {
     const { createInvite, commitInvite, createKeyPackageBundle, processWelcome } = await import(
       '@kumiai/mls'
     )
@@ -1186,11 +1211,16 @@ export async function createNotMemberFixture(
       ): Promise<ControllerBinding>
       trustedGrant(identity: OwnIdentity): Promise<string>
     }
-    const identity = randomIdentity()
-    const controller = await lifecycle.bindingFor(identity, undefined, {
-      identity: base.responder.identity,
-      parent: await lifecycle.trustedGrant(base.responder.identity),
-    })
+    const controller = await lifecycle.bindingFor(
+      identity,
+      undefined,
+      identity.id === base.responder.identity.id
+        ? undefined
+        : {
+            identity: base.responder.identity,
+            parent: await lifecycle.trustedGrant(base.responder.identity),
+          },
+    )
     const bundle = await createKeyPackageBundle(identity, { controller })
     const { invite } = await createInvite({
       group: common,
@@ -1200,7 +1230,8 @@ export async function createNotMemberFixture(
     const added = await commitInvite(common, bundle.publicPackage, invite)
     common = added.newGroup
     await own.processMessage(added.commitMessage)
-    additional = {
+    for (const previous of additionals) await previous.handle.processMessage(added.commitMessage)
+    additionals.push({
       identity,
       fixture: null,
       handle: (
@@ -1212,13 +1243,14 @@ export async function createNotMemberFixture(
           options: registryOptions({}),
         })
       ).group,
-    }
+    })
   }
   while (Number(common.epoch) < splitEpoch - 1) {
     const rotation = await commitKeyRotation(common)
     common = rotation.newGroup
     await own.processMessage(rotation.commitMessage)
-    await additional?.handle.processMessage(rotation.commitMessage)
+    for (const additional of additionals)
+      await additional.handle.processMessage(rotation.commitMessage)
   }
   const local = await createRegistryFixture({
     mode: params.mode ?? 'real-mls',
@@ -1270,7 +1302,7 @@ export async function createNotMemberFixture(
       trust: recoveryTrustFor(handle, key, await fixture.device.groups.loadTrust(key.groupID)),
     })
   }
-  if (additional !== undefined) {
+  for (const additional of additionals) {
     additional.fixture = await createRegistryFixture({
       mode: 'real-mls',
       setup: 'empty',
@@ -1282,16 +1314,18 @@ export async function createNotMemberFixture(
     })
   }
   const continuing = await clone(common)
+  const divergent = await clone(common)
   const continuers: Array<RegistryFixture> = []
   const { proposeSelfRemoval, commitSelfRemovals } = await import('@kumiai/mls')
   const removal = await proposeSelfRemoval(await clone(own))
   await common.processMessage(removal.frame)
-  await additional?.handle.processMessage(removal.frame)
+  for (const additional of additionals) await additional.handle.processMessage(removal.frame)
   const removed = await commitSelfRemovals(common)
   if (removed === null) throw new Error('Missing excluding branch')
   let excluding = removed.newGroup
   await install(remote, remoteKey, excluding)
-  if (additional?.fixture !== undefined && additional?.fixture !== null) {
+  for (const additional of additionals) {
+    if (additional.fixture === null) throw new Error('Missing additional responder fixture')
     await additional.handle.processMessage(removed.commitMessage)
     await install(additional.fixture, remoteKey, additional.handle)
   }
@@ -1299,7 +1333,8 @@ export async function createNotMemberFixture(
     const rotation = await commitKeyRotation(excluding)
     excluding = rotation.newGroup
     await install(remote, remoteKey, excluding)
-    if (additional?.fixture !== undefined && additional?.fixture !== null) {
+    for (const additional of additionals) {
+      if (additional.fixture === null) throw new Error('Missing additional responder fixture')
       await additional.handle.processMessage(rotation.commitMessage)
       await install(additional.fixture, remoteKey, additional.handle)
     }
@@ -1362,7 +1397,8 @@ export async function createNotMemberFixture(
       if (evidence == null) throw new Error('Missing signed absence proof')
       return { ...request, evidence, requestID }
     },
-    async secondProof() {
+    async secondProof(index = additionals.length - 1) {
+      const additional = additionals[index]
       if (additional?.fixture == null) throw new Error('Missing second responder')
       const service = createCheckpointService({
         registry: additional.fixture.registry,
@@ -1415,7 +1451,10 @@ export async function createNotMemberFixture(
       await localFixture.installRows({ key: localKey, control: { putRejoin: recovery.record } })
       return { ...recovery, source: await registryFixtureRecoverySource(localFixture, localKey) }
     },
-    async continuing() {
+    async continuing(options: { divergent?: boolean; epoch?: number } = {}) {
+      let offered = await clone(options.divergent ? divergent : continuing)
+      while (Number(offered.epoch) < (options.epoch ?? localEpoch))
+        offered = (await commitKeyRotation(offered)).newGroup
       const survivor = await createRegistryFixture({
         mode: 'real-mls',
         setup: 'empty',
@@ -1423,7 +1462,7 @@ export async function createNotMemberFixture(
         identity: base.responder.identity,
       })
       continuers.push(survivor)
-      await survivor.registry.seed(await clone(continuing), {
+      await survivor.registry.seed(offered, {
         packageUse: { sourceID: 'diagnostic', ref: 'continuing-responder', kind: 'ordinary' },
       })
       return survivor
@@ -1442,7 +1481,7 @@ export async function createNotMemberFixture(
     async close() {
       await localFixture.close()
       await remote.close()
-      await additional?.fixture?.close()
+      for (const additional of additionals) await additional.fixture?.close()
       for (const survivor of continuers) await survivor.close()
     },
   }

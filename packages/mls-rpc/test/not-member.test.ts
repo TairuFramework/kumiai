@@ -411,10 +411,19 @@ test('stale responder below requester join epoch cannot prove absence with a val
 })
 
 test('absence event counts distinct responder DIDs', async () => {
-  const f = await createNotMemberFixture({ additionalResponder: true })
+  const f = await createNotMemberFixture({ additionalResponder: true, sameDIDResponder: true })
   try {
     await f.diagnose(await f.proof())
+    const first = await f.local().safety().status(f.key)
+    expect(first.evidence).toMatchObject({ responderDIDs: [f.responderDID], responderCount: 1 })
+    const rotated = await f.secondProof(0)
+    expect(rotated.responderDID).toBe(f.responderDID)
+    await f.diagnose(rotated)
+    const sameDID = await f.local().safety().status(f.key)
+    expect(sameDID.evidence?.responderKeyHash).not.toBe(first.evidence?.responderKeyHash)
+    expect(sameDID.evidence).toMatchObject({ responderDIDs: [f.responderDID], responderCount: 1 })
     const second = await f.secondProof()
+    expect(second.responderDID).not.toBe(f.responderDID)
     await f.diagnose(second)
     expect(await f.local().safety().status(f.key)).toMatchObject({
       evidence: { responderDIDs: [f.responderDID, second.responderDID].sort(), responderCount: 2 },

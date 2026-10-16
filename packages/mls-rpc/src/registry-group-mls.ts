@@ -17,6 +17,7 @@ import {
 import type { ControlHandleAccess, ControlReadScope } from './access.js'
 import { provenCheckpointFacts } from './checkpoint-store.js'
 import type { AccountedGroupObservation, EntryReads } from './entry-capability.js'
+import { sameStoredValue } from './memory-incarnation-stores.js'
 import {
   createGroupMLS,
   type GroupMLSParams,
@@ -383,8 +384,9 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
       const result = await reconcile(record, reply)
       if (result.kind !== 'head-only') return result
       // Re-authenticate under the owner before clearing a diagnostic from an earlier capture.
+      const mutationID = crypto.randomUUID()
       await capability.entry.run(
-        { groupID: key.groupID, mutationID: crypto.randomUUID() },
+        { groupID: key.groupID, mutationID },
         async (reads) => {
           const source = await readSource(reads)
           if (record.forkRecovery !== undefined) {
@@ -410,9 +412,23 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
           })
           if (verified.kind !== 'head-only' || verified.head !== result.head)
             throw new DisplacedGroupHandleError('Recovery capture changed before reconciliation')
-          return { expected: await reads.lifetime(), value: null }
+          const control = await reads.control(key.incarnation)
+          const stateStatus = await reads.diagnoseState(key.incarnation)
+          const installed = source.trust.installed
+          // A signed head anchors only the identical installed state, never another branch's snapshot.
+          const cursor =
+            result.head !== null &&
+            stateStatus === 'readable' &&
+            installed.epoch === record.target.groupInfoEpoch &&
+            sameStoredValue(installed.authenticator, record.target.groupInfoAuthenticator) &&
+            (control.cursor?.position == null || control.cursor.position < result.head)
+              ? { ...control.cursor, position: result.head, epoch: installed.epoch }
+              : undefined
+          return { expected: await reads.lifetime(), value: cursor }
         },
-        async (stores) => {
+        async (stores, cursor) => {
+          if (cursor !== undefined)
+            await stores.incarnation(key.incarnation).control.apply({ cursor }, mutationID)
           await clearGroupCondition(stores.checkpoints, key)
         },
       )

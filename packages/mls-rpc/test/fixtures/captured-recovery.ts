@@ -211,7 +211,7 @@ export async function createCapturedRealRecovery(transactional = false) {
   }
 }
 
-async function boundCapturedGroup() {
+async function boundCapturedGroup(identity = randomIdentity()) {
   const lifecycle = (await import(
     new URL('../../../mls/test/fixtures/lifecycle-ledger.ts', import.meta.url).href
   )) as {
@@ -222,7 +222,6 @@ async function boundCapturedGroup() {
     ): Promise<ControllerBinding>
     trustedGrant(identity: OwnIdentity): Promise<string>
   }
-  const identity = randomIdentity()
   const responder = randomIdentity()
   const controller = await lifecycle.bindingFor(identity)
   const source = (
@@ -250,8 +249,8 @@ async function boundCapturedGroup() {
   }
 }
 
-export async function createCapturedFormerMember(present = false) {
-  const real = await boundCapturedGroup()
+export async function createCapturedFormerMember(present = false, identity?: OwnIdentity) {
+  const real = await boundCapturedGroup(identity)
   const responder = real.members[0]
   const requester = real.members[1]
   if (responder === undefined || requester === undefined) throw new Error('Missing bound members')

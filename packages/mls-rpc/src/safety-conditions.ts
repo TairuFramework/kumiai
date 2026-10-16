@@ -8,7 +8,7 @@ import type {
   NotMemberEvidence,
 } from '@kumiai/rpc'
 
-import { readCheckpointCoverage } from './checkpoint-store.js'
+import { provenCheckpointFacts } from './checkpoint-store.js'
 import type { EntryReads } from './entry-capability.js'
 import { copyStoredValue, sameStoredValue } from './memory-incarnation-stores.js'
 import { GroupStateConflictError } from './persistence-errors.js'
@@ -33,23 +33,8 @@ function prepare(record: ConditionRecord): ConditionRecord {
 }
 
 export function retainedComparisonFacts(records: Array<CheckpointRecord>, key: GroupKey) {
-  const coverage = readCheckpointCoverage(key.groupID, records)
-  const metadata = records.find((row) => row.kind === 'coverage' && row.id === 'coverage')
-  const ids = new Set(
-    metadata?.kind === 'coverage' ? metadata.installations.map(({ id }) => id) : [],
-  )
-  return records.flatMap((row) =>
-    row.kind === 'fact' &&
-    row.key.groupID === key.groupID &&
-    ids.has(row.id) &&
-    coverage.retained.some(
-      (range) =>
-        range.key.incarnation === row.key.incarnation &&
-        range.from <= row.epoch &&
-        range.through >= row.epoch,
-    )
-      ? [decodeEpochRosterFact(row.canonical)]
-      : [],
+  return provenCheckpointFacts(records, key.groupID).map((row) =>
+    decodeEpochRosterFact(row.canonical),
   )
 }
 
