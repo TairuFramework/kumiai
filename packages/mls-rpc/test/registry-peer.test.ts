@@ -149,7 +149,7 @@ async function setup(confirmed = true) {
       recovery: f.environment,
       target,
       continuation,
-      createMLS: async (key, sink) =>
+      createMLS: async (key) =>
         api.createRegistryGroupMLS({
           registry: f.registry,
           key,
@@ -157,7 +157,6 @@ async function setup(confirmed = true) {
           target,
           identity: f.identity,
           entrySlot: api.createLedgerEntrySlot(),
-          onConfirmedRecovery: sink,
         }),
       createPeer: async (key, options) => {
         created.push({ key, options })
@@ -284,7 +283,7 @@ describe('registry peer recovery coordination', () => {
             registry: f.registry,
             persistence: f.device.groups,
           }),
-          createMLS: (key, sink) =>
+          createMLS: (key) =>
             api.createRegistryGroupMLS({
               registry: f.registry,
               key,
@@ -292,7 +291,6 @@ describe('registry peer recovery coordination', () => {
               target,
               identity: f.identity,
               entrySlot: api.createLedgerEntrySlot(),
-              onConfirmedRecovery: sink,
             }),
           createPeer: async (key, options) => {
             const access = await f.registry.access(key.groupID)
@@ -947,7 +945,7 @@ describe('registry peer recovery coordination', () => {
     }
   })
 
-  test('pending proofs retry with bounded backoff and never write or create peers', async () => {
+  test('switch proof remains visibly pending without elapsed bound', async () => {
     const s = await setup()
     let owner: api.RegistryPeer | undefined
     const capability = registryRecoveryCoordinator(s.f.registry)
@@ -959,7 +957,7 @@ describe('registry peer recovery coordination', () => {
       vi.useFakeTimers()
       const delays: Array<number> = []
       owner = await s.start()
-      for (let round = 0; round < 12; round++) {
+      for (let round = 0; round < 100; round++) {
         await vi.advanceTimersByTimeAsync(0)
         expect(resolve.mock.calls.length).toBe(round + 1)
         expect(vi.getTimerCount()).toBe(1)
@@ -968,8 +966,20 @@ describe('registry peer recovery coordination', () => {
         delays.push(Date.now() - before)
       }
       expect(delays).toEqual([
-        100, 200, 400, 800, 1600, 3200, 6400, 12800, 15000, 15000, 15000, 15000,
+        100,
+        200,
+        400,
+        800,
+        1600,
+        3200,
+        6400,
+        12800,
+        ...Array<number>(92).fill(15000),
       ])
+      expect(owner.status()).toEqual({ kind: 'pending' })
+      expect(await s.f.device.groups.ports(source).control.load()).toMatchObject({
+        rejoin: s.recovery.record,
+      })
       expect(write).not.toHaveBeenCalled()
       expect(s.created).toEqual([])
       expect(
@@ -1259,7 +1269,7 @@ describe('registry peer recovery coordination', () => {
           return load(key)
         })
         owner = await s.start({
-          createMLS: async (key, sink) => {
+          createMLS: async (key) => {
             const mls = await api.createRegistryGroupMLS({
               registry: s.f.registry,
               key,
@@ -1267,7 +1277,6 @@ describe('registry peer recovery coordination', () => {
               target,
               identity: s.f.identity,
               entrySlot: api.createLedgerEntrySlot(),
-              onConfirmedRecovery: sink,
             })
             if (stage === 'MLS') {
               entered.resolve()
@@ -1422,10 +1431,7 @@ describe('registry peer recovery coordination', () => {
       let owner: api.RegistryPeer | undefined
       let disposed = false
       try {
-        const makeMLS = async (
-          key: api.GroupKey,
-          sink: (handoff: ConfirmedRecoveryHandoff) => void,
-        ) => {
+        const makeMLS = async (key: api.GroupKey) => {
           const mls = await api.createRegistryGroupMLS({
             registry: s.f.registry,
             key,
@@ -1433,7 +1439,6 @@ describe('registry peer recovery coordination', () => {
             target,
             identity: s.f.identity,
             entrySlot: api.createLedgerEntrySlot(),
-            onConfirmedRecovery: sink,
           })
           return {
             ...mls,
@@ -1860,7 +1865,6 @@ test('recovery retains the current ledger when private MLS state is unavailable'
       target,
       identity: s.f.identity,
       entrySlot: api.createLedgerEntrySlot(),
-      onConfirmedRecovery: () => {},
     })
     expect(mls.getRecoveryLedger).toBeTypeOf('function')
     const ledger = await mls.getRecoveryLedger?.()

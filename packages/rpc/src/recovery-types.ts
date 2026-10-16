@@ -67,7 +67,8 @@ export type RecoveryReconciliation =
   | { kind: 'accepted'; epoch: number; leafDigest: string }
   | { kind: 'head-only'; head: LogPosition | null }
   | { kind: 'unapplied-later'; epoch: number; leafDigest: string }
-  | { kind: 'retry' | 'held' }
+  | { kind: 'retry'; reason?: 'target-behind' | 'capture-authenticator-disagreement' }
+  | { kind: 'held' }
 export type CapturedPendingRecovery = Omit<LegacyPendingRecovery, 'onAccepted'> & {
   source: RecoverySource<unknown>
   target: RecoveryTargetCapture

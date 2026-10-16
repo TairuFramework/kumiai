@@ -1069,6 +1069,7 @@ export function createGroupPeerWithControlWalk<
   let healRequested = false
   let activeRecovery: Promise<{ advanced: boolean }> | null = null
   let refusalHeld = false
+  const ownedRecoveryBuffers = new Map<string, { requestKey: Uint8Array; candidate: Uint8Array }>()
   let pendingRecovery: { position: string; commitDigest: string; pending: PendingRecovery } | null =
     null
   let recoveryRetryTimer: ReturnType<typeof setTimeout> | undefined
@@ -2542,6 +2543,12 @@ export function createGroupPeerWithControlWalk<
   const refreshControl = async (freshEvidence?: ControlEvidenceSnapshot): Promise<void> => {
     if (control == null) return
     const snapshot = await control.load()
+    for (const [id, buffers] of ownedRecoveryBuffers) {
+      if (snapshot.rejoin?.id === id) continue
+      buffers.requestKey.fill(0)
+      buffers.candidate.fill(0)
+      ownedRecoveryBuffers.delete(id)
+    }
     // Adoption can commit before anchor repair throws and skips the runner's notification.
     for (const outcome of snapshot.outcomes) emitOutcome(outcome)
     for (const id of emittedOutcomes.keys()) {
@@ -2590,7 +2597,9 @@ export function createGroupPeerWithControlWalk<
     revokeHold = revokeHeld(snapshot)
     rejoinHeld = snapshot.rejoin != null || continuation !== null
     rejoinPosition = rejoinBarrier(snapshot.rejoin)
-    refusalHeld = snapshot.rejoin?.stage === 'refused'
+    refusalHeld =
+      snapshot.rejoin?.stage === 'refused' &&
+      ('format' in snapshot.rejoin || mls?.capturedRecovery === undefined)
     const adopted =
       continuation?.record ??
       (snapshot.rejoin?.stage === 'adopted' &&
@@ -3913,7 +3922,12 @@ export function createGroupPeerWithControlWalk<
     assertSafetyOpen()
     if (pendingRecovery?.commitDigest === record.digest) return pendingRecovery.pending
     if (mls == null) throw new Error('Missing recovery port')
-    const pending = await mls.restoreRecovery(record.candidate, record.requestKey)
+    const buffers = ownedRecoveryBuffers.get(record.id) ?? {
+      requestKey: record.requestKey,
+      candidate: record.candidate,
+    }
+    const pending = await mls.restoreRecovery(record.candidate, buffers.requestKey)
+    ownedRecoveryBuffers.set(record.id, buffers)
     assertSafetyOpen()
     return wrapPendingRecovery(boundary, pending)
   }
@@ -4126,7 +4140,12 @@ export function createGroupPeerWithControlWalk<
     const commits = commitTopicID
     const candidate = async (record: CapturedRejoinRecord) => {
       if (capturedPending?.digest === record.digest) return capturedPending.pending
-      const pending = await captured.restoreRecovery(record.candidate, record.requestKey)
+      const buffers = ownedRecoveryBuffers.get(record.id) ?? {
+        requestKey: record.requestKey,
+        candidate: record.candidate,
+      }
+      const pending = await captured.restoreRecovery(record.candidate, buffers.requestKey)
+      ownedRecoveryBuffers.set(record.id, buffers)
       capturedPending = { digest: record.digest, pending }
       return pending
     }
@@ -4383,116 +4402,124 @@ export function createGroupPeerWithControlWalk<
           requestID,
           Math.max(0, deadline - Date.now()),
         )
-        const outcome = await requestGroupInfo(request, requestID, rendezvous, deadline)
-        assertLive()
-        assertSafetyOpen()
-        if (outcome.kind === 'disposed') throw new PeerDisposedError('Peer is disposed')
-        if (outcome.kind === 'publish-failed') throw outcome.error
-        if (outcome.kind !== 'reply') {
-          requestKey.fill(0)
-          retryRecovery()
-          emitRecovery({
-            groupID: commits,
-            attemptID: currentRecoveryAttemptID ?? requestID,
-            trigger,
-            phase: 'failed',
-            reason:
-              outcome.kind === 'timeout'
-                ? outcome.atDeadline
-                  ? 'deadline'
-                  : 'no-responder'
-                : 'error',
-          })
-          return { advanced: false }
-        }
-        await runSerial(refreshControl)
-        assertLive()
-        assertSafetyOpen()
-        let pending: CapturedAppliedRecovery
+        let requestKeySaved = false
         try {
-          pending = await captured.applyRecovery(outcome.sealed, requestID, requestKey)
-        } catch (error) {
-          requestKey.fill(0)
-          throw error
+          const outcome = await requestGroupInfo(request, requestID, rendezvous, deadline)
+          assertLive()
+          assertSafetyOpen()
+          if (outcome.kind === 'disposed') throw new PeerDisposedError('Peer is disposed')
+          if (outcome.kind === 'publish-failed') throw outcome.error
+          if (outcome.kind !== 'reply') {
+            retryRecovery()
+            emitRecovery({
+              groupID: commits,
+              attemptID: currentRecoveryAttemptID ?? requestID,
+              trigger,
+              phase: 'failed',
+              reason:
+                outcome.kind === 'timeout'
+                  ? outcome.atDeadline
+                    ? 'deadline'
+                    : 'no-responder'
+                  : 'error',
+            })
+            return { advanced: false }
+          }
+          await runSerial(refreshControl)
+          assertLive()
+          assertSafetyOpen()
+          const pending: CapturedAppliedRecovery = await captured.applyRecovery(
+            outcome.sealed,
+            requestID,
+            requestKey,
+          )
+          if (pending === null) {
+            retryRecovery()
+            emitRecovery({
+              groupID: commits,
+              attemptID: currentRecoveryAttemptID ?? requestID,
+              trigger,
+              phase: 'failed',
+              reason: 'no-responder',
+            })
+            return { advanced: false }
+          }
+          if ('renewalRequired' in pending) {
+            renewalRequiredEpoch = currentEpoch()
+            clearRecoveryRetry()
+            emitRecovery({
+              groupID: commits,
+              attemptID: currentRecoveryAttemptID ?? requestID,
+              trigger,
+              phase: 'failed',
+              reason: 'renewal-required',
+            })
+            return { advanced: false }
+          }
+          const snapshot = await store.load()
+          if (
+            snapshot.recoveryEpochFloor !== null &&
+            pending.target.groupInfoEpoch < snapshot.recoveryEpochFloor
+          ) {
+            retryRecovery()
+            emitRecovery({
+              groupID: commits,
+              attemptID: currentRecoveryAttemptID ?? requestID,
+              trigger,
+              phase: 'failed',
+              reason: 'below-epoch-floor',
+            })
+            return { advanced: false }
+          }
+          const readLedger = params.recoveryOnly ? port.getRecoveryLedger : port.getLedger
+          if (readLedger === undefined) throw new Error('Retained recovery ledger is required')
+          const ledger = await readLedger()
+          const ledgerBefore = [
+            ...new Set([
+              ...(inFlightEntries ?? awaitingBootstrap?.entries ?? []),
+              ...snapshot.settledRejoins.flatMap((row) => row.ledgerBefore),
+              ...ledger,
+              ...(anchorRecoveryPending ? (snapshot.commitOnce?.bodies ?? []) : []),
+            ]),
+          ]
+          const { payload } = await frameCommit(pending.commit, [], null)
+          record = {
+            format: 2,
+            id: newPublishID(),
+            stage: 'built',
+            publishID: newPublishID(),
+            expectedHead: pending.target.captureHead,
+            captureHead: pending.target.captureHead,
+            searchFrom: pending.target.captureHead,
+            payload,
+            payloadDigest: toB64U(sha256(payload)),
+            requestID,
+            request,
+            requestKey,
+            candidate: pending.serialize(),
+            source: pending.source,
+            target: pending.target,
+            digest: digestAppliedCommit(pending.commit),
+            epochAfter: pending.epoch,
+            ledgerBefore,
+            trigger: 'automatic',
+            authorisationID: null,
+            switchMutationID: null,
+            destinationKey: null,
+          }
+          await applyResolved(
+            store,
+            { putRejoin: record, recoveryEpochFloor: record.target.groupInfoEpoch },
+            newPublishID(),
+          )
+          requestKeySaved = true
+          ownedRecoveryBuffers.set(record.id, { requestKey, candidate: record.candidate })
+          capturedPending = { digest: record.digest, pending }
+          inFlightEntries = ledgerBefore
+          await runSerial(refreshControl)
+        } finally {
+          if (!requestKeySaved) requestKey.fill(0)
         }
-        if (pending === null) {
-          requestKey.fill(0)
-          retryRecovery()
-          emitRecovery({
-            groupID: commits,
-            attemptID: currentRecoveryAttemptID ?? requestID,
-            trigger,
-            phase: 'failed',
-            reason: 'no-responder',
-          })
-          return { advanced: false }
-        }
-        if ('renewalRequired' in pending) {
-          requestKey.fill(0)
-          renewalRequiredEpoch = currentEpoch()
-          clearRecoveryRetry()
-          emitRecovery({
-            groupID: commits,
-            attemptID: currentRecoveryAttemptID ?? requestID,
-            trigger,
-            phase: 'failed',
-            reason: 'renewal-required',
-          })
-          return { advanced: false }
-        }
-        const snapshot = await store.load()
-        if (
-          snapshot.recoveryEpochFloor !== null &&
-          pending.target.groupInfoEpoch < snapshot.recoveryEpochFloor
-        ) {
-          requestKey.fill(0)
-          retryRecovery()
-          return { advanced: false }
-        }
-        const readLedger = params.recoveryOnly ? port.getRecoveryLedger : port.getLedger
-        if (readLedger === undefined) throw new Error('Retained recovery ledger is required')
-        const ledger = await readLedger()
-        const ledgerBefore = [
-          ...new Set([
-            ...(inFlightEntries ?? awaitingBootstrap?.entries ?? []),
-            ...snapshot.settledRejoins.flatMap((row) => row.ledgerBefore),
-            ...ledger,
-            ...(anchorRecoveryPending ? (snapshot.commitOnce?.bodies ?? []) : []),
-          ]),
-        ]
-        const { payload } = await frameCommit(pending.commit, [], null)
-        record = {
-          format: 2,
-          id: newPublishID(),
-          stage: 'built',
-          publishID: newPublishID(),
-          expectedHead: pending.target.captureHead,
-          captureHead: pending.target.captureHead,
-          searchFrom: pending.target.captureHead,
-          payload,
-          payloadDigest: toB64U(sha256(payload)),
-          requestID,
-          request,
-          requestKey,
-          candidate: pending.serialize(),
-          source: pending.source,
-          target: pending.target,
-          digest: digestAppliedCommit(pending.commit),
-          epochAfter: pending.epoch,
-          ledgerBefore,
-          trigger: 'automatic',
-          authorisationID: null,
-          switchMutationID: null,
-          destinationKey: null,
-        }
-        await applyResolved(
-          store,
-          { putRejoin: record, recoveryEpochFloor: record.target.groupInfoEpoch },
-          newPublishID(),
-        )
-        capturedPending = { digest: record.digest, pending }
-        inFlightEntries = ledgerBefore
-        await runSerial(refreshControl)
       }
       if (record.stage === 'adopted') {
         const complete = await runSerial(async () => {
@@ -4535,6 +4562,7 @@ export function createGroupPeerWithControlWalk<
         })
         return { advanced: false }
       }
+      let recaptureReason: RecoveryFailureReason | undefined
       let recaptured: string | undefined
       const deps = capturedRejoinDeps(deadline)
       const beforePublication = recaptureBuilt && record.stage === 'built'
@@ -4546,6 +4574,7 @@ export function createGroupPeerWithControlWalk<
           reconcileCapture: async (saved) => {
             const result = await deps.reconcileCapture(saved)
             recaptured = result.kind
+            if (result.kind === 'retry') recaptureReason = result.reason
             return result
           },
         },
@@ -4577,7 +4606,7 @@ export function createGroupPeerWithControlWalk<
           attemptID: record.id,
           trigger,
           phase: 'failed',
-          reason: 'unconfirmed',
+          reason: recaptureReason ?? 'unconfirmed',
           advisory: [],
         })
         return { advanced: false }
@@ -4617,7 +4646,8 @@ export function createGroupPeerWithControlWalk<
           reason === 'no-responder' ||
           reason === 'deadline' ||
           reason === 'error' ||
-          reason === 'bootstrap-failed')
+          reason === 'bootstrap-failed' ||
+          reason === 'legacy-recovery-record')
       )
         retryRecovery()
       emitRecovery({ ...base, phase: 'failed', reason, ...details })
@@ -4653,7 +4683,7 @@ export function createGroupPeerWithControlWalk<
         let record = (await controlStore.load()).rejoin
         assertSafetyOpen()
         if (record != null && !('format' in record) && port.capturedRecovery !== undefined)
-          return { advanced: false }
+          return failed('legacy-recovery-record')
         if ((record != null && 'format' in record) || port.capturedRecovery !== undefined)
           return await capturedAttempt(trigger, generation, port, commits, rendezvous, deadline)
         if (record?.stage === 'refused') return failed('refused', { refusal: record.refusal })
@@ -4683,67 +4713,74 @@ export function createGroupPeerWithControlWalk<
               requestID,
               Math.max(0, deadline - Date.now()),
             )
-            assertSafetyOpen()
-            const outcome = await requestGroupInfo(request, requestID, rendezvous, deadline)
-            assertLive()
-            assertSafetyOpen()
-            if (outcome.kind === 'disposed') throw new PeerDisposedError('Peer is disposed')
-            if (outcome.kind === 'publish-failed') throw outcome.error
-            if (outcome.kind === 'timeout')
-              return failed(outcome.atDeadline ? 'deadline' : 'no-responder')
-            await reconcileCommits()
-            assertSafetyOpen()
-            let pending: AppliedRecovery
+            let requestKeySaved = false
             try {
-              pending = await port.applyRecovery(outcome.sealed, requestID, requestKey)
-            } catch (error) {
-              if (safetyRefusal(error)) throw error
-              pending = null
+              assertSafetyOpen()
+              const outcome = await requestGroupInfo(request, requestID, rendezvous, deadline)
+              assertLive()
+              assertSafetyOpen()
+              if (outcome.kind === 'disposed') throw new PeerDisposedError('Peer is disposed')
+              if (outcome.kind === 'publish-failed') throw outcome.error
+              if (outcome.kind === 'timeout')
+                return failed(outcome.atDeadline ? 'deadline' : 'no-responder')
+              await reconcileCommits()
+              assertSafetyOpen()
+              let pending: AppliedRecovery
+              try {
+                pending = await port.applyRecovery(outcome.sealed, requestID, requestKey)
+              } catch (error) {
+                if (safetyRefusal(error)) throw error
+                pending = null
+              }
+              assertLive()
+              assertSafetyOpen()
+              if (pending == null) return null
+              if ('renewalRequired' in pending) return failed('renewal-required')
+              pending = wrapPendingRecovery(boundary, pending)
+              const source = await readLegacyRecoverySource(port)
+              assertSafetyOpen()
+              const ledgerBefore = [
+                ...new Set([
+                  ...(inFlightEntries ?? awaitingBootstrap?.entries ?? []),
+                  ...(await port.getLedger()),
+                  ...(anchorRecoveryPending
+                    ? ((await controlStore.load()).commitOnce?.bodies ?? [])
+                    : []),
+                ]),
+              ]
+              assertSafetyOpen()
+              const { payload } = await frameCommit(pending.commit, [], null)
+              assertSafetyOpen()
+              const record: LegacyRejoinRecord = {
+                id: newPublishID(),
+                stage: 'built',
+                publishID: newPublishID(),
+                expectedHead,
+                payload,
+                payloadDigest: toB64U(sha256(payload)),
+                requestID,
+                request,
+                requestKey,
+                candidate: pending.serialize(),
+                source: { ...source, head: reconciledHead },
+                digest: digestAppliedCommit(pending.commit),
+                epochAfter: pending.epoch,
+                ledgerBefore,
+                conflictEpoch: null,
+              }
+              assertSafetyOpen()
+              await applyResolved(controlStore, { putRejoin: record }, newPublishID())
+              requestKeySaved = true
+              ownedRecoveryBuffers.set(record.id, { requestKey, candidate: record.candidate })
+              inFlightEntries = ledgerBefore
+              assertLive()
+              assertSafetyOpen()
+              pendingRecovery = { position: '', commitDigest: record.digest, pending }
+              await refreshControl()
+              return record
+            } finally {
+              if (!requestKeySaved) requestKey.fill(0)
             }
-            assertLive()
-            assertSafetyOpen()
-            if (pending == null) return null
-            if ('renewalRequired' in pending) return failed('renewal-required')
-            pending = wrapPendingRecovery(boundary, pending)
-            const source = await readLegacyRecoverySource(port)
-            assertSafetyOpen()
-            const ledgerBefore = [
-              ...new Set([
-                ...(inFlightEntries ?? awaitingBootstrap?.entries ?? []),
-                ...(await port.getLedger()),
-                ...(anchorRecoveryPending
-                  ? ((await controlStore.load()).commitOnce?.bodies ?? [])
-                  : []),
-              ]),
-            ]
-            assertSafetyOpen()
-            const { payload } = await frameCommit(pending.commit, [], null)
-            assertSafetyOpen()
-            const record: LegacyRejoinRecord = {
-              id: newPublishID(),
-              stage: 'built',
-              publishID: newPublishID(),
-              expectedHead,
-              payload,
-              payloadDigest: toB64U(sha256(payload)),
-              requestID,
-              request,
-              requestKey,
-              candidate: pending.serialize(),
-              source: { ...source, head: reconciledHead },
-              digest: digestAppliedCommit(pending.commit),
-              epochAfter: pending.epoch,
-              ledgerBefore,
-              conflictEpoch: null,
-            }
-            assertSafetyOpen()
-            await applyResolved(controlStore, { putRejoin: record }, newPublishID())
-            inFlightEntries = ledgerBefore
-            assertLive()
-            assertSafetyOpen()
-            pendingRecovery = { position: '', commitDigest: record.digest, pending }
-            await refreshControl()
-            return record
           })
           if (built == null) continue
           if ('advanced' in built) return built
@@ -4873,8 +4910,10 @@ export function createGroupPeerWithControlWalk<
       retainedRejoin != null &&
       !('format' in retainedRejoin) &&
       mls?.capturedRecovery !== undefined
-    )
+    ) {
+      await runRecovery('consumer')
       return { advanced: false, reenact: [] }
+    }
     assertSafetyOpen()
     if (control != null && (await control.load()).rejoin?.stage === 'refused') {
       await runSerial(async () => {

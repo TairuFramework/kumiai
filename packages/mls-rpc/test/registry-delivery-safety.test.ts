@@ -147,7 +147,6 @@ for (const mode of ['real-mls', 'double'] as const) {
                   target: { targetID: 'hub', topicID: 'commits' },
                   identity: f.identity,
                   entrySlot: createLedgerEntrySlot(),
-                  onConfirmedRecovery: () => {},
                 })
               : createMemoryGroupMLS({
                   groupID,

@@ -38,7 +38,6 @@ for (const damage of ['null', 'unreadable', 'client-state', 'identity'] as const
         target,
         identity: f.identity,
         entrySlot: api.createLedgerEntrySlot(),
-        onConfirmedRecovery: () => {},
       })
       expect(mls.sendAdmission()).toEqual({ epoch: 0, admissible: false, reason: 'stranded' })
       expect(await mls.exportRecoverySecret()).toEqual(secret)
@@ -137,7 +136,6 @@ for (const damage of ['client-state', 'identity'] as const) {
         target: { targetID: 'hub', topicID: 'commit' },
         identity: f.identity,
         entrySlot: api.createLedgerEntrySlot(),
-        onConfirmedRecovery: () => {},
       })
       expect(mls.sendAdmission()).toEqual({ epoch: 0, admissible: true })
       await f.corruptState(key, damage)
@@ -151,7 +149,7 @@ for (const damage of ['client-state', 'identity'] as const) {
   })
 }
 
-test('registry constructor requires a coordinator sink and custom trust derivation before I/O', async () => {
+test('registry constructor requires custom trust derivation before I/O and no unused sink', async () => {
   const groupID = 'consumer-config'
   const f = await createRegistryFixture({ mode: 'real-mls', setup: 'seeded', groupID })
   try {
@@ -168,15 +166,6 @@ test('registry constructor requires a coordinator sink and custom trust derivati
       target: { targetID: 'hub', topicID: 'commit' },
       identity: f.identity,
       entrySlot: api.createLedgerEntrySlot(),
-      onConfirmedRecovery: () => {},
-    }
-    for (const sink of [undefined, null, {}]) {
-      await expect(
-        api.createRegistryGroupMLS({
-          ...params,
-          onConfirmedRecovery: sink as unknown as typeof params.onConfirmedRecovery,
-        }),
-      ).rejects.toThrow(TypeError)
     }
     await expect(
       api.createRegistryGroupMLS({ ...params, recoverySecret: async () => new Uint8Array(32) }),
@@ -210,7 +199,6 @@ for (const fault of ['provider', 'trusted-reader'] as const) {
         target: { targetID: 'hub', topicID: 'commit' },
         identity: f.identity,
         entrySlot: api.createLedgerEntrySlot(),
-        onConfirmedRecovery: () => {},
       })
       const held = await mls.createRecoveryRequest('errors')
       const failure = new Error(`Registry ${fault} unavailable`)
@@ -247,7 +235,6 @@ test('registry sealing binds the actual cursor and safety subscriptions use the 
       target: { targetID: 'hub', topicID: 'commit' },
       identity: f.identity,
       entrySlot: api.createLedgerEntrySlot(),
-      onConfirmedRecovery: () => {},
     })
     expect(mls.sendAdmission()).toEqual({ epoch: 0, admissible: true })
     expect(f.restoreCount(groupID)).toBe(restores)
@@ -299,7 +286,6 @@ test.each(['epoch', 'stranded', 'strand'] as const)(
         target: { targetID: 'hub', topicID: 'commit' },
         identity: f.identity,
         entrySlot: api.createLedgerEntrySlot(),
-        onConfirmedRecovery: () => {},
       })
       const { request } = await mls.createRecoveryRequest('incomplete-capture')
       const control = f.device.groups.ports(key).control
@@ -337,7 +323,6 @@ test('captured sealing releases ownership before signing and retains the capture
       target: { targetID: 'hub', topicID: 'commit' },
       identity: f.identity,
       entrySlot: api.createLedgerEntrySlot(),
-      onConfirmedRecovery: () => {},
     })
     const held = await mls.createRecoveryRequest('release-capture')
     const access = await f.registry.access(groupID)
@@ -416,7 +401,6 @@ test('registry admission follows cold control changes, access opening and extern
       target: { targetID: 'hub', topicID: 'commit' },
       identity: f.identity,
       entrySlot: api.createLedgerEntrySlot(),
-      onConfirmedRecovery: () => {},
     })
     expect(mls.sendAdmission()).toEqual({ epoch: 2, admissible: true })
     expect(f.restoreCount(groupID)).toBe(restores)
@@ -475,7 +459,6 @@ test('registry admission preserves saved safety holds when private state is unav
       target: { targetID: 'hub', topicID: 'commit' },
       identity: f.identity,
       entrySlot: api.createLedgerEntrySlot(),
-      onConfirmedRecovery: () => {},
     })
     expect(mls.sendAdmission()).toEqual({ epoch: 0, admissible: false, reason: 'fork-halted' })
   } finally {
@@ -503,7 +486,6 @@ test('registry admission observes changes between its initial read and construct
       target: { targetID: 'hub', topicID: 'commit' },
       identity: f.identity,
       entrySlot: api.createLedgerEntrySlot(),
-      onConfirmedRecovery: () => {},
     })
     expect(mls.sendAdmission()).toEqual({ epoch: 0, admissible: false, reason: 'stranded' })
   } finally {
@@ -530,7 +512,6 @@ test('registry admission preserves terminal state when private bytes are null', 
       target: { targetID: 'hub', topicID: 'commit' },
       identity: f.identity,
       entrySlot: api.createLedgerEntrySlot(),
-      onConfirmedRecovery: () => {},
     })
     expect(mls.sendAdmission()).toEqual({ epoch: 0, admissible: false, reason: 'terminal' })
     await f.device.groups
@@ -556,7 +537,6 @@ for (const opened of [false, true]) {
         target: { targetID: 'hub', topicID: 'commit' },
         identity: f.identity,
         entrySlot: api.createLedgerEntrySlot(),
-        onConfirmedRecovery: () => {},
       })
       if (opened) expect(await mls.readEpoch()).toBe(0)
       expect(mls.sendAdmission()).toEqual({ epoch: 0, admissible: true })

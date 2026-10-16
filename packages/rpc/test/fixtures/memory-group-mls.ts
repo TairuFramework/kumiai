@@ -1452,19 +1452,19 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
               )
                 throw new TypeError('Captured recovery record association mismatch')
               const info = capturedInfo(reply.sealed, reply.requestID, reply.requestKey, source)
+              if (info === null) return { kind: 'retry' }
               if (
-                info === null ||
                 info.epoch < saved.target.groupInfoEpoch ||
                 (reply.epochFloor !== null && info.epoch < reply.epochFloor)
               )
-                return { kind: 'retry' }
+                return { kind: 'retry', reason: 'target-behind' }
               if (info.epoch === saved.target.groupInfoEpoch)
                 return info.authenticator === toB64U(saved.target.groupInfoAuthenticator)
                   ? {
                       kind: 'head-only',
                       head: validateCaptureHead(info.captureHead),
                     }
-                  : { kind: 'retry' }
+                  : { kind: 'retry', reason: 'capture-authenticator-disagreement' }
               return info.leafTokens?.some(
                 ([did, leaf]) => did === localDID && leaf === held.freshLeaf,
               )

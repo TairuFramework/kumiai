@@ -147,7 +147,7 @@ export async function createCapturedRecoveryFixture() {
           registry: fixture.registry,
           persistence: fixture.device.groups,
         }),
-        createMLS: (current, sink) =>
+        createMLS: (current) =>
           createRegistryGroupMLS({
             registry: fixture.registry,
             key: current,
@@ -155,7 +155,6 @@ export async function createCapturedRecoveryFixture() {
             target,
             identity: realMember.identity,
             entrySlot,
-            onConfirmedRecovery: sink,
           }),
         createPeer: async (current, options) => {
           await hooks.beforePeer?.(current)

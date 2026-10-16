@@ -378,14 +378,13 @@ const registryPeer = await createRegistryPeer({
   recovery,
   target,
   continuation: createRecoveryContinuationPort({ registry, persistence }),
-  createMLS: (current, onConfirmedRecovery) => createRegistryGroupMLS({
+  createMLS: (current) => createRegistryGroupMLS({
     registry,
     key: current,
     recovery,
     target,
     identity,
     entrySlot: createLedgerEntrySlot(),
-    onConfirmedRecovery,
   }),
   createPeer: createPeerForIncarnation,
 })
@@ -421,6 +420,11 @@ Authenticated recapture recognises the exact fresh LeafNode, never identity or i
 A current bound confirmation permits adoption. Later accepted state without that proof produces compact accepted-unadoptable settlement before a fresh leaf-replacing attempt.
 Unconfirmed later leaf absence permits policy-gated discard with cumulative obligations and a durable epoch floor.
 Regressing hub heads remain usable. Stale authenticated epochs preserve the saved attempt. Backoff is capped at 15 seconds.
+Fresh attempts below the durable floor emit `below-epoch-floor`. Recaptures behind saved X or its floor emit `target-behind`.
+Equal-epoch authenticator disagreement emits `capture-authenticator-disagreement`, preserving X without a halt.
+Unanswered or ineligible captures retain their existing generic diagnostics. These reasons grant no floor-lowering authority.
+Request keys transfer to durable ownership only after proven save. Earlier failures zeroise the owned buffer.
+Proven settlement zeroises live owned buffers. Cumulative settlement retains every owed ledger token in its existing single row.
 
 Hub delivery faults never create new durable halts or authorise adverse settlement.
 Own copies use MLS-message recognition and receiver reference checks. Blob failures and unproven negatives remain advisory.
@@ -432,5 +436,5 @@ Fork detection remains deferred to out-of-band peer checkpoints.
 Custom `recoverySecret` requires equivalent `recoverySecretFromTrust` at construction. Missing equivalence throws before requests or hold writes.
 `RecoveryCandidateError`, `RegistryResyncRefusedError`, `RegistryRetiringError`, `RegistryRetireHookError` and `RegistryRecoveryReplacementError` expose actionable failures.
 `SeedAdmissionRefusedError` reports Welcome admission refusal. Existing conflict, uncertainty, movement and safety errors remain exported.
-Unadopted legacy attempts stop without rewriting saved bytes. Manual recovery remains 2.2e, and full registry crypto and leases remain 2.3.
+Unadopted legacy attempts retry with `legacy-recovery-record`, preserving saved bytes. Manual recovery remains 2.2e, and full registry crypto and leases remain 2.3.
 The integration witnesses reconstruct memory persistence. They do not provide phase-6 child-process SIGKILL evidence.

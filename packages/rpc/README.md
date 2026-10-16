@@ -104,6 +104,11 @@ missing-protocol record, but refuses a pending frame under a registered protocol
 to drop a sealed frame behind an earlier pending or sealed frame, because the durable cursor cannot
 record that drop until the earlier frame is settled.
 
+Without `GroupCrypto.pending`, retained event handlers run inside the peer's serial lane.
+Those handlers must return before awaiting `commit()`, `replay()`, `recover()` or `drained()` on the same peer.
+Schedule that follow-up work after the handler returns. The lane is not reentrant.
+Durable pending delivery runs handlers outside that lane.
+
 Durable delivery is off when `GroupCrypto.pending` is absent. Ephemeral events remain best effort;
 directed traffic and anycast requests and replies keep their existing live completion or expiry
 semantics. Log-intent pushes only wake a retained fetch: pushed bytes and positions never become
@@ -344,7 +349,8 @@ Historical halts remain immutable. Fork detection awaits later out-of-band peer 
 `GroupPeerParams.onRecovery` reports `started` and exactly one terminal event (`succeeded` or
 `failed`) for each attempt. The event's `attemptID`, `groupID` and `trigger` (`automatic` or
 `consumer`) stay the same. Failure reasons include `no-responder`, `renewal-required`, `refused`,
-`unconfirmed`, `invalidated`, `deadline`, `bootstrap-failed`, `disposed` and `error`.
+`unconfirmed`, `invalidated`, `deadline`, `bootstrap-failed`, `disposed`, `error`, `below-epoch-floor`,
+`legacy-recovery-record`, `capture-authenticator-disagreement` and `target-behind`.
 `error` includes the thrown value. Success means both the rejoin and ledger
 bootstrap completed. If a rejoin landed but bootstrap failed, a later lane operation can finish it
 and emit `bootstrapped` with that failed attempt's ID. This closes the stranded episode.
@@ -354,6 +360,10 @@ Its `blockingPosition` identifies the blocking source-epoch frame, or is `null` 
 Its `anchorRecovery` records whether anchor recovery held the peer at invalidation.
 Repeated `invalidated` failures with `anchorRecovery: true` and the same non-null `blockingPosition` identify an anchor-gated livelock.
 Captured recovery can reconcile authenticated applied state despite an unwalked source prefix.
+Floor and legacy-record diagnostics preserve saved attempts and retry with backoff capped at 15 seconds.
+`target-behind` identifies an authenticated recapture below X or its durable floor.
+`capture-authenticator-disagreement` identifies unequal authenticators at X's capture epoch. Neither diagnostic halts the peer.
+Failed requests zeroise locally owned keys. Proven attempt saves retain the key until settlement releases its live buffers.
 
 For manual repair of an ordinary strand with valid retained trust and no fork halt, stop the peer and await `drained()`.
 An authorised administrator removes the device's leaf and re-invites it with a fresh key package.

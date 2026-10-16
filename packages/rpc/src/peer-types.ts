@@ -164,6 +164,10 @@ export type StrandObservation = {
 export type RecoveryTrigger = 'automatic' | 'consumer'
 export type RecoveryFailureReason =
   | 'no-responder'
+  | 'below-epoch-floor'
+  | 'legacy-recovery-record'
+  | 'capture-authenticator-disagreement'
+  | 'target-behind'
   | 'renewal-required'
   | 'refused'
   | 'unconfirmed'

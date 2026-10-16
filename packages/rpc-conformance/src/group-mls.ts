@@ -473,7 +473,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           requestKey: fresh.requestKey,
           epochFloor: null,
         }),
-      ).toEqual({ kind: 'retry' })
+      ).toEqual({ kind: 'retry', reason: 'target-behind' })
       expect(record.candidate).toEqual(before)
       expect(s.accepted()).toBe(0)
     })
@@ -591,7 +591,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
       })
       expect(
         await captured.reconcileCapture(record, { ...recapture, epochFloor: pending.epoch }),
-      ).toEqual({ kind: 'retry' })
+      ).toEqual({ kind: 'retry', reason: 'target-behind' })
       for (const changed of [
         { ...record, digest: 'wrong' },
         { ...record, payloadDigest: 'wrong' },
@@ -1992,7 +1992,8 @@ export type ConformanceRecoveryReconciliation<Position extends string = string> 
   | { kind: 'accepted'; epoch: number; leafDigest: string }
   | { kind: 'head-only'; head: Position | null }
   | { kind: 'unapplied-later'; epoch: number; leafDigest: string }
-  | { kind: 'retry' | 'held' }
+  | { kind: 'retry'; reason?: 'target-behind' | 'capture-authenticator-disagreement' }
+  | { kind: 'held' }
 export type ConformanceCapturedPendingRecovery<Position extends string = string> = Omit<
   ConformancePendingRecovery,
   'onAccepted'

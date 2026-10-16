@@ -492,7 +492,7 @@ test('captured recapture authenticates and classifies saved X without another bu
   })
   expect(
     await captured.reconcileCapture(record, { ...recapture, epochFloor: pending.epoch }),
-  ).toEqual({ kind: 'retry' })
+  ).toEqual({ kind: 'retry', reason: 'target-behind' })
   expect(await captured.reconcileCapture(record, { ...recapture, requestID: 'wrong' })).toEqual({
     kind: 'retry',
   })
@@ -699,8 +699,11 @@ test.each([
   const record = capturedRecord(pending, s.request, s.requestKey, s.requestID)
   let responder = s.responder.handle
   let requestTrust = s.source.trust
-  let expected: { kind: string; epoch?: number; leafDigest?: unknown } = { kind: 'retry' }
+  let expected: { kind: string; epoch?: number; leafDigest?: unknown; reason?: string } = {
+    kind: 'retry',
+  }
   if (row === 'authenticator') {
+    expected = { kind: 'retry', reason: 'capture-authenticator-disagreement' }
     responder = await Mls.restoreGroup({
       state: Mls.decodeClientState(Mls.encodeClientState(responder.state)) ?? responder.state,
       credential: responder.credential,

@@ -1,7 +1,6 @@
 import { normalizeDID } from '@kokuin/token'
 import { decodeGroupAnchor, publicMembershipFacts } from '@kumiai/mls'
 import {
-  type ConfirmedRecoveryHandoff,
   type ControlStore,
   controlSafetyHeld,
   type GroupMLS,
@@ -29,12 +28,9 @@ export type RegistryGroupMLSParams = Omit<
   key: GroupKey
   recovery: RecoveryEnvironment
   target: RecoveryRouting
-  onConfirmedRecovery(handoff: ConfirmedRecoveryHandoff): void
 }
 
 export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Promise<GroupMLS> {
-  if (typeof params.onConfirmedRecovery !== 'function')
-    throw new TypeError('Registry recovery requires a confirmed recovery coordinator sink')
   if (params.recoverySecret !== undefined && typeof params.recoverySecretFromTrust !== 'function')
     throw new TypeError('Custom recoverySecret requires recoverySecretFromTrust')
   const capability = registrySafety<GroupTransaction>(params.registry)

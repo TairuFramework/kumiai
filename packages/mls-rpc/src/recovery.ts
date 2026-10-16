@@ -704,16 +704,16 @@ export async function reconcileRecoveryCapture(params: {
   )
   if (!(await verifyOfferedGroupInfo(snapshot.state, info, suite))) return { kind: 'retry' }
   const epoch = Number(info.groupInfo.groupContext.epoch)
+  if (!Number.isSafeInteger(epoch)) return { kind: 'retry' }
   if (
-    !Number.isSafeInteger(epoch) ||
     epoch < record.target.groupInfoEpoch ||
     (reply.epochFloor !== null && epoch < reply.epochFloor)
   )
-    return { kind: 'retry' }
+    return { kind: 'retry', reason: 'target-behind' }
   if (epoch === record.target.groupInfoEpoch)
     return sameBytes(recaptured.groupInfoAuthenticator, record.target.groupInfoAuthenticator)
       ? { kind: 'head-only', head: validateCaptureHead(recaptured.captureHead) }
-      : { kind: 'retry' }
+      : { kind: 'retry', reason: 'capture-authenticator-disagreement' }
   const fresh = leafBytes(
     snapshot.state,
     snapshot.state.ratchetTree[snapshot.state.privatePath.leafIndex * 2],

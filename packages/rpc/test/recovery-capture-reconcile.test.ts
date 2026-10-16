@@ -707,3 +707,159 @@ test.each([false, true])(
     }
   },
 )
+
+test.each(['floor', 'legacy', 'legacy-refused'] as const)(
+  'every floor and legacy retry exposes reason: %s',
+  async (row) => {
+    const { FakeHub } = await import('./fixtures/fake-hub.js')
+    const { makeMLSPeer } = await import('./fixtures/peer.js')
+    const hub = new FakeHub()
+    const secret = new Uint8Array(32).fill(106)
+    const events: Array<unknown> = []
+    const options = {
+      members: ['alice', 'bob'],
+      recovery: { timeoutMs: 50, deadlineMs: 200, getDelayMs: () => 0 },
+    }
+    const alice = makeMLSPeer(hub, 'alice', secret, options)
+    const bob = makeMLSPeer(hub, 'bob', secret, {
+      ...options,
+      onRecovery: (event) => {
+        events.push(event)
+      },
+    })
+    try {
+      await alice.peer.replay()
+      await bob.peer.replay()
+      if (row === 'floor') {
+        await bob.control.apply({ recoveryEpochFloor: 5 }, 'higher-floor')
+      } else {
+        const s = await setup()
+        const { format: _format, ...record } = s.record
+        await bob.control.apply(
+          {
+            putRejoin: {
+              ...record,
+              ...(row === 'legacy-refused'
+                ? { stage: 'refused' as const, refusal: 'policy' as const }
+                : {}),
+              source: {
+                key: record.source.key,
+                epoch: bob.mls.epoch(),
+                authenticator: new Uint8Array(32).fill(1),
+                head: null,
+              },
+              conflictEpoch: null,
+            },
+          },
+          'legacy-X',
+        )
+      }
+      const before = await bob.control.load()
+      vi.useFakeTimers()
+      for (let round = 0; round < 9; round++) {
+        if (round === 0) {
+          const recovering = bob.peer.recover()
+          await vi.advanceTimersByTimeAsync(50)
+          await recovering
+        } else await vi.advanceTimersByTimeAsync(Math.min(1000 * 2 ** (round - 1), 15000))
+        expect(events).toContainEqual(
+          expect.objectContaining({
+            phase: 'failed',
+            reason: row === 'floor' ? 'below-epoch-floor' : 'legacy-recovery-record',
+          }),
+        )
+        expect((await bob.control.load()).rejoin).toEqual(before.rejoin)
+        expect((await bob.control.load()).recoveryEpochFloor).toEqual(before.recoveryEpochFloor)
+        expect((await bob.control.load()).forkHalt).toBeNull()
+        events.length = 0
+      }
+    } finally {
+      await Promise.all([alice.peer.dispose(), bob.peer.dispose()])
+      await Promise.all([alice.peer.drained(), bob.peer.drained()])
+      vi.useRealTimers()
+    }
+  },
+)
+
+test.each(['lower', 'equal-different', 'no-reply', 'ineligible-reply'] as const)(
+  'same epoch disagreement diagnoses without halt and preserves X: %s',
+  async (row) => {
+    const { FakeHub } = await import('./fixtures/fake-hub.js')
+    const { makeMLSPeer } = await import('./fixtures/peer.js')
+    const { createMemoryGroupMLS } = await import('./fixtures/memory-group-mls.js')
+    const { memoryCapturedRecord } = await import('./fixtures/memory-captured-recovery.js')
+    const hub = new FakeHub()
+    const secret = new Uint8Array(32).fill(108)
+    const events: Array<{ phase: string; reason?: string }> = []
+    const options = {
+      epoch: 1,
+      members: ['alice', 'bob'],
+      recovery: { timeoutMs: 50, deadlineMs: 200, getDelayMs: () => 0 },
+    }
+    const alice = makeMLSPeer(hub, 'alice', secret, options)
+    const bob = makeMLSPeer(hub, 'bob', secret, {
+      ...options,
+      onRecovery: (event) => {
+        events.push(event)
+      },
+    })
+    try {
+      await alice.peer.replay()
+      await bob.peer.replay()
+      const captured = bob.mls.capturedRecovery
+      if (captured === undefined) throw new Error('Missing captured port')
+      const held = await bob.mls.createRecoveryRequest('saved-X')
+      const pending = await captured.applyRecovery(
+        await alice.mls.sealGroupInfo(held.request, null),
+        'saved-X',
+        held.requestKey,
+      )
+      if (pending === null || 'renewalRequired' in pending) throw new Error('Missing X')
+      const record = memoryCapturedRecord(pending, held.request, held.requestKey, 'saved-X')
+      await bob.control.apply({ putRejoin: record, recoveryEpochFloor: 1 }, 'save-X')
+      const before = await bob.control.load()
+      const responder = createMemoryGroupMLS({
+        groupID: record.source.key.groupID,
+        localDID: 'alice',
+        members: options.members,
+        recoverySecret: secret,
+        epoch: 0,
+      })
+      if (row === 'equal-different')
+        await responder.adopt(responder.buildCommit(['different-branch']))
+      alice.mls.sealGroupInfo = async (request: Uint8Array, head: LogPosition | null = null) => {
+        if (row === 'no-reply') throw new Error('withheld reply')
+        if (row === 'ineligible-reply') return new Uint8Array([0])
+        return await responder.sealGroupInfo(request, head)
+      }
+      vi.useFakeTimers()
+      const recovering = bob.peer.recover()
+      await vi.advanceTimersByTimeAsync(100)
+      await recovering
+      await vi.advanceTimersByTimeAsync(500_000)
+      const failures = events.filter((event) => event.phase === 'failed')
+      expect(failures.length).toBeGreaterThan(20)
+      expect(
+        failures.every(
+          (event) =>
+            event.reason ===
+            (row === 'lower'
+              ? 'target-behind'
+              : row === 'equal-different'
+                ? 'capture-authenticator-disagreement'
+                : 'unconfirmed'),
+        ),
+      ).toBe(true)
+      const after = await bob.control.load()
+      expect(after.rejoin).toEqual(before.rejoin)
+      expect(after.recoveryEpochFloor).toBe(1)
+      expect(after.settledRejoins).toEqual([])
+      expect(after.forkHalt).toBeNull()
+      expect(bob.mls.epoch()).toBe(1)
+    } finally {
+      await Promise.all([alice.peer.dispose(), bob.peer.dispose()])
+      await Promise.all([alice.peer.drained(), bob.peer.drained()])
+      vi.useRealTimers()
+    }
+  },
+)
