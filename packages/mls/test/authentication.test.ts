@@ -212,3 +212,98 @@ describe('createDIDAuthenticationService — peer4', () => {
     expect(ok).toBe(false)
   })
 })
+
+test('checkpoint signer resolves from the validated device key rather than the DID primary key', async () => {
+  const identity = await createIdentity({
+    keys: [
+      { purpose: 'sig', alg: 'EdDSA' },
+      { purpose: 'sig', alg: 'EdDSA' },
+    ],
+    didMethod: 'peer:4',
+  })
+  const second = identity.keys.filter((key) => key.purpose === 'sig')[1]
+  if (second == null) throw new Error('expected second signing key')
+  const service = createDIDAuthenticationService()
+  expect(await service.validateCredential(makeMLSCredential(identity), second.publicKey)).toBe(true)
+  const {
+    checkpointKeyHash,
+    checkpointSignatureInput,
+    encodeEpochCheckpoint,
+    encodeEpochRosterFact,
+    verifyCheckpointPair,
+  } = await import('../src/index.js')
+  const { toB64U } = await import('@sozai/codec')
+  const hash = toB64U(new Uint8Array(32))
+  const body = {
+    v: 1 as const,
+    type: 'kumiai/checkpoint/v1' as const,
+    groupID: 'device-key-group',
+    genesisHash: hash,
+    ciphersuite: 1,
+    epoch: 0,
+    authHash: hash,
+    parentAuthHash: null,
+    keyHash: checkpointKeyHash(second.publicKey),
+    leafIndex: 0,
+  }
+  const frame = encodeEpochCheckpoint(
+    body,
+    ed25519.sign(checkpointSignatureInput(body), second.privateKey),
+  )
+  const localRosterFact = encodeEpochRosterFact({
+    v: 1,
+    key: { groupID: body.groupID, incarnation: 0 },
+    genesisHash: hash,
+    ciphersuite: 1,
+    epoch: 0,
+    authHash: hash,
+    parentAuthHash: null,
+    confirmedTranscriptHash: '',
+    members: [
+      {
+        signerDID: identity.id,
+        keyHash: body.keyHash,
+        leafIndex: 0,
+        signaturePublicKey: toB64U(second.publicKey),
+      },
+    ],
+    installation: { mutationID: 'device-key-installation', stateVersion: 1 },
+  })
+  expect(await verifyCheckpointPair({ first: frame, second: frame, localRosterFact })).toEqual({
+    kind: 'agreement',
+    epoch: 0,
+    signerDID: identity.id,
+    keyHash: body.keyHash,
+  })
+})
+
+test('local facts reject long-form peer DIDs instead of silently normalising them', async () => {
+  const identity = await createIdentity({
+    keys: [{ purpose: 'sig', alg: 'EdDSA' }],
+    didMethod: 'peer:4',
+  })
+  const { checkpointKeyHash, encodeEpochRosterFact } = await import('../src/index.js')
+  const { toB64U } = await import('@sozai/codec')
+  const hash = toB64U(new Uint8Array(32))
+  expect(() =>
+    encodeEpochRosterFact({
+      v: 1,
+      key: { groupID: 'normalised-group', incarnation: 0 },
+      genesisHash: hash,
+      ciphersuite: 1,
+      epoch: 0,
+      authHash: hash,
+      parentAuthHash: null,
+      confirmedTranscriptHash: '',
+      members: [
+        {
+          signerDID: identity.longForm,
+          keyHash: checkpointKeyHash(identity.publicKey),
+          leafIndex: 0,
+          signaturePublicKey: toB64U(identity.publicKey),
+        },
+      ],
+      installation: { mutationID: 'normalised-installation', stateVersion: 1 },
+    }),
+  ).toThrow()
+})

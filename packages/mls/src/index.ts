@@ -35,6 +35,24 @@ export {
   mintLeafCapability,
   mintTrustedGrant,
 } from './capability.js'
+export { verifyCheckpointPair } from './checkpoint.js'
+export {
+  checkpointAuthHash,
+  checkpointGenesisHash,
+  checkpointKeyHash,
+  checkpointSignatureInput,
+  decodeEpochCheckpoint,
+  decodeEpochRosterFact,
+  encodeEpochCheckpoint,
+  encodeEpochRosterFact,
+} from './checkpoint-codec.js'
+export type {
+  CheckpointComparison,
+  CheckpointKey,
+  CheckpointMember,
+  EpochCheckpointBodyV1,
+  EpochRosterFactV1,
+} from './checkpoint-types.js'
 export {
   type ClientState,
   decodeClientState,
