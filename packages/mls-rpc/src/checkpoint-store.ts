@@ -72,6 +72,7 @@ function validate(record: CheckpointRecord, groupID: string, id: string): void {
     record.key.incarnation < 1 ||
     ![
       'fact',
+      'condition',
       'publication',
       'cursor',
       'coverage',

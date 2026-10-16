@@ -7,10 +7,12 @@ import type { CheckpointService } from '../src/checkpoint-types.js'
 import type { PendingRecovery } from '../src/crypto.js'
 import { PeerDisposedError } from '../src/errors.js'
 import {
+  capturedRecoveryHostMembers,
   checkpointHostMembers,
   createHostBoundary,
   peerHostFields,
   pendingRecoveryHostMembers,
+  recoveryRequestHostParameters,
   wrapPeerHost,
   wrapPendingRecovery,
 } from '../src/host-boundary.js'
@@ -19,6 +21,47 @@ import type { GroupPeerMLSParams, GroupPeerParams } from '../src/peer.js'
 import type { GroupProtocolDefinition } from '../src/protocol.js'
 
 afterEach(() => vi.restoreAllMocks())
+
+test('recovery comparison epoch crosses the host boundary as data', async () => {
+  expect(recoveryRequestHostParameters).toEqual(['data', 'data', 'data'])
+  const createRecoveryRequest = vi.fn(
+    async (_id: string, _deadline?: number, _comparison?: number) => ({
+      request: new Uint8Array([1]),
+      requestKey: new Uint8Array(32),
+    }),
+  )
+  const host = wrapPeerHost(createHostBoundary(), { mls: { createRecoveryRequest } })
+  await host.mls.createRecoveryRequest('comparison', 30000, 12)
+  expect(createRecoveryRequest).toHaveBeenCalledWith('comparison', 30000, 12)
+})
+
+test.each(['checkRosterAbsence', 'sealRosterAbsence'] as const)(
+  'roster absence host operation drains and fences disposal: %s',
+  async (name) => {
+    expect(capturedRecoveryHostMembers).toHaveProperty(name, 'host')
+    const boundary = createHostBoundary()
+    const pause = gate()
+    const callback = vi.fn(async () => {
+      await pause.promise
+      return null
+    })
+    const host = wrapPeerHost(boundary, { mls: { capturedRecovery: { [name]: callback } } })
+    const invoke = Reflect.get(host.mls.capturedRecovery, name) as () => Promise<null>
+    const pending = invoke()
+    boundary.close()
+    let drained = false
+    const draining = boundary.drained(Promise.resolve()).then(() => {
+      drained = true
+    })
+    await Promise.resolve()
+    expect(drained).toBe(false)
+    pause.release()
+    await pending
+    await draining
+    expect(() => invoke()).toThrow(PeerDisposedError)
+    expect(callback).toHaveBeenCalledOnce()
+  },
+)
 
 test.each(Object.keys(checkpointServiceHostMembers))(
   'checkpoint service survives host wrapping: %s',

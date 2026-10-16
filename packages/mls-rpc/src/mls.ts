@@ -34,6 +34,8 @@ import type {
   AdoptionExpected,
   AdoptionWriteFactory,
   AppliedRecovery,
+  AuthenticatedRosterAbsence,
+  CapturedRecoveryPort,
   CommitContext,
   CommitHeader,
   ControlStore,
@@ -75,10 +77,17 @@ import {
   type RecoveryCandidate,
   reconcileRecoveryCapture,
   restoreRecoveryCandidate,
+  verifyRosterAbsence,
 } from './recovery.js'
 import { decodeRecoveryCandidate, encodeRecoveryCandidate } from './recovery-codec.js'
 import type { RegistryRecoverySource } from './registry/types.js'
 import type { RecoveryEnvironment } from './registry/validation.js'
+
+// Bound only by the registry adapter, never by host-supplied dependency data.
+export const registryRosterSealers = new WeakMap<
+  ControlHandleAccess,
+  NonNullable<CapturedRecoveryPort['sealRosterAbsence']>
+>()
 
 export const groupHandleAccess = new WeakMap<GroupMLS, ControlHandleAccess>()
 
@@ -309,6 +318,23 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       captured === undefined || capturedEnvironment === undefined
         ? undefined
         : {
+            async checkRosterAbsence(
+              evidence,
+              requestID,
+              requestKey,
+            ): Promise<AuthenticatedRosterAbsence | null> {
+              const { trust } = await captured.readRecoverySource()
+              return await verifyRosterAbsence({
+                trust,
+                evidence,
+                requestID,
+                requestKey,
+                options: capturedEnvironment.options,
+              })
+            },
+            async sealRosterAbsence(request, captureHead) {
+              return (await registryRosterSealers.get(access)?.(request, captureHead)) ?? null
+            },
             async applyRecovery(sealed, requestID, requestKey) {
               if (controlSafetyHeld(await params.control.load()) !== null) return null
               return await buildRecoveryCandidate({
@@ -575,16 +601,23 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       }
     },
 
-    async createRecoveryRequest(requestID: string, deadlineMs?: number) {
+    async createRecoveryRequest(requestID: string, deadlineMs?: number, comparisonEpoch?: number) {
       if (params.recoveryAdoption !== undefined) {
         const { trust } = await params.recoveryAdoption.readRecoverySource()
-        return await createRecoveryRequestFromTrust({ trust, identity, requestID, deadlineMs })
+        return await createRecoveryRequestFromTrust({
+          trust,
+          identity,
+          requestID,
+          deadlineMs,
+          comparisonEpoch,
+        })
       }
       const { request, ephemeralPrivateKey } = await access.read((group) =>
         createRecoveryRequest({
           group,
           identity,
           requestID,
+          comparisonEpoch,
         }),
       )
       return { request: utf8.encode(request), requestKey: ephemeralPrivateKey }

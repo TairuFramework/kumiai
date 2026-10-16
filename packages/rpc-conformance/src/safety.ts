@@ -7,7 +7,142 @@ import type {
   ConformanceGroupSafetyEvent,
   ConformanceRecoveryUnavailableEvent,
 } from './control-store.js'
+import type { ConformanceGroupMLS } from './group-mls.js'
 import type { ConformanceRegistryFixture, ConformanceRegistryHandle } from './registry-fixture.js'
+
+export type RosterAbsenceScenario = 'absent' | 'present' | 'wrong-key' | 'expired' | 'imported'
+export type RosterAbsenceFixture = {
+  requester: ConformanceGroupMLS
+  responder: ConformanceGroupMLS
+  epoch: number
+  requesterDID: string
+  responderDID: string
+  comparisonEpoch(request: Uint8Array): Promise<number | undefined>
+  invalidateSigner(): void
+  refuseResponder(
+    reason: 'fork-halted' | 'stranded' | 'incomplete' | 'epoch-mismatch',
+  ): Promise<void>
+  snapshot(): Promise<{ attempt: unknown; state: unknown }>
+  close(): Promise<void>
+}
+
+export function testRosterAbsenceConformance(params: {
+  label: string
+  createFixture(scenario?: RosterAbsenceScenario): Promise<RosterAbsenceFixture>
+}): void {
+  describe(`roster absence: ${params.label}`, () => {
+    async function run(
+      fn: (fixture: RosterAbsenceFixture) => Promise<void>,
+      scenario?: RosterAbsenceScenario,
+    ) {
+      const fixture = await params.createFixture(scenario)
+      try {
+        await fn(fixture)
+      } finally {
+        await fixture.close()
+      }
+    }
+    async function proof(fixture: RosterAbsenceFixture, comparisonEpoch = 1) {
+      const requestID = 'roster-absence'
+      const held = await fixture.requester.createRecoveryRequest(
+        requestID,
+        undefined,
+        comparisonEpoch,
+      )
+      const sealed = await fixture.responder.capturedRecovery?.sealRosterAbsence?.(
+        held.request,
+        null,
+      )
+      if (sealed == null) throw new Error('Missing roster absence capability or evidence')
+      const check = fixture.requester.capturedRecovery?.checkRosterAbsence
+      if (check === undefined) throw new Error('Missing roster absence verifier')
+      return { ...held, requestID, sealed, check }
+    }
+    test('request comparison span reaches real and double roster sealers', () =>
+      run(async (fixture) => {
+        const held = await proof(fixture)
+        expect(await fixture.comparisonEpoch(held.request)).toBe(1)
+        const result = await held.check(held.sealed, held.requestID, held.requestKey)
+        expect(result).toMatchObject({
+          requesterDID: fixture.requesterDID,
+          responderDID: fixture.responderDID,
+          epoch: fixture.epoch,
+          captureHead: null,
+          lineage: [{ epoch: 1 }, { epoch: fixture.epoch }],
+        })
+        const narrow = await proof(fixture, fixture.epoch)
+        expect(await fixture.comparisonEpoch(narrow.request)).toBe(fixture.epoch)
+        expect(
+          (await narrow.check(narrow.sealed, narrow.requestID, narrow.requestKey))?.lineage,
+        ).toEqual([{ epoch: fixture.epoch, authHash: expect.any(String) }])
+        await expect(fixture.responder.sealGroupInfo(held.request, null)).rejects.toThrow()
+      }))
+    test('ineligible signer cannot assert absence', () =>
+      run(async (fixture) => {
+        const held = await proof(fixture)
+        fixture.invalidateSigner()
+        expect(await held.check(held.sealed, held.requestID, held.requestKey)).toBeNull()
+      }))
+    test('wrong request cannot assert absence', () =>
+      run(async (fixture) => {
+        const held = await proof(fixture)
+        expect(await held.check(held.sealed, 'another-request', held.requestKey)).toBeNull()
+        const another = await fixture.requester.createRecoveryRequest(held.requestID, undefined, 1)
+        expect(await held.check(held.sealed, held.requestID, another.requestKey)).toBeNull()
+      }))
+    test('changed leaf for present DID never means removed', () =>
+      run(async (fixture) => {
+        const held = await fixture.requester.createRecoveryRequest('changed-leaf', undefined, 1)
+        const seal = fixture.responder.capturedRecovery?.sealRosterAbsence
+        if (seal === undefined) throw new Error('Missing roster absence sealer')
+        expect(await seal(held.request, null)).toBeNull()
+      }, 'present'))
+    test('roster disclosure requires the complete captured head', () =>
+      run(async (fixture) => {
+        const held = await fixture.requester.createRecoveryRequest('wrong-head', undefined, 1)
+        const seal = fixture.responder.capturedRecovery?.sealRosterAbsence
+        if (seal === undefined) throw new Error('Missing roster absence sealer')
+        expect(await seal(held.request, 'different-head')).toBeNull()
+      }))
+    test.each(['fork-halted', 'stranded', 'incomplete', 'epoch-mismatch'] as const)(
+      'roster disclosure refuses an unsafe responder: %s',
+      (reason) =>
+        run(async (fixture) => {
+          const held = await fixture.requester.createRecoveryRequest('unsafe-roster', undefined, 1)
+          await fixture.refuseResponder(reason)
+          const seal = fixture.responder.capturedRecovery?.sealRosterAbsence
+          if (seal === undefined) throw new Error('Missing roster absence sealer')
+          expect(await seal(held.request, null)).toBeNull()
+        }),
+    )
+    test('legacy requests grant no roster disclosure', () =>
+      run(async (fixture) => {
+        const held = await fixture.requester.createRecoveryRequest('legacy-roster')
+        const seal = fixture.responder.capturedRecovery?.sealRosterAbsence
+        if (seal === undefined) throw new Error('Missing roster absence sealer')
+        expect(await seal(held.request, null)).toBeNull()
+      }))
+    test('absence verification cannot mutate recovery attempt', () =>
+      run(async (fixture) => {
+        const held = await proof(fixture)
+        const before = await fixture.snapshot()
+        expect(before.attempt).not.toBeNull()
+        expect(await held.check(held.sealed, held.requestID, held.requestKey)).not.toBeNull()
+        expect(await held.check(new Uint8Array([0]), held.requestID, held.requestKey)).toBeNull()
+        expect(await fixture.snapshot()).toEqual(before)
+      }))
+    test.each(['wrong-key', 'expired', 'imported'] as const)(
+      'former member disclosure requires responder local DID and key history: %s',
+      (scenario) =>
+        run(async (fixture) => {
+          const held = await fixture.requester.createRecoveryRequest('no-history', undefined, 1)
+          const seal = fixture.responder.capturedRecovery?.sealRosterAbsence
+          if (seal === undefined) throw new Error('Missing roster absence sealer')
+          expect(await seal(held.request, null)).toBeNull()
+        }, scenario),
+    )
+  })
+}
 
 export type ConformanceManualRecovery =
   | { mode: 'resync'; targetID: string }

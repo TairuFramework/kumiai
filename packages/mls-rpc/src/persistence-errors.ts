@@ -80,6 +80,7 @@ export class GroupUnavailableError extends Error {
 
 export type RegistryResyncRefusalReason =
   | 'fork-halted'
+  | 'spent-set-corrupt'
   | 'recovery-unavailable'
   | 'malformed'
   | 'unaccepted'

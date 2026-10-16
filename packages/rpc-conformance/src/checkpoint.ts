@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from 'vitest'
 
+import type { ConformanceGroupConditionEvent } from './control-store.js'
 import type { ConformanceForkNotice, ConformanceForkNoticeEvent } from './fork-notice.js'
 import { storageChange } from './group-storage.js'
 import type {
@@ -13,6 +14,14 @@ import type {
 } from './persistence-fixture.js'
 
 export type ConformanceCheckpointRecord =
+  | {
+      kind: 'condition'
+      id: string
+      key: ConformanceGroupKey
+      event: ConformanceGroupConditionEvent
+      active: boolean
+      sealedProof: Uint8Array | null
+    }
   | {
       kind: 'notice-tombstone'
       id: string
@@ -247,6 +256,49 @@ export function testCheckpointStorageConformance<TTx extends ConformanceGroupTra
           },
         )
         expect(await read(fixture)).toEqual(before)
+      } finally {
+        await fixture.close()
+      }
+    })
+
+    test('condition rows preserve diagnostic evidence and sealed proof across reopen', async () => {
+      const fixture = await params.createFixture(groupID)
+      try {
+        const key = { groupID, incarnation: 1 }
+        const record: ConformanceCheckpointRecord = {
+          kind: 'condition',
+          id: 'condition-absence',
+          key,
+          active: true,
+          event: {
+            ...key,
+            id: 'condition-absence',
+            kind: 'not-member',
+            detectedAt: 123,
+            evidence: {
+              responderKeyHash: 'responder-key',
+              epoch: 3,
+              authHash: 'other-branch',
+              observedAt: 123,
+              responderDIDs: ['responder'],
+              responderCount: 1,
+            },
+          },
+          sealedProof: new Uint8Array([0, 128, 255]),
+        }
+        await write(fixture, [record])
+        expect(await read(fixture)).toContainEqual(record)
+        const reopened = await fixture.reopen()
+        await reopened.device.groups.transition(
+          await storageChange(reopened.device.groups, groupID, 'condition-read'),
+          async (stores) => {
+            expect(await stores.checkpoints.load(record.id)).toEqual(record)
+          },
+        )
+        const loaded = (await read(fixture)).find((row) => row.id === record.id)
+        if (loaded?.kind !== 'condition') throw new Error('Missing condition')
+        loaded.sealedProof?.fill(9)
+        expect(await read(fixture)).toContainEqual(record)
       } finally {
         await fixture.close()
       }

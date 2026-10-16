@@ -1,5 +1,7 @@
 import { confirmationTag, decodeClientState, encodeClientState, restoreGroup } from '@kumiai/mls'
 import {
+  type AuthenticatedRosterAbsence,
+  type CapturedRecoveryPort,
   type GroupCrypto,
   type GroupMLS,
   isAppFrameStorageError,
@@ -7,6 +9,8 @@ import {
   type PendingAppFrame,
 } from '@kumiai/rpc'
 import {
+  type ConformanceAuthenticatedRosterAbsence,
+  type ConformanceCapturedRecoveryPort,
   type ConformanceCryptoMember,
   type ConformanceGroupMLS,
   type ConformanceMLSMember,
@@ -44,6 +48,18 @@ import { createTransactionalStore } from './fixtures/transactional-access.js'
 // in the package graph — so this is what keeps them honest: the REAL port types must be assignable
 // to them, checked by the compiler rather than by eye. This package is the one place that may
 // depend on both.
+const _absenceIsAPort = (
+  proof: AuthenticatedRosterAbsence,
+): ConformanceAuthenticatedRosterAbsence => proof
+const _absenceCoversPort = (
+  proof: ConformanceAuthenticatedRosterAbsence,
+): AuthenticatedRosterAbsence => proof
+const _capturedIsAPort = (
+  port: CapturedRecoveryPort,
+): ConformanceCapturedRecoveryPort<LogPosition> => port
+const _capturedCoversPort = (
+  port: ConformanceCapturedRecoveryPort<LogPosition>,
+): CapturedRecoveryPort => port
 const _cryptoIsAPort = (crypto: GroupCrypto): ConformanceCryptoMember['crypto'] => crypto
 const _mlsIsAPort = (mls: GroupMLS): ConformanceMLSMember['mls'] => mls
 

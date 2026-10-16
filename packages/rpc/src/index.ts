@@ -60,9 +60,12 @@ export {
   controlSafetyHeld,
   type ForkHalt,
   forkEventID,
+  type GroupCondition,
+  type GroupConditionEvent,
   type GroupForkEvidence,
   type GroupSafetyEvent,
   isHardControlHold,
+  type NotMemberEvidence,
   type RecoveryUnavailableEvent,
   recoveryUnavailableEventID,
   type SafetyHold,
@@ -167,7 +170,9 @@ export {
   AppOutboxFullError,
   ControlSafetyImmutableError,
   ControlWriteNotCommittedError,
+  type GroupConditionErrorParams,
   GroupControlUnsettledError,
+  GroupNotMemberError,
   GroupSafetyHeldError,
   OperationOutcomeError,
   type OperationOutcomeErrorParams,
@@ -175,6 +180,7 @@ export {
   PeerDisposedError,
   PeerRemovedError,
   SendNotAdmissibleError,
+  SpentSetCorruptError,
   StorageOutcomeUnknownError,
 } from './errors.js'
 export {
@@ -249,6 +255,7 @@ export {
 export type { CommitPrefix } from './recovery-capture.js'
 export {
   type AcceptedRejoinSettlement,
+  type AuthenticatedRosterAbsence,
   assignRecoverySwitchMutationID,
   type CapturedAppliedRecovery,
   type CapturedPendingRecovery,

@@ -1,6 +1,5 @@
 import { normalizeDID, type OwnIdentity } from '@kokuin/token'
 import {
-  type AuthenticatedRosterAbsence,
   assertRecoveryBinding,
   authenticateRecoveryReply as authenticateTrustedReply,
   type CapturedRecoveryGroupInfo,
@@ -27,6 +26,7 @@ import {
   verifyRosterAbsence as verifyTrustedRosterAbsence,
 } from '@kumiai/mls'
 import {
+  type AuthenticatedRosterAbsence,
   type CapturedAppliedRecovery,
   type CapturedPendingRecovery,
   type CapturedRecapture,

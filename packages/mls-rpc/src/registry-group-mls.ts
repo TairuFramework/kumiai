@@ -1,6 +1,13 @@
 import { normalizeDID } from '@kokuin/token'
-import { decodeGroupAnchor, publicMembershipFacts } from '@kumiai/mls'
 import {
+  decodeClientState,
+  decodeGroupAnchor,
+  publicMembershipFacts,
+  restoreGroup,
+  sealRosterAbsenceReply,
+} from '@kumiai/mls'
+import {
+  type CheckpointFactRecord,
   type ControlStore,
   controlSafetyHeld,
   type GroupMLS,
@@ -8,8 +15,14 @@ import {
 } from '@kumiai/rpc'
 
 import type { ControlHandleAccess } from './access.js'
+import { readCheckpointCoverage } from './checkpoint-store.js'
 import type { AccountedGroupObservation, EntryReads } from './entry-capability.js'
-import { createGroupMLS, type GroupMLSParams, type RecoveryRouting } from './mls.js'
+import {
+  createGroupMLS,
+  type GroupMLSParams,
+  type RecoveryRouting,
+  registryRosterSealers,
+} from './mls.js'
 import { DisplacedGroupHandleError, GroupUnavailableError } from './persistence-errors.js'
 import type { GroupKey, GroupTransaction } from './persistence-types.js'
 import { accountedRuntime } from './registry/runtime-facts.js'
@@ -227,6 +240,68 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
         },
       ),
   }
+  registryRosterSealers.set(lazy, (request, captureHead) =>
+    capability.entry.read(key.groupID, async (reads) => {
+      const source = await readSource(reads)
+      const control = await reads.control(key.incarnation)
+      if (controlSafetyHeld(control) !== null || capability.held(key) !== null) return null
+      if (
+        source.identity === null ||
+        (control.cursor?.position ?? null) !== captureHead ||
+        (control.cursor !== null && control.cursor.epoch !== source.identity.epoch) ||
+        control.cursor?.stranded === true ||
+        control.cursor?.incomplete === true ||
+        control.strand !== null
+      )
+        return null
+      const record = await reads.state(key.incarnation)
+      if (record === null || record.deleted || record.state === null) return null
+      const state = decodeClientState(record.state)
+      if (state == null) return null
+      const records = await reads.checkpoints()
+      const coverage = readCheckpointCoverage(key.groupID, records)
+      const metadata = records.find((row) => row.kind === 'coverage' && row.id === 'coverage')
+      const ids = new Set(
+        metadata?.kind === 'coverage' ? metadata.installations.map((row) => row.id) : [],
+      )
+      const facts = records
+        .filter(
+          (row): row is CheckpointFactRecord =>
+            row.kind === 'fact' &&
+            ids.has(row.id) &&
+            coverage.retained.some(
+              (range) =>
+                range.key.incarnation === row.key.incarnation &&
+                range.from <= row.epoch &&
+                range.through >= row.epoch,
+            ),
+        )
+        .sort((a, b) => a.epoch - b.epoch)
+      const lineage = facts
+        .filter((fact) => fact.key.incarnation === key.incarnation)
+        .flatMap((fact) =>
+          records.flatMap((row) =>
+            row.kind === 'publication' && row.factID === fact.id && row.frame !== null
+              ? [row.frame.slice()]
+              : [],
+          ),
+        )
+      const group = await restoreGroup({
+        state,
+        credential: record.credential,
+        ledgerEntries: record.ledger,
+        options: params.recovery.options,
+      })
+      return await sealRosterAbsenceReply({
+        group,
+        identity: params.identity,
+        request: new TextDecoder().decode(request),
+        captureHead,
+        retainedRosterFacts: facts.flatMap((row) => (row.kind === 'fact' ? [row.canonical] : [])),
+        lineage,
+      })
+    }),
+  )
   return createGroupMLS({
     ...params,
     access: lazy,

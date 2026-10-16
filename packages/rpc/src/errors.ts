@@ -1,6 +1,36 @@
 import type { SafetyHold } from './control/safety.js'
-import type { Outcome } from './control/types.js'
+import type { GroupKey, Outcome } from './control/types.js'
 import type { SendAdmission } from './crypto.js'
+
+export type GroupConditionErrorParams = { key: GroupKey; cause?: unknown }
+
+export class GroupNotMemberError extends Error {
+  override name = 'GroupNotMemberError'
+  #key: GroupKey
+
+  constructor(params: GroupConditionErrorParams) {
+    super('Group membership absence diagnosed', { cause: params.cause })
+    this.#key = { ...params.key }
+  }
+
+  get key(): GroupKey {
+    return { ...this.#key }
+  }
+}
+
+export class SpentSetCorruptError extends Error {
+  override name = 'SpentSetCorruptError'
+  #key: GroupKey
+
+  constructor(params: GroupConditionErrorParams) {
+    super('Group spent set is corrupt', { cause: params.cause })
+    this.#key = { ...params.key }
+  }
+
+  get key(): GroupKey {
+    return { ...this.#key }
+  }
+}
 
 /**
  * A peer that has been disposed refused an operation. A caller branches on this: retry against a

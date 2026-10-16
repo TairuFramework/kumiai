@@ -18,6 +18,12 @@ export type HostBoundary = {
 }
 
 type MemberKind = 'host' | 'data' | 'port' | 'core'
+type HostDataArguments<TArgs extends Array<unknown>> = { [TKey in keyof TArgs]-?: 'data' }
+export const recoveryRequestHostParameters = [
+  'data',
+  'data',
+  'data',
+] as const satisfies HostDataArguments<Parameters<GroupMLS['createRecoveryRequest']>>
 type HostMembers<TValue extends object, TCore extends keyof TValue = never> = {
   [TKey in keyof TValue]-?: TKey extends TCore
     ? 'data'
@@ -52,6 +58,8 @@ export const capturedPendingRecoveryHostMembers = {
 } as const satisfies HostMembers<CapturedPendingRecovery>
 
 export const capturedRecoveryHostMembers = {
+  checkRosterAbsence: 'host',
+  sealRosterAbsence: 'host',
   applyRecovery: 'host',
   restoreRecovery: 'host',
   reconcileCapture: 'host',

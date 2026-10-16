@@ -138,7 +138,9 @@ function storageSafety(open: () => ConformanceControlHost) {
         welcome: null,
       }
     },
-    hold: async (reason: 'fork-halted' | 'recovery-unavailable') => {
+    hold: async (reason: 'fork-halted' | 'spent-set-corrupt' | 'recovery-unavailable') => {
+      if (reason === 'spent-set-corrupt')
+        throw new Error('Spent condition requires checkpoint storage')
       await host.control.apply(
         reason === 'fork-halted'
           ? {
@@ -328,7 +330,9 @@ async function memorySafetyHost(did: string) {
       host
         .readEvidence()
         .then((evidence) => host.saveBuilt(intent, slot, evidence.source, 'save-built')),
-    hold: async (reason: 'fork-halted' | 'recovery-unavailable') => {
+    hold: async (reason: 'fork-halted' | 'spent-set-corrupt' | 'recovery-unavailable') => {
+      if (reason === 'spent-set-corrupt')
+        throw new Error('Spent condition requires checkpoint storage')
       const key = host.control.key
       await host.control.apply(
         reason === 'fork-halted'

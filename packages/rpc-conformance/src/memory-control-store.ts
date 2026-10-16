@@ -9,6 +9,7 @@ import type {
   ConformanceControlStore,
   ConformanceEpochIdentity,
   ConformanceForkHalt,
+  ConformanceGroupCondition,
   ConformanceGroupKey,
   ConformanceRecoveryUnavailableEvent,
   ConformanceSafetyHold,
@@ -141,8 +142,12 @@ function equal(left: unknown, right: unknown): boolean {
   )
 }
 
-export function controlSafetyHeld(snapshot: ConformanceControlSnapshot): ConformanceSafetyHold {
+export function controlSafetyHeld(
+  snapshot: ConformanceControlSnapshot,
+  condition?: ConformanceGroupCondition | null,
+): ConformanceSafetyHold {
   if (snapshot.forkHalt !== null) return 'fork-halted'
+  if (condition === 'spent-set-corrupt') return 'spent-set-corrupt'
   if (snapshot.recoveryUnavailable !== null) return 'recovery-unavailable'
   return null
 }

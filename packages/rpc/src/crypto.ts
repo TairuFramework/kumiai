@@ -422,6 +422,7 @@ export type SendAdmission =
         | 'terminal'
         | 'backup-restored'
         | 'recovery-unavailable'
+        | 'spent-set-corrupt'
     }
 
 /** The signed fields of a recovery ask that verified. */
@@ -546,6 +547,7 @@ export type GroupMLS = {
   createRecoveryRequest(
     requestID: string,
     deadlineMs?: number,
+    comparisonEpoch?: number,
   ): Promise<{ request: Uint8Array; requestKey: Uint8Array }>
   /**
    * Answer another member's request: verify the token, check the requester still holds a leaf in

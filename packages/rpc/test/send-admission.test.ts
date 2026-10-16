@@ -11,6 +11,7 @@ const reasons = [
   'terminal',
   'backup-restored',
   'recovery-unavailable',
+  'spent-set-corrupt',
 ] as const
 
 test('send admission accepts every variant', () => {
@@ -22,6 +23,7 @@ test('send admission accepts every variant', () => {
   assertType<SendAdmission>({ epoch: 7, admissible: false, reason: 'terminal' })
   assertType<SendAdmission>({ epoch: 7, admissible: false, reason: 'backup-restored' })
   assertType<SendAdmission>({ epoch: 7, admissible: false, reason: 'recovery-unavailable' })
+  assertType<SendAdmission>({ epoch: 7, admissible: false, reason: 'spent-set-corrupt' })
 })
 
 test('admission error accepts and exposes the complete reason union', () => {

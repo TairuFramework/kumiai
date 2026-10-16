@@ -1,3 +1,4 @@
+import type { GroupConditionEvent } from './control/safety.js'
 import type { GroupKey } from './control/types.js'
 import type { ForkNotice, ForkNoticeEvent } from './fork-notice.js'
 
@@ -45,6 +46,14 @@ export type CheckpointService = CheckpointPort & {
 }
 
 export type CheckpointRecord =
+  | {
+      kind: 'condition'
+      id: string
+      key: GroupKey
+      event: GroupConditionEvent
+      active: boolean
+      sealedProof: Uint8Array | null
+    }
   | {
       kind: 'notice-tombstone'
       id: string

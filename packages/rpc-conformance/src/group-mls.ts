@@ -125,6 +125,7 @@ export type ConformanceSendAdmission =
         | 'terminal'
         | 'backup-restored'
         | 'recovery-unavailable'
+        | 'spent-set-corrupt'
     }
 export type ConformanceProcessCommitResult = {
   applied: boolean
@@ -179,7 +180,9 @@ export type ConformanceRosterEntry = {
 export type ConformanceGroupMLS<Position extends string = string> = {
   ownCommitDigest(commit: Uint8Array): string | null
   /** Core incarnation-bound sink. Replays an existing hold synchronously and returns an unsubscribe. */
-  onSafetyHold?: (latch: (reason: 'fork-halted' | 'recovery-unavailable') => void) => () => void
+  onSafetyHold?: (
+    latch: (reason: 'fork-halted' | 'spent-set-corrupt' | 'recovery-unavailable') => void,
+  ) => () => void
   capturedRecovery?: ConformanceCapturedRecoveryPort<Position>
   signRecoveryConfirmation: (binding: {
     groupID: string
@@ -223,6 +226,7 @@ export type ConformanceGroupMLS<Position extends string = string> = {
   createRecoveryRequest: (
     requestID: string,
     deadlineMs?: number,
+    comparisonEpoch?: number,
   ) => Promise<{ request: Uint8Array; requestKey: Uint8Array }>
   sealGroupInfo: {
     (request: Uint8Array): Promise<Uint8Array>
@@ -2026,6 +2030,19 @@ export type ConformanceCapturedAppliedRecovery<Position extends string = string>
   | ConformanceCapturedPendingRecovery<Position>
   | { renewalRequired: true }
   | null
+export type ConformanceAuthenticatedRosterAbsence = {
+  groupID: string
+  requesterDID: string
+  requestID: string
+  epoch: number
+  captureHead: string | null
+  groupInfoAuthenticator: Uint8Array
+  confirmedTranscriptHash: string
+  responderDID: string
+  responderKeyHash: string
+  lineage: Array<{ epoch: number; authHash: string }>
+  evidence: Uint8Array
+}
 export type ConformanceCapturedRecoveryPort<Position extends string = string> = {
   applyRecovery(
     sealed: Uint8Array,
@@ -2040,6 +2057,12 @@ export type ConformanceCapturedRecoveryPort<Position extends string = string> = 
     record: ConformanceCapturedRejoinRecord<Position>,
     reply: ConformanceCapturedRecapture,
   ): Promise<ConformanceRecoveryReconciliation<Position>>
+  checkRosterAbsence?(
+    evidence: Uint8Array,
+    requestID: string,
+    requestKey: Uint8Array,
+  ): Promise<ConformanceAuthenticatedRosterAbsence | null>
+  sealRosterAbsence?(request: Uint8Array, captureHead: Position | null): Promise<Uint8Array | null>
   sealGroupInfo(request: Uint8Array, captureHead: Position | null): Promise<Uint8Array>
 }
 export type ConformanceConfirmedRecoveryHandoff<Position extends string = string> = {

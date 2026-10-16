@@ -35,7 +35,26 @@ export type ConformanceControlSearchPort<Position extends string = string> = {
 }
 export type ConformanceControlSlot<Position extends string = string> =
   ConformanceBuiltCommit<Position> & { opID: string }
-export type ConformanceSafetyHold = 'fork-halted' | 'recovery-unavailable' | null
+export type ConformanceGroupCondition = 'not-member' | 'spent-set-corrupt'
+export type ConformanceNotMemberEvidence = {
+  responderKeyHash: string
+  epoch: number
+  authHash: string
+  observedAt: number
+  responderDIDs: Array<string>
+  responderCount: number
+}
+export type ConformanceGroupConditionEvent = ConformanceGroupKey & {
+  id: string
+  kind: ConformanceGroupCondition
+  detectedAt: number
+  evidence: ConformanceNotMemberEvidence | null
+}
+export type ConformanceSafetyHold =
+  | 'fork-halted'
+  | 'spent-set-corrupt'
+  | 'recovery-unavailable'
+  | null
 
 export type ConformanceGroupForkEvidence =
   | {

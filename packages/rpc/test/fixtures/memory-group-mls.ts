@@ -38,6 +38,7 @@ import {
 } from '../../src/errors.js'
 import { encodeHandshakeFrame, HANDSHAKE_KIND } from '../../src/handshake.js'
 import {
+  type AuthenticatedRosterAbsence,
   type CapturedPendingRecovery,
   type CapturedRecoveryPort,
   copyRecoverySource,
@@ -421,6 +422,9 @@ type MemoryRecoveryRequest = {
   requestID: string
   requesterDID: string
   ephemeralKey: string
+  requesterKeyHash?: string
+  comparisonEpoch?: number
+  signature?: string
 }
 
 /**
@@ -433,6 +437,7 @@ const SEAL_DOMAIN = {
   groupInfo: 'kumiai/memory-recovery/group-info/v1',
   ledger: 'kumiai/memory-recovery/ledger/v1',
   verdict: 'kumiai/memory-recovery/verdict/v1',
+  roster: 'kumiai/memory-recovery/roster/v1',
 } as const
 
 function isRecoveryVerdict(value: unknown): value is RecoveryVerdict {
@@ -592,6 +597,16 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   let recoveryAuthenticator: string | undefined
   let epochIdentity: string | undefined
   let receiveState: string | undefined
+  type RosterFact = {
+    epoch: number
+    authHash: string
+    members: Array<{ did: string; keyHash: string }>
+    supersededAt: number | null
+  }
+  let rosterHistory: Array<RosterFact> = []
+  const identityKeyHash = (did: string) => toB64U(sha256(fromUTF(did)))
+  const rosterMAC = (value: unknown) =>
+    toB64U(hmac(sha256, recoverySecret, fromUTF(JSON.stringify(value))))
   let receiveHistory = new Map<number, { identity: string; state: string }>()
   const retainKeysForEpochs = options.retainKeysForEpochs ?? 4
   let epoch = options.epoch ?? 0
@@ -843,9 +858,32 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       history.set(epoch, { identity: toB64U(authenticator()), state: receiveState })
       while (history.size > retainKeysForEpochs) history.delete(Math.min(...history.keys()))
     }
+    const retained = rosterHistory.filter(
+      (fact) =>
+        fact.epoch < epoch &&
+        (fact.supersededAt === null || Date.now() - fact.supersededAt < 604800000),
+    )
+    const current = {
+      epoch,
+      authHash: toB64U(authenticator()),
+      members: occupiedDIDs().map((did) => ({ did, keyHash: identityKeyHash(did) })),
+      supersededAt: value.epoch > epoch ? Date.now() : null,
+    }
+    retained.push(current)
+    if (value.epoch > epoch)
+      retained.push({
+        epoch: value.epoch,
+        authHash: String(value.epochIdentity),
+        members: (value.slots as Array<[number, string]>).map(([, did]) => ({
+          did,
+          keyHash: identityKeyHash(did),
+        })),
+        supersededAt: null,
+      })
     return fromUTF(
       JSON.stringify({
         ...fields,
+        rosterHistory: retained.slice(-256),
         groupID,
         ownerDID: localDID,
         receiveState: value.epoch === epoch ? receiveState : undefined,
@@ -869,6 +907,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     })
   const restoreState = (state: Uint8Array): void => {
     const value = JSON.parse(toUTF(state)) as {
+      rosterHistory?: Array<RosterFact>
       groupID?: string
       ownerDID?: string
       receiveState?: string
@@ -891,6 +930,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     for (const [id, token] of value.bodies) {
       if (entryDigest(token) !== id) throw new Error('Memory ledger body ID mismatch')
     }
+    rosterHistory = value.rosterHistory ?? []
     slots = new Map(value.slots)
     ledger = value.ledger
     ledgerHead = value.ledgerHead
@@ -1513,6 +1553,115 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
               throw error
             }
           },
+          async checkRosterAbsence(evidence, requestID, requestKey) {
+            const source = validateSource(await capturedDependencies.readSource())
+            if (evidence.length > 786432) return null
+            const opened = openReply(SEAL_DOMAIN.roster, evidence, requestID, requestKey)
+            if (opened === null) return null
+            try {
+              const { signature, ...proof } = JSON.parse(toUTF(opened)) as Omit<
+                AuthenticatedRosterAbsence,
+                'groupInfoAuthenticator' | 'evidence'
+              > & { groupInfoAuthenticator: string; members: Array<string>; signature: string }
+              const trust = source.trust as {
+                members: Array<string>
+                revoked?: Array<string>
+                controller?: string
+                signerControllers?: Record<string, string>
+              }
+              if (
+                signature !== rosterMAC(proof) ||
+                proof.groupID !== groupID ||
+                proof.requestID !== requestID ||
+                proof.requesterDID !== localDID ||
+                proof.members.includes(localDID ?? '') ||
+                !trust.members.includes(proof.responderDID) ||
+                trust.revoked?.includes(proof.responderDID) === true ||
+                (trust.controller !== undefined &&
+                  trust.signerControllers?.[proof.responderDID] !== trust.controller) ||
+                proof.lineage.length === 0 ||
+                proof.lineage.at(-1)?.epoch !== proof.epoch ||
+                proof.lineage.at(-1)?.authHash !== proof.groupInfoAuthenticator
+              )
+                return null
+              const { members: _members, ...result } = proof
+              return {
+                ...result,
+                groupInfoAuthenticator: fromB64U(String(proof.groupInfoAuthenticator)),
+                evidence: evidence.slice(),
+              }
+            } catch {
+              return null
+            }
+          },
+          sealRosterAbsence: (request, head) =>
+            serialise(async () => {
+              const control = (await hostDB.snapshot(storageID)).control
+              if (
+                controlSafetyHeld(control) !== null ||
+                (control.cursor?.position ?? null) !== head ||
+                (control.cursor !== null && control.cursor.epoch !== epoch) ||
+                control.cursor?.stranded === true ||
+                control.cursor?.incomplete === true ||
+                control.strand !== null
+              )
+                return null
+              const to = authorize(request, 'sealRosterAbsence', false)
+              const { signature, ...body } = to
+              if (
+                signature !== rosterMAC(body) ||
+                !Number.isSafeInteger(to.comparisonEpoch) ||
+                (to.comparisonEpoch ?? -1) < 0 ||
+                (to.comparisonEpoch ?? Number.POSITIVE_INFINITY) > epoch ||
+                slotHas(to.requesterDID)
+              )
+                return null
+              const history = (
+                JSON.parse(toUTF(serializeState())) as { rosterHistory: Array<RosterFact> }
+              ).rosterHistory
+              if (
+                !history.some(
+                  (fact) =>
+                    fact.epoch < epoch &&
+                    fact.members.some(
+                      (member) =>
+                        member.did === to.requesterDID && member.keyHash === to.requesterKeyHash,
+                    ),
+                )
+              )
+                return null
+              let lineage = history
+                .filter((fact) => fact.epoch >= (to.comparisonEpoch ?? Number.POSITIVE_INFINITY))
+                .map(({ epoch, authHash }) => ({ epoch, authHash }))
+              if (
+                lineage.at(-1)?.epoch !== epoch ||
+                lineage.some((fact, i) => i > 0 && fact.epoch !== (lineage[i - 1]?.epoch ?? 0) + 1)
+              )
+                return null
+              for (;;) {
+                const proof = {
+                  groupID,
+                  requesterDID: to.requesterDID,
+                  requestID: to.requestID,
+                  epoch,
+                  captureHead: head,
+                  groupInfoAuthenticator: toB64U(authenticator()),
+                  confirmedTranscriptHash: toB64U(authenticator()),
+                  responderDID: localDID,
+                  responderKeyHash: identityKeyHash(localDID ?? ''),
+                  lineage,
+                  members: occupiedDIDs(),
+                }
+                const sealed = sealReply(
+                  SEAL_DOMAIN.roster,
+                  to,
+                  fromUTF(JSON.stringify({ ...proof, signature: rosterMAC(proof) })),
+                )
+                if (sealed.length <= 786432) return sealed
+                if (lineage.length <= 1) return null
+                lineage = lineage.slice(1)
+              }
+            }),
           sealGroupInfo: (request, head) => sealInfo(request, head),
         }
   async function sealInfo(
@@ -2067,6 +2216,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         commits += 1
         epochIdentity = nextIdentity
         freshLeaves = nextFreshLeaves
+        rosterHistory = (JSON.parse(toUTF(state)) as { rosterHistory: Array<RosterFact> })
+          .rosterHistory
         return { applied: true, advanced: !removed, epochBefore, epochAfter }
       }),
     async isLedgerComplete() {
@@ -2110,18 +2261,26 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
           throw error
         }
       }),
-    async createRecoveryRequest(requestID: string) {
+    async createRecoveryRequest(requestID: string, _deadlineMs?: number, comparisonEpoch?: number) {
       const requesterDID = localDID ?? ''
       const privateKey = x25519.utils.randomSecretKey()
+      if (
+        comparisonEpoch !== undefined &&
+        (!Number.isSafeInteger(comparisonEpoch) || comparisonEpoch < 0)
+      )
+        throw new TypeError('Invalid comparison epoch')
+      const body = {
+        groupID,
+        requestID,
+        requesterDID,
+        ephemeralKey: toB64U(x25519.getPublicKey(privateKey)),
+        requesterKeyHash: identityKeyHash(requesterDID),
+        ...(comparisonEpoch === undefined ? {} : { comparisonEpoch }),
+      }
       return {
         requestKey: privateKey,
         request: fromUTF(
-          JSON.stringify({
-            groupID,
-            requestID,
-            requesterDID,
-            ephemeralKey: toB64U(x25519.getPublicKey(privateKey)),
-          } satisfies MemoryRecoveryRequest),
+          JSON.stringify({ ...body, signature: rosterMAC(body) } satisfies MemoryRecoveryRequest),
         ),
       }
     },

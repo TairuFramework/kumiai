@@ -1,6 +1,16 @@
 import { confirmationTag, decodeClientState, encodeClientState } from '@kumiai/mls'
-import { isAppFrameStorageError, type PendingAppFrame } from '@kumiai/rpc'
 import {
+  type AuthenticatedRosterAbsence,
+  type CapturedRecoveryPort,
+  type GroupMLS,
+  isAppFrameStorageError,
+  type LogPosition,
+  type PendingAppFrame,
+} from '@kumiai/rpc'
+import {
+  type ConformanceAuthenticatedRosterAbsence,
+  type ConformanceCapturedRecoveryPort,
+  type ConformanceGroupMLS,
   testGroupCryptoConformance,
   testGroupMLSConformance,
   testPendingGroupCryptoConformance,
@@ -32,6 +42,21 @@ import {
  * The same contracts as `ports-conformance.test.ts`, over a host that restores a fresh handle for
  * every mutation and open and publishes only after its conditional write commits.
  */
+
+const _mlsIsAPort = (mls: GroupMLS): ConformanceGroupMLS<LogPosition> => mls
+const _mlsCoversPort = (mls: ConformanceGroupMLS<LogPosition>): GroupMLS => mls
+const _absenceIsAPort = (
+  proof: AuthenticatedRosterAbsence,
+): ConformanceAuthenticatedRosterAbsence => proof
+const _absenceCoversPort = (
+  proof: ConformanceAuthenticatedRosterAbsence,
+): AuthenticatedRosterAbsence => proof
+const _capturedIsAPort = (
+  port: CapturedRecoveryPort,
+): ConformanceCapturedRecoveryPort<LogPosition> => port
+const _capturedCoversPort = (
+  port: ConformanceCapturedRecoveryPort<LogPosition>,
+): CapturedRecoveryPort => port
 
 function hinted(access: HandleAccess, offset: () => number): HandleAccess {
   return { ...access, epoch: () => access.epoch() + offset() }

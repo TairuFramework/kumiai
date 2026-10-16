@@ -78,11 +78,14 @@ export {
   type ConformanceExternalResponse,
   type ConformanceFirstValidCommit,
   type ConformanceForkHalt,
+  type ConformanceGroupCondition,
+  type ConformanceGroupConditionEvent,
   type ConformanceGroupForkEvidence,
   type ConformanceGroupKey,
   type ConformanceGroupSafetyEvent,
   type ConformanceHostBuilt,
   type ConformanceLegacyRejoinRecord,
+  type ConformanceNotMemberEvidence,
   type ConformanceOperation,
   type ConformanceOperationRequest,
   type ConformanceOutcome,
@@ -118,6 +121,7 @@ export {
 } from './group-crypto.js'
 export {
   type ConformanceAdoptionWriteFactory,
+  type ConformanceAuthenticatedRosterAbsence,
   type ConformanceCapturedAppliedRecovery,
   type ConformanceCapturedPendingRecovery,
   type ConformanceCapturedRecapture,
@@ -166,5 +170,8 @@ export * from './registry-fixture.js'
 export {
   type ConformanceGroupSafety,
   type ConformanceManualRecovery,
+  type RosterAbsenceFixture,
+  type RosterAbsenceScenario,
   runGroupSafetyContract,
+  testRosterAbsenceConformance,
 } from './safety.js'

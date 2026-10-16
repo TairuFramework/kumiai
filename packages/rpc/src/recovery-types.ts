@@ -79,7 +79,29 @@ export type CapturedPendingRecovery = Omit<LegacyPendingRecovery, 'onAccepted'> 
   ): Promise<void>
 }
 export type CapturedAppliedRecovery = CapturedPendingRecovery | { renewalRequired: true } | null
+export type AuthenticatedRosterAbsence = {
+  groupID: string
+  requesterDID: string
+  requestID: string
+  epoch: number
+  captureHead: string | null
+  groupInfoAuthenticator: Uint8Array
+  confirmedTranscriptHash: string
+  responderDID: string
+  responderKeyHash: string
+  lineage: Array<{ epoch: number; authHash: string }>
+  evidence: Uint8Array
+}
 export type CapturedRecoveryPort = {
+  checkRosterAbsence?(
+    evidence: Uint8Array,
+    requestID: string,
+    requestKey: Uint8Array,
+  ): Promise<AuthenticatedRosterAbsence | null>
+  sealRosterAbsence?(
+    request: Uint8Array,
+    captureHead: LogPosition | null,
+  ): Promise<Uint8Array | null>
   applyRecovery(
     sealed: Uint8Array,
     requestID: string,
