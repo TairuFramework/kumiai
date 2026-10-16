@@ -121,6 +121,40 @@ describe('canonical checkpoints', () => {
     expect(frame).toEqual(rawFrame(bytes, signature))
   })
 
+  test.each(['bodyBytes', 'signature'] as const)(
+    'decoded %s mutations preserve the Buffer-backed frame',
+    (field) => {
+      const frame = signed()
+      const backing = Buffer.alloc(frame.length + 16, 0xa5)
+      const view = backing.subarray(7, 7 + frame.length)
+      view.set(frame)
+      const original = new Uint8Array(backing)
+      const decoded = decodeEpochCheckpoint(view)
+
+      decoded[field].fill(0)
+
+      expect(new Uint8Array(backing)).toEqual(original)
+      expect(decoded[field].constructor).toBe(Uint8Array)
+    },
+  )
+
+  test.each(['bodyBytes', 'signature'] as const)(
+    'Buffer-backed frame mutations preserve decoded %s',
+    (field) => {
+      const frame = signed()
+      const backing = Buffer.alloc(frame.length + 16, 0xa5)
+      const view = backing.subarray(7, 7 + frame.length)
+      view.set(frame)
+      const decoded = decodeEpochCheckpoint(view)
+      const original = new Uint8Array(decoded[field])
+
+      view.fill(0)
+
+      expect(decoded[field]).toEqual(original)
+      expect(decoded[field].constructor).toBe(Uint8Array)
+    },
+  )
+
   test('frame bound includes every header byte', () => {
     const initial = signed()
     const value = body({ groupID: 'g'.repeat(4096 - initial.length + 5) })

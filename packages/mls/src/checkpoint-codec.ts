@@ -216,7 +216,7 @@ export function decodeEpochCheckpoint(frame: Uint8Array): {
   const length = view.getUint32(2)
   const bodyLength = view.getUint32(6)
   if (length !== frame.length - 6 || bodyLength !== frame.length - 74) reject()
-  const bodyBytes = frame.slice(10, 10 + bodyLength)
+  const bodyBytes = new Uint8Array(frame.subarray(10, 10 + bodyLength))
   const body = validateBody(parse(bodyBytes))
-  return { body, bodyBytes, signature: frame.slice(10 + bodyLength) }
+  return { body, bodyBytes, signature: new Uint8Array(frame.subarray(10 + bodyLength)) }
 }
