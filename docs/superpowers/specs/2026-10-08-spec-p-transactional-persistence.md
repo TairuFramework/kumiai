@@ -330,9 +330,17 @@ Advise apps against disposal/deletion on first evidence. Another responder DID o
 App policy owns disposal, deletion and re-invitation. Neither silence nor an ineligible reply proves removal.
 Use 'no-reply' when nothing was received and 'no-eligible-responder' when replies arrived but none was eligible.
 
-Recovery requests sign comparisonEpoch: the open split E for fork recovery, otherwise the newest retained epoch.
-Return only signed lineage frames from that epoch through offered F, inclusively. Never append older frames or silently truncate required evidence.
-Keep complete replies within 786432 bytes. If F < comparisonEpoch or required frames are unavailable, no lineage exception is authorised.
+Recovery requests sign comparisonEpoch. comparisonEpoch is the LOWER bound of the requested lineage span.
+The requester sends split E when a fork notice is open, otherwise its OLDEST retained epoch.
+The responder sends its signed lineage frames for epochs in [max(comparisonEpoch, its oldest retained), F].
+Keep complete replies within 786432 bytes, keeping the frames nearest F when truncating to that bound.
+F's frame is always included in a qualifying lineage reply. An empty interval or unavailable F frame grants no qualifying lineage proof.
+The requester compares at the newest common retained epoch inside the received span.
+Absence diagnosis (R6) needs any common epoch, with the existing lineage-relative freshness and absence checks.
+Fork-floor authority (R2/R7) still needs the E frame in the span and every existing notice/signer/MLS transcript predicate.
+Trimming E or lacking any common epoch cannot grant the corresponding authority. No input causes new signing.
+T0-I1 supersedes the earlier R9 M-b newest-retained default and complete-requested-span requirement.
+This lower-bound meaning and bounded suffix apply to ordinary lineage-bearing recovery and former-member roster replies.
 Rendezvous disclosure includes DID, ephemeral key and comparisonEpoch. comparisonEpoch is cleartext, visible to the hub and subscribers.
 Legacy requests without comparisonEpoch retain ordinary recovery, without lineage-exception authority.
 
@@ -1440,14 +1448,18 @@ Reuse signed-request ephemeral-key sealing and group/requester/requestID AAD fra
 Sign group/request/head/authenticator/tree/ledger/lineage digests. Refold the authenticated complete role ledger from genesis.
 Payload: `u32(tokenLength) || UTF8(token) || u32(GroupInfoLength) || GroupInfo || u32(ledgerLength) || encodedLedgerTokens || encodedCheckpointList`.
 The checkpoint list is `u32(count)` followed by `u32(length) || frame`, at most 256 frames of at most 4096 bytes each.
-Require full consumption, contiguous parentAuthHash links and the reply's signing key/current offered authenticator binding.
-The complete frame, including sealing overhead, stays within 786432 bytes. Overflow/missing lineage grants no qualifying absence proof or exception.
+Require full consumption, contiguous parentAuthHash links within the returned span and the reply's signing key/current offered authenticator binding.
+The complete frame, including sealing overhead, stays within 786432 bytes. Trim older lineage frames first, preserving the frames nearest F.
+Never truncate the signed public tree or complete authenticated ledger. If those required fields plus F's frame cannot fit, no qualifying reply exists.
+A bounded suffix can qualify for absence at a common epoch without E. Missing E never grants fork-floor authority.
 Extract confirmedTranscriptHash only from verified GroupInfo.groupContext, never an unsigned field or checkpoint assertion.
 Roster replies cannot enter candidate-building GroupInfo, ledger-only or confirmation consumers. Transmit no historical roster facts.
 A present DID with a changed leaf is not absent. An obsolete incarnation with that DID can remain pending.
 
 Real GroupMLS adapter dependencies privately bind authoriseForkRecovery, readInstalledRecoveryLineage and checkForkRecoveryCapture to the registered coordinator.
 The lineage reader takes `{comparisonEpoch, throughEpoch}` and reads installed signed frames under the bound owner snapshot.
+Treat comparisonEpoch as the signed lower bound. Clamp to the responder's oldest retained epoch.
+When trimming under the complete-reply bound, retain the frames nearest throughEpoch.
 Ordinary sealCapturedGroupInfo receives those frames alongside public state/head/ledger. No reply causes signing.
 `checkForkRecoveryCapture({attempt, reply})` enforces E-lineage and transcript checks before settlement and every Y apply/restore/recapture.
 Registry construction supplies these dependencies and excludes them from host parameters. Hosts cannot replace private authority through object fields.
@@ -1822,7 +1834,8 @@ Keep each meaningful existing case. Replace cases tied solely to removed mechani
 | | bounded transport/storage | Separate checkpoint/commit heads and cursors, identical authorize gates, subscribe-before-drain, retained fetch, exact retry, deadlines/jitter and rate/receive budgets. Current included in 256; supersession age and count prune even unacknowledged evidence. No roster truncation or replay clock refresh. |
 | | notices and journal reports | Material-only coalescing/quiet close, local clocks, ack/history and partial summaries. Prospective own IDs/other counters, zero ephemeral rows. Unknown ancestry reports unknown/partial without delaying authenticated switch. Real/double report and retirement seams. |
 | roster absence / 2,3 | disclosure and complete proof | Historical DID AND key gate, never-seen/expired silence, bounded requestID dedupe/budgets. Bind request/head/tree/complete ledger/lineage. Changed leaf with present DID is never absence. No secret/message or historical roster disclosure. Real/double and restart rows. |
-| | bounded signed span | Reject comparisonEpoch tampering/unsafe values and cross-domain/spliced replies. Exact inclusive requested span, total reply <=786432 bytes including overhead, never silent truncation. Large-group six-frame reply fits while full history exceeds bound. |
+| | bounded signed span | Reject comparisonEpoch tampering/unsafe values and cross-domain/spliced replies. Select [max(comparisonEpoch, responder oldest retained), F]. Keep total reply <=786432 bytes including overhead by trimming older lineage frames, retaining those nearest F and always F's frame. Large-group full history exceeds the bound; its bounded suffix verifies without truncating public tree/ledger. Compare the newest common retained epoch in the suffix. Missing E refuses fork-floor authority even when common-epoch absence qualifies. |
+| | no-open-notice 20/12 diagnosis | Requester installed through 20 with no open notice signs its OLDEST retained epoch. Eligible former-member responder on the different branch at 12 returns the bounded retained span through 12. Newest common retained epoch comparison verifies unequal lineage and own-DID absence: surface not-member, keep retries running and X/floor unchanged. No fork-floor authority follows from this diagnosis alone. Real/double and restart rows. |
 | | lineage-relative diagnosis | Advanced losing device at 20, continuing branch at 12, split 10: verified unequal lineage permits not-member. Older/equal same-lineage proof refuses. Fresh losing-branch absence only diagnoses, retries continue; later install/head-only/re-anchor clears active condition and preserves evidence. No new admission refusal. |
 | | status and app policy | Defensive responder keyHash/epoch/observedAt/DIDs/count; retrying:true with optional pendingReason. Distinguish no-reply/no-eligible-responder. Events coalesce per new evidence. Disposal/deletion remains app policy, never terminal continuation authority. |
 | fork recovery / 2,3 | saved X and no-X | Eligible non-equivocating open E testimony plus same reply key's matching E checkpoint/pre-E roster and MLS lineage/transcript. Settle built/published/confirmed/adopted-incomplete X to superseded-branch with exact sealed history, never not-accepted. Union obligations and persist bound Y intent atomically, or no-X intent without invented settlement. |
@@ -1842,7 +1855,7 @@ Keep each meaningful existing case. Replace cases tied solely to removed mechani
 | | cross-group ordinary Welcome (r16 decision) | Concurrent Welcomes name one ordinary source/ref. Exactly one group installs/burns it, including COMMIT ambiguity; loser installs nothing. Retired winner cannot make the key reusable. |
 | | device cleanup retirement (r16 decision) | Install/burn, fail hub cleanup, retire/tombstone, reconstruct. Cleanup-capable adapter retries to confirmed removal; local key never returns. Current hub records unsupported/expiry residual. |
 | | lifetime/tombstone admission | every installation appends once. Rollback spends nothing. Delete/reopen keeps set. Unspent Welcome below an abandoned incarnation's epoch can create the next incarnation. Receipt-only replay never installs. |
-| | total database loss (r15 decision) | Lose group/spent state and all ordinary/last-resort private records together. Exact/alternate old Welcomes cannot decrypt/install, despite retained signing identity and hub copies. Retained-trust resync or manual fresh invitation succeeds; absent trust permits only the latter. Separately surviving key stores violate/refuse the provider-scope contract. |
+| | total database loss (r15 decision) | Lose group/spent state and all ordinary/last-resort private records together. Exact/alternate old Welcomes cannot decrypt/install, despite retained signing identity and hub copies. For same-group admission/reconstruction, retained-trust resync or manual fresh invitation succeeds; absent trust permits only fresh invitation. Already admitted successor retirement remains an exit. Separately surviving key stores violate/refuse the provider-scope contract. |
 | | declared backup restore/participants (r16 decision) | Restore an older snapshot, declare before startup. All groups hold durable/ephemeral sends across restart; discard/rotate restored ordinary and retained last-resort keys. Only fresh-leaf external resync switches each group once and enables sends. Missing old leaf refuses. Declare commits restore-work once; restart resumes registered participants/stages, rejects foreign providers and deletes work only after completion. Test revocation failure/residual. |
 | | restore outbox/crash (r16 decision) | All restored entries, including certified obligations, fail with database-restored events retaining data. Mid-write rollback exposes none; committed events replay until ack. Crash during declaration/invalidation/holds keeps startup blocked. No restored publish/reseal. Undeclared rollback is explicitly outside the guarantee. |
 | | failed-outbox event | switch atomically fails each unproven old entry/status and persists incarnation-abandoned event. Restart replays same ID/data until ack. No automatic reseal. Certified entries remain published. |
@@ -1946,6 +1959,10 @@ ambiguity/external seams and automatic non-fork stranded resync remain.
 - r24 (2026-10-16, DN1-DN5, R1-R10 and A1-A4): detection-only in-band checkpoints replace out-of-band deferral and checkpoint halts.
   R1 explicitly departs from approved design Goal 3/section 4: not-member is non-terminal. R6 makes freshness lineage-relative.
   R8 preserves admission and clears diagnosis on install/head-only reconcile/re-anchor. R9 adds evidence counts/pendingReason and signed bounded comparison spans.
+  T0-I1 amends R9 M-b: comparisonEpoch is a lower bound, using open split E or otherwise the oldest retained epoch.
+  Responders clamp to their retained range and trim older frames, keeping those nearest F within 786432 bytes and always F in qualifying replies.
+  Absence compares the newest common retained epoch in the received span. Fork-floor authority still requires E and all R2/R7 predicates.
+  The no-open-notice 20/12 witness diagnoses absence without changing X/floor. T0-M1 confines invitation-only total loss to same-group admission, preserving successor retirement.
   R2 adds superseded-branch cumulative settlement and sealed exact-X history. R7 scopes effective E to bound Y and checks every capture's MLS transcript.
   R10 requires registry-owned lineage/private authority through real adapters. R5 requires real/double witnesses, restart rows and exhaustive host boundaries.
   DN1/R3 persist exact targets and notice overrides, restrict current moves, preserve holds and add successor retirement/tombstones.
