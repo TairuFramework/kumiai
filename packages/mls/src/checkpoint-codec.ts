@@ -50,7 +50,16 @@ function object(value: unknown, fields: Array<string>): Record<string, unknown> 
 }
 
 function text(value: unknown, empty = false): asserts value is string {
-  if (typeof value !== 'string' || (!empty && value.length === 0) || !value.isWellFormed()) reject()
+  if (typeof value !== 'string' || (!empty && value.length === 0)) reject()
+  for (let index = 0; index < value.length; index++) {
+    const unit = value.charCodeAt(index)
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(++index)
+      if (!(next >= 0xdc00 && next <= 0xdfff)) reject()
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      reject()
+    }
+  }
 }
 
 function integer(value: unknown, max = Number.MAX_SAFE_INTEGER): asserts value is number {

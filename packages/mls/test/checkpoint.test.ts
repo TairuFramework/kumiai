@@ -231,6 +231,11 @@ describe('canonical checkpoints', () => {
     { parentAuthHash: 'bad' },
     { signerDID: alice.id },
     { groupID: '\ud800' },
+    { groupID: '\udfff' },
+    { groupID: 'prefix\ud800suffix' },
+    { groupID: 'prefix\udfff suffix' },
+    { groupID: '\ud800\ud800' },
+    { groupID: '\udfff\ud800' },
     { groupID: '' },
   ])('rejects invalid body fields %j', (changes) => {
     const value = { ...body(), ...changes }
@@ -239,6 +244,17 @@ describe('canonical checkpoints', () => {
       encodeEpochCheckpoint(value as EpochCheckpointBodyV1, new Uint8Array(64)),
     ).toThrow()
   })
+
+  test.each(['\ud800\udc00', '\udbff\udfff', 'prefix\ud83d\ude00suffix'])(
+    'preserves valid surrogate pairs in groupID %j',
+    (groupID) => {
+      const value = body({ groupID })
+      const frame = encodeEpochCheckpoint(value, new Uint8Array(64))
+      expect(decodeEpochCheckpoint(frame).body.groupID).toBe(groupID)
+      const roster = fact({ key: { groupID, incarnation: 0 } })
+      expect(decodeEpochRosterFact(encodeEpochRosterFact(roster)).key.groupID).toBe(groupID)
+    },
+  )
 
   test.each(['duplicate', 'extra', 'space', 'utf8', 'surrogate', 'bom'])(
     'rejects noncanonical %s JSON',
