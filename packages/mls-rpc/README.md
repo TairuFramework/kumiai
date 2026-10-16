@@ -81,7 +81,7 @@ Simple access forwards this key to source reads and adoption writes.
 `createGroupMLS` requires the same keyed `control` store and an identity-only `readRecoverySource` callback.
 The callback returns `AdoptionExpected`, including a nullable identity, without trust or lifetime metadata.
 Use `createRegistryGroupMLS` for captured recovery with retained trust and registry adoption.
-Plain construction preserves ordinary operations and legacy recovery without `recoveryAdoption`.
+Plain construction preserves ordinary operations and the explicit legacy recovery path without `recoveryAdoption`.
 
 ### A host's own `HandleAccess`
 
@@ -349,7 +349,8 @@ Identical field reapplication preserves the original body and does not recreate 
 `AppOutbox.ackEvent` rejects stored safety events with `TypeError`. Absent IDs are no-ops.
 
 Registry mutation, replacement, adoption and direct crypto refuse either safety reason with `GroupSafetyHeldError`.
-Peers observe committed fields on control refresh or restart. Immediate registry admission wiring into MLS and live peers belongs to 2.2d.
+Registry safety sinks immediately update MLS admission and hold live peers before durable writes complete.
+Restart loads committed fields before network work.
 Already opened handlers, stored outcomes/events, committed Welcome delivery and existing live certified settlement remain serviceable.
 Restart publication of frozen settlement under a safety hold remains a 2.3 obligation.
 
@@ -360,4 +361,68 @@ Neither Welcome nor GroupInfo reconstructs the spent set. Ordinary readmission r
 Manual re-invite after lost spent trust requires a new successor group with a new groupID. This recovery belongs to 2.2e.
 
 A validated latch survives failed or ambiguous writes in the current process. Only proven commits survive restart.
-A crash before durable writing can lose one-shot below-cursor or host-reported evidence.
+A crash before durable writing can lose volatile host evidence.
+
+
+## Captured registry recovery
+
+`createRegistryGroupMLS` constructs asynchronously from retained trust and stored identity, without restoring private MLS state.
+Missing or corrupt private state permits recovery. Missing or unreadable retained trust produces `recovery-unavailable` and requires manual re-invite.
+The public `RecoverySource<TTrust>` and `ResyncProof` types come from `@kumiai/rpc`.
+`RegistryRecoverySource` narrows trust to `GroupRecoveryTrust`. `RegistrySwitchWrite` restricts the incarnation switch write.
+
+```ts
+const registryPeer = await createRegistryPeer({
+  registry,
+  key,
+  recovery,
+  target,
+  continuation: createRecoveryContinuationPort({ registry, persistence }),
+  createMLS: (current, onConfirmedRecovery) => createRegistryGroupMLS({
+    registry,
+    key: current,
+    recovery,
+    target,
+    identity,
+    entrySlot: createLedgerEntrySlot(),
+    onConfirmedRecovery,
+  }),
+  createPeer: createPeerForIncarnation,
+})
+await registryPeer.ready
+```
+
+The host's `createPeerForIncarnation(key, options)` supplies the actual incarnation's control, crypto, anchor, cursor and outbox ports.
+It forwards `options.mls`, `recoveryOnly`, `onConfirmedRecovery`, `settleAcceptedRecovery`, both reconciliation callbacks, `continuation` and `completion` into `createGroupPeer`.
+`onConfirmedRecovery` requires `settleAcceptedRecovery`. Direct construction without the settlement callback throws `TypeError`.
+The coordinator supplies both callbacks and waits for source completion and drainage before restoring the raw candidate.
+It never retains the host-bound pending proxy.
+
+`createRecoverySwitchFactory` uses the saved `switchMutationID`. `toRegistrySwitchWrite` accepts only the adopted source record and destination cursor.
+A `RegistrySourceMovedError` permits a fresh-counter retry of the same identity, trust, target, key and switch ID.
+Uncertain saved-ID proof resolves before source movement. Local rollback preserves remotely accepted X and all source obligations.
+`createRecoveryContinuationPort` discovers the installed continuation after destination epoch advancement and settles source operations idempotently.
+Bootstrap verifies the destination ledger before computing missing reenact tokens. Source outcomes and owed Welcomes remain accessible after retirement.
+
+Captured replies use version 2 and `kumiai/mls/recovery/v2` / `kumiai/mls/recovery-aad/v2`.
+The attestation binds the exact capture head and committed epoch authenticator. Ledger-only replies retain version 1.
+Candidate v3 (`kumiai/recovery-candidate/v3`) saves the authenticated reply, immutable origin, target, search origin and existing confirmation tuple.
+ClientState codec v2 and ordinary control journals retain their formats.
+
+Authenticated recapture recognises the exact fresh LeafNode, never identity or index alone.
+A current bound confirmation permits adoption. Later accepted state without that proof produces compact accepted-unadoptable settlement before a fresh leaf-replacing attempt.
+Unconfirmed later leaf absence permits policy-gated discard with cumulative obligations and a durable epoch floor.
+Regressing hub heads remain usable. Stale authenticated epochs preserve the saved attempt. Backoff is capped at 15 seconds.
+
+Hub delivery faults never create new durable halts or authorise adverse settlement.
+Own copies use MLS-message recognition and receiver reference checks. Blob failures and unproven negatives remain advisory.
+Only host reports and genuine local invariants retain halt authority. Existing persisted halts and legacy record holds remain immutable.
+Origin-authorised signers removed after origin retain attestation authority, including possible signed floor inflation.
+This signer-authority residual lies outside the hub threat model. Busy responders can also cause accepted-unadoptable churn.
+Fork detection remains deferred to out-of-band peer checkpoints.
+
+Custom `recoverySecret` requires equivalent `recoverySecretFromTrust` at construction. Missing equivalence throws before requests or hold writes.
+`RecoveryCandidateError`, `RegistryResyncRefusedError`, `RegistryRetiringError`, `RegistryRetireHookError` and `RegistryRecoveryReplacementError` expose actionable failures.
+`SeedAdmissionRefusedError` reports Welcome admission refusal. Existing conflict, uncertainty, movement and safety errors remain exported.
+Unadopted legacy attempts stop without rewriting saved bytes. Manual recovery remains 2.2e, and full registry crypto and leases remain 2.3.
+The integration witnesses reconstruct memory persistence. They do not provide phase-6 child-process SIGKILL evidence.

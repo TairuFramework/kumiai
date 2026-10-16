@@ -23,6 +23,7 @@ export type {
   ControlAdoptionPort,
   ForkHalt,
   GroupSafetyEvent,
+  RecoverySource,
   RecoveryUnavailableEvent,
   SafetyHold,
 } from '@kumiai/rpc'
@@ -90,7 +91,14 @@ export {
   OutboxReplacementError,
   PersistencePhaseError,
   ReentrantOwnershipError,
+  RegistryRecoveryReplacementError,
+  type RegistryResyncRefusalReason,
+  RegistryResyncRefusedError,
+  RegistryRetireHookError,
+  RegistryRetiringError,
   RegistrySourceMovedError,
+  type SeedAdmissionRefusalReason,
+  SeedAdmissionRefusedError,
   StorageOutcomeUnknownError,
 } from './persistence-errors.js'
 export type {
@@ -147,6 +155,7 @@ export {
   createRecoveryRequestFromTrust,
   deriveRecoverySecretFromTrust,
   openRecoveryVerdictFromTrust,
+  RecoveryCandidateError,
   restoreRecoveryCandidate,
 } from './recovery.js'
 export { createRecoveryContinuationPort } from './registry/continuation.js'

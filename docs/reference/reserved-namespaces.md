@@ -64,12 +64,19 @@ reserved prefix and a host must not collide with them.
 | --- | --- | --- |
 | `kumiai/topic/v1` | `packages/broadcast/src/topic.ts:5` (`TOPIC_INFO_PREFIX`) | HKDF `info` prefix inside `deriveTopicID` |
 | `kumiai/mls/ledger-head/v1` | `packages/mls/src/head.ts:14` (`DOMAIN`) | Ledger-head domain separator |
-| `kumiai/mls/recovery/v1` | `packages/mls/src/recovery.ts:73` | Recovery HPKE `info` |
-| `kumiai/mls/recovery-aad/v1` | `packages/mls/src/recovery.ts:74` | Recovery AAD domain |
+| `kumiai/mls/recovery/v2` | `packages/mls/src/recovery.ts` | Captured GroupInfo HPKE `info` |
+| `kumiai/mls/recovery-aad/v2` | `packages/mls/src/recovery.ts` | Captured GroupInfo AAD domain |
 | `kumiai/mls/recovery-ledger/v1` | `packages/mls/src/recovery.ts:80` | Recovery-ledger HPKE `info` |
 | `kumiai/mls/recovery-verdict/v1` | `packages/mls/src/recovery-verdict.ts` | Recovery-verdict HPKE `info` |
 | `kumiai/mls/recovery-verdict-aad/v1` | `packages/mls/src/recovery-verdict.ts` | Recovery-verdict AAD domain |
 | `kumiai/mls/recovery-ledger-aad/v1` | `packages/mls/src/recovery.ts:81` | Recovery-ledger AAD domain |
+
+Captured GroupInfo replies use wire version 2. Their signature binds `captureHead`, committed epoch authenticator and exact GroupInfo digest.
+The head is explicit null or an opaque nonempty string of at most 64 JavaScript characters.
+Legacy GroupInfo v1 domains remain reserved for compatibility. New captured recovery refuses those replies.
+Ledger-only and recovery-verdict replies retain their v1 domains.
+The at-rest candidate codec uses `kumiai/recovery-candidate/v3`, preserving the authenticated reply and immutable recovery origin.
+ClientState codec v2, ordinary control journals and commit-frame version remain unchanged.
 
 > `kumiai/topic/v1` was previously documented as a topic label. It is not one — it is the HKDF `info`
 > prefix that *every* topic derivation is built on, one level below the labels in the first table.

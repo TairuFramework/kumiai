@@ -214,16 +214,55 @@ ambiguous state-free `control.apply` through `lastMutation()`, pausing until rea
 outcome in the current process. `outcomes()` reads durable results; `ack(id)` removes one after the
 host handles it. Operation deadlines start at `enqueuedAt`, so restarting does not extend them.
 Any unsettled operation with `revokes: true` holds retained app sends. The peer retains the newest
-64 epochs of applied commits and external responses for replay and fork detection.
+64 epochs of applied commits and external responses for replay and confirmation.
 
 `deliverWelcome(obligation)` resolves when the delivery transport durably accepts the complete
 artifact. Delivery is at least once and independent of local adoption; an obligation survives a
 rejoin. Hosts must make repeated delivery safe.
 
-Recovery uses a durable rejoin record with its exact payload, serialised candidate, explicit
-request key and stages through confirmed adoption. Restart restores that record, verifies the
-source and confirmation, and co-commits adoption with control. Encrypt the request key and
-candidate at rest.
+Captured recovery uses `RejoinRecord` (format 2), reply v2 and candidate codec v3.
+The durable record saves exact payload, publish ID, request key, candidate, source, target and authenticated capture before publication.
+`RecoverySource<TTrust>` and `ResyncProof` are portable contracts. Ordinary `readRecoverySource()` returns identity-only `AdoptionExpected`.
+Registry hosts use the concrete adapters in `@kumiai/mls-rpc`.
+
+The responder captures a committed MLS snapshot and complete reconciled log prefix together.
+`captureHead` is explicit null for an empty prefix, or an opaque nonempty string of at most 64 JavaScript characters.
+The signed reply binds this head and the committed epoch authenticator.
+Initial `expectedHead` equals `captureHead`. Capture, target and search origin remain immutable.
+Only authenticated recapture can refresh `expectedHead`, including a lower head.
+Encrypt the request key and candidate at rest.
+
+Authenticated applied state decides whether saved attempt X was accepted. Log search supplies confirmation hints.
+Same capture epoch and authenticator retries identical bytes, ID and candidate at the recaptured head.
+A later epoch containing X's exact fresh cryptographic LeafNode proves acceptance. Identity or leaf index alone never suffices.
+Adoption still requires bound confirmation at X's saved position and epoch.
+Otherwise, one transition clears X and stores compact `accepted-unadoptable` facts with cumulative owed ledger tokens.
+A fresh attempt replaces X's sole identity leaf under normal admission policy.
+Later leaf absence permits policy-gated replacement of unconfirmed X, preserving obligations as `not-accepted` settlement.
+Confirmed X retains accepted facts even after later removal.
+Its settlement keeps X's saved `epochAfter` and own leaf digest. The floor advances to the authenticated recaptured epoch.
+
+`recoveryEpochFloor` stores the highest authenticated capture epoch through first save, settlement, discard and restart.
+Head ordering never rejects authenticated recapture. Stale epochs preserve X and retry, with backoff capped at 15 seconds.
+Settlement omits retired request keys, candidates and payloads. Owned secrets are zeroised after proven commit.
+At most one cumulative settlement remains per source incarnation.
+Busy groups can repeatedly accept attempts then advance before confirmation. This remains a liveness residual.
+
+Hub drops, delays, replays, tampering, junk and unknown versions mean non-delivery.
+They never authorise durable safety holds, adverse settlement or deletion of owed work.
+Re-encoded no-entry commits ignore the blob. Named-entry recognition uses the receiver's MLS and reference-validation predicate.
+Failed copy recognition preserves the saved slot and unknown acceptance. Ordinary retries reuse exact saved bytes at a fresh head.
+Only refusal of the authenticated commit itself authorises a terminal negative verdict. Blob-negative verdicts remain advisory through replay and caches.
+
+The registry coordinator drains source callbacks and peer work before restoring the raw pending candidate and switching incarnations.
+`RecoveryContinuationPort` retains the adopted record in source storage while the destination bootstraps, even after destination epoch advancement.
+`RecoveryCompletion` settles accepted source operations as unknown once, then records missing reenact tokens after destination ledger verification.
+Source outcomes, history and owed Welcomes remain serviceable. Destination state receives no source ratchets, applied rows, anchors or app cursors.
+
+Unadopted legacy records retain every byte under unsupported-version policy until manual recovery support.
+Installed legacy continuations require independent installation proof. New captured attempts use automatic/null-authorisation records.
+Manual recovery remains deferred to 2.2e. Full registry crypto, leases and batching remain 2.3.
+These tests prove phase-2 memory reconstruction. Child-process SIGKILL evidence belongs to phase 6.
 
 For an authenticated Welcome newer than held state, stop and drain the peer before replacing the
 group. The host's `seed({replace: true})` compare-and-sets the stored version and, in one root
@@ -262,14 +301,14 @@ Stored outcomes/events, opened-record restoration, committed Welcome delivery an
 Restart publication of frozen settlement under a safety hold remains a 2.3 obligation.
 
 Peers latch self-detected evidence and held port refusals immediately.
-Registry/host committed fields reach peers through control refresh or restart. Immediate registry admission wiring into consumers belongs to 2.2d.
+Registry safety sinks synchronously hold live consumers before durable writes finish. Restart loads committed safety fields before network work.
 `GroupSafety.events(key)` in `@kumiai/mls-rpc` supplies the complete durable safety history until acknowledged.
 Its `ackEvent(key, id)` leaves safety fields intact. `AppOutbox.ackEvent` rejects stored safety events and ignores absent IDs.
 
 Optional `onSafetyEvent` fires at most once for this peer's matching halt after proven persistence, outside locks.
 It contains callback failures and promises no replay or notification for another writer's evidence.
 A validated latch holds the current process through failed or ambiguous writes. Only proven commits survive restart.
-A crash before writing can lose one-shot below-cursor or host-reported evidence, despite in-process storage retries.
+A crash before writing can lose volatile host evidence, despite in-process storage retries.
 
 Manual safety recovery remains unavailable. `GroupSafety.recover` rejects with `ManualRecoveryUnavailableError` until 2.2e.
 Manual re-invite after lost spent trust requires a new successor group with a new groupID, also assigned to 2.2e.
@@ -289,16 +328,18 @@ peer's `localEpoch`, a `kind`, and a `confidence`. `claimedEpoch` comes from the
 
 | Kind | Confidence | What the evidence establishes |
 | --- | --- | --- |
-| `own-unmerged` | `authenticated` | Sender data proves this device sealed a commit at this epoch that the hub now places in the log. Commit content is unverified; a hub can tamper beyond the ciphertext sample or fake acceptance. Heal. |
-| `fork-losing` | `observed` | This peer enacted different commit bytes at that epoch and is on the branch that loses the log-position tiebreak. The other commit is not authenticated. |
-| `fork-winning` | `observed` | This peer enacted different commit bytes at that epoch and wins the log-position tiebreak. The other commit is not authenticated. |
+| `own-unmerged` | `authenticated` | Sender data identifies this device. Unrecognised copies diagnose and skip, preserving saved work and unknown acceptance. |
+| `past-epoch-divergence` | `claimed` | Delivered bytes differ from local applied history. Skip without rewriting history or halting. |
 | `ahead` | `claimed` | A frame's cleartext epoch is ahead of this peer. A commit-topic publisher can forge that claim. |
 | `unknown-version` | `claimed` | A frame's handshake or commit-frame version cannot be read by this build. Its epoch and commit bytes are unavailable. |
 | `retention-gap` | `observed` | The hub reports a gap beyond the covered commit cursor. The peer cannot prove the missing range contained no membership changes. |
 
-Past-epoch commit-digest divergence halts on either classifier branch before authentication. The evidence is observed, not authenticated.
-Certified losers, identical bytes and missing applied history remain non-fork cases.
-Until authenticated `captureHead` lands in 2.2d, a stale-GroupInfo external recovery commit arriving after an applied commit halts the survivor.
+Past divergence, including signed CAS losers, never creates a durable halt or frame-triggered recovery.
+Unknown versions emit `upgrade-required` diagnostics and advance as poison.
+Caught-up future app frames wait only within two epochs and for less than 30,000 milliseconds.
+The age starts after commit-lane catch-up, so honest lag can exceed two epochs.
+Host authenticator comparisons and genuine local storage invariants retain durable halt authority.
+Historical halts remain immutable. Fork detection awaits later out-of-band peer checkpoints.
 
 `GroupPeerParams.onRecovery` reports `started` and exactly one terminal event (`succeeded` or
 `failed`) for each attempt. The event's `attemptID`, `groupID` and `trigger` (`automatic` or
@@ -312,7 +353,7 @@ and emit `bootstrapped` with that failed attempt's ID. This closes the stranded 
 Its `blockingPosition` identifies the blocking source-epoch frame, or is `null` for a gap or source-identity change.
 Its `anchorRecovery` records whether anchor recovery held the peer at invalidation.
 Repeated `invalidated` failures with `anchorRecovery: true` and the same non-null `blockingPosition` identify an anchor-gated livelock.
-Newer GroupInfo and further `recover()` calls cannot reconcile the unwalked source prefix.
+Captured recovery can reconcile authenticated applied state despite an unwalked source prefix.
 
 For manual repair of an ordinary strand with valid retained trust and no fork halt, stop the peer and await `drained()`.
 An authorised administrator removes the device's leaf and re-invites it with a fresh key package.

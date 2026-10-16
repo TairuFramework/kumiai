@@ -11,8 +11,16 @@ import {
   ledgerEntryDigest,
   processWelcome,
   removeMember,
+  sealRecoveryVerdict,
+  signLedgerEntry,
 } from '@kumiai/mls'
-import { createGroupCrypto, createGroupMLS, createLedgerEntrySlot } from '@kumiai/mls-rpc'
+import {
+  createGroupCrypto,
+  createGroupMLS,
+  createLedgerEntrySlot,
+  deriveEntryKey,
+  sealEntries,
+} from '@kumiai/mls-rpc'
 import {
   commitTopic,
   createGroupPeer,
@@ -20,7 +28,9 @@ import {
   decodeHandshakeFrame,
   decodeRecoveryConfirmRequest,
   digestAppliedCommit,
+  encodeCommitFrame,
   encodeHandshakeFrame,
+  encodeLedgerEntries,
   encodeRecoveryConfirmRequest,
   encodeRecoveryVerdict,
   type GroupPeer,
@@ -43,6 +53,7 @@ import {
   type Protocols,
 } from './app-lane-e2e.js'
 import { drainUntil } from './fixtures/drain.js'
+import { createCapturedRecoveryFixture } from './fixtures/fork-halt.js'
 import { createWireHub } from './log-hub-over-wire.js'
 
 beforeAll(async () => {
@@ -921,3 +932,135 @@ test('a lost verdict is retransmitted using the cached seal', async () => {
   expect(verdicts[1]).toEqual(verdicts[0])
   expect(s.published.filter((kind) => kind === HANDSHAKE_KIND.commit)).toHaveLength(1)
 })
+
+test('a signed blob-negative verdict remains advisory before the genuine confirmation', async () => {
+  const s = await setup({ deadlineMs: 10_000 })
+  const confirmation = gate()
+  cleanup.push(async () => confirmation.release())
+  let openedNegative = false
+  const open = s.bobMLS.openRecoveryVerdict.bind(s.bobMLS)
+  vi.spyOn(s.bobMLS, 'openRecoveryVerdict').mockImplementation(async (...args) => {
+    const opened = await open(...args)
+    if (opened?.verdict.verdict === 'refused') openedNegative = true
+    return opened
+  })
+  const publish = s.bobConnection.publish.bind(s.bobConnection)
+  let injected = false
+  vi.spyOn(s.bobConnection, 'publish').mockImplementation(async (params) => {
+    const frame = decodeHandshakeFrame(params.payload)
+    if (frame.kind === HANDSHAKE_KIND.recoveryConfirmRequest && !injected) {
+      injected = true
+      const request = decodeRecoveryConfirmRequest(frame.payload)
+      const sealed = await sealRecoveryVerdict({
+        group: s.aliceGroup(),
+        identity: s.aliceID,
+        request: new TextDecoder().decode(request.request),
+        verdict: {
+          groupID: s.initial.groupID,
+          requestID: request.requestID,
+          position: request.position,
+          commitDigest: request.commitDigest,
+          verdict: 'refused',
+          reason: 'invalid',
+        },
+      })
+      await s.aliceConnection.publish({
+        senderDID: s.aliceID.id,
+        topicID: params.topicID,
+        payload: encodeHandshakeFrame(
+          HANDSHAKE_KIND.recoveryVerdict,
+          encodeRecoveryVerdict(request.requestID, sealed),
+        ),
+      })
+      await vi.waitFor(() => expect(openedNegative).toBe(true))
+      // An adverse verdict would settle after one confirmation timeout.
+      await new Promise((resolve) => setTimeout(resolve, 120))
+      confirmation.release()
+    }
+    if (frame.kind === HANDSHAKE_KIND.recoveryConfirmRequest) await confirmation.promise
+    return publish(params)
+  })
+  expect((await s.bob.recover()).advanced).toBe(true)
+  expect(openedNegative).toBe(true)
+  expect(s.events.some((event) => event.phase === 'failed')).toBe(false)
+  expect(s.published.filter((kind) => kind === HANDSHAKE_KIND.commit)).toHaveLength(1)
+  expect(s.bobGroup().epoch).toBe(s.aliceGroup().epoch)
+})
+
+test.each(['re-encoded no-entry', 'valid swapped named-entry'] as const)(
+  'real own %s copy lands saved work once and agrees with the receiver',
+  async (copy) => {
+    const s = await createCapturedRecoveryFixture()
+    cleanup.push(() => s.close())
+    const access = await s.alice.fixture.registry.access(s.alice.key.groupID)
+    const source = await access.read((handle) => handle)
+    const token = await signLedgerEntry(s.alice.identity, {
+      type: 'note',
+      groupID: source.groupID,
+      subject: s.alice.identity.id,
+      value: 'recognised work',
+    })
+    s.real.bodies.set(ledgerEntryDigest(token), token)
+    const key = await deriveEntryKey(source)
+    let savedDigest: string | undefined
+    let savedPayloadDigest: string | undefined
+    let deliveries = 0
+    const publish = s.hub.publish.bind(s.hub)
+    vi.spyOn(s.hub, 'publish').mockImplementation(async (params) => {
+      if (
+        params.senderDID !== s.alice.identity.id ||
+        params.topicID !== s.topicID ||
+        params.retain !== 'log'
+      )
+        return publish(params)
+      deliveries++
+      const saved = (await s.alice.control.load()).commitOnce
+      expect(saved).not.toBeNull()
+      savedDigest = saved?.digest
+      savedPayloadDigest = saved?.payloadDigest
+      const frame = decodeCommitFrame(decodeHandshakeFrame(params.payload).payload)
+      const original = frame.commit
+      if ((original[4] ?? 64) >= 64) throw new Error('Fixture requires a short MLS group ID')
+      const commit =
+        copy === 're-encoded no-entry'
+          ? new Uint8Array([
+              ...original.subarray(0, 4),
+              0x40,
+              original[4] ?? 0,
+              ...original.subarray(5),
+            ])
+          : original
+      const blob =
+        copy === 'valid swapped named-entry'
+          ? sealEntries(key, encodeLedgerEntries(['unrelated body', token]))
+          : new Uint8Array([99, 42])
+      return publish({
+        ...params,
+        payload: encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(commit, blob)),
+      })
+    })
+    const request = operationRequest('rotation', {
+      tokens: copy === 'valid swapped named-entry' ? [token] : [],
+    })
+    expect((await s.alice.peer.commit(request)).position).toBeTypeOf('string')
+    expect((await s.alice.control.load()).outcomes).toContainEqual(
+      expect.objectContaining({ opID: request.id, kind: 'landed' }),
+    )
+    await s.bob.peer.replay()
+    expect(deliveries).toBe(1)
+    expect((await s.alice.control.load()).applied).toContainEqual(
+      expect.objectContaining({
+        opID: request.id,
+        digest: savedDigest,
+        payloadDigest: savedPayloadDigest,
+      }),
+    )
+    const own = await s.alice.fixture.safety().epochAuthenticator(s.alice.key)
+    const received = await s.bob.fixture.safety().epochAuthenticator(s.bob.key)
+    expect(own?.authenticator).toEqual(received?.authenticator)
+    expect(await s.alice.mls.readEpoch()).toBe(Number(source.epoch) + 1)
+    if (copy === 'valid swapped named-entry') expect(await s.bob.mls.getLedger()).toContain(token)
+    expect((await s.alice.control.load()).forkHalt).toBeNull()
+    expect((await s.bob.control.load()).controlHold).toBeNull()
+  },
+)

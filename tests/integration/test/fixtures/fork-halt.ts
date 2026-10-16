@@ -2,10 +2,13 @@ import { createHash } from 'node:crypto'
 import type { ProtocolDefinition } from '@enkaku/protocol'
 import {
   commitKeyRotation,
+  commitLedgerEntries,
   decodeClientState,
   encodeClientState,
   type GroupHandle,
+  ledgerEntryDigest,
   restoreGroup,
+  signLedgerEntry,
 } from '@kumiai/mls'
 import {
   createControlAdoptionPort,
@@ -30,6 +33,7 @@ import {
   encodeHandshakeFrame,
   encodeLedgerEntries,
   type GroupForkEvidence,
+  type GroupPeer,
   type GroupSafetyEvent,
   HANDSHAKE_KIND,
   type RecoveryEvent,
@@ -38,6 +42,17 @@ import {
 import { expect, vi } from 'vitest'
 
 import { entryCapability } from '../../../../packages/mls-rpc/src/entry-capability.js'
+import {
+  createControlBuildPort,
+  createLedgerEntrySlot,
+  createPersistenceBuildSaver,
+  createRecoveryContinuationPort,
+  createRegistryGroupMLS,
+  createRegistryHandleAccess,
+  createRegistryPeer,
+  type HandleAccess,
+  type RegistryPeer,
+} from '../../../../packages/mls-rpc/src/index.js'
 import {
   decodeStoredValue,
   encodeStoredValue,
@@ -59,6 +74,261 @@ import type { EpochRuntime, EpochRuntimeParams } from '../../../../packages/rpc/
 import * as epochModule from '../../../../packages/rpc/src/peer-epoch.js'
 import { FakeHub } from '../../../../packages/rpc/test/fixtures/fake-hub.js'
 import { chat, type Protocols } from '../app-lane-e2e.js'
+
+export async function createCapturedRecoveryFixture() {
+  const real = await createRealGroup(2, `captured-recovery-${crypto.randomUUID()}`)
+  const admin = real.members[0]
+  if (admin === undefined) throw new Error('Missing recovery administrator')
+  const role = await signLedgerEntry(real.committer.identity, {
+    type: 'kumiai.role',
+    groupID: admin.handle.groupID,
+    subject: admin.identity.id,
+    value: 'admin',
+  })
+  real.bodies.set(ledgerEntryDigest(role), role)
+  const promoted = await commitLedgerEntries(real.committer.handle, [role])
+  real.committer.handle = promoted.newGroup
+  for (const member of real.members) await member.handle.processMessage(promoted.commitMessage)
+  const hub = new FakeHub()
+  const groupID = real.committer.handle.groupID
+  const target = {
+    targetID: 'integration-hub',
+    topicID: commitTopic(await deriveRecoverySecret(real.committer.handle)),
+  }
+  const devices: Array<Awaited<ReturnType<typeof device>>> = []
+  async function device(realMember: RealMember) {
+    const entrySlot = createLedgerEntrySlot()
+    let fixture = await createRegistryFixture({
+      mode: 'real-mls',
+      setup: 'empty',
+      groupID,
+      identity: realMember.identity,
+      options: { resolveLedgerEntries: entrySlot.resolve },
+    })
+    const key = { groupID, incarnation: 1 }
+    await fixture.installRows({
+      key,
+      state: {
+        ...key,
+        version: 1,
+        deleted: false,
+        terminal: false,
+        epoch: Number(realMember.handle.epoch),
+        epochAuthenticator: realMember.handle.state.keySchedule.epochAuthenticator.slice(),
+        state: encodeClientState(realMember.handle.state),
+        credential: realMember.handle.credential,
+        ledger: realMember.handle.ledgerTokens,
+        senderHWM: 0,
+      },
+      trust: recoveryTrustFor(realMember.handle, key, null),
+    })
+    let owner: RegistryPeer
+    let currentPeer: GroupPeer<Protocols> | null = null
+    const controls = new Map<number, ReturnType<typeof fixture.device.groups.ports>>()
+    const control = (incarnation: number) => {
+      let ports = controls.get(incarnation)
+      if (ports === undefined) {
+        ports = fixture.device.groups.ports({ groupID, incarnation })
+        controls.set(incarnation, ports)
+      }
+      return ports
+    }
+    const created: Array<{ key: typeof key; mls: ReturnType<typeof createGroupMLS> }> = []
+    const hooks: {
+      beforePeer?: (requested: { groupID: string; incarnation: number }) => Promise<void>
+    } = {}
+    const start = async (startKey = key) => {
+      owner = await createRegistryPeer({
+        registry: fixture.registry,
+        key: startKey,
+        recovery: fixture.environment,
+        target,
+        continuation: createRecoveryContinuationPort({
+          registry: fixture.registry,
+          persistence: fixture.device.groups,
+        }),
+        createMLS: (current, sink) =>
+          createRegistryGroupMLS({
+            registry: fixture.registry,
+            key: current,
+            recovery: fixture.environment,
+            target,
+            identity: realMember.identity,
+            entrySlot,
+            onConfirmedRecovery: sink,
+          }),
+        createPeer: async (current, options) => {
+          await hooks.beforePeer?.(current)
+          created.push({ key: current, mls: options.mls })
+          const ports = control(current.incarnation)
+          const opened = async () =>
+            createRegistryHandleAccess({ access: await fixture.registry.access(groupID) })
+          const access: HandleAccess = {
+            open: async () => {
+              throw new Error('Application opens are outside this control fixture')
+            },
+            epoch: () => options.mls.sendAdmission().epoch,
+            admission: () => options.mls.sendAdmission(),
+            read: async (fn) => (await opened()).read(fn),
+            readControl: async (fn) => (await opened()).readControl(fn),
+            mutate: async (fn, write) => (await opened()).mutate(fn, write),
+            replace: async (next, write, prepare) => (await opened()).replace(next, write, prepare),
+          }
+          const restoreCandidate = async (bytes: Uint8Array) => {
+            const saved = decodeStoredValue(bytes) as {
+              state: Uint8Array
+              credential: GroupHandle['credential']
+              ledger: Array<string>
+            }
+            const state = decodeClientState(saved.state)
+            if (state === undefined) throw new Error('Invalid candidate state')
+            return restoreGroup({
+              state,
+              credential: saved.credential,
+              ledgerEntries: saved.ledger,
+              options: fixture.environment.options,
+            })
+          }
+          const build = createControlBuildPort({
+            access,
+            control: ports.control,
+            saveBuilt: createPersistenceBuildSaver({
+              persistence: fixture.device.groups,
+              key: current,
+            }),
+            now: Date.now,
+            newID: () => crypto.randomUUID(),
+            build: async (operation, handle) => {
+              const body = JSON.parse(new TextDecoder().decode(operation.body)) as {
+                tokens?: Array<string>
+              }
+              const tokens = body.tokens ?? []
+              const rotated =
+                tokens.length === 0
+                  ? await commitKeyRotation(handle)
+                  : await commitLedgerEntries(handle, tokens)
+              return {
+                commit: rotated.commitMessage,
+                bodies: tokens,
+                welcome: null,
+                epoch: Number(handle.epoch),
+                incarnation: current.incarnation,
+                authenticatorBefore: handle.state.keySchedule.epochAuthenticator.slice(),
+                digest: digestAppliedCommit(rotated.commitMessage),
+                journal: encodeStoredValue({
+                  state: encodeClientState(rotated.newGroup.state),
+                  credential: rotated.newGroup.credential,
+                  ledger: rotated.newGroup.ledgerTokens,
+                }),
+              }
+            },
+          })
+          const peer = createGroupPeerWithControlWalk<Protocols>({
+            ...options,
+            hub,
+            localDID: realMember.identity.id,
+            protocols: { chat },
+            handlers: {
+              chat: {
+                'chat/changed': () => {},
+                'chat/posted': () => {},
+                'chat/double': () => ({}),
+              },
+            },
+            crypto: createGroupCrypto({ access }),
+            control: ports.control,
+            prepareBuild: build.prepareBuild,
+            validation: createControlValidationPort({
+              identity: realMember.identity,
+              options: fixture.environment.options,
+              restoreCandidate,
+            }),
+            adopt: createControlAdoptionPort({ access, control: ports.control, restoreCandidate })
+              .adopt,
+            readEvidence: () => fixture.device.groups.readEvidence(current),
+            anchorStore: ports.anchor,
+            appCursorStore: ports.cursor,
+            appOutbox: ports.outbox,
+            appOutboxLimit: 128,
+            operationTimeoutMs: 10_000,
+            deliverWelcome: async () => {
+              throw new Error('Unexpected Welcome delivery')
+            },
+            recovery: { timeoutMs: 100, deadlineMs: 10_000, getDelayMs: () => 0 },
+          }).peer
+          currentPeer = peer
+          return peer
+        },
+      })
+      await owner.ready
+    }
+    const result = {
+      key,
+      created,
+      hooks,
+      identity: realMember.identity,
+      get fixture() {
+        return fixture
+      },
+      get owner() {
+        return owner
+      },
+      get peer() {
+        if (currentPeer === null || owner.peer() !== currentPeer) throw new Error('No active peer')
+        return currentPeer
+      },
+      get mls() {
+        const current = created.at(-1)
+        if (current === undefined) throw new Error('No active MLS port')
+        return current.mls
+      },
+      get control() {
+        return control(1).control
+      },
+      async stop() {
+        owner.dispose()
+        await owner.drained()
+      },
+      async restart() {
+        await result.stop()
+        fixture = await fixture.reopen()
+        controls.clear()
+        await start(
+          (await fixture.device.groups.load(groupID))?.activeIncarnation === 2
+            ? { groupID, incarnation: 2 }
+            : key,
+        )
+      },
+      async close() {
+        await result.stop()
+        await fixture.close()
+      },
+    }
+    await start()
+    await result.peer.replay()
+    return result
+  }
+  try {
+    for (const member of real.members) devices.push(await device(member))
+  } catch (error) {
+    for (const member of devices) await member.close()
+    throw error
+  }
+  const alice = devices[0]
+  const bob = devices[1]
+  if (alice === undefined || bob === undefined) throw new Error('Missing recovery devices')
+  return {
+    real,
+    hub,
+    alice,
+    bob,
+    topicID: target.topicID,
+    target,
+    async close() {
+      for (const member of devices) await member.close()
+    },
+  }
+}
 
 async function makePeer(
   registry: RegistryFixture,

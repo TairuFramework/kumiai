@@ -5,6 +5,7 @@ import { commitTopic } from '@kumiai/rpc'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import { type Member, makeMember, restoreMemberHandle } from './app-lane-e2e.js'
+import { createCapturedRecoveryFixture } from './fixtures/fork-halt.js'
 import { createWireHub } from './log-hub-over-wire.js'
 
 const close: Array<() => Promise<unknown>> = []
@@ -133,5 +134,70 @@ test.each(['built', 'published', 'confirmed', 'adopted'] as const)(
     expect(externalPayloads).toHaveLength(1)
     expect(externalPayloads[0]).toEqual(record?.payload)
     expect(again.peer.anchorEpoch()).toBe(await again.mls.readEpoch())
+  },
+)
+
+test.each(['built', 'published', 'confirmed', 'adopted'] as const)(
+  'registry reconstruction resumes captured %s with the original request, candidate and switch identity',
+  async (stage) => {
+    const s = await createCapturedRecoveryFixture()
+    close.push(() => s.close())
+    const bob = s.bob
+    const source = bob.peer
+    const payloads: Array<Uint8Array> = []
+    const publish = s.hub.publish.bind(s.hub)
+    vi.spyOn(s.hub, 'publish').mockImplementation(async (params) => {
+      if (
+        params.senderDID === bob.identity.id &&
+        params.topicID === s.topicID &&
+        params.retain === 'log'
+      )
+        payloads.push(params.payload.slice())
+      return publish(params)
+    })
+    let release = () => {}
+    const pause = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    close.push(async () => release())
+    if (stage === 'adopted')
+      bob.hooks.beforePeer = async (key) => {
+        if (key.incarnation === 2) await pause
+      }
+    else {
+      const apply = bob.control.apply.bind(bob.control)
+      vi.spyOn(bob.control, 'apply').mockImplementation(async (changes, mutationID) => {
+        await apply(changes, mutationID)
+        if (changes.putRejoin?.stage === stage) void source.dispose()
+      })
+    }
+    const recovering = source.recover()
+    void recovering.catch(() => {})
+    await expect
+      .poll(async () => (await bob.control.load()).rejoin?.stage, { timeout: 10_000 })
+      .toBe(stage)
+    bob.owner.dispose()
+    release()
+    await bob.owner.drained()
+    await recovering.catch(() => {})
+    const record = (await bob.control.load()).rejoin
+    if (record === null || !('format' in record)) throw new Error('Missing captured attempt')
+    expect(record.format).toBe(2)
+    expect(record.target.captureHead).toBeNull()
+    expect(record.captureHead).toBeNull()
+    expect(record.searchFrom).toBeNull()
+    expect(record.requestKey.byteLength).toBeGreaterThan(0)
+    expect(record.candidate.byteLength).toBeGreaterThan(0)
+    if (stage !== 'adopted') vi.mocked(bob.control.apply).mockRestore()
+    bob.hooks.beforePeer = undefined
+    await bob.restart()
+    await expect.poll(() => bob.owner.installedKey().incarnation, { timeout: 10_000 }).toBe(2)
+    await expect.poll(async () => (await bob.control.load()).rejoin, { timeout: 10_000 }).toBeNull()
+    expect(await bob.mls.readEpoch()).toBe(record.epochAfter)
+    expect(await s.alice.mls.readEpoch()).toBe(record.epochAfter)
+    expect(payloads).toEqual([record.payload])
+    const destination = await bob.fixture.device.groups.loadState(bob.owner.installedKey())
+    expect(destination).toMatchObject({ deleted: false, epoch: record.epochAfter })
+    expect((await bob.control.load()).recoveryEpochFloor).toBe(record.target.groupInfoEpoch)
   },
 )

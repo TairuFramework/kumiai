@@ -2,11 +2,12 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { encodeClientState, type GroupHandle } from '@kumiai/mls'
-import type { AdoptionWrite, GroupMLS } from '@kumiai/rpc'
+import type { AdoptionWrite, GroupMLS, RecoverySource, ResyncProof } from '@kumiai/rpc'
 import ts from 'typescript'
 import { expect, expectTypeOf, test } from 'vitest'
 
 import { type SimpleHandleAccessParams, simpleHandleAccess } from '../src/access.js'
+import * as api from '../src/index.js'
 import { createGroupMLS, type GroupMLSDependencies, type GroupMLSParams } from '../src/mls.js'
 import {
   buildRealCommit,
@@ -30,16 +31,56 @@ const mlsExamples = [...readme.matchAll(/const mls = (createGroupMLS\(\{[\s\S]*?
   (match) => match[1],
 )
 if (mlsExamples.length === 0) throw new Error('No documented MLS constructors')
+const registryExamples = [
+  ...readme.matchAll(/const registryPeer = (await createRegistryPeer\(\{[\s\S]*?^\}\))/gm),
+].map((match) => match[1])
+if (registryExamples.length === 0) throw new Error('No documented registry peer constructors')
 
-test('documented MLS constructors typecheck with the required dependencies', () => {
+test('the public registry recovery surface exposes portable contracts and actionable errors', () => {
+  expectTypeOf<api.RecoverySource>().toEqualTypeOf<RecoverySource>()
+  expectTypeOf<api.ResyncProof>().toEqualTypeOf<ResyncProof>()
+  expectTypeOf<api.RegistryRecoverySource>().toEqualTypeOf<RecoverySource<api.GroupRecoveryTrust>>()
+  expectTypeOf<api.RegistrySwitchWrite>().toExtend<{ mutationID: string }>()
+  for (const name of [
+    'createGroupHandleRegistry',
+    'createRegistryGroupMLS',
+    'createRegistryPeer',
+    'createRecoveryContinuationPort',
+    'createRecoverySwitchFactory',
+    'toRegistrySwitchWrite',
+    'createControlBuildPort',
+    'createControlValidationPort',
+    'createControlAdoptionPort',
+    'RecoveryCandidateError',
+    'RegistryResyncRefusedError',
+    'RegistryRetiringError',
+    'RegistryRetireHookError',
+    'RegistryRecoveryReplacementError',
+    'SeedAdmissionRefusedError',
+  ])
+    expect(Reflect.get(api, name)).toBeTypeOf('function')
+})
+
+test('documented MLS and registry constructors typecheck with the required dependencies', () => {
   const path = fileURLToPath(new URL('readme-constructors.ts', import.meta.url))
   const source = `
     import { createGroupMLS, type GroupMLSParams } from '../src/mls.js'
+    import {
+      createRegistryPeer, createRegistryGroupMLS, createRecoveryContinuationPort, createLedgerEntrySlot,
+      type RegistryPeerParams, type GroupPersistence, type MemoryTransaction,
+    } from '../src/index.js'
     declare const access: GroupMLSParams['access']
     declare const store: { control: GroupMLSParams['control'] }
     declare const identity: GroupMLSParams['identity']
     declare const entrySlot: GroupMLSParams['entrySlot']
+    declare const registry: RegistryPeerParams['registry']
+    declare const key: RegistryPeerParams['key']
+    declare const recovery: RegistryPeerParams['recovery']
+    declare const target: RegistryPeerParams['target']
+    declare const persistence: GroupPersistence<MemoryTransaction>
+    declare const createPeerForIncarnation: RegistryPeerParams['createPeer']
     ${mlsExamples.map((example) => `{ const mls = ${example} }`).join('\n')}
+    ${registryExamples.map((example) => `{ const registryPeer = ${example} }`).join('\n')}
   `
   const options: ts.CompilerOptions = {
     strict: true,
@@ -61,7 +102,7 @@ test('documented MLS constructors typecheck with the required dependencies', () 
       .getPreEmitDiagnostics(program)
       .map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')),
   ).toEqual([])
-})
+}, 15_000)
 
 test.each(mlsExamples)('documented MLS reads the stored identity (example %#)', async (example) => {
   const group = await createRealGroup(1, 'readme-mls')

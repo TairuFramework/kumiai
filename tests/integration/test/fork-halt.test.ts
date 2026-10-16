@@ -1,20 +1,25 @@
 import { commitKeyRotation } from '@kumiai/mls'
 import {
   ControlSafetyImmutableError,
+  encodeCommitFrame,
+  encodeHandshakeFrame,
   forkEventID,
   GroupSafetyHeldError,
+  HANDSHAKE_KIND,
   SendNotAdmissibleError,
 } from '@kumiai/rpc'
 import { afterEach, expect, test, vi } from 'vitest'
 
+import { operationRequest } from './app-lane-e2e.js'
 import {
+  createCapturedRecoveryFixture,
   createForkFixture,
   type ForkFixture,
   observeForkWork,
   observeStartup,
 } from './fixtures/fork-halt.js'
 
-const fixtures: Array<ForkFixture> = []
+const fixtures: Array<Pick<ForkFixture, 'close'>> = []
 afterEach(async () => {
   for (const fixture of fixtures.splice(0).reverse()) await fixture.close()
   vi.restoreAllMocks()
@@ -387,4 +392,98 @@ test('ordinary gap recovery still heals and confirms with real MLS', async () =>
   await expect(
     f.member.peer.protocol('chat').dispatch('chat/changed', { data: {} }),
   ).resolves.toBeUndefined()
+})
+
+test('an orphaned real own commit diagnoses a contradiction and permits the next valid commit', async () => {
+  const f = await setup()
+  const before = await f.member.control.load()
+  const receiver = f.real.members[0]
+  if (receiver === undefined) throw new Error('Missing receiver')
+  const own = await commitKeyRotation(receiver.handle)
+  const copied = await f.publish(own.commitMessage, receiver.handle)
+  await f.member.peer.replay()
+  const after = await f.member.control.load()
+  expect(after.cursor?.position).toBe(copied.sequenceID)
+  expect(after.applied).toEqual(before.applied)
+  expect(after.outcomes).toEqual(before.outcomes)
+  expect(after.welcomes).toEqual(before.welcomes)
+  expect(after.forkHalt).toBeNull()
+  expect(after.controlHold).toBeNull()
+  const valid = await commitKeyRotation(f.real.committer.handle)
+  await f.publish(valid.commitMessage, f.real.committer.handle)
+  await f.member.peer.replay()
+  expect(f.member.access.epoch()).toBe(Number(valid.newGroup.epoch))
+  expect(await f.safety().events(f.key)).toEqual([])
+  expect(f.onRecovery).not.toHaveBeenCalled()
+})
+
+test.each(['handshake', 'commit-frame'] as const)(
+  'an unknown real %s version advances with a diagnostic and leaves later work usable',
+  async (version) => {
+    const f = await setup()
+    const before = await f.member.control.load()
+    const rotated = await commitKeyRotation(f.real.committer.handle)
+    const frame = encodeHandshakeFrame(
+      HANDSHAKE_KIND.commit,
+      encodeCommitFrame(rotated.commitMessage, new Uint8Array()),
+    )
+    frame[version === 'handshake' ? 2 : 4] = 255
+    const unknown = await f.hub.publish({
+      senderDID: f.real.committer.identity.id,
+      topicID: f.topic,
+      retain: 'log',
+      payload: frame,
+    })
+    await f.member.peer.replay()
+    const snapshot = await f.member.control.load()
+    expect(snapshot.cursor?.position).toBe(unknown.sequenceID)
+    expect(snapshot.applied).toEqual(before.applied)
+    expect(snapshot.forkHalt).toBeNull()
+    expect(snapshot.controlHold).toBeNull()
+    expect(f.onStrand).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'unknown-version', diagnostic: 'upgrade-required' }),
+    )
+    await f.publish(rotated.commitMessage, f.real.committer.handle)
+    await f.member.peer.replay()
+    expect(f.member.access.epoch()).toBe(Number(rotated.newGroup.epoch))
+    expect(await f.safety().events(f.key)).toEqual([])
+    expect(f.onRecovery).not.toHaveBeenCalled()
+  },
+)
+
+test('a live registry host report holds the peer synchronously without waiting for control refresh', async () => {
+  const f = await createCapturedRecoveryFixture()
+  fixtures.push(f)
+  const before = await (await f.bob.fixture.registry.access(f.bob.key.groupID)).read(
+    (handle) => handle,
+  )
+  const other = (await commitKeyRotation(before)).newGroup
+  await f.bob.peer.commit(operationRequest('rotation', {}))
+  const safety = f.bob.fixture.safety()
+  const local = await safety.epochAuthenticator(f.bob.key)
+  if (local === null) throw new Error('Missing committed identity')
+  expect(local.epoch).toBe(Number(other.epoch))
+  const remote = other.state.keySchedule.epochAuthenticator.slice()
+  expect(remote).not.toEqual(local.authenticator)
+  const held = await f.bob.control.load()
+  await safety.reportFork(f.bob.key, {
+    kind: 'epoch-authenticator',
+    epoch: local.epoch,
+    local: local.authenticator,
+    remote,
+  })
+  expect(f.bob.mls.sendAdmission()).toEqual({
+    epoch: local.epoch,
+    admissible: false,
+    reason: 'fork-halted',
+  })
+  await expect(f.bob.peer.protocol('chat').dispatch('chat/changed', { data: {} })).rejects.toEqual(
+    new SendNotAdmissibleError('fork-halted'),
+  )
+  await expect(f.bob.peer.recover()).rejects.toEqual(new GroupSafetyHeldError('fork-halted'))
+  const snapshot = await f.bob.control.load()
+  expect(snapshot.forkHalt).not.toBeNull()
+  expect(snapshot.applied).toEqual(held.applied)
+  expect(snapshot.outcomes).toEqual(held.outcomes)
+  expect(snapshot.welcomes).toEqual(held.welcomes)
 })
