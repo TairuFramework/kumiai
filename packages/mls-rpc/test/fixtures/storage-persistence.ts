@@ -91,6 +91,7 @@ const markerNamespaces = new Set(['group-owner', 'device-owner'])
 const payloadNamespaces = new Set([
   'lifetime',
   'trust',
+  'checkpoints',
   'state',
   'control',
   'anchor',
@@ -763,11 +764,16 @@ export async function createStorageFixture(params: {
     },
     constructGroupStores(tx, key) {
       active()
-      const { lifetime, trust } = createGroupStateStores({ tx, groupID: key.groupID, atRest })
+      const { lifetime, trust, checkpoints } = createGroupStateStores({
+        tx,
+        groupID: key.groupID,
+        atRest,
+      })
       return {
         tx,
         lifetime,
         trust,
+        checkpoints,
         incarnation: (incarnation) =>
           createIncarnationStores({ tx, key: { groupID: key.groupID, incarnation }, atRest }),
       }

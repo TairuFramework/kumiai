@@ -1,4 +1,13 @@
-import { decodeClientState, encodeClientState } from '@kumiai/mls'
+import { randomIdentity } from '@kokuin/token'
+import {
+  checkpointAuthHash,
+  checkpointGenesisHash,
+  checkpointKeyHash,
+  decodeClientState,
+  decodeEpochRosterFact,
+  encodeClientState,
+  encodeEpochRosterFact,
+} from '@kumiai/mls'
 import {
   applyChanges,
   type CapturedRejoinRecord,
@@ -6,11 +15,14 @@ import {
   type LogPosition,
   readmissionChanges,
 } from '@kumiai/rpc'
+import { toB64U } from '@sozai/codec'
 import { expect, test } from 'vitest'
 
 import { decodeCapturedRecoveryCandidate, decodeRecoveryCandidate } from '../src/recovery-codec.js'
 import { decodeRecoveryRecord } from '../src/recovery-record.js'
 import { createCodecReopenFixture } from './fixtures/codec-reopen.js'
+import { createStorageFixture } from './fixtures/storage-persistence.js'
+import { nextChange } from './fixtures/storage-seed.js'
 
 test.each(['legacy', 'captured'] as const)(
   'reopens sealed %s MLS pending zero sender and recovery candidate without plaintext state caches',
@@ -165,3 +177,75 @@ test.each(['legacy', 'captured'] as const)(
     }
   },
 )
+
+test('reopens canonical checkpoint bytes without sharing mutable MLS state', async () => {
+  const groupID = 'checkpoint-codec-reopen'
+  const identity = randomIdentity()
+  const fixture = await createStorageFixture({ id: groupID, mode: 'real-mls', identity })
+  const key = { groupID, incarnation: 1 }
+  try {
+    const groups = fixture.ports.device.groups
+    const trust = await groups.loadTrust(groupID)
+    const stored = await groups.loadState(key)
+    if (trust === null || stored === null || stored.deleted || stored.state === null)
+      throw new Error('Missing installed state')
+    const client = decodeClientState(stored.state)
+    if (client === undefined) throw new Error('Invalid MLS state')
+    const fact = {
+      v: 1 as const,
+      key,
+      epoch: stored.epoch,
+      ciphersuite: 1,
+      genesisHash: checkpointGenesisHash(trust.genesisAnchor),
+      authHash: checkpointAuthHash({
+        groupID,
+        genesisHash: checkpointGenesisHash(trust.genesisAnchor),
+        epoch: stored.epoch,
+        epochAuthenticator: stored.epochAuthenticator,
+      }),
+      parentAuthHash: null,
+      confirmedTranscriptHash: toB64U(client.groupContext.confirmedTranscriptHash),
+      members: [
+        {
+          signerDID: identity.id,
+          keyHash: checkpointKeyHash(identity.publicKey),
+          leafIndex: 0,
+          signaturePublicKey: toB64U(identity.publicKey),
+        },
+      ],
+      installation: { mutationID: 'seed', stateVersion: 1 },
+    }
+    const canonical = encodeEpochRosterFact(fact)
+    const before = canonical.slice()
+    await groups.transition(
+      await nextChange(groups, groupID, 'store-canonical-checkpoint'),
+      (stores) =>
+        stores.checkpoints.put({
+          kind: 'fact',
+          id: 'installed-fact',
+          key,
+          epoch: stored.epoch,
+          canonical,
+          supersededAt: null,
+        }),
+    )
+    canonical.fill(0)
+    client.groupContext.confirmedTranscriptHash.fill(0)
+    await fixture.reopen()
+    const rows = await fixture.entry().read(groupID, (reads) => reads.checkpoints())
+    const saved = rows[0]
+    if (saved?.kind !== 'fact') throw new Error('Missing checkpoint fact')
+    expect(saved.canonical).toEqual(before)
+    expect(decodeEpochRosterFact(saved.canonical)).toEqual(fact)
+    const physicalRecord = (await fixture.inspectRawBytes()).find(
+      (row) => row.namespace === 'checkpoints',
+    )
+    expect(physicalRecord?.incarnation).toBeNull()
+    expect(physicalRecord?.bytes).not.toEqual(before)
+    saved.canonical.fill(0)
+    const again = await fixture.entry().read(groupID, (reads) => reads.checkpoints())
+    expect(again[0]).toMatchObject({ canonical: before })
+  } finally {
+    await fixture.close()
+  }
+})

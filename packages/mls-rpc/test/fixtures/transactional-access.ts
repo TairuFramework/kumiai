@@ -9,6 +9,8 @@ import {
   type AdoptionWrite,
   type AnchorSlot,
   applyChanges,
+  type CheckpointRecord,
+  type CheckpointStore,
   type CommitOnceWriteContext,
   type ControlEvidenceSnapshot,
   type ControlSnapshot,
@@ -34,6 +36,7 @@ export class RevisionConflictError extends Error {
 }
 
 export type StoredRow = {
+  checkpoints: Array<CheckpointRecord>
   state: Uint8Array
   initialState: Uint8Array
   ledger: Array<string>
@@ -49,6 +52,7 @@ export type StoredRow = {
  * serialised, which orders an earlier save ahead of a later open.
  */
 export type TransactionalStore = {
+  checkpoints: CheckpointStore
   control: ControlStore
   saveBuilt: SaveControlBuild
   snapshot(): StoredRow
@@ -80,6 +84,7 @@ export function createTransactionalStore(
 ): TransactionalStore {
   return storeOver(
     {
+      checkpoints: [],
       state: encodeClientState(handle.state),
       initialState: encodeClientState(handle.state),
       ledger: handle.ledgerTokens,
@@ -131,6 +136,44 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
     return saving
   }
   const store: TransactionalStore = {
+    checkpoints: {
+      async load(id) {
+        await tail
+        return structuredClone(row.checkpoints.find((record) => record.id === id) ?? null)
+      },
+      async list() {
+        await tail
+        return structuredClone(row.checkpoints)
+      },
+      put(record) {
+        const owned = structuredClone(record)
+        return queue(async () => {
+          if (
+            owned.key.groupID !== key.groupID ||
+            !Number.isSafeInteger(owned.key.incarnation) ||
+            owned.key.incarnation < 1 ||
+            !['fact', 'publication', 'cursor'].includes(owned.kind)
+          )
+            throw new Error('Checkpoint group binding mismatch')
+          await store.beforeWrite?.()
+          const records = row.checkpoints.slice()
+          const index = records.findIndex((value) => value.id === owned.id)
+          if (index === -1) records.push(owned)
+          else records[index] = owned
+          row = { ...row, checkpoints: records }
+        })
+      },
+      remove(ids) {
+        const owned = ids.slice()
+        return queue(async () => {
+          await store.beforeWrite?.()
+          row = {
+            ...row,
+            checkpoints: row.checkpoints.filter((record) => !owned.includes(record.id)),
+          }
+        })
+      },
+    },
     readEvidence: async () => {
       await tail
       const snapshot = structuredClone(row)
@@ -224,7 +267,12 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
     fork: async () => {
       await tail
       return storeOver(
-        { ...row, state: row.state.slice(), anchorSlot: structuredClone(row.anchorSlot) },
+        {
+          ...row,
+          state: row.state.slice(),
+          anchorSlot: structuredClone(row.anchorSlot),
+          checkpoints: structuredClone(row.checkpoints),
+        },
         records,
       )
     },
@@ -255,6 +303,7 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
         )
           throw new RevisionConflictError(write.expected.stateVersion, row.revision)
         const next: StoredRow = {
+          checkpoints: structuredClone(row.checkpoints),
           state: state.slice(),
           initialState: row.initialState.slice(),
           ledger,

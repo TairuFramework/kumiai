@@ -1,0 +1,66 @@
+import type { GroupKey } from './control/types.js'
+
+export type CheckpointComparison =
+  | { kind: 'agreement'; epoch: number; signerDID: string; keyHash: string }
+  | {
+      kind: 'conflict'
+      epoch: number
+      signerDID: string
+      keyHash: string
+      localAuthHash: string
+      remoteAuthHash: string
+      parentAuthHash: string | null
+    }
+  | { kind: 'invalid' | 'coverage-gap' }
+
+export type CheckpointCoverage = {
+  groupID: string
+  current: { key: GroupKey; epoch: number } | null
+  retained: Array<{ key: GroupKey; from: number; through: number }>
+  effectiveFloor: number | null
+  gaps: Array<{
+    key: GroupKey
+    from: number
+    through: number
+    reason: 'pre-join' | 'skipped' | 'expired'
+  }>
+}
+
+export type CheckpointPort = {
+  signInstalled(factID: string): Promise<Uint8Array | null>
+  compare(key: GroupKey, frame: Uint8Array): Promise<CheckpointComparison>
+  exportCheckpoints(key: GroupKey, epochs?: Array<number>): Promise<Array<Uint8Array>>
+  checkpointFact(key: GroupKey, epoch: number): Promise<Uint8Array | null>
+  checkpointCoverage(groupID: string): Promise<CheckpointCoverage>
+}
+
+export type CheckpointRecord =
+  | {
+      kind: 'fact'
+      id: string
+      key: GroupKey
+      epoch: number
+      canonical: Uint8Array
+      supersededAt: number | null
+    }
+  | {
+      kind: 'publication'
+      id: string
+      key: GroupKey
+      factID: string
+      frame: Uint8Array | null
+      publishID: string | null
+      accepted: boolean
+      nextHeartbeatAt: number | null
+    }
+  | { kind: 'cursor'; id: string; key: GroupKey; topicID: string; position: string | null }
+
+export type CheckpointFactRecord = Extract<CheckpointRecord, { kind: 'fact' }>
+
+// Records are data. Installation provenance and signing authority belong to the coordinator.
+export type CheckpointStore = {
+  load(id: string): Promise<CheckpointRecord | null>
+  list(): Promise<Array<CheckpointRecord>>
+  put(record: CheckpointRecord): Promise<void>
+  remove(ids: Array<string>): Promise<void>
+}

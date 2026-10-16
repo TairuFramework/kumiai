@@ -3,6 +3,7 @@ export type Scope = { groupID: string | null; devicePackages: boolean }
 export const groupNamespaces = new Set([
   'lifetime',
   'trust',
+  'checkpoints',
   'state',
   'control',
   'anchor',

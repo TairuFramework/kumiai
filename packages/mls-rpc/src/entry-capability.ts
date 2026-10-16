@@ -1,4 +1,4 @@
-import type { ControlSnapshot } from '@kumiai/rpc'
+import type { CheckpointRecord, ControlSnapshot } from '@kumiai/rpc'
 
 import type {
   EpochIdentity,
@@ -35,6 +35,7 @@ export type AccountedGroupObservation = {
   terminal: boolean | null
 }
 export type EntryReads = {
+  checkpoints(): Promise<Array<CheckpointRecord>>
   lifetime(): Promise<GroupLifetime | null>
   trust(): Promise<GroupRecoveryTrust | null>
   metadata(incarnation: number): Promise<StateMetadata | null>

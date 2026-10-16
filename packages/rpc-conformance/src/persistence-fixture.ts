@@ -1,6 +1,7 @@
 import type { LeafNodeExtension } from 'ts-mls'
 
 import type { ConformanceAnchorSlot, ConformanceAnchorStore } from './anchor-store.js'
+import type { ConformanceCheckpointRecord, ConformanceCheckpointStore } from './checkpoint.js'
 import type {
   ConformanceAdoptionWrite,
   ConformanceControlChanges,
@@ -214,6 +215,7 @@ export type ConformanceGroupStores<
   Position extends string = string,
 > = {
   tx: TTx
+  checkpoints: ConformanceCheckpointStore
   lifetime: {
     load(): Promise<ConformanceGroupLifetime | null>
     save(value: ConformanceGroupLifetime): Promise<void>
@@ -252,6 +254,7 @@ export type ConformanceAccountedGroupObservation<Position extends string = strin
   terminal: boolean | null
 }
 export type ConformanceEntryReads<Position extends string = string> = {
+  checkpoints(): Promise<Array<ConformanceCheckpointRecord>>
   lifetime(): Promise<ConformanceGroupLifetime | null>
   trust(): Promise<ConformanceGroupRecoveryTrust | null>
   metadata(incarnation: number): Promise<ConformanceStateMetadata | null>

@@ -31,6 +31,16 @@ export {
   testAppOutboxConformance,
 } from './app-outbox.js'
 export {
+  type CheckpointStorageConformanceParams,
+  type ConformanceCheckpointComparison,
+  type ConformanceCheckpointCoverage,
+  type ConformanceCheckpointFactRecord,
+  type ConformanceCheckpointPort,
+  type ConformanceCheckpointRecord,
+  type ConformanceCheckpointStore,
+  testCheckpointStorageConformance,
+} from './checkpoint.js'
+export {
   type CommitOnceEvidence,
   type CommitOnceScenario,
   peerCommitOnceScenarios,

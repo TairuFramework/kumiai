@@ -5,6 +5,7 @@ import type {
   AnchorSlot,
   AnchorStore,
   AppCursorStore,
+  CheckpointStore,
   ControlChanges,
   ControlEvidenceSnapshot,
   ControlSnapshot,
@@ -118,6 +119,7 @@ export type IncarnationStores = {
 
 export type GroupStores<TTx extends GroupTransaction> = {
   tx: TTx
+  checkpoints: CheckpointStore
   lifetime: { load(): Promise<GroupLifetime | null>; save(value: GroupLifetime): Promise<void> }
   trust: {
     load(): Promise<GroupRecoveryTrust | null>

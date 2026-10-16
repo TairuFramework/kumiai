@@ -401,6 +401,82 @@ for (const mode of ['real-mls', 'double'] as const) {
       expect((await reopened.ports(key).control.load()).commitOnce).toEqual(expected)
     })
 
+    test('checkpoint namespace isolates raw transaction views across groups', async () => {
+      const { db, groups } = await setup()
+      const address = { groupID, incarnation: null, namespace: 'checkpoints', recordID: 'cursor' }
+      const id = physicalRecordKey(address)
+      await groups.transition(await nextChange(groups, groupID, 'checkpoint-scope'), (stores) =>
+        stores.checkpoints.put({
+          kind: 'cursor',
+          id: 'cursor',
+          key,
+          topicID: 'checkpoint-topic',
+          position: null,
+        }),
+      )
+      await groups
+        .transition(
+          { groupID: 'group-B', mutationID: 'other-checkpoint-scope', expected: null },
+          async (stores) => {
+            expect([...(stores.tx.rows.checkpoints?.keys() ?? [])]).not.toContain(id)
+            expect(() => stores.tx.rows.checkpoints?.set(id, new Uint8Array([0]))).toThrow('scope')
+            // Deliberately abort without installing the unrelated group.
+            throw new Error('abort scope probe')
+          },
+        )
+        .catch((error: unknown) => {
+          expect(error).toMatchObject({ message: 'abort scope probe' })
+        })
+      expect(db.snapshot().checkpoints?.has(id)).toBe(true)
+    })
+
+    test.each(['work', 'effects'] as const)(
+      'accounts checkpoint record bindings after %s writes',
+      async (phase) => {
+        for (const mismatch of ['group', 'record', 'incarnation'] as const) {
+          const { db, groups } = await setup()
+          const before = db.snapshot()
+          const location = {
+            groupID,
+            incarnation: mismatch === 'incarnation' ? 1 : null,
+            namespace: 'checkpoints',
+            recordID: 'checkpoint-intake',
+          }
+          const value = {
+            kind: 'cursor',
+            id: mismatch === 'record' ? 'wrong-id' : location.recordID,
+            key: { ...key, groupID: mismatch === 'group' ? 'group-B' : groupID },
+            topicID: 'checkpoint-topic',
+            position: null,
+          }
+          const bytes = await sealRecord(atRest, location, value)
+          const inject = async (tx: Parameters<typeof createIncarnationStores>[0]['tx']) => {
+            tx.rows.checkpoints?.set(physicalRecordKey(location), bytes)
+          }
+          const scoped =
+            phase === 'work'
+              ? groups
+              : createMemoryGroupPersistence({
+                  owners: ownerQueues(db),
+                  db,
+                  atRest,
+                  providerID: 'memory',
+                  effects: { outbox: inject },
+                })
+          await expect(
+            scoped.transition(
+              await nextChange(scoped, groupID, 'invalid-checkpoint-binding'),
+              async (stores) => {
+                if (phase === 'work') await inject(stores.tx)
+                else await stores.incarnation(1).meta.putEvents([event])
+              },
+            ),
+          ).rejects.toMatchObject({ name: 'GroupStateConflictError' })
+          expect(db.snapshot()).toEqual(before)
+        }
+      },
+    )
+
     test('rejects overlapping state saves after one version advance', async () => {
       const { groups, seed } = await setup()
       await groups.transition(

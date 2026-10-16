@@ -1,5 +1,6 @@
 import { controlAdoptionAllowed, controlSafetyHeld } from '@kumiai/rpc'
 
+import { createCheckpointStore } from './checkpoint-store.js'
 import {
   type AccountedGroupObservation,
   bindEntryCapability,
@@ -238,6 +239,7 @@ export function createMemoryGroupCoordinator(params: {
     const incarnation = (incarnation: number) =>
       createUnlockedIncarnationStores({ tx, key: { groupID, incarnation }, atRest })
     const reads: EntryReads = {
+      checkpoints: memoryOperation(tx, states.checkpoints.list),
       lifetime: memoryOperation(tx, states.lifetime.load),
       trust: memoryOperation(tx, states.trust.load),
       metadata: memoryOperation(
@@ -583,6 +585,7 @@ export function createMemoryGroupCoordinator(params: {
             }
             const unlockedStores: GroupStores<MemoryTransaction> = {
               tx,
+              checkpoints: raw.checkpoints,
               lifetime: {
                 load: () => raw.lifetime.load(),
                 async save(value) {
@@ -774,6 +777,7 @@ export function createMemoryGroupCoordinator(params: {
             }
             const stores: GroupStores<MemoryTransaction> = {
               ...unlockedStores,
+              checkpoints: createCheckpointStore({ tx, groupID: request.groupID, atRest }),
               lifetime: {
                 load: memoryOperation(tx, unlockedStores.lifetime.load),
                 save: memoryOperation(tx, unlockedStores.lifetime.save, 'domain'),
@@ -1001,6 +1005,14 @@ export function createMemoryGroupCoordinator(params: {
             await entry.enter('account')
             await coordinateMemoryTransaction(tx, async (tx) => {
               const raw = createUnlockedGroupStateStores({ tx, groupID: request.groupID, atRest })
+              const checkpointRows = tx.rows.checkpoints ?? new Map<string, unknown>()
+              for (const [id, bytes] of checkpointRows) {
+                if (sameStoredValue(before.checkpoints?.get(id), bytes)) continue
+                const address = JSON.parse(id) as [string, number | null, string]
+                if (address[0] !== change.groupID || address[1] !== null)
+                  throw new GroupStateConflictError('Checkpoint address mismatch')
+                await raw.checkpoints.load(address[2])
+              }
               const affected = changedIncarnations(beforeEffects, snapshot(tx), change.groupID)
               const life = await raw.lifetime.load()
               for (const [incarnation, namespaces] of affected) {

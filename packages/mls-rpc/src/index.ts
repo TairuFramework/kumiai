@@ -20,6 +20,7 @@
  */
 
 export type {
+  CheckpointStore,
   ControlAdoptionPort,
   ForkHalt,
   GroupSafetyEvent,

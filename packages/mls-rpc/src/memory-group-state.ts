@@ -1,3 +1,4 @@
+import { createCheckpointStore, createUnlockedCheckpointStore } from './checkpoint-store.js'
 import type { StateMetadata } from './entry-capability.js'
 import { belongs, cloneValue, groupNamespaces } from './memory-rows.js'
 import type { OwnerAttempt, OwnerEntry, OwnerQueues, WriteTarget } from './owner-queue.js'
@@ -20,7 +21,10 @@ import type {
   MemoryTransaction,
 } from './persistence-types.js'
 
-export type GroupStateStores = Pick<GroupStores<MemoryTransaction>, 'tx' | 'lifetime' | 'trust'> & {
+export type GroupStateStores = Pick<
+  GroupStores<MemoryTransaction>,
+  'tx' | 'lifetime' | 'trust' | 'checkpoints'
+> & {
   state(incarnation: number): IncarnationStores['state']
   stateMetadata(incarnation: number): {
     load(): Promise<StateMetadata | null>
@@ -513,6 +517,7 @@ export function createUnlockedGroupStateStores(params: {
   return {
     tx,
     stateMetadata,
+    checkpoints: createUnlockedCheckpointStore({ tx, groupID, atRest }),
     lifetime: slot('lifetime', null),
     trust,
     state(incarnation) {
@@ -599,6 +604,7 @@ export function createGroupStateStores(
   const { tx } = params
   return {
     tx,
+    checkpoints: createCheckpointStore(params),
     stateMetadata(incarnation) {
       const metadata = stores.stateMetadata(incarnation)
       return {
