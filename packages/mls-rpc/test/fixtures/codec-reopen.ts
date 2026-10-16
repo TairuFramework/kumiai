@@ -36,6 +36,7 @@ import {
   testHandleAccess,
 } from './real-group.js'
 import { createStorageFixture } from './storage-persistence.js'
+import { writeInstallationCheckpoint } from './storage-seed.js'
 
 export async function createCodecReopenFixture(
   id: string,
@@ -95,6 +96,12 @@ export async function createCodecReopenFixture(
         restorePending: false,
       })
       await stores.trust.save(trust)
+      await writeInstallationCheckpoint(stores, {
+        key,
+        handle: source,
+        mutationID: `${mutationID}-seed`,
+        stateVersion: 1,
+      })
       await stores.incarnation(1).state.save({
         ...key,
         version: 1,

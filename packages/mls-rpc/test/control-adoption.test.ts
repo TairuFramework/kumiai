@@ -42,7 +42,12 @@ import {
   createRealGroup,
   testGroupMLSDependencies,
 } from './fixtures/real-group.js'
-import { installSeed, makeStorageSeed, nextChange } from './fixtures/storage-seed.js'
+import {
+  installSeed,
+  makeStorageSeed,
+  nextChange,
+  writeInstallationCheckpoint,
+} from './fixtures/storage-seed.js'
 import {
   createTransactionalAccess,
   createTransactionalStore,
@@ -527,6 +532,12 @@ test('2.1 adoption rolls back and co-commits trust spent anchor and opaque side 
             registry: next.registry,
             credential: next.credential,
             ledger: next.ledgerTokens,
+          })
+          await writeInstallationCheckpoint(stores, {
+            key: seed.key,
+            handle: next,
+            mutationID: write.mutationID,
+            stateVersion: state.version + 1,
           })
           if (holdInsideTransaction)
             await rows.control.apply(

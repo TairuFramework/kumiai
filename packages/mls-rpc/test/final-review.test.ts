@@ -18,7 +18,12 @@ import type {
 } from '../src/persistence-types.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
 import { createStorageFixture } from './fixtures/storage-persistence.js'
-import { installSeed, makeStorageSeed, nextChange } from './fixtures/storage-seed.js'
+import {
+  installSeed,
+  makeStorageSeed,
+  nextChange,
+  writeInstallationCheckpoint,
+} from './fixtures/storage-seed.js'
 
 const queues = new WeakMap<object, OwnerQueues>()
 function ownerQueues(db: object): OwnerQueues {
@@ -370,6 +375,12 @@ for (const mode of ['real-mls', 'double'] as const) {
           await stores.lifetime.save({ ...fresh.lifetime, revision: 2, mutationID: 'hook-retire' })
           await stores.incarnation(2).state.save(fresh.state)
           await stores.trust.save(fresh.trust)
+          await writeInstallationCheckpoint(stores, {
+            key: fresh.key,
+            confirmedTranscriptHash: fresh.confirmedTranscriptHash,
+            mutationID: 'hook-retire',
+            stateVersion: fresh.state.version,
+          })
         }),
       ).rejects.toMatchObject({
         name: 'PersistencePhaseError',

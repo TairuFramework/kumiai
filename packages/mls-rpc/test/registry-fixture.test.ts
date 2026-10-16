@@ -18,7 +18,7 @@ import {
   registryFixtureRestore,
 } from './fixtures/registry.js'
 import { createRegistryWelcomeHistory } from './fixtures/registry-welcome.js'
-import { makeStorageSeed } from './fixtures/storage-seed.js'
+import { makeStorageSeed, writeInstallationCheckpoint } from './fixtures/storage-seed.js'
 
 expectTypeOf<RegistryFixtureBase>().toExtend<ConformanceRegistryFixtureBase<GroupHandle>>()
 expectTypeOf<keyof RegistryFixtureBase>().toEqualTypeOf<
@@ -200,6 +200,12 @@ for (const mode of ['real-mls', 'double'] as const) {
                 senderHWM: 0,
               })
               await stores.trust.save(recoveryTrustFor(candidate, key, null))
+              await writeInstallationCheckpoint(stores, {
+                key,
+                handle: candidate,
+                mutationID: 'install-work',
+                stateVersion: 1,
+              })
             },
           )
           if (point === 'commit-then-reject') await operation

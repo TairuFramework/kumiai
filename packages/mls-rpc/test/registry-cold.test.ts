@@ -15,6 +15,7 @@ import {
   type RegistryFixtureBase,
   registryFixtureRestore,
 } from './fixtures/registry.js'
+import { writeInstallationCheckpoint } from './fixtures/storage-seed.js'
 
 function registry(fixture: RegistryFixtureBase) {
   return createGroupHandleRegistry({
@@ -769,6 +770,12 @@ for (const mode of ['real-mls', 'double'] as const) {
                 ledger: handle.ledgerTokens,
               })
               await stores.trust.save(recoveryTrustFor(handle, nextKey, await stores.trust.load()))
+              await writeInstallationCheckpoint(stores, {
+                key: nextKey,
+                handle,
+                mutationID: 'replace-after-read',
+                stateVersion: 1,
+              })
             },
           )
           await expect(previous.read(() => {})).rejects.toMatchObject({

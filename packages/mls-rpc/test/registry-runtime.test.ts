@@ -31,7 +31,7 @@ import {
   registryFixtureRestore,
 } from './fixtures/registry.js'
 import { registryHandle } from './fixtures/registry-welcome.js'
-import { nextChange } from './fixtures/storage-seed.js'
+import { nextChange, writeInstallationCheckpoint } from './fixtures/storage-seed.js'
 
 function registry(fixture: RegistryFixtureBase) {
   return createGroupHandleRegistry({
@@ -669,6 +669,12 @@ for (const mode of ['real-mls', 'double'] as const) {
               epochAuthenticator: handle.state.keySchedule.epochAuthenticator,
             })
             await stores.trust.save(recoveryTrustFor(handle, nextKey, await stores.trust.load()))
+            await writeInstallationCheckpoint(stores, {
+              key: nextKey,
+              handle,
+              mutationID: 'displace',
+              stateVersion: 1,
+            })
           },
         )
         expect(access.runtime.snapshot()).toBeNull()

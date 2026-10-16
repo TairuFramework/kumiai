@@ -5,7 +5,7 @@ import type { ControlRead, HandleAccess } from '../../src/access.js'
 import { decodeControlJournal } from '../../src/control-journal.js'
 import { DisplacedGroupHandleError } from '../../src/persistence-errors.js'
 import type { GroupKey, GroupPersistence, MemoryTransaction } from '../../src/persistence-types.js'
-import { nextChange } from './storage-seed.js'
+import { nextChange, writeInstallationCheckpoint } from './storage-seed.js'
 
 export type AdoptionFault = {
   skipTrust?: boolean
@@ -99,6 +99,13 @@ export async function createSealedControlAccess(
           signerTree: candidate.ratchetTree,
           ledger: next.ledgerTokens,
           registry: next.registry,
+        })
+      if (!fault.skipTrust && !fault.reuseAuthenticator)
+        await writeInstallationCheckpoint(stores, {
+          key,
+          handle: next,
+          mutationID: change.mutationID,
+          stateVersion: state.version + 1,
         })
       if (write !== undefined) {
         await rows.control.apply(write.changes, write.mutationID)

@@ -26,6 +26,7 @@ import {
   registryFixtureRemoveTrust,
   registryFixtureSafety,
 } from './fixtures/registry.js'
+import { writeInstallationCheckpoint } from './fixtures/storage-seed.js'
 
 function entry(fixture: RegistryFixture) {
   const value = entryCapability(fixture.device.groups)
@@ -679,6 +680,12 @@ for (const mode of ['real-mls', 'double'] as const) {
                       ledger: handle.ledgerTokens,
                     })
                     await stores.trust.save(recoveryTrustFor(handle, nextKey, trust))
+                    await writeInstallationCheckpoint(stores, {
+                      key: nextKey,
+                      handle,
+                      mutationID,
+                      stateVersion: 1,
+                    })
                   },
                 )
               }

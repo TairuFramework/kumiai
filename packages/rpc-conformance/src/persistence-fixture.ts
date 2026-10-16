@@ -109,6 +109,27 @@ export type ConformanceLastResortStore = Omit<ConformanceKeyPackagePoolStore, 'l
   put(ownerDID: string, record: ConformanceLastResortRecord): Promise<void>
 }
 
+export type ConformanceCheckpointFactRecord = {
+  kind: 'fact'
+  id: string
+  key: ConformanceGroupKey
+  epoch: number
+  canonical: Uint8Array
+  supersededAt: number | null
+}
+
+export type ConformanceCheckpointPreparation = {
+  prepareInstallationCheckpoint(params: {
+    key: ConformanceGroupKey
+    trust: ConformanceGroupRecoveryTrust
+    confirmedTranscriptHash: Uint8Array
+    mutationID: string
+    stateVersion: number
+    previousFact: Uint8Array | null
+  }): Promise<ConformanceCheckpointFactRecord>
+  readConfirmedTranscriptHash(state: Uint8Array | null): Promise<Uint8Array>
+}
+
 export type ConformanceGroupKey = { groupID: string; incarnation: number }
 
 export type ConformanceEpochIdentity = ConformanceGroupKey & {
@@ -608,13 +629,14 @@ export type ConformancePersistenceEvent =
   | ConformanceGroupSafetyEvent
   | ConformanceRecoveryUnavailableEvent
 
-export type StorageTestPorts<TTx extends ConformanceGroupTransaction> = {
-  device: ConformanceDevicePersistence<TTx>
-  packageStores(sourceID: string): {
-    ordinary: ConformanceKeyPackagePoolStore
-    lastResort: ConformanceLastResortStore
+export type StorageTestPorts<TTx extends ConformanceGroupTransaction> =
+  ConformanceCheckpointPreparation & {
+    device: ConformanceDevicePersistence<TTx>
+    packageStores(sourceID: string): {
+      ordinary: ConformanceKeyPackagePoolStore
+      lastResort: ConformanceLastResortStore
+    }
   }
-}
 export type FixtureOptions<TTx extends ConformanceGroupTransaction> = {
   effects?: ConformanceTransactionalGroupEffects<TTx>
   ownershipContext?: ConformanceOwnershipContextPort

@@ -31,6 +31,7 @@ import {
   registryFixtureSafety,
   registryFixtureSafetyParams,
 } from './fixtures/registry.js'
+import { writeInstallationCheckpoint } from './fixtures/storage-seed.js'
 
 function entry(fixture: RegistryFixture) {
   const value = entryCapability(fixture.device.groups)
@@ -112,6 +113,12 @@ async function move(fixture: RegistryFixture, key: GroupKey, incarnation: number
           })
         await stores.incarnation(incarnation).state.save(next)
         await stores.trust.save(recoveryTrustFor(handle, nextKey, trust))
+        await writeInstallationCheckpoint(stores, {
+          key: nextKey,
+          handle,
+          mutationID,
+          stateVersion: next.version,
+        })
       },
     )
 }

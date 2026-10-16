@@ -135,7 +135,7 @@ function runOwnershipPhasesConformance<TTx extends ConformanceGroupTransaction>(
               }),
             )
             const groups = fixture.ports.device.groups
-            const seed = await within(storageSeed(groups))
+            const seed = await within(storageSeed(fixture.ports))
             try {
               await within(
                 groups.transition(
@@ -222,7 +222,7 @@ function runOwnershipPhasesConformance<TTx extends ConformanceGroupTransaction>(
         const latch = fixture.holdNextSeal()
         try {
           const groups = fixture.ports.device.groups
-          const seed = await within(storageSeed(groups))
+          const seed = await within(storageSeed(fixture.ports))
           const change = await within(storageChange(groups, groupID, 'sequence'))
           const changedEntry = {
             ...entry,
@@ -285,7 +285,7 @@ function runOwnershipPhasesConformance<TTx extends ConformanceGroupTransaction>(
           }),
         )
         try {
-          const fresh = await within(storageSeed(donor.ports.device.groups))
+          const fresh = await within(storageSeed(donor.ports))
           for (const [fixture, inEffect] of [
             [workFixture, false],
             [effectFixture, true],
@@ -392,7 +392,7 @@ function runOwnershipPhasesConformance<TTx extends ConformanceGroupTransaction>(
             ),
           )
           const groups = fixture.ports.device.groups
-          const seed = await within(storageSeed(groups))
+          const seed = await within(storageSeed(fixture.ports))
           await within(
             groups.transition(
               await within(storageChange(groups, groupID, 'delete-effect')),
@@ -492,7 +492,7 @@ function runOwnershipPhasesConformance<TTx extends ConformanceGroupTransaction>(
         try {
           const { device } = fixture.ports
           const groups = device.groups
-          const seed = await within(storageSeed(groups))
+          const seed = await within(storageSeed(fixture.ports))
           const beforeDevice = await within(device.load())
           const outcome = {
             id: 'queued-control',
@@ -606,7 +606,7 @@ function runOwnershipPhasesConformance<TTx extends ConformanceGroupTransaction>(
         let finished = false
         const { device } = fixture.ports
         const groups = device.groups
-        const seed = await within(storageSeed(groups))
+        const seed = await within(storageSeed(fixture.ports))
         const beforeDevice = await within(device.load())
         const outcome = {
           id: 'queued-control',
@@ -1064,7 +1064,7 @@ function runOwnershipPhasesConformance<TTx extends ConformanceGroupTransaction>(
       test('reopened first read sees committed rows only after backend completion', async () => {
         const fixture = await within(params.createFixture(groupID))
         const groups = fixture.ports.device.groups
-        const seed = await within(storageSeed(groups))
+        const seed = await within(storageSeed(fixture.ports))
         const change = await within(storageChange(groups, groupID, 'restart'))
         const fault = fixture.rejectCommitPending()
         let finished = false
@@ -2230,7 +2230,7 @@ function testCommitObservation<TTx extends ConformanceGroupTransaction>(
       const fixture = await params.createFixture(groupID)
       try {
         const groups = fixture.ports.device.groups
-        const seed = await storageSeed(groups)
+        const seed = await storageSeed(fixture.ports)
         const observations: Array<ConformanceAccountedGroupObservation> = []
         const unsubscribe = fixture.entry().observe(groupID, (value) => observations.push(value))
         const ports = groups.ports(key)
@@ -2275,7 +2275,7 @@ function testCommitObservation<TTx extends ConformanceGroupTransaction>(
       })
       try {
         const groups = fixture.ports.device.groups
-        const fresh = await storageSeed(donor.ports.device.groups)
+        const fresh = await storageSeed(donor.ports)
         await groups.transition(
           await storageChange(groups, groupID, 'install-observed'),
           async (stores) => {

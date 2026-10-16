@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest'
 
 import { storageChange } from './group-storage.js'
 import type {
+  ConformanceCheckpointFactRecord,
   ConformanceGroupKey,
   ConformanceGroupStores,
   ConformanceGroupTransaction,
@@ -11,14 +12,7 @@ import type {
 } from './persistence-fixture.js'
 
 export type ConformanceCheckpointRecord =
-  | {
-      kind: 'fact'
-      id: string
-      key: ConformanceGroupKey
-      epoch: number
-      canonical: Uint8Array
-      supersededAt: number | null
-    }
+  | ConformanceCheckpointFactRecord
   | {
       kind: 'publication'
       id: string
@@ -37,7 +31,7 @@ export type ConformanceCheckpointRecord =
       position: string | null
     }
 
-export type ConformanceCheckpointFactRecord = Extract<ConformanceCheckpointRecord, { kind: 'fact' }>
+export type { ConformanceCheckpointFactRecord } from './persistence-fixture.js'
 export type ConformanceCheckpointComparison =
   | { kind: 'agreement'; epoch: number; signerDID: string; keyHash: string }
   | {
@@ -135,14 +129,16 @@ export function testCheckpointStorageConformance<TTx extends ConformanceGroupTra
     test('checkpoint rows are sealed and group scoped', async () => {
       const fixture = await params.createFixture(groupID)
       try {
-        const before = [fact(), publication(), cursor()]
-        await write(fixture, before)
+        const installed = await read(fixture)
+        const otherInstalled = await read(fixture, 'group-B')
+        const before = [...installed, fact(), publication(), cursor()]
+        await write(fixture, [fact(), publication(), cursor()])
         expect(await read(fixture)).toEqual(before)
-        expect(await read(fixture, 'group-B')).toEqual([])
+        expect(await read(fixture, 'group-B')).toEqual(otherInstalled)
         const rows = (await fixture.inspectRawBytes()).filter(
           (row) => row.namespace === 'checkpoints',
         )
-        expect(rows).toHaveLength(3)
+        expect(rows).toHaveLength(before.length + otherInstalled.length)
         for (const row of rows) {
           expect(row.incarnation).toBeNull()
           expect(row.bytes).not.toEqual(fact().canonical)
@@ -263,6 +259,7 @@ export function testCheckpointStorageConformance<TTx extends ConformanceGroupTra
         try {
           await write(fixture, [fact()])
           const before = await read(fixture)
+          const otherInstalled = await read(fixture, 'group-B')
           const groups = fixture.ports.device.groups
           const change = await storageChange(groups, groupID, 'checkpoint-unknown')
           const fault = fixture.rejectCommitPending()
@@ -295,7 +292,7 @@ export function testCheckpointStorageConformance<TTx extends ConformanceGroupTra
             readReleased = true
             return rows
           })
-          expect(await read(fixture, 'group-B')).toEqual([])
+          expect(await read(fixture, 'group-B')).toEqual(otherInstalled)
           expect(readReleased).toBe(false)
           await fault.finish(outcome)
           if (outcome === 'commit') expect(await observed).toEqual([...before, cursor()])
@@ -318,7 +315,15 @@ export function testCheckpointStorageConformance<TTx extends ConformanceGroupTra
         const before = await read(fixture)
         await params.retire(fixture)
         await fixture.reopen()
-        expect(await read(fixture)).toEqual(before)
+        const after = await read(fixture)
+        expect(after).toEqual(expect.arrayContaining(before))
+        expect(after.filter((record) => record.key.incarnation === 1)).toEqual(before)
+        expect(
+          after
+            .filter((record) => record.key.incarnation === 2)
+            .map((record) => record.kind)
+            .sort(),
+        ).toEqual(['fact', 'publication'])
         for (const physicalRecord of (await fixture.inspectRawBytes()).filter(
           (row) => row.namespace === 'checkpoints',
         )) {
@@ -332,6 +337,7 @@ export function testCheckpointStorageConformance<TTx extends ConformanceGroupTra
     test('prepare and expired capabilities cannot write checkpoints', async () => {
       const fixture = await params.createFixture(groupID)
       try {
+        const installed = await read(fixture)
         await write(fixture, [fact()])
         let expired: ConformanceGroupStores<TTx> | undefined
         await fixture.entry().run(
@@ -380,7 +386,7 @@ export function testCheckpointStorageConformance<TTx extends ConformanceGroupTra
         await expect(expired.checkpoints.load('fact-3')).rejects.toMatchObject({
           name: 'PersistencePhaseError',
         })
-        expect(await read(fixture)).toEqual([fact(), cursor()])
+        expect(await read(fixture)).toEqual([...installed, fact(), cursor()])
       } finally {
         await fixture.close()
       }
@@ -407,6 +413,8 @@ export function testCheckpointStorageConformance<TTx extends ConformanceGroupTra
 
     test('checkpoint operations drain before closure and preserve group independence', async () => {
       const fixture = await params.createFixture(groupID)
+      const installed = await read(fixture)
+      const otherInstalled = await read(fixture, 'group-B')
       const latch = fixture.holdNextSeal()
       const operations: Array<Promise<void>> = []
       let signalReady = (): void => {}
@@ -436,13 +444,14 @@ export function testCheckpointStorageConformance<TTx extends ConformanceGroupTra
             stores.checkpoints.put({ ...cursor(), key: { groupID: 'group-B', incarnation: 1 } }),
         )
         expect(await read(fixture, 'group-B')).toEqual([
+          ...otherInstalled,
           { ...cursor(), key: { groupID: 'group-B', incarnation: 1 } },
         ])
         latch.release()
         await writer
         await Promise.all(operations)
         await fixture.reopen()
-        expect(await read(fixture)).toEqual([fact(), cursor()])
+        expect(await read(fixture)).toEqual([...installed, fact(), cursor()])
       } finally {
         latch.release()
         await fixture.close()
@@ -452,6 +461,7 @@ export function testCheckpointStorageConformance<TTx extends ConformanceGroupTra
     test('checkpoint metadata needs no private state open', async () => {
       const fixture = await params.createFixture(groupID)
       try {
+        const installed = await read(fixture)
         const rows = await fixture.inspectRawBytes()
         for (const row of rows.filter(
           (row) => row.groupID === groupID && ['state', 'trust'].includes(row.namespace),
@@ -460,7 +470,7 @@ export function testCheckpointStorageConformance<TTx extends ConformanceGroupTra
         }
         await write(fixture, [fact(), publication(), cursor()])
         await fixture.reopen()
-        expect(await read(fixture)).toEqual([fact(), publication(), cursor()])
+        expect(await read(fixture)).toEqual([...installed, fact(), publication(), cursor()])
         const groups = fixture.ports.device.groups
         await expect(groups.loadState(key)).rejects.toThrow()
         await expect(groups.loadTrust(groupID)).rejects.toThrow()
@@ -468,7 +478,7 @@ export function testCheckpointStorageConformance<TTx extends ConformanceGroupTra
           await storageChange(groups, groupID, 'checkpoint-remove'),
           (stores) => stores.checkpoints.remove(['publication-3', 'absent']),
         )
-        expect(await read(fixture)).toEqual([fact(), cursor()])
+        expect(await read(fixture)).toEqual([...installed, fact(), cursor()])
       } finally {
         await fixture.close()
       }

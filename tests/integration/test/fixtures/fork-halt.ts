@@ -68,6 +68,7 @@ import {
   type RegistryFixture,
   registryFixtureRestore,
 } from '../../../../packages/mls-rpc/test/fixtures/registry.js'
+import { writeInstallationCheckpoint } from '../../../../packages/mls-rpc/test/fixtures/storage-seed.js'
 import * as muxModule from '../../../../packages/rpc/src/hub-mux.js'
 import { createGroupPeerWithControlWalk } from '../../../../packages/rpc/src/peer.js'
 import type { EpochRuntime, EpochRuntimeParams } from '../../../../packages/rpc/src/peer-epoch.js'
@@ -385,6 +386,12 @@ async function makePeer(
             write?.expected,
           )
           await stores.trust.save(recoveryTrustFor(next, key, previous.trust))
+          await writeInstallationCheckpoint(stores, {
+            key,
+            handle: next,
+            mutationID,
+            stateVersion: previous.state.version + 1,
+          })
           if (write !== undefined) await target.control.apply(write.changes, mutationID)
         },
       )

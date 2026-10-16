@@ -73,7 +73,7 @@ import {
 import { createRegistryWelcomeHistory, registryHandle } from './registry-welcome.js'
 import { memoryModel, restoreMemoryControlHandle } from './sealed-memory-mls.js'
 import { createStorageFixture, type RegistryStorageFixture } from './storage-persistence.js'
-import { nextChange } from './storage-seed.js'
+import { nextChange, storageTranscript, writeInstallationCheckpoint } from './storage-seed.js'
 
 export type RegistryRowSetup = {
   key: GroupKey
@@ -550,6 +550,13 @@ async function assemble(
         const target = stores.incarnation(setup.key.incarnation)
         if (setup.state !== undefined) await target.state.save(setup.state)
         if (setup.trust !== undefined) await stores.trust.save(setup.trust)
+        if (setup.state !== undefined && !setup.state.deleted && setup.trust !== undefined)
+          await writeInstallationCheckpoint(stores, {
+            key: setup.key,
+            confirmedTranscriptHash: storageTranscript(setup.state.state),
+            mutationID,
+            stateVersion: setup.state.version,
+          })
         if (setup.control !== undefined) {
           const slot = setup.control.commitOnce
           if (slot != null) {

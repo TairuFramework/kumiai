@@ -20,7 +20,11 @@ import {
   type RegistryFixtureBase,
   registryFixtureRestore,
 } from './fixtures/registry.js'
-import { makeStorageSeed, nextChange } from './fixtures/storage-seed.js'
+import {
+  makeStorageSeed,
+  nextChange,
+  writeInstallationCheckpoint,
+} from './fixtures/storage-seed.js'
 
 const key = { groupID: 'retired-service', incarnation: 1 }
 const bytes = new Uint8Array([1, 2, 3])
@@ -102,6 +106,12 @@ async function retire(fixture: RegistryFixtureBase, mode: 'real-mls' | 'double')
       ...seed.trust,
       genesisAnchor: trust.genesisAnchor,
       spentEpochAuthenticators: trust.spentEpochAuthenticators,
+    })
+    await writeInstallationCheckpoint(stores, {
+      key: seed.key,
+      confirmedTranscriptHash: seed.confirmedTranscriptHash,
+      mutationID,
+      stateVersion: seed.state.version,
     })
   })
 }

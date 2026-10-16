@@ -30,7 +30,12 @@ import {
   ReentrantOwnershipError,
 } from '../src/persistence-errors.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
-import { installSeed, makeStorageSeed, nextChange } from './fixtures/storage-seed.js'
+import {
+  installSeed,
+  makeStorageSeed,
+  nextChange,
+  writeInstallationCheckpoint,
+} from './fixtures/storage-seed.js'
 import { createTransactionalStore } from './fixtures/transactional-access.js'
 
 const intent: Operation & { stage: 'intent' } = {
@@ -431,6 +436,12 @@ async function advance(host: Awaited<ReturnType<typeof setup>>, clear: boolean, 
     await stores.trust.save({
       ...trust,
       installed: { ...host.key, epoch: state.epoch, authenticator: state.epochAuthenticator },
+    })
+    await writeInstallationCheckpoint(stores, {
+      key: host.key,
+      handle: rotated.newGroup,
+      mutationID: change.mutationID,
+      stateVersion: state.version,
     })
     if (clear) {
       const control = raw

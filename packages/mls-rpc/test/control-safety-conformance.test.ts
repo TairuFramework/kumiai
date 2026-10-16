@@ -18,8 +18,14 @@ import { encodeControlJournal } from '../src/control-journal.js'
 import { createMemoryGroupPersistence } from '../src/memory-group-persistence.js'
 import { createMemoryTransaction } from '../src/memory-transaction.js'
 import { createOwnerQueues } from '../src/owner-queue.js'
+import { recoveryTrustFor } from '../src/registry/trust.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
-import { installSeed, makeStorageSeed, nextChange } from './fixtures/storage-seed.js'
+import {
+  installSeed,
+  makeStorageSeed,
+  nextChange,
+  writeInstallationCheckpoint,
+} from './fixtures/storage-seed.js'
 import { createTransactionalStore } from './fixtures/transactional-access.js'
 
 async function safetyHost(mode: 'real' | 'transactional', id: string) {
@@ -76,18 +82,19 @@ async function safetyHost(mode: 'real' | 'transactional', id: string) {
         state: encodeClientState(next.state),
         ledger: next.ledgerTokens,
       }
-      await groups.transition(
-        await nextChange(groups, id, write?.mutationID ?? crypto.randomUUID()),
-        async (stores) => {
-          await stores.incarnation(1).state.save(state, write?.expected)
-          await stores.trust.save({
-            ...trust,
-            installed: { ...key, epoch: state.epoch, authenticator: state.epochAuthenticator },
-          })
-          if (write !== undefined)
-            await stores.incarnation(1).control.apply(write.changes, write.mutationID)
-        },
-      )
+      const mutationID = write?.mutationID ?? crypto.randomUUID()
+      await groups.transition(await nextChange(groups, id, mutationID), async (stores) => {
+        await stores.incarnation(1).state.save(state, write?.expected)
+        await stores.trust.save(recoveryTrustFor(next, key, trust))
+        await writeInstallationCheckpoint(stores, {
+          key,
+          handle: next,
+          mutationID,
+          stateVersion: state.version,
+        })
+        if (write !== undefined)
+          await stores.incarnation(1).control.apply(write.changes, write.mutationID)
+      })
     },
   })
   const intent: Operation & { stage: 'intent' } = {

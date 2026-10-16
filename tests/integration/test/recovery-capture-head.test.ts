@@ -171,7 +171,7 @@ test.each(['present', 'absent'] as const)(
           },
         },
       }),
-    ).toEqual({ kind: 'retry' })
+    ).toEqual({ kind: 'retry', reason: 'target-behind' })
     expect((await again.control.load()).recoveryEpochFloor).toBe(floor)
     expect((await again.control.load()).rejoin).toBeNull()
     await again.peer.recover()

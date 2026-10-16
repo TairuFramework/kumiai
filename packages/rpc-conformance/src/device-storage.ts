@@ -19,7 +19,7 @@ export function testDeviceStorageConformance<TTx extends ConformanceGroupTransac
       const fixture = await params.createFixture(groupID)
       try {
         const { device } = fixture.ports
-        const seed = await storageSeed(device.groups)
+        const seed = await storageSeed(fixture.ports)
         const before = await device.load()
         const control = await device.groups.ports({ groupID, incarnation: 1 }).control.load()
         const ordinary = (
@@ -126,7 +126,7 @@ export function testDeviceStorageConformance<TTx extends ConformanceGroupTransac
         try {
           const { device } = fixture.ports
           const groups = device.groups
-          const seed = await storageSeed(groups)
+          const seed = await storageSeed(fixture.ports)
           const before = await device.load()
           const change = await storageChange(groups, groupID, 'shared-overlap')
           const hooks: Array<string> = []
@@ -273,7 +273,7 @@ export function testDeviceStorageConformance<TTx extends ConformanceGroupTransac
       const donor = await params.createFixture(groupID)
       try {
         const { device } = fixture.ports
-        const seed = await storageSeed(donor.ports.device.groups)
+        const seed = await storageSeed(donor.ports)
         const pool = fixture.ports.packageStores(sourceID)
         const ordinary = (await pool.ordinary.list(device.ownerDID))[0]
         const retained = await pool.lastResort.list(device.ownerDID)
@@ -380,7 +380,7 @@ export function testDeviceStorageConformance<TTx extends ConformanceGroupTransac
             await fixture.ports.packageStores(sourceID).ordinary.list(device.ownerDID)
           )[0]
           if (ordinary === undefined) throw new Error('Missing ordinary seed')
-          const seed = await storageSeed(donor.ports.device.groups)
+          const seed = await storageSeed(donor.ports)
           const change = {
             mutationID: 'join-failed',
             expectedRevision: (await device.load()).revision,
@@ -446,7 +446,7 @@ export function testDeviceStorageConformance<TTx extends ConformanceGroupTransac
           const pool = fixture.ports.packageStores(sourceID).ordinary
           const ordinary = (await pool.list(device.ownerDID))[0]
           if (ordinary === undefined) throw new Error('Missing package')
-          const seed = await storageSeed(donor.ports.device.groups)
+          const seed = await storageSeed(donor.ports)
           const revision = (await device.load()).revision
           const before = await fixture.inspectRows()
           const hooks: Array<string> = []
@@ -513,7 +513,7 @@ export function testDeviceStorageConformance<TTx extends ConformanceGroupTransac
             receiptDone = true
             return value
           })
-          const independentSeed = await storageSeed(device.groups, 'group-B')
+          const independentSeed = await storageSeed(fixture.ports, 'group-B')
           await device.groups.transition(
             await storageChange(device.groups, 'group-B', 'independent'),
             async (stores) => {
@@ -586,7 +586,7 @@ export function testDeviceStorageConformance<TTx extends ConformanceGroupTransac
       try {
         const { device } = fixture.ports
         await device.groups.load(groupID)
-        const seed = await storageSeed(donor.ports.device.groups)
+        const seed = await storageSeed(donor.ports)
         const ordinary = (
           await fixture.ports.packageStores(sourceID).ordinary.list(device.ownerDID)
         )[0]

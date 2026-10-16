@@ -35,6 +35,7 @@ import {
   makeStorageSeed,
   nextChange,
   type StorageSeed,
+  writeInstallationCheckpoint,
 } from './fixtures/storage-seed.js'
 
 const queues = new WeakMap<object, OwnerQueues>()
@@ -137,6 +138,12 @@ async function writeInstall(
   await stores.group.lifetime.save({ ...seed.lifetime, mutationID })
   await stores.group.incarnation(1).state.save(seed.state)
   await stores.group.trust.save(seed.trust)
+  await writeInstallationCheckpoint(stores.group, {
+    key: seed.key,
+    confirmedTranscriptHash: seed.confirmedTranscriptHash,
+    mutationID,
+    stateVersion: seed.state.version,
+  })
 }
 
 async function install(
@@ -422,6 +429,12 @@ for (const mode of ['real-mls', 'double'] as const) {
           await stores.group.lifetime.save({ ...seed.lifetime, mutationID: 'shared-id' })
           await stores.group.incarnation(1).state.save(seed.state)
           await stores.group.trust.save(seed.trust)
+          await writeInstallationCheckpoint(stores.group, {
+            key: seed.key,
+            confirmedTranscriptHash: seed.confirmedTranscriptHash,
+            mutationID: 'shared-id',
+            stateVersion: seed.state.version,
+          })
         },
       )
       const before = db.snapshot()

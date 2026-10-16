@@ -5,7 +5,7 @@ import type { MemoryTransaction } from '../src/persistence-types.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import { createRealGroup } from './fixtures/real-group.js'
 import { createStorageFixture, writeSideRow } from './fixtures/storage-persistence.js'
-import { makeStorageSeed } from './fixtures/storage-seed.js'
+import { makeStorageSeed, writeInstallationCheckpoint } from './fixtures/storage-seed.js'
 import { createTransactionalStore } from './fixtures/transactional-access.js'
 
 for (const mode of ['real-mls', 'double'] as const) {
@@ -43,6 +43,12 @@ for (const mode of ['real-mls', 'double'] as const) {
             })
             await stores.incarnation(2).state.save(next.state)
             await stores.trust.save(next.trust)
+            await writeInstallationCheckpoint(stores, {
+              key: next.key,
+              confirmedTranscriptHash: next.confirmedTranscriptHash,
+              mutationID: 'checkpoint-retirement',
+              stateVersion: next.state.version,
+            })
           },
         )
       },

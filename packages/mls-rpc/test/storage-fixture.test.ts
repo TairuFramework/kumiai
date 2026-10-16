@@ -13,6 +13,7 @@ import {
 } from '../src/testing.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
 import { createStorageFixture, writeSideRow } from './fixtures/storage-persistence.js'
+import { storageTranscript, writeInstallationCheckpoint } from './fixtures/storage-seed.js'
 
 test('mutates only addressed ciphertext and preserves markers on missing keys or callback throws', async () => {
   const fixture = await createStorageFixture({ id: 'group-A', mode: 'double' })
@@ -462,6 +463,12 @@ async function writeStorageInstall(
   })
   await stores.incarnation(incarnation).state.save({ ...seed.state, incarnation, version: 1 })
   await stores.trust.save({ ...seed.trust, installed: { ...seed.trust.installed, incarnation } })
+  await writeInstallationCheckpoint(stores, {
+    key: { groupID: seed.state.groupID, incarnation },
+    confirmedTranscriptHash: storageTranscript(seed.state.state),
+    mutationID,
+    stateVersion: 1,
+  })
 }
 
 test.each(['commit', 'rollback'] as const)(

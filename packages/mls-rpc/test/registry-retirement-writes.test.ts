@@ -19,7 +19,11 @@ import {
   registryFixtureRestore,
   registryFixtureRetirement,
 } from './fixtures/registry.js'
-import { makeStorageSeed, nextChange } from './fixtures/storage-seed.js'
+import {
+  makeStorageSeed,
+  nextChange,
+  writeInstallationCheckpoint,
+} from './fixtures/storage-seed.js'
 
 const groupID = 'retirement-writes'
 const source = { groupID, incarnation: 1 }
@@ -88,6 +92,12 @@ for (const mode of ['real-mls', 'double'] as const) {
         ...candidate.trust,
         genesisAnchor: trust.genesisAnchor,
         spentEpochAuthenticators: trust.spentEpochAuthenticators,
+      })
+      await writeInstallationCheckpoint(stores, {
+        key: candidate.key,
+        confirmedTranscriptHash: candidate.confirmedTranscriptHash,
+        mutationID,
+        stateVersion: candidate.state.version,
       })
       await stores.incarnation(2).control.apply({ cursor: null }, mutationID)
       await stores.incarnation(2).anchor.save(null)

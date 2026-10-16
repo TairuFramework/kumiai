@@ -23,6 +23,7 @@ import {
   registryFixtureRestore,
   registryFixtureRetirement as registryRetirement,
 } from './fixtures/registry.js'
+import { writeInstallationCheckpoint } from './fixtures/storage-seed.js'
 
 function registry(fixture: RegistryFixtureBase) {
   return createGroupHandleRegistry({
@@ -164,6 +165,12 @@ for (const mode of ['real-mls', 'double'] as const) {
                 senderHWM: 0,
               })
               await stores.trust.save(recoveryTrustFor(handleB, keyB, null))
+              await writeInstallationCheckpoint(stores, {
+                key: keyB,
+                handle: handleB,
+                mutationID: 'independent',
+                stateVersion: 1,
+              })
               return 'group B'
             },
           ),

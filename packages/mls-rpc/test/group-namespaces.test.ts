@@ -27,7 +27,12 @@ import type {
   PersistenceEvent,
 } from '../src/persistence-types.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
-import { installSeed, makeStorageSeed, nextChange } from './fixtures/storage-seed.js'
+import {
+  installSeed,
+  makeStorageSeed,
+  nextChange,
+  writeInstallationCheckpoint,
+} from './fixtures/storage-seed.js'
 
 const queues = new WeakMap<object, OwnerQueues>()
 function ownerQueues(db: object): OwnerQueues {
@@ -273,6 +278,12 @@ test('barrier creates a neutral owner marker and proves initially absent rollbac
       await stores.lifetime.save({ ...seed.lifetime, mutationID: change.mutationID })
       await stores.incarnation(1).state.save(seed.state)
       await stores.trust.save(seed.trust)
+      await writeInstallationCheckpoint(stores, {
+        key: seed.key,
+        confirmedTranscriptHash: seed.confirmedTranscriptHash,
+        mutationID: change.mutationID,
+        stateVersion: seed.state.version,
+      })
     })
     .catch((error: unknown) => error)
   await fault.rejected

@@ -31,6 +31,7 @@ import { createGroupPeerWithControlWalk } from '@kumiai/rpc/testing'
 import type { CommitOnceEvidence, StorageTestPorts } from '@kumiai/rpc-conformance'
 import { expect, vi } from 'vitest'
 
+import { prepareCheckpointInstallationFromTrust } from '../../src/checkpoint-capture.js'
 import { createControlAdoptionPort } from '../../src/control-adoption.js'
 import { createControlBuildPort, createPersistenceBuildSaver } from '../../src/control-build.js'
 import { decodeControlJournal } from '../../src/control-journal.js'
@@ -84,7 +85,13 @@ import {
   restoreMemoryControlHandle,
   sealedMemoryValidation,
 } from './sealed-memory-mls.js'
-import { installSeed, makeStorageSeed, nextChange, type StorageSeed } from './storage-seed.js'
+import {
+  installSeed,
+  makeStorageSeed,
+  nextChange,
+  type StorageSeed,
+  storageTranscript,
+} from './storage-seed.js'
 
 const sideNamespace = 'host-side'
 const markerNamespaces = new Set(['group-owner', 'device-owner'])
@@ -142,6 +149,8 @@ type ArmedWorkFault = {
   backend: ReturnType<typeof deferred<PendingCommitFault>>
 }
 type RegistryStoragePorts = {
+  prepareInstallationCheckpoint: typeof prepareCheckpointInstallationFromTrust
+  readConfirmedTranscriptHash(state: Uint8Array | null): Promise<Uint8Array>
   device: DevicePersistence<MemoryTransaction>
   packageStores(sourceID: string): ReturnType<typeof createMemoryPackageStores>
 }
@@ -437,6 +446,10 @@ export async function createStorageFixture(params: {
     instrumentOwners(database)
     registeredGroups = device.groups
     return {
+      prepareInstallationCheckpoint: prepareCheckpointInstallationFromTrust,
+      async readConfirmedTranscriptHash(state: Uint8Array | null) {
+        return storageTranscript(state)
+      },
       device,
       packageStores: (sourceID: string) => createMemoryPackageStores({ device, sourceID }),
     }

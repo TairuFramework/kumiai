@@ -106,15 +106,22 @@ export async function storageChange<TTx extends ConformanceGroupTransaction>(
 }
 
 export async function storageSeed<TTx extends ConformanceGroupTransaction>(
-  groups: ConformanceGroupPersistence<TTx>,
+  ports: StorageTestPorts<TTx>,
   id = groupID,
 ) {
+  const groups = ports.device.groups
   const lifetime = await groups.load(id)
   const state = await groups.loadState({ groupID: id, incarnation: 1 })
   const trust = await groups.loadTrust(id)
   if (lifetime === null || state === null || state.deleted || trust === null)
     throw new Error('Missing storage seed')
-  return { lifetime, state, trust }
+  return {
+    lifetime,
+    state,
+    trust,
+    confirmedTranscriptHash: await ports.readConfirmedTranscriptHash(state.state),
+    prepareInstallationCheckpoint: ports.prepareInstallationCheckpoint,
+  }
 }
 
 export async function writeStorageInstall<TTx extends ConformanceGroupTransaction>(
@@ -133,7 +140,7 @@ export async function writeStorageInstall<TTx extends ConformanceGroupTransactio
     mutationID,
   })
   await stores.incarnation(incarnation).state.save({ ...seed.state, incarnation, version: 1 })
-  await stores.trust.save({
+  const trust = {
     ...seed.trust,
     genesisAnchor: retained?.genesisAnchor ?? seed.trust.genesisAnchor,
     installed: { ...seed.trust.installed, incarnation },
@@ -141,6 +148,30 @@ export async function writeStorageInstall<TTx extends ConformanceGroupTransactio
       ...(retained?.spentEpochAuthenticators ?? []),
       ...seed.trust.spentEpochAuthenticators,
     ],
+  }
+  await stores.trust.save(trust)
+  const facts = (await stores.checkpoints.list()).filter((record) => record.kind === 'fact')
+  const previousFact = facts.sort(
+    (a, b) => b.key.incarnation - a.key.incarnation || b.epoch - a.epoch,
+  )[0]
+  const fact = await seed.prepareInstallationCheckpoint({
+    key: { groupID: seed.state.groupID, incarnation },
+    trust,
+    confirmedTranscriptHash: seed.confirmedTranscriptHash,
+    mutationID,
+    stateVersion: 1,
+    previousFact: previousFact?.canonical ?? null,
+  })
+  await stores.checkpoints.put(fact)
+  await stores.checkpoints.put({
+    kind: 'publication',
+    id: `publication:${fact.id}`,
+    key: fact.key,
+    factID: fact.id,
+    frame: null,
+    publishID: null,
+    accepted: false,
+    nextHeartbeatAt: null,
   })
 }
 
@@ -150,7 +181,7 @@ export async function assertLowerEpochRefused<TTx extends ConformanceGroupTransa
   const fixture = await params.createFixture(groupID)
   try {
     const groups = fixture.ports.device.groups
-    const seed = await storageSeed(groups)
+    const seed = await storageSeed(fixture.ports)
     const lower = await params.lowerEpochCandidate(groupID)
     expect(lower.state.epoch).toBeLessThan(seed.state.epoch)
     expect(seed.trust.spentEpochAuthenticators).not.toContainEqual(lower.state.epochAuthenticator)
@@ -187,8 +218,8 @@ export async function assertCorruptStorageRecovery<TTx extends ConformanceGroupT
   const donor = await params.createFixture(groupID)
   try {
     const groups = fixture.ports.device.groups
-    const seed = await storageSeed(groups)
-    const fresh = await storageSeed(donor.ports.device.groups)
+    const seed = await storageSeed(fixture.ports)
+    const fresh = await storageSeed(donor.ports)
     const lifetimeBefore = await groups.load(groupID)
     const row = (await fixture.inspectRawBytes()).find((row) => row.namespace === namespace)
     if (row === undefined) throw new Error('Missing ciphertext')
@@ -261,7 +292,7 @@ export async function assertPartialLossSpentRefused<TTx extends ConformanceGroup
 ): Promise<void> {
   const fixture = await params.createFixture(groupID)
   try {
-    const seed = await storageSeed(fixture.ports.device.groups)
+    const seed = await storageSeed(fixture.ports)
     for (const [namespace, values] of Object.entries(await fixture.inspectRows())) {
       if (namespace === 'trust') continue
       for (const address of values.keys()) {
@@ -296,6 +327,54 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
   params: GroupStorageConformanceParams<TTx>,
 ): void {
   describe(`Group storage conformance -- ${params.label}`, () => {
+    for (const ownership of ['supplied', 'absent'] as const) {
+      test(`direct successful installations prepare matching fact and debt (${ownership} ownership context)`, async () => {
+        const fixture = await params.createFixture(groupID, {
+          ownershipContext: ownership === 'supplied' ? params.ownershipContext?.() : undefined,
+        })
+        const donor = await params.createFixture(groupID)
+        try {
+          const fresh = await storageSeed(donor.ports)
+          const groups = fixture.ports.device.groups
+          const before = await fixture.entry().read(groupID, (reads) => reads.checkpoints())
+          await groups.transition(
+            await storageChange(groups, groupID, 'shared-install'),
+            (stores) => writeStorageInstall(stores, fresh, 'shared-install', 2),
+          )
+          const records = await fixture.entry().read(groupID, (reads) => reads.checkpoints())
+          const facts = records.filter(
+            (record) => record.kind === 'fact' && record.key.incarnation === 2,
+          )
+          expect(facts).toHaveLength(1)
+          const fact = facts[0]
+          if (fact?.kind !== 'fact') throw new Error('Missing shared installation fact')
+          expect(fact.key).toEqual({ groupID, incarnation: 2 })
+          expect(JSON.parse(new TextDecoder().decode(fact.canonical))).toMatchObject({
+            key: fact.key,
+            epoch: fresh.state.epoch,
+            installation: { mutationID: 'shared-install', stateVersion: 1 },
+          })
+          expect(
+            records.filter((record) => record.kind === 'publication' && record.factID === fact.id),
+          ).toEqual([
+            expect.objectContaining({
+              key: fact.key,
+              factID: fact.id,
+              accepted: false,
+              frame: null,
+            }),
+          ])
+          expect(records).toEqual(expect.arrayContaining(before))
+          await fixture.reopen()
+          expect(await fixture.entry().read(groupID, (reads) => reads.checkpoints())).toEqual(
+            records,
+          )
+        } finally {
+          await donor.close()
+          await fixture.close()
+        }
+      })
+    }
     for (const { field, changes, event } of safetyRows) {
       test(`${field}: halt and event co-commit`, async () => {
         const fixture = await params.createFixture(groupID)
@@ -599,7 +678,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
         const donor = action === 'retire' ? await params.createFixture(groupID) : null
         try {
           const groups = fixture.ports.device.groups
-          const seed = await storageSeed(donor?.ports.device.groups ?? groups)
+          const seed = await storageSeed(donor?.ports ?? fixture.ports)
           await groups.ports(key).control.apply({ forkHalt, recoveryUnavailable }, 'hold-safety')
           if (action === 'clear' || action === 'delete')
             await fixture.deleteCommittedRow(
@@ -771,7 +850,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
       const fixture = await params.createFixture(groupID)
       try {
         const groups = fixture.ports.device.groups
-        const seed = await storageSeed(groups)
+        const seed = await storageSeed(fixture.ports)
         const before = await groups.readEvidence(key)
         expect(before.source).toEqual({
           key,
@@ -854,6 +933,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
         expect([...namespaces].sort()).toEqual(
           [
             'anchor',
+            'checkpoints',
             'control',
             'cursor',
             'device',
@@ -998,7 +1078,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
       const fixture = await params.createFixture(groupID)
       try {
         const groups = fixture.ports.device.groups
-        const seed = await storageSeed(groups)
+        const seed = await storageSeed(fixture.ports)
         const before = await groups.ports(key).control.load()
         const outcomes = [
           { id: 'overlap-1', opID: null, at: 1001, kind: 'unknown' as const },
@@ -1095,7 +1175,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
       const fixture = await params.createFixture(groupID)
       try {
         const groups = fixture.ports.device.groups
-        const seed = await storageSeed(groups)
+        const seed = await storageSeed(fixture.ports)
         const source = {
           key,
           identity: {
@@ -1139,7 +1219,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
       const fixture = await params.createFixture(groupID)
       try {
         const groups = fixture.ports.device.groups
-        const seed = await storageSeed(groups)
+        const seed = await storageSeed(fixture.ports)
         const change = await storageChange(groups, groupID, 'advance')
         await groups.transition(change, async (stores) => {
           await stores
@@ -1203,7 +1283,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
       const donor = await params.createFixture(groupID)
       try {
         const groups = fixture.ports.device.groups
-        const seed = await storageSeed(groups)
+        const seed = await storageSeed(fixture.ports)
         await groups.transition(await storageChange(groups, groupID, 'lost'), async (stores) =>
           stores
             .incarnation(1)
@@ -1215,7 +1295,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
             stores.incarnation(1).state.save({ ...seed.state, version: seed.state.version + 2 }),
           ),
         ).rejects.toThrow()
-        const fresh = await storageSeed(donor.ports.device.groups)
+        const fresh = await storageSeed(donor.ports)
         const before = await fixture.inspectRows()
         await expect(
           groups.transition(
@@ -1247,7 +1327,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
       try {
         const { device } = await fixture.reopen()
         const groups = device.groups
-        const fresh = await storageSeed(donor.ports.device.groups)
+        const fresh = await storageSeed(donor.ports)
         await groups.transition(await storageChange(groups, groupID, 'switch'), async (stores) =>
           writeStorageInstall(stores, fresh, 'switch', 2),
         )
@@ -1289,7 +1369,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
           const donor = await params.createFixture(groupID)
           try {
             const groups = fixture.ports.device.groups
-            const seed = await storageSeed(donor.ports.device.groups)
+            const seed = await storageSeed(donor.ports)
             const change = await storageChange(groups, groupID, 'late')
             const before = await fixture.inspectRows()
             const hooks: Array<string> = []
@@ -1350,7 +1430,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
               return value
             })
             // An unrelated group progresses while the completion owner remains held.
-            const independentSeed = await storageSeed(groups, 'group-B')
+            const independentSeed = await storageSeed(fixture.ports, 'group-B')
             await groups.transition(
               await storageChange(groups, 'group-B', 'independent'),
               async (stores) => {
@@ -1423,7 +1503,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
           const donor = await params.createFixture(groupID)
           try {
             const groups = fixture.ports.device.groups
-            const seed = await storageSeed(donor.ports.device.groups)
+            const seed = await storageSeed(donor.ports)
             const change = await storageChange(groups, groupID, 'failed-stage')
             const before = await fixture.inspectRows()
             fixture.failNext(point)
@@ -1458,7 +1538,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
         const donor = await params.createFixture(groupID)
         try {
           const groups = fixture.ports.device.groups
-          const seed = await storageSeed(donor.ports.device.groups)
+          const seed = await storageSeed(donor.ports)
           const change = await storageChange(groups, groupID, 'committed-rejection')
           const hooks: Array<string> = []
           fixture.commitThenReject()

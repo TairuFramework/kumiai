@@ -1,21 +1,31 @@
-import { type OwnIdentity, randomIdentity } from '@kokuin/token'
+import { normalizeDID, type OwnIdentity, randomIdentity } from '@kokuin/token'
 import {
   type ClientState,
+  checkpointAuthHash,
+  checkpointGenesisHash,
   commitKeyRotation,
   createGroup,
   createKeyPackageBundle,
+  decodeClientState,
+  decodeEpochRosterFact,
   encodeClientState,
   encodeGroupAnchor,
+  type GroupHandle,
   type GroupOptions,
   signLedgerEntry,
 } from '@kumiai/mls'
 
+import {
+  prepareCheckpointInstallation,
+  prepareCheckpointInstallationFromTrust,
+} from '../../src/checkpoint-capture.js'
 import type {
   GroupKey,
   GroupLifetime,
   GroupPersistence,
   GroupRecoveryTrust,
   GroupStateRecord,
+  GroupStores,
   GroupTransition,
   MemoryTransaction,
 } from '../../src/persistence-types.js'
@@ -27,6 +37,7 @@ export type StorageSeed = {
   lifetime: GroupLifetime
   state: GroupStateRecord & { deleted: false }
   trust: GroupRecoveryTrust
+  confirmedTranscriptHash: Uint8Array
 }
 
 const ciphersuiteName = 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519'
@@ -156,6 +167,7 @@ export async function makeStorageSeed(params: {
       senderHWM: 16,
     },
     trust,
+    confirmedTranscriptHash: client.groupContext.confirmedTranscriptHash.slice(),
   }
 }
 
@@ -173,6 +185,12 @@ export async function installSeed(
     })
     await stores.incarnation(seed.key.incarnation).state.save(seed.state)
     await stores.trust.save(seed.trust)
+    await writeInstallationCheckpoint(stores, {
+      key: seed.key,
+      confirmedTranscriptHash: seed.confirmedTranscriptHash,
+      mutationID,
+      stateVersion: seed.state.version,
+    })
   })
 }
 
@@ -192,5 +210,65 @@ export async function nextChange(
             revision: lifetime.revision,
             activeIncarnation: lifetime.activeIncarnation,
           },
+  }
+}
+
+export function storageTranscript(state: Uint8Array | null): Uint8Array {
+  if (state === null) throw new Error('Missing installed GroupContext')
+  const client = decodeClientState(state)
+  if (client === undefined) throw new Error('Invalid installed GroupContext')
+  return client.groupContext.confirmedTranscriptHash.slice()
+}
+
+export async function writeInstallationCheckpoint(
+  stores: Pick<GroupStores<MemoryTransaction>, 'checkpoints' | 'trust'>,
+  params: { key: GroupKey; mutationID: string; stateVersion: number } & (
+    | { handle: GroupHandle }
+    | { confirmedTranscriptHash: Uint8Array }
+  ),
+): Promise<void> {
+  const trust = await stores.trust.load()
+  if (trust === null) throw new Error('Missing installed trust')
+  const facts = (await stores.checkpoints.list()).filter((row) => row.kind === 'fact')
+  const previous = facts.sort(
+    (a, b) => b.key.incarnation - a.key.incarnation || b.epoch - a.epoch,
+  )[0]
+  const prior = previous === undefined ? null : decodeEpochRosterFact(previous.canonical)
+  if (
+    prior !== null &&
+    prior.key.groupID === params.key.groupID &&
+    prior.key.incarnation === params.key.incarnation &&
+    prior.epoch === trust.installed.epoch &&
+    prior.authHash ===
+      checkpointAuthHash({
+        groupID: params.key.groupID,
+        genesisHash: checkpointGenesisHash(trust.genesisAnchor),
+        epoch: trust.installed.epoch,
+        epochAuthenticator: trust.installed.authenticator,
+      })
+  )
+    return
+  const capture = { ...params, previousFact: previous?.canonical ?? null }
+  const fact =
+    'handle' in params
+      ? await prepareCheckpointInstallation({ ...capture, handle: params.handle })
+      : await prepareCheckpointInstallationFromTrust({
+          ...capture,
+          trust,
+          confirmedTranscriptHash: params.confirmedTranscriptHash,
+        })
+  const decoded = decodeEpochRosterFact(fact.canonical)
+  await stores.checkpoints.put(fact)
+  if (decoded.members.some((member) => member.signerDID === normalizeDID(trust.credential.id))) {
+    await stores.checkpoints.put({
+      kind: 'publication',
+      id: `publication:${fact.id}`,
+      key: fact.key,
+      factID: fact.id,
+      frame: null,
+      publishID: null,
+      accepted: false,
+      nextHeartbeatAt: null,
+    })
   }
 }
