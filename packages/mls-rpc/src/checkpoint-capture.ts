@@ -8,7 +8,7 @@ import {
   type GroupHandle,
   readGroupAnchorExtension,
 } from '@kumiai/mls'
-import type { CheckpointFactRecord } from '@kumiai/rpc'
+import type { CheckpointFactRecord, CheckpointRecord } from '@kumiai/rpc'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { toB64U } from '@sozai/codec'
 import { type CiphersuiteName, ciphersuites } from 'ts-mls'
@@ -27,6 +27,21 @@ type PublicTrust = Pick<
   GroupRecoveryTrust,
   'groupID' | 'genesisAnchor' | 'installed' | 'signerTree' | 'ciphersuiteName'
 >
+
+const preparations = new WeakMap<CheckpointFactRecord, Uint8Array>()
+
+export function checkpointPreparation(record: CheckpointFactRecord): Uint8Array | undefined {
+  return preparations.get(record)?.slice()
+}
+
+export function currentCheckpointFact(
+  records: Array<CheckpointRecord>,
+): CheckpointFactRecord | null {
+  const coverage = records.find((row) => row.kind === 'coverage' && row.id === 'coverage')
+  const id = coverage?.kind === 'coverage' ? coverage.installations.at(-1)?.id : undefined
+  const fact = records.find((row) => row.kind === 'fact' && row.id === id)
+  return fact?.kind === 'fact' ? fact : null
+}
 
 async function prepare(
   params: Installation & {
@@ -84,7 +99,7 @@ async function prepare(
     }),
     installation: { mutationID, stateVersion },
   })
-  return {
+  const record: CheckpointFactRecord = {
     kind: 'fact',
     id: toB64U(sha256(canonical)),
     key: { ...key },
@@ -92,6 +107,8 @@ async function prepare(
     canonical,
     supersededAt: null,
   }
+  preparations.set(record, canonical.slice())
+  return record
 }
 
 export async function prepareCheckpointInstallation(

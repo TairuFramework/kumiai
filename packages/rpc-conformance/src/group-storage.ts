@@ -150,17 +150,17 @@ export async function writeStorageInstall<TTx extends ConformanceGroupTransactio
     ],
   }
   await stores.trust.save(trust)
-  const facts = (await stores.checkpoints.list()).filter((record) => record.kind === 'fact')
-  const previousFact = facts.sort(
-    (a, b) => b.key.incarnation - a.key.incarnation || b.epoch - a.epoch,
-  )[0]
+  const records = await stores.checkpoints.list()
+  const coverage = records.find((record) => record.kind === 'coverage' && record.id === 'coverage')
+  const previousID = coverage?.kind === 'coverage' ? coverage.installations.at(-1)?.id : undefined
+  const previousFact = records.find((record) => record.kind === 'fact' && record.id === previousID)
   const fact = await seed.prepareInstallationCheckpoint({
     key: { groupID: seed.state.groupID, incarnation },
     trust,
     confirmedTranscriptHash: seed.confirmedTranscriptHash,
     mutationID,
     stateVersion: 1,
-    previousFact: previousFact?.canonical ?? null,
+    previousFact: previousFact?.kind === 'fact' ? previousFact.canonical : null,
   })
   await stores.checkpoints.put(fact)
   await stores.checkpoints.put({
@@ -364,7 +364,13 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
               frame: null,
             }),
           ])
-          expect(records).toEqual(expect.arrayContaining(before))
+          for (const row of before) {
+            if (row.kind === 'coverage') continue
+            const after = records.find((record) => record.id === row.id)
+            expect(after).toMatchObject(
+              row.kind === 'fact' ? { ...row, supersededAt: expect.any(Number) } : row,
+            )
+          }
           await fixture.reopen()
           expect(await fixture.entry().read(groupID, (reads) => reads.checkpoints())).toEqual(
             records,

@@ -54,6 +54,15 @@ export type CheckpointRecord =
       nextHeartbeatAt: number | null
     }
   | { kind: 'cursor'; id: string; key: GroupKey; topicID: string; position: string | null }
+  | {
+      kind: 'coverage'
+      id: string
+      key: GroupKey
+      current: { key: GroupKey; epoch: number } | null
+      effectiveFloor: number | null
+      gaps: CheckpointCoverage['gaps']
+      installations: Array<{ id: string; key: GroupKey; epoch: number }>
+    }
 
 export type CheckpointFactRecord = Extract<CheckpointRecord, { kind: 'fact' }>
 

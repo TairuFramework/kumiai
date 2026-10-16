@@ -127,7 +127,9 @@ for (const mode of ['real-mls', 'double'] as const) {
           const capability = entryCapability(fixture.device.groups)
           if (capability === null) throw new Error('Missing fixture entry')
           const records = await capability.read(id, (reads) => reads.checkpoints())
-          expect(records.map((record) => record.kind)).toEqual(['fact', 'publication'])
+          expect(
+            records.filter((record) => record.kind !== 'coverage').map((record) => record.kind),
+          ).toEqual(['fact', 'publication'])
           const fact = records[0]
           if (fact?.kind !== 'fact') throw new Error('Missing registry installation fact')
           expect(decodeEpochRosterFact(fact.canonical)).toMatchObject({
@@ -443,7 +445,9 @@ test('storage only removed installation retains its fact without publication', a
   try {
     await installSeed(fixture.ports.device.groups, seed, 'removed')
     const records = await fixture.entry().read(seed.key.groupID, (reads) => reads.checkpoints())
-    expect(records.map((record) => record.kind)).toEqual(['fact'])
+    expect(
+      records.filter((record) => record.kind !== 'coverage').map((record) => record.kind),
+    ).toEqual(['fact'])
     const fact = records[0]
     if (fact?.kind !== 'fact') throw new Error('Missing removed installation fact')
     expect(decodeEpochRosterFact(fact.canonical)).toMatchObject({

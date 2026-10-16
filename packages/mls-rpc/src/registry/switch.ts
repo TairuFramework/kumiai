@@ -9,6 +9,7 @@ import {
   type StoredRejoinRecord,
 } from '@kumiai/rpc'
 
+import { currentCheckpointFact, prepareCheckpointInstallation } from '../checkpoint-capture.js'
 import type { EntryCapability } from '../entry-capability.js'
 import { copyStoredValue, sameStoredValue } from '../memory-incarnation-stores.js'
 import {
@@ -227,7 +228,21 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
               revision: lifetime.revision,
               activeIncarnation: lifetime.activeIncarnation,
             },
-            value: { current, lifetime, record, state, trust, anchor },
+            value: {
+              current,
+              lifetime,
+              record,
+              state,
+              trust,
+              anchor,
+              checkpoint: await prepareCheckpointInstallation({
+                key: destination,
+                handle: candidate,
+                mutationID: write.mutationID,
+                stateVersion: state.version,
+                previousFact: currentCheckpointFact(await reads.checkpoints())?.canonical ?? null,
+              }),
+            },
           }
         },
         async (stores, prepared) => {
@@ -283,6 +298,18 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
           const rows = stores.incarnation(destination.incarnation)
           await rows.state.save(prepared.state)
           await stores.trust.save(prepared.trust)
+          await stores.checkpoints.put(prepared.checkpoint)
+          if (!prepared.state.terminal)
+            await stores.checkpoints.put({
+              kind: 'publication',
+              id: `publication:${prepared.checkpoint.id}`,
+              key: destination,
+              factID: prepared.checkpoint.id,
+              frame: null,
+              publishID: null,
+              accepted: false,
+              nextHeartbeatAt: null,
+            })
           await rows.control.apply({ cursor }, write.mutationID)
           await rows.anchor.save(prepared.anchor)
           return destination

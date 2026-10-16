@@ -219,6 +219,11 @@ function envelope(state: ClientState, mls: MemoryMLS): ClientState {
     groupContext: {
       ...state.groupContext,
       epoch: BigInt(mls.epoch()),
+      confirmedTranscriptHash: changingEpoch
+        ? sha256(
+            new TextEncoder().encode(`kumiai/test-transcript/v1:${toB64U(mls.authenticator())}`),
+          )
+        : state.groupContext.confirmedTranscriptHash,
       extensions: [
         ...state.groupContext.extensions.filter(
           (extension) => extension.extensionType !== LEDGER_HEAD_EXTENSION_TYPE,

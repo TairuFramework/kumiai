@@ -1,6 +1,16 @@
-import { controlAdoptionAllowed, controlSafetyHeld } from '@kumiai/rpc'
+import { normalizeDID } from '@kokuin/token'
+import { decodeClientState, decodeEpochRosterFact } from '@kumiai/mls'
+import { type CheckpointFactRecord, controlAdoptionAllowed, controlSafetyHeld } from '@kumiai/rpc'
+import { fromB64U } from '@sozai/codec'
 
-import { createCheckpointStore, openCheckpointRow } from './checkpoint-store.js'
+import { prepareCheckpointInstallationFromTrust } from './checkpoint-capture.js'
+import {
+  assertCheckpointUpdates,
+  checkpointCaptureFor,
+  createCheckpointStore,
+  openCheckpointRow,
+  retainCheckpointInstallations,
+} from './checkpoint-store.js'
 import {
   type AccountedGroupObservation,
   bindEntryCapability,
@@ -807,6 +817,14 @@ export function createMemoryGroupCoordinator(params: {
                     : { ...previous, revision, mutationID: change.mutationID })
                 if (life === undefined)
                   throw new GroupStateConflictError('Initial transition requires a lifetime')
+                assertCheckpointUpdates(
+                  await createUnlockedGroupStateStores({
+                    tx: { ...tx, rows: before },
+                    groupID: request.groupID,
+                    atRest,
+                  }).checkpoints.list(),
+                  await raw.checkpoints.list(),
+                )
                 const installing =
                   previous === null ||
                   (life.activeIncarnation !== null &&
@@ -828,6 +846,7 @@ export function createMemoryGroupCoordinator(params: {
                   if (previous !== null && (await retainedTrust(tx)) === null)
                     throw new GroupStateConflictError('Existing lifetime requires retained trust')
                 }
+                const installations: Array<CheckpointFactRecord> = []
                 for (const [incarnation, next] of savedStates) {
                   // Tombstone counters were validated without opening private state.
                   if (next.deleted) continue
@@ -861,6 +880,65 @@ export function createMemoryGroupCoordinator(params: {
                     )
                       throw new GroupStateConflictError('Identity change requires matching trust')
                     assertStateTransition(original, next, await retainedTrust(tx))
+                    const records = await raw.checkpoints.list()
+                    const capture = records.find(
+                      (row) =>
+                        row.kind === 'fact' &&
+                        row.key.incarnation === incarnation &&
+                        row.epoch === next.epoch &&
+                        checkpointCaptureFor(tx, row.id) !== undefined,
+                    )
+                    if (
+                      capture?.kind !== 'fact' ||
+                      !sameStoredValue(capture.canonical, checkpointCaptureFor(tx, capture.id))
+                    )
+                      throw new GroupStateConflictError(
+                        'Checkpoint installation requires matching capture',
+                      )
+                    const decoded = decodeEpochRosterFact(capture.canonical)
+                    const client = next.state === null ? undefined : decodeClientState(next.state)
+                    const coverage = records.find(
+                      (row) => row.kind === 'coverage' && row.id === 'coverage',
+                    )
+                    const priorID =
+                      coverage?.kind === 'coverage' ? coverage.installations.at(-1)?.id : undefined
+                    const prior = records.find((row) => row.kind === 'fact' && row.id === priorID)
+                    const expected = await prepareCheckpointInstallationFromTrust({
+                      key: { groupID: change.groupID, incarnation },
+                      trust,
+                      mutationID: change.mutationID,
+                      stateVersion: next.version,
+                      confirmedTranscriptHash:
+                        client?.groupContext.confirmedTranscriptHash ??
+                        fromB64U(decoded.confirmedTranscriptHash),
+                      previousFact: prior?.kind === 'fact' ? prior.canonical : null,
+                    })
+                    if (!sameStoredValue(capture, expected))
+                      throw new GroupStateConflictError('Checkpoint installation capture mismatch')
+                    const signable =
+                      !next.terminal &&
+                      decoded.members.some(
+                        (member) => member.signerDID === normalizeDID(trust.credential.id),
+                      )
+                    const debt = records.find((row) => row.id === `publication:${capture.id}`)
+                    if (
+                      signable &&
+                      (debt?.kind !== 'publication' ||
+                        debt.factID !== capture.id ||
+                        !sameStoredValue(debt.key, capture.key) ||
+                        debt.frame !== null ||
+                        debt.publishID !== null ||
+                        debt.accepted ||
+                        debt.nextHeartbeatAt !== null)
+                    )
+                      throw new GroupStateConflictError(
+                        'Checkpoint installation requires publication debt',
+                      )
+                    if (!signable && debt !== undefined)
+                      throw new GroupStateConflictError(
+                        'Checkpoint installation cannot publish removed identity',
+                      )
+                    installations.push(capture)
                     if (
                       !trust.spentEpochAuthenticators.some((value) =>
                         sameStoredValue(value, next.epochAuthenticator),
@@ -913,6 +991,7 @@ export function createMemoryGroupCoordinator(params: {
                   }
                   await raw.trust.save(proposedTrust)
                 }
+                await retainCheckpointInstallations(raw.checkpoints, installations, Date.now())
                 const after = snapshot(tx)
                 const affected = changedIncarnations(before, after, change.groupID)
                 if (
@@ -1006,6 +1085,24 @@ export function createMemoryGroupCoordinator(params: {
             await coordinateMemoryTransaction(tx, async (tx) => {
               const raw = createUnlockedGroupStateStores({ tx, groupID: request.groupID, atRest })
               const checkpointRows = tx.rows.checkpoints ?? new Map<string, unknown>()
+              const checkpointChanges = new Set([
+                ...checkpointRows.keys(),
+                ...(beforeEffects.checkpoints?.keys() ?? []),
+              ])
+              if (
+                [...checkpointChanges].some(
+                  (id) =>
+                    !sameStoredValue(beforeEffects.checkpoints?.get(id), checkpointRows.get(id)),
+                )
+              )
+                assertCheckpointUpdates(
+                  await createUnlockedGroupStateStores({
+                    tx: { ...tx, rows: beforeEffects },
+                    groupID: request.groupID,
+                    atRest,
+                  }).checkpoints.list(),
+                  await raw.checkpoints.list(),
+                )
               for (const [id, bytes] of checkpointRows) {
                 if (sameStoredValue(before.checkpoints?.get(id), bytes)) continue
                 await openCheckpointRow({ tx, groupID: change.groupID, atRest }, id, bytes)

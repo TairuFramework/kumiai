@@ -2,6 +2,7 @@ import { encodeClientState, type GroupHandle } from '@kumiai/mls'
 import { judgeWelcomeAdmission } from '@kumiai/mls-hub'
 import type { SafetyHold } from '@kumiai/rpc'
 
+import { currentCheckpointFact, prepareCheckpointInstallation } from '../checkpoint-capture.js'
 import type { EntryCapability, EntryReads, StateMetadata } from '../entry-capability.js'
 import { sameStoredValue } from '../memory-incarnation-stores.js'
 import { isStoredOpenFailure } from '../persistence-codec.js'
@@ -255,6 +256,13 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
             value: {
               // Staged for the later combined package-install boundary; no provider package hook here.
               packageUse,
+              checkpoint: await prepareCheckpointInstallation({
+                key,
+                handle: group,
+                mutationID,
+                stateVersion: 1,
+                previousFact: currentCheckpointFact(await reads.checkpoints())?.canonical ?? null,
+              }),
               state: encodeClientState(group.state),
               credential: { ...group.credential },
               ledger: [...group.ledgerTokens],
@@ -302,6 +310,17 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
             senderHWM: 0,
           })
           await stores.trust.save(prepared.trust)
+          await stores.checkpoints.put(prepared.checkpoint)
+          await stores.checkpoints.put({
+            kind: 'publication',
+            id: `publication:${prepared.checkpoint.id}`,
+            key,
+            factID: prepared.checkpoint.id,
+            frame: null,
+            publishID: null,
+            accepted: false,
+            nextHeartbeatAt: null,
+          })
           await rows.control.apply({ cursor: null }, mutationID)
           await rows.anchor.save(null)
           return key

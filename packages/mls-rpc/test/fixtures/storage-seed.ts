@@ -16,6 +16,7 @@ import {
 } from '@kumiai/mls'
 
 import {
+  currentCheckpointFact,
   prepareCheckpointInstallation,
   prepareCheckpointInstallationFromTrust,
 } from '../../src/checkpoint-capture.js'
@@ -229,11 +230,8 @@ export async function writeInstallationCheckpoint(
 ): Promise<void> {
   const trust = await stores.trust.load()
   if (trust === null) throw new Error('Missing installed trust')
-  const facts = (await stores.checkpoints.list()).filter((row) => row.kind === 'fact')
-  const previous = facts.sort(
-    (a, b) => b.key.incarnation - a.key.incarnation || b.epoch - a.epoch,
-  )[0]
-  const prior = previous === undefined ? null : decodeEpochRosterFact(previous.canonical)
+  const previous = currentCheckpointFact(await stores.checkpoints.list())
+  const prior = previous === null ? null : decodeEpochRosterFact(previous.canonical)
   if (
     prior !== null &&
     prior.key.groupID === params.key.groupID &&

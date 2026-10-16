@@ -32,6 +32,7 @@ for (const mode of ['double', 'real-mls'] as const) {
           })
     if (seed !== undefined && real !== undefined) {
       const handle = real.committer.handle
+      seed.confirmedTranscriptHash = handle.state.groupContext.confirmedTranscriptHash.slice()
       seed.state = {
         ...seed.state,
         state: encodeClientState(handle.state),

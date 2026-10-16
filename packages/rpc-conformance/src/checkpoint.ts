@@ -14,6 +14,15 @@ import type {
 export type ConformanceCheckpointRecord =
   | ConformanceCheckpointFactRecord
   | {
+      kind: 'coverage'
+      id: string
+      key: ConformanceGroupKey
+      current: { key: ConformanceGroupKey; epoch: number } | null
+      effectiveFloor: number | null
+      gaps: ConformanceCheckpointCoverage['gaps']
+      installations: Array<{ id: string; key: ConformanceGroupKey; epoch: number }>
+    }
+  | {
       kind: 'publication'
       id: string
       key: ConformanceGroupKey
@@ -316,11 +325,23 @@ export function testCheckpointStorageConformance<TTx extends ConformanceGroupTra
         await params.retire(fixture)
         await fixture.reopen()
         const after = await read(fixture)
-        expect(after).toEqual(expect.arrayContaining(before))
-        expect(after.filter((record) => record.key.incarnation === 1)).toEqual(before)
+        for (const row of before) {
+          if (row.kind === 'coverage') continue
+          const retained = after.find((record) => record.id === row.id)
+          const installed = before.find((record) => record.kind === 'coverage')
+          const authorised =
+            installed?.kind === 'coverage' &&
+            installed.installations.some((fact) => fact.id === row.id)
+          expect(retained).toMatchObject(
+            row.kind === 'fact' && authorised ? { ...row, supersededAt: expect.any(Number) } : row,
+          )
+        }
+        expect(after.find((record) => record.kind === 'coverage')).toMatchObject({
+          key: { groupID, incarnation: 2 },
+        })
         expect(
           after
-            .filter((record) => record.key.incarnation === 2)
+            .filter((record) => record.key.incarnation === 2 && record.kind !== 'coverage')
             .map((record) => record.kind)
             .sort(),
         ).toEqual(['fact', 'publication'])
@@ -406,6 +427,77 @@ export function testCheckpointStorageConformance<TTx extends ConformanceGroupTra
         expect(await groups.loadTrust(groupID)).toEqual(beforeTrust)
         expect((await groups.load(groupID))?.latestIncarnation).toBe(1)
         expect(await groups.loadState({ ...key, incarnation: 999 })).toBeNull()
+      } finally {
+        await fixture.close()
+      }
+    })
+
+    test('installed coverage and provenance cannot be rewritten by ordinary records', async () => {
+      const fixture = await params.createFixture(groupID)
+      try {
+        const records = await read(fixture)
+        const coverage = records.find((row) => row.kind === 'coverage')
+        if (coverage?.kind !== 'coverage') throw new Error('Missing installed coverage')
+        expect(coverage.current).toEqual({ key, epoch: 3 })
+        expect(coverage.effectiveFloor).toBe(3)
+        expect(coverage.gaps).toEqual([{ key, from: 0, through: 2, reason: 'pre-join' }])
+        expect(coverage).not.toHaveProperty('members')
+        const installed = records.find((row) => row.id === coverage.installations[0]?.id)
+        if (installed?.kind !== 'fact') throw new Error('Missing authorised fact')
+        await expect(
+          write(fixture, [{ ...coverage, effectiveFloor: 0, gaps: [] }]),
+        ).rejects.toMatchObject({ name: 'GroupStateConflictError' })
+        await expect(write(fixture, [{ ...installed, supersededAt: 0 }])).rejects.toMatchObject({
+          name: 'GroupStateConflictError',
+        })
+        expect(await read(fixture)).toEqual(records)
+        await fixture.reopen()
+        expect(await read(fixture)).toEqual(records)
+      } finally {
+        await fixture.close()
+      }
+    })
+
+    test('effects cannot rewrite installed coverage after finalisation', async () => {
+      let replacement: ConformanceCheckpointRecord | undefined
+      const fixture = await params.createFixture(groupID, {
+        effects: {
+          async outbox(tx) {
+            if (replacement !== undefined)
+              await fixture.constructGroupStores(tx, key).checkpoints.put(replacement)
+          },
+        },
+      })
+      try {
+        const records = await read(fixture)
+        const coverage = records.find((row) => row.kind === 'coverage')
+        if (coverage?.kind !== 'coverage') throw new Error('Missing installed coverage')
+        replacement = { ...coverage, current: null, installations: [], gaps: [] }
+        const groups = fixture.ports.device.groups
+        const before = await fixture.inspectRows()
+        await expect(
+          groups.transition(
+            await storageChange(groups, groupID, 'effect-coverage'),
+            async (stores) => {
+              await stores.incarnation(1).meta.putEvents([
+                {
+                  ...key,
+                  id: 'effect-checkpoint-event',
+                  kind: 'accepted',
+                  entry: {
+                    seq: 79,
+                    protocol: 'chat',
+                    prc: 'posted',
+                    data: new Uint8Array([7]),
+                    lastAttempt: null,
+                    status: 'accepted',
+                  },
+                },
+              ])
+            },
+          ),
+        ).rejects.toMatchObject({ name: 'GroupStateConflictError' })
+        expect(await fixture.inspectRows()).toEqual(before)
       } finally {
         await fixture.close()
       }

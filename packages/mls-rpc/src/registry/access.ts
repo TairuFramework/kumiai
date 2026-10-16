@@ -2,6 +2,7 @@ import { encodeClientState, type GroupHandle } from '@kumiai/mls'
 import {
   type AdoptionExpected,
   type AdoptionWrite,
+  type CheckpointFactRecord,
   type ControlSnapshot,
   type ControlStore,
   controlSafetyHeld,
@@ -11,6 +12,7 @@ import {
 } from '@kumiai/rpc'
 
 import type { ControlRead, ControlReadScope, HandleAccess } from '../access.js'
+import { currentCheckpointFact, prepareCheckpointInstallation } from '../checkpoint-capture.js'
 import { type ControlJournal, decodeControlJournal } from '../control-journal.js'
 import { controlBuildContexts } from '../control-write-context.js'
 import type { EntryCapability, EntryReads } from '../entry-capability.js'
@@ -212,12 +214,27 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     record: ReadableGroupState,
     trust: ValidatedGroupState['trust'],
     write?: AdoptionWrite,
+    checkpoint?: CheckpointFactRecord,
   ) {
     params.assertCurrent()
     await assertWorkSafety(stores)
     const target = stores.incarnation(owner.key.incarnation)
     await target.state.save(record, write?.expected)
     await stores.trust.save(trust)
+    if (checkpoint !== undefined) {
+      await stores.checkpoints.put(checkpoint)
+      if (!record.terminal)
+        await stores.checkpoints.put({
+          kind: 'publication',
+          id: `publication:${checkpoint.id}`,
+          key: { groupID: record.groupID, incarnation: record.incarnation },
+          factID: checkpoint.id,
+          frame: null,
+          publishID: null,
+          accepted: false,
+          nextHeartbeatAt: null,
+        })
+    }
     if (write !== undefined) {
       await target.control.apply(write.changes, write.mutationID)
       if (write.anchorLanded !== undefined) {
@@ -415,7 +432,19 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
           return {
             expected: lifetime,
             mutationID: write.mutationID,
-            value: { source, record, trust, write },
+            value: {
+              source,
+              record,
+              trust,
+              write,
+              checkpoint: await prepareCheckpointInstallation({
+                key: owner.key,
+                handle: destination,
+                mutationID: write.mutationID,
+                stateVersion: record.version,
+                previousFact: currentCheckpointFact(await reads.checkpoints())?.canonical ?? null,
+              }),
+            },
           }
         },
         async (stores, prepared) => {
@@ -436,7 +465,13 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
             after: prepared.trust.installed,
           })
           try {
-            await writeState(stores, prepared.record, prepared.trust, prepared.write)
+            await writeState(
+              stores,
+              prepared.record,
+              prepared.trust,
+              prepared.write,
+              prepared.checkpoint,
+            )
           } finally {
             controlBuildContexts.delete(stores.tx)
           }
@@ -457,12 +492,13 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
   const mutate: HandleAccess['mutate'] = async (fn, adoption) => {
     params.assertAvailable()
     assertSafety()
+    const fallbackMutationID = crypto.randomUUID()
     let noopResult: { value: Awaited<ReturnType<typeof fn>> } | undefined
     try {
       return await capability.run(
         {
           groupID: owner.key.groupID,
-          mutationID: adoption === undefined ? crypto.randomUUID() : null,
+          mutationID: adoption === undefined ? fallbackMutationID : null,
         },
         async (reads) => {
           assertSafety()
@@ -473,6 +509,8 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
           let record: ReadableGroupState | undefined
           let trust: ValidatedGroupState['trust'] | undefined
           let write: AdoptionWrite | undefined
+          let checkpoint: CheckpointFactRecord | undefined
+          let mutationID: string = fallbackMutationID
           let nooped = false
           let active = true
           const persist = async (candidate: GroupHandle): Promise<void> => {
@@ -519,9 +557,25 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
             const stagedRecord = recordFor(final, value)
             const stagedTrust = recoveryTrustFor(final, value.key, value.trust)
             if (!active) throw new Error('Mutation prepare scope has ended')
+            const stagedMutationID = stagedWrite?.mutationID ?? fallbackMutationID
+            const stagedCheckpoint =
+              stagedRecord.epoch === value.record.epoch &&
+              sameStoredValue(stagedRecord.epochAuthenticator, value.record.epochAuthenticator)
+                ? undefined
+                : await prepareCheckpointInstallation({
+                    key: owner.key,
+                    handle: final,
+                    mutationID: stagedMutationID,
+                    stateVersion: stagedRecord.version,
+                    previousFact:
+                      currentCheckpointFact(await reads.checkpoints())?.canonical ?? null,
+                  })
+            if (!active) throw new Error('Mutation prepare scope has ended')
             record = stagedRecord
             trust = stagedTrust
             write = stagedWrite
+            mutationID = stagedMutationID
+            checkpoint = stagedCheckpoint
           }
           let result: Awaited<ReturnType<typeof fn>>
           try {
@@ -540,8 +594,8 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
             throw new Error('Mutation state was not staged')
           return {
             expected: lifetime,
-            mutationID: write?.mutationID ?? crypto.randomUUID(),
-            value: { result, record, trust, write, source },
+            mutationID,
+            value: { result, record, trust, write, source, checkpoint },
           }
         },
         async (stores, prepared) => {
@@ -553,7 +607,13 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
               after: prepared.trust.installed,
             })
           try {
-            await writeState(stores, prepared.record, prepared.trust, prepared.write)
+            await writeState(
+              stores,
+              prepared.record,
+              prepared.trust,
+              prepared.write,
+              prepared.checkpoint,
+            )
           } finally {
             controlBuildContexts.delete(stores.tx)
           }
