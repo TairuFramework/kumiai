@@ -6,12 +6,6 @@ export type { LogHub, MailboxHub } from '@kumiai/hub-tunnel'
  * @module rpc
  */
 
-/**
- * High-level MLS-aware group RPC for Enkaku.
- *
- * @module rpc
- */
-
 export type { Anchor, AnchorSlot, AnchorStore } from './anchor.js'
 export { type AppAAD, decodeAppAAD, encodeAppAAD } from './app-aad.js'
 export type { AppCursorStore, AppWindowPruned } from './app-cursor.js'

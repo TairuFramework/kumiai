@@ -1,6 +1,6 @@
 import { controlAdoptionAllowed, controlSafetyHeld } from '@kumiai/rpc'
 
-import { createCheckpointStore } from './checkpoint-store.js'
+import { createCheckpointStore, openCheckpointRow } from './checkpoint-store.js'
 import {
   type AccountedGroupObservation,
   bindEntryCapability,
@@ -1008,10 +1008,7 @@ export function createMemoryGroupCoordinator(params: {
               const checkpointRows = tx.rows.checkpoints ?? new Map<string, unknown>()
               for (const [id, bytes] of checkpointRows) {
                 if (sameStoredValue(before.checkpoints?.get(id), bytes)) continue
-                const address = JSON.parse(id) as [string, number | null, string]
-                if (address[0] !== change.groupID || address[1] !== null)
-                  throw new GroupStateConflictError('Checkpoint address mismatch')
-                await raw.checkpoints.load(address[2])
+                await openCheckpointRow({ tx, groupID: change.groupID, atRest }, id, bytes)
               }
               const affected = changedIncarnations(beforeEffects, snapshot(tx), change.groupID)
               const life = await raw.lifetime.load()

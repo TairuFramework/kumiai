@@ -9,6 +9,7 @@ import {
 } from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
+import { createUnlockedCheckpointStore, openCheckpointRow } from '../src/checkpoint-store.js'
 import { createPersistenceBuildSaver } from '../src/control-build.js'
 import { encodeControlJournal } from '../src/control-journal.js'
 import { memoryFaults } from '../src/memory-faults.js'
@@ -485,6 +486,94 @@ for (const mode of ['real-mls', 'double'] as const) {
           ).rejects.toMatchObject({ name: 'GroupStateConflictError' })
           expect(db.snapshot()).toEqual(before)
         }
+      },
+    )
+
+    test.each([
+      { phase: 'work', collision: false },
+      { phase: 'effects', collision: false },
+      { phase: 'work', collision: true },
+      { phase: 'effects', collision: true },
+    ])(
+      'rejects noncanonical checkpoint keys after $phase writes (canonical collision: $collision)',
+      async ({ phase, collision }) => {
+        const { db, groups } = await setup()
+        const record = {
+          kind: 'cursor' as const,
+          id: 'checkpoint-intake',
+          key,
+          topicID: 'checkpoint-topic',
+          position: null,
+        }
+        if (collision)
+          await groups.transition(await nextChange(groups, groupID, 'seed-checkpoint'), (stores) =>
+            stores.checkpoints.put(record),
+          )
+        const before = db.snapshot()
+        const inject = async (tx: Parameters<typeof createIncarnationStores>[0]['tx']) => {
+          tx.rows.checkpoints?.set('["group-A", null, "checkpoint-intake"]', new Uint8Array([0]))
+        }
+        const scoped =
+          phase === 'work'
+            ? groups
+            : createMemoryGroupPersistence({
+                owners: ownerQueues(db),
+                db,
+                atRest,
+                providerID: 'memory',
+                effects: { outbox: inject },
+              })
+        await expect(
+          scoped.transition(
+            await nextChange(scoped, groupID, 'noncanonical-checkpoint'),
+            async (stores) => {
+              await stores.checkpoints.put({ ...record, id: 'valid-side-write' })
+              await stores.incarnation(1).meta.putEvents([event])
+              if (phase === 'work') await inject(stores.tx)
+            },
+          ),
+        ).rejects.toMatchObject({ name: 'GroupStateConflictError' })
+        expect(db.snapshot()).toEqual(before)
+      },
+    )
+
+    test.each(['work', 'effects'] as const)(
+      'authenticates changed checkpoint bytes after %s writes with complete rollback',
+      async (phase) => {
+        const { db, groups } = await setup()
+        await groups.transition(await nextChange(groups, groupID, 'seed-checkpoint'), (stores) =>
+          stores.checkpoints.put({
+            kind: 'cursor',
+            id: 'checkpoint-intake',
+            key,
+            topicID: 'checkpoint-topic',
+            position: null,
+          }),
+        )
+        const before = db.snapshot()
+        const inject = async (tx: Parameters<typeof createIncarnationStores>[0]['tx']) => {
+          tx.rows.checkpoints?.set('["group-A",null,"checkpoint-intake"]', new Uint8Array([0]))
+        }
+        const scoped =
+          phase === 'work'
+            ? groups
+            : createMemoryGroupPersistence({
+                owners: ownerQueues(db),
+                db,
+                atRest,
+                providerID: 'memory',
+                effects: { outbox: inject },
+              })
+        await expect(
+          scoped.transition(
+            await nextChange(scoped, groupID, 'corrupt-checkpoint'),
+            async (stores) => {
+              await stores.incarnation(1).meta.putEvents([event])
+              if (phase === 'work') await inject(stores.tx)
+            },
+          ),
+        ).rejects.toThrow('Truncated sealed record')
+        expect(db.snapshot()).toEqual(before)
       },
     )
 
@@ -1940,4 +2029,90 @@ test('retries completion-barrier and proof-read failures outside storage without
   } finally {
     timer.mockRestore()
   }
+})
+
+test.each([
+  '["group-A", null, "checkpoint-intake"]',
+  '["group-A",null,"checkpoint-intake","extra"]',
+  '["group-A",null,7]',
+  '{"0":"group-A","1":null,"2":"checkpoint-intake"}',
+  'invalid-json',
+])('checkpoint list rejects malformed physical key %s', async (id) => {
+  const address = {
+    groupID,
+    incarnation: null,
+    namespace: 'checkpoints',
+    recordID: 'checkpoint-intake',
+  }
+  const bytes = await sealRecord(atRest, address, {
+    kind: 'cursor',
+    id: address.recordID,
+    key,
+    topicID: 'checkpoint-topic',
+    position: null,
+  })
+  const store = createUnlockedCheckpointStore({
+    tx: {
+      providerID: 'memory',
+      groupID,
+      onCommit: vi.fn(),
+      onRollback: vi.fn(),
+      rows: { checkpoints: new Map([[id, bytes]]) },
+    },
+    groupID,
+    atRest,
+  })
+  await expect(store.list()).rejects.toMatchObject({ name: 'GroupStateConflictError' })
+})
+
+test('checkpoint list rejects a sealed null record', async () => {
+  const address = {
+    groupID,
+    incarnation: null,
+    namespace: 'checkpoints',
+    recordID: 'checkpoint-intake',
+  }
+  const bytes = await sealRecord(atRest, address, null)
+  const store = createUnlockedCheckpointStore({
+    tx: {
+      providerID: 'memory',
+      groupID,
+      onCommit: vi.fn(),
+      onRollback: vi.fn(),
+      rows: { checkpoints: new Map([[physicalRecordKey(address), bytes]]) },
+    },
+    groupID,
+    atRest,
+  })
+  await expect(store.list()).rejects.toMatchObject({ name: 'GroupStateConflictError' })
+})
+
+test('checkpoint authentication opens supplied bytes despite an existing canonical row', async () => {
+  const address = {
+    groupID,
+    incarnation: null,
+    namespace: 'checkpoints',
+    recordID: 'checkpoint-intake',
+  }
+  const id = physicalRecordKey(address)
+  const bytes = await sealRecord(atRest, address, {
+    kind: 'cursor',
+    id: address.recordID,
+    key,
+    topicID: 'checkpoint-topic',
+    position: null,
+  })
+  const tx = {
+    providerID: 'memory',
+    groupID,
+    onCommit: vi.fn(),
+    onRollback: vi.fn(),
+    rows: { checkpoints: new Map([[id, bytes]]) },
+  }
+  await expect(openCheckpointRow({ tx, groupID, atRest }, id, new Uint8Array([0]))).rejects.toThrow(
+    'Truncated sealed record',
+  )
+  expect(
+    await createUnlockedCheckpointStore({ tx, groupID, atRest }).load(address.recordID),
+  ).toMatchObject({ id: address.recordID, kind: 'cursor' })
 })
