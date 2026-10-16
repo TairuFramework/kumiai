@@ -9,10 +9,11 @@ import type {
   RecoveryCompletion,
   RecoveryContinuation,
   RecoveryContinuationPort,
+  RecoveryEvent,
   RecoveryReconciliation,
   ResyncProof,
 } from '@kumiai/rpc'
-import { applyResolved, controlSafetyHeld } from '@kumiai/rpc'
+import { applyResolved, controlSafetyHeld, isHardControlHold } from '@kumiai/rpc'
 
 import { copyStoredValue, sameStoredValue } from './memory-incarnation-stores.js'
 import type { RecoveryRouting } from './mls.js'
@@ -62,9 +63,13 @@ export type RegistryPeerOptions = {
   continuation: RecoveryContinuation | null
   completion: RecoveryCompletion | null
 }
+export type RegistryPeerStatus =
+  | { kind: 'starting' | 'running' | 'switching' | 'pending' | 'disposed' }
+  | { kind: 'failed'; error: unknown }
 export type RegistryPeer = {
   peer(): Peer | null
   installedKey(): GroupKey
+  status(): RegistryPeerStatus
   ready: Promise<void>
   dispose(): void
   drained(): Promise<void>
@@ -75,6 +80,7 @@ export type RegistryPeerParams = {
   recovery: RecoveryEnvironment
   target: RecoveryRouting
   continuation: RecoveryContinuationPort
+  onRecovery?: (event: RecoveryEvent) => void | Promise<void>
   settleAcceptedRecovery?: (
     record: CapturedRejoinRecord,
     epoch: number,
@@ -132,16 +138,29 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
               if (
                 !sameStoredValue(snapshot.rejoin, record) ||
                 controlSafetyHeld(snapshot) !== null ||
-                snapshot.controlHold !== null
+                isHardControlHold(snapshot.controlHold)
               )
                 throw new GroupStateConflictError('Accepted recovery moved before settlement')
               return { expected: await reads.lifetime(), value: null }
             },
             async (stores) => {
               const control = stores.incarnation(sourceKey.incarnation).control
-              if (!sameStoredValue((await control.load()).rejoin, record))
+              const snapshot = await control.load()
+              if (
+                !sameStoredValue(snapshot.rejoin, record) ||
+                controlSafetyHeld(snapshot) !== null ||
+                isHardControlHold(snapshot.controlHold)
+              )
                 throw new GroupStateConflictError('Accepted recovery moved before settlement')
-              await control.apply(changes, mutationID)
+              await control.apply(
+                {
+                  ...changes,
+                  ...(snapshot.controlHold?.reason === 'acceptance-unknown'
+                    ? { controlHold: null }
+                    : {}),
+                },
+                mutationID,
+              )
             },
           ),
       }
@@ -169,7 +188,25 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
       record.requestKey.fill(0)
       record.candidate.fill(0)
     })
-  let failure: unknown
+  let status: RegistryPeerStatus = { kind: 'starting' }
+  let recoveryAttempt: Pick<CapturedRejoinRecord, 'id' | 'trigger'> | undefined
+  function fail(error: unknown, record = recoveryAttempt): void {
+    if (status.kind === 'failed') return
+    status = { kind: 'failed', error }
+    if (!disposed && record !== undefined) {
+      const event: RecoveryEvent = {
+        groupID: target.topicID,
+        attemptID: record.id,
+        trigger: record.trigger === 'automatic' ? 'automatic' : 'consumer',
+        phase: 'failed',
+        reason: 'error',
+        error,
+      }
+      void Promise.resolve()
+        .then(() => params.onRecovery?.(event))
+        .catch(() => {})
+    }
+  }
   function track<T>(value: Promise<T>): Promise<T> {
     pending.add(value)
     void value.then(
@@ -221,7 +258,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
       reads.control(requested.incarnation),
     )
     const held = capability.held(requested) ?? controlSafetyHeld(control)
-    if (held !== null || control.controlHold !== null)
+    if (held !== null || isHardControlHold(control.controlHold))
       throw new GroupUnavailableError({
         reason: held === 'recovery-unavailable' ? held : 'invalid',
       })
@@ -294,6 +331,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
     }
     key = { ...requested }
     current = peer
+    status = { kind: 'running' }
   }
   async function accept(
     record: CapturedRejoinRecord,
@@ -368,6 +406,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
           reads.control(key.incarnation),
         )
         if (record !== null && 'format' in record) {
+          recoveryAttempt = { id: record.id, trigger: record.trigger }
           try {
             validateCapturedRecoveryRecord(record)
           } catch (cause) {
@@ -379,7 +418,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
         if (
           capability.held(key) !== null ||
           controlSafetyHeld(control) !== null ||
-          control.controlHold !== null
+          isHardControlHold(control.controlHold)
         )
           throw new GroupStateConflictError('Recovery source is held')
         if (
@@ -406,6 +445,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
           return
         }
         if (resolved.kind === 'rolled-back') {
+          status = { kind: 'switching' }
           const control = await capability.entry.read(key.groupID, (reads) =>
             reads.control(key.incarnation),
           )
@@ -433,6 +473,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
           }
           continue
         }
+        status = { kind: 'pending' }
       } catch (error) {
         if (disposed) return
         if (error instanceof RetainedTrustUnavailableError)
@@ -458,7 +499,14 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
   }
   function onConfirmedRecovery(handoff: ConfirmedRecoveryHandoff): void {
     void handoff.completion.catch(() => {})
-    if (disposed || worker !== null || !sameStoredValue(handoff.record.source.key, key)) return
+    if (
+      disposed ||
+      status.kind === 'failed' ||
+      worker !== null ||
+      !sameStoredValue(handoff.record.source.key, key)
+    )
+      return
+    status = { kind: 'switching' }
     const completion = handoff.completion
     const running = Promise.resolve().then(async () => {
       await completion
@@ -470,7 +518,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
     track(running)
     void running
       .catch((error: unknown) => {
-        failure = error
+        fail(error, handoff.record)
       })
       .finally(() => {
         if (worker === running) worker = null
@@ -478,15 +526,17 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
   }
   const ready = track(Promise.resolve().then(resume))
   void ready.catch((error: unknown) => {
-    failure = error
+    fail(error)
   })
   return {
     peer: () => current,
     installedKey: () => ({ ...key }),
+    status: () => ({ ...status }),
     ready,
     dispose() {
       if (disposed) return
       disposed = true
+      if (status.kind !== 'failed') status = { kind: 'disposed' }
       if (timer !== undefined) clearTimeout(timer)
       wake?.()
       unregister()
@@ -496,7 +546,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
       if (!disposed) throw new Error('Call dispose() before drained()')
       while (pending.size > 0) await Promise.allSettled([...pending])
       await Promise.all([...peers].map((peer) => peer.drained()))
-      if (failure !== undefined) throw failure
+      if (status.kind === 'failed') throw status.error
     },
   }
 }

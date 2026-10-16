@@ -392,6 +392,14 @@ const registryPeer = await createRegistryPeer({
 await registryPeer.ready
 ```
 
+`registryPeer.status()` reports `starting`, `running`, `switching`, `pending`, `failed` or `disposed`.
+`failed` includes the terminal `error`, available without disposing the owner. `drained()` still rethrows that error after disposal.
+Pass `onRecovery` to receive coordinator failures through the existing rpc `RecoveryEvent` shape (`phase: 'failed'`, `reason: 'error'`).
+The event identifies the saved attempt and uses `target.topicID` as `groupID`. Callback failures cannot replace the coordinator error.
+Use the same callback for the incarnation peer's `onRecovery` to observe both recovery stages.
+An unresolved switch proof exposes `pending`, with no peer. Initial `ready` keeps waiting while that proof remains unresolved.
+Retries have no count or elapsed-time bound. Their backoff caps at 15 seconds, and disposal stops retries.
+
 The host's `createPeerForIncarnation(key, options)` supplies the actual incarnation's control, crypto, anchor, cursor and outbox ports.
 It forwards `options.mls`, `recoveryOnly`, `onConfirmedRecovery`, `settleAcceptedRecovery`, both reconciliation callbacks, `continuation` and `completion` into `createGroupPeer`.
 `onConfirmedRecovery` requires `settleAcceptedRecovery`. Direct construction without the settlement callback throws `TypeError`.

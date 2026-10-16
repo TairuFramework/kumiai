@@ -186,6 +186,7 @@ export {
   type RegistryPeer,
   type RegistryPeerOptions,
   type RegistryPeerParams,
+  type RegistryPeerStatus,
 } from './registry-peer.js'
 export {
   buildRevokeProofOnHandle,

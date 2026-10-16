@@ -2,14 +2,29 @@ import { randomIdentity } from '@kokuin/token'
 import * as mlsAPI from '@kumiai/mls'
 import {
   commitInvite,
+  commitKeyRotation,
   createGroup,
   createInvite,
   createKeyPackageBundle,
   encodeClientState,
   processWelcome,
 } from '@kumiai/mls'
-import type { ConfirmedRecoveryHandoff, GroupPeer, GroupProtocolDefinition } from '@kumiai/rpc'
-import { decodeCommitFrame, decodeHandshakeFrame } from '@kumiai/rpc'
+import type {
+  ConfirmedRecoveryHandoff,
+  GroupPeer,
+  GroupProtocolDefinition,
+  LogHub,
+  RecoveryEvent,
+} from '@kumiai/rpc'
+import {
+  commitTopic,
+  createGroupPeer,
+  decodeCommitFrame,
+  decodeHandshakeFrame,
+  encodeCommitFrame,
+  encodeHandshakeFrame,
+  HANDSHAKE_KIND,
+} from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
 import type { EntryReads } from '../src/entry-capability.js'
@@ -37,6 +52,9 @@ const groupID = 'registry-peer'
 const source = { groupID, incarnation: 1 }
 const destination = { groupID, incarnation: 2 }
 const target = { targetID: 'registry-recovery-hub', topicID: `commits/${groupID}` }
+const { FakeHub } = (await import(
+  new URL('../../rpc/test/fixtures/fake-hub.ts', import.meta.url).href
+)) as { FakeHub: new () => LogHub }
 
 type Peer = GroupPeer<Record<string, GroupProtocolDefinition>>
 function peerDouble(onDrain: () => Promise<void> = async () => {}): Peer {
@@ -164,6 +182,319 @@ async function setup(confirmed = true) {
 }
 
 describe('registry peer recovery coordination', () => {
+  test.each(['return', 'throw', 'reject'] as const)(
+    'a terminal handoff failure reaches the live host when its diagnostic callback will %s',
+    async (callback) => {
+      const s = await setup(false)
+      let owner: api.RegistryPeer | undefined
+      try {
+        const events: Array<RecoveryEvent> = []
+        owner = await s.start({
+          onRecovery: (event) => {
+            events.push(event)
+            if (callback === 'throw') throw new Error('Host diagnostic failed')
+            if (callback === 'reject') return Promise.reject(new Error('Host diagnostic rejected'))
+          },
+        })
+        await owner.ready
+        const error = new api.GroupStateConflictError('Confirmed recovery cannot continue')
+        vi.spyOn(
+          registryRecoveryCoordinator(s.f.registry),
+          'resolveRecoverySwitch',
+        ).mockRejectedValue(error)
+        await s.f.installRows({ key: source, control: { putRejoin: s.recovery.record } })
+        const before = await s.f.inspectRows()
+        s.handoff()({ record: s.recovery.record, completion: Promise.resolve() })
+        await vi.waitFor(() => expect(owner?.peer()).toBeNull())
+        await vi.waitFor(() => expect(events).toHaveLength(1))
+        expect(events[0]).toEqual({
+          groupID: target.topicID,
+          attemptID: s.recovery.record.id,
+          trigger: 'automatic',
+          phase: 'failed',
+          reason: 'error',
+          error,
+        })
+        expect(owner.status()).toEqual({ kind: 'failed', error })
+        expect(await s.f.inspectRows()).toEqual(before)
+        owner.dispose()
+        await expect(owner.drained()).rejects.toBe(error)
+      } finally {
+        owner?.dispose()
+        await owner?.drained().catch(() => {})
+        vi.restoreAllMocks()
+        await s.f.close()
+      }
+    },
+  )
+
+  test('an unresolved switch exposes pending state while ready waits without a timeout', async () => {
+    const s = await setup()
+    let owner: api.RegistryPeer | undefined
+    try {
+      vi.spyOn(
+        registryRecoveryCoordinator(s.f.registry),
+        'resolveRecoverySwitch',
+      ).mockResolvedValue({ kind: 'pending' })
+      const events: Array<RecoveryEvent> = []
+      vi.useFakeTimers()
+      owner = await s.start({
+        onRecovery: (event) => {
+          events.push(event)
+        },
+      })
+      let ready = false
+      void owner.ready.then(() => {
+        ready = true
+      })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(owner.status()).toEqual({ kind: 'pending' })
+      expect(owner.peer()).toBeNull()
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(owner.status()).toEqual({ kind: 'pending' })
+      expect(ready).toBe(false)
+      expect(events).toEqual([])
+      owner.dispose()
+      await owner.drained()
+      expect(owner.status()).toEqual({ kind: 'disposed' })
+    } finally {
+      owner?.dispose()
+      await owner?.drained().catch(() => {})
+      vi.useRealTimers()
+      vi.restoreAllMocks()
+      await s.f.close()
+    }
+  })
+
+  test.each(['acceptance-unknown', 'unsupported-version'] as const)(
+    'restart with %s preserves hold policy through normal delivery',
+    async (reason) => {
+      const s = await setup(false)
+      await s.f.installRows({ key: source, control: { controlHold: { reason, position: null } } })
+      const f = await s.f.reopen()
+      let owner: api.RegistryPeer | undefined
+      try {
+        const hub = new FakeHub()
+        owner = await api.createRegistryPeer({
+          registry: f.registry,
+          key: source,
+          recovery: f.environment,
+          target,
+          continuation: api.createRecoveryContinuationPort({
+            registry: f.registry,
+            persistence: f.device.groups,
+          }),
+          createMLS: (key, sink) =>
+            api.createRegistryGroupMLS({
+              registry: f.registry,
+              key,
+              recovery: f.environment,
+              target,
+              identity: f.identity,
+              entrySlot: api.createLedgerEntrySlot(),
+              onConfirmedRecovery: sink,
+            }),
+          createPeer: async (key, options) => {
+            const access = await f.registry.access(key.groupID)
+            const ports = f.device.groups.ports(key)
+            return createGroupPeer({
+              ...options,
+              hub,
+              crypto: api.createGroupCrypto({
+                access: {
+                  ...api.createRegistryHandleAccess({ access }),
+                  open: async () => {
+                    throw new Error('No app frames expected')
+                  },
+                },
+              }),
+              control: ports.control,
+              anchorStore: ports.anchor,
+              appCursorStore: ports.cursor,
+              appOutbox: ports.outbox,
+              appOutboxLimit: 16,
+              localDID: f.identity.id,
+              protocols: {},
+              handlers: {},
+              validation: api.createControlValidationPort({
+                identity: f.identity,
+                options: f.environment.options,
+                restoreCandidate: async () => {
+                  throw new Error('No own candidate expected')
+                },
+              }),
+              readEvidence: () => f.device.groups.readEvidence(key),
+              prepareBuild: async () => {
+                throw new Error('No own build expected')
+              },
+              adopt: async () => {
+                throw new Error('No own adoption expected')
+              },
+              deliverWelcome: async () => {},
+            })
+          },
+        })
+        if (reason === 'unsupported-version') {
+          await expect(owner.ready).rejects.toThrow('held')
+          expect(owner.peer()).toBeNull()
+          expect((await f.device.groups.ports(source).control.load()).controlHold?.reason).toBe(
+            reason,
+          )
+        } else {
+          await owner.ready
+          const peer = owner.peer()
+          if (peer === null) throw new Error('Restart did not start a peer')
+          await peer.replay()
+          expect((await f.device.groups.ports(source).control.load()).controlHold?.reason).toBe(
+            reason,
+          )
+          const rotation = await commitKeyRotation(s.responder)
+          const topicID = commitTopic(await api.deriveRecoverySecret(s.responder))
+          await hub.publish({
+            topicID,
+            senderDID: s.responderIdentity.id,
+            payload: encodeHandshakeFrame(
+              HANDSHAKE_KIND.commit,
+              encodeCommitFrame(rotation.commitMessage, new Uint8Array()),
+            ),
+            retain: 'log',
+          })
+          await vi.waitFor(async () => {
+            const control = await f.device.groups.ports(source).control.load()
+            expect(control.cursor?.epoch).toBe(Number(rotation.newGroup.epoch))
+            expect(control.controlHold).toBeNull()
+          })
+        }
+      } finally {
+        owner?.dispose()
+        await owner?.drained().catch(() => {})
+        await f.close()
+        await s.f.close()
+      }
+    },
+  )
+
+  test.each([
+    ['acceptance-unknown', false],
+    ['acceptance-unknown', true],
+    ['unsupported-version', false],
+    ['unsupported-version', true],
+  ] as const)(
+    'confirmed recovery with %s and missing switch ID=%s obeys hold policy',
+    async (reason, missingID) => {
+      const s = await setup(false)
+      let owner: api.RegistryPeer | undefined
+      try {
+        const record = {
+          ...s.recovery.record,
+          switchMutationID: missingID ? null : s.recovery.record.switchMutationID,
+        }
+        await s.f.installRows({
+          key: source,
+          control: { putRejoin: record, controlHold: { reason, position: null } },
+        })
+        const before = await s.f.inspectRows()
+        owner = await s.start()
+        if (reason === 'unsupported-version') {
+          await expect(owner.ready).rejects.toThrow('held')
+          expect(await s.f.inspectRows()).toEqual(before)
+          expect(owner.peer()).toBeNull()
+          if (missingID)
+            await expect(
+              registryRecoveryCoordinator(s.f.registry).assignSwitchID(record),
+            ).rejects.toThrow('held')
+        } else {
+          await owner.ready
+          expect(owner.installedKey()).toEqual(destination)
+          const old = await s.f.device.groups.ports(source).control.load()
+          expect(old.rejoin?.stage).toBe('adopted')
+          expect(old.controlHold).toBeNull()
+          if (old.rejoin === null || !('format' in old.rejoin))
+            throw new Error('Missing captured adoption')
+          expect(await s.f.device.groups.ports(source).control.lastMutation()).toBe(
+            old.rejoin.switchMutationID,
+          )
+          expect((await s.f.device.groups.ports(destination).control.load()).controlHold).toBeNull()
+        }
+      } finally {
+        owner?.dispose()
+        await owner?.drained().catch(() => {})
+        await s.f.close()
+      }
+    },
+  )
+
+  test.each(['acceptance-unknown', 'unsupported-version'] as const)(
+    'accepted-unadoptable settlement with %s obeys hold policy in one transition',
+    async (reason) => {
+      const s = await setup(false)
+      let owner: api.RegistryPeer | undefined
+      try {
+        owner = await s.start()
+        await owner.ready
+        const record = { ...s.recovery.record, ledgerBefore: ['owed-X'] }
+        await s.f.installRows({
+          key: source,
+          control: {
+            putRejoin: record,
+            controlHold: { reason, position: null },
+            putOutcomes: [{ id: 'prior', opID: null, at: 1, kind: 'unknown' }],
+            putWelcomes: [
+              {
+                opID: 'owed',
+                welcome: new Uint8Array([7]),
+                recipients: ['member'],
+                committed: true,
+              },
+            ],
+          },
+        })
+        const before = await s.f.inspectRows()
+        const settle = s.created[0]?.options.settleAcceptedRecovery
+        if (settle === undefined) throw new Error('Missing settlement sink')
+        let transitions = 0
+        s.f.onPhase('work', () => {
+          transitions++
+        })
+        if (reason === 'unsupported-version') {
+          await expect(
+            settle(record, record.epochAfter + 1, 'authenticated-leaf', record.epochAfter + 2),
+          ).rejects.toThrow('settlement')
+          expect(await s.f.inspectRows()).toEqual(before)
+          expect(transitions).toBe(0)
+          expect(record.requestKey.some((byte) => byte !== 0)).toBe(true)
+        } else {
+          await settle(record, record.epochAfter + 1, 'authenticated-leaf', record.epochAfter + 2)
+          expect(transitions).toBe(1)
+          const snapshot = await s.f.device.groups.ports(source).control.load()
+          expect(snapshot.controlHold).toBeNull()
+          expect(snapshot.rejoin).toBeNull()
+          expect(snapshot.recoveryEpochFloor).toBe(record.epochAfter + 2)
+          expect(snapshot.settledRejoins).toEqual([
+            expect.objectContaining({
+              id: record.id,
+              kind: 'accepted-unadoptable',
+              ledgerBefore: ['owed-X'],
+            }),
+          ])
+          expect(snapshot.outcomes).toContainEqual({
+            id: 'prior',
+            opID: null,
+            at: 1,
+            kind: 'unknown',
+          })
+          expect(snapshot.welcomes.map((row) => row.opID)).toEqual(['owed'])
+          expect(record.requestKey.every((byte) => byte === 0)).toBe(true)
+          expect(record.candidate.every((byte) => byte === 0)).toBe(true)
+        }
+      } finally {
+        owner?.dispose()
+        await owner?.drained().catch(() => {})
+        await s.f.close()
+      }
+    },
+  )
+
   test('resumes a saved confirmed switch before source peer work', async () => {
     const s = await setup()
     let owner: api.RegistryPeer | undefined

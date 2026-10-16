@@ -2,6 +2,7 @@ import {
   type CapturedRejoinRecord,
   controlSafetyHeld,
   type GroupKey,
+  isHardControlHold,
   type StoredRejoinRecord,
 } from '@kumiai/rpc'
 
@@ -57,14 +58,14 @@ export function bindRegistryRecoveryCoordinator<TTx extends GroupTransaction>(pa
               'Confirmed recovery moved before switch ID assignment',
             )
           const control = await reads.control(record.source.key.incarnation)
-          if (controlSafetyHeld(control) !== null || control.controlHold !== null)
+          if (controlSafetyHeld(control) !== null || isHardControlHold(control.controlHold))
             throw new GroupStateConflictError('Recovery source is held')
           return { expected: await reads.lifetime(), value: null }
         },
         async (stores) => {
           const control = stores.incarnation(record.source.key.incarnation).control
           const snapshot = await control.load()
-          if (controlSafetyHeld(snapshot) !== null || snapshot.controlHold !== null)
+          if (controlSafetyHeld(snapshot) !== null || isHardControlHold(snapshot.controlHold))
             throw new GroupStateConflictError('Recovery source is held')
           if (!sameStoredValue(snapshot.rejoin, record))
             throw new GroupStateConflictError(

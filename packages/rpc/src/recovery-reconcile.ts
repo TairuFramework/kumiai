@@ -1,12 +1,10 @@
-import { controlSafetyHeld } from './control/safety.js'
+import { controlSafetyHeld, isHardControlHold } from './control/safety.js'
 import { applyResolved } from './control/store.js'
 import type { ControlSnapshot, ControlStore } from './control/types.js'
 import type { AcceptedRejoinSettlement, CapturedRejoinRecord } from './recovery-types.js'
 
 export function recoveryHeld(snapshot: ControlSnapshot): boolean {
-  return (
-    controlSafetyHeld(snapshot) !== null || snapshot.controlHold?.reason === 'unsupported-version'
-  )
+  return controlSafetyHeld(snapshot) !== null || isHardControlHold(snapshot.controlHold)
 }
 
 /** Persist obligations before releasing the only durable copy of X's private state. */

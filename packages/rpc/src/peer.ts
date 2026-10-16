@@ -40,6 +40,7 @@ import {
   type ForkHalt,
   forkEventID,
   type GroupForkEvidence,
+  isHardControlHold,
   type SafetyHold,
 } from './control/safety.js'
 import {
@@ -380,8 +381,7 @@ export function createGroupPeerWithControlWalk<
     latchSafetyHold(error.reason)
     return true
   }
-  const controlHoldPresent = () =>
-    controlHold !== null && controlHold.reason !== 'acceptance-unknown'
+  const controlHoldPresent = () => isHardControlHold(controlHold)
   const hardControlHeld = () => safetyHold() !== null || controlHoldPresent()
   const control: ControlStore | undefined =
     hostControl === undefined

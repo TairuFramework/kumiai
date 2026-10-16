@@ -1,4 +1,9 @@
+import type { ControlHold } from './search.js'
 import type { ControlSnapshot, GroupKey } from './types.js'
+
+export function isHardControlHold(hold: ControlHold | null): boolean {
+  return hold !== null && hold.reason !== 'acceptance-unknown'
+}
 
 export type GroupForkEvidence =
   | {

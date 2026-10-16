@@ -4,6 +4,7 @@ import {
   type ControlSnapshot,
   controlSafetyHeld,
   type GroupKey,
+  isHardControlHold,
   type SafetyHold,
   type StoredRejoinRecord,
 } from '@kumiai/rpc'
@@ -120,6 +121,8 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
       const pending = environment.held(source.key)
       const reason = pending === 'fork-halted' ? pending : (controlSafetyHeld(control) ?? pending)
       if (reason !== null) throw new RegistryResyncRefusedError({ reason })
+      if (isHardControlHold(control.controlHold))
+        throw new GroupStateConflictError('Recovery source is held')
     }
     let resolved: 'committed' | 'rolled-back' | undefined
     try {

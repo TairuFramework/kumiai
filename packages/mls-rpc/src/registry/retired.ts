@@ -109,6 +109,9 @@ export async function retireIncarnation<TTx extends GroupTransaction>(
   }))
   const changes: ControlChanges = {
     deleteOperations: abandoned.map(({ id }) => id),
+    ...(switchedRejoinID !== undefined && control.controlHold?.reason === 'acceptance-unknown'
+      ? { controlHold: null }
+      : {}),
   }
   if (rejoin !== null) {
     if (switchedRejoinID !== undefined)

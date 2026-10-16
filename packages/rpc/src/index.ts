@@ -51,6 +51,7 @@ export {
   forkEventID,
   type GroupForkEvidence,
   type GroupSafetyEvent,
+  isHardControlHold,
   type RecoveryUnavailableEvent,
   recoveryUnavailableEventID,
   type SafetyHold,
