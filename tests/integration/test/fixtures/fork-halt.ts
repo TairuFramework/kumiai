@@ -36,11 +36,13 @@ import {
   type GroupPeer,
   type GroupSafetyEvent,
   HANDSHAKE_KIND,
+  type LogHub,
   type RecoveryEvent,
   type StrandObservation,
 } from '@kumiai/rpc'
 import { expect, vi } from 'vitest'
 
+import { createCheckpointService } from '../../../../packages/mls-rpc/src/checkpoint.js'
 import { entryCapability } from '../../../../packages/mls-rpc/src/entry-capability.js'
 import {
   createControlBuildPort,
@@ -330,10 +332,10 @@ export async function createCapturedRecoveryFixture() {
   }
 }
 
-async function makePeer(
+export async function makeCheckpointPeer(
   registry: RegistryFixture,
   real: RealMember,
-  hub: FakeHub,
+  hub: LogHub,
   callbacks: {
     onSafetyEvent?: (event: GroupSafetyEvent) => void | Promise<void>
     onStrand?: (event: StrandObservation) => void | Promise<void>
@@ -436,6 +438,11 @@ async function makePeer(
     },
     hub,
     crypto: cryptoPort,
+    checkpoints: createCheckpointService({
+      registry: registry.registry,
+      key,
+      identity: real.identity,
+    }),
     mls,
     control: ports.control,
     prepareBuild,
@@ -465,7 +472,7 @@ async function makePeer(
   }
 }
 
-export type ForkPeer = Awaited<ReturnType<typeof makePeer>>
+export type ForkPeer = Awaited<ReturnType<typeof makeCheckpointPeer>>
 export type ForkFixture = Awaited<ReturnType<typeof createForkFixture>>
 
 export async function createForkFixture() {
@@ -505,7 +512,11 @@ export async function createForkFixture() {
   const onSafetyEvent = vi.fn<(event: GroupSafetyEvent) => void | Promise<void>>()
   const onStrand = vi.fn<(event: StrandObservation) => void>()
   const onRecovery = vi.fn<(event: RecoveryEvent) => void>()
-  let member = await makePeer(registry, receiver, hub, { onSafetyEvent, onStrand, onRecovery })
+  let member = await makeCheckpointPeer(registry, receiver, hub, {
+    onSafetyEvent,
+    onStrand,
+    onRecovery,
+  })
   const peers = [member]
   const extraRegistries: Array<RegistryFixture> = []
   await member.peer.replay()
@@ -689,7 +700,11 @@ export async function createForkFixture() {
     ) {
       await fixture.stopPeer()
       registry = await registry.reopen()
-      member = await makePeer(registry, receiver, hub, { onSafetyEvent, onStrand, onRecovery })
+      member = await makeCheckpointPeer(registry, receiver, hub, {
+        onSafetyEvent,
+        onStrand,
+        onRecovery,
+      })
       peers.push(member)
       options.beforeReady?.(fixture)
       await member.peer.outcomes()
@@ -704,7 +719,7 @@ export async function createForkFixture() {
       })
       extraRegistries.push(other)
       await install(other, real.committer.handle)
-      const survivor = await makePeer(other, real.committer, hub)
+      const survivor = await makeCheckpointPeer(other, real.committer, hub)
       peers.push(survivor)
       await survivor.peer.replay()
       return survivor

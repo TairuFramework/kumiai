@@ -2,6 +2,8 @@ import { stdout } from 'node:process'
 import { createSigningIdentity } from '@kokuin/token'
 import { afterEach, describe, expect, expectTypeOf, test, vi } from 'vitest'
 
+import { checkpointServiceHostMembers } from '../src/checkpoint.js'
+import type { CheckpointService } from '../src/checkpoint-types.js'
 import type { PendingRecovery } from '../src/crypto.js'
 import { PeerDisposedError } from '../src/errors.js'
 import {
@@ -17,6 +19,47 @@ import type { GroupPeerMLSParams, GroupPeerParams } from '../src/peer.js'
 import type { GroupProtocolDefinition } from '../src/protocol.js'
 
 afterEach(() => vi.restoreAllMocks())
+
+test.each(Object.keys(checkpointServiceHostMembers))(
+  'checkpoint service survives host wrapping: %s',
+  async (name) => {
+    const boundary = createHostBoundary()
+    const pause = gate()
+    const input = { bytes: new Uint8Array([7]) }
+    const output = { bytes: new Uint8Array([9]) }
+    let received: typeof input | undefined
+    const callback = vi.fn(async (value: typeof input) => {
+      received = value
+      await pause.promise
+      return output
+    })
+    const service = Object.fromEntries(
+      Object.keys(checkpointServiceHostMembers).map((method) => [method, callback]),
+    ) as unknown as CheckpointService
+    const host = wrapPeerHost(boundary, { checkpoints: service })
+    expect(peerHostFields).toHaveProperty('checkpoints', 'port')
+    const invoke = Reflect.get(host.checkpoints, name) as (
+      value: typeof input,
+    ) => Promise<typeof output>
+    const pending = invoke(input)
+    input.bytes[0] = 8
+    expect(received?.bytes).toEqual(new Uint8Array([7]))
+    boundary.close()
+    let drained = false
+    const draining = boundary.drained(Promise.resolve()).then(() => {
+      drained = true
+    })
+    await Promise.resolve()
+    expect(drained).toBe(false)
+    pause.release()
+    const result = await pending
+    result.bytes[0] = 10
+    expect(output.bytes).toEqual(new Uint8Array([9]))
+    await draining
+    expect(() => invoke(input)).toThrow(PeerDisposedError)
+    expect(callback).toHaveBeenCalledOnce()
+  },
+)
 
 function gate() {
   let release = (): void => {}

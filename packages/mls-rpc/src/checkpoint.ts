@@ -268,6 +268,15 @@ export const checkpointServiceParameterMembers = {
   onForkNotice: 'host',
 } as const satisfies Record<keyof CheckpointServiceParams, 'core' | 'data' | 'host'>
 
+export function createRegistryCheckpointService(
+  registry: GroupHandleRegistry,
+  key: GroupKey,
+): CheckpointService {
+  const binding = bindings.get(registry)
+  if (binding === undefined) throw new TypeError('Registered checkpoint coordinator required')
+  return createCheckpointService({ registry, key, identity: binding.identity })
+}
+
 export function createCheckpointService(params: CheckpointServiceParams): CheckpointService {
   const port = createCheckpointPort(params)
   const registered = bindings.get(params.registry)
@@ -386,6 +395,8 @@ export function createCheckpointService(params: CheckpointServiceParams): Checkp
             }
           }
           if (action.kind === 'update') {
+            if (lifetime?.activeIncarnation !== key.incarnation)
+              throw new GroupStateConflictError('Checkpoint worker is retired')
             const writable = (row: CheckpointRecord) =>
               row.kind === 'cursor' || row.kind === 'publication'
             for (const row of action.put) {
@@ -393,6 +404,9 @@ export function createCheckpointService(params: CheckpointServiceParams): Checkp
               if (
                 !sameKey(row.key) ||
                 !writable(row) ||
+                (row.kind === 'cursor' &&
+                  row.position !== null &&
+                  (row.position.length === 0 || row.position.length > 64)) ||
                 (previous !== undefined && !writable(previous)) ||
                 (row.kind === 'publication' &&
                   (previous?.kind !== 'publication' ||

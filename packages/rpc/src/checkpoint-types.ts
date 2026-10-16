@@ -81,8 +81,23 @@ export type CheckpointRecord =
       publishID: string | null
       accepted: boolean
       nextHeartbeatAt: number | null
+      retryAt?: number
+      retryDelay?: number
     }
-  | { kind: 'cursor'; id: string; key: GroupKey; topicID: string; position: string | null }
+  | {
+      kind: 'cursor'
+      id: string
+      key: GroupKey
+      topicID: string
+      position: string | null
+      schedule?: {
+        clock: number
+        tokens: number
+        refilledAt: number
+        receiveAt: number
+        retryDelay: number
+      }
+    }
   | {
       kind: 'coverage'
       id: string

@@ -1,7 +1,8 @@
 import type { GatherOptions } from '@kumiai/broadcast'
 
 import type { AnchorStore } from './anchor.js'
-import type { CheckpointPort } from './checkpoint-types.js'
+import { checkpointServiceHostMembers, copyCheckpointValue } from './checkpoint.js'
+import type { CheckpointPort, CheckpointService } from './checkpoint-types.js'
 import type { ControlValidation, ControlValidationPort } from './control/search.js'
 import type { GroupCrypto, GroupMLS, PendingAppFrames, PendingRecovery } from './crypto.js'
 import { PeerDisposedError } from './errors.js'
@@ -122,6 +123,7 @@ export const peerHostFields = {
   crypto: 'crypto',
   mls: 'mls',
   control: 'port',
+  checkpoints: 'port',
   prepareBuild: 'callback',
   validation: 'port',
   readEvidence: 'callback',
@@ -362,6 +364,25 @@ export function wrapPeerHost<TParams extends object>(
             : selectHostMembers(boundary, validation, validationHostMembers)
         },
       }
+    } else if (key === 'checkpoints') {
+      const service = selectHostMembers(
+        boundary,
+        value as CheckpointService,
+        checkpointServiceHostMembers,
+      )
+      selected = Object.fromEntries(
+        Object.keys(checkpointServiceHostMembers).map((method) => [
+          method,
+          (...args: Array<unknown>) => {
+            const result = Reflect.apply(
+              Reflect.get(service, method),
+              service,
+              copyCheckpointValue(args),
+            ) as Promise<unknown>
+            return result.then(copyCheckpointValue)
+          },
+        ]),
+      )
     } else if (key === 'anchorStore')
       selected = selectHostMembers(boundary, value as AnchorStore, anchorStoreHostMembers)
     else if (kind === 'mls') {

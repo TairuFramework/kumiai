@@ -19,6 +19,7 @@ import type { AnchorStore } from './anchor.js'
 import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 import type { AppDeliveryResumed, AppDeliveryStalled } from './app-lane.js'
 import type { AppOutbox } from './app-outbox.js'
+import type { CheckpointService } from './checkpoint-types.js'
 import type { ControlBuildPort } from './control/build.js'
 import type { OperationDeps } from './control/operations.js'
 import type { GroupSafetyEvent } from './control/safety.js'
@@ -205,6 +206,7 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
   hub: LogHub
   crypto: GroupCrypto
   localDID: string
+  checkpoints?: CheckpointService
   protocols: Protocols
   handlers: { [K in keyof Protocols]: GroupProcedureHandlers<Protocols[K]> }
   suppress?: SuppressConfig

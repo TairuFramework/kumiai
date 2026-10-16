@@ -233,6 +233,7 @@ export class DurableFakeHub implements LogHub {
   }
 
   receive(subscriberDID: string): HubReceiveSubscription {
+    this.#sinks.get(subscriberDID)?.close()
     const queue: Array<StoredMessage> = []
     let resolveNext: ((result: IteratorResult<StoredMessage>) => void) | undefined
     let closed = false

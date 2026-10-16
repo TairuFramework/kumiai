@@ -181,6 +181,30 @@ async function setup(confirmed = true) {
 }
 
 describe('registry peer recovery coordination', () => {
+  test('peer factories receive the registry-bound checkpoint service', async () => {
+    const s = await setup(false)
+    const owner = await s.start()
+    try {
+      await owner.ready
+      const created = s.created[0]
+      if (created === undefined) throw new Error('Missing peer factory call')
+      const service = created.options.checkpoints
+      const records = await service.readRecords()
+      const fact = records.find((row) => row.kind === 'fact')
+      if (fact?.kind !== 'fact') throw new Error('Missing installed fact')
+      expect(await service.signInstalled(fact.id)).toBeInstanceOf(Uint8Array)
+      expect(await service.checkpointCoverage(source.groupID)).toMatchObject({
+        current: { key: source },
+      })
+      await expect(
+        service.updateRecords({ put: [{ ...fact, id: 'fabricated' }] }),
+      ).rejects.toThrow()
+    } finally {
+      owner.dispose()
+      await owner.drained()
+      await s.f.close()
+    }
+  })
   test.each(['return', 'throw', 'reject'] as const)(
     'a terminal handoff failure reaches the live host when its diagnostic callback will %s',
     async (callback) => {

@@ -51,6 +51,8 @@ export type ConformanceCheckpointRecord =
       publishID: string | null
       accepted: boolean
       nextHeartbeatAt: number | null
+      retryAt?: number
+      retryDelay?: number
     }
   | {
       kind: 'cursor'
@@ -58,6 +60,13 @@ export type ConformanceCheckpointRecord =
       key: ConformanceGroupKey
       topicID: string
       position: string | null
+      schedule?: {
+        clock: number
+        tokens: number
+        refilledAt: number
+        receiveAt: number
+        retryDelay: number
+      }
     }
 
 export type { ConformanceCheckpointFactRecord } from './persistence-fixture.js'
@@ -126,6 +135,7 @@ const cursor = (): Extract<ConformanceCheckpointRecord, { kind: 'cursor' }> => (
   key: { ...key },
   topicID: 'checkpoint-topic',
   position: '7',
+  schedule: { clock: 10000, tokens: 0, refilledAt: 10000, receiveAt: 11000, retryDelay: 15000 },
 })
 const publication = (): Extract<ConformanceCheckpointRecord, { kind: 'publication' }> => ({
   kind: 'publication',
@@ -136,6 +146,8 @@ const publication = (): Extract<ConformanceCheckpointRecord, { kind: 'publicatio
   publishID: 'checkpoint-publish',
   accepted: false,
   nextHeartbeatAt: null,
+  retryAt: 12000,
+  retryDelay: 15000,
 })
 
 export function testCheckpointStorageConformance<TTx extends ConformanceGroupTransaction>(

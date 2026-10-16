@@ -12,6 +12,18 @@ export type { LogHub, MailboxHub } from '@kumiai/hub-tunnel'
  * @module rpc
  */
 
+/**
+ * High-level MLS-aware group RPC for Enkaku.
+ *
+ * @module rpc
+ */
+
+/**
+ * High-level MLS-aware group RPC for Enkaku.
+ *
+ * @module rpc
+ */
+
 export type { Anchor, AnchorSlot, AnchorStore } from './anchor.js'
 export { type AppAAD, decodeAppAAD, encodeAppAAD } from './app-aad.js'
 export type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
@@ -31,6 +43,7 @@ export type {
   CheckpointService,
   CheckpointStore,
 } from './checkpoint-types.js'
+export { createCheckpointWorker } from './checkpoint-worker.js'
 export {
   type ClassifyCommitParams,
   type CommitClassifierState,
@@ -280,6 +293,7 @@ export { detectRosterChange } from './roster.js'
 export {
   APP_TOPIC_LABEL,
   COMMIT_LABEL,
+  checkpointTopic,
   commitTopic,
   discoveryTopic,
   INBOX_LABEL,

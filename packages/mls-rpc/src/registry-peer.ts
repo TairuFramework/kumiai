@@ -1,6 +1,7 @@
 import type {
   CapturedRecapture,
   CapturedRejoinRecord,
+  CheckpointService,
   ConfirmedRecoveryHandoff,
   ControlStore,
   GroupMLS,
@@ -15,6 +16,7 @@ import type {
 } from '@kumiai/rpc'
 import { applyResolved, controlSafetyHeld, isHardControlHold } from '@kumiai/rpc'
 
+import { createRegistryCheckpointService } from './checkpoint.js'
 import { copyStoredValue, sameStoredValue } from './memory-incarnation-stores.js'
 import type { RecoveryRouting } from './mls.js'
 import {
@@ -50,6 +52,7 @@ function retirementTimedOut(cause: unknown): boolean {
 
 type Peer = GroupPeer<Record<string, GroupProtocolDefinition>>
 export type RegistryPeerOptions = {
+  checkpoints: CheckpointService
   mls: GroupMLS
   recoveryOnly: boolean
   target: RecoveryRouting
@@ -275,6 +278,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
         { ...requested },
         {
           mls,
+          checkpoints: createRegistryCheckpointService(registry, requested),
           recoveryOnly: control.rejoin !== null || !mls.sendAdmission().admissible,
           target: { ...target },
           onConfirmedRecovery,

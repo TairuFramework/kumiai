@@ -10,6 +10,7 @@ import type { Anchor, AnchorSlot } from './anchor.js'
 import { decodeAppAAD } from './app-aad.js'
 import { type AppDeliveryResumed, type AppDeliveryStalled, createAppLane } from './app-lane.js'
 import { createAppOutboxAcceptance } from './app-outbox.js'
+import { createCheckpointWorker } from './checkpoint-worker.js'
 import { classifyCommit, digestAppliedCommit } from './classify.js'
 import { createMonotoneClock } from './clock.js'
 import { RecoveryRequiredError } from './commit.js'
@@ -952,6 +953,7 @@ export function createGroupPeerWithControlWalk<
    * `resync`'s own comment carries the mechanism; read it there rather than restating it here.
    */
   let disposed = false
+  let checkpointWorker: ReturnType<typeof createCheckpointWorker> | undefined
   let disposePromise: Promise<void> | undefined
   const assertLive = (): void => {
     if (disposed) throw new PeerDisposedError('Peer is disposed')
@@ -2483,6 +2485,19 @@ export function createGroupPeerWithControlWalk<
       retention: commitLogRetentionSeconds,
     })
     rendezvousUnsubscribe = mux.onInbound(rendezvousTopicID, onRendezvousMessage)
+    if (params.checkpoints !== undefined && hostControl !== undefined) {
+      checkpointWorker = createCheckpointWorker({
+        key: hostControl.key,
+        mux,
+        recoverySecret,
+        checkpoints: params.checkpoints,
+        networkAllowed: () =>
+          !disposed && initialSafetyLoaded && safetyHold() === null && !locallyRemoved,
+        now: Date.now,
+        random: Math.random,
+      })
+      void checkpointWorker.start()
+    }
   }
 
   /**
@@ -5316,6 +5331,7 @@ export function createGroupPeerWithControlWalk<
       // no-op on a disposed one (the mux guards `disposed`). It touches only topics the hub already
       // refused, so it cannot subscribe anything a normal retain would not have.
       mux.rearmRefusedTopics()
+      void checkpointWorker?.resume()
       scheduleControlSlotRetry(0)
     },
     drained: () => {
@@ -5326,6 +5342,7 @@ export function createGroupPeerWithControlWalk<
     dispose: () => {
       if (disposePromise != null) return disposePromise
       disposed = true
+      const checkpointDrain = checkpointWorker?.dispose()
       unsubscribeSafety?.()
       controlAbort.abort(new PeerDisposedError('Peer is disposed'))
       if (operationTimer != null) clearTimeout(operationTimer)
@@ -5362,6 +5379,7 @@ export function createGroupPeerWithControlWalk<
       for (const timer of verdictTimers) clearTimeout(timer)
       verdictTimers.clear()
       disposePromise = (async () => {
+        await checkpointDrain
         // Tear down even a peer whose init failed — it still holds a hub drain.
         // Initialization may be waiting on a host port that never answers. Disposal closes the
         // mux now; late initialization checks `disposed` before registering more listeners.

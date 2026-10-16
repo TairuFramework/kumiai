@@ -10,6 +10,7 @@ import {
   restoreGroup,
 } from '@kumiai/mls'
 import type { CheckpointPort } from '@kumiai/rpc'
+import { createCheckpointWorker } from '@kumiai/rpc'
 import type { ConformanceCheckpointPort } from '@kumiai/rpc-conformance'
 import {
   malformedCheckpointBodies,
@@ -20,9 +21,9 @@ import {
 } from '@kumiai/rpc-conformance'
 import { ed25519 } from '@noble/curves/ed25519.js'
 import { toB64U } from '@sozai/codec'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
-import { createCheckpointPort } from '../src/checkpoint.js'
+import { createCheckpointPort, createCheckpointService } from '../src/checkpoint.js'
 import { prepareCheckpointInstallation } from '../src/checkpoint-capture.js'
 import { entryCapability } from '../src/entry-capability.js'
 import { createGroupHandleRegistry } from '../src/registry/registry.js'
@@ -34,6 +35,11 @@ import { registryHandle } from './fixtures/registry-welcome.js'
 import { independentCheckpointFrame } from './fixtures/sealed-memory-mls.js'
 import { createStorageFixture } from './fixtures/storage-persistence.js'
 import { installSeed, makeStorageSeed, nextChange } from './fixtures/storage-seed.js'
+
+vi.mock('@noble/curves/ed25519.js', async (importOriginal) => {
+  const actual = await importOriginal<{ ed25519: typeof ed25519 }>()
+  return { ...actual, ed25519: { ...actual.ed25519, verify: vi.fn(actual.ed25519.verify) } }
+})
 
 const _checkpointIsAPort = (port: CheckpointPort): ConformanceCheckpointPort => port
 const _checkpointCoversPort = (port: ConformanceCheckpointPort): CheckpointPort => port
@@ -68,6 +74,108 @@ for (const mode of ['real-mls', 'double'] as const) {
       })
       return { fixture, key, port, records, installed }
     }
+    test(`transport metadata persists and fences retirement -- ${mode}, ${ownership}`, async () => {
+      const setupResult = await setup()
+      let fixture = setupResult.fixture
+      const { key } = setupResult
+      let service = createCheckpointService({
+        registry: fixture.registry,
+        key,
+        identity: fixture.identity,
+      })
+      try {
+        const fact = await setupResult.installed()
+        await service.signInstalled(fact.id)
+        const debt = (await service.readRecords()).find((row) => row.kind === 'publication')
+        if (debt?.kind !== 'publication') throw new Error('Missing publication')
+        const publication = { ...debt, retryAt: 12000, retryDelay: 15000, nextHeartbeatAt: 1800000 }
+        const cursor = {
+          kind: 'cursor' as const,
+          id: 'worker-cursor',
+          key,
+          topicID: 'checkpoint-topic',
+          position: '7',
+          schedule: {
+            clock: 11000,
+            tokens: 0,
+            refilledAt: 11000,
+            receiveAt: 12000,
+            retryDelay: 15000,
+          },
+        }
+        await service.updateRecords({ put: [publication, cursor] })
+        fixture = await fixture.reopen()
+        service = createCheckpointService({
+          registry: fixture.registry,
+          key,
+          identity: fixture.identity,
+        })
+        expect(await service.readRecords()).toEqual(expect.arrayContaining([publication, cursor]))
+        await expect(
+          service.updateRecords({ put: [{ ...cursor, position: 'x'.repeat(65) }] }),
+        ).rejects.toThrow()
+        await fixture.registry.delete(key)
+        await expect(
+          service.updateRecords({ put: [{ ...cursor, position: '8' }] }),
+        ).rejects.toThrow('retired')
+      } finally {
+        await fixture.close()
+      }
+    })
+    test(`receive turn bounds real signature checks -- ${mode}, ${ownership}`, async () => {
+      const { fixture, key, installed } = await setup()
+      const service = createCheckpointService({
+        registry: fixture.registry,
+        key,
+        identity: fixture.identity,
+      })
+      let worker: ReturnType<typeof createCheckpointWorker> | undefined
+      try {
+        const fact = await installed()
+        const signed = await service.signInstalled(fact.id)
+        if (signed === null) throw new Error('Missing installed frame')
+        const original = decodeEpochCheckpoint(signed).body
+        const messages = Array.from({ length: 40 }, (_, index) => {
+          const body = { ...original, authHash: toB64U(new Uint8Array(32).fill(index + 1)) }
+          return {
+            sequenceID: String(index + 1).padStart(4, '0'),
+            senderDID: fixture.identity.id,
+            topicID: 'checkpoints',
+            payload: encodeEpochCheckpoint(
+              body,
+              ed25519.sign(checkpointSignatureInput(body), fixture.identity.privateKey),
+            ),
+          }
+        })
+        const verify = vi.mocked(ed25519.verify)
+        verify.mockClear()
+        const imported = vi.spyOn(service, 'importCheckpoint')
+        worker = createCheckpointWorker({
+          key,
+          checkpoints: service,
+          mux: {
+            onInbound: () => () => {},
+            publish: async () => ({ sequenceID: '1' }),
+            fetchTopic: async () => ({ messages, head: '0040', oldest: '0001', gap: false }),
+          },
+          recoverySecret: new Uint8Array(32),
+          networkAllowed: () => true,
+          now: () => 10000,
+          random: () => 0.5,
+        })
+        await worker.start()
+        expect(imported).toHaveBeenCalledTimes(32)
+        expect(verify.mock.calls.length).toBeGreaterThan(0)
+        expect(verify.mock.calls.length).toBeLessThanOrEqual(64)
+        expect(
+          imported.mock.calls.reduce((sum, [, bytes]) => sum + bytes.length, 0),
+        ).toBeLessThanOrEqual(131072)
+      } finally {
+        await worker?.dispose()
+        vi.restoreAllMocks()
+        await fixture.close()
+      }
+    })
     testCheckpointPortConformance({
       label: `${mode}, ${ownership} ownership context`,
       createFixture: async () => {

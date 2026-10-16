@@ -78,6 +78,10 @@ export function commitTopic(recoverySecret: Uint8Array): string {
   return deriveTopicID(recoverySecret, 0, COMMIT_LABEL)
 }
 
+export function checkpointTopic(recoverySecret: Uint8Array): string {
+  return deriveTopicID(recoverySecret, 0, 'kumiai/checkpoint/v1', '')
+}
+
 /**
  * The non-rotating recovery-rendezvous topic: recovery request/reply, published
  * unconditionally and pushed. Derived from the same epoch-independent recovery secret, so a
