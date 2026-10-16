@@ -386,7 +386,7 @@ test('incomplete ledgers skip commit processing and later wakeups can retry', as
   await drainUntil(() => complete.mock.calls.length > 0, 'ledger check')
   await vi.advanceTimersByTimeAsync(50)
   await retry
-  expect(requests).toHaveBeenCalledWith(expect.any(String), 100)
+  expect(requests).toHaveBeenCalledWith(expect.any(String), 100, undefined)
   expect(process).not.toHaveBeenCalled()
   expect(await bob.mls.readEpoch()).toBe(1)
   complete.mockResolvedValue(true)

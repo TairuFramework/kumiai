@@ -156,6 +156,7 @@ import {
 } from './recovery-confirmation.js'
 import { recoveryOnlyMLS } from './recovery-only-mls.js'
 import type {
+  AuthenticatedRosterAbsence,
   CapturedAppliedRecovery,
   CapturedPendingRecovery,
   CapturedRejoinRecord,
@@ -1162,6 +1163,7 @@ export function createGroupPeerWithControlWalk<
     hostOutbox.push(() => notifyHost((value) => params.onStrand?.(value), notice))
   }
   const emitRecovery = (event: RecoveryEvent): void => {
+    if (event.phase === 'succeeded' || event.phase === 'bootstrapped') diagnosticAbsences.clear()
     recoveryNotices.push(() => notifyHost((value) => params.onRecovery?.(value), event))
   }
   const observeStrand = (observation: Omit<StrandObservation, 'groupID'>): void => {
@@ -1250,11 +1252,13 @@ export function createGroupPeerWithControlWalk<
   // Recovery rendezvous state, keyed by requestID.
   const recoveryWaiters = new Map<string, (outcome: RendezvousOutcome) => void>()
   const recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>()
-  const pendingReplies = new Map<string, ReturnType<typeof setTimeout>>()
+  const pendingReplies = new Map<string, ReturnType<typeof setTimeout> | null>()
   const inFlightBootstraps = new Set<Promise<void>>()
   const suppressedRequests = new Set<string>()
   const confirmationWaiters = new Map<string, ConfirmationWaiter>()
   const commitOutcomes = new Map<string, ExternalResponse>()
+  const diagnosticAbsences = createRecoveryCache<AuthenticatedRosterAbsence>()
+  const completedReplies = createRecoveryCache<boolean>()
   const verdictCache = createRecoveryCache<Promise<Uint8Array>>()
   const confirmationMemo = createRecoveryCache<RecoveryCommitValidation>(() => {}, 64)
   const confirmationEvaluations = new Map<string, Promise<RecoveryCommitValidation>>()
@@ -1486,29 +1490,36 @@ export function createGroupPeerWithControlWalk<
       mls == null ||
       rendezvousTopicID == null ||
       disposed ||
-      safetyHold() !== null ||
+      hardControlHeld() ||
       pendingRecovery != null
     )
       return
-    if (suppressedRequests.has(requestID) || pendingReplies.has(requestID)) return
+    if (
+      suppressedRequests.has(requestID) ||
+      pendingReplies.has(requestID) ||
+      completedReplies.get(requestID) !== undefined ||
+      pendingConfirmations >= maxPendingConfirmations
+    )
+      return
+    completedReplies.set(requestID, true, Date.now() + 30_000)
+    pendingConfirmations++
     const port = mls
     const topicID = rendezvousTopicID
     const timer = setTimeout(() => {
-      pendingReplies.delete(requestID)
+      pendingReplies.set(requestID, null)
       void (async () => {
         try {
           // The port verifies the request and checks the requester's leaf against its own current
           // tree. A refused request raises, and this peer stays silent.
-          if (disposed || safetyHold() !== null || pendingRecovery != null) return
+          if (disposed || hardControlHeld() || pendingRecovery != null) return
           if (port.capturedRecovery !== undefined) {
             await replyWithCapturedGroupInfo(request)
             return
           }
           const groupInfo = await port.sealGroupInfo(request.request)
-          // Same window as `handleLedgerRequest`'s guard: a timer that fired before dispose is
-          // gone from `pendingReplies` by the time the clear sweep runs, and is then an await
-          // away from here. Silent, for the same reason.
-          if (disposed || safetyHold() !== null || pendingRecovery != null) return
+          await refreshControl()
+          // Disposal can occur while a fired timer is still sealing.
+          if (disposed || hardControlHeld() || pendingRecovery != null) return
           // Mailbox class, deliberately: a rendezvous frame must never move the commit topic's
           // head, and its reader — the requester — subscribed before it asked.
           await mux.publish({
@@ -1521,6 +1532,9 @@ export function createGroupPeerWithControlWalk<
         } catch (error) {
           safetyRefusal(error)
           // a refused or failed reply just means another responder (or a retry) covers it
+        } finally {
+          pendingReplies.delete(requestID)
+          pendingConfirmations--
         }
       })()
     }, getReplyDelayMs())
@@ -1542,6 +1556,7 @@ export function createGroupPeerWithControlWalk<
     if (replyTimer != null) {
       clearTimeout(replyTimer)
       pendingReplies.delete(reply.requestID)
+      pendingConfirmations--
     }
     const waiter = recoveryWaiters.get(reply.requestID)
     if (waiter != null) {
@@ -1551,6 +1566,7 @@ export function createGroupPeerWithControlWalk<
         clearTimeout(timer)
         recoveryTimers.delete(reply.requestID)
       }
+      recoveryPendingReason = 'no-eligible-responder'
       waiter({ kind: 'reply', sealed: reply.groupInfo })
     }
   }
@@ -2377,16 +2393,35 @@ export function createGroupPeerWithControlWalk<
     const topicID = rendezvousTopicID
     return await replyWithReconciledGroupInfo({
       reconcileCommitPrefix,
-      sealGroupInfo: (head) => port.sealGroupInfo(request.request, head),
-      blocked: () => disposed || safetyHold() !== null || pendingRecovery != null,
-      publish: (groupInfo) =>
-        mux.publish({
+      sealGroupInfo: async (head) => {
+        try {
+          return await port.sealGroupInfo(request.request, head)
+        } catch (error) {
+          if (
+            !(error instanceof Error) ||
+            error.name !== 'RecoveryRequestError' ||
+            !('reason' in error) ||
+            error.reason !== 'not-a-member'
+          )
+            throw error
+          if (disposed || safetyHold() !== null) throw error
+          const evidence = await port.capturedRecovery?.sealRosterAbsence?.(request.request, head)
+          if (evidence == null) throw error
+          return evidence
+        }
+      },
+      blocked: () => disposed || hardControlHeld() || pendingRecovery != null,
+      publish: async (groupInfo) => {
+        await refreshControl()
+        if (disposed || hardControlHeld() || pendingRecovery != null) return
+        return await mux.publish({
           topicID,
           payload: encodeHandshakeFrame(
             HANDSHAKE_KIND.recoveryReply,
             encodeRecoveryReply(request.requestID, groupInfo),
           ),
-        }),
+        })
+      },
     })
   }
 
@@ -3573,6 +3608,7 @@ export function createGroupPeerWithControlWalk<
     const { request, requestKey } = await port.createRecoveryRequest(
       requestID,
       Math.max(recoveryTimeoutMs, recoveryDeadlineMs),
+      await comparisonEpoch(),
     )
     if (disposed || safetyHold() !== null) return false
     return await new Promise<boolean>((resolve) => {
@@ -3810,6 +3846,43 @@ export function createGroupPeerWithControlWalk<
    * Ask the group for its state and wait for one member to answer, bounded by the deadline.
    * The outcome distinguishes a silent responder, disposal and a failed request publish.
    */
+  const comparisonEpoch = async (): Promise<number | undefined> => {
+    if (params.checkpoints === undefined || control == null) return undefined
+    const records = await params.checkpoints.readRecords()
+    const split = records
+      .filter((row) => row.kind === 'notice' && row.notice.closedAt === null)
+      .flatMap((row) => (row.kind === 'notice' ? [row.notice.splitEpoch] : []))
+    if (split.length > 0) return Math.min(...split)
+    const coverage = await params.checkpoints.checkpointCoverage(control.key.groupID)
+    const epochs = coverage.retained.map((range) => range.from)
+    return epochs.length === 0 ? undefined : Math.min(...epochs)
+  }
+  let recoveryPendingReason: 'no-reply' | 'no-eligible-responder' = 'no-reply'
+  const diagnoseAbsence = async (
+    port: GroupMLS,
+    sealed: Uint8Array,
+    requestID: string,
+    requestKey: Uint8Array,
+  ): Promise<void> => {
+    const verified = await port.capturedRecovery?.checkRosterAbsence?.(
+      sealed,
+      requestID,
+      requestKey,
+    )
+    if (verified === undefined || verified === null || disposed) return
+    const evidenceID = JSON.stringify([verified.responderKeyHash, verified.epoch, verified.lineage])
+    if (diagnosticAbsences.get(evidenceID) === undefined)
+      diagnosticAbsences.set(evidenceID, verified, Date.now() + 30_000)
+    try {
+      await params.onNotMember?.({
+        evidence: sealed.slice(),
+        requestID,
+        requestKey: requestKey.slice(),
+      })
+    } catch {
+      // Diagnosis persistence cannot terminate recovery.
+    }
+  }
   const requestGroupInfo = async (
     request: Uint8Array,
     requestID: string,
@@ -3819,6 +3892,7 @@ export function createGroupPeerWithControlWalk<
     assertSafetyOpen()
     const remaining = deadline - Date.now()
     const wait = Math.max(0, Math.min(recoveryTimeoutMs, remaining))
+    recoveryPendingReason = 'no-reply'
     const atDeadline = remaining <= recoveryTimeoutMs
     return await new Promise<RendezvousOutcome>((resolve) => {
       recoveryWaiters.set(requestID, resolve)
@@ -4211,6 +4285,7 @@ export function createGroupPeerWithControlWalk<
         const { request, requestKey } = await port.createRecoveryRequest(
           requestID,
           Math.max(0, deadline - Date.now()),
+          await comparisonEpoch(),
         )
         try {
           const outcome = await requestGroupInfo(
@@ -4221,6 +4296,7 @@ export function createGroupPeerWithControlWalk<
           )
           assertSafetyOpen()
           if (outcome.kind !== 'reply') return { kind: 'retry' }
+          await diagnoseAbsence(port, outcome.sealed, requestID, requestKey)
           const reply = {
             sealed: outcome.sealed,
             requestID,
@@ -4416,6 +4492,7 @@ export function createGroupPeerWithControlWalk<
         const { request, requestKey } = await port.createRecoveryRequest(
           requestID,
           Math.max(0, deadline - Date.now()),
+          await comparisonEpoch(),
         )
         let requestKeySaved = false
         try {
@@ -4437,6 +4514,7 @@ export function createGroupPeerWithControlWalk<
                     ? 'deadline'
                     : 'no-responder'
                   : 'error',
+              pendingReason: recoveryPendingReason,
             })
             return { advanced: false }
           }
@@ -4449,6 +4527,7 @@ export function createGroupPeerWithControlWalk<
             requestKey,
           )
           if (pending === null) {
+            await diagnoseAbsence(port, outcome.sealed, requestID, requestKey)
             retryRecovery()
             emitRecovery({
               groupID: commits,
@@ -4456,6 +4535,7 @@ export function createGroupPeerWithControlWalk<
               trigger,
               phase: 'failed',
               reason: 'no-responder',
+              pendingReason: recoveryPendingReason,
             })
             return { advanced: false }
           }
@@ -4622,6 +4702,7 @@ export function createGroupPeerWithControlWalk<
           trigger,
           phase: 'failed',
           reason: recaptureReason ?? 'unconfirmed',
+          pendingReason: recoveryPendingReason,
           advisory: [],
         })
         return { advanced: false }
@@ -4727,6 +4808,7 @@ export function createGroupPeerWithControlWalk<
             const { request, requestKey } = await port.createRecoveryRequest(
               requestID,
               Math.max(0, deadline - Date.now()),
+              await comparisonEpoch(),
             )
             let requestKeySaved = false
             try {
@@ -5397,13 +5479,20 @@ export function createGroupPeerWithControlWalk<
         for (const waiter of recoveryWaiters.values()) waiter({ kind: 'disposed' })
         recoveryWaiters.clear()
         for (const timer of recoveryTimers.values()) clearTimeout(timer)
-        for (const timer of pendingReplies.values()) clearTimeout(timer)
+        for (const timer of pendingReplies.values()) {
+          if (timer !== null) {
+            clearTimeout(timer)
+            pendingConfirmations--
+          }
+        }
         for (const timer of pendingLedgerReplies) clearTimeout(timer)
         recoveryTimers.clear()
         pendingReplies.clear()
         pendingLedgerReplies.clear()
         ledgerWaiters.clear()
         suppressedRequests.clear()
+        completedReplies.clear()
+        diagnosticAbsences.clear()
         // Independent failures, both surfaced: a teardown that failed must not stop the mux from
         // closing its hub drain, and a mux that failed must not hide a teardown failure that
         // happened first. `inboxLane` is cleared unconditionally after both, whichever way they

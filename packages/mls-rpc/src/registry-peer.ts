@@ -7,6 +7,7 @@ import type {
   GroupMLS,
   GroupPeer,
   GroupProtocolDefinition,
+  NotMemberEvidence,
   RecoveryCompletion,
   RecoveryContinuation,
   RecoveryContinuationPort,
@@ -38,6 +39,11 @@ import { RetainedTrustUnavailableError, registrySafety } from './registry/safety
 import { createRecoverySwitchFactory, toRegistrySwitchWrite } from './registry/switch-write.js'
 import type { GroupHandleRegistry, RegistryRecoverySource } from './registry/types.js'
 import type { RecoveryEnvironment } from './registry/validation.js'
+import {
+  createNotMemberHandler,
+  flushConditionEvents,
+  groupCondition,
+} from './safety-conditions.js'
 
 const SOURCE_RETIREMENT_TIMEOUT_MS = 5_000
 class PeerRetirementTimeoutError extends RegistryRetireHookError {}
@@ -51,7 +57,14 @@ function retirementTimedOut(cause: unknown): boolean {
 }
 
 type Peer = GroupPeer<Record<string, GroupProtocolDefinition>>
+export type RecoveryPendingReason = 'no-reply' | 'no-eligible-responder'
 export type RegistryPeerOptions = {
+  onNotMember?: (params: {
+    evidence: Uint8Array
+    requestID: string
+    requestKey: Uint8Array
+  }) => Promise<void>
+  onRecovery?: (event: RecoveryEvent) => void | Promise<void>
   checkpoints: CheckpointService
   mls: GroupMLS
   recoveryOnly: boolean
@@ -67,7 +80,15 @@ export type RegistryPeerOptions = {
   completion: RecoveryCompletion | null
 }
 export type RegistryPeerStatus =
-  | { kind: 'starting' | 'running' | 'switching' | 'pending' | 'disposed' }
+  | { kind: 'starting' | 'running' | 'switching' | 'disposed' }
+  | { kind: 'pending'; reason?: RecoveryPendingReason }
+  | {
+      kind: 'not-member'
+      eventID: string
+      evidence: NotMemberEvidence
+      retrying: true
+      pendingReason?: RecoveryPendingReason
+    }
   | { kind: 'failed'; error: unknown }
 export type RegistryPeer = {
   peer(): Peer | null
@@ -192,6 +213,70 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
       record.candidate.fill(0)
     })
   let status: RegistryPeerStatus = { kind: 'starting' }
+  let conditionTimer: ReturnType<typeof setTimeout> | undefined
+  let pendingReason: RecoveryPendingReason | undefined
+  async function refreshCondition(): Promise<void> {
+    const { observed, deadlines } = await capability.entry.read(key.groupID, async (reads) => {
+      const records = await reads.checkpoints()
+      return {
+        observed: groupCondition(records, key),
+        deadlines: records.flatMap((row) =>
+          row.kind === 'condition' &&
+          row.key.incarnation === key.incarnation &&
+          row.notification?.emitted === false
+            ? [row.notification.emitAt]
+            : [],
+        ),
+      }
+    })
+    if (disposed || status.kind === 'failed') return
+    if (conditionTimer !== undefined) clearTimeout(conditionTimer)
+    conditionTimer = undefined
+    if (deadlines.length > 0)
+      conditionTimer = setTimeout(
+        () => {
+          conditionTimer = undefined
+          void track(
+            flushConditionEvents(registry, key, () => !disposed).then(refreshCondition),
+          ).catch(() => {
+            if (!disposed)
+              conditionTimer = setTimeout(() => {
+                void track(refreshCondition()).catch(() => {})
+              }, 30000)
+          })
+        },
+        Math.max(0, Math.min(2147483647, Math.min(...deadlines) - Date.now())),
+      )
+    if (
+      observed.condition === 'not-member' &&
+      observed.evidence !== null &&
+      observed.eventID !== undefined
+    )
+      status = {
+        kind: 'not-member',
+        eventID: observed.eventID,
+        evidence: observed.evidence,
+        retrying: true,
+        ...(pendingReason === undefined ? {} : { pendingReason }),
+      }
+    else if (status.kind === 'not-member') status = { kind: 'running' }
+  }
+  function onRecovery(event: RecoveryEvent): void | Promise<void> {
+    if (event.phase === 'failed' && event.pendingReason !== undefined) {
+      pendingReason = event.pendingReason
+      if (status.kind === 'not-member') status = { ...status, pendingReason }
+      else if (!disposed && status.kind !== 'failed')
+        status = { kind: 'pending', reason: pendingReason }
+    }
+    return params.onRecovery?.(event)
+  }
+  const unobserve = capability.entry.observe(
+    key.groupID,
+    () => {},
+    () => {
+      if (!disposed) void track(refreshCondition()).catch(() => {})
+    },
+  )
   let recoveryAttempt: Pick<CapturedRejoinRecord, 'id' | 'trigger'> | undefined
   function fail(error: unknown, record = recoveryAttempt): void {
     if (status.kind === 'failed') return
@@ -282,6 +367,21 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
           recoveryOnly: control.rejoin !== null || !mls.sendAdmission().admissible,
           target: { ...target },
           onConfirmedRecovery,
+          onRecovery,
+          onNotMember: async (input) => {
+            await track(
+              createNotMemberHandler({
+                registry,
+                key: requested,
+                recovery: params.recovery,
+                current: () =>
+                  !disposed &&
+                  generation === retirementGeneration &&
+                  sameStoredValue(key, requested),
+              })(input),
+            )
+            await refreshCondition()
+          },
           settleAcceptedRecovery,
           reconcileAcceptedRecovery: async (record, reply) => {
             const saved = await coordinator.readRecoveryRecord(key)
@@ -336,6 +436,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
     key = { ...requested }
     current = peer
     status = { kind: 'running' }
+    await refreshCondition()
   }
   async function accept(
     record: CapturedRejoinRecord,
@@ -535,7 +636,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
   return {
     peer: () => current,
     installedKey: () => ({ ...key }),
-    status: () => ({ ...status }),
+    status: () => (status.kind === 'not-member' ? copyStoredValue(status) : { ...status }),
     ready,
     dispose() {
       if (disposed) return
@@ -544,6 +645,8 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
       if (timer !== undefined) clearTimeout(timer)
       wake?.()
       unregister()
+      unobserve()
+      if (conditionTimer !== undefined) clearTimeout(conditionTimer)
       for (const peer of peers) void track(peer.dispose()).catch(() => {})
     },
     async drained() {

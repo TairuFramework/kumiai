@@ -52,6 +52,7 @@ export type CheckpointRecord =
       key: GroupKey
       event: GroupConditionEvent
       active: boolean
+      notification?: { emitAt: number; emitted: boolean; installationID: string }
       sealedProof: Uint8Array | null
     }
   | {

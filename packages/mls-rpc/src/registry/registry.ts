@@ -16,6 +16,7 @@ import {
   StorageOutcomeUnknownError,
 } from '../persistence-errors.js'
 import type { GroupKey, GroupTransaction } from '../persistence-types.js'
+import { groupCondition } from '../safety-conditions.js'
 import { createRegistryAccess, type RegistryOwner } from './access.js'
 import { admissionFor, type ColdEnvironment, loadValidatedGroup } from './cold.js'
 import { bindRegistryRecoveryCoordinator } from './recovery-coordinator.js'
@@ -277,6 +278,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       assertMutationSafety,
     )
     assertLoadCurrent()
+    value.snapshot.condition = groupCondition(await reads.checkpoints(), value.key).condition
     const reason = controlSafetyHeld(control)
     if (reason !== null) latch(value.key, reason)
     if (admittedOwner !== undefined && value.key.incarnation !== admittedOwner.key.incarnation)

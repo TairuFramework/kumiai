@@ -73,6 +73,7 @@ import type {
   TransactionalGroupEffects,
   TransactionHookSettlement,
 } from './persistence-types.js'
+import { clearGroupCondition, groupCondition } from './safety-conditions.js'
 
 type Proof = {
   previous: GroupOwnerMarker | null
@@ -470,6 +471,7 @@ export function createMemoryGroupCoordinator(params: {
           }
         }
       }
+      const checkpointObservation = await diagnose(raw.checkpoints.list)
       return {
         mutationID,
         lifetime,
@@ -484,6 +486,12 @@ export function createMemoryGroupCoordinator(params: {
         controlStatus,
         stateStatus,
         terminal,
+        condition:
+          activeKey === null
+            ? null
+            : checkpointObservation.value === null
+              ? undefined
+              : groupCondition(checkpointObservation.value, activeKey).condition,
       }
     })
     const attempt = entry.attempt()
@@ -824,6 +832,7 @@ export function createMemoryGroupCoordinator(params: {
                     atRest,
                   }).checkpoints.list(),
                   await raw.checkpoints.list(),
+                  tx,
                 )
                 const installing =
                   previous === null ||
@@ -991,7 +1000,27 @@ export function createMemoryGroupCoordinator(params: {
                   }
                   await raw.trust.save(proposedTrust)
                 }
+                if (installations.length > 0) {
+                  for (const row of await raw.checkpoints.list()) {
+                    if (row.kind === 'condition' && row.active)
+                      await clearGroupCondition(raw.checkpoints, row.key)
+                  }
+                }
+                const conditionsBeforeRetention = (await raw.checkpoints.list()).filter(
+                  (row) => row.kind === 'condition',
+                )
                 await retainCheckpointInstallations(raw.checkpoints, installations, Date.now())
+                const retainedCheckpointIDs = new Set(
+                  (await raw.checkpoints.list()).map((row) => row.id),
+                )
+                for (const row of conditionsBeforeRetention) {
+                  if (!retainedCheckpointIDs.has(row.id))
+                    await createUnlockedIncarnationStores({
+                      tx,
+                      key: row.key,
+                      atRest,
+                    }).meta.ackEvent(row.event.id)
+                }
                 const after = snapshot(tx)
                 const affected = changedIncarnations(before, after, change.groupID)
                 if (
@@ -1102,6 +1131,7 @@ export function createMemoryGroupCoordinator(params: {
                     atRest,
                   }).checkpoints.list(),
                   await raw.checkpoints.list(),
+                  tx,
                 )
               for (const [id, bytes] of checkpointRows) {
                 if (sameStoredValue(before.checkpoints?.get(id), bytes)) continue

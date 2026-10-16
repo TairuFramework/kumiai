@@ -1,5 +1,6 @@
 import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import {
+  type ControllerBinding,
   checkpointAuthHash,
   checkpointKeyHash,
   checkpointSignatureInput,
@@ -1115,5 +1116,313 @@ export async function createForkNoticeFixture(params: {
       service = create()
     },
     close: () => fixture.close(),
+  }
+}
+
+export async function createNotMemberFixture(
+  params: {
+    additionalResponder?: boolean
+    localEpoch?: number
+    remoteEpoch?: number
+    splitEpoch?: number
+    mode?: 'real-mls' | 'double'
+    ownershipContext?: OwnershipContextPort
+  } = {},
+) {
+  const { createCapturedFormerMember } = await import('./captured-recovery.js')
+  const { createRegistryGroupMLS } = await import('../../src/registry-group-mls.js')
+  const { createNotMemberHandler } = await import('../../src/safety-conditions.js')
+  const base = await createCapturedFormerMember(true)
+  const splitEpoch = params.splitEpoch ?? 10
+  const localEpoch = params.localEpoch ?? 20
+  const remoteEpoch = params.remoteEpoch ?? 12
+  const clone = async (handle: GroupHandle) => {
+    const state = decodeClientState(encodeClientState(handle.state))
+    if (state === undefined) throw new Error('Missing diagnostic state')
+    return restoreGroup({
+      state,
+      credential: handle.credential,
+      ledgerEntries: handle.ledgerTokens,
+      options: registryOptions({}),
+    })
+  }
+  let common = await clone(base.earlierGroup)
+  let own = await clone(base.requester.handle)
+  let additional:
+    | { identity: OwnIdentity; handle: GroupHandle; fixture: RegistryFixture | null }
+    | undefined
+  if (params.additionalResponder) {
+    const { createInvite, commitInvite, createKeyPackageBundle, processWelcome } = await import(
+      '@kumiai/mls'
+    )
+    const lifecycle = (await import(
+      new URL('../../../mls/test/fixtures/lifecycle-ledger.ts', import.meta.url).href
+    )) as {
+      bindingFor(
+        identity: OwnIdentity,
+        prefix?: ControllerBinding['prefix'],
+        issuer?: { identity: OwnIdentity; parent: string },
+      ): Promise<ControllerBinding>
+      trustedGrant(identity: OwnIdentity): Promise<string>
+    }
+    const identity = randomIdentity()
+    const controller = await lifecycle.bindingFor(identity, undefined, {
+      identity: base.responder.identity,
+      parent: await lifecycle.trustedGrant(base.responder.identity),
+    })
+    const bundle = await createKeyPackageBundle(identity, { controller })
+    const { invite } = await createInvite({
+      group: common,
+      identity: base.responder.identity,
+      recipientDID: identity.id,
+    })
+    const added = await commitInvite(common, bundle.publicPackage, invite)
+    common = added.newGroup
+    await own.processMessage(added.commitMessage)
+    additional = {
+      identity,
+      fixture: null,
+      handle: (
+        await processWelcome({
+          identity,
+          invite,
+          welcome: added.welcomeMessage,
+          keyPackageBundle: bundle,
+          options: registryOptions({}),
+        })
+      ).group,
+    }
+  }
+  while (Number(common.epoch) < splitEpoch - 1) {
+    const rotation = await commitKeyRotation(common)
+    common = rotation.newGroup
+    await own.processMessage(rotation.commitMessage)
+    await additional?.handle.processMessage(rotation.commitMessage)
+  }
+  const local = await createRegistryFixture({
+    mode: params.mode ?? 'real-mls',
+    setup: 'empty',
+    groupID: own.groupID,
+    identity: base.requester.identity,
+    ownershipContext: params.ownershipContext,
+  })
+  const remote = await createRegistryFixture({
+    mode: 'real-mls',
+    setup: 'empty',
+    groupID: own.groupID,
+    identity: base.responder.identity,
+    ownershipContext: params.ownershipContext,
+  })
+  const localKey = await local.registry.seed(
+    await registryHandle({
+      mode: params.mode ?? 'real-mls',
+      handle: await clone(own),
+      options: local.environment.options,
+    }),
+    { packageUse: { sourceID: 'diagnostic', ref: 'requester-package', kind: 'ordinary' } },
+  )
+  const remoteKey = await remote.registry.seed(await clone(common), {
+    packageUse: { sourceID: 'diagnostic', ref: 'responder-package', kind: 'ordinary' },
+  })
+  async function install(fixture: RegistryFixture, key: GroupKey, proposed: GroupHandle) {
+    const handle =
+      fixture === local
+        ? await registryHandle({
+            mode: params.mode ?? 'real-mls',
+            handle: await clone(proposed),
+            options: fixture.environment.options,
+          })
+        : proposed
+    const previous = await fixture.device.groups.loadState(key)
+    if (previous === null || previous.deleted) throw new Error('Missing diagnostic installation')
+    await fixture.installRows({
+      key,
+      state: {
+        ...previous,
+        version: previous.version + 1,
+        state: encodeClientState(handle.state),
+        credential: handle.credential,
+        ledger: handle.ledgerTokens,
+        epoch: Number(handle.epoch),
+        epochAuthenticator: handle.state.keySchedule.epochAuthenticator.slice(),
+      },
+      trust: recoveryTrustFor(handle, key, await fixture.device.groups.loadTrust(key.groupID)),
+    })
+  }
+  if (additional !== undefined) {
+    additional.fixture = await createRegistryFixture({
+      mode: 'real-mls',
+      setup: 'empty',
+      groupID: own.groupID,
+      identity: additional.identity,
+    })
+    await additional.fixture.registry.seed(await clone(additional.handle), {
+      packageUse: { sourceID: 'diagnostic', ref: 'second-responder', kind: 'ordinary' },
+    })
+  }
+  const continuing = await clone(common)
+  const continuers: Array<RegistryFixture> = []
+  const { proposeSelfRemoval, commitSelfRemovals } = await import('@kumiai/mls')
+  const removal = await proposeSelfRemoval(await clone(own))
+  await common.processMessage(removal.frame)
+  await additional?.handle.processMessage(removal.frame)
+  const removed = await commitSelfRemovals(common)
+  if (removed === null) throw new Error('Missing excluding branch')
+  let excluding = removed.newGroup
+  await install(remote, remoteKey, excluding)
+  if (additional?.fixture !== undefined && additional?.fixture !== null) {
+    await additional.handle.processMessage(removed.commitMessage)
+    await install(additional.fixture, remoteKey, additional.handle)
+  }
+  while (Number(excluding.epoch) < remoteEpoch) {
+    const rotation = await commitKeyRotation(excluding)
+    excluding = rotation.newGroup
+    await install(remote, remoteKey, excluding)
+    if (additional?.fixture !== undefined && additional?.fixture !== null) {
+      await additional.handle.processMessage(rotation.commitMessage)
+      await install(additional.fixture, remoteKey, additional.handle)
+    }
+  }
+  while (Number(own.epoch) < localEpoch) {
+    const rotation = await commitKeyRotation(own)
+    own = rotation.newGroup
+    await continuing.processMessage(rotation.commitMessage)
+    await install(local, localKey, own)
+  }
+  let localFixture = local
+  let localMLS = await createRegistryGroupMLS({
+    registry: localFixture.registry,
+    key: localKey,
+    identity: base.requester.identity,
+    entrySlot: createLedgerEntrySlot(),
+    recovery: localFixture.environment,
+    target: { targetID: 'diagnostic-hub', topicID: 'diagnostic-commits' },
+  })
+  const remoteMLS = await createRegistryGroupMLS({
+    registry: remote.registry,
+    key: remoteKey,
+    identity: base.responder.identity,
+    entrySlot: createLedgerEntrySlot(),
+    recovery: remote.environment,
+    target: { targetID: 'diagnostic-hub', topicID: 'diagnostic-commits' },
+  })
+  const remoteService = createCheckpointService({
+    registry: remote.registry,
+    key: remoteKey,
+    identity: base.responder.identity,
+  })
+  for (const row of await remoteService.readRecords())
+    if (row.kind === 'fact') await remoteService.signInstalled(row.id)
+  let current = true
+  const handler = () =>
+    createNotMemberHandler({
+      registry: localFixture.registry,
+      key: localKey,
+      recovery: localFixture.environment,
+      current: () => current,
+    })
+  return {
+    key: localKey,
+    remoteKey,
+    local: () => localFixture,
+    remote,
+    mls: () => localMLS,
+    remoteMLS,
+    responderDID: base.responder.identity.id,
+    service: () =>
+      createCheckpointService({
+        registry: localFixture.registry,
+        key: localKey,
+        identity: base.requester.identity,
+      }),
+    async proof(requestID = crypto.randomUUID()) {
+      const request = await localMLS.createRecoveryRequest(requestID, undefined, splitEpoch)
+      const evidence = await remoteMLS.capturedRecovery?.sealRosterAbsence?.(request.request, null)
+      if (evidence == null) throw new Error('Missing signed absence proof')
+      return { ...request, evidence, requestID }
+    },
+    async secondProof() {
+      if (additional?.fixture == null) throw new Error('Missing second responder')
+      const service = createCheckpointService({
+        registry: additional.fixture.registry,
+        key: remoteKey,
+        identity: additional.identity,
+      })
+      for (const row of await service.readRecords())
+        if (row.kind === 'fact') await service.signInstalled(row.id)
+      const responder = await createRegistryGroupMLS({
+        registry: additional.fixture.registry,
+        key: remoteKey,
+        identity: additional.identity,
+        entrySlot: createLedgerEntrySlot(),
+        recovery: additional.fixture.environment,
+        target: { targetID: 'diagnostic-hub', topicID: 'diagnostic-commits' },
+      })
+      const requestID = crypto.randomUUID()
+      const held = await localMLS.createRecoveryRequest(requestID, undefined, splitEpoch)
+      const evidence = await responder.capturedRecovery?.sealRosterAbsence?.(held.request, null)
+      if (evidence == null) throw new Error('Missing second signed absence')
+      return { ...held, evidence, requestID, responderDID: additional.identity.id }
+    },
+    async advanceResponder() {
+      excluding = (await commitKeyRotation(excluding)).newGroup
+      await install(remote, remoteKey, excluding)
+      for (const row of await remoteService.readRecords())
+        if (row.kind === 'fact') await remoteService.signInstalled(row.id)
+    },
+    diagnose: (input: { evidence: Uint8Array; requestID: string; requestKey: Uint8Array }) =>
+      handler()(input),
+    stop: () => {
+      current = false
+    },
+    async advance() {
+      own = (await commitKeyRotation(own)).newGroup
+      await install(localFixture, localKey, own)
+    },
+    async confirmedRecovery() {
+      const recovery = await createRegistryRecovery({
+        format: 'captured',
+        mode: 'real-mls',
+        identity: localFixture.identity,
+        options: localFixture.environment.options,
+        source: await clone(own),
+        sourceKey: localKey,
+        recoverySource: await registryFixtureRecoverySource(localFixture, localKey),
+        responder: { identity: remote.identity, group: await clone(continuing) },
+      })
+      retainCapturedDestination(localFixture, recovery)
+      await localFixture.installRows({ key: localKey, control: { putRejoin: recovery.record } })
+      return { ...recovery, source: await registryFixtureRecoverySource(localFixture, localKey) }
+    },
+    async continuing() {
+      const survivor = await createRegistryFixture({
+        mode: 'real-mls',
+        setup: 'empty',
+        groupID: own.groupID,
+        identity: base.responder.identity,
+      })
+      continuers.push(survivor)
+      await survivor.registry.seed(await clone(continuing), {
+        packageUse: { sourceID: 'diagnostic', ref: 'continuing-responder', kind: 'ordinary' },
+      })
+      return survivor
+    },
+    async restart() {
+      localFixture = await localFixture.reopen()
+      localMLS = await createRegistryGroupMLS({
+        registry: localFixture.registry,
+        key: localKey,
+        identity: base.requester.identity,
+        entrySlot: createLedgerEntrySlot(),
+        recovery: localFixture.environment,
+        target: { targetID: 'diagnostic-hub', topicID: 'diagnostic-commits' },
+      })
+    },
+    async close() {
+      await localFixture.close()
+      await remote.close()
+      await additional?.fixture?.close()
+      for (const survivor of continuers) await survivor.close()
+    },
   }
 }

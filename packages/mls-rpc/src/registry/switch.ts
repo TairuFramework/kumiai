@@ -21,6 +21,7 @@ import {
 } from '../persistence-errors.js'
 import type { GroupPersistence, GroupTransaction } from '../persistence-types.js'
 import { recoveryTrustDigest } from '../recovery-trust-digest.js'
+import { clearGroupCondition } from '../safety-conditions.js'
 import { retireIncarnation } from './retired.js'
 import type { RegistryRetirement } from './retirement.js'
 import { readRecoverySource } from './source.js'
@@ -298,6 +299,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
           const rows = stores.incarnation(destination.incarnation)
           await rows.state.save(prepared.state)
           await stores.trust.save(prepared.trust)
+          await clearGroupCondition(stores.checkpoints, source.key)
           await stores.checkpoints.put(prepared.checkpoint)
           if (!prepared.state.terminal)
             await stores.checkpoints.put({

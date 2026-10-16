@@ -15,6 +15,7 @@ import type {
   GroupTransaction,
   PackageUse,
 } from '../persistence-types.js'
+import { clearGroupCondition } from '../safety-conditions.js'
 import { retireIncarnation } from './retired.js'
 import type { RegistryRetirement } from './retirement.js'
 import { recoveryTrustFor } from './trust.js'
@@ -310,6 +311,7 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
             senderHWM: 0,
           })
           await stores.trust.save(prepared.trust)
+          if (source !== null) await clearGroupCondition(stores.checkpoints, source)
           await stores.checkpoints.put(prepared.checkpoint)
           await stores.checkpoints.put({
             kind: 'publication',

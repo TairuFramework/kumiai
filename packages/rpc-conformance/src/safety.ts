@@ -2,10 +2,14 @@ import { describe, expect, test } from 'vitest'
 
 import type {
   ConformanceEpochIdentity,
+  ConformanceGroupCondition,
+  ConformanceGroupConditionEvent,
   ConformanceGroupForkEvidence,
   ConformanceGroupKey,
   ConformanceGroupSafetyEvent,
+  ConformanceNotMemberEvidence,
   ConformanceRecoveryUnavailableEvent,
+  ConformanceSafetyHold,
 } from './control-store.js'
 import type { ConformanceGroupMLS } from './group-mls.js'
 import type { ConformanceRegistryFixture, ConformanceRegistryHandle } from './registry-fixture.js'
@@ -149,12 +153,23 @@ export type ConformanceManualRecovery =
   | { mode: 'successor'; successor: ConformanceGroupKey }
 
 export type ConformanceGroupSafety = {
+  status(key: ConformanceGroupKey): Promise<{
+    hold: ConformanceSafetyHold
+    condition: ConformanceGroupCondition | null
+    evidence: ConformanceNotMemberEvidence | null
+  }>
   epochAuthenticator(key: ConformanceGroupKey): Promise<ConformanceEpochIdentity | null>
   reportFork(key: ConformanceGroupKey, evidence: ConformanceGroupForkEvidence): Promise<void>
   recover(key: ConformanceGroupKey, choice: ConformanceManualRecovery): Promise<ConformanceGroupKey>
   events(
     key: ConformanceGroupKey,
-  ): Promise<Array<ConformanceGroupSafetyEvent | ConformanceRecoveryUnavailableEvent>>
+  ): Promise<
+    Array<
+      | ConformanceGroupSafetyEvent
+      | ConformanceRecoveryUnavailableEvent
+      | ConformanceGroupConditionEvent
+    >
+  >
   ackEvent(key: ConformanceGroupKey, id: string): Promise<void>
 }
 
@@ -201,6 +216,20 @@ export function runGroupSafetyContract<THandle extends ConformanceRegistryHandle
   }
 
   describe('GroupSafety contract', () => {
+    test('diagnostic status separates active conditions from hard holds', async () => {
+      const key = await activeKey()
+      expect(await fixture.safety().status(key)).toEqual({
+        hold: null,
+        condition: null,
+        evidence: null,
+      })
+      await hold(key, 'fork-halted')
+      expect(await fixture.safety().status(key)).toEqual({
+        hold: 'fork-halted',
+        condition: null,
+        evidence: null,
+      })
+    })
     test('host mismatch co-writes field/event/admission', async () => {
       const key = await activeKey()
       const access = await fixture.registry.access(key.groupID)

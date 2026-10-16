@@ -2,6 +2,7 @@ import type { GroupHandle } from '@kumiai/mls'
 import type {
   AdoptionExpected,
   AdoptionWrite,
+  GroupCondition,
   LogPosition,
   RecoverySource,
   ResyncProof,
@@ -21,6 +22,7 @@ import type {
 import type { RecoveryEnvironment } from './validation.js'
 
 export type GroupRuntimeSnapshot = EpochIdentity & {
+  condition?: GroupCondition | null
   stateVersion: number
   members: ReadonlySet<string>
   available: boolean

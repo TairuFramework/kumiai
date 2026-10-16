@@ -18,13 +18,28 @@ import { copyStoredValue, memoryRecordTable, sameStoredValue } from './memory-in
 import { physicalRecordKey } from './persistence-codec.js'
 import { GroupStateConflictError } from './persistence-errors.js'
 import type { AtRestCodec, MemoryTransaction } from './persistence-types.js'
+import { conditionPreparation } from './safety-conditions.js'
 
+const conditionCaptures = new WeakMap<object, Map<string, CheckpointRecord>>()
 const captures = new WeakMap<object, Map<string, Uint8Array>>()
 
 export function assertCheckpointUpdates(
   before: Array<CheckpointRecord>,
   after: Array<CheckpointRecord>,
+  tx?: MemoryTransaction,
 ): void {
+  const entry = tx === undefined ? undefined : memoryTransactionEntry(tx.rows)
+  const authorised = entry === undefined ? undefined : conditionCaptures.get(entry)
+  for (const row of [...before, ...after]) {
+    if (row.kind !== 'condition') continue
+    const next = after.find((value) => value.id === row.id)
+    const previous = before.find((value) => value.id === row.id)
+    if (
+      !sameStoredValue(previous, next) &&
+      (authorised?.has(row.id) !== true || !sameStoredValue(authorised.get(row.id), next))
+    )
+      throw new GroupStateConflictError('Group condition requires coordinator authority')
+  }
   const coverage = before.find((row) => row.kind === 'coverage' && row.id === 'coverage')
   const ids = new Set(
     coverage?.kind === 'coverage' ? coverage.installations.map((row) => row.id) : [],
@@ -181,9 +196,15 @@ export function createCheckpointStore(
     load: memoryOperation(tx, store.load),
     list: memoryOperation(tx, store.list),
     put(record) {
+      const condition = record.kind === 'condition' ? conditionPreparation(record) : undefined
       const canonical = record.kind === 'fact' ? checkpointPreparation(record) : undefined
       const result = put(record)
       const entry = memoryTransactionEntry(tx.rows)
+      if (condition !== undefined && entry !== undefined) {
+        const prepared = conditionCaptures.get(entry) ?? new Map<string, CheckpointRecord>()
+        prepared.set(record.id, condition)
+        conditionCaptures.set(entry, prepared)
+      }
       if (canonical !== undefined && entry !== undefined) {
         const prepared = captures.get(entry) ?? new Map<string, Uint8Array>()
         prepared.set(record.id, canonical)
@@ -313,6 +334,13 @@ export async function retainCheckpointInstallations(
     } else retained.push(fact)
   }
   await store.remove([
+    ...records.flatMap((row) =>
+      row.kind === 'condition' &&
+      row.notification !== undefined &&
+      removed.has(row.notification.installationID)
+        ? [row.id]
+        : [],
+    ),
     ...removed,
     ...records
       .filter((row) => row.kind === 'publication' && removed.has(row.factID))

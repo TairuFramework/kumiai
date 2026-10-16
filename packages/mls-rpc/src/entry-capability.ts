@@ -1,4 +1,4 @@
-import type { CheckpointRecord, ControlSnapshot } from '@kumiai/rpc'
+import type { CheckpointRecord, ControlSnapshot, GroupCondition } from '@kumiai/rpc'
 
 import type {
   EpochIdentity,
@@ -20,6 +20,7 @@ export type StateMetadata = GroupKey & {
 }
 export type AccountedGroupObservation = {
   mutationID: string
+  condition?: GroupCondition | null
   lifetime: GroupLifetime | null
   lifetimeStatus: 'missing' | 'readable' | 'unreadable'
   metadata: Array<StateMetadata>

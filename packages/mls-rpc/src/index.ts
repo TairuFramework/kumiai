@@ -185,6 +185,7 @@ export { createRegistryGroupMLS, type RegistryGroupMLSParams } from './registry-
 export { createRegistryHandleAccess } from './registry-handle-access.js'
 export {
   createRegistryPeer,
+  type RecoveryPendingReason,
   type RegistryPeer,
   type RegistryPeerOptions,
   type RegistryPeerParams,

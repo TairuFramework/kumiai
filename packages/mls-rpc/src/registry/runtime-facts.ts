@@ -108,6 +108,7 @@ export function accountedRuntime(params: {
     return {
       snapshot: {
         ...trust.installed,
+        condition: value.condition ?? null,
         authenticator: trust.installed.authenticator.slice(),
         stateVersion: activeVersion,
         members: new Set(facts.members),

@@ -193,6 +193,7 @@ export type RecoveryEvent =
 
 /** What a failed recovery learned from its responders, when it learned anything. */
 export type RecoveryFailureDetails = {
+  pendingReason?: 'no-reply' | 'no-eligible-responder'
   refusal?: RecoveryRefusalReason
   responder?: string
   advisory?: Array<OpenedRecoveryVerdict>
@@ -244,6 +245,11 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
   onStrand?: (observation: StrandObservation) => void | Promise<void>
   onControlPublishError?: (notice: { opID: string; error: unknown }) => void | Promise<void>
   onOutcome?: (outcome: Outcome) => void | Promise<void>
+  onNotMember?: (params: {
+    evidence: Uint8Array
+    requestID: string
+    requestKey: Uint8Array
+  }) => Promise<void>
   onRecovery?: (event: RecoveryEvent) => void | Promise<void>
   onAppDeliveryStalled?: (event: AppDeliveryStalled) => void | Promise<void>
   onAppDeliveryResumed?: (event: AppDeliveryResumed) => void | Promise<void>

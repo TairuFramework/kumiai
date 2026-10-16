@@ -11,6 +11,7 @@ import type {
   ControlSnapshot,
   ControlStore,
   EpochIdentity,
+  GroupConditionEvent,
   GroupKey,
   GroupSafetyEvent,
   RecoveryUnavailableEvent,
@@ -412,7 +413,11 @@ export type AppStatusEvent = GroupKey & { id: string; entry: AppOutboxEntry } & 
       }
   )
 
-export type PersistenceEvent = AppStatusEvent | GroupSafetyEvent | RecoveryUnavailableEvent
+export type PersistenceEvent =
+  | AppStatusEvent
+  | GroupSafetyEvent
+  | RecoveryUnavailableEvent
+  | GroupConditionEvent
 
 export type DevicePackageAdapters = {
   providerID: string

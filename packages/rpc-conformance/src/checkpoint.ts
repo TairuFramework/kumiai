@@ -20,6 +20,7 @@ export type ConformanceCheckpointRecord =
       key: ConformanceGroupKey
       event: ConformanceGroupConditionEvent
       active: boolean
+      notification?: { emitAt: number; emitted: boolean; installationID: string }
       sealedProof: Uint8Array | null
     }
   | {
@@ -261,7 +262,7 @@ export function testCheckpointStorageConformance<TTx extends ConformanceGroupTra
       }
     })
 
-    test('condition rows preserve diagnostic evidence and sealed proof across reopen', async () => {
+    test('ordinary condition writes require verified coordinator authority', async () => {
       const fixture = await params.createFixture(groupID)
       try {
         const key = { groupID, incarnation: 1 }
@@ -286,19 +287,8 @@ export function testCheckpointStorageConformance<TTx extends ConformanceGroupTra
           },
           sealedProof: new Uint8Array([0, 128, 255]),
         }
-        await write(fixture, [record])
-        expect(await read(fixture)).toContainEqual(record)
-        const reopened = await fixture.reopen()
-        await reopened.device.groups.transition(
-          await storageChange(reopened.device.groups, groupID, 'condition-read'),
-          async (stores) => {
-            expect(await stores.checkpoints.load(record.id)).toEqual(record)
-          },
-        )
-        const loaded = (await read(fixture)).find((row) => row.id === record.id)
-        if (loaded?.kind !== 'condition') throw new Error('Missing condition')
-        loaded.sealedProof?.fill(9)
-        expect(await read(fixture)).toContainEqual(record)
+        await expect(write(fixture, [record])).rejects.toThrow('authority')
+        expect(await read(fixture)).not.toContainEqual(record)
       } finally {
         await fixture.close()
       }

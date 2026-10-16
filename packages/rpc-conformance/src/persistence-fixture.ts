@@ -7,6 +7,8 @@ import type {
   ConformanceControlChanges,
   ConformanceControlSnapshot,
   ConformanceControlStore,
+  ConformanceGroupCondition,
+  ConformanceGroupConditionEvent,
   ConformanceGroupSafetyEvent,
   ConformanceRecoveryUnavailableEvent,
 } from './control-store.js'
@@ -261,6 +263,7 @@ export type ConformanceStateMetadata = ConformanceGroupKey & {
 }
 export type ConformanceAccountedGroupObservation<Position extends string = string> = {
   mutationID: string
+  condition?: ConformanceGroupCondition | null
   lifetime: ConformanceGroupLifetime | null
   lifetimeStatus: 'missing' | 'readable' | 'unreadable'
   metadata: Array<ConformanceStateMetadata>
@@ -628,6 +631,7 @@ export type ConformancePersistenceEvent =
   | ConformanceAppStatusEvent
   | ConformanceGroupSafetyEvent
   | ConformanceRecoveryUnavailableEvent
+  | ConformanceGroupConditionEvent
 
 export type StorageTestPorts<TTx extends ConformanceGroupTransaction> =
   ConformanceCheckpointPreparation & {

@@ -4,16 +4,21 @@ import {
   type ConformanceGroupSafety,
   type ConformanceGroupSafetyEvent,
   type ConformanceManualRecovery,
+  type ConformanceRecoveryPendingReason,
   type ConformanceRecoveryUnavailableEvent,
   type ConformanceRegistryFixture,
+  type ConformanceRegistryPeerStatus,
   runGroupSafetyContract,
 } from '@kumiai/rpc-conformance'
 import { afterEach, beforeEach, describe, expectTypeOf } from 'vitest'
 
+import type { RecoveryPendingReason, RegistryPeerStatus } from '../src/registry-peer.js'
 import type { GroupSafety, ManualRecovery } from '../src/safety.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import { createRegistryFixture, type RegistryFixture } from './fixtures/registry.js'
 
+expectTypeOf<RegistryPeerStatus>().toEqualTypeOf<ConformanceRegistryPeerStatus>()
+expectTypeOf<RecoveryPendingReason>().toEqualTypeOf<ConformanceRecoveryPendingReason>()
 expectTypeOf<GroupSafety>().toExtend<ConformanceGroupSafety>()
 expectTypeOf<ConformanceGroupSafety>().toExtend<GroupSafety>()
 expectTypeOf<ManualRecovery>().toEqualTypeOf<ConformanceManualRecovery>()

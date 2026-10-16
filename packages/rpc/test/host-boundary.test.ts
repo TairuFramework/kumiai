@@ -591,3 +591,38 @@ test.each(Object.keys(checkpointHostMembers))(
     await assertPaused(`checkpoints.${method}`, (pause) => pause)
   },
 )
+
+test('dispose drains late condition callbacks', async () => {
+  expect(peerHostFields).toHaveProperty('onNotMember', 'callback')
+  const boundary = createHostBoundary()
+  const pause = gate()
+  const onNotMember = vi.fn(
+    async (_input: { evidence: Uint8Array; requestID: string; requestKey: Uint8Array }) => {
+      await pause.promise
+    },
+  )
+  const host = wrapPeerHost(boundary, { onNotMember })
+  const pending = host.onNotMember({
+    evidence: new Uint8Array([1]),
+    requestID: 'request',
+    requestKey: new Uint8Array(32),
+  })
+  boundary.close()
+  let drained = false
+  const draining = boundary.drained(Promise.resolve()).then(() => {
+    drained = true
+  })
+  await Promise.resolve()
+  expect(drained).toBe(false)
+  pause.release()
+  await pending
+  await draining
+  expect(() =>
+    host.onNotMember({
+      evidence: new Uint8Array(),
+      requestID: 'late',
+      requestKey: new Uint8Array(32),
+    }),
+  ).toThrow(PeerDisposedError)
+  expect(onNotMember).toHaveBeenCalledOnce()
+})

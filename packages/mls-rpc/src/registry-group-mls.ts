@@ -25,6 +25,7 @@ import {
 } from './mls.js'
 import { DisplacedGroupHandleError, GroupUnavailableError } from './persistence-errors.js'
 import type { GroupKey, GroupTransaction } from './persistence-types.js'
+import { reconcileRecoveryCapture } from './recovery.js'
 import { accountedRuntime } from './registry/runtime-facts.js'
 import { registrySafety } from './registry/safety.js'
 import { readRecoverySource, recoverySourceIdentity } from './registry/source.js'
@@ -32,6 +33,7 @@ import { toRegistrySwitchWrite } from './registry/switch-write.js'
 import type { GroupHandleRegistry, RegistryRecoverySource } from './registry/types.js'
 import type { RecoveryEnvironment } from './registry/validation.js'
 import { createRegistryHandleAccess } from './registry-handle-access.js'
+import { clearGroupCondition } from './safety-conditions.js'
 
 export type RegistryGroupMLSParams = Omit<
   GroupMLSParams,
@@ -302,7 +304,7 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
       })
     }),
   )
-  return createGroupMLS({
+  const groupMLS = createGroupMLS({
     ...params,
     access: lazy,
     control,
@@ -335,4 +337,39 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
     },
     onSafetyHold: (latch) => capability.onSafetyHold(key, latch),
   })
+  const captured = groupMLS.capturedRecovery
+  if (captured !== undefined) {
+    const reconcile = captured.reconcileCapture
+    captured.reconcileCapture = async (record, reply) => {
+      const result = await reconcile(record, reply)
+      if (result.kind !== 'head-only') return result
+      // Re-authenticate under the owner before clearing a diagnostic from an earlier capture.
+      await capability.entry.run(
+        { groupID: key.groupID, mutationID: crypto.randomUUID() },
+        async (reads) => {
+          const source = await readSource(reads)
+          const verified = await reconcileRecoveryCapture({
+            source,
+            target,
+            record,
+            reply,
+            environment: {
+              ...params.recovery,
+              accept: async () => {
+                throw new Error('Head reconciliation cannot install')
+              },
+            },
+          })
+          if (verified.kind !== 'head-only' || verified.head !== result.head)
+            throw new DisplacedGroupHandleError('Recovery capture changed before reconciliation')
+          return { expected: await reads.lifetime(), value: null }
+        },
+        async (stores) => {
+          await clearGroupCondition(stores.checkpoints, key)
+        },
+      )
+      return result
+    }
+  }
+  return groupMLS
 }

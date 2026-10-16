@@ -74,6 +74,7 @@ export function createRegistryRuntime(): {
         current.epoch === value.epoch &&
         current.stateVersion === value.stateVersion &&
         current.available === value.available &&
+        current.condition === value.condition &&
         current.authenticator.length === value.authenticator.length &&
         current.authenticator.every((byte, index) => byte === value.authenticator[index]) &&
         current.members.size === value.members.size &&

@@ -5,6 +5,8 @@ import type {
   ConformanceControlChanges,
   ConformanceControlSearchPort,
   ConformanceControlSnapshot,
+  ConformanceGroupCondition,
+  ConformanceNotMemberEvidence,
   ConformanceRecoverySource,
   ConformanceResyncProof,
   ConformanceStoredRejoinRecord,
@@ -26,6 +28,19 @@ import type {
 } from './persistence-fixture.js'
 import type { ConformanceGroupSafety } from './safety.js'
 
+export type ConformanceRecoveryPendingReason = 'no-reply' | 'no-eligible-responder'
+export type ConformanceRegistryPeerStatus =
+  | { kind: 'starting' | 'running' | 'switching' | 'disposed' }
+  | { kind: 'pending'; reason?: ConformanceRecoveryPendingReason }
+  | {
+      kind: 'not-member'
+      eventID: string
+      evidence: ConformanceNotMemberEvidence
+      retrying: true
+      pendingReason?: ConformanceRecoveryPendingReason
+    }
+  | { kind: 'failed'; error: unknown }
+
 export type ConformanceRegistryHandle = {
   groupID: string
   epoch: bigint
@@ -37,6 +52,7 @@ export type ConformanceRegistryHandle = {
 export type ConformanceRegistryRuntime = {
   snapshot():
     | (ConformanceEpochIdentity & {
+        condition?: ConformanceGroupCondition | null
         stateVersion: number
         members: ReadonlySet<string>
         available: boolean

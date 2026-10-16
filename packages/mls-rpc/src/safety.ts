@@ -1,12 +1,17 @@
 import {
   type ControlSnapshot,
+  controlSafetyHeld,
   forkEventID,
+  type GroupCondition,
+  type GroupConditionEvent,
   type GroupMLS,
   type GroupSafetyEvent,
   GroupSafetyHeldError,
   type LogHub,
   type MailboxHub,
+  type NotMemberEvidence,
   type RecoveryUnavailableEvent,
+  type SafetyHold,
 } from '@kumiai/rpc'
 
 import { coordinatorBinding } from './entry-capability.js'
@@ -33,16 +38,24 @@ import {
 } from './registry/safety.js'
 import { readRecoverySource } from './registry/source.js'
 import type { GroupHandleRegistry } from './registry/types.js'
+import { flushConditionEvents, groupCondition } from './safety-conditions.js'
 
 export type ManualRecovery =
   | { mode: 'resync'; targetID: string }
   | { mode: 'successor'; successor: GroupKey }
 export type RecoveryTarget = { id: string; commitTopicID: string; hub: LogHub & MailboxHub }
 export type GroupSafety = {
+  status(key: GroupKey): Promise<{
+    hold: SafetyHold
+    condition: GroupCondition | null
+    evidence: NotMemberEvidence | null
+  }>
   epochAuthenticator(key: GroupKey): Promise<EpochIdentity | null>
   reportFork(key: GroupKey, evidence: GroupForkEvidence): Promise<void>
   recover(key: GroupKey, choice: ManualRecovery): Promise<GroupKey>
-  events(key: GroupKey): Promise<Array<GroupSafetyEvent | RecoveryUnavailableEvent>>
+  events(
+    key: GroupKey,
+  ): Promise<Array<GroupSafetyEvent | RecoveryUnavailableEvent | GroupConditionEvent>>
   ackEvent(key: GroupKey, id: string): Promise<void>
 }
 
@@ -59,8 +72,13 @@ function validKey(key: GroupKey): boolean {
 
 function safetyEvent(
   event: PersistenceEvent,
-): event is GroupSafetyEvent | RecoveryUnavailableEvent {
-  return event.kind === 'group:fork' || event.kind === 'group:recovery-unavailable'
+): event is GroupSafetyEvent | RecoveryUnavailableEvent | GroupConditionEvent {
+  return (
+    event.kind === 'group:fork' ||
+    event.kind === 'group:recovery-unavailable' ||
+    event.kind === 'not-member' ||
+    event.kind === 'spent-set-corrupt'
+  )
 }
 
 async function readReportControl(read: () => Promise<ControlSnapshot>): Promise<ControlSnapshot> {
@@ -103,6 +121,18 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
     throw new TypeError('GroupSafety requires a registered registry with the same coordinator')
   const { entry } = capability
   return {
+    async status(requested) {
+      const key = { ...requested }
+      return await entry.read(key.groupID, async (reads) => {
+        const { condition, evidence } = groupCondition(await reads.checkpoints(), key)
+        const control = await reads.control(key.incarnation)
+        return {
+          hold: capability.held(key) ?? controlSafetyHeld(control, condition),
+          condition,
+          evidence,
+        }
+      })
+    },
     async epochAuthenticator(requested) {
       const key = { ...requested }
       if (!validKey(key)) return null
@@ -173,10 +203,23 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
     async recover() {
       throw new ManualRecoveryUnavailableError('Manual recovery is unavailable')
     },
-    events(requested) {
+    async events(requested) {
       const key = { ...requested }
+      await flushConditionEvents(params.registry, key)
       return entry.read(key.groupID, async (reads) => {
-        return (await reads.events(key.incarnation)).filter(safetyEvent)
+        const records = await reads.checkpoints()
+        return (await reads.events(key.incarnation))
+          .filter(safetyEvent)
+          .filter(
+            (event) =>
+              (event.kind !== 'not-member' && event.kind !== 'spent-set-corrupt') ||
+              records.some(
+                (row) =>
+                  row.kind === 'condition' &&
+                  row.event.id === event.id &&
+                  sameStoredValue(row.event, event),
+              ),
+          )
       })
     },
     async ackEvent(requested, id) {
