@@ -107,7 +107,10 @@ export function foldForkNotices(params: {
         const local = ancestor(statement.localAuthHash, statement.epoch, notice.splitEpoch)
         const remote = ancestor(statement.authHash, statement.epoch, notice.splitEpoch)
         return (
-          local !== null && remote !== null && notice.branches.some((b) => b.authHash === local)
+          local !== null &&
+          remote !== null &&
+          (statement.authHash === statement.localAuthHash || local !== remote) &&
+          notice.branches.some((b) => b.authHash === local)
         )
       }
       const roots = notice.branches.map((branch) =>

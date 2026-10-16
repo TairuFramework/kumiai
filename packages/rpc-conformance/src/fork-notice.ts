@@ -164,6 +164,18 @@ export function testForkNoticeConformance(params: {
         expect(await service.events(fixture.key.groupID)).toEqual([])
         const next = required((await service.forkNotices(fixture.key.groupID))[0])
         expect(next).toMatchObject({ revision: 2, acknowledgedAt: null })
+        const marker = required(
+          (await service.readRecords()).find((row) => row.kind === 'notice-tombstone'),
+        )
+        if (marker.kind !== 'notice-tombstone') throw new Error('Missing notice replay marker')
+        expect(marker).toMatchObject({ acknowledgedRevision: 1, acknowledgedAt: null })
+        expect(marker.frames).toHaveLength(2)
+        expect(marker.frames.map((frame) => frame.hash)).toEqual(
+          marker.frames.map((frame) => frame.hash).sort(),
+        )
+        await expect(service.updateRecords({ put: [marker] })).rejects.toThrow()
+        await expect(service.updateRecords({ remove: [marker.id] })).rejects.toThrow()
+
         await service.ackForkNotice(fixture.key.groupID, next.id, 1)
         clock.mockReturnValue(130000)
         expect(
@@ -295,7 +307,7 @@ export function testForkNoticeConformance(params: {
         await vi.advanceTimersByTimeAsync(29999)
         expect(fixture.emitted).toHaveLength(1)
         await vi.advanceTimersByTimeAsync(1)
-        await vi.waitFor(() => expect(fixture.emitted).toHaveLength(2))
+        await vi.waitFor(() => expect(fixture.emitted).toHaveLength(2), { interval: 0 })
         expect(fixture.emitted[1]?.notice.revision).toBe(2)
       } finally {
         vi.useRealTimers()
@@ -315,6 +327,134 @@ export function testForkNoticeConformance(params: {
         expect((await service.readRecords()).some((row) => row.kind === 'evidence')).toBe(true)
       } finally {
         clock.mockRestore()
+        await fixture.close()
+      }
+    })
+    test('acknowledgement expiry cannot resurrect an identical current-installation frame after restart', async () => {
+      const fixture = await params.createFixture()
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(100000)
+      try {
+        let service = fixture.service()
+        await service.importCheckpoint(fixture.key, fixture.frame)
+        const notice = required((await service.forkNotices(fixture.key.groupID))[0])
+        clock.mockReturnValue(86500000)
+        await service.importCheckpoint(fixture.key, fixture.frame)
+        expect((await service.forkNotices(fixture.key.groupID))[0]?.closedAt).toBe(86500000)
+        await service.ackForkNotice(fixture.key.groupID, notice.id, notice.revision)
+        clock.mockReturnValue(86500000 + 604800001)
+        expect(await service.checkpointFact(fixture.key, notice.splitEpoch)).not.toBeNull()
+        expect(await service.forkNotices(fixture.key.groupID)).toEqual([])
+        expect((await service.readRecords()).filter((row) => row.kind === 'evidence')).toEqual([])
+        const tombstones = (await service.readRecords()).filter(
+          (row) => row.kind === 'notice-tombstone',
+        )
+        expect(tombstones).toHaveLength(1)
+        expect(tombstones[0]).toMatchObject({
+          noticeID: notice.id,
+          acknowledgedRevision: notice.revision,
+          acknowledgedAt: 86500000,
+          frames: [{ hash: expect.any(String), installationID: expect.any(String) }],
+        })
+        await fixture.restart()
+        service = fixture.service()
+        const emitted = fixture.emitted.length
+        await service.importCheckpoint(fixture.key, fixture.frame)
+        expect(await service.forkNotices(fixture.key.groupID)).toEqual([])
+        expect(await service.events(fixture.key.groupID)).toEqual([])
+        expect(fixture.emitted).toHaveLength(emitted)
+        expect((await service.readRecords()).filter((row) => row.kind === 'evidence')).toEqual([])
+      } finally {
+        clock.mockRestore()
+        await fixture.close()
+      }
+    })
+    test('a failed deadline flush retries without another API call', async () => {
+      const fixture = await params.createFixture()
+      vi.useFakeTimers()
+      vi.setSystemTime(100000)
+      let fault: ReturnType<ForkNoticeFixture['holdProof']> | undefined
+      try {
+        const service = fixture.service()
+        await service.importCheckpoint(fixture.key, fixture.frame)
+        const notice = required((await service.forkNotices(fixture.key.groupID))[0])
+        await service.ackForkNotice(fixture.key.groupID, notice.id, notice.revision)
+        await service.importCheckpoint(fixture.key, fixture.nextSignerFrame)
+        fault = fixture.holdProof()
+        await vi.advanceTimersByTimeAsync(30000)
+        await fault.rejected
+        expect(fixture.emitted).toHaveLength(1)
+        await fault.finish('rollback')
+        fault = undefined
+        await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1), { interval: 0 })
+        await vi.advanceTimersByTimeAsync(29999)
+        expect(fixture.emitted).toHaveLength(1)
+        await vi.advanceTimersByTimeAsync(1)
+        await vi.waitFor(() => expect(fixture.emitted).toHaveLength(2), { interval: 0 })
+        expect(fixture.emitted[1]?.notice.revision).toBe(2)
+      } finally {
+        if (fault !== undefined) await fault.finish('rollback')
+        vi.useRealTimers()
+        await fixture.close()
+      }
+    })
+    test('repeated flush failures double the retry delay up to 600000 milliseconds', async () => {
+      const fixture = await params.createFixture()
+      vi.useFakeTimers()
+      vi.setSystemTime(100000)
+      let fault: ReturnType<ForkNoticeFixture['holdProof']> | undefined
+      try {
+        const service = fixture.service()
+        await service.importCheckpoint(fixture.key, fixture.frame)
+        const notice = required((await service.forkNotices(fixture.key.groupID))[0])
+        await service.ackForkNotice(fixture.key.groupID, notice.id, notice.revision)
+        await service.importCheckpoint(fixture.key, fixture.nextSignerFrame)
+        for (const delay of [30000, 30000, 60000, 120000, 240000, 480000, 600000]) {
+          fault = fixture.holdProof()
+          let rejected = false
+          void fault.rejected.then(() => {
+            rejected = true
+          })
+          await vi.advanceTimersByTimeAsync(delay - 1)
+          expect(rejected).toBe(false)
+          expect(vi.getTimerCount()).toBe(1)
+          await vi.advanceTimersByTimeAsync(1)
+          expect(vi.getTimerCount()).toBe(0)
+          await fault.rejected
+          expect(fixture.emitted).toHaveLength(1)
+          await fault.finish('rollback')
+          fault = undefined
+          await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1), { interval: 0 })
+        }
+        await vi.advanceTimersByTimeAsync(599999)
+        expect(fixture.emitted).toHaveLength(1)
+        await vi.advanceTimersByTimeAsync(1)
+        await vi.waitFor(() => expect(fixture.emitted).toHaveLength(2), { interval: 0 })
+      } finally {
+        if (fault !== undefined) {
+          if (vi.getTimerCount() > 0) await vi.advanceTimersToNextTimerAsync()
+          await fault.finish('rollback')
+        }
+        vi.useRealTimers()
+        await fixture.close()
+      }
+    })
+    test('a disposed owner remains observable and stops timer retries', async () => {
+      const fixture = await params.createFixture()
+      vi.useFakeTimers()
+      vi.setSystemTime(100000)
+      try {
+        const service = fixture.service()
+        await service.importCheckpoint(fixture.key, fixture.frame)
+        const notice = required((await service.forkNotices(fixture.key.groupID))[0])
+        await service.ackForkNotice(fixture.key.groupID, notice.id, notice.revision)
+        await service.importCheckpoint(fixture.key, fixture.nextSignerFrame)
+        await fixture.close()
+        await vi.advanceTimersByTimeAsync(30000)
+        expect(vi.getTimerCount()).toBe(0)
+        expect(fixture.emitted).toHaveLength(1)
+        await expect(service.readRecords()).rejects.toThrow()
+      } finally {
+        vi.useRealTimers()
         await fixture.close()
       }
     })
@@ -363,6 +503,9 @@ export function testForkNoticeConformance(params: {
           expect(
             (await service.readRecords()).find((row) => row.kind === 'evidence'),
           ).toBeUndefined()
+          expect((await service.readRecords()).some((row) => row.kind === 'notice-tombstone')).toBe(
+            false,
+          )
           const summary = required((await service.forkNotices(fixture.key.groupID))[0])
           expect(summary.coverage.evidence).toEqual({ kind: 'partial', reasons: ['retention-gap'] })
           expect((await service.events(fixture.key.groupID))[0]?.notice.coverage.evidence).toEqual({

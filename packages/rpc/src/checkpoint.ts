@@ -39,6 +39,12 @@ export function retainForkEvidence(
   now: number,
 ): Array<CheckpointRecord> {
   const result = copyCheckpointValue(records)
+  for (const row of result.filter((row) => row.kind === 'notice-tombstone')) {
+    row.frames = row.frames.filter((frame) =>
+      facts.some((fact) => fact.id === frame.installationID),
+    )
+    if (row.frames.length === 0) result.splice(result.indexOf(row), 1)
+  }
   for (const row of result.filter((row) => row.kind === 'evidence')) {
     const supported = [row.localRosterFact, row.eligibilityRosterFact].every(
       (bytes) => bytes === null || facts.some((fact) => equal(fact.canonical, bytes)),

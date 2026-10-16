@@ -286,6 +286,7 @@ export function createCheckpointService(params: CheckpointServiceParams): Checkp
   const key = { ...params.key }
   const delivered = new Set<string>()
   let timer: ReturnType<typeof setTimeout> | undefined
+  let retryDelay = 30000
   const sameKey = (other: GroupKey) =>
     other.groupID === key.groupID && other.incarnation === key.incarnation
   type Action =
@@ -321,12 +322,21 @@ export function createCheckpointService(params: CheckpointServiceParams): Checkp
           if (action.kind === 'import') {
             if (action.key.groupID !== key.groupID)
               throw new GroupStateConflictError('Checkpoint import binding mismatch')
-            const comparison = await compareRecords(records, action.key, action.frame)
+            const hash = toB64U(sha256(action.frame))
+            const tombstoned = records.some(
+              (row) =>
+                row.kind === 'notice-tombstone' &&
+                !records.some((notice) => notice.kind === 'notice' && notice.id === row.noticeID) &&
+                row.frames.some((frame) => frame.hash === hash),
+            )
+            const comparison = tombstoned
+              ? { kind: 'invalid' as const }
+              : await compareRecords(records, action.key, action.frame)
             if (comparison.kind === 'agreement' || comparison.kind === 'conflict') {
               const { body } = decodeEpochCheckpoint(action.frame)
               const fact = retainedFactAt(records, action.key, body.epoch)
               if (fact === undefined) throw new GroupStateConflictError('Missing checkpoint fact')
-              const frameID = `evidence:${toB64U(sha256(action.frame))}`
+              const frameID = `evidence:${hash}`
               statements.push({
                 ...body,
                 signerDID: comparison.signerDID,
@@ -343,6 +353,32 @@ export function createCheckpointService(params: CheckpointServiceParams): Checkp
             const notice = folded.notices.find(
               (notice) => notice.id === folded.assignments.get(statement.frameID),
             )
+            if (notice !== undefined) {
+              const fact = retainedFactAt(records, action.key, statement.epoch)
+              if (fact === undefined) throw new GroupStateConflictError('Missing checkpoint fact')
+              let tombstone = records.find(
+                (row) => row.kind === 'notice-tombstone' && row.noticeID === notice.id,
+              )
+              if (tombstone === undefined) {
+                tombstone = {
+                  kind: 'notice-tombstone',
+                  id: `notice-tombstone:${notice.id}`,
+                  key: { ...key },
+                  noticeID: notice.id,
+                  acknowledgedRevision: notice.acknowledgedRevision,
+                  acknowledgedAt: notice.acknowledgedAt,
+                  frames: [],
+                }
+                records.push(tombstone)
+              }
+              if (tombstone.kind !== 'notice-tombstone')
+                throw new GroupStateConflictError('Invalid notice tombstone')
+              const hash = toB64U(sha256(action.frame))
+              if (!tombstone.frames.some((frame) => frame.hash === hash)) {
+                tombstone.frames.push({ hash, installationID: fact.id })
+                tombstone.frames.sort((a, b) => (a.hash < b.hash ? -1 : a.hash > b.hash ? 1 : 0))
+              }
+            }
             if (
               notice !== undefined &&
               (notice.coverage.evidence.kind === 'complete' ||
@@ -392,6 +428,16 @@ export function createCheckpointService(params: CheckpointServiceParams): Checkp
                   )
                     event.acknowledged = true
               }
+            }
+          }
+          for (const tombstone of records) {
+            if (tombstone.kind !== 'notice-tombstone') continue
+            const row = records.find(
+              (row) => row.kind === 'notice' && row.id === tombstone.noticeID,
+            )
+            if (row?.kind === 'notice') {
+              tombstone.acknowledgedRevision = row.notice.acknowledgedRevision
+              tombstone.acknowledgedAt = row.notice.acknowledgedAt
             }
           }
           if (action.kind === 'update') {
@@ -462,22 +508,34 @@ export function createCheckpointService(params: CheckpointServiceParams): Checkp
         }
       }
     }
+    retryDelay = 30000
     if (timer !== undefined) clearTimeout(timer)
+    timer = undefined
     const nextEmission = result.flatMap((row) =>
       row.kind === 'notice-event' && !row.acknowledged && row.emitAt > Date.now()
         ? [row.emitAt]
         : [],
     )
     if (params.onForkNotice !== undefined && nextEmission.length > 0) {
-      timer = setTimeout(
-        () => {
-          timer = undefined
-          void act({ kind: 'refresh' }).catch(() => {})
-        },
-        Math.max(0, Math.min(...nextEmission) - Date.now()),
-      )
+      schedule(Math.max(0, Math.min(...nextEmission) - Date.now()))
     }
     return result
+  }
+  function schedule(delay: number) {
+    timer = setTimeout(() => {
+      timer = undefined
+      void act({ kind: 'refresh' }).catch(() => {
+        // Owner fail-stop remains authoritative. Only live owners retry transient failures.
+        try {
+          binding.assertOpen()
+        } catch {
+          return
+        }
+        if (timer !== undefined) return
+        schedule(retryDelay)
+        retryDelay = Math.min(retryDelay * 2, 600000)
+      })
+    }, delay)
   }
   return {
     ...port,

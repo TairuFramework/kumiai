@@ -13,6 +13,15 @@ import type {
 } from './persistence-fixture.js'
 
 export type ConformanceCheckpointRecord =
+  | {
+      kind: 'notice-tombstone'
+      id: string
+      key: ConformanceGroupKey
+      noticeID: string
+      acknowledgedRevision: number
+      acknowledgedAt: number | null
+      frames: Array<{ hash: string; installationID: string }>
+    }
   | { kind: 'notice'; id: string; key: ConformanceGroupKey; notice: ConformanceForkNotice }
   | {
       kind: 'evidence'

@@ -551,3 +551,71 @@ test('disconnected branch families retain separate notices', () => {
   })
   expect(result.notices.filter((notice) => notice.closedAt === null)).toHaveLength(2)
 })
+
+test('intake keeps a later conflict distinct when both roots descend from one earlier branch', () => {
+  const first = start()
+  const later = statement({
+    epoch: 6,
+    authHash: 'remote-6',
+    localAuthHash: 'local-6',
+    parentAuthHash: 'remote-5',
+    frameID: 'later-frame',
+  })
+  const lineage = [
+    { epoch: 6, authHash: 'local-6', parentAuthHash: 'local-5' },
+    { epoch: 5, authHash: 'local-5', parentAuthHash: 'local' },
+    { epoch: 5, authHash: 'remote-5', parentAuthHash: 'local' },
+  ]
+  const intake = foldForkNotices({
+    key,
+    records: first.records,
+    statements: [later],
+    lineage,
+    now: 1,
+  })
+  expect(intake.notices.filter((notice) => notice.closedAt === null)).toHaveLength(2)
+  expect(intake.notices.find((notice) => notice.id === first.notices[0]?.id)).toEqual(
+    first.notices[0],
+  )
+  const notice = required(intake.notices.find((notice) => notice.splitEpoch === 6))
+  expect(intake.assignments.get('later-frame')).toBe(notice.id)
+  expect(notice.branches.map((branch) => branch.authHash)).toEqual(['local-6', 'remote-6'])
+  const replay = foldForkNotices({
+    key,
+    records: intake.records,
+    statements: [later],
+    lineage,
+    now: 2,
+  })
+  expect(replay.notices).toHaveLength(2)
+  expect(replay.assignments.get('later-frame')).toBe(notice.id)
+  expect(replay.notices.find((row) => row.id === notice.id)?.revision).toBe(1)
+})
+
+test('replay hashes expire with their supporting installations', () => {
+  const fact = {
+    kind: 'fact' as const,
+    id: 'current',
+    key,
+    epoch: 4,
+    canonical: new Uint8Array([1]),
+    supersededAt: null,
+  }
+  const marker = {
+    kind: 'notice-tombstone' as const,
+    id: 'notice-tombstone:closed',
+    key,
+    noticeID: 'closed',
+    acknowledgedRevision: 2,
+    acknowledgedAt: 10,
+    frames: [
+      { hash: 'expired-frame', installationID: 'expired' },
+      { hash: 'retained-frame', installationID: 'current' },
+    ],
+  }
+  expect(retainForkEvidence([marker], [fact], 604800011)).toEqual([
+    { ...marker, frames: [{ hash: 'retained-frame', installationID: 'current' }] },
+  ])
+  expect(retainForkEvidence([marker], [], 604800011)).toEqual([])
+  expect(marker.frames).toHaveLength(2)
+})

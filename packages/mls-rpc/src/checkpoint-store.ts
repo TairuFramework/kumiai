@@ -70,9 +70,16 @@ function validate(record: CheckpointRecord, groupID: string, id: string): void {
     record.id !== id ||
     !Number.isSafeInteger(record.key.incarnation) ||
     record.key.incarnation < 1 ||
-    !['fact', 'publication', 'cursor', 'coverage', 'notice', 'evidence', 'notice-event'].includes(
-      record.kind,
-    )
+    ![
+      'fact',
+      'publication',
+      'cursor',
+      'coverage',
+      'notice',
+      'evidence',
+      'notice-event',
+      'notice-tombstone',
+    ].includes(record.kind)
   ) {
     throw new GroupStateConflictError('Checkpoint record binding mismatch')
   }
@@ -321,7 +328,12 @@ export async function retainCheckpointInstallations(
     gaps: mergeGaps(gaps),
     installations: retained.map(({ id, key, epoch }) => ({ id, key, epoch })),
   })
-  if (!records.some((row) => row.kind === 'evidence' || row.kind === 'notice')) return
+  if (
+    !records.some(
+      (row) => row.kind === 'evidence' || row.kind === 'notice' || row.kind === 'notice-tombstone',
+    )
+  )
+    return
   const beforeEvidence = await store.list()
   const afterEvidence = retainForkEvidence(beforeEvidence, retained, now)
   await store.remove(

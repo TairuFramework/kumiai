@@ -45,6 +45,15 @@ export type CheckpointService = CheckpointPort & {
 }
 
 export type CheckpointRecord =
+  | {
+      kind: 'notice-tombstone'
+      id: string
+      key: GroupKey
+      noticeID: string
+      acknowledgedRevision: number
+      acknowledgedAt: number | null
+      frames: Array<{ hash: string; installationID: string }>
+    }
   | { kind: 'notice'; id: string; key: GroupKey; notice: ForkNotice }
   | {
       kind: 'evidence'
