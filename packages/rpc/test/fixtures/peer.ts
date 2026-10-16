@@ -37,7 +37,9 @@ import type { SubscribeFailure } from '../../src/hub-mux.js'
 import { createLedgerEntryResolver, encodeLedgerEntries } from '../../src/ledger-entries.js'
 import type { AppOutboxCleared } from '../../src/log-delivery.js'
 import type { GroupPeer, RecoveryEvent, StrandObservation } from '../../src/peer.js'
+import type { GroupPeerMLSParams } from '../../src/peer-types.js'
 import type { GroupProtocolDefinition } from '../../src/protocol.js'
+import { settleRecovery } from '../../src/recovery-reconcile.js'
 import type {
   CapturedRejoinRecord,
   ConfirmedRecoveryHandoff,
@@ -166,6 +168,8 @@ export type MakeMLSPeerOptions = {
   onOutcome?: (outcome: Outcome) => void | Promise<void>
   onRecovery?: (event: RecoveryEvent) => void | Promise<void>
   onConfirmedRecovery?: (handoff: ConfirmedRecoveryHandoff) => void
+  settleAcceptedRecovery?: GroupPeerMLSParams['settleAcceptedRecovery']
+  reconcileConfirmedRecovery?: string
   onAppDeliveryStalled?: (event: AppDeliveryStalled) => void
   onAppDeliveryResumed?: (event: AppDeliveryResumed) => void
   /** The host's notice that a subscribe was refused or exhausted its retries. */
@@ -260,6 +264,20 @@ export function makeMLSPeer(
     control,
     recoveryOnly: options.recoveryOnly,
     onConfirmedRecovery: options.onConfirmedRecovery,
+    settleAcceptedRecovery:
+      'settleAcceptedRecovery' in options
+        ? options.settleAcceptedRecovery
+        : options.onConfirmedRecovery === undefined
+          ? undefined
+          : (record, epoch, leafDigest, recoveryEpochFloor) =>
+              settleRecovery({
+                control,
+                record,
+                provenance: { kind: 'accepted-unadoptable', epoch, leafDigest },
+                recoveryEpochFloor,
+                mutationID: globalThis.crypto.randomUUID(),
+              }),
+    reconcileConfirmedRecovery: options.reconcileConfirmedRecovery,
     continuation: options.continuation,
     completion: options.completion,
     ...ports,

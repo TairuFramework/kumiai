@@ -87,6 +87,7 @@ export type GroupPeerMLSParams = {
     record: CapturedRejoinRecord,
     acceptedEpoch: number,
     leafDigest: string,
+    recoveryEpochFloor?: number,
   ) => Promise<void>
   reconcileAcceptedRecovery?: (
     record: CapturedRejoinRecord,

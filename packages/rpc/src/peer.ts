@@ -307,6 +307,12 @@ export function createGroupPeerWithControlWalk<
 } {
   if (input.recoveryOnly && input.mls == null)
     throw new TypeError('Recovery-only peer requires MLS')
+  if (
+    input.mls?.capturedRecovery !== undefined &&
+    input.onConfirmedRecovery !== undefined &&
+    typeof input.settleAcceptedRecovery !== 'function'
+  )
+    throw new TypeError('Captured recovery coordinator requires an accepted settlement sink')
   if ((input.continuation == null) !== (input.completion == null))
     throw new TypeError('Recovery continuation and completion must be supplied together')
   if (
@@ -1081,7 +1087,10 @@ export function createGroupPeerWithControlWalk<
       healRequested = safetyHold() === null
       void healIfRequested()
     }, recoveryBackoff)
-    recoveryBackoff = Math.min(recoveryBackoff * 2, 15_000)
+    recoveryBackoff = Math.min(
+      recoveryBackoff * 2,
+      mls?.capturedRecovery === undefined ? 60_000 : 15_000,
+    )
   }
   let recoveryGeneration = 0
   let bootstrapHealRequested = false
@@ -1719,7 +1728,7 @@ export function createGroupPeerWithControlWalk<
       (controlHold !== null && controlHold.reason !== 'acceptance-unknown')
     )
       return false
-    if (continuation !== null && !(await port.isLedgerComplete())) return false
+    if (!(await port.isLedgerComplete())) return false
     let advancedEpoch = false
     const started = logDelivery?.beginWalk() ?? 0
     const unprocessable = async (
@@ -3045,8 +3054,7 @@ export function createGroupPeerWithControlWalk<
   const searchControlLog: OperationDeps['searchLog'] = async (built, position) => {
     checkedWelcome = null
     if (controlSearch === null) return { kind: 'unknown' }
-    if (continuation !== null && mls != null && !(await mls.isLedgerComplete()))
-      return { kind: 'unknown' }
+    if (mls != null && !(await mls.isLedgerComplete())) return { kind: 'unknown' }
     controlSearchActive = true
     try {
       const result = await controlSearch.searchLog(built, position)
@@ -3449,7 +3457,7 @@ export function createGroupPeerWithControlWalk<
     assertLive()
     if (safetyHold() !== null || awaitingBootstrap == null) return
     if (activeRecovery !== null && capturedPending !== null && !capturedFinishing) return
-    if (continuation !== null && !(await port.isLedgerComplete())) return
+    if (!(await port.isLedgerComplete())) return
     if (disposed || safetyHold() !== null) return
     const { attemptID, trigger, entries } = awaitingBootstrap
     await repairRejoin()

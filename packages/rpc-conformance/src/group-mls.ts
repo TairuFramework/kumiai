@@ -440,7 +440,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           requestKey: fresh.requestKey,
           epochFloor: null,
         }),
-      ).toEqual({ kind: 'unapplied-later', epoch: first.epoch })
+      ).toEqual({ kind: 'unapplied-later', epoch: first.epoch, leafDigest: expect.any(String) })
     })
     test('captured recapture refuses a genuine reply older than the saved capture epoch', async () => {
       const s = await params.createCapturedRecovery()
@@ -1991,7 +1991,7 @@ export type ConformanceCapturedRecapture = {
 export type ConformanceRecoveryReconciliation<Position extends string = string> =
   | { kind: 'accepted'; epoch: number; leafDigest: string }
   | { kind: 'head-only'; head: Position | null }
-  | { kind: 'unapplied-later'; epoch: number }
+  | { kind: 'unapplied-later'; epoch: number; leafDigest: string }
   | { kind: 'retry' | 'held' }
 export type ConformanceCapturedPendingRecovery<Position extends string = string> = Omit<
   ConformancePendingRecovery,

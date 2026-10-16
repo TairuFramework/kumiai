@@ -2,7 +2,7 @@ import { isHeadMismatch } from '../commit.js'
 import type { CommitHeader } from '../crypto.js'
 import { asLogPosition, type LogPosition } from '../cursor.js'
 import type { ConfirmationOutcome } from '../recovery-confirmation.js'
-import { settleRecovery } from '../recovery-reconcile.js'
+import { recoveryHeld, settleRecovery } from '../recovery-reconcile.js'
 import type {
   CapturedRejoinRecord,
   RecoveryReconciliation,
@@ -263,6 +263,7 @@ export type RejoinDeps = Omit<LegacyRejoinDeps, 'confirm' | 'scan' | 'adopt' | '
     record: CapturedRejoinRecord,
     acceptedEpoch: number,
     leafDigest: string,
+    recoveryEpochFloor?: number,
   ) => Promise<void>
   discarded(reason: 'unapplied-later' | 'accepted', record: CapturedRejoinRecord): void
 }
@@ -276,12 +277,7 @@ export async function stepRejoin(
   record: CapturedRejoinRecord,
 ): Promise<RejoinStep> {
   const snapshot = await deps.control.load()
-  if (
-    controlSafetyHeld(snapshot) !== null ||
-    record.trigger !== 'automatic' ||
-    snapshot.controlHold?.reason === 'unsupported-version'
-  )
-    return record
+  if (recoveryHeld(snapshot) || record.trigger !== 'automatic') return record
   const save = async (next: CapturedRejoinRecord) => {
     await applyResolved(deps.control, { putRejoin: next }, deps.newID(), undefined, deps.signal)
     return next
@@ -292,8 +288,7 @@ export async function stepRejoin(
     return await deps.runSerial(async () => {
       const snapshot = await deps.control.load()
       const current = snapshot.rejoin
-      if (controlSafetyHeld(snapshot) !== null)
-        return current !== null && 'format' in current ? current : null
+      if (recoveryHeld(snapshot)) return current !== null && 'format' in current ? current : null
       if (
         current === null ||
         !('format' in current) ||
@@ -308,31 +303,31 @@ export async function stepRejoin(
       )
         return await save({ ...current, stage: 'built', expectedHead: result.head })
       if (result.kind === 'accepted' || result.kind === 'unapplied-later') {
-        if (
-          result.kind === 'unapplied-later' &&
-          (current.stage === 'confirmed' || current.stage === 'adopted')
-        )
-          return current
-        if (result.kind === 'accepted' && deps.settleAcceptedRecovery !== undefined)
-          await deps.settleAcceptedRecovery(current, result.epoch, result.leafDigest)
+        const confirmed = current.stage === 'confirmed' || current.stage === 'adopted'
+        const accepted = result.kind === 'accepted' || confirmed
+        // Bound confirmation saved epochAfter with this exact candidate, even if its leaf was removed later.
+        const acceptedEpoch =
+          result.kind === 'unapplied-later' && confirmed ? current.epochAfter : result.epoch
+        if (accepted && deps.settleAcceptedRecovery !== undefined)
+          await deps.settleAcceptedRecovery(current, acceptedEpoch, result.leafDigest, result.epoch)
         else
           await settleRecovery({
             control: deps.control,
             record: current,
-            provenance:
-              result.kind === 'accepted'
-                ? {
-                    kind: 'accepted-unadoptable',
-                    epoch: result.epoch,
-                    leafDigest: result.leafDigest,
-                  }
-                : { kind: 'not-accepted', epoch: result.epoch },
+            provenance: accepted
+              ? {
+                  kind: 'accepted-unadoptable',
+                  epoch: acceptedEpoch,
+                  leafDigest: result.leafDigest,
+                }
+              : { kind: 'not-accepted', epoch: result.epoch },
             mutationID: deps.newID(),
+            recoveryEpochFloor: result.epoch,
             signal: deps.signal,
           })
         record.requestKey.fill(0)
         record.candidate.fill(0)
-        deps.discarded(result.kind === 'accepted' ? 'accepted' : 'unapplied-later', record)
+        deps.discarded(accepted ? 'accepted' : 'unapplied-later', record)
         return null
       }
       return current
@@ -425,8 +420,12 @@ export async function stepRejoin(
     }
     return await reconcile()
   }
+  if (
+    (record.stage === 'confirmed' || record.stage === 'adopted') &&
+    deps.reconcileConfirmedRecovery === record.id
+  )
+    return await reconcile()
   if (record.stage === 'confirmed') {
-    if (deps.reconcileConfirmedRecovery === record.id) return await reconcile()
     if (deps.canAdopt !== undefined && !(await deps.canAdopt())) return record
     const confirmed = await deps.runSerial(async () => {
       const snapshot = await deps.control.load()

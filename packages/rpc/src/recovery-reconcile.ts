@@ -1,6 +1,13 @@
+import { controlSafetyHeld } from './control/safety.js'
 import { applyResolved } from './control/store.js'
-import type { ControlStore } from './control/types.js'
+import type { ControlSnapshot, ControlStore } from './control/types.js'
 import type { AcceptedRejoinSettlement, CapturedRejoinRecord } from './recovery-types.js'
+
+export function recoveryHeld(snapshot: ControlSnapshot): boolean {
+  return (
+    controlSafetyHeld(snapshot) !== null || snapshot.controlHold?.reason === 'unsupported-version'
+  )
+}
 
 /** Persist obligations before releasing the only durable copy of X's private state. */
 export async function settleRecovery(params: {
@@ -10,10 +17,12 @@ export async function settleRecovery(params: {
     | { kind: 'not-accepted'; epoch: number }
     | { kind: 'accepted-unadoptable'; epoch: number; leafDigest: string }
   mutationID: string
+  recoveryEpochFloor?: number
   signal?: AbortSignal
 }): Promise<void> {
   const { control, record, provenance } = params
   const snapshot = await control.load()
+  if (recoveryHeld(snapshot)) throw new Error('Recovery settlement is held')
   if (snapshot.rejoin?.id !== record.id) return
   if (
     provenance.kind === 'not-accepted' &&
@@ -42,7 +51,7 @@ export async function settleRecovery(params: {
     {
       putSettledRejoins: [settlement],
       deleteRejoin: true,
-      recoveryEpochFloor: provenance.epoch,
+      recoveryEpochFloor: params.recoveryEpochFloor ?? provenance.epoch,
     },
     params.mutationID,
     undefined,

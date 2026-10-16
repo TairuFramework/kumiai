@@ -682,6 +682,7 @@ test.each([
   'other fresh leaf',
   'later absent',
   'applied then removed',
+  'confirmed then removed',
   'group',
   'origin',
   'held',
@@ -696,10 +697,9 @@ test.each([
   if (pending === null || 'renewalRequired' in pending) throw new Error('Missing candidate')
   const { capturedRecord } = await import('./fixtures/captured-recovery.js')
   const record = capturedRecord(pending, s.request, s.requestKey, s.requestID)
-  const before = record.candidate.slice()
   let responder = s.responder.handle
   let requestTrust = s.source.trust
-  let expected: { kind: string; epoch?: number } = { kind: 'retry' }
+  let expected: { kind: string; epoch?: number; leafDigest?: unknown } = { kind: 'retry' }
   if (row === 'authenticator') {
     responder = await Mls.restoreGroup({
       state: Mls.decodeClientState(Mls.encodeClientState(responder.state)) ?? responder.state,
@@ -713,20 +713,49 @@ test.each([
     if (other === null || 'renewalRequired' in other) throw new Error('Missing other candidate')
     expect(other.commit).not.toEqual(pending.commit)
     await responder.processMessage(other.commit)
-    expected = { kind: 'unapplied-later', epoch: pending.epoch }
+    expected = { kind: 'unapplied-later', epoch: pending.epoch, leafDigest: expect.any(String) }
   }
   if (row === 'later absent') {
     responder = (await Mls.commitKeyRotation(responder)).newGroup
-    expected = { kind: 'unapplied-later', epoch: pending.epoch }
+    expected = { kind: 'unapplied-later', epoch: pending.epoch, leafDigest: expect.any(String) }
   }
-  if (row === 'applied then removed') {
+  if (row === 'confirmed then removed') {
+    const { asLogPosition } = await import('@kumiai/rpc')
+    record.position = asLogPosition('accepted-X')
+    const key = await pending.confirmationKey(record.position, record.digest)
+    record.verdict = await sealRecoveryVerdict({
+      group: responder,
+      identity: s.responder.identity,
+      request: new TextDecoder().decode(s.request),
+      verdict: {
+        groupID: s.source.key.groupID,
+        requestID: s.requestID,
+        position: record.position,
+        commitDigest: record.digest,
+        verdict: 'confirmed',
+        epoch: pending.epoch,
+        tag: Mls.confirmationTag(key, s.requestID),
+      },
+    })
+    record.stage = 'confirmed'
+    record.candidate = pending.serialize()
+  }
+  if (row === 'applied then removed' || row === 'confirmed then removed') {
     await responder.processMessage(pending.commit)
     await s.real.committer.handle.processMessage(pending.commit)
     const index = s.real.committer.handle.findMemberLeafIndex(s.member.identity.id)
     if (index === undefined) throw new Error('Missing recovered member')
     const removed = await Mls.removeMember(s.real.committer.handle, index)
     await responder.processMessage(removed.commitMessage)
-    expected = { kind: 'unapplied-later', epoch: pending.epoch + 1 }
+    const { decodeCapturedRecoveryCandidate } = await import('../src/recovery-codec.js')
+    const { leafBytes } = await import('../src/recovery-public-state.js')
+    const saved = decodeCapturedRecoveryCandidate(record.candidate, record.requestKey)
+    const freshLeaf = saved.state.ratchetTree[saved.state.privatePath.leafIndex * 2]
+    expected = {
+      kind: 'unapplied-later',
+      epoch: pending.epoch + 1,
+      leafDigest: toB64U(sha256(leafBytes(saved.state, freshLeaf))),
+    }
   }
   if (row === 'group') {
     const { createRealGroup } = await import('./fixtures/real-group.js')
@@ -751,7 +780,7 @@ test.each([
   })
   // A member can attest post-removal public state despite the normal responder's membership policy.
   const originalFind = responder.findMemberLeafIndex
-  if (row === 'applied then removed')
+  if (row === 'applied then removed' || row === 'confirmed then removed')
     responder.findMemberLeafIndex = (did) => (did === s.member.identity.id ? 0 : originalFind(did))
   let sealed: Uint8Array
   try {
@@ -796,6 +825,7 @@ test.each([
       new StorageOutcomeUnknownError('Control unavailable'),
     )
   }
+  const before = record.candidate.slice()
   const builds = vi.spyOn(Mls, 'joinGroupExternal')
   try {
     if (row === 'origin') {

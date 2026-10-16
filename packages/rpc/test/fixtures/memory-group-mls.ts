@@ -1473,7 +1473,11 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
                     epoch: info.epoch,
                     leafDigest: toB64U(sha256(fromUTF(JSON.stringify([localDID, held.freshLeaf])))),
                   }
-                : { kind: 'unapplied-later', epoch: info.epoch }
+                : {
+                    kind: 'unapplied-later',
+                    epoch: info.epoch,
+                    leafDigest: toB64U(sha256(fromUTF(JSON.stringify([localDID, held.freshLeaf])))),
+                  }
             } catch (error) {
               if (
                 error instanceof Error &&

@@ -721,7 +721,12 @@ describe('registry peer recovery coordination', () => {
         leafDigest: expect.any(String),
       })
       if (result.kind !== 'accepted') throw new Error('X acceptance was not authenticated')
-      await options.settleAcceptedRecovery(record, result.epoch, result.leafDigest)
+      await options.settleAcceptedRecovery(
+        record,
+        record.epochAfter,
+        result.leafDigest,
+        result.epoch,
+      )
       const snapshot = await s.f.device.groups.ports(source).control.load()
       expect(snapshot.rejoin).toBeNull()
       expect(snapshot.recoveryEpochFloor).toBe(Number(advanced.epoch))
@@ -729,6 +734,7 @@ describe('registry peer recovery coordination', () => {
         expect.objectContaining({
           kind: 'accepted-unadoptable',
           id: record.id,
+          acceptedEpoch: record.epochAfter,
           ledgerBefore: ['owed-X'],
         }),
       ])

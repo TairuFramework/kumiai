@@ -66,7 +66,7 @@ export type CapturedRecapture = {
 export type RecoveryReconciliation =
   | { kind: 'accepted'; epoch: number; leafDigest: string }
   | { kind: 'head-only'; head: LogPosition | null }
-  | { kind: 'unapplied-later'; epoch: number }
+  | { kind: 'unapplied-later'; epoch: number; leafDigest: string }
   | { kind: 'retry' | 'held' }
 export type CapturedPendingRecovery = Omit<LegacyPendingRecovery, 'onAccepted'> & {
   source: RecoverySource<unknown>

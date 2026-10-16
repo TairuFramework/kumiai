@@ -79,6 +79,7 @@ export type RegistryPeerParams = {
     record: CapturedRejoinRecord,
     epoch: number,
     leafDigest: string,
+    recoveryEpochFloor?: number,
   ) => Promise<void>
   createMLS(
     key: GroupKey,
@@ -108,7 +109,12 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
   let reconcileConfirmedRecovery: string | undefined
   const settleAcceptedRecovery =
     params.settleAcceptedRecovery ??
-    (async (record: CapturedRejoinRecord, epoch: number, leafDigest: string) => {
+    (async (
+      record: CapturedRejoinRecord,
+      epoch: number,
+      leafDigest: string,
+      recoveryEpochFloor = epoch,
+    ) => {
       const sourceKey = record.source.key
       const store: ControlStore = {
         key: sourceKey,
@@ -143,7 +149,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
         store,
         {
           deleteRejoin: true,
-          recoveryEpochFloor: epoch,
+          recoveryEpochFloor,
           putSettledRejoins: [
             {
               kind: 'accepted-unadoptable',

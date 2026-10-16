@@ -1,6 +1,7 @@
 import { BroadcastClient } from '@kumiai/broadcast'
 import { describe, expect, type MockInstance, test, vi } from 'vitest'
 
+import { asLogPosition } from '../src/cursor.js'
 import { PeerDisposedError } from '../src/errors.js'
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
@@ -9,7 +10,7 @@ import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS, requireCapturedRecovery } from './fixtures/memory-group-mls.js'
-import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
+import { buildLedgerCommit, makeMLSPeer, seedBuiltOperation } from './fixtures/peer.js'
 
 const members = ['alice', 'bob', 'carol']
 const owed = 'circle:x=Alice'
@@ -72,6 +73,137 @@ async function setup(byte: number, onStrand?: (observation: StrandObservation) =
 }
 
 describe('delayed ledger bootstrap', () => {
+  test('an adopted captured restart defers saved-operation search and commit walking until bootstrap', async () => {
+    const state = await setup(0xd1)
+    const { alice, bob, hub, rs } = state
+    let restarted: typeof alice | undefined
+    try {
+      expect(await alice.peer.recover()).toEqual({ advanced: false, reenact: [] })
+      expect(await alice.mls.isLedgerComplete()).toBe(false)
+      const adopted = (await alice.control.load()).rejoin
+      expect(adopted).toMatchObject({ format: 2, stage: 'adopted' })
+      await alice.peer.dispose()
+      await alice.peer.drained()
+      const incomplete = alice.mls.serializeState()
+      await alice.mls.bootstrapLedger(['circle:x=Bob'])
+      const cursor = (await alice.control.load()).cursor
+      if (cursor === null) throw new Error('Missing adopted cursor')
+      await alice.control.apply(
+        { cursor: { position: cursor.position, epoch: cursor.epoch }, strand: null },
+        'adopted-before-bootstrap',
+      )
+      const operation = await seedBuiltOperation(alice, buildLedgerCommit(alice, ['saved']))
+      await alice.database.saveState('memory-group', incomplete)
+      alice.mls.restoreState(incomplete)
+      const frame = await publishCommit({
+        hub,
+        senderDID: 'bob',
+        recoverySecret: rs,
+        epoch: alice.mls.epoch(),
+      })
+      const crypto = createFakeCrypto({ localDID: 'alice', epoch: alice.mls.epoch() })
+      const reopened = createMemoryGroupMLS({
+        localDID: 'alice',
+        storageID: 'memory-group',
+        hostDB: alice.database,
+        members,
+        recoverySecret: rs,
+        onAdvance: (epoch) => crypto.setEpoch(epoch),
+      })
+      const savedState = await alice.database.loadState('memory-group')
+      if (savedState === null) throw new Error('Missing adopted state')
+      reopened.restoreState(savedState)
+      restarted = makeMLSPeer(hub, 'alice', rs, {
+        members,
+        mls: reopened,
+        crypto,
+        anchorStore: alice.anchorStore,
+        recovery: { timeoutMs: 20, deadlineMs: 80, getDelayMs: () => 60_000 },
+      })
+      const destination = restarted
+      let prematureHeaders = 0
+      let prematureCommits = 0
+      const header = destination.mls.readCommitHeader.bind(destination.mls)
+      vi.spyOn(destination.mls, 'readCommitHeader').mockImplementation(async (commit) => {
+        if (!(await destination.mls.isLedgerComplete())) prematureHeaders++
+        return header(commit)
+      })
+      const process = destination.mls.processCommit.bind(destination.mls)
+      vi.spyOn(destination.mls, 'processCommit').mockImplementation(async (...args) => {
+        if (!(await destination.mls.isLedgerComplete())) prematureCommits++
+        return process(...args)
+      })
+      let prematureJudgments = 0
+      const restore = destination.validation.restoreValidation.bind(destination.validation)
+      vi.spyOn(destination.validation, 'restoreValidation').mockImplementation(async (built) => {
+        const validation = await restore(built)
+        if (validation === null) return null
+        return {
+          ...validation,
+          readCommitHeader: async (commit) => {
+            if (!(await destination.mls.isLedgerComplete())) prematureJudgments++
+            return validation.readCommitHeader(commit)
+          },
+          validateFrame: async (...args) => {
+            if (!(await destination.mls.isLedgerComplete())) prematureJudgments++
+            return validation.validateFrame(...args)
+          },
+        }
+      })
+      await destination.peer.replay()
+      expect(await destination.controlWalk.searchLog(operation.slot, undefined)).toEqual({
+        kind: 'unknown',
+      })
+      await destination.controlWalk.walkCommits({
+        through: asLogPosition(frame.sequenceID),
+        range: null,
+        work: { takeFetch: () => true, takeFrame: () => true },
+      })
+      expect(prematureHeaders).toBe(0)
+      expect(prematureCommits).toBe(0)
+      expect(prematureJudgments).toBe(0)
+      expect((await destination.control.load()).rejoin).toEqual(adopted)
+      expect((await destination.control.load()).outcomes).not.toContainEqual(
+        expect.objectContaining({ kind: 'refused' }),
+      )
+      await destination.mls.bootstrapLedger(['circle:x=Bob'])
+      await destination.controlWalk.walkCommits({
+        through: asLogPosition(frame.sequenceID),
+        range: null,
+        work: { takeFetch: () => true, takeFrame: () => true },
+      })
+      expect(destination.mls.epoch()).toBe(alice.mls.epoch() + 1)
+    } finally {
+      await Promise.all([alice.peer.dispose(), bob.peer.dispose(), restarted?.peer.dispose()])
+      await Promise.all([alice.peer.drained(), bob.peer.drained(), restarted?.peer.drained()])
+    }
+  })
+
+  test('bootstrap finalization rechecks completeness after an awaited handle change', async () => {
+    const state = await setup(0xd2)
+    const { alice, bob, events } = state
+    try {
+      expect(await alice.peer.recover()).toEqual({ advanced: false, reenact: [] })
+      const adopted = (await alice.control.load()).rejoin
+      const incomplete = alice.mls.serializeState()
+      state.stopLying()
+      const bootstrap = alice.mls.bootstrapLedger.bind(alice.mls)
+      const changed = vi.spyOn(alice.mls, 'bootstrapLedger').mockImplementation(async (...args) => {
+        await bootstrap(...args)
+        alice.mls.restoreState(incomplete)
+      })
+      expect(await alice.peer.replay()).toEqual({})
+      expect((await alice.control.load()).rejoin).toEqual(adopted)
+      expect(events.filter((event) => event.phase === 'bootstrapped')).toEqual([])
+      changed.mockRestore()
+      expect(await alice.peer.replay()).toEqual({ reenact: [owed] })
+      expect((await alice.control.load()).rejoin).toBeNull()
+    } finally {
+      await Promise.all([alice.peer.dispose(), bob.peer.dispose()])
+      await Promise.all([alice.peer.drained(), bob.peer.drained()])
+    }
+  })
+
   test('replay cannot finalize a bootstrap completed after disposal', async () => {
     const state = await setup(0xce)
     const { alice, bob, events } = state

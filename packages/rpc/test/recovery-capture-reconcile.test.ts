@@ -5,6 +5,7 @@ import { stepRejoin } from '../src/control/rejoin.js'
 import type { AdoptionWriteFactory, Outcome } from '../src/control/types.js'
 import { asLogPosition, type LogPosition } from '../src/cursor.js'
 import type { ConfirmationOutcome } from '../src/recovery-confirmation.js'
+import { settleRecovery } from '../src/recovery-reconcile.js'
 import type {
   CapturedRejoinRecord,
   ConfirmedRecoveryHandoff,
@@ -125,9 +126,61 @@ test('propagated recapture errors preserve X without negative settlement', async
   expect((await s.control.load()).settledRejoins).toEqual([])
 })
 
+test.each([
+  { kind: 'unapplied-later', epoch: 7, leafDigest: 'saved-X-leaf' },
+  { kind: 'accepted', epoch: 8, leafDigest: 'exact-wire-leaf' },
+  { kind: 'head-only', head: asLogPosition('fresh-head') },
+] satisfies Array<RecoveryReconciliation>)(
+  'a hold installed during $kind recapture preserves X and its floor',
+  async (result) => {
+    const s = await setup()
+    const before = await s.control.load()
+    const settle = vi.fn()
+    expect(
+      await stepRejoin(
+        {
+          ...s.deps,
+          settleAcceptedRecovery: settle,
+          reconcileCapture: async () => {
+            await s.control.apply(
+              { controlHold: { reason: 'unsupported-version', position: asLogPosition('hold') } },
+              'hold-during-recapture',
+            )
+            return result
+          },
+        },
+        s.record,
+      ),
+    ).toEqual(s.record)
+    const after = await s.control.load()
+    expect(after.rejoin).toEqual(before.rejoin)
+    expect(after.recoveryEpochFloor).toBe(before.recoveryEpochFloor)
+    expect(after.settledRejoins).toEqual(before.settledRejoins)
+    expect(settle).not.toHaveBeenCalled()
+  },
+)
+
+test('direct recovery settlement refuses an unsupported-version hold', async () => {
+  const s = await setup()
+  await s.control.apply(
+    { controlHold: { reason: 'unsupported-version', position: null } },
+    'held-settlement',
+  )
+  const before = await s.control.load()
+  await expect(
+    settleRecovery({
+      control: s.control,
+      record: s.record,
+      provenance: { kind: 'not-accepted', epoch: 7 },
+      mutationID: 'forbidden-settlement',
+    }),
+  ).rejects.toThrow('Recovery settlement is held')
+  expect(await s.control.load()).toEqual(before)
+})
+
 test('authenticated leaf absence atomically retains obligations, clears X and raises the floor', async () => {
   const s = await setup()
-  s.reconcile({ kind: 'unapplied-later', epoch: 7 })
+  s.reconcile({ kind: 'unapplied-later', epoch: 7, leafDigest: 'saved-X-leaf' })
   expect(await stepRejoin(s.deps, s.record)).toBeNull()
   const restarted = await s.control.load()
   expect(restarted.rejoin).toBeNull()
@@ -195,144 +248,247 @@ test('known-position bound confirmation co-writes the switch ID then hands off',
   expect(s.builds()).toBe(0)
 })
 
-test('confirmed X is never discarded by a later leaf absence', async () => {
-  const s = await setup()
-  const record: CapturedRejoinRecord = {
-    ...s.record,
-    stage: 'confirmed',
-    position: asLogPosition('known'),
-    verdict: new Uint8Array([9]),
-    switchMutationID: 'saved-switch',
-  }
-  await s.control.apply({ putRejoin: record }, 'confirmed')
-  s.reconcile({ kind: 'unapplied-later', epoch: 9 })
-  await stepRejoin(
-    {
-      ...s.deps,
-      adopt: async (): Promise<'adopted' | 'handoff'> => {
-        throw new Error('local movement')
+test.each([
+  { stage: 'confirmed', sink: false },
+  { stage: 'confirmed', sink: true },
+  { stage: 'adopted', sink: false },
+  { stage: 'adopted', sink: true },
+] as const)(
+  '$stage X settles accepted provenance after a later leaf absence (sink: $sink)',
+  async ({ stage, sink }) => {
+    const s = await setup()
+    const record: CapturedRejoinRecord = {
+      ...s.record,
+      stage,
+      position: asLogPosition('known'),
+      verdict: new Uint8Array([9]),
+      switchMutationID: 'saved-switch',
+      destinationKey: stage === 'adopted' ? { ...s.record.source.key, incarnation: 2 } : null,
+    }
+    await s.control.apply(
+      {
+        putRejoin: record,
+        putSettledRejoins: [
+          {
+            kind: 'not-accepted',
+            id: 'prior-X',
+            epoch: 0,
+            origin: { sourceKey: record.source.key, target: record.target, searchFrom: null },
+            ledgerBefore: ['prior-owed', 'shared'],
+          },
+        ],
       },
-    },
-    record,
-  ).catch(() => {})
-  expect((await s.control.load()).rejoin).toEqual(record)
-  expect((await s.control.load()).settledRejoins).toEqual([])
-})
-
-test('delayed acceptance after responder advancement settles X then bootstraps leaf-replacing Y with every owed token', async () => {
-  const { FakeHub } = await import('./fixtures/fake-hub.js')
-  const { makeMLSPeer, buildLedgerCommit } = await import('./fixtures/peer.js')
-  const secret = new Uint8Array(32).fill(91)
-  const hub = new FakeHub()
-  const options = {
-    members: ['alice', 'bob'],
-    recovery: { timeoutMs: 100, deadlineMs: 1500, getDelayMs: () => 0 },
-  }
-  const alice = makeMLSPeer(hub, 'alice', secret, options)
-  const bob = makeMLSPeer(hub, 'bob', secret, options)
-  let restarted: typeof bob | undefined
-  try {
-    await alice.peer.replay()
-    await bob.peer.replay()
-    const apply = bob.control.apply.bind(bob.control)
-    bob.control.apply = async (changes, id) => {
+      'confirmed',
+    )
+    s.reconcile({ kind: 'unapplied-later', epoch: 9, leafDigest: 'saved-X-leaf' })
+    const transitions: Array<unknown> = []
+    const apply = s.control.apply.bind(s.control)
+    s.control.apply = async (changes, id) => {
+      transitions.push(changes)
       await apply(changes, id)
-      if (changes.putRejoin?.stage === 'published') void bob.peer.dispose()
     }
-    await expect(bob.peer.recover()).rejects.toThrow()
-    await bob.peer.dispose()
-    await bob.peer.drained()
-    const x = (await bob.control.load()).rejoin
-    if (x === null || !('format' in x)) throw new Error('Missing captured X')
-    bob.control.apply = apply
-    await bob.control.apply(
-      { putRejoin: { ...x, ledgerBefore: ['owed-only-X'] } },
-      'retain-X-obligation',
-    )
-    await expect.poll(() => alice.mls.epoch()).toBe(x.epochAfter)
-    await alice.peer.commit(buildLedgerCommit(alice, ['present-in-destination']))
-    expect(alice.mls.epoch()).toBe(x.epochAfter + 1)
-    if (x.position === undefined) throw new Error('Missing X occurrence')
-    const { commitTopic } = await import('../src/topic.js')
-    hub.trim(commitTopic(secret), x.position)
-    restarted = makeMLSPeer(hub, 'bob', secret, { ...options, restartOf: bob })
-    const settledPeer = restarted
-    const applySettlement = settledPeer.control.apply.bind(settledPeer.control)
-    settledPeer.control.apply = async (changes, id) => {
-      await applySettlement(changes, id)
-      if (changes.putSettledRejoins?.some((row) => row.id === x.id)) void settledPeer.peer.dispose()
-    }
-    await expect
-      .poll(async () => (await settledPeer.control.load()).settledRejoins.length, { timeout: 7000 })
-      .toBe(1)
-    await settledPeer.peer.dispose()
-    await settledPeer.peer.drained()
-    const retained = await settledPeer.control.load()
-    expect(retained.rejoin).toBeNull()
-    expect(retained.recoveryEpochFloor).toBe(x.epochAfter + 1)
-    expect(Object.keys(retained.settledRejoins[0] ?? {}).sort()).toEqual([
-      'acceptedEpoch',
-      'digest',
-      'epochAfter',
-      'id',
-      'kind',
-      'leafDigest',
-      'ledgerBefore',
-      'origin',
-      'payloadDigest',
-    ])
-    let firstY: CapturedRejoinRecord | undefined
-    restarted = makeMLSPeer(hub, 'bob', secret, { ...options, restartOf: settledPeer })
-    let incompleteFolds = 0
-    const roster = restarted.mls.rosterEntries.bind(restarted.mls)
-    const destination = restarted
-    destination.mls.rosterEntries = async () => {
-      if (!(await destination.mls.isLedgerComplete())) incompleteFolds++
-      return await roster()
-    }
-    const applyY = restarted.control.apply.bind(restarted.control)
-    restarted.control.apply = async (changes, id) => {
-      if (
-        changes.putRejoin !== undefined &&
-        'format' in changes.putRejoin &&
-        changes.putRejoin.stage === 'built' &&
-        firstY === undefined
-      ) {
-        firstY = changes.putRejoin
-        expect(changes.recoveryEpochFloor).toBe(x.epochAfter + 1)
-        expect(firstY.ledgerBefore).toContain('owed-only-X')
-      }
-      await applyY(changes, id)
-    }
-    await expect.poll(() => restarted?.mls.epoch(), { timeout: 7000 }).toBe(x.epochAfter + 2)
-    await expect
-      .poll(async () => (await restarted?.control.load())?.rejoin, { timeout: 7000 })
-      .toBeNull()
-    expect(firstY?.id).not.toBe(x.id)
-    expect(firstY?.target.groupInfoEpoch).toBe(x.epochAfter + 1)
-    const snapshot = await restarted.control.load()
+    expect(
+      await stepRejoin(
+        {
+          ...s.deps,
+          reconcileConfirmedRecovery: record.id,
+          ...(sink
+            ? {
+                settleAcceptedRecovery: async (
+                  saved: CapturedRejoinRecord,
+                  epoch: number,
+                  leafDigest: string,
+                  recoveryEpochFloor?: number,
+                ) => {
+                  expect(epoch).toBe(record.epochAfter)
+                  expect(leafDigest).toBe('saved-X-leaf')
+                  expect(recoveryEpochFloor).toBe(9)
+                  await settleRecovery({
+                    control: s.control,
+                    record: saved,
+                    provenance: { kind: 'accepted-unadoptable', epoch, leafDigest },
+                    recoveryEpochFloor,
+                    mutationID: 'accepted-sink',
+                  })
+                },
+              }
+            : {}),
+        },
+        record,
+      ),
+    ).toBeNull()
+    expect(s.builds()).toBe(1)
+    expect(s.adopted()).toBe(0)
+    const snapshot = await s.control.load()
+    expect(snapshot.rejoin).toBeNull()
+    expect(snapshot.recoveryEpochFloor).toBe(9)
     expect(snapshot.settledRejoins).toEqual([
-      expect.objectContaining({
+      {
         kind: 'accepted-unadoptable',
-        id: x.id,
-        acceptedEpoch: x.epochAfter + 1,
-        ledgerBefore: ['owed-only-X'],
-      }),
+        id: record.id,
+        digest: record.digest,
+        payloadDigest: record.payloadDigest,
+        epochAfter: record.epochAfter,
+        acceptedEpoch: record.epochAfter,
+        leafDigest: 'saved-X-leaf',
+        origin: { sourceKey: record.source.key, target: record.target, searchFrom: null },
+        ledgerBefore: ['prior-owed', 'shared', 'owed-X'],
+      },
     ])
-    expect(snapshot.recoveryEpochFloor).toBe(x.epochAfter + 1)
-    expect(snapshot.outcomes).toContainEqual(
-      expect.objectContaining({ kind: 'reenact', tokens: ['owed-only-X'] }),
-    )
-    expect(incompleteFolds).toBe(0)
-    expect(await restarted.mls.isLedgerComplete()).toBe(true)
-    expect(await restarted.mls.getLedger()).toEqual(['present-in-destination'])
-    expect(restarted.mls.memberSlots().filter(([, did]) => did === 'bob')).toHaveLength(1)
-    expect(alice.mls.epoch()).toBe(restarted.mls.epoch())
-  } finally {
-    await Promise.all([alice.peer.dispose(), bob.peer.dispose(), restarted?.peer.dispose()])
-    await Promise.all([alice.peer.drained(), bob.peer.drained(), restarted?.peer.drained()])
-  }
-})
+    expect(transitions).toHaveLength(1)
+  },
+)
+
+test.each(['later-present', 'confirmed-absent'] as const)(
+  'delayed %s acceptance settles X then builds and bootstraps Y with every owed token',
+  async (classification) => {
+    const { FakeHub } = await import('./fixtures/fake-hub.js')
+    const { makeMLSPeer, buildLedgerCommit } = await import('./fixtures/peer.js')
+    const secret = new Uint8Array(32).fill(91)
+    const hub = new FakeHub()
+    const options = {
+      members: ['alice', 'bob'],
+      recovery: { timeoutMs: 100, deadlineMs: 1500, getDelayMs: () => 0 },
+    }
+    const alice = makeMLSPeer(hub, 'alice', secret, options)
+    const bob = makeMLSPeer(hub, 'bob', secret, options)
+    let restarted: typeof bob | undefined
+    try {
+      await alice.peer.replay()
+      await bob.peer.replay()
+      const apply = bob.control.apply.bind(bob.control)
+      bob.control.apply = async (changes, id) => {
+        await apply(changes, id)
+        if (
+          changes.putRejoin?.stage ===
+          (classification === 'confirmed-absent' ? 'confirmed' : 'published')
+        )
+          void bob.peer.dispose()
+      }
+      await expect(bob.peer.recover()).rejects.toThrow()
+      await bob.peer.dispose()
+      await bob.peer.drained()
+      const x = (await bob.control.load()).rejoin
+      if (x === null || !('format' in x)) throw new Error('Missing captured X')
+      bob.control.apply = apply
+      await bob.control.apply(
+        { putRejoin: { ...x, ledgerBefore: ['owed-only-X'] } },
+        'retain-X-obligation',
+      )
+      await expect.poll(() => alice.mls.epoch()).toBe(x.epochAfter)
+      if (classification === 'confirmed-absent') {
+        const { publishCommit } = await import('./fixtures/commits.js')
+        const captured = bob.mls.capturedRecovery
+        if (captured === undefined) throw new Error('Missing captured recovery')
+        const otherRequest = await bob.mls.createRecoveryRequest('other-bob')
+        const other = await captured.applyRecovery(
+          await alice.mls.sealGroupInfo(otherRequest.request, alice.controlWalk.head()),
+          'other-bob',
+          otherRequest.requestKey,
+        )
+        if (other === null || 'renewalRequired' in other)
+          throw new Error('Missing replacement candidate')
+        await publishCommit({
+          hub,
+          senderDID: 'bob',
+          recoverySecret: secret,
+          epoch: alice.mls.epoch(),
+          commit: other.commit,
+        })
+        await expect.poll(() => alice.mls.epoch()).toBe(x.epochAfter + 1)
+      }
+      await alice.peer.commit(buildLedgerCommit(alice, ['present-in-destination']))
+      const recapturedEpoch = alice.mls.epoch()
+      expect(recapturedEpoch).toBe(x.epochAfter + (classification === 'confirmed-absent' ? 2 : 1))
+      if (x.position === undefined) throw new Error('Missing X occurrence')
+      const { commitTopic } = await import('../src/topic.js')
+      hub.trim(commitTopic(secret), x.position)
+      restarted = makeMLSPeer(hub, 'bob', secret, {
+        ...options,
+        restartOf: bob,
+        ...(classification === 'confirmed-absent' ? { reconcileConfirmedRecovery: x.id } : {}),
+      })
+      const settledPeer = restarted
+      const applySettlement = settledPeer.control.apply.bind(settledPeer.control)
+      settledPeer.control.apply = async (changes, id) => {
+        await applySettlement(changes, id)
+        if (changes.putSettledRejoins?.some((row) => row.id === x.id))
+          void settledPeer.peer.dispose()
+      }
+      await expect
+        .poll(async () => (await settledPeer.control.load()).settledRejoins.length, {
+          timeout: 7000,
+        })
+        .toBe(1)
+      await settledPeer.peer.dispose()
+      await settledPeer.peer.drained()
+      const retained = await settledPeer.control.load()
+      expect(retained.rejoin).toBeNull()
+      expect(retained.recoveryEpochFloor).toBe(recapturedEpoch)
+      expect(Object.keys(retained.settledRejoins[0] ?? {}).sort()).toEqual([
+        'acceptedEpoch',
+        'digest',
+        'epochAfter',
+        'id',
+        'kind',
+        'leafDigest',
+        'ledgerBefore',
+        'origin',
+        'payloadDigest',
+      ])
+      let firstY: CapturedRejoinRecord | undefined
+      restarted = makeMLSPeer(hub, 'bob', secret, { ...options, restartOf: settledPeer })
+      let incompleteFolds = 0
+      const roster = restarted.mls.rosterEntries.bind(restarted.mls)
+      const destination = restarted
+      destination.mls.rosterEntries = async () => {
+        if (!(await destination.mls.isLedgerComplete())) incompleteFolds++
+        return await roster()
+      }
+      const applyY = restarted.control.apply.bind(restarted.control)
+      restarted.control.apply = async (changes, id) => {
+        if (
+          changes.putRejoin !== undefined &&
+          'format' in changes.putRejoin &&
+          changes.putRejoin.stage === 'built' &&
+          firstY === undefined
+        ) {
+          firstY = changes.putRejoin
+          expect(changes.recoveryEpochFloor).toBe(recapturedEpoch)
+          expect(firstY.ledgerBefore).toContain('owed-only-X')
+        }
+        await applyY(changes, id)
+      }
+      await expect.poll(() => restarted?.mls.epoch(), { timeout: 7000 }).toBe(recapturedEpoch + 1)
+      await expect
+        .poll(async () => (await restarted?.control.load())?.rejoin, { timeout: 7000 })
+        .toBeNull()
+      expect(firstY?.id).not.toBe(x.id)
+      expect(firstY?.target.groupInfoEpoch).toBe(recapturedEpoch)
+      const snapshot = await restarted.control.load()
+      expect(snapshot.settledRejoins).toEqual([
+        expect.objectContaining({
+          kind: 'accepted-unadoptable',
+          id: x.id,
+          acceptedEpoch: classification === 'confirmed-absent' ? x.epochAfter : recapturedEpoch,
+          ledgerBefore: ['owed-only-X'],
+        }),
+      ])
+      expect(snapshot.recoveryEpochFloor).toBe(recapturedEpoch)
+      expect(snapshot.outcomes).toContainEqual(
+        expect.objectContaining({ kind: 'reenact', tokens: ['owed-only-X'] }),
+      )
+      expect(incompleteFolds).toBe(0)
+      expect(await restarted.mls.isLedgerComplete()).toBe(true)
+      expect(await restarted.mls.getLedger()).toEqual(['present-in-destination'])
+      expect(restarted.mls.memberSlots().filter(([, did]) => did === 'bob')).toHaveLength(1)
+      expect(alice.mls.epoch()).toBe(restarted.mls.epoch())
+    } finally {
+      await Promise.all([alice.peer.dispose(), bob.peer.dispose(), restarted?.peer.dispose()])
+      await Promise.all([alice.peer.drained(), bob.peer.drained(), restarted?.peer.drained()])
+    }
+  },
+)
 
 test('defensive confirmed startup assigns its saved switch ID before handing off', async () => {
   const s = await setup()
@@ -397,6 +553,23 @@ test('a newly confirmed peer invokes its coordinator after source recovery compl
   }
 })
 
+test('captured coordinator construction requires an accepted settlement sink', async () => {
+  const { FakeHub } = await import('./fixtures/fake-hub.js')
+  const { makeMLSPeer } = await import('./fixtures/peer.js')
+  let invalid: ReturnType<typeof makeMLSPeer> | undefined
+  try {
+    expect(() => {
+      invalid = makeMLSPeer(new FakeHub(), 'bob', new Uint8Array(32).fill(95), {
+        onConfirmedRecovery: () => {},
+        settleAcceptedRecovery: undefined,
+      })
+    }).toThrow(TypeError)
+  } finally {
+    await invalid?.peer.dispose()
+    await invalid?.peer.drained()
+  }
+})
+
 test('a saved X with a lost acknowledgement recaptures before attempting another publication', async () => {
   const s = await setup()
   s.reconcile({ kind: 'accepted', epoch: 8, leafDigest: 'exact-wire-leaf' })
@@ -406,6 +579,46 @@ test('a saved X with a lost acknowledgement recaptures before attempting another
     { id: s.record.id, acceptedEpoch: 8 },
   ])
 })
+
+test.each([
+  { captured: false, delays: [1000, 2000, 4000, 8000, 16000, 32000, 60000, 60000] },
+  { captured: true, delays: [1000, 2000, 4000, 8000, 15000, 15000, 15000, 15000] },
+])(
+  'recovery retries retain the appropriate bound (captured: $captured)',
+  async ({ captured, delays }) => {
+    const { FakeHub } = await import('./fixtures/fake-hub.js')
+    const { makeMLSPeer } = await import('./fixtures/peer.js')
+    const { createMemoryGroupMLS } = await import('./fixtures/memory-group-mls.js')
+    const secret = new Uint8Array(32).fill(94)
+    const mls = createMemoryGroupMLS({ localDID: 'bob', recoverySecret: secret })
+    if (!captured) mls.capturedRecovery = undefined
+    const bob = makeMLSPeer(new FakeHub(), 'bob', secret, {
+      mls,
+      recovery: { timeoutMs: 10, deadlineMs: 30, getDelayMs: () => 0 },
+    })
+    try {
+      await bob.peer.replay()
+      vi.useFakeTimers()
+      let requests = 0
+      mls.createRecoveryRequest = async () => {
+        requests++
+        throw new Error('request transport unavailable')
+      }
+      await expect(bob.peer.recover()).rejects.toThrow('request transport unavailable')
+      expect(requests).toBe(1)
+      for (const [index, delay] of delays.entries()) {
+        await vi.advanceTimersByTimeAsync(delay - 1)
+        expect(requests).toBe(index + 1)
+        await vi.advanceTimersByTimeAsync(1)
+        expect(requests).toBe(index + 2)
+      }
+    } finally {
+      await bob.peer.dispose()
+      await bob.peer.drained()
+      vi.useRealTimers()
+    }
+  },
+)
 
 test.each([false, true])(
   'a fresh recovery-only attempt retries non-delivery without private state (renewal required: %s)',

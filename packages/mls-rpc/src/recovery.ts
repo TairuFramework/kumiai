@@ -723,5 +723,5 @@ export async function reconcileRecoveryCapture(params: {
   )
   return present
     ? { kind: 'accepted', epoch, leafDigest: toB64U(sha256(fresh)) }
-    : { kind: 'unapplied-later', epoch }
+    : { kind: 'unapplied-later', epoch, leafDigest: toB64U(sha256(fresh)) }
 }
