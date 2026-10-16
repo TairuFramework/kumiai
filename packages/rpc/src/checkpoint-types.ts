@@ -1,7 +1,11 @@
 import type { GroupConditionEvent } from './control/safety.js'
 import type { GroupKey } from './control/types.js'
 import type { ForkNotice, ForkNoticeEvent } from './fork-notice.js'
-import type { CapturedRejoinRecord, ForkRecoveryAuthorisation } from './recovery-types.js'
+import type {
+  AcceptedRejoinSettlement,
+  CapturedRejoinRecord,
+  ForkRecoveryAuthorisation,
+} from './recovery-types.js'
 
 export type CheckpointComparison =
   | { kind: 'agreement'; epoch: number; signerDID: string; keyHash: string }
@@ -46,7 +50,29 @@ export type CheckpointService = CheckpointPort & {
   updateRecords(change: { put?: Array<CheckpointRecord>; remove?: Array<string> }): Promise<void>
 }
 
+export type PersistedManualRecovery =
+  | { mode: 'resync'; targetID: string; commitTopicID: string; allowOpenFork: boolean }
+  | { mode: 'successor'; successor: GroupKey }
+export type ManualRecoveryRecord = {
+  id: string
+  source: GroupKey
+  choice: PersistedManualRecovery
+  stage: 'authorised' | 'completed'
+  pauseReason: 'target-unresolved' | null
+  destination: GroupKey | null
+  attempt: CapturedRejoinRecord | null
+  epochFloor: number | null
+  settlements: Array<AcceptedRejoinSettlement>
+  mutationID: string
+}
+export type ManualRecoveryStatus = {
+  id: string
+  kind: 'pending' | 'paused' | 'completed'
+  reason: 'target-unresolved' | null
+}
+
 export type CheckpointRecord =
+  | { kind: 'manual-recovery'; id: string; key: GroupKey; value: ManualRecoveryRecord }
   | {
       kind: 'superseded-rejoin'
       id: string

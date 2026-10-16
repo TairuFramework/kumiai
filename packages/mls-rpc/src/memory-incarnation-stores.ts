@@ -374,13 +374,21 @@ export function createUnlockedIncarnationStores(params: {
           !(slotOnly && context?.kind === 'retirement' && sameStoredValue(context.key, key))
         )
           await active()
-        const snapshot = applyChanges(
-          previous,
-          owned,
-          context,
-          key,
-          completing ? completion.forkRecovery : undefined,
-        )
+        let snapshot: ControlSnapshot
+        if (completing && completion.abandonForkRecovery === true) {
+          if (Object.keys(owned).length !== 0 || completion.forkRecovery?.attempt !== null)
+            throw new GroupStateConflictError('Fork intent abandonment permits no other changes')
+          // Abandonment must not normalise unrelated legacy control rows.
+          snapshot = { ...copyStoredValue(previous), forkRecoveryAttempt: null }
+        } else {
+          snapshot = applyChanges(
+            previous,
+            owned,
+            context,
+            key,
+            completing ? completion.forkRecovery : undefined,
+          )
+        }
         if (previous.forkHalt === null && snapshot.forkHalt !== null)
           await putEvent({
             ...key,

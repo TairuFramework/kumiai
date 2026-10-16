@@ -20,6 +20,7 @@ import {
   asLogPosition,
   type ControlChanges,
   type ControlSlot,
+  type ControlSnapshot,
   type LogPosition,
   type WelcomeObligation,
 } from '@kumiai/rpc'
@@ -37,6 +38,7 @@ import {
   type EntryReads,
   entryCapability,
 } from '../../src/entry-capability.js'
+import { createManualRecoveryStore, type ManualRecoveryStore } from '../../src/manual-recovery.js'
 import { createGroupMLS, createLedgerEntrySlot } from '../../src/mls.js'
 import {
   decodeStoredValue,
@@ -96,6 +98,7 @@ export type RegistryRowSetup = {
 }
 export type RegistryFixture = Omit<RegistryFixtureBase, 'reopen'> & {
   registry: GroupHandleRegistry
+  manualRecovery(): ManualRecoveryStore
   safety(): GroupSafety
   reopen(): Promise<RegistryFixture>
 }
@@ -188,6 +191,20 @@ const restorers = new WeakMap<
 >()
 const markerWriters = new WeakMap<RegistryFixtureBase, RegistryStorageFixture['forceOwnerMarker']>()
 const rowRemovers = new WeakMap<RegistryFixtureBase, RegistryStorageFixture['deleteCommittedRow']>()
+
+type ControlMutator = (
+  key: GroupKey,
+  mutate: (snapshot: ControlSnapshot) => ControlSnapshot,
+) => Promise<void>
+const controlMutators = new WeakMap<RegistryFixtureBase, ControlMutator>()
+export function registryFixtureMutateControl(
+  fixture: RegistryFixtureBase,
+  ...args: Parameters<ControlMutator>
+): Promise<void> {
+  const mutate = controlMutators.get(fixture)
+  if (mutate === undefined) throw new Error('Unknown registry fixture')
+  return mutate(...args)
+}
 
 const controlCorrupters = new WeakMap<RegistryFixtureBase, (key: GroupKey) => Promise<void>>()
 type CapturedFixtureState = { keys: Set<string>; handles: WeakSet<GroupHandle> }
@@ -404,6 +421,12 @@ async function assemble(
       return owner
     },
     device: storage.ports.device,
+    manualRecovery: () =>
+      createManualRecoveryStore({
+        registry: fixture.registry,
+        persistence: fixture.device.groups,
+        key,
+      }),
     safety: () =>
       createGroupSafety({
         registry: fixture.registry,
@@ -737,6 +760,16 @@ async function assemble(
   capturedStates.set(fixture, captured)
   markerWriters.set(fixture, storage.forceOwnerMarker)
   rowRemovers.set(fixture, storage.deleteCommittedRow)
+  controlMutators.set(fixture, async (target, mutate) => {
+    const control = fixture.device.groups.ports(target).control
+    const location = { ...target, namespace: 'control', recordID: 'current' }
+    const codec = createDeterministicAtRestCodec({ key: new Uint8Array(32).fill(98) })
+    const bytes = await sealRecord(codec, location, {
+      snapshot: mutate(await control.load()),
+      mutationID: await control.lastMutation(),
+    })
+    await storage.mutateStoredRecord('control', physicalRecordKey(location), () => bytes)
+  })
   const safetyHandle = await fixture.makeHandle(0)
   safetyMLS = createGroupMLS({
     ...testGroupMLSDependencies(

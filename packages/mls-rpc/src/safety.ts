@@ -9,12 +9,14 @@ import {
   GroupSafetyHeldError,
   type LogHub,
   type MailboxHub,
+  type ManualRecoveryStatus,
   type NotMemberEvidence,
   type RecoveryUnavailableEvent,
   type SafetyHold,
 } from '@kumiai/rpc'
 
 import { coordinatorBinding } from './entry-capability.js'
+import { manualRecoveryStatus } from './manual-recovery.js'
 import { sameStoredValue } from './memory-incarnation-stores.js'
 import { isStoredOpenFailure } from './persistence-codec.js'
 import {
@@ -49,6 +51,7 @@ export type GroupSafety = {
     hold: SafetyHold
     condition: GroupCondition | null
     evidence: NotMemberEvidence | null
+    manualRecovery: ManualRecoveryStatus | null
   }>
   epochAuthenticator(key: GroupKey): Promise<EpochIdentity | null>
   reportFork(key: GroupKey, evidence: GroupForkEvidence): Promise<void>
@@ -124,12 +127,14 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
     async status(requested) {
       const key = { ...requested }
       return await entry.read(key.groupID, async (reads) => {
-        const { condition, evidence } = groupCondition(await reads.checkpoints(), key)
+        const records = await reads.checkpoints()
+        const { condition, evidence } = groupCondition(records, key)
         const control = await reads.control(key.incarnation)
         return {
           hold: capability.held(key) ?? controlSafetyHeld(control, condition),
           condition,
           evidence,
+          manualRecovery: manualRecoveryStatus(records, key),
         }
       })
     },

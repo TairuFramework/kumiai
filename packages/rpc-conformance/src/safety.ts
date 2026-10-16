@@ -12,6 +12,7 @@ import type {
   ConformanceSafetyHold,
 } from './control-store.js'
 import type { ConformanceGroupMLS } from './group-mls.js'
+import type { ConformanceManualRecoveryStatus } from './manual-recovery.js'
 import type { ConformanceRegistryFixture, ConformanceRegistryHandle } from './registry-fixture.js'
 
 export type RosterAbsenceScenario = 'absent' | 'present' | 'wrong-key' | 'expired' | 'imported'
@@ -157,6 +158,7 @@ export type ConformanceGroupSafety = {
     hold: ConformanceSafetyHold
     condition: ConformanceGroupCondition | null
     evidence: ConformanceNotMemberEvidence | null
+    manualRecovery: ConformanceManualRecoveryStatus | null
   }>
   epochAuthenticator(key: ConformanceGroupKey): Promise<ConformanceEpochIdentity | null>
   reportFork(key: ConformanceGroupKey, evidence: ConformanceGroupForkEvidence): Promise<void>
@@ -222,12 +224,14 @@ export function runGroupSafetyContract<THandle extends ConformanceRegistryHandle
         hold: null,
         condition: null,
         evidence: null,
+        manualRecovery: null,
       })
       await hold(key, 'fork-halted')
       expect(await fixture.safety().status(key)).toEqual({
         hold: 'fork-halted',
         condition: null,
         evidence: null,
+        manualRecovery: null,
       })
     })
     test('host mismatch co-writes field/event/admission', async () => {

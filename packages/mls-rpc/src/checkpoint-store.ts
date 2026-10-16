@@ -7,6 +7,7 @@ import type {
 import { retainForkEvidence } from '@kumiai/rpc'
 
 import { checkpointPreparation } from './checkpoint-capture.js'
+import { manualRecoveryPreparation } from './manual-recovery.js'
 import {
   memoryOpen,
   memoryOperation,
@@ -21,6 +22,7 @@ import type { AtRestCodec, MemoryTransaction } from './persistence-types.js'
 import { supersededRejoinPrepared } from './registry/recovery-coordinator.js'
 import { conditionPreparation } from './safety-conditions.js'
 
+const manuals = new WeakMap<object, Map<string, CheckpointRecord>>()
 const histories = new WeakMap<object, Array<CheckpointRecord>>()
 const conditionCaptures = new WeakMap<object, Map<string, CheckpointRecord>>()
 const captures = new WeakMap<object, Map<string, Uint8Array>>()
@@ -33,6 +35,18 @@ export function assertCheckpointUpdates(
   const entry = tx === undefined ? undefined : memoryTransactionEntry(tx.rows)
   const authorised = entry === undefined ? undefined : conditionCaptures.get(entry)
   for (const row of [...before, ...after]) {
+    if (row.kind === 'manual-recovery') {
+      const next = after.find((value) => value.id === row.id)
+      const previous = before.find((value) => value.id === row.id)
+      if (
+        !sameStoredValue(previous, next) &&
+        (entry === undefined ||
+          next === undefined ||
+          manuals.get(entry)?.has(row.id) !== true ||
+          !sameStoredValue(manuals.get(entry)?.get(row.id), next))
+      )
+        throw new GroupStateConflictError('Manual recovery requires coordinator authority')
+    }
     if (row.kind === 'superseded-rejoin') {
       const next = after.find((value) => value.id === row.id)
       const previous = before.find((value) => value.id === row.id)
@@ -101,6 +115,7 @@ function validate(record: CheckpointRecord, groupID: string, id: string): void {
     record.key.incarnation < 1 ||
     ![
       'fact',
+      'manual-recovery',
       'superseded-rejoin',
       'condition',
       'publication',
@@ -211,12 +226,18 @@ export function createCheckpointStore(
     load: memoryOperation(tx, store.load),
     list: memoryOperation(tx, store.list),
     put(record) {
+      const manual = manualRecoveryPreparation(record)
       const history =
         record.kind === 'superseded-rejoin' && supersededRejoinPrepared(record) ? record : undefined
       const condition = record.kind === 'condition' ? conditionPreparation(record) : undefined
       const canonical = record.kind === 'fact' ? checkpointPreparation(record) : undefined
       const result = put(record)
       const entry = memoryTransactionEntry(tx.rows)
+      if (manual !== undefined && entry !== undefined) {
+        const prepared = manuals.get(entry) ?? new Map<string, CheckpointRecord>()
+        prepared.set(record.id, manual)
+        manuals.set(entry, prepared)
+      }
       if (history !== undefined && entry !== undefined)
         histories.set(entry, [...(histories.get(entry) ?? []), copyStoredValue(history)])
       if (condition !== undefined && entry !== undefined) {

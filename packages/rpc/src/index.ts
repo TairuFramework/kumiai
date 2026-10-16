@@ -26,6 +26,9 @@ export type {
   CheckpointRecord,
   CheckpointService,
   CheckpointStore,
+  ManualRecoveryRecord,
+  ManualRecoveryStatus,
+  PersistedManualRecovery,
 } from './checkpoint-types.js'
 export { createCheckpointWorker } from './checkpoint-worker.js'
 export {

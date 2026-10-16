@@ -13,6 +13,7 @@ import type {
   ConformanceWelcomeObligation,
 } from './control-store.js'
 import type { ConformanceSendAdmission } from './group-mls.js'
+import type { ConformanceManualRecoveryStore } from './manual-recovery.js'
 import type {
   ConformanceAppSettlementObligation,
   ConformanceDevicePersistence,
@@ -245,6 +246,7 @@ export type ConformanceRegistryFixture<
   TTx extends ConformanceGroupTransaction = ConformanceGroupTransaction,
 > = Omit<ConformanceRegistryFixtureBase<THandle, TTx>, 'reopen'> & {
   registry: ConformanceRegistry<THandle>
+  manualRecovery(): ConformanceManualRecoveryStore
   safety(): ConformanceGroupSafety
   reopen(): Promise<ConformanceRegistryFixture<THandle, TTx>>
 }

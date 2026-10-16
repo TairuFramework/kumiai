@@ -32,6 +32,9 @@ export type {
   GroupForkEvidence,
   GroupKey,
   GroupSafetyEvent,
+  ManualRecoveryRecord,
+  ManualRecoveryStatus,
+  PersistedManualRecovery,
   RecoveryUnavailableEvent,
   SafetyHold,
 } from '@kumiai/rpc'

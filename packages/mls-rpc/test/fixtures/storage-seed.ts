@@ -237,7 +237,9 @@ export async function writeInstallationCheckpoint(
   const trust = await stores.trust.load()
   if (trust === null) throw new Error('Missing installed trust')
   const previous = currentCheckpointFact(
-    (await stores.checkpoints.list()).filter((row) => row.kind !== 'superseded-rejoin'),
+    (await stores.checkpoints.list()).filter(
+      (row) => row.kind === 'fact' || row.kind === 'coverage',
+    ),
   )
   const prior = previous === null ? null : decodeEpochRosterFact(previous.canonical)
   if (

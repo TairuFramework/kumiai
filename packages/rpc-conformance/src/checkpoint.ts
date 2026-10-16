@@ -7,6 +7,7 @@ import type {
 } from './control-store.js'
 import type { ConformanceForkNotice, ConformanceForkNoticeEvent } from './fork-notice.js'
 import { storageChange } from './group-storage.js'
+import type { ConformanceManualRecoveryRecord } from './manual-recovery.js'
 import type {
   ConformanceCheckpointFactRecord,
   ConformanceGroupKey,
@@ -18,6 +19,12 @@ import type {
 } from './persistence-fixture.js'
 
 export type ConformanceCheckpointRecord<Position extends string = string> =
+  | {
+      kind: 'manual-recovery'
+      id: string
+      key: ConformanceGroupKey
+      value: ConformanceManualRecoveryRecord<Position>
+    }
   | {
       kind: 'superseded-rejoin'
       id: string
