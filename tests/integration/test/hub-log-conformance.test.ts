@@ -11,8 +11,12 @@ import { afterEach } from 'vitest'
 // hub-server already declares the conformance dependency, so its build orders these declarations.
 import {
   type ConformanceLogHub,
+  testLogAckConformance,
   testLogHubConformance,
+  testTopicAuthorizationConformance,
 } from '../../../packages/hub-conformance/lib/index.js'
+import { fixtureTopic } from './fixture-topic.js'
+import { createWireHub } from './log-hub-over-wire.js'
 
 const MAX_RETENTION = 30 * 24 * 60 * 60
 const MAX_DEPTH = 6
@@ -22,7 +26,12 @@ afterEach(async () => {
   await Promise.all(wireDisposals.splice(0).map((dispose) => dispose()))
 })
 
-function createWireLogHub(options: { maxRetention: number; maxDepth: number }): ConformanceLogHub {
+type ReconnectableLogHub = ConformanceLogHub & { reconnect: (did: string) => Promise<void> }
+
+function createWireLogHub(options: {
+  maxRetention: number
+  maxDepth: number
+}): ReconnectableLogHub {
   const store = createMemoryStore({
     maxDepth: options.maxDepth,
     retention: { max: options.maxRetention },
@@ -31,8 +40,11 @@ function createWireLogHub(options: { maxRetention: number; maxDepth: number }): 
   const first: HubTransports = new DirectTransports()
   const transports = [first]
   const hub = createHub({ identity, store, transport: first.server, purge: false })
+  let firstUsed = false
+  const members = new Map<string, ReturnType<typeof randomIdentity>>()
   const clients = new Map<string, HubClient>()
   const aliases = new Map<string, string>()
+  const connections = new Map<string, HubTransports>()
   const topics = new Map<string, string>()
   const topicAliases = new Map<string, string>()
   function topic(label: string): string {
@@ -49,12 +61,14 @@ function createWireLogHub(options: { maxRetention: number; maxDepth: number }): 
   function client(did: string): HubClient {
     let value = clients.get(did)
     if (value == null) {
-      const connection: HubTransports = clients.size === 0 ? first : new DirectTransports()
-      if (clients.size !== 0) {
+      const connection: HubTransports = firstUsed ? new DirectTransports() : first
+      if (firstUsed) {
         transports.push(connection)
         hub.server.handle(connection.server)
       }
-      const member = randomIdentity()
+      firstUsed = true
+      const member = members.get(did) ?? randomIdentity()
+      members.set(did, member)
       aliases.set(member.id, did)
       value = new HubClient({
         client: new Client<HubProtocol>({
@@ -63,6 +77,7 @@ function createWireLogHub(options: { maxRetention: number; maxDepth: number }): 
           transport: connection.client,
         }),
       })
+      connections.set(did, connection)
       clients.set(did, value)
     }
     return value
@@ -94,6 +109,12 @@ function createWireLogHub(options: { maxRetention: number; maxDepth: number }): 
     await Promise.all(transports.map((connection) => connection.dispose()))
   })
   return {
+    reconnect: async (did) => {
+      const connection = connections.get(did)
+      if (connection != null) await connection.dispose()
+      connections.delete(did)
+      clients.delete(did)
+    },
     subscribe: async (did, label, subscription) => {
       await request(client(did).subscribe({ topicID: topic(label), ...subscription }))
     },
@@ -130,6 +151,9 @@ function createWireLogHub(options: { maxRetention: number; maxDepth: number }): 
           stopped = true
           channel?.close()
         },
+        ack: async (sequenceID) => {
+          await channel?.send({ ack: [sequenceID] })
+        },
       }
     },
   }
@@ -140,9 +164,46 @@ testLogHubConformance({
   createHub: createWireLogHub,
   maxRetention: MAX_RETENTION,
   maxDepth: MAX_DEPTH,
+  reconnect: (hub, did) => hub.reconnect(did),
+})
+
+testLogAckConformance({
+  label: 'HubClient over hub-server wire',
+  createHub: createWireLogHub,
+  maxRetention: MAX_RETENTION,
+  maxDepth: MAX_DEPTH,
 })
 
 type HubTransports = DirectTransports<
   AnyServerMessageOf<HubProtocol>,
   AnyClientMessageOf<HubProtocol>
 >
+
+testTopicAuthorizationConformance({
+  createFixture: async () => {
+    const commitTopicID = fixtureTopic('opaque-commit')
+    const checkpointTopicID = fixtureTopic('opaque-checkpoint')
+    const deniedIdentity = randomIdentity()
+    let revoked = false
+    const wire = createWireHub({
+      authorize: (request) => {
+        if (!('topicID' in request)) return true
+        return !(revoked && request.did === deniedIdentity.id)
+      },
+    })
+    const sender = wire.connect(randomIdentity())
+    const recipient = wire.connect(randomIdentity())
+    const denied = wire.connect(deniedIdentity)
+    for (const topicID of [commitTopicID, checkpointTopicID]) {
+      await denied.subscribe(deniedIdentity.id, topicID, { retention: 604_800 })
+    }
+    revoked = true
+    return {
+      commitTopicID,
+      checkpointTopicID,
+      allowed: { ...recipient, publish: sender.publish },
+      denied,
+      dispose: wire.dispose,
+    }
+  },
+})

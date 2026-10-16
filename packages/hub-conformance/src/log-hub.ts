@@ -77,6 +77,8 @@ export type MailboxHubConformanceParams<Hub extends ConformanceMailboxHub> = {
   maxDepth: number
   /** Prefix for the describe block, so a failure names the double it came from. */
   label: string
+  /** Drop and recreate the subscriber's transport. Store-only views keep the same store. */
+  reconnect?: (hub: Hub, subscriberDID: string) => void | Promise<void>
 }
 
 const ALICE = 'did:key:alice'
@@ -238,6 +240,138 @@ export function testLogHubConformance<Hub extends ConformanceLogHub>(
   testMailboxHubConformance(params)
 
   describe(`${label}: LogHub conformance`, () => {
+    test('independent retained topics have independent heads and cursors', async () => {
+      const hub = await createHub({ maxRetention, maxDepth })
+      const checkpointTopicID = `${TOPIC}:checkpoint`
+      for (const topicID of [TOPIC, checkpointTopicID]) await subscribing(hub, BOB, topicID)
+      const commit = await hub.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(1),
+        retain: 'log',
+        expectedHead: null,
+      })
+      const commitHeadBeforeCheckpoint = (
+        await hub.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+      ).head
+      const checkpoint = await hub.publish({
+        senderDID: ALICE,
+        topicID: checkpointTopicID,
+        payload: new Uint8Array([0, 255, 128, 0]),
+        retain: 'log',
+      })
+      const commitHeadAfterCheckpoint = (
+        await hub.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+      ).head
+      expect(commitHeadAfterCheckpoint).toBe(commitHeadBeforeCheckpoint)
+      const nextCommit = await hub.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(2),
+        retain: 'log',
+        expectedHead: commit.sequenceID,
+      })
+      const nextCheckpoint = await hub.publish({
+        senderDID: ALICE,
+        topicID: checkpointTopicID,
+        payload: payload(3),
+        retain: 'log',
+      })
+      const commits = await hub.fetchTopic({
+        subscriberDID: BOB,
+        topicID: TOPIC,
+        after: commit.sequenceID,
+      })
+      expect(commits.messages.map((message) => message.sequenceID)).toEqual([nextCommit.sequenceID])
+      expect(commits.head).toBe(nextCommit.sequenceID)
+      const checkpoints = await hub.fetchTopic({ subscriberDID: BOB, topicID: checkpointTopicID })
+      expect(checkpoints.messages.map((message) => message.sequenceID)).toEqual([
+        checkpoint.sequenceID,
+        nextCheckpoint.sequenceID,
+      ])
+      expect(checkpoints.messages[0]?.payload).toEqual(new Uint8Array([0, 255, 128, 0]))
+      expect(checkpoints.messages.every((message) => message.topicID === checkpointTopicID)).toBe(
+        true,
+      )
+      expect(checkpoints.head).toBe(nextCheckpoint.sequenceID)
+      const resumed = await hub.fetchTopic({
+        subscriberDID: BOB,
+        topicID: checkpointTopicID,
+        after: checkpoint.sequenceID,
+      })
+      expect(resumed.messages.map((message) => message.sequenceID)).toEqual([
+        nextCheckpoint.sequenceID,
+      ])
+    })
+
+    test('checkpoint dedup survives unrelated topic writes', async () => {
+      const hub = await createHub({ maxRetention, maxDepth })
+      const checkpointTopicID = `${TOPIC}:checkpoint`
+      for (const topicID of [TOPIC, checkpointTopicID]) await subscribing(hub, BOB, topicID)
+      const checkpoint = {
+        senderDID: ALICE,
+        topicID: checkpointTopicID,
+        payload: payload(255),
+        retain: 'log' as const,
+        publishID: 'checkpoint-installation',
+      }
+      const firstPublish = await hub.publish(checkpoint)
+      const commit = await hub.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(1),
+        retain: 'log',
+        publishID: 'commit-installation',
+      })
+      const replayedPublish = await hub.publish(checkpoint)
+      expect(replayedPublish.sequenceID).toBe(firstPublish.sequenceID)
+      const checkpoints = await hub.fetchTopic({ subscriberDID: BOB, topicID: checkpointTopicID })
+      expect(checkpoints.messages.map((message) => message.sequenceID)).toEqual([
+        firstPublish.sequenceID,
+      ])
+      expect(checkpoints.head).toBe(firstPublish.sequenceID)
+      const commits = await hub.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+      expect(commits.messages.map((message) => message.sequenceID)).toEqual([commit.sequenceID])
+      expect(commits.head).toBe(commit.sequenceID)
+    })
+
+    test('retained checkpoint replay survives reconnect', async () => {
+      const hub = await createHub({ maxRetention, maxDepth })
+      const topicID = `${TOPIC}:checkpoint`
+      const retention = Math.min(604_800, maxRetention)
+      await subscribing(hub, BOB, topicID, { retention })
+      const initial = hub.receive(BOB)
+      const first = await hub.publish({
+        senderDID: ALICE,
+        topicID,
+        payload: payload(255),
+        retain: 'log',
+      })
+      expect(await drain(initial, 1)).toHaveLength(1)
+      initial.return?.()
+      await params.reconnect?.(hub, BOB)
+      const second = await hub.publish({
+        senderDID: ALICE,
+        topicID,
+        payload: payload(128),
+        retain: 'log',
+      })
+      await subscribing(hub, BOB, topicID, { retention })
+      const replay = await hub.fetchTopic({ subscriberDID: BOB, topicID })
+      expect(replay.messages.map((message) => message.sequenceID)).toEqual([
+        first.sequenceID,
+        second.sequenceID,
+      ])
+      expect(replay.messages.map((message) => message.payload)).toEqual([
+        payload(255),
+        payload(128),
+      ])
+      expect(replay.head).toBe(second.sequenceID)
+      expect(replay.gap).toBe(false)
+      const resumed = await hub.fetchTopic({ subscriberDID: BOB, topicID, after: first.sequenceID })
+      expect(resumed.messages.map((message) => message.sequenceID)).toEqual([second.sequenceID])
+    })
+
     test('publishes become visible across topics before acknowledgement returns', async () => {
       const hub = await createHub({ maxRetention, maxDepth })
       const other = `${TOPIC}:other`
@@ -562,6 +696,47 @@ export function testLogAckConformance<Hub extends ConformanceLogHub>(
   const { createHub, maxRetention, maxDepth, label } = params
 
   describe(`${label}: log ack conformance`, () => {
+    test('checkpoint dedup survives acknowledgement and unrelated topic writes', async () => {
+      const hub = await createHub({ maxRetention, maxDepth })
+      const topicID = `${TOPIC}:checkpoint`
+      for (const topic of [TOPIC, topicID]) await subscribing(hub, BOB, topic)
+      const subscription = hub.receive(BOB)
+      try {
+        const checkpoint = {
+          senderDID: ALICE,
+          topicID,
+          payload: new Uint8Array([0, 255, 128]),
+          retain: 'log' as const,
+          publishID: 'checkpoint-ack',
+        }
+        const firstPublish = await hub.publish(checkpoint)
+        const delivered = await drain(subscription, 1)
+        expect(delivered).toHaveLength(1)
+        expect(subscription.ack).toBeDefined()
+        await subscription.ack?.(delivered[0]?.sequenceID as string)
+        const commit = await hub.publish({
+          senderDID: ALICE,
+          topicID: TOPIC,
+          payload: payload(1),
+          retain: 'log',
+          publishID: 'unrelated-commit',
+        })
+        const replayedPublish = await hub.publish(checkpoint)
+        expect(replayedPublish.sequenceID).toBe(firstPublish.sequenceID)
+        const checkpoints = await hub.fetchTopic({ subscriberDID: BOB, topicID })
+        expect(checkpoints.messages.map((message) => message.sequenceID)).toEqual([
+          firstPublish.sequenceID,
+        ])
+        expect(checkpoints.messages[0]?.payload).toEqual(checkpoint.payload)
+        expect(checkpoints.head).toBe(firstPublish.sequenceID)
+        const commits = await hub.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+        expect(commits.messages.map((message) => message.sequenceID)).toEqual([commit.sequenceID])
+        expect(commits.head).toBe(commit.sequenceID)
+      } finally {
+        subscription.return?.()
+      }
+    })
+
     test('a log frame survives every ack', async () => {
       const hub = await createHub({ maxRetention, maxDepth })
       await subscribing(hub, BOB, TOPIC)

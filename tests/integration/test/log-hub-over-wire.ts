@@ -4,7 +4,7 @@ import { DirectTransports } from '@enkaku/transport'
 import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import { HubClient } from '@kumiai/hub-client'
 import { type HubProtocol, hubErrorFromCode, type StoredMessage } from '@kumiai/hub-protocol'
-import { createHub, createMemoryStore } from '@kumiai/hub-server'
+import { type AuthorizeHook, createHub, createMemoryStore } from '@kumiai/hub-server'
 import type { HubReceiveSubscription, LogHub } from '@kumiai/hub-tunnel'
 
 /**
@@ -98,7 +98,9 @@ export type WireHub = {
   dispose: () => Promise<void>
 }
 
-export function createWireHub(options: { retentionSeconds?: number } = {}): WireHub {
+export function createWireHub(
+  options: { retentionSeconds?: number; authorize?: AuthorizeHook } = {},
+): WireHub {
   const store = createMemoryStore({
     retention: { max: options.retentionSeconds ?? 30 * 24 * 60 * 60 },
   })
@@ -110,6 +112,8 @@ export function createWireHub(options: { retentionSeconds?: number } = {}): Wire
     store,
     transport: firstTransports.server,
     purge: false,
+    authorize: options.authorize,
+    receiveAuthCacheTTL: 0,
   })
   let firstUsed = false
   const subscriptions: Array<HubReceiveSubscription> = []

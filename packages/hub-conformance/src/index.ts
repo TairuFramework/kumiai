@@ -1302,6 +1302,10 @@ export {
   testMailboxHubConformance,
 } from './log-hub.js'
 export {
+  type TopicAuthorizationConformanceParams,
+  testTopicAuthorizationConformance,
+} from './topic-authorization.js'
+export {
   testWakeRegistryConformance,
   type WakeRegistryConformanceParams,
 } from './wake-registry.js'

@@ -1,6 +1,7 @@
 import {
   type ConformanceLogHub,
   type ConformanceReceiveSubscription,
+  testLogAckConformance,
   testLogHubConformance,
 } from '@kumiai/hub-conformance'
 import type { HubStore, StoredMessage } from '@kumiai/hub-protocol'
@@ -12,10 +13,9 @@ const MAX_DEPTH = 6
 
 /**
  * A `HubStore` has no push side, so `receive` is a poll over `fetch` with the cursor the store
- * itself hands back. It acks nothing: an ack would delete the mailbox frames the clauses are
- * observing, and none of the properties under test live here — the sender exclusion, the sequenceID
- * format, the retention refusal and the depth bound are all in the store's own `publish` and
- * `subscribe`. This adapter can only lose messages, never invent one.
+ * itself hands back. Acknowledgements go straight to the store. Sender exclusion, sequenceIDs,
+ * retention refusal and depth bounds all come from the store. This adapter can only lose
+ * messages, never invent one.
  */
 function pollingReceive(store: HubStore, recipientDID: string): ConformanceReceiveSubscription {
   let stopped = false
@@ -34,6 +34,7 @@ function pollingReceive(store: HubStore, recipientDID: string): ConformanceRecei
     return: () => {
       stopped = true
     },
+    ack: (sequenceID) => store.ack({ recipientDID, sequenceIDs: [sequenceID] }),
   }
 }
 
@@ -60,6 +61,13 @@ function createStoreAsLogHub(options: {
 }
 
 testLogHubConformance({
+  label: 'createMemoryStore',
+  createHub: createStoreAsLogHub,
+  maxRetention: MAX_RETENTION,
+  maxDepth: MAX_DEPTH,
+})
+
+testLogAckConformance({
   label: 'createMemoryStore',
   createHub: createStoreAsLogHub,
   maxRetention: MAX_RETENTION,

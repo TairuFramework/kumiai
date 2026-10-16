@@ -2,6 +2,7 @@ import {
   type ConformanceLogHub,
   type ConformanceReceiveSubscription,
   testHubStoreConformance,
+  testLogAckConformance,
   testLogHubConformance,
 } from '@kumiai/hub-conformance'
 import type { HubStore, StoredMessage } from '@kumiai/hub-protocol'
@@ -117,6 +118,13 @@ describe.each(backends())('$name', (backend) => {
   })
 
   testLogHubConformance({
+    label: backend.name,
+    createHub: async (limits) => logHubOver(await storeFor(backend, limits)),
+    maxRetention: MAX_RETENTION,
+    maxDepth: MAX_DEPTH,
+  })
+
+  testLogAckConformance({
     label: backend.name,
     createHub: async (limits) => logHubOver(await storeFor(backend, limits)),
     maxRetention: MAX_RETENTION,

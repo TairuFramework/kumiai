@@ -31,6 +31,10 @@ testLogHubConformance({
   createHub: (options) => new DurableFakeHub(options),
   maxRetention: MAX_RETENTION,
   maxDepth: MAX_DEPTH,
+  reconnect: (hub, did) => {
+    hub.detach(did)
+    hub.reattach(did)
+  },
 })
 
 // DurableFakeHub declares an ack (`durable-fake-hub.ts`), so it opts into the clauses that assert
