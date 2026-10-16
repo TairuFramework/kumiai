@@ -40,6 +40,78 @@ const empty = (): Rpc.ControlSnapshot => ({
 })
 
 describe('control safety fields', () => {
+  test.each(['app-report', 'internal'] as const)(
+    'preserves producer %s and reads it once',
+    async (producer) => {
+      const expected = { ...halt(), producer }
+      for (const source of ['RPC', 'independent double'] as const) {
+        let reads = 0
+        const value = Object.defineProperty(halt(), 'producer', {
+          get: () => (++reads === 1 ? producer : 'invalid'),
+        })
+        const result =
+          source === 'RPC'
+            ? Rpc.applyChanges(empty(), { forkHalt: value }, null, key)
+            : await (async () => {
+                const store = Memory.createMemoryControlStore(key)
+                await store.apply({ forkHalt: value }, 'report')
+                return store.load()
+              })()
+        expect(reads).toBe(1)
+        expect(result.forkHalt).toEqual(expected)
+      }
+    },
+  )
+
+  test.each(['other', null, 1])(
+    'rejects unknown producer %j in both reducers',
+    async (producer) => {
+      const changes = { forkHalt: { ...halt(), producer } } as unknown as Rpc.ControlChanges
+      expect(() => Rpc.applyChanges(empty(), changes, null, key)).toThrow(TypeError)
+      const store = Memory.createMemoryControlStore(key)
+      await expect(store.apply(changes, 'invalid-producer')).rejects.toThrow(TypeError)
+      expect((await store.load()).forkHalt).toBeNull()
+      expect(await store.lastMutation()).toBeNull()
+    },
+  )
+
+  test.each([undefined, 'app-report', 'internal'] as const)(
+    'producer %s cannot be reclassified while held',
+    async (producer) => {
+      const original = { ...halt(), ...(producer === undefined ? {} : { producer }) }
+      const replacement = {
+        ...halt(),
+        producer: producer === 'app-report' ? ('internal' as const) : ('app-report' as const),
+      }
+      const snapshot = Rpc.applyChanges(empty(), { forkHalt: original }, null, key)
+      expect(() => Rpc.applyChanges(snapshot, { forkHalt: replacement }, null, key)).toThrow()
+      const store = Memory.createMemoryControlStore(key)
+      await store.apply({ forkHalt: original }, 'original')
+      await expect(store.apply({ forkHalt: replacement }, 'replacement')).rejects.toThrow()
+      expect((await store.load()).forkHalt).toEqual(original)
+      expect(await store.lastMutation()).toBe('original')
+    },
+  )
+
+  test('app clear requests require provider authority even for app-owned event IDs', () => {
+    const snapshot = Rpc.applyChanges(
+      empty(),
+      { forkHalt: { ...halt(), producer: 'app-report' } },
+      null,
+      key,
+    )
+    const before = structuredClone(snapshot)
+    expect(() =>
+      Rpc.applyChanges(
+        snapshot,
+        { clearAppHold: { eventID: halt().eventID, reportMutationID: 'report' } },
+        null,
+        key,
+      ),
+    ).toThrow()
+    expect(snapshot).toEqual(before)
+  })
+
   test('stable event IDs', () => {
     expect(Rpc.forkEventID(key)).toBe('["group:fork","g",2]')
     expect(Rpc.recoveryUnavailableEventID(key)).toBe('["group:recovery-unavailable","g",2]')

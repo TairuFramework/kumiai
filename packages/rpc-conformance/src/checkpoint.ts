@@ -8,17 +8,21 @@ import type {
 import type { ConformanceForkNotice, ConformanceForkNoticeEvent } from './fork-notice.js'
 import { storageChange } from './group-storage.js'
 import type {
+  ConformanceAppHoldRecord,
   ConformanceBranchAbandonedEvent,
   ConformanceCheckpointFactRecord,
   ConformanceGroupKey,
   ConformanceGroupStores,
   ConformanceGroupTransaction,
+  ConformanceHoldHistoryRecord,
   ConformancePersistenceFixture,
   FixtureOptions,
   StorageTestPorts,
 } from './persistence-fixture.js'
 
 export type ConformanceCheckpointRecord<Position extends string = string> =
+  | ConformanceAppHoldRecord
+  | ConformanceHoldHistoryRecord
   | {
       kind: 'branch-abandonment'
       id: string

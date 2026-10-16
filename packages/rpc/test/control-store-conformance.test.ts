@@ -16,6 +16,7 @@ import {
   createMemoryControlStore,
   type MemoryControlStore,
 } from '../../rpc-conformance/src/memory-control-store.js'
+import { testReportedHoldStorageConformance } from '../../rpc-conformance/src/safety.js'
 import { forkEventID, recoveryUnavailableEventID } from '../src/control/safety.js'
 import type { AdoptionWrite, ControlSlot, Operation } from '../src/control/types.js'
 import { asLogPosition } from '../src/cursor.js'
@@ -393,4 +394,35 @@ describe('memory MLS and peer builder safety', () => {
     },
     cryptoCalls: () => build.cryptoCalls() + adoption.cryptoCalls(),
   })
+})
+
+const appHoldKey = { groupID: 'reported-hold-double', incarnation: 1 }
+testReportedHoldStorageConformance({
+  label: 'independent memory double',
+  async createFixture() {
+    const store = createMemoryControlStore(appHoldKey)
+    return {
+      key: appHoldKey,
+      control: store,
+      async report() {
+        const halt = {
+          eventID: forkEventID(appHoldKey),
+          producer: 'app-report' as const,
+          detectedAt: Date.now(),
+          evidence: {
+            kind: 'unexplained-own-commit' as const,
+            epoch: 0,
+            position: '1',
+            digest: crypto.randomUUID(),
+          },
+        }
+        await store.reportAppHold(halt, crypto.randomUUID())
+        return halt
+      },
+      clear: () => store.clearReportedHold(),
+      records: () => store.holdRecords(),
+      reopen: async () => ({ control: store, records: () => store.holdRecords() }),
+      close: async () => {},
+    }
+  },
 })

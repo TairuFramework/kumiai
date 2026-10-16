@@ -1,4 +1,5 @@
 import type { ConformanceAnchorSlot, ConformanceAnchorStore } from './anchor-store.js'
+import type { ConformanceCheckpointRecord } from './checkpoint.js'
 import type {
   ConformanceAcceptedRejoinSettlement,
   ConformanceAdoptionExpected,
@@ -22,6 +23,9 @@ import type { ConformanceRecoveryReconciliation } from './group-mls.js'
 
 export type MemoryControlStore<Position extends string = string> =
   ConformanceControlStore<Position> & {
+    reportAppHold(halt: ConformanceForkHalt, reportMutationID: string): Promise<void>
+    clearReportedHold(): Promise<void>
+    holdRecords(): Promise<Array<ConformanceCheckpointRecord>>
     retainForkContinuation(snapshot: ConformanceControlSnapshot<Position>): Promise<void>
     authoriseFork(attempt: ConformanceForkRecoveryAttempt): Promise<void>
     forkHistory(): Promise<Array<ConformanceCapturedRejoinRecord<Position>>>
@@ -198,6 +202,7 @@ function copyEvidence(value: unknown): unknown {
 
 function copySafety(field: 'forkHalt' | 'recoveryUnavailable', value: unknown): unknown {
   if (value === null || typeof value !== 'object') return value
+  const producer = field === 'forkHalt' ? Reflect.get(value, 'producer') : undefined
   const names =
     field === 'forkHalt'
       ? ['eventID', 'evidence', 'detectedAt']
@@ -207,6 +212,7 @@ function copySafety(field: 'forkHalt' | 'recoveryUnavailable', value: unknown): 
     const child: unknown = Reflect.get(value, name)
     result[name] = field === 'forkHalt' && name === 'evidence' ? copyEvidence(child) : child
   }
+  if (producer !== undefined) result.producer = producer
   return result
 }
 
@@ -246,6 +252,9 @@ function checkSafetyIdentity(
   const body = value as Record<string, unknown>
   if (field === 'forkHalt') {
     if (
+      (body.producer !== undefined &&
+        body.producer !== 'app-report' &&
+        body.producer !== 'internal') ||
       body.eventID !== JSON.stringify(['group:fork', key.groupID, key.incarnation]) ||
       typeof body.detectedAt !== 'number' ||
       !Number.isFinite(body.detectedAt) ||
@@ -325,6 +334,8 @@ function mutateControl<Position extends string>(
   context: Context | null = null,
   key: ConformanceGroupKey | null = null,
 ): void {
+  if ('clearAppHold' in changes)
+    throw new TypeError('App hold release requires coordinator authority')
   if (
     'forkRecoveryAttempt' in changes ||
     changes.putSettledRejoins?.some((row) => row.kind === 'superseded-branch')
@@ -452,6 +463,7 @@ export function createMemoryControlStore<Position extends string = string>(
 ): MemoryControlStore<Position> {
   const fixedKey = { ...key }
   let record: {
+    holdRecords: Array<ConformanceCheckpointRecord>
     forkContinuation: ConformanceControlSnapshot<Position> | null
     forkHistory: Array<ConformanceCapturedRejoinRecord<Position>>
     state: Uint8Array | null
@@ -461,6 +473,7 @@ export function createMemoryControlStore<Position extends string = string>(
     control: ConformanceControlSnapshot<Position>
     mutationID: string | null
   } = {
+    holdRecords: [],
     forkContinuation: null,
     forkHistory: [],
     state: null,
@@ -503,6 +516,63 @@ export function createMemoryControlStore<Position extends string = string>(
     }
   }
   return {
+    async reportAppHold(halt, reportMutationID) {
+      if (record.control.forkHalt !== null) return
+      if (halt.producer !== 'app-report') throw new TypeError('App report required')
+      const next = cloneValue(record)
+      mutateControl(next.control, { forkHalt: halt }, null, fixedKey)
+      const id = JSON.stringify([
+        'app-hold',
+        fixedKey.groupID,
+        fixedKey.incarnation,
+        reportMutationID,
+      ])
+      if (next.holdRecords.some((row) => row.id === id))
+        throw new TypeError('Report identity reused')
+      next.holdRecords.push({
+        kind: 'app-hold',
+        id,
+        key: { ...fixedKey },
+        producer: 'app-report',
+        eventID: halt.eventID,
+        reportMutationID,
+        clearedAt: null,
+      })
+      next.mutationID = reportMutationID
+      finish(next, 'apply')
+    },
+    async clearReportedHold() {
+      const halt = record.control.forkHalt
+      if (halt?.producer !== 'app-report') return
+      const provenance = record.holdRecords.find(
+        (row) =>
+          row.kind === 'app-hold' &&
+          row.producer === 'app-report' &&
+          row.clearedAt === null &&
+          equal(row.key, fixedKey) &&
+          row.eventID === halt.eventID,
+      )
+      if (provenance?.kind !== 'app-hold') return
+      const next = cloneValue(record)
+      const index = next.holdRecords.findIndex((row) => row.id === provenance.id)
+      next.holdRecords[index] = { ...provenance, clearedAt: Date.now() }
+      next.holdRecords.push({
+        kind: 'hold-history',
+        id: JSON.stringify([
+          'hold-history',
+          fixedKey.groupID,
+          fixedKey.incarnation,
+          provenance.reportMutationID,
+        ]),
+        key: { ...fixedKey },
+        halt: cloneValue(halt),
+        reportMutationID: provenance.reportMutationID,
+      })
+      next.control.forkHalt = null
+      next.mutationID = crypto.randomUUID()
+      finish(next, 'apply')
+    },
+    holdRecords: async () => cloneValue(record.holdRecords),
     async retainForkContinuation(snapshot) {
       const saved = snapshot.rejoin
       if (

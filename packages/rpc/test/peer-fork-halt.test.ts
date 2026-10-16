@@ -164,6 +164,7 @@ test('fork halt latches immediately, persists only safety, and notifies once aft
   expect(member.controlWalk.safetyHold()).toBe('fork-halted')
   const after = await member.control.load()
   expect(after.forkHalt).toEqual({
+    producer: 'internal',
     eventID: forkEventID(member.control.key),
     evidence,
     detectedAt: expect.any(Number),

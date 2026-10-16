@@ -15,6 +15,7 @@ import {
   startBranchCoverage,
 } from './branch-history.js'
 import { checkpointPreparation } from './checkpoint-capture.js'
+import { appHoldPreparation } from './clear-hold.js'
 import {
   memoryOpen,
   memoryOperation,
@@ -30,6 +31,7 @@ import { supersededRejoinPrepared } from './registry/recovery-coordinator.js'
 import { conditionPreparation } from './safety-conditions.js'
 
 const journalCaptures = new WeakMap<object, Map<string, CheckpointRecord>>()
+const appHolds = new WeakMap<object, Map<string, CheckpointRecord>>()
 const histories = new WeakMap<object, Array<CheckpointRecord>>()
 const conditionCaptures = new WeakMap<object, Map<string, CheckpointRecord>>()
 const captures = new WeakMap<object, Map<string, Uint8Array>>()
@@ -56,6 +58,17 @@ export function assertCheckpointUpdates(
           !sameStoredValue(journalCaptures.get(entry)?.get(row.id), next))
       )
         throw new GroupStateConflictError('Branch journal requires dedicated writer authority')
+    }
+    if (row.kind === 'app-hold' || row.kind === 'hold-history') {
+      const next = after.find((value) => value.id === row.id)
+      const previous = before.find((value) => value.id === row.id)
+      if (
+        !sameStoredValue(previous, next) &&
+        (entry === undefined ||
+          !appHolds.get(entry)?.has(row.id) ||
+          !sameStoredValue(appHolds.get(entry)?.get(row.id), next))
+      )
+        throw new GroupStateConflictError('App hold records require coordinator authority')
     }
     if (row.kind === 'superseded-rejoin') {
       const next = after.find((value) => value.id === row.id)
@@ -130,6 +143,8 @@ function validate(record: CheckpointRecord, groupID: string, id: string): void {
       'own-branch-messages',
       'others-seen',
       'branch-coverage',
+      'app-hold',
+      'hold-history',
       'fact',
       'superseded-rejoin',
       'condition',
@@ -253,12 +268,21 @@ export function createCheckpointStore(
       const condition = record.kind === 'condition' ? conditionPreparation(record) : undefined
       const canonical = record.kind === 'fact' ? checkpointPreparation(record) : undefined
       const journal = branchHistoryPreparation(record)
+      const appHold =
+        record.kind === 'app-hold' || record.kind === 'hold-history'
+          ? appHoldPreparation(record)
+          : undefined
       const result = put(record)
       const entry = memoryTransactionEntry(tx.rows)
       if (journal !== undefined && entry !== undefined) {
         const prepared = journalCaptures.get(entry) ?? new Map<string, CheckpointRecord>()
         prepared.set(record.id, journal)
         journalCaptures.set(entry, prepared)
+      }
+      if (appHold !== undefined && entry !== undefined) {
+        const prepared = appHolds.get(entry) ?? new Map<string, CheckpointRecord>()
+        prepared.set(record.id, appHold)
+        appHolds.set(entry, prepared)
       }
       if (history !== undefined && entry !== undefined)
         histories.set(entry, [...(histories.get(entry) ?? []), copyStoredValue(history)])

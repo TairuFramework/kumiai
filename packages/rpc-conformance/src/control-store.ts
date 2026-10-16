@@ -68,6 +68,7 @@ export type ConformanceGroupForkEvidence =
   | { kind: 'unexplained-own-commit'; epoch: number; position: string; digest: string }
 
 export type ConformanceForkHalt = {
+  producer?: 'app-report' | 'internal'
   eventID: string
   evidence: ConformanceGroupForkEvidence
   detectedAt: number
@@ -122,6 +123,7 @@ export type ConformanceControlChanges<Position extends string = string> = {
   commitOnce?: ConformanceControlSlot<Position> | null
   commitOnceAcceptance?: ConformanceFirstValidCommit<Position> | null
   controlHold?: ConformanceControlSnapshot<Position>['controlHold']
+  clearAppHold?: { eventID: string; reportMutationID: string }
   forkHalt?: ConformanceForkHalt
   recoveryUnavailable?: ConformanceRecoveryUnavailableEvent
   strand?: ConformanceControlSnapshot<Position>['strand']
@@ -386,6 +388,35 @@ export function testControlSafetyInputConformance(params: {
   }
 
   describe('ControlStore safety inputs', () => {
+    test.each([undefined, 'app-report', 'internal'] as const)(
+      'bare callers cannot clear a halt with producer %s',
+      async (producer) => {
+        const store = await params.open()
+        const halt = {
+          ...safety(store.key).forkHalt,
+          ...(producer === undefined ? {} : { producer }),
+        }
+        await store.apply({ forkHalt: halt }, 'report')
+        const before = await store.load()
+        const mutation = await store.lastMutation()
+        for (const request of [
+          { eventID: halt.eventID, reportMutationID: 'report' },
+          { eventID: 'wrong-event', reportMutationID: 'report' },
+          { eventID: halt.eventID, reportMutationID: 'wrong-report' },
+        ]) {
+          for (const changes of [
+            { clearAppHold: request },
+            Object.create({ clearAppHold: request }),
+          ]) {
+            await expect(store.apply(changes, 'unauthorised-clear')).rejects.toThrow()
+            expect(await store.load()).toEqual(before)
+            expect(await store.lastMutation()).toBe(mutation)
+          }
+        }
+        expect((await (await params.reopen()).load()).forkHalt).toEqual(halt)
+      },
+    )
+
     test.each(keyFields)('reads the supplied %s accessor once', async (field) => {
       const store = await params.open()
       const expected = safety(store.key)[field]

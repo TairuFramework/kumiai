@@ -174,8 +174,10 @@ export * from './registry-fixture.js'
 export {
   type ConformanceGroupSafety,
   type ConformanceManualRecovery,
+  type ReportedHoldStorageFixture,
   type RosterAbsenceFixture,
   type RosterAbsenceScenario,
   runGroupSafetyContract,
+  testReportedHoldStorageConformance,
   testRosterAbsenceConformance,
 } from './safety.js'

@@ -12,6 +12,7 @@ import {
   recordOwnBranchMessage,
 } from './branch-history.js'
 import { createUnlockedCheckpointStore } from './checkpoint-store.js'
+import { consumeAppHoldClear } from './clear-hold.js'
 import { controlBuildContexts } from './control-write-context.js'
 import {
   assertMemoryWrite,
@@ -193,7 +194,7 @@ const emptyControl = (): ControlSnapshot => ({
 })
 
 export function copyControlChanges(changes: ControlChanges, key: GroupKey): ControlChanges {
-  const { forkHalt, recoveryUnavailable, ...ordinary } = changes
+  const { forkHalt, recoveryUnavailable, clearAppHold, ...ordinary } = changes
   // Materialize safety before an own-property clone can erase supplied fields.
   const safety = applyChanges(
     emptyControl(),
@@ -206,6 +207,7 @@ export function copyControlChanges(changes: ControlChanges, key: GroupKey): Cont
   )
   return {
     ...copyStoredValue(ordinary),
+    ...('clearAppHold' in changes ? { clearAppHold: copyStoredValue(clearAppHold) } : {}),
     ...(safety.forkHalt === null ? {} : { forkHalt: safety.forkHalt }),
     ...(safety.recoveryUnavailable === null
       ? {}
@@ -388,20 +390,44 @@ export function createUnlockedIncarnationStores(params: {
           !(slotOnly && context?.kind === 'retirement' && sameStoredValue(context.key, key))
         )
           await active()
+        const appHoldClear = consumeAppHoldClear({
+          tx,
+          key,
+          changes: owned,
+          halt: previous.forkHalt,
+          mutationID,
+          records: 'clearAppHold' in owned ? await stateStores.checkpoints.list() : [],
+        })
         const snapshot = applyChanges(
           previous,
           owned,
           context,
           key,
           completing ? completion.forkRecovery : undefined,
+          appHoldClear,
         )
-        if (previous.forkHalt === null && snapshot.forkHalt !== null)
+        if (previous.forkHalt === null && snapshot.forkHalt !== null) {
+          // The stable event ID replays the current incident. Earlier evidence remains in history.
+          const existing = await meta.load(eventID(forkEventID(key)))
+          if (
+            existing !== null &&
+            'kind' in existing &&
+            existing.kind === 'group:fork' &&
+            (await stateStores.checkpoints.list()).some(
+              (row) =>
+                row.kind === 'hold-history' &&
+                sameStoredValue(row.key, key) &&
+                sameStoredValue(row.halt, existing.halt),
+            )
+          )
+            meta.remove(eventID(existing.id))
           await putEvent({
             ...key,
             id: forkEventID(key),
             kind: 'group:fork',
             halt: snapshot.forkHalt,
           })
+        }
         if (previous.recoveryUnavailable === null && snapshot.recoveryUnavailable !== null)
           await putEvent(snapshot.recoveryUnavailable)
         await control.save('current', { snapshot, mutationID })

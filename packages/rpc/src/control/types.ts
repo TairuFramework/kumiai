@@ -65,6 +65,8 @@ export type ControlChanges = {
   commitOnce?: ControlSlot | null
   commitOnceAcceptance?: FirstValidCommit | null
   controlHold?: ControlHold | null
+  // Requires provider-owned report provenance and transaction authority.
+  clearAppHold?: { eventID: string; reportMutationID: string }
   forkHalt?: ForkHalt
   recoveryUnavailable?: RecoveryUnavailableEvent
   strand?: ControlSnapshot['strand']

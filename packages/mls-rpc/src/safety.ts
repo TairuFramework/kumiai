@@ -16,6 +16,7 @@ import {
 } from '@kumiai/rpc'
 
 import { acknowledgeBranchAbandonment, branchAbandonmentEvents } from './branch-history.js'
+import { writeAppHoldReport } from './clear-hold.js'
 import { coordinatorBinding } from './entry-capability.js'
 import { sameStoredValue } from './memory-incarnation-stores.js'
 import { isStoredOpenFailure } from './persistence-codec.js'
@@ -166,7 +167,12 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
           : { ...supplied }
       const detectedAt = Date.now()
       if (!validKey(key)) throw new ForkReportRefusedError({ reason: 'key' })
-      const halt = { eventID: forkEventID(key), evidence, detectedAt }
+      const halt = {
+        eventID: forkEventID(key),
+        evidence,
+        detectedAt,
+        producer: 'app-report' as const,
+      }
       const mutationID = crypto.randomUUID()
       try {
         await entry.run(
@@ -197,7 +203,7 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
             const trust = await readRetainedTrust({ trust: stores.trust.load }, key)
             if (!sameStoredValue(trust?.installed, identity))
               throw new ForkReportRefusedError({ reason: 'authenticator' })
-            await target.control.apply({ forkHalt: halt }, mutationID)
+            await writeAppHoldReport(stores, key, halt, mutationID)
           },
         )
       } catch (error) {

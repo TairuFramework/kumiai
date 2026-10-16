@@ -230,8 +230,10 @@ function materializeForkEvidence(value: unknown): unknown {
 function materializeSafetyBody(field: 'forkHalt' | 'recoveryUnavailable', value: unknown): unknown {
   if (value === null || typeof value !== 'object') return value
   const body = value as Record<string, unknown>
+  const producer = field === 'forkHalt' ? body.producer : undefined
   return field === 'forkHalt'
     ? {
+        ...(producer === undefined ? {} : { producer }),
         eventID: body.eventID,
         evidence: materializeForkEvidence(body.evidence),
         detectedAt: body.detectedAt,
@@ -282,7 +284,10 @@ function assertSafetyIdentity(
   const body = value as Record<string, unknown>
   const valid =
     field === 'forkHalt'
-      ? body.eventID === forkEventID(key) &&
+      ? (body.producer === undefined ||
+          body.producer === 'app-report' ||
+          body.producer === 'internal') &&
+        body.eventID === forkEventID(key) &&
         typeof body.detectedAt === 'number' &&
         Number.isFinite(body.detectedAt) &&
         validForkEvidence(body.evidence)
@@ -302,7 +307,17 @@ export function applyChanges(
   context: CommitOnceWriteContext | null = null,
   key: GroupKey | null = null,
   forkRecovery?: { attempt: ForkRecoveryAttempt | null; supersededID?: string },
+  appHoldClear?: { eventID: string; reportMutationID: string },
 ): ControlSnapshot {
+  if (
+    'clearAppHold' in changes &&
+    (appHoldClear === undefined ||
+      !sameValue(changes.clearAppHold, appHoldClear) ||
+      snapshot.forkHalt?.producer !== 'app-report' ||
+      snapshot.forkHalt.eventID !== appHoldClear.eventID ||
+      'forkHalt' in changes)
+  )
+    throw new ControlStoreInvariantError('App hold release requires coordinator authority')
   if ('forkRecoveryAttempt' in changes)
     throw new ControlStoreInvariantError('Fork recovery intent requires coordinator authority')
   if (
@@ -402,7 +417,7 @@ export function applyChanges(
     commitOnce: changes.commitOnce === undefined ? snapshot.commitOnce : changes.commitOnce,
     commitOnceAcceptance: acceptance,
     controlHold: changes.controlHold === undefined ? snapshot.controlHold : changes.controlHold,
-    forkHalt: snapshot.forkHalt ?? safety.forkHalt ?? null,
+    forkHalt: 'clearAppHold' in changes ? null : (snapshot.forkHalt ?? safety.forkHalt ?? null),
     recoveryUnavailable: snapshot.recoveryUnavailable ?? safety.recoveryUnavailable ?? null,
     strand: changes.strand === undefined ? snapshot.strand : changes.strand,
     operations: putRows(

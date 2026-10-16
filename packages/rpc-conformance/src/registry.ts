@@ -970,7 +970,12 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
             value: (await fixture.device.groups.loadTrust(groupID))?.installed,
           })
           if (outcome === 'commit') {
-            expect(halt).toEqual({ eventID, evidence: reported, detectedAt: expect.any(Number) })
+            expect(halt).toEqual({
+              producer: 'app-report',
+              eventID,
+              evidence: reported,
+              detectedAt: expect.any(Number),
+            })
             expect(events).toEqual({ value: [{ ...key, id: eventID, kind: 'group:fork', halt }] })
             expect(notifications).toHaveLength(1)
           } else {

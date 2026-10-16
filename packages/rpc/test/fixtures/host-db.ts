@@ -145,6 +145,8 @@ export function createMemoryHostDatabase(
         }),
         lastMutation: async () => read(storageID).mutationID,
         apply: async (changes, mutationID) => {
+          if ('clearAppHold' in changes)
+            throw new TypeError('App hold release requires coordinator authority')
           const { forkHalt, recoveryUnavailable, ...ordinary } = changes
           // Materialize safety before an own-property clone can erase supplied fields.
           const safety = applyChanges(

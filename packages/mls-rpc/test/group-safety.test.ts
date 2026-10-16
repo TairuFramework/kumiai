@@ -501,6 +501,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         const halt = (await fixture.device.groups.ports(key).control.load()).forkHalt
         expect(halt?.evidence).toEqual(expected)
         expect(halt?.detectedAt).toBe(123)
+        expect(halt?.producer).toBe('app-report')
         clock.mockRestore()
       } finally {
         vi.restoreAllMocks()

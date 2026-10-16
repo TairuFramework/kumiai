@@ -1,7 +1,10 @@
 import { describe, expect, test } from 'vitest'
 
+import type { ConformanceCheckpointRecord } from './checkpoint.js'
 import type {
+  ConformanceControlStore,
   ConformanceEpochIdentity,
+  ConformanceForkHalt,
   ConformanceGroupCondition,
   ConformanceGroupConditionEvent,
   ConformanceGroupForkEvidence,
@@ -242,7 +245,12 @@ export function runGroupSafetyContract<THandle extends ConformanceRegistryHandle
       const after = await fixture.device.groups.ports(key).control.load()
       expect(after).toEqual({
         ...control,
-        forkHalt: { eventID: forkID(key), evidence: reported, detectedAt: expect.any(Number) },
+        forkHalt: {
+          producer: 'app-report',
+          eventID: forkID(key),
+          evidence: reported,
+          detectedAt: expect.any(Number),
+        },
       })
       expect(await fixture.safety().events(key)).toEqual([
         { ...key, id: forkID(key), kind: 'group:fork', halt: after.forkHalt },
@@ -681,5 +689,103 @@ export function runGroupSafetyContract<THandle extends ConformanceRegistryHandle
         expect(await fixture.inspectRows()).toEqual(before)
       },
     )
+  })
+}
+
+export type ReportedHoldStorageFixture = {
+  key: ConformanceGroupKey
+  control: ConformanceControlStore
+  report(): Promise<ConformanceForkHalt>
+  clear(): Promise<void>
+  records(): Promise<Array<ConformanceCheckpointRecord>>
+  reopen(): Promise<{
+    control: ConformanceControlStore
+    records(): Promise<Array<ConformanceCheckpointRecord>>
+  }>
+  close(): Promise<void>
+}
+
+export function testReportedHoldStorageConformance(params: {
+  label: string
+  createFixture(): Promise<ReportedHoldStorageFixture>
+}): void {
+  describe(`reported hold storage: ${params.label}`, () => {
+    async function run(work: (fixture: ReportedHoldStorageFixture) => Promise<void>) {
+      const fixture = await params.createFixture()
+      try {
+        await work(fixture)
+      } finally {
+        await fixture.close()
+      }
+    }
+    test('clear retains the exact report and provenance across reopen', () =>
+      run(async (f) => {
+        const halt = await f.report()
+        expect(halt.producer).toBe('app-report')
+        await f.clear()
+        await f.clear()
+        const reopened = await f.reopen()
+        expect((await reopened.control.load()).forkHalt).toBeNull()
+        const records = await reopened.records()
+        expect(records).toContainEqual(
+          expect.objectContaining({ kind: 'hold-history', key: f.key, halt }),
+        )
+        expect(records).toContainEqual(
+          expect.objectContaining({
+            kind: 'app-hold',
+            key: f.key,
+            producer: 'app-report',
+            clearedAt: expect.any(Number),
+          }),
+        )
+        const before = await reopened.records()
+        records.splice(0)
+        expect(await reopened.records()).toEqual(before)
+      }))
+    test('bare clear requests have no release authority', () =>
+      run(async (f) => {
+        const halt = await f.report()
+        const provenance = (await f.records()).find((row) => row.kind === 'app-hold')
+        if (provenance?.kind !== 'app-hold') throw new Error('Missing report provenance')
+        const before = await f.control.load()
+        const records = await f.records()
+        const mutation = await f.control.lastMutation()
+        await expect(
+          f.control.apply(
+            {
+              clearAppHold: {
+                eventID: halt.eventID,
+                reportMutationID: provenance.reportMutationID,
+              },
+            },
+            'bare-clear',
+          ),
+        ).rejects.toThrow()
+        expect(await f.control.load()).toEqual(before)
+        expect(await f.control.lastMutation()).toBe(mutation)
+        expect(await f.records()).toEqual(records)
+      }))
+    test('internal halt never inherits cleared app ownership', () =>
+      run(async (f) => {
+        const halt = await f.report()
+        await f.clear()
+        const internal = { ...halt, producer: 'internal' as const }
+        await f.control.apply({ forkHalt: internal }, 'internal-report')
+        const before = await f.control.load()
+        const records = await f.records()
+        await f.clear()
+        expect(await f.control.load()).toEqual(before)
+        expect(await f.records()).toEqual(records)
+      }))
+    test('successive reports keep distinct immutable histories', () =>
+      run(async (f) => {
+        const first = await f.report()
+        await f.clear()
+        const second = await f.report()
+        await f.clear()
+        const histories = (await f.records()).filter((row) => row.kind === 'hold-history')
+        expect(histories.map((row) => row.halt)).toEqual([first, second])
+        expect(new Set(histories.map((row) => row.id)).size).toBe(2)
+      }))
   })
 }

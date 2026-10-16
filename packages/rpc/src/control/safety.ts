@@ -32,7 +32,13 @@ export type GroupConditionEvent = GroupKey & {
   evidence: NotMemberEvidence | null
 }
 export type SafetyHold = 'fork-halted' | 'spent-set-corrupt' | 'recovery-unavailable' | null
-export type ForkHalt = { eventID: string; evidence: GroupForkEvidence; detectedAt: number }
+export type ForkHalt = {
+  eventID: string
+  evidence: GroupForkEvidence
+  detectedAt: number
+  // Absence identifies legacy halts, which require manual recovery.
+  producer?: 'app-report' | 'internal'
+}
 export type GroupSafetyEvent = GroupKey & { id: string; kind: 'group:fork'; halt: ForkHalt }
 export type RecoveryUnavailableEvent = GroupKey & {
   id: string

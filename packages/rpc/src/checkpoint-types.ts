@@ -1,4 +1,4 @@
-import type { GroupConditionEvent } from './control/safety.js'
+import type { ForkHalt, GroupConditionEvent } from './control/safety.js'
 import type { GroupKey } from './control/types.js'
 import type {
   ForkNotice,
@@ -103,6 +103,16 @@ export type CheckpointRecord =
       startedEpoch: number
       startedAuthHash: string
     }
+  | {
+      kind: 'app-hold'
+      id: string
+      key: GroupKey
+      producer: 'app-report'
+      eventID: string
+      reportMutationID: string
+      clearedAt: number | null
+    }
+  | { kind: 'hold-history'; id: string; key: GroupKey; halt: ForkHalt; reportMutationID: string }
   | {
       kind: 'superseded-rejoin'
       id: string

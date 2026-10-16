@@ -2948,6 +2948,7 @@ export function createGroupPeerWithControlWalk<
     }
   }
   const sameHalt = (left: ForkHalt, right: ForkHalt): boolean =>
+    left.producer === right.producer &&
     left.eventID === right.eventID &&
     left.detectedAt === right.detectedAt &&
     JSON.stringify(forkBody(left.evidence)) === JSON.stringify(forkBody(right.evidence))
@@ -2956,6 +2957,7 @@ export function createGroupPeerWithControlWalk<
     if (control === undefined || pendingForkHalt !== null) return
     const key = { ...control.key }
     const halt: ForkHalt = {
+      producer: 'internal',
       eventID: forkEventID(key),
       evidence: forkBody(evidence),
       detectedAt: Date.now(),

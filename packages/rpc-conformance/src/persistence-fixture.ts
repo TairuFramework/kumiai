@@ -7,6 +7,7 @@ import type {
   ConformanceControlChanges,
   ConformanceControlSnapshot,
   ConformanceControlStore,
+  ConformanceForkHalt,
   ConformanceGroupCondition,
   ConformanceGroupConditionEvent,
   ConformanceGroupSafetyEvent,
@@ -133,6 +134,22 @@ export type ConformanceCheckpointPreparation = {
 }
 
 export type ConformanceGroupKey = { groupID: string; incarnation: number }
+export type ConformanceAppHoldRecord = {
+  kind: 'app-hold'
+  id: string
+  key: ConformanceGroupKey
+  producer: 'app-report'
+  eventID: string
+  reportMutationID: string
+  clearedAt: number | null
+}
+export type ConformanceHoldHistoryRecord = {
+  kind: 'hold-history'
+  id: string
+  key: ConformanceGroupKey
+  halt: ConformanceForkHalt
+  reportMutationID: string
+}
 
 export type ConformanceEpochIdentity = ConformanceGroupKey & {
   epoch: number
