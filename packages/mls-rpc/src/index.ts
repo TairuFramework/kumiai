@@ -38,6 +38,7 @@ export {
   simpleHandleAccess,
 } from './access.js'
 export { type ApplyCommitParams, type ApplyCommitResult, applyCommit } from './apply-commit.js'
+export { incrementOthersSeen, recordOwnBranchMessage } from './branch-history.js'
 export { createCheckpointPort, createCheckpointService } from './checkpoint.js'
 export { createControlAdoptionPort } from './control-adoption.js'
 export {

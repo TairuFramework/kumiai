@@ -129,9 +129,14 @@ for (const mode of ['real-mls', 'double'] as const) {
           const records = await capability.read(id, (reads) => reads.checkpoints())
           expect(
             records.filter((record) => record.kind !== 'coverage').map((record) => record.kind),
-          ).toEqual(['fact', 'publication'])
+          ).toEqual(['fact', 'publication', 'branch-coverage'])
           const fact = records[0]
           if (fact?.kind !== 'fact') throw new Error('Missing registry installation fact')
+          expect(records.find((row) => row.kind === 'branch-coverage')).toMatchObject({
+            key: seed.key,
+            startedEpoch: seed.state.epoch,
+            startedAuthHash: decodeEpochRosterFact(fact.canonical).authHash,
+          })
           expect(decodeEpochRosterFact(fact.canonical)).toMatchObject({
             key: seed.key,
             installation: {
@@ -447,9 +452,14 @@ test('storage only removed installation retains its fact without publication', a
     const records = await fixture.entry().read(seed.key.groupID, (reads) => reads.checkpoints())
     expect(
       records.filter((record) => record.kind !== 'coverage').map((record) => record.kind),
-    ).toEqual(['fact'])
+    ).toEqual(['fact', 'branch-coverage'])
     const fact = records[0]
     if (fact?.kind !== 'fact') throw new Error('Missing removed installation fact')
+    expect(records.find((row) => row.kind === 'branch-coverage')).toMatchObject({
+      key: seed.key,
+      startedEpoch: seed.state.epoch,
+      startedAuthHash: decodeEpochRosterFact(fact.canonical).authHash,
+    })
     expect(decodeEpochRosterFact(fact.canonical)).toMatchObject({
       members: [],
       confirmedTranscriptHash: toB64U(client.groupContext.confirmedTranscriptHash),

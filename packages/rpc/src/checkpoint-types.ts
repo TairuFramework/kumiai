@@ -1,6 +1,6 @@
 import type { GroupConditionEvent } from './control/safety.js'
 import type { GroupKey } from './control/types.js'
-import type { ForkNotice, ForkNoticeEvent } from './fork-notice.js'
+import type { ForkNotice, ForkNoticeEvent, OwnBranchMessage } from './fork-notice.js'
 import type { CapturedRejoinRecord, ForkRecoveryAuthorisation } from './recovery-types.js'
 
 export type CheckpointComparison =
@@ -47,6 +47,29 @@ export type CheckpointService = CheckpointPort & {
 }
 
 export type CheckpointRecord =
+  | {
+      kind: 'own-branch-messages'
+      id: string
+      key: GroupKey
+      epoch: number
+      authHash: string
+      messages: Array<OwnBranchMessage>
+    }
+  | {
+      kind: 'others-seen'
+      id: string
+      key: GroupKey
+      epoch: number
+      authHash: string
+      count: number
+    }
+  | {
+      kind: 'branch-coverage'
+      id: string
+      key: GroupKey
+      startedEpoch: number
+      startedAuthHash: string
+    }
   | {
       kind: 'superseded-rejoin'
       id: string

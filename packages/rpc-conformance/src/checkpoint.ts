@@ -19,6 +19,29 @@ import type {
 
 export type ConformanceCheckpointRecord<Position extends string = string> =
   | {
+      kind: 'own-branch-messages'
+      id: string
+      key: ConformanceGroupKey
+      epoch: number
+      authHash: string
+      messages: Array<{ id: string; epoch: number; authHash: string }>
+    }
+  | {
+      kind: 'others-seen'
+      id: string
+      key: ConformanceGroupKey
+      epoch: number
+      authHash: string
+      count: number
+    }
+  | {
+      kind: 'branch-coverage'
+      id: string
+      key: ConformanceGroupKey
+      startedEpoch: number
+      startedAuthHash: string
+    }
+  | {
       kind: 'superseded-rejoin'
       id: string
       key: ConformanceGroupKey
@@ -439,7 +462,19 @@ export function testCheckpointStorageConformance<TTx extends ConformanceGroupTra
             .filter((record) => record.key.incarnation === 2 && record.kind !== 'coverage')
             .map((record) => record.kind)
             .sort(),
-        ).toEqual(['fact', 'publication'])
+        ).toEqual(['branch-coverage', 'fact', 'publication'])
+        const marker = after.find(
+          (row) => row.kind === 'branch-coverage' && row.key.incarnation === 2,
+        )
+        const destinationFact = after.find(
+          (row) => row.kind === 'fact' && row.key.incarnation === 2,
+        )
+        if (marker?.kind !== 'branch-coverage' || destinationFact?.kind !== 'fact')
+          throw new Error('Missing destination journal coverage')
+        expect(JSON.parse(new TextDecoder().decode(destinationFact.canonical))).toMatchObject({
+          epoch: marker.startedEpoch,
+          authHash: marker.startedAuthHash,
+        })
         for (const physicalRecord of (await fixture.inspectRawBytes()).filter(
           (row) => row.namespace === 'checkpoints',
         )) {

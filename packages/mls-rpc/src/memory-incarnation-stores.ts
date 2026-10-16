@@ -6,6 +6,12 @@ import {
   forkEventID,
 } from '@kumiai/rpc'
 
+import {
+  incrementOthersSeenBy,
+  installedBranchMetadata,
+  recordOwnBranchMessage,
+} from './branch-history.js'
+import { createUnlockedCheckpointStore } from './checkpoint-store.js'
 import { controlBuildContexts } from './control-write-context.js'
 import {
   assertMemoryWrite,
@@ -35,6 +41,7 @@ import type {
   AppStatusEvent,
   AtRestCodec,
   GroupKey,
+  GroupStores,
   IncarnationStores,
   MemoryTransaction,
   PendingAppFrame,
@@ -243,6 +250,13 @@ export function createUnlockedIncarnationStores(params: {
     atRest,
     requiredOpen: params.requiredOpen,
   })
+  const journalStores: GroupStores<MemoryTransaction> = {
+    ...stateStores,
+    tx,
+    checkpoints: createUnlockedCheckpointStore({ tx, groupID: key.groupID, atRest }),
+    incarnation: (incarnation) =>
+      createUnlockedIncarnationStores({ ...params, key: { ...key, incarnation } }),
+  }
   const table = <TValue>(namespace: string) =>
     memoryRecordTable<TValue>({ tx, key, namespace, atRest, requiredOpen: params.requiredOpen })
   const control = table<ControlRecord>('control')
@@ -411,9 +425,22 @@ export function createUnlockedIncarnationStores(params: {
       async put(records) {
         const owned = copyStoredValue(records)
         await active()
+        const state = await stateStores.state(key.incarnation).load()
+        const accepted = new Map<number, number>()
         for (const record of owned) {
           frameKey(record.frame)
+          const previous = await pending.load(record.frame.id)
+          const position = await cursor.load(await topicLocator(record.frame.topicID))
+          if (position !== null && BigInt(position.position) >= BigInt(record.frame.position))
+            continue
+          if (previous !== null) continue
           await pending.save(record.frame.id, record)
+          if (state !== null && !state.deleted && record.senderDID !== state.credential.id)
+            accepted.set(record.epoch, (accepted.get(record.epoch) ?? 0) + 1)
+        }
+        for (const [epoch, count] of accepted) {
+          const branch = await installedBranchMetadata(journalStores.checkpoints, key, epoch)
+          if (branch !== null) await incrementOthersSeenBy(journalStores, { key, ...branch }, count)
         }
       },
       async poison(records) {
@@ -469,6 +496,18 @@ export function createUnlockedIncarnationStores(params: {
               throw new GroupStateConflictError('Obligated entry cannot change')
           }
           if (!sameStoredValue(previous, entry)) await outbox.save(String(entry.seq), entry)
+          if (entry.lastAttempt !== null) {
+            const branch = await installedBranchMetadata(
+              journalStores.checkpoints,
+              key,
+              entry.lastAttempt.epoch,
+            )
+            if (branch !== null)
+              await recordOwnBranchMessage(journalStores, {
+                key,
+                message: { id: entry.lastAttempt.publishID, ...branch },
+              })
+          }
         }
       },
       async remove(seqs) {

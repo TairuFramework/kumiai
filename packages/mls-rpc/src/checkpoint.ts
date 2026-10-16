@@ -21,6 +21,7 @@ import { foldForkNotices, forkNoticeEmissions, retainForkEvidence } from '@kumia
 import { sha256 } from '@noble/hashes/sha2.js'
 import { toB64U } from '@sozai/codec'
 
+import { projectBranchHistory } from './branch-history.js'
 import { provenCheckpointFacts, readCheckpointCoverage } from './checkpoint-store.js'
 import type { EntryCapability } from './entry-capability.js'
 import { copyStoredValue, sameStoredValue } from './memory-incarnation-stores.js'
@@ -477,6 +478,20 @@ export function createCheckpointService(params: CheckpointServiceParams): Checkp
                 return saved
               }),
             )
+          }
+          records = projectBranchHistory(records)
+          for (const row of records) {
+            if (row.kind !== 'notice-event' || before.some((previous) => previous.id === row.id))
+              continue
+            const notice = records.find(
+              (candidate) => candidate.kind === 'notice' && candidate.id === row.event.notice.id,
+            )
+            if (notice?.kind === 'notice') {
+              row.event.notice.atRisk = copyStoredValue(notice.notice.atRisk)
+              row.event.notice.coverage.ownMessages = copyStoredValue(
+                notice.notice.coverage.ownMessages,
+              )
+            }
           }
           return { expected: lifetime, value: { before, records } }
         },

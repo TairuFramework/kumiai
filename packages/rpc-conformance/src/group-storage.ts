@@ -328,6 +328,77 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
 ): void {
   describe(`Group storage conformance -- ${params.label}`, () => {
     for (const ownership of ['supplied', 'absent'] as const) {
+      test(`branch journal survives acknowledgement and counts only accepted occurrences (${ownership} ownership context)`, async () => {
+        const fixture = await params.createFixture(groupID, {
+          ownershipContext: ownership === 'supplied' ? params.ownershipContext?.() : undefined,
+        })
+        try {
+          const groups = fixture.ports.device.groups
+          const seed = await storageSeed(fixture.ports)
+          const outbox = groups.ports(key).outbox
+          await outbox.put({
+            seq: 8,
+            protocol: 'chat',
+            prc: 'posted',
+            data: utf8('plaintext-sentinel'),
+            status: 'accepted',
+            lastAttempt: {
+              incarnation: 1,
+              epoch: seed.state.epoch,
+              publishID: 'prospective-shared',
+              attempts: 1,
+              floor: null,
+              segment: seed.state.epoch,
+              topicID,
+            },
+          })
+          await outbox.remove(8)
+          for (const event of await outbox.events()) await outbox.ackEvent(event.id)
+          const received = {
+            frame: {
+              ...key,
+              id: 'shared-received',
+              protocol: 'chat',
+              procedure: 'posted',
+              topicID,
+              segment: seed.state.epoch,
+              position: '11',
+            },
+            payload: utf8('plaintext-sentinel'),
+            senderDID: 'did:key:other',
+            epoch: seed.state.epoch,
+            idempotencyKey: 'shared-received',
+          }
+          await groups.transition(
+            await storageChange(groups, groupID, 'shared-receive'),
+            async (stores) => {
+              await stores.incarnation(1).pending.put([received, received])
+              await stores.incarnation(1).pending.complete([received.frame.id])
+              await stores.incarnation(1).cursor.save(topicID, '11')
+            },
+          )
+          const reopened = await fixture.reopen()
+          await reopened.device.groups.transition(
+            await storageChange(reopened.device.groups, groupID, 'shared-replay'),
+            async (stores) => {
+              await stores.incarnation(1).pending.put([received])
+            },
+          )
+          const records = await fixture.entry().read(groupID, (reads) => reads.checkpoints())
+          expect(records.filter((row) => row.kind === 'others-seen')).toEqual([
+            expect.objectContaining({ count: 1 }),
+          ])
+          expect(records.find((row) => row.kind === 'own-branch-messages')).toMatchObject({
+            messages: [
+              { id: 'prospective-shared', epoch: seed.state.epoch, authHash: expect.any(String) },
+            ],
+          })
+          await scanSealed(fixture)
+        } finally {
+          await fixture.close()
+        }
+      })
+
       test(`direct successful installations prepare matching fact and debt (${ownership} ownership context)`, async () => {
         const fixture = await params.createFixture(groupID, {
           ownershipContext: ownership === 'supplied' ? params.ownershipContext?.() : undefined,

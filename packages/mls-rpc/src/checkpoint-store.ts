@@ -1,3 +1,4 @@
+import { decodeEpochRosterFact } from '@kumiai/mls'
 import type {
   CheckpointCoverage,
   CheckpointFactRecord,
@@ -6,6 +7,12 @@ import type {
 } from '@kumiai/rpc'
 import { retainForkEvidence } from '@kumiai/rpc'
 
+import {
+  branchHistoryPreparation,
+  projectBranchHistory,
+  retainBranchHistory,
+  startBranchCoverage,
+} from './branch-history.js'
 import { checkpointPreparation } from './checkpoint-capture.js'
 import {
   memoryOpen,
@@ -21,6 +28,7 @@ import type { AtRestCodec, MemoryTransaction } from './persistence-types.js'
 import { supersededRejoinPrepared } from './registry/recovery-coordinator.js'
 import { conditionPreparation } from './safety-conditions.js'
 
+const journalCaptures = new WeakMap<object, Map<string, CheckpointRecord>>()
 const histories = new WeakMap<object, Array<CheckpointRecord>>()
 const conditionCaptures = new WeakMap<object, Map<string, CheckpointRecord>>()
 const captures = new WeakMap<object, Map<string, Uint8Array>>()
@@ -33,6 +41,17 @@ export function assertCheckpointUpdates(
   const entry = tx === undefined ? undefined : memoryTransactionEntry(tx.rows)
   const authorised = entry === undefined ? undefined : conditionCaptures.get(entry)
   for (const row of [...before, ...after]) {
+    if (['own-branch-messages', 'others-seen', 'branch-coverage'].includes(row.kind)) {
+      const next = after.find((value) => value.id === row.id)
+      const previous = before.find((value) => value.id === row.id)
+      if (
+        !sameStoredValue(previous, next) &&
+        (entry === undefined ||
+          next === undefined ||
+          !sameStoredValue(journalCaptures.get(entry)?.get(row.id), next))
+      )
+        throw new GroupStateConflictError('Branch journal requires dedicated writer authority')
+    }
     if (row.kind === 'superseded-rejoin') {
       const next = after.find((value) => value.id === row.id)
       const previous = before.find((value) => value.id === row.id)
@@ -86,6 +105,8 @@ export function assertCheckpointUpdates(
     )
       throw new GroupStateConflictError('Checkpoint debt requires coordinator authority')
   }
+  // Finalisation may prune rows before effects run.
+  if (entry !== undefined) journalCaptures.delete(entry)
 }
 
 export function checkpointCaptureFor(tx: MemoryTransaction, id: string): Uint8Array | undefined {
@@ -100,6 +121,9 @@ function validate(record: CheckpointRecord, groupID: string, id: string): void {
     !Number.isSafeInteger(record.key.incarnation) ||
     record.key.incarnation < 1 ||
     ![
+      'own-branch-messages',
+      'others-seen',
+      'branch-coverage',
       'fact',
       'superseded-rejoin',
       'condition',
@@ -193,6 +217,13 @@ export function createUnlockedCheckpointStore(params: {
       }),
     async put(record) {
       validate(record, groupID, record.id)
+      const journal = branchHistoryPreparation(record)
+      const entry = memoryTransactionEntry(tx.rows)
+      if (journal !== undefined && entry !== undefined) {
+        const prepared = journalCaptures.get(entry) ?? new Map<string, CheckpointRecord>()
+        prepared.set(record.id, journal)
+        journalCaptures.set(entry, prepared)
+      }
       await table.save(record.id, record)
     },
     async remove(ids) {
@@ -215,8 +246,14 @@ export function createCheckpointStore(
         record.kind === 'superseded-rejoin' && supersededRejoinPrepared(record) ? record : undefined
       const condition = record.kind === 'condition' ? conditionPreparation(record) : undefined
       const canonical = record.kind === 'fact' ? checkpointPreparation(record) : undefined
+      const journal = branchHistoryPreparation(record)
       const result = put(record)
       const entry = memoryTransactionEntry(tx.rows)
+      if (journal !== undefined && entry !== undefined) {
+        const prepared = journalCaptures.get(entry) ?? new Map<string, CheckpointRecord>()
+        prepared.set(record.id, journal)
+        journalCaptures.set(entry, prepared)
+      }
       if (history !== undefined && entry !== undefined)
         histories.set(entry, [...(histories.get(entry) ?? []), copyStoredValue(history)])
       if (condition !== undefined && entry !== undefined) {
@@ -361,6 +398,8 @@ export async function retainCheckpointInstallations(
         through: fact.epoch - 1,
         reason: from === 0 ? 'pre-join' : 'skipped',
       })
+    const decoded = decodeEpochRosterFact(fact.canonical)
+    await startBranchCoverage(store, fact.key, fact.epoch, decoded.authHash)
     facts.push(fact)
     current = { key: { ...fact.key }, epoch: fact.epoch }
   }
@@ -376,6 +415,7 @@ export async function retainCheckpointInstallations(
     } else retained.push(fact)
   }
   await store.remove([
+    ...retainBranchHistory(records, retained),
     ...records.flatMap((row) =>
       row.kind === 'condition' &&
       row.notification !== undefined &&
@@ -406,7 +446,7 @@ export async function retainCheckpointInstallations(
   )
     return
   const beforeEvidence = await store.list()
-  const afterEvidence = retainForkEvidence(beforeEvidence, retained, now)
+  const afterEvidence = retainForkEvidence(projectBranchHistory(beforeEvidence), retained, now)
   await store.remove(
     beforeEvidence
       .filter((row) => !afterEvidence.some((next) => next.id === row.id))

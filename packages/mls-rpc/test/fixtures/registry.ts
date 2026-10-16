@@ -906,7 +906,12 @@ export async function createForkNoticeFixture(params: {
   mode: 'real-mls' | 'double'
   ownershipContext?: OwnershipContextPort
   deferSplit?: boolean
-}): Promise<ForkNoticeFixture<LogPosition> & { installSplit(): Promise<void> }> {
+}): Promise<
+  ForkNoticeFixture<LogPosition> & {
+    installSplit(): Promise<void>
+    journalOwnMessage(id: string): Promise<{ id: string; epoch: number; authHash: string }>
+  }
+> {
   const real = await createRealGroup(1, `fork-notice-${crypto.randomUUID()}`)
   const member = real.members[0]
   if (member === undefined) throw new Error('Missing fork member')
@@ -1024,6 +1029,29 @@ export async function createForkNoticeFixture(params: {
     service: () => service,
     signingReads: () => signingReads,
     installSplit: install,
+    async journalOwnMessage(id) {
+      const epoch = Number(local.epoch)
+      const canonical = await service.checkpointFact(serviceKey, epoch)
+      if (canonical === null) throw new Error('Missing prospective installation')
+      const fact = decodeEpochRosterFact(canonical)
+      await fixture.device.groups.ports(serviceKey).outbox.put({
+        seq: 1,
+        protocol: 'chat',
+        prc: 'posted',
+        data: new Uint8Array([1]),
+        status: 'accepted',
+        lastAttempt: {
+          incarnation: serviceKey.incarnation,
+          epoch,
+          publishID: id,
+          attempts: 1,
+          floor: null,
+          segment: epoch,
+          topicID: 'own-message-topic',
+        },
+      })
+      return { id, epoch, authHash: fact.authHash }
+    },
     holdProof: () => fixture.armNextWorkFault('pending'),
     async raw() {
       const rows = await fixture.inspectRows()
