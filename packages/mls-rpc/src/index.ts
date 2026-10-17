@@ -35,6 +35,7 @@ export type {
   SafetyHold,
   SuccessorTombstone,
 } from '@kumiai/rpc'
+export { InvalidAppEntryError } from '@kumiai/rpc'
 
 export {
   type ControlHandleAccess,
@@ -96,7 +97,6 @@ export {
   GroupStateUncertainError,
   GroupUnavailableError,
   type GroupUnavailableReason,
-  InvalidAppEntryError,
   ManualRecoveryUnavailableError,
   NonRootProviderError,
   OutboxReplacementError,

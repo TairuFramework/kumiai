@@ -1,6 +1,8 @@
+import * as rpc from '@kumiai/rpc'
 import { expect, test } from 'vitest'
 
 import { createGroupCrypto } from '../src/crypto.js'
+import * as mlsRpc from '../src/index.js'
 import { createGroupMLS } from '../src/mls.js'
 import {
   buildRealCommit,
@@ -8,6 +10,10 @@ import {
   testGroupMLSDependencies,
   testHandleAccess,
 } from './fixtures/real-group.js'
+
+test('one InvalidAppEntryError class', () => {
+  expect(mlsRpc.InvalidAppEntryError).toBe(rpc.InvalidAppEntryError)
+})
 
 test('operation results carry the epoch used by the handle', async () => {
   const group = await createRealGroup(1, 'epoch-results')

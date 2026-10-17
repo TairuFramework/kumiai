@@ -2,6 +2,7 @@ import type { GroupKey } from './persistence-types.js'
 
 export {
   GroupControlUnsettledError,
+  InvalidAppEntryError,
   SpentSetCorruptError,
   StorageOutcomeUnknownError,
 } from '@kumiai/rpc'
@@ -42,10 +43,6 @@ export class RegistryRetireHookError extends Error {
 
 export class OutboxReplacementError extends Error {
   override name = 'OutboxReplacementError'
-}
-
-export class InvalidAppEntryError extends Error {
-  override name = 'InvalidAppEntryError'
 }
 
 export class NonRootProviderError extends Error {
