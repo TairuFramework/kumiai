@@ -120,6 +120,14 @@ test('real MLS delivers accepted plaintext after a commit overtakes publication'
   const { hub, alice, bob, received } = await setup()
   const secret = await deriveRecoverySecret(alice.handle())
   const topic = commitTopic(secret)
+  const opened: Array<{ bytes: Uint8Array; handleEpoch: number }> = []
+  const unwrap = alice.crypto.unwrap.bind(alice.crypto)
+  vi.spyOn(alice.crypto, 'unwrap').mockImplementation(async (bytes, options) => {
+    const handleEpoch = Number(alice.handle().epoch)
+    const result = await unwrap(bytes, options)
+    opened.push({ bytes, handleEpoch })
+    return result
+  })
   const publish = hub.log.publish.bind(hub.log)
   let injected = false
   vi.spyOn(hub.log, 'publish').mockImplementation(async (params) => {
@@ -136,7 +144,6 @@ test('real MLS delivers accepted plaintext after a commit overtakes publication'
   })
   const plaintext = { text: 'survives the epoch race' }
   await bob.peer.protocol('chat').dispatch('chat/posted', { data: plaintext })
-  await vi.waitFor(() => expect(received).toEqual([plaintext]), { timeout: 3000 })
   await vi.waitFor(async () => expect(await bob.appOutbox.list()).toEqual([]), { timeout: 3000 })
   const anchor = alice.anchorStore.stored()
   if (anchor == null) throw new Error('Missing anchor')
@@ -144,8 +151,21 @@ test('real MLS delivers accepted plaintext after a commit overtakes publication'
     (m) => m.senderDID === bob.identity.id && m.topicID !== topic,
   )
   expect(publications).toHaveLength(2)
+  expect(publications.map((m) => bob.crypto.frameEpoch(m.payload))).toEqual([1, 2])
+  expect(publications.map((m) => m.logPosition)).toEqual(['000000000002', '000000000003'])
+  expect(publications[0]?.payload).not.toEqual(publications[1]?.payload)
+  expect(opened).toEqual(publications.map((m) => ({ bytes: m.payload, handleEpoch: 2 })))
+  // Retained originals and their reseals are distinct occurrences of the same plaintext.
+  expect(received).toEqual([plaintext, plaintext])
   expect(publications.at(-1)?.topicID).toBe(protocolTopic(anchor.secret, anchor.epoch, 'chat'))
   expect(bob.handle().epoch).toBe(alice.handle().epoch)
+  await alice.peer.retryAppDelivery()
+  await alice.peer.replay()
+  expect(received).toEqual([plaintext, plaintext])
+  expect(opened).toEqual(publications.map((m) => ({ bytes: m.payload, handleEpoch: 2 })))
+  for (const topicID of new Set(publications.map((m) => m.topicID))) {
+    expect(alice.appCursorStore.stored(topicID)).toBe(hub.log.head(topicID))
+  }
 })
 
 test.each([
