@@ -5654,7 +5654,10 @@ export function createGroupPeerWithControlWalk<
     drained: () => {
       if (disposePromise == null)
         return Promise.reject(new Error('Call dispose() before drained()'))
-      return boundary.drained(disposePromise).then(() => commitTail)
+      return boundary
+        .drained(disposePromise)
+        .then(() => appLane.idle())
+        .then(() => commitTail)
     },
     dispose: () => {
       if (disposePromise != null) return disposePromise

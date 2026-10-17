@@ -160,6 +160,8 @@ export type AppLane = {
   pendingRecords: () => Array<PendingAppFrame>
   /** Restore durable records before the first retained pull. */
   restore: (records: Array<PendingAppFrame>) => Promise<void>
+  /** Await a snapshot of durable record completions already in flight. */
+  idle: () => Promise<void>
   /** Stop queued retries and prevent new handler calls. */
   dispose: () => void
 }
@@ -236,6 +238,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
   let segment = new Map<string, Array<AppFrame>>()
   let segmentGeneration = 0
   const pendingRecords: Array<PendingAppFrame> = []
+  const finishingRecords = new Set<Promise<void>>()
   const pulls = new Map<AbortController, number>()
   const reportedPruned = new Map<string, Set<string>>()
   const blockingFrames = new Map<string, AppDeliveryResumed>()
@@ -266,13 +269,17 @@ export function createAppLane(params: AppLaneParams): AppLane {
     if (pendingNotices == null) notify()
     else pendingNotices.push(notify)
   }
-  const blockingKey = (topicID: string, position: string): string => `${topicID}\u0000${position}`
-  const resumeBlocked = (topicID: string, position: string): void => {
-    const key = blockingKey(topicID, position)
-    const event = blockingFrames.get(key)
-    if (event == null || disposed) return
-    blockingFrames.delete(key)
-    notifyAppHost(onAppDeliveryResumed, { ...event, settlement: 'resumed' })
+  const blockingKey = (topicID: string, position: string, id: string): string =>
+    `${topicID}\u0000${position}\u0000${id}`
+  const resumeBlocked = (topicID: string, position: string, id?: string): void => {
+    if (disposed) return
+    const prefix = `${topicID}\u0000${position}\u0000`
+    for (const [key, event] of blockingFrames) {
+      if (id == null ? !key.startsWith(prefix) : key !== blockingKey(topicID, position, id))
+        continue
+      blockingFrames.delete(key)
+      notifyAppHost(onAppDeliveryResumed, { ...event, settlement: 'resumed' })
+    }
   }
   const resumeUnknown = (record: PendingAppFrame): void => {
     const event = reportedUnknown.get(record.frame.id)
@@ -284,10 +291,11 @@ export function createAppLane(params: AppLaneParams): AppLane {
     protocol: string,
     topicID: string,
     position: string,
+    id: string,
     error: Error,
     reason?: AppDeliveryStalled['reason'],
   ): void => {
-    const key = blockingKey(topicID, position)
+    const key = blockingKey(topicID, position, id)
     if (disposed || onAppDeliveryStalled == null || blockingFrames.has(key)) return
     const group = groupID()
     if (group == null) return
@@ -455,7 +463,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
       // Opened records survive topic expiry and settle when durable delivery completes.
       if (
         pendingRecords.some(
-          (record) => record.frame.topicID === topicID && record.frame.position === event.position,
+          (record) =>
+            blockingKey(record.frame.topicID, record.frame.position, record.frame.id) === key,
         )
       )
         continue
@@ -716,7 +725,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
     await runAppLane(async () => {
       const index = pendingRecords.findIndex((item) => item.frame.id === record.frame.id)
       if (index !== -1) pendingRecords.splice(index, 1)
-      resumeBlocked(record.frame.topicID, record.frame.position)
+      resumeBlocked(record.frame.topicID, record.frame.position, record.frame.id)
       resumeUnknown(record)
       const cursor = cursors.get(record.frame.topicID)
       if (cursor?.topicID !== record.frame.topicID) return
@@ -757,7 +766,15 @@ export function createAppLane(params: AppLaneParams): AppLane {
       }
       await events.emit(prc, event)
     }
-    if (!disposed) await finishRecord(record)
+    if (!disposed) {
+      const finishing = finishRecord(record)
+      finishingRecords.add(finishing)
+      try {
+        await finishing
+      } finally {
+        finishingRecords.delete(finishing)
+      }
+    }
   }
 
   const scheduleWorker = (name: string, delay = 0): void => {
@@ -985,10 +1002,11 @@ export function createAppLane(params: AppLaneParams): AppLane {
         if (frame.sealed.state !== 'sealed') continue
         if (disposed || generation !== segmentGeneration || safetyHold() !== null) break
         const sealed = frame.sealed.bytes
+        const id = frameID(cursor.topicID, sealed)
         // Unreadable bytes are dead. Past and future are the open's locked answer, below.
         if (crypto.frameEpoch(sealed) == null) {
           frame.sealed = { state: 'done' }
-          resumeBlocked(cursor.topicID, frame.position)
+          resumeBlocked(cursor.topicID, frame.position, id)
           continue
         }
         const aad = crypto.frameAAD(sealed)
@@ -996,7 +1014,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
         if ((aad != null && decoded == null) || crypto.pending != null) {
           if (decoded?.topicID !== cursor.topicID || decoded.intent !== 'log') {
             frame.sealed = { state: 'done' }
-            resumeBlocked(cursor.topicID, frame.position)
+            resumeBlocked(cursor.topicID, frame.position, id)
             continue
           }
         }
@@ -1004,7 +1022,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
           crypto.pending == null
             ? undefined
             : {
-                id: frameID(cursor.topicID, sealed),
+                id,
                 topicID: cursor.topicID,
                 protocol: name,
                 segment: cursor.anchorEpoch,
@@ -1036,7 +1054,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
                 remaining <= 0
               ) {
                 frame.sealed = { state: 'done' }
-                resumeBlocked(cursor.topicID, frame.position)
+                resumeBlocked(cursor.topicID, frame.position, id)
                 continue
               }
               const deadline = frame.caughtUpAt + APP_FUTURE_HOLD_MS
@@ -1055,6 +1073,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
                 name,
                 cursor.topicID,
                 frame.position,
+                id,
                 new Error(`frame claims future epoch ${error.frameEpoch}`),
                 'future-epoch',
               )
@@ -1062,12 +1081,12 @@ export function createAppLane(params: AppLaneParams): AppLane {
             continue
           }
           if (crypto.pending != null && isAppFrameStorageError(error)) {
-            reportBlocked(name, cursor.topicID, frame.position, error)
+            reportBlocked(name, cursor.topicID, frame.position, id, error)
             throw error
           }
           // A past epoch is not retained. Other refusals also finish without delivery.
           frame.sealed = { state: 'done' }
-          resumeBlocked(cursor.topicID, frame.position)
+          resumeBlocked(cursor.topicID, frame.position, id)
           continue
         }
         if (ref != null) {
@@ -1083,7 +1102,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
         // Opened, so it is done whatever the payload turns out to be — every path below either
         // delivers it or drops it exactly as the live transport would.
         frame.sealed = { state: 'done' }
-        resumeBlocked(cursor.topicID, frame.position)
+        resumeBlocked(cursor.topicID, frame.position, id)
         if (events == null) continue
         // This `unwrap` is its own ingress — not fed by `peer.ts`'s normalized inbound path — so
         // the recovered sender is normalized HERE, once, before either use below: `localDID` (the
@@ -1235,6 +1254,9 @@ export function createAppLane(params: AppLaneParams): AppLane {
     deliver,
     note,
     pendingRecords: () => [...pendingRecords],
+    idle: async () => {
+      await Promise.all([...finishingRecords])
+    },
     restore: async (records): Promise<void> => {
       await runAppLane(async () => {
         for (const record of records) {
