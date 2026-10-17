@@ -445,6 +445,8 @@ if (status.kind === 'not-member') {
 
 The `not-member` arm carries `retrying: true` and an optional `pendingReason` (`no-reply`, `no-eligible-responder`, `target-behind`, `target-unresolved`).
 `responderDIDs` and `responderCount` count distinct responder DIDs and survive restart. Events emit once per new evidence, coalesced like notices.
+One not-member row stays active per incarnation; superseded evidence keeps at most eight inactive summaries (oldest pruned with
+their events). Rows store no sealed reply.
 Do not dispose or delete on first evidence: wait for another responder DID or for the condition to persist.
 That wait is app policy, not a protocol threshold; disposal, deletion and re-invitation stay with the app.
 

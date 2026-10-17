@@ -1,6 +1,7 @@
 import type { AuthenticatedRosterAbsence, GroupConditionEvent } from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
+import { entryCapability } from '../src/entry-capability.js'
 import { absenceFreshness } from '../src/safety-conditions.js'
 
 const absence: AuthenticatedRosterAbsence = {
@@ -145,6 +146,27 @@ for (const mode of ['real-mls', 'double'] as const) {
           expect(await f.local().safety().events(f.key)).toEqual(first)
           expect(await f.local().safety().status(f.key)).toEqual(before)
         }))
+      test('advancing epochs while not member keep condition rows bounded and unsealed', () =>
+        run(async (f) => {
+          const capability = entryCapability(f.local().device.groups)
+          if (capability === null) throw new Error('Missing capability')
+          for (let round = 0; round < 12; round++) {
+            await f.advanceResponder()
+            await f.diagnose(await f.proof())
+          }
+          const rows = (
+            await capability.read(f.key.groupID, (reads) => reads.checkpoints())
+          ).filter((row) => row.kind === 'condition' && row.event.kind === 'not-member')
+          expect(rows.filter((row) => row.kind === 'condition' && row.active)).toHaveLength(1)
+          expect(rows.length).toBeLessThanOrEqual(9)
+          expect(rows.every((row) => row.kind === 'condition' && row.sealedProof === null)).toBe(
+            true,
+          )
+          expect(await f.local().safety().status(f.key)).toMatchObject({
+            condition: 'not-member',
+            evidence: { epoch: 24, responderCount: 1 },
+          })
+        }))
       test('not member ack preserves evidence until successful recovery', () =>
         run(async (f) => {
           await f.diagnose(await f.proof())
@@ -240,6 +262,28 @@ for (const mode of ['real-mls', 'double'] as const) {
             ),
           ).rejects.toThrow('authority')
           expect(await f.local().safety().status(f.key)).toMatchObject({ condition: null })
+          await f.diagnose(await f.proof())
+          const diagnosed = await f.local().safety().status(f.key)
+          const capability = entryCapability(groups)
+          if (capability === null) throw new Error('Missing capability')
+          const ids = (await capability.read(f.key.groupID, (reads) => reads.checkpoints()))
+            .filter((row) => row.kind === 'condition')
+            .map((row) => row.id)
+          expect(ids).not.toEqual([])
+          // Only the coordinator's own pruning may remove a condition row.
+          await expect(
+            groups.transition(
+              {
+                groupID: f.key.groupID,
+                mutationID: crypto.randomUUID(),
+                expected: await groups.load(f.key.groupID),
+              },
+              async (stores) => {
+                await stores.checkpoints.remove(ids)
+              },
+            ),
+          ).rejects.toThrow('authority')
+          expect(await f.local().safety().status(f.key)).toEqual(diagnosed)
         }))
     })
   }

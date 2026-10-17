@@ -23,9 +23,19 @@ type ComparisonFact = { epoch: number; authHash: string; confirmedTranscriptHash
 type ConditionRecord = Extract<CheckpointRecord, { kind: 'condition' }>
 const preparations = new WeakMap<ConditionRecord, ConditionRecord>()
 
+const removals = new WeakSet<Array<string>>()
+
 export function conditionPreparation(record: ConditionRecord): ConditionRecord | undefined {
   return preparations.get(record)
 }
+
+/** Ids the coordinator itself pruned; the guarded store admits only these removals. */
+export function conditionRemovalPrepared(ids: Array<string>): boolean {
+  return removals.has(ids)
+}
+
+// Superseded not-member evidence kept for dedupe; older summaries are pruned.
+const INACTIVE_NOT_MEMBER_SUMMARIES = 8
 
 function prepare(record: ConditionRecord): ConditionRecord {
   preparations.set(record, copyStoredValue(record))
@@ -213,7 +223,8 @@ export function createNotMemberHandler(params: {
             id,
             key,
             active: true,
-            sealedProof: proof.evidence,
+            // Nothing reopens the reply (its request key is zeroed), so store none.
+            sealedProof: null,
             notification: { emitAt, emitted: emitAt <= now, installationID },
             event: { ...key, id, kind: 'not-member', detectedAt: now, evidence },
           })
@@ -242,6 +253,26 @@ export function createNotMemberHandler(params: {
           await stores.checkpoints.put(row)
           if (row.notification?.emitted)
             await stores.incarnation(key.incarnation).meta.putEvents([row.event])
+          const pruned = (await stores.checkpoints.list())
+            .filter(
+              (stored): stored is ConditionRecord =>
+                stored.kind === 'condition' &&
+                stored.event.kind === 'not-member' &&
+                !stored.active &&
+                stored.key.groupID === key.groupID,
+            )
+            .sort(
+              (a, b) =>
+                b.event.detectedAt - a.event.detectedAt || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0),
+            )
+            .slice(INACTIVE_NOT_MEMBER_SUMMARIES)
+          if (pruned.length > 0) {
+            const ids = pruned.map((stored) => stored.id)
+            removals.add(ids)
+            await stores.checkpoints.remove(ids)
+            for (const stored of pruned)
+              await stores.incarnation(stored.key.incarnation).meta.ackEvent(stored.event.id)
+          }
         },
       )
     } catch (error) {

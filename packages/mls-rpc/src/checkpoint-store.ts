@@ -35,13 +35,14 @@ import { physicalRecordKey } from './persistence-codec.js'
 import { GroupStateConflictError } from './persistence-errors.js'
 import type { AtRestCodec, MemoryTransaction } from './persistence-types.js'
 import { supersededRejoinPrepared } from './registry/recovery-coordinator.js'
-import { conditionPreparation } from './safety-conditions.js'
+import { conditionPreparation, conditionRemovalPrepared } from './safety-conditions.js'
 
 const journalCaptures = new WeakMap<object, Map<string, CheckpointRecord>>()
 const appHolds = new WeakMap<object, Map<string, CheckpointRecord>>()
 const manuals = new WeakMap<object, Map<string, CheckpointRecord>>()
 const histories = new WeakMap<object, Array<CheckpointRecord>>()
-const conditionCaptures = new WeakMap<object, Map<string, CheckpointRecord>>()
+// An undefined entry authorises the coordinator's own removal of that condition row.
+const conditionCaptures = new WeakMap<object, Map<string, CheckpointRecord | undefined>>()
 const captures = new WeakMap<object, Map<string, Uint8Array>>()
 // Finalisation re-lists checkpoints several times per transition; open unchanged bytes once.
 // Keyed by OwnerEntry: lives for the whole owner run (prepare, work, effects, finalise, all
@@ -300,6 +301,7 @@ export function createCheckpointStore(
   const store = createUnlockedCheckpointStore(params)
   const { tx } = params
   const put = memoryOperation(tx, store.put, 'side')
+  const remove = memoryOperation(tx, store.remove, 'side')
   return {
     load: memoryOperation(tx, store.load),
     list: memoryOperation(tx, store.list),
@@ -334,7 +336,8 @@ export function createCheckpointStore(
       if (history !== undefined && entry !== undefined)
         histories.set(entry, [...(histories.get(entry) ?? []), copyStoredValue(history)])
       if (condition !== undefined && entry !== undefined) {
-        const prepared = conditionCaptures.get(entry) ?? new Map<string, CheckpointRecord>()
+        const prepared =
+          conditionCaptures.get(entry) ?? new Map<string, CheckpointRecord | undefined>()
         prepared.set(record.id, condition)
         conditionCaptures.set(entry, prepared)
       }
@@ -345,7 +348,16 @@ export function createCheckpointStore(
       }
       return result
     },
-    remove: memoryOperation(tx, store.remove, 'side'),
+    remove(ids) {
+      const entry = memoryTransactionEntry(tx.rows)
+      if (entry !== undefined && conditionRemovalPrepared(ids)) {
+        const prepared =
+          conditionCaptures.get(entry) ?? new Map<string, CheckpointRecord | undefined>()
+        for (const id of ids) prepared.set(id, undefined)
+        conditionCaptures.set(entry, prepared)
+      }
+      return remove(ids)
+    },
   }
 }
 
