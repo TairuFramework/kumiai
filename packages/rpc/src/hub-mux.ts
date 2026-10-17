@@ -887,7 +887,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
     // instead, so what reaches the host is the reason.
     assertSubscribable(params.topicID)
     const { signal } = params
-    signal?.throwIfAborted()
+    if (signal?.aborted) throw signal.reason
     // Only cancellable app pulls consume these slots. Commit fetches remain independent.
     if (signal != null && outstandingAppFetches >= APP_OUTSTANDING_FETCHES_MAX) {
       throw new AppFetchBusyError('app fetch slots are occupied')
