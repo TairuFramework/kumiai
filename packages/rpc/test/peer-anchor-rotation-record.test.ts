@@ -148,7 +148,10 @@ describe('recovery ordering', { concurrent: false }, () => {
       const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob })
       await restarted.peer.replay()
       expect(restarted.peer.anchorEpoch()).toBe(landed ? 2 : 1)
-      expect(await restarted.anchorStore.load()).toEqual({ anchor: restarted.anchorStore.stored() })
+      expect(await restarted.anchorStore.load()).toEqual({
+        anchor: restarted.anchorStore.stored(),
+        ...(landed ? { departing: [{ anchor, departedAt: 2 }] } : {}),
+      })
       await restarted.peer.dispose()
     },
   )

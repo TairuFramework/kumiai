@@ -90,6 +90,7 @@ describe('durable storage stall', () => {
     await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1))
     await vi.waitFor(() =>
       expect(resumed).toHaveBeenCalledExactlyOnceWith({
+        settlement: 'resumed',
         groupID: expect.any(String),
         protocol: 'chat',
         topicID,
@@ -270,6 +271,7 @@ describe('durable storage stall', () => {
     await vi.waitFor(() => expect(save).toHaveBeenCalledWith(topicID, position))
     await vi.waitFor(() => expect(lane.pendingRecords()).toHaveLength(0))
     expect(resumed).toHaveBeenCalledExactlyOnceWith({
+      settlement: 'resumed',
       groupID: 'group',
       protocol: 'chat',
       topicID,
@@ -332,6 +334,7 @@ describe('durable storage stall', () => {
     await expect(lane.dropFrame(topicID, position)).rejects.toThrow('cursor unavailable')
     expect(save).toHaveBeenCalledWith(topicID, position)
     expect(resumed).toHaveBeenCalledExactlyOnceWith({
+      settlement: 'resumed',
       groupID: 'group',
       protocol: 'chat',
       topicID,
@@ -722,6 +725,7 @@ describe('durable storage stall', () => {
     await lane.deliver()
     await vi.waitFor(() =>
       expect(resumed).toHaveBeenCalledExactlyOnceWith({
+        settlement: 'resumed',
         groupID: 'group',
         protocol: 'chat',
         topicID,
@@ -773,6 +777,7 @@ describe('durable storage stall', () => {
     expect(stalled).toHaveBeenCalledTimes(1)
     await lane.dropFrame(topicID, frame.frame.position)
     expect(resumed).toHaveBeenCalledExactlyOnceWith({
+      settlement: 'resumed',
       groupID: 'group',
       protocol: 'missing',
       topicID,
@@ -829,6 +834,7 @@ describe('durable storage stall', () => {
     await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1))
     await vi.waitFor(() =>
       expect(resumed).toHaveBeenCalledExactlyOnceWith({
+        settlement: 'resumed',
         groupID: 'group',
         protocol: 'missing',
         topicID,
@@ -881,6 +887,7 @@ describe('durable storage stall', () => {
     expect(bob.appCursorStore.stored(topicID)).toBe(first.sequenceID)
     expect(store.rows.size).toBe(0)
     expect(resumed).toHaveBeenCalledExactlyOnceWith({
+      settlement: 'resumed',
       groupID: expect.any(String),
       protocol: 'chat',
       topicID,

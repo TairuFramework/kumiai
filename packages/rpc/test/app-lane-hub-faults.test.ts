@@ -149,7 +149,7 @@ function collections() {
     key,
     value,
   ) {
-    if (key === 'chat' && Array.isArray(value)) arrays.push(value)
+    if (key === topicID && Array.isArray(value)) arrays.push(value)
     if (key === topicID && value instanceof Set) {
       notices.push(value)
       noticeMaps.push(this)

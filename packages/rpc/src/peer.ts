@@ -8,6 +8,7 @@ import { createRuntime } from '@sozai/runtime'
 
 import type { Anchor, AnchorSlot } from './anchor.js'
 import { decodeAppAAD } from './app-aad.js'
+import { RETAINED_EPOCHS_MAX } from './app-frame.js'
 import { type AppDeliveryResumed, type AppDeliveryStalled, createAppLane } from './app-lane.js'
 import { createAppOutboxAcceptance } from './app-outbox.js'
 import { createCheckpointWorker } from './checkpoint-worker.js'
@@ -551,6 +552,7 @@ export function createGroupPeerWithControlWalk<
     secret: new Uint8Array(),
     epoch: currentEpoch(),
   }
+  let departing: Array<{ anchor: Anchor; departedAt: number }> = []
   let appliedEpoch = 0
   let appNotices: Array<() => void> = []
   let appDrainScheduled = false
@@ -582,6 +584,7 @@ export function createGroupPeerWithControlWalk<
     eventHandlers: appEventHandlers,
     retentionSeconds: appLogRetentionSeconds,
     anchor: () => anchor,
+    departing: () => departing,
     groupID: () => commitTopicID,
     safetyHold,
     commitLaneCaughtUp: () => commitLaneCaughtUp,
@@ -664,20 +667,28 @@ export function createGroupPeerWithControlWalk<
       mux.retainTopic(protocolTopic(secret, epoch, name), { retention: appLogRetentionSeconds })
     }
     mux.retainTopic(inboxTopic(secret, epoch, localDID), { retention: appLogRetentionSeconds })
-    await saveResolvedAnchor({ anchor: anchorCapture.anchor })
+    const next =
+      anchor.secret.length === 0
+        ? departing
+        : [...departing, { anchor, departedAt: epoch }].slice(-RETAINED_EPOCHS_MAX)
+    await saveResolvedAnchor({
+      anchor: anchorCapture.anchor,
+      ...(next.length === 0 ? {} : { departing: next }),
+    })
     if (disposed || safetyHold() !== null) return
     anchor = { secret, epoch }
+    departing = next
     if (mls == null) appliedEpoch = epoch
     anchorCapture = undefined
     anchorPending = undefined
     sealError = undefined
     finishSealBarrier()
-    appLane.reset()
+    if (departing.length > 0) appLane.kick()
   }
 
   /** The rotation resolved without moving the anchor: drop the record and keep the anchor. */
   const keepAnchor = async (): Promise<void> => {
-    await saveResolvedAnchor({ anchor })
+    await saveResolvedAnchor({ anchor, ...(departing.length === 0 ? {} : { departing }) })
     if (disposed || safetyHold() !== null) return
     anchorPending = undefined
     sealError = undefined
@@ -1742,7 +1753,11 @@ export function createGroupPeerWithControlWalk<
             forced: identity.forced,
             advance: identity.advance,
           }
-    await anchorStore?.save({ anchor, pending: record })
+    await anchorStore?.save({
+      anchor,
+      pending: record,
+      ...(departing.length === 0 ? {} : { departing }),
+    })
     assertLive()
     assertSafetyOpen()
     anchorPending = record
@@ -2345,9 +2360,11 @@ export function createGroupPeerWithControlWalk<
     search?: ControlWalkRequest,
     requireCompletePrefix = false,
   ): Promise<boolean> => {
-    const advanced = await walkCommitLog(port, topicID, search, requireCompletePrefix)
-    if (!disposed && safetyHold() === null) appliedEpoch = await port.readEpoch()
-    return advanced
+    try {
+      return await walkCommitLog(port, topicID, search, requireCompletePrefix)
+    } finally {
+      if (!disposed && safetyHold() === null) appliedEpoch = await port.readEpoch()
+    }
   }
 
   /** Walk commits, then request app delivery without waiting for pulls or host handlers. */
@@ -5347,6 +5364,7 @@ export function createGroupPeerWithControlWalk<
       if (stopped()) return
       if (stored != null) {
         anchor = stored.anchor
+        departing = stored.departing ?? []
         anchorPending = stored.pending
       }
       await removalEffect()

@@ -182,7 +182,7 @@ test('an expiry gap observer can await resync without blocking later serial work
   const bob = durableBob(hub, {
     onAppWindowPruned: pruned,
     onAppDeliveryStalled: () => notices.push('stalled'),
-    onAppDeliveryResumed: () => notices.push('resumed'),
+    onAppDeliveryResumed: (event) => notices.push(event.settlement ?? 'missing settlement'),
   })
   await bob.peer.protocol('chat').to('alice')
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
