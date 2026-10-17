@@ -16,7 +16,7 @@ import {
 } from '@kumiai/rpc'
 
 import { acknowledgeBranchAbandonment, branchAbandonmentEvents } from './branch-history.js'
-import { writeAppHoldReport } from './clear-hold.js'
+import { createClearReportedHold, writeAppHoldReport } from './clear-hold.js'
 import { coordinatorBinding } from './entry-capability.js'
 import { sameStoredValue } from './memory-incarnation-stores.js'
 import { isStoredOpenFailure } from './persistence-codec.js'
@@ -55,6 +55,7 @@ export type GroupSafety = {
   }>
   epochAuthenticator(key: GroupKey): Promise<EpochIdentity | null>
   reportFork(key: GroupKey, evidence: GroupForkEvidence): Promise<void>
+  clearHold(key: GroupKey): Promise<void>
   recover(key: GroupKey, choice: ManualRecovery): Promise<GroupKey>
   events(
     key: GroupKey,
@@ -131,6 +132,7 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
     throw new TypeError('GroupSafety requires a registered registry with the same coordinator')
   const { entry } = capability
   return {
+    clearHold: createClearReportedHold(params),
     async status(requested) {
       const key = { ...requested }
       return await entry.read(key.groupID, async (reads) => {
@@ -180,7 +182,7 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
           async (reads) => {
             const control = await readReportControl(() => reads.control(key.incarnation))
             if (control.forkHalt !== null) {
-              capability.latch(key, 'fork-halted')
+              capability.observeHold(key, control)
               throw new Noop()
             }
             const lifetime = await reads.lifetime()
@@ -190,7 +192,7 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
             if (source.identity === null)
               throw new ForkReportRefusedError({ reason: 'authenticator' })
             validateEvidence(evidence, source.identity)
-            capability.latch(key, 'fork-halted')
+            capability.reportHold(key, halt)
             return { expected: lifetime, value: source.identity }
           },
           async (stores, identity) => {

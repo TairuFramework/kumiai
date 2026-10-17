@@ -111,6 +111,17 @@ for (const mode of ['real-mls', 'double'] as const) {
           })
           expect(await f.local().device.groups.ports(f.key).control.load()).toEqual(before)
         }))
+      test('clearHold cannot erase retrying not member condition', () =>
+        run(async (f) => {
+          await f.diagnose(await f.proof())
+          const before = await f.local().safety().status(f.key)
+          const admission = f.mls().sendAdmission()
+          await f.local().safety().clearHold(f.key)
+          expect(await f.local().safety().status(f.key)).toEqual(before)
+          expect(f.mls().sendAdmission()).toEqual(admission)
+          await f.diagnose(await f.proof())
+          expect(await f.local().safety().status(f.key)).toEqual(before)
+        }))
       test('diagnostic absence alone never refuses admission', () =>
         run(async (f) => {
           const before = f.mls().sendAdmission()

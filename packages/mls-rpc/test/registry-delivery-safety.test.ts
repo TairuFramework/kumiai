@@ -179,7 +179,10 @@ for (const mode of ['real-mls', 'double'] as const) {
             payload: kind === 'signed-loser' ? frame(winnerCommit) : new Uint8Array(),
             retain: 'log',
           })
-          const subscribe = vi.spyOn(mls, 'onSafetyHold')
+          const subscribe = vi.spyOn(
+            mls,
+            mls.onSafetyChanged === undefined ? 'onSafetyHold' : 'onSafetyChanged',
+          )
           const onStrand = vi.fn()
           const onRecovery = vi.fn()
           const onSafetyEvent = vi.fn()

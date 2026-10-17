@@ -184,6 +184,7 @@ export type MemoryRecoveryBinding = {
 }
 export type MemoryGroupMLSOptions = {
   onSafetyHold?: GroupMLS['onSafetyHold']
+  onSafetyChanged?: GroupMLS['onSafetyChanged']
   capturedRecovery?: {
     authoriseForkRecovery?: (
       reply: CapturedRecapture,
@@ -1843,6 +1844,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   }
 
   return {
+    ...(options.onSafetyChanged === undefined ? {} : { onSafetyChanged: options.onSafetyChanged }),
     ...(options.onSafetyHold === undefined ? {} : { onSafetyHold: options.onSafetyHold }),
     capturedRecovery,
     async getRecoveryLedger() {

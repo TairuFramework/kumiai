@@ -87,6 +87,7 @@ export const pendingFrameHostMembers = {
 export const mlsHostMembers = {
   ownCommitDigest: 'data',
   validateRecoveryCommit: 'host',
+  onSafetyChanged: 'core',
   onSafetyHold: 'core', // Synchronous memory latch, outside host drain accounting.
   verifyRecoveryRequest: 'host',
   signRecoveryConfirmation: 'host',
@@ -398,6 +399,36 @@ export function wrapPeerHost<TParams extends object>(
     else if (kind === 'mls') {
       const mls = value as GroupMLS
       selected = selectHostMembers(boundary, mls, mlsHostMembers)
+      for (const name of ['onSafetyHold', 'onSafetyChanged'] as const) {
+        const subscribe = mls[name]
+        if (subscribe === undefined) continue
+        Object.defineProperty(selected, name, {
+          enumerable: true,
+          value: (sink: (reason: unknown) => void) => {
+            let active = true
+            const unsubscribe = subscribe.call(mls, (reason) => {
+              if (!active || (reason === null && name === 'onSafetyHold')) return
+              if (
+                reason !== null &&
+                reason !== 'fork-halted' &&
+                reason !== 'spent-set-corrupt' &&
+                reason !== 'recovery-unavailable'
+              )
+                return
+              try {
+                sink(reason)
+              } catch {
+                // Core listeners cannot throw back into the host's proven state transition.
+              }
+            })
+            return () => {
+              if (!active) return
+              active = false
+              unsubscribe()
+            }
+          },
+        })
+      }
       if (mls.capturedRecovery !== undefined) {
         const captured = selectHostMembers(
           boundary,

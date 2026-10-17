@@ -8,10 +8,13 @@ import {
   encodeHandshakeFrame,
   encodeRecoveryReply,
   encodeRecoveryRequest,
+  forkEventID,
+  GroupSafetyHeldError,
   HANDSHAKE_KIND,
   type LogPosition,
   type RecoveryEvent,
   rendezvousTopic,
+  SendNotAdmissibleError,
 } from '@kumiai/rpc'
 import { afterEach, expect, test, vi } from 'vitest'
 
@@ -33,6 +36,7 @@ import {
   type RegistryFixture,
 } from '../../../packages/mls-rpc/test/fixtures/registry.js'
 import { FakeHub } from '../../../packages/rpc/test/fixtures/fake-hub.js'
+import { createCapturedRecoveryFixture } from './fixtures/fork-halt.js'
 
 const cleanup: Array<() => Promise<unknown>> = []
 afterEach(async () => {
@@ -199,6 +203,9 @@ test('advanced losing device removed on continuing branch surfaces not-member', 
     hold: null,
     condition: 'not-member',
   })
+  const beforeClear = await f.local().safety().status(f.key)
+  await f.local().safety().clearHold(f.key)
+  expect(await f.local().safety().status(f.key)).toEqual(beforeClear)
   expect(comparisons).toContain(10)
   const after = await f.local().device.groups.ports(f.key).control.load()
   expect(after.rejoin).toEqual(before.rejoin)
@@ -960,4 +967,253 @@ test('concurrent roster replay remains suppressed after completed-cache expiry',
   } finally {
     release()
   }
+})
+
+const rotation = () => ({
+  id: crypto.randomUUID(),
+  kind: 'rotation' as const,
+  revokes: false,
+  body: new TextEncoder().encode('{}'),
+  timeoutMs: 10000,
+})
+
+async function reportAppHold(f: Awaited<ReturnType<typeof createCapturedRecoveryFixture>>) {
+  const identity = await f.alice.fixture.safety().epochAuthenticator(f.alice.key)
+  if (identity === null) throw new Error('Missing local identity')
+  const remote = identity.authenticator.slice()
+  remote[0] = (remote[0] ?? 0) ^ 1
+  await f.alice.fixture.safety().reportFork(f.alice.key, {
+    kind: 'epoch-authenticator',
+    epoch: identity.epoch,
+    local: identity.authenticator,
+    remote,
+  })
+}
+
+test('clear app halt resumes ordinary walk', async () => {
+  const f = await createCapturedRecoveryFixture()
+  cleanup.push(() => f.close())
+  const original = f.alice.peer
+  const before = f.alice.mls.sendAdmission().epoch
+  await reportAppHold(f)
+  await f.bob.peer.commit(rotation())
+  expect(f.alice.mls.sendAdmission().epoch).toBe(before)
+  await f.alice.fixture.safety().clearHold(f.alice.key)
+  await expect
+    .poll(() => f.alice.mls.sendAdmission())
+    .toMatchObject({
+      epoch: before + 1,
+      admissible: true,
+    })
+  expect(f.alice.peer).toBe(original)
+  expect(f.alice.created).toHaveLength(1)
+  expect((await f.alice.fixture.device.groups.load(f.alice.key.groupID))?.activeIncarnation).toBe(1)
+  await f.alice.peer.commit(rotation())
+  await expect.poll(() => f.bob.mls.sendAdmission().epoch).toBe(before + 2)
+})
+
+test('clear before proof leaves every live lane closed', async () => {
+  const f = await createCapturedRecoveryFixture()
+  cleanup.push(() => f.close())
+  const before = f.alice.mls.sendAdmission().epoch
+  const process = vi.spyOn(f.alice.mls, 'processCommit')
+  await reportAppHold(f)
+  const fault = f.alice.fixture.armNextWorkFault('commit-then-reject')
+  const pending = f.alice.fixture.safety().clearHold(f.alice.key)
+  const proof = f.alice.fixture.holdProof(await fault.mutationID)
+  try {
+    await proof.started
+    await f.bob.peer.commit(rotation())
+    const chat = f.alice.peer.protocol('chat')
+    for (const procedure of ['chat/posted', 'chat/changed'] as const)
+      await expect(chat.dispatch(procedure, { data: {} })).rejects.toEqual(
+        new SendNotAdmissibleError('fork-halted'),
+      )
+    await expect(chat.request('chat/double', { param: {} })).rejects.toEqual(
+      new SendNotAdmissibleError('fork-halted'),
+    )
+    await expect(chat.gather('chat/double', { param: {} })).rejects.toEqual(
+      new SendNotAdmissibleError('fork-halted'),
+    )
+    await expect(chat.to(f.bob.identity.id)).rejects.toEqual(
+      new SendNotAdmissibleError('fork-halted'),
+    )
+    await expect(f.alice.peer.enqueue(rotation())).rejects.toEqual(
+      new GroupSafetyHeldError('fork-halted'),
+    )
+    await expect(f.alice.peer.commit(rotation())).rejects.toEqual(
+      new GroupSafetyHeldError('fork-halted'),
+    )
+    expect(() => f.alice.peer.reauthorize()).toThrow(new GroupSafetyHeldError('fork-halted'))
+    expect(process).not.toHaveBeenCalled()
+    expect(f.alice.mls.sendAdmission().epoch).toBe(before)
+  } finally {
+    proof.release()
+  }
+  await pending
+  await expect.poll(() => f.alice.mls.sendAdmission().epoch).toBe(before + 1)
+  expect(process).toHaveBeenCalled()
+})
+
+test('clear resumes a peer whose startup stopped under the app hold', async () => {
+  const f = await createCapturedRecoveryFixture()
+  cleanup.push(() => f.close())
+  f.alice.hooks.beforePeer = async () => {
+    await reportAppHold(f)
+  }
+  await f.alice.restart()
+  f.alice.hooks.beforePeer = undefined
+  expect(f.alice.mls.sendAdmission()).toMatchObject({ reason: 'fork-halted' })
+  await f.alice.fixture.safety().clearHold(f.alice.key)
+  await expect.poll(() => f.alice.mls.sendAdmission().admissible).toBe(true)
+  const before = f.alice.mls.sendAdmission().epoch
+  await f.bob.peer.commit(rotation())
+  await expect.poll(() => f.alice.mls.sendAdmission().epoch).toBe(before + 1)
+  await f.alice.peer.commit(rotation())
+  await expect.poll(() => f.bob.mls.sendAdmission().epoch).toBe(before + 2)
+})
+
+test('legacy clear has no live release or network resume', async () => {
+  const f = await createCapturedRecoveryFixture()
+  cleanup.push(() => f.close())
+  await f.alice.fixture.installRows({
+    key: f.alice.key,
+    control: {
+      forkHalt: {
+        eventID: forkEventID(f.alice.key),
+        detectedAt: 42,
+        evidence: { kind: 'unexplained-own-commit', epoch: 0, position: '1', digest: 'legacy' },
+      },
+    },
+  })
+  const notifications: Array<unknown> = []
+  f.alice.mls.onSafetyChanged?.((reason) => {
+    notifications.push(reason)
+  })
+  const subscribe = vi.spyOn(f.hub, 'subscribe')
+  const fetch = vi.spyOn(f.hub, 'fetchTopic')
+  await f.alice.fixture.safety().clearHold(f.alice.key)
+  await f.alice.peer.replay()
+  expect(notifications).toEqual(['fork-halted'])
+  expect(subscribe).not.toHaveBeenCalled()
+  expect(fetch).not.toHaveBeenCalled()
+  expect(f.alice.mls.sendAdmission()).toMatchObject({ reason: 'fork-halted' })
+})
+
+test('successive app releases serialize an interrupted startup', async () => {
+  const f = await createCapturedRecoveryFixture()
+  cleanup.push(() => f.close())
+  f.alice.hooks.beforePeer = async () => {
+    await reportAppHold(f)
+  }
+  await f.alice.restart()
+  f.alice.hooks.beforePeer = undefined
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let started!: () => void
+  const starting = new Promise<void>((resolve) => {
+    started = resolve
+  })
+  const original = f.alice.mls.exportRecoverySecret
+  const exported = vi.spyOn(f.alice.mls, 'exportRecoverySecret').mockImplementation(async () => {
+    started()
+    await gate
+    return await original()
+  })
+  try {
+    await f.alice.fixture.safety().clearHold(f.alice.key)
+    await starting
+    await reportAppHold(f)
+    await f.alice.fixture.safety().clearHold(f.alice.key)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(exported).toHaveBeenCalledTimes(1)
+  } finally {
+    release()
+  }
+  await f.bob.peer.commit(rotation())
+  await expect.poll(() => f.alice.mls.sendAdmission().epoch).toBe(f.bob.mls.sendAdmission().epoch)
+})
+
+test('disposing a peer fences an already queued receive', async () => {
+  const f = await createCapturedRecoveryFixture()
+  cleanup.push(() => f.close())
+  await f.hub.publish({
+    senderDID: f.bob.identity.id,
+    topicID: f.topicID,
+    payload: new Uint8Array([255]),
+  })
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  const stopped = f.alice.stop()
+  await f.hub.publish({
+    senderDID: f.bob.identity.id,
+    topicID: f.topicID,
+    payload: new Uint8Array([254]),
+  })
+  await stopped
+})
+
+test('clear app hold preserves not member evidence and resumes retries', async () => {
+  const { f, hub } = await setup()
+  await start(f.remote, hub)
+  const events: Array<RecoveryEvent> = []
+  const local = await start(f.local(), hub, events)
+  await local.owner.peer()?.recover()
+  await expect
+    .poll(() => local.owner.status())
+    .toMatchObject({ kind: 'not-member', retrying: true })
+  const safety = f.local().safety()
+  const identity = await safety.epochAuthenticator(f.key)
+  if (identity === null) throw new Error('Missing reported identity')
+  const remote = identity.authenticator.slice()
+  remote[0] = (remote[0] ?? 0) ^ 1
+  await safety.reportFork(f.key, {
+    kind: 'epoch-authenticator',
+    epoch: identity.epoch,
+    local: identity.authenticator,
+    remote,
+  })
+  await new Promise((resolve) => setTimeout(resolve, 1500))
+  const before = await safety.status(f.key)
+  const count = events.length
+  await safety.clearHold(f.key)
+  expect(await safety.status(f.key)).toMatchObject({
+    hold: null,
+    condition: 'not-member',
+    evidence: before.evidence,
+  })
+  await expect.poll(() => events.length, { timeout: 5000 }).toBeGreaterThan(count)
+  expect(local.owner.status()).toMatchObject({ kind: 'not-member', retrying: true })
+})
+
+test('clear app hold resumes interrupted recovery', async () => {
+  const f = await createCapturedRecoveryFixture()
+  cleanup.push(() => f.close())
+  let started!: () => void
+  const starting = new Promise<void>((resolve) => {
+    started = resolve
+  })
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const original = f.alice.mls.createRecoveryRequest
+  const create = vi
+    .spyOn(f.alice.mls, 'createRecoveryRequest')
+    .mockImplementationOnce(async (...args) => {
+      started()
+      await gate
+      return await original(...args)
+    })
+  const pending = f.alice.peer.recover().catch((error: unknown) => error)
+  await starting
+  try {
+    await reportAppHold(f)
+  } finally {
+    release()
+  }
+  await pending
+  await f.alice.fixture.safety().clearHold(f.alice.key)
+  await expect.poll(() => create.mock.calls.length, { timeout: 5000 }).toBeGreaterThan(1)
 })

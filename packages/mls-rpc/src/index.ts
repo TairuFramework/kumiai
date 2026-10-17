@@ -164,6 +164,7 @@ export {
   RecoveryCandidateError,
   restoreRecoveryCandidate,
 } from './recovery.js'
+export { type RegistryConsumers, registryConsumers } from './registry/consumers.js'
 export { createRecoveryContinuationPort } from './registry/continuation.js'
 export { createGroupHandleRegistry } from './registry/registry.js'
 export {

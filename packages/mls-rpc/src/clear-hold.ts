@@ -92,7 +92,6 @@ export function consumeAppHoldClear(params: {
 
 class ClearNoop extends Error {}
 
-// Storage only. Registry and peer release propagation is installed separately.
 export function createClearReportedHold<TTx extends GroupTransaction>(params: {
   registry: GroupHandleRegistry
   persistence: GroupPersistence<TTx>
@@ -103,6 +102,7 @@ export function createClearReportedHold<TTx extends GroupTransaction>(params: {
   return async function clearReportedHold(requested) {
     const key = { ...requested }
     const mutationID = crypto.randomUUID()
+    let release: (() => void) | undefined
     try {
       await capability.entry.run(
         { groupID: key.groupID, mutationID },
@@ -121,6 +121,8 @@ export function createClearReportedHold<TTx extends GroupTransaction>(params: {
               row.clearedAt === null,
           )
           if (provenance === undefined) throw new ClearNoop()
+          capability.observeHold(key, await reads.control(key.incarnation))
+          release = capability.prepareReportedHoldRelease(key, halt)
           return { expected: lifetime, value: { halt, provenance } }
         },
         async (stores, { halt, provenance }) => {
@@ -163,6 +165,7 @@ export function createClearReportedHold<TTx extends GroupTransaction>(params: {
           }
         },
       )
+      release?.()
     } catch (error) {
       if (!(error instanceof ClearNoop)) throw error
     }

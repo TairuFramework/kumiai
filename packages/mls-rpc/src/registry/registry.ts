@@ -1,5 +1,5 @@
 import { normalizeDID } from '@kokuin/token'
-import { controlSafetyHeld, type SafetyHold } from '@kumiai/rpc'
+import type { ControlSnapshot, ForkHalt, SafetyHold } from '@kumiai/rpc'
 
 import { bindRegistryCheckpoint } from '../checkpoint.js'
 import {
@@ -91,7 +91,17 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     groupSlot(key.groupID)
     safetyLatch(key).latch(reason)
   }
-  const persistTrustUnavailable = trustUnavailableWriter({ entry: capability, latch })
+  function reportHold(key: GroupKey, halt: ForkHalt): void {
+    if (disposed) return
+    groupSlot(key.groupID)
+    safetyLatch(key).report(halt, true)
+  }
+  function observeHold(key: GroupKey, control: ControlSnapshot): void {
+    if (control.forkHalt?.producer === 'app-report') safetyLatch(key).report(control.forkHalt)
+    else if (control.forkHalt !== null) latch(key, 'fork-halted')
+    if (control.recoveryUnavailable !== null) latch(key, 'recovery-unavailable')
+  }
+  const persistTrustUnavailable = trustUnavailableWriter({ entry: capability, latch, observeHold })
   async function diagnoseFailure(error: unknown): Promise<void> {
     if (!(error instanceof RetainedTrustUnavailableError)) return
     try {
@@ -195,8 +205,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
             observation.controlStatus === 'readable' &&
             observation.control !== null
           ) {
-            const reason = controlSafetyHeld(observation.control)
-            if (reason !== null) latch(observation.activeKey, reason)
+            observeHold(observation.activeKey, observation.control)
           }
           const previous = observedSlot.owner
           observedSlot.generation++
@@ -279,8 +288,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     )
     assertLoadCurrent()
     value.snapshot.condition = groupCondition(await reads.checkpoints(), value.key).condition
-    const reason = controlSafetyHeld(control)
-    if (reason !== null) latch(value.key, reason)
+    observeHold(value.key, control)
     if (admittedOwner !== undefined && value.key.incarnation !== admittedOwner.key.incarnation)
       throw new DisplacedGroupHandleError('Registry access belongs to a retired incarnation')
     if (slot.owner === null || slot.owner.key.incarnation !== value.key.incarnation) {
@@ -583,7 +591,20 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     latch,
     held,
     persistTrustUnavailable,
+    reportHold,
+    observeHold,
+    prepareReportedHoldRelease(key, halt) {
+      const release = safetyLatch(key).prepareRelease(halt)
+      return () => {
+        if (!disposed) release()
+      }
+    },
     safetyHold: held,
+    onSafetyChanged(key, sink) {
+      assertOpen()
+      groupSlot(key.groupID)
+      return safetyLatch(key).subscribeChanged(sink)
+    },
     onSafetyHold(key, sink) {
       assertOpen()
       groupSlot(key.groupID)

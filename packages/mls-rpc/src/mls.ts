@@ -191,6 +191,7 @@ export type GroupMLSDependencies = {
   control: ControlStore
   readRecoverySource(): Promise<AdoptionExpected>
   recoveryAdoption?: RecoveryAdoptionDependencies
+  onSafetyChanged?: (sink: (reason: SafetyHold) => void) => () => void
   onSafetyHold?: (latch: (reason: NonNullable<SafetyHold>) => void) => () => void
   recoverySecretFromTrust?: (trust: GroupRecoveryTrust) => Promise<Uint8Array>
 }
@@ -592,6 +593,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
     },
     sendAdmission: () => access.admission(),
     ownCommitDigest,
+    ...(params.onSafetyChanged === undefined ? {} : { onSafetyChanged: params.onSafetyChanged }),
     ...(params.onSafetyHold === undefined ? {} : { onSafetyHold: params.onSafetyHold }),
     async rosterEntries(): Promise<Array<RosterEntry>> {
       return await access.read((group) =>

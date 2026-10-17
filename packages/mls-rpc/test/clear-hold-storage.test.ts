@@ -352,8 +352,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           const before = await control(f).load()
           await clear(f)(key)
           expect(await control(f).load()).toEqual({ ...before, forkHalt: null })
-          // Live latches stay held until release propagation is installed.
-          expect((await f.safety().status(key)).hold).toBe('fork-halted')
+          expect((await f.safety().status(key)).hold).toBe('recovery-unavailable')
         }))
 
       test('repeated reports after clear preserve both incidents', () =>

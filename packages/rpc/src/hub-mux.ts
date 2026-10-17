@@ -152,6 +152,8 @@ export type MuxFetchTopicParams = {
 export type HubMux = {
   /** Start receive at most once, while network is allowed. */
   start: () => void
+  /** Retry demanded subscriptions and wake the safety-paused receive drain. */
+  resume: () => void
   readonly bus: BroadcastBus
   /** A mailbox-shaped view of the drain, for the directed tunnels. It carries no log. */
   readonly mailbox: MailboxHub
@@ -239,6 +241,7 @@ type PendingAck = {
  * retain is a fresh chance to ask.
  */
 type TopicSubscription =
+  | { kind: 'deferred'; options: HubSubscribeOptions | undefined }
   | { kind: 'asking' }
   | { kind: 'held' }
   /**
@@ -381,7 +384,14 @@ export function createHubMux(params: HubMuxParams): HubMux {
     options: HubSubscribeOptions | undefined,
     attempt: number,
   ): Promise<void> => {
-    if (!networkAllowed()) return
+    if (disposed || (refcount.get(topicID) ?? 0) === 0) {
+      if (subscriptions.get(topicID)?.kind === 'asking') subscriptions.delete(topicID)
+      return
+    }
+    if (!networkAllowed()) {
+      subscriptions.set(topicID, { kind: 'deferred', options })
+      return
+    }
     subscriptions.set(topicID, { kind: 'asking' })
     try {
       // Inside the try, and awaited: `subscribe` may reject OR throw synchronously (the type
@@ -413,7 +423,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
   }
 
   const retain = (topicID: string, options?: HubSubscribeOptions): void => {
-    if (!networkAllowed()) return
+    if (disposed) return
     refcount.set(topicID, (refcount.get(topicID) ?? 0) + 1)
     // Gated on the SUBSCRIPTION, never on the refcount. A topic held, or currently being asked
     // for, is not asked for again. A refused one may be: the hub said no, so this peer does not
@@ -500,22 +510,14 @@ export function createHubMux(params: HubMuxParams): HubMux {
     const current = refcount.get(topicID) ?? 0
     if (current <= 0) return
     const next = current - 1
-    if (next === 0) refcount.delete(topicID)
-    else refcount.set(topicID, next)
+    if (next === 0) {
+      refcount.delete(topicID)
+      if (subscriptions.get(topicID)?.kind === 'deferred') subscriptions.delete(topicID)
+    } else refcount.set(topicID, next)
   }
 
-  const onInbound = (
-    topicID: string,
-    listener: InboundListener,
-    options?: HubSubscribeOptions,
-  ): (() => void) => {
-    let set = listeners.get(topicID)
-    if (set == null) {
-      set = new Set()
-      listeners.set(topicID, set)
-    }
-    set.add(listener)
-    retain(topicID, options)
+  const handoff = (topicID: string, listener: InboundListener): void => {
+    if (!networkAllowed()) return
     sweepPending(Date.now())
     const handoffs: Array<{ sequenceID: string; entry: PendingAck; message: StoredMessage }> = []
     for (const [sequenceID, entry] of pending) {
@@ -535,6 +537,21 @@ export function createHubMux(params: HubMuxParams): HubMux {
         // listener errors must not break registration
       }
     }
+  }
+
+  const onInbound = (
+    topicID: string,
+    listener: InboundListener,
+    options?: HubSubscribeOptions,
+  ): (() => void) => {
+    let set = listeners.get(topicID)
+    if (set == null) {
+      set = new Set()
+      listeners.set(topicID, set)
+    }
+    set.add(listener)
+    retain(topicID, options)
+    handoff(topicID, listener)
     let removed = false
     return () => {
       if (removed) return
@@ -619,6 +636,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
       // a host's notice handler must not break the mux
     }
   }
+  const resumeWaiters = new Set<() => void>()
   const drain = async (iterator: AsyncIterator<StoredMessage>): Promise<void> => {
     while (true) {
       let result: IteratorResult<StoredMessage>
@@ -633,6 +651,12 @@ export function createHubMux(params: HubMuxParams): HubMux {
         reportEnded({})
         return
       }
+      while (!disposed && !networkAllowed()) {
+        await new Promise<void>((resolve) => {
+          resumeWaiters.add(resolve)
+        })
+      }
+      if (disposed) return
       const message = result.value
       const now = Date.now()
       sweepPending(now)
@@ -704,6 +728,21 @@ export function createHubMux(params: HubMuxParams): HubMux {
     subscription = hub.receive(localDID)
     iterator = subscription[Symbol.asyncIterator]()
     void drain(iterator)
+  }
+
+  const resume = (): void => {
+    if (disposed || !(params.networkAllowed?.() ?? true)) return
+    start()
+    for (const [topicID, state] of [...subscriptions]) {
+      if (state.kind !== 'deferred') continue
+      subscriptions.delete(topicID)
+      if ((refcount.get(topicID) ?? 0) > 0) void attemptSubscribe(topicID, state.options, 0)
+    }
+    for (const wake of resumeWaiters) wake()
+    resumeWaiters.clear()
+    for (const [topicID, registered] of listeners) {
+      for (const listener of registered) handoff(topicID, listener)
+    }
   }
 
   const bus: BroadcastBus = {
@@ -839,6 +878,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
 
   return {
     start,
+    resume,
     bus,
     mailbox,
     publish,
@@ -855,6 +895,8 @@ export function createHubMux(params: HubMuxParams): HubMux {
     dispose: () => {
       if (disposePromise != null) return disposePromise
       disposed = true
+      for (const wake of resumeWaiters) wake()
+      resumeWaiters.clear()
       // Belt-and-suspenders: `peer.dispose()` already calls `suspendPublishing()` before this
       // runs, but a caller of THIS `dispose()` directly (every test file that builds a mux
       // standalone) gets the same guarantee. Idempotency stays keyed on `disposePromise` (the

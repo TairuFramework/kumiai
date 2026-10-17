@@ -164,6 +164,7 @@ export type ConformanceGroupSafety = {
   }>
   epochAuthenticator(key: ConformanceGroupKey): Promise<ConformanceEpochIdentity | null>
   reportFork(key: ConformanceGroupKey, evidence: ConformanceGroupForkEvidence): Promise<void>
+  clearHold(key: ConformanceGroupKey): Promise<void>
   recover(key: ConformanceGroupKey, choice: ConformanceManualRecovery): Promise<ConformanceGroupKey>
   events(
     key: ConformanceGroupKey,
@@ -235,6 +236,24 @@ export function runGroupSafetyContract<THandle extends ConformanceRegistryHandle
         evidence: null,
       })
     })
+    test('clearHold releases only the current app report and preserves evidence', async () => {
+      const key = await activeKey()
+      const access = await fixture.registry.access(key.groupID)
+      const before = access.admission()
+      await hold(key, 'fork-halted')
+      const events = await fixture.safety().events(key)
+      await fixture.safety().clearHold(key)
+      expect(await fixture.safety().status(key)).toEqual({
+        hold: null,
+        condition: null,
+        evidence: null,
+      })
+      expect(access.admission()).toEqual(before)
+      expect(await fixture.safety().events(key)).toEqual(events)
+      await fixture.safety().clearHold(key)
+      expect(access.admission()).toEqual(before)
+    })
+
     test('host mismatch co-writes field/event/admission', async () => {
       const key = await activeKey()
       const access = await fixture.registry.access(key.groupID)

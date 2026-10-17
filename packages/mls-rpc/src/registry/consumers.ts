@@ -6,6 +6,7 @@ import { registrySafety } from './safety.js'
 import type { GroupHandleRegistry } from './types.js'
 
 export type RegistryConsumers = {
+  onSafetyChanged(key: GroupKey, sink: (reason: SafetyHold) => void): () => void
   onSafetyHold(key: GroupKey, latch: (reason: NonNullable<SafetyHold>) => void): () => void
   onRetire(key: GroupKey, hook: () => Promise<void>): () => void
   safetyHold(key: GroupKey): SafetyHold
@@ -22,6 +23,7 @@ export function registryConsumers<TTx extends GroupTransaction>(params: {
     )
   return {
     onSafetyHold: capability.onSafetyHold,
+    onSafetyChanged: capability.onSafetyChanged,
     onRetire: capability.onRetire,
     safetyHold: capability.safetyHold,
   }

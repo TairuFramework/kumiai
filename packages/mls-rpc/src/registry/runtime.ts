@@ -1,34 +1,73 @@
-import type { SafetyHold } from '@kumiai/rpc'
+import type { ForkHalt, SafetyHold } from '@kumiai/rpc'
 
+import { copyStoredValue, sameStoredValue } from '../memory-incarnation-stores.js'
 import type { GroupEpochRuntime, GroupRuntimeSnapshot } from './types.js'
 
 export function createRegistrySafetyLatch() {
-  let reason: SafetyHold = null
-  const sinks = new Set<(reason: NonNullable<SafetyHold>) => void>()
-  function supply(sink: (reason: NonNullable<SafetyHold>) => void): void {
-    if (reason === null) return
+  const reasons = new Set<NonNullable<SafetyHold>>()
+  let appHold: ForkHalt | null = null
+  const sinks = new Set<(reason: SafetyHold) => void>()
+  const held = (): SafetyHold =>
+    reasons.has('fork-halted') || appHold !== null
+      ? 'fork-halted'
+      : reasons.has('spent-set-corrupt')
+        ? 'spent-set-corrupt'
+        : reasons.has('recovery-unavailable')
+          ? 'recovery-unavailable'
+          : null
+  function supply(sink: (reason: SafetyHold) => void): void {
     try {
-      sink(reason)
+      sink(held())
     } catch {
       // A broken core sink cannot change storage outcomes or suppress other sinks.
     }
   }
+  function change(work: () => void): void {
+    const before = held()
+    work()
+    if (before === held()) return
+    for (const sink of [...sinks]) if (sinks.has(sink)) supply(sink)
+  }
   return {
-    held: (): SafetyHold => reason,
+    held,
     latch(next: NonNullable<SafetyHold>): void {
-      if (reason === 'fork-halted' || reason === next) return
-      reason = next
-      for (const sink of [...sinks]) {
-        if (sinks.has(sink)) supply(sink)
+      change(() => {
+        reasons.add(next)
+      })
+    },
+    report(halt: ForkHalt, fresh = false): void {
+      if (!fresh && sameStoredValue(appHold, halt)) return
+      change(() => {
+        appHold = copyStoredValue(halt)
+      })
+    },
+    prepareRelease(halt: ForkHalt): () => void {
+      // Identical reports may be distinct incidents. Release only the captured latch.
+      const incident = appHold
+      return () => {
+        if (
+          halt.producer !== 'app-report' ||
+          appHold !== incident ||
+          !sameStoredValue(incident, halt)
+        )
+          return
+        change(() => {
+          appHold = null
+        })
       }
     },
-    subscribe(sink: (reason: NonNullable<SafetyHold>) => void): () => void {
-      const registered = (value: NonNullable<SafetyHold>) => sink(value)
+    subscribeChanged(sink: (reason: SafetyHold) => void): () => void {
+      const registered = (value: SafetyHold) => sink(value)
       sinks.add(registered)
-      supply(registered)
+      if (held() !== null) supply(registered)
       return () => {
         sinks.delete(registered)
       }
+    },
+    subscribe(sink: (reason: NonNullable<SafetyHold>) => void): () => void {
+      return this.subscribeChanged((reason) => {
+        if (reason !== null) sink(reason)
+      })
     },
     dispose(): void {
       sinks.clear()

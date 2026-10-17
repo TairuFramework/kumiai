@@ -362,8 +362,12 @@ export function createGroupPeerWithControlWalk<
   let storageServicePending = false
   let controlHold: ControlHold | null = null
   let safetyReason: SafetyHold = null
+  let internalForkHeld = false
+  let safetyGeneration = 0
+  let recoveryRetryPending = false
   let pendingForkHalt: ForkHalt | null = null
   const latchSafetyHold = (reason: NonNullable<SafetyHold>): void => {
+    recoveryRetryPending ||= healRequested || activeRecovery !== null
     safetyReason ??= reason
     healRequested = false
   }
@@ -441,7 +445,7 @@ export function createGroupPeerWithControlWalk<
     hub,
     localDID,
     deferredStart: true,
-    networkAllowed: () => initialSafetyLoaded && safetyHold() === null,
+    networkAllowed: () => !disposed && initialSafetyLoaded && safetyHold() === null,
     ...(params.onSubscribeFailed != null ? { onSubscribeFailed: params.onSubscribeFailed } : {}),
     ...(params.onReceiveEnded != null ? { onReceiveEnded: params.onReceiveEnded } : {}),
   })
@@ -1082,12 +1086,14 @@ export function createGroupPeerWithControlWalk<
   let recoveryRetryTimer: ReturnType<typeof setTimeout> | undefined
   let recoveryBackoff = 1000
   const clearRecoveryRetry = (): void => {
+    recoveryRetryPending = false
     if (recoveryRetryTimer != null) clearTimeout(recoveryRetryTimer)
     recoveryRetryTimer = undefined
   }
   const retryRecovery = (): void => {
-    if (disposed || hardControlHeld() || recoveryRetryTimer != null || renewalHeld() || refusalHeld)
-      return
+    if (disposed) return
+    recoveryRetryPending = true
+    if (hardControlHeld() || recoveryRetryTimer != null || renewalHeld() || refusalHeld) return
     recoveryRetryTimer = setTimeout(() => {
       recoveryRetryTimer = undefined
       if (disposed || hardControlHeld() || renewalHeld() || refusalHeld || activeRecovery != null)
@@ -2512,7 +2518,7 @@ export function createGroupPeerWithControlWalk<
   }
 
   const initControlLanes = async (): Promise<void> => {
-    if (mls == null || safetyHold() !== null) return
+    if (mls == null || safetyHold() !== null || commitUnsubscribe !== undefined) return
     const recoverySecret = await mls.exportRecoverySecret()
     if (disposed || safetyHold() !== null) return
     commitTopicID = commitTopic(recoverySecret)
@@ -2596,7 +2602,9 @@ export function createGroupPeerWithControlWalk<
   let slotEvidenceStamp: string | null = null
   const refreshControl = async (freshEvidence?: ControlEvidenceSnapshot): Promise<void> => {
     if (control == null) return
+    const generation = safetyGeneration
     const snapshot = await control.load()
+    if (generation !== safetyGeneration) return await refreshControl(freshEvidence)
     for (const [id, buffers] of ownedRecoveryBuffers) {
       if (snapshot.rejoin?.id === id) continue
       buffers.requestKey.fill(0)
@@ -2953,6 +2961,7 @@ export function createGroupPeerWithControlWalk<
     left.detectedAt === right.detectedAt &&
     JSON.stringify(forkBody(left.evidence)) === JSON.stringify(forkBody(right.evidence))
   const haltFork = async (evidence: GroupForkEvidence): Promise<void> => {
+    internalForkHeld = true
     latchSafetyHold('fork-halted')
     if (control === undefined || pendingForkHalt !== null) return
     const key = { ...control.key }
@@ -5178,9 +5187,53 @@ export function createGroupPeerWithControlWalk<
   }
 
   // Core sinks latch synchronously, including holds already present at subscription.
-  const unsubscribeSafety = mls?.onSafetyHold?.(latchSafetyHold)
+  let startupComplete = false
+  let safetyResume: Promise<void> = Promise.resolve()
+  const unsubscribeSafety =
+    mls?.onSafetyChanged !== undefined
+      ? mls.onSafetyChanged((reason) => {
+          if (disposed) return
+          safetyGeneration++
+          if (reason !== null) {
+            latchSafetyHold(reason)
+            safetyReason = internalForkHeld ? 'fork-halted' : reason
+            return
+          }
+          if (internalForkHeld || pendingForkHalt !== null) return
+          safetyReason = null
+          safetyResume = safetyResume
+            .then(() => ready)
+            .then(async () => {
+              if (disposed || safetyHold() !== null) return
+              await refreshControl()
+              if (disposed || safetyHold() !== null) return
+              mux.resume()
+              if (!startupComplete) await initialise()
+              await runSerial(async () => {
+                if (disposed || safetyHold() !== null) return
+                if (await settleOperations()) await rebuildEpoch()
+                if (disposed || safetyHold() !== null) return
+                await ensureLedger(Date.now() + recoveryTimeoutMs)
+                if (disposed || safetyHold() !== null) return
+                await reconcileCommits()
+              })
+              if (disposed || safetyHold() !== null) return
+              void checkpointWorker?.resume()
+              appLane.retryDelivery()
+              logDelivery?.trigger()
+              retryAppPull()
+              scheduleOperations()
+              scheduleControlSlotRetry(0)
+              if (recoveryRetryPending || healRequested || stranded || anchorRecoveryPending)
+                retryRecovery()
+            })
+            .catch((error: unknown) => {
+              if (!safetyRefusal(error) && !disposed) scheduleOperations(operationBackoff)
+            })
+        })
+      : mls?.onSafetyHold?.(latchSafetyHold)
   const safetyReady = refreshControl()
-  const ready = (async () => {
+  const initialise = async (): Promise<void> => {
     await safetyReady
     initialSafetyLoaded = true
     const stopped = () => disposed || safetyHold() !== null
@@ -5299,6 +5352,7 @@ export function createGroupPeerWithControlWalk<
           armAppPull(appPullBackoff)
         }
       }
+      startupComplete = !stopped()
     } catch (error) {
       if (!safetyRefusal(error)) throw error
     } finally {
@@ -5312,7 +5366,8 @@ export function createGroupPeerWithControlWalk<
         }
       }
     }
-  })()
+  }
+  const ready = initialise()
   // A failed init rejects every public call, but must not raise an unhandled rejection before the
   // first is made.
   const settled = ready.catch(() => {})

@@ -47,6 +47,7 @@ export type RegistryGroupMLSParams = Omit<
   | 'readRecoverySource'
   | 'recoveryAdoption'
   | 'onSafetyHold'
+  | 'onSafetyChanged'
   | 'authoriseForkRecovery'
   | 'readInstalledRecoveryLineage'
   | 'checkForkRecoveryCapture'
@@ -87,9 +88,18 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
     return source
   }
   let admission: SendAdmission
+  let ordinaryAdmission: SendAdmission
   let initialised = false
   let pendingObservation: AccountedGroupObservation | undefined
   function cache(next: SendAdmission): void {
+    // Runtime reads can carry the hold projection. Preserve the underlying admission.
+    if (
+      next.admissible ||
+      (next.reason !== 'fork-halted' &&
+        next.reason !== 'spent-set-corrupt' &&
+        next.reason !== 'recovery-unavailable')
+    )
+      ordinaryAdmission = { ...next }
     const reason = capability?.held(key)
     admission = reason == null ? { ...next } : { epoch: next.epoch, admissible: false, reason }
   }
@@ -152,8 +162,12 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
   initialised = true
   if (pendingObservation !== undefined) observe(pendingObservation)
   let opening: Promise<ControlHandleAccess> | undefined
-  const unsubscribeSafety = capability.onSafetyHold(key, (reason) => {
-    admission = { epoch: admission.epoch, admissible: false, reason }
+  ordinaryAdmission = { ...admission }
+  const unsubscribeSafety = capability.onSafetyChanged(key, (reason) => {
+    admission =
+      reason === null
+        ? { ...ordinaryAdmission }
+        : { epoch: admission.epoch, admissible: false, reason }
   })
   let unsubscribeRuntime: (() => void) | undefined
   capability.onRetire(key, async () => {
@@ -376,6 +390,7 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
       },
     },
     onSafetyHold: (latch) => capability.onSafetyHold(key, latch),
+    onSafetyChanged: (sink) => capability.onSafetyChanged(key, sink),
   })
   const captured = groupMLS.capturedRecovery
   if (captured !== undefined) {

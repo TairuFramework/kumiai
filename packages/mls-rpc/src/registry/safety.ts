@@ -1,6 +1,6 @@
 import {
   type ControlSnapshot,
-  controlSafetyHeld,
+  type ForkHalt,
   recoveryUnavailableEventID,
   type SafetyHold,
 } from '@kumiai/rpc'
@@ -17,6 +17,9 @@ export type RegistrySafetyCapability<TTx extends GroupTransaction> = RegistryCon
   binding: object
   entry: EntryCapability<TTx>
   latch(key: GroupKey, reason: NonNullable<SafetyHold>): void
+  reportHold(key: GroupKey, halt: ForkHalt): void
+  prepareReportedHoldRelease(key: GroupKey, halt: ForkHalt): () => void
+  observeHold(key: GroupKey, control: ControlSnapshot): void
   held(key: GroupKey): SafetyHold
   persistTrustUnavailable(key: GroupKey): Promise<void>
 }
@@ -88,6 +91,7 @@ class SafetyNoop extends Error {}
 
 export function trustUnavailableWriter<TTx extends GroupTransaction>(params: {
   entry: EntryCapability<TTx>
+  observeHold(key: GroupKey, control: ControlSnapshot): void
   latch(key: GroupKey, reason: NonNullable<SafetyHold>): void
 }): (key: GroupKey) => Promise<void> {
   return async (requested) => {
@@ -115,7 +119,8 @@ export function trustUnavailableWriter<TTx extends GroupTransaction>(params: {
             // biome-ignore lint/style/useErrorCause: The constructor forwards cause.
             throw new GroupUnavailableError({ reason: 'invalid', cause })
           }
-          params.latch(key, controlSafetyHeld(control) ?? 'recovery-unavailable')
+          params.observeHold(key, control)
+          params.latch(key, 'recovery-unavailable')
           if (control.recoveryUnavailable !== null) throw new SafetyNoop()
           return { expected: lifetime, value: null }
         },

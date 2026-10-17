@@ -160,6 +160,29 @@ describe('host invocation boundary', () => {
     expect(held).toEqual(['fork-halted'])
   })
 
+  test('nullable core safety subscription fences late and malformed host notifications', () => {
+    const boundary = createHostBoundary()
+    let supply: ((reason: unknown) => void) | undefined
+    const host = wrapPeerHost(boundary, {
+      mls: {
+        onSafetyChanged(sink: (reason: unknown) => void) {
+          supply = sink
+          return () => {}
+        },
+      },
+    })
+    const reasons: Array<unknown> = []
+    const unsubscribe = host.mls.onSafetyChanged((reason) => {
+      reasons.push(reason)
+    })
+    supply?.('fork-halted')
+    supply?.({ reason: null })
+    supply?.(null)
+    unsubscribe()
+    supply?.('recovery-unavailable')
+    expect(reasons).toEqual(['fork-halted', null])
+  })
+
   test('waits for a paused method and refuses its later invocation', async () => {
     const output = vi.spyOn(stdout, 'write').mockImplementation(() => true)
     await assertPaused('host.write', async (pause) => {
