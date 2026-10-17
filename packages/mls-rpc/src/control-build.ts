@@ -1,4 +1,4 @@
-import { encodeClientState, type GroupHandle } from '@kumiai/mls'
+import { decodeClientState, encodeClientState, type GroupHandle } from '@kumiai/mls'
 import {
   type ControlBuildPort,
   type ControlSlot,
@@ -19,6 +19,7 @@ import { toB64U } from '@sozai/codec'
 import type { Runtime } from '@sozai/runtime'
 
 import type { ControlHandleAccess } from './access.js'
+import { controlCompatible } from './control-compat.js'
 import { decodeControlJournal, encodeControlJournal } from './control-journal.js'
 import { controlBuildContexts } from './control-write-context.js'
 import { deriveEntryKey, sealEntries } from './crypto.js'
@@ -200,6 +201,7 @@ export function createControlBuildPort(params: {
     params.access.readControl(async (scope) => ({
       handle: scope.handle,
       source: scope.source,
+      state: encodeClientState(scope.handle.state),
       snapshot: await scope.loadControl(params.control),
     }))
   const safetyHeld = async () => controlSafetyHeld((await read()).snapshot)
@@ -347,6 +349,10 @@ export function createControlBuildPort(params: {
             (current.cursor.epoch !== identity.epoch || current.cursor.stranded)) ||
           !sameStoredValue(current.operations[0], saved)
         )
+          return { kind: 'moved', operation: saved }
+        const source = decodeClientState(sourceState)
+        const stored = decodeClientState(fresh.state)
+        if (source === undefined || stored === undefined || !controlCompatible(source, stored))
           return { kind: 'moved', operation: saved }
         if (attempts >= 8) return { kind: 'moved', operation: saved }
         expected = fresh.source

@@ -279,6 +279,65 @@ test('version-only preparation retry refreshes under owned access', async () => 
   }
 })
 
+test('proposal between build and save moves the build', async () => {
+  const host = await setup()
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  let attempts = 0
+  const port = host.make(async (op, slot, expected, id) => {
+    attempts++
+    if (attempts === 1) {
+      entered.resolve()
+      await release.promise
+    }
+    return host.saver(op, slot, expected, id)
+  })
+  const preparing = port.prepareBuild(intent, host.frame)
+  try {
+    await entered.promise
+    const stored = await host.groups.loadState(host.key)
+    if (stored === null || stored.deleted || stored.state === null)
+      throw new Error('Missing stored state')
+    const state = decodeClientState(stored.state)
+    if (state === undefined) throw new Error('Invalid stored state')
+    const bare = await restoreGroup({
+      state,
+      credential: stored.credential,
+      ledgerEntries: stored.ledger,
+    })
+    const own = 2 * state.privatePath.leafIndex
+    const generation = state.secretTree.leafNodes[own]?.handshake.generation ?? 0
+    await bare.proposeSelfRemoval()
+    expect(bare.state.secretTree.leafNodes[own]?.handshake.generation).toBe(generation + 1)
+    await host.groups.transition(
+      await nextChange(host.groups, host.key.groupID, 'own-proposal'),
+      async (stores) => {
+        await stores.incarnation(1).state.save(
+          { ...stored, version: stored.version + 1, state: encodeClientState(bare.state) },
+          {
+            key: host.key,
+            stateVersion: stored.version,
+            identity: {
+              ...host.key,
+              epoch: stored.epoch,
+              authenticator: stored.epochAuthenticator,
+            },
+          },
+        )
+      },
+    )
+    host.setHandle(bare)
+    release.resolve()
+    expect((await preparing).kind).toBe('moved')
+    expect(attempts).toBe(1)
+    expect((await host.control.load()).commitOnce).toBeNull()
+    expect((await host.control.load()).operations).toEqual([intent])
+  } finally {
+    release.resolve()
+    await preparing
+  }
+})
+
 test.each(['key', 'epoch', 'authenticator', 'checkpoint', 'cursor epoch', 'queue'] as const)(
   'raw built-save rejects a moved guard without access refresh: %s',
   async (move) => {

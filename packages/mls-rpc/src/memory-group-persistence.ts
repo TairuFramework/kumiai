@@ -1062,6 +1062,11 @@ export function createMemoryGroupCoordinator(params: {
                 }
                 const after = snapshot(tx)
                 const affected = changedIncarnations(before, after, change.groupID)
+                for (const namespaces of affected.values()) {
+                  namespaces.delete('pending')
+                  namespaces.delete('poison')
+                  namespaces.delete('cursor')
+                }
                 if (
                   life.activeIncarnation !== null &&
                   (!sameStoredValue(before.trust, after.trust) ||
@@ -1072,7 +1077,7 @@ export function createMemoryGroupCoordinator(params: {
                   affected.set(life.activeIncarnation, namespaces)
                 }
                 for (const [incarnation, namespaces] of affected) {
-                  if (savedStates.has(incarnation)) continue
+                  if (savedStates.has(incarnation) || namespaces.size === 0) continue
                   const state = await loadAffectedState(
                     tx,
                     { groupID: change.groupID, incarnation },
