@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest'
 import type { ConformanceAdoptionWrite, ConformanceControlChanges } from './control-store.js'
 import type {
   ConformanceGroupPersistence,
+  ConformanceGroupStateRecord,
   ConformanceGroupStores,
   ConformanceGroupTransaction,
   ConformanceGroupTransition,
@@ -325,8 +326,86 @@ export async function assertPartialLossSpentRefused<TTx extends ConformanceGroup
 
 export function testGroupStorageConformance<TTx extends ConformanceGroupTransaction>(
   params: GroupStorageConformanceParams<TTx>,
+  guards?: {
+    cacheAtCurrentGeneration(
+      record: ConformanceGroupStateRecord & { deleted: false },
+    ): Promise<ConformanceGroupStateRecord & { deleted: false }>
+    retainedTupleChanged(
+      record: ConformanceGroupStateRecord & { deleted: false },
+    ): Promise<ConformanceGroupStateRecord & { deleted: false }>
+  },
 ): void {
   describe(`Group storage conformance -- ${params.label}`, () => {
+    if (guards !== undefined) {
+      for (const [name, candidate, message] of [
+        [
+          'skipped key at the current generation refuses',
+          guards.cacheAtCurrentGeneration,
+          'Invalid skipped-key index',
+        ],
+        [
+          'retained epoch tuple change refuses',
+          guards.retainedTupleChanged,
+          'Retained epoch tuple changed',
+        ],
+      ] as const) {
+        test(name, async () => {
+          const fixture = await params.createFixture(groupID)
+          try {
+            const groups = fixture.ports.device.groups
+            const seed = await storageSeed(fixture.ports)
+            const next = await candidate(seed.state)
+            expect(next.version).toBe(seed.state.version + 1)
+            const confirmedTranscriptHash = await fixture.ports.readConfirmedTranscriptHash(
+              next.state,
+            )
+            const before = await fixture.inspectRows()
+            await expect(
+              groups.transition(await storageChange(groups, groupID, name), async (stores) => {
+                await stores.incarnation(1).state.save(next)
+                if (next.epoch === seed.state.epoch) return
+                const trust = {
+                  ...seed.trust,
+                  installed: { ...key, epoch: next.epoch, authenticator: next.epochAuthenticator },
+                  spentEpochAuthenticators: [
+                    ...seed.trust.spentEpochAuthenticators,
+                    next.epochAuthenticator,
+                  ],
+                }
+                await stores.trust.save(trust)
+                const records = await stores.checkpoints.list()
+                const coverage = records.find((row) => row.kind === 'coverage')
+                const previousID =
+                  coverage?.kind === 'coverage' ? coverage.installations.at(-1)?.id : undefined
+                const previous = records.find((row) => row.kind === 'fact' && row.id === previousID)
+                const fact = await seed.prepareInstallationCheckpoint({
+                  key,
+                  trust,
+                  confirmedTranscriptHash,
+                  mutationID: name,
+                  stateVersion: next.version,
+                  previousFact: previous?.kind === 'fact' ? previous.canonical : null,
+                })
+                await stores.checkpoints.put(fact)
+                await stores.checkpoints.put({
+                  kind: 'publication',
+                  id: `publication:${fact.id}`,
+                  key,
+                  factID: fact.id,
+                  frame: null,
+                  publishID: null,
+                  accepted: false,
+                  nextHeartbeatAt: null,
+                })
+              }),
+            ).rejects.toMatchObject({ name: 'GroupStateConflictError', message })
+            expect(await fixture.inspectRows()).toEqual(before)
+          } finally {
+            await fixture.close()
+          }
+        })
+      }
+    }
     for (const ownership of ['supplied', 'absent'] as const) {
       test(`ordinary stores cannot fabricate spent corruption (${ownership} ownership context)`, async () => {
         const fixture = await params.createFixture(groupID, {

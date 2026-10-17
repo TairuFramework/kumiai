@@ -315,6 +315,10 @@ callbacks and key retention of at least 1000 generations and forward ratchet ste
 apply those options in their `restore` callback. `restoreCandidate` decodes host-serialised control
 journal candidates; cold access never uses candidates as a substitute for stored state.
 
+`recovery.options.keyRetention.retainKeysForEpochs` defaults to `4` and accepts integers from `1`
+through `32`. Other values throw `KeyRetentionRangeError`. Restored state must fit the configured
+epoch and skipped-generation limits.
+
 Providers must register the internal entry capability and an equivalent shared coordinator
 binding token for all root group wrappers on the same database ownership boundary. The registry
 owns that token: a second live registry is rejected synchronously before any load, restoration or

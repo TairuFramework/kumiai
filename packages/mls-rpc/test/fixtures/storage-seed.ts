@@ -12,6 +12,7 @@ import {
   encodeGroupAnchor,
   type GroupHandle,
   type GroupOptions,
+  restoreGroup,
   signLedgerEntry,
 } from '@kumiai/mls'
 import type { ConformanceCheckpointRecord } from '@kumiai/rpc-conformance'
@@ -43,6 +44,41 @@ export type StorageSeed = {
 }
 
 const ciphersuiteName = 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519'
+
+async function storageHandle(record: GroupStateRecord & { deleted: false }): Promise<GroupHandle> {
+  const state = record.state === null ? undefined : decodeClientState(record.state)
+  if (state === undefined) throw new Error('Missing storage state')
+  return restoreGroup({ state, credential: record.credential, ledgerEntries: record.ledger })
+}
+
+export async function cacheAtCurrentGeneration(
+  record: GroupStateRecord & { deleted: false },
+): Promise<GroupStateRecord & { deleted: false }> {
+  const handle = await storageHandle(record)
+  await handle.encrypt(new Uint8Array([1]))
+  const node = handle.state.secretTree.leafNodes[2 * handle.state.privatePath.leafIndex]
+  if (node === undefined) throw new Error('Missing own ratchet')
+  node.application.unusedGenerations[node.application.generation] = node.application.secret.slice()
+  return { ...record, version: record.version + 1, state: encodeClientState(handle.state) }
+}
+
+export async function retainedTupleChanged(
+  record: GroupStateRecord & { deleted: false },
+): Promise<GroupStateRecord & { deleted: false }> {
+  const previous = await storageHandle(record)
+  const handle = (await commitKeyRotation(previous)).newGroup
+  const retained = handle.state.historicalReceiverData.get(BigInt(record.epoch))
+  if (retained === undefined) throw new Error('Missing retained epoch')
+  retained.senderDataSecret[0] = (retained.senderDataSecret[0] ?? 0) ^ 1
+  return {
+    ...record,
+    version: record.version + 1,
+    epoch: Number(handle.epoch),
+    epochAuthenticator: handle.state.keySchedule.epochAuthenticator.slice(),
+    state: encodeClientState(handle.state),
+    senderHWM: 0,
+  }
+}
 
 export async function makeStorageSeed(params: {
   id: string

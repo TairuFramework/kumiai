@@ -6,9 +6,10 @@ import {
   parseMLSCredentialIdentity,
   readGroupAnchorExtension,
 } from '@kumiai/mls'
+import { RETAINED_EPOCHS_DEFAULT, RETAINED_EPOCHS_MAX } from '@kumiai/rpc'
 import { ciphersuites, defaultKeyRetentionConfig } from 'ts-mls'
 
-import { GroupStateConflictError } from '../persistence-errors.js'
+import { GroupStateConflictError, KeyRetentionRangeError } from '../persistence-errors.js'
 import type { GroupKey, GroupRecoveryTrust, GroupStateRecord } from '../persistence-types.js'
 import type { RecoveryBinding } from '../recovery.js'
 import { recoveryTrustFor } from './trust.js'
@@ -21,6 +22,15 @@ export type RecoveryEnvironment = {
 
 export function registryOptions(options: GroupOptions): GroupOptions {
   const keyRetention = { ...options.keyRetention }
+  const epochs =
+    keyRetention.retainKeysForEpochs === undefined
+      ? RETAINED_EPOCHS_DEFAULT
+      : keyRetention.retainKeysForEpochs
+  if (!Number.isInteger(epochs) || epochs < 1 || epochs > RETAINED_EPOCHS_MAX)
+    throw new KeyRetentionRangeError(
+      `Registry retainKeysForEpochs must be an integer in 1..${RETAINED_EPOCHS_MAX}`,
+    )
+  keyRetention.retainKeysForEpochs = epochs
   for (const field of ['retainKeysForGenerations', 'maximumForwardRatchetSteps'] as const) {
     const value = keyRetention[field] === undefined ? 1000 : keyRetention[field]
     if (!Number.isSafeInteger(value) || value < 1000)
@@ -87,6 +97,24 @@ export function validateRegistryHandle(params: {
     }),
     'Registry key retention mismatch',
   )
+  requireCondition(
+    handle.state.historicalReceiverData.size <= expectedRetention.retainKeysForEpochs,
+    'Registry retained epoch limit exceeded',
+  )
+  for (const tree of [
+    handle.state.secretTree,
+    ...Array.from(handle.state.historicalReceiverData.values(), (receiver) => receiver.secretTree),
+  ]) {
+    for (const node of Object.values(tree.leafNodes)) {
+      for (const kind of ['handshake', 'application'] as const) {
+        requireCondition(
+          Object.keys(node[kind].unusedGenerations).length <=
+            expectedRetention.retainKeysForGenerations,
+          'Registry skipped-key limit exceeded',
+        )
+      }
+    }
+  }
   if (handle.state.groupActiveState.kind !== 'removedFromGroup') {
     const leaf = handle.state.ratchetTree[handle.state.privatePath.leafIndex * 2]
     requireCondition(

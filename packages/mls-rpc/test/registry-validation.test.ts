@@ -80,6 +80,7 @@ async function setup() {
 describe('registry retention defaults and floors', () => {
   test('supplies generation and forward window floors while preserving other options', () => {
     expect(registryOptions({}).keyRetention).toEqual({
+      retainKeysForEpochs: 4,
       retainKeysForGenerations: 1000,
       maximumForwardRatchetSteps: 1000,
     })
@@ -95,6 +96,7 @@ describe('registry retention defaults and floors', () => {
         keyRetention: { retainKeysForGenerations: 1001, maximumForwardRatchetSteps: 2000 },
       }).keyRetention,
     ).toEqual({
+      retainKeysForEpochs: 4,
       retainKeysForGenerations: 1001,
       maximumForwardRatchetSteps: 2000,
     })

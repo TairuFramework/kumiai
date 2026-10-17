@@ -97,6 +97,7 @@ export {
   GroupStateUncertainError,
   GroupUnavailableError,
   type GroupUnavailableReason,
+  KeyRetentionRangeError,
   ManualRecoveryUnavailableError,
   NonRootProviderError,
   OutboxReplacementError,

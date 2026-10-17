@@ -1,4 +1,5 @@
-import { type ClientState, decodeClientState } from '@kumiai/mls'
+import { type ClientState, decodeClientState, encodeClientState } from '@kumiai/mls'
+import type { EpochReceiverData } from 'ts-mls'
 
 import { GroupStateConflictError } from './persistence-errors.js'
 import type { GroupRecoveryTrust, GroupStateRecord } from './persistence-types.js'
@@ -48,7 +49,20 @@ function isDescendant(node: number, ancestor: number): boolean {
   return node !== ancestor && Math.abs(node - ancestor) < radius
 }
 
-function assertTreeProgress(previous: SecretTree, next: SecretTree): void {
+function assertTreeProgress(previous: SecretTree | undefined, next: SecretTree): void {
+  for (const node of Object.values(next.leafNodes)) {
+    for (const kind of ['handshake', 'application'] as const) {
+      const ratchet = node[kind]
+      for (const key of Object.keys(ratchet.unusedGenerations)) {
+        const index = Number(key)
+        requireCondition(
+          Number.isSafeInteger(index) && index >= 0 && index < ratchet.generation,
+          'Invalid skipped-key index',
+        )
+      }
+    }
+  }
+  if (previous === undefined) return
   requireCondition(next.leafWidth === previous.leafWidth, 'Secret tree width changed')
   const expanded = Object.keys(previous.intermediateNodes)
     .filter((key) => !Object.hasOwn(next.intermediateNodes, key))
@@ -77,26 +91,55 @@ function assertTreeProgress(previous: SecretTree, next: SecretTree): void {
   }
 }
 
+function assertRetainedTuple(
+  template: ClientState,
+  previous: EpochReceiverData,
+  next: EpochReceiverData,
+): void {
+  // ts-mls exposes the combined encoder, but not its public tree/context encoders.
+  const publicTuple = (receiver: EpochReceiverData) => {
+    return encodeClientState({
+      ...template,
+      groupContext: receiver.groupContext,
+      ratchetTree: receiver.ratchetTree,
+    })
+  }
+  requireCondition(
+    sameBytes(previous.resumptionPsk, next.resumptionPsk) &&
+      sameBytes(previous.senderDataSecret, next.senderDataSecret) &&
+      sameBytes(publicTuple(previous), publicTuple(next)),
+    'Retained epoch tuple changed',
+  )
+}
+
 function assertReceiveProgress(previous: ClientState, next: ClientState): void {
   const previousEpoch = previous.groupContext.epoch
-  if (next.groupContext.epoch === previousEpoch)
-    assertTreeProgress(previous.secretTree, next.secretTree)
+  assertTreeProgress(
+    next.groupContext.epoch === previousEpoch ? previous.secretTree : undefined,
+    next.secretTree,
+  )
   for (const [epoch, receiver] of next.historicalReceiverData) {
     requireCondition(epoch < next.groupContext.epoch, 'Invalid retained epoch')
-    if (epoch > previousEpoch) continue
+    if (epoch > previousEpoch) {
+      assertTreeProgress(undefined, receiver.secretTree)
+      continue
+    }
     if (epoch === previousEpoch) {
-      requireCondition(
-        sameBytes(previous.keySchedule.resumptionPsk, receiver.resumptionPsk),
-        'Retained epoch identity changed',
+      assertRetainedTuple(
+        previous,
+        {
+          ...previous.keySchedule,
+          secretTree: previous.secretTree,
+          ratchetTree: previous.ratchetTree,
+          groupContext: previous.groupContext,
+        },
+        receiver,
       )
       assertTreeProgress(previous.secretTree, receiver.secretTree)
     } else {
       const before = previous.historicalReceiverData.get(epoch)
       requireCondition(before !== undefined, 'Evicted epoch resurrected')
-      requireCondition(
-        sameBytes(before.resumptionPsk, receiver.resumptionPsk),
-        'Retained epoch identity changed',
-      )
+      assertRetainedTuple(previous, before, receiver)
       assertTreeProgress(before.secretTree, receiver.secretTree)
     }
   }

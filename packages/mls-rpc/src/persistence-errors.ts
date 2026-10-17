@@ -11,6 +11,10 @@ export class GroupStateConflictError extends Error {
   override name = 'GroupStateConflictError'
 }
 
+export class KeyRetentionRangeError extends RangeError {
+  override name = 'KeyRetentionRangeError'
+}
+
 export class RegistrySourceMovedError extends GroupStateConflictError {
   override name = 'RegistrySourceMovedError'
 }

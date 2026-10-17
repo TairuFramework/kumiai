@@ -201,7 +201,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
       ownerDID: environment.ownerDID,
     })
     const generation =
-      handle.state.secretTree.leafNodes[handle.state.privatePath.leafIndex]?.application
+      handle.state.secretTree.leafNodes[2 * handle.state.privatePath.leafIndex]?.application
         .generation ?? 0
     return {
       ...value.record,
