@@ -16,7 +16,11 @@ import {
 } from '@kumiai/rpc'
 
 import { coordinatorBinding } from './entry-capability.js'
-import { createManualRecoveryStore, manualRecoveryStatus } from './manual-recovery.js'
+import {
+  createManualRecoveryStore,
+  manualRecoveryStatus,
+  rememberManualRecoveryTarget,
+} from './manual-recovery.js'
 import { sameStoredValue } from './memory-incarnation-stores.js'
 import { isStoredOpenFailure } from './persistence-codec.js'
 import {
@@ -45,6 +49,11 @@ import { flushConditionEvents, groupCondition } from './safety-conditions.js'
 
 export type ManualRecovery =
   | { mode: 'resync'; targetID: string; allowOpenFork?: boolean }
+  | {
+      mode: 'resync'
+      target: { targetID: string; hub: LogHub & MailboxHub; commitTopicID: string }
+      allowOpenFork?: boolean
+    }
   | { mode: 'successor'; successor: GroupKey }
 export type RecoveryTarget = { id: string; commitTopicID: string; hub: LogHub & MailboxHub }
 export type GroupSafety = {
@@ -209,7 +218,16 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
     async recover(requested, choice) {
       if (choice.mode === 'successor')
         throw new ManualRecoveryUnavailableError('Successor recovery is unavailable')
-      const { targetID, allowOpenFork = false } = choice
+      const { allowOpenFork = false } = choice
+      const supplied =
+        'target' in choice
+          ? {
+              id: choice.target.targetID,
+              hub: choice.target.hub,
+              commitTopicID: choice.target.commitTopicID,
+            }
+          : null
+      const targetID = supplied?.id ?? ('targetID' in choice ? choice.targetID : undefined)
       const key = { ...requested }
       if (
         !validKey(key) ||
@@ -218,7 +236,7 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
         typeof allowOpenFork !== 'boolean'
       )
         throw new TypeError('Invalid manual recovery choice')
-      const target = await params.resolveTarget(targetID)
+      const target = supplied ?? (await params.resolveTarget(targetID))
       if (
         target.id !== targetID ||
         typeof target.commitTopicID !== 'string' ||
@@ -236,6 +254,8 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
         commitTopicID: target.commitTopicID,
         allowOpenFork,
       })
+      // The live binding becomes usable only after durable authorisation is proven.
+      if (supplied !== null) rememberManualRecoveryTarget(params.registry, record.id, supplied)
       return await registryRecoveryCoordinator(params.registry).runManual(record)
     },
     async events(requested) {

@@ -8,6 +8,12 @@ import type {
 import type { ConformanceGroupKey } from './persistence-fixture.js'
 import type { ConformanceRegistryFixture, ConformanceRegistryHandle } from './registry-fixture.js'
 
+export type ConformanceCallTimeRecoveryTarget<Hub> = {
+  targetID: string
+  hub: Hub
+  commitTopicID: string
+}
+
 export type ConformancePersistedManualRecovery =
   | { mode: 'resync'; targetID: string; commitTopicID: string; allowOpenFork: boolean }
   | { mode: 'successor'; successor: ConformanceGroupKey }

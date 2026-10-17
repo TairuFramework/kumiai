@@ -1,5 +1,5 @@
 import type { GroupHandle } from '@kumiai/mls'
-import type { GroupSafetyEvent, RecoveryUnavailableEvent } from '@kumiai/rpc'
+import type { GroupSafetyEvent, LogHub, MailboxHub, RecoveryUnavailableEvent } from '@kumiai/rpc'
 import {
   type ConformanceGroupSafety,
   type ConformanceGroupSafetyEvent,
@@ -19,9 +19,9 @@ import { createRegistryFixture, type RegistryFixture } from './fixtures/registry
 
 expectTypeOf<RegistryPeerStatus>().toEqualTypeOf<ConformanceRegistryPeerStatus>()
 expectTypeOf<RecoveryPendingReason>().toEqualTypeOf<ConformanceRecoveryPendingReason>()
-expectTypeOf<GroupSafety>().toExtend<ConformanceGroupSafety>()
-expectTypeOf<ConformanceGroupSafety>().toExtend<GroupSafety>()
-expectTypeOf<ManualRecovery>().toEqualTypeOf<ConformanceManualRecovery>()
+expectTypeOf<GroupSafety>().toExtend<ConformanceGroupSafety<LogHub & MailboxHub>>()
+expectTypeOf<ConformanceGroupSafety<LogHub & MailboxHub>>().toExtend<GroupSafety>()
+expectTypeOf<ManualRecovery>().toEqualTypeOf<ConformanceManualRecovery<LogHub & MailboxHub>>()
 expectTypeOf<GroupSafetyEvent>().toEqualTypeOf<ConformanceGroupSafetyEvent>()
 expectTypeOf<RecoveryUnavailableEvent>().toEqualTypeOf<ConformanceRecoveryUnavailableEvent>()
 expectTypeOf<RegistryFixture>().toExtend<ConformanceRegistryFixture<GroupHandle>>()

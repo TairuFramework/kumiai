@@ -22,6 +22,17 @@ import type { RecoveryTarget } from './safety.js'
 
 type ManualRow = Extract<CheckpointRecord, { kind: 'manual-recovery' }>
 const preparations = new WeakMap<object, ManualRow>()
+const liveTargets = new WeakMap<GroupHandleRegistry, Map<string, RecoveryTarget>>()
+
+export function rememberManualRecoveryTarget(
+  registry: GroupHandleRegistry,
+  id: string,
+  target: RecoveryTarget,
+): void {
+  const targets = liveTargets.get(registry) ?? new Map<string, RecoveryTarget>()
+  targets.set(id, { id: target.id, commitTopicID: target.commitTopicID, hub: target.hub })
+  liveTargets.set(registry, targets)
+}
 
 export function manualRecoveryPreparation(record: CheckpointRecord): ManualRow | undefined {
   return preparations.get(record)
@@ -394,7 +405,9 @@ export function createManualRecoveryStore<TTx extends GroupTransaction>(params: 
         throw new GroupStateConflictError('Resync authorisation required')
       let target: RecoveryTarget | null = null
       try {
-        const resolved = await params.resolveTarget?.(record.choice.targetID)
+        const resolved =
+          liveTargets.get(params.registry)?.get(id) ??
+          (await params.resolveTarget?.(record.choice.targetID))
         if (
           resolved?.id === record.choice.targetID &&
           resolved.commitTopicID === record.choice.commitTopicID

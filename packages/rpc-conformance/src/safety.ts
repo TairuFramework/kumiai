@@ -12,7 +12,10 @@ import type {
   ConformanceSafetyHold,
 } from './control-store.js'
 import type { ConformanceGroupMLS } from './group-mls.js'
-import type { ConformanceManualRecoveryStatus } from './manual-recovery.js'
+import type {
+  ConformanceCallTimeRecoveryTarget,
+  ConformanceManualRecoveryStatus,
+} from './manual-recovery.js'
 import type { ConformanceRegistryFixture, ConformanceRegistryHandle } from './registry-fixture.js'
 
 export type RosterAbsenceScenario = 'absent' | 'present' | 'wrong-key' | 'expired' | 'imported'
@@ -149,11 +152,12 @@ export function testRosterAbsenceConformance(params: {
   })
 }
 
-export type ConformanceManualRecovery =
+export type ConformanceManualRecovery<Hub = never> =
   | { mode: 'resync'; targetID: string; allowOpenFork?: boolean }
+  | { mode: 'resync'; target: ConformanceCallTimeRecoveryTarget<Hub>; allowOpenFork?: boolean }
   | { mode: 'successor'; successor: ConformanceGroupKey }
 
-export type ConformanceGroupSafety = {
+export type ConformanceGroupSafety<Hub = never> = {
   status(key: ConformanceGroupKey): Promise<{
     hold: ConformanceSafetyHold
     condition: ConformanceGroupCondition | null
@@ -162,7 +166,10 @@ export type ConformanceGroupSafety = {
   }>
   epochAuthenticator(key: ConformanceGroupKey): Promise<ConformanceEpochIdentity | null>
   reportFork(key: ConformanceGroupKey, evidence: ConformanceGroupForkEvidence): Promise<void>
-  recover(key: ConformanceGroupKey, choice: ConformanceManualRecovery): Promise<ConformanceGroupKey>
+  recover(
+    key: ConformanceGroupKey,
+    choice: ConformanceManualRecovery<Hub>,
+  ): Promise<ConformanceGroupKey>
   events(
     key: ConformanceGroupKey,
   ): Promise<
