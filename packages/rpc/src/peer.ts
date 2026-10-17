@@ -2360,11 +2360,21 @@ export function createGroupPeerWithControlWalk<
     search?: ControlWalkRequest,
     requireCompletePrefix = false,
   ): Promise<boolean> => {
+    let advanced: boolean
     try {
-      return await walkCommitLog(port, topicID, search, requireCompletePrefix)
-    } finally {
-      if (!disposed && safetyHold() === null) appliedEpoch = await port.readEpoch()
+      advanced = await walkCommitLog(port, topicID, search, requireCompletePrefix)
+    } catch (error) {
+      if (!disposed && safetyHold() === null) {
+        try {
+          appliedEpoch = await port.readEpoch()
+        } catch {
+          // Preserve the walk's original refusal if the refresh also fails.
+        }
+      }
+      throw error
     }
+    if (!disposed && safetyHold() === null) appliedEpoch = await port.readEpoch()
+    return advanced
   }
 
   /** Walk commits, then request app delivery without waiting for pulls or host handlers. */

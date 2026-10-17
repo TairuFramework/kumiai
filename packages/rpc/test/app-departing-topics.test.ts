@@ -7,10 +7,10 @@ import { encodeAppAAD } from '../src/app-aad.js'
 import { RETAINED_EPOCHS_MAX } from '../src/app-frame.js'
 import type * as AppLaneModule from '../src/app-lane.js'
 import { type AppLaneParams, createAppLane } from '../src/app-lane.js'
-import { FrameEpochError, type PendingAppFrame } from '../src/crypto.js'
+import { AppFrameStorageError, FrameEpochError, type PendingAppFrame } from '../src/crypto.js'
 import { asLogPosition } from '../src/cursor.js'
 import { adaptBusHandlers } from '../src/handlers.js'
-import { createHubMux } from '../src/hub-mux.js'
+import { AppFetchBusyError, createHubMux } from '../src/hub-mux.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { publishCommit } from './fixtures/commits.js'
@@ -49,7 +49,9 @@ const empty = () => ({ messages: [], head: null, oldest: null, gap: false })
 const recoverySecret = new Uint8Array(32).fill(0xb4)
 const members = ['alice', 'bob', 'carol']
 
-function fixture() {
+function fixture(
+  options: Pick<AppLaneParams, 'scheduleDrain' | 'scheduleDelivery'> & { durable?: boolean } = {},
+) {
   let anchor = at(1)
   let applied = 1
   let departing: NonNullable<AnchorSlot['departing']> = []
@@ -59,18 +61,21 @@ function fixture() {
     epoch: 1,
     localDID: 'bob',
     retainedEpochs: RETAINED_EPOCHS_MAX,
-    pending: {
-      async persistOpened(_state, record) {
-        rows.set(record.frame.id, record)
-        saved.push(record)
-      },
-      async list() {
-        return [...rows.values()]
-      },
-      async complete(id) {
-        rows.delete(id)
-      },
-    },
+    pending:
+      options.durable === false
+        ? undefined
+        : {
+            async persistOpened(_state, record) {
+              rows.set(record.frame.id, record)
+              saved.push(record)
+            },
+            async list() {
+              return [...rows.values()]
+            },
+            async complete(id) {
+              rows.delete(id)
+            },
+          },
   })
   const seen: Array<string> = []
   const handlers = adaptBusHandlers(chat, {
@@ -99,6 +104,8 @@ function fixture() {
     anchor: () => anchor,
     groupID: () => 'group',
     departing: () => departing,
+    scheduleDrain: options.scheduleDrain,
+    scheduleDelivery: options.scheduleDelivery,
   })
   onTestFinished(() => {
     lane.dispose()
@@ -143,8 +150,10 @@ function fixture() {
 function peerFixture() {
   const hub = new DurableFakeHub()
   const seen: Array<string> = []
+  const pruned = vi.fn()
   const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
     members,
+    onAppWindowPruned: pruned,
     handlers: {
       'chat/posted': ({ data }: { data: { text: string } }) => {
         seen.push(data.text)
@@ -152,7 +161,7 @@ function peerFixture() {
     },
   })
   onTestFinished(() => bob.peer.dispose())
-  return { hub, seen, bob }
+  return { hub, seen, bob, pruned }
 }
 const currentLane = () => {
   const found = captured.at(-1)
@@ -328,12 +337,70 @@ describe('departing app topics', () => {
     expect(params.appliedEpoch()).toBe(2)
   })
 
-  test.each([-1, 0, 1])('expiry boundary ignores epoch hint offset %s', async (offset) => {
+  test('a failed epoch refresh preserves the original walk error', async () => {
+    const { bob, hub } = peerFixture()
+    await bob.peer.replay()
+    hub.detach('bob')
+    const landed = await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
+    const walkError = new Error('walk observation failed')
+    const refreshError = new Error('final epoch refresh failed')
+    const read = bob.mls.readEpoch.bind(bob.mls)
+    let failures = 0
+    vi.spyOn(bob.mls, 'readEpoch').mockImplementation(async () => {
+      const epoch = await read()
+      if (epoch === 2) throw failures++ < 2 ? walkError : refreshError
+      return epoch
+    })
+    await expect(
+      bob.controlWalk.walkCommits({
+        through: asLogPosition(landed.sequenceID),
+        range: null,
+        work: { takeFetch: () => true, takeFrame: () => true },
+      }),
+    ).rejects.toBe(walkError)
+    expect(failures).toBe(3)
+  })
+
+  test('a successful walk still rejects when its epoch refresh fails', async () => {
     const { bob } = peerFixture()
     await bob.peer.replay()
-    await bob.peer.commit(buildRemoveCommit(bob, 'carol'))
+    const refreshError = new Error('final epoch refresh failed')
+    vi.spyOn(bob.mls, 'readEpoch').mockRejectedValue(refreshError)
+    await expect(
+      bob.controlWalk.walkCommits({
+        through: null,
+        range: null,
+        work: { takeFetch: () => true, takeFrame: () => true },
+      }),
+    ).rejects.toBe(refreshError)
+  })
+
+  test.each([-1, 0, 1])('expiry boundary ignores epoch hint offset %s', async (offset) => {
+    const { bob, hub } = peerFixture()
+    await bob.peer.replay()
     const { lane, params } = currentLane()
-    const fetch = vi.spyOn(params.mux, 'fetchTopic')
+    await publishOld(hub, 'cursor before pruning')
+    await lane.deliver()
+    await expect.poll(() => params.appCursorStore?.load(topic(1))).toBe(pos(1))
+    await bob.peer.commit(buildRemoveCommit(bob, 'carol'))
+    let reportedPruned: Map<unknown, unknown> | undefined
+    const set = Map.prototype.set
+    vi.spyOn(Map.prototype, 'set').mockImplementation(function (
+      this: Map<unknown, unknown>,
+      key,
+      value,
+    ) {
+      if (key === topic(1) && value instanceof Set) reportedPruned = this
+      return set.call(this, key, value)
+    })
+    const fetchTopic = params.mux.fetchTopic.bind(params.mux)
+    const fetch = vi
+      .spyOn(params.mux, 'fetchTopic')
+      .mockImplementation((request) =>
+        request.topicID === topic(1)
+          ? Promise.resolve({ ...empty(), head: pos(5), oldest: pos(5), gap: true })
+          : fetchTopic(request),
+      )
     for (let epoch = 3; epoch <= 33; epoch++) await bob.peer.commit(buildLedgerCommit(bob, []))
     const epoch = bob.crypto.epoch
     const setEpochHintOffset = (offset: number) =>
@@ -343,6 +410,7 @@ describe('departing app topics', () => {
     await lane.deliver()
     expect(params.appliedEpoch()).toBe(33)
     expect(fetch.mock.calls.some(([request]) => request.topicID === topic(1))).toBe(true)
+    expect(reportedPruned?.has(topic(1))).toBe(true)
     hint.mockRestore()
     await bob.peer.commit(buildLedgerCommit(bob, []))
     setEpochHintOffset(offset)
@@ -350,6 +418,7 @@ describe('departing app topics', () => {
     await lane.deliver()
     expect(params.appliedEpoch()).toBe(34)
     expect(fetch.mock.calls.some(([request]) => request.topicID === topic(1))).toBe(false)
+    expect(reportedPruned?.has(topic(1))).toBe(false)
   })
 
   test('trimming at 33 rotations', async () => {
@@ -360,6 +429,101 @@ describe('departing app topics', () => {
     expect((await bob.anchorStore.load())?.departing).toEqual(
       Array.from({ length: 32 }, (_, i) => ({ anchor: at(i + 2), departedAt: i + 3 })),
     )
+  })
+
+  test('expiry clears staged and buffered bookkeeping before caught-up times are applied', async () => {
+    const f = fixture({ durable: false, scheduleDrain: async () => {} })
+    const oldTopic = topic(1)
+    const topicMaps: Array<Map<unknown, unknown>> = []
+    let times: Map<unknown, unknown> | undefined
+    let lastTopicSet: Set<unknown> | undefined
+    let retained: Set<unknown> | undefined
+    let busyTopics: Set<unknown> | undefined
+    const set = Map.prototype.set
+    vi.spyOn(Map.prototype, 'set').mockImplementation(function (
+      this: Map<unknown, unknown>,
+      key,
+      value,
+    ) {
+      if (key === oldTopic) topicMaps.push(this)
+      if (typeof key === 'object' && key != null && 'sealed' in key && typeof value === 'number')
+        times = this
+      return set.call(this, key, value)
+    })
+    const add = Set.prototype.add
+    vi.spyOn(Set.prototype, 'add').mockImplementation(function (this: Set<unknown>, value) {
+      if (value === oldTopic) lastTopicSet = this
+      return add.call(this, value)
+    })
+    const retain = f.mux.retainTopic.bind(f.mux)
+    vi.spyOn(f.mux, 'retainTopic').mockImplementation((topicID, options) => {
+      if (topicID === oldTopic) retained = lastTopicSet
+      retain(topicID, options)
+    })
+    vi.spyOn(f.mux, 'onAppFetchAvailable').mockImplementation(() => {
+      busyTopics = lastTopicSet
+      return () => {}
+    })
+    const payload = await f.send(1, 2, 'buffered future')
+    await f.lane.deliver()
+    const segment = topicMaps.find(
+      (map) => (map.get(oldTopic) as Array<{ sealed?: unknown }> | undefined)?.[0]?.sealed != null,
+    )
+    const cursors = topicMaps.find(
+      (map) => (map.get(oldTopic) as { anchorEpoch?: number } | undefined)?.anchorEpoch === 1,
+    )
+    vi.spyOn(f.mux, 'fetchTopic').mockRejectedValueOnce(new AppFetchBusyError())
+    await f.lane.deliver()
+    expect(segment?.has(oldTopic)).toBe(true)
+    expect(cursors?.has(oldTopic)).toBe(true)
+    expect(retained?.has(oldTopic)).toBe(true)
+    expect(busyTopics?.has(oldTopic)).toBe(true)
+
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    vi.mocked(f.mux.fetchTopic).mockImplementation(async () => {
+      entered.resolve()
+      await release.promise
+      return empty()
+    })
+    f.lane.note(
+      'chat',
+      oldTopic,
+      {
+        topicID: oldTopic,
+        senderDID: 'alice',
+        payload,
+        sequenceID: pos(5),
+        logPosition: pos(5),
+      },
+      new FrameEpochError(2, 1),
+    )
+    const staged = topicMaps.find(
+      (map) => (map.get(oldTopic) as Array<{ frame?: unknown }> | undefined)?.[0]?.frame != null,
+    )
+    expect(staged?.has(oldTopic)).toBe(true)
+    expect(times?.size).toBe(2)
+    const clear = Map.prototype.clear
+    let generalClears = 0
+    vi.spyOn(Map.prototype, 'clear').mockImplementation(function (this: Map<unknown, unknown>) {
+      if (this === times) generalClears++
+      clear.call(this)
+    })
+    f.rotate(2)
+    f.advance(34)
+    await entered.promise
+    try {
+      expect(generalClears).toBe(0)
+      expect(times?.size).toBe(0)
+      expect(segment?.has(oldTopic)).toBe(false)
+      expect(cursors?.has(oldTopic)).toBe(false)
+      expect(staged?.has(oldTopic)).toBe(false)
+      expect(retained?.has(oldTopic)).toBe(false)
+      expect(busyTopics?.has(oldTopic)).toBe(false)
+    } finally {
+      release.resolve()
+    }
+    await f.lane.deliver()
   })
 
   test('expiry settles stall bookkeeping over 40 cycles', async () => {
@@ -438,6 +602,51 @@ describe('departing app topics', () => {
       expect(peakNotices).toBeLessThanOrEqual(2)
     }
   })
+
+  test.each(['storage', 'future'] as const)(
+    'expiry leaves an opened %s-stalled record to settle on completion',
+    async (failure) => {
+      const starts: Array<() => void> = []
+      const f = fixture({
+        scheduleDelivery: (start) => {
+          starts.push(start)
+        },
+      })
+      await f.send(1, failure === 'future' ? 2 : 1, 'pending delivery')
+      if (failure === 'storage') {
+        vi.spyOn(f.reader, 'unwrap').mockImplementationOnce(() => {
+          throw new AppFrameStorageError('storage unavailable')
+        })
+        await expect(f.lane.deliver()).rejects.toThrow('storage unavailable')
+      } else {
+        await f.lane.deliver()
+      }
+      expect(f.stalled).toHaveBeenCalledTimes(1)
+      expect(f.lane.pendingRecords()).toHaveLength(0)
+      f.advance(2)
+      await f.lane.deliver()
+      expect(f.lane.pendingRecords()).toHaveLength(1)
+      expect(f.resumed).not.toHaveBeenCalled()
+      f.rotate(3)
+      f.advance(35)
+      await f.lane.deliver()
+      expect(f.lane.pendingRecords()).toHaveLength(1)
+      expect(f.seen).toEqual([])
+      expect(f.resumed).not.toHaveBeenCalled()
+      expect(starts.length).toBeGreaterThan(0)
+      for (const start of starts) start()
+      await expect.poll(() => f.rows.size).toBe(0)
+      expect(f.seen).toEqual(['pending delivery'])
+      expect(f.resumed).toHaveBeenCalledExactlyOnceWith({
+        groupID: 'group',
+        protocol: 'chat',
+        topicID: topic(1),
+        position: pos(1),
+        ...(failure === 'future' ? { reason: 'future-epoch' } : {}),
+        settlement: 'resumed',
+      })
+    },
+  )
 
   test('app work never writes the anchor slot, including a capture racing expiry', async () => {
     const { bob } = peerFixture()

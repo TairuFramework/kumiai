@@ -452,6 +452,13 @@ export function createAppLane(params: AppLaneParams): AppLane {
     busyTopics.delete(topicID)
     for (const [key, event] of blockingFrames) {
       if (!key.startsWith(`${topicID}\u0000`)) continue
+      // Opened records survive topic expiry and settle when durable delivery completes.
+      if (
+        pendingRecords.some(
+          (record) => record.frame.topicID === topicID && record.frame.position === event.position,
+        )
+      )
+        continue
       blockingFrames.delete(key)
       notifyAppHost(onAppDeliveryResumed, { ...event, settlement: 'expired' })
     }
