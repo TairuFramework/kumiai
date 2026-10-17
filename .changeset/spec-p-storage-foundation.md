@@ -51,12 +51,24 @@ Unconfirmed later leaf absence records not-accepted provenance and carries oblig
 
 Export portable source/proof types, concrete registry source/write types, captured constructors, continuation and existing refusal errors.
 Recover missing private state using retained trust. Complete source accepted operations idempotently after destination bootstrap.
-Unadopted legacy records stop unchanged until manual recovery. Custom recovery secrets require equivalent retained-trust derivation at construction.
+Unadopted legacy records stop unchanged; successor retirement is their explicit exit. Custom recovery secrets require equivalent retained-trust derivation at construction.
 Origin-authorised removed signers retain attestation authority. Busy responders can cause accepted-unadoptable churn.
-Fork detection remains deferred to out-of-band peer checkpoints. Full registry crypto, leases and batching remain 2.3.
+Full registry crypto, leases and batching remain 2.3.
 Real-MLS memory reconstruction and sensitivity witnesses provide phase-2 evidence. Phase-6 child-process SIGKILL evidence remains outstanding.
 Restart frozen-settlement publication under safety remains a 2.3 obligation. A crash before durable writing can still lose volatile host evidence.
 
 Hosts derive Welcome admission's `held.forkHalted` from `forkHalt` alone.
 A recovery-unavailable field permits otherwise admissible readmission with valid retained trust. Missing, unreadable or empty-spent trust refuses seed without reconstruction.
-Manual recovery remains unavailable until 2.2e. Manual re-invite after lost spent trust requires a new successor group with a new groupID.
+After lost spent trust, successor retirement (new groupID) is the exit; total key and database loss takes a fresh invite into the same group.
+
+Detect forks with member-signed checkpoints on a recovery-secret topic; the hub `authorize` hook must gate it like the commit topic.
+Frames carry key hashes, not DIDs. Conflicts open durable fork notices with at-risk own messages and coverage; notices never halt, switch or rank branches.
+Notices coalesce to one update per 30 s and close after 24 h of single-branch quiet, on local clocks. Evidence keeps the 256-installation / seven-day bounds.
+Export, import and standalone verification keep checkpoints portable.
+Report `branch-abandoned` with own message IDs, others' counts, membership delta and coverage; the app resends its own messages.
+With fork evidence and a transcript-checked lineage, one recovery attempt may adopt the hub's branch below the epoch floor; the ordinary floor never changes.
+Expired evidence stays target-behind until manual resync. Coherent fake GroupInfo plus checkpoint chains remain an accepted insider residual.
+Surface non-terminal `not-member` (distinct responder DIDs and count, optional pendingReason) and `spent-set-corrupt` conditions through status, events and errors.
+Add manual recovery: resync to a registered or call-time target (current move or rejoin) and successor retirement with an app-clearable tombstone.
+A current move does not reset app-topic cursors. `clearHold` lifts only app-reported halts.
+Phase-2.3 crypto, batching, leases, package burn and restore, phase-3 providers and child-process SIGKILL evidence remain excluded.

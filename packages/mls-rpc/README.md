@@ -28,6 +28,9 @@ depend on both.
   transaction (see below).
 - `createLedgerEntrySlot()` — the per-commit ledger-entry resolver seam (see below).
 - `deriveEntryKey`, `sealEntries`, `openEntries`, `ENTRY_SEAL_LABEL` — the ledger-entry seal.
+- `createCheckpointService({ registry, key, identity, onForkNotice? })` — checkpoints, fork notices and portable export/import
+  (see below); `createCheckpointPort` is its read/sign half.
+- `recordOwnBranchMessage`, `incrementOthersSeen` — the branch journal writes a non-memory provider makes inside its group transaction.
 - `deriveRecoverySecret`, `RECOVERY_LABEL` — the default recovery secret.
   `GroupMLS.createRecoveryRequest` returns explicit request keys. `applyRecovery` creates candidates,
   and `restoreRecovery(candidate, requestKey)` restores them.
@@ -338,7 +341,9 @@ restorations are never cached. Pure reads advance no persistence revision or sta
 `GroupSafety.epochAuthenticator(key)` reads a defensive copy of active installed trust without writing.
 `reportFork(key, evidence)` validates the active incarnation and committed identity before latching and atomically storing evidence with its event.
 `recover(key, choice)` persists a resync choice before any network use, then moves or rejoins (see Hub migration). A successor choice retires the source (see Successor retirement).
-The factory requires a registered registry and persistence sharing its coordinator binding.
+`status(key)` returns `{ hold, condition, evidence, manualRecovery }`. `clearHold(key)` and `clearTombstone(groupID)` are the only release operations;
+there is no floor reset or general hold clear.
+The factory requires a registered registry and persistence sharing its coordinator binding, plus `resolveTarget(targetID)` for registered targets.
 
 `forkHalt` and `recoveryUnavailable` are immutable incarnation fields.
 Deletion and replacement preserve old-incarnation evidence and events, including fork-halted tombstones.
@@ -359,11 +364,129 @@ Hosts derive `judgeWelcomeAdmission`'s `held.forkHalted` from `forkHalt` alone.
 Missing, unreadable or empty-spent trust refuses seed as unavailable without changing admission state.
 Neither Welcome nor GroupInfo reconstructs the spent set. Ordinary readmission refuses a fork-halted tombstone.
 After lost spent trust, retirement to an already admitted successor group (another groupID) remains the explicit exit.
+After total key and database loss there is nothing to corrupt: the app re-invites the device into the same group.
 
 A validated latch survives failed or ambiguous writes in the current process. Only proven commits survive restart.
 A crash before durable writing can lose volatile host evidence.
 
+## Checkpoints and fork notices
+
+The registry peer creates its own checkpoint service and forwards it as `options.checkpoints`.
+Apps read notices and exchange frames through a service of their own over the same registry:
+
+```ts
+const checkpoints = createCheckpointService({
+  registry,
+  key,
+  identity,
+  onForkNotice: (event) => app.notify(event.kind, event.notice),
+})
+// Unacknowledged events replay after restart.
+for (const event of await checkpoints.events(key.groupID)) app.notify(event.kind, event.notice)
+for (const notice of await checkpoints.forkNotices(key.groupID)) {
+  if (notice.closedAt === null) app.review(notice.splitEpoch, notice.branches, notice.atRisk, notice.coverage)
+  await checkpoints.ackForkNotice(key.groupID, notice.id, notice.revision)
+}
+
+// Portable exchange: signed frames out, frames from another device in.
+const frames = await checkpoints.exportCheckpoints(key, [epoch])
+await checkpoints.importCheckpoint(key, theirFrame)
+const fact = await checkpoints.checkpointFact(key, epoch)
+const ours = frames[0]
+if (fact !== null && ours !== undefined) {
+  const comparison = await verifyCheckpointPair({ first: ours, second: theirFrame, localRosterFact: fact })
+  app.notify(comparison.kind)
+}
+const coverage = await checkpoints.checkpointCoverage(key.groupID)
+app.notify(coverage.effectiveFloor, coverage.gaps)
+```
+
+`exportCheckpoints`, `checkpointFact` and `checkpointCoverage` return defensive copies. Imports carry no provenance: they compare like received frames.
+`verifyCheckpointPair` (`@kumiai/mls`) verifies two frames against a local roster fact without any store.
+`onForkNotice` runs once per event per service after the proven write, outside the owner gate; a throw is ignored.
+Coverage lists `retained` ranges, `gaps` (`pre-join`, `skipped`, `expired`) and the `effectiveFloor` across incarnations.
+Format, budgets, retention and detection limits are in the `@kumiai/rpc` README.
+
+## Branch abandonment
+
+`branch-abandoned` events arrive through `GroupSafety.events(key)` and are acknowledged with `ackEvent`:
+
+```ts
+for (const event of await safety.events(key)) {
+  if (event.kind !== 'branch-abandoned') continue
+  // Resend own messages from the app's copy; plaintext is not retained.
+  await app.resend(event.ownMessages.map((message) => message.id), event.coverage.ownMessages)
+  app.redoMembership(event.membersAdded, event.membersRemoved, event.epochs)
+  await safety.ackEvent(key, event.id)
+}
+```
+
+## Group conditions
+
+`status(key).condition` is `not-member`, `spent-set-corrupt` or `null`; `evidence` is the latest `NotMemberEvidence`.
+`registryPeer.status()` reports the same conditions per peer:
+
+```ts
+const { hold, condition, evidence, manualRecovery } = await safety.status(key)
+app.notify(hold, condition, evidence, manualRecovery)
+const status = registryPeer.status()
+if (status.kind === 'not-member') {
+  // Diagnostic: status.retrying is true and recovery continues.
+  const corroborated = status.evidence.responderDIDs.length > 1
+  const persisted = Date.now() - status.evidence.observedAt > app.persistenceWindowMs()
+  app.showNotMember(status.evidence.responderCount, status.pendingReason)
+  if (corroborated || persisted) app.offerReinvite(key)
+} else if (status.kind === 'spent-set-corrupt') {
+  app.showSpentSetCorrupt(status.eventID)
+} else if (status.kind === 'pending') {
+  app.showPending(status.reason)
+}
+```
+
+The `not-member` arm carries `retrying: true` and an optional `pendingReason` (`no-reply`, `no-eligible-responder`, `target-behind`, `target-unresolved`).
+`responderDIDs` and `responderCount` count distinct responder DIDs and survive restart. Events emit once per new evidence, coalesced like notices.
+Do not dispose or delete on first evidence: wait for another responder DID or for the condition to persist.
+That wait is app policy, not a protocol threshold; disposal, deletion and re-invitation stay with the app.
+
+Seed and trust reads throw `SpentSetCorruptError` (optional `key`); `reportFork` under corruption records the condition and throws `GroupSafetyHeldError`.
+`not-member` never refuses sends or admission. While a manual recovery is authorised, resume does not stop on spent-set corruption: movement is rejoin-only.
+The condition is reported again once no manual recovery is pending.
+
+## Clearing reported halts
+
+```ts
+await safety.reportFork(key, evidence)
+// Later, once the app has resolved its own report:
+await safety.clearHold(key)
+```
+
+`clearHold` lifts only an app-reported halt (`producer: 'app-report'`) on the active incarnation; anything else is a no-op.
+It never touches spent-set corruption, `not-member`, unsupported-version holds, internal latches or legacy halts (no `producer`).
+Evidence and events stay as history. Live peers resume only after the clear is proven, through the ordinary commit walk; a stranded peer then recovers. No resync is forced.
+Legacy and internal halts leave through manual recovery: resync rejoins (never a current move) or successor retirement.
+
 ## Hub migration
+
+```ts
+const safety = createGroupSafety({
+  registry,
+  persistence,
+  mls,
+  resolveTarget: async (targetID: string) => {
+    const target = targets.get(targetID)
+    if (target === undefined) throw new Error(`Unknown target ${targetID}`)
+    return target
+  },
+})
+// Call-time target, for example a new hub while the old one is down.
+const installed = await safety.recover(key, {
+  mode: 'resync',
+  target: { targetID: 'hub-b', hub: newHub, commitTopicID: newCommitTopicID },
+})
+app.route(installed)
+// Or a registered target through resolveTarget; allowOpenFork overrides only the open-notice check.
+await safety.recover(key, { mode: 'resync', targetID: 'hub-b', allowOpenFork: true })
+```
 
 `recover(key, { mode: 'resync', target: { targetID, hub, commitTopicID }, allowOpenFork })` moves a group to a destination the app selects.
 kumiai never chooses destinations or creates successors. The selected binding is saved before the source peer stops.
@@ -380,7 +503,7 @@ Freshness is the absence of known lag. It proves nothing against a hub that with
 A current move keeps the GroupKey, MLS state and every hold. It resets hub positions (commit cursor, checkpoint receive cursor)
 and re-queues retained checkpoint publications with their exact frames. The peer restarts on the destination only after the move is proven.
 The first device publishing on an empty topic starts its log at its current state; others compare-and-set after it.
-App-topic cursors keep their stored positions: hosts whose hubs mint unrelated positions must reset those host stores themselves.
+A current move does not reset app-topic cursors: hosts must reset their app-topic cursors after a current move.
 
 Every other device rejoins through captured recovery from destination responders, checked against retained trust.
 It publishes nothing to the destination log before an authenticated reply. A confirmed rejoin installs a fresh incarnation without holds.
@@ -388,8 +511,19 @@ Source holds and evidence stay as history. A failed attempt leaves source state,
 A device that arrives ahead of the destination's responders stays pending with `target-behind` unless R2/R7 fork-floor evidence applies.
 Apps must move every device. Separate hubs cannot exchange checkpoint evidence, so a partial migration can split undetectably.
 Restart resumes only the saved destination; an unresolved binding, or a resolved hub missing a transport method, pauses with `target-unresolved`.
+Only `targetID` and the sealed `commitTopicID` persist. After restart, `resolveTarget(targetID)` must rebuild that exact binding; a mismatch pauses without fallback.
+`status(key).manualRecovery` shows `pending`, `paused` or `completed`. A pending fork recovery counts as active rejoin; authorising manual recovery abandons it.
+Expired fork evidence or a head in a retained-range hole leaves automatic healing `target-behind`; manual resync is the exit.
+Manual resync proceeds under fork halts (app-reported, internal or legacy) by rejoining; it never moves current while held.
 
 ## Successor retirement
+
+```ts
+const successor = await safety.recover(key, { mode: 'successor', successor: successorKey })
+// Optional: allow a later Welcome to readmit the retired group.
+await safety.clearTombstone(key.groupID)
+app.route(successor)
+```
 
 `recover(key, { mode: 'successor', successor })` retires the source in favour of a group the app already created or joined through normal admission.
 The successor must be a different, available group admitted at exactly that key; otherwise `ManualRecoveryUnavailableError` refuses before any write.
@@ -400,6 +534,7 @@ Nothing is copied: no state, ratchets, messages or roster. Owed outcomes, Welcom
 Retirement reads no private state or retained trust, so corrupt source state or trust is no obstacle. Failure leaves the source, its routing and any halt intact.
 A successor choice supersedes a pending resync, and a later successor choice replaces an unexecuted one in place; a resync never supersedes, and an executed choice is final.
 Restart resumes only the saved successor when the app calls `recover` again. A group cannot be its own successor.
+A pending successor choice blocks a resync of the same source.
 
 An open tombstone refuses every Welcome into the source group with `SeedAdmissionRefusedError` reason `successor-tombstone`, including newer or unspent ones after restart.
 `clearTombstone(groupID)` releases only that block. Spent-authenticator checks, fork halts and other safety latches still apply to later admissions.
@@ -433,7 +568,7 @@ const registryPeer = await createRegistryPeer({
 await registryPeer.ready
 ```
 
-`registryPeer.status()` reports `starting`, `running`, `switching`, `pending`, `failed` or `disposed`.
+`registryPeer.status()` reports `starting`, `running`, `switching`, `pending`, `spent-set-corrupt`, `not-member`, `failed` or `disposed`.
 `failed` includes the terminal `error`, available without disposing the owner. `drained()` still rethrows that error after disposal.
 Pass `onRecovery` to receive coordinator failures through the existing rpc `RecoveryEvent` shape (`phase: 'failed'`, `reason: 'error'`).
 The event identifies the saved attempt and uses `target.topicID` as `groupID`. Callback failures cannot replace the coordinator error.
@@ -442,7 +577,9 @@ An unresolved switch proof exposes `pending`, with no peer. Initial `ready` keep
 Retries have no count or elapsed-time bound. Their backoff caps at 15 seconds, and disposal stops retries.
 
 The host's `createPeerForIncarnation(key, options)` supplies the actual incarnation's control, crypto, anchor, cursor and outbox ports.
-It forwards `options.mls`, `recoveryOnly`, `onConfirmedRecovery`, `settleAcceptedRecovery`, both reconciliation callbacks, `continuation` and `completion` into `createGroupPeer`.
+It spreads `options` into `createGroupPeer`, preferring `options.hub` and `options.control` over its own.
+That forwards `mls`, `checkpoints`, `manualRecovery`, `recoveryTarget`, `onNotMember`, `recoveryOnly`, `onConfirmedRecovery`, `settleAcceptedRecovery`,
+both reconciliation callbacks, `continuation` and `completion`.
 `onConfirmedRecovery` requires `settleAcceptedRecovery`. Direct construction without the settlement callback throws `TypeError`.
 The coordinator supplies both callbacks and waits for source completion and drainage before restoring the raw candidate.
 It never retains the host-bound pending proxy.
@@ -472,11 +609,12 @@ Hub delivery faults never create new durable halts or authorise adverse settleme
 Own copies use MLS-message recognition and receiver reference checks. Blob failures and unproven negatives remain advisory.
 Only host reports and genuine local invariants retain halt authority. Existing persisted halts and legacy record holds remain immutable.
 Origin-authorised signers removed after origin retain attestation authority, including possible signed floor inflation.
-This signer-authority residual lies outside the hub threat model. Busy responders can also cause accepted-unadoptable churn.
-Fork detection remains deferred to out-of-band peer checkpoints.
+This signer-authority residual lies outside the hub threat model; manual resync and successor retirement are its exits.
+Busy responders can also cause accepted-unadoptable churn.
 
 Custom `recoverySecret` requires equivalent `recoverySecretFromTrust` at construction. Missing equivalence throws before requests or hold writes.
 `RecoveryCandidateError`, `RegistryResyncRefusedError`, `RegistryRetiringError`, `RegistryRetireHookError` and `RegistryRecoveryReplacementError` expose actionable failures.
 `SeedAdmissionRefusedError` reports Welcome admission refusal. Existing conflict, uncertainty, movement and safety errors remain exported.
-Unadopted legacy attempts retry with `legacy-recovery-record`, preserving saved bytes. Manual recovery remains 2.2e, and full registry crypto and leases remain 2.3.
+Unadopted legacy attempts retry with `legacy-recovery-record`, preserving saved bytes; successor retirement is the explicit exit.
+Full registry crypto, leases, batching, package burn and restore remain 2.3; phase-3 providers are excluded.
 The integration witnesses reconstruct memory persistence. They do not provide phase-6 child-process SIGKILL evidence.

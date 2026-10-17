@@ -264,9 +264,9 @@ The registry coordinator drains source callbacks and peer work before restoring 
 `RecoveryCompletion` settles accepted source operations as unknown once, then records missing reenact tokens after destination ledger verification.
 Source outcomes, history and owed Welcomes remain serviceable. Destination state receives no source ratchets, applied rows, anchors or app cursors.
 
-Unadopted legacy records retain every byte under unsupported-version policy until manual recovery support.
-Installed legacy continuations require independent installation proof. New captured attempts use automatic/null-authorisation records.
-Manual recovery remains deferred to 2.2e. Full registry crypto, leases and batching remain 2.3.
+Unadopted legacy records retain every byte and retry with `legacy-recovery-record`; successor retirement in `@kumiai/mls-rpc` is the explicit exit.
+Installed legacy continuations require independent installation proof. Automatic captured attempts use null-authorisation records.
+Full registry crypto, leases and batching remain 2.3.
 These tests prove phase-2 memory reconstruction. Child-process SIGKILL evidence belongs to phase 6.
 
 For an authenticated Welcome newer than held state, stop and drain the peer before replacing the
@@ -318,7 +318,83 @@ A crash before writing can lose volatile host evidence, despite in-process stora
 `canMoveCurrent(inputs)` decides whether a device may move to another hub without rejoining (see `@kumiai/mls-rpc` Hub migration).
 It refuses any hold, condition, active rejoin, known lag, unresolved publication or settlement and pending owner work.
 An open fork notice refuses unless `allowOpenFork` is set, which overrides that predicate only.
-Manual re-invite after lost spent trust requires a new successor group with a new groupID, also assigned to 2.2e.
+A current move resets commit and checkpoint positions but does not reset app-topic cursors; hosts must reset their app-topic cursors after a current move.
+After lost spent trust, the exits are a successor group (new groupID) or, after total key and database loss, a fresh invite into the same group.
+
+## Checkpoints and fork notices
+
+Every eligible installation publishes a signed checkpoint on `checkpointTopic(recoverySecret)`.
+The hub `authorize` hook must gate the checkpoint topic with the same rule as the commit topic.
+Frames are at most 4096 bytes, strict Ed25519, and carry `keyHash`, `leafIndex`, `epoch`, `authHash` and `parentAuthHash`.
+They name no DID: verifiers resolve the signer privately in their own retained roster fact.
+Anyone who can derive the topic sees those fields, so frames reveal key hashes and epoch progress, not identities.
+
+Publishing uses `retain: 'log'` without `expectedHead`: once per installation, then the exact current frame every 30 minutes (±20% jitter).
+Drain is one frame per second, burst eight, retries capped at 15 seconds. Receive takes at most 32 frames, 128 KiB and 64 signature checks per turn.
+Each group adds one checkpoint subscription and this publish traffic; no cross-group scheduler is included.
+The hub's retained-log policy is the app's and hub operator's; peers request seven days.
+
+A signer counts once per DID when its DID and key hash are in our retained roster fact before the split.
+Same-key unequal statements are reported as `equivocations`. Remote input never induces signing.
+Local facts cover the newest 256 installations; superseded facts expire seven days after local supersession or outside that set.
+
+Detection limits: a fork is visible only when both branches' checkpoints reach this device within retention.
+A hub that also withholds checkpoints, a split across separate hubs, or expired facts hide it. Detection never halts, switches or picks a branch.
+
+A conflict opens or updates a `ForkNotice`: best-known `splitEpoch`, per-branch `authHash` and signers, this device's `deviceAuthHash`,
+`atRisk` own messages, and `coverage` (`evidence`, `ownMessages`, `ephemeral`). Times are local clocks; hub timestamps are never used.
+`fork-detected` replays until acknowledged. `fork-updated` fires only on material change, at most once per 30000 ms.
+A notice closes after 86400000 ms with one branch active, or when the device switches branch.
+Evidence stays within the 256-installation / seven-day bounds even while unacknowledged; acknowledgement never extends them.
+Closed evidence expires at the earlier of acknowledgement plus seven days and those bounds.
+
+### Branch abandonment
+
+When a switch leaves epochs this device installed, `branch-abandoned` reports `epochs` (`{from, through}` or `'unknown'`),
+the open `noticeID`, own message IDs (`ownMessages`), a count of others' messages (`othersSeen`), and `membersAdded`/`membersRemoved` on the abandoned branch.
+Plaintext is not retained: the app resends its own messages from its copy, never others'.
+Own-send IDs are journalled per epoch; others are counted, never stored. Ephemeral sends are never covered.
+`coverage` marks `ancestry`, `ownMessages`, `othersSeen`, `membership` and `ephemeral` each `complete` or `partial`, with reasons `pre-journal-history`, `retention-gap`, `unknown-ancestry` or `ephemeral-uncovered`.
+Unknown ancestry reports `'unknown'` without delaying the switch.
+
+### Fork floor exception
+
+With an open notice splitting at E, recovery may adopt the hub's branch below `recoveryEpochFloor`.
+It needs an eligible, non-equivocating signer from our pre-E roster whose signed checkpoint at E differs from our fact,
+a reply lineage binding that checkpoint to the offered state, and offered GroupInfo epoch F >= E whose `confirmedTranscriptHash` differs from our fact at F.
+Retained facts store the installed `confirmedTranscriptHash`; checkpoints never publish it.
+The check repeats for every capture, retry and restart. Only that attempt gets effective floor E; the ordinary floor never changes, and settling or abandoning it removes the exception.
+F below our oldest fact, or in a retained-range hole (epochs crossed by external commit), stays `target-behind` until that branch reaches a retained epoch or passes our newest.
+F >= E uses the notice's best-known split; a notice moving E earlier re-enables authorisation.
+Expired evidence (seven days or the 256-installation bound) also leaves healing `target-behind`. Manual resync is the exit in every case.
+No distinct-DID threshold applies, so two-member groups heal. A deliberately coherent fake GroupInfo plus checkpoint chain is an accepted insider residual:
+the fake state stays the attacker's and honest members never confirm it.
+
+Recovery requests carry `comparisonEpoch`: E for fork recovery, otherwise the newest retained epoch. It is cleartext on the rendezvous topic,
+visible to the hub and subscribers with the requester DID and ephemeral key. Responders send only signed lineage from that epoch through F,
+at most 256 frames, and the complete reply stays within 786432 bytes. That bound does not hold 256 maximum-size frames; a span that does not fit is not sent.
+
+### Conditions
+
+`GroupCondition` is `not-member` or `spent-set-corrupt`, separate from hard `SafetyHold`.
+Precedence: hard holds > `spent-set-corrupt` > `not-member` > recovery-unavailable > pending.
+
+`not-member` is diagnostic and non-terminal: an eligible responder's verified head, tree and ledger lack our DID.
+It adds no send-admission refusal; recovery keeps retrying with capped backoff.
+Former-member disclosure needs the requester's DID and key hash in a responder's retained earlier roster; replies carry public roster and ledger only.
+That discloses history to any DID+key pair the responder once held, and nothing to never-seen or expired pairs.
+A changed leaf never proves absence, so a present DID on an obsolete incarnation (old key) can stay pending.
+Freshness is lineage-relative: same lineage needs a reply epoch above our newest installed epoch; a different lineage (unequal `authHash` or `confirmedTranscriptHash`) needs none.
+Evidence (`NotMemberEvidence`) carries responder `responderKeyHash`, `epoch`, local `observedAt`, distinct `responderDIDs` and `responderCount`.
+Any install, head-only reconcile or re-anchor clears it. Failure or a pending proof does not.
+`no-reply` (nothing received) and `no-eligible-responder` (replies, none eligible) never prove removal.
+
+`spent-set-corrupt` means a surviving store decrypted a missing or malformed spent set. An unreadable trust envelope stays recovery-unavailable.
+Total key and database loss is not corruption: the app re-invites the device into the same group.
+
+Apps should not dispose or delete on first evidence. Wait for another responder DID or for the condition to persist.
+Disposal, deletion and re-invitation are app policy; corroboration is advice, not a protocol threshold.
+`GroupNotMemberError` and `SpentSetCorruptError` carry the exact `key` for hosts mapping conditions to errors.
 
 ## Host notices for commit strands and recovery
 
@@ -346,7 +422,7 @@ Unknown versions emit `upgrade-required` diagnostics and advance as poison.
 Caught-up future app frames wait only within two epochs and for less than 30,000 milliseconds.
 The age starts after commit-lane catch-up, so honest lag can exceed two epochs.
 Host authenticator comparisons and genuine local storage invariants retain durable halt authority.
-Historical halts remain immutable. Fork detection awaits later out-of-band peer checkpoints.
+Historical halts remain immutable. Fork detection uses member-signed checkpoints (above) and never halts.
 
 `GroupPeerParams.onRecovery` reports `started` and exactly one terminal event (`succeeded` or
 `failed`) for each attempt. The event's `attemptID`, `groupID` and `trigger` (`automatic` or

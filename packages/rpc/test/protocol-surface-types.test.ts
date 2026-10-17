@@ -1,6 +1,20 @@
+import { readFileSync } from 'node:fs'
 import type { GatheredReply } from '@kumiai/broadcast'
-import { expectTypeOf, test } from 'vitest'
+import { expect, expectTypeOf, test } from 'vitest'
 
+import type {
+  AbandonedEpochRange,
+  BranchAbandonedEvent,
+  BranchReportCoverage,
+  CoverageGapReason,
+  ForkNotice,
+  GroupCondition,
+  GroupConditionEvent,
+  NotMemberEvidence,
+  ReportCoverage,
+  SafetyHold,
+  SendAdmission,
+} from '../src/index.js'
 import type { createGroupPeer, InternalSurface, ProtocolSurface } from '../src/peer.js'
 import { defineGroupProtocol } from '../src/protocol.js'
 
@@ -8,6 +22,57 @@ import { defineGroupProtocol } from '../src/protocol.js'
 // registers one; the type checking itself happens in `_protocolSurfaceTypes` below, which `tsc`
 // checks but nothing ever calls.
 test('protocol surface types (checked by tsc, not run)', () => {})
+
+test('README documents the shipped fork and recovery surface', () => {
+  const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
+  const gaps = {
+    'pre-journal-history': true,
+    'retention-gap': true,
+    'unknown-ancestry': true,
+    'ephemeral-uncovered': true,
+  } satisfies Record<CoverageGapReason, true>
+  const conditions = { 'not-member': true, 'spent-set-corrupt': true } satisfies Record<
+    GroupCondition,
+    true
+  >
+  const coverage = {
+    ancestry: true,
+    ownMessages: true,
+    othersSeen: true,
+    membership: true,
+    ephemeral: true,
+  } satisfies Record<keyof BranchReportCoverage, true>
+  for (const name of [...Object.keys(gaps), ...Object.keys(conditions), ...Object.keys(coverage)])
+    expect(readme).toContain(`\`${name}\``)
+  for (const required of [
+    /`authorize` hook must gate the checkpoint topic/,
+    /comparisonEpoch/,
+    /786432/,
+    /seven days/,
+    /does not reset app-topic cursors/,
+    /fake GroupInfo/,
+  ])
+    expect(readme).toMatch(required)
+  const intent = readFileSync(
+    new URL('../../../.changeset/spec-p-storage-foundation.md', import.meta.url),
+    'utf8',
+  )
+  for (const stale of [/until 2\.2e/, /deferred to 2\.2e/, /remains 2\.2e/, /assigned to 2\.2e/]) {
+    expect(readme).not.toMatch(stale)
+    expect(intent).not.toMatch(stale)
+  }
+
+  const abandonment = {} as BranchAbandonedEvent
+  expectTypeOf(abandonment.epochs).toEqualTypeOf<AbandonedEpochRange>()
+  expectTypeOf<ForkNotice['coverage']['ownMessages']>().toEqualTypeOf<ReportCoverage>()
+  const notMemberEvidence = {} as NotMemberEvidence
+  expectTypeOf(notMemberEvidence.responderDIDs).toEqualTypeOf<Array<string>>()
+  expectTypeOf<GroupConditionEvent['kind']>().toEqualTypeOf<GroupCondition>()
+  // Not-member stays diagnostic: no hold and no admission refusal.
+  expectTypeOf<Extract<SafetyHold, 'not-member'>>().toEqualTypeOf<never>()
+  type Refusal = Extract<SendAdmission, { admissible: false }>['reason']
+  expectTypeOf<Extract<Refusal, 'not-member'>>().toEqualTypeOf<never>()
+})
 
 const chat = defineGroupProtocol({
   'chat/posted': {
