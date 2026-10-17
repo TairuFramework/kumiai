@@ -332,7 +332,7 @@ Anyone who can derive the topic sees those fields, so frames reveal key hashes a
 
 Publishing uses `retain: 'log'` without `expectedHead`: once per installation, then the exact current frame every 30 minutes (±20% jitter).
 Drain is one frame per second, burst eight, retries capped at 15 seconds. Receive takes at most 32 frames, 128 KiB and 64 signature checks per turn.
-After a full page the next receive turn waits at least 250 ms, so a hub cannot drive continuous intake.
+After a full page the next receive turn starts at least 250 ms after that turn ends, so a hub cannot drive continuous intake.
 Each group adds one checkpoint subscription and this publish traffic; no cross-group scheduler is included.
 The hub's retained-log policy is the app's and hub operator's; peers request seven days.
 

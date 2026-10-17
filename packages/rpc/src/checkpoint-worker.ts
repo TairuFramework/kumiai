@@ -243,9 +243,10 @@ export function createCheckpointWorker(params: Params): {
       }
       schedule.retryDelay = 1000
       if (page.messages.length >= 32) {
-        // Turn budgets bound work per turn; this bounds the rate a hub can drive.
+        // Turn budgets bound work per turn; this bounds the rate a hub can drive. Counted from the
+        // turn's end, so slow storage cannot shrink the gap.
         receivePending = true
-        schedule.receiveAt = now + 250
+        schedule.receiveAt = Math.max(now, params.now()) + 250
       }
       await saveCursor()
     } catch {

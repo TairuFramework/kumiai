@@ -254,6 +254,24 @@ test('full receive pages pace the next turn by at least 250 ms', async () => {
   expect(fetches()).toBeLessThanOrEqual(2 + 40)
 })
 
+test('the 250 ms receive delay counts from the end of a slow full turn', async () => {
+  const f = setup(0)
+  let next = 1
+  vi.mocked(f.mux.fetchTopic).mockImplementation(async () => {
+    // Slow storage: the turn itself spends 300 ms.
+    vi.setSystemTime(Date.now() + 300)
+    const messages = Array.from({ length: 32 }, () => frame(next++))
+    return { messages, head: messages.at(-1)?.sequenceID ?? null, oldest: '00000001', gap: false }
+  })
+  await f.create().start()
+  const fetches = () => vi.mocked(f.mux.fetchTopic).mock.calls.length
+  expect(fetches()).toBe(1)
+  await vi.advanceTimersByTimeAsync(240)
+  expect(fetches()).toBe(1)
+  await vi.advanceTimersByTimeAsync(20)
+  expect(fetches()).toBe(2)
+})
+
 test('checkpoint traffic never moves commit head', async () => {
   const f = setup()
   await f.create().start()
