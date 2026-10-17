@@ -7,6 +7,7 @@ import type {
 } from './control-store.js'
 import type { ConformanceGroupKey } from './persistence-fixture.js'
 import type { ConformanceRegistryFixture, ConformanceRegistryHandle } from './registry-fixture.js'
+import type { ConformanceGroupSafety, ConformanceManualRecovery } from './safety.js'
 
 export type ConformanceCallTimeRecoveryTarget<Hub> = {
   targetID: string
@@ -48,9 +49,33 @@ export type ConformanceManualRecoveryStore = {
   ): Promise<boolean>
 }
 
-export function testManualRecoveryConformance<THandle extends ConformanceRegistryHandle>(params: {
+export type ConformanceRecoveryTarget<Hub> = { id: string; commitTopicID: string; hub: Hub }
+export type ConformanceRecoveryTargetResolver<Hub> = (
+  targetID: string,
+) => Promise<ConformanceRecoveryTarget<Hub>>
+/** Builds the call-time surfaces over a fixture with a contract-supplied host resolver. */
+export type ConformanceCallTimeRecovery<THandle, Hub> = {
+  /** A fresh transport-shaped hub. The contract never calls its methods. */
+  hub(): Hub
+  safety(
+    fixture: ConformanceRegistryFixture<THandle>,
+    resolveTarget: ConformanceRecoveryTargetResolver<Hub>,
+  ): Promise<ConformanceGroupSafety<Hub>>
+  manualRecovery(
+    fixture: ConformanceRegistryFixture<THandle>,
+    resolveTarget: ConformanceRecoveryTargetResolver<Hub>,
+  ): ConformanceManualRecoveryStore & {
+    resolveManualRecoveryTarget(id: string): Promise<ConformanceRecoveryTarget<Hub> | null>
+  }
+}
+
+export function testManualRecoveryConformance<
+  THandle extends ConformanceRegistryHandle,
+  Hub = never,
+>(params: {
   label: string
   createFixture(): Promise<ConformanceRegistryFixture<THandle>>
+  callTime: ConformanceCallTimeRecovery<THandle, Hub>
 }) {
   describe(`manual recovery storage / ${params.label}`, () => {
     const choice = {
@@ -812,6 +837,142 @@ export function testManualRecoveryConformance<THandle extends ConformanceRegistr
         ).rejects.toThrow()
         expect(await fixture.device.groups.ports(key).control.load()).toEqual(before)
         expect((await fixture.safety().status(key)).manualRecovery).toBeNull()
+      }))
+    function recordingResolver(
+      answer: (targetID: string) => ConformanceRecoveryTarget<Hub>,
+    ): ConformanceRecoveryTargetResolver<Hub> & { calls: Array<string> } {
+      const calls: Array<string> = []
+      return Object.assign(
+        async (targetID: string) => {
+          calls.push(targetID)
+          return answer(targetID)
+        },
+        { calls },
+      )
+    }
+    const refusing = () =>
+      recordingResolver(() => {
+        throw new Error('Host binding unavailable')
+      })
+    test('call time choice persists and binds the exact resolver result', () =>
+      run(async (fixture, key) => {
+        const resolver = refusing()
+        const liveHub = params.callTime.hub()
+        const target = {
+          targetID: choice.targetID,
+          hub: liveHub,
+          commitTopicID: choice.commitTopicID,
+        }
+        const callTime = { mode: 'resync' as const, target, allowOpenFork: true }
+        // No recovery peer runs here: the choice must be durable whether or not execution starts.
+        await (await params.callTime.safety(fixture, resolver))
+          .recover(key, callTime)
+          .catch(() => undefined)
+        target.targetID = 'changed-hub'
+        target.commitTopicID = 'changed-commits'
+        callTime.allowOpenFork = false
+        expect(resolver.calls).toEqual([])
+        const status = (await fixture.safety().status(key)).manualRecovery
+        if (status === null) throw new Error('Missing call time authority')
+        const saved = await fixture.manualRecovery().readManualRecovery(status.id)
+        if (saved === null) throw new Error('Missing call time record')
+        expect(saved).toMatchObject({ source: key, stage: 'authorised', pauseReason: null })
+        expect(saved.choice).toEqual(choice)
+        expect(Object.keys(saved.choice).sort()).toEqual([
+          'allowOpenFork',
+          'commitTopicID',
+          'mode',
+          'targetID',
+        ])
+        const reopened = await fixture.reopen()
+        try {
+          const restoredHub = params.callTime.hub()
+          const answers: Array<[string, ConformanceRecoveryTargetResolver<Hub>]> = [
+            ['unresolved', refusing()],
+            [
+              'substituted target',
+              recordingResolver(() => ({
+                id: 'substituted-hub',
+                commitTopicID: choice.commitTopicID,
+                hub: restoredHub,
+              })),
+            ],
+            [
+              'substituted topic',
+              recordingResolver((id) => ({
+                id,
+                commitTopicID: 'substituted-commits',
+                hub: restoredHub,
+              })),
+            ],
+          ]
+          for (const [label, answer] of answers) {
+            const store = params.callTime.manualRecovery(reopened, answer)
+            expect(await store.resolveManualRecoveryTarget(saved.id), label).toBeNull()
+            expect(await reopened.manualRecovery().readManualRecovery(saved.id), label).toEqual({
+              ...saved,
+              pauseReason: 'target-unresolved',
+              mutationID: expect.any(String),
+            })
+            expect((await reopened.safety().status(key)).manualRecovery, label).toEqual({
+              id: saved.id,
+              kind: 'paused',
+              reason: 'target-unresolved',
+            })
+          }
+          const exact = recordingResolver((id) => ({
+            id,
+            commitTopicID: choice.commitTopicID,
+            hub: restoredHub,
+          }))
+          const resolved = await params.callTime
+            .manualRecovery(reopened, exact)
+            .resolveManualRecoveryTarget(saved.id)
+          expect(resolved).toMatchObject({
+            id: choice.targetID,
+            commitTopicID: choice.commitTopicID,
+          })
+          expect(resolved?.hub).toBe(restoredHub)
+          expect(exact.calls).toEqual([choice.targetID])
+          for (const [label, answer] of answers)
+            expect((answer as typeof exact).calls, label).toEqual([choice.targetID])
+          expect(await reopened.manualRecovery().readManualRecovery(saved.id)).toEqual({
+            ...saved,
+            mutationID: expect.any(String),
+          })
+          expect((await reopened.safety().status(key)).manualRecovery).toEqual(status)
+        } finally {
+          await reopened.close()
+        }
+      }))
+    test('call time choice refuses a target without a usable binding', () =>
+      run(async (fixture, key) => {
+        const resolver = refusing()
+        const safety = await params.callTime.safety(fixture, resolver)
+        const before = await fixture.device.groups.ports(key).control.load()
+        const hub = params.callTime.hub()
+        const binding = { targetID: choice.targetID, commitTopicID: choice.commitTopicID }
+        // A JS caller can omit what the types require; none of these may reach authority.
+        const invalid: Array<[string, Record<string, unknown>]> = [
+          ['hub undefined', { ...binding, hub: undefined }],
+          ['hub null', { ...binding, hub: null }],
+          ['hub primitive', { ...binding, hub: 'selected-hub' }],
+          ['hub without methods', { ...binding, hub: {} }],
+          ['empty targetID', { ...binding, targetID: '', hub }],
+          ['empty commitTopicID', { ...binding, commitTopicID: '', hub }],
+          ['non-string commitTopicID', { ...binding, commitTopicID: 7, hub }],
+        ]
+        for (const [label, target] of invalid) {
+          const refused = {
+            mode: 'resync',
+            target,
+            allowOpenFork: true,
+          } as unknown as ConformanceManualRecovery<Hub>
+          await expect(safety.recover(key, refused), label).rejects.toThrow(TypeError)
+          expect((await fixture.safety().status(key)).manualRecovery, label).toBeNull()
+        }
+        expect(resolver.calls).toEqual([])
+        expect(await fixture.device.groups.ports(key).control.load()).toEqual(before)
       }))
   })
 }

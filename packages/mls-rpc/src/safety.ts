@@ -123,6 +123,20 @@ function validateEvidence(evidence: GroupForkEvidence, identity: EpochIdentity):
   }
 }
 
+const hubMethods = ['subscribe', 'receive', 'publish', 'fetchTopic'] as const
+
+// A missing hub would let a peer factory default to the original hub: a fallback kumiai forbids.
+function validCallTimeTarget(target: RecoveryTarget): boolean {
+  const hub: unknown = target.hub
+  if (typeof hub !== 'object' || hub === null) return false
+  const methods = hub as Record<string, unknown>
+  return (
+    hubMethods.every((name) => typeof methods[name] === 'function') &&
+    typeof target.commitTopicID === 'string' &&
+    target.commitTopicID.length > 0
+  )
+}
+
 export function createGroupSafety<TTx extends GroupTransaction>(params: {
   registry: GroupHandleRegistry
   persistence: GroupPersistence<TTx>
@@ -233,7 +247,8 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
         !validKey(key) ||
         typeof targetID !== 'string' ||
         targetID.length === 0 ||
-        typeof allowOpenFork !== 'boolean'
+        typeof allowOpenFork !== 'boolean' ||
+        (supplied !== null && !validCallTimeTarget(supplied))
       )
         throw new TypeError('Invalid manual recovery choice')
       const target = supplied ?? (await params.resolveTarget(targetID))

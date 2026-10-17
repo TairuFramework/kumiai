@@ -46,7 +46,9 @@ import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.j
 import {
   createNotMemberFixture,
   createRegistryFixture,
+  type RegistryFixture,
   registryFixtureMutateControl,
+  registryFixtureSafetyParams,
 } from './fixtures/registry.js'
 
 expectTypeOf<ManualRecoveryRecord>().toEqualTypeOf<ConformanceManualRecoveryRecord<LogPosition>>()
@@ -64,8 +66,33 @@ for (const mode of ['real-mls', 'double'] as const) {
           setup: 'seeded',
           ownershipContext: context === 'supplied' ? createAsyncLocalOwnershipContext() : undefined,
         }),
+      callTime: {
+        hub: contractHub,
+        safety: async (fixture, resolveTarget) =>
+          api.createGroupSafety({
+            ...(await registryFixtureSafetyParams(fixture as unknown as RegistryFixture)),
+            resolveTarget,
+          }),
+        manualRecovery: (fixture, resolveTarget) => {
+          const local = fixture as unknown as RegistryFixture
+          return createManualRecoveryStore({
+            registry: local.registry,
+            persistence: local.device.groups,
+            key: { groupID: 'manual-recovery', incarnation: 1 },
+            resolveTarget,
+          })
+        },
+      },
     })
   }
+}
+
+// The contract only binds hubs; calling one is a network action it must never take.
+function contractHub(): LogHub & MailboxHub {
+  const refuse = () => {
+    throw new Error('Unexpected network action')
+  }
+  return { subscribe: refuse, receive: refuse, publish: refuse, fetchTopic: refuse }
 }
 
 for (const ownership of ['supplied', 'absent'] as const) {

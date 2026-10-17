@@ -24,12 +24,26 @@ import {
 const key = { groupID: 'hub-migration', incarnation: 1 }
 const binding = { targetID: 'registry-recovery-hub', commitTopicID: `commits/${key.groupID}` }
 
+const hubMethods = ['subscribe', 'receive', 'publish', 'fetchTopic'] as const
+
 function watchedHub() {
   const calls = vi.fn()
+  const methods = new Map<PropertyKey, () => never>(
+    hubMethods.map((name) => [
+      name,
+      () => {
+        calls(name)
+        throw new Error('Unexpected network action')
+      },
+    ]),
+  )
   return {
     calls,
     hub: new Proxy({} as LogHub & MailboxHub, {
       get(_target, property) {
+        // Shape checks may read a transport method; only calling it is network use.
+        const method = methods.get(property)
+        if (method !== undefined) return method
         calls(property)
         throw new Error('Unexpected network action')
       },
@@ -306,6 +320,72 @@ test('call time authority is saved before hub use', async () => {
     await fixture.close()
   }
 })
+
+function partialHub(omit: (typeof hubMethods)[number]): unknown {
+  return Object.fromEntries(
+    hubMethods.filter((name) => name !== omit).map((name) => [name, () => {}]),
+  )
+}
+
+// TypeScript cannot express these targets; a JS caller can.
+const invalidTargets: Array<[string, Record<string, unknown>]> = [
+  ['hub undefined', { ...binding, hub: undefined }],
+  ['hub missing', { ...binding }],
+  ['hub null', { ...binding, hub: null }],
+  ['hub string', { ...binding, hub: 'registry-recovery-hub' }],
+  ['hub function', { ...binding, hub: () => {} }],
+  ['hub empty object', { ...binding, hub: {} }],
+  ...hubMethods.map((name): [string, Record<string, unknown>] => [
+    `hub without ${name}`,
+    { ...binding, hub: partialHub(name) },
+  ]),
+  ['empty targetID', { ...binding, targetID: '', hub: watchedHub().hub }],
+  ['non-string targetID', { ...binding, targetID: 7, hub: watchedHub().hub }],
+  ['empty commitTopicID', { ...binding, commitTopicID: '', hub: watchedHub().hub }],
+  ['non-string commitTopicID', { ...binding, commitTopicID: null, hub: watchedHub().hub }],
+]
+
+for (const mode of ['real-mls', 'double'] as const) {
+  for (const context of ['supplied', 'absent'] as const) {
+    test(`invalid call time target is refused before authority / ${mode} / ${context}`, async () => {
+      const fixture = await createRegistryFixture({
+        mode,
+        groupID: key.groupID,
+        setup: 'seeded',
+        ownershipContext: context === 'supplied' ? createAsyncLocalOwnershipContext() : undefined,
+      })
+      const resolver = vi.fn(async (): Promise<api.RecoveryTarget> => {
+        throw new Error('Resolver must not run for a call time target')
+      })
+      const active = await start(fixture, resolver)
+      try {
+        const safety = api.createGroupSafety({
+          ...(await registryFixtureSafetyParams(fixture)),
+          resolveTarget: resolver,
+        })
+        const before = await fixture.device.groups.ports(key).control.load()
+        for (const [label, target] of invalidTargets) {
+          const choice = {
+            mode: 'resync',
+            target,
+            allowOpenFork: true,
+          } as unknown as api.ManualRecovery
+          await expect(safety.recover(key, choice), label).rejects.toThrow(
+            new TypeError('Invalid manual recovery choice'),
+          )
+          expect((await safety.status(key)).manualRecovery, label).toBeNull()
+        }
+        expect(resolver).not.toHaveBeenCalled()
+        expect(active.created).toHaveLength(1)
+        expect(await fixture.device.groups.ports(key).control.load()).toEqual(before)
+      } finally {
+        active.owner.dispose()
+        await active.owner.drained()
+        await fixture.close()
+      }
+    })
+  }
+}
 
 type Fixture = Awaited<ReturnType<typeof createRegistryFixture>>
 const movedBinding = { targetID: 'destination-hub', commitTopicID: `moved/${key.groupID}` }
