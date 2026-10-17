@@ -119,19 +119,21 @@ test('a final frame one byte above the hub cap settles rejected before publishin
       subject: identity.id,
       value: 'cap',
     })
-    const built = await commitLedgerEntries(group, [token])
     const before = publish.mock.calls.length
     const request = operationRequest('ledger', { tokens: [token] })
-    host.builders.set(request.id, async () => ({
-      commit: built.commitMessage,
-      bodies: [token],
-      journal: encodeJournal(built.newGroup),
-      welcome: null,
-      epoch: Number(group.epoch),
-      authenticatorBefore: group.state.keySchedule.epochAuthenticator.slice(),
-      incarnation: 1,
-      digest: digestAppliedCommit(built.commitMessage),
-    }))
+    host.builders.set(request.id, async (_op, supplied) => {
+      const built = await commitLedgerEntries(supplied, [token])
+      return {
+        commit: built.commitMessage,
+        bodies: [token],
+        journal: encodeJournal(built.newGroup),
+        welcome: null,
+        epoch: Number(group.epoch),
+        authenticatorBefore: group.state.keySchedule.epochAuthenticator.slice(),
+        incarnation: 1,
+        digest: digestAppliedCommit(built.commitMessage),
+      }
+    })
     await expect(peer.commit(request)).rejects.toMatchObject({
       name: OperationOutcomeError.name,
       outcome: { opID: request.id, kind: 'rejected', reason: expect.stringContaining('exceeds') },

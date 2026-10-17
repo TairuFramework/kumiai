@@ -4,6 +4,7 @@ import {
   type GroupHandle,
   type GroupOptions,
   restoreGroup,
+  restrictCommitAuthoring,
 } from '@kumiai/mls'
 import {
   type AdoptionWrite,
@@ -23,6 +24,7 @@ import {
 
 import type { ControlRead, HandleAccess } from '../../src/access.js'
 import type { SaveControlBuild } from '../../src/control-build.js'
+import { controlCompatible } from '../../src/control-compat.js'
 import { decodeControlJournal } from '../../src/control-journal.js'
 import { sameStoredValue } from '../../src/memory-incarnation-stores.js'
 import { DisplacedGroupHandleError } from '../../src/persistence-errors.js'
@@ -299,6 +301,16 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
               stateVersion: row.revision,
             },
             write.expected,
+            (bytes) => {
+              const journal = decodeControlJournal(bytes)
+              const source = decodeClientState(journal.sourceState)
+              const current = decodeClientState(row.state)
+              return (
+                source !== undefined &&
+                current !== undefined &&
+                controlCompatible(source, current, journal.referencedProposals)
+              )
+            },
           )
         )
           throw new RevisionConflictError(write.expected.stateVersion, row.revision)
@@ -365,12 +377,14 @@ export async function createTransactionalAccess(
   const restore = async (row: StoredRow): Promise<GroupHandle> => {
     const state = decodeClientState(row.state)
     if (state == null) throw new Error('bad stored state')
-    return await restoreGroup({
-      state,
-      credential: member.handle.credential,
-      ledgerEntries: row.ledger,
-      options: { ...callbacks, resolveLedgerEntries: member.slot.resolve },
-    })
+    return restrictCommitAuthoring(
+      await restoreGroup({
+        state,
+        credential: member.handle.credential,
+        ledgerEntries: row.ledger,
+        options: { ...callbacks, resolveLedgerEntries: member.slot.resolve },
+      }),
+    )
   }
 
   let live = await restore(store.snapshot())
@@ -394,7 +408,7 @@ export async function createTransactionalAccess(
   // after its lock is released, and a mutation may have committed in between.
   const publish = (next: GroupHandle, revision: number): void => {
     if (revision <= liveRevision) return
-    live = next
+    live = restrictCommitAuthoring(next)
     liveRevision = revision
     publishedAdmission = next.sendAdmission()
   }

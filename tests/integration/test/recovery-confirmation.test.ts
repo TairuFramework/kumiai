@@ -41,6 +41,7 @@ import {
 } from '@kumiai/rpc'
 import { afterEach, beforeAll, expect, test, vi } from 'vitest'
 
+import { bareTestHandle } from '../../../packages/mls-rpc/test/fixtures/real-group.js'
 import {
   chat,
   createDurableHandleAccess,
@@ -426,8 +427,8 @@ test('stale GroupInfo external commit is rejected while the survivor progresses'
   const request = operationRequest('invite', { material: offered.invite })
   const host = s.aliceHost
   let localDigest: string | undefined
-  host.builders.set(request.id, async () => {
-    const rotated = await commitInvite(source, material.publicPackage, offered.invite)
+  host.builders.set(request.id, async (_op, supplied) => {
+    const rotated = await commitInvite(supplied, material.publicPackage, offered.invite)
     localDigest = createHash('sha256').update(rotated.commitMessage).digest('base64url')
     return {
       commit: rotated.commitMessage,
@@ -497,8 +498,7 @@ test('stale GroupInfo external commit is rejected while the survivor progresses'
   expect(supersededOpened).toBe(false)
   expect(adopted).not.toContain(2)
   const next = operationRequest('rotation', {})
-  host.builders.set(next.id, async () => {
-    const group = s.aliceGroup()
+  host.builders.set(next.id, async (_op, group) => {
     const rotated = await commitKeyRotation(group)
     return {
       commit: rotated.commitMessage,
@@ -668,7 +668,11 @@ test('a ratchet of the old handle while pending invalidates adoption on revalida
     recipientDID: carol.id,
     permission: 'member',
   })
-  const alternative = await commitInvite(source, bundle.publicPackage, offered.invite)
+  const alternative = await commitInvite(
+    await bareTestHandle(source),
+    bundle.publicPackage,
+    offered.invite,
+  )
   const pause = gate()
   cleanup.push(async () => pause.release())
   const seal = s.aliceMLS.sealRecoveryVerdict.bind(s.aliceMLS)
@@ -782,7 +786,7 @@ test.each([false, true])(
     await s.carol.dispose()
     const leaf = s.aliceGroup().findMemberLeafIndex(s.carolID.id)
     if (leaf == null) throw new Error('Missing removed leaf')
-    const removal = await removeMember(s.aliceGroup(), leaf)
+    const removal = await removeMember(await bareTestHandle(s.aliceGroup()), leaf)
     await s.aliceAccess.replace(removal.newGroup)
     expect(s.bobGroup().findMemberLeafIndex(s.carolID.id)).toBeDefined()
     expect(s.aliceGroup().findMemberLeafIndex(s.carolID.id)).toBeUndefined()

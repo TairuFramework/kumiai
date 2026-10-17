@@ -1,5 +1,9 @@
+import { randomIdentity } from '@kokuin/token'
 import {
+  commitInvite,
   commitKeyRotation,
+  createInvite,
+  createKeyPackageBundle,
   decodeClientState,
   encodeClientState,
   encodeGroupAnchor,
@@ -11,6 +15,7 @@ import {
   asLogPosition,
   type ControlSlot,
   ControlWriteNotCommittedError,
+  digestAppliedCommit,
   forkEventID,
   type GroupCrypto,
   type HostBuilt,
@@ -23,6 +28,7 @@ import { expect, test, vi } from 'vitest'
 
 import { simpleHandleAccess } from '../src/access.js'
 import { createControlBuildPort, createPersistenceBuildSaver } from '../src/control-build.js'
+import { controlCompatible } from '../src/control-compat.js'
 import { decodeControlJournal, encodeControlJournal } from '../src/control-journal.js'
 import { memoryFaults } from '../src/memory-faults.js'
 import { createMemoryGroupPersistence } from '../src/memory-group-persistence.js'
@@ -179,16 +185,21 @@ async function setup(member?: RealMember) {
   let frameCalls = 0
   const build = async (_op: Operation, supplied: typeof handle): Promise<HostBuilt> => {
     expect(inTransaction).toBe(false)
-    expect(supplied).toBe(handle)
+    expect(supplied).not.toBe(handle)
+    expect(supplied.state).not.toBe(handle.state)
+    expect(supplied.state.keySchedule.epochAuthenticator).toEqual(
+      handle.state.keySchedule.epochAuthenticator,
+    )
     buildCalls++
+    const rotation = await commitKeyRotation(supplied)
     return {
-      commit: new Uint8Array([1, 2]),
+      commit: rotation.commitMessage,
       epoch: Number(handle.epoch),
       incarnation: 1,
       authenticatorBefore: handle.state.keySchedule.epochAuthenticator.slice(),
-      digest: 'commit',
+      digest: digestAppliedCommit(rotation.commitMessage),
       bodies: ['body'],
-      journal: new Uint8Array([7, 8, 9]),
+      journal: encodeClientState(rotation.newGroup.state),
       welcome: { bytes: new Uint8Array([10]), recipients: ['recipient'] },
     }
   }
@@ -200,15 +211,24 @@ async function setup(member?: RealMember) {
     expect(result.epoch).toBe(seed.state.epoch)
     return framed
   }
-  const make = (saveBuilt = saver, now = () => 10) =>
+  const make = (saveBuilt = saver, now = () => 10, builder = build) =>
     createControlBuildPort({
       access,
       control,
-      build,
+      build: builder,
       saveBuilt,
       now,
       newID: () => crypto.randomUUID(),
       runtime: sealRuntime,
+      restoreCandidate: async (bytes) => {
+        const state = decodeClientState(bytes)
+        if (state === undefined) throw new Error('Invalid candidate')
+        return restoreGroup({
+          state,
+          credential: handle.credential,
+          ledgerEntries: handle.ledgerTokens,
+        })
+      },
     })
   const source = async (): Promise<AdoptionExpected> =>
     access.readControl(async (scope) => scope.source)
@@ -596,7 +616,9 @@ test('preparation and framing run outside provider transactions', async () => {
   const journal = decodeControlJournal(slot.journal)
   expect(journal.sourceState).toEqual(encodeClientState(host.handle.state))
   expect(journal.checkpoint).toBe(slot.searchFrom)
-  expect(journal.candidate).toEqual(new Uint8Array([7, 8, 9]))
+  expect(decodeClientState(journal.candidate)?.keySchedule.epochAuthenticator).toEqual(
+    journal.candidateAuthenticator,
+  )
 })
 
 test('expired saved intent returns without construction or settlement', async () => {
@@ -609,7 +631,14 @@ test('expired saved intent returns without construction or settlement', async ()
 })
 
 async function advance(host: Awaited<ReturnType<typeof setup>>, clear: boolean, raw = false) {
-  const rotated = await commitKeyRotation(host.handle)
+  const copied = decodeClientState(encodeClientState(host.handle.state))
+  if (copied === undefined) throw new Error('Invalid source')
+  const bare = await restoreGroup({
+    state: copied,
+    credential: host.handle.credential,
+    ledgerEntries: host.handle.ledgerTokens,
+  })
+  const rotated = await commitKeyRotation(bare)
   const previous = await host.groups.loadState(host.key)
   const trust = await host.groups.loadTrust(host.key.groupID)
   if (previous === null || previous.deleted || trust === null) throw new Error('Missing source')
@@ -831,7 +860,14 @@ test.each([false, true])(
     const host = await setup()
     let store = createTransactionalStore(host.handle)
     if (later) {
-      const rotated = await commitKeyRotation(host.handle)
+      const copied = decodeClientState(encodeClientState(host.handle.state))
+      if (copied === undefined) throw new Error('Invalid source')
+      const bare = await restoreGroup({
+        state: copied,
+        credential: host.handle.credential,
+        ledgerEntries: host.handle.ledgerTokens,
+      })
+      const rotated = await commitKeyRotation(bare)
       await store.save(
         store.snapshot().revision,
         encodeClientState(rotated.newGroup.state),
@@ -1065,3 +1101,81 @@ test.each(['fork-halted', 'recovery-unavailable'] as const)(
     expect(f.db.snapshot()).toEqual(before)
   },
 )
+
+test('build retry ignores an unreferenced source proposal', async () => {
+  const real = await createRealGroup(1, 'build')
+  const proposer = real.members[0]
+  if (proposer === undefined) throw new Error('Missing proposer')
+  const host = await setup(real.committer)
+  const bare = await restoreGroup({
+    state: structuredClone(host.handle.state),
+    credential: host.handle.credential,
+    ledgerEntries: host.handle.ledgerTokens,
+  })
+  const proposal = await proposer.handle.proposeSelfRemoval()
+  await bare.processMessage(proposal.frame)
+  const saveState = async () => {
+    const stored = await host.groups.loadState(host.key)
+    if (stored === null || stored.deleted) throw new Error('Missing source')
+    await host.groups.transition(
+      await nextChange(host.groups, host.key.groupID, crypto.randomUUID()),
+      async (stores) => {
+        await stores.incarnation(1).state.save(
+          { ...stored, version: stored.version + 1, state: encodeClientState(bare.state) },
+          {
+            key: host.key,
+            stateVersion: stored.version,
+            identity: {
+              ...host.key,
+              epoch: stored.epoch,
+              authenticator: stored.epochAuthenticator,
+            },
+          },
+        )
+      },
+    )
+    host.setHandle(bare)
+  }
+  await saveState()
+  const before = structuredClone(bare.state)
+  const newcomer = randomIdentity()
+  const bundle = await createKeyPackageBundle(newcomer)
+  const { invite } = await createInvite({
+    group: bare,
+    identity: real.committer.identity,
+    recipientDID: newcomer.id,
+    permission: 'member',
+  })
+  let attempts = 0
+  const port = host.make(
+    async (op, slot, expected, id) => {
+      if (++attempts === 1) {
+        await bare.decrypt(await real.committer.handle.encrypt(new Uint8Array([42])))
+        bare.state.unappliedProposals = {}
+        expect(controlCompatible(before, bare.state)).toBe(false)
+        expect(controlCompatible(before, bare.state, [])).toBe(true)
+        await saveState()
+      }
+      return host.saver(op, slot, expected, id)
+    },
+    () => 10,
+    async (_op, supplied) => {
+      const result = await commitInvite(supplied, bundle.publicPackage, invite)
+      return {
+        commit: result.commitMessage,
+        digest: digestAppliedCommit(result.commitMessage),
+        epoch: Number(supplied.epoch),
+        incarnation: 1,
+        authenticatorBefore: supplied.state.keySchedule.epochAuthenticator.slice(),
+        bodies: invite.ledgerEntries,
+        journal: encodeClientState(result.newGroup.state),
+        welcome: null,
+      }
+    },
+  )
+  expect((await port.prepareBuild(intent, host.frame)).kind).toBe('saved')
+  expect(attempts).toBe(2)
+  const slot = (await host.control.load()).commitOnce
+  if (slot === null) throw new Error('Missing slot')
+  expect(decodeControlJournal(slot.journal).referencedProposals).toEqual([])
+})

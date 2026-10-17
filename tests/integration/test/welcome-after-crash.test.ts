@@ -21,6 +21,7 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { judgeWelcomeAdmission } from '../../../packages/mls-hub/src/admission.js'
 import { type BundleSource, openWelcome } from '../../../packages/mls-hub/src/join.js'
 import { createMemoryKeyPackagePoolStore } from '../../../packages/mls-hub/src/pool-store.js'
+import { bareTestHandle } from '../../../packages/mls-rpc/test/fixtures/real-group.js'
 import {
   buildInviteCommit,
   createEntryBodies,
@@ -316,7 +317,7 @@ test('invitee restart refuses a fresh later Welcome from persisted fork halt', a
     const persisted = structuredClone(await control.load())
     const leaf = ctx.member.handle().findMemberLeafIndex(ctx.invitee.id)
     if (leaf == null) throw new Error('Missing invitee leaf')
-    const removed = await removeMember(ctx.member.handle(), leaf)
+    const removed = await removeMember(await bareTestHandle(ctx.member.handle()), leaf)
     const offered = await createInvite({
       group: removed.newGroup,
       identity: ctx.member.identity,

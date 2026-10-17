@@ -1,14 +1,14 @@
 import { randomIdentity } from '@kokuin/token'
+import type { GroupHandle } from '@kumiai/mls'
 import {
   commitInvite,
-  createGroup,
   createInvite,
   createKeyPackageBundle,
   encodeClientState,
   encodeControlEnvelope,
 } from '@kumiai/mls'
 import { createGroupMLS } from '@kumiai/mls-rpc'
-import type { ControlStore, GroupForkEvidence } from '@kumiai/rpc'
+import type { ControlStore, GroupForkEvidence, Operation } from '@kumiai/rpc'
 import {
   asLogPosition,
   CONTROL_SEARCH_BUDGET,
@@ -62,8 +62,8 @@ async function firstValidRunner() {
   })
   const bundle = await createKeyPackageBundle(invitee)
   let candidateAuthenticator: Uint8Array | undefined
-  const builds = vi.fn(async () => {
-    const committed = await commitInvite(current, bundle.publicPackage, invite)
+  const builds = vi.fn(async (_op: Operation, supplied: GroupHandle) => {
+    const committed = await commitInvite(supplied, bundle.publicPackage, invite)
     candidateAuthenticator = committed.newGroup.state.keySchedule.epochAuthenticator.slice()
     return {
       commit: committed.commitMessage,
@@ -291,9 +291,10 @@ test('missing referenced proposal holds sender and refuses receiver', async () =
 test.each(['unknown', 'lost', 'abandon'] as const)(
   'real first-valid adoption of an orphaned %s invite co-commits and delivers its saved Welcome',
   async (prior) => {
-    const identity = randomIdentity()
+    const real = await createRealGroup(1, `first-valid-${prior}`)
+    const identity = real.committer.identity
     const invitee = randomIdentity()
-    let current = (await createGroup(identity, `first-valid-${prior}`)).group
+    let current = real.committer.handle
     const access = await createDurableHandleAccess({
       handle: () => current,
       adopt: (next) => {
@@ -308,32 +309,34 @@ test.each(['unknown', 'lost', 'abandon'] as const)(
       permission: 'member',
     })
     const bundle = await createKeyPackageBundle(invitee)
-    const committed = await commitInvite(current, bundle.publicPackage, invite)
     const op = operationIntent(operationRequest('invite', {}))
-    const builds = vi.fn(async () => ({
-      commit: committed.commitMessage,
-      journal: encodeJournal(committed.newGroup),
-      bodies: invite.ledgerEntries,
-      welcome: { bytes: committed.welcomeMessage, recipients: [invitee.id] },
-      epoch: Number(current.epoch),
-      incarnation: 1,
-      authenticatorBefore: current.state.keySchedule.epochAuthenticator.slice(),
-      digest: digestAppliedCommit(committed.commitMessage),
-    }))
+    let committed: Awaited<ReturnType<typeof commitInvite>> | undefined
+    const builds = vi.fn(async (_op: Operation, supplied: GroupHandle) => {
+      committed = await commitInvite(supplied, bundle.publicPackage, invite)
+      return {
+        commit: committed.commitMessage,
+        journal: encodeJournal(committed.newGroup),
+        bodies: invite.ledgerEntries,
+        welcome: { bytes: committed.welcomeMessage, recipients: [invitee.id] },
+        epoch: Number(current.epoch),
+        incarnation: 1,
+        authenticatorBefore: current.state.keySchedule.epochAuthenticator.slice(),
+        digest: digestAppliedCommit(committed.commitMessage),
+      }
+    })
     host.builders.set(op.id, builds)
     await host.control.apply({ putOperations: [op] }, 'enqueue')
     expect(
-      (
-        await host.prepareBuild(op, async (built, seal) => ({
-          payload: encodeHandshakeFrame(
-            HANDSHAKE_KIND.commit,
-            encodeCommitFrame(built.commit, (await seal(encodeLedgerEntries(built.bodies))).sealed),
-          ),
-          publishID: 'retained-invite',
-          expectedHead: null,
-        }))
-      ).kind,
-    ).toBe('saved')
+      await host.prepareBuild(op, async (built, seal) => ({
+        payload: encodeHandshakeFrame(
+          HANDSHAKE_KIND.commit,
+          encodeCommitFrame(built.commit, (await seal(encodeLedgerEntries(built.bodies))).sealed),
+        ),
+        publishID: 'retained-invite',
+        expectedHead: null,
+      })),
+    ).toMatchObject({ kind: 'saved' })
+    if (committed === undefined) throw new Error('Missing built invite')
     const slot = (await host.control.load()).commitOnce
     if (slot === null) throw new Error('Missing slot')
     await host.control.apply(
@@ -401,9 +404,10 @@ test.each(['unknown', 'lost', 'abandon'] as const)(
     expect((await host.control.load()).controlHold?.reason).toBe('acceptance-unknown')
     expect(current.epoch).toBe(BigInt(slot.epoch))
     const version = (await host.readEvidence()).source.stateVersion
-    await access.mutate(async (handle) => {
-      await handle.proposeSelfRemoval()
-    })
+    const proposer = real.members[0]
+    if (proposer === undefined) throw new Error('Missing proposer')
+    const proposal = await proposer.handle.proposeSelfRemoval()
+    await access.mutate((handle) => handle.processMessage(proposal.frame))
     expect(Object.keys(current.state.unappliedProposals)).toHaveLength(1)
     expect((await host.readEvidence()).source.stateVersion).toBeGreaterThan(version)
     expect((await host.control.load()).commitOnce).toEqual(slot)

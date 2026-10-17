@@ -10,6 +10,7 @@ import {
 } from '@kumiai/rpc'
 import { afterEach, expect, test, vi } from 'vitest'
 
+import { bareTestHandle } from '../../../packages/mls-rpc/test/fixtures/real-group.js'
 import { operationRequest } from './app-lane-e2e.js'
 import {
   createCapturedRecoveryFixture,
@@ -366,16 +367,16 @@ test('certified losing replay remains non-fork with real competing commits', asy
 test('ordinary gap recovery still heals and confirms with real MLS', async () => {
   const f = await setup()
   const survivor = await f.survivor()
-  const initial = await commitKeyRotation(f.real.committer.handle)
+  const initial = await commitKeyRotation(await bareTestHandle(f.real.committer.handle))
   await survivor.access.replace(initial.newGroup)
   await f.publish(initial.commitMessage, f.real.committer.handle)
   await f.member.peer.replay()
   expect(f.member.access.epoch()).toBe(Number(initial.newGroup.epoch))
   await f.stopPeer()
-  const missed = await commitKeyRotation(initial.newGroup)
+  const missed = await commitKeyRotation(await bareTestHandle(initial.newGroup))
   await survivor.access.replace(missed.newGroup)
   await f.publish(missed.commitMessage, initial.newGroup)
-  const afterGap = await commitKeyRotation(missed.newGroup)
+  const afterGap = await commitKeyRotation(await bareTestHandle(missed.newGroup))
   await survivor.access.replace(afterGap.newGroup)
   const retained = await f.publish(afterGap.commitMessage, missed.newGroup)
   f.hub.trim(f.topic, retained.sequenceID)
@@ -399,7 +400,7 @@ test('an orphaned real own commit diagnoses a contradiction and permits the next
   const before = await f.member.control.load()
   const receiver = f.real.members[0]
   if (receiver === undefined) throw new Error('Missing receiver')
-  const own = await commitKeyRotation(receiver.handle)
+  const own = await commitKeyRotation(await bareTestHandle(receiver.handle))
   const copied = await f.publish(own.commitMessage, receiver.handle)
   await f.member.peer.replay()
   const after = await f.member.control.load()
@@ -409,7 +410,7 @@ test('an orphaned real own commit diagnoses a contradiction and permits the next
   expect(after.welcomes).toEqual(before.welcomes)
   expect(after.forkHalt).toBeNull()
   expect(after.controlHold).toBeNull()
-  const valid = await commitKeyRotation(f.real.committer.handle)
+  const valid = await commitKeyRotation(await bareTestHandle(f.real.committer.handle))
   await f.publish(valid.commitMessage, f.real.committer.handle)
   await f.member.peer.replay()
   expect(f.member.access.epoch()).toBe(Number(valid.newGroup.epoch))
@@ -422,7 +423,7 @@ test.each(['handshake', 'commit-frame'] as const)(
   async (version) => {
     const f = await setup()
     const before = await f.member.control.load()
-    const rotated = await commitKeyRotation(f.real.committer.handle)
+    const rotated = await commitKeyRotation(await bareTestHandle(f.real.committer.handle))
     const frame = encodeHandshakeFrame(
       HANDSHAKE_KIND.commit,
       encodeCommitFrame(rotated.commitMessage, new Uint8Array()),
@@ -457,7 +458,7 @@ test('a live registry host report holds the peer synchronously without waiting f
   const before = await (await f.bob.fixture.registry.access(f.bob.key.groupID)).read(
     (handle) => handle,
   )
-  const other = (await commitKeyRotation(before)).newGroup
+  const other = (await commitKeyRotation(await bareTestHandle(before))).newGroup
   await f.bob.peer.commit(operationRequest('rotation', {}))
   const safety = f.bob.fixture.safety()
   const local = await safety.epochAuthenticator(f.bob.key)

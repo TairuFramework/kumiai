@@ -533,7 +533,15 @@ async function assemble(
       }),
     async advance(handle) {
       if (params.mode === 'real-mls' || captured.handles.has(handle)) {
-        const advanced = (await commitKeyRotation(handle)).newGroup
+        const state = decodeClientState(encodeClientState(handle.state))
+        if (state === undefined) throw new Error('Invalid source')
+        const bare = await restoreGroup({
+          state,
+          credential: handle.credential,
+          ledgerEntries: handle.ledgerTokens,
+          options: environment.options,
+        })
+        const advanced = (await commitKeyRotation(bare)).newGroup
         captured.handles.add(advanced)
         return advanced
       }
@@ -903,11 +911,13 @@ async function acceptedOrdinary(
   }))
   const candidate = await fixture.advance(handle)
   const alternate = await fixture.advance(await access.read((current) => current))
+  const stored = await fixture.device.groups.loadState(access.key)
+  if (stored === null || stored.deleted || stored.state === null) throw new Error('Missing source')
   const journal = encodeControlJournal({
     version: 1,
     source,
     checkpoint: null,
-    sourceState: encodeClientState(handle.state),
+    sourceState: stored.state,
     sourceCredential: handle.credential,
     sourceLedger: handle.ledgerTokens,
     candidate: hostBytes(candidate),

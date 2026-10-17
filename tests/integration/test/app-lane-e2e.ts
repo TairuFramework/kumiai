@@ -79,6 +79,7 @@ import {
 import { createCommit, encode, mlsMessageEncoder } from 'ts-mls'
 
 import {
+  bareTestHandle,
   buildRealUnavailableCommit,
   createRealGroup,
   testGroupMLSDependencies,
@@ -272,7 +273,7 @@ export type Member = {
   control: ControlStore
   build: (op: Operation, group?: GroupHandle) => Promise<HostBuilt>
   prepareBuild: ControlBuildPort['prepareBuild']
-  builders: Map<string, (op: Operation) => Promise<HostBuilt>>
+  builders: Map<string, (op: Operation, group: GroupHandle) => Promise<HostBuilt>>
   signers: Map<string, OwnIdentity>
   deliveries: Map<string, (welcome: Uint8Array) => void>
   stateStore: StateStore
@@ -363,13 +364,15 @@ export function makeMember(params: MakeMemberParams): Member {
   })
 
   const control = stateStore.control
-  const builders = restartOf?.builders ?? new Map<string, (op: Operation) => Promise<HostBuilt>>()
+  const builders =
+    restartOf?.builders ??
+    new Map<string, (op: Operation, group: GroupHandle) => Promise<HostBuilt>>()
   const signers = restartOf?.signers ?? new Map([[identity.id, identity]])
   const deliveries = new Map<string, (welcome: Uint8Array) => void>()
   const build = async (op: Operation, supplied?: GroupHandle): Promise<HostBuilt> => {
     hostHooks.beforeBuild?.()
     const custom = builders.get(op.id)
-    if (custom != null) return custom(op)
+    if (custom != null) return custom(op, supplied ?? (await bareTestHandle(handle)))
     const body = decodeOperationBody(op.body) as {
       type: string
       target?: string
@@ -382,7 +385,7 @@ export function makeMember(params: MakeMemberParams): Member {
     let committed: { commitMessage: Uint8Array; newGroup: GroupHandle }
     let bodies: Array<string> = []
     let welcome: HostBuilt['welcome'] = null
-    const current = supplied ?? handle
+    const current = supplied ?? (await bareTestHandle(handle))
     if (body.type === 'invite' && body.material != null) {
       const result = await commitInvite(
         current,
@@ -416,7 +419,7 @@ export function makeMember(params: MakeMemberParams): Member {
     } else if (body.type === 'revoke-proof') {
       const options = { serializeJournal: hostHooks.serializeJournal ?? encodeJournal }
       return supplied === undefined
-        ? buildRevokeProofOperation({ mls, op, options })
+        ? buildRevokeProofOperation({ mls, group: current, op, options })
         : buildRevokeProofOnHandle({ group: supplied, incarnation: 1, op, options })
     } else {
       bodies = body.tokens ?? []
@@ -434,6 +437,7 @@ export function makeMember(params: MakeMemberParams): Member {
     }
   }
   const buildPort = createControlBuildPort({
+    restoreCandidate: (bytes) => restoreCandidate(bytes),
     access,
     control,
     build,
@@ -636,7 +640,7 @@ export function buildLedgerCommit(
 }
 export function customOperation(
   member: Member,
-  builder: (op: Operation) => Promise<HostBuilt>,
+  builder: (op: Operation, group: GroupHandle) => Promise<HostBuilt>,
 ): OperationRequest {
   const request = operationRequest('ledger', { tokens: [] })
   member.builders.set(request.id, builder)
@@ -704,15 +708,16 @@ export function createOperationHost(access: HandleAccess, identity: OwnIdentity)
   const welcomes: Array<WelcomeObligation> = []
   const store = operationStores.get(access)
   if (store === undefined) throw new Error('Operation host requires durable handle access')
-  const builders = new Map<string, () => Promise<HostBuilt>>()
-  const build = async (op: Operation) => {
+  const builders = new Map<string, (op: Operation, group: GroupHandle) => Promise<HostBuilt>>()
+  const build = async (op: Operation, group: GroupHandle) => {
     const builder = builders.get(op.id)
     if (builder === undefined) throw new OperationRejectedError('No host builder')
-    return builder()
+    return builder(op, group)
   }
   const restoreCandidate = candidateRestorer(access)
   const control = store.control
   const buildPort = createControlBuildPort({
+    restoreCandidate: (bytes) => restoreCandidate(bytes),
     access,
     control,
     build,

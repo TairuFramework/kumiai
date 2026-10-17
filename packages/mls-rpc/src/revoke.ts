@@ -35,19 +35,19 @@ export type PublishRevokeProofParams<Protocols extends Record<string, GroupProto
 /** Host build routing for a durable proof request. */
 export async function buildRevokeProofOperation(params: {
   mls: GroupMLS
+  group: GroupHandle
   op: Operation
   options: RevokeJournalOptions
 }): Promise<HostBuilt> {
   const access = groupHandleAccess.get(params.mls)
   if (access == null) throw new Error('Proof operations require an adapter-created GroupMLS')
-  return access.readControl(({ handle, source }) =>
-    buildRevokeProofOnHandle({
-      group: handle,
-      incarnation: source.key.incarnation,
-      op: params.op,
-      options: params.options,
-    }),
-  )
+  const incarnation = await access.readControl(async ({ source }) => source.key.incarnation)
+  return buildRevokeProofOnHandle({
+    group: params.group,
+    incarnation,
+    op: params.op,
+    options: params.options,
+  })
 }
 
 export async function buildRevokeProofOnHandle(params: {

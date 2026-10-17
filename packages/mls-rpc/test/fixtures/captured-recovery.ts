@@ -50,7 +50,12 @@ import { recoveryTrustFor } from '../../src/registry/trust.js'
 import { registryOptions } from '../../src/registry/validation.js'
 import { createRegistryGroupMLS } from '../../src/registry-group-mls.js'
 import { createAsyncLocalOwnershipContext } from './ownership-context.js'
-import { persistedTestAccess, type RealMember, testGroupMLSDependencies } from './real-group.js'
+import {
+  bareTestHandle,
+  persistedTestAccess,
+  type RealMember,
+  testGroupMLSDependencies,
+} from './real-group.js'
 import { createRegistryFixture } from './registry.js'
 import {
   createTransactionalAccess,
@@ -267,7 +272,7 @@ export async function createCapturedFormerMember(present = false, identity?: Own
   const index = responder.handle.findMemberLeafIndex(requester.identity.id)
   if (index === undefined) throw new Error('Missing requester')
   if (present) {
-    const rotation = await commitKeyRotation(requester.handle)
+    const rotation = await commitKeyRotation(await bareTestHandle(requester.handle))
     const state = decodeClientState(encodeClientState(responder.handle.state))
     if (state == null) throw new Error('Missing prior state')
     responder.handle = await restoreGroup({
@@ -563,7 +568,7 @@ export async function createForkRecoveryRealFixture(
     })
   }
   while (Number(peer.handle.epoch) < 9) {
-    const rotation = await commitKeyRotation(peer.handle)
+    const rotation = await commitKeyRotation(await bareTestHandle(peer.handle))
     peer.handle = rotation.newGroup
     await own.handle.processMessage(rotation.commitMessage)
   }
@@ -614,7 +619,7 @@ export async function createForkRecoveryRealFixture(
   const ownHeads = new Map<number, GroupHandle>([[9, await clone(ownResponder)]])
   const otherHeads = new Map<number, GroupHandle>([[9, await clone(peer.handle)]])
   while (Number(own.handle.epoch) < 20) {
-    const rotation = await commitKeyRotation(own.handle)
+    const rotation = await commitKeyRotation(await bareTestHandle(own.handle))
     own.handle = rotation.newGroup
     await ownResponder.processMessage(rotation.commitMessage)
     ownHeads.set(Number(ownResponder.epoch), await clone(ownResponder))
@@ -622,7 +627,7 @@ export async function createForkRecoveryRealFixture(
     await install(original, originalKey, ownResponder)
   }
   while (Number(peer.handle.epoch) < 21) {
-    peer.handle = (await commitKeyRotation(peer.handle)).newGroup
+    peer.handle = (await commitKeyRotation(await bareTestHandle(peer.handle))).newGroup
     otherHeads.set(Number(peer.handle.epoch), await clone(peer.handle))
     if (Number(peer.handle.epoch) <= 12) await install(remote, remoteKey, peer.handle)
   }

@@ -1,4 +1,10 @@
-import { decodeClientState, encodeClientState, type GroupHandle, restoreGroup } from '@kumiai/mls'
+import {
+  decodeClientState,
+  encodeClientState,
+  type GroupHandle,
+  restoreGroup,
+  restrictCommitAuthoring,
+} from '@kumiai/mls'
 import type { AdoptionWrite, ControlStore } from '@kumiai/rpc'
 
 import type { ControlRead, HandleAccess } from '../../src/access.js'
@@ -36,11 +42,13 @@ export async function createSealedControlAccess(
     if (bytes === undefined) throw new Error('Missing retained adoption source')
     const state = decodeClientState(bytes)
     if (state === undefined) throw new Error('Invalid adoption source')
-    const handle = await restore({
-      state,
-      credential: row.credential,
-      ledgerEntries: row.ledger,
-    })
+    const handle = restrictCommitAuthoring(
+      await restore({
+        state,
+        credential: row.credential,
+        ledgerEntries: row.ledger,
+      }),
+    )
     const source = {
       key,
       stateVersion: row.version,
@@ -48,7 +56,7 @@ export async function createSealedControlAccess(
     }
     return { row, handle, source }
   }
-  let live = fallback
+  let live = restrictCommitAuthoring(fallback)
   let tail: Promise<void> = Promise.resolve()
   let fault: AdoptionFault = {}
   const serial = async <T>(work: () => Promise<T>): Promise<T> => {
@@ -156,7 +164,7 @@ export async function createSealedControlAccess(
           await current.handle.carryReceiveProgress(next)
         beforeAdopt()
         await persist(next, write)
-        live = next
+        live = restrictCommitAuthoring(next)
         next.confirmAdopted()
         adopted()
       }),

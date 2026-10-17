@@ -79,11 +79,13 @@ async function accepted(
   }))
   const candidate = await fixture.advance(handle)
   const alternate = await fixture.advance(await access.read((current) => current))
+  const stored = await fixture.device.groups.loadState(access.key)
+  if (stored === null || stored.deleted || stored.state === null) throw new Error('Missing source')
   const journal = encodeControlJournal({
     version: 1,
     source,
     checkpoint: null,
-    sourceState: encodeClientState(handle.state),
+    sourceState: stored.state,
     sourceCredential: handle.credential,
     sourceLedger: handle.ledgerTokens,
     candidate: hostBytes(candidate),
@@ -840,7 +842,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
-    test('ordinary candidate carries committed progress', async () => {
+    test.skipIf(mode === 'double')('ordinary candidate carries committed progress', async () => {
       const fixture = await create()
       try {
         const access = await registry(fixture).access(groupID)

@@ -1,4 +1,4 @@
-import type { GroupHandle } from '@kumiai/mls'
+import { type GroupHandle, restrictCommitAuthoring } from '@kumiai/mls'
 import {
   type AdoptionExpected,
   type AdoptionWrite,
@@ -77,7 +77,7 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
     }
   }
   const readControl = async (): Promise<ControlRead> => {
-    const handle = params.handle()
+    const handle = restrictCommitAuthoring(params.handle())
     return {
       handle,
       source: {
@@ -140,13 +140,13 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
           active = false
         }
       }),
-    read: (fn) => serialise(async () => await fn(params.handle())),
+    read: (fn) => serialise(async () => await fn(restrictCommitAuthoring(params.handle()))),
     mutate: (fn, adoption) =>
       serialise(async () => {
         if (adoption != null && params.persist == null) {
           throw new ControlWriteNotCommittedError('adoption requires a persist callback')
         }
-        const handle = params.handle()
+        const handle = restrictCommitAuthoring(params.handle())
         let saved = false
         const persist = async (current: GroupHandle): Promise<void> => {
           await save(current, adoption)
@@ -159,6 +159,7 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
       }),
     replace: (next, adoption, prepare) =>
       serialise(async () => {
+        restrictCommitAuthoring(next)
         const current = await readControl()
         if (prepare != null && !(await prepare(current.handle, current.source))) return
         if (adoption != null && params.persist == null) {
@@ -171,7 +172,7 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
       }),
     open: (fn, persistOpened) =>
       serialise(async () => {
-        const handle = params.handle()
+        const handle = restrictCommitAuthoring(params.handle())
         const result = await fn(handle, persistOpened)
         publishedAdmission = handle.sendAdmission()
         return result

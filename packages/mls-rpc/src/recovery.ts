@@ -22,6 +22,7 @@ import {
   RevokeProofError,
   recoverySignerEligible,
   restoreGroup,
+  restrictCommitAuthoring,
   SealedGroupInfoError,
   verifyRosterAbsence as verifyTrustedRosterAbsence,
 } from '@kumiai/mls'
@@ -286,7 +287,7 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
             onLedgerEntries: group.onLedgerEntries,
           },
           ...(group.anchor.controller == null ? {} : { ledgerEntries: reply.ledger }),
-        })
+        }).then((result) => ({ ...result, group: restrictCommitAuthoring(result.group) }))
       }
       const candidate = async (controller?: ControllerBinding) => {
         const result = await build(controller)
@@ -491,12 +492,14 @@ async function capturedPending(
   const key = requestKey.slice()
   let group: GroupHandle
   try {
-    group = await restoreGroup({
-      state: snapshot.state,
-      credential: source.trust.credential,
-      ledgerEntries: snapshot.replyLedger,
-      options: { ...environment.options, ciphersuiteName: source.trust.ciphersuiteName },
-    })
+    group = restrictCommitAuthoring(
+      await restoreGroup({
+        state: snapshot.state,
+        credential: source.trust.credential,
+        ledgerEntries: snapshot.replyLedger,
+        options: { ...environment.options, ciphersuiteName: source.trust.ciphersuiteName },
+      }),
+    )
   } catch (cause) {
     if (cause instanceof GroupRestoreError)
       throw new RecoveryCandidateError('Saved recovery state refused', { cause })
@@ -598,7 +601,7 @@ export async function buildRecoveryCandidate(params: {
           await assertRecoveryBinding({ group: before, identity: environment.identity, controller })
         }
       },
-    })
+    }).then((result) => ({ ...result, group: restrictCommitAuthoring(result.group) }))
   let result: Awaited<ReturnType<typeof build>>
   try {
     result = await build()

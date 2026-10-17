@@ -11,6 +11,8 @@ import {
   openCheckpointRow,
   retainCheckpointInstallations,
 } from './checkpoint-store.js'
+import { controlCompatible } from './control-compat.js'
+import { decodeControlJournal } from './control-journal.js'
 import {
   type AccountedGroupObservation,
   bindEntryCapability,
@@ -805,7 +807,19 @@ export function createMemoryGroupCoordinator(params: {
                             )
                           )) ||
                         (expected !== undefined &&
-                          !controlAdoptionAllowed(snapshot, source, expected)) ||
+                          !controlAdoptionAllowed(snapshot, source, expected, (bytes) => {
+                            const journal = decodeControlJournal(bytes)
+                            const from = decodeClientState(journal.sourceState)
+                            const current =
+                              prior === null || prior.deleted || prior.state === null
+                                ? undefined
+                                : decodeClientState(prior.state)
+                            return (
+                              from !== undefined &&
+                              current !== undefined &&
+                              controlCompatible(from, current, journal.referencedProposals)
+                            )
+                          })) ||
                         (prior !== null &&
                           !prior.deleted &&
                           !owned.deleted &&

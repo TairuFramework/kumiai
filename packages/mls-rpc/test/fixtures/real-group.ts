@@ -5,6 +5,7 @@ import {
   createGroup,
   createInvite,
   createKeyPackageBundle,
+  decodeClientState,
   encodeClientState,
   encodeControlEnvelope,
   exportGroupInfo,
@@ -14,6 +15,7 @@ import {
   processWelcome,
   removeMember,
   renewLeaf,
+  restoreGroup,
 } from '@kumiai/mls'
 import type { ControlStore } from '@kumiai/rpc'
 import { createMemoryControlStore } from '@kumiai/rpc-conformance'
@@ -165,7 +167,7 @@ export async function createRealBoundRecovery(
     responder,
     ratchet: async () => {
       const current = await access.read((handle) => handle)
-      await access.replace((await renewLeaf(current, cached)).newGroup)
+      await access.replace((await renewLeaf(await bareTestHandle(current), cached)).newGroup)
     },
     replaceBinding: async () => {
       offered = await fixture.timedBinding({ identity: bob, iat: now - 10, exp: now + 1000 })
@@ -257,6 +259,7 @@ export async function buildRealCommit(
   group: RealGroup,
   options: { removes?: number } = {},
 ): Promise<Uint8Array> {
+  group.committer.handle = await bareTestHandle(group.committer.handle)
   if (options.removes != null) {
     const member = group.members[options.removes]
     if (member == null) throw new Error(`no member at index ${options.removes}`)
@@ -424,4 +427,22 @@ export function testHandleAccess(
     createMemoryControlStore(params.key ?? { groupID: params.handle().groupID, incarnation: 1 }),
   )
   return access
+}
+
+/** Bare test authors restore raw keys independently of the access under test. */
+export async function bareTestHandle(handle: GroupHandle): Promise<GroupHandle> {
+  const state = decodeClientState(encodeClientState(handle.state))
+  if (state === undefined) throw new Error('Invalid test state')
+  return restoreGroup({
+    state,
+    credential: handle.credential,
+    ledgerEntries: handle.ledgerTokens,
+    options: {
+      cryptoProvider: { getCiphersuiteImpl: async () => handle.context.cipherSuite },
+      keyRetention: handle.context.clientConfig?.keyRetentionConfig,
+      commitPolicy: handle.commitPolicy,
+      resolveLedgerEntries: handle.resolveLedgerEntries,
+      onLedgerEntries: handle.onLedgerEntries,
+    },
+  })
 }

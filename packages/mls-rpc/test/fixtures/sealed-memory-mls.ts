@@ -1,5 +1,6 @@
 import { getSignatureInfo, normalizeDID } from '@kokuin/token'
 import {
+  authorPrivateCommit,
   buildGroupAnchorExtension,
   buildLedgerHeadExtension,
   type ClientState,
@@ -23,6 +24,7 @@ import {
   parseMLSCredentialIdentity,
   readLedgerHead,
   restoreGroup,
+  restrictCommitAuthoring,
   type SendAdmission,
   type VerifiedLedgerEntry,
   verifyLedgerEntry,
@@ -134,12 +136,14 @@ function model(
         }),
       )
       if (previous !== null) {
-        const base = await restoreGroup({
-          state: envelope(state, mls),
-          credential,
-          ledgerEntries: previous,
-          options,
-        })
+        const base = restrictCommitAuthoring(
+          await restoreGroup({
+            state: envelope(state, mls),
+            credential,
+            ledgerEntries: previous,
+            options,
+          }),
+        )
         const result = foldEnvelope({
           entries,
           baseRoster: base.roster,
@@ -214,7 +218,7 @@ function envelope(state: ClientState, mls: MemoryMLS): ClientState {
     }
   }
   const changingEpoch = state.groupContext.epoch !== BigInt(mls.epoch())
-  return {
+  const next: ClientState = {
     ...state,
     ratchetTree: tree,
     groupContext: {
@@ -257,6 +261,9 @@ function envelope(state: ClientState, mls: MemoryMLS): ClientState {
     // The v2 storage envelope retains the independent double's entire durable state.
     confirmationTag: mls.serializeState(),
   }
+  captureReceiveState(next, mls)
+  next.confirmationTag = mls.serializeState()
+  return next
 }
 
 export function seedMemoryControlState(
@@ -287,8 +294,11 @@ export function memoryModel(handle: GroupHandle): MemoryMLS {
 }
 
 function captureReceiveState(state: ClientState, mls: MemoryMLS): void {
+  // Model snapshots must use the same wire-normalised shape as a restored handle.
+  const canonical = decodeClientState(encodeClientState(state))
+  if (canonical === undefined) throw new Error('Invalid memory receive state')
   mls.setReceiveHistory(
-    [...state.historicalReceiverData].map(([at, held]) => [
+    [...canonical.historicalReceiverData].map(([at, held]) => [
       Number(at),
       {
         identity: toB64U(held.resumptionPsk),
@@ -299,10 +309,10 @@ function captureReceiveState(state: ClientState, mls: MemoryMLS): void {
   mls.setReceiveState(
     encodeStoredValue({
       resumptionPsk: mls.authenticator(),
-      secretTree: state.secretTree,
-      ratchetTree: state.ratchetTree,
-      senderDataSecret: state.keySchedule.senderDataSecret,
-      groupContext: state.groupContext,
+      secretTree: canonical.secretTree,
+      ratchetTree: canonical.ratchetTree,
+      senderDataSecret: canonical.keySchedule.senderDataSecret,
+      groupContext: canonical.groupContext,
     }),
   )
 }
@@ -496,12 +506,14 @@ export async function restoreMemoryControlHandle(params: {
   )
     throw new Error('Memory ledger projection mismatch')
   // Reuse only context construction and signed ledger folding, never MLS transitions.
-  const restored = await restoreGroup({
-    state,
-    credential: { ...credential },
-    ledgerEntries: tokens,
-    options,
-  })
+  const restored = restrictCommitAuthoring(
+    await restoreGroup({
+      state,
+      credential: { ...credential },
+      ledgerEntries: tokens,
+      options,
+    }),
+  )
   if (restored.ledgerTokens.length !== tokens.length) throw new Error('Invalid memory ledger')
   if (toB64U(readLedgerHead(restored)?.head ?? new Uint8Array()) !== mls.authenticatedLedgerHead())
     throw new Error('Memory authenticated ledger head mismatch')
@@ -524,30 +536,43 @@ export async function buildSealedMemoryOperation(
   op: Operation,
   handle: GroupHandle,
 ): Promise<HostBuilt> {
-  const sourceState = handle.state
-  const mls = memoryModel(handle)
-  const before = mls.serializeState()
-  const epoch = mls.epoch()
-  const authenticatorBefore = mls.authenticator()
-  const { target } = decodeStoredValue(op.body) as { target: string }
-  const commit = mls.buildCommit([], { adds: [target] })
-  let candidate: Uint8Array
-  try {
-    await mls.adopt(commit)
-    candidate = encodeClientState(envelope(sourceState, mls))
-  } finally {
-    mls.restoreState(before)
-  }
-  return {
-    commit,
-    bodies: [],
-    journal: candidate,
-    welcome: { bytes: new TextEncoder().encode(target), recipients: [target] },
-    incarnation: 1,
-    epoch,
-    authenticatorBefore,
-    digest: toB64U(sha256(commit)),
-  }
+  return authorPrivateCommit(handle, async () => {
+    const sourceState = handle.state
+    const mls = memoryModel(handle)
+    const before = mls.serializeState()
+    const epoch = mls.epoch()
+    const authenticatorBefore = mls.authenticator()
+    const { target } = decodeStoredValue(op.body) as { target: string }
+    const commit = mls.buildCommit([], { adds: [target] })
+    let candidate: Uint8Array
+    let candidateAuthenticator: Uint8Array
+    try {
+      await mls.adopt(commit)
+      candidate = encodeClientState(envelope(sourceState, mls))
+      candidateAuthenticator = mls.authenticator().slice()
+    } finally {
+      mls.restoreState(before)
+    }
+    return {
+      receipt: {
+        commit,
+        referencedProposals: [],
+        epoch,
+        authenticatorBefore,
+        candidateAuthenticator,
+      },
+      value: {
+        commit,
+        bodies: [],
+        journal: candidate,
+        welcome: { bytes: new TextEncoder().encode(target), recipients: [target] },
+        incarnation: 1,
+        epoch,
+        authenticatorBefore,
+        digest: toB64U(sha256(commit)),
+      },
+    }
+  })
 }
 
 export function sealedMemoryValidation(): ControlValidationPort {

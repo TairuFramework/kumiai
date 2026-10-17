@@ -1,4 +1,9 @@
-import { encodeClientState, type GroupHandle } from '@kumiai/mls'
+import {
+  decodeClientState,
+  encodeClientState,
+  type GroupHandle,
+  restrictCommitAuthoring,
+} from '@kumiai/mls'
 import {
   type AdoptionExpected,
   type AdoptionWrite,
@@ -13,6 +18,7 @@ import {
 
 import type { ControlRead, ControlReadScope, HandleAccess } from '../access.js'
 import { currentCheckpointFact, prepareCheckpointInstallation } from '../checkpoint-capture.js'
+import { controlCompatible } from '../control-compat.js'
 import { type ControlJournal, decodeControlJournal } from '../control-journal.js'
 import { controlBuildContexts } from '../control-write-context.js'
 import type { EntryCapability, EntryReads } from '../entry-capability.js'
@@ -274,11 +280,19 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     const journal = journalFor(write)
     let destination: GroupHandle
     try {
-      destination = await params.restoreCandidate(journal.candidate)
+      destination = restrictCommitAuthoring(await params.restoreCandidate(journal.candidate))
     } catch (cause) {
       throw moved(cause)
     }
-    if (!ordinaryCandidateMatches(next, destination, owner.key)) throw moved()
+    if (
+      !ordinaryCandidateMatches(next, destination, owner.key) ||
+      (journal.candidateAuthenticator !== undefined &&
+        !sameStoredValue(
+          destination.state.keySchedule.epochAuthenticator,
+          journal.candidateAuthenticator,
+        ))
+    )
+      throw moved()
     try {
       for (const handle of [next, destination]) {
         validateRegistryHandle({
@@ -340,14 +354,21 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
         return null
       throw moved()
     }
+    const stored = await reads.state(owner.key.incarnation)
+    const sourceState = decodeClientState(journal.sourceState)
+    const currentState =
+      stored === null || stored.deleted || stored.state === null
+        ? undefined
+        : decodeClientState(stored.state)
     if (
-      !sameStoredValue(source, expected) ||
-      !sameStoredValue(source, {
-        key: write.expected?.key,
-        stateVersion: write.expected?.stateVersion,
-        identity: write.expected?.identity,
-      }) ||
-      !sameStoredValue(source.identity, journal.source.identity)
+      !sameStoredValue(source.key, expected.key) ||
+      !sameStoredValue(source.identity, expected.identity) ||
+      !sameStoredValue(source.key, write.expected?.key) ||
+      !sameStoredValue(source.identity, write.expected?.identity) ||
+      !sameStoredValue(source.identity, journal.source.identity) ||
+      sourceState === undefined ||
+      currentState === undefined ||
+      !controlCompatible(sourceState, currentState, journal.referencedProposals)
     )
       throw moved()
     assertSafety()

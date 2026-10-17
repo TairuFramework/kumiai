@@ -10,6 +10,8 @@ export type ControlJournal = {
   sourceState: Uint8Array
   sourceCredential: MemberCredential
   sourceLedger: Array<string>
+  referencedProposals?: Array<string>
+  candidateAuthenticator?: Uint8Array
   candidate: Uint8Array
 }
 
@@ -35,6 +37,11 @@ function assertJournal(value: unknown): asserts value is ControlJournal {
     !(identity.authenticator instanceof Uint8Array) ||
     !(journal.sourceState instanceof Uint8Array) ||
     !(journal.candidate instanceof Uint8Array) ||
+    (journal.candidateAuthenticator !== undefined &&
+      !(journal.candidateAuthenticator instanceof Uint8Array)) ||
+    (journal.referencedProposals !== undefined &&
+      (!Array.isArray(journal.referencedProposals) ||
+        !journal.referencedProposals.every((ref) => typeof ref === 'string'))) ||
     (journal.checkpoint !== null && typeof journal.checkpoint !== 'string') ||
     typeof journal.sourceCredential?.id !== 'string' ||
     journal.sourceCredential.groupID !== source.key.groupID ||

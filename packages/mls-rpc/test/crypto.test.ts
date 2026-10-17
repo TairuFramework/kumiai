@@ -14,7 +14,7 @@ import { UnsupportedLedgerEntriesVersionError } from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
 import { createGroupCrypto, ENTRY_SEAL_LABEL } from '../src/crypto.js'
-import { testHandleAccess } from './fixtures/real-group.js'
+import { bareTestHandle, testHandleAccess } from './fixtures/real-group.js'
 
 const utf8 = new TextEncoder()
 
@@ -77,7 +77,7 @@ async function addMember(params: {
   })
   params.publish(invite)
   const bundle = await createKeyPackageBundle(params.invitee)
-  const added = await commitInvite(params.group, bundle.publicPackage, invite)
+  const added = await commitInvite(await bareTestHandle(params.group), bundle.publicPackage, invite)
   const { group: joinedGroup } = await processWelcome({
     identity: params.invitee,
     invite,
@@ -161,7 +161,7 @@ describe('createGroupCrypto', () => {
     // The handle swap a peer makes when it adopts its own commit: the port follows it, and the
     // secret moves with the epoch. A crypto closing over the handle it was built with would
     // still be exporting the line above.
-    const removed = await removeMember(aliceGroup, 1)
+    const removed = await removeMember(await bareTestHandle(aliceGroup), 1)
     await alice.adopt(removed.newGroup)
     expect(alice.crypto.epoch()).toBe(2)
     const { secret: rotated } = await alice.crypto.exportSecret(LABEL)
@@ -335,7 +335,7 @@ describe('createGroupCrypto', () => {
     const bob = cryptoOver(bobGroup)
 
     const atOne = await alice.crypto.wrap(utf8.encode('epoch one'))
-    const removed = await removeMember(aliceGroup, 1)
+    const removed = await removeMember(await bareTestHandle(aliceGroup), 1)
     alice.adopt(removed.newGroup)
     const atTwo = await alice.crypto.wrap(utf8.encode('epoch two'))
 
@@ -359,7 +359,7 @@ describe('createGroupCrypto', () => {
       const bob = cryptoOver(bobGroup)
 
       const { sealed: atOne } = await alice.crypto.sealEntries(utf8.encode('entries at one'))
-      const removed = await removeMember(aliceGroup, 1)
+      const removed = await removeMember(await bareTestHandle(aliceGroup), 1)
       alice.adopt(removed.newGroup)
       const { sealed: atTwo } = await alice.crypto.sealEntries(utf8.encode('entries at two'))
 
@@ -434,7 +434,7 @@ describe('createGroupCrypto', () => {
       const appFrame = await alice.crypto.wrap(utf8.encode('framed'))
       expect(alice.crypto.frameEpoch(appFrame)).toBe(1)
 
-      const removed = await removeMember(aliceGroup, 1)
+      const removed = await removeMember(await bareTestHandle(aliceGroup), 1)
       alice.adopt(removed.newGroup)
       const laterFrame = await alice.crypto.wrap(utf8.encode('later'))
 

@@ -1016,6 +1016,12 @@ export async function createControlCrashHarness(mode: 'real-mls' | 'double', see
       access: host.access,
       control,
       build: buildHost,
+      restoreCandidate,
+      restoreSource: async ({ state, credential, ledgerEntries }) => {
+        const decoded = decodeClientState(state)
+        if (decoded === undefined) throw new TypeError('Invalid control source state')
+        return restoreHandle({ state: decoded, credential, ledgerEntries })
+      },
       saveBuilt,
       now: Date.now,
       newID: () => crypto.randomUUID(),
@@ -1118,6 +1124,12 @@ export async function createControlCrashHarness(mode: 'real-mls' | 'double', see
         access: host.access,
         control,
         build: buildHost,
+        restoreCandidate,
+        restoreSource: async ({ state, credential, ledgerEntries }) => {
+          const decoded = decodeClientState(state)
+          if (decoded === undefined) throw new TypeError('Invalid control source state')
+          return restoreHandle({ state: decoded, credential, ledgerEntries })
+        },
         saveBuilt: async (_intent, value, source) => {
           slot = value
           expected = source

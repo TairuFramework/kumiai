@@ -1,5 +1,11 @@
 import { randomIdentity } from '@kokuin/token'
-import { commitLedgerEntries, createGroup, decodeClientState, signLedgerEntry } from '@kumiai/mls'
+import {
+  commitLedgerEntries,
+  createGroup,
+  decodeClientState,
+  type GroupHandle,
+  signLedgerEntry,
+} from '@kumiai/mls'
 import {
   asLogPosition,
   digestAppliedCommit,
@@ -86,20 +92,23 @@ test('standalone operation adoption co-commits the anchor landed mark with contr
     subject: identity.id,
     value: 'atomic',
   })
-  const committed = await commitLedgerEntries(current, [token])
-  const next = committed.newGroup
+  let next: GroupHandle | undefined
   const epochBefore = Number(current.epoch)
   const op = operationIntent(operationRequest('ledger', {}))
-  host.builders.set(op.id, async () => ({
-    commit: committed.commitMessage,
-    journal: encodeJournal(next),
-    bodies: [token],
-    welcome: null,
-    epoch: epochBefore,
-    authenticatorBefore: current.state.keySchedule.epochAuthenticator.slice(),
-    incarnation: 1,
-    digest: digestAppliedCommit(committed.commitMessage),
-  }))
+  host.builders.set(op.id, async (_op, supplied) => {
+    const committed = await commitLedgerEntries(supplied, [token])
+    next = committed.newGroup
+    return {
+      commit: committed.commitMessage,
+      journal: encodeJournal(next),
+      bodies: [token],
+      welcome: null,
+      epoch: epochBefore,
+      authenticatorBefore: current.state.keySchedule.epochAuthenticator.slice(),
+      incarnation: 1,
+      digest: digestAppliedCommit(committed.commitMessage),
+    }
+  })
   await host.control.apply({ putOperations: [op] }, 'intent')
   const prepared = await host.prepareBuild(op, async (built, seal) => ({
     payload: encodeHandshakeFrame(
@@ -112,6 +121,7 @@ test('standalone operation adoption co-commits the anchor landed mark with contr
   expect(prepared.kind).toBe('saved')
   const slot = (await host.control.load()).commitOnce
   if (slot === null) throw new Error('Missing saved build')
+  if (next === undefined) throw new Error('Missing candidate')
   const proof = {
     source: (await host.readEvidence()).source,
     from: slot.searchFrom,

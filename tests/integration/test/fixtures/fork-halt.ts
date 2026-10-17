@@ -61,6 +61,7 @@ import {
 } from '../../../../packages/mls-rpc/src/persistence-codec.js'
 import { recoveryTrustFor } from '../../../../packages/mls-rpc/src/registry/trust.js'
 import {
+  bareTestHandle,
   createRealGroup,
   type RealMember,
   testGroupMLSDependencies,
@@ -194,6 +195,7 @@ export async function createCapturedRecoveryFixture(params: { timeoutMs?: number
           const build = createControlBuildPort({
             access,
             control: ports.control,
+            restoreCandidate,
             saveBuilt: createPersistenceBuildSaver({
               persistence: fixture.device.groups,
               key: current,
@@ -576,8 +578,8 @@ export async function createForkFixture() {
       const retained = await registry.device.groups.readEvidence(key)
       await fixture.stopPeer()
       const source = real.committer.handle
-      const first = await commitKeyRotation(source)
-      const second = await commitKeyRotation(source)
+      const first = await commitKeyRotation(await bareTestHandle(source))
+      const second = await commitKeyRotation(await bareTestHandle(source))
       const firstRow = await publish(first.commitMessage, source, null)
       await expect(publish(second.commitMessage, source, null)).rejects.toMatchObject({
         name: 'HeadMismatchError',
@@ -616,7 +618,7 @@ export async function createForkFixture() {
         appliedPosition: applied.sequenceID,
         async certify(): Promise<CertifiedControlRange> {
           if (branch !== 'winning') throw new Error('Certification requires the first valid winner')
-          const built = await commitKeyRotation(receiver.handle)
+          const built = await commitKeyRotation(await bareTestHandle(receiver.handle))
           const payload = encodeHandshakeFrame(
             HANDSHAKE_KIND.commit,
             encodeCommitFrame(

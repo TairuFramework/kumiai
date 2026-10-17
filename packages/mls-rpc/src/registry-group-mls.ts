@@ -4,6 +4,7 @@ import {
   decodeGroupAnchor,
   publicMembershipFacts,
   restoreGroup,
+  restrictCommitAuthoring,
   sealRosterAbsenceReply,
 } from '@kumiai/mls'
 import {
@@ -343,12 +344,14 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
               : [],
           ),
         )
-      const group = await restoreGroup({
-        state,
-        credential: record.credential,
-        ledgerEntries: record.ledger,
-        options: params.recovery.options,
-      })
+      const group = restrictCommitAuthoring(
+        await restoreGroup({
+          state,
+          credential: record.credential,
+          ledgerEntries: record.ledger,
+          options: params.recovery.options,
+        }),
+      )
       return await sealRosterAbsenceReply({
         group,
         identity: params.identity,

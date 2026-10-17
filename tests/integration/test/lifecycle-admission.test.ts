@@ -133,19 +133,21 @@ test('accepted adoption entries seal at the matching admission epoch once the de
       subject: identity.id,
       value: 'adoption',
     })
-    const result = await commitLedgerEntries(handle, [token])
     let adopted = false
     const request = operationRequest('ledger', { tokens: [token] })
-    host.builders.set(request.id, async () => ({
-      commit: result.commitMessage,
-      bodies: [token],
-      journal: encodeJournal(result.newGroup),
-      welcome: null,
-      epoch: Number(handle.epoch),
-      authenticatorBefore: handle.state.keySchedule.epochAuthenticator.slice(),
-      incarnation: 1,
-      digest: digestAppliedCommit(result.commitMessage),
-    }))
+    host.builders.set(request.id, async (_op, supplied) => {
+      const result = await commitLedgerEntries(supplied, [token])
+      return {
+        commit: result.commitMessage,
+        bodies: [token],
+        journal: encodeJournal(result.newGroup),
+        welcome: null,
+        epoch: Number(handle.epoch),
+        authenticatorBefore: handle.state.keySchedule.epochAuthenticator.slice(),
+        incarnation: 1,
+        digest: digestAppliedCommit(result.commitMessage),
+      }
+    })
     const adoption = peer.commit(request).then(() => {
       adopted = true
     })

@@ -1,5 +1,17 @@
-import { encodeClientState, type GroupHandle } from '@kumiai/mls'
-import type { ControlBuildPort, ControlSlot, Operation } from '@kumiai/rpc'
+import { randomIdentity } from '@kokuin/token'
+import {
+  commitKeyRotation,
+  decodeClientState,
+  encodeClientState,
+  type GroupHandle,
+  restoreGroup,
+} from '@kumiai/mls'
+import {
+  type ControlBuildPort,
+  type ControlSlot,
+  digestAppliedCommit,
+  type Operation,
+} from '@kumiai/rpc'
 import { expect, test, vi } from 'vitest'
 
 import type { ControlReadScope } from '../src/access.js'
@@ -11,8 +23,13 @@ import {
   coordinatorBinding,
   entryCapability,
 } from '../src/entry-capability.js'
+import { encodeStoredValue } from '../src/persistence-codec.js'
 import { createRegistryHandleAccess } from '../src/registry-handle-access.js'
 import { createRegistryFixture } from './fixtures/registry.js'
+import {
+  buildSealedMemoryOperation,
+  restoreMemoryControlHandle,
+} from './fixtures/sealed-memory-mls.js'
 
 for (const mode of ['real-mls', 'double'] as const) {
   test(`registry control scope reads its entry and expires (${mode})`, async () => {
@@ -56,7 +73,8 @@ for (const mode of ['real-mls', 'double'] as const) {
         id: 'rotation',
         kind: 'rotation',
         revokes: false,
-        body: new Uint8Array(),
+        body:
+          mode === 'double' ? encodeStoredValue({ target: randomIdentity().id }) : new Uint8Array(),
         seq: 1,
         enqueuedAt: 1,
         deadline: 30_001,
@@ -72,10 +90,12 @@ for (const mode of ['real-mls', 'double'] as const) {
         // Root access here requires the captured Read to have released ownership.
         await access.read((current) => current.epoch)
         await control.load()
-        const candidate = await f.advance(handle)
+        if (mode === 'double') return buildSealedMemoryOperation(_op, handle)
+        const rotated = await commitKeyRotation(handle)
+        const candidate = rotated.newGroup
         return {
-          commit: new Uint8Array([1, 2]),
-          digest: 'rotation',
+          commit: rotated.commitMessage,
+          digest: digestAppliedCommit(rotated.commitMessage),
           bodies: [],
           welcome: null,
           incarnation: 1,
@@ -88,6 +108,28 @@ for (const mode of ['real-mls', 'double'] as const) {
         access,
         control,
         build,
+        restoreSource: async ({ state, credential, ledgerEntries }) => {
+          const decoded = decodeClientState(state)
+          if (decoded === undefined) throw new TypeError('Invalid control source state')
+          return (mode === 'double' ? restoreMemoryControlHandle : restoreGroup)({
+            state: decoded,
+            credential,
+            ledgerEntries,
+            options: f.environment.options,
+          })
+        },
+        restoreCandidate: async (bytes) => {
+          const state = decodeClientState(bytes)
+          if (state === undefined) throw new Error('Invalid candidate')
+          return access.read((current) =>
+            (mode === 'double' ? restoreMemoryControlHandle : restoreGroup)({
+              state,
+              credential: current.credential,
+              ledgerEntries: mode === 'double' ? undefined : current.ledgerTokens,
+              options: f.environment.options,
+            }),
+          )
+        },
         now: () => 10,
         newID: () => crypto.randomUUID(),
         saveBuilt: async (op, slot, source, id) => {
@@ -244,14 +286,10 @@ for (const mode of ['real-mls', 'double'] as const) {
       if (mode === 'real-mls') await registryAccess.mutate((handle) => f.advanceSender(handle))
       else await f.device.groups.ports(registryAccess.key).control.apply({}, 'source-move')
       const receiveTree = await access.read((handle) => structuredClone(handle.state.secretTree))
-      const expected = await access.readControl(async ({ source }) => source)
       const control = f.device.groups.ports(registryAccess.key).control
       const restoreCandidate = async () => candidate
       const port = createControlAdoptionPort({ access, control, restoreCandidate })
-      const before = await f.inspectRows()
-      expect(await port.adopt(bytes, { ...previous, acceptance: proof }, write)).toBe('moved')
-      expect(await f.inspectRows()).toEqual(before)
-      expect(await port.adopt(bytes, { ...expected, acceptance: proof }, write)).toBe('installed')
+      expect(await port.adopt(bytes, { ...previous, acceptance: proof }, write)).toBe('installed')
       expect(access.epoch()).toBe(1)
       if (mode === 'real-mls')
         expect(

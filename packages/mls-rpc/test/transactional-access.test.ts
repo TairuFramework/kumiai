@@ -1,7 +1,9 @@
 import {
   commitKeyRotation,
   commitLedgerEntries,
+  decodeClientState,
   encodeClientState,
+  restoreGroup,
   signLedgerEntry,
 } from '@kumiai/mls'
 import {
@@ -496,6 +498,15 @@ test('transactional build uses committed open state before delayed publication',
     access: host.access,
     control: store.control,
     saveBuilt: store.saveBuilt,
+    restoreCandidate: async (bytes) => {
+      const state = decodeClientState(bytes)
+      if (state === undefined) throw new Error('Invalid candidate')
+      return restoreGroup({
+        state,
+        credential: host.live().credential,
+        ledgerEntries: store.snapshot().ledger,
+      })
+    },
     now: () => 10,
     newID: () => cryptoRandomID(),
     build: async (_op, group) => {

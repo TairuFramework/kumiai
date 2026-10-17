@@ -3,6 +3,7 @@ import {
   type AdoptionWrite,
   asLogPosition,
   type ControlSlot,
+  digestAppliedCommit,
   forkEventID,
   type Operation,
   recoveryUnavailableEventID,
@@ -144,19 +145,29 @@ async function safetyHost(mode: 'real' | 'transactional', id: string) {
     access,
     control,
     saveBuilt: saver,
+    restoreCandidate: async (bytes) => {
+      const state = decodeClientState(bytes)
+      if (state === undefined) throw new Error('Invalid candidate')
+      return restoreGroup({
+        state,
+        credential: handle.credential,
+        ledgerEntries: handle.ledgerTokens,
+      })
+    },
     now: Date.now,
     newID: () => crypto.randomUUID(),
-    build: async () => {
+    build: async (_op, supplied) => {
       cryptoCalls++
+      const permitted = await commitKeyRotation(supplied)
       return {
         epoch: 0,
         incarnation: 1,
         authenticatorBefore: slot.authenticatorBefore,
-        commit: rotation.commitMessage,
-        digest: slot.digest,
+        commit: permitted.commitMessage,
+        digest: digestAppliedCommit(permitted.commitMessage),
         bodies: [],
         welcome: null,
-        journal: candidate,
+        journal: encodeClientState(permitted.newGroup.state),
       }
     },
   })

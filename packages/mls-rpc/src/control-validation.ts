@@ -16,6 +16,7 @@ import {
   readCommitEntryIDs,
   readMessageEpoch,
   restoreGroup,
+  restrictCommitAuthoring,
   verifyLedgerEntry,
 } from '@kumiai/mls'
 import {
@@ -106,12 +107,16 @@ export async function validateRecoveryCommit(
       return { epoch }
     const state = decodeClientState(encodeClientState(group.state))
     if (state === undefined) return { epoch }
-    const working = new GroupHandle({
-      state,
-      credential: decodeStoredValue(encodeStoredValue(group.credential)) as typeof group.credential,
-      context: { ...group.context },
-      ledger: decodeStoredValue(encodeStoredValue(group.ledger)) as typeof group.ledger,
-    })
+    const working = restrictCommitAuthoring(
+      new GroupHandle({
+        state,
+        credential: decodeStoredValue(
+          encodeStoredValue(group.credential),
+        ) as typeof group.credential,
+        context: { ...group.context },
+        ledger: decodeStoredValue(encodeStoredValue(group.ledger)) as typeof group.ledger,
+      }),
+    )
     if (normalizeDID(header.committerDID) === normalizeDID(ownDID))
       return { epoch, refusal: 'policy', refusalAuthority: 'authenticated-commit' }
     let policyFault = false
@@ -190,12 +195,14 @@ export function createControlValidationPort(params: {
         ) as typeof journal.sourceCredential
         return {
           slot,
-          group: await restoreGroup({
-            state,
-            credential,
-            ledgerEntries: [...journal.sourceLedger],
-            options: { ...options, resolveLedgerEntries: slot.resolve },
-          }),
+          group: restrictCommitAuthoring(
+            await restoreGroup({
+              state,
+              credential,
+              ledgerEntries: [...journal.sourceLedger],
+              options: { ...options, resolveLedgerEntries: slot.resolve },
+            }),
+          ),
         }
       }
       type Restored = Awaited<ReturnType<typeof restore>>
@@ -243,9 +250,16 @@ export function createControlValidationPort(params: {
           } catch {
             return false
           }
-          const candidate = await params.restoreCandidate(journal.candidate.slice())
+          const candidate = restrictCommitAuthoring(
+            await params.restoreCandidate(journal.candidate.slice()),
+          )
           const history = candidate.state.historicalReceiverData.get(BigInt(identity.epoch))
           return (
+            (journal.candidateAuthenticator === undefined ||
+              sameBytes(
+                candidate.state.keySchedule.epochAuthenticator,
+                journal.candidateAuthenticator,
+              )) &&
             candidate.groupID === identity.groupID &&
             candidate.epoch === BigInt(identity.epoch + 1) &&
             normalizeDID(candidate.credential.id) === normalizeDID(params.identity.id) &&

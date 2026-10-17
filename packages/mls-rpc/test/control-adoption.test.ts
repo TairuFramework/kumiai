@@ -86,6 +86,7 @@ async function retainedRotation(size = 1) {
     access: host.access,
     control: store.control,
     build: builds,
+    restoreCandidate: (bytes) => restoreCandidate(bytes),
     saveBuilt: store.saveBuilt,
     now: Date.now,
     newID: () => crypto.randomUUID(),
@@ -261,7 +262,9 @@ test('extra proposal is omitted cleared and requires reproposal', async () => {
   const targetDID = proposer.identity.id
   expect(adopted.listMembers().map((member) => member.id)).toContain(targetDID)
   expect(adopted.state.unappliedProposals).toEqual({})
-  const omitted = await commitKeyRotation(adopted)
+  const omitted = await commitKeyRotation(
+    await f.restoreCandidate(encodeClientState(adopted.state)),
+  )
   expect(omitted.newGroup.listMembers().map((member) => member.id)).toContain(targetDID)
   await proposer.handle.processMessage(
     decodeCommitFrame(decodeHandshakeFrame(slot.payload).payload).commit,
@@ -272,7 +275,7 @@ test('extra proposal is omitted cleared and requires reproposal', async () => {
   const reproposed = await proposer.handle.proposeSelfRemoval()
   await later.processMessage(reproposed.frame)
   expect(Object.keys(later.state.unappliedProposals)).toHaveLength(1)
-  const enacted = await commitSelfRemovals(later)
+  const enacted = await commitSelfRemovals(await f.restoreCandidate(encodeClientState(later.state)))
   expect(enacted).not.toBeNull()
   expect(enacted?.newGroup.listMembers().map((member) => member.id)).not.toContain(targetDID)
   expect(enacted?.newGroup.state.unappliedProposals).toEqual({})
@@ -346,14 +349,11 @@ test('acceptance persistence refreshes adoption expectations without rewriting h
   ])
 })
 
-test('stale adoption version leaves state and control unchanged', async () => {
+test('a compatible adoption version change preserves the owed commit', async () => {
   const f = await controlAdoptionFixture()
   const expected = await f.expected()
   f.store.bump()
-  const before = structuredClone(f.store.snapshot())
-  expect(await f.port.adopt(f.slot.journal, expected, f.write)).toBe('moved')
-  expect(f.store.snapshot()).toEqual(before)
-  expect(await f.port.adopt(f.slot.journal, await f.expected(), f.write)).toBe('installed')
+  expect(await f.port.adopt(f.slot.journal, expected, f.write)).toBe('installed')
   expect(f.host.live().state.keySchedule.epochAuthenticator).toEqual(
     f.rotation.newGroup.state.keySchedule.epochAuthenticator,
   )
@@ -571,7 +571,6 @@ test('2.1 adoption rolls back and co-commits trust spent anchor and opaque side 
     },
   })
   const control = groups.ports(seed.key).control
-  const rotation = await commitKeyRotation(current)
   const intent: Operation & { stage: 'intent' } = {
     id: 'coupled',
     kind: 'rotation',
@@ -583,22 +582,36 @@ test('2.1 adoption rolls back and co-commits trust spent anchor and opaque side 
     stage: 'intent',
   }
   await control.apply({ putOperations: [intent] }, 'intent')
+  let candidateAuthenticator: Uint8Array | undefined
   const build = createControlBuildPort({
     access,
     control,
     now: () => 0,
     newID: () => 'build',
     saveBuilt: createPersistenceBuildSaver({ persistence: groups, key: seed.key }),
-    build: async () => ({
-      commit: rotation.commitMessage,
-      bodies: [],
-      welcome: null,
-      journal: encodeClientState(rotation.newGroup.state),
-      epoch: 0,
-      incarnation: 1,
-      authenticatorBefore: current.state.keySchedule.epochAuthenticator,
-      digest: 'rotation',
-    }),
+    restoreCandidate: async (bytes) => {
+      const state = decodeClientState(bytes)
+      if (state === undefined) throw new Error('Invalid candidate')
+      return restoreGroup({
+        state,
+        credential: current.credential,
+        ledgerEntries: current.ledgerTokens,
+      })
+    },
+    build: async (_op, supplied) => {
+      const rotation = await commitKeyRotation(supplied)
+      candidateAuthenticator = rotation.newGroup.state.keySchedule.epochAuthenticator.slice()
+      return {
+        commit: rotation.commitMessage,
+        bodies: [],
+        welcome: null,
+        journal: encodeClientState(rotation.newGroup.state),
+        epoch: 0,
+        incarnation: 1,
+        authenticatorBefore: supplied.state.keySchedule.epochAuthenticator,
+        digest: digestAppliedCommit(rotation.commitMessage),
+      }
+    },
   })
   expect(
     (
@@ -609,6 +622,7 @@ test('2.1 adoption rolls back and co-commits trust spent anchor and opaque side 
       }))
     ).kind,
   ).toBe('saved')
+  if (candidateAuthenticator === undefined) throw new Error('Missing built candidate')
   const slot = (await control.load()).commitOnce
   if (slot === null) throw new Error('Missing slot')
   const position = asLogPosition('001')
@@ -673,14 +687,9 @@ test('2.1 adoption rolls back and co-commits trust spent anchor and opaque side 
   rollback = false
   expect(await port.adopt(slot.journal, expected, write)).toBe('installed')
   const trust = await groups.loadTrust(seed.key.groupID)
-  expect(trust?.installed.authenticator).toEqual(
-    rotation.newGroup.state.keySchedule.epochAuthenticator,
-  )
+  expect(trust?.installed.authenticator).toEqual(candidateAuthenticator)
   expect(trust?.spentEpochAuthenticators).toEqual(
-    expect.arrayContaining([
-      seed.state.epochAuthenticator,
-      rotation.newGroup.state.keySchedule.epochAuthenticator,
-    ]),
+    expect.arrayContaining([seed.state.epochAuthenticator, candidateAuthenticator]),
   )
   expect((await groups.ports(seed.key).anchor.load())?.pending?.landed).toBe(true)
   expect(db.snapshot().side?.get('handler')).toEqual(new Uint8Array([7]))

@@ -1,8 +1,10 @@
 import type { GroupHandle } from '@kumiai/mls'
+import { decodeClientState, restrictCommitAuthoring } from '@kumiai/mls'
 import type { ControlAdoptionPort, ControlStore } from '@kumiai/rpc'
 import { controlSafetyHeld } from '@kumiai/rpc'
 
 import type { ControlHandleAccess } from './access.js'
+import { controlCompatible } from './control-compat.js'
 import { decodeControlJournal } from './control-journal.js'
 import { sameStoredValue } from './memory-incarnation-stores.js'
 
@@ -27,8 +29,16 @@ export function createControlAdoptionPort(params: {
         proof.from !== journal.checkpoint
       )
         return 'moved'
-      const candidate = await params.restoreCandidate(journal.candidate)
-      if (candidate.groupID !== expected.key.groupID) return 'moved'
+      const candidate = restrictCommitAuthoring(await params.restoreCandidate(journal.candidate))
+      if (
+        candidate.groupID !== expected.key.groupID ||
+        (journal.candidateAuthenticator !== undefined &&
+          !sameStoredValue(
+            candidate.state.keySchedule.epochAuthenticator,
+            journal.candidateAuthenticator,
+          ))
+      )
+        return 'moved'
       const captured = await params.access.readControl(async (scope) => ({
         source: scope.source,
         snapshot: await scope.loadControl(params.control),
@@ -40,15 +50,14 @@ export function createControlAdoptionPort(params: {
           candidate,
           () => ({ ...write, expected: { ...expected, journal: bytes } }),
           async (current, source) => {
+            const sourceState = decodeClientState(journal.sourceState)
             if (
-              !sameStoredValue(source, {
-                key: expected.key,
-                identity: expected.identity,
-                stateVersion: expected.stateVersion,
-              })
+              !sameStoredValue(source.key, expected.key) ||
+              !sameStoredValue(source.identity, expected.identity) ||
+              !sameStoredValue(source.key, captured.source.key) ||
+              !sameStoredValue(source.identity, captured.source.identity)
             )
               return false
-            if (!sameStoredValue(source, captured.source)) return false
             const snapshot = captured.snapshot
             if (
               controlSafetyHeld(snapshot) !== null ||
@@ -75,6 +84,11 @@ export function createControlAdoptionPort(params: {
                 result = 'noop'
               return false
             }
+            if (
+              sourceState === undefined ||
+              !controlCompatible(sourceState, current.state, journal.referencedProposals)
+            )
+              return false
             const slot = snapshot.commitOnce
             if (
               !sameStoredValue(source.identity, journal.source.identity) ||

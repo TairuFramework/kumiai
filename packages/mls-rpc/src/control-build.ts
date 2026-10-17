@@ -1,4 +1,12 @@
-import { decodeClientState, encodeClientState, type GroupHandle } from '@kumiai/mls'
+import {
+  decodeClientState,
+  encodeClientState,
+  type GroupHandle,
+  type MemberCredential,
+  restoreGroup,
+  restrictCommitAuthoring,
+  withCommitPermit,
+} from '@kumiai/mls'
 import {
   type ControlBuildPort,
   type ControlSlot,
@@ -7,6 +15,7 @@ import {
   ControlWriteNotCommittedError,
   controlBuildRef,
   controlSafetyHeld,
+  digestAppliedCommit,
   GroupSafetyHeldError,
   type HostBuilt,
   type Operation,
@@ -17,6 +26,7 @@ import {
 import { sha256 } from '@noble/hashes/sha2.js'
 import { toB64U } from '@sozai/codec'
 import type { Runtime } from '@sozai/runtime'
+import { ciphersuites } from 'ts-mls'
 
 import type { ControlHandleAccess } from './access.js'
 import { controlCompatible } from './control-compat.js'
@@ -190,6 +200,12 @@ export function createPersistenceBuildSaver<TTx extends GroupTransaction>(params
 export function createControlBuildPort(params: {
   access: ControlHandleAccess
   control: ControlStore
+  restoreCandidate: (candidate: Uint8Array) => Promise<GroupHandle>
+  restoreSource?: (source: {
+    state: Uint8Array
+    credential: MemberCredential
+    ledgerEntries: Array<string>
+  }) => Promise<GroupHandle>
   build: (op: Operation, group: GroupHandle) => Promise<HostBuilt>
   saveBuilt: SaveControlBuild
   now: () => number
@@ -239,12 +255,37 @@ export function createControlBuildPort(params: {
           snapshot.commitOnce.epoch >= identity.epoch
         )
           return { kind: 'occupied' as const, operation: saved }
+        const suite = scope.handle.context.cipherSuite
+        const options = {
+          ciphersuiteName: Object.keys(ciphersuites).find(
+            (name) => ciphersuites[name as keyof typeof ciphersuites] === suite.id,
+          ),
+          cryptoProvider: { getCiphersuiteImpl: async () => suite },
+          keyRetention: { ...scope.handle.context.clientConfig?.keyRetentionConfig },
+          commitPolicy: scope.handle.commitPolicy,
+          resolveLedgerEntries: scope.handle.resolveLedgerEntries,
+          onLedgerEntries: scope.handle.onLedgerEntries,
+        }
         return {
           kind: 'captured' as const,
           saved,
           original,
           identity,
-          handle: scope.handle,
+          restoreSource:
+            params.restoreSource ??
+            (async ({
+              state,
+              credential,
+              ledgerEntries,
+            }: {
+              state: Uint8Array
+              credential: MemberCredential
+              ledgerEntries: Array<string>
+            }) => {
+              const decoded = decodeClientState(state)
+              if (decoded === undefined) throw new TypeError('Invalid control source state')
+              return restoreGroup({ state: decoded, credential, ledgerEntries, options })
+            }),
           checkpoint: snapshot.cursor?.position ?? null,
           sourceState: encodeClientState(scope.handle.state),
           sourceCredential: { ...scope.handle.credential },
@@ -257,7 +298,7 @@ export function createControlBuildPort(params: {
         saved,
         original,
         identity,
-        handle,
+        restoreSource,
         checkpoint,
         sourceState,
         sourceCredential,
@@ -265,8 +306,44 @@ export function createControlBuildPort(params: {
         key,
       } = captured
       let built: ControlSlot
+      let referencedProposals: Array<string>
       try {
-        const host = await params.build(saved, handle)
+        const { value: host, receipt } = await withCommitPermit(
+          () =>
+            restoreSource({
+              state: sourceState,
+              credential: sourceCredential,
+              ledgerEntries: sourceLedger,
+            }),
+          (permitted) => params.build(saved, permitted),
+        )
+        const rejected = () => ({
+          kind: 'rejected' as const,
+          operation: saved,
+          reason: 'commit not built under the control-build permit',
+        })
+        if (
+          receipt === null ||
+          !sameStoredValue(receipt.commit, host.commit) ||
+          host.digest !== digestAppliedCommit(receipt.commit) ||
+          receipt.epoch !== host.epoch ||
+          !sameStoredValue(receipt.authenticatorBefore, host.authenticatorBefore)
+        )
+          return rejected()
+        try {
+          const candidate = restrictCommitAuthoring(await params.restoreCandidate(host.journal))
+          if (
+            !sameStoredValue(
+              candidate.state.keySchedule.epochAuthenticator,
+              receipt.candidateAuthenticator,
+            )
+          )
+            return rejected()
+        } catch {
+          return rejected()
+        }
+        referencedProposals = receipt.referencedProposals
+
         if (
           host.incarnation !== original.key.incarnation ||
           host.epoch !== identity.epoch ||
@@ -294,6 +371,8 @@ export function createControlBuildPort(params: {
             sourceCredential,
             sourceLedger,
             candidate: host.journal,
+            referencedProposals,
+            candidateAuthenticator: receipt.candidateAuthenticator,
           }),
         }
       } catch (error) {
@@ -352,7 +431,11 @@ export function createControlBuildPort(params: {
           return { kind: 'moved', operation: saved }
         const source = decodeClientState(sourceState)
         const stored = decodeClientState(fresh.state)
-        if (source === undefined || stored === undefined || !controlCompatible(source, stored))
+        if (
+          source === undefined ||
+          stored === undefined ||
+          !controlCompatible(source, stored, referencedProposals)
+        )
           return { kind: 'moved', operation: saved }
         if (attempts >= 8) return { kind: 'moved', operation: saved }
         expected = fresh.source

@@ -191,14 +191,14 @@ test.each([
     const topic = commitTopic(await deriveRecoverySecret(alice.handle()))
     const commit = (value: string) =>
       alice.peer.commit(
-        customOperation(alice, async () => {
+        customOperation(alice, async (_op, supplied) => {
           const token = await signLedgerEntry(alice.identity, {
             groupID: alice.handle().groupID,
             type: 'note',
             subject: alice.identity.id,
             value,
           })
-          const result = await commitLedgerEntries(alice.handle(), [token])
+          const result = await commitLedgerEntries(supplied, [token])
           return {
             commit: result.commitMessage,
             bodies: [token],

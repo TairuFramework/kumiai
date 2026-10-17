@@ -34,6 +34,7 @@ import {
 } from '@kumiai/rpc'
 import { afterEach, expect, test, vi } from 'vitest'
 
+import { bareTestHandle } from '../../../packages/mls-rpc/test/fixtures/real-group.js'
 import {
   chat,
   createDurableHandleAccess,
@@ -321,7 +322,7 @@ test('a tree-lapsed present leaf can external-renew with a fresh binding', async
   expect(s.bobGroup().sendAdmission()).toMatchObject({ admissible: false, reason: 'lapsed' })
   fresh = await fixture.timedBinding({ identity: s.bob, iat: 250, exp: 350 })
   await expect(
-    commitLedgerEntries(s.bobGroup(), [
+    commitLedgerEntries(await bareTestHandle(s.bobGroup()), [
       await signLedgerEntry(s.bob, {
         groupID: 'lifecycle-recovery',
         type: 'note',
@@ -520,7 +521,7 @@ test('renewal-required suppresses subsequent automatic triggers and explicit rec
     subject: s.alice.id,
     value: 'first',
   })
-  const first = await commitLedgerEntries(s.aliceGroup(), [firstToken])
+  const first = await commitLedgerEntries(await bareTestHandle(s.aliceGroup()), [firstToken])
   const second = await commitLedgerEntries(first.newGroup, [
     await signLedgerEntry(s.alice, {
       groupID: 'lifecycle-recovery',
@@ -571,7 +572,7 @@ test('renewal-required suppresses subsequent automatic triggers and explicit rec
         })
       ).advanced,
     ).toBe(true)
-    const third = await commitLedgerEntries(s.aliceGroup(), [
+    const third = await commitLedgerEntries(await bareTestHandle(s.aliceGroup()), [
       await signLedgerEntry(s.alice, {
         groupID: 'lifecycle-recovery',
         type: 'note',
@@ -619,7 +620,9 @@ test('a correctly signed reply with a ledger that misses the GroupInfo head retu
     subject: s.alice.id,
     value: 'authenticated-ledger',
   })
-  s.installAlice((await commitLedgerEntries(s.aliceGroup(), [entry])).newGroup)
+  s.installAlice(
+    (await commitLedgerEntries(await bareTestHandle(s.aliceGroup()), [entry])).newGroup,
+  )
   expect(await s.mls.prepareRecovery()).toBe('ready')
   vi.spyOn(s.aliceGroup(), 'getLedger').mockResolvedValue([])
   expect(await buildRecovery(s)).toBeNull()
@@ -702,12 +705,15 @@ test('a generation floor in the reply ledger prevents publication of a cached pr
   s.installAlice(
     (
       await renewLeaf(
-        s.aliceGroup(),
+        await bareTestHandle(s.aliceGroup()),
         await fixture.timedBinding({ identity: s.alice, iat: 100, exp: 200, prefix }),
       )
     ).newGroup,
   )
-  const reset = await revokeWithProof(s.aliceGroup(), { reset: true, log: prefix })
+  const reset = await revokeWithProof(await bareTestHandle(s.aliceGroup()), {
+    reset: true,
+    log: prefix,
+  })
   if (reset.status !== 'built') throw new Error('Expected reset commit')
   s.installAlice(reset.result.newGroup)
   expect(s.aliceGroup().registry.controllers.get(fixture.controllerID)?.genFloor).toBe(1)
@@ -762,7 +768,7 @@ test('a reply-ledger floor ends peer recovery without publication and holds late
   const s = await setup(host)
   vi.spyOn(Date, 'now').mockReturnValue(250_000)
   s.installAlice(await installFloor(s, 250))
-  const ahead = await commitLedgerEntries(s.aliceGroup(), [
+  const ahead = await commitLedgerEntries(await bareTestHandle(s.aliceGroup()), [
     await signLedgerEntry(s.alice, {
       groupID: 'lifecycle-recovery',
       type: 'note',
@@ -890,7 +896,7 @@ test('an ineligible attestation cannot impose a renewal-required peer hold', asy
   const host = vi.fn(async () => null)
   const s = await setup(host)
   const responder = await ineligibleReply(s, 'leafless')
-  const ahead = await commitLedgerEntries(s.aliceGroup(), [
+  const ahead = await commitLedgerEntries(await bareTestHandle(s.aliceGroup()), [
     await signLedgerEntry(s.alice, {
       groupID: s.aliceGroup().groupID,
       type: 'note',

@@ -112,17 +112,21 @@ export function controlAdoptionAllowed(
   snapshot: ControlSnapshot,
   source: AdoptionExpected,
   expected: NonNullable<AdoptionWrite['expected']>,
+  compatible?: (journal: Uint8Array) => boolean,
 ): boolean {
   if (
     controlSafetyHeld(snapshot) !== null ||
     (snapshot.controlHold !== null && snapshot.controlHold.reason !== 'acceptance-unknown') ||
     !sameValue(source.key, expected.key) ||
-    !sameValue(source.identity, expected.identity) ||
-    source.stateVersion !== expected.stateVersion
+    !sameValue(source.identity, expected.identity)
   )
     return false
   const proof = expected.acceptance
-  if (proof === undefined) return true
+  const sourceAllowed = () =>
+    expected.journal !== undefined && compatible !== undefined
+      ? compatible(expected.journal)
+      : source.stateVersion === expected.stateVersion
+  if (proof === undefined) return sourceAllowed()
   if (snapshot.strand !== null || snapshot.cursor?.stranded === true) return false
   const slot = snapshot.commitOnce
   return (
@@ -130,7 +134,8 @@ export function controlAdoptionAllowed(
     slot.payloadDigest === proof.payloadDigest &&
     slot.searchFrom === proof.from &&
     sameValue(slot.journal, expected.journal) &&
-    sameValue(snapshot.commitOnceAcceptance, proof)
+    sameValue(snapshot.commitOnceAcceptance, proof) &&
+    sourceAllowed()
   )
 }
 

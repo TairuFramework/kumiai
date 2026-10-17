@@ -226,8 +226,8 @@ test('fresh startup with a lost anchor secret retains unexplained acceptance whi
   let removedCommit: Uint8Array = new Uint8Array()
   const build = buildRemoveCommit(alice, carolID.id)
   await alice.peer.commit(
-    customOperation(alice, async () => {
-      const pending = await alice.build(operationIntent(build))
+    customOperation(alice, async (_op, supplied) => {
+      const pending = await alice.build(operationIntent(build), supplied)
       removedCommit = pending.commit
       return pending
     }),
