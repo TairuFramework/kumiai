@@ -220,6 +220,8 @@ export {
 } from './ledger-entries.js'
 export type { AppOutboxCleared, EpochFloor } from './log-delivery.js'
 export {
+  type CurrentMoveInputs,
+  canMoveCurrent,
   createGroupPeer,
   type GroupPeer,
   type GroupPeerMLSParams,

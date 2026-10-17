@@ -1,10 +1,25 @@
-import type { LogHub, MailboxHub } from '@kumiai/rpc'
+import {
+  type CheckpointRecord,
+  type ControlSnapshot,
+  canMoveCurrent,
+  type GroupKey,
+  type LogHub,
+  type LogPosition,
+  type MailboxHub,
+} from '@kumiai/rpc'
 import { expect, test, vi } from 'vitest'
 
+import { entryCapability } from '../src/entry-capability.js'
 import * as api from '../src/index.js'
 import { encodeStoredValue } from '../src/persistence-codec.js'
+import { registrySafety } from '../src/registry/safety.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
-import { createRegistryFixture, registryFixtureSafetyParams } from './fixtures/registry.js'
+import {
+  createNotMemberFixture,
+  createRegistryFixture,
+  registryFixtureMutateControl,
+  registryFixtureSafetyParams,
+} from './fixtures/registry.js'
 
 const key = { groupID: 'hub-migration', incarnation: 1 }
 const binding = { targetID: 'registry-recovery-hub', commitTopicID: `commits/${key.groupID}` }
@@ -72,6 +87,11 @@ for (const mode of ['real-mls', 'double'] as const) {
       })
       let active: Awaited<ReturnType<typeof start>> | undefined
       try {
+        // A known-behind device keeps the attempt pending instead of moving current.
+        await mutateControl(fixture, (snapshot) => ({
+          ...snapshot,
+          strand: { reason: 'retention-gap' },
+        }))
         active = await start(fixture, resolver)
         const safety = api.createGroupSafety(await registryFixtureSafetyParams(fixture))
         const running = safety.recover(key, { mode: 'resync', target: { ...binding, hub } })
@@ -286,3 +306,756 @@ test('call time authority is saved before hub use', async () => {
     await fixture.close()
   }
 })
+
+type Fixture = Awaited<ReturnType<typeof createRegistryFixture>>
+const movedBinding = { targetID: 'destination-hub', commitTopicID: `moved/${key.groupID}` }
+const freshControl: ControlSnapshot = {
+  commitOnce: null,
+  commitOnceAcceptance: null,
+  controlHold: null,
+  forkHalt: null,
+  recoveryUnavailable: null,
+  strand: null,
+  operations: [],
+  forkRecoveryAttempt: null,
+  rejoin: null,
+  recoveryEpochFloor: null,
+  settledRejoins: [],
+  outcomes: [],
+  welcomes: [],
+  applied: [],
+  responses: [],
+  cursor: null,
+}
+const readyInputs: Parameters<typeof canMoveCurrent>[0] = {
+  control: freshControl,
+  activity: { pending: 0 },
+  stateReadable: true,
+  ledgerComplete: true,
+  walkComplete: true,
+  outboxUnresolved: false,
+  settlementUnresolved: false,
+  hardHold: null,
+  condition: null,
+  openForkNotice: false,
+  activeRejoin: false,
+  allowOpenFork: false,
+}
+const blockedInputs: Array<[string, Partial<Parameters<typeof canMoveCurrent>[0]>]> = [
+  ['pending owner work', { activity: { pending: 1 } }],
+  ['unreadable state', { stateReadable: false }],
+  ['incomplete ledger', { ledgerComplete: false }],
+  ['incomplete walk', { walkComplete: false }],
+  ['unresolved outbox', { outboxUnresolved: true }],
+  ['unresolved settlement', { settlementUnresolved: true }],
+  ['fork hold', { hardHold: 'fork-halted' }],
+  ['spent hold', { hardHold: 'spent-set-corrupt' }],
+  ['unavailable hold', { hardHold: 'recovery-unavailable' }],
+  ['not-member', { condition: 'not-member' }],
+  ['spent condition', { condition: 'spent-set-corrupt' }],
+  ['active rejoin', { activeRejoin: true }],
+  [
+    'commit slot',
+    { control: { ...freshControl, commitOnce: {} as ControlSnapshot['commitOnce'] } },
+  ],
+  [
+    'unsettled acceptance',
+    {
+      control: {
+        ...freshControl,
+        commitOnceAcceptance: {} as ControlSnapshot['commitOnceAcceptance'],
+      },
+    },
+  ],
+  [
+    'acceptance unknown',
+    { control: { ...freshControl, controlHold: { reason: 'acceptance-unknown', position: null } } },
+  ],
+  [
+    'unsupported version',
+    {
+      control: { ...freshControl, controlHold: { reason: 'unsupported-version', position: null } },
+    },
+  ],
+  [
+    'saved halt',
+    { control: { ...freshControl, forkHalt: {} as NonNullable<ControlSnapshot['forkHalt']> } },
+  ],
+  [
+    'saved unavailable',
+    {
+      control: {
+        ...freshControl,
+        recoveryUnavailable: {} as NonNullable<ControlSnapshot['recoveryUnavailable']>,
+      },
+    },
+  ],
+  ['strand', { control: { ...freshControl, strand: { reason: 'retention-gap' } } }],
+  [
+    'operation',
+    { control: { ...freshControl, operations: [{} as ControlSnapshot['operations'][0]] } },
+  ],
+  [
+    'fork intent',
+    {
+      control: {
+        ...freshControl,
+        forkRecoveryAttempt: {} as NonNullable<ControlSnapshot['forkRecoveryAttempt']>,
+      },
+    },
+  ],
+  ['ordinary X', { control: { ...freshControl, rejoin: {} as ControlSnapshot['rejoin'] } }],
+  ['welcome', { control: { ...freshControl, welcomes: [{} as ControlSnapshot['welcomes'][0]] } }],
+  [
+    'stranded cursor',
+    {
+      control: {
+        ...freshControl,
+        cursor: { position: 'p' as LogPosition, epoch: 0, stranded: true },
+      },
+    },
+  ],
+  [
+    'incomplete cursor',
+    {
+      control: {
+        ...freshControl,
+        cursor: { position: 'p' as LogPosition, epoch: 0, incomplete: true },
+      },
+    },
+  ],
+]
+
+test('current move predicate requires every freshness and safety input', () => {
+  expect(canMoveCurrent(readyInputs)).toBe(true)
+  expect(canMoveCurrent({ ...readyInputs, openForkNotice: true })).toBe(false)
+  for (const [label, change] of blockedInputs)
+    expect(canMoveCurrent({ ...readyInputs, ...change }), label).toBe(false)
+})
+
+test('allow open fork overrides only notice exclusion / predicate', () => {
+  const override = { ...readyInputs, openForkNotice: true, allowOpenFork: true }
+  expect(canMoveCurrent(override)).toBe(true)
+  for (const [label, change] of blockedInputs)
+    expect(canMoveCurrent({ ...override, ...change }), label).toBe(false)
+})
+
+async function putOpenNotice(fixture: Fixture, owner: GroupKey = key): Promise<void> {
+  const entry = entryCapability(fixture.device.groups)
+  if (entry === null) throw new Error('Missing entry capability')
+  const row: CheckpointRecord = {
+    kind: 'notice',
+    id: 'open-notice',
+    key: owner,
+    notice: {
+      id: 'open-notice',
+      groupID: owner.groupID,
+      splitEpoch: 0,
+      branches: [],
+      deviceAuthHash: 'local',
+      detectedAt: 1,
+      lastEvidenceAt: 1,
+      atRisk: [],
+      revision: 1,
+      acknowledgedRevision: 0,
+      acknowledgedAt: null,
+      coverage: {
+        evidence: { kind: 'complete' },
+        ownMessages: { kind: 'complete' },
+        ephemeral: { kind: 'complete' },
+      },
+      closedAt: null,
+      equivocations: [],
+    },
+  }
+  await entry.run(
+    { groupID: owner.groupID, mutationID: crypto.randomUUID() },
+    async (reads) => ({ expected: await reads.lifetime(), value: null }),
+    async (stores) => {
+      await stores.checkpoints.put(row)
+    },
+  )
+}
+
+async function mutateControl(
+  fixture: Fixture,
+  change: (snapshot: ControlSnapshot) => ControlSnapshot,
+): Promise<void> {
+  // The raw mutator rewrites an existing sealed control row only.
+  await fixture.installRows({ key, control: {} })
+  await registryFixtureMutateControl(fixture, key, change)
+}
+
+function forkHalt(producer?: 'app-report' | 'internal') {
+  return (fixture: Fixture) =>
+    mutateControl(fixture, (snapshot) => ({
+      ...snapshot,
+      forkHalt: {
+        eventID: `halt-${producer ?? 'legacy'}`,
+        detectedAt: 1,
+        ...(producer === undefined ? {} : { producer }),
+        evidence: { kind: 'unexplained-own-commit', epoch: 0, position: 'fork', digest: 'fork' },
+      },
+    }))
+}
+
+function mutate(change: (snapshot: ControlSnapshot) => Partial<ControlSnapshot>) {
+  return (fixture: Fixture) =>
+    mutateControl(fixture, (snapshot) => ({
+      ...snapshot,
+      ...change(snapshot),
+    }))
+}
+
+const movementRefusals: Array<[string, (fixture: Fixture) => Promise<void>]> = [
+  [
+    'app-report halt',
+    (fixture) =>
+      fixture.safety().reportFork(key, {
+        kind: 'digest-divergence',
+        epoch: 0,
+        position: 'fork',
+        localDigest: 'ours',
+        remoteDigest: 'theirs',
+      }),
+  ],
+  ['internal halt', forkHalt('internal')],
+  ['legacy halt', forkHalt()],
+  [
+    'internal latch',
+    async (fixture) => {
+      registrySafety(fixture.registry)?.latch(key, 'fork-halted')
+    },
+  ],
+  [
+    'spent-set-corrupt latch',
+    async (fixture) => {
+      registrySafety(fixture.registry)?.latch(key, 'spent-set-corrupt')
+    },
+  ],
+  [
+    'unsupported version hold',
+    mutate(() => ({ controlHold: { reason: 'unsupported-version', position: null } })),
+  ],
+  [
+    'recovery-unavailable',
+    mutate(() => ({
+      recoveryUnavailable: {
+        ...key,
+        id: JSON.stringify(['group:recovery-unavailable', key.groupID, key.incarnation]),
+        kind: 'group:recovery-unavailable',
+        reason: 'trust-unreadable',
+      },
+    })),
+  ],
+  ['open notice', (fixture) => putOpenNotice(fixture)],
+  [
+    'ordinary X',
+    async (fixture) => {
+      const candidate = await fixture.confirmedRecovery(key, { confirm: false })
+      if (!('format' in candidate.record)) throw new Error('Captured candidate required')
+      await fixture.installRows({ key, control: { putRejoin: candidate.record } })
+    },
+  ],
+  [
+    'pending fork recovery intent',
+    mutate(() => ({
+      forkRecoveryAttempt: {
+        id: 'fork-intent',
+        source: key,
+        forkRecovery: {
+          attemptID: 'fork-intent',
+          noticeID: 'open-notice',
+          splitEpoch: 0,
+          otherAuthHash: 'other',
+          responderKeyHash: 'responder',
+          source: key,
+          evidence: new Uint8Array([1]),
+        },
+      },
+    })),
+  ],
+  ['retention strand', mutate(() => ({ strand: { reason: 'retention-gap' } }))],
+  [
+    'stranded cursor',
+    mutate(() => ({ cursor: { position: '0001' as LogPosition, epoch: 0, stranded: true } })),
+  ],
+  [
+    'acceptance unknown',
+    mutate(() => ({ controlHold: { reason: 'acceptance-unknown', position: null } })),
+  ],
+  ['cursor epoch lag', mutate(() => ({ cursor: { position: '0001' as LogPosition, epoch: 1 } }))],
+  [
+    'unresolved app settlement',
+    (fixture) =>
+      fixture.installRows({
+        key,
+        outbox: [
+          {
+            seq: 0,
+            protocol: 'chat',
+            prc: 'send',
+            data: new Uint8Array([1]),
+            lastAttempt: null,
+            status: 'accepted',
+          },
+        ],
+        settlements: [
+          {
+            seq: 0,
+            value: {
+              sequenceID: '0001',
+              attemptID: 'published-attempt',
+              topicID: 'app-topic',
+              outcome: 'published',
+            },
+          },
+        ],
+      }),
+  ],
+  [
+    'unresolved outbox',
+    (fixture) =>
+      fixture.installRows({
+        key,
+        outbox: [
+          {
+            seq: 0,
+            protocol: 'chat',
+            prc: 'send',
+            data: new Uint8Array([1]),
+            lastAttempt: {
+              incarnation: key.incarnation,
+              epoch: 0,
+              floor: null,
+              attempts: 1,
+              publishID: 'unresolved-publish',
+              segment: 0,
+              topicID: 'app-topic',
+            },
+            status: 'accepted',
+          },
+        ],
+      }),
+  ],
+]
+
+async function movement(
+  fixture: Fixture,
+  choice: { allowOpenFork: boolean },
+  hub: LogHub & MailboxHub = watchedHub().hub,
+) {
+  const saved = await fixture.manualRecovery().authoriseManualRecovery(key, {
+    mode: 'resync',
+    ...movedBinding,
+    ...choice,
+  })
+  const resolver = vi.fn(async (id: string) => ({
+    id,
+    hub,
+    commitTopicID: movedBinding.commitTopicID,
+  }))
+  const active = await start(fixture, resolver)
+  await vi.waitFor(() =>
+    expect(active.created.length > 0 || active.owner.status().kind === 'failed').toBe(true),
+  )
+  return { saved, active, resolver }
+}
+
+function expectRejoinOnly(created: Array<api.RegistryPeerOptions>, id: string): void {
+  expect(created.length).toBeGreaterThan(0)
+  for (const options of created)
+    expect(options).toMatchObject({
+      recoveryOnly: true,
+      manualRecovery: { authorisationID: id, source: key },
+    })
+}
+
+for (const [label, apply] of movementRefusals) {
+  test(`current move refuses every hold condition notice and active rejoin / ${label}`, async () => {
+    const fixture = await createRegistryFixture({
+      mode: 'double',
+      groupID: key.groupID,
+      setup: 'seeded',
+    })
+    let active: Awaited<ReturnType<typeof start>> | undefined
+    try {
+      await apply(fixture)
+      const before = await fixture.device.groups.ports(key).control.load()
+      const started = await movement(fixture, { allowOpenFork: false })
+      active = started.active
+      expect(active.owner.installedKey()).toEqual(key)
+      expect((await fixture.manualRecovery().readManualRecovery(started.saved.id))?.stage).toBe(
+        'authorised',
+      )
+      expectRejoinOnly(active.created, started.saved.id)
+      expect((await fixture.device.groups.ports(key).control.load()).cursor).toEqual(before.cursor)
+    } finally {
+      active?.owner.dispose()
+      await active?.owner.drained().catch(() => {})
+      await fixture.close()
+    }
+  })
+}
+
+test('current move refuses every hold condition notice and active rejoin / not-member', async () => {
+  const diagnosed = await createNotMemberFixture()
+  let active: Awaited<ReturnType<typeof start>> | undefined
+  try {
+    await diagnosed.diagnose(await diagnosed.proof())
+    const local = diagnosed.local()
+    expect((await local.safety().status(diagnosed.key)).condition).toBe('not-member')
+    const saved = await local.manualRecovery().authoriseManualRecovery(diagnosed.key, {
+      mode: 'resync',
+      ...movedBinding,
+      allowOpenFork: true,
+    })
+    const created: Array<api.RegistryPeerOptions> = []
+    const owner = await api.createRegistryPeer({
+      registry: local.registry,
+      key: diagnosed.key,
+      target: { targetID: 'original-hub', topicID: 'original-commits' },
+      recovery: local.environment,
+      resolveTarget: async (id) => ({
+        id,
+        hub: watchedHub().hub,
+        commitTopicID: movedBinding.commitTopicID,
+      }),
+      continuation: api.createRecoveryContinuationPort({
+        registry: local.registry,
+        persistence: local.device.groups,
+      }),
+      createMLS: (current, _handoff, options) =>
+        api.createRegistryGroupMLS({
+          registry: local.registry,
+          key: current,
+          recovery: local.environment,
+          identity: local.identity,
+          entrySlot: api.createLedgerEntrySlot(),
+          ...options,
+        }),
+      createPeer: async (_current, options) => {
+        created.push(options)
+        return { dispose: async () => {}, drained: async () => {} } as unknown as NonNullable<
+          ReturnType<api.RegistryPeer['peer']>
+        >
+      },
+    })
+    active = { owner, created }
+    await owner.ready
+    await vi.waitFor(() => expect(created.length).toBeGreaterThan(0))
+    expect(created[0]).toMatchObject({
+      recoveryOnly: true,
+      manualRecovery: { authorisationID: saved.id, source: diagnosed.key },
+    })
+    expect((await local.manualRecovery().readManualRecovery(saved.id))?.stage).toBe('authorised')
+  } finally {
+    active?.owner.dispose()
+    await active?.owner.drained().catch(() => {})
+    await diagnosed.close()
+  }
+})
+
+for (const [label, apply] of [
+  ['legacy halt', forkHalt()],
+  ['internal latch', movementRefusals[3]?.[1]],
+  ['ordinary X', movementRefusals[8]?.[1]],
+  ['retention strand', movementRefusals[10]?.[1]],
+] as Array<[string, (fixture: Fixture) => Promise<void>]>) {
+  test(`allow open fork overrides only notice exclusion / ${label}`, async () => {
+    const fixture = await createRegistryFixture({
+      mode: 'double',
+      groupID: key.groupID,
+      setup: 'seeded',
+    })
+    let active: Awaited<ReturnType<typeof start>> | undefined
+    try {
+      await putOpenNotice(fixture)
+      await apply(fixture)
+      const started = await movement(fixture, { allowOpenFork: true })
+      active = started.active
+      expectRejoinOnly(active.created, started.saved.id)
+      expect((await fixture.manualRecovery().readManualRecovery(started.saved.id))?.stage).toBe(
+        'authorised',
+      )
+    } finally {
+      active?.owner.dispose()
+      await active?.owner.drained().catch(() => {})
+      await fixture.close()
+    }
+  })
+}
+
+test('allow open fork overrides only notice exclusion / notice alone', async () => {
+  const fixture = await createRegistryFixture({
+    mode: 'double',
+    groupID: key.groupID,
+    setup: 'seeded',
+  })
+  let active: Awaited<ReturnType<typeof start>> | undefined
+  try {
+    await putOpenNotice(fixture)
+    const started = await movement(fixture, { allowOpenFork: true })
+    active = started.active
+    await vi.waitFor(async () =>
+      expect((await fixture.manualRecovery().readManualRecovery(started.saved.id))?.stage).toBe(
+        'completed',
+      ),
+    )
+    expect(active.created[0]?.manualRecovery).toBeUndefined()
+    expect(active.created[0]?.recoveryOnly).toBe(false)
+  } finally {
+    active?.owner.dispose()
+    await active?.owner.drained()
+    await fixture.close()
+  }
+})
+
+for (const mode of ['real-mls', 'double'] as const) {
+  for (const context of ['supplied', 'absent'] as const) {
+    test(`current device moves without rejoin / ${mode} / ${context}`, async () => {
+      const fixture = await createRegistryFixture({
+        mode,
+        groupID: key.groupID,
+        setup: 'seeded',
+        ownershipContext: context === 'supplied' ? createAsyncLocalOwnershipContext() : undefined,
+      })
+      const destination = watchedHub()
+      const original = watchedHub()
+      let active: Awaited<ReturnType<typeof start>> | undefined
+      try {
+        const state = await fixture.device.groups.loadState(key)
+        if (state === null || state.deleted) throw new Error('Missing seeded state')
+        await mutateControl(fixture, (snapshot) => ({
+          ...snapshot,
+          cursor: { position: '0000000042' as LogPosition, epoch: state.epoch },
+        }))
+        const safety = api.createGroupSafety(await registryFixtureSafetyParams(fixture))
+        const keyBefore = { ...key }
+        const authenticatorBefore = await safety.epochAuthenticator(key)
+        active = await start(fixture, async () => {
+          throw new Error('Live binding must be used')
+        })
+        expect(active.created).toHaveLength(1)
+        // Ordinary startup may persist state bookkeeping; the move itself must not.
+        const stateBefore = await fixture.device.groups.loadState(key)
+        const moved = await safety.recover(key, {
+          mode: 'resync',
+          target: { ...movedBinding, hub: destination.hub },
+        })
+        const keyAfterCurrentMove = moved
+        expect(keyAfterCurrentMove).toEqual(keyBefore)
+        const authenticatorAfterCurrentMove = await safety.epochAuthenticator(key)
+        expect(authenticatorAfterCurrentMove).toEqual(authenticatorBefore)
+        const stateAfter = await fixture.device.groups.loadState(key)
+        if (
+          stateBefore === null ||
+          stateBefore.deleted ||
+          stateAfter === null ||
+          stateAfter.deleted
+        )
+          throw new Error('Missing moved state')
+        // Same MLS bytes: epoch secrets and every ratchet generation stay untouched.
+        expect(stateAfter.state).toEqual(stateBefore.state)
+        expect(stateAfter.epoch).toBe(stateBefore.epoch)
+        expect(stateAfter.senderHWM).toBe(stateBefore.senderHWM)
+        expect(active.owner.installedKey()).toEqual(key)
+        expect(active.created).toHaveLength(2)
+        expect(active.created[1]).toMatchObject({
+          recoveryOnly: false,
+          target: { targetID: movedBinding.targetID, topicID: movedBinding.commitTopicID },
+          recoveryTarget: { targetID: movedBinding.targetID, topicID: movedBinding.commitTopicID },
+        })
+        expect(active.created[1]?.manualRecovery).toBeUndefined()
+        expect(active.created[1]?.control).toBeUndefined()
+        expect(active.created[1]?.hub === destination.hub).toBe(true)
+        const control = await fixture.device.groups.ports(key).control.load()
+        expect(control.cursor).toEqual({ position: null, epoch: state.epoch })
+        const status = await safety.status(key)
+        expect(status.hold).toBeNull()
+        expect(status.manualRecovery?.kind).toBe('completed')
+        const saved = await fixture
+          .manualRecovery()
+          .readManualRecovery(status.manualRecovery?.id ?? '')
+        expect(saved).toMatchObject({ stage: 'completed', destination: key, attempt: null })
+        expect(destination.calls).not.toHaveBeenCalled()
+        expect(original.calls).not.toHaveBeenCalled()
+      } finally {
+        active?.owner.dispose()
+        await active?.owner.drained()
+        await fixture.close()
+      }
+    })
+  }
+}
+
+test('restart mid move contacts only saved destination', async () => {
+  let fixture = await createRegistryFixture({
+    mode: 'real-mls',
+    groupID: key.groupID,
+    setup: 'seeded',
+  })
+  const old = watchedHub()
+  const destination = watchedHub()
+  let active: Awaited<ReturnType<typeof start>> | undefined
+  try {
+    const saved = await fixture.manualRecovery().authoriseManualRecovery(key, {
+      mode: 'resync',
+      ...movedBinding,
+      allowOpenFork: false,
+    })
+    fixture = await fixture.reopen()
+    const resolver = vi.fn(async (id: string) => ({
+      id,
+      hub: destination.hub,
+      commitTopicID: movedBinding.commitTopicID,
+    }))
+    const startOn = async () => {
+      const created: Array<api.RegistryPeerOptions> = []
+      const owner = await api.createRegistryPeer({
+        registry: fixture.registry,
+        key,
+        target: { targetID: 'original-hub', topicID: 'original-commits' },
+        recovery: fixture.environment,
+        resolveTarget: resolver,
+        continuation: api.createRecoveryContinuationPort({
+          registry: fixture.registry,
+          persistence: fixture.device.groups,
+        }),
+        createMLS: (current, _handoff, options) =>
+          api.createRegistryGroupMLS({
+            registry: fixture.registry,
+            key: current,
+            recovery: fixture.environment,
+            identity: fixture.identity,
+            entrySlot: api.createLedgerEntrySlot(),
+            ...options,
+          }),
+        createPeer: async (_current, options) => {
+          created.push(options)
+          // A host falls back to its old hub only when no destination is supplied.
+          if (options.hub === undefined) void old.hub.publish
+          return { dispose: async () => {}, drained: async () => {} } as unknown as NonNullable<
+            ReturnType<api.RegistryPeer['peer']>
+          >
+        },
+      })
+      await owner.ready.catch(() => {})
+      return { owner, created }
+    }
+    active = await startOn()
+    expect(active.created).toHaveLength(1)
+    expect(active.created[0]?.hub === destination.hub).toBe(true)
+    expect(await fixture.manualRecovery().readManualRecovery(saved.id)).toMatchObject({
+      stage: 'completed',
+      destination: key,
+    })
+    active.owner.dispose()
+    await active.owner.drained()
+    fixture = await fixture.reopen()
+    active = await startOn()
+    expect(active.created).toHaveLength(1)
+    expect(active.created[0]?.hub === destination.hub).toBe(true)
+    expect(active.created[0]?.manualRecovery).toBeUndefined()
+    const oldHubCallsAfterRestart = old.calls.mock.calls.length
+    expect(oldHubCallsAfterRestart).toBe(0)
+    expect(resolver.mock.calls.every(([id]) => id === movedBinding.targetID)).toBe(true)
+  } finally {
+    active?.owner.dispose()
+    await active?.owner.drained()
+    await fixture.close()
+  }
+})
+
+test('destination mismatch preserves saved work', async () => {
+  let fixture = await createRegistryFixture({
+    mode: 'real-mls',
+    groupID: key.groupID,
+    setup: 'seeded',
+  })
+  let active: Awaited<ReturnType<typeof start>> | undefined
+  try {
+    const candidate = await fixture.confirmedRecovery(key, { confirm: false })
+    if (!('format' in candidate.record)) throw new Error('Captured candidate required')
+    const saved = await fixture.manualRecovery().authoriseManualRecovery(key, {
+      mode: 'resync',
+      ...binding,
+      allowOpenFork: false,
+    })
+    await fixture
+      .manualRecovery()
+      .manualRecoveryControl(saved.id)
+      .apply(
+        {
+          putRejoin: {
+            ...candidate.record,
+            stage: 'built',
+            switchMutationID: null,
+            trigger: 'manual',
+            authorisationID: saved.id,
+          },
+        },
+        'exact-saved-work',
+      )
+    const before = await fixture.manualRecovery().readManualRecovery(saved.id)
+    const control = await fixture.device.groups.ports(key).control.load()
+    fixture = await fixture.reopen()
+    const alternate = watchedHub()
+    active = await start(fixture, async (id) => ({
+      id,
+      hub: alternate.hub,
+      commitTopicID: binding.commitTopicID,
+    }))
+    await vi.waitFor(() => expect(active?.created).toHaveLength(1))
+    // A saved candidate retries exactly; it is never discarded for a current move.
+    expectRejoinOnly(active.created, saved.id)
+    const after = await fixture.manualRecovery().readManualRecovery(saved.id)
+    expect(after?.stage).toBe('authorised')
+    expect(encodeStoredValue(after?.attempt)).toEqual(encodeStoredValue(before?.attempt))
+    expect(await fixture.device.groups.ports(key).control.load()).toEqual(control)
+    expect(alternate.calls).not.toHaveBeenCalled()
+  } finally {
+    active?.owner.dispose()
+    await active?.owner.drained()
+    await fixture.close()
+  }
+})
+
+for (const mode of ['real-mls', 'double'] as const) {
+  test(`current move refuses every hold condition notice and active rejoin / pending owner work / ${mode}`, async () => {
+    const fixture = await createRegistryFixture({ mode, groupID: key.groupID, setup: 'seeded' })
+    try {
+      const entry = entryCapability(fixture.device.groups)
+      if (entry === null) throw new Error('Missing entry capability')
+      const store = fixture.manualRecovery()
+      const saved = await store.authoriseManualRecovery(key, {
+        mode: 'resync',
+        ...movedBinding,
+        allowOpenFork: false,
+      })
+      const access = await fixture.registry.access(key.groupID)
+      const runtime = { stateVersion: access.stateVersion(), ledgerComplete: true }
+      const reached = Promise.withResolvers<void>()
+      const gate = Promise.withResolvers<void>()
+      fixture.onPhase('work', async () => {
+        reached.resolve()
+        await gate.promise
+      })
+      const moving = store.moveCurrent(saved.id, runtime)
+      await reached.promise
+      // Owner work queued behind the decision could still publish from or advance this state.
+      const queued = entry.run(
+        { groupID: key.groupID, mutationID: crypto.randomUUID() },
+        async (reads) => ({ expected: await reads.lifetime(), value: null }),
+        async () => {},
+      )
+      gate.resolve()
+      expect(await moving).toBe(false)
+      await queued
+      expect(await store.readManualRecovery(saved.id)).toEqual(saved)
+      expect(await store.moveCurrent(saved.id, runtime)).toBe(true)
+    } finally {
+      await fixture.close()
+    }
+  })
+}

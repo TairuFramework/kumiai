@@ -315,7 +315,9 @@ It contains callback failures and promises no replay or notification for another
 A validated latch holds the current process through failed or ambiguous writes. Only proven commits survive restart.
 A crash before writing can lose volatile host evidence, despite in-process storage retries.
 
-Manual safety recovery remains unavailable. `GroupSafety.recover` rejects with `ManualRecoveryUnavailableError` until 2.2e.
+`canMoveCurrent(inputs)` decides whether a device may move to another hub without rejoining (see `@kumiai/mls-rpc` Hub migration).
+It refuses any hold, condition, active rejoin, known lag, unresolved publication or settlement and pending owner work.
+An open fork notice refuses unless `allowOpenFork` is set, which overrides that predicate only.
 Manual re-invite after lost spent trust requires a new successor group with a new groupID, also assigned to 2.2e.
 
 ## Host notices for commit strands and recovery

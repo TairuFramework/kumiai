@@ -337,7 +337,7 @@ restorations are never cached. Pure reads advance no persistence revision or sta
 
 `GroupSafety.epochAuthenticator(key)` reads a defensive copy of active installed trust without writing.
 `reportFork(key, evidence)` validates the active incarnation and committed identity before latching and atomically storing evidence with its event.
-`recover(key, choice)` currently rejects with `ManualRecoveryUnavailableError`.
+`recover(key, choice)` persists a resync choice before any network use, then moves or rejoins (see Hub migration). Successor recovery is unavailable.
 The factory requires a registered registry and persistence sharing its coordinator binding.
 
 `forkHalt` and `recoveryUnavailable` are immutable incarnation fields.
@@ -363,6 +363,31 @@ Manual re-invite after lost spent trust requires a new successor group with a ne
 A validated latch survives failed or ambiguous writes in the current process. Only proven commits survive restart.
 A crash before durable writing can lose volatile host evidence.
 
+## Hub migration
+
+`recover(key, { mode: 'resync', target: { targetID, hub, commitTopicID }, allowOpenFork })` moves a group to a destination the app selects.
+kumiai never chooses destinations or creates successors. The selected binding is saved before the source peer stops.
+The destination commit topic is the binding's `commitTopicID`; rendezvous and checkpoint topics stay derived from the recovery secret.
+
+A device moves current only when `canMoveCurrent` holds against the saved record inside one owner transaction.
+That requires readable state, a complete ledger, no known lag (strand, stranded or incomplete cursor, cursor epoch behind state),
+no commit slot, operation, Welcome, unresolved app publication or settlement, and zero other pending owner work.
+It also requires no hard hold, no `not-member` or `spent-set-corrupt` condition and no active rejoin.
+Active rejoin covers ordinary X, a pending fork recovery intent (including one this authorisation abandoned) and a saved manual candidate.
+An open fork notice refuses too, unless the saved `allowOpenFork` is true; that override touches nothing else.
+Freshness is the absence of known lag. It proves nothing against a hub that withheld frames.
+
+A current move keeps the GroupKey, MLS state and every hold. It resets hub positions (commit cursor, checkpoint receive cursor)
+and re-queues retained checkpoint publications with their exact frames. The peer restarts on the destination only after the move is proven.
+The first device publishing on an empty topic starts its log at its current state; others compare-and-set after it.
+App-topic cursors keep their stored positions: hosts whose hubs mint unrelated positions must reset those host stores themselves.
+
+Every other device rejoins through captured recovery from destination responders, checked against retained trust.
+It publishes nothing to the destination log before an authenticated reply. A confirmed rejoin installs a fresh incarnation without holds.
+Source holds and evidence stay as history. A failed attempt leaves source state, routing and holds intact.
+A device that arrives ahead of the destination's responders stays pending with `target-behind` unless R2/R7 fork-floor evidence applies.
+Apps must move every device. Separate hubs cannot exchange checkpoint evidence, so a partial migration can split undetectably.
+Restart resumes only the saved destination; an unresolved binding pauses with `target-unresolved`.
 
 ## Captured registry recovery
 

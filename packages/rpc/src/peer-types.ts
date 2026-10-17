@@ -22,9 +22,10 @@ import type { AppOutbox } from './app-outbox.js'
 import type { CheckpointService } from './checkpoint-types.js'
 import type { ControlBuildPort } from './control/build.js'
 import type { OperationDeps } from './control/operations.js'
-import type { GroupSafetyEvent } from './control/safety.js'
+import type { GroupCondition, GroupSafetyEvent, SafetyHold } from './control/safety.js'
 import type { ControlEvidenceSnapshot, ControlValidationPort } from './control/search.js'
 import type {
+  ControlSnapshot,
   ControlStore,
   GroupKey,
   OperationRequest,
@@ -138,6 +139,27 @@ export type GroupPeerMLSParams = {
    * this peer can never hold again. See {@link "app-cursor".AppCursorStore}.
    */
   appCursorStore: AppCursorStore
+}
+
+/**
+ * Local facts deciding whether a device may move its transport without rejoining. Freshness is
+ * the absence of known lag only; it proves nothing against a hub that withheld frames.
+ */
+export type CurrentMoveInputs = {
+  control: ControlSnapshot
+  activity: { pending: number }
+  stateReadable: boolean
+  ledgerComplete: boolean
+  walkComplete: boolean
+  outboxUnresolved: boolean
+  settlementUnresolved: boolean
+  hardHold: SafetyHold
+  condition: GroupCondition | null
+  openForkNotice: boolean
+  /** Competing ordinary/manual candidates or a pending fork intent, never the executing choice. */
+  activeRejoin: boolean
+  /** Saved app override of the open-notice exclusion only. */
+  allowOpenFork: boolean
 }
 
 export type StrandKind =

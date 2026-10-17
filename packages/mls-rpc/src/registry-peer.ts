@@ -662,6 +662,28 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
     timer = undefined
     wake = undefined
   }
+  async function moveCurrent(record: ManualRecoveryRecord): Promise<boolean> {
+    if (manualStore === null) return false
+    let runtime: { stateVersion: number; ledgerComplete: boolean }
+    try {
+      const access = await registry.access(key.groupID)
+      if (!sameStoredValue(access.key, record.source)) return false
+      runtime = {
+        stateVersion: access.stateVersion(),
+        ledgerComplete: await access.read((group) => group.isLedgerComplete()),
+      }
+    } catch {
+      return false // Unreadable state can only rejoin.
+    }
+    if (!(await manualStore.moveCurrent(record.id, runtime))) return false
+    // Routing goes live only after the completed move is proven.
+    manual = null
+    manualStore = null
+    await start(key)
+    manualCompletion?.resolve({ ...key })
+    manualCompletion = null
+    return true
+  }
   async function resume(): Promise<void> {
     let backoff = 100
     await discoverManual()
@@ -682,7 +704,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
         key = { ...manual.destination }
         manual = null
         manualStore = null
-      }
+      } else if (manual.stage === 'authorised' && (await moveCurrent(manual))) return
     }
     while (!disposed) {
       try {

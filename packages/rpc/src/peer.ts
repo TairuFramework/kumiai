@@ -115,6 +115,7 @@ import {
 import { checkedFetchResult, createLogDelivery, type EpochFloor } from './log-delivery.js'
 import { createEpochRuntime } from './peer-epoch.js'
 import {
+  type CurrentMoveInputs,
   DEFAULT_APP_LOG_RETENTION_SECONDS,
   DEFAULT_COMMIT_DEADLINE_MS,
   DEFAULT_COMMIT_LOG_RETENTION_SECONDS,
@@ -176,6 +177,7 @@ import {
 } from './topic.js'
 
 export {
+  type CurrentMoveInputs,
   DEFAULT_APP_LOG_RETENTION_SECONDS,
   DEFAULT_COMMIT_LOG_RETENTION_SECONDS,
   type GroupPeer,
@@ -276,6 +278,35 @@ function verdictForOutcome(
         refusalAuthority: outcome.refusalAuthority,
       }
   }
+}
+
+/** A device moves transport with its MLS state only when it knows of no lag, hold or rejoin. */
+export function canMoveCurrent(params: CurrentMoveInputs): boolean {
+  const { control } = params
+  return (
+    params.stateReadable &&
+    params.ledgerComplete &&
+    params.walkComplete &&
+    params.activity.pending === 0 &&
+    !params.outboxUnresolved &&
+    !params.settlementUnresolved &&
+    params.hardHold === null &&
+    params.condition === null &&
+    (params.allowOpenFork || !params.openForkNotice) &&
+    !params.activeRejoin &&
+    controlSafetyHeld(control) === null &&
+    // Either reason blocks: a hard hold, or acceptance whose settlement is still unknown.
+    control.controlHold === null &&
+    control.commitOnce === null &&
+    control.commitOnceAcceptance === null &&
+    control.operations.length === 0 &&
+    control.welcomes.length === 0 &&
+    control.rejoin === null &&
+    control.forkRecoveryAttempt == null &&
+    control.strand === null &&
+    control.cursor?.stranded !== true &&
+    control.cursor?.incomplete !== true
+  )
 }
 
 export function createGroupPeer<Protocols extends Record<string, ProtocolDefinition>>(

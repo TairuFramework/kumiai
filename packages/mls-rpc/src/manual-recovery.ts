@@ -5,6 +5,8 @@ import {
   type CheckpointRecord,
   type ControlSnapshot,
   type ControlStore,
+  canMoveCurrent,
+  controlSafetyHeld,
   type GroupKey,
   type ManualRecoveryRecord,
   type ManualRecoveryStatus,
@@ -19,6 +21,7 @@ import { recoveryCompletionContexts } from './recovery-completion-context.js'
 import { registrySafety } from './registry/safety.js'
 import type { GroupHandleRegistry } from './registry/types.js'
 import type { RecoveryTarget } from './safety.js'
+import { groupCondition } from './safety-conditions.js'
 
 type ManualRow = Extract<CheckpointRecord, { kind: 'manual-recovery' }>
 const preparations = new WeakMap<object, ManualRow>()
@@ -187,6 +190,11 @@ export type ManualRecoveryStore = {
   manualRecoveryControl(id: string): ControlStore
   readManualRecovery(id: string): Promise<ManualRecoveryRecord | null>
   resolveManualRecoveryTarget(id: string): Promise<RecoveryTarget | null>
+  /** Completes the choice as a same-key transport move, or returns false so it must rejoin. */
+  moveCurrent(
+    id: string,
+    runtime: { stateVersion: number; ledgerComplete: boolean },
+  ): Promise<boolean>
 }
 
 export function createManualRecoveryStore<TTx extends GroupTransaction>(params: {
@@ -283,7 +291,8 @@ export function createManualRecoveryStore<TTx extends GroupTransaction>(params: 
         async (stores, { record, existing }) => {
           if (!existing) {
             const control = stores.incarnation(key.incarnation).control
-            if ((await control.load()).forkRecoveryAttempt != null) {
+            const intent = (await control.load()).forkRecoveryAttempt
+            if (intent != null) {
               const changes = {}
               recoveryCompletionContexts.set(stores.tx, {
                 key,
@@ -296,6 +305,8 @@ export function createManualRecoveryStore<TTx extends GroupTransaction>(params: 
               } finally {
                 recoveryCompletionContexts.delete(stores.tx)
               }
+              // The abandoned intent proves this device behind; it can never move current.
+              record.abandonedForkRecovery = intent.id
             }
             await save(stores, record)
           }
@@ -387,6 +398,94 @@ export function createManualRecoveryStore<TTx extends GroupTransaction>(params: 
           })
         },
       }
+    },
+    async moveCurrent(id, runtime) {
+      const mutationID = crypto.randomUUID()
+      return await entry.run(
+        { groupID: key.groupID, mutationID },
+        async (reads) => {
+          const lifetime = await reads.lifetime()
+          const record = findManualRecovery(await reads.checkpoints(), key, id)
+          if (record.stage !== 'authorised' || lifetime?.activeIncarnation !== key.incarnation)
+            throw new GroupStateConflictError('Manual recovery source is no longer active')
+          return { expected: lifetime, value: record }
+        },
+        async (stores, prepared) => {
+          // Any other queued owner work could still publish from or advance this state.
+          const { pending } = entry.activity(key.groupID, mutationID)
+          const records = await stores.checkpoints.list()
+          const record = findManualRecovery(records, key, id)
+          if (!sameStoredValue(record, prepared) || record.choice.mode !== 'resync')
+            throw new GroupStateConflictError('Manual recovery authorisation moved')
+          const target = stores.incarnation(key.incarnation)
+          const control = await target.control.load()
+          const state = await target.state.load()
+          const outbox = await target.outbox.list()
+          let settlementUnresolved = false
+          for (const entry of outbox)
+            if ((await target.meta.loadSettlement(entry.seq)) !== null) settlementUnresolved = true
+          const { condition } = groupCondition(records, key)
+          const readable = state !== null && !state.deleted && state.state !== null ? state : null
+          const current = canMoveCurrent({
+            control,
+            activity: { pending },
+            stateReadable: readable !== null && readable.version === runtime.stateVersion,
+            ledgerComplete: runtime.ledgerComplete,
+            walkComplete: control.cursor === null || control.cursor.epoch === readable?.epoch,
+            outboxUnresolved: outbox.some(
+              (entry) => entry.status === 'accepted' && entry.lastAttempt !== null,
+            ),
+            settlementUnresolved,
+            hardHold: capability.held(key) ?? controlSafetyHeld(control, condition),
+            condition,
+            openForkNotice: records.some(
+              (row) =>
+                row.kind === 'notice' &&
+                row.key.groupID === key.groupID &&
+                row.notice.closedAt === null,
+            ),
+            // The executing choice counts once it saved a candidate or abandoned a fork intent.
+            activeRejoin:
+              record.attempt !== null ||
+              record.abandonedForkRecovery !== undefined ||
+              records.some(
+                (row) =>
+                  row.kind === 'manual-recovery' &&
+                  row.id !== id &&
+                  row.value.stage === 'authorised' &&
+                  sameStoredValue(row.key, key),
+              ),
+            allowOpenFork: record.choice.allowOpenFork,
+          })
+          if (!current) return false
+          // Hub positions are per hub; MLS state, holds and owed work stay exactly as they were.
+          if (control.cursor !== null && control.cursor.position !== null)
+            await target.control.apply(
+              { cursor: { position: null, epoch: control.cursor.epoch } },
+              mutationID,
+            )
+          for (const row of records) {
+            if (row.key.groupID !== key.groupID || row.key.incarnation !== key.incarnation) continue
+            if (row.kind === 'cursor' && row.position !== null)
+              await stores.checkpoints.put({ ...row, position: null })
+            if (row.kind === 'publication' && row.accepted && row.frame !== null)
+              await stores.checkpoints.put({
+                ...row,
+                accepted: false,
+                nextHeartbeatAt: null,
+                retryAt: 0,
+                retryDelay: 1000,
+              })
+          }
+          await save(stores, {
+            ...record,
+            stage: 'completed',
+            destination: { ...key },
+            mutationID,
+          })
+          return true
+        },
+      )
     },
     readManualRecovery: (id) =>
       entry.read(key.groupID, async (reads) => {

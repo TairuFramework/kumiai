@@ -64,6 +64,8 @@ export type ManualRecoveryRecord = {
   epochFloor: number | null
   settlements: Array<AcceptedRejoinSettlement>
   mutationID: string
+  /** A fork recovery intent this authorisation abandoned; the device stays known-behind. */
+  abandonedForkRecovery?: string
 }
 export type ManualRecoveryStatus = {
   id: string

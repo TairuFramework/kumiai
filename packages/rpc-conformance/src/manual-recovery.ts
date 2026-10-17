@@ -28,6 +28,7 @@ export type ConformanceManualRecoveryRecord<Position extends string = string> = 
   epochFloor: number | null
   settlements: Array<ConformanceAcceptedRejoinSettlement<Position>>
   mutationID: string
+  abandonedForkRecovery?: string
 }
 export type ConformanceManualRecoveryStatus = {
   id: string
@@ -41,6 +42,10 @@ export type ConformanceManualRecoveryStore = {
   ): Promise<ConformanceManualRecoveryRecord>
   manualRecoveryControl(id: string): ConformanceControlStore
   readManualRecovery(id: string): Promise<ConformanceManualRecoveryRecord | null>
+  moveCurrent(
+    id: string,
+    runtime: { stateVersion: number; ledgerComplete: boolean },
+  ): Promise<boolean>
 }
 
 export function testManualRecoveryConformance<THandle extends ConformanceRegistryHandle>(params: {
@@ -275,6 +280,66 @@ export function testManualRecoveryConformance<THandle extends ConformanceRegistr
         await expect(
           overlay.apply({ recoveryEpochFloor: 1 }, 'uncommitted-write'),
         ).rejects.toThrow()
+      }))
+    async function runtime(fixture: ConformanceRegistryFixture<THandle>, key: ConformanceGroupKey) {
+      const access = await fixture.registry.access(key.groupID)
+      return { stateVersion: access.stateVersion(), ledgerComplete: true }
+    }
+    test('current move completes the choice on the same key', () =>
+      run(async (fixture, key) => {
+        const saved = await fixture.manualRecovery().authoriseManualRecovery(key, choice)
+        const before = await fixture.device.groups.ports(key).control.load()
+        expect(
+          await fixture.manualRecovery().moveCurrent(saved.id, await runtime(fixture, key)),
+        ).toBe(true)
+        expect(await fixture.manualRecovery().readManualRecovery(saved.id)).toEqual({
+          ...saved,
+          stage: 'completed',
+          destination: key,
+          mutationID: expect.any(String),
+        })
+        const after = await fixture.device.groups.ports(key).control.load()
+        expect(after).toEqual({
+          ...before,
+          cursor: before.cursor === null ? null : { position: null, epoch: before.cursor.epoch },
+        })
+        expect(await fixture.safety().status(key)).toMatchObject({
+          hold: null,
+          manualRecovery: { id: saved.id, kind: 'completed' },
+        })
+      }))
+    test('current move refuses held sources and leaves the choice', () =>
+      run(async (fixture, key) => {
+        const saved = await fixture.manualRecovery().authoriseManualRecovery(key, choice)
+        await fixture.safety().reportFork(key, {
+          kind: 'digest-divergence',
+          epoch: 0,
+          position: 'fork',
+          localDigest: 'ours',
+          remoteDigest: 'theirs',
+        })
+        const before = await fixture.device.groups.ports(key).control.load()
+        expect(
+          await fixture.manualRecovery().moveCurrent(saved.id, await runtime(fixture, key)),
+        ).toBe(false)
+        expect(await fixture.manualRecovery().readManualRecovery(saved.id)).toEqual(saved)
+        expect(await fixture.device.groups.ports(key).control.load()).toEqual(before)
+      }))
+    test('current move refuses a stale state version', () =>
+      run(async (fixture, key) => {
+        const saved = await fixture.manualRecovery().authoriseManualRecovery(key, choice)
+        const current = await runtime(fixture, key)
+        expect(
+          await fixture
+            .manualRecovery()
+            .moveCurrent(saved.id, { ...current, stateVersion: current.stateVersion + 1 }),
+        ).toBe(false)
+        expect(
+          await fixture
+            .manualRecovery()
+            .moveCurrent(saved.id, { ...current, ledgerComplete: false }),
+        ).toBe(false)
+        expect(await fixture.manualRecovery().readManualRecovery(saved.id)).toEqual(saved)
       }))
     test('manual saved target survives reopen', () =>
       run(async (fixture, key) => {
