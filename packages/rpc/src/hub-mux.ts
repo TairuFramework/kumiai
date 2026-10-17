@@ -142,11 +142,14 @@ export type MuxPublishParams = {
   publishID?: string
 }
 
+export const APP_OUTSTANDING_FETCHES_MAX = 2
+
 export type MuxFetchTopicParams = {
   topicID: string
   /** Exclusive cursor: entries after this log position. Absent: from the oldest retained. */
   after?: string
   limit?: number
+  signal?: AbortSignal
 }
 
 export type HubMux = {
@@ -870,21 +873,49 @@ export function createHubMux(params: HubMuxParams): HubMux {
     return result
   }
 
+  let outstandingAppFetches = 0
   const fetchTopic = async (params: MuxFetchTopicParams): Promise<HubFetchTopicResult> => {
     // A fetch of a refused topic would die of `NotSubscribedError` — the SYMPTOM, naming the mux's
     // own failure to subscribe as if it were the caller's mistake. The latched refusal is raised
     // instead, so what reaches the host is the reason.
     assertSubscribable(params.topicID)
-    // Called on `hub`, not through a detached reference: a LogHub is often a class, and
-    // an unbound method loses its receiver.
-    const result = await Promise.resolve(
-      hub.fetchTopic({
-        subscriberDID: localDID,
-        topicID: params.topicID,
-        ...(params.after != null ? { after: params.after } : {}),
-        ...(params.limit != null ? { limit: params.limit } : {}),
-      }),
-    )
+    const { signal } = params
+    signal?.throwIfAborted()
+    // Only cancellable app pulls consume these slots. Commit fetches remain independent.
+    if (signal != null && outstandingAppFetches >= APP_OUTSTANDING_FETCHES_MAX) {
+      return { messages: [], head: null, oldest: null, gap: false }
+    }
+    const request = (async () => {
+      if (signal != null) outstandingAppFetches += 1
+      try {
+        return await hub.fetchTopic({
+          subscriberDID: localDID,
+          topicID: params.topicID,
+          ...(params.after != null ? { after: params.after } : {}),
+          ...(params.limit != null ? { limit: params.limit } : {}),
+        })
+      } finally {
+        // An abort releases the caller, never the underlying request's slot.
+        if (signal != null) outstandingAppFetches -= 1
+      }
+    })()
+    let abort: (() => void) | undefined
+    let result: HubFetchTopicResult
+    try {
+      result =
+        signal == null
+          ? await request
+          : await Promise.race([
+              request,
+              new Promise<never>((_resolve, reject) => {
+                abort = () => reject(signal.reason)
+                signal.addEventListener('abort', abort, { once: true })
+                if (signal.aborted) abort()
+              }),
+            ])
+    } finally {
+      if (abort != null) signal?.removeEventListener('abort', abort)
+    }
     for (const message of result.messages) assertLogPosition(message.sequenceID)
     if (result.head !== null) assertLogPosition(result.head)
     if (result.oldest !== null) assertLogPosition(result.oldest)

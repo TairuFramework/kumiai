@@ -5,6 +5,7 @@ import { encodeAppAAD } from '../src/app-aad.js'
 import type { PendingAppFrame } from '../src/crypto.js'
 import { PeerDisposedError } from '../src/index.js'
 import { APP_TOPIC_LABEL, commitTopic, protocolTopic } from '../src/topic.js'
+import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
@@ -236,7 +237,20 @@ describe('work resumed after disposal', () => {
     const recoverySecret = new Uint8Array(32).fill(0xb6)
     const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
     const rows = new Map<string, PendingAppFrame>()
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const cursor = createMemoryAppCursorStore()
+    const load = cursor.load.bind(cursor)
+    const loadSpy = vi.spyOn(cursor, 'load').mockImplementation(async (topic) => {
+      const position = await load(topic)
+      if (topic === topicID) {
+        entered.resolve()
+        await release.promise
+      }
+      return position
+    })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      appCursorStore: cursor,
       crypto: createFakeCrypto({
         epoch: 1,
         localDID: 'bob',
@@ -254,17 +268,6 @@ describe('work resumed after disposal', () => {
       }),
     })
     await bob.peer.protocol('chat').to('alice')
-    const entered = Promise.withResolvers<void>()
-    const release = Promise.withResolvers<void>()
-    const fetch = hub.fetchTopic.bind(hub)
-    const fetchSpy = vi.spyOn(hub, 'fetchTopic').mockImplementation(async (params) => {
-      const page = await fetch(params)
-      if (params.topicID === topicID) {
-        entered.resolve()
-        await release.promise
-      }
-      return page
-    })
     try {
       await bob.peer.retryAppDelivery()
       await entered.promise
@@ -279,7 +282,7 @@ describe('work resumed after disposal', () => {
       expect(bob.appCursorStore.stored(topicID)).toBeNull()
     } finally {
       release.resolve()
-      fetchSpy.mockRestore()
+      loadSpy.mockRestore()
       await bob.peer.dispose()
     }
   })

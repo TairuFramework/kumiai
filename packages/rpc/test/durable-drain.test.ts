@@ -1,5 +1,5 @@
 import { fromUTF } from '@sozai/codec'
-import { describe, expect, test, vi } from 'vitest'
+import { describe, expect, onTestFinished, test, vi } from 'vitest'
 
 import { encodeAppAAD } from '../src/app-aad.js'
 import { createAppLane } from '../src/app-lane.js'
@@ -138,7 +138,7 @@ describe('durable retained drain', () => {
     expect([...store.records.values()][0]?.frame.position).toBe('000000000001')
   })
 
-  test('a rejected fetch waits for the other protocol before a retry starts', async () => {
+  test('a rejected pull waits for its other protocol without reserving the app lane', async () => {
     const anchor = { epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }
     const chatTopic = protocolTopic(anchor.secret, 1, 'chat')
     let releaseDelayed: (() => void) | undefined
@@ -170,13 +170,17 @@ describe('durable retained drain', () => {
       anchor: () => anchor,
       groupID: () => 'group',
     })
+    onTestFinished(() => {
+      releaseDelayed?.()
+      lane.dispose()
+    })
     const first = lane.deliver()
     const failed = expect(first).rejects.toThrow('first fetch failed')
     await new Promise((resolve) => setTimeout(resolve, 0))
     const retry = lane.deliver()
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(chatFetches).toBe(1)
-    expect(otherFetches).toBe(1)
+    expect(chatFetches).toBe(2)
+    expect(otherFetches).toBe(2)
     releaseDelayed?.()
     await failed
     await retry
