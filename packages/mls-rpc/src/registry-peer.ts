@@ -738,7 +738,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
         key = { ...manual.destination }
         manual = null
         manualStore = null
-      } else if (manual.stage === 'authorised' && (await moveCurrent(manual))) return
+      }
     }
     while (!disposed) {
       try {
@@ -764,15 +764,15 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
           control.forkHalt !== null ||
           isHardControlHold(control.controlHold) ||
           capability.held(key) === 'fork-halted'
-        // Spent corruption outranks a recovery-unavailable refusal, so diagnose it first. An
-        // authorised manual recovery moves past every hold, rejoin-only.
-        const diagnoseSpent = !hardHeld && manual === null
+        // Diagnose spent corruption before a same-key transport move or recovery refusal.
+        const diagnoseSpent = !hardHeld
         if (diagnoseSpent) await diagnoseSpentSet()
         if (diagnoseSpent && capability.held(key) === 'spent-set-corrupt') {
           await persistSpentCondition(new SpentSetCorruptError({ key }))
           await refreshCondition()
           return
         }
+        if (manual?.stage === 'authorised' && (await moveCurrent(manual))) return
         if (
           manual === null &&
           (capability.held(key) !== null ||
