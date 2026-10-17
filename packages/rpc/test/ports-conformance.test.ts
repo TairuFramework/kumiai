@@ -420,6 +420,11 @@ testAnchorStoreConformance({
   createStore: createMemoryAnchorStore,
 })
 
+testAnchorStoreConformance({
+  label: 'rpc host-db anchor store',
+  createStore: () => createMemoryHostDatabase().anchorStore('anchor-conformance'),
+})
+
 test('a failed bootstrap save leaves the live and durable ledger incomplete until a persisted retry', async () => {
   const groupID = 'bootstrap-save-failure'
   const hostDB = createMemoryHostDatabase()

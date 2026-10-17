@@ -11,6 +11,12 @@ export type Anchor = {
 /** One durable anchor and the advance whose rotation is still unresolved. */
 export type AnchorSlot = {
   anchor: Anchor
+  /** Oldest first, absent when empty, at most RETAINED_EPOCHS_MAX entries. Co-committed with anchor. */
+  departing?: Array<{
+    anchor: Anchor
+    /** Epoch of the anchor that replaced this one. */
+    departedAt: number
+  }>
   pending?: {
     epochBefore: number
     epochAfter: number

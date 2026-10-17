@@ -1661,6 +1661,7 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       await host.control.apply(records(), 'baseline')
       const slot = {
         anchor: { secret: new Uint8Array([10]), epoch: 4 },
+        departing: [{ anchor: { secret: new Uint8Array([0, 128, 255]), epoch: 2 }, departedAt: 4 }],
         pending: {
           epochBefore: 4,
           epochAfter: 5,
