@@ -12,9 +12,14 @@ import {
   removeMember,
   restoreGroup,
 } from '@kumiai/mls'
+import type { CheckpointRecord } from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
-import { incrementOthersSeen, recordOwnBranchMessage } from '../src/branch-history.js'
+import {
+  branchAbandonmentPreparer,
+  incrementOthersSeen,
+  recordOwnBranchMessage,
+} from '../src/branch-history.js'
 import { createCheckpointService } from '../src/checkpoint.js'
 import { entryCapability } from '../src/entry-capability.js'
 import { registryRecoveryCoordinator } from '../src/registry/recovery-coordinator.js'
@@ -174,6 +179,202 @@ for (const mode of ['real-mls', 'double'] as const) {
     })
   }
 }
+
+test.each(['commit', 'rollback'] as const)(
+  'earlier notice links later v2 divergence and closes with switch proof: %s',
+  async (outcome) => {
+    const f = await createForkRecoveryRealFixture(true)
+    try {
+      const source = f.key
+      await f.reply(20, 'other', true)
+      const responder = await (await f.remote().registry.access(source.groupID)).read(
+        (handle) => handle,
+      )
+      const groups = f.local().device.groups
+      const records = await f.service().readRecords()
+      const original = records.find((row) => row.kind === 'notice' && row.id === f.noticeID)
+      if (original?.kind !== 'notice') throw new Error('Missing notice')
+      expect(original.notice.splitEpoch).toBe(10)
+      await groups.transition(
+        await nextChange(groups, source.groupID, crypto.randomUUID()),
+        async (stores) => {
+          for (const epoch of [10, 20]) {
+            const row = records.find((row) => row.kind === 'fact' && row.epoch === epoch)
+            if (row?.kind !== 'fact') throw new Error('Missing source fact')
+            const fact = decodeEpochRosterFact(row.canonical)
+            await recordOwnBranchMessage(stores, {
+              key: source,
+              message: { id: `own-${epoch}`, epoch, authHash: fact.authHash },
+            })
+            await incrementOthersSeen(stores, { key: source, epoch, authHash: fact.authHash })
+          }
+        },
+      )
+      const recovery = await registryFixtureCapturedRecovery(f.local(), source, {
+        confirm: true,
+        responder: { identity: f.responderIdentity, group: responder },
+      })
+      const params = {
+        source: recovery.source,
+        rejoinID: recovery.record.id,
+        proof: recovery.proof,
+        write: {
+          mutationID: recovery.record.switchMutationID ?? crypto.randomUUID(),
+          source: { rejoinID: recovery.record.id },
+          destination: {
+            control: {
+              cursor: { position: recovery.proof.position, epoch: recovery.record.epochAfter },
+            },
+          },
+        },
+      }
+      const run = () => f.local().registry.switchIncarnation(recovery.candidate, params)
+      const fault = f.local().armWorkFault(params.write.mutationID, 'pending')
+      const switching = run().then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      )
+      await Promise.race([
+        fault.rejected,
+        switching.then((result) => {
+          if ('error' in result) throw result.error
+        }),
+      ])
+      const eventsBeforeProof: Array<unknown> = []
+      const read = f
+        .local()
+        .safety()
+        .events(source)
+        .then((events) => {
+          eventsBeforeProof.push(...events)
+        })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(eventsBeforeProof).toEqual([])
+      await fault.finish(outcome)
+      const settled = await switching
+      await read
+      if (outcome === 'rollback') {
+        expect(settled).toHaveProperty('error')
+        expect(await f.local().safety().events(source)).toEqual([])
+        expect(
+          (await f.service().forkNotices(source.groupID)).find((row) => row.id === f.noticeID),
+        ).toMatchObject({ closedAt: null })
+        params.source = await f.local().registry.recoverySource(source.groupID)
+        await run()
+      } else expect(settled).toEqual({ value: { ...source, incarnation: 2 } })
+      const events = await f.local().safety().events(source)
+      expect(events).toHaveLength(1)
+      expect(events[0]).toMatchObject({
+        kind: 'branch-abandoned',
+        noticeID: f.noticeID,
+        epochs: 'unknown',
+        ownMessages: [{ id: 'own-20' }],
+        othersSeen: 1,
+        membersAdded: [],
+        membersRemoved: [],
+        coverage: { ancestry: { kind: 'partial', reasons: ['unknown-ancestry'] } },
+      })
+      const notice = (await f.service().forkNotices(source.groupID)).find(
+        (row) => row.id === f.noticeID,
+      )
+      expect(notice?.closedAt).toEqual(expect.any(Number))
+      const cold = await f.local().reopen()
+      try {
+        expect(await cold.safety().events(source)).toEqual(events)
+        await cold.registry.switchIncarnation(recovery.candidate, params)
+        expect(await cold.safety().events(source)).toEqual(events)
+        const service = createCheckpointService({
+          registry: cold.registry,
+          key: { ...source, incarnation: 2 },
+          identity: cold.identity,
+        })
+        expect(
+          (await service.forkNotices(source.groupID)).find((row) => row.id === f.noticeID),
+        ).toEqual(notice)
+      } finally {
+        await cold.close()
+      }
+    } finally {
+      await f.close()
+    }
+  },
+)
+
+test('applicable notices use earliest detection then smaller ID and match the abandoned branch', async () => {
+  const f = await createForkRecoveryRealFixture(true)
+  try {
+    const source = f.key
+    await f.reply(20)
+    const responder = await (await f.remote().registry.access(source.groupID)).read(
+      (handle) => handle,
+    )
+    const remoteService = createCheckpointService({
+      registry: f.remote().registry,
+      key: source,
+      identity: f.responderIdentity,
+    })
+    await registryFixtureCapturedRecovery(f.local(), source, {
+      confirm: true,
+      responder: { identity: f.responderIdentity, group: responder },
+      lineage: await remoteService.exportCheckpoints(source),
+    })
+    const records = await f.service().readRecords()
+    const original = records.find((row) => row.kind === 'notice' && row.id === f.noticeID)
+    const tip = records.find((row) => row.kind === 'fact' && row.epoch === 20)
+    if (original?.kind !== 'notice' || tip?.kind !== 'fact') throw new Error('Missing history')
+    type Notice = Extract<CheckpointRecord, { kind: 'notice' }>
+    const notice = (
+      id: string,
+      detectedAt: number,
+      change: Partial<Notice['notice']> = {},
+    ): Notice => ({
+      ...structuredClone(original),
+      id,
+      notice: { ...structuredClone(original.notice), id, detectedAt, ...change },
+    })
+    const earliest = notice('notice-Z', 10)
+    const smaller = notice('notice-A', 10)
+    const cases: Array<{ notices: Array<Notice>; want: string | null }> = [
+      { notices: [notice('notice-A-new', 20), earliest], want: 'notice-Z' },
+      { notices: [earliest, smaller], want: 'notice-A' },
+      { notices: [smaller, earliest], want: 'notice-A' },
+      { notices: [notice('notice-before', 10, { splitEpoch: 9 })], want: 'notice-before' },
+      {
+        notices: [
+          notice('notice-later', 10, {
+            splitEpoch: 20,
+            deviceAuthHash: decodeEpochRosterFact(tip.canonical).authHash,
+          }),
+        ],
+        want: 'notice-later',
+      },
+      { notices: [notice('notice-unrelated', 1, { splitEpoch: 20 })], want: null },
+      { notices: [notice('notice-closed', 1, { closedAt: 2 })], want: null },
+      {
+        notices: [{ ...notice('notice-foreign', 1), key: { ...source, groupID: 'foreign' } }],
+        want: null,
+      },
+      {
+        notices: [{ ...notice('notice-other-incarnation', 1), key: { ...source, incarnation: 2 } }],
+        want: null,
+      },
+    ]
+    const entry = entryCapability(f.local().device.groups)
+    if (entry === null) throw new Error('Missing entry')
+    for (const { notices, want } of cases) {
+      const event = await entry.read(source.groupID, (reads) =>
+        branchAbandonmentPreparer({
+          ...reads,
+          checkpoints: async () => [...records.filter((row) => row.kind !== 'notice'), ...notices],
+        })({ source, destination: { ...source, incarnation: 2 }, mutationID: crypto.randomUUID() }),
+      )
+      expect(event?.noticeID, JSON.stringify(notices.map((row) => row.id))).toBe(want)
+      expect(event?.epochs).toEqual({ from: 10, through: 20 })
+    }
+  } finally {
+    await f.close()
+  }
+})
 
 for (const scenario of ['complete', 'missing-link', 'pre-upgrade'] as const) {
   const holes = scenario === 'missing-link' ? [15] : []

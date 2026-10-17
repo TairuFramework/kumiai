@@ -414,13 +414,21 @@ export function branchAbandonmentPreparer(reads: EntryReads) {
     )
     const before = new Set(prior?.fact.members.map((member) => member.signerDID) ?? [])
     const after = new Set(tip?.fact.members.map((member) => member.signerDID) ?? [])
-    const notice = records.find(
-      (row) =>
+    // Notice identity can predate retained comparison coverage without proving more abandoned work.
+    const notice = records
+      .flatMap((row) =>
         row.kind === 'notice' &&
         sameKey(row.key, source) &&
         row.notice.closedAt === null &&
-        (split === undefined || row.notice.splitEpoch === split),
-    )
+        ((split !== undefined && row.notice.splitEpoch <= split) ||
+          selected.some(
+            ({ fact }) =>
+              fact.epoch === row.notice.splitEpoch && fact.authHash === row.notice.deviceAuthHash,
+          ))
+          ? [row.notice]
+          : [],
+      )
+      .sort((a, b) => a.detectedAt - b.detectedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0]
     return {
       ...source,
       id: JSON.stringify([
@@ -431,7 +439,7 @@ export function branchAbandonmentPreparer(reads: EntryReads) {
         mutationID,
       ]),
       kind: 'branch-abandoned',
-      noticeID: notice?.kind === 'notice' ? notice.notice.id : null,
+      noticeID: notice?.id ?? null,
       epochs:
         completeAncestry && split !== undefined && tip !== undefined
           ? { from: split, through: tip.fact.epoch }
