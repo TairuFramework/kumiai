@@ -232,34 +232,55 @@ describe('work resumed after disposal', () => {
   })
 
   test('a queued drop does not enter app delivery after disposal', async () => {
-    const hub = new FakeHub()
+    const hub = new DurableFakeHub()
     const recoverySecret = new Uint8Array(32).fill(0xb6)
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret)
-    await alice.peer.replay()
-    let releaseBuild = (): void => {}
-    const buildGate = new Promise<void>((resolve) => {
-      releaseBuild = resolve
-    })
-    let building = false
-    try {
-      const committing = alice.peer.commit(
-        buildLedgerCommit(alice, ['late=commit'], {
-          onBuild: async () => {
-            building = true
-            await buildGate
+    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+    const rows = new Map<string, PendingAppFrame>()
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      crypto: createFakeCrypto({
+        epoch: 1,
+        localDID: 'bob',
+        pending: {
+          async persistOpened(_state, record) {
+            rows.set(record.frame.id, record)
           },
-        }),
-      )
-      await vi.waitFor(() => expect(building).toBe(true))
-      const dropping = alice.peer.dropAppFrame('unknown-topic', '000000000001')
+          async list() {
+            return [...rows.values()]
+          },
+          async complete(id) {
+            rows.delete(id)
+          },
+        },
+      }),
+    })
+    await bob.peer.protocol('chat').to('alice')
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const fetch = hub.fetchTopic.bind(hub)
+    const fetchSpy = vi.spyOn(hub, 'fetchTopic').mockImplementation(async (params) => {
+      const page = await fetch(params)
+      if (params.topicID === topicID) {
+        entered.resolve()
+        await release.promise
+      }
+      return page
+    })
+    try {
+      await bob.peer.retryAppDelivery()
+      await entered.promise
+      // Disposal must win even over validation of an unbuffered drop target.
+      const dropping = bob.peer.dropAppFrame('unknown-topic', '000000000001')
+      const rejection = expect(dropping).rejects.toBeInstanceOf(PeerDisposedError)
       await new Promise((resolve) => setTimeout(resolve, 0))
-      await alice.peer.dispose()
-      releaseBuild()
-      await expect(committing).rejects.toBeInstanceOf(PeerDisposedError)
-      await expect(dropping).rejects.toBeInstanceOf(PeerDisposedError)
+      await bob.peer.dispose()
+      release.resolve()
+      await rejection
+      expect(rows.size).toBe(0)
+      expect(bob.appCursorStore.stored(topicID)).toBeNull()
     } finally {
-      releaseBuild()
-      await alice.peer.dispose()
+      release.resolve()
+      fetchSpy.mockRestore()
+      await bob.peer.dispose()
     }
   })
 

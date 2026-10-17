@@ -720,8 +720,7 @@ export function createGroupPeerWithControlWalk<
     }
   }
 
-  // Live log pushes carry no authoritative bytes or position. One queued control-first pull
-  // covers a burst; a failed pull retries without waiting for another hub delivery.
+  // Live log pushes wake independent app and control pulls. Neither trusts pushed metadata.
   let appPullNeeded = false
   let appPullActive = false
   let appPullTimer: ReturnType<typeof setTimeout> | undefined
@@ -763,6 +762,7 @@ export function createGroupPeerWithControlWalk<
   }
   const requestAppPull = (): void => {
     if (safetyHold() !== null) return
+    appLane.kick()
     appPullNeeded = true
     armAppPull(0)
   }

@@ -89,7 +89,7 @@ describe('single-connection durable host contract', () => {
     await peer.peer.dispose()
   })
 
-  test('holding the sole connection across a peer await wedges the inverse lock order', async () => {
+  test('replay returns while an app open waits for the sole connection', async () => {
     const host = createSingleConnectionHost()
     const hub = new DurableFakeHub()
     const entered = deferred<void>()
@@ -116,14 +116,16 @@ describe('single-connection durable host contract', () => {
     await entered.promise
     await publish(hub, 'second')
     await vi.waitFor(() => expect(host.persistAttempts()).toBe(2))
+    expect(host.records()).toHaveLength(1)
     startAwait.resolve()
     expect(await Promise.race([returned.promise.then(() => 'returned' as const), timeout()])).toBe(
-      'timeout',
+      'returned',
     )
-    expect(host.records()).toHaveLength(1)
     abort.resolve()
     await returned.promise
     await vi.waitFor(() => expect(host.records()).toHaveLength(0), { timeout: 2500 })
+    expect(host.maxConcurrentCalls()).toBe(1)
+    expect(host.savedState()).toEqual(peer.crypto.saveState())
     await peer.peer.dispose()
   })
 })

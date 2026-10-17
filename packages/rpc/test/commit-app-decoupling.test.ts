@@ -6,7 +6,9 @@ import { encodeAppAAD } from '../src/app-aad.js'
 import type * as AppLaneModule from '../src/app-lane.js'
 import { type AppLane, type AppLaneParams, createAppLane } from '../src/app-lane.js'
 import type { PendingAppFrame } from '../src/crypto.js'
+import { adaptBusHandlers } from '../src/handlers.js'
 import { APP_TOPIC_LABEL, commitTopic, protocolTopic } from '../src/topic.js'
+import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
@@ -305,6 +307,141 @@ describe('app work leaves the commit queue', () => {
     expect(f.rows.size).toBe(0)
     expect(f.queue.pending).toBe(0)
   })
+
+  test('a live durable arrival drains while a serial control fetch remains gated', async () => {
+    const seen = vi.fn()
+    const f = await setup({ handlers: { 'chat/posted': seen } })
+    const pause = gate()
+    f.hub.controlGate = pause
+    const operation = track(f.bob.controlWalk.reconcileCommitPrefix())
+    await pause.entered.promise
+    f.hub.reattach('bob')
+    const frame = await append(f.hub)
+
+    await vi.waitFor(() => expect(seen).toHaveBeenCalledTimes(1), { timeout: 500 })
+    await vi.waitFor(() => {
+      expect(f.rows.size).toBe(0)
+      expect(f.bob.appCursorStore.stored(topicID)).toBe(frame.sequenceID)
+    })
+    expect(f.bob.mls.epoch()).toBe(1)
+    expect(f.queue.pending).toBe(0)
+    pause.release.resolve()
+    await operation
+  })
+
+  test.each(['cursor load', 'fetch', 'open'] as const)(
+    'anchor rotation during a gated %s reloads the new segment without another wakeup',
+    async (boundary) => {
+      const pause = gate()
+      let anchor = { epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }
+      const newTopic = protocolTopic(fakeEpochSecret(2, APP_TOPIC_LABEL), 2, 'chat')
+      const cursor = createMemoryAppCursorStore()
+      await cursor.save(topicID, '000000000009')
+      const load = cursor.load.bind(cursor)
+      vi.spyOn(cursor, 'load').mockImplementation(async (topic) => {
+        const position = await load(topic)
+        if (boundary === 'cursor load' && topic === topicID) {
+          pause.entered.resolve()
+          await pause.release.promise
+        }
+        return position
+      })
+      const records = new Map<string, PendingAppFrame>()
+      const persisted: Array<PendingAppFrame['frame']> = []
+      const reader = createFakeCrypto({
+        epoch: 1,
+        localDID: 'bob',
+        retainedEpochs: 2,
+        pending: {
+          async persistOpened(_state, record) {
+            persisted.push(record.frame)
+            records.set(record.frame.id, record)
+          },
+          async list() {
+            return [...records.values()]
+          },
+          async complete(id) {
+            records.delete(id)
+          },
+        },
+      })
+      const unwrap = reader.unwrap.bind(reader)
+      vi.spyOn(reader, 'unwrap').mockImplementation(async (bytes, options) => {
+        const opened = await unwrap(bytes, options)
+        if (boundary === 'open' && options?.frame?.topicID === topicID) {
+          pause.entered.resolve()
+          await pause.release.promise
+        }
+        return opened
+      })
+      const oldFrame = {
+        sequenceID: '000000000010',
+        payload: await createFakeCrypto({ epoch: 1, localDID: 'alice' }).wrap(
+          encodeEventFrame('chat/posted', { text: 'old' }),
+          { aad: encodeAppAAD({ topicID, intent: 'log' }) },
+        ),
+      }
+      const newFrame = {
+        sequenceID: '000000000001',
+        payload: await createFakeCrypto({ epoch: 2, localDID: 'alice' }).wrap(
+          encodeEventFrame('chat/posted', { text: 'new' }),
+          { aad: encodeAppAAD({ topicID: newTopic, intent: 'log' }) },
+        ),
+      }
+      const seen: Array<string> = []
+      const lane = createAppLane({
+        mux: {
+          retainTopic() {},
+          async fetchTopic({ topicID: topic, after }: { topicID: string; after?: string }) {
+            if (boundary === 'fetch' && topic === topicID) {
+              pause.entered.resolve()
+              await pause.release.promise
+            }
+            const frame = topic === topicID ? oldFrame : newFrame
+            return {
+              messages: after == null || frame.sequenceID > after ? [frame] : [],
+              head: frame.sequenceID,
+              oldest: frame.sequenceID,
+              gap: false,
+            }
+          },
+        } as never,
+        crypto: reader,
+        appliedEpoch: () => reader.epoch(),
+        localDID: 'bob',
+        protocols: { chat },
+        eventHandlers: new Map([
+          [
+            'chat',
+            adaptBusHandlers(chat, {
+              'chat/posted': ({ data }: { data: { text: string } }) => void seen.push(data.text),
+            }).events,
+          ],
+        ]),
+        retentionSeconds: 60,
+        appCursorStore: cursor,
+        anchor: () => anchor,
+        groupID: () => 'group',
+      })
+      lanes.push(lane)
+      lane.kick()
+      await pause.entered.promise
+      reader.setEpoch(2)
+      anchor = { epoch: 2, secret: fakeEpochSecret(2, APP_TOPIC_LABEL) }
+      lane.reset()
+      pause.release.resolve()
+
+      await vi.waitFor(() => expect(seen).toContain('new'), { timeout: 500 })
+      await vi.waitFor(() => expect(cursor.stored(newTopic)).toBe('000000000001'))
+      expect(seen.filter((text) => text === 'new')).toHaveLength(1)
+      expect(persisted.filter((frame) => frame.topicID === newTopic)).toMatchObject([
+        { segment: 2, position: '000000000001' },
+      ])
+      expect(cursor.history(newTopic)).toEqual(['000000000001'])
+      expect(cursor.stored(topicID)).toBe('000000000009')
+      expect(records.size).toBe(0)
+    },
+  )
 
   test.each([
     { gated: false, name: 'stall notices flow without commit activity' },

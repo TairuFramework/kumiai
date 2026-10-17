@@ -17,7 +17,7 @@ import {
   type PendingAppFrame,
 } from './crypto.js'
 import { asLogPosition, assertForwardPage, type LogPosition } from './cursor.js'
-import { GroupSafetyHeldError } from './errors.js'
+import { GroupSafetyHeldError, PeerDisposedError } from './errors.js'
 import type { BusHandlerMaps } from './handlers.js'
 import { notifyHost } from './host-notice.js'
 import type { HubMux } from './hub-mux.js'
@@ -389,7 +389,10 @@ export function createAppLane(params: AppLaneParams): AppLane {
    * and has walked no commit still has to keep a read position over what it was pushed — so the
    * durable cursor cannot be something only a pull establishes.
    */
-  const laneFor = async (name: string): Promise<{ frames: Array<AppFrame>; cursor: AppCursor }> => {
+  const laneFor = async (
+    name: string,
+  ): Promise<{ frames: Array<AppFrame>; cursor: AppCursor } | undefined> => {
+    const generation = segmentGeneration
     let frames = segment.get(name)
     if (frames == null) {
       frames = []
@@ -400,6 +403,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
       const at = anchor()
       const topicID = protocolTopic(at.secret, at.epoch, name)
       const stored = (await appCursorStore?.load(topicID)) ?? null
+      // Reset runs outside this mutex; an old cursor must not enter the new segment.
+      if (generation !== segmentGeneration) return
       cursor = { topicID, position: stored != null ? asLogPosition(stored) : null, fetched: null }
       cursors.set(name, cursor)
     }
@@ -427,12 +432,14 @@ export function createAppLane(params: AppLaneParams): AppLane {
    */
   const loadSegment = async (): Promise<void> => {
     if (safetyHold() !== null) return
+    const generation = segmentGeneration
     // One protocol per lane, sharing nothing (a topic is derived per protocol NAME). Paged
     // concurrently — otherwise each protocol waits out the previous one's whole pull.
     const loadOne = async (name: string): Promise<void> => {
       if (safetyHold() !== null) return
-      const { frames, cursor } = await laneFor(name)
-      if (safetyHold() !== null) return
+      const lane = await laneFor(name)
+      if (lane == null || generation !== segmentGeneration || safetyHold() !== null) return
+      const { frames, cursor } = lane
       const topicID = cursor.topicID
       // Carrying the window on the listener-less subscribe too: a member that is AWAY reaches a
       // segment by rotating onto it mid-walk, pulled here and never listened on.
@@ -456,6 +463,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
           ...(after != null ? { after } : {}),
           limit: APP_FETCH_LIMIT,
         })
+        if (generation !== segmentGeneration) return
         assertForwardPage(after, result.messages)
         if (after != null && result.gap)
           reportPrunedWindow({ name, topicID, cursor: after, oldest: result.oldest })
@@ -505,6 +513,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
    * remembers them from now on.
    */
   const advanceCursor = async (name: string, frames: Array<AppFrame>): Promise<void> => {
+    if (segment.get(name) !== frames) return
     const cursor = cursors.get(name)
     if (cursor == null) return
     let passed = 0
@@ -783,8 +792,10 @@ export function createAppLane(params: AppLaneParams): AppLane {
 
   const drain = async (): Promise<void> => {
     if (disposed) return
+    const generation = segmentGeneration
     applyCaughtUpTimes()
     await loadSegment()
+    if (generation !== segmentGeneration) return
     applyCaughtUpTimes()
     for (const [name, frames] of segment) {
       const events = appEventHandlers.get(name)
@@ -794,7 +805,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       }
       for (const frame of frames) {
         if (frame.sealed.state !== 'sealed') continue
-        if (disposed || safetyHold() !== null) break
+        if (disposed || generation !== segmentGeneration || safetyHold() !== null) break
         const sealed = frame.sealed.bytes
         // Unreadable bytes are dead. Past and future are the open's locked answer, below.
         if (crypto.frameEpoch(sealed) == null) {
@@ -928,10 +939,17 @@ export function createAppLane(params: AppLaneParams): AppLane {
     }
   }
 
+  let drainingEpoch: number | undefined
   const deliver = async (generation = segmentGeneration): Promise<void> => {
     try {
       await runAppLane(async () => {
-        if (generation === segmentGeneration) await drain()
+        if (generation !== segmentGeneration) return
+        drainingEpoch = anchor().epoch
+        try {
+          await drain()
+        } finally {
+          drainingEpoch = undefined
+        }
       })
     } finally {
       if (generation === segmentGeneration && crypto.pending != null && !disposed) {
@@ -981,6 +999,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
   return {
     dropFrame: (topicID, position) =>
       runAppLane(async () => {
+        if (disposed) throw new PeerDisposedError('Peer is disposed')
         if (crypto.pending == null) throw new Error('durable app delivery is disabled')
         const unknown = pendingRecords.find(
           (record) =>
@@ -1039,6 +1058,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       }
     },
     reset: (): void => {
+      const interrupted = drainingEpoch != null && drainingEpoch !== anchor().epoch
       segmentGeneration += 1
       if (futureTimer != null) clearTimeout(futureTimer)
       if (retryTimer != null) clearTimeout(retryTimer)
@@ -1058,6 +1078,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       // topic and is dropped by the merge if it disagrees with the live anchor.
       staged = new Map()
       retained = new Set()
+      if (interrupted) kick()
     },
   }
 }
