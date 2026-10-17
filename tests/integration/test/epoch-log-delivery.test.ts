@@ -145,6 +145,7 @@ test('real MLS delivers accepted plaintext after a commit overtakes publication'
   const plaintext = { text: 'survives the epoch race' }
   await bob.peer.protocol('chat').dispatch('chat/posted', { data: plaintext })
   await vi.waitFor(async () => expect(await bob.appOutbox.list()).toEqual([]), { timeout: 3000 })
+  await vi.waitFor(() => expect(received).toHaveLength(2), { timeout: 3000 })
   const anchor = alice.anchorStore.stored()
   if (anchor == null) throw new Error('Missing anchor')
   const publications = hub.log.published.filter(
