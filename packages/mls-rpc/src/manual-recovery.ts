@@ -193,7 +193,7 @@ export function createManualRecoveryStore<TTx extends GroupTransaction>(params: 
   async function change(
     id: string,
     mutationID: string,
-    update: (record: ManualRecoveryRecord, source: ControlSnapshot) => ManualRecoveryRecord,
+    update: (record: ManualRecoveryRecord, source: ControlSnapshot) => ManualRecoveryRecord | null,
     continuation = false,
   ): Promise<void> {
     await entry.run(
@@ -217,6 +217,7 @@ export function createManualRecoveryStore<TTx extends GroupTransaction>(params: 
         }
       },
       async (stores, prepared) => {
+        if (prepared.next === null) return
         if (
           !sameStoredValue(
             findManualRecovery(await stores.checkpoints.list(), key, id),
@@ -356,6 +357,14 @@ export function createManualRecoveryStore<TTx extends GroupTransaction>(params: 
                 throw new GroupStateConflictError('Manual settlement requires its bound attempt')
               settlement.ledgerBefore = [...new Set([...settlement.ledgerBefore, ...obligations])]
             }
+            if (
+              changes.deleteRejoin &&
+              record.attempt !== null &&
+              !changes.putSettledRejoins?.length
+            )
+              throw new GroupStateConflictError(
+                'Manual attempt deletion requires its bound settlement',
+              )
             const { putSettledRejoins, ...remaining } = changes
             const next = applyChanges(overlay(source, record), remaining, null, key)
             return {
@@ -395,8 +404,12 @@ export function createManualRecoveryStore<TTx extends GroupTransaction>(params: 
         /* An unavailable host binding pauses the saved choice. */
       }
       const pauseReason = target === null ? 'target-unresolved' : null
-      if (record.pauseReason !== pauseReason)
-        await change(id, crypto.randomUUID(), (current) => ({ ...current, pauseReason }), true)
+      await change(
+        id,
+        crypto.randomUUID(),
+        (current) => (current.pauseReason === pauseReason ? null : { ...current, pauseReason }),
+        true,
+      )
       return target
     },
   }

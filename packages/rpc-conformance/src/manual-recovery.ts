@@ -512,6 +512,56 @@ export function testManualRecoveryConformance<THandle extends ConformanceRegistr
         ).rejects.toThrow()
         expect(await fixture.manualRecovery().readManualRecovery(saved.id)).toEqual(saved)
       }))
+    test('manual bare deletion preserves obligations across replacement and reopen', () =>
+      run(async (fixture, key) => {
+        const recovery = await fixture.confirmedRecovery(key, { confirm: true })
+        if (!('format' in recovery.record)) throw new Error('Expected captured recovery')
+        const saved = await fixture.manualRecovery().authoriseManualRecovery(key, choice)
+        const overlay = fixture.manualRecovery().manualRecoveryControl(saved.id)
+        const candidate = {
+          ...recovery.record,
+          id: 'manual-with-obligations',
+          trigger: 'manual' as const,
+          authorisationID: saved.id,
+          target: {
+            ...recovery.record.target,
+            targetID: choice.targetID,
+            topicID: choice.commitTopicID,
+          },
+          ledgerBefore: ['manual-owed'],
+        }
+        await overlay.apply({ putRejoin: candidate }, 'save-before-delete')
+        const before = await fixture.manualRecovery().readManualRecovery(saved.id)
+        for (const putSettledRejoins of [undefined, []]) {
+          await expect(
+            overlay.apply({ deleteRejoin: true, putSettledRejoins }, 'bare-delete'),
+          ).rejects.toThrow()
+          expect(await fixture.manualRecovery().readManualRecovery(saved.id)).toEqual(before)
+        }
+        const reopened = await fixture.reopen()
+        try {
+          const restored = reopened.manualRecovery().manualRecoveryControl(saved.id)
+          expect(await reopened.manualRecovery().readManualRecovery(saved.id)).toEqual(before)
+          await restored.apply(
+            { putRejoin: { ...candidate, id: 'replacement-manual', ledgerBefore: ['next-owed'] } },
+            'replace-after-delete',
+          )
+          const replaced = await reopened.reopen()
+          try {
+            const record = await replaced.manualRecovery().readManualRecovery(saved.id)
+            expect(record?.attempt).toMatchObject({
+              id: 'replacement-manual',
+              authorisationID: saved.id,
+              ledgerBefore: expect.arrayContaining(['manual-owed', 'next-owed']),
+            })
+            expect(record?.settlements).toEqual(saved.settlements)
+          } finally {
+            await replaced.close()
+          }
+        } finally {
+          await reopened.close()
+        }
+      }))
     test('manual settlements retain all cumulative obligations', () =>
       run(async (fixture, key) => {
         const recovery = await fixture.confirmedRecovery(key, { confirm: true })

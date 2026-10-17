@@ -205,6 +205,72 @@ test('saved pause projects visibly and clears without replacing authorisation', 
   }
 })
 
+for (const context of ['supplied', 'absent'] as const) {
+  test(`successful deferred resolution clears an interleaved pause / ${context}`, async () => {
+    const fixture = await createRegistryFixture({
+      mode: 'double',
+      groupID: 'manual-recovery',
+      setup: 'seeded',
+      ownershipContext: context === 'supplied' ? createAsyncLocalOwnershipContext() : undefined,
+    })
+    const key = { groupID: 'manual-recovery', incarnation: 1 }
+    const hub = new Proxy({} as LogHub & MailboxHub, {
+      get() {
+        throw new Error('Storage must not call hub methods')
+      },
+    })
+    const target = { id: 'selected', commitTopicID: 'commits', hub }
+    const started = deferred<void>()
+    const released = deferred<void>()
+    let calls = 0
+    const storage = createManualRecoveryStore({
+      registry: fixture.registry,
+      persistence: fixture.device.groups,
+      key,
+      resolveTarget: async () => {
+        if (++calls !== 1) throw new Error('Host binding unavailable')
+        started.resolve()
+        await released.promise
+        return target
+      },
+    })
+    try {
+      const saved = await storage.authoriseManualRecovery(key, {
+        mode: 'resync',
+        targetID: 'selected',
+        commitTopicID: 'commits',
+        allowOpenFork: false,
+      })
+      const resolving = storage.resolveManualRecoveryTarget(saved.id)
+      await started.promise
+      expect(await storage.resolveManualRecoveryTarget(saved.id)).toBeNull()
+      expect(await fixture.safety().status(key)).toMatchObject({
+        manualRecovery: { id: saved.id, kind: 'paused', reason: 'target-unresolved' },
+      })
+      released.resolve()
+      expect(await resolving).toBe(target)
+      expect(await storage.readManualRecovery(saved.id)).toEqual({
+        ...saved,
+        mutationID: expect.any(String),
+      })
+      expect(await fixture.safety().status(key)).toMatchObject({
+        manualRecovery: { id: saved.id, kind: 'pending', reason: null },
+      })
+      const reopened = await fixture.reopen()
+      try {
+        expect(await reopened.safety().status(key)).toMatchObject({
+          manualRecovery: { id: saved.id, kind: 'pending', reason: null },
+        })
+      } finally {
+        await reopened.close()
+      }
+    } finally {
+      released.resolve()
+      await fixture.close()
+    }
+  })
+}
+
 test('manual overlay rejects fork floor authority even with matching ordinary intent', async () => {
   const fixture = await createForkRecoveryRealFixture(true)
   try {
