@@ -24,7 +24,11 @@ import {
 } from '@kumiai/rpc'
 
 import { createRegistryCheckpointService } from './checkpoint.js'
-import { type ManualRecoveryStore, manualRecoveryAttempt } from './manual-recovery.js'
+import {
+  type ManualRecoveryStore,
+  manualRecoveryAttempt,
+  successorChosen,
+} from './manual-recovery.js'
 import { copyStoredValue, sameStoredValue } from './memory-incarnation-stores.js'
 import type { RecoveryRouting } from './mls.js'
 import {
@@ -168,12 +172,15 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
   async function discoverManual(): Promise<void> {
     if (manual !== null) return
     manual = await capability.entry.read(key.groupID, async (reads) => {
-      const row = [...(await reads.checkpoints())]
+      const records = await reads.checkpoints()
+      // A successor choice is the app's to resume; it also retires any pending resync.
+      const superseded = successorChosen(records, key)
+      const row = [...records]
         .reverse()
         .find(
           (row) =>
             row.kind === 'manual-recovery' &&
-            ((row.value.stage === 'authorised' && sameStoredValue(row.key, key)) ||
+            ((row.value.stage === 'authorised' && !superseded && sameStoredValue(row.key, key)) ||
               (row.value.stage === 'completed' &&
                 (sameStoredValue(row.key, key) || sameStoredValue(row.value.destination, key)))),
         )

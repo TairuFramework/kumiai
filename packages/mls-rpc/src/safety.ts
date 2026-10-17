@@ -28,7 +28,6 @@ import {
   ForkReportRefusedError,
   GroupStateConflictError,
   GroupUnavailableError,
-  ManualRecoveryUnavailableError,
 } from './persistence-errors.js'
 import type {
   EpochIdentity,
@@ -47,6 +46,7 @@ import {
 import { readRecoverySource } from './registry/source.js'
 import type { GroupHandleRegistry } from './registry/types.js'
 import { flushConditionEvents, groupCondition } from './safety-conditions.js'
+import { clearSuccessorTombstone, retireToSuccessor } from './successor.js'
 
 export type ManualRecovery =
   | { mode: 'resync'; targetID: string; allowOpenFork?: boolean }
@@ -66,11 +66,14 @@ export type GroupSafety = {
   }>
   epochAuthenticator(key: GroupKey): Promise<EpochIdentity | null>
   reportFork(key: GroupKey, evidence: GroupForkEvidence): Promise<void>
+  /** Resync returns the installed key; successor returns the successor after source retirement. */
   recover(key: GroupKey, choice: ManualRecovery): Promise<GroupKey>
   events(
     key: GroupKey,
   ): Promise<Array<GroupSafetyEvent | RecoveryUnavailableEvent | GroupConditionEvent>>
   ackEvent(key: GroupKey, id: string): Promise<void>
+  /** Releases only the successor readmission block; spent checks and safety latches stay. */
+  clearTombstone(groupID: string): Promise<void>
 }
 
 class Noop extends Error {}
@@ -217,8 +220,18 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
       }
     },
     async recover(requested, choice) {
-      if (choice.mode === 'successor')
-        throw new ManualRecoveryUnavailableError('Successor recovery is unavailable')
+      if (choice.mode === 'successor') {
+        const source = { ...requested }
+        const successor = { ...choice.successor }
+        if (!validKey(source) || !validKey(successor) || successor.groupID === source.groupID)
+          throw new TypeError('Invalid manual recovery choice')
+        return await retireToSuccessor({
+          registry: params.registry,
+          persistence: params.persistence,
+          source,
+          successor,
+        })
+      }
       const { allowOpenFork = false } = choice
       const supplied =
         'target' in choice
@@ -277,6 +290,13 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
                   sameStoredValue(row.event, event),
               ),
           )
+      })
+    },
+    async clearTombstone(groupID) {
+      await clearSuccessorTombstone({
+        registry: params.registry,
+        persistence: params.persistence,
+        groupID,
       })
     },
     async ackEvent(requested, id) {

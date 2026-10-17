@@ -30,6 +30,7 @@ export type {
   RecoverySource,
   RecoveryUnavailableEvent,
   SafetyHold,
+  SuccessorTombstone,
 } from '@kumiai/rpc'
 
 export {

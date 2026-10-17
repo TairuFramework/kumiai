@@ -15,7 +15,7 @@ import {
   GroupUnavailableError,
   StorageOutcomeUnknownError,
 } from '../persistence-errors.js'
-import type { GroupKey, GroupTransaction } from '../persistence-types.js'
+import type { GroupKey, GroupStores, GroupTransaction } from '../persistence-types.js'
 import { groupCondition } from '../safety-conditions.js'
 import { createRegistryAccess, type RegistryOwner } from './access.js'
 import { admissionFor, type ColdEnvironment, loadValidatedGroup } from './cold.js'
@@ -364,6 +364,18 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     return value
   }
   async function deleteGroup(requestedKey: GroupKey): Promise<void> {
+    const key = { ...requestedKey }
+    await retireGroup(key, 'Inactive deletion source', (stores, mutationID) =>
+      deleteIncarnations(stores, key, mutationID),
+    )
+  }
+  /** Drains source hooks and work, then runs one retiring transaction on a quiet source. */
+  async function retireGroup<TResult>(
+    requestedKey: GroupKey,
+    inactive: string,
+    work: (stores: GroupStores<TTx>, mutationID: string) => Promise<TResult>,
+    afterDrain?: () => Promise<void>,
+  ): Promise<TResult> {
     assertOpen()
     const key = { ...requestedKey }
     retirement.assertAvailable(key.groupID)
@@ -379,6 +391,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     try {
       for (let round = 0; round < 3; round++) {
         await attempt.drain()
+        await afterDrain?.()
         const activity = capability.activity(key.groupID)
         const generation = slot.generation
         const mutationID = crypto.randomUUID()
@@ -387,12 +400,12 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
           stopObservation = capability.observe(key.groupID, (observation) => {
             if (observation.mutationID === mutationID) settle('committed')
           })
-          await capability.run(
+          return await capability.run(
             { groupID: key.groupID, mutationID },
             async (reads) => {
               const lifetime = await reads.lifetime()
               if (lifetime?.activeIncarnation !== key.incarnation)
-                throw new DisplacedGroupHandleError('Inactive deletion source')
+                throw new DisplacedGroupHandleError(inactive)
               return { expected: lifetime, value: null }
             },
             async (stores) => {
@@ -405,10 +418,9 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
               )
                 throw new DeleteDrainChanged()
               stores.tx.onRollback(() => settle('rolled-back'))
-              await deleteIncarnations(stores, key, mutationID)
+              return await work(stores, mutationID)
             },
           )
-          return
         } catch (error) {
           if (error instanceof DeleteDrainChanged) {
             stopObservation()
@@ -583,6 +595,8 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     latch,
     held,
     persistTrustUnavailable,
+    retire: (key, work, afterDrain) =>
+      track(retireGroup(key, 'Inactive retirement source', work, afterDrain)),
     safetyHold: held,
     onSafetyHold(key, sink) {
       assertOpen()

@@ -73,8 +73,20 @@ export type ManualRecoveryStatus = {
   reason: 'target-unresolved' | null
 }
 
+/** Blocks readmission of a source retired in favour of an admitted successor until the app clears it. */
+export type SuccessorTombstone = {
+  kind: 'successor-tombstone'
+  id: string
+  source: GroupKey
+  successor: GroupKey
+  authorisationID: string
+  retiredAt: number
+  clearedAt: number | null
+}
+
 export type CheckpointRecord =
   | { kind: 'manual-recovery'; id: string; key: GroupKey; value: ManualRecoveryRecord }
+  | { kind: 'successor'; id: string; key: GroupKey; value: SuccessorTombstone }
   | {
       kind: 'superseded-rejoin'
       id: string

@@ -29,6 +29,7 @@ export type {
   ManualRecoveryRecord,
   ManualRecoveryStatus,
   PersistedManualRecovery,
+  SuccessorTombstone,
 } from './checkpoint-types.js'
 export { createCheckpointWorker } from './checkpoint-worker.js'
 export {

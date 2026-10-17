@@ -35,7 +35,7 @@ export function assertCheckpointUpdates(
   const entry = tx === undefined ? undefined : memoryTransactionEntry(tx.rows)
   const authorised = entry === undefined ? undefined : conditionCaptures.get(entry)
   for (const row of [...before, ...after]) {
-    if (row.kind === 'manual-recovery') {
+    if (row.kind === 'manual-recovery' || row.kind === 'successor') {
       const next = after.find((value) => value.id === row.id)
       const previous = before.find((value) => value.id === row.id)
       if (
@@ -116,6 +116,7 @@ function validate(record: CheckpointRecord, groupID: string, id: string): void {
     ![
       'fact',
       'manual-recovery',
+      'successor',
       'superseded-rejoin',
       'condition',
       'publication',

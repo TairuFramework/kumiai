@@ -180,6 +180,7 @@ export type ConformanceGroupSafety<Hub = never> = {
     >
   >
   ackEvent(key: ConformanceGroupKey, id: string): Promise<void>
+  clearTombstone(groupID: string): Promise<void>
 }
 
 function signal() {
@@ -672,15 +673,294 @@ export function runGroupSafetyContract<THandle extends ConformanceRegistryHandle
       },
     )
 
-    test.each(['successor'] as const)('manual %s recovery remains unavailable', async (mode) => {
+    const freshUse = (ref: string) => ({ sourceID: 'source', ref, kind: 'ordinary' as const })
+    async function admitSuccessor(groupID = 'admitted-successor') {
+      return await fixture.registry.seed(await fixture.makeHandle(0, groupID), {
+        packageUse: null,
+      })
+    }
+    async function successorRows(successor: ConformanceGroupKey) {
+      return {
+        lifetime: await fixture.device.groups.load(successor.groupID),
+        state: await fixture.device.groups.loadState(successor),
+        trust: await fixture.device.groups.loadTrust(successor.groupID),
+        control: await fixture.device.groups.ports(successor).control.load(),
+        outbox: await fixture.device.groups.ports(successor).outbox.list(),
+      }
+    }
+
+    test('successor must already be admitted', async () => {
       const key = await activeKey()
-      const before = await fixture.inspectRows()
+      const unavailable = { name: 'ManualRecoveryUnavailableError' }
+      // Reading an absent group writes only its owner marker; prime it before comparing rows.
+      await expect(fixture.registry.access('missing-successor')).rejects.toThrow()
+      let before = await fixture.inspectRows()
       await expect(
-        fixture
-          .safety()
-          .recover(key, { mode, successor: { groupID: 'successor', incarnation: 1 } }),
-      ).rejects.toMatchObject({ name: 'ManualRecoveryUnavailableError' })
+        fixture.safety().recover(key, {
+          mode: 'successor',
+          successor: { groupID: 'missing-successor', incarnation: 1 },
+        }),
+      ).rejects.toMatchObject(unavailable)
       expect(await fixture.inspectRows()).toEqual(before)
+      await expect(
+        fixture.safety().recover(key, { mode: 'successor', successor: { ...key } }),
+      ).rejects.toBeInstanceOf(TypeError)
+      const admitted = await admitSuccessor()
+      before = await fixture.inspectRows()
+      await expect(
+        fixture.safety().recover(key, {
+          mode: 'successor',
+          successor: { ...admitted, incarnation: admitted.incarnation + 1 },
+        }),
+      ).rejects.toMatchObject(unavailable)
+      expect(await fixture.inspectRows()).toEqual(before)
+      await fixture.safety().reportFork(admitted, await evidence(admitted))
+      before = await fixture.inspectRows()
+      await expect(
+        fixture.safety().recover(key, { mode: 'successor', successor: admitted }),
+      ).rejects.toMatchObject(unavailable)
+      expect(await fixture.inspectRows()).toEqual(before)
+      const deleted = await admitSuccessor('deleted-successor')
+      await fixture.registry.delete(deleted)
+      before = await fixture.inspectRows()
+      await expect(
+        fixture.safety().recover(key, { mode: 'successor', successor: deleted }),
+      ).rejects.toMatchObject(unavailable)
+      expect(await fixture.inspectRows()).toEqual(before)
+      expect((await fixture.safety().status(key)).manualRecovery).toBeNull()
+      expect((await fixture.registry.access(key.groupID)).admission().admissible).toBe(true)
     })
+
+    test('successor retires source without copying state', async () => {
+      const key = await activeKey()
+      const successor = await admitSuccessor()
+      const successorBefore = await successorRows(successor)
+      const sourceState = await fixture.device.groups.loadState(key)
+      const retired = await fixture.safety().recover(key, { mode: 'successor', successor })
+      expect(retired).toEqual(successor)
+      expect(await successorRows(successor)).toEqual(successorBefore)
+      expect(await fixture.device.groups.load(key.groupID)).toMatchObject({
+        activeIncarnation: null,
+        latestIncarnation: key.incarnation,
+      })
+      expect(sourceState).toMatchObject({ deleted: false })
+      expect(await fixture.device.groups.loadState(key)).toMatchObject({ deleted: true })
+      await expect(fixture.registry.access(key.groupID)).rejects.toMatchObject({
+        name: 'GroupUnavailableError',
+      })
+      expect((await fixture.safety().status(key)).manualRecovery).toMatchObject({
+        kind: 'completed',
+        reason: null,
+      })
+      const rows = await fixture.inspectRows()
+      // Completion is idempotent; a later choice cannot reopen the retired source.
+      expect(await fixture.safety().recover(key, { mode: 'successor', successor })).toEqual(
+        successor,
+      )
+      expect(await fixture.inspectRows()).toEqual(rows)
+      await expect(
+        fixture.safety().recover(key, {
+          mode: 'successor',
+          successor: await admitSuccessor('other-successor'),
+        }),
+      ).rejects.toThrow()
+      expect(await successorRows(successor)).toEqual(successorBefore)
+      expect((await fixture.registry.access(successor.groupID)).admission().admissible).toBe(true)
+    })
+
+    test('old Welcome cannot bypass successor tombstone', async () => {
+      const key = await activeKey()
+      const successor = await admitSuccessor()
+      const older = await fixture.makeHandle(1, key.groupID)
+      const newer = await fixture.makeHandle(3, key.groupID)
+      await fixture.safety().recover(key, { mode: 'successor', successor })
+      const before = await fixture.inspectRows()
+      for (const [handle, ref] of [
+        [older, 'older'],
+        [newer, 'newer'],
+      ] as const)
+        for (const replace of [undefined, true])
+          await expect(
+            fixture.registry.seed(handle, { replace, packageUse: freshUse(ref) }),
+          ).rejects.toMatchObject({
+            name: 'SeedAdmissionRefusedError',
+            reason: 'successor-tombstone',
+          })
+      expect(await fixture.inspectRows()).toEqual(before)
+      const cold = await fixture.reopen()
+      try {
+        // Restart leaves no private state for the retired source; only the tombstone decides.
+        expect(await cold.device.groups.loadState(key)).toMatchObject({ deleted: true })
+        const rows = await cold.inspectRows()
+        await expect(
+          cold.registry.seed(await cold.makeHandle(2, key.groupID), {
+            replace: true,
+            packageUse: freshUse('restarted'),
+          }),
+        ).rejects.toMatchObject({
+          name: 'SeedAdmissionRefusedError',
+          reason: 'successor-tombstone',
+        })
+        expect(await cold.inspectRows()).toEqual(rows)
+      } finally {
+        await cold.close()
+      }
+    })
+
+    test('explicit tombstone clear preserves spent checks', async () => {
+      const key = await activeKey()
+      const successor = await admitSuccessor()
+      const fresh = await fixture.makeHandle(2, key.groupID)
+      const untouched = await fixture.inspectRows()
+      await fixture.safety().clearTombstone(key.groupID)
+      expect(await fixture.inspectRows()).toEqual(untouched)
+      await fixture.safety().recover(key, { mode: 'successor', successor })
+      await expect(
+        fixture.registry.seed(fresh, { replace: true, packageUse: freshUse('fresh') }),
+      ).rejects.toMatchObject({ reason: 'successor-tombstone' })
+      const successorBefore = await successorRows(successor)
+      await fixture.safety().clearTombstone(key.groupID)
+      const cleared = await fixture.inspectRows()
+      await fixture.safety().clearTombstone(key.groupID)
+      expect(await fixture.inspectRows()).toEqual(cleared)
+      const next = await fixture.registry.seed(fresh, {
+        replace: true,
+        packageUse: freshUse('fresh'),
+      })
+      expect(next).toEqual({ ...key, incarnation: key.incarnation + 1 })
+      expect((await fixture.registry.access(key.groupID)).admission().admissible).toBe(true)
+      expect(await successorRows(successor)).toEqual(successorBefore)
+      await fixture.registry.delete(next)
+      const rows = await fixture.inspectRows()
+      await expect(
+        fixture.registry.seed(fresh, { replace: true, packageUse: freshUse('replay') }),
+      ).rejects.toMatchObject({ name: 'SeedAdmissionRefusedError', reason: 'spent' })
+      expect(await fixture.inspectRows()).toEqual(rows)
+    })
+
+    test('tombstone clear never releases a safety latch', async () => {
+      const key = await activeKey()
+      const successor = await admitSuccessor()
+      await hold(key, 'fork-halted')
+      expect(await fixture.safety().recover(key, { mode: 'successor', successor })).toEqual(
+        successor,
+      )
+      await fixture.safety().clearTombstone(key.groupID)
+      const rows = await fixture.inspectRows()
+      await expect(
+        fixture.registry.seed(await fixture.makeHandle(2, key.groupID), {
+          replace: true,
+          packageUse: freshUse('halted'),
+        }),
+      ).rejects.toMatchObject({ name: 'SeedAdmissionRefusedError', reason: 'fork-halted' })
+      expect(await fixture.inspectRows()).toEqual(rows)
+      expect((await fixture.device.groups.ports(key).control.load()).forkHalt).not.toBeNull()
+    })
+
+    test('successor retirement preserves owed work and history', async () => {
+      const key = await activeKey()
+      const successor = await admitSuccessor()
+      const access = await fixture.registry.access(key.groupID)
+      const certified = {
+        seq: 41,
+        protocol: 'chat',
+        prc: 'posted',
+        data: new Uint8Array([13]),
+        status: 'accepted' as const,
+        lastAttempt: null,
+      }
+      const uncertified = { ...certified, seq: 42, data: new Uint8Array([14]) }
+      const settlement = {
+        attemptID: 'owed-certified-attempt',
+        topicID: 'owed-app-topic',
+        sequenceID: 'owed-certified-position',
+        outcome: 'published' as const,
+      }
+      const welcome = {
+        opID: 'owed-welcome',
+        welcome: new Uint8Array([12]),
+        recipients: [fixture.identity.id],
+        committed: true as const,
+      }
+      await fixture.installRows({
+        key,
+        control: {
+          putOperations: [
+            {
+              id: 'abandoned-operation',
+              kind: 'rotation',
+              revokes: false,
+              body: new Uint8Array([11]),
+              seq: 1,
+              enqueuedAt: 1,
+              deadline: 30_001,
+              stage: 'intent',
+            },
+          ],
+          putOutcomes: [{ id: 'owed-outcome', opID: null, at: 2, kind: 'unknown' }],
+          putWelcomes: [welcome],
+        },
+        outbox: [certified, uncertified],
+        settlements: [{ seq: certified.seq, value: settlement }],
+      })
+      await hold(key, 'fork-halted')
+      const [halt] = await fixture.safety().events(key)
+      const order: Array<string> = []
+      access.onRetire(async () => {
+        order.push(`hook:${(await fixture.device.groups.load(key.groupID))?.activeIncarnation}`)
+      })
+      await fixture.safety().recover(key, { mode: 'successor', successor })
+      order.push(`after:${(await fixture.device.groups.load(key.groupID))?.activeIncarnation}`)
+      expect(order).toEqual([`hook:${key.incarnation}`, 'after:null'])
+      const control = await fixture.device.groups.ports(key).control.load()
+      expect(control.welcomes).toEqual([welcome])
+      expect(control.operations).toEqual([])
+      expect(control.outcomes).toEqual(
+        expect.arrayContaining([
+          { id: 'owed-outcome', opID: null, at: 2, kind: 'unknown' },
+          expect.objectContaining({ id: 'abandoned-operation', kind: 'unknown' }),
+        ]),
+      )
+      expect(control.forkHalt).not.toBeNull()
+      const ports = fixture.device.groups.ports(key)
+      expect(await ports.outbox.list()).toEqual([certified])
+      expect(await ports.outbox.loadSettlement(certified.seq)).toEqual(settlement)
+      const events = await ports.outbox.events()
+      expect(events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ kind: 'failed', entry: { ...uncertified, status: 'failed' } }),
+        ]),
+      )
+      expect(await fixture.safety().events(key)).toEqual([halt])
+      const served = await fixture.serveRetiredWelcomes(key, async () => {})
+      expect(served).toMatchObject({ remaining: [], failures: [] })
+    })
+
+    test.each(['state', 'trust'] as const)(
+      'source %s corruption does not require private restoration for successor',
+      async (damage) => {
+        const key = await activeKey()
+        const successor = await admitSuccessor()
+        if (damage === 'state') await fixture.corruptState(key)
+        else await fixture.corruptTrust(key.groupID)
+        const cold = await fixture.reopen()
+        try {
+          const restores = cold.restoreCount(key.groupID)
+          expect(await cold.safety().recover(key, { mode: 'successor', successor })).toEqual(
+            successor,
+          )
+          expect(cold.restoreCount(key.groupID)).toBe(restores)
+          expect(await cold.device.groups.load(key.groupID)).toMatchObject({
+            activeIncarnation: null,
+          })
+          expect((await cold.safety().status(key)).manualRecovery).toMatchObject({
+            kind: 'completed',
+          })
+          expect((await cold.registry.access(successor.groupID)).admission().admissible).toBe(true)
+        } finally {
+          await cold.close()
+        }
+      },
+    )
   })
 }

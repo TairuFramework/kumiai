@@ -337,7 +337,7 @@ restorations are never cached. Pure reads advance no persistence revision or sta
 
 `GroupSafety.epochAuthenticator(key)` reads a defensive copy of active installed trust without writing.
 `reportFork(key, evidence)` validates the active incarnation and committed identity before latching and atomically storing evidence with its event.
-`recover(key, choice)` persists a resync choice before any network use, then moves or rejoins (see Hub migration). Successor recovery is unavailable.
+`recover(key, choice)` persists a resync choice before any network use, then moves or rejoins (see Hub migration). A successor choice retires the source (see Successor retirement).
 The factory requires a registered registry and persistence sharing its coordinator binding.
 
 `forkHalt` and `recoveryUnavailable` are immutable incarnation fields.
@@ -358,7 +358,7 @@ Hosts derive `judgeWelcomeAdmission`'s `held.forkHalted` from `forkHalt` alone.
 `recoveryUnavailable` alone permits an otherwise admissible Welcome into the next incarnation when retained trust is valid.
 Missing, unreadable or empty-spent trust refuses seed as unavailable without changing admission state.
 Neither Welcome nor GroupInfo reconstructs the spent set. Ordinary readmission refuses a fork-halted tombstone.
-Manual re-invite after lost spent trust requires a new successor group with a new groupID. This recovery belongs to 2.2e.
+After lost spent trust, retirement to an already admitted successor group (another groupID) remains the explicit exit.
 
 A validated latch survives failed or ambiguous writes in the current process. Only proven commits survive restart.
 A crash before durable writing can lose volatile host evidence.
@@ -388,6 +388,22 @@ Source holds and evidence stay as history. A failed attempt leaves source state,
 A device that arrives ahead of the destination's responders stays pending with `target-behind` unless R2/R7 fork-floor evidence applies.
 Apps must move every device. Separate hubs cannot exchange checkpoint evidence, so a partial migration can split undetectably.
 Restart resumes only the saved destination; an unresolved binding, or a resolved hub missing a transport method, pauses with `target-unresolved`.
+
+## Successor retirement
+
+`recover(key, { mode: 'successor', successor })` retires the source in favour of a group the app already created or joined through normal admission.
+The successor must be a different, available group admitted at exactly that key; otherwise `ManualRecoveryUnavailableError` refuses before any write.
+kumiai checks the successor through its own gate only, persists the choice, drains source work and retirement hooks (stopping the source peer), then commits in one transaction:
+the source lifetime becomes a tombstone, abandoned operations and superseded manual candidates become `unknown` outcomes, uncertified outbox entries fail with events,
+the choice completes and a `SuccessorTombstone` row records `source`, `successor`, `authorisationID` and `retiredAt`. It returns the successor key.
+Nothing is copied: no state, ratchets, messages or roster. Owed outcomes, Welcomes, certified settlements, events and halt evidence stay serviceable as history.
+Retirement reads no private state or retained trust, so corrupt source state or trust is no obstacle. Failure leaves the source, its routing and any halt intact.
+A pending resync may be superseded by a successor choice, never the reverse; restart resumes only the saved successor when the app calls `recover` again.
+
+An open tombstone refuses every Welcome into the source group with `SeedAdmissionRefusedError` reason `successor-tombstone`, including newer or unspent ones after restart.
+`clearTombstone(groupID)` releases only that block. Spent-authenticator checks, fork halts and other safety latches still apply to later admissions.
+Hard-held devices never answer recovery requests, and manual resync never opens that lane. When every device is halted, successor retirement is the exit.
+Application code owns successor creation, admission, routing and member migration.
 
 ## Captured registry recovery
 

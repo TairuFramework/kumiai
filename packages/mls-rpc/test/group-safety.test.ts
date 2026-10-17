@@ -648,7 +648,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
-    test('factory rejects foreign binding and unregistered registry; successor stays unavailable', async () => {
+    test('factory rejects foreign binding and unregistered registry; successor requires admission', async () => {
       const fixture = await create()
       const foreign = await createRegistryFixture({
         mode,
@@ -678,10 +678,19 @@ for (const mode of ['real-mls', 'double'] as const) {
         await expect(api.recover(key, { mode: 'resync', targetID: 'hub' })).rejects.toThrow(
           'Unexpected target resolution',
         )
-        for (const choice of [{ mode: 'successor' as const, successor: key }])
-          await expect(api.recover(key, choice)).rejects.toBeInstanceOf(
-            ManualRecoveryUnavailableError,
-          )
+        await expect(
+          api.recover(key, { mode: 'successor', successor: key }),
+        ).rejects.toBeInstanceOf(TypeError)
+        // Reading an absent group writes only its owner marker; prime it before comparing rows.
+        await expect(fixture.registry.access(`${groupID}-unadmitted`)).rejects.toThrow()
+        const rows = await fixture.inspectRows()
+        await expect(
+          api.recover(key, {
+            mode: 'successor',
+            successor: { groupID: `${groupID}-unadmitted`, incarnation: 1 },
+          }),
+        ).rejects.toBeInstanceOf(ManualRecoveryUnavailableError)
+        expect(await fixture.inspectRows()).toEqual(rows)
         expect(new ForkReportRefusedError({ reason: 'authenticator' })).toMatchObject({
           name: 'ForkReportRefusedError',
           reason: 'authenticator',

@@ -66,26 +66,31 @@ export async function deleteIncarnations<TTx extends GroupTransaction>(
   })
 }
 
-/** The caller drains source hooks before entering this transaction and saves the new lifetime after. */
+/** The caller drains source hooks before entering this transaction and saves the new lifetime after.
+ * A null destination retires the source to a successor tombstone instead of a next incarnation. */
 export async function retireIncarnation<TTx extends GroupTransaction>(
   stores: GroupStores<TTx>,
   params: {
     source: GroupKey
-    nextIncarnation: number
+    nextIncarnation: number | null
     switchedRejoinID?: string
     manualRejoinID?: string
+    /** Manual candidates outside control whose acceptance stays unknown. */
+    abandonedAttempts?: Array<string>
     mutationID: string
     at: number
   },
 ): Promise<void> {
   const { source, nextIncarnation, switchedRejoinID, manualRejoinID, mutationID, at } = params
+  if (nextIncarnation === null && (switchedRejoinID !== undefined || manualRejoinID !== undefined))
+    throw new GroupStateConflictError('Successor retirement adopts no rejoin')
   const lifetime = await stores.lifetime.load()
   if (lifetime?.activeIncarnation !== source.incarnation)
     throw new DisplacedGroupHandleError('Inactive retirement source')
   if (
     stores.tx.groupID !== source.groupID ||
     lifetime.groupID !== source.groupID ||
-    nextIncarnation !== lifetime.latestIncarnation + 1
+    (nextIncarnation !== null && nextIncarnation !== lifetime.latestIncarnation + 1)
   )
     throw new GroupStateConflictError('Retirement destination mismatch')
 
@@ -117,7 +122,7 @@ export async function retireIncarnation<TTx extends GroupTransaction>(
       : {}),
   }
   if (rejoin !== null && manualRejoinID === undefined) {
-    if (switchedRejoinID !== undefined)
+    if (switchedRejoinID !== undefined && nextIncarnation !== null)
       changes.putRejoin = {
         ...rejoin,
         stage: 'adopted',
@@ -130,6 +135,8 @@ export async function retireIncarnation<TTx extends GroupTransaction>(
       outcomes.push({ id: rejoin.id, opID: null, at, kind: 'unknown' })
     }
   }
+  for (const id of params.abandonedAttempts ?? [])
+    outcomes.push({ id, opID: null, at, kind: 'unknown' })
   // Owed outcomes survive unchanged, including their original timestamps.
   changes.putOutcomes = outcomes.filter(({ id }) => !control.outcomes.some((row) => row.id === id))
   if (control.forkRecoveryAttempt != null)
@@ -160,7 +167,7 @@ export async function retireIncarnation<TTx extends GroupTransaction>(
         kind: 'failed',
         reason: 'incarnation-abandoned',
         entry: failed,
-        nextIncarnation,
+        ...(nextIncarnation === null ? {} : { nextIncarnation }),
       },
     ])
     await rows.outbox.remove([entry.seq])

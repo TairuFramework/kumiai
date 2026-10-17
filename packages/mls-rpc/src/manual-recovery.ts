@@ -11,6 +11,7 @@ import {
   type ManualRecoveryRecord,
   type ManualRecoveryStatus,
   type PersistedManualRecovery,
+  type SuccessorTombstone,
 } from '@kumiai/rpc'
 
 import { coordinatorBinding } from './entry-capability.js'
@@ -24,6 +25,7 @@ import type { RecoveryTarget } from './safety.js'
 import { groupCondition } from './safety-conditions.js'
 
 type ManualRow = Extract<CheckpointRecord, { kind: 'manual-recovery' }>
+type AuthorityRow = Extract<CheckpointRecord, { kind: 'manual-recovery' | 'successor' }>
 
 const hubMethods = ['subscribe', 'receive', 'publish', 'fetchTopic'] as const
 
@@ -38,7 +40,7 @@ export function validCallTimeTarget(target: RecoveryTarget): boolean {
     target.commitTopicID.length > 0
   )
 }
-const preparations = new WeakMap<object, ManualRow>()
+const preparations = new WeakMap<object, AuthorityRow>()
 const liveTargets = new WeakMap<GroupHandleRegistry, Map<string, RecoveryTarget>>()
 
 export function rememberManualRecoveryTarget(
@@ -51,8 +53,42 @@ export function rememberManualRecoveryTarget(
   liveTargets.set(registry, targets)
 }
 
-export function manualRecoveryPreparation(record: CheckpointRecord): ManualRow | undefined {
+export function manualRecoveryPreparation(record: CheckpointRecord): AuthorityRow | undefined {
   return preparations.get(record)
+}
+
+/** Only coordinator code writes successor tombstones; generic writers cannot forge or clear them. */
+export async function saveSuccessorTombstone(
+  stores: { checkpoints: { put(row: CheckpointRecord): Promise<void> } },
+  value: SuccessorTombstone,
+): Promise<void> {
+  const row: AuthorityRow = {
+    kind: 'successor',
+    id: value.id,
+    key: { ...value.source },
+    value: copyStoredValue(value),
+  }
+  preparations.set(row, copyStoredValue(row))
+  await stores.checkpoints.put(row)
+}
+
+/** A successor choice supersedes every pending resync of the same source. */
+export function successorChosen(records: Array<CheckpointRecord>, key: GroupKey): boolean {
+  return records.some(
+    (row) =>
+      row.kind === 'manual-recovery' &&
+      row.value.choice.mode === 'successor' &&
+      sameStoredValue(row.key, key),
+  )
+}
+
+function assertNotSuperseded(records: Array<CheckpointRecord>, record: ManualRecoveryRecord): void {
+  if (
+    record.choice.mode === 'resync' &&
+    record.stage === 'authorised' &&
+    successorChosen(records, record.source)
+  )
+    throw new GroupStateConflictError('Manual resync superseded by a successor choice')
 }
 
 export function findManualRecovery(
@@ -192,6 +228,7 @@ export function manualRecoveryAttempt(
   const record = findManualRecovery(records, key, id)
   if (record.choice.mode !== 'resync')
     throw new GroupStateConflictError('Resync authorisation required')
+  assertNotSuperseded(records, record)
   if (record.attempt !== null) assertCandidate(record, record.attempt)
   return record
 }
@@ -233,7 +270,9 @@ export function createManualRecoveryStore<TTx extends GroupTransaction>(params: 
       { groupID: key.groupID, mutationID },
       async (reads) => {
         const lifetime = await reads.lifetime()
-        const record = findManualRecovery(await reads.checkpoints(), key, id)
+        const records = await reads.checkpoints()
+        const record = findManualRecovery(records, key, id)
+        assertNotSuperseded(records, record)
         if (
           !(record.stage === 'authorised' && lifetime?.activeIncarnation === key.incarnation) &&
           !(
@@ -274,19 +313,24 @@ export function createManualRecoveryStore<TTx extends GroupTransaction>(params: 
           const lifetime = await reads.lifetime()
           if (lifetime?.activeIncarnation !== key.incarnation)
             throw new GroupStateConflictError('Manual recovery requires the active source')
-          const existing = (await reads.checkpoints()).find(
-            (row) =>
+          const pending = (await reads.checkpoints()).filter(
+            (row): row is ManualRow =>
               row.kind === 'manual-recovery' &&
               sameStoredValue(row.key, key) &&
               row.value.stage === 'authorised',
           )
-          if (existing?.kind === 'manual-recovery') {
-            if (!sameStoredValue(existing.value.choice, choice))
-              throw new GroupStateConflictError(
-                'Manual recovery already authorised for another choice',
-              )
+          const existing = pending.find((row) => sameStoredValue(row.value.choice, choice))
+          if (existing !== undefined)
             return { expected: lifetime, value: { record: existing.value, existing: true } }
-          }
+          // Only the successor exit may supersede a pending resync; nothing supersedes a successor.
+          if (
+            pending.length > 0 &&
+            (choice.mode !== 'successor' ||
+              pending.some((row) => row.value.choice.mode === 'successor'))
+          )
+            throw new GroupStateConflictError(
+              'Manual recovery already authorised for another choice',
+            )
           const control = await reads.control(key.incarnation)
           const record: ManualRecoveryRecord = {
             id: crypto.randomUUID(),
@@ -419,7 +463,9 @@ export function createManualRecoveryStore<TTx extends GroupTransaction>(params: 
         { groupID: key.groupID, mutationID },
         async (reads) => {
           const lifetime = await reads.lifetime()
-          const record = findManualRecovery(await reads.checkpoints(), key, id)
+          const records = await reads.checkpoints()
+          const record = findManualRecovery(records, key, id)
+          assertNotSuperseded(records, record)
           if (record.stage !== 'authorised' || lifetime?.activeIncarnation !== key.incarnation)
             throw new GroupStateConflictError('Manual recovery source is no longer active')
           return { expected: lifetime, value: record }

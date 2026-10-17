@@ -8,7 +8,12 @@ import {
 import type { EntryCapability, EntryReads } from '../entry-capability.js'
 import { isStoredOpenFailure } from '../persistence-codec.js'
 import { GroupStateConflictError, GroupUnavailableError } from '../persistence-errors.js'
-import type { GroupKey, GroupRecoveryTrust, GroupTransaction } from '../persistence-types.js'
+import type {
+  GroupKey,
+  GroupRecoveryTrust,
+  GroupStores,
+  GroupTransaction,
+} from '../persistence-types.js'
 import type { RegistryConsumers } from './consumers.js'
 import { assertRecoverySourceTrust } from './source-trust.js'
 import type { GroupHandleRegistry } from './types.js'
@@ -19,6 +24,12 @@ export type RegistrySafetyCapability<TTx extends GroupTransaction> = RegistryCon
   latch(key: GroupKey, reason: NonNullable<SafetyHold>): void
   held(key: GroupKey): SafetyHold
   persistTrustUnavailable(key: GroupKey): Promise<void>
+  /** Authorised retirement: drains source hooks, then runs `work` once the source is quiet. */
+  retire<TResult>(
+    key: GroupKey,
+    work: (stores: GroupStores<TTx>, mutationID: string) => Promise<TResult>,
+    afterDrain?: () => Promise<void>,
+  ): Promise<TResult>
 }
 
 const capabilities = new WeakMap<GroupHandleRegistry, unknown>()

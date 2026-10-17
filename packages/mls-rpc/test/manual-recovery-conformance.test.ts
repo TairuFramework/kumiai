@@ -7,6 +7,7 @@ import {
 } from '@kumiai/mls'
 import {
   asLogPosition,
+  type CheckpointRecord,
   checkpointTopic,
   createGroupPeer,
   decodeHandshakeFrame,
@@ -24,11 +25,14 @@ import {
   type ManualRecoveryStatus,
   type PersistedManualRecovery,
   rendezvousTopic,
+  type SuccessorTombstone,
 } from '@kumiai/rpc'
 import {
+  type ConformanceCheckpointRecord,
   type ConformanceManualRecoveryRecord,
   type ConformanceManualRecoveryStatus,
   type ConformancePersistedManualRecovery,
+  type ConformanceSuccessorTombstone,
   testManualRecoveryConformance,
 } from '@kumiai/rpc-conformance'
 import { expect, expectTypeOf, test, vi } from 'vitest'
@@ -54,6 +58,10 @@ import {
 expectTypeOf<ManualRecoveryRecord>().toEqualTypeOf<ConformanceManualRecoveryRecord<LogPosition>>()
 expectTypeOf<ManualRecoveryStatus>().toEqualTypeOf<ConformanceManualRecoveryStatus>()
 expectTypeOf<PersistedManualRecovery>().toEqualTypeOf<ConformancePersistedManualRecovery>()
+expectTypeOf<SuccessorTombstone>().toEqualTypeOf<ConformanceSuccessorTombstone>()
+expectTypeOf<Extract<CheckpointRecord, { kind: 'successor' }>>().toEqualTypeOf<
+  Extract<ConformanceCheckpointRecord, { kind: 'successor' }>
+>()
 
 for (const mode of ['real-mls', 'double'] as const) {
   for (const context of ['supplied', 'absent'] as const) {

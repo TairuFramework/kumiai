@@ -31,6 +31,15 @@ export type ConformanceManualRecoveryRecord<Position extends string = string> = 
   mutationID: string
   abandonedForkRecovery?: string
 }
+export type ConformanceSuccessorTombstone = {
+  kind: 'successor-tombstone'
+  id: string
+  source: ConformanceGroupKey
+  successor: ConformanceGroupKey
+  authorisationID: string
+  retiredAt: number
+  clearedAt: number | null
+}
 export type ConformanceManualRecoveryStatus = {
   id: string
   kind: 'pending' | 'paused' | 'completed'
@@ -817,6 +826,138 @@ export function testManualRecoveryConformance<
         } finally {
           await reopened.close()
         }
+      }))
+    test('successor choice supersedes a pending resync and closes its overlay', () =>
+      run(async (fixture, key) => {
+        const pending = await selected(fixture, key)
+        const saved = await fixture.manualRecovery().readManualRecovery(pending.saved.id)
+        if (saved?.attempt == null) throw new Error('Missing saved manual candidate')
+        const successor = await fixture.registry.seed(
+          await fixture.makeHandle(0, 'superseding-successor'),
+          { packageUse: null },
+        )
+        // A pending resync cannot take a different resync, only the successor exit.
+        await expect(
+          fixture.manualRecovery().authoriseManualRecovery(key, {
+            ...pending.saved.choice,
+            targetID: 'other',
+          } as ConformancePersistedManualRecovery),
+        ).rejects.toThrow()
+        const chosen = await fixture
+          .manualRecovery()
+          .authoriseManualRecovery(key, { mode: 'successor', successor })
+        expect(chosen.id).not.toBe(saved.id)
+        // The superseded resync can neither change, move nor switch while the source stays active.
+        await expect(
+          fixture
+            .manualRecovery()
+            .manualRecoveryControl(saved.id)
+            .apply({ recoveryEpochFloor: 0 }, 'superseded-floor'),
+        ).rejects.toThrow()
+        await expect(
+          fixture.manualRecovery().moveCurrent(saved.id, { stateVersion: 1, ledgerComplete: true }),
+        ).rejects.toThrow()
+        const before = await fixture.inspectRows()
+        await expect(
+          fixture.registry.switchIncarnation(pending.recovery.candidate, {
+            source: await fixture.registry.recoverySource(key.groupID),
+            rejoinID: pending.record.id,
+            proof: pending.recovery.proof,
+            write: pending.write,
+          }),
+        ).rejects.toThrow()
+        expect(await fixture.inspectRows()).toEqual(before)
+        expect(await fixture.safety().recover(key, { mode: 'successor', successor })).toEqual(
+          successor,
+        )
+        expect(await fixture.manualRecovery().readManualRecovery(saved.id)).toEqual(saved)
+        // The superseded candidate may have been accepted; its outcome stays owed as unknown.
+        expect((await fixture.device.groups.ports(key).control.load()).outcomes).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ id: saved.attempt.id, opID: null, kind: 'unknown' }),
+          ]),
+        )
+        expect((await fixture.safety().status(key)).manualRecovery).toMatchObject({
+          id: chosen.id,
+          kind: 'completed',
+        })
+        await expect(
+          fixture.manualRecovery().authoriseManualRecovery(key, choice),
+        ).rejects.toThrow()
+      }))
+    test('raw checkpoint writes cannot fabricate or clear successor tombstones', () =>
+      run(async (fixture, key) => {
+        const successor = await fixture.registry.seed(
+          await fixture.makeHandle(0, 'raw-successor'),
+          { packageUse: null },
+        )
+        class Captured extends Error {}
+        type Stores = Parameters<Parameters<typeof fixture.device.groups.transition>[1]>[0]
+        async function transition<T>(work: (stores: Stores) => Promise<T>): Promise<T> {
+          const lifetime = await fixture.device.groups.load(key.groupID)
+          if (lifetime === null) throw new Error('Missing lifetime')
+          return fixture.device.groups.transition(
+            {
+              groupID: key.groupID,
+              mutationID: crypto.randomUUID(),
+              expected: {
+                revision: lifetime.revision,
+                activeIncarnation: lifetime.activeIncarnation,
+              },
+            },
+            work,
+          )
+        }
+        const forged = {
+          kind: 'successor' as const,
+          id: 'forged-successor',
+          key,
+          value: {
+            kind: 'successor-tombstone' as const,
+            id: 'forged-successor',
+            source: key,
+            successor,
+            authorisationID: 'forged',
+            retiredAt: 1,
+            clearedAt: null,
+          },
+        }
+        await expect(
+          transition(async (stores) => {
+            await stores.checkpoints.put(forged)
+          }),
+        ).rejects.toThrow()
+        await fixture.safety().recover(key, { mode: 'successor', successor })
+        let row: ConformanceSuccessorTombstone | undefined
+        await expect(
+          transition(async (stores) => {
+            const found = (await stores.checkpoints.list()).find(
+              (value) => value.kind === 'successor',
+            )
+            row = found?.kind === 'successor' ? found.value : undefined
+            throw new Captured()
+          }),
+        ).rejects.toBeInstanceOf(Captured)
+        if (row === undefined) throw new Error('Missing successor tombstone')
+        expect(row).toMatchObject({ source: key, successor, clearedAt: null })
+        const saved = row
+        for (const change of [
+          (stores: Stores) =>
+            stores.checkpoints.put({
+              kind: 'successor',
+              id: saved.id,
+              key,
+              value: { ...saved, clearedAt: Date.now() },
+            }),
+          (stores: Stores) => stores.checkpoints.remove([saved.id]),
+        ])
+          await expect(transition(change)).rejects.toThrow()
+        await expect(
+          fixture.registry.seed(await fixture.makeHandle(2, key.groupID), {
+            replace: true,
+            packageUse: { sourceID: 'source', ref: 'raw', kind: 'ordinary' },
+          }),
+        ).rejects.toMatchObject({ reason: 'successor-tombstone' })
       }))
     test('manual writes reject inactive sources', () =>
       run(async (fixture, key) => {
