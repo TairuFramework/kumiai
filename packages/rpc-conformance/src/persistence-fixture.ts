@@ -727,3 +727,8 @@ export type GroupStorageConformanceParams<TTx extends ConformanceGroupTransactio
 }
 
 export type { ConformanceForkNotice, ConformanceForkNoticeEvent } from './fork-notice.js'
+export type {
+  ConformanceManualRecoveryRecord,
+  ConformanceManualRecoveryStatus,
+  ConformancePersistedManualRecovery,
+} from './manual-recovery.js'

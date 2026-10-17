@@ -693,7 +693,6 @@ export async function reconcileRecoveryCapture(params: {
   validateCapturedRecoveryRecord(record)
   const snapshot = decodeCapturedRecoveryCandidate(record.candidate, record.requestKey)
   if (
-    !sameOrigin(source, snapshot.source) ||
     record.target.targetID !== params.target.targetID ||
     record.target.topicID !== params.target.topicID
   )
@@ -716,6 +715,14 @@ export async function reconcileRecoveryCapture(params: {
   if (!(await verifyOfferedGroupInfo(snapshot.state, info, suite))) return { kind: 'retry' }
   const epoch = Number(info.groupInfo.groupContext.epoch)
   if (!Number.isSafeInteger(epoch)) return { kind: 'retry' }
+  const targetBehind =
+    epoch < record.target.groupInfoEpoch || (reply.epochFloor !== null && epoch < reply.epochFloor)
+  // A stale origin cannot settle X. An authenticated lower head still explains why it must wait.
+  if (
+    !sameOrigin(source, snapshot.source) &&
+    (params.forkAuthorisation !== undefined || !targetBehind)
+  )
+    throw new TypeError('Captured recovery origin or target mismatch')
   if (params.forkAuthorisation !== undefined) {
     const authorisation = params.forkAuthorisation
     if (
@@ -727,11 +734,7 @@ export async function reconcileRecoveryCapture(params: {
       return { kind: 'retry', reason: 'target-behind' }
     return { kind: 'superseded-branch', epoch: authorisation.splitEpoch, authorisation }
   }
-  if (
-    epoch < record.target.groupInfoEpoch ||
-    (reply.epochFloor !== null && epoch < reply.epochFloor)
-  )
-    return { kind: 'retry', reason: 'target-behind' }
+  if (targetBehind) return { kind: 'retry', reason: 'target-behind' }
   if (epoch === record.target.groupInfoEpoch)
     return sameBytes(recaptured.groupInfoAuthenticator, record.target.groupInfoAuthenticator)
       ? { kind: 'head-only', head: validateCaptureHead(recaptured.captureHead) }

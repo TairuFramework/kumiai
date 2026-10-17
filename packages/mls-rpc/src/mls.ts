@@ -43,6 +43,7 @@ import type {
   ControlStore,
   ForkRecoveryAttempt,
   ForkRecoveryAuthorisation,
+  GroupKey,
   GroupMLS,
   LogPosition,
   OpenedRecoveryVerdict,
@@ -59,6 +60,7 @@ import {
   ControlWriteNotCommittedError,
   controlSafetyHeld,
   GroupSafetyHeldError,
+  isHardControlHold,
   RecoveryTargetBehindError,
   StorageOutcomeUnknownError,
 } from '@kumiai/rpc'
@@ -158,6 +160,8 @@ export function createLedgerEntrySlot(): LedgerEntrySlot {
 export type RecoveryRouting = { targetID: string; topicID: string }
 
 export type RecoveryAdoptionDependencies = {
+  manualRecovery?: { authorisationID: string; source: GroupKey; check(): Promise<void> }
+
   target: RecoveryRouting
   environment: RecoveryEnvironment
   readRecoverySource(): Promise<RegistryRecoverySource>
@@ -367,9 +371,11 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
             },
             async applyRecovery(sealed, requestID, requestKey) {
               const snapshot = await params.control.load()
-              if (controlSafetyHeld(snapshot) !== null) return null
+              if (captured.manualRecovery === undefined && controlSafetyHeld(snapshot) !== null)
+                return null
+              await captured.manualRecovery?.check()
               const source = await captured.readRecoverySource()
-              if (snapshot.forkRecoveryAttempt == null) {
+              if (captured.manualRecovery === undefined && snapshot.forkRecoveryAttempt == null) {
                 const verified = await authenticateRecoveryReply({
                   trust: source.trust,
                   sealed,
@@ -403,7 +409,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
                 }))
               )
                 return null
-              return await buildRecoveryCandidate({
+              const candidate = await buildRecoveryCandidate({
                 source,
                 sealed,
                 requestID,
@@ -411,10 +417,25 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
                 target: captured.target,
                 environment: capturedEnvironment,
               })
+              await captured.manualRecovery?.check()
+              if (
+                captured.manualRecovery !== undefined &&
+                candidate !== null &&
+                !('renewalRequired' in candidate) &&
+                candidate.target.groupInfoEpoch < (snapshot.recoveryEpochFloor ?? 0)
+              )
+                throw new RecoveryTargetBehindError('Manual recovery capture is target-behind')
+              return candidate
             },
             async restoreRecovery(candidate, requestKey) {
               const control = await params.control.load()
               const saved = control.rejoin
+              if (captured.manualRecovery !== undefined) {
+                await captured.manualRecovery.check()
+                const snapshot = decodeCapturedRecoveryCandidate(candidate, requestKey)
+                if (snapshot.target.groupInfoEpoch < (control.recoveryEpochFloor ?? 0))
+                  throw new RecoveryTargetBehindError('Manual recovery capture is target-behind')
+              }
               const attempt = control.forkRecoveryAttempt
               if (
                 attempt != null ||
@@ -445,7 +466,9 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
             async reconcileCapture(record, reply) {
               try {
                 const control = await params.control.load()
-                if (controlSafetyHeld(control) !== null) return { kind: 'held' }
+                if (captured.manualRecovery === undefined && controlSafetyHeld(control) !== null)
+                  return { kind: 'held' }
+                await captured.manualRecovery?.check()
                 const intent = control.forkRecoveryAttempt
                 const superseded =
                   record.forkRecovery === undefined &&
@@ -752,6 +775,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           const control = await scope.loadControl(params.control)
           const safety = controlSafetyHeld(control)
           if (safety !== null) throw new GroupSafetyHeldError(safety)
+          if (isHardControlHold(control.controlHold)) throw new Error('Recovery responder is held')
           const { handle, source } = scope
           if (
             source.identity === null ||

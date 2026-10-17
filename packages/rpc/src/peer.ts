@@ -115,6 +115,7 @@ import {
 import { checkedFetchResult, createLogDelivery, type EpochFloor } from './log-delivery.js'
 import { createEpochRuntime } from './peer-epoch.js'
 import {
+  type CurrentMoveInputs,
   DEFAULT_APP_LOG_RETENTION_SECONDS,
   DEFAULT_COMMIT_DEADLINE_MS,
   DEFAULT_COMMIT_LOG_RETENTION_SECONDS,
@@ -176,6 +177,7 @@ import {
 } from './topic.js'
 
 export {
+  type CurrentMoveInputs,
   DEFAULT_APP_LOG_RETENTION_SECONDS,
   DEFAULT_COMMIT_LOG_RETENTION_SECONDS,
   type GroupPeer,
@@ -278,6 +280,37 @@ function verdictForOutcome(
   }
 }
 
+/** A device moves transport with its MLS state only when it knows of no lag, hold or rejoin. */
+export function canMoveCurrent(params: CurrentMoveInputs): boolean {
+  const { control } = params
+  return (
+    params.stateReadable &&
+    params.ledgerComplete &&
+    params.walkComplete &&
+    (control.recoveryEpochFloor === null ||
+      (params.stateEpoch !== null && control.recoveryEpochFloor <= params.stateEpoch)) &&
+    params.activity.pending === 0 &&
+    !params.outboxUnresolved &&
+    !params.settlementUnresolved &&
+    params.hardHold === null &&
+    params.condition === null &&
+    (params.allowOpenFork || !params.openForkNotice) &&
+    !params.activeRejoin &&
+    controlSafetyHeld(control) === null &&
+    // Either reason blocks: a hard hold, or acceptance whose settlement is still unknown.
+    control.controlHold === null &&
+    control.commitOnce === null &&
+    control.commitOnceAcceptance === null &&
+    control.operations.length === 0 &&
+    control.welcomes.length === 0 &&
+    control.rejoin === null &&
+    control.forkRecoveryAttempt == null &&
+    control.strand === null &&
+    control.cursor?.stranded !== true &&
+    control.cursor?.incomplete !== true
+  )
+}
+
 export function createGroupPeer<Protocols extends Record<string, ProtocolDefinition>>(
   input: GroupPeerParams<Protocols>,
 ): GroupPeer<Protocols> {
@@ -312,6 +345,8 @@ export function createGroupPeerWithControlWalk<
     searchLog: OperationDeps['searchLog']
   }
 } {
+  if (input.manualRecovery !== undefined && input.recoveryOnly !== true)
+    throw new TypeError('Manual recovery requires a recovery-only peer')
   if (input.recoveryOnly && input.mls == null)
     throw new TypeError('Recovery-only peer requires MLS')
   if (
@@ -391,6 +426,26 @@ export function createGroupPeerWithControlWalk<
     latchSafetyHold(error.reason)
     return true
   }
+  const manual = params.manualRecovery
+  const recoveryLaneHeld = (): boolean => manual === undefined && hardControlHeld()
+  const assertRecoveryOpen = async (): Promise<void> => {
+    if (manual === undefined) {
+      assertSafetyOpen()
+      return
+    }
+    if (
+      !params.recoveryOnly ||
+      control === undefined ||
+      control.key.groupID !== manual.source.groupID ||
+      control.key.incarnation !== manual.source.incarnation ||
+      !manual.authorisationID
+    )
+      throw new TypeError('Bound manual recovery source required')
+    // The registry-backed port rechecks the durable authorisation before transport work.
+    if (mls?.getRecoveryLedger === undefined)
+      throw new TypeError('Retained manual recovery authority required')
+    await mls.getRecoveryLedger()
+  }
   const controlHoldPresent = () => isHardControlHold(controlHold)
   const hardControlHeld = () => safetyHold() !== null || controlHoldPresent()
   const control: ControlStore | undefined =
@@ -441,11 +496,13 @@ export function createGroupPeerWithControlWalk<
   const appLogRetentionSeconds = params.appLogRetentionSeconds ?? DEFAULT_APP_LOG_RETENTION_SECONDS
   const operationTimeoutMs = params.operationTimeoutMs ?? DEFAULT_COMMIT_DEADLINE_MS
   let initialSafetyLoaded = false
+  let manualNetworkReady = false
   const mux: HubMux = createHubMux({
     hub,
     localDID,
     deferredStart: true,
-    networkAllowed: () => !disposed && initialSafetyLoaded && safetyHold() === null,
+    networkAllowed: () =>
+      !disposed && initialSafetyLoaded && (manualNetworkReady || safetyHold() === null),
     ...(params.onSubscribeFailed != null ? { onSubscribeFailed: params.onSubscribeFailed } : {}),
     ...(params.onReceiveEnded != null ? { onReceiveEnded: params.onReceiveEnded } : {}),
   })
@@ -1093,12 +1150,12 @@ export function createGroupPeerWithControlWalk<
   const retryRecovery = (): void => {
     if (disposed) return
     recoveryRetryPending = true
-    if (hardControlHeld() || recoveryRetryTimer != null || renewalHeld() || refusalHeld) return
+    if (recoveryLaneHeld() || recoveryRetryTimer != null || renewalHeld() || refusalHeld) return
     recoveryRetryTimer = setTimeout(() => {
       recoveryRetryTimer = undefined
-      if (disposed || hardControlHeld() || renewalHeld() || refusalHeld || activeRecovery != null)
+      if (disposed || recoveryLaneHeld() || renewalHeld() || refusalHeld || activeRecovery != null)
         return
-      healRequested = safetyHold() === null
+      healRequested = !recoveryLaneHeld()
       void healIfRequested()
     }, recoveryBackoff)
     recoveryBackoff = Math.min(
@@ -2518,10 +2575,11 @@ export function createGroupPeerWithControlWalk<
   }
 
   const initControlLanes = async (): Promise<void> => {
-    if (mls == null || safetyHold() !== null || commitUnsubscribe !== undefined) return
+    if (mls == null || recoveryLaneHeld() || commitUnsubscribe !== undefined) return
+    await assertRecoveryOpen()
     const recoverySecret = await mls.exportRecoverySecret()
-    if (disposed || safetyHold() !== null) return
-    commitTopicID = commitTopic(recoverySecret)
+    if (disposed || recoveryLaneHeld()) return
+    commitTopicID = params.recoveryTarget?.topicID ?? commitTopic(recoverySecret)
     rendezvousTopicID = rendezvousTopic(recoverySecret)
     // Both topics subscribed once for the peer's whole life — NOT rebuilt on resync, so a
     // stranded peer still shares both rendezvous with the live group. Subscribe BEFORE the first
@@ -3697,8 +3755,8 @@ export function createGroupPeerWithControlWalk<
   }
 
   const enqueue = async (request: OperationRequest): Promise<void> => {
-    if (params.recoveryOnly) throw new SendNotAdmissibleError('stranded')
     assertSafetyOpen()
+    if (params.recoveryOnly) throw new SendNotAdmissibleError('stranded')
     await ready
     assertLive()
     const reason = safetyHold()
@@ -3905,7 +3963,7 @@ export function createGroupPeerWithControlWalk<
     topicID: string,
     deadline: number,
   ): Promise<RendezvousOutcome> => {
-    assertSafetyOpen()
+    await assertRecoveryOpen()
     const remaining = deadline - Date.now()
     const wait = Math.max(0, Math.min(recoveryTimeoutMs, remaining))
     recoveryPendingReason = 'no-reply'
@@ -4230,7 +4288,11 @@ export function createGroupPeerWithControlWalk<
   }
 
   const authoriseForkReply = async (captured: CapturedRecoveryPort, reply: CapturedRecapture) => {
-    if (captured.authoriseForkRecovery === undefined || params.checkpoints === undefined)
+    if (
+      manual !== undefined ||
+      captured.authoriseForkRecovery === undefined ||
+      params.checkpoints === undefined
+    )
       return null
     const records = await params.checkpoints.readRecords()
     const notices = records
@@ -4270,6 +4332,7 @@ export function createGroupPeerWithControlWalk<
     }
     return {
       control: store,
+      manualRecovery: manual,
       signal: controlAbort.signal,
       runSerial,
       now: Date.now,
@@ -4280,13 +4343,13 @@ export function createGroupPeerWithControlWalk<
       discarded: (_reason, record) => {
         inFlightEntries = record.ledgerBefore
         capturedPending = null
-        healRequested = safetyHold() === null
+        healRequested = !recoveryLaneHeld()
       },
       publish: async (payload, publishID, expectedHead) => {
         assertLive()
         await refreshControl()
-        assertSafetyOpen()
-        if (hardControlHeld()) throw new RecoveryRequiredError('Recovery publication is held')
+        await assertRecoveryOpen()
+        if (recoveryLaneHeld()) throw new RecoveryRequiredError('Recovery publication is held')
         return await mux.publish({
           topicID: commits,
           payload,
@@ -4298,7 +4361,7 @@ export function createGroupPeerWithControlWalk<
       searchLog: (from, digest) =>
         searchOccurrence(
           async (after) => {
-            assertSafetyOpen()
+            await assertRecoveryOpen()
             return checkedFetchResult(
               await mux.fetchTopic({
                 topicID: commits,
@@ -4324,7 +4387,7 @@ export function createGroupPeerWithControlWalk<
             rendezvous,
             Math.min(deadline, Date.now() + 15_000),
           )
-          assertSafetyOpen()
+          await assertRecoveryOpen()
           if (outcome.kind !== 'reply') return { kind: 'retry' }
           await diagnoseAbsence(port, outcome.sealed, requestID, requestKey)
           const reply = {
@@ -4366,27 +4429,30 @@ export function createGroupPeerWithControlWalk<
           deadline: Math.min(deadline, Date.now() + Math.min(3 * recoveryTimeoutMs, 15_000)),
           timeoutMs: recoveryTimeoutMs,
           waiters: confirmationWaiters,
-          safetyHold,
-          send: async () =>
-            mux.publish({
+          safetyHold: () => (manual === undefined ? safetyHold() : null),
+          send: async () => {
+            const signature = await port.signRecoveryConfirmation({
+              groupID: record.source.key.groupID,
+              requestID: record.requestID,
+              position,
+              commitDigest: record.digest,
+            })
+            await assertRecoveryOpen()
+            return mux.publish({
               topicID: rendezvous,
               payload: encodeHandshakeFrame(
                 HANDSHAKE_KIND.recoveryConfirmRequest,
                 encodeRecoveryConfirmRequest({
                   requestID: record.requestID,
                   request: record.request,
-                  signature: await port.signRecoveryConfirmation({
-                    groupID: record.source.key.groupID,
-                    requestID: record.requestID,
-                    position,
-                    commitDigest: record.digest,
-                  }),
+                  signature,
                   position,
                   commitDigest: record.digest,
                   commit: decodeCommitFrame(decodeHandshakeFrame(record.payload).payload).commit,
                 }),
               ),
-            }),
+            })
+          },
         })
         if (verdict.kind === 'refused' && ['binding', 'lapse', 'floor'].includes(verdict.refusal))
           pending.markBindingUnusable()
@@ -4394,7 +4460,7 @@ export function createGroupPeerWithControlWalk<
       },
       canAdopt: async () => {
         await refreshControl()
-        return !hardControlHeld()
+        return !recoveryLaneHeld()
       },
       adopt: async (record) => {
         if (params.onConfirmedRecovery !== undefined) return 'handoff'
@@ -4500,12 +4566,16 @@ export function createGroupPeerWithControlWalk<
     while (
       Date.now() < deadline &&
       !disposed &&
-      safetyHold() === null &&
+      !recoveryLaneHeld() &&
       recoveryGeneration === generation
     ) {
       let record = (await store.load()).rejoin
       if (record !== null && !('format' in record)) return { advanced: false }
-      if (record?.trigger === 'manual' || record?.stage === 'refused') return { advanced: false }
+      if (
+        (record?.trigger === 'manual' && record.authorisationID !== manual?.authorisationID) ||
+        record?.stage === 'refused'
+      )
+        return { advanced: false }
       if (record === null) {
         if (!params.recoveryOnly) {
           await runSerial(async () => {
@@ -4535,7 +4605,7 @@ export function createGroupPeerWithControlWalk<
         try {
           const outcome = await requestGroupInfo(request, requestID, rendezvous, deadline)
           assertLive()
-          assertSafetyOpen()
+          await assertRecoveryOpen()
           if (outcome.kind === 'disposed') throw new PeerDisposedError('Peer is disposed')
           if (outcome.kind === 'publish-failed') throw outcome.error
           if (outcome.kind !== 'reply') {
@@ -4557,7 +4627,7 @@ export function createGroupPeerWithControlWalk<
           }
           await runSerial(refreshControl)
           assertLive()
-          assertSafetyOpen()
+          await assertRecoveryOpen()
           const authorisation = await authoriseForkReply(captured, {
             sealed: outcome.sealed,
             requestID,
@@ -4648,8 +4718,8 @@ export function createGroupPeerWithControlWalk<
             digest: digestAppliedCommit(pending.commit),
             epochAfter: pending.epoch,
             ledgerBefore,
-            trigger: 'automatic',
-            authorisationID: null,
+            trigger: manual === undefined ? 'automatic' : 'manual',
+            authorisationID: manual?.authorisationID ?? null,
             switchMutationID: null,
             destinationKey: null,
           }
@@ -4779,7 +4849,7 @@ export function createGroupPeerWithControlWalk<
     rendezvous: string,
   ): Promise<{ advanced: boolean }> => {
     assertLive()
-    assertSafetyOpen()
+    await assertRecoveryOpen()
     currentRecoveryTrigger = trigger
     const controlStore = control
     if (controlStore == null) throw new Error('Missing control store')
@@ -4810,7 +4880,7 @@ export function createGroupPeerWithControlWalk<
     }
     try {
       const started = await runSerial(async () => {
-        if (safetyHold() !== null) return false
+        if (recoveryLaneHeld()) return false
         if (recoveryGeneration !== generation && !stranded && !healRequested && !rejoinHeld)
           return false
         queueMicrotask(() =>
@@ -4821,22 +4891,22 @@ export function createGroupPeerWithControlWalk<
         )
         if (params.recoveryOnly) return true
         if (await settleOperations(true)) await rebuildEpoch()
-        if (safetyHold() !== null) return false
+        if (recoveryLaneHeld()) return false
         if ((await controlStore.load()).rejoin == null) {
-          if (safetyHold() !== null) return false
+          if (recoveryLaneHeld()) return false
           if (await ensureLedger(Date.now() + recoveryTimeoutMs)) await finalizeBootstrap(port)
           assertLive()
-          assertSafetyOpen()
+          await assertRecoveryOpen()
         }
-        return safetyHold() === null
+        return !recoveryLaneHeld()
       })
-      if (!started) return { advanced: safetyHold() === null }
+      if (!started) return { advanced: !recoveryLaneHeld() }
       const deadline = Date.now() + recoveryDeadlineMs
       let prepared = false
       while (Date.now() < deadline) {
-        if (safetyHold() !== null || recoveryGeneration !== generation) return { advanced: false }
+        if (recoveryLaneHeld() || recoveryGeneration !== generation) return { advanced: false }
         let record = (await controlStore.load()).rejoin
-        assertSafetyOpen()
+        await assertRecoveryOpen()
         if (record != null && !('format' in record) && port.capturedRecovery !== undefined)
           return failed('legacy-recovery-record')
         if ((record != null && 'format' in record) || port.capturedRecovery !== undefined)
@@ -5022,12 +5092,12 @@ export function createGroupPeerWithControlWalk<
   }
 
   const runRecovery = (trigger: RecoveryTrigger): Promise<{ advanced: boolean }> => {
-    const safety = safetyHold()
+    const safety = manual === undefined ? safetyHold() : null
     if (safety !== null)
       return trigger === 'consumer'
         ? Promise.reject(new GroupSafetyHeldError(safety))
         : Promise.resolve({ advanced: false })
-    if (hardControlHeld() || (trigger === 'automatic' && (renewalHeld() || refusalHeld)))
+    if (recoveryLaneHeld() || (trigger === 'automatic' && (renewalHeld() || refusalHeld)))
       return Promise.resolve({ advanced: false })
     if (activeRecovery != null) return activeRecovery
     const generation = recoveryGeneration
@@ -5035,7 +5105,7 @@ export function createGroupPeerWithControlWalk<
     attempt = (async (): Promise<{ advanced: boolean }> => {
       await ready
       assertLive()
-      assertSafetyOpen()
+      await assertRecoveryOpen()
       if (locallyRemoved) throw new PeerRemovedError('Peer was removed')
       if (mls == null || commitTopicID == null || rendezvousTopicID == null) {
         return { advanced: false }
@@ -5124,7 +5194,7 @@ export function createGroupPeerWithControlWalk<
     if (
       disposed ||
       locallyRemoved ||
-      hardControlHeld() ||
+      recoveryLaneHeld() ||
       (params.recoveryOnly && params.onConfirmedRecovery === undefined) ||
       !healRequested ||
       activeRecovery != null ||
@@ -5236,10 +5306,12 @@ export function createGroupPeerWithControlWalk<
   const initialise = async (): Promise<void> => {
     await safetyReady
     initialSafetyLoaded = true
-    const stopped = () => disposed || safetyHold() !== null
+    const stopped = () => disposed || (manual === undefined && safetyHold() !== null)
     try {
       if (stopped()) return
       if (params.recoveryOnly) {
+        await assertRecoveryOpen()
+        manualNetworkReady = manual !== undefined
         mux.start()
         await initControlLanes()
         if (params.onConfirmedRecovery !== undefined)

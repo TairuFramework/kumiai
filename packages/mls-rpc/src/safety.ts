@@ -10,6 +10,7 @@ import {
   GroupSafetyHeldError,
   type LogHub,
   type MailboxHub,
+  type ManualRecoveryStatus,
   type NotMemberEvidence,
   type RecoveryUnavailableEvent,
   type SafetyHold,
@@ -18,13 +19,18 @@ import {
 import { acknowledgeBranchAbandonment, branchAbandonmentEvents } from './branch-history.js'
 import { createClearReportedHold, writeAppHoldReport } from './clear-hold.js'
 import { coordinatorBinding } from './entry-capability.js'
+import {
+  createManualRecoveryStore,
+  manualRecoveryStatus,
+  rememberManualRecoveryTarget,
+  validCallTimeTarget,
+} from './manual-recovery.js'
 import { sameStoredValue } from './memory-incarnation-stores.js'
 import { isStoredOpenFailure } from './persistence-codec.js'
 import {
   ForkReportRefusedError,
   GroupStateConflictError,
   GroupUnavailableError,
-  ManualRecoveryUnavailableError,
   SpentSetCorruptError,
 } from './persistence-errors.js'
 import type {
@@ -35,6 +41,7 @@ import type {
   GroupTransaction,
   PersistenceEvent,
 } from './persistence-types.js'
+import { registryRecoveryCoordinator } from './registry/recovery-coordinator.js'
 import {
   RetainedTrustUnavailableError,
   readRetainedTrust,
@@ -43,9 +50,15 @@ import {
 import { readRecoverySource } from './registry/source.js'
 import type { GroupHandleRegistry } from './registry/types.js'
 import { flushConditionEvents, groupCondition } from './safety-conditions.js'
+import { clearSuccessorTombstone, retireToSuccessor } from './successor.js'
 
 export type ManualRecovery =
-  | { mode: 'resync'; targetID: string }
+  | { mode: 'resync'; targetID: string; allowOpenFork?: boolean }
+  | {
+      mode: 'resync'
+      target: { targetID: string; hub: LogHub & MailboxHub; commitTopicID: string }
+      allowOpenFork?: boolean
+    }
   | { mode: 'successor'; successor: GroupKey }
 export type RecoveryTarget = { id: string; commitTopicID: string; hub: LogHub & MailboxHub }
 export type GroupSafety = {
@@ -53,10 +66,12 @@ export type GroupSafety = {
     hold: SafetyHold
     condition: GroupCondition | null
     evidence: NotMemberEvidence | null
+    manualRecovery: ManualRecoveryStatus | null
   }>
   epochAuthenticator(key: GroupKey): Promise<EpochIdentity | null>
   reportFork(key: GroupKey, evidence: GroupForkEvidence): Promise<void>
   clearHold(key: GroupKey): Promise<void>
+  /** Resync returns the installed key; successor returns the successor after source retirement. */
   recover(key: GroupKey, choice: ManualRecovery): Promise<GroupKey>
   events(
     key: GroupKey,
@@ -64,6 +79,8 @@ export type GroupSafety = {
     Array<GroupSafetyEvent | RecoveryUnavailableEvent | GroupConditionEvent | BranchAbandonedEvent>
   >
   ackEvent(key: GroupKey, id: string): Promise<void>
+  /** Releases only the successor readmission block; spent checks and safety latches stay. */
+  clearTombstone(groupID: string): Promise<void>
 }
 
 class Noop extends Error {}
@@ -149,7 +166,8 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
         else throw error
       }
       return await entry.read(key.groupID, async (reads) => {
-        const { condition, evidence } = groupCondition(await reads.checkpoints(), key)
+        const records = await reads.checkpoints()
+        const { condition, evidence } = groupCondition(records, key)
         const control = await reads.control(key.incarnation)
         const held = capability.held(key)
         return {
@@ -161,6 +179,7 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
                 : (held ?? controlSafetyHeld(control, condition)),
           condition,
           evidence,
+          manualRecovery: manualRecoveryStatus(records, key),
         }
       })
     },
@@ -245,8 +264,59 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
         if (!(error instanceof Noop)) throw error
       }
     },
-    async recover() {
-      throw new ManualRecoveryUnavailableError('Manual recovery is unavailable')
+    async recover(requested, choice) {
+      if (choice.mode === 'successor') {
+        const source = { ...requested }
+        const successor = { ...choice.successor }
+        if (!validKey(source) || !validKey(successor) || successor.groupID === source.groupID)
+          throw new TypeError('Invalid manual recovery choice')
+        return await retireToSuccessor({
+          registry: params.registry,
+          persistence: params.persistence,
+          source,
+          successor,
+        })
+      }
+      const { allowOpenFork = false } = choice
+      const supplied =
+        'target' in choice
+          ? {
+              id: choice.target.targetID,
+              hub: choice.target.hub,
+              commitTopicID: choice.target.commitTopicID,
+            }
+          : null
+      const targetID = supplied?.id ?? ('targetID' in choice ? choice.targetID : undefined)
+      const key = { ...requested }
+      if (
+        !validKey(key) ||
+        typeof targetID !== 'string' ||
+        targetID.length === 0 ||
+        typeof allowOpenFork !== 'boolean' ||
+        (supplied !== null && !validCallTimeTarget(supplied))
+      )
+        throw new TypeError('Invalid manual recovery choice')
+      const target = supplied ?? (await params.resolveTarget(targetID))
+      if (
+        target.id !== targetID ||
+        typeof target.commitTopicID !== 'string' ||
+        target.commitTopicID.length === 0
+      )
+        throw new GroupStateConflictError('Manual recovery target mismatch')
+      const storage = createManualRecoveryStore({
+        registry: params.registry,
+        persistence: params.persistence,
+        key,
+      })
+      const record = await storage.authoriseManualRecovery(key, {
+        mode: 'resync',
+        targetID: target.id,
+        commitTopicID: target.commitTopicID,
+        allowOpenFork,
+      })
+      // The live binding becomes usable only after durable authorisation is proven.
+      if (supplied !== null) rememberManualRecoveryTarget(params.registry, record.id, supplied)
+      return await registryRecoveryCoordinator(params.registry).runManual(record)
     },
     async events(requested) {
       const key = { ...requested }
@@ -270,6 +340,13 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
                   sameStoredValue(row.event, event),
               ),
           )
+      })
+    },
+    async clearTombstone(groupID) {
+      await clearSuccessorTombstone({
+        registry: params.registry,
+        persistence: params.persistence,
+        groupID,
       })
     },
     async ackEvent(requested, id) {

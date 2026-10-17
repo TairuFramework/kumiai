@@ -29,6 +29,10 @@ export type {
   CheckpointRecord,
   CheckpointService,
   CheckpointStore,
+  ManualRecoveryRecord,
+  ManualRecoveryStatus,
+  PersistedManualRecovery,
+  SuccessorTombstone,
 } from './checkpoint-types.js'
 export { createCheckpointWorker } from './checkpoint-worker.js'
 export {
@@ -220,6 +224,8 @@ export {
 } from './ledger-entries.js'
 export type { AppOutboxCleared, EpochFloor } from './log-delivery.js'
 export {
+  type CurrentMoveInputs,
+  canMoveCurrent,
   createGroupPeer,
   type GroupPeer,
   type GroupPeerMLSParams,

@@ -16,6 +16,7 @@ import {
 } from './branch-history.js'
 import { checkpointPreparation } from './checkpoint-capture.js'
 import { appHoldPreparation } from './clear-hold.js'
+import { manualRecoveryPreparation } from './manual-recovery.js'
 import {
   memoryOpen,
   memoryOperation,
@@ -38,6 +39,7 @@ import { conditionPreparation } from './safety-conditions.js'
 
 const journalCaptures = new WeakMap<object, Map<string, CheckpointRecord>>()
 const appHolds = new WeakMap<object, Map<string, CheckpointRecord>>()
+const manuals = new WeakMap<object, Map<string, CheckpointRecord>>()
 const histories = new WeakMap<object, Array<CheckpointRecord>>()
 const conditionCaptures = new WeakMap<object, Map<string, CheckpointRecord>>()
 const captures = new WeakMap<object, Map<string, Uint8Array>>()
@@ -83,6 +85,18 @@ export function assertCheckpointUpdates(
           !sameStoredValue(appHolds.get(entry)?.get(row.id), next))
       )
         throw new GroupStateConflictError('App hold records require coordinator authority')
+    }
+    if (row.kind === 'manual-recovery' || row.kind === 'successor') {
+      const next = after.find((value) => value.id === row.id)
+      const previous = before.find((value) => value.id === row.id)
+      if (
+        !sameStoredValue(previous, next) &&
+        (entry === undefined ||
+          next === undefined ||
+          manuals.get(entry)?.has(row.id) !== true ||
+          !sameStoredValue(manuals.get(entry)?.get(row.id), next))
+      )
+        throw new GroupStateConflictError('Manual recovery requires coordinator authority')
     }
     if (row.kind === 'superseded-rejoin') {
       const next = after.find((value) => value.id === row.id)
@@ -160,6 +174,8 @@ function validate(record: CheckpointRecord, groupID: string, id: string): void {
       'app-hold',
       'hold-history',
       'fact',
+      'manual-recovery',
+      'successor',
       'superseded-rejoin',
       'condition',
       'publication',
@@ -288,6 +304,7 @@ export function createCheckpointStore(
     load: memoryOperation(tx, store.load),
     list: memoryOperation(tx, store.list),
     put(record) {
+      const manual = manualRecoveryPreparation(record)
       const history =
         record.kind === 'superseded-rejoin' && supersededRejoinPrepared(record) ? record : undefined
       const condition = record.kind === 'condition' ? conditionPreparation(record) : undefined
@@ -308,6 +325,11 @@ export function createCheckpointStore(
         const prepared = appHolds.get(entry) ?? new Map<string, CheckpointRecord>()
         prepared.set(record.id, appHold)
         appHolds.set(entry, prepared)
+      }
+      if (manual !== undefined && entry !== undefined) {
+        const prepared = manuals.get(entry) ?? new Map<string, CheckpointRecord>()
+        prepared.set(record.id, manual)
+        manuals.set(entry, prepared)
       }
       if (history !== undefined && entry !== undefined)
         histories.set(entry, [...(histories.get(entry) ?? []), copyStoredValue(history)])

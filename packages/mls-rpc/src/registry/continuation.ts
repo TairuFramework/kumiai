@@ -1,4 +1,5 @@
 import type {
+  CheckpointRecord,
   ControlChanges,
   GroupKey,
   Outcome,
@@ -7,6 +8,7 @@ import type {
 } from '@kumiai/rpc'
 
 import { coordinatorBinding, type EntryReads, entryCapability } from '../entry-capability.js'
+import { manualRecoveryAttempt, saveManualRecovery } from '../manual-recovery.js'
 import { copyStoredValue, sameStoredValue } from '../memory-incarnation-stores.js'
 import { GroupStateConflictError } from '../persistence-errors.js'
 import type { GroupPersistence, GroupTransaction } from '../persistence-types.js'
@@ -27,6 +29,24 @@ function boundRecord(
     (!('format' in record) ||
       (record.switchMutationID !== null && sameStoredValue(record.destinationKey, destination)))
   )
+}
+
+function continuationRecord(
+  records: Array<CheckpointRecord>,
+  source: GroupKey,
+  destination: GroupKey,
+  ordinary: StoredRejoinRecord | null,
+): StoredRejoinRecord | null {
+  const manual = records.find(
+    (row) =>
+      row.kind === 'manual-recovery' &&
+      sameStoredValue(row.key, source) &&
+      row.value.stage === 'completed' &&
+      sameStoredValue(row.value.destination, destination),
+  )
+  return manual?.kind === 'manual-recovery'
+    ? manualRecoveryAttempt(records, source, manual.id).attempt
+    : ordinary
 }
 
 async function installed(
@@ -72,7 +92,12 @@ export function createRecoveryContinuationPort<TTx extends GroupTransaction>(par
         const lifetime = await reads.lifetime()
         if (lifetime === null || destination.incarnation > lifetime.latestIncarnation) return null
         const source = { ...destination, incarnation: destination.incarnation - 1 }
-        const record = (await reads.control(source.incarnation)).rejoin
+        const record = continuationRecord(
+          await reads.checkpoints(),
+          source,
+          destination,
+          (await reads.control(source.incarnation)).rejoin,
+        )
         if (!boundRecord(record, destination) || !(await installed(reads, destination, record)))
           return null
         return copyStoredValue({ source, destination, record })
@@ -92,8 +117,14 @@ export function createRecoveryContinuationPort<TTx extends GroupTransaction>(par
           { groupID: source.groupID, mutationID },
           async (reads) => {
             const snapshot = await reads.control(source.incarnation)
-            if (snapshot.rejoin === null) throw new CompletionNoop()
-            if (!sameStoredValue(snapshot.rejoin, record))
+            const saved = continuationRecord(
+              await reads.checkpoints(),
+              source,
+              destination,
+              snapshot.rejoin,
+            )
+            if (saved === null) throw new CompletionNoop()
+            if (!sameStoredValue(saved, record))
               throw new GroupStateConflictError('Recovery continuation moved')
             const lifetime = await reads.lifetime()
             if (
@@ -115,7 +146,7 @@ export function createRecoveryContinuationPort<TTx extends GroupTransaction>(par
             if (tokens.length > 0)
               outcomes.push({ id: record.id, opID: null, at, kind: 'reenact', tokens })
             const changes: ControlChanges = {
-              deleteRejoin: true,
+              ...('format' in record && record.trigger === 'manual' ? {} : { deleteRejoin: true }),
               deleteOperations: accepted.map(({ id }) => id),
               putOutcomes: outcomes.filter(
                 ({ id }) => !snapshot.outcomes.some((outcome) => outcome.id === id),
@@ -126,6 +157,16 @@ export function createRecoveryContinuationPort<TTx extends GroupTransaction>(par
               value: {
                 changes,
                 snapshot,
+                manual:
+                  'format' in record &&
+                  record.trigger === 'manual' &&
+                  record.authorisationID !== null
+                    ? manualRecoveryAttempt(
+                        await reads.checkpoints(),
+                        source,
+                        record.authorisationID,
+                      )
+                    : null,
                 initial: (await reads.metadata(destination.incarnation))?.initialIdentity,
               },
             }
@@ -140,6 +181,16 @@ export function createRecoveryContinuationPort<TTx extends GroupTransaction>(par
               )
             )
               throw new GroupStateConflictError('Recovery continuation moved during completion')
+            if (prepared.manual !== null) {
+              const manual = manualRecoveryAttempt(
+                await stores.checkpoints.list(),
+                source,
+                prepared.manual.id,
+              )
+              if (!sameStoredValue(manual, prepared.manual))
+                throw new GroupStateConflictError('Manual continuation moved')
+              await saveManualRecovery(stores, { ...manual, attempt: null, mutationID })
+            }
             recoveryCompletionContexts.set(stores.tx, { key: source, changes: prepared.changes })
             try {
               await rows.control.apply(prepared.changes, mutationID)

@@ -396,22 +396,30 @@ export function createUnlockedIncarnationStores(params: {
           !(slotOnly && context?.kind === 'retirement' && sameStoredValue(context.key, key))
         )
           await active()
-        const appHoldClear = consumeAppHoldClear({
-          tx,
-          key,
-          changes: owned,
-          halt: previous.forkHalt,
-          mutationID,
-          records: 'clearAppHold' in owned ? await stateStores.checkpoints.list() : [],
-        })
-        const snapshot = applyChanges(
-          previous,
-          owned,
-          context,
-          key,
-          completing ? completion.forkRecovery : undefined,
-          appHoldClear,
-        )
+        let snapshot: ControlSnapshot
+        if (completing && completion.abandonForkRecovery === true) {
+          if (Object.keys(owned).length !== 0 || completion.forkRecovery?.attempt !== null)
+            throw new GroupStateConflictError('Fork intent abandonment permits no other changes')
+          // Abandonment must not normalise unrelated legacy control rows.
+          snapshot = { ...copyStoredValue(previous), forkRecoveryAttempt: null }
+        } else {
+          const appHoldClear = consumeAppHoldClear({
+            tx,
+            key,
+            changes: owned,
+            halt: previous.forkHalt,
+            mutationID,
+            records: 'clearAppHold' in owned ? await stateStores.checkpoints.list() : [],
+          })
+          snapshot = applyChanges(
+            previous,
+            owned,
+            context,
+            key,
+            completing ? completion.forkRecovery : undefined,
+            appHoldClear,
+          )
+        }
         if (previous.forkHalt === null && snapshot.forkHalt !== null) {
           // The stable event ID replays the current incident. Earlier evidence remains in history.
           const existing = await meta.load(eventID(forkEventID(key)))

@@ -9,6 +9,7 @@ import type {
   BranchAbandonedEvent,
   CheckpointRecord,
   CheckpointStore,
+  ControlSnapshot,
   CoverageGapReason,
   OwnBranchMessage,
   ReportCoverage,
@@ -276,7 +277,13 @@ export function retainBranchHistory(
   })
 }
 
-type AbandonmentParams = { source: GroupKey; destination: GroupKey; mutationID: string }
+type AbandonmentParams = {
+  source: GroupKey
+  destination: GroupKey
+  mutationID: string
+  // Manual switches confirm the authorised attempt, not the control rejoin slot.
+  record?: ControlSnapshot['rejoin']
+}
 
 // The caller has already verified the destination and its installation proof.
 export function branchAbandonmentPreparer(reads: EntryReads) {
@@ -285,7 +292,8 @@ export function branchAbandonmentPreparer(reads: EntryReads) {
   ): Promise<BranchAbandonedEvent | null> {
     const { source, destination, mutationID } = params
     const records = await reads.checkpoints()
-    const record = (await reads.control(source.incarnation)).rejoin
+    const record =
+      params.record !== undefined ? params.record : (await reads.control(source.incarnation)).rejoin
     if (
       record?.stage !== 'confirmed' ||
       destination.groupID !== source.groupID ||

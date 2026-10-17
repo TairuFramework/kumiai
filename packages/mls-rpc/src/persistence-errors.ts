@@ -125,6 +125,7 @@ export type SeedAdmissionRefusalReason =
   | 'unavailable'
   | 'invalid-genesis'
   | 'invalid-package-use'
+  | 'successor-tombstone'
 
 export class SeedAdmissionRefusedError extends Error {
   override name = 'SeedAdmissionRefusedError'

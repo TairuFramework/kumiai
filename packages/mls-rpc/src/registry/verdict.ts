@@ -96,6 +96,7 @@ export async function verifyRegistryResync(params: {
   source: LegacyRegistryRecoverySource | RegistryRecoverySource
   candidate: GroupHandle
   record: StoredRejoinRecord
+  authorisationID?: string
   proof: LegacyResyncProof | ResyncProof
 }): Promise<void> {
   const { candidate, record, proof } = params
@@ -106,7 +107,11 @@ export async function verifyRegistryResync(params: {
     // Legacy records are non-executable; their proof target/topic/head remain unbound.
     if (captured !== null) {
       requireMatch(
-        captured.trigger === 'automatic' && captured.authorisationID === null,
+        params.authorisationID === undefined
+          ? captured.trigger === 'automatic' && captured.authorisationID === null
+          : captured.trigger === 'manual' &&
+              captured.authorisationID === params.authorisationID &&
+              captured.forkRecovery === undefined,
         'unaccepted',
       )
       const current = validateRecoverySource(source as RegistryRecoverySource)

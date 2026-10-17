@@ -22,9 +22,16 @@ import type { AppOutbox } from './app-outbox.js'
 import type { CheckpointService } from './checkpoint-types.js'
 import type { ControlBuildPort } from './control/build.js'
 import type { OperationDeps } from './control/operations.js'
-import type { GroupSafetyEvent } from './control/safety.js'
+import type { GroupCondition, GroupSafetyEvent, SafetyHold } from './control/safety.js'
 import type { ControlEvidenceSnapshot, ControlValidationPort } from './control/search.js'
-import type { ControlStore, OperationRequest, Outcome, WelcomeObligation } from './control/types.js'
+import type {
+  ControlSnapshot,
+  ControlStore,
+  GroupKey,
+  OperationRequest,
+  Outcome,
+  WelcomeObligation,
+} from './control/types.js'
 import type {
   GroupCrypto,
   GroupMLS,
@@ -82,6 +89,8 @@ export const DEFAULT_COMMIT_DEADLINE_MS = 30_000
 
 /** MLS lifecycle and the host stores used by the durable control and app lanes. */
 export type GroupPeerMLSParams = {
+  recoveryTarget?: { targetID: string; topicID: string }
+  manualRecovery?: { authorisationID: string; source: GroupKey }
   recoveryOnly?: boolean
   onConfirmedRecovery?: (handoff: ConfirmedRecoveryHandoff) => void
   settleAcceptedRecovery?: (
@@ -130,6 +139,29 @@ export type GroupPeerMLSParams = {
    * this peer can never hold again. See {@link "app-cursor".AppCursorStore}.
    */
   appCursorStore: AppCursorStore
+}
+
+/**
+ * Local facts deciding whether a device may move its transport without rejoining. Freshness is
+ * the absence of known lag only; it proves nothing against a hub that withheld frames.
+ */
+export type CurrentMoveInputs = {
+  control: ControlSnapshot
+  activity: { pending: number }
+  stateReadable: boolean
+  /** Installed state epoch, or null when unreadable. A recovery floor above it is known lag. */
+  stateEpoch: number | null
+  ledgerComplete: boolean
+  walkComplete: boolean
+  outboxUnresolved: boolean
+  settlementUnresolved: boolean
+  hardHold: SafetyHold
+  condition: GroupCondition | null
+  openForkNotice: boolean
+  /** Competing ordinary/manual candidates or a pending fork intent, never the executing choice. */
+  activeRejoin: boolean
+  /** Saved app override of the open-notice exclusion only. */
+  allowOpenFork: boolean
 }
 
 export type StrandKind =
@@ -279,6 +311,8 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
   | GroupPeerMLSParams
   | {
       mls?: undefined
+      recoveryTarget?: undefined
+      manualRecovery?: undefined
       recoveryOnly?: undefined
       onConfirmedRecovery?: undefined
       settleAcceptedRecovery?: undefined

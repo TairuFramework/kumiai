@@ -20,6 +20,7 @@ import type {
   PackageUse,
 } from '../persistence-types.js'
 import { clearGroupCondition } from '../safety-conditions.js'
+import { openSuccessorTombstone } from '../successor.js'
 import { retireIncarnation } from './retired.js'
 import type { RegistryRetirement } from './retirement.js'
 import { recoveryTrustFor } from './trust.js'
@@ -31,6 +32,7 @@ type AdmissionInputs = {
   metadata: StateMetadata | null
   trust: GroupRecoveryTrust | null
   forkHalted?: boolean
+  successorTombstoned?: boolean
 }
 type SeedDecision = 'join' | 'alreadyJoined' | 'readmit' | 'next-incarnation'
 
@@ -41,7 +43,7 @@ export function seedAdmission(
     forkHalted: boolean
   },
 ): SeedDecision {
-  const { lifetime, metadata, trust, welcome, replace, forkHalted } = params
+  const { lifetime, metadata, trust, welcome, replace, forkHalted, successorTombstoned } = params
   if (lifetime === null) {
     if (metadata !== null || trust !== null)
       throw new SeedAdmissionRefusedError({ reason: 'unavailable' })
@@ -80,6 +82,9 @@ export function seedAdmission(
   if (spent.some((value) => sameStoredValue(value, welcome.epochAuthenticator)))
     throw new SeedAdmissionRefusedError({ reason: 'spent' })
   if (forkHalted) throw new SeedAdmissionRefusedError({ reason: 'fork-halted' })
+  // Independent of epochs and spent state: only an explicit app clear lifts it.
+  if (successorTombstoned === true)
+    throw new SeedAdmissionRefusedError({ reason: 'successor-tombstone' })
   const active = lifetime?.activeIncarnation ?? null
   if (
     active !== null &&
@@ -121,7 +126,7 @@ function metadataFailure(cause: unknown): never {
   throw cause
 }
 async function readAdmission(
-  reads: Pick<EntryReads, 'lifetime' | 'trust' | 'metadata' | 'control'>,
+  reads: Pick<EntryReads, 'lifetime' | 'trust' | 'metadata' | 'control' | 'checkpoints'>,
   held: (key: GroupKey) => SafetyHold,
 ): Promise<AdmissionInputs> {
   let lifetime: GroupLifetime | null = null
@@ -141,8 +146,10 @@ async function readAdmission(
     throw new SeedAdmissionRefusedError({ reason: 'unavailable', cause })
   }
   let forkHalted = false
+  let successorTombstoned = false
   if (lifetime !== null) {
     try {
+      successorTombstoned = openSuccessorTombstone(await reads.checkpoints(), lifetime.groupID)
       const control = await reads.control(lifetime.latestIncarnation)
       forkHalted =
         control.forkHalt !== null ||
@@ -162,7 +169,7 @@ async function readAdmission(
       metadataFailure(cause)
     }
   }
-  return { lifetime, trust, metadata, forkHalted }
+  return { lifetime, trust, metadata, forkHalted, successorTombstoned }
 }
 
 export function createRegistrySeed<TTx extends GroupTransaction>(params: {
@@ -297,6 +304,7 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
               trust: stores.trust.load,
               metadata: (incarnation) => stores.incarnation(incarnation).state.loadMetadata(),
               control: (incarnation) => stores.incarnation(incarnation).control.load(),
+              checkpoints: stores.checkpoints.list,
             },
             params.held,
           )

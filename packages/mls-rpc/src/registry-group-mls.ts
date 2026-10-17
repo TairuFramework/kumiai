@@ -10,6 +10,7 @@ import {
   type ControlStore,
   controlSafetyHeld,
   type GroupMLS,
+  isHardControlHold,
   RecoveryTargetBehindError,
   type SendAdmission,
 } from '@kumiai/rpc'
@@ -17,6 +18,7 @@ import {
 import type { ControlHandleAccess, ControlReadScope } from './access.js'
 import { provenCheckpointFacts } from './checkpoint-store.js'
 import type { AccountedGroupObservation, EntryReads } from './entry-capability.js'
+import { manualRecoveryAttempt } from './manual-recovery.js'
 import { sameStoredValue } from './memory-incarnation-stores.js'
 import {
   createGroupMLS,
@@ -57,6 +59,7 @@ export type RegistryGroupMLSParams = Omit<
   key: GroupKey
   recovery: RecoveryEnvironment
   target: RecoveryRouting
+  manualRecovery?: { authorisationID: string; source: GroupKey }
 }
 
 export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Promise<GroupMLS> {
@@ -64,6 +67,13 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
     throw new TypeError('Custom recoverySecret requires recoverySecretFromTrust')
   const capability = registrySafety<GroupTransaction>(params.registry)
   if (capability === null) throw new TypeError('Registry GroupMLS requires a registered registry')
+  const manualRecovery =
+    params.manualRecovery === undefined
+      ? undefined
+      : {
+          authorisationID: params.manualRecovery.authorisationID,
+          source: { ...params.manualRecovery.source },
+        }
   const key = { ...params.key }
   if (
     !key.groupID ||
@@ -80,7 +90,23 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
     if (source.key.groupID !== key.groupID || source.key.incarnation !== key.incarnation)
       throw new DisplacedGroupHandleError('Registry GroupMLS belongs to another incarnation')
   }
+  async function checkManual(reads: EntryReads): Promise<void> {
+    if (manualRecovery === undefined) return
+    const { authorisationID, source } = manualRecovery
+    const manual = manualRecoveryAttempt(await reads.checkpoints(), key, authorisationID)
+    if (
+      !sameStoredValue(source, key) ||
+      manual.stage !== 'authorised' ||
+      manual.pauseReason !== null ||
+      manual.choice.mode !== 'resync' ||
+      manual.choice.targetID !== target.targetID ||
+      manual.choice.commitTopicID !== target.topicID ||
+      (await reads.lifetime())?.activeIncarnation !== key.incarnation
+    )
+      throw new DisplacedGroupHandleError('Manual recovery authority moved')
+  }
   async function readSource(reads: EntryReads): Promise<RegistryRecoverySource> {
+    await checkManual(reads)
     const source = await readRecoverySource(reads, key.groupID)
     assertKey(source)
     if (normalizeDID(source.trust.credential.id) !== normalizeDID(params.identity.id))
@@ -253,7 +279,7 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
       }
     },
   }
-  const control: ControlStore = {
+  const ordinaryControl: ControlStore = {
     key: { ...key },
     load: () =>
       capability.entry.read(key.groupID, async (reads) => {
@@ -277,11 +303,22 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
         },
       ),
   }
+  const control =
+    manualRecovery === undefined
+      ? ordinaryControl
+      : registryRecoveryCoordinator(registry)
+          .manualStore(key)
+          .manualRecoveryControl(manualRecovery.authorisationID)
   registryRosterSealers.set(lazy, (request, captureHead) =>
     capability.entry.read(key.groupID, async (reads) => {
       const source = await readSource(reads)
       const control = await reads.control(key.incarnation)
-      if (controlSafetyHeld(control) !== null || capability.held(key) !== null) return null
+      if (
+        controlSafetyHeld(control) !== null ||
+        isHardControlHold(control.controlHold) ||
+        capability.held(key) !== null
+      )
+        return null
       if (
         source.identity === null ||
         (control.cursor?.position ?? null) !== captureHead ||
@@ -367,6 +404,14 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
         recoverySourceIdentity(await readSource(reads)),
       ),
     recoveryAdoption: {
+      ...(manualRecovery === undefined
+        ? {}
+        : {
+            manualRecovery: {
+              ...manualRecovery,
+              check: () => capability.entry.read(key.groupID, checkManual),
+            },
+          }),
       target,
       environment: params.recovery,
       readRecoverySource: () => capability.entry.read(key.groupID, readSource),
@@ -397,7 +442,7 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
     const reconcile = captured.reconcileCapture
     captured.reconcileCapture = async (record, reply) => {
       const result = await reconcile(record, reply)
-      if (result.kind !== 'head-only') return result
+      if (result.kind !== 'head-only' || manualRecovery !== undefined) return result
       // Re-authenticate under the owner before clearing a diagnostic from an earlier capture.
       const mutationID = crypto.randomUUID()
       await capability.entry.run(

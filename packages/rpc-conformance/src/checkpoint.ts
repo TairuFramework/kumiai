@@ -8,6 +8,10 @@ import type {
 import type { ConformanceForkNotice, ConformanceForkNoticeEvent } from './fork-notice.js'
 import { storageChange } from './group-storage.js'
 import type {
+  ConformanceManualRecoveryRecord,
+  ConformanceSuccessorTombstone,
+} from './manual-recovery.js'
+import type {
   ConformanceAppHoldRecord,
   ConformanceBranchAbandonedEvent,
   ConformanceCheckpointFactRecord,
@@ -53,6 +57,18 @@ export type ConformanceCheckpointRecord<Position extends string = string> =
       key: ConformanceGroupKey
       startedEpoch: number
       startedAuthHash: string
+    }
+  | {
+      kind: 'manual-recovery'
+      id: string
+      key: ConformanceGroupKey
+      value: ConformanceManualRecoveryRecord<Position>
+    }
+  | {
+      kind: 'successor'
+      id: string
+      key: ConformanceGroupKey
+      value: ConformanceSuccessorTombstone
     }
   | {
       kind: 'superseded-rejoin'

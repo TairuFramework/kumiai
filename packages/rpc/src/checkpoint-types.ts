@@ -6,7 +6,11 @@ import type {
   OwnBranchMessage,
   ReportCoverage,
 } from './fork-notice.js'
-import type { CapturedRejoinRecord, ForkRecoveryAuthorisation } from './recovery-types.js'
+import type {
+  AcceptedRejoinSettlement,
+  CapturedRejoinRecord,
+  ForkRecoveryAuthorisation,
+} from './recovery-types.js'
 
 export type BranchReportCoverage = {
   ancestry: ReportCoverage
@@ -71,7 +75,43 @@ export type CheckpointService = CheckpointPort & {
   updateRecords(change: { put?: Array<CheckpointRecord>; remove?: Array<string> }): Promise<void>
 }
 
+export type PersistedManualRecovery =
+  | { mode: 'resync'; targetID: string; commitTopicID: string; allowOpenFork: boolean }
+  | { mode: 'successor'; successor: GroupKey }
+export type ManualRecoveryRecord = {
+  id: string
+  source: GroupKey
+  choice: PersistedManualRecovery
+  stage: 'authorised' | 'completed'
+  pauseReason: 'target-unresolved' | null
+  destination: GroupKey | null
+  attempt: CapturedRejoinRecord | null
+  epochFloor: number | null
+  settlements: Array<AcceptedRejoinSettlement>
+  mutationID: string
+  /** A fork recovery intent this authorisation abandoned; the device stays known-behind. */
+  abandonedForkRecovery?: string
+}
+export type ManualRecoveryStatus = {
+  id: string
+  kind: 'pending' | 'paused' | 'completed'
+  reason: 'target-unresolved' | null
+}
+
+/** Blocks readmission of a source retired in favour of an admitted successor until the app clears it. */
+export type SuccessorTombstone = {
+  kind: 'successor-tombstone'
+  id: string
+  source: GroupKey
+  successor: GroupKey
+  authorisationID: string
+  retiredAt: number
+  clearedAt: number | null
+}
+
 export type CheckpointRecord =
+  | { kind: 'manual-recovery'; id: string; key: GroupKey; value: ManualRecoveryRecord }
+  | { kind: 'successor'; id: string; key: GroupKey; value: SuccessorTombstone }
   | {
       kind: 'branch-abandonment'
       id: string

@@ -7,6 +7,7 @@ export const recoveryCompletionContexts = new WeakMap<
   {
     key: GroupKey
     changes: ControlChanges
+    abandonForkRecovery?: true
     forkRecovery?: { attempt: ForkRecoveryAttempt | null; supersededID?: string }
   }
 >()

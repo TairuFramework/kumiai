@@ -300,6 +300,7 @@ for (const mode of ['real-mls', 'double'] as const) {
             hold: 'recovery-unavailable',
             condition: null,
             evidence: null,
+            manualRecovery: null,
           })
         }))
       test('clearHold and event ack cannot repair corruption', () =>
@@ -352,6 +353,7 @@ for (const mode of ['real-mls', 'double'] as const) {
             hold: null,
             condition: null,
             evidence: null,
+            manualRecovery: null,
           })
           expect(await f.safety().events(key)).toEqual([])
         }),

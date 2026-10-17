@@ -335,6 +335,42 @@ test('not member retains pending reason', async () => {
   })
 })
 
+test('not member device exits only through an explicit admitted successor', async () => {
+  const { f, hub } = await setup()
+  await start(f.remote, hub)
+  const device = f.local()
+  const local = await start(device, hub)
+  await local.owner.peer()?.recover()
+  await expect.poll(() => local.owner.status().kind).toBe('not-member')
+  const { evidence } = await device.safety().status(f.key)
+  expect(evidence).not.toBeNull()
+  // The diagnosis is non-terminal: kumiai never retires or tombstones on its own.
+  expect(await device.device.groups.load(f.key.groupID)).toMatchObject({
+    activeIncarnation: f.key.incarnation,
+  })
+  const successor = await device.registry.seed(await device.makeHandle(0, 'not-member-successor'), {
+    packageUse: null,
+  })
+  const successorState = await device.device.groups.loadState(successor)
+  expect(await device.safety().recover(f.key, { mode: 'successor', successor })).toEqual(successor)
+  await expect.poll(() => local.owner.peer()).toBeNull()
+  const sent = () => hub.published.filter((frame) => frame.senderDID === device.identity.id).length
+  const before = sent()
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  expect(sent()).toBe(before)
+  expect(await device.device.groups.loadState(successor)).toEqual(successorState)
+  expect(await device.safety().status(f.key)).toMatchObject({
+    evidence,
+    manualRecovery: { kind: 'completed' },
+  })
+  await expect(
+    device.registry.seed(await device.makeHandle(2, f.key.groupID), {
+      replace: true,
+      packageUse: { sourceID: 'source', ref: 'old-welcome', kind: 'ordinary' },
+    }),
+  ).rejects.toMatchObject({ name: 'SeedAdmissionRefusedError', reason: 'successor-tombstone' })
+})
+
 test('replayed former member request does not re seal', async () => {
   const { f, hub } = await setup()
   const seal = vi.fn()

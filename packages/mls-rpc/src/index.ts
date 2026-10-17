@@ -27,9 +27,13 @@ export type {
   ControlAdoptionPort,
   ForkHalt,
   GroupSafetyEvent,
+  ManualRecoveryRecord,
+  ManualRecoveryStatus,
+  PersistedManualRecovery,
   RecoverySource,
   RecoveryUnavailableEvent,
   SafetyHold,
+  SuccessorTombstone,
 } from '@kumiai/rpc'
 
 export {
@@ -63,6 +67,7 @@ export {
   openEntries,
   sealEntries,
 } from './crypto.js'
+export { createManualRecoveryStore, type ManualRecoveryStore } from './manual-recovery.js'
 export {
   createGroupMLS,
   createLedgerEntrySlot,

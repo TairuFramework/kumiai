@@ -337,7 +337,7 @@ restorations are never cached. Pure reads advance no persistence revision or sta
 
 `GroupSafety.epochAuthenticator(key)` reads a defensive copy of active installed trust without writing.
 `reportFork(key, evidence)` validates the active incarnation and committed identity before latching and atomically storing evidence with its event.
-`recover(key, choice)` currently rejects with `ManualRecoveryUnavailableError`.
+`recover(key, choice)` persists a resync choice before any network use, then moves or rejoins (see Hub migration). A successor choice retires the source (see Successor retirement).
 The factory requires a registered registry and persistence sharing its coordinator binding.
 
 `forkHalt` and `recoveryUnavailable` are immutable incarnation fields.
@@ -358,11 +358,53 @@ Hosts derive `judgeWelcomeAdmission`'s `held.forkHalted` from `forkHalt` alone.
 `recoveryUnavailable` alone permits an otherwise admissible Welcome into the next incarnation when retained trust is valid.
 Missing, unreadable or empty-spent trust refuses seed as unavailable without changing admission state.
 Neither Welcome nor GroupInfo reconstructs the spent set. Ordinary readmission refuses a fork-halted tombstone.
-Manual re-invite after lost spent trust requires a new successor group with a new groupID. This recovery belongs to 2.2e.
+After lost spent trust, retirement to an already admitted successor group (another groupID) remains the explicit exit.
 
 A validated latch survives failed or ambiguous writes in the current process. Only proven commits survive restart.
 A crash before durable writing can lose volatile host evidence.
 
+## Hub migration
+
+`recover(key, { mode: 'resync', target: { targetID, hub, commitTopicID }, allowOpenFork })` moves a group to a destination the app selects.
+kumiai never chooses destinations or creates successors. The selected binding is saved before the source peer stops.
+The destination commit topic is the binding's `commitTopicID`; rendezvous and checkpoint topics stay derived from the recovery secret.
+
+A device moves current only when `canMoveCurrent` holds against the saved record inside one owner transaction.
+That requires readable state, a complete ledger, no known lag (strand, stranded or incomplete cursor, cursor epoch behind state, `recoveryEpochFloor` above state),
+no commit slot, operation, Welcome, unresolved app publication or settlement, and zero other pending owner work.
+It also requires no hard hold, no `not-member` or `spent-set-corrupt` condition and no active rejoin.
+Active rejoin covers ordinary X, a pending fork recovery intent (including one this authorisation abandoned) and a saved manual candidate.
+An open fork notice refuses too, unless the saved `allowOpenFork` is true; that override touches nothing else.
+Freshness is the absence of known lag. It proves nothing against a hub that withheld frames.
+
+A current move keeps the GroupKey, MLS state and every hold. It resets hub positions (commit cursor, checkpoint receive cursor)
+and re-queues retained checkpoint publications with their exact frames. The peer restarts on the destination only after the move is proven.
+The first device publishing on an empty topic starts its log at its current state; others compare-and-set after it.
+App-topic cursors keep their stored positions: hosts whose hubs mint unrelated positions must reset those host stores themselves.
+
+Every other device rejoins through captured recovery from destination responders, checked against retained trust.
+It publishes nothing to the destination log before an authenticated reply. A confirmed rejoin installs a fresh incarnation without holds.
+Source holds and evidence stay as history. A failed attempt leaves source state, routing and holds intact.
+A device that arrives ahead of the destination's responders stays pending with `target-behind` unless R2/R7 fork-floor evidence applies.
+Apps must move every device. Separate hubs cannot exchange checkpoint evidence, so a partial migration can split undetectably.
+Restart resumes only the saved destination; an unresolved binding, or a resolved hub missing a transport method, pauses with `target-unresolved`.
+
+## Successor retirement
+
+`recover(key, { mode: 'successor', successor })` retires the source in favour of a group the app already created or joined through normal admission.
+The successor must be a different, available group admitted at exactly that key; otherwise `ManualRecoveryUnavailableError` refuses before any write.
+kumiai checks the successor through its own gate only, persists the choice, drains source work and retirement hooks (stopping the source peer), then commits in one transaction:
+the source lifetime becomes a tombstone, abandoned operations and superseded manual candidates become `unknown` outcomes, uncertified outbox entries fail with events,
+the choice completes and a `SuccessorTombstone` row records `source`, `successor`, `authorisationID` and `retiredAt`. It returns the successor key.
+Nothing is copied: no state, ratchets, messages or roster. Owed outcomes, Welcomes, certified settlements, events and halt evidence stay serviceable as history.
+Retirement reads no private state or retained trust, so corrupt source state or trust is no obstacle. Failure leaves the source, its routing and any halt intact.
+A successor choice supersedes a pending resync, and a later successor choice replaces an unexecuted one in place; a resync never supersedes, and an executed choice is final.
+Restart resumes only the saved successor when the app calls `recover` again. A group cannot be its own successor.
+
+An open tombstone refuses every Welcome into the source group with `SeedAdmissionRefusedError` reason `successor-tombstone`, including newer or unspent ones after restart.
+`clearTombstone(groupID)` releases only that block. Spent-authenticator checks, fork halts and other safety latches still apply to later admissions.
+Hard-held devices never answer recovery requests, and manual resync never opens that lane. When every device is halted, successor retirement is the exit.
+Application code owns successor creation, admission, routing and member migration.
 
 ## Captured registry recovery
 

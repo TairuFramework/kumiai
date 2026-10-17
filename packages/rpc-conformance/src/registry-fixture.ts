@@ -13,6 +13,7 @@ import type {
   ConformanceWelcomeObligation,
 } from './control-store.js'
 import type { ConformanceSendAdmission } from './group-mls.js'
+import type { ConformanceManualRecoveryStore } from './manual-recovery.js'
 import type {
   ConformanceAppSettlementObligation,
   ConformanceDevicePersistence,
@@ -32,9 +33,10 @@ export type ConformanceRecoveryPendingReason =
   | 'no-reply'
   | 'no-eligible-responder'
   | 'target-behind'
+  | 'target-unresolved'
 export type ConformanceRegistryPeerStatus =
   | { kind: 'starting' | 'running' | 'switching' | 'disposed' }
-  | { kind: 'pending'; reason?: ConformanceRecoveryPendingReason }
+  | { kind: 'pending'; reason?: ConformanceRecoveryPendingReason; authorisationID?: string }
   | { kind: 'spent-set-corrupt'; eventID: string }
   | {
       kind: 'not-member'
@@ -42,6 +44,7 @@ export type ConformanceRegistryPeerStatus =
       evidence: ConformanceNotMemberEvidence
       retrying: true
       pendingReason?: ConformanceRecoveryPendingReason
+      authorisationID?: string
     }
   | { kind: 'failed'; error: unknown }
 
@@ -122,7 +125,7 @@ export type ConformanceLegacyResyncProof = {
 }
 export type ConformanceRegistrySwitchWrite = {
   mutationID: string
-  source: { rejoinID: string }
+  source: { rejoinID: string; authorisationID?: string }
   destination: { control: { cursor: { position: string; epoch: number } } }
 }
 export type ConformanceRegistry<THandle> = {
@@ -246,6 +249,7 @@ export type ConformanceRegistryFixture<
   TTx extends ConformanceGroupTransaction = ConformanceGroupTransaction,
 > = Omit<ConformanceRegistryFixtureBase<THandle, TTx>, 'reopen'> & {
   registry: ConformanceRegistry<THandle>
+  manualRecovery(): ConformanceManualRecoveryStore
   safety(): ConformanceGroupSafety
   reopen(): Promise<ConformanceRegistryFixture<THandle, TTx>>
 }

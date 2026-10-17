@@ -7,6 +7,7 @@ import type {
   GroupMLS,
   GroupPeer,
   GroupProtocolDefinition,
+  ManualRecoveryRecord,
   NotMemberEvidence,
   RecoveryCompletion,
   RecoveryContinuation,
@@ -23,6 +24,11 @@ import {
 } from '@kumiai/rpc'
 
 import { createRegistryCheckpointService } from './checkpoint.js'
+import {
+  type ManualRecoveryStore,
+  manualRecoveryAttempt,
+  successorChosen,
+} from './manual-recovery.js'
 import { copyStoredValue, sameStoredValue } from './memory-incarnation-stores.js'
 import type { RecoveryRouting } from './mls.js'
 import {
@@ -42,7 +48,10 @@ import {
 import { decodeCapturedRecoveryCandidate } from './recovery-codec.js'
 import { recoveryCompletionContexts } from './recovery-completion-context.js'
 import { validateCapturedRecoveryRecord } from './recovery-record.js'
-import { registryRecoveryCoordinator } from './registry/recovery-coordinator.js'
+import {
+  bindRegistryManualRunner,
+  registryRecoveryCoordinator,
+} from './registry/recovery-coordinator.js'
 import {
   RetainedTrustUnavailableError,
   readRetainedTrust,
@@ -51,6 +60,8 @@ import {
 import { createRecoverySwitchFactory, toRegistrySwitchWrite } from './registry/switch-write.js'
 import type { GroupHandleRegistry, RegistryRecoverySource } from './registry/types.js'
 import type { RecoveryEnvironment } from './registry/validation.js'
+import { deferred } from './runtime.js'
+import type { RecoveryTarget } from './safety.js'
 import {
   createNotMemberHandler,
   flushConditionEvents,
@@ -69,8 +80,17 @@ function retirementTimedOut(cause: unknown): boolean {
 }
 
 type Peer = GroupPeer<Record<string, GroupProtocolDefinition>>
-export type RecoveryPendingReason = 'no-reply' | 'no-eligible-responder' | 'target-behind'
+export type RecoveryPendingReason =
+  | 'no-reply'
+  | 'no-eligible-responder'
+  | 'target-behind'
+  | 'target-unresolved'
 export type RegistryPeerOptions = {
+  hub?: RecoveryTarget['hub']
+  control?: ControlStore
+  manualRecovery?: { authorisationID: string; source: GroupKey }
+  recoveryTarget?: RecoveryRouting
+
   onNotMember?: (params: {
     evidence: Uint8Array
     requestID: string
@@ -93,7 +113,7 @@ export type RegistryPeerOptions = {
 }
 export type RegistryPeerStatus =
   | { kind: 'starting' | 'running' | 'switching' | 'disposed' }
-  | { kind: 'pending'; reason?: RecoveryPendingReason }
+  | { kind: 'pending'; reason?: RecoveryPendingReason; authorisationID?: string }
   | { kind: 'spent-set-corrupt'; eventID: string }
   | {
       kind: 'not-member'
@@ -101,9 +121,11 @@ export type RegistryPeerStatus =
       evidence: NotMemberEvidence
       retrying: true
       pendingReason?: RecoveryPendingReason
+      authorisationID?: string
     }
   | { kind: 'failed'; error: unknown }
 export type RegistryPeer = {
+  runManualRecovery(record: ManualRecoveryRecord): Promise<GroupKey>
   peer(): Peer | null
   installedKey(): GroupKey
   status(): RegistryPeerStatus
@@ -112,6 +134,7 @@ export type RegistryPeer = {
   drained(): Promise<void>
 }
 export type RegistryPeerParams = {
+  resolveTarget?: (targetID: string) => Promise<RecoveryTarget>
   registry: GroupHandleRegistry
   key: GroupKey
   recovery: RecoveryEnvironment
@@ -127,6 +150,10 @@ export type RegistryPeerParams = {
   createMLS(
     key: GroupKey,
     onConfirmedRecovery: (handoff: ConfirmedRecoveryHandoff) => void,
+    options: {
+      target: RecoveryRouting
+      manualRecovery?: { authorisationID: string; source: GroupKey }
+    },
   ): GroupMLS | Promise<GroupMLS>
   createPeer(key: GroupKey, options: RegistryPeerOptions): Promise<Peer>
 }
@@ -137,7 +164,38 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
   if (registered === null) throw new TypeError('Registry peer requires a registered registry')
   const capability = registered
   const coordinator = registryRecoveryCoordinator(registry)
-  const target = { ...params.target }
+  let target = { ...params.target }
+  let manual: ManualRecoveryRecord | null = null
+  let selectedTarget: RecoveryTarget | null = null
+  let manualStore: ManualRecoveryStore | null = null
+  let preparingManual = false
+  let manualCompletion: {
+    id: string
+    promise: Promise<GroupKey>
+    resolve(key: GroupKey): void
+    reject(error: unknown): void
+  } | null = null
+  async function discoverManual(): Promise<void> {
+    if (manual !== null) return
+    manual = await capability.entry.read(key.groupID, async (reads) => {
+      const records = await reads.checkpoints()
+      // A successor choice is the app's to resume; it also retires any pending resync.
+      const superseded = successorChosen(records, key)
+      const row = [...records]
+        .reverse()
+        .find(
+          (row) =>
+            row.kind === 'manual-recovery' &&
+            ((row.value.stage === 'authorised' && !superseded && sameStoredValue(row.key, key)) ||
+              (row.value.stage === 'completed' &&
+                (sameStoredValue(row.key, key) || sameStoredValue(row.value.destination, key)))),
+        )
+      return row?.kind === 'manual-recovery' ? row.value : null
+    })
+    if (manual !== null) manualStore = coordinator.manualStore(manual.source, params.resolveTarget)
+  }
+  const manualID = () => manual?.id
+
   let key = { ...params.key }
   let current: Peer | null = null
   let disposed = false
@@ -159,6 +217,33 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
       recoveryEpochFloor: number | null,
     ) => {
       const sourceKey = record.source.key
+      if (record.trigger === 'manual' && record.authorisationID !== null) {
+        const store = coordinator
+          .manualStore(record.source.key)
+          .manualRecoveryControl(record.authorisationID)
+        await applyResolved(
+          store,
+          {
+            deleteRejoin: true,
+            recoveryEpochFloor,
+            putSettledRejoins: [
+              {
+                kind: 'accepted-unadoptable',
+                id: record.id,
+                digest: record.digest,
+                payloadDigest: record.payloadDigest,
+                epochAfter: record.epochAfter,
+                acceptedEpoch: epoch,
+                leafDigest,
+                origin: { sourceKey, target: record.target, searchFrom: record.searchFrom },
+                ledgerBefore: record.ledgerBefore,
+              },
+            ],
+          },
+          crypto.randomUUID(),
+        )
+        return
+      }
       const store: ControlStore = {
         key: sourceKey,
         load: () =>
@@ -291,15 +376,22 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
         evidence: observed.evidence,
         retrying: true,
         ...(pendingReason === undefined ? {} : { pendingReason }),
+        ...(manual === null ? {} : { authorisationID: manual.id }),
       }
     else if (status.kind === 'not-member') status = { kind: 'running' }
   }
   function onRecovery(event: RecoveryEvent): void | Promise<void> {
+    if (manual !== null && event.phase === 'failed' && event.reason === 'refused')
+      manualCompletion?.reject(new RegistryResyncRefusedError({ reason: 'unaccepted' }))
     if (event.phase === 'failed' && event.pendingReason !== undefined) {
       pendingReason = event.pendingReason
       if (status.kind === 'not-member') status = { ...status, pendingReason }
       else if (!disposed && status.kind !== 'failed' && status.kind !== 'spent-set-corrupt')
-        status = { kind: 'pending', reason: pendingReason }
+        status = {
+          kind: 'pending',
+          reason: pendingReason,
+          ...(manual === null ? {} : { authorisationID: manual.id }),
+        }
     }
     return params.onRecovery?.(event)
   }
@@ -334,6 +426,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
   function fail(error: unknown, record = recoveryAttempt): void {
     if (status.kind === 'failed') return
     status = { kind: 'failed', error }
+    if (!preparingManual) manualCompletion?.reject(error)
     if (!disposed && record !== undefined) {
       const event: RecoveryEvent = {
         groupID: target.topicID,
@@ -399,13 +492,21 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
       reads.control(requested.incarnation),
     )
     const held = capability.held(requested) ?? controlSafetyHeld(control)
-    if (held !== null || isHardControlHold(control.controlHold))
+    const manualSource = manual !== null && sameStoredValue(manual.source, requested)
+    if (!manualSource && (held !== null || isHardControlHold(control.controlHold)))
       throw new GroupUnavailableError({
         reason: held === 'recovery-unavailable' ? held : 'invalid',
       })
     retire(requested)
     const generation = retirementGeneration
-    const mls = await params.createMLS({ ...requested }, onConfirmedRecovery)
+    const authority =
+      manualSource && manual !== null
+        ? { authorisationID: manual.id, source: { ...manual.source } }
+        : undefined
+    const mls = await params.createMLS({ ...requested }, onConfirmedRecovery, {
+      target: { ...target },
+      ...(authority === undefined ? {} : { manualRecovery: authority }),
+    })
     let peer: Peer | undefined
     let installed = false
     try {
@@ -416,8 +517,18 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
         { ...requested },
         {
           mls,
+          ...(authority === undefined
+            ? {}
+            : {
+                manualRecovery: authority,
+                control: manualStore?.manualRecoveryControl(authority.authorisationID),
+              }),
+          ...(selectedTarget === null
+            ? {}
+            : { hub: selectedTarget.hub, recoveryTarget: { ...target } }),
           checkpoints: createRegistryCheckpointService(registry, requested),
           recoveryOnly:
+            manualSource ||
             control.rejoin !== null ||
             control.forkRecoveryAttempt != null ||
             !mls.sendAdmission().admissible,
@@ -440,7 +551,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
           },
           settleAcceptedRecovery,
           reconcileAcceptedRecovery: async (record, reply) => {
-            const saved = await coordinator.readRecoveryRecord(key)
+            const saved = await coordinator.readRecoveryRecord(manual?.source ?? key, manualID())
             if (
               reconcileConfirmedRecovery !== record.id ||
               record.stage !== 'confirmed' ||
@@ -596,11 +707,53 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
     timer = undefined
     wake = undefined
   }
+  async function moveCurrent(record: ManualRecoveryRecord): Promise<boolean> {
+    if (manualStore === null) return false
+    let runtime: { stateVersion: number; ledgerComplete: boolean }
+    try {
+      const access = await registry.access(key.groupID)
+      if (!sameStoredValue(access.key, record.source)) return false
+      runtime = {
+        stateVersion: access.stateVersion(),
+        ledgerComplete: await access.read((group) => group.isLedgerComplete()),
+      }
+    } catch {
+      return false // Unreadable state can only rejoin.
+    }
+    if (!(await manualStore.moveCurrent(record.id, runtime))) return false
+    // Routing goes live only after the completed move is proven.
+    manual = null
+    manualStore = null
+    await start(key)
+    manualCompletion?.resolve({ ...key })
+    manualCompletion = null
+    return true
+  }
   async function resume(): Promise<void> {
     let backoff = 100
+    await discoverManual()
+    if (manual !== null && manualStore !== null) {
+      selectedTarget = await manualStore.resolveManualRecoveryTarget(manual.id)
+      if (selectedTarget === null) {
+        pendingReason = 'target-unresolved'
+        status = { kind: 'pending', reason: pendingReason, authorisationID: manual.id }
+        await refreshCondition()
+        timer = setTimeout(() => {
+          if (!disposed) void track(resume()).catch((error: unknown) => fail(error))
+        }, 1000)
+        return
+      }
+      target = { targetID: selectedTarget.id, topicID: selectedTarget.commitTopicID }
+      pendingReason = undefined
+      if (manual.stage === 'completed' && manual.attempt === null && manual.destination !== null) {
+        key = { ...manual.destination }
+        manual = null
+        manualStore = null
+      } else if (manual.stage === 'authorised' && (await moveCurrent(manual))) return
+    }
     while (!disposed) {
       try {
-        let record = await coordinator.readRecoveryRecord(key)
+        let record = await coordinator.readRecoveryRecord(manual?.source ?? key, manualID())
         if (disposed) return
         const control = await capability.entry.read(key.groupID, (reads) =>
           reads.control(key.incarnation),
@@ -612,24 +765,30 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
           } catch (cause) {
             throw new GroupStateConflictError('Invalid saved recovery record', { cause })
           }
-          if (record.trigger !== 'automatic')
+          if (
+            record.trigger !== 'automatic' &&
+            (manual === null || record.authorisationID !== manual.id)
+          )
             throw new GroupStateConflictError('Manual recovery requires host activation')
         }
         const hardHeld =
           control.forkHalt !== null ||
           isHardControlHold(control.controlHold) ||
           capability.held(key) === 'fork-halted'
-        // Spent corruption outranks a recovery-unavailable refusal, so diagnose it first.
-        if (!hardHeld) await diagnoseSpentSet()
-        if (!hardHeld && capability.held(key) === 'spent-set-corrupt') {
+        // Spent corruption outranks a recovery-unavailable refusal, so diagnose it first. An
+        // authorised manual recovery moves past every hold, rejoin-only.
+        const diagnoseSpent = !hardHeld && manual === null
+        if (diagnoseSpent) await diagnoseSpentSet()
+        if (diagnoseSpent && capability.held(key) === 'spent-set-corrupt') {
           await persistSpentCondition(new SpentSetCorruptError({ key }))
           await refreshCondition()
           return
         }
         if (
-          capability.held(key) !== null ||
-          controlSafetyHeld(control) !== null ||
-          isHardControlHold(control.controlHold)
+          manual === null &&
+          (capability.held(key) !== null ||
+            controlSafetyHeld(control) !== null ||
+            isHardControlHold(control.controlHold))
         )
           throw new GroupStateConflictError('Recovery source is held')
         if (
@@ -653,6 +812,11 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
         if (resolved.kind === 'committed') {
           if (current !== null) await stopPeer(current)
           await start(resolved.destination)
+          manualCompletion?.resolve(resolved.destination)
+          manualCompletion = null
+          pendingReason = undefined
+          manual = null
+          manualStore = null
           return
         }
         if (resolved.kind === 'rolled-back') {
@@ -660,12 +824,15 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
           const control = await capability.entry.read(key.groupID, (reads) =>
             reads.control(key.incarnation),
           )
-          if (capability.held(key) !== null || controlSafetyHeld(control) !== null)
+          if (
+            manual === null &&
+            (capability.held(key) !== null || controlSafetyHeld(control) !== null)
+          )
             throw new GroupStateConflictError('Recovery source is held')
-          const source = await registry.recoverySource(key.groupID)
           if (current !== null) await stopPeer(current)
+          const source = await registry.recoverySource(key.groupID)
           // Reread after source callbacks and completion writes have drained.
-          record = await coordinator.readRecoveryRecord(key)
+          record = await coordinator.readRecoveryRecord(manual?.source ?? key, manualID())
           if (record === null || !('format' in record) || record.stage !== 'confirmed')
             throw new GroupStateConflictError('Confirmed recovery moved after drainage')
           try {
@@ -742,11 +909,57 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
         if (worker === running) worker = null
       })
   }
+  async function activateManual(record: ManualRecoveryRecord): Promise<GroupKey> {
+    if (disposed) throw new GroupStateConflictError('Recovery peer disposed')
+    if (manualCompletion?.id === record.id) return await manualCompletion.promise
+    if (manualCompletion !== null)
+      throw new GroupStateConflictError('Another manual recovery is running')
+    preparingManual = true
+    const completion = deferred<GroupKey>()
+    const promise = completion.promise
+    manualCompletion = { id: record.id, ...completion }
+    void promise.catch(() => {})
+    const running = (async () => {
+      await ready.catch(() => {})
+      if (worker !== null) await worker.catch(() => {})
+      if (current !== null) await stopPeer(current)
+      await capability.entry.read(record.source.groupID, async (reads) => {
+        const saved = manualRecoveryAttempt(await reads.checkpoints(), record.source, record.id)
+        if (
+          saved.stage !== 'authorised' ||
+          !sameStoredValue(saved.choice, record.choice) ||
+          (await reads.lifetime())?.activeIncarnation !== record.source.incarnation
+        )
+          throw new GroupStateConflictError('Manual recovery source or authority moved')
+      })
+      manual = copyStoredValue(record)
+      manualStore = coordinator.manualStore(record.source, params.resolveTarget)
+      key = { ...record.source }
+      status = { kind: 'switching' }
+      preparingManual = false
+      if (timer !== undefined) clearTimeout(timer)
+      await resume()
+    })()
+    void track(running).catch((error: unknown) => {
+      preparingManual = false
+      manualCompletion?.reject(error)
+      fail(error)
+    })
+    return await promise
+  }
+  const unbindManual = bindRegistryManualRunner(registry, key.groupID, activateManual)
   const ready = track(Promise.resolve().then(resume))
   void ready.catch((error: unknown) => {
     fail(error)
   })
   return {
+    runManualRecovery: (record) => {
+      if (record.source.groupID !== key.groupID)
+        return Promise.reject(
+          new GroupStateConflictError('Manual recovery belongs to another group'),
+        )
+      return coordinator.runManual(record)
+    },
     peer: () => current,
     installedKey: () => ({ ...key }),
     status: () => (status.kind === 'not-member' ? copyStoredValue(status) : { ...status }),
@@ -759,6 +972,8 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
       wake?.()
       unregister()
       unobserve()
+      unbindManual()
+      manualCompletion?.reject(new GroupStateConflictError('Recovery peer disposed'))
       if (conditionTimer !== undefined) clearTimeout(conditionTimer)
       for (const peer of peers) void track(peer.dispose()).catch(() => {})
     },
