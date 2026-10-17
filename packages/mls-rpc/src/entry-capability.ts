@@ -1,6 +1,7 @@
 import type { CheckpointRecord, ControlSnapshot, GroupCondition } from '@kumiai/rpc'
 
 import type {
+  AppPoisonRecord,
   EpochIdentity,
   GroupKey,
   GroupLifetime,
@@ -10,6 +11,7 @@ import type {
   GroupStores,
   GroupTransaction,
   GroupTransition,
+  PendingAppFrame,
   PersistenceEvent,
 } from './persistence-types.js'
 
@@ -43,6 +45,12 @@ export type EntryReads = {
   state(incarnation: number): Promise<GroupStateRecord | null>
   control(incarnation: number): Promise<ControlSnapshot>
   events(incarnation: number): Promise<Array<PersistenceEvent>>
+  appFrame(
+    incarnation: number,
+    id: string,
+  ): Promise<{ pending: PendingAppFrame | null; poison: AppPoisonRecord | null }>
+  pendingFrames(incarnation: number): Promise<Array<PendingAppFrame>>
+  appCursor(incarnation: number, topicID: string): Promise<string | null>
   controlMutation(incarnation: number): Promise<string | null>
   diagnoseState(
     incarnation: number,

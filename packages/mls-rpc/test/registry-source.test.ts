@@ -144,6 +144,8 @@ for (const mode of ['real-mls', 'double'] as const) {
           },
           state: forbidden,
           control: forbidden,
+          appFrame: forbidden,
+          pendingFrames: forbidden,
           diagnoseState: forbidden,
         }))
         const owner = registry(fixture)

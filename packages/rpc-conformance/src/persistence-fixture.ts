@@ -303,6 +303,15 @@ export type ConformanceEntryReads<Position extends string = string> = {
   state(incarnation: number): Promise<ConformanceGroupStateRecord | null>
   control(incarnation: number): Promise<ConformanceControlSnapshot<Position>>
   events(incarnation: number): Promise<Array<ConformancePersistenceEvent>>
+  appFrame(
+    incarnation: number,
+    id: string,
+  ): Promise<{
+    pending: ConformanceStoragePendingAppFrame | null
+    poison: ConformanceAppPoisonRecord | null
+  }>
+  pendingFrames(incarnation: number): Promise<Array<ConformanceStoragePendingAppFrame>>
+  appCursor(incarnation: number, topicID: string): Promise<string | null>
   controlMutation(incarnation: number): Promise<string | null>
   diagnoseState(
     incarnation: number,

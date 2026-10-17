@@ -108,6 +108,82 @@ test.each([
   })
 })
 
+test('prepare reads app frames by id', async () => {
+  const fixture = await setup()
+  const key = { groupID: 'entry-group', incarnation: 1 }
+  const topicID = 'topic:app'
+  const frame = {
+    ...key,
+    id: 'frame-a',
+    protocol: 'app',
+    procedure: 'message',
+    topicID,
+    segment: 3,
+    position: 'A',
+  }
+  const life = await fixture.groups.load(key.groupID)
+  if (life === null) throw new Error('Missing lifetime')
+  await fixture.groups.transition(
+    {
+      groupID: key.groupID,
+      mutationID: 'save-app-frames',
+      expected: { revision: life.revision, activeIncarnation: 1 },
+    },
+    async (stores) => {
+      await stores.incarnation(1).pending.put([
+        {
+          frame,
+          payload: new Uint8Array([1, 2]),
+          senderDID: 'sender',
+          epoch: 3,
+          idempotencyKey: 'message-a',
+        },
+      ])
+      await stores
+        .incarnation(1)
+        .pending.poison([
+          { frame: { ...frame, id: 'poison-a' }, reason: 'malformed-plaintext', keyConsumed: true },
+        ])
+    },
+  )
+  await fixture.groups.ports(key).cursor.save(topicID, 'B')
+  await fixture.capability.run(
+    { groupID: key.groupID, mutationID: 'read-app-frames' },
+    async (reads) => {
+      const pending = (await reads.appFrame(1, 'frame-a')).pending
+      expect(pending?.frame.id).toBe('frame-a')
+      const poison = (await reads.appFrame(1, 'poison-a')).poison
+      expect(poison?.keyConsumed).toBe(true)
+      expect(await reads.appFrame(1, 'none')).toEqual({ pending: null, poison: null })
+      const listed = await reads.pendingFrames(1)
+      expect(listed.map((row) => row.frame.id)).toEqual(['frame-a'])
+      if (pending === null || poison === null) throw new Error('Missing saved app frame')
+      pending.frame.id = 'changed'
+      pending.payload[0] = 99
+      poison.keyConsumed = false
+      for (const row of listed) row.frame.id = 'changed-list'
+      expect((await reads.appFrame(1, 'frame-a')).pending).toMatchObject({
+        frame: { id: 'frame-a' },
+        payload: new Uint8Array([1, 2]),
+      })
+      expect((await reads.appFrame(1, 'poison-a')).poison?.keyConsumed).toBe(true)
+      expect((await reads.pendingFrames(1)).map((row) => row.frame.id)).toEqual(['frame-a'])
+      expect(await reads.appCursor(1, topicID)).toBe('B')
+      expect(await reads.appCursor(1, 'topic:unknown')).toBeNull()
+      expect(await reads.appFrame(2, 'frame-a')).toEqual({ pending: null, poison: null })
+      expect(await reads.pendingFrames(2)).toEqual([])
+      expect(await reads.appCursor(2, topicID)).toBeNull()
+      const lifetime = await reads.lifetime()
+      if (lifetime === null) throw new Error('Missing lifetime')
+      return {
+        expected: { revision: lifetime.revision, activeIncarnation: 1 },
+        value: null,
+      }
+    },
+    async () => undefined,
+  )
+})
+
 test('prepare has real committed reads', async () => {
   const fixture = await setup()
   const opened = deferred()

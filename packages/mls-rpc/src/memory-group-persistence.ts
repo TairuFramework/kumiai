@@ -58,6 +58,7 @@ import {
 } from './persistence-errors.js'
 import { assertStateTransition, assertTrustTransition, readState } from './persistence-guards.js'
 import type {
+  AppPoisonRecord,
   AppStatusEvent,
   AtRestCodec,
   GroupKey,
@@ -71,6 +72,7 @@ import type {
   MemoryStoreRows,
   MemoryTransaction,
   OwnershipContextPort,
+  PendingAppFrame,
   TransactionalGroupEffects,
   TransactionHookSettlement,
 } from './persistence-types.js'
@@ -269,6 +271,30 @@ export function createMemoryGroupCoordinator(params: {
       events: memoryOperation(
         tx,
         async (number: number) => await incarnation(number).meta.events(),
+      ),
+      appFrame: memoryOperation(tx, async (incarnation: number, id: string) => {
+        const key = { groupID, incarnation }
+        const pending = await memoryRecordTable<PendingAppFrame>({
+          tx,
+          key,
+          namespace: 'pending',
+          atRest,
+        }).load(id)
+        const poison = await memoryRecordTable<AppPoisonRecord>({
+          tx,
+          key,
+          namespace: 'poison',
+          atRest,
+        }).load(id)
+        return { pending, poison }
+      }),
+      pendingFrames: memoryOperation(
+        tx,
+        async (number: number) => await incarnation(number).pending.list(),
+      ),
+      appCursor: memoryOperation(
+        tx,
+        async (number: number, topicID: string) => await incarnation(number).cursor.load(topicID),
       ),
       controlMutation: memoryOperation(
         tx,

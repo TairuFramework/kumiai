@@ -1513,6 +1513,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
         const { device } = await fixture.reopen()
         const groups = device.groups
         const fresh = await storageSeed(donor.ports)
+        await groups.ports(key).cursor.save('topic:keep', '7')
         await groups.transition(await storageChange(groups, groupID, 'switch'), async (stores) =>
           writeStorageInstall(stores, fresh, 'switch', 2),
         )
@@ -1536,6 +1537,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
             const pendingBefore = await stores.incarnation(1).pending.list()
             // Clearing forgets every app position of that incarnation and nothing else.
             await stores.incarnation(2).cursor.clear()
+            expect(await stores.incarnation(1).cursor.load('topic:keep')).toBe('7')
             expect(await stores.incarnation(2).cursor.load('topic:secret')).toBeNull()
             expect(await stores.incarnation(2).cursor.load('topic\u0000secret')).toBeNull()
             expect(await stores.incarnation(1).pending.list()).toEqual(pendingBefore)
