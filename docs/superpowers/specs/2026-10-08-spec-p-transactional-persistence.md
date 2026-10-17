@@ -1,7 +1,7 @@
 # Spec P: transactional persistence — design
 
 Date: 2026-10-08
-Status: draft r24 (2026-10-16)
+Status: draft r25 (2026-10-17)
 Parent: [client host, messaging protocol and multi-device e2e](2026-10-08-client-messaging-e2e-design.md)
 Control baseline: [Spec P2a](2026-10-08-spec-p2a-crash-safe-control-design.md), superseded where amended here.
 
@@ -478,11 +478,13 @@ refuse. Copy no source progress/ceilings/cursors/applied/anchor; no same-epoch r
 owed Welcomes remain addressable under `n` until ack/delivery. Storage-only workers serve those obligations without starting an old peer. Old applied rows cannot
 mask new self-removal. Resync bootstrap reports missing ledger tokens as `reenact`; only the host decides to enqueue them again.
 
+(r25) Until 2.3c, every retirement (resync switch, delete, successor) leaves opened records durable and undelivered in the retired incarnation; 2.3c retired-port delivery drains them without a live peer, and the visible blocked-switch status moves with it.
+
 Unpublished old entries fail with `incarnation-abandoned` events retaining entry/destination incarnation; host retry may enqueue fresh, never automatic reseal.
 Certified settlements publish with original occurrence/topicID. Host history survives unchanged.
 
 **Order (r14 decision).** Use `(incarnation, anchorEpoch, position)` lexicographically within a durable lane. `anchorEpoch` is the authenticated MLS capture epoch,
-not a local counter. Positions compare numerically only within that topic. This extra epoch component is necessary because different anchor topics have independent
+not a local counter. Positions compare by one code-unit order only within that topic (r25). This extra epoch component is necessary because different anchor topics have independent
 position spaces. Keep/restore preserves anchorEpoch; one epoch has one capture identity. Resync starts a new incarnation; late frames retain original epoch, retired
 opens refuse. Host message dedup is `(groupID, author, id)`; the first occurrence keeps its order and persisted topicID. Local read watermarks include incarnation;
 peer receipts remain `(authenticated topicID, position)` with no local incarnation on wire. Different topics' receipt positions are incomparable. No ordering lineage,
@@ -515,6 +517,8 @@ round-robin other lanes and enqueue/completion work before another burst-lane ba
 sustained burst, ready lane B work and control adoption complete before a second further A batch; with only A/B/control ready, both finish within three total batches
 including the active A batch. The bound assumes protocol prerequisites, available storage and short/settling handlers. Enqueue cannot wait for backlog exhaustion.
 Self-removal/switch await opened-record drains. Groups have independent gates/queues; SQLite writer limits authorise no global application mutex.
+
+(r25) Until 2.3c, every retirement (resync switch, delete, successor) leaves opened records durable and undelivered in the retired incarnation; 2.3c retired-port delivery drains them without a live peer, and the visible blocked-switch status moves with it.
 
 **Durable lanes only (r14 decision).** Only log-retained events use outbox/pending/cursor/completion persistence.
 Ephemeral RPC requests/responses, streams/channels and signals perform no persistence and initiate no provider transaction.
@@ -878,6 +882,11 @@ export type GroupStateRecord = GroupKey & { version: number } & (
       senderHWM: number
     }
 )
+```
+
+(r25) `GroupOptions.keyRetention.retainKeysForEpochs` is host-configurable: default 4, an integer from 1 to 32; anything else throws KeyRetentionRangeError. Registry handles and storage guards enforce the configured epoch count, and every skipped-key index is a safe integer below its ratchet's generation.
+
+```ts
 export type GroupTransaction = { providerID: string; groupID: string | null; onCommit(fn: () => void): void; onRollback(fn: () => void): void }
 export type IncarnationStores = {
   state: { load(): Promise<GroupStateRecord | null>; save(record: GroupStateRecord): Promise<void> }
@@ -926,7 +935,7 @@ export type OwnershipContextPort = { run<T>(token: object, fn: () => T): T; get(
 ```
 
 Transition-bound methods never transact or join an owner queue; the coordinator owns validation/sealing/hooks and completion proof.
-Expected null means absent lifetime, never a tombstone. Lifetime revision advances per transition; state version per state/metadata change.
+Expected null means absent lifetime, never a tombstone. Lifetime revision advances per transition; state version per MLS state, control, anchor, outbox, meta or trust change; pending, poison and cursor writes never advance it (r25).
 Enforce incarnation/epoch/authenticator/spent rules independently of CAS. Stores are group-bound and expire with their phase/attempt binding; operations admitted before expiry still complete unless revoked.
 
 ### Device persistence and retained trust (r16 decision)
@@ -981,7 +990,7 @@ export type RegistryHandleAccess = {
   receive<TValue>(fn: (handle: GroupHandle) => Promise<{ result: TValue; accepted: number }>): Promise<TValue>
   openBatch(frames: Array<OpenAppInput>): Promise<Array<OpenAppResult>>
   adopt(next: GroupHandle, expected: AdoptionExpected, write: AdoptionWrite): Promise<'installed' | 'noop' | 'moved'>
-  mutate: HandleAccess['mutate']; replace: HandleAccess['replace']; open: HandleAccess['open']
+  mutate: HandleAccess['mutate']; replace: HandleAccess['replace']
   pending: PendingAppFrames
 }
 export type GroupHandleRegistry = {
@@ -1007,15 +1016,18 @@ export type PreOpenAppFrameRef = GroupKey & {
   id: string; protocol: string; topicID: string; segment: number; position: string // segment = anchor epoch
 }
 export type AppFrameRef = PreOpenAppFrameRef & { procedure: string }
-// GroupCrypto.unwrap opts.frame changes to PreOpenAppFrameRef (r16 decision).
+// GroupCrypto.unwrap opts.frame changes to PreOpenAppFrameRef (r16 decision). (r25) Phase 2.3a routes durable unwrap only; wrap and ephemeral unwrap use `mutate` until 2.3b. Until 2.3d, rpc keeps the r14 `AppFrameRef` and narrow `PendingAppFrame` and calls only singleton durable unwrap. Registry crypto binds GroupKey from its incarnation-bound access; a mismatching supplied key refuses as storage failure, never as a dead frame.
 export type OpenAppInput = { frame: PreOpenAppFrameRef; ciphertext: Uint8Array; expectedAAD?: Uint8Array }
 export type OpenAppResult =
   | { kind: 'opened'; record: PendingAppFrame }
   | { kind: 'refused'; frame: PreOpenAppFrameRef; reason: 'malformed-plaintext'; keyConsumed: true }
-  | { kind: 'refused'; frame: PreOpenAppFrameRef; reason: 'invalid-ciphertext' | 'past-epoch' | 'wrong-aad'; keyConsumed: false }
-  | { kind: 'held'; frame: PreOpenAppFrameRef; reason: 'future-epoch' | 'unsupported-version' } // future-epoch bounded after commit catch-up below; unsupported-version legacy/read-only
-// New outer-version/window/age refusal commits AppPoisonRecord with keyConsumed:false, then counts as a completed occurrence.
-export type AppPoisonRecord = { frame: PreOpenAppFrameRef; reason: string; keyConsumed: boolean }
+  | { kind: 'refused'; frame: PreOpenAppFrameRef; reason: 'invalid-ciphertext' | 'wrong-aad' | 'duplicate' | 'invalid-position'; keyConsumed: false }
+  | { kind: 'refused'; frame: PreOpenAppFrameRef; reason: 'past-epoch'; keyConsumed: false; frameEpoch: number; handleEpoch: number } // not retained
+  | { kind: 'held'; frame: PreOpenAppFrameRef; reason: 'future-epoch'; frameEpoch: number; handleEpoch: number }
+  | { kind: 'held'; frame: PreOpenAppFrameRef; reason: 'unsupported-version' } // legacy/read-only; never produced
+// r25: locked epochs, duplicate, invalid-position; past-epoch only for epochs no longer retained
+// r25: only authenticated malformed plaintext (keyConsumed:true) persists an AppPoisonRecord. Crypto refusals, duplicates, invalid positions, outer-version faults and window/age expiry persist no row; durable cursor completion records them.
+export type AppPoisonRecord = { frame: PreOpenAppFrameRef; reason: string; keyConsumed: boolean } // r25: new rows always carry keyConsumed:true; legacy rows may carry false.
 export type PendingAppFrame = { frame: AppFrameRef; payload: Uint8Array; senderDID: string; epoch: number; idempotencyKey: string }
 export type PendingAppFrames = { list(): Promise<Array<PendingAppFrame>>; complete(id: string): Promise<void> }
 export type GroupHandlerMetadata = { epoch: number; incarnation: number; frame?: AppFrameRef; idempotencyKey?: string }
@@ -1027,25 +1039,42 @@ export type DurableHandler<TContext, TTx extends GroupTransaction> =
       frame: AppFrameRef; idempotencyKey: string; tx: TTx
     }): Promise<void> }
 export type CommitKeyRotationResult = { commitMessage: Uint8Array; newGroup: GroupHandle; epoch: bigint }
+```
+
+(r25) Private commit construction requires an authoring permit, checked inside @kumiai/mls before the commit is constructed. Every handle an access implementation issues (initial, refreshed, adopted, restored) and every handle derived from one is permanently restricted (CommitAuthoringRefusedError). Only the durable control-build path grants a permit: on a handle restored from the journal's sourceState bytes, for exactly one commit, whose receipt must match the returned commit bytes and candidate; journal, candidate and slot are persisted before the bytes are handed to the network. Public external commits (recovery, rejoin) spend no own handshake generation and are outside the permit.
+
+```ts
 export function commitKeyRotation(group: GroupHandle): Promise<CommitKeyRotationResult>
 ```
 
 `seal` consumes an already committed application lease. Durable attempt persistence belongs to its caller's transition. `receive` never writes for ephemeral traffic.
 `accepted` counts successful crypto opens, including subsequently malformed plaintext; it is an exact non-negative count. `openBatch` stages in input order and returns one mixed result per input only after atomic
-state/pending/poison commit (r16 decision). Authenticated plaintext supplies procedure and idempotency key; pre-open references supply neither. Validate fatal
-UTF-8/JSON, broadcast v2, type/procedure/schema/retention. Outer unsupported versions commit diagnostic poison without opening, count as completed, and never create durable holds.
+state/pending/poison commit (r16 decision).
+
+(r25) openBatch accepts at most 64 inputs and rejects larger arrays with RangeError before any read.
+
+Authenticated plaintext supplies procedure and idempotency key; pre-open references supply neither. Validate fatal
+UTF-8/JSON, broadcast v2, type/procedure/schema/retention. Outer unsupported versions refuse as invalid-ciphertext without opening or writing, count as completed through the cursor, and never create durable holds (r25).
+
+(r25) Registry crypto validates fatal UTF-8, a JSON object, broadcast `v: 2`, `payload.typ === 'event'`, a non-empty well-formed string `payload.prc` and an absent or plain-object `payload.data`. Protocol membership, schema and retention stay rpc delivery checks.
+
 Before commit-lane catch-up, future-epoch claims hold as at HEAD. Catch-up means no applicable unapplied commit through its observed head.
 Only while caught up, require APP_FUTURE_EPOCH_WINDOW=2 of locked local epoch and hold age < APP_FUTURE_HOLD_MS=30,000 ms.
 Age starts when the commit lane first catches up after the future occurrence arrives, using local monotone time.
 Future occurrences arriving while caught up start age at observation. Duplicate/refetched copies preserve it; expiry needs no new traffic: each transition into catch-up re-runs app delivery, which starts age and schedules expiry.
 Task 5e wires peer commit-lane catch-up into app-lane. Recheck it before poison; after catch-up, try opening held frames before applying bounds.
 Use the open refusal's locked handle epoch, never a crypto epoch hint. Restart permits a fresh bounded wait, preserving committed poison/completed cursors.
-While caught up, beyond either bound commit diagnostic poison with keyConsumed:false and mark completed. Durable cursor commit records completion through the prefix.
+
+(r25) A frame whose epoch is below the handle epoch but still retained opens from the retained epoch; past-epoch refuses only epochs no longer retained, and such frames are not delivered. Authenticated commit progress never awaits application delivery or a handler, and app work never runs on the peer's commit queue. App pulls run under page, byte and time budgets with a bounded number of outstanding hub requests; exhaustion leaves frames undelivered and is retried later. After an anchor rotation, the departing anchor is saved with the new anchor in one anchor-slot write, together with the epoch of the new anchor (its departure epoch). Every later anchor-slot write carries the departing list forward. Its topic keeps being pulled under its own segment identity while the authenticated applied epoch is less than the departure epoch plus 32; neither a short page nor the crypto epoch hint ends it, and expiry is computed when read, never written by app work. Expiry settles that topic's stalled frames with a delivery-settled notice marked `expired`, distinct from `resumed`.
+
+While caught up, beyond either bound mark completed through the durable cursor without a poison row (r25). Durable cursor commit records completion through the prefix.
 Task 5e tests honest lag >2 epochs delivering all frames after catch-up, plus caught-up +2/+3 and 29,999/30,000 ms boundaries.
 Malformed authenticated plaintext refuses, commits the consumed key and dead/poison occurrence, advances only a
 contiguous completed prefix, and never invokes a handler. Storage failure/ambiguity exposes no result; replay resolves saved pending/poison before reopening. Held
 inputs remain uncompleted. Registry crypto owns pending. `access` awaits `start()`; declaration itself only proves the durable restore-work write. Null/unreadable state permits retained-trust recovery, never handle access; recoverySource reads
 lifetime/version/trust independently of state bytes. Recovery uses switchIncarnation, never ordinary replace.
+
+(r25) Positions are opaque hub tokens ordered by one code-unit comparison everywhere; the registry compares them for equality only. One occurrence matcher (frame id, topicID, segment, position) serves in-batch and saved replay: a match returns the earlier or saved record or refusal without reopening or writing; the same id at another occurrence refuses as `duplicate` with keyConsumed:false and no write. A position that is empty or longer than 64 characters refuses as `invalid-position`. A completed frame's key is spent, so a refetch refuses without a write. An occurrence at or before the topic's durable cursor refuses as `duplicate` before decryption, and an attempt whose cursor moved before work re-prepares; openBatch never reports `opened` for a record it did not persist.
 
 ```ts
 export type BuiltCommit = {
@@ -1336,12 +1365,18 @@ export type GroupPeerHandlerParams<TProtocols extends Record<string, GroupProtoc
 `mutate` stages ordinary MLS changes and co-commits state/trust/adoption writes. Supplied persist callbacks stage writes, never commit independently.
 `replace` runs prepare against the gated current handle, captures identity/version, then ordinary adopt carries progress; recovery replacement refuses.
 `open` intercepts staged state/record persistence into the same transition, ignoring independent root-save callbacks.
-Registry `createGroupCrypto` routes wrap to lease-backed seal, ephemeral unwrap to receive, durable unwrap to a singleton openBatch.
+
+(r25) RegistryHandleAccess has no `open`; `openBatch` replaces it.
+
+Registry `createGroupCrypto` routes wrap to lease-backed seal, ephemeral unwrap to receive, durable unwrap to a singleton openBatch. (r25) Phase 2.3a routes durable unwrap only; wrap and ephemeral unwrap use `mutate` until 2.3b. Until 2.3d, rpc keeps the r14 `AppFrameRef` and narrow `PendingAppFrame` and calls only singleton durable unwrap. Registry crypto binds GroupKey from its incarnation-bound access; a mismatching supplied key refuses as storage failure, never as a dead frame.
 Singleton unwrap maps results to FrameEpochError (past/future), AppFrameStorageError (storage), InvalidAppEntryError (plaintext) or crypto refusal. `unwrapBatch` preserves per-input results; it never rejects valid siblings for crypto refusal.
 GroupMLS/PendingRecovery/GroupPeerMLSParams/OperationDeps use the named replacement port members above; GroupPeerParams adds GroupPeerHandlerParams.
 Registry-injected recovery methods read RegistryRecoverySource through recoveryAdoption without handle access.
 Ordinary GroupMLS readRecoverySource returns identity-only AdoptionExpected. Live responders still use read/captured-prefix state.
 Stale key/version/identity/lifetime revision refuses adoption/switch unchanged. Candidate replay resolves mutation proof before spent admission.
+
+(r25) Every MLS state write, application receipt included, is an exact version CAS serialised per group; a receive save that loses its CAS re-prepares at most three times. An ordinary adoption or build retry of an own commit carries the commit journal and is checked for control compatibility: the current state's control projection (everything except secret-tree progress other than the own handshake generation, retained history and the proposal map) must equal that of the journal's `sourceState`; every proposal the commit references must still be present unchanged; no own-sender proposal may be added; and retained epochs may only have been evicted, never added. Extra foreign proposals are allowed (:576), and history eviction the retention policy performs is allowed and carried into the candidate. This replaces matching the captured stateVersion. Adoptions without a journal keep the exact version match.
+
 Functions remain default at-least-once registrations. Transactional policy is valid only for log events; mixed listener policies refuse registration.
 `completion.transact` reloads uncompleted IDs, runs the registered effect and co-writes completion/cursor once; completed IDs invoke nothing.
 
@@ -1864,7 +1899,7 @@ Keep each meaningful existing case. Replace cases tied solely to removed mechani
 | | open N, crash mid-batch | all N key advances/pending records commit or none. Rollback leaves keys usable and emits no plaintext/ack. Duplicate frame creates one pending record. |
 | | batching latency/fairness | idle lone frame commits without advancing batching timer. Sustained lane A burst allows low-rate B and ready control adoption within three total A/B/control batches, including active A. Enqueue also receives service. |
 | | group independence | held/pending group A transition does not block B. Concurrent memory group commits preserve both groups' rows. |
-| | completion/cursors | pending completion and contiguous cursor atomic. Unknown/double completion harmless. Future/unopenable records cannot advance cursor. Numeric position ordering survives reopen. |
+| | completion/cursors | pending completion and contiguous cursor atomic. Unknown/double completion harmless. Future/unopenable records cannot advance cursor. Code-unit position ordering survives reopen (r25). |
 | | transactional exactly-once effect | side-row effect plus completion/cursor rolls back mid-transaction. Commit then crash/redelivery leaves one effect and no handler invocation for completed record. |
 | | stable idempotency key | default handler effect before completion crash causes redelivery with byte-identical key/sender/epoch/incarnation. Semantic chat dedup keeps first content on conflicting reuse. |
 | | terminal opened drain | opened batch, self-removal, kill before handlers. Restart awaits all handlers/completions before clear. Failures retain pending. No decrypt/publish. Live path matches. |
@@ -1972,3 +2007,4 @@ ambiguity/external seams and automatic non-fork stranded resync remain.
   A1 refuses retained-range holes. A2 uses the best-known split and permits earlier-moving notices to re-enable authorisation.
   A3 treats pending fork intents as active rejoin and atomically abandons them on manual authorisation. A4 discloses cleartext comparisonEpoch.
   Manual resync remains the exit after evidence expiry or unavailable coverage. Phase 2.3 application crypto and phase 3 providers stay excluded here.
+- r25 (2026-10-17, plan 2.3a): locked epochs, duplicate/invalid-position results; poison only for authenticated malformed plaintext; envelope validation; durable-only registry routing; RegistryHandleAccess drops open; opaque positions with one comparator and occurrence matcher; exact CAS for every MLS state write with app metadata off the version clock; journal control-compatibility for own-commit adoption and build retry; private commit authoring only under a control-build permit; durable departing anchors preserved by every anchor-slot write; 64-frame bound; retained past epochs open; commit progress independent of app work; configurable epoch retention (default 4, cap 32); opened-record drain deferred to 2.3c.
