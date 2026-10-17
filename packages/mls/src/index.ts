@@ -30,6 +30,13 @@ export {
   verifyManagementCapability,
 } from './authentication.js'
 export {
+  authorPrivateCommit,
+  CommitAuthoringRefusedError,
+  type CommitReceipt,
+  restrictCommitAuthoring,
+  withCommitPermit,
+} from './authoring.js'
+export {
   type MintLeafCapabilityParams,
   type MintTrustedGrantParams,
   mintLeafCapability,

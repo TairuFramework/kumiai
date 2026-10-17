@@ -29,6 +29,11 @@ import {
 
 import { type GroupAnchor, readGroupAnchor } from './anchor.js'
 import { verifyLeafCredential } from './authentication.js'
+import {
+  CommitAuthoringRefusedError,
+  isCommitAuthoringMarked,
+  restrictCommitAuthoring,
+} from './authoring.js'
 import { cloneData } from './clone.js'
 import { decodeClientState, encodeClientState } from './codec.js'
 import {
@@ -935,6 +940,9 @@ export class GroupHandle {
    */
   async proposeSelfRemoval(): Promise<{ frame: Uint8Array; epoch: bigint }> {
     return mutexFor(this).run(async () => {
+      if (isCommitAuthoringMarked(this)) {
+        throw new CommitAuthoringRefusedError('Own proposals are refused under access')
+      }
       const senderLeafIndex = this.#state.privatePath.leafIndex
       const proposal = {
         proposalType: defaultProposalTypes.remove,
@@ -1800,7 +1808,7 @@ export function buildCommitPolicyContext(
 export function deriveGroup(group: GroupHandle, state: ClientState): GroupHandle {
   const context = createMlsContext(group.context.cipherSuite, group.anchor)
   if (group.context.clientConfig != null) context.clientConfig = group.context.clientConfig
-  return new GroupHandle({
+  const derived = new GroupHandle({
     state,
     credential: group.credential,
     context,
@@ -1811,4 +1819,5 @@ export function deriveGroup(group: GroupHandle, state: ClientState): GroupHandle
     events: emitterOf(group),
     speculative: true,
   })
+  return isCommitAuthoringMarked(group) ? restrictCommitAuthoring(derived) : derived
 }
