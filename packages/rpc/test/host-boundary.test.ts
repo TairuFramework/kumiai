@@ -18,9 +18,33 @@ import {
 } from '../src/host-boundary.js'
 import { notifyHost } from '../src/host-notice.js'
 import type { GroupPeerMLSParams, GroupPeerParams } from '../src/peer.js'
+import { createGroupPeerWithControlWalk } from '../src/peer.js'
 import type { GroupProtocolDefinition } from '../src/protocol.js'
+import { createMemoryAnchorStore } from './fixtures/anchor.js'
+import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
+import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import { FakeHub } from './fixtures/fake-hub.js'
+import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { createMemoryAppOutbox } from './fixtures/outbox.js'
+import { memoryControlPorts } from './fixtures/peer.js'
 
 afterEach(() => vi.restoreAllMocks())
+
+test('manual recovery authority crosses the host boundary as data', () => {
+  const manualRecovery = {
+    authorisationID: 'saved-authority',
+    source: { groupID: 'held-group', incarnation: 1 },
+  }
+  const recoveryTarget = { targetID: 'selected-hub', topicID: 'selected-topic' }
+  expect(peerHostFields.manualRecovery).toBe('data')
+  expect(peerHostFields.recoveryTarget).toBe('data')
+  const boundary = createHostBoundary()
+  const host = wrapPeerHost(boundary, { manualRecovery, recoveryTarget })
+  expect(host.manualRecovery).toBe(manualRecovery)
+  expect(host.recoveryTarget).toBe(recoveryTarget)
+  boundary.close()
+  expect(host.manualRecovery).toBe(manualRecovery)
+})
 
 test('recovery comparison epoch crosses the host boundary as data', async () => {
   expect(recoveryRequestHostParameters).toEqual(['data', 'data', 'data'])
@@ -625,4 +649,41 @@ test('dispose drains late condition callbacks', async () => {
     }),
   ).toThrow(PeerDisposedError)
   expect(onNotMember).toHaveBeenCalledOnce()
+})
+
+test('manual authority cannot construct an ordinary peer', async () => {
+  const hub = new FakeHub()
+  const mls = createMemoryGroupMLS({ localDID: 'alice' })
+  const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+  const control = mls.control()
+  const ports = memoryControlPorts(mls, crypto, async () => {
+    throw new Error('Unexpected ordinary build')
+  })
+  let created: ReturnType<typeof createGroupPeerWithControlWalk> | undefined
+  try {
+    expect(() => {
+      created = createGroupPeerWithControlWalk({
+        hub,
+        crypto,
+        mls,
+        control,
+        ...ports,
+        recoveryOnly: false,
+        manualRecovery: { source: control.key, authorisationID: 'uncommitted' },
+        anchorStore: createMemoryAnchorStore(),
+        appCursorStore: createMemoryAppCursorStore(),
+        appOutbox: createMemoryAppOutbox(),
+        appOutboxLimit: 16,
+        localDID: 'alice',
+        protocols: {},
+        handlers: {},
+        adopt: mls.adoptOperation,
+        deliverWelcome: async () => {},
+      })
+    }).toThrow('Manual recovery requires a recovery-only peer')
+    expect(hub.published).toEqual([])
+  } finally {
+    await created?.peer.dispose()
+    await created?.peer.drained().catch(() => {})
+  }
 })

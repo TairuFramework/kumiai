@@ -63,7 +63,7 @@ export type LegacyResyncProof = {
 }
 export type RegistrySwitchWrite = {
   mutationID: string
-  source: { rejoinID: string }
+  source: { rejoinID: string; authorisationID?: string }
   destination: { control: { cursor: { position: LogPosition; epoch: number } } }
 }
 export type GroupHandleRegistry = {

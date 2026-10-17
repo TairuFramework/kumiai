@@ -20,6 +20,7 @@ import {
   type ForkRecoveryAuthorisation,
   type GroupKey,
   isHardControlHold,
+  type ManualRecoveryRecord,
   type RecoveryReconciliation,
   type StoredRejoinRecord,
 } from '@kumiai/rpc'
@@ -34,13 +35,24 @@ import {
 
 import { provenCheckpointFacts } from '../checkpoint-store.js'
 import type { EntryCapability, EntryReads } from '../entry-capability.js'
+import {
+  createManualRecoveryStore,
+  hasActiveManualRecovery,
+  type ManualRecoveryStore,
+  manualRecoveryAttempt,
+} from '../manual-recovery.js'
 import { copyStoredValue, sameStoredValue } from '../memory-incarnation-stores.js'
 import { encodeStoredValue } from '../persistence-codec.js'
-import { GroupStateConflictError, GroupStateUncertainError } from '../persistence-errors.js'
+import {
+  GroupStateConflictError,
+  GroupStateUncertainError,
+  RegistryResyncRefusedError,
+} from '../persistence-errors.js'
 import type { GroupPersistence, GroupTransaction } from '../persistence-types.js'
 import { authenticateRecoveryReply, reconcileRecoveryCapture } from '../recovery.js'
 import { decodeCapturedRecoveryCandidate } from '../recovery-codec.js'
 import { recoveryCompletionContexts } from '../recovery-completion-context.js'
+import type { RecoveryTarget } from '../safety.js'
 import { readRetainedTrust } from './safety.js'
 import { readRecoverySource } from './source.js'
 import { recoveryTrustInputs } from './trust.js'
@@ -51,6 +63,12 @@ export type RecoverySwitchResolution =
   | { kind: 'committed'; destination: GroupKey }
   | { kind: 'rolled-back' | 'pending' }
 export type RegistryRecoveryCoordinator = {
+  manualStore(
+    key: GroupKey,
+    resolveTarget?: (id: string) => Promise<RecoveryTarget>,
+  ): ManualRecoveryStore
+  runManual(record: ManualRecoveryRecord): Promise<GroupKey>
+
   settleForkRecoveryCapture(
     params: { record: CapturedRejoinRecord; reply: CapturedRecapture },
     environment: RecoveryEnvironment,
@@ -65,9 +83,23 @@ export type RegistryRecoveryCoordinator = {
     params: { attempt: ForkRecoveryAttempt; reply: CapturedRecapture },
     environment: RecoveryEnvironment,
   ): Promise<boolean>
-  readRecoveryRecord(key: GroupKey): Promise<StoredRejoinRecord | null>
+  readRecoveryRecord(key: GroupKey, authorisationID?: string): Promise<StoredRejoinRecord | null>
   assignSwitchID(record: CapturedRejoinRecord): Promise<void>
   resolveRecoverySwitch(record: CapturedRejoinRecord): Promise<RecoverySwitchResolution>
+}
+type ManualRunner = (record: ManualRecoveryRecord) => Promise<GroupKey>
+const manualRunners = new WeakMap<GroupHandleRegistry, Map<string, ManualRunner>>()
+export function bindRegistryManualRunner(
+  registry: GroupHandleRegistry,
+  groupID: string,
+  runner: ManualRunner,
+): () => void {
+  const runners = manualRunners.get(registry) ?? new Map<string, ManualRunner>()
+  runners.set(groupID, runner)
+  manualRunners.set(registry, runners)
+  return () => {
+    if (runners.get(groupID) === runner) runners.delete(groupID)
+  }
 }
 const coordinators = new WeakMap<GroupHandleRegistry, RegistryRecoveryCoordinator>()
 export function registryRecoveryCoordinator(
@@ -84,6 +116,33 @@ export function bindRegistryRecoveryCoordinator<TTx extends GroupTransaction>(pa
 }): void {
   const { entry, persistence } = params
   const coordinator: RegistryRecoveryCoordinator = {
+    manualStore: (key, resolveTarget) =>
+      createManualRecoveryStore({ registry: params.registry, persistence, key, resolveTarget }),
+    async runManual(input) {
+      const record = copyStoredValue(input)
+      const saved = await entry.read(record.source.groupID, async (reads) => {
+        const saved = manualRecoveryAttempt(await reads.checkpoints(), record.source, record.id)
+        if (
+          !sameStoredValue(saved.choice, record.choice) ||
+          !sameStoredValue(saved.source, record.source)
+        )
+          throw new GroupStateConflictError('Manual authorisation moved')
+        const lifetime = await reads.lifetime()
+        if (
+          saved.stage === 'authorised' &&
+          lifetime?.activeIncarnation !== record.source.incarnation
+        )
+          throw new GroupStateConflictError('Manual recovery source moved')
+        return saved
+      })
+      if (saved.attempt?.stage === 'refused')
+        throw new RegistryResyncRefusedError({ reason: 'unaccepted' })
+      if (saved.stage === 'completed' && saved.destination !== null) return saved.destination
+      const runner = manualRunners.get(params.registry)?.get(saved.source.groupID)
+      if (runner === undefined)
+        throw new GroupStateConflictError('Registered recovery peer required')
+      return await runner(saved)
+    },
     async settleForkRecoveryCapture({ record, reply }, environment) {
       const key = record.source.key
       const mutationID = crypto.randomUUID()
@@ -210,6 +269,8 @@ export function bindRegistryRecoveryCoordinator<TTx extends GroupTransaction>(pa
             const lifetime = await reads.lifetime()
             if (lifetime?.activeIncarnation !== key.incarnation) throw new ForkRecoveryRefused()
             const control = await reads.control(key.incarnation)
+            if (hasActiveManualRecovery(await reads.checkpoints(), key))
+              throw new ForkRecoveryRefused()
             if (controlSafetyHeld(control) !== null || isHardControlHold(control.controlHold))
               throw new ForkRecoveryRefused()
             if (control.forkRecoveryAttempt != null) {
@@ -410,11 +471,31 @@ export function bindRegistryRecoveryCoordinator<TTx extends GroupTransaction>(pa
         reply.requestKey.fill(0)
       }
     },
-    readRecoveryRecord: (key) =>
+    readRecoveryRecord: (key, authorisationID) =>
       entry.read(key.groupID, async (reads) =>
-        copyStoredValue((await reads.control(key.incarnation)).rejoin),
+        copyStoredValue(
+          authorisationID === undefined
+            ? (await reads.control(key.incarnation)).rejoin
+            : manualRecoveryAttempt(await reads.checkpoints(), key, authorisationID).attempt,
+        ),
       ),
     async assignSwitchID(record) {
+      if (record.trigger === 'manual' && record.authorisationID !== null) {
+        const control = coordinator
+          .manualStore(record.source.key)
+          .manualRecoveryControl(record.authorisationID)
+        if (
+          !sameStoredValue((await control.load()).rejoin, record) ||
+          record.stage !== 'confirmed' ||
+          record.switchMutationID !== null
+        )
+          throw new GroupStateConflictError('Confirmed manual recovery moved')
+        await control.apply(
+          { putRejoin: { ...record, switchMutationID: crypto.randomUUID() } },
+          crypto.randomUUID(),
+        )
+        return
+      }
       const mutationID = crypto.randomUUID()
       const switchMutationID = crypto.randomUUID()
       await entry.run(
@@ -431,6 +512,8 @@ export function bindRegistryRecoveryCoordinator<TTx extends GroupTransaction>(pa
               'Confirmed recovery moved before switch ID assignment',
             )
           const control = await reads.control(record.source.key.incarnation)
+          if (hasActiveManualRecovery(await reads.checkpoints(), record.source.key))
+            throw new GroupStateConflictError('Manual recovery owns the source')
           if (controlSafetyHeld(control) !== null || isHardControlHold(control.controlHold))
             throw new GroupStateConflictError('Recovery source is held')
           return { expected: await reads.lifetime(), value: null }
@@ -438,6 +521,8 @@ export function bindRegistryRecoveryCoordinator<TTx extends GroupTransaction>(pa
         async (stores) => {
           const control = stores.incarnation(record.source.key.incarnation).control
           const snapshot = await control.load()
+          if (hasActiveManualRecovery(await stores.checkpoints.list(), record.source.key))
+            throw new GroupStateConflictError('Manual recovery owns the source')
           if (controlSafetyHeld(snapshot) !== null || isHardControlHold(snapshot.controlHold))
             throw new GroupStateConflictError('Recovery source is held')
           if (!sameStoredValue(snapshot.rejoin, record))
@@ -459,7 +544,10 @@ export function bindRegistryRecoveryCoordinator<TTx extends GroupTransaction>(pa
       }
       // Read crosses the completion fence even when a later marker hid the saved ID.
       return await entry.read(key.groupID, async (reads) => {
-        const saved = (await reads.control(key.incarnation)).rejoin
+        const saved =
+          record.trigger === 'manual' && record.authorisationID !== null
+            ? manualRecoveryAttempt(await reads.checkpoints(), key, record.authorisationID).attempt
+            : (await reads.control(key.incarnation)).rejoin
         const destination = { groupID: key.groupID, incarnation: key.incarnation + 1 }
         const metadata = await reads.metadata(destination.incarnation)
         const initial = metadata?.initialIdentity ?? null

@@ -27,7 +27,11 @@ export function manualRecoveryPreparation(record: CheckpointRecord): ManualRow |
   return preparations.get(record)
 }
 
-function find(records: Array<CheckpointRecord>, key: GroupKey, id: string): ManualRecoveryRecord {
+export function findManualRecovery(
+  records: Array<CheckpointRecord>,
+  key: GroupKey,
+  id: string,
+): ManualRecoveryRecord {
   const row = records.find((row) => row.id === id)
   if (
     row?.kind !== 'manual-recovery' ||
@@ -36,6 +40,15 @@ function find(records: Array<CheckpointRecord>, key: GroupKey, id: string): Manu
   )
     throw new GroupStateConflictError('Committed manual recovery authorisation required')
   return copyStoredValue(row.value)
+}
+
+export function hasActiveManualRecovery(records: Array<CheckpointRecord>, key: GroupKey): boolean {
+  return records.some(
+    (row) =>
+      row.kind === 'manual-recovery' &&
+      sameStoredValue(row.key, key) &&
+      row.value.stage === 'authorised',
+  )
 }
 
 export function manualRecoveryStatus(
@@ -129,6 +142,32 @@ function assertCandidate(record: ManualRecoveryRecord, attempt: CapturedRejoinRe
     )
 }
 
+export async function saveManualRecovery(
+  stores: { checkpoints: { put(row: CheckpointRecord): Promise<void> } },
+  value: ManualRecoveryRecord,
+): Promise<void> {
+  const row: ManualRow = {
+    kind: 'manual-recovery',
+    id: value.id,
+    key: { ...value.source },
+    value: copyStoredValue(value),
+  }
+  preparations.set(row, copyStoredValue(row))
+  await stores.checkpoints.put(row)
+}
+
+export function manualRecoveryAttempt(
+  records: Array<CheckpointRecord>,
+  key: GroupKey,
+  id: string,
+): ManualRecoveryRecord {
+  const record = findManualRecovery(records, key, id)
+  if (record.choice.mode !== 'resync')
+    throw new GroupStateConflictError('Resync authorisation required')
+  if (record.attempt !== null) assertCandidate(record, record.attempt)
+  return record
+}
+
 export type ManualRecoveryStore = {
   authoriseManualRecovery(
     key: GroupKey,
@@ -150,30 +189,27 @@ export function createManualRecoveryStore<TTx extends GroupTransaction>(params: 
     throw new TypeError('Manual recovery requires a registry with the same coordinator')
   const { entry } = capability
   const key = { ...params.key }
-  async function save(
-    stores: { checkpoints: { put(row: CheckpointRecord): Promise<void> } },
-    value: ManualRecoveryRecord,
-  ) {
-    const row: ManualRow = {
-      kind: 'manual-recovery',
-      id: value.id,
-      key: { ...key },
-      value: copyStoredValue(value),
-    }
-    preparations.set(row, copyStoredValue(row))
-    await stores.checkpoints.put(row)
-  }
+  const save = saveManualRecovery
   async function change(
     id: string,
     mutationID: string,
     update: (record: ManualRecoveryRecord, source: ControlSnapshot) => ManualRecoveryRecord,
+    continuation = false,
   ): Promise<void> {
     await entry.run(
       { groupID: key.groupID, mutationID },
       async (reads) => {
         const lifetime = await reads.lifetime()
-        const record = find(await reads.checkpoints(), key, id)
-        if (lifetime?.activeIncarnation !== key.incarnation || record.stage !== 'authorised')
+        const record = findManualRecovery(await reads.checkpoints(), key, id)
+        if (
+          !(record.stage === 'authorised' && lifetime?.activeIncarnation === key.incarnation) &&
+          !(
+            continuation &&
+            record.stage === 'completed' &&
+            record.destination !== null &&
+            lifetime?.activeIncarnation === record.destination?.incarnation
+          )
+        )
           throw new GroupStateConflictError('Manual recovery source is no longer active')
         return {
           expected: lifetime,
@@ -181,7 +217,12 @@ export function createManualRecoveryStore<TTx extends GroupTransaction>(params: 
         }
       },
       async (stores, prepared) => {
-        if (!sameStoredValue(find(await stores.checkpoints.list(), key, id), prepared.before))
+        if (
+          !sameStoredValue(
+            findManualRecovery(await stores.checkpoints.list(), key, id),
+            prepared.before,
+          )
+        )
           throw new GroupStateConflictError('Manual recovery authorisation moved')
         await save(stores, { ...prepared.next, mutationID })
       },
@@ -255,12 +296,15 @@ export function createManualRecoveryStore<TTx extends GroupTransaction>(params: 
         key: { ...key },
         load: () =>
           entry.read(key.groupID, async (reads) =>
-            overlay(await reads.control(key.incarnation), find(await reads.checkpoints(), key, id)),
+            overlay(
+              await reads.control(key.incarnation),
+              findManualRecovery(await reads.checkpoints(), key, id),
+            ),
           ),
         lastMutation: () =>
           entry.read(
             key.groupID,
-            async (reads) => find(await reads.checkpoints(), key, id).mutationID,
+            async (reads) => findManualRecovery(await reads.checkpoints(), key, id).mutationID,
           ),
         async apply(supplied, mutationID) {
           const changes = copyStoredValue(supplied)
@@ -328,12 +372,16 @@ export function createManualRecoveryStore<TTx extends GroupTransaction>(params: 
       entry.read(key.groupID, async (reads) => {
         const records = await reads.checkpoints()
         return records.some((row) => row.kind === 'manual-recovery' && row.id === id)
-          ? find(records, key, id)
+          ? findManualRecovery(records, key, id)
           : null
       }),
     async resolveManualRecoveryTarget(id) {
       const record = await api.readManualRecovery(id)
-      if (record === null || record.choice.mode !== 'resync' || record.stage !== 'authorised')
+      if (
+        record === null ||
+        record.choice.mode !== 'resync' ||
+        (record.stage !== 'authorised' && record.stage !== 'completed')
+      )
         throw new GroupStateConflictError('Resync authorisation required')
       let target: RecoveryTarget | null = null
       try {
@@ -348,7 +396,7 @@ export function createManualRecoveryStore<TTx extends GroupTransaction>(params: 
       }
       const pauseReason = target === null ? 'target-unresolved' : null
       if (record.pauseReason !== pauseReason)
-        await change(id, crypto.randomUUID(), (current) => ({ ...current, pauseReason }))
+        await change(id, crypto.randomUUID(), (current) => ({ ...current, pauseReason }), true)
       return target
     },
   }

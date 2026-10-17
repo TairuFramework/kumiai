@@ -949,3 +949,69 @@ test.each([null, 20])('fork settlement forwards the unchanged ordinary floor %s'
   await stepRejoin({ ...s.deps, settleAcceptedRecovery }, s.record)
   expect(settleAcceptedRecovery).toHaveBeenCalledWith(s.record, 2, 'accepted-leaf', floor)
 })
+
+test('manual refusal stays inside the restricted overlay', async () => {
+  const s = await setup()
+  const record: CapturedRejoinRecord = {
+    ...s.record,
+    stage: 'published',
+    position: asLogPosition('known'),
+    trigger: 'manual',
+    authorisationID: 'saved-authority',
+  }
+  await s.control.apply({ putRejoin: record }, 'save-manual')
+  s.verdict({ kind: 'refused', refusal: 'policy', responder: 'bob' })
+  const control = {
+    ...s.control,
+    apply: (changes: Parameters<typeof s.control.apply>[0], mutationID: string) => {
+      if (
+        Object.keys(changes).some(
+          (field) =>
+            !['putRejoin', 'deleteRejoin', 'recoveryEpochFloor', 'putSettledRejoins'].includes(
+              field,
+            ),
+        )
+      )
+        throw new Error('Manual overlay permits only recovery changes')
+      return s.control.apply(changes, mutationID)
+    },
+  }
+  expect(
+    await stepRejoin(
+      {
+        ...s.deps,
+        control,
+        manualRecovery: { authorisationID: 'saved-authority', source: record.source.key },
+      },
+      record,
+    ),
+  ).toMatchObject({ stage: 'refused', refusal: 'policy' })
+  expect((await s.control.load()).outcomes).toEqual([])
+  expect(s.events).toMatchObject([{ kind: 'refused', reason: 'policy' }])
+})
+
+test.each(['authorisation', 'source'] as const)(
+  'manual runner refuses mismatched %s',
+  async (mismatch) => {
+    const s = await setup()
+    const record: CapturedRejoinRecord = {
+      ...s.record,
+      stage: 'published',
+      position: asLogPosition('known'),
+      trigger: 'manual',
+      authorisationID: 'saved-authority',
+    }
+    await s.control.apply({ putRejoin: record }, 'save-manual')
+    const confirm = vi.fn(s.deps.confirm)
+    const manualRecovery = {
+      authorisationID: mismatch === 'authorisation' ? 'foreign' : 'saved-authority',
+      source: {
+        ...record.source.key,
+        incarnation: mismatch === 'source' ? 2 : record.source.key.incarnation,
+      },
+    }
+    expect(await stepRejoin({ ...s.deps, confirm, manualRecovery }, record)).toEqual(record)
+    expect(confirm).not.toHaveBeenCalled()
+    expect((await s.control.load()).rejoin).toEqual(record)
+  },
+)

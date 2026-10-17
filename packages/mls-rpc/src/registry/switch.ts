@@ -1,6 +1,7 @@
 import { encodeClientState, type GroupHandle } from '@kumiai/mls'
 import {
   APP_TOPIC_LABEL,
+  type CheckpointRecord,
   type ControlSnapshot,
   controlSafetyHeld,
   effectiveRecoveryEpochFloor,
@@ -13,6 +14,11 @@ import {
 
 import { currentCheckpointFact, prepareCheckpointInstallation } from '../checkpoint-capture.js'
 import type { EntryCapability } from '../entry-capability.js'
+import {
+  hasActiveManualRecovery,
+  manualRecoveryAttempt,
+  saveManualRecovery,
+} from '../manual-recovery.js'
 import { copyStoredValue, sameStoredValue } from '../memory-incarnation-stores.js'
 import {
   GroupStateConflictError,
@@ -55,13 +61,19 @@ function exactFields(
 
 function validateWrite(value: RegistrySwitchWrite): void {
   exactFields(value, ['mutationID', 'source', 'destination'])
-  exactFields(value.source, ['rejoinID'])
+  exactFields(
+    value.source,
+    value.source.authorisationID === undefined ? ['rejoinID'] : ['rejoinID', 'authorisationID'],
+  )
   exactFields(value.destination, ['control'])
   exactFields(value.destination.control, ['cursor'])
   exactFields(value.destination.control.cursor, ['position', 'epoch'])
   if (
     typeof value.mutationID !== 'string' ||
     value.mutationID.length === 0 ||
+    (value.source.authorisationID !== undefined &&
+      (typeof value.source.authorisationID !== 'string' ||
+        value.source.authorisationID.length === 0)) ||
     typeof value.source.rejoinID !== 'string' ||
     value.source.rejoinID.length === 0 ||
     typeof value.destination.control.cursor.position !== 'string' ||
@@ -121,9 +133,15 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
       !sameStoredValue(write.destination.control.cursor, cursor)
     )
       throw new RegistryResyncRefusedError({ reason: 'tuple' })
+    const authorisationID = write.source.authorisationID
     const groupID = source.key.groupID
     const destination = { groupID, incarnation: source.key.incarnation + 1 }
+    function assertChoice(records: Array<CheckpointRecord>): void {
+      if (authorisationID === undefined && hasActiveManualRecovery(records, source.key))
+        throw new GroupStateConflictError('Manual recovery owns the source')
+    }
     function assertSafety(control: ControlSnapshot): void {
+      if (authorisationID !== undefined) return
       const pending = environment.held(source.key)
       const reason = pending === 'fork-halted' ? pending : (controlSafetyHeld(control) ?? pending)
       if (reason !== null) throw new RegistryResyncRefusedError({ reason })
@@ -137,8 +155,13 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
       if (!(error instanceof GroupStateUncertainError)) throw error
     }
     const replay = await capability.read(groupID, async (reads) => {
+      assertChoice(await reads.checkpoints())
       const control = await reads.control(source.key.incarnation)
-      const record = control.rejoin
+      const manual =
+        authorisationID === undefined
+          ? null
+          : manualRecoveryAttempt(await reads.checkpoints(), source.key, authorisationID)
+      const record = manual === null ? control.rejoin : manual.attempt
       if (record !== null && 'format' in record && record.switchMutationID !== write.mutationID)
         throw new RegistryResyncRefusedError({ reason: 'tuple' })
       if (record?.stage === 'adopted') {
@@ -146,6 +169,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
         // Durable adoption proves this semantic replay even after later markers or retirement.
         await verifyRegistryResync({
           source,
+          authorisationID,
           candidate,
           record: { ...record, stage: 'confirmed' },
           proof,
@@ -155,6 +179,8 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
       if (resolved === 'committed')
         throw new GroupStateConflictError('Committed switch lacks matching adopted evidence')
       assertSafety(control)
+      if (manual !== null && manual.stage !== 'authorised')
+        throw new GroupStateConflictError('Manual recovery already completed')
       confirmedRecord(record, rejoinID)
       return false
     })
@@ -181,17 +207,26 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
       return await capability.run(
         { groupID, mutationID: write.mutationID },
         async (reads) => {
+          assertChoice(await reads.checkpoints())
           assertSafety(await reads.control(source.key.incarnation))
           const current = await readRecoverySource(reads, groupID)
           matchSource(current, source)
           const lifetime = await reads.lifetime()
           if (lifetime === null || lifetime.latestIncarnation !== source.key.incarnation)
             throw new GroupStateConflictError('Registry switch incarnation moved')
+          const manual =
+            authorisationID === undefined
+              ? null
+              : manualRecoveryAttempt(await reads.checkpoints(), source.key, authorisationID)
+          if (manual !== null && manual.stage !== 'authorised')
+            throw new GroupStateConflictError('Manual recovery already completed')
           const record = confirmedRecord(
-            (await reads.control(source.key.incarnation)).rejoin,
+            manual === null ? (await reads.control(source.key.incarnation)).rejoin : manual.attempt,
             rejoinID,
           )
           if ('format' in record) {
+            if (manual !== null && record.target.groupInfoEpoch < (manual.epochFloor ?? 0))
+              throw new RecoveryTargetBehindError('Manual recovery capture is target-behind')
             const snapshot = await reads.control(source.key.incarnation)
             const floor = effectiveRecoveryEpochFloor(snapshot, {
               id: record.id,
@@ -218,13 +253,14 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
               )
                 throw new RecoveryTargetBehindError('Fork recovery capture is target-behind')
             } else if (
+              authorisationID === undefined &&
               record.target.groupInfoEpoch < Math.max(floor ?? 0, current.identity?.epoch ?? 0)
             )
               throw new RecoveryTargetBehindError('Recovery capture is target-behind')
           }
           if ('format' in record && record.switchMutationID !== write.mutationID)
             throw new RegistryResyncRefusedError({ reason: 'tuple' })
-          await verifyRegistryResync({ source: current, candidate, record, proof })
+          await verifyRegistryResync({ source: current, candidate, record, proof, authorisationID })
           // Spent admission is independent of provider CAS and candidate epoch ordering.
           if (
             current.trust.spentEpochAuthenticators.some((spent) =>
@@ -266,6 +302,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
             },
             value: {
               current,
+              manual,
               recoveryEpochFloor: (await reads.control(source.key.incarnation)).recoveryEpochFloor,
               lifetime,
               record,
@@ -283,6 +320,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
           }
         },
         async (stores, prepared) => {
+          assertChoice(await stores.checkpoints.list())
           assertSafety(await stores.incarnation(source.key.incarnation).control.load())
           const lifetime = await stores.lifetime.load()
           const metadata = await stores.incarnation(source.key.incarnation).state.loadMetadata()
@@ -308,8 +346,16 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
           matchSource(current, source)
           if (!sameStoredValue(lifetime, prepared.lifetime))
             throw new GroupStateConflictError('Registry switch lifetime changed in work')
+          const manual =
+            authorisationID === undefined
+              ? null
+              : manualRecoveryAttempt(await stores.checkpoints.list(), source.key, authorisationID)
+          if (!sameStoredValue(manual, prepared.manual))
+            throw new GroupStateConflictError('Manual authorisation moved')
           const record = confirmedRecord(
-            (await stores.incarnation(source.key.incarnation).control.load()).rejoin,
+            manual === null
+              ? (await stores.incarnation(source.key.incarnation).control.load()).rejoin
+              : manual.attempt,
             rejoinID,
           )
           if (!sameStoredValue(record, prepared.record))
@@ -320,10 +366,20 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
           await retireIncarnation(stores, {
             source: source.key,
             nextIncarnation: destination.incarnation,
-            switchedRejoinID: rejoinID,
+            ...(authorisationID === undefined
+              ? { switchedRejoinID: rejoinID }
+              : { manualRejoinID: rejoinID }),
             mutationID: write.mutationID,
             at: Date.now(),
           })
+          if (manual !== null && 'format' in record)
+            await saveManualRecovery(stores, {
+              ...manual,
+              stage: 'completed',
+              destination,
+              mutationID: write.mutationID,
+              attempt: { ...record, stage: 'adopted', destinationKey: destination },
+            })
           await stores.lifetime.save({
             ...lifetime,
             latestIncarnation: destination.incarnation,

@@ -2,7 +2,7 @@ import { isHeadMismatch } from '../commit.js'
 import type { CommitHeader } from '../crypto.js'
 import { asLogPosition, type LogPosition } from '../cursor.js'
 import type { ConfirmationOutcome } from '../recovery-confirmation.js'
-import { recoveryHeld, settleRecovery } from '../recovery-reconcile.js'
+import { manualRecoveryBound, recoveryHeld, settleRecovery } from '../recovery-reconcile.js'
 import type {
   CapturedRejoinRecord,
   RecoveryReconciliation,
@@ -272,6 +272,7 @@ export async function stepLegacyRejoin(
 }
 
 export type RejoinDeps = Omit<LegacyRejoinDeps, 'confirm' | 'scan' | 'adopt' | 'discarded'> & {
+  manualRecovery?: { authorisationID: string; source: GroupKey }
   confirm(record: CapturedRejoinRecord): Promise<ConfirmationOutcome & { candidate?: Uint8Array }>
   reconcileCapture(record: CapturedRejoinRecord): Promise<RecoveryReconciliation>
   adopt(record: CapturedRejoinRecord, write: AdoptionWriteFactory): Promise<'adopted' | 'handoff'>
@@ -295,7 +296,11 @@ export async function stepRejoin(
   record: CapturedRejoinRecord,
 ): Promise<RejoinStep> {
   const snapshot = await deps.control.load()
-  if (recoveryHeld(snapshot) || record.trigger !== 'automatic') return record
+  if (
+    recoveryHeld(snapshot, deps.manualRecovery) ||
+    (record.trigger !== 'automatic' && !manualRecoveryBound(snapshot, deps.manualRecovery))
+  )
+    return record
   const save = async (next: CapturedRejoinRecord) => {
     await applyResolved(deps.control, { putRejoin: next }, deps.newID(), undefined, deps.signal)
     return next
@@ -306,7 +311,8 @@ export async function stepRejoin(
     return await deps.runSerial(async () => {
       const snapshot = await deps.control.load()
       const current = snapshot.rejoin
-      if (recoveryHeld(snapshot)) return current !== null && 'format' in current ? current : null
+      if (recoveryHeld(snapshot, deps.manualRecovery))
+        return current !== null && 'format' in current ? current : null
       if (
         current === null ||
         !('format' in current) ||
@@ -336,6 +342,7 @@ export async function stepRejoin(
         else
           await settleRecovery({
             control: deps.control,
+            manualRecovery: deps.manualRecovery,
             record: current,
             provenance: accepted
               ? {
@@ -433,7 +440,7 @@ export async function stepRejoin(
         }
         await applyResolved(
           deps.control,
-          { putRejoin: next, putOutcomes: [outcome] },
+          { putRejoin: next, ...(record.trigger === 'manual' ? {} : { putOutcomes: [outcome] }) },
           deps.newID(),
           undefined,
           deps.signal,
@@ -455,7 +462,7 @@ export async function stepRejoin(
       const snapshot = await deps.control.load()
       const current = snapshot.rejoin
       if (
-        controlSafetyHeld(snapshot) !== null ||
+        recoveryHeld(snapshot, deps.manualRecovery) ||
         current === null ||
         !('format' in current) ||
         current.id !== record.id ||

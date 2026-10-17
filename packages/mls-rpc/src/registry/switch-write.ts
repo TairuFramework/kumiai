@@ -19,8 +19,7 @@ function adopted(record: CapturedRejoinRecord, staged: StagedAdoption): Captured
   if (
     record.format !== 2 ||
     record.stage !== 'confirmed' ||
-    record.trigger !== 'automatic' ||
-    record.authorisationID !== null ||
+    (record.trigger === 'automatic' ? record.authorisationID !== null : !record.authorisationID) ||
     record.destinationKey !== null ||
     typeof record.switchMutationID !== 'string' ||
     record.switchMutationID.length === 0 ||
@@ -76,7 +75,10 @@ export function toRegistrySwitchWrite(params: {
     throw new TypeError('Restricted recovery adoption write required')
   return {
     mutationID: write.mutationID,
-    source: { rejoinID: record.id },
+    source: {
+      rejoinID: record.id,
+      ...(record.trigger === 'manual' ? { authorisationID: record.authorisationID as string } : {}),
+    },
     destination: { control: { cursor } },
   }
 }

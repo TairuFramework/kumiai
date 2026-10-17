@@ -138,6 +138,8 @@ export const peerHostFields = {
   readEvidence: 'callback',
   adopt: 'callback',
   deliverWelcome: 'callback',
+  recoveryTarget: 'data',
+  manualRecovery: 'data',
   recoveryOnly: 'data',
   onConfirmedRecovery: 'callback',
   settleAcceptedRecovery: 'callback',

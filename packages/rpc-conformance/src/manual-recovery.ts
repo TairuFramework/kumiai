@@ -58,6 +58,210 @@ export function testManualRecoveryConformance<THandle extends ConformanceRegistr
         await fixture.close()
       }
     }
+    async function selected(
+      fixture: ConformanceRegistryFixture<THandle>,
+      key: ConformanceGroupKey,
+    ) {
+      const recovery = await fixture.confirmedRecovery(key, { confirm: true })
+      if (!('format' in recovery.record)) throw new Error('Captured candidate required')
+      const saved = await fixture.manualRecovery().authoriseManualRecovery(key, {
+        mode: 'resync',
+        targetID: recovery.record.target.targetID,
+        commitTopicID: recovery.record.target.topicID,
+        allowOpenFork: true,
+      })
+      const overlay = fixture.manualRecovery().manualRecoveryControl(saved.id)
+      const record = {
+        ...recovery.record,
+        id: crypto.randomUUID(),
+        switchMutationID: crypto.randomUUID(),
+        trigger: 'manual' as const,
+        authorisationID: saved.id,
+      }
+      await overlay.apply({ putRejoin: record }, crypto.randomUUID())
+      const write = {
+        mutationID: record.switchMutationID as string,
+        source: { rejoinID: record.id, authorisationID: saved.id },
+        destination: {
+          control: { cursor: { position: recovery.proof.position, epoch: record.epochAfter } },
+        },
+      }
+      return { recovery, saved, record, write }
+    }
+    test('manual attempt crosses strong holds without opening ordinary work', () =>
+      run(async (fixture, key) => {
+        const selectedRecovery = await selected(fixture, key)
+        await fixture.safety().reportFork(key, {
+          kind: 'digest-divergence',
+          epoch: 0,
+          position: 'fork',
+          localDigest: 'ours',
+          remoteDigest: 'theirs',
+        })
+        const before = await fixture.device.groups.ports(key).control.load()
+        const installedKey = await fixture.registry.switchIncarnation(
+          selectedRecovery.recovery.candidate,
+          {
+            source: await fixture.registry.recoverySource(key.groupID),
+            rejoinID: selectedRecovery.record.id,
+            proof: selectedRecovery.recovery.proof,
+            write: selectedRecovery.write,
+          },
+        )
+        expect(installedKey).toEqual({ ...key, incarnation: 2 })
+        expect(await fixture.device.groups.ports(key).control.load()).toMatchObject({
+          rejoin: before.rejoin,
+          forkHalt: before.forkHalt,
+        })
+        expect((await fixture.safety().status(installedKey)).hold).toBeNull()
+        expect(
+          await fixture.manualRecovery().readManualRecovery(selectedRecovery.saved.id),
+        ).toMatchObject({
+          stage: 'completed',
+          destination: installedKey,
+          attempt: {
+            stage: 'adopted',
+            authorisationID: selectedRecovery.saved.id,
+            destinationKey: installedKey,
+          },
+        })
+        expect((await fixture.registry.access(key.groupID)).admission().admissible).toBe(true)
+      }))
+    test('failed manual recovery preserves prior state and halt', () =>
+      run(async (fixture, key) => {
+        const selectedRecovery = await selected(fixture, key)
+        await fixture.safety().reportFork(key, {
+          kind: 'digest-divergence',
+          epoch: 0,
+          position: 'fork',
+          localDigest: 'ours',
+          remoteDigest: 'theirs',
+        })
+        const sourceBefore = await fixture.inspectRows()
+        for (const write of [
+          {
+            ...selectedRecovery.write,
+            source: { ...selectedRecovery.write.source, authorisationID: 'foreign' },
+          },
+          { ...selectedRecovery.write, source: { rejoinID: selectedRecovery.record.id } },
+        ]) {
+          await expect(
+            fixture.registry.switchIncarnation(selectedRecovery.recovery.candidate, {
+              source: await fixture.registry.recoverySource(key.groupID),
+              rejoinID: selectedRecovery.record.id,
+              proof: selectedRecovery.recovery.proof,
+              write,
+            }),
+          ).rejects.toThrow()
+          expect(await fixture.inspectRows()).toEqual(sourceBefore)
+        }
+        fixture.armNextWorkFault('before-commit')
+        await expect(
+          fixture.registry.switchIncarnation(selectedRecovery.recovery.candidate, {
+            source: await fixture.registry.recoverySource(key.groupID),
+            rejoinID: selectedRecovery.record.id,
+            proof: selectedRecovery.recovery.proof,
+            write: selectedRecovery.write,
+          }),
+        ).rejects.toThrow()
+        expect(await fixture.inspectRows()).toEqual(sourceBefore)
+      }))
+    test.each(['trust', 'spent', 'target', 'proof'] as const)(
+      'failed manual recovery preserves prior state and halt / %s',
+      (failure) =>
+        run(async (fixture, key) => {
+          const selectedRecovery = await selected(fixture, key)
+          await fixture.safety().reportFork(key, {
+            kind: 'digest-divergence',
+            epoch: 0,
+            position: 'fork',
+            localDigest: 'ours',
+            remoteDigest: 'theirs',
+          })
+          if (failure === 'trust') await fixture.corruptTrust(key.groupID)
+          if (failure === 'spent') {
+            const trust = await fixture.device.groups.loadTrust(key.groupID)
+            if (trust === null) throw new Error('Missing retained trust')
+            await fixture.installRows({
+              key,
+              trust: {
+                ...trust,
+                spentEpochAuthenticators: [
+                  ...trust.spentEpochAuthenticators,
+                  await fixture.authenticator(selectedRecovery.recovery.candidate),
+                ],
+              },
+            })
+          }
+          const sourceBefore = await fixture.inspectRows()
+          const proof =
+            failure === 'target'
+              ? { ...selectedRecovery.recovery.proof, topicID: 'foreign-topic' }
+              : failure === 'proof'
+                ? { ...selectedRecovery.recovery.proof, verdict: new Uint8Array([1]) }
+                : selectedRecovery.recovery.proof
+          await expect(
+            fixture.registry.switchIncarnation(selectedRecovery.recovery.candidate, {
+              source:
+                failure === 'trust'
+                  ? selectedRecovery.recovery.source
+                  : await fixture.registry.recoverySource(key.groupID),
+              rejoinID: selectedRecovery.record.id,
+              proof,
+              write: selectedRecovery.write,
+            }),
+          ).rejects.toThrow()
+          expect(await fixture.inspectRows()).toEqual(sourceBefore)
+        }),
+    )
+    test('manual retry preserves its own authenticated floor', () =>
+      run(async (fixture, key) => {
+        const selectedRecovery = await selected(fixture, key)
+        await fixture
+          .manualRecovery()
+          .manualRecoveryControl(selectedRecovery.saved.id)
+          .apply({ recoveryEpochFloor: 40 }, 'manual-higher-floor')
+        const before = await fixture.inspectRows()
+        await expect(
+          fixture.registry.switchIncarnation(selectedRecovery.recovery.candidate, {
+            source: await fixture.registry.recoverySource(key.groupID),
+            rejoinID: selectedRecovery.record.id,
+            proof: selectedRecovery.recovery.proof,
+            write: selectedRecovery.write,
+          }),
+        ).rejects.toMatchObject({ name: 'RecoveryTargetBehindError' })
+        expect(await fixture.inspectRows()).toEqual(before)
+      }))
+    test('manual floor override preserves exact accepted work', () =>
+      run(async (fixture, key) => {
+        const selectedRecovery = await selected(fixture, key)
+        await fixture.installRows({
+          key,
+          control: {
+            recoveryEpochFloor: 40,
+            putOutcomes: [{ id: 'owed', opID: null, at: 1, kind: 'unknown' }],
+            putWelcomes: [
+              { opID: 'welcome', welcome: new Uint8Array([3]), recipients: ['member'] },
+            ],
+          },
+        })
+        const sourceBefore = await fixture.device.groups.ports(key).control.load()
+        const installedKey = await fixture.registry.switchIncarnation(
+          selectedRecovery.recovery.candidate,
+          {
+            source: await fixture.registry.recoverySource(key.groupID),
+            rejoinID: selectedRecovery.record.id,
+            proof: selectedRecovery.recovery.proof,
+            write: selectedRecovery.write,
+          },
+        )
+        expect(installedKey).not.toEqual(key)
+        const sourceAfter = await fixture.device.groups.ports(key).control.load()
+        expect(sourceAfter.rejoin).toEqual(sourceBefore.rejoin)
+        expect(sourceAfter.outcomes).toEqual(sourceBefore.outcomes)
+        expect(sourceAfter.welcomes).toEqual(sourceBefore.welcomes)
+        expect(sourceAfter.recoveryEpochFloor).toBe(40)
+      }))
     test('manual overlay requires committed authorisation', () =>
       run(async (fixture) => {
         const overlay = fixture.manualRecovery().manualRecoveryControl('uncommitted')

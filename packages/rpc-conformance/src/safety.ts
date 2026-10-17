@@ -150,7 +150,7 @@ export function testRosterAbsenceConformance(params: {
 }
 
 export type ConformanceManualRecovery =
-  | { mode: 'resync'; targetID: string }
+  | { mode: 'resync'; targetID: string; allowOpenFork?: boolean }
   | { mode: 'successor'; successor: ConformanceGroupKey }
 
 export type ConformanceGroupSafety = {
@@ -665,23 +665,15 @@ export function runGroupSafetyContract<THandle extends ConformanceRegistryHandle
       },
     )
 
-    test.each(['resync', 'successor'] as const)(
-      'manual %s recovery remains unavailable',
-      async (mode) => {
-        const key = await activeKey()
-        const before = await fixture.inspectRows()
-        await expect(
-          fixture
-            .safety()
-            .recover(
-              key,
-              mode === 'resync'
-                ? { mode, targetID: 'hub' }
-                : { mode, successor: { groupID: 'successor', incarnation: 1 } },
-            ),
-        ).rejects.toMatchObject({ name: 'ManualRecoveryUnavailableError' })
-        expect(await fixture.inspectRows()).toEqual(before)
-      },
-    )
+    test.each(['successor'] as const)('manual %s recovery remains unavailable', async (mode) => {
+      const key = await activeKey()
+      const before = await fixture.inspectRows()
+      await expect(
+        fixture
+          .safety()
+          .recover(key, { mode, successor: { groupID: 'successor', incarnation: 1 } }),
+      ).rejects.toMatchObject({ name: 'ManualRecoveryUnavailableError' })
+      expect(await fixture.inspectRows()).toEqual(before)
+    })
   })
 }

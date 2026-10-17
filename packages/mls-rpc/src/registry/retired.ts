@@ -73,11 +73,12 @@ export async function retireIncarnation<TTx extends GroupTransaction>(
     source: GroupKey
     nextIncarnation: number
     switchedRejoinID?: string
+    manualRejoinID?: string
     mutationID: string
     at: number
   },
 ): Promise<void> {
-  const { source, nextIncarnation, switchedRejoinID, mutationID, at } = params
+  const { source, nextIncarnation, switchedRejoinID, manualRejoinID, mutationID, at } = params
   const lifetime = await stores.lifetime.load()
   if (lifetime?.activeIncarnation !== source.incarnation)
     throw new DisplacedGroupHandleError('Inactive retirement source')
@@ -100,7 +101,8 @@ export async function retireIncarnation<TTx extends GroupTransaction>(
     throw new GroupStateConflictError('Retirement requires matching confirmed rejoin')
 
   const abandoned = control.operations.filter(
-    (op) => switchedRejoinID === undefined || op.stage !== 'accepted',
+    (op) =>
+      (switchedRejoinID === undefined && manualRejoinID === undefined) || op.stage !== 'accepted',
   )
   const outcomes: Array<Outcome> = abandoned.map(({ id }) => ({
     id,
@@ -114,7 +116,7 @@ export async function retireIncarnation<TTx extends GroupTransaction>(
       ? { controlHold: null }
       : {}),
   }
-  if (rejoin !== null) {
+  if (rejoin !== null && manualRejoinID === undefined) {
     if (switchedRejoinID !== undefined)
       changes.putRejoin = {
         ...rejoin,

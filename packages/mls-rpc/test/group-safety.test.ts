@@ -648,7 +648,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
-    test('factory rejects foreign binding and unregistered registry; recovery stays unavailable', async () => {
+    test('factory rejects foreign binding and unregistered registry; successor stays unavailable', async () => {
       const fixture = await create()
       const foreign = await createRegistryFixture({
         mode,
@@ -675,10 +675,10 @@ for (const mode of ['real-mls', 'double'] as const) {
           TypeError,
         )
         const api = createGroupSafety(params)
-        for (const choice of [
-          { mode: 'resync' as const, targetID: 'hub' },
-          { mode: 'successor' as const, successor: key },
-        ])
+        await expect(api.recover(key, { mode: 'resync', targetID: 'hub' })).rejects.toThrow(
+          'Unexpected target resolution',
+        )
+        for (const choice of [{ mode: 'successor' as const, successor: key }])
           await expect(api.recover(key, choice)).rejects.toBeInstanceOf(
             ManualRecoveryUnavailableError,
           )

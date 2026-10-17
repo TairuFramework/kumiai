@@ -33,15 +33,17 @@ export type ConformanceRecoveryPendingReason =
   | 'no-reply'
   | 'no-eligible-responder'
   | 'target-behind'
+  | 'target-unresolved'
 export type ConformanceRegistryPeerStatus =
   | { kind: 'starting' | 'running' | 'switching' | 'disposed' }
-  | { kind: 'pending'; reason?: ConformanceRecoveryPendingReason }
+  | { kind: 'pending'; reason?: ConformanceRecoveryPendingReason; authorisationID?: string }
   | {
       kind: 'not-member'
       eventID: string
       evidence: ConformanceNotMemberEvidence
       retrying: true
       pendingReason?: ConformanceRecoveryPendingReason
+      authorisationID?: string
     }
   | { kind: 'failed'; error: unknown }
 
@@ -122,7 +124,7 @@ export type ConformanceLegacyResyncProof = {
 }
 export type ConformanceRegistrySwitchWrite = {
   mutationID: string
-  source: { rejoinID: string }
+  source: { rejoinID: string; authorisationID?: string }
   destination: { control: { cursor: { position: string; epoch: number } } }
 }
 export type ConformanceRegistry<THandle> = {

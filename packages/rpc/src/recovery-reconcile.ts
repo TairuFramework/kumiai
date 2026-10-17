@@ -1,9 +1,29 @@
 import { controlSafetyHeld, isHardControlHold } from './control/safety.js'
 import { applyResolved } from './control/store.js'
-import type { ControlSnapshot, ControlStore } from './control/types.js'
+import type { ControlSnapshot, ControlStore, GroupKey } from './control/types.js'
 import type { AcceptedRejoinSettlement, CapturedRejoinRecord } from './recovery-types.js'
 
-export function recoveryHeld(snapshot: ControlSnapshot): boolean {
+export function manualRecoveryBound(
+  snapshot: ControlSnapshot,
+  authority?: { authorisationID: string; source: GroupKey },
+): boolean {
+  const record = snapshot.rejoin
+  return (
+    authority !== undefined &&
+    record !== null &&
+    'format' in record &&
+    record.trigger === 'manual' &&
+    record.authorisationID === authority.authorisationID &&
+    record.source.key.groupID === authority.source.groupID &&
+    record.source.key.incarnation === authority.source.incarnation
+  )
+}
+
+export function recoveryHeld(
+  snapshot: ControlSnapshot,
+  authority?: { authorisationID: string; source: GroupKey },
+): boolean {
+  if (manualRecoveryBound(snapshot, authority)) return false
   return controlSafetyHeld(snapshot) !== null || isHardControlHold(snapshot.controlHold)
 }
 
@@ -17,10 +37,11 @@ export async function settleRecovery(params: {
   mutationID: string
   recoveryEpochFloor?: number | null
   signal?: AbortSignal
+  manualRecovery?: { authorisationID: string; source: GroupKey }
 }): Promise<void> {
   const { control, record, provenance } = params
   const snapshot = await control.load()
-  if (recoveryHeld(snapshot)) throw new Error('Recovery settlement is held')
+  if (recoveryHeld(snapshot, params.manualRecovery)) throw new Error('Recovery settlement is held')
   if (snapshot.rejoin?.id !== record.id) return
   if (
     provenance.kind === 'not-accepted' &&

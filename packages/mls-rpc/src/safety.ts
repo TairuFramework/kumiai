@@ -16,7 +16,7 @@ import {
 } from '@kumiai/rpc'
 
 import { coordinatorBinding } from './entry-capability.js'
-import { manualRecoveryStatus } from './manual-recovery.js'
+import { createManualRecoveryStore, manualRecoveryStatus } from './manual-recovery.js'
 import { sameStoredValue } from './memory-incarnation-stores.js'
 import { isStoredOpenFailure } from './persistence-codec.js'
 import {
@@ -33,6 +33,7 @@ import type {
   GroupTransaction,
   PersistenceEvent,
 } from './persistence-types.js'
+import { registryRecoveryCoordinator } from './registry/recovery-coordinator.js'
 import {
   RetainedTrustUnavailableError,
   readRetainedTrust,
@@ -43,7 +44,7 @@ import type { GroupHandleRegistry } from './registry/types.js'
 import { flushConditionEvents, groupCondition } from './safety-conditions.js'
 
 export type ManualRecovery =
-  | { mode: 'resync'; targetID: string }
+  | { mode: 'resync'; targetID: string; allowOpenFork?: boolean }
   | { mode: 'successor'; successor: GroupKey }
 export type RecoveryTarget = { id: string; commitTopicID: string; hub: LogHub & MailboxHub }
 export type GroupSafety = {
@@ -205,8 +206,37 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
         if (!(error instanceof Noop)) throw error
       }
     },
-    async recover() {
-      throw new ManualRecoveryUnavailableError('Manual recovery is unavailable')
+    async recover(requested, choice) {
+      if (choice.mode === 'successor')
+        throw new ManualRecoveryUnavailableError('Successor recovery is unavailable')
+      const { targetID, allowOpenFork = false } = choice
+      const key = { ...requested }
+      if (
+        !validKey(key) ||
+        typeof targetID !== 'string' ||
+        targetID.length === 0 ||
+        typeof allowOpenFork !== 'boolean'
+      )
+        throw new TypeError('Invalid manual recovery choice')
+      const target = await params.resolveTarget(targetID)
+      if (
+        target.id !== targetID ||
+        typeof target.commitTopicID !== 'string' ||
+        target.commitTopicID.length === 0
+      )
+        throw new GroupStateConflictError('Manual recovery target mismatch')
+      const storage = createManualRecoveryStore({
+        registry: params.registry,
+        persistence: params.persistence,
+        key,
+      })
+      const record = await storage.authoriseManualRecovery(key, {
+        mode: 'resync',
+        targetID: target.id,
+        commitTopicID: target.commitTopicID,
+        allowOpenFork,
+      })
+      return await registryRecoveryCoordinator(params.registry).runManual(record)
     },
     async events(requested) {
       const key = { ...requested }
