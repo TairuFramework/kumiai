@@ -1199,3 +1199,39 @@ for (const mode of ['real-mls', 'double'] as const) {
     }
   })
 }
+
+for (const mode of ['real-mls', 'double'] as const) {
+  test(`manual resync start finding spent corruption rejects recover / ${mode}`, async () => {
+    const fixture = await createRegistryFixture({ mode, groupID: key.groupID, setup: 'seeded' })
+    const { hub } = watchedHub()
+    let active: Awaited<ReturnType<typeof start>> | undefined
+    try {
+      // Behind, so the authorised resync cannot move current and reaches start().
+      await mutateControl(fixture, (snapshot) => ({
+        ...snapshot,
+        strand: { reason: 'retention-gap' },
+      }))
+      active = await start(fixture, async () => {
+        throw new Error('Resolver unused')
+      })
+      await fixture.corruptTrust(key.groupID, 'missing-spent')
+      const safety = api.createGroupSafety(await registryFixtureSafetyParams(fixture))
+      const running = safety.recover(key, { mode: 'resync', target: { ...binding, hub } })
+      const settled = await Promise.race([
+        running.then(
+          () => 'resolved',
+          (error: unknown) => error,
+        ),
+        new Promise((resolve) => setTimeout(() => resolve('unsettled'), 5_000)),
+      ])
+      expect(settled).toBeInstanceOf(api.SpentSetCorruptError)
+      expect(await fixture.safety().status(key)).toMatchObject({
+        condition: 'spent-set-corrupt',
+      })
+    } finally {
+      active?.owner.dispose()
+      await active?.owner.drained().catch(() => {})
+      await fixture.close()
+    }
+  })
+}

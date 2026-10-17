@@ -858,6 +858,11 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
         if (error instanceof SpentSetCorruptError) {
           await persistSpentCondition(error)
           if (capability.held(key) === 'fork-halted') throw error
+          if (manual !== null) {
+            // The authorised row stays; recover() must still settle.
+            manualCompletion?.reject(error)
+            manualCompletion = null
+          }
           await refreshCondition()
           return
         }
