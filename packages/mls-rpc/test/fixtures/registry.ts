@@ -192,6 +192,14 @@ const restorers = new WeakMap<
 const markerWriters = new WeakMap<RegistryFixtureBase, RegistryStorageFixture['forceOwnerMarker']>()
 const rowRemovers = new WeakMap<RegistryFixtureBase, RegistryStorageFixture['deleteCommittedRow']>()
 
+// Counts trust reads through entry reads; coordinator observation reads are excluded.
+const trustReadCounters = new WeakMap<RegistryFixtureBase, () => number>()
+export function registryFixtureTrustReads(fixture: RegistryFixtureBase): number {
+  const count = trustReadCounters.get(fixture)
+  if (count === undefined) throw new Error('Missing trust read counter')
+  return count()
+}
+
 const controlCorrupters = new WeakMap<RegistryFixtureBase, (key: GroupKey) => Promise<void>>()
 type CapturedFixtureState = { keys: Set<string>; handles: WeakSet<GroupHandle> }
 const capturedStates = new WeakMap<RegistryFixtureBase, CapturedFixtureState>()
@@ -383,6 +391,7 @@ async function assemble(
   let owner: GroupHandleRegistry | undefined
   let safetyMLS: ReturnType<typeof createGroupMLS>
   let trustReadFailure: Error | null = null
+  let trustReads = 0
   async function restore(
     record: GroupStateRecord & { deleted: false; state: Uint8Array },
   ): Promise<GroupHandle> {
@@ -720,6 +729,7 @@ async function assemble(
     return {
       ...reads,
       trust: async () => {
+        trustReads++
         if (trustReadFailure !== null) throw trustReadFailure
         return reads.trust()
       },
@@ -765,6 +775,7 @@ async function assemble(
     },
   })
   restorers.set(fixture, restore)
+  trustReadCounters.set(fixture, () => trustReads)
   capturedStates.set(fixture, captured)
   markerWriters.set(fixture, storage.forceOwnerMarker)
   rowRemovers.set(fixture, storage.deleteCommittedRow)

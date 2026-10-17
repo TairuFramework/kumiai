@@ -13,6 +13,7 @@ import {
   createNotMemberFixture,
   createRegistryFixture,
   type RegistryFixture,
+  registryFixtureTrustReads,
 } from './fixtures/registry.js'
 
 for (const mode of ['real-mls', 'double'] as const) {
@@ -233,6 +234,27 @@ for (const mode of ['real-mls', 'double'] as const) {
               control,
             ),
           ).toMatchObject({ admissible: false, reason: 'spent-set-corrupt' })
+        }))
+      test('healthy committed mutations start no diagnostic trust read', () =>
+        run(async (f) => {
+          await f.registry.access(groupID)
+          const capability = entryCapability(f.device.groups)
+          if (capability === null) throw new Error('Missing capability')
+          const mutate = () =>
+            capability.run(
+              { groupID, mutationID: crypto.randomUUID() },
+              async (reads) => ({ expected: await reads.lifetime(), value: null }),
+              async () => {},
+            )
+          // Owner reads are queued, so a later read drains any diagnosis the commit started.
+          const drain = () => capability.read(groupID, async () => {})
+          await mutate()
+          await drain()
+          const before = registryFixtureTrustReads(f)
+          for (let index = 0; index < 3; index++) await mutate()
+          await drain()
+          expect(registryFixtureTrustReads(f)).toBe(before)
+          expect(await f.safety().status(key)).toMatchObject({ hold: null, condition: null })
         }))
       test('failed condition persistence preserves the spent corruption error and latch', () =>
         run(async (f) => {

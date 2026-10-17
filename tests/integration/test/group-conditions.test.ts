@@ -13,12 +13,14 @@ import {
   HANDSHAKE_KIND,
   type LogPosition,
   type RecoveryEvent,
+  recoveryUnavailableEventID,
   rendezvousTopic,
   SendNotAdmissibleError,
 } from '@kumiai/rpc'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import { createCheckpointService } from '../../../packages/mls-rpc/src/checkpoint.js'
+import { entryCapability } from '../../../packages/mls-rpc/src/entry-capability.js'
 import {
   createControlValidationPort,
   createGroupCrypto,
@@ -28,6 +30,7 @@ import {
   createRegistryHandleAccess,
   createRegistryPeer,
   type RegistryPeerOptions,
+  SpentSetCorruptError,
 } from '../../../packages/mls-rpc/src/index.js'
 import { capturedRecord } from '../../../packages/mls-rpc/test/fixtures/captured-recovery.js'
 import { createAsyncLocalOwnershipContext } from '../../../packages/mls-rpc/test/fixtures/ownership-context.js'
@@ -1292,3 +1295,254 @@ test.each(['empty-spent', 'missing-spent', 'malformed-spent'] as const)(
     )
   },
 )
+
+async function startDiagnosticPeer(
+  fixture: RegistryFixture,
+  key: { groupID: string; incarnation: number },
+  observe?: (options: RegistryPeerOptions) => void,
+) {
+  const created = vi.fn(async () => {
+    throw new Error('Held or corrupt state must never start a peer')
+  })
+  const owner = await createRegistryPeer({
+    registry: fixture.registry,
+    key,
+    target: { targetID: 'diagnostic-hub', topicID: 'diagnostic-commits' },
+    recovery: fixture.environment,
+    continuation: createRecoveryContinuationPort({
+      registry: fixture.registry,
+      persistence: fixture.device.groups,
+    }),
+    createMLS: created,
+    createPeer: async (_key, options) => {
+      observe?.(options)
+      return await created()
+    },
+  })
+  const stop = async () => {
+    owner.dispose()
+    await owner.drained().catch(() => {})
+  }
+  cleanup.push(stop)
+  await owner.ready.catch(() => {})
+  return { owner, created, stop }
+}
+
+// The not-member fixture's restart rebuilds MLS, which corrupt trust refuses.
+async function reopenLocal(fixture: RegistryFixture) {
+  const reopened = await fixture.reopen()
+  cleanup.push(() => reopened.close())
+  return reopened
+}
+
+async function activeConditionKinds(fixture: RegistryFixture, groupID: string) {
+  const capability = entryCapability(fixture.device.groups)
+  if (capability === null) throw new Error('Missing capability')
+  return (await capability.read(groupID, (reads) => reads.checkpoints())).flatMap((row) =>
+    row.kind === 'condition' && row.active ? [row.event.kind] : [],
+  )
+}
+
+// A running peer may commit between the fixture's lifetime read and its write.
+async function installRecoveryUnavailable(
+  fixture: RegistryFixture,
+  key: { groupID: string; incarnation: number },
+) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await fixture.installRows({
+        key,
+        control: {
+          recoveryUnavailable: {
+            ...key,
+            id: recoveryUnavailableEventID(key),
+            kind: 'group:recovery-unavailable',
+            reason: 'trust-unreadable',
+          },
+        },
+      })
+      return
+    } catch (error) {
+      if (attempt >= 4 || !(error instanceof Error) || error.message !== 'Group lifetime conflict')
+        throw error
+    }
+  }
+}
+
+function appFork(key: { groupID: string; incarnation: number }) {
+  return {
+    eventID: forkEventID(key),
+    detectedAt: 42,
+    producer: 'app-report' as const,
+    evidence: { kind: 'unexplained-own-commit' as const, epoch: 0, position: '1', digest: 'held' },
+  }
+}
+
+test('peer startup reports spent corruption over not-member across restart', async () => {
+  const { f } = await setup(false)
+  await f.diagnose(await f.proof())
+  expect(await f.local().safety().status(f.key)).toMatchObject({ condition: 'not-member' })
+  await f.local().corruptTrust(f.key.groupID, 'empty-spent')
+  const first = await startDiagnosticPeer(f.local(), f.key)
+  expect(first.owner.status()).toMatchObject({ kind: 'spent-set-corrupt' })
+  expect(first.created).not.toHaveBeenCalled()
+  expect(await activeConditionKinds(f.local(), f.key.groupID)).toEqual(
+    expect.arrayContaining(['not-member', 'spent-set-corrupt']),
+  )
+  await first.stop()
+  const reopened = await reopenLocal(f.local())
+  const second = await startDiagnosticPeer(reopened, f.key)
+  expect(second.owner.status()).toMatchObject({ kind: 'spent-set-corrupt' })
+  expect(await reopened.safety().status(f.key)).toMatchObject({
+    hold: 'spent-set-corrupt',
+    condition: 'spent-set-corrupt',
+  })
+  expect(await activeConditionKinds(reopened, f.key.groupID)).toEqual(
+    expect.arrayContaining(['not-member', 'spent-set-corrupt']),
+  )
+})
+
+test('spent corruption outranks recovery unavailable and pending reasons at runtime and startup', async () => {
+  const { f, hub } = await setup()
+  let options: RegistryPeerOptions | undefined
+  const local = await start(f.local(), hub, [], (value) => {
+    options = value
+  })
+  await local.owner.peer()?.recover()
+  expect(local.owner.status()).toMatchObject({ kind: 'pending', reason: 'no-reply' })
+  await installRecoveryUnavailable(f.local(), f.key)
+  await f.local().corruptTrust(f.key.groupID, 'empty-spent')
+  await expect(f.local().registry.recoverySource(f.key.groupID)).rejects.toMatchObject({
+    name: 'SpentSetCorruptError',
+  })
+  await expect.poll(() => local.owner.status().kind).toBe('spent-set-corrupt')
+  if (options === undefined) throw new Error('Missing peer options')
+  await options.onRecovery?.({
+    groupID: local.target.topicID,
+    attemptID: 'late-attempt',
+    trigger: 'automatic',
+    phase: 'failed',
+    reason: 'error',
+    error: new Error('late'),
+    pendingReason: 'no-reply',
+  })
+  expect(local.owner.status()).toMatchObject({ kind: 'spent-set-corrupt' })
+  expect(await f.local().safety().status(f.key)).toMatchObject({
+    hold: 'spent-set-corrupt',
+    condition: 'spent-set-corrupt',
+  })
+  local.owner.dispose()
+  await local.owner.drained()
+  const fixture = await reopenLocal(f.local())
+  const reopened = await startDiagnosticPeer(fixture, f.key)
+  expect(reopened.owner.status()).toMatchObject({ kind: 'spent-set-corrupt' })
+  expect(reopened.created).not.toHaveBeenCalled()
+  expect(
+    (await fixture.device.groups.ports(f.key).control.load()).recoveryUnavailable,
+  ).not.toBeNull()
+})
+
+test('pending then recovery unavailable reopens held without a pending status', async () => {
+  const { f, hub } = await setup()
+  const local = await start(f.local(), hub)
+  await local.owner.peer()?.recover()
+  expect(local.owner.status()).toMatchObject({ kind: 'pending', reason: 'no-reply' })
+  await installRecoveryUnavailable(f.local(), f.key)
+  expect(await f.local().safety().status(f.key)).toMatchObject({
+    hold: 'recovery-unavailable',
+    condition: null,
+  })
+  local.owner.dispose()
+  await local.owner.drained()
+  const fixture = await reopenLocal(f.local())
+  let options: RegistryPeerOptions | undefined
+  const reopened = await startDiagnosticPeer(fixture, f.key, (value) => {
+    options = value
+  })
+  expect(reopened.owner.status()).toMatchObject({
+    kind: 'failed',
+    error: { message: 'Recovery source is held' },
+  })
+  expect(options).toBeUndefined()
+  expect(reopened.created).not.toHaveBeenCalled()
+  expect(await fixture.safety().status(f.key)).toMatchObject({
+    hold: 'recovery-unavailable',
+    condition: null,
+  })
+})
+
+test.each([
+  { hold: 'fork-halted', warm: false },
+  { hold: 'fork-halted', warm: true },
+  { hold: 'control-hold', warm: false },
+  { hold: 'control-hold', warm: true },
+] as const)(
+  'hard holds outrank spent corruption at peer startup: $hold / warm $warm',
+  async ({ hold, warm }) => {
+    const { f } = await setup(false)
+    await f.local().installRows({
+      key: f.key,
+      control:
+        hold === 'fork-halted'
+          ? { forkHalt: appFork(f.key) }
+          : { controlHold: { reason: 'unsupported-version', position: null } },
+    })
+    await f.local().corruptTrust(f.key.groupID, 'empty-spent')
+    if (warm)
+      await expect(f.local().registry.recoverySource(f.key.groupID)).rejects.toMatchObject({
+        name: 'SpentSetCorruptError',
+      })
+    const peer = await startDiagnosticPeer(f.local(), f.key)
+    expect(peer.owner.status()).toMatchObject({ kind: 'failed' })
+    expect(peer.created).not.toHaveBeenCalled()
+    expect(await f.local().safety().status(f.key)).toMatchObject({
+      hold: hold === 'fork-halted' ? 'fork-halted' : 'spent-set-corrupt',
+      condition: 'spent-set-corrupt',
+    })
+    await peer.stop()
+    const fixture = await reopenLocal(f.local())
+    const reopened = await startDiagnosticPeer(fixture, f.key)
+    expect(reopened.owner.status()).toMatchObject({ kind: 'failed' })
+    expect(await fixture.safety().status(f.key)).toMatchObject({
+      hold: hold === 'fork-halted' ? 'fork-halted' : 'spent-set-corrupt',
+      condition: 'spent-set-corrupt',
+    })
+  },
+)
+
+test('failed condition write at peer startup keeps the spent corruption cause', async () => {
+  const { f } = await setup(false)
+  await f.local().corruptTrust(f.key.groupID, 'empty-spent')
+  f.local().armNextWorkFault('before-commit')
+  const peer = await startDiagnosticPeer(f.local(), f.key)
+  const status = peer.owner.status()
+  expect(status).toMatchObject({ kind: 'failed' })
+  expect('error' in status ? status.error : undefined).toBeInstanceOf(SpentSetCorruptError)
+  expect(peer.created).not.toHaveBeenCalled()
+})
+
+test('running peer keeps a hard control hold over later spent corruption', async () => {
+  const { f, hub } = await setup()
+  const local = await start(f.local(), hub)
+  await local.owner.peer()?.recover()
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await f.local().installRows({
+        key: f.key,
+        control: { controlHold: { reason: 'unsupported-version', position: null } },
+      })
+      break
+    } catch (error) {
+      if (attempt >= 4 || !(error instanceof Error) || error.message !== 'Group lifetime conflict')
+        throw error
+    }
+  }
+  await f.local().corruptTrust(f.key.groupID, 'empty-spent')
+  await expect(f.local().registry.recoverySource(f.key.groupID)).rejects.toMatchObject({
+    name: 'SpentSetCorruptError',
+  })
+  expect(await activeConditionKinds(f.local(), f.key.groupID)).toContain('spent-set-corrupt')
+  // The condition write notifies observers; give the peer's refresh time to land.
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  expect(local.owner.status().kind).not.toBe('spent-set-corrupt')
+})

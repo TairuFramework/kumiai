@@ -12,7 +12,11 @@ import {
   sealRecord,
 } from './persistence-codec.js'
 import { GroupStateConflictError, PersistencePhaseError } from './persistence-errors.js'
-import { assertStateTransition, assertTrustTransition } from './persistence-guards.js'
+import {
+  assertPersistedSpentSet,
+  assertStateTransition,
+  assertTrustTransition,
+} from './persistence-guards.js'
 import type {
   AtRestCodec,
   GroupRecoveryTrust,
@@ -486,6 +490,7 @@ export function createUnlockedGroupStateStores(params: {
     load: loadTrust,
     async save(value) {
       assertMemoryWrite(tx, 'domain')
+      assertPersistedSpentSet(value)
       const previous = await loadTrust()
       assertTrustTransition(previous, value)
       await trustRow.save(copyTrust(value))

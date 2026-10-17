@@ -43,7 +43,11 @@ import { decodeCapturedRecoveryCandidate } from './recovery-codec.js'
 import { recoveryCompletionContexts } from './recovery-completion-context.js'
 import { validateCapturedRecoveryRecord } from './recovery-record.js'
 import { registryRecoveryCoordinator } from './registry/recovery-coordinator.js'
-import { RetainedTrustUnavailableError, registrySafety } from './registry/safety.js'
+import {
+  RetainedTrustUnavailableError,
+  readRetainedTrust,
+  registrySafety,
+} from './registry/safety.js'
 import { createRecoverySwitchFactory, toRegistrySwitchWrite } from './registry/switch-write.js'
 import type { GroupHandleRegistry, RegistryRecoverySource } from './registry/types.js'
 import type { RecoveryEnvironment } from './registry/validation.js'
@@ -237,10 +241,12 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
       key.groupID,
       async (reads) => {
         const records = await reads.checkpoints()
+        const control = await reads.control(key.incarnation)
         return {
           observed: groupCondition(records, key),
           hardHeld:
-            (await reads.control(key.incarnation)).forkHalt !== null ||
+            control.forkHalt !== null ||
+            isHardControlHold(control.controlHold) ||
             capability.held(key) === 'fork-halted',
           deadlines: records.flatMap((row) =>
             row.kind === 'condition' &&
@@ -305,6 +311,26 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
     },
   )
   let recoveryAttempt: Pick<CapturedRejoinRecord, 'id' | 'trigger'> | undefined
+  async function diagnoseSpentSet(): Promise<void> {
+    try {
+      await capability.entry.read(key.groupID, async (reads) => {
+        const lifetime = await reads.lifetime()
+        if (lifetime?.activeIncarnation === key.incarnation) await readRetainedTrust(reads, key)
+      })
+    } catch (error) {
+      // Other trust failures keep their existing startup diagnosis.
+      if (error instanceof SpentSetCorruptError) throw error
+    }
+  }
+  async function persistSpentCondition(error: SpentSetCorruptError): Promise<void> {
+    try {
+      await capability.persistGroupCondition(key, 'spent-set-corrupt', null)
+    } catch (failure) {
+      if (failure instanceof GroupUnavailableError && failure.reason === 'invalid') throw failure
+      // A failed diagnostic write leaves the corruption, not the storage fault, as the cause.
+      throw error
+    }
+  }
   function fail(error: unknown, record = recoveryAttempt): void {
     if (status.kind === 'failed') return
     status = { kind: 'failed', error }
@@ -589,8 +615,14 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
           if (record.trigger !== 'automatic')
             throw new GroupStateConflictError('Manual recovery requires host activation')
         }
-        if (control.forkHalt === null && capability.held(key) === 'spent-set-corrupt') {
-          await capability.persistGroupCondition(key, 'spent-set-corrupt', null)
+        const hardHeld =
+          control.forkHalt !== null ||
+          isHardControlHold(control.controlHold) ||
+          capability.held(key) === 'fork-halted'
+        // Spent corruption outranks a recovery-unavailable refusal, so diagnose it first.
+        if (!hardHeld) await diagnoseSpentSet()
+        if (!hardHeld && capability.held(key) === 'spent-set-corrupt') {
+          await persistSpentCondition(new SpentSetCorruptError({ key }))
           await refreshCondition()
           return
         }
@@ -657,7 +689,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
       } catch (error) {
         if (disposed) return
         if (error instanceof SpentSetCorruptError) {
-          await capability.persistGroupCondition(key, 'spent-set-corrupt', null)
+          await persistSpentCondition(error)
           if (capability.held(key) === 'fork-halted') throw error
           await refreshCondition()
           return

@@ -9,7 +9,7 @@ import {
 } from '../src/memory-group-state.js'
 import { createMemoryTransaction } from '../src/memory-transaction.js'
 import { createOwnerQueues } from '../src/owner-queue.js'
-import { GroupStateConflictError } from '../src/persistence-errors.js'
+import { GroupStateConflictError, SpentSetCorruptError } from '../src/persistence-errors.js'
 import { assertStateTransition, assertTrustTransition } from '../src/persistence-guards.js'
 import type {
   AtRestCodec,
@@ -257,6 +257,36 @@ for (const mode of ['real-mls', 'double'] as const) {
         const stores = createGroupStateStores({ tx, groupID, atRest: unreadable })
         await expect(stores.trust.load()).rejects.toThrow('trust unreadable')
         await expect(stores.trust.save(value.trust)).rejects.toThrow('trust unreadable')
+      })
+    })
+
+    test.each([
+      ['empty', () => []],
+      ['zero-length', () => [new Uint8Array(0)]],
+    ] as const)('refuses a %s surviving spent set when it is written', async (_, spent) => {
+      const value = await seed()
+      const db = createMemoryTransaction({ rows: {} })
+      const write = (trust: typeof value.trust) =>
+        db.transact(scope, async (tx) => {
+          const stores = createGroupStateStores({ tx, groupID, atRest: codec })
+          if ((await stores.state(1).load()) === null) await stores.state(1).save(value.state)
+          await stores.trust.save(trust)
+        })
+      const malformed = { ...value.trust, spentEpochAuthenticators: [...spent()] }
+      const refusal = write(malformed)
+      await expect(refusal).rejects.toThrow(GroupStateConflictError)
+      await expect(refusal).rejects.not.toBeInstanceOf(SpentSetCorruptError)
+      await write(value.trust)
+      // A later save cannot append a zero-length entry to a stored set.
+      await expect(
+        write({
+          ...value.trust,
+          spentEpochAuthenticators: [...value.trust.spentEpochAuthenticators, new Uint8Array(0)],
+        }),
+      ).rejects.toThrow(GroupStateConflictError)
+      await db.transact(scope, async (tx) => {
+        const stores = createGroupStateStores({ tx, groupID, atRest: codec })
+        expect(await stores.trust.load()).toEqual(value.trust)
       })
     })
 

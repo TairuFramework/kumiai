@@ -123,7 +123,13 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   const diagnosing = new Set<string>()
   function diagnoseObservation(observation: AccountedGroupObservation): void {
     const key = observation.activeKey
-    if (key === null || observation.condition === 'spent-set-corrupt') return
+    // Readable trust already passed the surviving spent-set check when it was opened.
+    if (
+      key === null ||
+      observation.condition === 'spent-set-corrupt' ||
+      (observation.trustStatus === 'readable' && observation.trust !== null)
+    )
+      return
     const id = keyID(key)
     if (diagnosing.has(id)) return
     diagnosing.add(id)

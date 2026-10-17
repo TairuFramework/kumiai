@@ -182,6 +182,18 @@ function assertPublicValue(value: unknown): void {
   }
 }
 
+// Prospective trust may be empty until installation appends its authenticator; stored trust may not.
+export function assertPersistedSpentSet(trust: GroupRecoveryTrust): void {
+  requireCondition(
+    Array.isArray(trust.spentEpochAuthenticators) &&
+      trust.spentEpochAuthenticators.length > 0 &&
+      trust.spentEpochAuthenticators.every(
+        (bytes) => bytes instanceof Uint8Array && bytes.length > 0,
+      ),
+    'Persisted spent authenticator set is empty or malformed',
+  )
+}
+
 export function assertTrustTransition(
   previous: GroupRecoveryTrust | null,
   next: GroupRecoveryTrust,
