@@ -119,10 +119,16 @@ export function manualRecoveryStatus(
   records: Array<CheckpointRecord>,
   key: GroupKey,
 ): ManualRecoveryStatus | null {
-  const row = [...records]
-    .reverse()
-    .find((row) => row.kind === 'manual-recovery' && sameStoredValue(row.key, key))
-  if (row?.kind !== 'manual-recovery') return null
+  const rows = records.filter(
+    (row): row is ManualRow => row.kind === 'manual-recovery' && sameStoredValue(row.key, key),
+  )
+  // The live choice wins regardless of list order: a successor supersedes, then a pending
+  // resync; completed history ties break by id only to stay deterministic.
+  const row =
+    rows.find((row) => row.value.choice.mode === 'successor') ??
+    rows.find((row) => row.value.stage === 'authorised') ??
+    rows.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0]
+  if (row === undefined) return null
   return {
     id: row.id,
     kind:
@@ -306,8 +312,13 @@ export function createManualRecoveryStore<TTx extends GroupTransaction>(params: 
       if (!sameStoredValue(requested, key))
         throw new TypeError('Manual recovery source key mismatch')
       const choice = choiceValue(supplied)
+      if (choice.mode === 'successor' && choice.successor.groupID === key.groupID)
+        throw new TypeError('A successor must be another group')
       const mutationID = crypto.randomUUID()
-      return entry.run(
+      return entry.run<
+        { record: ManualRecoveryRecord; existing: boolean; replaces?: ManualRecoveryRecord },
+        ManualRecoveryRecord
+      >(
         { groupID: key.groupID, mutationID },
         async (reads) => {
           const lifetime = await reads.lifetime()
@@ -322,15 +333,22 @@ export function createManualRecoveryStore<TTx extends GroupTransaction>(params: 
           const existing = pending.find((row) => sameStoredValue(row.value.choice, choice))
           if (existing !== undefined)
             return { expected: lifetime, value: { record: existing.value, existing: true } }
-          // Only the successor exit may supersede a pending resync; nothing supersedes a successor.
-          if (
-            pending.length > 0 &&
-            (choice.mode !== 'successor' ||
-              pending.some((row) => row.value.choice.mode === 'successor'))
-          )
+          // Only a successor choice supersedes pending work; a retired source is already inactive.
+          if (pending.length > 0 && choice.mode !== 'successor')
             throw new GroupStateConflictError(
               'Manual recovery already authorised for another choice',
             )
+          // An unexecuted successor choice is replaced in place, so one successor row stays live.
+          const unexecuted = pending.find((row) => row.value.choice.mode === 'successor')
+          if (unexecuted !== undefined)
+            return {
+              expected: lifetime,
+              value: {
+                record: { ...copyStoredValue(unexecuted.value), choice, mutationID },
+                existing: false,
+                replaces: copyStoredValue(unexecuted.value),
+              },
+            }
           const control = await reads.control(key.incarnation)
           const record: ManualRecoveryRecord = {
             id: crypto.randomUUID(),
@@ -346,8 +364,13 @@ export function createManualRecoveryStore<TTx extends GroupTransaction>(params: 
           }
           return { expected: lifetime, value: { record, existing: false } }
         },
-        async (stores, { record, existing }) => {
-          if (!existing) {
+        async (stores, { record, existing, replaces }) => {
+          if (replaces !== undefined) {
+            const current = findManualRecovery(await stores.checkpoints.list(), key, replaces.id)
+            if (!sameStoredValue(current, replaces))
+              throw new GroupStateConflictError('Manual recovery authorisation moved')
+            await save(stores, record)
+          } else if (!existing) {
             const control = stores.incarnation(key.incarnation).control
             const intent = (await control.load()).forkRecoveryAttempt
             if (intent != null) {
@@ -376,12 +399,13 @@ export function createManualRecoveryStore<TTx extends GroupTransaction>(params: 
       return {
         key: { ...key },
         load: () =>
-          entry.read(key.groupID, async (reads) =>
-            overlay(
-              await reads.control(key.incarnation),
-              findManualRecovery(await reads.checkpoints(), key, id),
-            ),
-          ),
+          entry.read(key.groupID, async (reads) => {
+            const records = await reads.checkpoints()
+            const record = findManualRecovery(records, key, id)
+            // A superseded attempt must not feed a live peer its stale candidate.
+            assertNotSuperseded(records, record)
+            return overlay(await reads.control(key.incarnation), record)
+          }),
         lastMutation: () =>
           entry.read(
             key.groupID,

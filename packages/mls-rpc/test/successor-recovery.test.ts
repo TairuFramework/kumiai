@@ -9,6 +9,7 @@ import {
   type LogHub,
   type LogPosition,
   type MailboxHub,
+  type ManualRecoveryRecord,
   rendezvousTopic,
   type SuccessorTombstone,
 } from '@kumiai/rpc'
@@ -16,6 +17,7 @@ import { expect, test, vi } from 'vitest'
 
 import { entryCapability } from '../src/entry-capability.js'
 import * as api from '../src/index.js'
+import { manualRecoveryStatus } from '../src/manual-recovery.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import {
   createNotMemberFixture,
@@ -183,6 +185,50 @@ for (const mode of ['real-mls', 'double'] as const) {
         })
         expect(await tombstones(fixture, key.groupID)).toEqual([])
         expect((await fixture.registry.access(key.groupID)).admission().admissible).toBe(true)
+        // The lost successor strands nothing: another admitted successor still retires the source.
+        const replacement = await admit(fixture, 'replacement-successor')
+        expect(
+          await fixture.safety().recover(key, { mode: 'successor', successor: replacement }),
+        ).toEqual(replacement)
+        expect(await tombstones(fixture, key.groupID)).toMatchObject([
+          { successor: replacement, clearedAt: null },
+        ])
+      } finally {
+        await fixture.close()
+      }
+    })
+
+    test(`successor replaced while the source drains refuses the stale retirement / ${mode} / ${context}`, async () => {
+      const fixture = await createRegistryFixture({
+        mode,
+        groupID: key.groupID,
+        setup: 'seeded',
+        ownershipContext: context === 'supplied' ? createAsyncLocalOwnershipContext() : undefined,
+      })
+      try {
+        const first = await admit(fixture, 'first-successor')
+        const second = await admit(fixture, 'second-successor')
+        const access = await fixture.registry.access(key.groupID)
+        let replaced = false
+        access.onRetire(async () => {
+          if (replaced) return
+          replaced = true
+          await fixture
+            .manualRecovery()
+            .authoriseManualRecovery(key, { mode: 'successor', successor: second })
+        })
+        await expect(
+          fixture.safety().recover(key, { mode: 'successor', successor: first }),
+        ).rejects.toThrow('Successor authorisation moved')
+        expect(replaced).toBe(true)
+        expect(await fixture.device.groups.load(key.groupID)).toMatchObject({
+          activeIncarnation: key.incarnation,
+        })
+        expect(await tombstones(fixture, key.groupID)).toEqual([])
+        expect(
+          await fixture.safety().recover(key, { mode: 'successor', successor: second }),
+        ).toEqual(second)
+        expect(await tombstones(fixture, key.groupID)).toMatchObject([{ successor: second }])
       } finally {
         await fixture.close()
       }
@@ -197,7 +243,6 @@ for (const mode of ['real-mls', 'double'] as const) {
       })
       try {
         const successorKey = await admit(fixture, 'admitted-successor')
-        const otherKey = await admit(fixture, 'other-successor')
         // The raw mutator rewrites an existing sealed control row only.
         await fixture.installRows({ key, control: {} })
         await registryFixtureMutateControl(fixture, key, (snapshot) => ({
@@ -234,8 +279,14 @@ for (const mode of ['real-mls', 'double'] as const) {
           kind: 'pending',
         })
         fixture = await fixture.reopen()
+        // The pending successor choice survives restart; a resync cannot displace it.
         await expect(
-          fixture.safety().recover(key, { mode: 'successor', successor: otherKey }),
+          fixture.manualRecovery().authoriseManualRecovery(key, {
+            mode: 'resync',
+            targetID: 'other-hub',
+            commitTopicID: 'other-commits',
+            allowOpenFork: false,
+          }),
         ).rejects.toThrow()
         expect(
           await fixture.safety().recover(key, { mode: 'successor', successor: successorKey }),
@@ -541,3 +592,55 @@ test('all devices legacy halted exit through successor', async () => {
     await fixture.close()
   }
 }, 60000)
+
+test('manual recovery status reports the live choice in any row order', () => {
+  const base = {
+    source: key,
+    pauseReason: null,
+    destination: null,
+    attempt: null,
+    epochFloor: null,
+    settlements: [],
+    mutationID: 'm',
+  }
+  const row = (
+    id: string,
+    value: Omit<ManualRecoveryRecord, 'id' | keyof typeof base> & Partial<ManualRecoveryRecord>,
+  ): CheckpointRecord => ({
+    kind: 'manual-recovery',
+    id,
+    key,
+    value: { ...base, ...value, id },
+  })
+  const resync = {
+    mode: 'resync' as const,
+    targetID: 't',
+    commitTopicID: 'c',
+    allowOpenFork: false,
+  }
+  const completedMove = row('a-completed', { choice: resync, stage: 'completed', destination: key })
+  const superseded = row('b-superseded', {
+    choice: resync,
+    stage: 'authorised',
+    pauseReason: 'target-unresolved',
+  })
+  const successor = row('c-successor', {
+    choice: { mode: 'successor', successor: { groupID: 'other', incarnation: 1 } },
+    stage: 'authorised',
+  })
+  for (const rows of [
+    [completedMove, superseded, successor],
+    [successor, superseded, completedMove],
+    [superseded, successor, completedMove],
+  ])
+    expect(manualRecoveryStatus(rows, key)).toEqual({
+      id: 'c-successor',
+      kind: 'pending',
+      reason: null,
+    })
+  for (const rows of [
+    [completedMove, superseded],
+    [superseded, completedMove],
+  ])
+    expect(manualRecoveryStatus(rows, key)).toMatchObject({ id: 'b-superseded', kind: 'paused' })
+})

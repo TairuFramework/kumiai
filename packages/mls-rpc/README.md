@@ -398,7 +398,8 @@ the source lifetime becomes a tombstone, abandoned operations and superseded man
 the choice completes and a `SuccessorTombstone` row records `source`, `successor`, `authorisationID` and `retiredAt`. It returns the successor key.
 Nothing is copied: no state, ratchets, messages or roster. Owed outcomes, Welcomes, certified settlements, events and halt evidence stay serviceable as history.
 Retirement reads no private state or retained trust, so corrupt source state or trust is no obstacle. Failure leaves the source, its routing and any halt intact.
-A pending resync may be superseded by a successor choice, never the reverse; restart resumes only the saved successor when the app calls `recover` again.
+A successor choice supersedes a pending resync, and a later successor choice replaces an unexecuted one in place; a resync never supersedes, and an executed choice is final.
+Restart resumes only the saved successor when the app calls `recover` again. A group cannot be its own successor.
 
 An open tombstone refuses every Welcome into the source group with `SeedAdmissionRefusedError` reason `successor-tombstone`, including newer or unspent ones after restart.
 `clearTombstone(groupID)` releases only that block. Spent-authenticator checks, fork halts and other safety latches still apply to later admissions.

@@ -794,6 +794,9 @@ export function testManualRecoveryConformance<
           { ...choice, allowOpenFork: undefined } as unknown as ConformancePersistedManualRecovery,
           { mode: 'successor' as const, successor: { groupID: '', incarnation: 1 } },
           { mode: 'successor' as const, successor: { groupID: 'successor', incarnation: 0 } },
+          // A group cannot succeed itself, at any incarnation.
+          { mode: 'successor' as const, successor: { ...key } },
+          { mode: 'successor' as const, successor: { ...key, incarnation: key.incarnation + 1 } },
         ])
           await expect(storage.authoriseManualRecovery(key, invalid)).rejects.toThrow()
         const saved = await storage.authoriseManualRecovery(key, choice)
@@ -847,7 +850,10 @@ export function testManualRecoveryConformance<
           .manualRecovery()
           .authoriseManualRecovery(key, { mode: 'successor', successor })
         expect(chosen.id).not.toBe(saved.id)
-        // The superseded resync can neither change, move nor switch while the source stays active.
+        // The superseded resync can neither show, change, move nor switch while the source stays active.
+        await expect(
+          fixture.manualRecovery().manualRecoveryControl(saved.id).load(),
+        ).rejects.toThrow()
         await expect(
           fixture
             .manualRecovery()
@@ -883,6 +889,51 @@ export function testManualRecoveryConformance<
         })
         await expect(
           fixture.manualRecovery().authoriseManualRecovery(key, choice),
+        ).rejects.toThrow()
+      }))
+    test('an unexecuted successor choice is replaced by a later successor choice', () =>
+      run(async (fixture, key) => {
+        const unadmitted = { groupID: 'never-admitted-successor', incarnation: 1 }
+        const stale = await fixture
+          .manualRecovery()
+          .authoriseManualRecovery(key, { mode: 'successor', successor: unadmitted })
+        await expect(
+          fixture.safety().recover(key, { mode: 'successor', successor: unadmitted }),
+        ).rejects.toMatchObject({ name: 'ManualRecoveryUnavailableError' })
+        // A pending successor still refuses a resync, and repeating it is idempotent.
+        await expect(
+          fixture.manualRecovery().authoriseManualRecovery(key, choice),
+        ).rejects.toThrow()
+        expect(
+          await fixture
+            .manualRecovery()
+            .authoriseManualRecovery(key, { mode: 'successor', successor: unadmitted }),
+        ).toEqual(stale)
+        const successor = await fixture.registry.seed(
+          await fixture.makeHandle(0, 'replacing-successor'),
+          { packageUse: null },
+        )
+        expect(await fixture.safety().recover(key, { mode: 'successor', successor })).toEqual(
+          successor,
+        )
+        expect(await fixture.manualRecovery().readManualRecovery(stale.id)).toMatchObject({
+          stage: 'completed',
+          choice: { mode: 'successor', successor },
+          destination: successor,
+        })
+        expect((await fixture.safety().status(key)).manualRecovery).toEqual({
+          id: stale.id,
+          kind: 'completed',
+          reason: null,
+        })
+        // The executed choice is final.
+        await expect(
+          fixture
+            .manualRecovery()
+            .authoriseManualRecovery(key, { mode: 'successor', successor: unadmitted }),
+        ).rejects.toThrow()
+        await expect(
+          fixture.safety().recover(key, { mode: 'successor', successor: unadmitted }),
         ).rejects.toThrow()
       }))
     test('raw checkpoint writes cannot fabricate or clear successor tombstones', () =>
