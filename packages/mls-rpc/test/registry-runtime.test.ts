@@ -730,7 +730,9 @@ for (const mode of ['real-mls', 'double'] as const) {
         setup: 'seeded',
         effects: {
           async outbox() {
-            await supplied?.incarnation(1).cursor.save('effect', '1')
+            await supplied
+              ?.incarnation(1)
+              .control.apply({ cursor: { position: asLogPosition('1'), epoch: 0 } }, 'effect-only')
           },
         },
       })
@@ -759,7 +761,10 @@ for (const mode of ['real-mls', 'double'] as const) {
           },
         )
         expect(access.runtime.snapshot()?.stateVersion).toBe(2)
-        expect(await fixture.device.groups.ports(key).cursor.load('effect')).toBe('1')
+        expect((await fixture.device.groups.ports(key).control.load()).cursor).toEqual({
+          position: '1',
+          epoch: 0,
+        })
       } finally {
         await fixture.close()
       }

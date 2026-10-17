@@ -2269,43 +2269,97 @@ function testCommitObservation<TTx extends ConformanceGroupTransaction>(
       }
     })
 
-    test('effect-only observation uses accounting once after side writes', async () => {
-      let supplied!: ConformanceGroupStores<TTx>
-      const donor = await params.createFixture(groupID)
-      const fixture = await params.createFixture(groupID, {
-        effects: {
-          async outbox() {
-            await supplied.incarnation(2).cursor.save('effect-observed', '000000000001')
-          },
-        },
-      })
-      try {
-        const groups = fixture.ports.device.groups
+    test.each([
+      { namespace: 'control', versionBump: 1 },
+      { namespace: 'pending', versionBump: 0 },
+      { namespace: 'poison', versionBump: 0 },
+      { namespace: 'cursor', versionBump: 0 },
+    ] as const)(
+      'effect-only $namespace observation accounts once after side writes',
+      async ({ namespace, versionBump }) => {
+        let supplied!: ConformanceGroupStores<TTx>
+        const donor = await params.createFixture(groupID)
+        const frame = {
+          ...key,
+          incarnation: 2,
+          id: 'effect-frame',
+          protocol: 'chat',
+          procedure: 'posted',
+          topicID: 'effect-observed',
+          segment: 0,
+          position: '000000000001',
+        }
+        const poison = { frame, reason: 'malformed-plaintext', keyConsumed: true }
+        const outcome = { id: 'effect-observed', opID: null, at: 1, kind: 'unknown' as const }
         const fresh = await storageSeed(donor.ports)
-        await groups.transition(
-          await storageChange(groups, groupID, 'install-observed'),
-          async (stores) => {
-            await writeStorageInstall(stores, fresh, 'install-observed', 2)
+        const pending = {
+          frame,
+          payload: utf8('effect-payload'),
+          senderDID: fresh.trust.credential.id,
+          epoch: fresh.state.epoch,
+          idempotencyKey: 'effect-observed',
+        }
+        const fixture = await params.createFixture(groupID, {
+          effects: {
+            async outbox() {
+              const rows = supplied.incarnation(2)
+              if (namespace === 'control')
+                await rows.control.apply({ putOutcomes: [outcome] }, 'effect-observed')
+              else if (namespace === 'pending') await rows.pending.put([pending])
+              else if (namespace === 'poison') await rows.pending.poison([poison])
+              else await rows.cursor.save(frame.topicID, frame.position)
+            },
           },
-        )
-        const installed = await groups.loadState({ ...key, incarnation: 2 })
-        const observations: Array<ConformanceAccountedGroupObservation> = []
-        fixture.entry().observe(groupID, (value) => observations.push(value))
-        const change = await storageChange(groups, groupID, 'effect-observed')
-        await groups.transition(change, async (stores) => {
-          supplied = stores
-          await stores.incarnation(1).meta.putEvents([event])
         })
-        expect(observations).toHaveLength(1)
-        expect(observations[0]?.activeVersion).toBe((installed?.version ?? 0) + 1)
-        expect(await groups.ports({ ...key, incarnation: 2 }).cursor.load('effect-observed')).toBe(
-          '000000000001',
-        )
-      } finally {
-        await fixture.close()
-        await donor.close()
-      }
-    })
+        try {
+          const groups = fixture.ports.device.groups
+          await groups.transition(
+            await storageChange(groups, groupID, 'install-observed'),
+            async (stores) => {
+              await writeStorageInstall(stores, fresh, 'install-observed', 2)
+            },
+          )
+          const installed = await groups.loadState({ ...key, incarnation: 2 })
+          const observations: Array<ConformanceAccountedGroupObservation> = []
+          fixture.entry().observe(groupID, (value) => observations.push(value))
+          const change = await storageChange(groups, groupID, 'effect-observed')
+          await groups.transition(change, async (stores) => {
+            supplied = stores
+            await stores.incarnation(1).meta.putEvents([event])
+          })
+          expect(observations).toHaveLength(1)
+          if (installed === null) throw new Error('Missing installed state')
+          expect(observations[0]?.activeVersion).toBe(installed.version + versionBump)
+          expect(observations[0]?.metadata).toContainEqual(
+            expect.objectContaining({
+              ...key,
+              incarnation: 2,
+              version: installed.version + versionBump,
+            }),
+          )
+          const reopened = (await fixture.reopen()).device.groups
+          expect(await reopened.loadState({ ...key, incarnation: 2 })).toEqual({
+            ...installed,
+            version: installed.version + versionBump,
+          })
+          await reopened.transition(
+            await storageChange(reopened, groupID, 'read-effect-observed'),
+            async (stores) => {
+              const rows = stores.incarnation(2)
+              if (namespace === 'control')
+                expect((await rows.control.load()).outcomes).toEqual([outcome])
+              else if (namespace === 'pending') expect(await rows.pending.list()).toEqual([pending])
+              else if (namespace === 'poison')
+                expect(await rows.pending.listPoison()).toEqual([poison])
+              else expect(await rows.cursor.load(frame.topicID)).toBe(frame.position)
+            },
+          )
+        } finally {
+          await fixture.close()
+          await donor.close()
+        }
+      },
+    )
 
     test.each(['commit', 'rollback', 'conflict'] as const)(
       'pending proof publishes once and retains prior observation: %s',

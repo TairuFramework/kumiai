@@ -1,4 +1,10 @@
-import { commitKeyRotation, decodeClientState, encodeClientState, restoreGroup } from '@kumiai/mls'
+import {
+  commitKeyRotation,
+  decodeClientState,
+  encodeClientState,
+  encodeGroupAnchor,
+  restoreGroup,
+} from '@kumiai/mls'
 import {
   type AdoptionExpected,
   applyChanges,
@@ -30,6 +36,7 @@ import {
   ReentrantOwnershipError,
 } from '../src/persistence-errors.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
+import { createRealGroup, type RealMember } from './fixtures/real-group.js'
 import {
   installSeed,
   makeStorageSeed,
@@ -49,7 +56,7 @@ const intent: Operation & { stage: 'intent' } = {
   stage: 'intent',
 }
 
-async function setup() {
+async function setup(member?: RealMember) {
   const key = { groupID: 'build', incarnation: 1 }
   const db = createMemoryTransaction({ rows: {} })
   let inTransaction = false
@@ -76,12 +83,39 @@ async function setup() {
     atRest,
     providerID: 'build',
   })
-  const seed = await makeStorageSeed({
+  let seed = await makeStorageSeed({
     id: key.groupID,
     incarnation: 1,
     epoch: 0,
     mode: 'real-mls',
   })
+  if (member !== undefined) {
+    const handle = member.handle
+    const epoch = Number(handle.epoch)
+    const authenticator = handle.state.keySchedule.epochAuthenticator.slice()
+    seed = {
+      ...seed,
+      state: {
+        ...seed.state,
+        epoch,
+        epochAuthenticator: authenticator,
+        state: encodeClientState(handle.state),
+        credential: handle.credential,
+        ledger: handle.ledgerTokens,
+      },
+      trust: {
+        ...seed.trust,
+        genesisAnchor: encodeGroupAnchor(handle.anchor),
+        installed: { ...key, epoch, authenticator },
+        signerTree: structuredClone(handle.state.ratchetTree),
+        registry: structuredClone(handle.registry),
+        credential: handle.credential,
+        ledger: handle.ledgerTokens,
+        spentEpochAuthenticators: [authenticator],
+      },
+      confirmedTranscriptHash: handle.state.groupContext.confirmedTranscriptHash.slice(),
+    }
+  }
   await installSeed(groups, seed, 'seed')
   if (seed.state.state === null) throw new Error('missing seed state')
   const state = decodeClientState(seed.state.state)
@@ -92,7 +126,10 @@ async function setup() {
     ledgerEntries: seed.state.ledger,
   })
   const control = groups.ports(key).control
-  await control.apply({ putOperations: [intent], cursor: { position: null, epoch: 0 } }, 'intent')
+  await control.apply(
+    { putOperations: [intent], cursor: { position: null, epoch: seed.state.epoch } },
+    'intent',
+  )
   const access = simpleHandleAccess({
     key,
     handle: () => handle,
@@ -160,7 +197,7 @@ async function setup() {
     expect(inTransaction).toBe(false)
     frameCalls++
     const result = await seal(new Uint8Array([4]))
-    expect(result.epoch).toBe(0)
+    expect(result.epoch).toBe(seed.state.epoch)
     return framed
   }
   const make = (saveBuilt = saver, now = () => 10) =>
@@ -177,7 +214,7 @@ async function setup() {
     access.readControl(async (scope) => scope.source)
   const slot = async (): Promise<ControlSlot> => ({
     opID: intent.id,
-    epoch: 0,
+    epoch: seed.state.epoch,
     incarnation: 1,
     authenticatorBefore: handle.state.keySchedule.epochAuthenticator.slice(),
     digest: 'commit',
@@ -335,6 +372,100 @@ test('proposal between build and save moves the build', async () => {
   } finally {
     release.resolve()
     await preparing
+  }
+})
+
+test.each([
+  { progress: 'app receive', kind: 'saved', attempts: 2 },
+  { progress: 'processed commit', kind: 'moved', attempts: 1 },
+] as const)('$progress between build and save gives $kind', async (row) => {
+  const real = await createRealGroup(1, 'build')
+  const member = real.members[0]
+  if (member === undefined) throw new Error('Missing receiver')
+  const host = await setup(member)
+  let attempts = 0
+  let freshVersion: number | undefined
+  let retriedVersion: number | undefined
+  let prepared: ControlSlot | undefined
+  const port = host.make(async (op, slot, expected, id) => {
+    attempts++
+    if (attempts === 1) {
+      prepared = structuredClone(slot)
+      const stored = await host.groups.loadState(host.key)
+      if (stored === null || stored.deleted || stored.state === null)
+        throw new Error('Missing stored state')
+      const state = decodeClientState(stored.state)
+      if (state === undefined) throw new Error('Invalid stored state')
+      const bare = await restoreGroup({
+        state,
+        credential: stored.credential,
+        ledgerEntries: stored.ledger,
+      })
+      if (row.progress === 'app receive') {
+        const opened = await bare.decrypt(await real.committer.handle.encrypt(new Uint8Array([42])))
+        expect(opened.payload).toEqual(new Uint8Array([42]))
+      } else {
+        const rotation = await commitKeyRotation(real.committer.handle)
+        await bare.processMessage(rotation.commitMessage)
+        expect(bare.epoch).toBe(BigInt(stored.epoch + 1))
+      }
+      const next = {
+        ...stored,
+        version: stored.version + 1,
+        epoch: Number(bare.epoch),
+        epochAuthenticator: bare.state.keySchedule.epochAuthenticator.slice(),
+        state: encodeClientState(bare.state),
+      }
+      expect(next.state).not.toEqual(stored.state)
+      const change = await nextChange(
+        host.groups,
+        host.key.groupID,
+        'receive-between-build-and-save',
+      )
+      await host.groups.transition(change, async (stores) => {
+        await stores.incarnation(1).state.save(next, {
+          key: host.key,
+          stateVersion: stored.version,
+          identity: {
+            ...host.key,
+            epoch: stored.epoch,
+            authenticator: stored.epochAuthenticator,
+          },
+        })
+        if (row.progress === 'processed commit') {
+          const trust = await stores.trust.load()
+          if (trust === null) throw new Error('Missing trust')
+          await stores.trust.save({
+            ...trust,
+            installed: { ...host.key, epoch: next.epoch, authenticator: next.epochAuthenticator },
+          })
+          await writeInstallationCheckpoint(stores, {
+            key: host.key,
+            handle: bare,
+            mutationID: change.mutationID,
+            stateVersion: next.version,
+          })
+        }
+      })
+      host.setHandle(bare)
+      freshVersion = next.version
+    } else {
+      retriedVersion = expected.stateVersion
+      expect(slot).toEqual(prepared)
+    }
+    return host.saver(op, slot, expected, id)
+  })
+  expect((await port.prepareBuild(intent, host.frame)).kind).toBe(row.kind)
+  expect(attempts).toBe(row.attempts)
+  expect(host.counts()).toEqual({ buildCalls: 1, frameCalls: 1 })
+  const saved = await host.control.load()
+  if (row.kind === 'saved') {
+    expect(retriedVersion).toBe(freshVersion)
+    expect(saved.commitOnce).toEqual(prepared)
+    expect(saved.operations[0]?.stage).toBe('built')
+  } else {
+    expect(saved.commitOnce).toBeNull()
+    expect(saved.operations).toEqual([intent])
   }
 })
 

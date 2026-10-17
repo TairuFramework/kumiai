@@ -182,6 +182,10 @@ function changedIncarnations(
   return result
 }
 
+function versionedNamespaces(namespaces: Set<string>): Set<string> {
+  return new Set([...namespaces].filter((name) => !['pending', 'poison', 'cursor'].includes(name)))
+}
+
 export function createMemoryGroupCoordinator(params: {
   db: MemoryDatabase
   owners: OwnerQueues
@@ -1062,11 +1066,6 @@ export function createMemoryGroupCoordinator(params: {
                 }
                 const after = snapshot(tx)
                 const affected = changedIncarnations(before, after, change.groupID)
-                for (const namespaces of affected.values()) {
-                  namespaces.delete('pending')
-                  namespaces.delete('poison')
-                  namespaces.delete('cursor')
-                }
                 if (
                   life.activeIncarnation !== null &&
                   (!sameStoredValue(before.trust, after.trust) ||
@@ -1076,7 +1075,8 @@ export function createMemoryGroupCoordinator(params: {
                   namespaces.add('trust')
                   affected.set(life.activeIncarnation, namespaces)
                 }
-                for (const [incarnation, namespaces] of affected) {
+                for (const [incarnation, changed] of affected) {
+                  const namespaces = versionedNamespaces(changed)
                   if (savedStates.has(incarnation) || namespaces.size === 0) continue
                   const state = await loadAffectedState(
                     tx,
@@ -1183,9 +1183,11 @@ export function createMemoryGroupCoordinator(params: {
               }
               const affected = changedIncarnations(beforeEffects, snapshot(tx), change.groupID)
               const life = await raw.lifetime.load()
-              for (const [incarnation, namespaces] of affected) {
+              for (const [incarnation, changed] of affected) {
                 if (life === null || incarnation > life.latestIncarnation)
                   throw new DisplacedGroupHandleError('Effect wrote an unknown incarnation')
+                const namespaces = versionedNamespaces(changed)
+                if (namespaces.size === 0) continue
                 // Once per transition, including incarnations first touched by an effect.
                 const metadata = await raw.stateMetadata(incarnation).load()
                 const original = await createUnlockedGroupStateStores({
