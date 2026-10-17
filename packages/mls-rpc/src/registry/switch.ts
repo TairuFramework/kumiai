@@ -11,6 +11,7 @@ import {
   type StoredRejoinRecord,
 } from '@kumiai/rpc'
 
+import { branchAbandonmentPreparer, writeBranchAbandonment } from '../branch-history.js'
 import { currentCheckpointFact, prepareCheckpointInstallation } from '../checkpoint-capture.js'
 import type { EntryCapability } from '../entry-capability.js'
 import { copyStoredValue, sameStoredValue } from '../memory-incarnation-stores.js'
@@ -266,6 +267,12 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
             },
             value: {
               current,
+              abandonment: await branchAbandonmentPreparer(reads)({
+                source: source.key,
+                destination,
+                mutationID: write.mutationID,
+              }),
+              branchFacts: await reads.checkpoints(),
               recoveryEpochFloor: (await reads.control(source.key.incarnation)).recoveryEpochFloor,
               lifetime,
               record,
@@ -336,6 +343,12 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
           await rows.state.save(prepared.state)
           await stores.trust.save(prepared.trust)
           await clearGroupCondition(stores.checkpoints, source.key)
+          if (prepared.abandonment !== null)
+            await writeBranchAbandonment(
+              stores.checkpoints,
+              prepared.abandonment,
+              prepared.branchFacts,
+            )
           await stores.checkpoints.put(prepared.checkpoint)
           if (!prepared.state.terminal)
             await stores.checkpoints.put({

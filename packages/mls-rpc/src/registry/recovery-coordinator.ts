@@ -10,6 +10,7 @@ import {
 } from '@kumiai/mls'
 import {
   type AcceptedRejoinSettlement,
+  type BranchAbandonedEvent,
   type CapturedRecapture,
   type CapturedRejoinRecord,
   type CheckpointRecord,
@@ -32,6 +33,7 @@ import {
   wireformats,
 } from 'ts-mls'
 
+import { branchAbandonmentPreparer } from '../branch-history.js'
 import { provenCheckpointFacts } from '../checkpoint-store.js'
 import type { EntryCapability, EntryReads } from '../entry-capability.js'
 import { copyStoredValue, sameStoredValue } from '../memory-incarnation-stores.js'
@@ -51,6 +53,11 @@ export type RecoverySwitchResolution =
   | { kind: 'committed'; destination: GroupKey }
   | { kind: 'rolled-back' | 'pending' }
 export type RegistryRecoveryCoordinator = {
+  prepareBranchAbandonment(params: {
+    source: GroupKey
+    destination: GroupKey
+    mutationID: string
+  }): Promise<BranchAbandonedEvent | null>
   settleForkRecoveryCapture(
     params: { record: CapturedRejoinRecord; reply: CapturedRecapture },
     environment: RecoveryEnvironment,
@@ -84,6 +91,9 @@ export function bindRegistryRecoveryCoordinator<TTx extends GroupTransaction>(pa
 }): void {
   const { entry, persistence } = params
   const coordinator: RegistryRecoveryCoordinator = {
+    prepareBranchAbandonment(params) {
+      return entry.read(params.source.groupID, (reads) => branchAbandonmentPreparer(reads)(params))
+    },
     async settleForkRecoveryCapture({ record, reply }, environment) {
       const key = record.source.key
       const mutationID = crypto.randomUUID()

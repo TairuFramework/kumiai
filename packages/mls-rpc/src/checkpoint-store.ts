@@ -10,6 +10,7 @@ import { retainForkEvidence } from '@kumiai/rpc'
 import {
   branchHistoryPreparation,
   projectBranchHistory,
+  retainBranchAbandonments,
   retainBranchHistory,
   startBranchCoverage,
 } from './branch-history.js'
@@ -41,7 +42,11 @@ export function assertCheckpointUpdates(
   const entry = tx === undefined ? undefined : memoryTransactionEntry(tx.rows)
   const authorised = entry === undefined ? undefined : conditionCaptures.get(entry)
   for (const row of [...before, ...after]) {
-    if (['own-branch-messages', 'others-seen', 'branch-coverage'].includes(row.kind)) {
+    if (
+      ['own-branch-messages', 'others-seen', 'branch-coverage', 'branch-abandonment'].includes(
+        row.kind,
+      )
+    ) {
       const next = after.find((value) => value.id === row.id)
       const previous = before.find((value) => value.id === row.id)
       if (
@@ -121,6 +126,7 @@ function validate(record: CheckpointRecord, groupID: string, id: string): void {
     !Number.isSafeInteger(record.key.incarnation) ||
     record.key.incarnation < 1 ||
     ![
+      'branch-abandonment',
       'own-branch-messages',
       'others-seen',
       'branch-coverage',
@@ -439,6 +445,8 @@ export async function retainCheckpointInstallations(
     gaps: mergeGaps(gaps),
     installations: retained.map(({ id, key, epoch }) => ({ id, key, epoch })),
   })
+  if (records.some((row) => row.kind === 'branch-abandonment'))
+    await retainBranchAbandonments(store, retained, now)
   if (
     !records.some(
       (row) => row.kind === 'evidence' || row.kind === 'notice' || row.kind === 'notice-tombstone',

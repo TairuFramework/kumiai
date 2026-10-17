@@ -54,6 +54,50 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
     const create = (setup: 'empty' | 'seeded' = 'seeded') =>
       params.createFixture({ groupID, setup })
 
+    test('confirmed abandonment is replayable and acknowledged independently after retirement', async () => {
+      let fixture = await create()
+      try {
+        const recovery = await fixture.confirmedRecovery(key, { confirm: true, format: 'legacy' })
+        const params = {
+          source: recovery.source,
+          rejoinID: recovery.record.id,
+          proof: recovery.proof,
+          write: switchWrite(recovery),
+        }
+        expect(await fixture.safety().events(key)).toEqual([])
+        await fixture.registry.switchIncarnation(recovery.candidate, params)
+        const reports = (await fixture.safety().events(key)).filter(
+          (event) => event.kind === 'branch-abandoned',
+        )
+        expect(reports).toHaveLength(1)
+        expect(reports[0]).toMatchObject({
+          ...key,
+          epochs: 'unknown',
+          ownMessages: [],
+          othersSeen: 0,
+          coverage: {
+            ancestry: { kind: 'partial', reasons: ['unknown-ancestry'] },
+            ephemeral: { kind: 'partial', reasons: ['ephemeral-uncovered'] },
+          },
+        })
+        fixture = await fixture.reopen()
+        expect(await fixture.safety().events(key)).toEqual(reports)
+        await fixture.registry.switchIncarnation(recovery.candidate, params)
+        expect(await fixture.safety().events(key)).toEqual(reports)
+        const destination = { ...key, incarnation: 2 }
+        const before = await fixture.device.groups.loadState(destination)
+        const report = reports[0]
+        if (report === undefined) throw new Error('Missing abandonment')
+        await fixture.safety().ackEvent(key, report.id)
+        expect(await fixture.safety().events(key)).toEqual([])
+        expect(await fixture.device.groups.loadState(destination)).toEqual(before)
+        fixture = await fixture.reopen()
+        expect(await fixture.safety().events(key)).toEqual([])
+      } finally {
+        await fixture.close()
+      }
+    })
+
     test('complete fixture reopen preserves committed access and starts cold', async () => {
       let fixture = await create()
       try {

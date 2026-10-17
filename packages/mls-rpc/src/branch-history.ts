@@ -1,10 +1,29 @@
-import { decodeEpochRosterFact } from '@kumiai/mls'
-import type { CheckpointRecord, CheckpointStore, OwnBranchMessage } from '@kumiai/rpc'
+import {
+  checkpointAuthHash,
+  decodeEpochCheckpoint,
+  decodeEpochRosterFact,
+  didFromCredential,
+  verifyRecoveryLineage,
+} from '@kumiai/mls'
+import type {
+  BranchAbandonedEvent,
+  CheckpointRecord,
+  CheckpointStore,
+  CoverageGapReason,
+  OwnBranchMessage,
+  ReportCoverage,
+} from '@kumiai/rpc'
+import { toB64U } from '@sozai/codec'
+import { decode, mlsMessageDecoder, wireformats } from 'ts-mls'
 
 import { provenCheckpointFacts, readCheckpointCoverage } from './checkpoint-store.js'
+import type { EntryReads } from './entry-capability.js'
 import { copyStoredValue } from './memory-incarnation-stores.js'
 import { GroupStateConflictError } from './persistence-errors.js'
 import type { GroupKey, GroupStores, GroupTransaction } from './persistence-types.js'
+import { authenticateRecoveryReply } from './recovery.js'
+import { decodeCapturedRecoveryCandidate, decodeRecoveryCandidate } from './recovery-codec.js'
+import { recoveryTrustInputs } from './registry/trust.js'
 
 type JournalRecord = Extract<
   CheckpointRecord,
@@ -255,4 +274,295 @@ export function retainBranchHistory(
       ? []
       : [journal.id]
   })
+}
+
+type AbandonmentParams = { source: GroupKey; destination: GroupKey; mutationID: string }
+
+// The caller has already verified the destination and its installation proof.
+export function branchAbandonmentPreparer(reads: EntryReads) {
+  return async function prepareBranchAbandonment(
+    params: AbandonmentParams,
+  ): Promise<BranchAbandonedEvent | null> {
+    const { source, destination, mutationID } = params
+    const records = await reads.checkpoints()
+    const record = (await reads.control(source.incarnation)).rejoin
+    if (
+      record?.stage !== 'confirmed' ||
+      destination.groupID !== source.groupID ||
+      destination.incarnation !== source.incarnation + 1
+    )
+      throw new GroupStateConflictError('Abandonment requires an established switch')
+    const snapshot =
+      'format' in record
+        ? decodeCapturedRecoveryCandidate(record.candidate, record.requestKey)
+        : decodeRecoveryCandidate(record.candidate, record.requestKey)
+    const info = decode(mlsMessageDecoder, snapshot.groupInfo)
+    const context =
+      info?.wireformat === wireformats.mls_group_info ? info.groupInfo.groupContext : null
+    const facts = provenCheckpointFacts(records, source.groupID)
+      .filter((row) => sameKey(row.key, source))
+      .map((row) => ({ row, fact: decodeEpochRosterFact(row.canonical) }))
+      .sort((a, b) => a.fact.epoch - b.fact.epoch)
+    const retainedTrust = await reads.trust()
+    const installedEpoch = retainedTrust?.installed.epoch
+    const tip = facts.find(({ fact }) => fact.epoch === installedEpoch)
+    const epoch = context === null ? null : Number(context.epoch)
+    const transcript = context === null ? null : toB64U(context.confirmedTranscriptHash)
+    const sameAtCapture = facts.find(({ fact }) => fact.epoch === epoch)
+    if (
+      tip !== undefined &&
+      sameAtCapture === tip &&
+      tip.fact.confirmedTranscriptHash === transcript
+    )
+      return null
+    let remote: Array<{ epoch: number; authHash: string; parentAuthHash: string | null }> = []
+    if ('format' in record && epoch !== null) {
+      const captured = decodeCapturedRecoveryCandidate(record.candidate, record.requestKey)
+      const trust = retainedTrust
+      if (trust !== null) {
+        const reply = await authenticateRecoveryReply({
+          trust,
+          sealed: captured.attestedReply,
+          requestID: snapshot.requestID,
+          requestKey: record.requestKey,
+          options: {},
+        })
+        if (
+          reply?.lineage !== undefined &&
+          reply.responderKeyHash !== undefined &&
+          tip !== undefined
+        ) {
+          const lineage = await verifyRecoveryLineage({
+            trust: recoveryTrustInputs(trust),
+            frames: reply.lineage,
+            signerKeyHash: reply.responderKeyHash,
+            epoch,
+            authHash: checkpointAuthHash({
+              groupID: source.groupID,
+              genesisHash: tip.fact.genesisHash,
+              epoch,
+              epochAuthenticator: reply.groupInfoAuthenticator,
+            }),
+          })
+          if (lineage !== null)
+            remote = reply.lineage.map((frame) => decodeEpochCheckpoint(frame).body)
+        }
+      }
+    }
+    if (
+      tip !== undefined &&
+      remote.some((frame) => frame.epoch === tip.fact.epoch && frame.authHash === tip.fact.authHash)
+    )
+      return null
+    const divergence = facts.find(
+      ({ fact }) =>
+        remote.some((frame) => frame.epoch === fact.epoch && frame.authHash !== fact.authHash) ||
+        (transcript !== null &&
+          fact.epoch === epoch &&
+          fact.confirmedTranscriptHash !== transcript),
+    )
+    const split = divergence?.fact.epoch
+    const branchOnly = (fact: ReturnType<typeof decodeEpochRosterFact>) => {
+      if (split === undefined || fact.epoch < split) return false
+      let current = fact
+      while (current.epoch > split) {
+        const parent = facts.find(
+          (entry) =>
+            entry.fact.epoch === current.epoch - 1 &&
+            entry.fact.authHash === current.parentAuthHash,
+        )
+        if (parent === undefined) return false
+        current = parent.fact
+      }
+      return current.authHash === divergence?.fact.authHash
+    }
+    const selected = facts.filter(({ fact }) => branchOnly(fact))
+    const prior =
+      split === undefined ? undefined : facts.find(({ fact }) => fact.epoch === split - 1)
+    const firstRemote = remote.find((frame) => frame.epoch === split)
+    const boundedSplit =
+      prior !== undefined &&
+      firstRemote !== undefined &&
+      prior.fact.authHash === firstRemote.parentAuthHash &&
+      divergence?.fact.parentAuthHash === prior.fact.authHash
+    const completeAncestry = boundedSplit && tip !== undefined && branchOnly(tip.fact)
+    const coverage = readCheckpointCoverage(source.groupID, records)
+    const marker = records.find((row) => row.kind === 'branch-coverage' && sameKey(row.key, source))
+    const reasons = new Set<CoverageGapReason>()
+    if (!completeAncestry) reasons.add('unknown-ancestry')
+    if (marker?.kind !== 'branch-coverage' || split === undefined || marker.startedEpoch > split)
+      reasons.add('pre-journal-history')
+    if (
+      coverage.gaps.some(
+        (gap) =>
+          sameKey(gap.key, source) &&
+          gap.reason === 'expired' &&
+          (split === undefined || gap.through >= split),
+      )
+    )
+      reasons.add('retention-gap')
+    const known = (row: { epoch: number; authHash: string }) =>
+      selected.some(({ fact }) => fact.epoch === row.epoch && fact.authHash === row.authHash)
+    const observedCoverage: ReportCoverage =
+      reasons.size === 0 ? { kind: 'complete' } : { kind: 'partial', reasons: [...reasons] }
+    const destinationMembers = new Set(
+      snapshot.sourceTree.flatMap((node) => {
+        if (node?.nodeType !== 1) return []
+        const did = didFromCredential(node.leaf.credential)
+        return did === null ? [] : [did]
+      }),
+    )
+    const before = new Set(prior?.fact.members.map((member) => member.signerDID) ?? [])
+    const after = new Set(tip?.fact.members.map((member) => member.signerDID) ?? [])
+    const notice = records.find(
+      (row) =>
+        row.kind === 'notice' &&
+        sameKey(row.key, source) &&
+        row.notice.closedAt === null &&
+        (split === undefined || row.notice.splitEpoch === split),
+    )
+    return {
+      ...source,
+      id: JSON.stringify([
+        'branch-abandoned',
+        source.groupID,
+        source.incarnation,
+        destination.incarnation,
+        mutationID,
+      ]),
+      kind: 'branch-abandoned',
+      noticeID: notice?.kind === 'notice' ? notice.notice.id : null,
+      epochs:
+        completeAncestry && split !== undefined && tip !== undefined
+          ? { from: split, through: tip.fact.epoch }
+          : 'unknown',
+      ownMessages: [
+        ...new Map(
+          records.flatMap((row) =>
+            row.kind === 'own-branch-messages' && sameKey(row.key, source) && known(row)
+              ? row.messages.map((message) => [message.id, message] as const)
+              : [],
+          ),
+        ).values(),
+      ],
+      othersSeen: records.reduce(
+        (count, row) =>
+          count +
+          (row.kind === 'others-seen' && sameKey(row.key, source) && known(row) ? row.count : 0),
+        0,
+      ),
+      membersAdded: completeAncestry
+        ? [...after].filter((did) => !before.has(did) && !destinationMembers.has(did)).sort()
+        : [],
+      membersRemoved: completeAncestry
+        ? [...before].filter((did) => !after.has(did) && destinationMembers.has(did)).sort()
+        : [],
+      coverage: {
+        ancestry: completeAncestry
+          ? { kind: 'complete' }
+          : { kind: 'partial', reasons: ['unknown-ancestry'] },
+        ownMessages: observedCoverage,
+        othersSeen: copyStoredValue(observedCoverage),
+        membership: completeAncestry
+          ? { kind: 'complete' }
+          : { kind: 'partial', reasons: ['unknown-ancestry'] },
+        ephemeral: { kind: 'partial', reasons: ['ephemeral-uncovered'] },
+      },
+    }
+  }
+}
+
+export async function writeBranchAbandonment(
+  store: CheckpointStore,
+  event: BranchAbandonedEvent,
+  facts: Array<CheckpointRecord>,
+): Promise<void> {
+  await put(store, {
+    kind: 'branch-abandonment',
+    id: event.id,
+    key: { groupID: event.groupID, incarnation: event.incarnation },
+    event,
+    factIDs: provenCheckpointFacts(facts, event.groupID)
+      .filter((row) => row.key.incarnation === event.incarnation)
+      .map((row) => row.id),
+    acknowledgedAt: null,
+  })
+  for (const row of facts) {
+    if (
+      row.kind !== 'notice' ||
+      row.key.incarnation !== event.incarnation ||
+      row.notice.closedAt !== null
+    )
+      continue
+    await store.put({ ...row, notice: { ...row.notice, closedAt: Date.now() } })
+  }
+}
+
+export async function acknowledgeBranchAbandonment(
+  store: CheckpointStore,
+  key: GroupKey,
+  id: string,
+): Promise<boolean> {
+  const row = await store.load(id)
+  if (row?.kind !== 'branch-abandonment' || !sameKey(row.key, key)) return false
+  if (row.acknowledgedAt === null) await put(store, { ...row, acknowledgedAt: Date.now() })
+  return true
+}
+
+type AbandonmentRecord = Extract<CheckpointRecord, { kind: 'branch-abandonment' }>
+
+function retainedAbandonment(
+  row: AbandonmentRecord,
+  ids: Set<string>,
+  now: number,
+): AbandonmentRecord | null {
+  if (row.acknowledgedAt !== null && now - row.acknowledgedAt >= 604800000) return null
+  if (row.factIDs.every((id) => ids.has(id))) return row
+  const partial = { kind: 'partial' as const, reasons: ['retention-gap' as const] }
+  return {
+    ...row,
+    factIDs: row.factIDs.filter((id) => ids.has(id)),
+    event: {
+      ...row.event,
+      epochs: 'unknown',
+      ownMessages: [],
+      othersSeen: 0,
+      membersAdded: [],
+      membersRemoved: [],
+      coverage: {
+        ...row.event.coverage,
+        ancestry: partial,
+        ownMessages: partial,
+        othersSeen: partial,
+        membership: partial,
+      },
+    },
+  }
+}
+
+export function branchAbandonmentEvents(
+  records: Array<CheckpointRecord>,
+  key: GroupKey,
+): Array<BranchAbandonedEvent> {
+  const ids = new Set(provenCheckpointFacts(records, key.groupID).map((row) => row.id))
+  return records.flatMap((row) => {
+    if (row.kind !== 'branch-abandonment' || !sameKey(row.key, key) || row.acknowledgedAt !== null)
+      return []
+    const retained = retainedAbandonment(row, ids, Date.now())
+    return retained === null ? [] : [copyStoredValue(retained.event)]
+  })
+}
+
+export async function retainBranchAbandonments(
+  store: CheckpointStore,
+  facts: Array<{ id: string }>,
+  now: number,
+): Promise<void> {
+  const ids = new Set(facts.map((row) => row.id))
+  for (const row of await store.list()) {
+    if (row.kind !== 'branch-abandonment') continue
+    const retained = retainedAbandonment(row, ids, now)
+    if (retained === null) await store.remove([row.id])
+    else if (retained !== row) await store.put(retained)
+  }
 }

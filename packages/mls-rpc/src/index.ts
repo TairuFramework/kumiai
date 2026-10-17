@@ -20,6 +20,9 @@
  */
 
 export type {
+  AbandonedEpochRange,
+  BranchAbandonedEvent,
+  BranchReportCoverage,
   CheckpointStore,
   ControlAdoptionPort,
   ForkHalt,

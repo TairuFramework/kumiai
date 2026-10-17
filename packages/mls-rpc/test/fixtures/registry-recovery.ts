@@ -10,6 +10,7 @@ import {
   createKeyPackageBundle,
   createRecoveryRequest,
   decodeClientState,
+  decodeEpochCheckpoint,
   encodeClientState,
   exportGroupInfo,
   type GroupHandle,
@@ -62,6 +63,7 @@ type RecoveryFixtureParams = {
   sourceTrust?: GroupRecoveryTrust
   missingLedger?: boolean
   responder?: { identity: OwnIdentity; group: GroupHandle }
+  lineage?: Array<Uint8Array>
   recoverySource?: RegistryRecoverySource
 }
 export type LegacyRecoveryFixture = {
@@ -127,6 +129,10 @@ export async function createRegistryRecovery(
     trust: source.trust,
     identity: params.identity,
     requestID,
+    comparisonEpoch:
+      params.lineage?.[0] === undefined
+        ? undefined
+        : decodeEpochCheckpoint(params.lineage[0]).body.epoch,
   })
   const captureHead = null
   const sealed = await sealCapturedGroupInfo({
@@ -134,6 +140,7 @@ export async function createRegistryRecovery(
     identity: capture.identity,
     request: new TextDecoder().decode(request),
     captureHead,
+    lineage: params.lineage,
   })
   const pending = await buildRecoveryCandidate({
     source,

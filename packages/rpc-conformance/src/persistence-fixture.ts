@@ -627,7 +627,34 @@ export type {
   ConformanceRecoveryUnavailableEvent,
 } from './control-store.js'
 
+export type ConformanceReportCoverage =
+  | { kind: 'complete' }
+  | {
+      kind: 'partial'
+      reasons: Array<
+        'pre-journal-history' | 'retention-gap' | 'unknown-ancestry' | 'ephemeral-uncovered'
+      >
+    }
+export type ConformanceBranchAbandonedEvent = ConformanceGroupKey & {
+  id: string
+  kind: 'branch-abandoned'
+  noticeID: string | null
+  epochs: { from: number; through: number } | 'unknown'
+  ownMessages: Array<{ id: string; epoch: number; authHash: string }>
+  othersSeen: number
+  membersAdded: Array<string>
+  membersRemoved: Array<string>
+  coverage: {
+    ancestry: ConformanceReportCoverage
+    ownMessages: ConformanceReportCoverage
+    othersSeen: ConformanceReportCoverage
+    membership: ConformanceReportCoverage
+    ephemeral: ConformanceReportCoverage
+  }
+}
+
 export type ConformancePersistenceEvent =
+  | ConformanceBranchAbandonedEvent
   | ConformanceAppStatusEvent
   | ConformanceGroupSafetyEvent
   | ConformanceRecoveryUnavailableEvent

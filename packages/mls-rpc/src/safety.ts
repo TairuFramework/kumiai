@@ -1,4 +1,5 @@
 import {
+  type BranchAbandonedEvent,
   type ControlSnapshot,
   controlSafetyHeld,
   forkEventID,
@@ -14,6 +15,7 @@ import {
   type SafetyHold,
 } from '@kumiai/rpc'
 
+import { acknowledgeBranchAbandonment, branchAbandonmentEvents } from './branch-history.js'
 import { coordinatorBinding } from './entry-capability.js'
 import { sameStoredValue } from './memory-incarnation-stores.js'
 import { isStoredOpenFailure } from './persistence-codec.js'
@@ -55,7 +57,9 @@ export type GroupSafety = {
   recover(key: GroupKey, choice: ManualRecovery): Promise<GroupKey>
   events(
     key: GroupKey,
-  ): Promise<Array<GroupSafetyEvent | RecoveryUnavailableEvent | GroupConditionEvent>>
+  ): Promise<
+    Array<GroupSafetyEvent | RecoveryUnavailableEvent | GroupConditionEvent | BranchAbandonedEvent>
+  >
   ackEvent(key: GroupKey, id: string): Promise<void>
 }
 
@@ -72,8 +76,13 @@ function validKey(key: GroupKey): boolean {
 
 function safetyEvent(
   event: PersistenceEvent,
-): event is GroupSafetyEvent | RecoveryUnavailableEvent | GroupConditionEvent {
+): event is
+  | GroupSafetyEvent
+  | RecoveryUnavailableEvent
+  | GroupConditionEvent
+  | BranchAbandonedEvent {
   return (
+    event.kind === 'branch-abandoned' ||
     event.kind === 'group:fork' ||
     event.kind === 'group:recovery-unavailable' ||
     event.kind === 'not-member' ||
@@ -208,7 +217,12 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
       await flushConditionEvents(params.registry, key)
       return entry.read(key.groupID, async (reads) => {
         const records = await reads.checkpoints()
-        return (await reads.events(key.incarnation))
+        return [
+          ...(await reads.events(key.incarnation)).filter(
+            (event) => event.kind !== 'branch-abandoned',
+          ),
+          ...branchAbandonmentEvents(records, key),
+        ]
           .filter(safetyEvent)
           .filter(
             (event) =>
@@ -228,13 +242,24 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
         await entry.run(
           { groupID: key.groupID, mutationID: crypto.randomUUID() },
           async (reads) => {
-            const event = (await reads.events(key.incarnation)).find((value) => value.id === id)
+            const report = (await reads.checkpoints()).find(
+              (row) =>
+                row.kind === 'branch-abandonment' &&
+                row.key.incarnation === key.incarnation &&
+                row.id === id &&
+                row.acknowledgedAt === null,
+            )
+            const event =
+              report?.kind === 'branch-abandonment'
+                ? report.event
+                : (await reads.events(key.incarnation)).find((value) => value.id === id)
             if (event === undefined) throw new Noop()
             if (!safetyEvent(event))
               throw new TypeError('GroupSafety only acknowledges safety events')
             return { expected: await reads.lifetime(), value: null }
           },
           async (stores) => {
+            if (await acknowledgeBranchAbandonment(stores.checkpoints, key, id)) return
             const target = stores.incarnation(key.incarnation)
             const event = (await target.meta.events()).find((value) => value.id === id)
             if (event === undefined) throw new Noop()

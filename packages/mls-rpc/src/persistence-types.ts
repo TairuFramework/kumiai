@@ -5,6 +5,7 @@ import type {
   AnchorSlot,
   AnchorStore,
   AppCursorStore,
+  BranchAbandonedEvent,
   CheckpointStore,
   ControlChanges,
   ControlEvidenceSnapshot,
@@ -25,6 +26,9 @@ export type OwnershipContextPort = {
 }
 
 export type {
+  AbandonedEpochRange,
+  BranchAbandonedEvent,
+  BranchReportCoverage,
   EpochIdentity,
   ForkHalt,
   ForkNotice,
@@ -418,6 +422,7 @@ export type AppStatusEvent = GroupKey & { id: string; entry: AppOutboxEntry } & 
   )
 
 export type PersistenceEvent =
+  | BranchAbandonedEvent
   | AppStatusEvent
   | GroupSafetyEvent
   | RecoveryUnavailableEvent

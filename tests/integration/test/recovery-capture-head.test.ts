@@ -15,7 +15,7 @@ afterEach(async () => {
 })
 
 async function setup() {
-  const fixture = await createCapturedRecoveryFixture()
+  const fixture = await createCapturedRecoveryFixture({ timeoutMs: 1000 })
   cleanup.push(() => fixture.close())
   return fixture
 }
@@ -75,6 +75,11 @@ test('stale capture CAS recaptures poison at the same epoch and retries identica
   expect(await s.bob.mls.readEpoch()).toBe(await s.alice.mls.readEpoch())
   expect((await s.bob.control.load()).forkHalt).toBeNull()
   expect((await s.alice.control.load()).controlHold).toBeNull()
+  expect(
+    (await s.bob.fixture.safety().events(s.bob.key)).filter(
+      (event) => event.kind === 'branch-abandoned',
+    ),
+  ).toEqual([])
 })
 
 test.each(['present', 'absent'] as const)(

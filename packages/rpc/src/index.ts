@@ -19,6 +19,9 @@ export {
 } from './app-outbox.js'
 export { checkpointServiceHostMembers, retainForkEvidence } from './checkpoint.js'
 export type {
+  AbandonedEpochRange,
+  BranchAbandonedEvent,
+  BranchReportCoverage,
   CheckpointComparison,
   CheckpointCoverage,
   CheckpointFactRecord,

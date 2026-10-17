@@ -67,6 +67,22 @@ for (const transactional of [false, true]) {
       expect(result.applied).toMatchObject({ applied: true, advanced: true, epochAfter: 13 })
       const installed = await f.local().device.groups.loadState(result.destination)
       expect(installed).toMatchObject({ epoch: 13, terminal: false })
+      const abandonment = (await f.local().safety().events(result.sourceKey)).filter(
+        (event) => event.kind === 'branch-abandoned',
+      )
+      expect(abandonment).toHaveLength(1)
+      expect(abandonment[0]).toMatchObject({
+        noticeID: f.noticeID,
+        epochs: { from: 10, through: 20 },
+        ownMessages: [],
+        othersSeen: 0,
+        membersAdded: [],
+        membersRemoved: [],
+        coverage: {
+          ancestry: { kind: 'complete' },
+          ephemeral: { kind: 'partial', reasons: ['ephemeral-uncovered'] },
+        },
+      })
       expect((await f.snapshot()).recoveryEpochFloor).toBe(20)
       expect(
         (await f.local().device.groups.ports(result.sourceKey).control.load()).forkRecoveryAttempt,

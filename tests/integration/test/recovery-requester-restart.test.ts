@@ -140,7 +140,7 @@ test.each(['built', 'published', 'confirmed', 'adopted'] as const)(
 test.each(['built', 'published', 'confirmed', 'adopted'] as const)(
   'registry reconstruction resumes captured %s with the original request, candidate and switch identity',
   async (stage) => {
-    const s = await createCapturedRecoveryFixture()
+    const s = await createCapturedRecoveryFixture({ timeoutMs: 1000 })
     close.push(() => s.close())
     const bob = s.bob
     const source = bob.peer
@@ -198,6 +198,11 @@ test.each(['built', 'published', 'confirmed', 'adopted'] as const)(
     expect(payloads).toEqual([record.payload])
     const destination = await bob.fixture.device.groups.loadState(bob.owner.installedKey())
     expect(destination).toMatchObject({ deleted: false, epoch: record.epochAfter })
+    expect(
+      (await bob.fixture.safety().events(record.source.key)).filter(
+        (event) => event.kind === 'branch-abandoned',
+      ),
+    ).toEqual([])
     expect((await bob.control.load()).recoveryEpochFloor).toBe(record.target.groupInfoEpoch)
   },
 )

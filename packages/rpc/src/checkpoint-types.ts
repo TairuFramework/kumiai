@@ -1,7 +1,32 @@
 import type { GroupConditionEvent } from './control/safety.js'
 import type { GroupKey } from './control/types.js'
-import type { ForkNotice, ForkNoticeEvent, OwnBranchMessage } from './fork-notice.js'
+import type {
+  ForkNotice,
+  ForkNoticeEvent,
+  OwnBranchMessage,
+  ReportCoverage,
+} from './fork-notice.js'
 import type { CapturedRejoinRecord, ForkRecoveryAuthorisation } from './recovery-types.js'
+
+export type BranchReportCoverage = {
+  ancestry: ReportCoverage
+  ownMessages: ReportCoverage
+  othersSeen: ReportCoverage
+  membership: ReportCoverage
+  ephemeral: ReportCoverage
+}
+export type AbandonedEpochRange = { from: number; through: number } | 'unknown'
+export type BranchAbandonedEvent = GroupKey & {
+  id: string
+  kind: 'branch-abandoned'
+  noticeID: string | null
+  epochs: AbandonedEpochRange
+  ownMessages: Array<OwnBranchMessage>
+  othersSeen: number
+  membersAdded: Array<string>
+  membersRemoved: Array<string>
+  coverage: BranchReportCoverage
+}
 
 export type CheckpointComparison =
   | { kind: 'agreement'; epoch: number; signerDID: string; keyHash: string }
@@ -47,6 +72,14 @@ export type CheckpointService = CheckpointPort & {
 }
 
 export type CheckpointRecord =
+  | {
+      kind: 'branch-abandonment'
+      id: string
+      key: GroupKey
+      event: BranchAbandonedEvent
+      factIDs: Array<string>
+      acknowledgedAt: number | null
+    }
   | {
       kind: 'own-branch-messages'
       id: string

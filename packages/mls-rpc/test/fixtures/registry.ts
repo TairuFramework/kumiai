@@ -207,7 +207,12 @@ function retainCapturedDestination(
 export async function registryFixtureCapturedRecovery(
   fixture: RegistryFixtureBase,
   sourceKey: GroupKey,
-  options?: { confirm?: boolean; missingLedger?: boolean },
+  options?: {
+    confirm?: boolean
+    missingLedger?: boolean
+    responder?: { identity: OwnIdentity; group: GroupHandle }
+    lineage?: Array<Uint8Array>
+  },
 ): Promise<CapturedRecoveryFixture> {
   const stored = await fixture.device.groups.loadState(sourceKey)
   if (stored === null || stored.deleted || stored.state === null)
@@ -221,6 +226,8 @@ export async function registryFixtureCapturedRecovery(
     sourceKey,
     recoverySource: await registryFixtureRecoverySource(fixture, sourceKey),
     missingLedger: options?.missingLedger,
+    responder: options?.responder,
+    lineage: options?.lineage,
   })
   retainCapturedDestination(fixture, result)
   if (options?.confirm) {
@@ -245,6 +252,23 @@ export async function registryFixtureCorruptControl(fixture: RegistryFixtureBase
   if (corrupt === undefined) throw new Error('Missing control corruption helper')
   await fixture.device.groups.ports(key).control.apply({}, crypto.randomUUID())
   await corrupt(key)
+}
+
+export async function registryFixtureRemoveBranchCoverage(
+  fixture: RegistryFixtureBase,
+  key: GroupKey,
+): Promise<void> {
+  const remove = rowRemovers.get(fixture)
+  if (remove === undefined) throw new Error('Missing row removal helper')
+  await remove(
+    'checkpoints',
+    physicalRecordKey({
+      groupID: key.groupID,
+      incarnation: null,
+      namespace: 'checkpoints',
+      recordID: JSON.stringify(['branch-coverage', key.incarnation]),
+    }),
+  )
 }
 
 export async function registryFixtureRemoveTrust(fixture: RegistryFixtureBase, groupID: string) {

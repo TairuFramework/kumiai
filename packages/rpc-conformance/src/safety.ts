@@ -12,6 +12,7 @@ import type {
   ConformanceSafetyHold,
 } from './control-store.js'
 import type { ConformanceGroupMLS } from './group-mls.js'
+import type { ConformanceBranchAbandonedEvent } from './persistence-fixture.js'
 import type { ConformanceRegistryFixture, ConformanceRegistryHandle } from './registry-fixture.js'
 
 export type RosterAbsenceScenario = 'absent' | 'present' | 'wrong-key' | 'expired' | 'imported'
@@ -165,6 +166,7 @@ export type ConformanceGroupSafety = {
     key: ConformanceGroupKey,
   ): Promise<
     Array<
+      | ConformanceBranchAbandonedEvent
       | ConformanceGroupSafetyEvent
       | ConformanceRecoveryUnavailableEvent
       | ConformanceGroupConditionEvent
