@@ -584,9 +584,10 @@ export function testForkNoticeConformance(params: {
         await fixture.close()
       }
     })
-    test.each(['count', 'age'] as const)(
+    test.for(['count', 'age'] as const)(
       'closed evidence obeys ack and retention bounds: %s',
-      async (bound) => {
+      { timeout: 60000 },
+      async (bound, { signal }) => {
         const fixture = await params.createFixture()
         const start = Date.now()
         const clock = vi.spyOn(Date, 'now').mockReturnValue(start)
@@ -594,7 +595,11 @@ export function testForkNoticeConformance(params: {
           const service = fixture.service()
           await service.importCheckpoint(fixture.key, fixture.frame)
           const initial = required((await service.forkNotices(fixture.key.groupID))[0])
-          if (bound === 'count') await fixture.advance(256)
+          if (bound === 'count')
+            for (let installed = 0; installed < 256; installed++) {
+              if (signal.aborted) throw signal.reason
+              await fixture.advance(1)
+            }
           else {
             await fixture.advance(1)
             clock.mockReturnValue(start + 604800000)
@@ -623,11 +628,11 @@ export function testForkNoticeConformance(params: {
             (await restarted.checkpointCoverage(fixture.key.groupID)).effectiveFloor,
           ).toBeGreaterThan(initial.splitEpoch)
         } finally {
-          clock.mockRestore()
+          // A timed-out body keeps running; it must not restore the clock of a later test.
+          if (!signal.aborted) clock.mockRestore()
           await fixture.close()
         }
       },
-      60000,
     )
   })
 }

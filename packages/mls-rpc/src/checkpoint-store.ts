@@ -23,7 +23,13 @@ import {
   memoryRequired,
   memoryTransactionEntry,
 } from './memory-group-state.js'
-import { copyStoredValue, memoryRecordTable, sameStoredValue } from './memory-incarnation-stores.js'
+import {
+  copyStoredValue,
+  memoryRecordTable,
+  sameBytes,
+  sameStoredValue,
+} from './memory-incarnation-stores.js'
+import { cloneValue } from './memory-rows.js'
 import { physicalRecordKey } from './persistence-codec.js'
 import { GroupStateConflictError } from './persistence-errors.js'
 import type { AtRestCodec, MemoryTransaction } from './persistence-types.js'
@@ -35,6 +41,11 @@ const appHolds = new WeakMap<object, Map<string, CheckpointRecord>>()
 const histories = new WeakMap<object, Array<CheckpointRecord>>()
 const conditionCaptures = new WeakMap<object, Map<string, CheckpointRecord>>()
 const captures = new WeakMap<object, Map<string, Uint8Array>>()
+// Finalisation re-lists checkpoints several times per transition; open unchanged bytes once.
+const openedRows = new WeakMap<
+  object,
+  Map<string, { bytes: Uint8Array; record: CheckpointRecord }>
+>()
 
 export function assertCheckpointUpdates(
   before: Array<CheckpointRecord>,
@@ -186,8 +197,19 @@ export async function openCheckpointRow(
     throw new GroupStateConflictError('Checkpoint address mismatch')
   if (!(bytes instanceof Uint8Array))
     throw new GroupStateConflictError('Unreadable sealed checkpoint row')
+  const entry = memoryTransactionEntry(tx.rows)
+  let opened = entry === undefined ? undefined : openedRows.get(entry)
+  const cached = opened?.get(id)
+  if (cached !== undefined && sameBytes(cached.bytes, bytes)) return cloneValue(cached.record)
   const record = (await memoryOpen(tx, atRest, location, bytes)) as CheckpointRecord
   validate(record, groupID, location.recordID)
+  if (entry !== undefined) {
+    if (opened === undefined) {
+      opened = new Map()
+      openedRows.set(entry, opened)
+    }
+    opened.set(id, { bytes: Uint8Array.from(bytes), record: cloneValue(record) })
+  }
   return record
 }
 

@@ -958,14 +958,19 @@ export function testCheckpointCoverageConformance(params: {
     close(): Promise<void>
   }>
 }): void {
-  test(`public comparison coverage survives pruning and restart: ${params.label}`, async () => {
+  test(`public comparison coverage survives pruning and restart: ${params.label}`, async ({
+    signal,
+  }) => {
     const fixture = await params.createFixture()
     const start = Date.now()
     const clock = vi.spyOn(Date, 'now').mockReturnValue(start)
     try {
       await fixture.install(1, 3)
       await fixture.install(1, 6)
-      for (let epoch = 7; epoch <= 261; epoch++) await fixture.install(epoch < 130 ? 1 : 2, epoch)
+      for (let epoch = 7; epoch <= 261; epoch++) {
+        if (signal.aborted) throw signal.reason
+        await fixture.install(epoch < 130 ? 1 : 2, epoch)
+      }
       const key = { groupID: fixture.groupID, incarnation: 2 }
       const before = await fixture.port().checkpointCoverage(fixture.groupID)
       expect(before).toMatchObject({
@@ -1000,7 +1005,8 @@ export function testCheckpointCoverageConformance(params: {
       expect(await fixture.port().checkpointCoverage(fixture.groupID)).toEqual(expired)
       expect(await fixture.port().checkpointFact({ ...key, incarnation: 1 }, 6)).toBeNull()
     } finally {
-      clock.mockRestore()
+      // A timed-out body keeps running; it must not restore the clock of a later test.
+      if (!signal.aborted) clock.mockRestore()
       await fixture.close()
     }
   }, 60000)

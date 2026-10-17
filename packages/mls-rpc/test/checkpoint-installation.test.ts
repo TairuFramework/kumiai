@@ -301,7 +301,7 @@ test('checkpoint frames omit the installed transcript', async () => {
   ).toThrow()
 })
 
-test('group history keeps current within count and age bounds', async () => {
+test('group history keeps current within count and age bounds', async ({ signal }) => {
   const fixture = await createStorageFixture({
     id: 'checkpoint-retention',
     mode: 'double',
@@ -319,6 +319,7 @@ test('group history keeps current within count and age bounds', async () => {
     const client = seed.state.state === null ? undefined : decodeClientState(seed.state.state)
     if (client === undefined) throw new Error('Missing state')
     for (let epoch = 0; epoch < 257; epoch++) {
+      if (signal.aborted) throw signal.reason
       const incarnation = epoch < 128 ? 1 : 2
       seed.key.incarnation = incarnation
       seed.lifetime.activeIncarnation = seed.lifetime.latestIncarnation = incarnation
@@ -374,7 +375,8 @@ test('group history keeps current within count and age bounds', async () => {
     await fixture.reopen()
     expect(await records()).toEqual(after)
   } finally {
-    now.mockRestore()
+    // A timed-out body keeps running; it must not restore the clock of a later test.
+    if (!signal.aborted) now.mockRestore()
     await fixture.close()
   }
 }, 60000)

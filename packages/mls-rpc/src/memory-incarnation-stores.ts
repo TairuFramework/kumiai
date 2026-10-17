@@ -56,10 +56,16 @@ export function copyStoredValue<TValue>(value: TValue): TValue {
   return decodeStoredValue(encodeStoredValue(value)) as TValue
 }
 
+export function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.length !== right.length) return false
+  // A plain loop: sealed-row comparisons sit on every transition's hot path.
+  for (let index = 0; index < left.length; index++) if (left[index] !== right[index]) return false
+  return true
+}
+
 export function sameStoredValue(left: unknown, right: unknown): boolean {
   if (Object.is(left, right)) return true
-  if (left instanceof Uint8Array && right instanceof Uint8Array)
-    return left.length === right.length && left.every((byte, index) => byte === right[index])
+  if (left instanceof Uint8Array && right instanceof Uint8Array) return sameBytes(left, right)
   if (Array.isArray(left) && Array.isArray(right))
     return (
       left.length === right.length &&
