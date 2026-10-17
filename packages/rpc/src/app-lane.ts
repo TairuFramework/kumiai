@@ -49,7 +49,8 @@ export type AppDeliveryStalled = {
 
 export type AppDeliveryResumed = Omit<AppDeliveryStalled, 'error'>
 
-function frameID(topicID: string, bytes: Uint8Array): string {
+/** A durable pending frame's id: bound to its topic and exact ciphertext. */
+export function frameID(topicID: string, bytes: Uint8Array): string {
   const topic = fromUTF(topicID)
   const input = new Uint8Array(4 + topic.length + bytes.length)
   new DataView(input.buffer).setUint32(0, topic.length, false)
@@ -459,11 +460,13 @@ export function createAppLane(params: AppLaneParams): AppLane {
           reportPrunedWindow({ name, topicID, cursor: after, oldest: result.oldest })
         for (const message of result.messages) {
           const position = asLogPosition(message.sequenceID)
+          // Positions are per hub: after a move a different frame can sit at a waiting one's place.
           const restored = pendingRecords.find(
             (record) =>
               record.frame.protocol === name &&
               record.frame.topicID === topicID &&
-              record.frame.position === position,
+              record.frame.position === position &&
+              record.frame.id === frameID(topicID, message.payload),
           )
           takeAppFrame(
             frames,

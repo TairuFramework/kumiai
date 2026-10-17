@@ -2,7 +2,7 @@ import { fromUTF } from '@sozai/codec'
 import { describe, expect, test, vi } from 'vitest'
 
 import { encodeAppAAD } from '../src/app-aad.js'
-import { createAppLane } from '../src/app-lane.js'
+import { createAppLane, frameID } from '../src/app-lane.js'
 import type { PendingAppFrame } from '../src/crypto.js'
 import { adaptBusHandlers } from '../src/handlers.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
@@ -135,7 +135,7 @@ describe('durable pending restoration', () => {
     })
     const record: PendingAppFrame = {
       frame: {
-        id: 'old-id',
+        id: frameID(oldTopic, sealed),
         topicID: oldTopic,
         protocol: 'chat',
         segment: 1,
@@ -208,7 +208,7 @@ describe('durable pending restoration', () => {
       lane.dropFrame(unknown.frame.topicID, unknown.frame.position),
     ).resolves.toBeUndefined()
     expect(rows.size).toBe(0)
-    expect(complete).toHaveBeenCalledWith('old-id')
+    expect(complete).toHaveBeenCalledWith(record.frame.id)
     expect(cursor.stored(newTopic)).toBeNull()
     expect(cursor.history(newTopic)).toEqual([])
     lane.dispose()
@@ -332,4 +332,81 @@ describe('durable pending restoration', () => {
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(list).toHaveBeenCalledTimes(1)
   })
+
+  for (const served of ['different', 'same'] as const) {
+    test(`a waiting frame dedupes only its own ciphertext at its position / ${served} frame`, async () => {
+      const alice = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+      const wrap = async (text: string) =>
+        alice.wrap(payload(text), { aad: encodeAppAAD({ topicID: oldTopic, intent: 'log' }) })
+      const waiting = await wrap('old hub')
+      // A fresh hub mints the same position for a different frame.
+      const fetched = served === 'same' ? waiting : await wrap('new hub')
+      const position = '000000000001'
+      const record: PendingAppFrame = {
+        frame: {
+          id: frameID(oldTopic, waiting),
+          topicID: oldTopic,
+          protocol: 'chat',
+          segment: 1,
+          position,
+        },
+        payload: payload('old hub'),
+        senderDID: 'alice',
+      }
+      const rows = new Map([[record.frame.id, record]])
+      const persistOpened = vi.fn(async (_state: Uint8Array, opened: PendingAppFrame) => {
+        rows.set(opened.frame.id, opened)
+      })
+      const seen: Array<string> = []
+      const lane = createAppLane({
+        mux: {
+          retainTopic() {},
+          async fetchTopic({ topicID, after }: { topicID: string; after?: string }) {
+            return {
+              messages:
+                topicID === oldTopic && after == null
+                  ? [{ sequenceID: position, payload: fetched }]
+                  : [],
+              head: null,
+              oldest: null,
+            }
+          },
+        } as never,
+        crypto: createFakeCrypto({
+          epoch: 1,
+          localDID: 'bob',
+          pending: {
+            persistOpened,
+            async list() {
+              return [...rows.values()]
+            },
+            async complete(id: string) {
+              rows.delete(id)
+            },
+          },
+        }),
+        localDID: 'bob',
+        protocols: { chat },
+        eventHandlers: new Map([
+          [
+            'chat',
+            adaptBusHandlers(chat, {
+              'chat/posted': ({ data }: { data: { text: string } }) => void seen.push(data.text),
+            }).events,
+          ],
+        ]),
+        retentionSeconds: 60,
+        appCursorStore: createMemoryAppCursorStore(),
+        anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
+        groupID: () => 'group',
+      })
+      await lane.restore([record])
+      await lane.deliver()
+      const expected = served === 'same' ? ['old hub'] : ['old hub', 'new hub']
+      await vi.waitFor(() => expect([...seen].sort()).toEqual([...expected].sort()))
+      await vi.waitFor(() => expect(rows.size).toBe(0))
+      expect(persistOpened).toHaveBeenCalledTimes(served === 'same' ? 0 : 1)
+      lane.dispose()
+    })
+  }
 })
