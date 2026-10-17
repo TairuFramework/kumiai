@@ -287,6 +287,8 @@ export function canMoveCurrent(params: CurrentMoveInputs): boolean {
     params.stateReadable &&
     params.ledgerComplete &&
     params.walkComplete &&
+    (control.recoveryEpochFloor === null ||
+      (params.stateEpoch !== null && control.recoveryEpochFloor <= params.stateEpoch)) &&
     params.activity.pending === 0 &&
     !params.outboxUnresolved &&
     !params.settlementUnresolved &&

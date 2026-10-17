@@ -149,6 +149,8 @@ export type CurrentMoveInputs = {
   control: ControlSnapshot
   activity: { pending: number }
   stateReadable: boolean
+  /** Installed state epoch, or null when unreadable. A recovery floor above it is known lag. */
+  stateEpoch: number | null
   ledgerComplete: boolean
   walkComplete: boolean
   outboxUnresolved: boolean

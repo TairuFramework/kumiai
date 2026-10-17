@@ -20,6 +20,7 @@ import {
   createManualRecoveryStore,
   manualRecoveryStatus,
   rememberManualRecoveryTarget,
+  validCallTimeTarget,
 } from './manual-recovery.js'
 import { sameStoredValue } from './memory-incarnation-stores.js'
 import { isStoredOpenFailure } from './persistence-codec.js'
@@ -121,20 +122,6 @@ function validateEvidence(evidence: GroupForkEvidence, identity: EpochIdentity):
     )
       throw new ForkReportRefusedError({ reason: 'authenticator' })
   }
-}
-
-const hubMethods = ['subscribe', 'receive', 'publish', 'fetchTopic'] as const
-
-// A missing hub would let a peer factory default to the original hub: a fallback kumiai forbids.
-function validCallTimeTarget(target: RecoveryTarget): boolean {
-  const hub: unknown = target.hub
-  if (typeof hub !== 'object' || hub === null) return false
-  const methods = hub as Record<string, unknown>
-  return (
-    hubMethods.every((name) => typeof methods[name] === 'function') &&
-    typeof target.commitTopicID === 'string' &&
-    target.commitTopicID.length > 0
-  )
 }
 
 export function createGroupSafety<TTx extends GroupTransaction>(params: {

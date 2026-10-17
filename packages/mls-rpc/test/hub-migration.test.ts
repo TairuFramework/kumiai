@@ -156,8 +156,14 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
-    for (const mismatch of ['id', 'topic'] as const) {
-      test(`${mismatch === 'id' ? 'resolver cannot substitute saved target or topic' : 'restored host handle resumes identical move'} / ${mismatch} / ${mode} / ${context}`, async () => {
+    for (const mismatch of ['id', 'topic', 'hub undefined', 'hub without fetchTopic'] as const) {
+      const title =
+        mismatch === 'id'
+          ? 'resolver cannot substitute saved target or topic'
+          : mismatch === 'topic'
+            ? 'restored host handle resumes identical move'
+            : 'resolver hub without transport pauses saved choice'
+      test(`${title} / ${mismatch} / ${mode} / ${context}`, async () => {
         let fixture = await createRegistryFixture({
           mode,
           groupID: key.groupID,
@@ -224,7 +230,12 @@ for (const mode of ['real-mls', 'double'] as const) {
             id: restored || mismatch !== 'id' ? id : 'substituted-hub',
             commitTopicID:
               restored || mismatch !== 'topic' ? binding.commitTopicID : 'substituted-topic',
-            hub: alternate.hub,
+            // A JS host can return any hub; only a complete transport may reach a peer factory.
+            hub: (restored || !mismatch.startsWith('hub')
+              ? alternate.hub
+              : mismatch === 'hub undefined'
+                ? undefined
+                : partialHub('fetchTopic')) as LogHub & MailboxHub,
           }))
           const storage = api.createManualRecoveryStore({
             registry: fixture.registry,
@@ -411,6 +422,7 @@ const readyInputs: Parameters<typeof canMoveCurrent>[0] = {
   control: freshControl,
   activity: { pending: 0 },
   stateReadable: true,
+  stateEpoch: 3,
   ledgerComplete: true,
   walkComplete: true,
   outboxUnresolved: false,
@@ -426,6 +438,11 @@ const blockedInputs: Array<[string, Partial<Parameters<typeof canMoveCurrent>[0]
   ['unreadable state', { stateReadable: false }],
   ['incomplete ledger', { ledgerComplete: false }],
   ['incomplete walk', { walkComplete: false }],
+  ['epoch floor above state', { control: { ...freshControl, recoveryEpochFloor: 4 } }],
+  [
+    'epoch floor with unknown state epoch',
+    { stateEpoch: null, control: { ...freshControl, recoveryEpochFloor: 0 } },
+  ],
   ['unresolved outbox', { outboxUnresolved: true }],
   ['unresolved settlement', { settlementUnresolved: true }],
   ['fork hold', { hardHold: 'fork-halted' }],
@@ -508,6 +525,9 @@ const blockedInputs: Array<[string, Partial<Parameters<typeof canMoveCurrent>[0]
 
 test('current move predicate requires every freshness and safety input', () => {
   expect(canMoveCurrent(readyInputs)).toBe(true)
+  expect(
+    canMoveCurrent({ ...readyInputs, control: { ...freshControl, recoveryEpochFloor: 3 } }),
+  ).toBe(true)
   expect(canMoveCurrent({ ...readyInputs, openForkNotice: true })).toBe(false)
   for (const [label, change] of blockedInputs)
     expect(canMoveCurrent({ ...readyInputs, ...change }), label).toBe(false)
@@ -890,6 +910,46 @@ test('allow open fork overrides only notice exclusion / notice alone', async () 
     await fixture.close()
   }
 })
+
+for (const mode of ['real-mls', 'double'] as const) {
+  for (const offset of [1, 0] as const) {
+    test(`current move ${offset === 1 ? 'refuses known lag floor above' : 'allows floor at'} state epoch / ${mode}`, async () => {
+      const fixture = await createRegistryFixture({ mode, groupID: key.groupID, setup: 'seeded' })
+      let active: Awaited<ReturnType<typeof start>> | undefined
+      try {
+        const state = await fixture.device.groups.loadState(key)
+        if (state === null || state.deleted) throw new Error('Missing seeded state')
+        // An authenticated floor without any strand or rejoin: the device knows the group moved on.
+        await mutate(() => ({ recoveryEpochFloor: state.epoch + offset }))(fixture)
+        const before = await fixture.device.groups.ports(key).control.load()
+        expect(before).toMatchObject({ strand: null, rejoin: null, cursor: null })
+        const started = await movement(fixture, { allowOpenFork: false })
+        active = started.active
+        if (offset === 1) {
+          expect((await fixture.manualRecovery().readManualRecovery(started.saved.id))?.stage).toBe(
+            'authorised',
+          )
+          expectRejoinOnly(active.created, started.saved.id)
+          expect((await fixture.device.groups.ports(key).control.load()).recoveryEpochFloor).toBe(
+            state.epoch + 1,
+          )
+        } else {
+          await vi.waitFor(async () =>
+            expect(
+              (await fixture.manualRecovery().readManualRecovery(started.saved.id))?.stage,
+            ).toBe('completed'),
+          )
+          expect(active.created[0]?.manualRecovery).toBeUndefined()
+          expect(active.created[0]?.recoveryOnly).toBe(false)
+        }
+      } finally {
+        active?.owner.dispose()
+        await active?.owner.drained().catch(() => {})
+        await fixture.close()
+      }
+    })
+  }
+}
 
 for (const mode of ['real-mls', 'double'] as const) {
   for (const context of ['supplied', 'absent'] as const) {

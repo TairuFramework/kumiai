@@ -24,6 +24,20 @@ import type { RecoveryTarget } from './safety.js'
 import { groupCondition } from './safety-conditions.js'
 
 type ManualRow = Extract<CheckpointRecord, { kind: 'manual-recovery' }>
+
+const hubMethods = ['subscribe', 'receive', 'publish', 'fetchTopic'] as const
+
+// A missing hub would let a peer factory default to the original hub: a fallback kumiai forbids.
+export function validCallTimeTarget(target: RecoveryTarget): boolean {
+  const hub: unknown = target.hub
+  if (typeof hub !== 'object' || hub === null) return false
+  const methods = hub as Record<string, unknown>
+  return (
+    hubMethods.every((name) => typeof methods[name] === 'function') &&
+    typeof target.commitTopicID === 'string' &&
+    target.commitTopicID.length > 0
+  )
+}
 const preparations = new WeakMap<object, ManualRow>()
 const liveTargets = new WeakMap<GroupHandleRegistry, Map<string, RecoveryTarget>>()
 
@@ -430,6 +444,7 @@ export function createManualRecoveryStore<TTx extends GroupTransaction>(params: 
             control,
             activity: { pending },
             stateReadable: readable !== null && readable.version === runtime.stateVersion,
+            stateEpoch: readable?.epoch ?? null,
             ledgerComplete: runtime.ledgerComplete,
             walkComplete: control.cursor === null || control.cursor.epoch === readable?.epoch,
             outboxUnresolved: outbox.some(
@@ -509,7 +524,8 @@ export function createManualRecoveryStore<TTx extends GroupTransaction>(params: 
           (await params.resolveTarget?.(record.choice.targetID))
         if (
           resolved?.id === record.choice.targetID &&
-          resolved.commitTopicID === record.choice.commitTopicID
+          resolved.commitTopicID === record.choice.commitTopicID &&
+          validCallTimeTarget(resolved)
         )
           target = resolved
       } catch {

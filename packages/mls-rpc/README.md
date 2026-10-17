@@ -370,7 +370,7 @@ kumiai never chooses destinations or creates successors. The selected binding is
 The destination commit topic is the binding's `commitTopicID`; rendezvous and checkpoint topics stay derived from the recovery secret.
 
 A device moves current only when `canMoveCurrent` holds against the saved record inside one owner transaction.
-That requires readable state, a complete ledger, no known lag (strand, stranded or incomplete cursor, cursor epoch behind state),
+That requires readable state, a complete ledger, no known lag (strand, stranded or incomplete cursor, cursor epoch behind state, `recoveryEpochFloor` above state),
 no commit slot, operation, Welcome, unresolved app publication or settlement, and zero other pending owner work.
 It also requires no hard hold, no `not-member` or `spent-set-corrupt` condition and no active rejoin.
 Active rejoin covers ordinary X, a pending fork recovery intent (including one this authorisation abandoned) and a saved manual candidate.
@@ -387,7 +387,7 @@ It publishes nothing to the destination log before an authenticated reply. A con
 Source holds and evidence stay as history. A failed attempt leaves source state, routing and holds intact.
 A device that arrives ahead of the destination's responders stays pending with `target-behind` unless R2/R7 fork-floor evidence applies.
 Apps must move every device. Separate hubs cannot exchange checkpoint evidence, so a partial migration can split undetectably.
-Restart resumes only the saved destination; an unresolved binding pauses with `target-unresolved`.
+Restart resumes only the saved destination; an unresolved binding, or a resolved hub missing a transport method, pauses with `target-unresolved`.
 
 ## Captured registry recovery
 

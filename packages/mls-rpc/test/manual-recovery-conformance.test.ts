@@ -87,6 +87,20 @@ for (const mode of ['real-mls', 'double'] as const) {
   }
 }
 
+// Shape checks read transport methods; only calling one is a network action.
+function refusingHub(message: string): LogHub & MailboxHub {
+  const refuse = () => {
+    throw new Error(message)
+  }
+  return new Proxy({} as LogHub & MailboxHub, {
+    get(_target, property) {
+      if (['subscribe', 'receive', 'publish', 'fetchTopic'].includes(property as string))
+        return refuse
+      throw new Error(message)
+    },
+  })
+}
+
 // The contract only binds hubs; calling one is a network action it must never take.
 function contractHub(): LogHub & MailboxHub {
   const refuse = () => {
@@ -137,6 +151,7 @@ for (const ownership of ['supplied', 'absent'] as const) {
         allowOpenFork: false,
       })
       expect(await fixture.snapshot()).toEqual({ ...before, forkRecoveryAttempt: null })
+      expect(saved.abandonedForkRecovery).toBe(authority.attemptID)
       expect(await manual.readManualRecovery(saved.id)).toEqual(saved)
       expect((await manual.manualRecoveryControl(saved.id).load()).settledRejoins).toEqual(
         before.settledRejoins,
@@ -179,11 +194,7 @@ test('saved pause projects visibly and clears without replacing authorisation', 
     setup: 'seeded',
   })
   const key = { groupID: 'manual-recovery', incarnation: 1 }
-  const hub = new Proxy({} as LogHub & MailboxHub, {
-    get() {
-      throw new Error('Storage must not call hub methods')
-    },
-  })
+  const hub = refusingHub('Storage must not call hub methods')
   let resolved: { id: string; commitTopicID: string; hub: LogHub & MailboxHub } | null = null
   const create = () =>
     createManualRecoveryStore({
@@ -242,11 +253,7 @@ for (const context of ['supplied', 'absent'] as const) {
       ownershipContext: context === 'supplied' ? createAsyncLocalOwnershipContext() : undefined,
     })
     const key = { groupID: 'manual-recovery', incarnation: 1 }
-    const hub = new Proxy({} as LogHub & MailboxHub, {
-      get() {
-        throw new Error('Storage must not call hub methods')
-      },
-    })
+    const hub = refusingHub('Storage must not call hub methods')
     const target = { id: 'selected', commitTopicID: 'commits', hub }
     const started = deferred<void>()
     const released = deferred<void>()
@@ -1213,11 +1220,7 @@ test('manual switch proof fences destination peers and resolves the saved switch
     const sourceBefore = await fixture.device.groups.ports(key).control.load()
     const topicID = recovery.record.target.topicID
     const fault = fixture.armWorkFault(recovery.record.switchMutationID, 'pending')
-    const hub = new Proxy({} as LogHub & MailboxHub, {
-      get() {
-        throw new Error('Confirmed switch requires no network')
-      },
-    })
+    const hub = refusingHub('Confirmed switch requires no network')
     const started = await manualOwner(fixture, async (id) => ({ id, hub, commitTopicID: topicID }))
     owner = started.owner
     await fault.rejected
