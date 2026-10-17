@@ -371,7 +371,130 @@ test('a permit allows exactly one commit and identifies its encoded bytes', asyn
     authenticatorBefore: group.state.keySchedule.epochAuthenticator,
     candidateAuthenticator: value.newGroup.state.keySchedule.epochAuthenticator,
   })
+  const candidateAuthenticator = value.newGroup.state.keySchedule.epochAuthenticator
+  const recordedAuthenticator = candidateAuthenticator.slice()
+  candidateAuthenticator.fill(0)
+  expect(receipt?.candidateAuthenticator).toEqual(recordedAuthenticator)
+  receipt?.candidateAuthenticator.fill(1)
+  expect(candidateAuthenticator).toEqual(new Uint8Array(candidateAuthenticator.length))
   await expect(commitKeyRotation(retained)).rejects.toBeInstanceOf(CommitAuthoringRefusedError)
+})
+
+test.each(['fulfils', 'rejects'] as const)(
+  'a permit tracks microtask construction after its callback %s',
+  async (callbackOutcome) => {
+    const { group } = await pair()
+    const receipt: CommitReceipt = {
+      commit: new Uint8Array([1]),
+      referencedProposals: [],
+      epoch: Number(group.epoch),
+      authenticatorBefore: group.state.keySchedule.epochAuthenticator.slice(),
+      candidateAuthenticator: new Uint8Array([2]),
+    }
+    const failure = new Error('callback failed')
+    const started = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const attempted = Promise.withResolvers<string>()
+    let settled = false
+    const scope = withCommitPermit(restoreFromBytes(group), (permitted) => {
+      queueMicrotask(() => {
+        try {
+          attempted.resolve(
+            authorPrivateCommit(permitted, async () => {
+              started.resolve()
+              await release.promise
+              return { value: 'commit complete', receipt }
+            }),
+          )
+        } catch (error) {
+          started.reject(error)
+          attempted.reject(error)
+        }
+      })
+      return callbackOutcome === 'fulfils'
+        ? Promise.resolve('callback complete')
+        : Promise.reject(failure)
+    })
+    const outcome = scope.then(
+      (value) => {
+        settled = true
+        return { status: 'fulfilled', value }
+      },
+      (reason: unknown) => {
+        settled = true
+        return { status: 'rejected', reason }
+      },
+    )
+    try {
+      await started.promise
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(settled).toBe(false)
+    } finally {
+      release.resolve()
+      await attempted.promise
+      await outcome
+    }
+    expect(await attempted.promise).toBe('commit complete')
+    expect(await outcome).toEqual(
+      callbackOutcome === 'fulfils'
+        ? { status: 'fulfilled', value: { value: 'callback complete', receipt } }
+        : { status: 'rejected', reason: failure },
+    )
+  },
+)
+
+test('a permit returns the receipt of an unawaited real MLS builder', async () => {
+  const { group } = await pair()
+  const pending = Promise.withResolvers<Awaited<ReturnType<typeof commitKeyRotation>>>()
+  const { value, receipt } = await withCommitPermit(restoreFromBytes(group), async (permitted) => {
+    pending.resolve(commitKeyRotation(permitted))
+    return 'callback complete'
+  })
+  const built = await pending.promise
+  expect(value).toBe('callback complete')
+  expect(built.epoch).toBe(group.epoch + 1n)
+  expect(receipt).toEqual({
+    commit: built.commitMessage,
+    referencedProposals: [],
+    epoch: Number(group.epoch),
+    authenticatorBefore: group.state.keySchedule.epochAuthenticator,
+    candidateAuthenticator: built.newGroup.state.keySchedule.epochAuthenticator,
+  })
+})
+
+test.each(['fulfils', 'rejects'] as const)(
+  'construction failure rejects the scope when its callback %s',
+  async (callbackOutcome) => {
+    const { group } = await pair()
+    const failure = new Error('construction failed')
+    const started = Promise.withResolvers<void>()
+    const construction = Promise.withResolvers<{ value: string; receipt: CommitReceipt }>()
+    const scope = withCommitPermit(restoreFromBytes(group), async (permitted) => {
+      authorPrivateCommit(permitted, () => construction.promise).catch(() => {})
+      started.resolve()
+      if (callbackOutcome === 'rejects') throw new Error('callback failed')
+      return 'callback complete'
+    })
+    const rejected = expect(scope).rejects.toBe(failure)
+    await started.promise
+    construction.reject(failure)
+    await rejected
+  },
+)
+
+test('a caught synchronous construction failure still rejects the scope', async () => {
+  const { group } = await pair()
+  const failure = new Error('construction failed')
+  await expect(
+    withCommitPermit(restoreFromBytes(group), async (permitted) => {
+      expect(() =>
+        authorPrivateCommit(permitted, () => {
+          throw failure
+        }),
+      ).toThrow(failure)
+      return 'callback complete'
+    }),
+  ).rejects.toBe(failure)
 })
 
 test('a permit needs a fresh handle, including when a permit is already active', async () => {
@@ -454,18 +577,19 @@ test('failed construction consumes the permit and callback failure revokes it', 
   expect(retried.receipt?.commit).toEqual(retried.value.commitMessage)
 })
 
-test('a rejected construction leaves the permit consumed without a receipt', async () => {
+test('a caught rejected construction leaves the permit consumed and rejects the scope', async () => {
   const { group } = await pair()
   const failure = new Error('construction rejected')
-  const { receipt } = await withCommitPermit(restoreFromBytes(group), async (permitted) => {
-    await expect(
-      authorPrivateCommit(permitted, async () => {
-        throw failure
-      }),
-    ).rejects.toBe(failure)
-    expect(() => authorPrivateCommit(permitted, vi.fn())).toThrow(CommitAuthoringRefusedError)
-  })
-  expect(receipt).toBeNull()
+  await expect(
+    withCommitPermit(restoreFromBytes(group), async (permitted) => {
+      await expect(
+        authorPrivateCommit(permitted, async () => {
+          throw failure
+        }),
+      ).rejects.toBe(failure)
+      expect(() => authorPrivateCommit(permitted, vi.fn())).toThrow(CommitAuthoringRefusedError)
+    }),
+  ).rejects.toBe(failure)
 })
 
 test('an unused permit is revoked and has no receipt when the callback settles', async () => {

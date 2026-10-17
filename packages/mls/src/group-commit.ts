@@ -354,7 +354,7 @@ export async function commitWithEntries(
         referencedProposals: Object.keys(params.pendingProposals ?? {}),
         epoch,
         authenticatorBefore,
-        candidateAuthenticator: result.newState.keySchedule.epochAuthenticator,
+        candidateAuthenticator: result.newState.keySchedule.epochAuthenticator.slice(),
       },
     }
   })
