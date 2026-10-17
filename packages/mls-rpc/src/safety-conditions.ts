@@ -9,7 +9,7 @@ import type {
 } from '@kumiai/rpc'
 
 import { provenCheckpointFacts } from './checkpoint-store.js'
-import type { EntryReads } from './entry-capability.js'
+import type { EntryCapability, EntryReads } from './entry-capability.js'
 import { copyStoredValue, sameStoredValue } from './memory-incarnation-stores.js'
 import { GroupStateConflictError } from './persistence-errors.js'
 import type { GroupKey, GroupTransaction } from './persistence-types.js'
@@ -75,7 +75,11 @@ export function groupCondition(
         row.key.groupID === key.groupID &&
         row.key.incarnation === key.incarnation,
     )
-    .sort((a, b) => a.event.detectedAt - b.event.detectedAt)
+    .sort(
+      (a, b) =>
+        Number(a.event.kind === 'spent-set-corrupt') -
+          Number(b.event.kind === 'spent-set-corrupt') || a.event.detectedAt - b.event.detectedAt,
+    )
     .at(-1)
   return row === undefined
     ? { condition: null, evidence: null }
@@ -283,5 +287,44 @@ export async function flushConditionEvents(
     )
   } catch (error) {
     if (!(error instanceof ConditionNoop)) throw error
+  }
+}
+
+class ConditionAlreadyStored extends Error {}
+
+export function groupConditionWriter<TTx extends GroupTransaction>(params: {
+  entry: EntryCapability<TTx>
+  latch(key: GroupKey, reason: 'spent-set-corrupt'): void
+}) {
+  return async (
+    requested: GroupKey,
+    condition: 'spent-set-corrupt',
+    evidence: null,
+  ): Promise<void> => {
+    const key = { ...requested }
+    const id = JSON.stringify([condition, key.groupID, key.incarnation])
+    try {
+      await params.entry.run(
+        { groupID: key.groupID, mutationID: crypto.randomUUID() },
+        async (reads) => {
+          const lifetime = await reads.lifetime()
+          if (lifetime?.latestIncarnation !== key.incarnation) throw new ConditionAlreadyStored()
+          params.latch(key, condition)
+          if ((await reads.checkpoints()).some((row) => row.id === id))
+            throw new ConditionAlreadyStored()
+          return { expected: lifetime, value: Date.now() }
+        },
+        async (stores, detectedAt) => {
+          if ((await stores.checkpoints.load(id)) !== null) throw new ConditionAlreadyStored()
+          const event = { ...key, id, kind: condition, detectedAt, evidence }
+          await stores.checkpoints.put(
+            prepare({ kind: 'condition', id, key, event, active: true, sealedProof: null }),
+          )
+          await stores.incarnation(key.incarnation).meta.putEvents([event])
+        },
+      )
+    } catch (error) {
+      if (!(error instanceof ConditionAlreadyStored)) throw error
+    }
   }
 }

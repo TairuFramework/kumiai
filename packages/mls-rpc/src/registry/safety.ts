@@ -6,8 +6,12 @@ import {
 } from '@kumiai/rpc'
 
 import type { EntryCapability, EntryReads } from '../entry-capability.js'
-import { isStoredOpenFailure } from '../persistence-codec.js'
-import { GroupStateConflictError, GroupUnavailableError } from '../persistence-errors.js'
+import { assertSurvivingSpentSet, isStoredOpenFailure } from '../persistence-codec.js'
+import {
+  GroupStateConflictError,
+  GroupUnavailableError,
+  SpentSetCorruptError,
+} from '../persistence-errors.js'
 import type { GroupKey, GroupRecoveryTrust, GroupTransaction } from '../persistence-types.js'
 import type { RegistryConsumers } from './consumers.js'
 import { assertRecoverySourceTrust } from './source-trust.js'
@@ -22,6 +26,11 @@ export type RegistrySafetyCapability<TTx extends GroupTransaction> = RegistryCon
   observeHold(key: GroupKey, control: ControlSnapshot): void
   held(key: GroupKey): SafetyHold
   persistTrustUnavailable(key: GroupKey): Promise<void>
+  persistGroupCondition(
+    key: GroupKey,
+    condition: 'spent-set-corrupt',
+    evidence: null,
+  ): Promise<void>
 }
 
 const capabilities = new WeakMap<GroupHandleRegistry, unknown>()
@@ -60,6 +69,10 @@ export async function readRetainedTrust(
   try {
     trust = await reads.trust()
   } catch (cause) {
+    if (cause instanceof SpentSetCorruptError) {
+      // biome-ignore lint/style/useErrorCause: The constructor forwards cause.
+      throw new SpentSetCorruptError({ key, cause })
+    }
     if (!isStoredOpenFailure(cause) && !(cause instanceof GroupStateConflictError)) throw cause
     // biome-ignore lint/style/useErrorCause: The diagnosis retains cause.
     throw new RetainedTrustUnavailableError({ key, cause })
@@ -77,9 +90,13 @@ export async function readRetainedTrust(
   )
     throw new GroupUnavailableError({ reason: 'invalid' })
   try {
+    assertSurvivingSpentSet(trust)
+  } catch (cause) {
+    // biome-ignore lint/style/useErrorCause: The constructor forwards cause.
+    throw new SpentSetCorruptError({ key, cause })
+  }
+  try {
     assertRecoverySourceTrust(trust)
-    if (trust.spentEpochAuthenticators.length === 0)
-      throw new GroupStateConflictError('Empty surviving spent trust')
   } catch (cause) {
     // biome-ignore lint/style/useErrorCause: The diagnosis retains cause.
     throw new RetainedTrustUnavailableError({ key, cause })

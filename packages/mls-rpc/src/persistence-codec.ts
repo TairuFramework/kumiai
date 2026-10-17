@@ -1,5 +1,6 @@
 import { type DeviceRegistry, decodeDeviceRegistry, encodeDeviceRegistry } from '@kumiai/mls'
 
+import { SpentSetCorruptError } from './persistence-errors.js'
 import type { AtRestCodec } from './persistence-types.js'
 
 // Preserve provider error identity while recording guarded open/decoding refusal.
@@ -202,6 +203,16 @@ export function encodeTrust(value: unknown): unknown {
   return { ...trust, registry: encodeDeviceRegistry(registry as DeviceRegistry) }
 }
 
+export function assertSurvivingSpentSet(trust: { spentEpochAuthenticators?: unknown }): void {
+  const spent = trust.spentEpochAuthenticators
+  if (
+    !Array.isArray(spent) ||
+    spent.length === 0 ||
+    !Array.from(spent).every((entry) => entry instanceof Uint8Array && entry.length > 0)
+  )
+    throw new SpentSetCorruptError()
+}
+
 export function decodeTrust(value: unknown): unknown {
   const trust = objectValue(value)
   if (!(trust.registry instanceof Uint8Array)) {
@@ -228,7 +239,9 @@ export async function openRecord(
   try {
     const plaintext = await codec.open(Uint8Array.from(bytes), recordAAD(address))
     const value = decodeStoredValue(Uint8Array.from(plaintext))
-    return address.namespace === 'trust' ? decodeTrust(value) : value
+    if (address.namespace !== 'trust') return value
+    assertSurvivingSpentSet(objectValue(value))
+    return decodeTrust(value)
   } catch (cause) {
     const error =
       cause !== null && (typeof cause === 'object' || typeof cause === 'function')

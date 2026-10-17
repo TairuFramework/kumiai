@@ -5,8 +5,12 @@ import type { SafetyHold } from '@kumiai/rpc'
 import { currentCheckpointFact, prepareCheckpointInstallation } from '../checkpoint-capture.js'
 import type { EntryCapability, EntryReads, StateMetadata } from '../entry-capability.js'
 import { sameStoredValue } from '../memory-incarnation-stores.js'
-import { isStoredOpenFailure } from '../persistence-codec.js'
-import { GroupStateConflictError, SeedAdmissionRefusedError } from '../persistence-errors.js'
+import { assertSurvivingSpentSet, isStoredOpenFailure } from '../persistence-codec.js'
+import {
+  GroupStateConflictError,
+  SeedAdmissionRefusedError,
+  SpentSetCorruptError,
+} from '../persistence-errors.js'
 import { assertTrustTransition } from '../persistence-guards.js'
 import type {
   GroupKey,
@@ -44,6 +48,15 @@ export function seedAdmission(
   } else {
     if (lifetime.restorePending || trust === null)
       throw new SeedAdmissionRefusedError({ reason: 'unavailable' })
+    try {
+      assertSurvivingSpentSet(trust)
+    } catch (cause) {
+      // biome-ignore lint/style/useErrorCause: The constructor forwards cause.
+      throw new SpentSetCorruptError({
+        key: { groupID: lifetime.groupID, incarnation: lifetime.latestIncarnation },
+        cause,
+      })
+    }
     try {
       assertTrustTransition(null, trust)
       if (
@@ -111,12 +124,18 @@ async function readAdmission(
   reads: Pick<EntryReads, 'lifetime' | 'trust' | 'metadata' | 'control'>,
   held: (key: GroupKey) => SafetyHold,
 ): Promise<AdmissionInputs> {
-  let lifetime: GroupLifetime | null
+  let lifetime: GroupLifetime | null = null
   let trust: GroupRecoveryTrust | null
   try {
     lifetime = await reads.lifetime()
     trust = await reads.trust()
   } catch (cause) {
+    if (cause instanceof SpentSetCorruptError && lifetime !== null)
+      // biome-ignore lint/style/useErrorCause: The constructor forwards cause.
+      throw new SpentSetCorruptError({
+        key: { groupID: lifetime.groupID, incarnation: lifetime.latestIncarnation },
+        cause,
+      })
     if (!(cause instanceof GroupStateConflictError) && !isStoredOpenFailure(cause)) throw cause
     // biome-ignore lint/style/useErrorCause: The constructor forwards params.cause.
     throw new SeedAdmissionRefusedError({ reason: 'unavailable', cause })

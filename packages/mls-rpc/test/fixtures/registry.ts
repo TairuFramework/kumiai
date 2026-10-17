@@ -133,7 +133,10 @@ export type RegistryFixtureBase = {
   inspectRows(): Promise<MemoryStoreRows>
   corruptState(key: GroupKey, damage?: 'unreadable' | 'client-state' | 'identity'): Promise<void>
   removeStateBytes(key: GroupKey): Promise<void>
-  corruptTrust(groupID: string, damage?: 'unreadable' | 'empty-spent'): Promise<void>
+  corruptTrust(
+    groupID: string,
+    damage?: 'unreadable' | 'empty-spent' | 'missing-spent' | 'malformed-spent',
+  ): Promise<void>
   removeTrust(groupID: string): Promise<void>
   failTrustReads(error: Error | null): void
   mutateMetadata(key: GroupKey, fn: (value: unknown) => unknown): Promise<void>
@@ -656,7 +659,11 @@ async function assemble(
       if (trust === null) throw new Error('Missing retained trust')
       const location = { groupID, incarnation: null, namespace: 'trust', recordID: 'current' }
       const codec = createDeterministicAtRestCodec({ key: new Uint8Array(32).fill(98) })
-      const bytes = await sealRecord(codec, location, { ...trust, spentEpochAuthenticators: [] })
+      const bytes = await sealRecord(codec, location, {
+        ...trust,
+        spentEpochAuthenticators:
+          damage === 'missing-spent' ? undefined : damage === 'malformed-spent' ? [null] : [],
+      })
       // Physical damage bypasses the domain's monotonic spent-set guard.
       await storage.mutateStoredRecord('trust', physicalRecordKey(location), () => bytes)
     },

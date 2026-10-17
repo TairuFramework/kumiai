@@ -105,6 +105,7 @@ export {
   RegistrySourceMovedError,
   type SeedAdmissionRefusalReason,
   SeedAdmissionRefusedError,
+  SpentSetCorruptError,
   StorageOutcomeUnknownError,
 } from './persistence-errors.js'
 export type {

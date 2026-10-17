@@ -53,6 +53,7 @@ import {
   GroupStateUncertainError,
   PersistencePhaseError,
   ReentrantOwnershipError,
+  SpentSetCorruptError,
   StorageOutcomeUnknownError,
 } from './persistence-errors.js'
 import { assertStateTransition, assertTrustTransition, readState } from './persistence-guards.js'
@@ -432,7 +433,19 @@ export function createMemoryGroupCoordinator(params: {
         const value = await loadMetadata(incarnation)
         if (value !== null) metadata.push(value)
       }
-      const { value: trust, status: trustStatus } = await diagnose(raw.trust.load)
+      let spentSetCorrupt = false
+      const trustObservation = await diagnose(async () => {
+        try {
+          return await raw.trust.load()
+        } catch (cause) {
+          spentSetCorrupt = cause instanceof SpentSetCorruptError
+          throw cause
+        }
+      })
+      const trust = trustObservation.value
+      const trustStatus: AccountedGroupObservation['trustStatus'] = spentSetCorrupt
+        ? 'spent-set-corrupt'
+        : trustObservation.status
       const activeKey =
         lifetime?.activeIncarnation == null
           ? null

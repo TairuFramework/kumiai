@@ -13,10 +13,11 @@ import {
   GroupControlUnsettledError,
   GroupStateConflictError,
   GroupUnavailableError,
+  SpentSetCorruptError,
   StorageOutcomeUnknownError,
 } from '../persistence-errors.js'
 import type { GroupKey, GroupTransaction } from '../persistence-types.js'
-import { groupCondition } from '../safety-conditions.js'
+import { groupCondition, groupConditionWriter } from '../safety-conditions.js'
 import { createRegistryAccess, type RegistryOwner } from './access.js'
 import { admissionFor, type ColdEnvironment, loadValidatedGroup } from './cold.js'
 import { bindRegistryRecoveryCoordinator } from './recovery-coordinator.js'
@@ -102,10 +103,18 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     if (control.recoveryUnavailable !== null) latch(key, 'recovery-unavailable')
   }
   const persistTrustUnavailable = trustUnavailableWriter({ entry: capability, latch, observeHold })
+  const persistGroupCondition = groupConditionWriter({ entry: capability, latch })
   async function diagnoseFailure(error: unknown): Promise<void> {
-    if (!(error instanceof RetainedTrustUnavailableError)) return
+    if (
+      !(error instanceof SpentSetCorruptError) &&
+      !(error instanceof RetainedTrustUnavailableError)
+    )
+      return
     try {
-      await persistTrustUnavailable(error.key)
+      if (error instanceof SpentSetCorruptError) {
+        if (error.key !== undefined)
+          await persistGroupCondition(error.key, 'spent-set-corrupt', null)
+      } else await persistTrustUnavailable(error.key)
     } catch (failure) {
       if (failure instanceof GroupUnavailableError && failure.reason === 'invalid') throw failure
       // Failed persistence leaves the latch and original trust diagnosis authoritative.
@@ -114,14 +123,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   const diagnosing = new Set<string>()
   function diagnoseObservation(observation: AccountedGroupObservation): void {
     const key = observation.activeKey
-    if (
-      key === null ||
-      observation.control?.recoveryUnavailable != null ||
-      (observation.trustStatus === 'readable' &&
-        observation.trust !== null &&
-        observation.trust.spentEpochAuthenticators?.length !== 0)
-    )
-      return
+    if (key === null || observation.condition === 'spent-set-corrupt') return
     const id = keyID(key)
     if (diagnosing.has(id)) return
     diagnosing.add(id)
@@ -207,6 +209,12 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
           ) {
             observeHold(observation.activeKey, observation.control)
           }
+          if (
+            observation.activeKey !== null &&
+            (observation.condition === 'spent-set-corrupt' ||
+              observation.trustStatus === 'spent-set-corrupt')
+          )
+            latch(observation.activeKey, 'spent-set-corrupt')
           const previous = observedSlot.owner
           observedSlot.generation++
           if (previous !== null) previous.cacheValid = false
@@ -217,6 +225,24 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
             previous: previous?.acceptedTrust ?? null,
           })
           if (previous === null) return
+          if (
+            observation.activeKey?.incarnation === previous.key.incarnation &&
+            observation.trustStatus === 'spent-set-corrupt'
+          ) {
+            previous.snapshot = {
+              ...previous.snapshot,
+              available: false,
+              condition: 'spent-set-corrupt',
+            }
+            previous.admission = {
+              epoch: previous.snapshot.epoch,
+              admissible: false,
+              reason: held(previous.key) ?? 'spent-set-corrupt',
+            }
+            const dispatch = previous.runtime.install(previous.snapshot)
+            if (dispatch !== undefined) notifications.set(observation, dispatch)
+            return
+          }
           if (
             projected === null ||
             observation.trust === null ||
@@ -289,6 +315,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     assertLoadCurrent()
     value.snapshot.condition = groupCondition(await reads.checkpoints(), value.key).condition
     observeHold(value.key, control)
+    if (value.snapshot.condition === 'spent-set-corrupt') latch(value.key, 'spent-set-corrupt')
     if (admittedOwner !== undefined && value.key.incarnation !== admittedOwner.key.incarnation)
       throw new DisplacedGroupHandleError('Registry access belongs to a retired incarnation')
     if (slot.owner === null || slot.owner.key.incarnation !== value.key.incarnation) {
@@ -319,7 +346,8 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
           held(owner.key) ??
           (owner.admission.admissible
             ? null
-            : owner.admission.reason === 'fork-halted' ||
+            : owner.admission.reason === 'spent-set-corrupt' ||
+                owner.admission.reason === 'fork-halted' ||
                 owner.admission.reason === 'recovery-unavailable'
               ? owner.admission.reason
               : null),
@@ -503,7 +531,13 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     start,
     async seed(group, options) {
       assertOpen()
-      return await track(seed(group, options))
+      groupSlot(group.groupID)
+      try {
+        return await track(seed(group, options))
+      } catch (error) {
+        await diagnoseFailure(error)
+        throw error
+      }
     },
     async switchIncarnation(candidate, options) {
       assertOpen()
@@ -591,6 +625,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     latch,
     held,
     persistTrustUnavailable,
+    persistGroupCondition,
     reportHold,
     observeHold,
     prepareReportedHoldRelease(key, halt) {

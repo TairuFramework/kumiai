@@ -104,7 +104,7 @@ export function accountedRuntime(params: {
       ownerDID,
     })
     const epoch = trust.installed.epoch
-    const safety = controlSafetyHeld(control)
+    const safety = controlSafetyHeld(control, value.condition)
     return {
       snapshot: {
         ...trust.installed,

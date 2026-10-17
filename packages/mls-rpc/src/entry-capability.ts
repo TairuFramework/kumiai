@@ -27,7 +27,7 @@ export type AccountedGroupObservation = {
   // Includes affected incarnations and the active version read. Readable rows survive partial failure.
   metadataStatus: 'missing' | 'readable' | 'unreadable'
   trust: GroupRecoveryTrust | null
-  trustStatus: 'missing' | 'readable' | 'unreadable'
+  trustStatus: 'missing' | 'readable' | 'unreadable' | 'spent-set-corrupt'
   activeKey: GroupKey | null
   activeVersion: number | null
   control: ControlSnapshot | null

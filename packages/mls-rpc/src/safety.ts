@@ -25,6 +25,7 @@ import {
   GroupStateConflictError,
   GroupUnavailableError,
   ManualRecoveryUnavailableError,
+  SpentSetCorruptError,
 } from './persistence-errors.js'
 import type {
   EpochIdentity,
@@ -135,11 +136,29 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
     clearHold: createClearReportedHold(params),
     async status(requested) {
       const key = { ...requested }
+      try {
+        await entry.read(key.groupID, async (reads) => {
+          const lifetime = await reads.lifetime()
+          if (lifetime?.activeIncarnation === key.incarnation) await readRetainedTrust(reads, key)
+        })
+      } catch (error) {
+        if (error instanceof SpentSetCorruptError)
+          await capability.persistGroupCondition(key, 'spent-set-corrupt', null)
+        else if (error instanceof RetainedTrustUnavailableError)
+          await capability.persistTrustUnavailable(key)
+        else throw error
+      }
       return await entry.read(key.groupID, async (reads) => {
         const { condition, evidence } = groupCondition(await reads.checkpoints(), key)
         const control = await reads.control(key.incarnation)
+        const held = capability.held(key)
         return {
-          hold: capability.held(key) ?? controlSafetyHeld(control, condition),
+          hold:
+            control.forkHalt !== null || held === 'fork-halted'
+              ? 'fork-halted'
+              : condition === 'spent-set-corrupt' || held === 'spent-set-corrupt'
+                ? 'spent-set-corrupt'
+                : (held ?? controlSafetyHeld(control, condition)),
           condition,
           evidence,
         }
@@ -156,7 +175,11 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
           const source = await readRecoverySource(reads, key.groupID)
           return source.identity
         } catch (error) {
-          if (error instanceof RetainedTrustUnavailableError) return null
+          if (
+            error instanceof RetainedTrustUnavailableError ||
+            error instanceof SpentSetCorruptError
+          )
+            return null
           throw error
         }
       })
@@ -209,6 +232,11 @@ export function createGroupSafety<TTx extends GroupTransaction>(params: {
           },
         )
       } catch (error) {
+        if (error instanceof SpentSetCorruptError) {
+          await capability.persistGroupCondition(key, 'spent-set-corrupt', null)
+          // biome-ignore lint/style/useErrorCause: The durable diagnosis supplies the refusal reason.
+          throw new GroupSafetyHeldError(capability.held(key) ?? 'spent-set-corrupt')
+        }
         if (error instanceof RetainedTrustUnavailableError) {
           await capability.persistTrustUnavailable(error.key)
           // biome-ignore lint/style/useErrorCause: The persisted diagnosis supplies the refusal reason.

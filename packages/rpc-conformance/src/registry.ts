@@ -160,16 +160,30 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
       }
     })
 
-    test.each(['absent', 'state', 'trust', 'missing-bytes', 'metadata'] as const)(
+    test.each(['absent', 'state', 'trust', 'empty-spent', 'missing-bytes', 'metadata'] as const)(
       'unavailable %s exposes no handle or fabricated snapshot',
       async (fault) => {
         const fixture = await create(fault === 'absent' ? 'empty' : 'seeded')
         try {
           if (fault === 'state') await fixture.corruptState(key)
           if (fault === 'trust') await fixture.corruptTrust(groupID)
+          if (fault === 'empty-spent') await fixture.corruptTrust(groupID, 'empty-spent')
           if (fault === 'missing-bytes') await fixture.removeStateBytes(key)
           if (fault === 'metadata')
             await fixture.mutateMetadata(key, (value) => ({ ...(value as object), version: -1 }))
+          if (fault === 'empty-spent') {
+            await expect(fixture.registry.access(groupID)).rejects.toMatchObject({
+              name: 'SpentSetCorruptError',
+            })
+            expect(await fixture.safety().status(key)).toMatchObject({
+              hold: 'spent-set-corrupt',
+              condition: 'spent-set-corrupt',
+            })
+            expect(
+              (await fixture.device.groups.ports(key).control.load()).recoveryUnavailable,
+            ).toBeNull()
+            return
+          }
           await expect(fixture.registry.access(groupID)).rejects.toMatchObject({
             name: 'GroupUnavailableError',
             reason:

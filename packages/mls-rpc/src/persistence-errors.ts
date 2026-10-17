@@ -2,6 +2,20 @@ import type { GroupKey } from './persistence-types.js'
 
 export { GroupControlUnsettledError, StorageOutcomeUnknownError } from '@kumiai/rpc'
 
+export class SpentSetCorruptError extends Error {
+  override name = 'SpentSetCorruptError'
+  #key: GroupKey | undefined
+
+  constructor(params: { key?: GroupKey; cause?: unknown } = {}) {
+    super('Surviving spent set is missing or malformed', { cause: params.cause })
+    this.#key = params.key === undefined ? undefined : { ...params.key }
+  }
+
+  get key(): GroupKey | undefined {
+    return this.#key === undefined ? undefined : { ...this.#key }
+  }
+}
+
 export class GroupStateConflictError extends Error {
   override name = 'GroupStateConflictError'
 }

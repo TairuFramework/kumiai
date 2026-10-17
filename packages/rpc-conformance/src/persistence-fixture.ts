@@ -286,7 +286,7 @@ export type ConformanceAccountedGroupObservation<Position extends string = strin
   metadata: Array<ConformanceStateMetadata>
   metadataStatus: 'missing' | 'readable' | 'unreadable'
   trust: ConformanceGroupRecoveryTrust | null
-  trustStatus: 'missing' | 'readable' | 'unreadable'
+  trustStatus: 'missing' | 'readable' | 'unreadable' | 'spent-set-corrupt'
   activeKey: ConformanceGroupKey | null
   activeVersion: number | null
   control: ConformanceControlSnapshot<Position> | null

@@ -527,30 +527,34 @@ export function runGroupSafetyContract<THandle extends ConformanceRegistryHandle
                 : access.read(() => {
                     invoked = true
                   })
-          await expect(work).rejects.toMatchObject({
-            name: 'GroupUnavailableError',
-            reason: 'recovery-unavailable',
-          })
+          const error =
+            damage === 'empty-spent'
+              ? { name: 'SpentSetCorruptError' }
+              : { name: 'GroupUnavailableError', reason: 'recovery-unavailable' }
+          await expect(work).rejects.toMatchObject(error)
           expect(invoked).toBe(false)
           expect(
             (await fixture.device.groups.ports(key).control.load()).recoveryUnavailable,
-          ).toEqual(recoveryEvent(key))
-          expect(await fixture.safety().events(key)).toEqual([recoveryEvent(key)])
+          ).toEqual(damage === 'empty-spent' ? null : recoveryEvent(key))
+          const events = await fixture.safety().events(key)
+          expect(events).toEqual([
+            damage === 'empty-spent'
+              ? expect.objectContaining({ kind: 'spent-set-corrupt', ...key })
+              : recoveryEvent(key),
+          ])
           expect((await fixture.device.groups.load(key.groupID))?.revision).toBe(
             (revision ?? 0) + 1,
           )
           const before = await fixture.inspectRows()
-          await expect(fixture.registry.recoverySource(key.groupID)).rejects.toMatchObject({
-            reason: 'recovery-unavailable',
-          })
+          await expect(fixture.registry.recoverySource(key.groupID)).rejects.toMatchObject(error)
           expect(await fixture.inspectRows()).toEqual(before)
-          await fixture.safety().ackEvent(key, recoveryEvent(key).id)
+          const event = events[0]
+          if (event === undefined) throw new Error('Missing diagnosis event')
+          await fixture.safety().ackEvent(key, event.id)
           const cold = await fixture.reopen()
           try {
             const acknowledged = await cold.inspectRows()
-            await expect(cold.registry.recoverySource(key.groupID)).rejects.toMatchObject({
-              reason: 'recovery-unavailable',
-            })
+            await expect(cold.registry.recoverySource(key.groupID)).rejects.toMatchObject(error)
             expect(await cold.safety().events(key)).toEqual([])
             expect(await cold.inspectRows()).toEqual(acknowledged)
           } finally {
@@ -597,13 +601,25 @@ export function runGroupSafetyContract<THandle extends ConformanceRegistryHandle
         if (damage === 'corrupt') await fixture.corruptTrust(key.groupID)
         if (damage === 'empty-spent') await fixture.corruptTrust(key.groupID, 'empty-spent')
         const before = await fixture.inspectRows()
+        const beforeState = await fixture.device.groups.loadState(key)
         await expect(
           fixture.registry.seed(fresh, {
             replace: true,
             packageUse: { sourceID: 'source', ref: 'fresh', kind: 'ordinary' },
           }),
-        ).rejects.toMatchObject({ name: 'SeedAdmissionRefusedError', reason: 'unavailable' })
-        expect(await fixture.inspectRows()).toEqual(before)
+        ).rejects.toMatchObject(
+          damage === 'empty-spent'
+            ? { name: 'SpentSetCorruptError' }
+            : { name: 'SeedAdmissionRefusedError', reason: 'unavailable' },
+        )
+        if (damage === 'empty-spent') {
+          expect(await fixture.safety().status(key)).toMatchObject({
+            condition: 'spent-set-corrupt',
+          })
+          expect((await fixture.inspectRows()).trust).toEqual(before.trust)
+          const afterState = await fixture.device.groups.loadState(key)
+          expect(afterState).toEqual({ ...beforeState, version: afterState?.version })
+        } else expect(await fixture.inspectRows()).toEqual(before)
       },
     )
 

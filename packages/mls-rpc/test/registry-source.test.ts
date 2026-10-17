@@ -14,6 +14,7 @@ import {
   type LegacyRegistryRecoverySource,
   type RegistryRecoverySource,
   type ResyncProof,
+  SpentSetCorruptError,
 } from '../src/index.js'
 import type { GroupRecoveryTrust } from '../src/persistence-types.js'
 import { recoveryTrustDigest } from '../src/recovery-trust-digest.js'
@@ -254,7 +255,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           },
         }))
         await expect(registry(fixture).recoverySource(groupID)).rejects.toBeInstanceOf(
-          GroupUnavailableError,
+          damage === 'empty-spent' ? SpentSetCorruptError : GroupUnavailableError,
         )
       } finally {
         await fixture.close()

@@ -35,6 +35,7 @@ export type ConformanceRecoveryPendingReason =
 export type ConformanceRegistryPeerStatus =
   | { kind: 'starting' | 'running' | 'switching' | 'disposed' }
   | { kind: 'pending'; reason?: ConformanceRecoveryPendingReason }
+  | { kind: 'spent-set-corrupt'; eventID: string }
   | {
       kind: 'not-member'
       eventID: string

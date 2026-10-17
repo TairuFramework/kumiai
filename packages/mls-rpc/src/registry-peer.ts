@@ -31,6 +31,7 @@ import {
   RegistryResyncRefusedError,
   RegistryRetireHookError,
   RegistrySourceMovedError,
+  SpentSetCorruptError,
 } from './persistence-errors.js'
 import type { GroupKey, GroupTransaction } from './persistence-types.js'
 import {
@@ -89,6 +90,7 @@ export type RegistryPeerOptions = {
 export type RegistryPeerStatus =
   | { kind: 'starting' | 'running' | 'switching' | 'disposed' }
   | { kind: 'pending'; reason?: RecoveryPendingReason }
+  | { kind: 'spent-set-corrupt'; eventID: string }
   | {
       kind: 'not-member'
       eventID: string
@@ -231,19 +233,25 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
   let conditionTimer: ReturnType<typeof setTimeout> | undefined
   let pendingReason: RecoveryPendingReason | undefined
   async function refreshCondition(): Promise<void> {
-    const { observed, deadlines } = await capability.entry.read(key.groupID, async (reads) => {
-      const records = await reads.checkpoints()
-      return {
-        observed: groupCondition(records, key),
-        deadlines: records.flatMap((row) =>
-          row.kind === 'condition' &&
-          row.key.incarnation === key.incarnation &&
-          row.notification?.emitted === false
-            ? [row.notification.emitAt]
-            : [],
-        ),
-      }
-    })
+    const { observed, deadlines, hardHeld } = await capability.entry.read(
+      key.groupID,
+      async (reads) => {
+        const records = await reads.checkpoints()
+        return {
+          observed: groupCondition(records, key),
+          hardHeld:
+            (await reads.control(key.incarnation)).forkHalt !== null ||
+            capability.held(key) === 'fork-halted',
+          deadlines: records.flatMap((row) =>
+            row.kind === 'condition' &&
+            row.key.incarnation === key.incarnation &&
+            row.notification?.emitted === false
+              ? [row.notification.emitAt]
+              : [],
+          ),
+        }
+      },
+    )
     if (disposed || status.kind === 'failed') return
     if (conditionTimer !== undefined) clearTimeout(conditionTimer)
     conditionTimer = undefined
@@ -262,6 +270,10 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
         },
         Math.max(0, Math.min(2147483647, Math.min(...deadlines) - Date.now())),
       )
+    if (!hardHeld && observed.condition === 'spent-set-corrupt' && observed.eventID !== undefined) {
+      status = { kind: 'spent-set-corrupt', eventID: observed.eventID }
+      return
+    }
     if (
       observed.condition === 'not-member' &&
       observed.evidence !== null &&
@@ -280,7 +292,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
     if (event.phase === 'failed' && event.pendingReason !== undefined) {
       pendingReason = event.pendingReason
       if (status.kind === 'not-member') status = { ...status, pendingReason }
-      else if (!disposed && status.kind !== 'failed')
+      else if (!disposed && status.kind !== 'failed' && status.kind !== 'spent-set-corrupt')
         status = { kind: 'pending', reason: pendingReason }
     }
     return params.onRecovery?.(event)
@@ -577,6 +589,11 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
           if (record.trigger !== 'automatic')
             throw new GroupStateConflictError('Manual recovery requires host activation')
         }
+        if (control.forkHalt === null && capability.held(key) === 'spent-set-corrupt') {
+          await capability.persistGroupCondition(key, 'spent-set-corrupt', null)
+          await refreshCondition()
+          return
+        }
         if (
           capability.held(key) !== null ||
           controlSafetyHeld(control) !== null ||
@@ -639,6 +656,12 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
         status = { kind: 'pending' }
       } catch (error) {
         if (disposed) return
+        if (error instanceof SpentSetCorruptError) {
+          await capability.persistGroupCondition(key, 'spent-set-corrupt', null)
+          if (capability.held(key) === 'fork-halted') throw error
+          await refreshCondition()
+          return
+        }
         if (error instanceof RetainedTrustUnavailableError)
           await registry.recoverySource(key.groupID)
         if (error instanceof RegistrySourceMovedError && backoff === 100) {

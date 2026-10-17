@@ -328,6 +328,35 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
 ): void {
   describe(`Group storage conformance -- ${params.label}`, () => {
     for (const ownership of ['supplied', 'absent'] as const) {
+      test(`ordinary stores cannot fabricate spent corruption (${ownership} ownership context)`, async () => {
+        const fixture = await params.createFixture(groupID, {
+          ownershipContext: ownership === 'supplied' ? params.ownershipContext?.() : undefined,
+        })
+        try {
+          const groups = fixture.ports.device.groups
+          await storageSeed(fixture.ports)
+          const before = await fixture.inspectRows()
+          const id = JSON.stringify(['spent-set-corrupt', groupID, 1])
+          await expect(
+            groups.transition(
+              await storageChange(groups, groupID, 'fabricated-corruption'),
+              async (stores) => {
+                await stores.checkpoints.put({
+                  kind: 'condition',
+                  id,
+                  key,
+                  active: true,
+                  sealedProof: null,
+                  event: { ...key, id, kind: 'spent-set-corrupt', detectedAt: 1, evidence: null },
+                })
+              },
+            ),
+          ).rejects.toMatchObject({ name: 'GroupStateConflictError' })
+          expect(await fixture.inspectRows()).toEqual(before)
+        } finally {
+          await fixture.close()
+        }
+      })
       test(`branch journal survives acknowledgement and counts only accepted occurrences (${ownership} ownership context)`, async () => {
         const fixture = await params.createFixture(groupID, {
           ownershipContext: ownership === 'supplied' ? params.ownershipContext?.() : undefined,

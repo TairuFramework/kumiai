@@ -114,7 +114,11 @@ test('serializes trust registries through the canonical registry codec', async (
     controllers: new Map([['did:key:controller', { genFloor: 0, timeFloor: 0, recordedLog: [] }]]),
   }
   const trustAddress = { ...address, incarnation: null, namespace: 'trust', recordID: 'current' }
-  const value = { registry, ledger: ['token'] }
+  const value = {
+    registry,
+    ledger: ['token'],
+    spentEpochAuthenticators: [new Uint8Array(32).fill(7)],
+  }
   const bytes = await sealRecord(codec, trustAddress, value)
   expect(await openRecord(codec, trustAddress, bytes)).toEqual(value)
   expect(decodeStoredValue(await codec.open(bytes, recordAAD(trustAddress)))).toMatchObject({

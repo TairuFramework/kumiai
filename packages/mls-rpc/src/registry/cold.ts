@@ -185,7 +185,7 @@ export async function loadValidatedGroup(
 
 export function admissionFor(value: ValidatedGroupState, control: ControlSnapshot): SendAdmission {
   const epoch = value.snapshot.epoch
-  const safety = controlSafetyHeld(control)
+  const safety = controlSafetyHeld(control, value.snapshot.condition)
   if (safety !== null) return { epoch, admissible: false, reason: safety }
   if (value.record.terminal || !value.ownMember)
     return { epoch, admissible: false, reason: 'terminal' }

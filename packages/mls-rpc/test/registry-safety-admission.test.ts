@@ -82,7 +82,18 @@ function expectedRecovery(key: GroupKey) {
     reason: 'trust-unreadable',
   }
 }
-async function durableDiagnosis(fixture: RegistryFixture, key: GroupKey) {
+async function durableDiagnosis(fixture: RegistryFixture, key: GroupKey, spentCorrupt = false) {
+  if (spentCorrupt) {
+    expect(await fixture.safety().status(key)).toMatchObject({
+      hold: 'spent-set-corrupt',
+      condition: 'spent-set-corrupt',
+    })
+    expect((await fixture.device.groups.ports(key).control.load()).recoveryUnavailable).toBeNull()
+    expect(await fixture.safety().events(key)).toEqual([
+      expect.objectContaining({ ...key, kind: 'spent-set-corrupt', evidence: null }),
+    ])
+    return
+  }
   const control = await fixture.device.groups.ports(key).control.load()
   expect(control).toMatchObject({
     recoveryUnavailable: expectedRecovery(key),
@@ -482,8 +493,13 @@ for (const mode of ['real-mls', 'double'] as const) {
               replace: true,
               packageUse: { sourceID: 'source', ref: 'fresh', kind: 'ordinary' },
             }),
-          ).rejects.toMatchObject({ name: 'SeedAdmissionRefusedError', reason: 'unavailable' })
-          expect(await fixture.inspectRows()).toEqual(before)
+          ).rejects.toMatchObject(
+            damage === 'empty-spent'
+              ? { name: 'SpentSetCorruptError' }
+              : { name: 'SeedAdmissionRefusedError', reason: 'unavailable' },
+          )
+          if (damage === 'empty-spent') await durableDiagnosis(fixture, key, true)
+          else expect(await fixture.inspectRows()).toEqual(before)
         } finally {
           await fixture.close()
         }
@@ -895,18 +911,21 @@ for (const mode of ['real-mls', 'double'] as const) {
           if (damage === 'missing') await registryFixtureRemoveTrust(fixture, groupID)
           if (damage === 'corrupt' || damage === 'both-corrupt') await fixture.corruptTrust(groupID)
           if (damage === 'both-corrupt') await fixture.corruptState(key)
-          await expect(owner.recoverySource(groupID)).rejects.toMatchObject({
-            name: 'GroupUnavailableError',
-            reason: 'recovery-unavailable',
-          })
-          await durableDiagnosis(fixture, key)
+          await expect(owner.recoverySource(groupID)).rejects.toMatchObject(
+            damage === 'empty-spent'
+              ? { name: 'SpentSetCorruptError' }
+              : { name: 'GroupUnavailableError', reason: 'recovery-unavailable' },
+          )
+          await durableDiagnosis(fixture, key, damage === 'empty-spent')
           const rows = await fixture.inspectRows()
-          await expect(owner.recoverySource(groupID)).rejects.toMatchObject({
-            reason: 'recovery-unavailable',
-          })
+          await expect(owner.recoverySource(groupID)).rejects.toMatchObject(
+            damage === 'empty-spent'
+              ? { name: 'SpentSetCorruptError' }
+              : { reason: 'recovery-unavailable' },
+          )
           expect(await fixture.inspectRows()).toEqual(rows)
           reopened = await fixture.reopen()
-          await durableDiagnosis(reopened, key)
+          await durableDiagnosis(reopened, key, damage === 'empty-spent')
         } finally {
           await reopened?.close()
           await fixture.close()
@@ -1036,8 +1055,11 @@ for (const mode of ['real-mls', 'double'] as const) {
               position: '1',
               digest: 'remote',
             }),
-          ).rejects.toMatchObject({ name: 'GroupSafetyHeldError', reason: 'recovery-unavailable' })
-          await durableDiagnosis(fixture, key)
+          ).rejects.toMatchObject({
+            name: 'GroupSafetyHeldError',
+            reason: damage === 'empty-spent' ? 'spent-set-corrupt' : 'recovery-unavailable',
+          })
+          await durableDiagnosis(fixture, key, damage === 'empty-spent')
         } finally {
           await fixture.close()
         }

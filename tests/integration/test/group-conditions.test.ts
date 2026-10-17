@@ -1217,3 +1217,78 @@ test('clear app hold resumes interrupted recovery', async () => {
   await f.alice.fixture.safety().clearHold(f.alice.key)
   await expect.poll(() => create.mock.calls.length, { timeout: 5000 }).toBeGreaterThan(1)
 })
+
+test.each(['unreadable', 'empty-spent'] as const)(
+  'legacy holds and envelope loss retain exact diagnoses: %s',
+  async (damage) => {
+    const f = await createCapturedRecoveryFixture()
+    cleanup.push(() => f.close())
+    await f.alice.fixture.installRows({
+      key: f.alice.key,
+      control: {
+        forkHalt: {
+          eventID: forkEventID(f.alice.key),
+          detectedAt: 42,
+          evidence: { kind: 'unexplained-own-commit', epoch: 0, position: '1', digest: 'legacy' },
+        },
+      },
+    })
+    await f.alice.fixture.corruptTrust(f.alice.key.groupID, damage)
+    await expect(
+      f.alice.fixture.registry.recoverySource(f.alice.key.groupID),
+    ).rejects.toMatchObject(
+      damage === 'empty-spent'
+        ? { name: 'SpentSetCorruptError' }
+        : { reason: 'recovery-unavailable' },
+    )
+    expect(await f.alice.fixture.safety().status(f.alice.key)).toMatchObject({
+      hold: 'fork-halted',
+      condition: damage === 'empty-spent' ? 'spent-set-corrupt' : null,
+    })
+    await f.alice.fixture.safety().clearHold(f.alice.key)
+    expect(await f.alice.fixture.safety().status(f.alice.key)).toMatchObject({
+      hold: 'fork-halted',
+      condition: damage === 'empty-spent' ? 'spent-set-corrupt' : null,
+    })
+    const rows = await f.alice.fixture.inspectRows()
+    expect(rows.trust?.size).toBe(1)
+  },
+)
+
+test.each(['empty-spent', 'missing-spent', 'malformed-spent'] as const)(
+  'spent corruption peer startup has a durable status: %s',
+  async (damage) => {
+    const { f } = await setup(false)
+    const fixture = f.local()
+    await fixture.corruptTrust(f.key.groupID, damage)
+    const created = vi.fn(async () => {
+      throw new Error('Corrupt state must never start a peer')
+    })
+    const owner = await createRegistryPeer({
+      registry: fixture.registry,
+      key: f.key,
+      target: { targetID: 'diagnostic-hub', topicID: 'diagnostic-commits' },
+      recovery: fixture.environment,
+      continuation: createRecoveryContinuationPort({
+        registry: fixture.registry,
+        persistence: fixture.device.groups,
+      }),
+      createMLS: created,
+      createPeer: created,
+    })
+    cleanup.push(async () => {
+      owner.dispose()
+      await owner.drained()
+    })
+    await owner.ready
+    expect(owner.status()).toMatchObject({ kind: 'spent-set-corrupt', eventID: expect.any(String) })
+    expect(owner.peer()).toBeNull()
+    expect(created).not.toHaveBeenCalled()
+    const event = (await fixture.safety().events(f.key)).find(
+      (event) => event.kind === 'spent-set-corrupt',
+    )
+    expect(event?.id).toBe(
+      'eventID' in owner.status() ? Reflect.get(owner.status(), 'eventID') : undefined,
+    )
+  },
+)

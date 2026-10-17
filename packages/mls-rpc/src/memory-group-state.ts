@@ -3,6 +3,7 @@ import type { StateMetadata } from './entry-capability.js'
 import { belongs, cloneValue, groupNamespaces } from './memory-rows.js'
 import type { OwnerAttempt, OwnerEntry, OwnerQueues, WriteTarget } from './owner-queue.js'
 import {
+  assertSurvivingSpentSet,
   decodeStoredValue,
   encodeStoredValue,
   openRecord,
@@ -477,6 +478,7 @@ export function createUnlockedGroupStateStores(params: {
   async function loadTrust(): Promise<GroupRecoveryTrust | null> {
     const value = await trustRow.load()
     if (value === null) return null
+    assertSurvivingSpentSet(value)
     assertTrustTransition(null, value)
     return copyTrust(value)
   }
