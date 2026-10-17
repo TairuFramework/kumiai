@@ -26,7 +26,7 @@ import {
 import { GroupSafetyHeldError, PeerDisposedError } from './errors.js'
 import type { BusHandlerMaps } from './handlers.js'
 import { notifyHost } from './host-notice.js'
-import type { HubMux } from './hub-mux.js'
+import { APP_OUTSTANDING_FETCHES_MAX, AppFetchBusyError, type HubMux } from './hub-mux.js'
 import { retentionOf } from './protocol.js'
 import { protocolTopic } from './topic.js'
 
@@ -448,10 +448,10 @@ export function createAppLane(params: AppLaneParams): AppLane {
     const controller = new AbortController()
     const { signal } = controller
     pulls.set(controller, anchor().epoch)
-    const deadline = Date.now() + APP_PULL_DEADLINE_MS
-    const timer = setTimeout(() => controller.abort(), APP_PULL_DEADLINE_MS)
+    let deadline: number | undefined
+    let timer: ReturnType<typeof setTimeout> | undefined
     const stopped = (): boolean => {
-      if (Date.now() >= deadline) controller.abort()
+      if (deadline != null && Date.now() >= deadline) controller.abort()
       return disposed || signal.aborted || safetyHold() !== null
     }
     let bytes = 0
@@ -492,82 +492,107 @@ export function createAppLane(params: AppLaneParams): AppLane {
         const departing: Array<PullTopic> = []
         return [...current, ...departing]
       })
-      const results = await Promise.allSettled(
-        topics.map(async (snapshot) => {
-          let topic = snapshot
-          for (let pages = 0; pages < APP_PULL_MAX_PAGES; pages++) {
-            if (stopped() || bytes >= APP_PULL_MAX_BYTES || topic.limit === 0) break
-            let result: HubFetchTopicResult
-            try {
-              result = await mux.fetchTopic({
-                topicID: topic.topicID,
-                ...(topic.fetched != null ? { after: topic.fetched } : {}),
-                limit: topic.limit,
-                signal,
-              })
-            } catch (error) {
-              if (signal.aborted || error instanceof InvalidLogPositionError) break
-              throw error
-            }
-            const next = await runAppLane(async () => {
-              if (stopped() || topic.generation !== segmentGeneration) return
-              const cursor = cursors.get(topic.name)
-              const frames = segment.get(topic.name)
-              if (
-                cursor?.topicID !== topic.topicID ||
-                frames == null ||
-                (cursor.fetched ?? cursor.position) !== topic.fetched ||
-                cursor.position !== topic.position
-              )
-                return
-              if (topic.fetched != null && result.gap) {
-                reportPrunedWindow({
-                  name: topic.name,
-                  topicID: topic.topicID,
-                  cursor: topic.fetched,
-                  oldest: result.oldest,
-                })
-              }
-              for (const message of result.messages) {
-                if (stopped() || frames.length >= APP_BUFFER_MAX_FRAMES) break
-                if (bytes + message.payload.byteLength > APP_PULL_MAX_BYTES) return
-                bytes += message.payload.byteLength
-                const position = asLogPosition(message.sequenceID)
-                cursor.fetched = position
-                if (cursor.accepted != null && compareLogPositions(position, cursor.accepted) <= 0)
-                  continue
-                const restored = pendingRecords.find(
-                  (record) =>
-                    record.frame.protocol === topic.name &&
-                    record.frame.topicID === topic.topicID &&
-                    record.frame.position === position &&
-                    record.frame.id === frameID(topic.topicID, message.payload),
-                )
-                takeAppFrame(
-                  frames,
-                  {
-                    position,
-                    ...(commitLaneCaughtUp() ? { caughtUpAt: now() } : {}),
-                    sealed:
-                      restored == null
-                        ? { state: 'sealed', bytes: message.payload }
-                        : { state: 'pending', id: restored.frame.id },
-                  },
-                  crypto.pending != null,
-                )
-                cursor.accepted = position
-              }
-              return {
-                ...topic,
-                fetched: cursor.fetched ?? cursor.position,
-                position: cursor.position,
-                limit: Math.min(APP_FETCH_LIMIT, APP_BUFFER_MAX_FRAMES - frames.length),
-              }
-            })
-            if (next == null || result.messages.length < topic.limit) break
-            topic = next
+      const queue = topics.map((topic) => ({ topic, pages: 0 }))
+      const fetchNext = async (): Promise<void> => {
+        while (queue.length > 0) {
+          const item = queue.shift()
+          if (item == null) return
+          const { topic, pages } = item
+          if (stopped() || bytes >= APP_PULL_MAX_BYTES) return
+          if (topic.limit === 0) continue
+          if (deadline == null) {
+            deadline = Date.now() + APP_PULL_DEADLINE_MS
+            timer = setTimeout(() => controller.abort(), APP_PULL_DEADLINE_MS)
           }
-        }),
+          let result: HubFetchTopicResult
+          try {
+            result = await mux.fetchTopic({
+              topicID: topic.topicID,
+              ...(topic.fetched != null ? { after: topic.fetched } : {}),
+              limit: topic.limit,
+              signal,
+            })
+          } catch (error) {
+            if (signal.aborted) return
+            if (error instanceof InvalidLogPositionError || error instanceof AppFetchBusyError)
+              continue
+            throw error
+          }
+          const next = await runAppLane(async () => {
+            if (stopped() || topic.generation !== segmentGeneration) return
+            const cursor = cursors.get(topic.name)
+            const frames = segment.get(topic.name)
+            if (
+              cursor?.topicID !== topic.topicID ||
+              frames == null ||
+              (cursor.fetched ?? cursor.position) !== topic.fetched ||
+              cursor.position !== topic.position
+            )
+              return
+            if (topic.fetched != null && result.gap) {
+              reportPrunedWindow({
+                name: topic.name,
+                topicID: topic.topicID,
+                cursor: topic.fetched,
+                oldest: result.oldest,
+              })
+            }
+            for (const message of result.messages) {
+              if (stopped() || frames.length >= APP_BUFFER_MAX_FRAMES) break
+              // A frame larger than an entire fresh budget cannot be legitimate.
+              const oversized = bytes === 0 && message.payload.byteLength > APP_PULL_MAX_BYTES
+              if (!oversized && bytes + message.payload.byteLength > APP_PULL_MAX_BYTES) return
+              if (!oversized) bytes += message.payload.byteLength
+              const position = asLogPosition(message.sequenceID)
+              const fetched = cursor.fetched ?? cursor.position
+              if (fetched == null || compareLogPositions(position, fetched) > 0) {
+                cursor.fetched = position
+              }
+              if (cursor.accepted != null && compareLogPositions(position, cursor.accepted) <= 0)
+                continue
+              const restored = oversized
+                ? undefined
+                : pendingRecords.find(
+                    (record) =>
+                      record.frame.protocol === topic.name &&
+                      record.frame.topicID === topic.topicID &&
+                      record.frame.position === position &&
+                      record.frame.id === frameID(topic.topicID, message.payload),
+                  )
+              takeAppFrame(
+                frames,
+                {
+                  position,
+                  ...(commitLaneCaughtUp() ? { caughtUpAt: now() } : {}),
+                  sealed: oversized
+                    ? { state: 'done' }
+                    : restored == null
+                      ? { state: 'sealed', bytes: message.payload }
+                      : { state: 'pending', id: restored.frame.id },
+                },
+                crypto.pending != null,
+              )
+              cursor.accepted = position
+            }
+            return {
+              ...topic,
+              fetched: cursor.fetched ?? cursor.position,
+              position: cursor.position,
+              limit: Math.min(APP_FETCH_LIMIT, APP_BUFFER_MAX_FRAMES - frames.length),
+            }
+          })
+          if (
+            next != null &&
+            result.messages.length >= topic.limit &&
+            pages + 1 < APP_PULL_MAX_PAGES
+          ) {
+            // Requeue one page at a time so busy topics cannot overtake unvisited topics.
+            queue.push({ topic: next, pages: pages + 1 })
+          }
+        }
+      }
+      const results = await Promise.allSettled(
+        Array.from({ length: Math.min(APP_OUTSTANDING_FETCHES_MAX, topics.length) }, fetchNext),
       )
       const failure = results.find((result) => result.status === 'rejected')
       if (failure?.status === 'rejected') throw failure.reason
@@ -751,15 +776,17 @@ export function createAppLane(params: AppLaneParams): AppLane {
         if (generation === segmentGeneration && !disposed) await deliver(generation)
       }).then(
         () => {
-          if (generation !== segmentGeneration) return
           retryScheduled = false
           retryBackoff = 1000
           if (retryRequested) retryDelivery()
         },
         () => {
-          if (generation !== segmentGeneration) return
           retryScheduled = false
           if (disposed || safetyHold() !== null) return
+          if (generation !== segmentGeneration) {
+            if (retryRequested) retryDelivery()
+            return
+          }
           retryTimer = setTimeout(() => {
             retryTimer = undefined
             retryDelivery()
@@ -1164,7 +1191,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       if (retryTimer != null) clearTimeout(retryTimer)
       retryTimer = undefined
       retryBackoff = 1000
-      retryScheduled = false
+      // Old queued work still occupies its slot. New hints request one replacement.
       retryRequested = false
       caughtUpTimes.clear()
       futureTimer = undefined

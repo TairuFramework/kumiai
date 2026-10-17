@@ -6,7 +6,7 @@ import { afterEach, describe, expect, onTestFinished, test, vi } from 'vitest'
 import { encodeAppAAD } from '../src/app-aad.js'
 import type * as AppLaneModule from '../src/app-lane.js'
 import { type AppLaneParams, createAppLane } from '../src/app-lane.js'
-import type { PendingAppFrame } from '../src/crypto.js'
+import { FrameEpochError, type PendingAppFrame } from '../src/crypto.js'
 import { adaptBusHandlers } from '../src/handlers.js'
 import { createHubMux } from '../src/hub-mux.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
@@ -104,7 +104,9 @@ function fixture(
     appliedEpoch: () => reader.epoch(),
     localDID: 'bob',
     protocols: options.protocols ?? { chat },
-    eventHandlers: new Map([['chat', events]]),
+    eventHandlers: new Map(
+      Object.keys(options.protocols ?? { chat }).map((name) => [name, events]),
+    ),
     retentionSeconds: 60,
     appCursorStore: cursor,
     onAppWindowPruned: pruned,
@@ -126,10 +128,10 @@ function fixture(
     mux.dispose()
   })
   const sender = createFakeCrypto({ epoch: 1, localDID: 'alice' })
-  const sealed = async (text: string, epoch = 1) =>
+  const sealed = async (text: string, epoch = 1, topic = topicID) =>
     (epoch === 1 ? sender : createFakeCrypto({ epoch, localDID: 'alice' })).wrap(
       encodeEventFrame('chat/posted', { text }),
-      { aad: encodeAppAAD({ topicID, intent: 'log' }) },
+      { aad: encodeAppAAD({ topicID: topic, intent: 'log' }) },
     )
   return { lane, reader, rows, complete, seen, cursor, hub, mux, pruned, drains, sealed }
 }
@@ -139,6 +141,8 @@ function collections() {
   const arrays: Array<Array<unknown>> = []
   const notices: Array<Set<unknown>> = []
   const noticeMaps: Array<Map<unknown, unknown>> = []
+  const pullMaps = new Set<Map<unknown, unknown>>()
+  let peakControllers = 0
   const set = Map.prototype.set
   vi.spyOn(Map.prototype, 'set').mockImplementation(function (
     this: Map<unknown, unknown>,
@@ -150,7 +154,12 @@ function collections() {
       notices.push(value)
       noticeMaps.push(this)
     }
-    return set.call(this, key, value)
+    const result = set.call(this, key, value)
+    if (key instanceof AbortController) {
+      pullMaps.add(this)
+      peakControllers = Math.max(peakControllers, this.size)
+    }
+    return result
   })
   return {
     check() {
@@ -160,6 +169,10 @@ function collections() {
     arrays,
     notices,
     noticeMaps,
+    pullMaps,
+    get peakControllers() {
+      return peakControllers
+    },
   }
 }
 
@@ -172,14 +185,22 @@ describe('app pulls against a faulty hub', () => {
     const capturedLane = captured.at(-1)
     if (capturedLane == null) throw new Error('missing peer lane')
     const { lane, params } = capturedLane
+    const at = params.anchor()
+    const appTopic = protocolTopic(at.secret, at.epoch, 'chat')
     await lane.deliver()
     hub.detach('bob')
     const observed = collections()
     let calls = 0
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
     const fetch = hub.fetchTopic.bind(hub)
     vi.spyOn(hub, 'fetchTopic').mockImplementation(async (params) => {
-      if (params.topicID !== topicID) return fetch(params)
+      if (params.topicID !== appTopic) return fetch(params)
       calls++
+      if (calls === 1) {
+        entered.resolve()
+        await release.promise
+      }
       if (calls > 20) return empty()
       return page(Array.from({ length: 100 }, (_, i) => entry(position((calls - 1) * 100 + i + 1))))
     })
@@ -187,16 +208,121 @@ describe('app pulls against a faulty hub', () => {
     const muxFetch = params.mux.fetchTopic
     vi.spyOn(params.mux, 'fetchTopic').mockImplementation((request) => {
       const signal = (request as { signal?: AbortSignal }).signal
-      if (request.topicID === topicID) perPull.set(signal, (perPull.get(signal) ?? 0) + 1)
+      if (request.topicID === appTopic) perPull.set(signal, (perPull.get(signal) ?? 0) + 1)
       return muxFetch(request)
     })
     const delivery = lane.deliver()
-    await bob.peer.commit(buildLedgerCommit(bob, []))
-    expect(bob.mls.epoch()).toBe(2)
+    let finished = false
+    void delivery.then(() => {
+      finished = true
+    })
+    try {
+      await entered.promise
+      await bob.peer.commit(buildLedgerCommit(bob, []))
+      expect(bob.mls.epoch()).toBe(2)
+      expect(finished).toBe(false)
+    } finally {
+      release.resolve()
+    }
     await delivery
+    expect(perPull.size).toBeGreaterThan(0)
+    expect(Math.max(...perPull.values())).toBe(4)
     for (const count of perPull.values()) expect(count).toBeLessThanOrEqual(4)
     observed.check()
   })
+
+  test('a fair pull fetches every populated topic before fetching another page', async () => {
+    const f = fixture({ protocols: { chat, other: chat, third: chat, fourth: chat } })
+    const topics = ['chat', 'other', 'third', 'fourth'].map((name) =>
+      protocolTopic(anchor.secret, 1, name),
+    )
+    const fetched: Array<string> = []
+    vi.spyOn(f.hub, 'fetchTopic').mockImplementation(async ({ topicID: topic, after }) => {
+      fetched.push(topic)
+      if (after != null) return empty()
+      const messages = Array.from({ length: 100 }, (_, i) => entry(position(i + 1)))
+      messages[0] = entry(position(1), await f.sealed(topic, 1, topic))
+      return page(messages)
+    })
+    await f.lane.deliver()
+    expect(new Set(f.seen)).toEqual(new Set(topics))
+    expect(new Set(fetched.slice(0, 4))).toEqual(new Set(topics))
+    for (const topic of topics) expect(f.cursor.stored(topic)).toBe(position(100))
+  })
+
+  test('a busy mux rejects distinctly and retries after underlying fetches settle', async () => {
+    const f = fixture()
+    const withheld = Promise.withResolvers<HubFetchTopicResult>()
+    const fetch = vi.spyOn(f.hub, 'fetchTopic').mockReturnValue(withheld.promise)
+    const controller = new AbortController()
+    const request = { topicID, signal: controller.signal, limit: 100 }
+    const first = f.mux.fetchTopic(request)
+    const second = f.mux.fetchTopic(request)
+    try {
+      await expect(f.mux.fetchTopic(request)).rejects.toMatchObject({ name: 'AppFetchBusyError' })
+      expect(fetch).toHaveBeenCalledTimes(2)
+    } finally {
+      withheld.resolve(empty())
+      await Promise.all([first, second])
+    }
+    await expect(f.mux.fetchTopic(request)).resolves.toEqual(empty())
+    expect(fetch).toHaveBeenCalledTimes(3)
+  })
+
+  test('oversized pages inspect only the requested prefix before validating entries', async () => {
+    const f = fixture()
+    let inspected = 0
+    const duplicate = entry('1', new Uint8Array())
+    const messages = new Proxy(
+      Array.from({ length: 100_000 }, () => duplicate),
+      {
+        get(target, key, receiver) {
+          if (typeof key === 'string' && /^\d+$/.test(key)) inspected++
+          return Reflect.get(target, key, receiver)
+        },
+      },
+    )
+    messages[99_999] = entry('x'.repeat(65), new Uint8Array())
+    vi.spyOn(f.hub, 'fetchTopic').mockResolvedValue({
+      messages,
+      head: '1',
+      oldest: '1',
+      gap: false,
+    })
+    const result = f.mux.fetchTopic({ topicID, limit: 100, signal: new AbortController().signal })
+    await expect(result).resolves.toMatchObject({
+      messages: Array.from({ length: 100 }, () => duplicate),
+    })
+    expect(inspected).toBe(100)
+  })
+
+  test('a first entry larger than the pull byte budget is consumed without wedging the topic', async () => {
+    const f = fixture()
+    vi.spyOn(f.hub, 'fetchTopic').mockResolvedValue(
+      page([
+        entry('1', new Uint8Array(4 * 1024 * 1024 + 1)),
+        entry('2', await f.sealed('after oversized')),
+      ]),
+    )
+    await f.lane.deliver()
+    expect(f.seen).toEqual(['after oversized'])
+    expect(f.cursor.stored(topicID)).toBe('2')
+  })
+
+  test.each([null, '3'])(
+    'replayed entries never move the next transport cursor backwards from %s',
+    async (stored) => {
+      const f = fixture()
+      if (stored != null) await f.cursor.save(topicID, stored)
+      const fetch = vi
+        .spyOn(f.hub, 'fetchTopic')
+        .mockResolvedValueOnce(page([entry('2'), ...Array.from({ length: 99 }, () => entry('1'))]))
+        .mockResolvedValue(empty())
+      await f.lane.deliver()
+      expect(fetch.mock.calls[1]?.[0].after).toBe(stored ?? '2')
+      expect(f.cursor.stored(topicID)).toBe(stored ?? '2')
+    },
+  )
 
   test('a full future-frame buffer stops pulling', async () => {
     const f = fixture()
@@ -294,6 +420,88 @@ describe('app pulls against a faulty hub', () => {
     }
   })
 
+  test('the fetch deadline starts after the snapshot reservation finishes', async () => {
+    vi.useFakeTimers()
+    const f = fixture()
+    const loaded = Promise.withResolvers<string | null>()
+    const withheld = Promise.withResolvers<HubFetchTopicResult>()
+    vi.spyOn(f.cursor, 'load').mockReturnValueOnce(loaded.promise)
+    const fetch = vi.spyOn(f.hub, 'fetchTopic').mockReturnValue(withheld.promise)
+    let settled = false
+    const task = f.lane.deliver().then(() => {
+      settled = true
+    })
+    try {
+      await flush()
+      await vi.advanceTimersByTimeAsync(15_000)
+      expect(fetch).not.toHaveBeenCalled()
+      loaded.resolve(null)
+      await flush()
+      expect(fetch).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(9_999)
+      expect(settled).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(settled).toBe(true)
+    } finally {
+      loaded.resolve(null)
+      withheld.resolve(empty())
+      await task
+    }
+  })
+
+  test('resets coalesce ahead-hint retries behind a hanging handler across generations', async () => {
+    const release = Promise.withResolvers<void>()
+    const entered = Promise.withResolvers<void>()
+    const f = fixture({
+      handler: () => {
+        entered.resolve()
+        return release.promise
+      },
+    })
+    vi.spyOn(f.hub, 'fetchTopic')
+      .mockResolvedValueOnce(page([entry('1', await f.sealed('held'))]))
+      .mockResolvedValue(empty())
+    const observed = collections()
+    f.lane.kick()
+    await entered.promise
+    const then = Promise.prototype.then
+    let continuations = 0
+    Object.defineProperty(Promise.prototype, 'then', {
+      configurable: true,
+      writable: true,
+      value: function (
+        this: Promise<unknown>,
+        fulfilled: Parameters<Promise<unknown>['then']>[0],
+        rejected: Parameters<Promise<unknown>['then']>[1],
+      ) {
+        continuations++
+        return then.call(this, fulfilled, rejected)
+      },
+    })
+    try {
+      for (let i = 0; i < 50; i++) {
+        f.lane.reset()
+        f.lane.note('chat', topicID, entry(position(i + 2)), new FrameEpochError(2, 1))
+        await flush()
+      }
+      Object.defineProperty(Promise.prototype, 'then', { value: then })
+      expect(f.drains.starts).toBe(2)
+      expect(f.drains.peak).toBeLessThanOrEqual(2)
+      expect(observed.pullMaps.size).toBeGreaterThan(0)
+      expect(observed.peakControllers).toBeGreaterThan(0)
+      expect(observed.peakControllers).toBeLessThanOrEqual(2)
+      for (const pulls of observed.pullMaps) expect(pulls.size).toBeLessThanOrEqual(2)
+      expect(continuations).toBeGreaterThan(0)
+      expect(continuations).toBeLessThanOrEqual(20)
+    } finally {
+      Object.defineProperty(Promise.prototype, 'then', { value: then })
+      release.resolve()
+    }
+    await vi.waitFor(() => expect(f.drains.pending).toBe(0))
+    expect(f.drains.starts).toBe(3)
+    for (const pulls of observed.pullMaps) expect(pulls.size).toBe(0)
+  })
+
   test('repeated deadlines keep outstanding fetches bounded', async () => {
     vi.useFakeTimers()
     const f = fixture()
@@ -353,20 +561,47 @@ describe('app pulls against a faulty hub', () => {
     try {
       await entered.promise
       for (let i = 0; i < 10_000; i++) {
-        f.lane.note('chat', topicID, entry(position(i + 2)), undefined)
+        f.lane.note('chat', topicID, entry(position(i + 2)), new FrameEpochError(2, 1))
         f.lane.kick()
       }
       await flush()
       observed.check()
       expect(observed.arrays.some((values) => values.length === 1_000)).toBe(true)
-      expect(f.drains.pending).toBeLessThanOrEqual(2)
-      expect(f.drains.peak).toBeLessThanOrEqual(2)
+      expect(f.drains.pending).toBe(2)
+      expect(f.drains.peak).toBe(2)
       expect(peak).toBeLessThanOrEqual(2)
     } finally {
       release.resolve()
     }
     await vi.waitFor(() => expect(f.drains.pending).toBe(0))
-    expect(f.drains.starts).toBeLessThanOrEqual(2)
+    expect(f.drains.starts).toBeGreaterThan(1)
+    vi.useFakeTimers()
+    const withheld = Promise.withResolvers<void>()
+    const concurrentFetch = vi.spyOn(f.hub, 'fetchTopic').mockImplementation(async () => {
+      outstanding++
+      peak = Math.max(peak, outstanding)
+      try {
+        await withheld.promise
+        return empty()
+      } finally {
+        outstanding--
+      }
+    })
+    concurrentFetch.mockClear()
+    const deliveries = Array.from({ length: 20 }, () => f.lane.deliver())
+    try {
+      await flush()
+      expect(concurrentFetch).toHaveBeenCalledTimes(2)
+      expect(outstanding).toBe(2)
+      expect(peak).toBe(2)
+      await vi.advanceTimersByTimeAsync(10_000)
+      await Promise.all(deliveries)
+    } finally {
+      withheld.resolve()
+      await Promise.all(deliveries)
+      vi.useRealTimers()
+    }
+    concurrentFetch.mockImplementation(async () => page([entry(position(sequence++))], true))
     for (let i = 0; i < 200; i++) {
       await f.lane.deliver()
       observed.check()

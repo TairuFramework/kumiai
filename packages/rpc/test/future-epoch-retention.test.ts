@@ -659,7 +659,7 @@ describe('caught-up future occurrence bounds', () => {
   })
 
   test.each(['resolve', 'reject'])(
-    'new segment retries proceed while an old queued drain awaits %s',
+    'new segment retries coalesce until an old queued drain settles with %s',
     async (outcome) => {
       const release = Promise.withResolvers<void>()
       let scheduled = 0
@@ -682,9 +682,12 @@ describe('caught-up future occurrence bounds', () => {
       try {
         f.lane.retryDelivery()
         await vi.advanceTimersByTimeAsync(0)
-        expect(f.fetch.mock.calls.length).toBe(fetches + 1)
+        expect(f.fetch.mock.calls.length).toBe(fetches)
+        expect(scheduled).toBe(1)
         release.resolve()
         await vi.advanceTimersByTimeAsync(0)
+        expect(f.fetch.mock.calls.length).toBe(fetches + 1)
+        expect(scheduled).toBe(2)
         expect(vi.getTimerCount()).toBe(1)
         await vi.advanceTimersByTimeAsync(30_000)
         expect(f.cursor.stored(topicID)).toBe('000000000001')

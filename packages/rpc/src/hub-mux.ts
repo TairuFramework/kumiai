@@ -144,6 +144,10 @@ export type MuxPublishParams = {
 
 export const APP_OUTSTANDING_FETCHES_MAX = 2
 
+export class AppFetchBusyError extends Error {
+  override name = 'AppFetchBusyError'
+}
+
 export type MuxFetchTopicParams = {
   topicID: string
   /** Exclusive cursor: entries after this log position. Absent: from the oldest retained. */
@@ -883,7 +887,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
     signal?.throwIfAborted()
     // Only cancellable app pulls consume these slots. Commit fetches remain independent.
     if (signal != null && outstandingAppFetches >= APP_OUTSTANDING_FETCHES_MAX) {
-      return { messages: [], head: null, oldest: null, gap: false }
+      throw new AppFetchBusyError('app fetch slots are occupied')
     }
     const request = (async () => {
       if (signal != null) outstandingAppFetches += 1
@@ -916,10 +920,12 @@ export function createHubMux(params: HubMuxParams): HubMux {
     } finally {
       if (abort != null) signal?.removeEventListener('abort', abort)
     }
-    for (const message of result.messages) assertLogPosition(message.sequenceID)
+    // A hub may ignore the requested limit. Bound inspection before validating entries.
+    const messages = params.limit == null ? result.messages : result.messages.slice(0, params.limit)
+    for (const message of messages) assertLogPosition(message.sequenceID)
     if (result.head !== null) assertLogPosition(result.head)
     if (result.oldest !== null) assertLogPosition(result.oldest)
-    return result
+    return { ...result, messages }
   }
 
   if (!params.deferredStart) start()
