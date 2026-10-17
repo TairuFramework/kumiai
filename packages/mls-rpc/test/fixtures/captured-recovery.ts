@@ -349,13 +349,16 @@ export async function createRosterAbsenceRealFixture(
       })
     }
     const earlier = await restore(s.earlierGroup)
+    const current = await restore(s.responder.handle)
     if (scenario === 'wrong-key') {
       const index = earlier.findMemberLeafIndex(s.requester.identity.id)
       const leaf = index === undefined ? undefined : earlier.state.ratchetTree[index * 2]
       if (leaf?.nodeType !== 1) throw new Error('Missing historical requester leaf')
       leaf.leaf.signaturePublicKey = randomIdentity().publicKey
+      const retained = current.state.historicalReceiverData.get(BigInt(earlier.epoch))
+      if (retained === undefined) throw new Error('Missing historical requester epoch')
+      retained.ratchetTree = structuredClone(earlier.state.ratchetTree)
     }
-    const current = await restore(s.responder.handle)
     const key = await fixture.registry.seed(await restore(s.genesis), { packageUse: null })
     async function install(handle: typeof current) {
       const previous = await fixture.device.groups.loadState(key)

@@ -25,6 +25,56 @@ for (const mode of ['real-mls', 'double'] as const) {
     },
     { cacheAtCurrentGeneration, retainedTupleChanged },
   )
+
+  describe(`installed state guards -- ${mode}`, () => {
+    for (const installation of ['first installation', 'new incarnation'] as const) {
+      for (const location of ['current', 'retained'] as const) {
+        test.each(['handshake', 'application'] as const)(
+          `${installation} refuses a skipped %s key at the generation in the ${location} tree`,
+          async (kind) => {
+            const seed = await makeStorageSeed({
+              id: 'installed-skipped-index',
+              incarnation: 1,
+              epoch: 1,
+              mode,
+            })
+            const state =
+              seed.state.state === null ? undefined : decodeClientState(seed.state.state)
+            if (state === undefined) throw new Error('Missing seed state')
+            let handle = await restoreGroup({
+              state,
+              credential: seed.state.credential,
+              ledgerEntries: seed.state.ledger,
+            })
+            await handle.encrypt(new Uint8Array([1]))
+            handle = (await commitKeyRotation(handle)).newGroup
+            await handle.encrypt(new Uint8Array([2]))
+            const previous = installation === 'first installation' ? null : seed.state
+            const candidate = () => {
+              return {
+                ...seed.state,
+                incarnation: installation === 'first installation' ? 1 : 2,
+                epoch: Number(handle.epoch),
+                epochAuthenticator: handle.state.keySchedule.epochAuthenticator.slice(),
+                state: encodeClientState(handle.state),
+              }
+            }
+            expect(() => assertStateTransition(previous, candidate(), seed.trust)).not.toThrow()
+            const tree =
+              location === 'current'
+                ? handle.state.secretTree
+                : handle.state.historicalReceiverData.get(1n)?.secretTree
+            const ratchet = tree?.leafNodes[0]?.[kind]
+            if (ratchet === undefined) throw new Error('Missing ratchet')
+            ratchet.unusedGenerations[ratchet.generation] = ratchet.secret.slice()
+            expect(() => assertStateTransition(previous, candidate(), seed.trust)).toThrow(
+              'Invalid skipped-key index',
+            )
+          },
+        )
+      }
+    }
+  })
 }
 
 test('senderHWM reads the own node index', async () => {

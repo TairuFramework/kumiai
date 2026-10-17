@@ -49,8 +49,8 @@ function isDescendant(node: number, ancestor: number): boolean {
   return node !== ancestor && Math.abs(node - ancestor) < radius
 }
 
-function assertTreeProgress(previous: SecretTree | undefined, next: SecretTree): void {
-  for (const node of Object.values(next.leafNodes)) {
+function assertSkippedKeyIndices(tree: SecretTree): void {
+  for (const node of Object.values(tree.leafNodes)) {
     for (const kind of ['handshake', 'application'] as const) {
       const ratchet = node[kind]
       for (const key of Object.keys(ratchet.unusedGenerations)) {
@@ -62,6 +62,9 @@ function assertTreeProgress(previous: SecretTree | undefined, next: SecretTree):
       }
     }
   }
+}
+
+function assertTreeProgress(previous: SecretTree | undefined, next: SecretTree): void {
   if (previous === undefined) return
   requireCondition(next.leafWidth === previous.leafWidth, 'Secret tree width changed')
   const expanded = Object.keys(previous.intermediateNodes)
@@ -120,10 +123,7 @@ function assertReceiveProgress(previous: ClientState, next: ClientState): void {
   )
   for (const [epoch, receiver] of next.historicalReceiverData) {
     requireCondition(epoch < next.groupContext.epoch, 'Invalid retained epoch')
-    if (epoch > previousEpoch) {
-      assertTreeProgress(undefined, receiver.secretTree)
-      continue
-    }
+    if (epoch > previousEpoch) continue
     if (epoch === previousEpoch) {
       assertRetainedTuple(
         previous,
@@ -172,6 +172,11 @@ export function assertStateTransition(
   )
   requireCondition(next.credential.groupID === next.groupID, 'Credential group mismatch')
   const client = readState(next)
+  if (client !== null) {
+    assertSkippedKeyIndices(client.secretTree)
+    for (const receiver of client.historicalReceiverData.values())
+      assertSkippedKeyIndices(receiver.secretTree)
+  }
   if (sameIncarnation) {
     requireCondition(!previous.deleted, 'Deleted incarnation resurrected')
     requireCondition(
