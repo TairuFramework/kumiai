@@ -2242,10 +2242,15 @@ function testCommitObservation<TTx extends ConformanceGroupTransaction>(
         await ports.cursor.save('observed-topic', '000000000001')
         await ports.outbox.put({ ...entry, seq: 8 })
         expect(observations).toHaveLength(4)
+        expect(observations.map((value) => value.activeVersion)).toEqual([
+          seed.state.version + 1,
+          seed.state.version + 2,
+          seed.state.version + 2,
+          seed.state.version + 3,
+        ])
         for (const [index, value] of observations.entries()) {
           expect(value.lifetime?.revision).toBe(seed.lifetime.revision + index + 1)
           expect(value.activeKey).toEqual(key)
-          expect(value.activeVersion).toBe(seed.state.version + index + 1)
           expect(value.metadata).toContainEqual(
             expect.objectContaining({ ...key, version: value.activeVersion }),
           )
@@ -2255,6 +2260,7 @@ function testCommitObservation<TTx extends ConformanceGroupTransaction>(
           expect(value.terminal).toBe(false)
           expect(value.control?.cursor?.epoch).toBe(seed.state.epoch)
         }
+        expect(await ports.cursor.load('observed-topic')).toBe('000000000001')
         unsubscribe()
         await ports.cursor.save('observed-topic', '000000000002')
         expect(observations).toHaveLength(4)

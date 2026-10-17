@@ -6,7 +6,12 @@ import {
   publicMembershipFacts,
   signLedgerEntry,
 } from '@kumiai/mls'
-import { forkEventID, recoveryUnavailableEventID, type SafetyHold } from '@kumiai/rpc'
+import {
+  asLogPosition,
+  forkEventID,
+  recoveryUnavailableEventID,
+  type SafetyHold,
+} from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
 import {
@@ -299,7 +304,9 @@ for (const mode of ['real-mls', 'double'] as const) {
         registryFixtureObserve(fixture, groupID, () => {
           atProof.push({ stateVersion: access.runtime.snapshot()?.stateVersion, calls })
         })
-        await fixture.device.groups.ports(key).cursor.save('proof', '1')
+        await fixture.device.groups
+          .ports(key)
+          .control.apply({ cursor: { position: asLogPosition('1'), epoch: 0 } }, 'proof')
         expect(atProof).toEqual([{ stateVersion: 2, calls: 0 }])
         expect(calls).toBe(1)
       } finally {
@@ -313,26 +320,39 @@ for (const mode of ['real-mls', 'double'] as const) {
         const owner = registry(fixture)
         const access = await owner.access(groupID)
         const ports = fixture.device.groups.ports(key)
+        const notifications: Array<number | undefined> = []
+        access.runtime.onEpochChanged((value) => {
+          notifications.push(value?.stateVersion)
+        })
         const writes = [
-          () => ports.anchor.save({ anchor: { epoch: 0, secret: new Uint8Array(32).fill(8) } }),
-          () =>
-            ports.outbox.put({
-              seq: 1,
-              protocol: 'app',
-              prc: 'message',
-              data: new Uint8Array([9]),
-              lastAttempt: null,
-              status: 'accepted',
-            }),
-          () => ports.cursor.save('topic', '1'),
+          {
+            write: () =>
+              ports.anchor.save({ anchor: { epoch: 0, secret: new Uint8Array(32).fill(8) } }),
+            version: 2,
+          },
+          {
+            write: () =>
+              ports.outbox.put({
+                seq: 1,
+                protocol: 'app',
+                prc: 'message',
+                data: new Uint8Array([9]),
+                lastAttempt: null,
+                status: 'accepted',
+              }),
+            version: 3,
+          },
+          { write: () => ports.cursor.save('topic', '1'), version: 3 },
         ]
-        for (const [index, write] of writes.entries()) {
+        for (const { write, version } of writes) {
           const count = fixture.restoreCount(groupID)
           await write()
-          expect(access.stateVersion()).toBe(index + 2)
+          expect(access.stateVersion()).toBe(version)
           expect(await owner.access(groupID)).toBe(access)
           expect(fixture.restoreCount(groupID)).toBe(count + 1)
         }
+        expect(await ports.cursor.load('topic')).toBe('1')
+        expect(notifications).toEqual([2, 3])
       } finally {
         await fixture.close()
       }
@@ -353,7 +373,12 @@ for (const mode of ['real-mls', 'double'] as const) {
           const saving = fixture.device.groups.transition(
             await nextChange(fixture.device.groups, groupID, 'pending-runtime'),
             async (stores) => {
-              await stores.incarnation(1).cursor.save('pending', '2')
+              await stores
+                .incarnation(1)
+                .control.apply(
+                  { cursor: { position: asLogPosition('2'), epoch: 0 } },
+                  'pending-runtime',
+                )
             },
           )
           const settled = saving.then(
@@ -468,7 +493,9 @@ for (const mode of ['real-mls', 'double'] as const) {
         access.runtime.onEpochChanged(() => {
           void fixture.device.groups.load(groupID).then(() => read.resolve(), read.reject)
         })
-        await fixture.device.groups.ports(key).cursor.save('root', '1')
+        await fixture.device.groups
+          .ports(key)
+          .control.apply({ cursor: { position: asLogPosition('1'), epoch: 0 } }, 'root')
         await expect(read.promise).resolves.toBeUndefined()
       } finally {
         await fixture.close()
@@ -491,8 +518,12 @@ for (const mode of ['real-mls', 'double'] as const) {
         access.runtime.onEpochChanged((value) => {
           order.push(`last:${value?.stateVersion}`)
         })
-        await fixture.device.groups.ports(key).cursor.save('fifo', '1')
-        await fixture.device.groups.ports(key).cursor.save('fifo', '2')
+        await fixture.device.groups
+          .ports(key)
+          .control.apply({ cursor: { position: asLogPosition('1'), epoch: 0 } }, 'fifo-1')
+        await fixture.device.groups
+          .ports(key)
+          .control.apply({ cursor: { position: asLogPosition('2'), epoch: 0 } }, 'fifo-2')
         expect(order).toEqual(['first:2', 'last:2', 'first:3', 'last:3'])
         expect(access.stateVersion()).toBe(3)
         pending.reject(new Error('Listener failed asynchronously'))

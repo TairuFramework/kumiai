@@ -795,8 +795,12 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
         access.runtime.onEpochChanged(() => {
           throw new Error('Listener refused')
         })
-        await fixture.device.groups.ports(key).cursor.save('fifo', '1')
-        await fixture.device.groups.ports(key).cursor.save('fifo', '2')
+        await fixture.device.groups
+          .ports(key)
+          .control.apply({ cursor: { position: '1', epoch: 0 } }, 'fifo-1')
+        await fixture.device.groups
+          .ports(key)
+          .control.apply({ cursor: { position: '2', epoch: 0 } }, 'fifo-2')
         expect(order).toEqual([2, 3])
         expect((await Promise.all(reads)).every((value) => value !== null)).toBe(true)
       } finally {

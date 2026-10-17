@@ -1751,10 +1751,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
             })
             expect(
               await reopened.device.groups.loadState({ groupID: 'group-B', incarnation: 1 }),
-            ).toEqual({
-              ...independentSeed.state,
-              version: independentSeed.state.version + 1,
-            })
+            ).toEqual(independentSeed.state)
             expect(
               await reopened.device.groups
                 .ports({ groupID: 'group-B', incarnation: 1 })

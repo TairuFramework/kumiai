@@ -232,10 +232,9 @@ export function testDeviceStorageConformance<TTx extends ConformanceGroupTransac
             revision: seed.lifetime.revision + 2,
             mutationID: next.mutationID,
           })
-          expect(await reopened.device.groups.loadState({ groupID, incarnation: 1 })).toEqual({
-            ...seed.state,
-            version: seed.state.version + 2,
-          })
+          expect(await reopened.device.groups.loadState({ groupID, incarnation: 1 })).toEqual(
+            seed.state,
+          )
           expect(
             await reopened.device.groups
               .ports({ groupID, incarnation: 1 })
@@ -558,10 +557,7 @@ export function testDeviceStorageConformance<TTx extends ConformanceGroupTransac
           })
           expect(
             await reopened.device.groups.loadState({ groupID: 'group-B', incarnation: 1 }),
-          ).toEqual({
-            ...independentSeed.state,
-            version: independentSeed.state.version + 1,
-          })
+          ).toEqual(independentSeed.state)
           expect(
             await reopened.device.groups
               .ports({ groupID: 'group-B', incarnation: 1 })
