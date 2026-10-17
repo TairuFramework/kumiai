@@ -22,7 +22,7 @@ import { createRegistryHandleAccess } from '../src/registry-handle-access.js'
 import { buildRevokeProofOperation } from '../src/revoke.js'
 import { accessKinds, authoringAccessFixture, rotationIntent } from './fixtures/authoring-access.js'
 import { testGroupMLSDependencies } from './fixtures/real-group.js'
-import { createRegistryFixture } from './fixtures/registry.js'
+import { createRegistryFixture, restoreHost } from './fixtures/registry.js'
 import {
   buildSealedMemoryOperation,
   memoryModel,
@@ -186,6 +186,60 @@ test('candidate restoration storage faults propagate without rejecting the opera
       newID: () => crypto.randomUUID(),
     })
     await expect(port.prepareBuild(rotationIntent, frame)).rejects.toBe(failure)
+    expect(frame).not.toHaveBeenCalled()
+    expect(await f.control().load()).toEqual(before)
+    expect(await f.stored()).toEqual(stored)
+  } finally {
+    await f.close()
+  }
+})
+
+test.each([
+  'missing envelope credential',
+  'malformed own identity',
+  'malformed peer identity',
+] as const)('double candidate with %s is rejected before framing or persistence', async (fault) => {
+  const f = await authoringAccessFixture('simple')
+  try {
+    await f.control().apply({ putOperations: [rotationIntent] }, 'intent')
+    const before = await f.control().load()
+    const stored = await f.stored()
+    const frame = vi.fn()
+    const port = createControlBuildPort({
+      access: f.access,
+      control: f.control(),
+      build: async (op, permitted) => {
+        const actual = await f.build(op, permitted)
+        const state = decodeClientState(actual.journal)
+        if (state === undefined) throw new Error('Missing candidate state')
+        if (fault === 'missing envelope credential') {
+          return { ...actual, journal: encodeStoredValue({ state: actual.journal, ledger: [] }) }
+        }
+        const candidate = state
+        const ownIndex = candidate.privatePath.leafIndex * 2
+        const index =
+          fault === 'malformed own identity'
+            ? ownIndex
+            : candidate.ratchetTree.findIndex(
+                (node, index) => node?.nodeType === 1 && index !== ownIndex,
+              )
+        const leaf = candidate.ratchetTree[index]
+        if (leaf?.nodeType !== 1 || !('identity' in leaf.leaf.credential))
+          throw new Error('Missing candidate leaf')
+        leaf.leaf.credential.identity = new TextEncoder().encode('{')
+        return { ...actual, journal: encodeClientState(candidate) }
+      },
+      restoreCandidate: async (bytes) => {
+        if (fault === 'missing envelope credential') return restoreHost(f.fixture, bytes)
+        const state = decodeClientState(bytes)
+        if (state === undefined) throw new InvalidCandidateError('Invalid candidate')
+        return restoreMemoryControlHandle({ state, credential: f.member.handle.credential })
+      },
+      saveBuilt: createPersistenceBuildSaver({ persistence: f.fixture.device.groups, key: f.key }),
+      now: () => 1,
+      newID: () => crypto.randomUUID(),
+    })
+    expect(await port.prepareBuild(rotationIntent, frame)).toMatchObject({ kind: 'rejected' })
     expect(frame).not.toHaveBeenCalled()
     expect(await f.control().load()).toEqual(before)
     expect(await f.stored()).toEqual(stored)

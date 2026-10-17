@@ -494,29 +494,40 @@ export async function restoreMemoryControlHandle(params: {
   options?: GroupOptions
 }): Promise<GroupHandle> {
   const { credential, ledgerEntries, options = {} } = params
-  const state = structuredClone(params.state)
-  const ownLeaf = state.ratchetTree[state.privatePath.leafIndex * 2]
-  if (
-    new TextDecoder().decode(state.groupContext.groupId) !== credential.groupID ||
-    (state.groupActiveState.kind !== 'removedFromGroup' &&
-      (ownLeaf?.nodeType !== 1 ||
-        !('identity' in ownLeaf.leaf.credential) ||
-        parseMLSCredentialIdentity(ownLeaf.leaf.credential.identity).id !== credential.id))
-  )
-    throw new InvalidCandidateError('Memory handle owner or group mismatch')
-  const mls = model(state, credential, true, false, options)
-  if (
-    BigInt(mls.epoch()) !== state.groupContext.epoch ||
-    toB64U(mls.authenticator()) !== toB64U(state.keySchedule.epochAuthenticator)
-  )
-    throw new InvalidCandidateError('Memory state identity mismatch')
-  const tokens = mls.ledgerTokens()
-  if (
-    ledgerEntries !== undefined &&
-    (tokens.length !== ledgerEntries.length ||
-      tokens.some((token, index) => token !== ledgerEntries[index]))
-  )
-    throw new InvalidCandidateError('Memory ledger projection mismatch')
+  let state: ClientState
+  let mls: MemoryMLS
+  let tokens: Array<string>
+  try {
+    state = structuredClone(params.state)
+    const ownLeaf = state.ratchetTree[state.privatePath.leafIndex * 2]
+    if (
+      new TextDecoder().decode(state.groupContext.groupId) !== credential.groupID ||
+      (state.groupActiveState.kind !== 'removedFromGroup' &&
+        (ownLeaf?.nodeType !== 1 ||
+          !('identity' in ownLeaf.leaf.credential) ||
+          parseMLSCredentialIdentity(ownLeaf.leaf.credential.identity).id !== credential.id))
+    )
+      throw new InvalidCandidateError('Memory handle owner or group mismatch')
+    mls = model(state, credential, true, false, options)
+    if (
+      BigInt(mls.epoch()) !== state.groupContext.epoch ||
+      toB64U(mls.authenticator()) !== toB64U(state.keySchedule.epochAuthenticator)
+    )
+      throw new InvalidCandidateError('Memory state identity mismatch')
+    tokens = mls.ledgerTokens()
+    if (
+      ledgerEntries !== undefined &&
+      (tokens.length !== ledgerEntries.length ||
+        tokens.some((token, index) => token !== ledgerEntries[index]))
+    )
+      throw new InvalidCandidateError('Memory ledger projection mismatch')
+  } catch (cause) {
+    if (cause instanceof InvalidCandidateError) throw cause
+    throw new InvalidCandidateError(
+      cause instanceof Error ? cause.message : 'Invalid memory candidate',
+      { cause },
+    )
+  }
   // Reuse only context construction and signed ledger folding, never MLS transitions.
   const restored = restrictCommitAuthoring(
     await restoreGroup({

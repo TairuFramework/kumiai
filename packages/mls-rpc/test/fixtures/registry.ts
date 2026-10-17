@@ -880,17 +880,28 @@ function hostBytes(handle: GroupHandle) {
     ledger: handle.ledgerTokens,
   })
 }
-async function restoreHost(fixture: RegistryFixtureBase, bytes: Uint8Array): Promise<GroupHandle> {
+export async function restoreHost(
+  fixture: RegistryFixtureBase,
+  bytes: Uint8Array,
+): Promise<GroupHandle> {
   let host: Pick<ReadableGroupState, 'state' | 'credential' | 'ledger'>
+  let state: NonNullable<ReturnType<typeof decodeClientState>>
   try {
     host = decodeStoredValue(bytes) as typeof host
-    if (!(host?.state instanceof Uint8Array)) throw new InvalidCandidateError('Missing host state')
+    if (
+      !(host?.state instanceof Uint8Array) ||
+      typeof host.credential?.id !== 'string' ||
+      typeof host.credential?.groupID !== 'string' ||
+      !Array.isArray(host.ledger) ||
+      !host.ledger.every((entry) => typeof entry === 'string')
+    )
+      throw new InvalidCandidateError('Invalid candidate envelope fields')
+    const decoded = decodeClientState(host.state)
+    if (decoded === undefined) throw new InvalidCandidateError('Missing host state')
+    state = decoded
   } catch (cause) {
     throw new InvalidCandidateError('Invalid candidate envelope', { cause })
   }
-  const state = host.state === null ? undefined : decodeClientState(host.state)
-  if (state === undefined || host.state === null)
-    throw new InvalidCandidateError('Missing host state')
   return registryFixtureRestore(fixture)({
     ...host,
     state: host.state,
