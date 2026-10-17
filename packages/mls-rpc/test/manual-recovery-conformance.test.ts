@@ -1874,6 +1874,54 @@ test('saved manual authority fences late ordinary switch ID assignment', async (
   }
 })
 
+test.each(['successor only', 'superseded resync'] as const)(
+  'pending successor choice leaves ordinary recovery to heal the source / %s',
+  async (rows) => {
+    const fixture = await createRegistryFixture({
+      mode: 'real-mls',
+      groupID: 'manual-recovery',
+      setup: 'seeded',
+    })
+    const key = { groupID: 'manual-recovery', incarnation: 1 }
+    let owner: api.RegistryPeer | undefined
+    try {
+      const recovery = await fixture.confirmedRecovery(key)
+      if (!('format' in recovery.record)) throw new Error('Missing ordinary X')
+      // An accepted ordinary X whose switch ID is still unassigned.
+      const record = { ...recovery.record, switchMutationID: null }
+      await fixture.installRows({ key, control: { putRejoin: record } })
+      if (rows === 'superseded resync')
+        await fixture.manualRecovery().authoriseManualRecovery(key, {
+          mode: 'resync',
+          targetID: 'superseded-hub',
+          commitTopicID: 'superseded-commits',
+          allowOpenFork: false,
+        })
+      // The successor choice committed but its retirement never ran.
+      await fixture.manualRecovery().authoriseManualRecovery(key, {
+        mode: 'successor',
+        successor: { groupID: 'unexecuted-successor', incarnation: 1 },
+      })
+      const started = await manualOwner(
+        fixture,
+        async () => {
+          throw new Error('A successor choice resolves no transport')
+        },
+        key,
+        { targetID: record.target.targetID, topicID: record.target.topicID },
+      )
+      owner = started.owner
+      await owner.ready
+      expect(owner.status().kind).not.toBe('failed')
+      expect(owner.installedKey()).toEqual({ ...key, incarnation: 2 })
+    } finally {
+      owner?.dispose()
+      await owner?.drained()
+      await fixture.close()
+    }
+  },
+)
+
 test('manual refusal notification reaches the active caller', async () => {
   const fixture = await createForkRecoveryRealFixture(true)
   const local = fixture.local()

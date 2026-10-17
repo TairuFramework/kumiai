@@ -106,12 +106,19 @@ export function findManualRecovery(
   return copyStoredValue(row.value)
 }
 
+/**
+ * Only a live resync owns the source's recovery. A successor never uses the rejoin slot (its
+ * retirement re-reads its own row), and a resync it superseded is never resumed; counting either
+ * would let an unexecuted successor choice disable automatic healing.
+ */
 export function hasActiveManualRecovery(records: Array<CheckpointRecord>, key: GroupKey): boolean {
+  if (successorChosen(records, key)) return false
   return records.some(
     (row) =>
       row.kind === 'manual-recovery' &&
       sameStoredValue(row.key, key) &&
-      row.value.stage === 'authorised',
+      row.value.stage === 'authorised' &&
+      row.value.choice.mode === 'resync',
   )
 }
 

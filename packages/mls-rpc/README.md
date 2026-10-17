@@ -535,7 +535,8 @@ Nothing is copied: no state, ratchets, messages or roster. Owed outcomes, Welcom
 Retirement reads no private state or retained trust, so corrupt source state or trust is no obstacle. Failure leaves the source, its routing and any halt intact.
 A successor choice supersedes a pending resync, and a later successor choice replaces an unexecuted one in place; a resync never supersedes, and an executed choice is final.
 Restart resumes only the saved successor when the app calls `recover` again. A group cannot be its own successor.
-A pending successor choice blocks a resync of the same source.
+A pending successor choice blocks a resync of the same source, but not automatic or fork recovery: until it executes,
+the source heals as an ordinary peer.
 
 An open tombstone refuses every Welcome into the source group with `SeedAdmissionRefusedError` reason `successor-tombstone`, including newer or unspent ones after restart.
 `clearTombstone(groupID)` releases only that block. Spent-authenticator checks, fork halts and other safety latches still apply to later admissions.
