@@ -4391,26 +4391,29 @@ export function createGroupPeerWithControlWalk<
           timeoutMs: recoveryTimeoutMs,
           waiters: confirmationWaiters,
           safetyHold: () => (manual === undefined ? safetyHold() : null),
-          send: async () =>
-            mux.publish({
+          send: async () => {
+            const signature = await port.signRecoveryConfirmation({
+              groupID: record.source.key.groupID,
+              requestID: record.requestID,
+              position,
+              commitDigest: record.digest,
+            })
+            await assertRecoveryOpen()
+            return mux.publish({
               topicID: rendezvous,
               payload: encodeHandshakeFrame(
                 HANDSHAKE_KIND.recoveryConfirmRequest,
                 encodeRecoveryConfirmRequest({
                   requestID: record.requestID,
                   request: record.request,
-                  signature: await port.signRecoveryConfirmation({
-                    groupID: record.source.key.groupID,
-                    requestID: record.requestID,
-                    position,
-                    commitDigest: record.digest,
-                  }),
+                  signature,
                   position,
                   commitDigest: record.digest,
                   commit: decodeCommitFrame(decodeHandshakeFrame(record.payload).payload).commit,
                 }),
               ),
-            }),
+            })
+          },
         })
         if (verdict.kind === 'refused' && ['binding', 'lapse', 'floor'].includes(verdict.refusal))
           pending.markBindingUnusable()

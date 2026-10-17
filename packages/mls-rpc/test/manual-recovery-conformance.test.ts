@@ -14,6 +14,7 @@ import {
   encodeRecoveryRequest,
   type GroupCrypto,
   type GroupKey,
+  type GroupMLS,
   GroupSafetyHeldError,
   HANDSHAKE_KIND,
   type LogHub,
@@ -640,6 +641,7 @@ async function liveManualPeer(
   hub: LogHub & MailboxHub,
   target: { targetID: string; topicID: string },
   recovery = { timeoutMs: 1000, deadlineMs: 8000, getDelayMs: () => 0 },
+  onMLS: (mls: GroupMLS) => void = () => {},
 ) {
   const cryptos: Array<GroupCrypto> = []
   const events: Array<unknown> = []
@@ -662,8 +664,8 @@ async function liveManualPeer(
       registry: fixture.registry,
       persistence: fixture.device.groups,
     }),
-    createMLS: (key, _handoff, options) =>
-      api.createRegistryGroupMLS({
+    createMLS: async (key, _handoff, options) => {
+      const mls = await api.createRegistryGroupMLS({
         registry: fixture.registry,
         key,
         manualRecovery: options.manualRecovery,
@@ -671,7 +673,10 @@ async function liveManualPeer(
         target: options.target,
         identity: fixture.identity,
         entrySlot: api.createLedgerEntrySlot(),
-      }),
+      })
+      onMLS(mls)
+      return mls
+    },
     createPeer: async (key, options) => {
       const access = await fixture.registry.access(key.groupID)
       const crypto = api.createGroupCrypto({
@@ -811,6 +816,97 @@ for (const producer of ['app-report', 'internal', 'legacy'] as const) {
     }
   })
 }
+
+test('manual confirmation rechecks durable authority after signing', async () => {
+  const fixture = await createForkRecoveryRealFixture(true)
+  const local = fixture.local()
+  const key = fixture.key
+  const hub = new FakeHub()
+  const signing = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  const owners: Array<api.RegistryPeer> = []
+  try {
+    await fixture.saveX('confirmed')
+    await local.safety().reportFork(key, {
+      kind: 'digest-divergence',
+      epoch: 10,
+      position: 'reported',
+      localDigest: 'ours',
+      remoteDigest: 'theirs',
+    })
+    const storage = local.manualRecovery()
+    const saved = await storage.authoriseManualRecovery(key, {
+      mode: 'resync',
+      targetID: fixture.target.targetID,
+      commitTopicID: fixture.target.topicID,
+      allowOpenFork: false,
+    })
+    const requester = await liveManualPeer(
+      local,
+      key,
+      hub,
+      fixture.target,
+      { timeoutMs: 1000, deadlineMs: 8000, getDelayMs: () => 0 },
+      (mls) => {
+        const sign = mls.signRecoveryConfirmation.bind(mls)
+        vi.spyOn(mls, 'signRecoveryConfirmation').mockImplementation(async (request) => {
+          const signature = await sign(request)
+          signing.resolve()
+          await release.promise
+          return signature
+        })
+      },
+    )
+    owners.push(requester.owner)
+    await requester.owner.ready
+    const remote = await liveManualPeer(fixture.remote(), key, hub, fixture.target)
+    owners.push(remote.owner)
+    await remote.owner.ready
+    await signing.promise
+    const sourceBefore = await fixture.snapshot()
+    const attemptBefore = await storage.readManualRecovery(saved.id)
+    expect(attemptBefore?.attempt?.stage).toBe('published')
+    const unavailable = createManualRecoveryStore({
+      registry: local.registry,
+      persistence: local.device.groups,
+      key,
+      resolveTarget: async () => {
+        throw new Error('Target unavailable')
+      },
+    })
+    expect(await unavailable.resolveManualRecoveryTarget(saved.id)).toBeNull()
+    const paused = await storage.readManualRecovery(saved.id)
+    expect(paused).toMatchObject({ stage: 'authorised', pauseReason: 'target-unresolved' })
+    const stateBefore = await local.registry.recoverySource(key.groupID)
+    const eventCount = requester.events.length
+    release.resolve()
+    await vi.waitFor(() =>
+      expect(requester.events.slice(eventCount)).toContainEqual(
+        expect.objectContaining({ phase: 'failed' }),
+      ),
+    )
+    expect(
+      hub.published.filter((message) => {
+        try {
+          return (
+            decodeHandshakeFrame(message.payload).kind === HANDSHAKE_KIND.recoveryConfirmRequest
+          )
+        } catch {
+          return false
+        }
+      }),
+    ).toHaveLength(0)
+    expect(await storage.readManualRecovery(saved.id)).toEqual(paused)
+    expect(await fixture.snapshot()).toEqual(sourceBefore)
+    expect(await local.registry.recoverySource(key.groupID)).toEqual(stateBefore)
+  } finally {
+    release.resolve()
+    for (const owner of owners) owner.dispose()
+    await Promise.all(owners.map((owner) => owner.drained()))
+    await fixture.close()
+    vi.restoreAllMocks()
+  }
+})
 
 test('manual authorisation precedes every network action', async () => {
   const fixture = await createRegistryFixture({
