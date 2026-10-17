@@ -79,6 +79,86 @@ test('clear during pending subscribe retains exactly one holder', async () => {
   }
 })
 
+test.each([
+  { failure: 'retryable', retryDelaysMs: [0] },
+  { failure: 'exhausted', retryDelaysMs: [] },
+])(
+  'replacement demand keeps its options after a released pending subscribe fails ($failure)',
+  async ({ retryDelaysMs }) => {
+    const hub = new FakeHub()
+    let reject: (error: Error) => void = () => {
+      throw new Error('No subscribe pending')
+    }
+    const subscribe = vi.spyOn(hub, 'subscribe').mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, fail) => {
+          reject = fail
+        }),
+    )
+    let allowed = true
+    const mux = createHubMux({
+      hub,
+      localDID: 'reader',
+      networkAllowed: () => allowed,
+      subscribeRetryDelaysMs: retryDelaysMs,
+    })
+    try {
+      const release = mux.onInbound('replacement', () => {}, { retention: 123 })
+      release()
+      allowed = false
+      const releaseReplacement = mux.onInbound('replacement', () => {}, { retention: 456 })
+      mux.resume()
+      expect(subscribe).toHaveBeenCalledTimes(1)
+      reject(new Error('Disconnected'))
+      await flush()
+      expect(subscribe).toHaveBeenCalledTimes(1)
+      allowed = true
+      mux.resume()
+      mux.resume()
+      await flush()
+      expect(subscribe.mock.calls.map((call) => call[2]?.retention)).toEqual([123, 456])
+      expect(hub.requestedRetention('replacement')).toBe(456)
+      releaseReplacement()
+      mux.rearmRefusedTopics()
+      mux.resume()
+      expect(subscribe).toHaveBeenCalledTimes(2)
+    } finally {
+      await mux.dispose()
+    }
+  },
+)
+
+test('replacement demand keeps its options across an existing retry backoff', async () => {
+  vi.useFakeTimers()
+  const hub = new FakeHub()
+  const subscribe = vi.spyOn(hub, 'subscribe').mockRejectedValueOnce(new Error('Disconnected'))
+  let allowed = true
+  const mux = createHubMux({
+    hub,
+    localDID: 'reader',
+    networkAllowed: () => allowed,
+    subscribeRetryDelaysMs: [100],
+  })
+  try {
+    const release = mux.onInbound('backoff', () => {}, { retention: 123 })
+    await vi.advanceTimersByTimeAsync(0)
+    release()
+    allowed = false
+    const releaseReplacement = mux.onInbound('backoff', () => {}, { retention: 456 })
+    await vi.advanceTimersByTimeAsync(100)
+    expect(subscribe).toHaveBeenCalledTimes(1)
+    allowed = true
+    mux.resume()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(subscribe.mock.calls.map((call) => call[2]?.retention)).toEqual([123, 456])
+    expect(hub.requestedRetention('backoff')).toBe(456)
+    releaseReplacement()
+  } finally {
+    await mux.dispose()
+    vi.useRealTimers()
+  }
+})
+
 test('receive pauses while held and resumes retained delivery', async () => {
   const hub = new FakeHub()
   let allowed = true

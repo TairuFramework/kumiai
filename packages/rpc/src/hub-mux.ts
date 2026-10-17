@@ -229,6 +229,8 @@ type PendingAck = {
   unmatched?: StoredMessage
 }
 
+type TopicDemand = { options: HubSubscribeOptions | undefined }
+
 /**
  * The state of the SUBSCRIPTION at the hub, per topic — deliberately NOT the refcount, which
  * counts local listeners. Conflating the two is the defect this replaces: a listener registration
@@ -324,6 +326,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
 
   const listeners = new Map<string, Set<InboundListener>>()
   const refcount = new Map<string, number>()
+  const demands = new Map<string, TopicDemand>()
   const subscriptions = new Map<string, TopicSubscription>()
   const sinks = new Set<Sink>()
   let disposed = false
@@ -383,9 +386,15 @@ export function createHubMux(params: HubMuxParams): HubMux {
     topicID: string,
     options: HubSubscribeOptions | undefined,
     attempt: number,
+    demand = demands.get(topicID),
   ): Promise<void> => {
     if (disposed || (refcount.get(topicID) ?? 0) === 0) {
       if (subscriptions.get(topicID)?.kind === 'asking') subscriptions.delete(topicID)
+      return
+    }
+    const currentDemand = demands.get(topicID)
+    if (currentDemand !== demand) {
+      await attemptSubscribe(topicID, currentDemand?.options, 0)
       return
     }
     if (!networkAllowed()) {
@@ -402,6 +411,12 @@ export function createHubMux(params: HubMuxParams): HubMux {
       return
     } catch (error) {
       if (disposed) return
+      // A released request cannot refuse or choose options for its replacement.
+      const currentDemand = demands.get(topicID)
+      if (currentDemand !== demand) {
+        await attemptSubscribe(topicID, currentDemand?.options, 0)
+        return
+      }
       const permanent = isPermanentSubscribeFailure(error)
       const delay = retryDelaysMs[attempt]
       if (permanent || delay === undefined) {
@@ -418,12 +433,13 @@ export function createHubMux(params: HubMuxParams): HubMux {
       }
       await sleep(delay)
       if (disposed) return
-      await attemptSubscribe(topicID, options, attempt + 1)
+      await attemptSubscribe(topicID, options, attempt + 1, demand)
     }
   }
 
   const retain = (topicID: string, options?: HubSubscribeOptions): void => {
     if (disposed) return
+    if ((refcount.get(topicID) ?? 0) === 0) demands.set(topicID, { options })
     refcount.set(topicID, (refcount.get(topicID) ?? 0) + 1)
     // Gated on the SUBSCRIPTION, never on the refcount. A topic held, or currently being asked
     // for, is not asked for again. A refused one may be: the hub said no, so this peer does not
@@ -512,6 +528,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
     const next = current - 1
     if (next === 0) {
       refcount.delete(topicID)
+      demands.delete(topicID)
       if (subscriptions.get(topicID)?.kind === 'deferred') subscriptions.delete(topicID)
     } else refcount.set(topicID, next)
   }
@@ -917,6 +934,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
         // not "read everything, discard the rest". On mobile this is what backgrounding calls;
         // unsubscribing here would delete the user's unread mail on every app switch.
         refcount.clear()
+        demands.clear()
         listeners.clear()
         // Fire-and-forget: awaiting `return()` deadlocks on the real wire hub, where it waits behind
         // the drain loop's in-flight `next()` that never settles during teardown. Post-dispose writes
