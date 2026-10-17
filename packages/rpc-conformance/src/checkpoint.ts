@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from 'vitest'
+import { describe, expect, onTestFinished, test, vi } from 'vitest'
 
 import type {
   ConformanceCapturedRejoinRecord,
@@ -964,6 +964,10 @@ export function testCheckpointCoverageConformance(params: {
     const fixture = await params.createFixture()
     const start = Date.now()
     const clock = vi.spyOn(Date, 'now').mockReturnValue(start)
+    // Runs on timeout too; the abandoned body keeps running and must not leak the mocked clock.
+    onTestFinished(() => {
+      clock.mockRestore()
+    })
     try {
       await fixture.install(1, 3)
       await fixture.install(1, 6)
@@ -1005,8 +1009,6 @@ export function testCheckpointCoverageConformance(params: {
       expect(await fixture.port().checkpointCoverage(fixture.groupID)).toEqual(expired)
       expect(await fixture.port().checkpointFact({ ...key, incarnation: 1 }, 6)).toBeNull()
     } finally {
-      // A timed-out body keeps running; it must not restore the clock of a later test.
-      if (!signal.aborted) clock.mockRestore()
       await fixture.close()
     }
   }, 60000)

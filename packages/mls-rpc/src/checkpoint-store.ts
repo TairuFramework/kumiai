@@ -42,6 +42,8 @@ const histories = new WeakMap<object, Array<CheckpointRecord>>()
 const conditionCaptures = new WeakMap<object, Map<string, CheckpointRecord>>()
 const captures = new WeakMap<object, Map<string, Uint8Array>>()
 // Finalisation re-lists checkpoints several times per transition; open unchanged bytes once.
+// Keyed by OwnerEntry: lives for the whole owner run (prepare, work, effects, finalise, all
+// attempts), not one transaction. Cleared on release or rollback.
 const openedRows = new WeakMap<
   object,
   Map<string, { bytes: Uint8Array; record: CheckpointRecord }>
@@ -207,6 +209,9 @@ export async function openCheckpointRow(
     if (opened === undefined) {
       opened = new Map()
       openedRows.set(entry, opened)
+      const owned = entry
+      entry.afterRelease(() => openedRows.delete(owned))
+      entry.onRollback(() => openedRows.delete(owned))
     }
     opened.set(id, { bytes: Uint8Array.from(bytes), record: cloneValue(record) })
   }

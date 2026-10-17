@@ -8,7 +8,7 @@ import {
 } from '@kumiai/mls'
 import type { CheckpointFactRecord } from '@kumiai/rpc'
 import { toB64U } from '@sozai/codec'
-import { describe, expect, test, vi } from 'vitest'
+import { describe, expect, onTestFinished, test, vi } from 'vitest'
 
 import { prepareCheckpointInstallationFromTrust } from '../src/checkpoint-capture.js'
 import { readCheckpointCoverage } from '../src/checkpoint-store.js'
@@ -308,6 +308,10 @@ test('group history keeps current within count and age bounds', async ({ signal 
     setup: 'empty',
   })
   const now = vi.spyOn(Date, 'now').mockReturnValue(1000)
+  // Runs on timeout too; the abandoned body keeps running and must not leak the mocked clock.
+  onTestFinished(() => {
+    now.mockRestore()
+  })
   try {
     const groups = fixture.ports.device.groups
     const seed = await makeStorageSeed({
@@ -375,8 +379,6 @@ test('group history keeps current within count and age bounds', async ({ signal 
     await fixture.reopen()
     expect(await records()).toEqual(after)
   } finally {
-    // A timed-out body keeps running; it must not restore the clock of a later test.
-    if (!signal.aborted) now.mockRestore()
     await fixture.close()
   }
 }, 60000)

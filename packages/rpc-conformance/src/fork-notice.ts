@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from 'vitest'
+import { describe, expect, onTestFinished, test, vi } from 'vitest'
 
 import type { ConformanceCheckpointRecord, ConformanceCheckpointService } from './checkpoint.js'
 import type { ConformanceGroupKey } from './persistence-fixture.js'
@@ -591,6 +591,10 @@ export function testForkNoticeConformance(params: {
         const fixture = await params.createFixture()
         const start = Date.now()
         const clock = vi.spyOn(Date, 'now').mockReturnValue(start)
+        // Runs on timeout too; the abandoned body keeps running and must not leak the mocked clock.
+        onTestFinished(() => {
+          clock.mockRestore()
+        })
         try {
           const service = fixture.service()
           await service.importCheckpoint(fixture.key, fixture.frame)
@@ -628,8 +632,6 @@ export function testForkNoticeConformance(params: {
             (await restarted.checkpointCoverage(fixture.key.groupID)).effectiveFloor,
           ).toBeGreaterThan(initial.splitEpoch)
         } finally {
-          // A timed-out body keeps running; it must not restore the clock of a later test.
-          if (!signal.aborted) clock.mockRestore()
           await fixture.close()
         }
       },
