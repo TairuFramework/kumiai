@@ -3,6 +3,7 @@ import {
   commitSelfRemovals,
   decodeClientState,
   encodeClientState,
+  GroupRestoreError as InvalidCandidateError,
   restoreGroup,
 } from '@kumiai/mls'
 import type { ControlStore, GroupForkEvidence } from '@kumiai/rpc'
@@ -111,7 +112,7 @@ async function retainedRotation(size = 1) {
   }
   const restoreCandidate = async (bytes: Uint8Array) => {
     const state = decodeClientState(bytes)
-    if (state === undefined) throw new Error('Invalid candidate')
+    if (state === undefined) throw new InvalidCandidateError('Invalid candidate')
     return restoreGroup({
       state,
       credential: member.handle.credential,
@@ -484,7 +485,7 @@ test('2.1 adoption rolls back and co-commits trust spent anchor and opaque side 
   await installSeed(groups, seed, 'seed')
   const restoreCandidate = async (bytes: Uint8Array) => {
     const state = decodeClientState(bytes)
-    if (state === undefined) throw new Error('Invalid candidate')
+    if (state === undefined) throw new InvalidCandidateError('Invalid candidate')
     return restoreGroup({
       state,
       credential: seed.trust.credential,
@@ -591,7 +592,7 @@ test('2.1 adoption rolls back and co-commits trust spent anchor and opaque side 
     saveBuilt: createPersistenceBuildSaver({ persistence: groups, key: seed.key }),
     restoreCandidate: async (bytes) => {
       const state = decodeClientState(bytes)
-      if (state === undefined) throw new Error('Invalid candidate')
+      if (state === undefined) throw new InvalidCandidateError('Invalid candidate')
       return restoreGroup({
         state,
         credential: current.credential,

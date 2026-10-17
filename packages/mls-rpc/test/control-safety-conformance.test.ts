@@ -1,4 +1,10 @@
-import { commitKeyRotation, decodeClientState, encodeClientState, restoreGroup } from '@kumiai/mls'
+import {
+  commitKeyRotation,
+  decodeClientState,
+  encodeClientState,
+  GroupRestoreError as InvalidCandidateError,
+  restoreGroup,
+} from '@kumiai/mls'
 import {
   type AdoptionWrite,
   asLogPosition,
@@ -147,7 +153,7 @@ async function safetyHost(mode: 'real' | 'transactional', id: string) {
     saveBuilt: saver,
     restoreCandidate: async (bytes) => {
       const state = decodeClientState(bytes)
-      if (state === undefined) throw new Error('Invalid candidate')
+      if (state === undefined) throw new InvalidCandidateError('Invalid candidate')
       return restoreGroup({
         state,
         credential: handle.credential,
@@ -177,7 +183,7 @@ async function safetyHost(mode: 'real' | 'transactional', id: string) {
     restoreCandidate: async (bytes) => {
       cryptoCalls++
       const state = decodeClientState(bytes)
-      if (state === undefined) throw new Error('Invalid candidate')
+      if (state === undefined) throw new InvalidCandidateError('Invalid candidate')
       return restoreGroup({
         state,
         credential: handle.credential,

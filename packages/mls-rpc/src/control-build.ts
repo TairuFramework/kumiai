@@ -2,7 +2,7 @@ import {
   decodeClientState,
   encodeClientState,
   type GroupHandle,
-  GroupRestoreError,
+  GroupRestoreError as InvalidCandidateError,
   type MemberCredential,
   restoreGroup,
   restrictCommitAuthoring,
@@ -27,7 +27,7 @@ import {
 import { sha256 } from '@noble/hashes/sha2.js'
 import { toB64U } from '@sozai/codec'
 import type { Runtime } from '@sozai/runtime'
-import { CodecError, ciphersuites } from 'ts-mls'
+import { ciphersuites } from 'ts-mls'
 
 import type { ControlHandleAccess } from './access.js'
 import { controlCompatible } from './control-compat.js'
@@ -343,8 +343,7 @@ export function createControlBuildPort(params: {
             return rejected()
         } catch (error) {
           if (
-            error instanceof GroupRestoreError ||
-            error instanceof CodecError ||
+            error instanceof InvalidCandidateError ||
             (error instanceof Error &&
               /^decodeClientState: unsupported client-state version \d+$/.test(error.message))
           )

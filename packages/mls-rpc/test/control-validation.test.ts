@@ -14,6 +14,7 @@ import {
   exportGroupInfo,
   type GroupHandle,
   type GroupOptions,
+  GroupRestoreError as InvalidCandidateError,
   joinGroupExternal,
   ledgerEntryDigest,
   nobleCryptoProvider,
@@ -198,7 +199,7 @@ async function fixture(
     options,
     restoreCandidate: async (candidate: Uint8Array) => {
       const decoded = decodeClientState(candidate)
-      if (decoded == null) throw new Error('missing candidate')
+      if (decoded == null) throw new InvalidCandidateError('missing candidate')
       return restoreGroup({
         state: decoded,
         credential: member.handle.credential,
@@ -1146,7 +1147,7 @@ test('already adopted own build requires committed full payload evidence after r
   const f = await fixture()
   const journal = decodeControlJournal(f.built.journal)
   const state = decodeClientState(journal.candidate)
-  if (state === undefined) throw new Error('missing candidate')
+  if (state === undefined) throw new InvalidCandidateError('missing candidate')
   const restarted = await restoreGroup({
     state,
     credential: f.member.handle.credential,

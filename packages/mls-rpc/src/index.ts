@@ -19,6 +19,7 @@
  * @module mls-rpc
  */
 
+export { GroupRestoreError as InvalidCandidateError } from '@kumiai/mls'
 export type {
   AbandonedEpochRange,
   BranchAbandonedEvent,

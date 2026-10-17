@@ -1,4 +1,10 @@
-import { commitKeyRotation, decodeClientState, encodeClientState, restoreGroup } from '@kumiai/mls'
+import {
+  commitKeyRotation,
+  decodeClientState,
+  encodeClientState,
+  GroupRestoreError as InvalidCandidateError,
+  restoreGroup,
+} from '@kumiai/mls'
 import {
   type AdoptionWrite,
   asLogPosition,
@@ -96,7 +102,7 @@ export async function controlAdoptionFixture() {
   }
   const restoreCandidate = async (bytes: Uint8Array) => {
     const state = decodeClientState(bytes)
-    if (state === undefined) throw new Error('invalid candidate')
+    if (state === undefined) throw new InvalidCandidateError('invalid candidate')
     return restoreGroup({
       state,
       credential: member.handle.credential,

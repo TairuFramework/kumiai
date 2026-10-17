@@ -15,6 +15,7 @@ import { expect, test, vi } from 'vitest'
 
 import { createControlBuildPort, createPersistenceBuildSaver } from '../src/control-build.js'
 import { decodeControlJournal } from '../src/control-journal.js'
+import { InvalidCandidateError } from '../src/index.js'
 import { createGroupMLS } from '../src/mls.js'
 import { encodeStoredValue } from '../src/persistence-codec.js'
 import { createRegistryHandleAccess } from '../src/registry-handle-access.js'
@@ -201,6 +202,8 @@ test.each([
   'wrong epoch',
   'wrong authenticator',
   'invalid candidate',
+  'empty candidate',
+  'truncated version-2 candidate',
 ] as const)('a host commit %s is rejected before framing or persistence', async (fault) => {
   const f = await authoringAccessFixture('simple')
   try {
@@ -222,6 +225,11 @@ test.each([
       if (fault === 'cached candidate') return { ...actual, journal: cached.journal }
       if (fault === 'wrong digest') return { ...actual, digest: 'another-digest' }
       if (fault === 'invalid candidate') return { ...actual, journal: new Uint8Array([0]) }
+      if (fault === 'empty candidate') return { ...actual, journal: new Uint8Array() }
+      if (fault === 'truncated version-2 candidate') {
+        expect(actual.journal[0]).toBe(2)
+        return { ...actual, journal: actual.journal.slice(0, -1) }
+      }
       if (fault === 'wrong epoch') return { ...actual, epoch: actual.epoch + 1 }
       return { ...actual, authenticatorBefore: new Uint8Array([1]) }
     }
@@ -321,7 +329,7 @@ test('overlapping double builds refuse before construction and after model resto
     const restoreCandidate = async (bytes: Uint8Array) =>
       access.read((current) => {
         const state = decodeClientState(bytes)
-        if (state === undefined) throw new Error('Invalid candidate')
+        if (state === undefined) throw new InvalidCandidateError('Invalid candidate')
         return restoreMemoryControlHandle({
           state,
           credential: current.credential,

@@ -1,4 +1,5 @@
 import { decodeClientState, type GroupHandle, restoreGroup } from '@kumiai/mls'
+import { InvalidCandidateError } from '@kumiai/mls-rpc'
 import {
   checkpointTopic,
   decodeCommitFrame,
@@ -161,13 +162,20 @@ async function startPeerOwner(
         },
       }
       const restoreCandidate = async (bytes: Uint8Array) => {
-        const value = decodeStoredValue(bytes) as {
+        let value: {
           state: Uint8Array
           credential: GroupHandle['credential']
           ledger: Array<string>
         }
+        try {
+          value = decodeStoredValue(bytes) as typeof value
+          if (!(value?.state instanceof Uint8Array))
+            throw new InvalidCandidateError('Invalid candidate state')
+        } catch (cause) {
+          throw new InvalidCandidateError('Invalid candidate envelope', { cause })
+        }
         const state = decodeClientState(value.state)
-        if (state === undefined) throw new Error('Invalid control candidate')
+        if (state === undefined) throw new InvalidCandidateError('Invalid control candidate')
         return restoreGroup({
           state,
           credential: value.credential,

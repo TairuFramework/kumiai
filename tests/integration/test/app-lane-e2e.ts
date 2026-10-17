@@ -33,6 +33,7 @@ import {
   type GroupMLSDependencies,
   type GroupMLSParams,
   type HandleAccess,
+  InvalidCandidateError,
   type LedgerEntrySlot,
   simpleHandleAccess,
 } from '@kumiai/mls-rpc'
@@ -774,9 +775,14 @@ function candidateRestorer(
   options: Parameters<typeof restoreGroup>[0]['options'] = {},
 ) {
   return async (candidate: Uint8Array) => {
-    const saved = decodeStoredState(candidate)
+    let saved: ReturnType<typeof decodeStoredState>
+    try {
+      saved = decodeStoredState(candidate)
+    } catch (cause) {
+      throw new InvalidCandidateError('Invalid candidate envelope', { cause })
+    }
     const state = decodeClientState(saved.state)
-    if (state == null) throw new Error('Invalid candidate state')
+    if (state == null) throw new InvalidCandidateError('Invalid candidate state')
     const credential = await access.read((handle) => handle.credential)
     return restoreGroup({ state, credential, ledgerEntries: saved.ledger, options })
   }

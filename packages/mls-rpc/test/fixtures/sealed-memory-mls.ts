@@ -17,6 +17,7 @@ import {
   type GroupHandleParams,
   type GroupMember,
   type GroupOptions,
+  GroupRestoreError as InvalidCandidateError,
   LEDGER_HEAD_EXTENSION_TYPE,
   type LeafBinding,
   ledgerEntryDigest,
@@ -131,7 +132,7 @@ function model(
         tokens.map(async (token) => {
           const entry = await verifyLedgerEntry(token)
           if (entry === null || entry.entry.groupID !== credential.groupID)
-            throw new Error('Invalid memory ledger')
+            throw new InvalidCandidateError('Invalid memory ledger')
           return { token, entryID: ledgerEntryDigest(token), verified: entry }
         }),
       )
@@ -175,7 +176,18 @@ function model(
     },
   })
   verifiedLedgers.set(mls, verified)
-  if (restore) mls.restoreState(state.confirmationTag)
+  if (restore) {
+    try {
+      mls.restoreState(state.confirmationTag)
+    } catch (cause) {
+      throw new InvalidCandidateError(
+        cause instanceof Error ? cause.message : 'Invalid memory state',
+        {
+          cause,
+        },
+      )
+    }
+  }
   return mls
 }
 
@@ -491,20 +503,20 @@ export async function restoreMemoryControlHandle(params: {
         !('identity' in ownLeaf.leaf.credential) ||
         parseMLSCredentialIdentity(ownLeaf.leaf.credential.identity).id !== credential.id))
   )
-    throw new Error('Memory handle owner or group mismatch')
+    throw new InvalidCandidateError('Memory handle owner or group mismatch')
   const mls = model(state, credential, true, false, options)
   if (
     BigInt(mls.epoch()) !== state.groupContext.epoch ||
     toB64U(mls.authenticator()) !== toB64U(state.keySchedule.epochAuthenticator)
   )
-    throw new Error('Memory state identity mismatch')
+    throw new InvalidCandidateError('Memory state identity mismatch')
   const tokens = mls.ledgerTokens()
   if (
     ledgerEntries !== undefined &&
     (tokens.length !== ledgerEntries.length ||
       tokens.some((token, index) => token !== ledgerEntries[index]))
   )
-    throw new Error('Memory ledger projection mismatch')
+    throw new InvalidCandidateError('Memory ledger projection mismatch')
   // Reuse only context construction and signed ledger folding, never MLS transitions.
   const restored = restrictCommitAuthoring(
     await restoreGroup({
@@ -514,9 +526,10 @@ export async function restoreMemoryControlHandle(params: {
       options,
     }),
   )
-  if (restored.ledgerTokens.length !== tokens.length) throw new Error('Invalid memory ledger')
+  if (restored.ledgerTokens.length !== tokens.length)
+    throw new InvalidCandidateError('Invalid memory ledger')
   if (toB64U(readLedgerHead(restored)?.head ?? new Uint8Array()) !== mls.authenticatedLedgerHead())
-    throw new Error('Memory authenticated ledger head mismatch')
+    throw new InvalidCandidateError('Memory authenticated ledger head mismatch')
   const verified = verifiedLedgers.get(mls)
   if (verified === undefined) throw new Error('Missing memory verification cache')
   for (const entry of restored.ledger) verified.set(entry.token, entry.verified)

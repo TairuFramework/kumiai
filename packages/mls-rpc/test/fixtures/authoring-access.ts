@@ -4,6 +4,7 @@ import {
   encodeClientState,
   encodeGroupAnchor,
   type GroupHandle,
+  GroupRestoreError as InvalidCandidateError,
   restoreGroup,
 } from '@kumiai/mls'
 import {
@@ -81,10 +82,19 @@ export async function authoringAccessFixture(
   await f.installRows({ key, state, trust })
   let store = createTransactionalStore(live)
   const restoreCandidate = async (bytes: Uint8Array) => {
-    const candidate =
-      kind === 'registry' ? (decodeStoredValue(bytes) as { state: Uint8Array }).state : bytes
+    let candidate = bytes
+    if (kind === 'registry') {
+      try {
+        const saved = decodeStoredValue(bytes) as { state: Uint8Array }
+        if (!(saved?.state instanceof Uint8Array))
+          throw new InvalidCandidateError('Invalid candidate')
+        candidate = saved.state
+      } catch (cause) {
+        throw new InvalidCandidateError('Invalid candidate envelope', { cause })
+      }
+    }
     const decoded = decodeClientState(candidate)
-    if (decoded === undefined) throw new Error('Invalid candidate')
+    if (decoded === undefined) throw new InvalidCandidateError('Invalid candidate')
     return restoreGroup({
       state: decoded,
       credential: member.handle.credential,

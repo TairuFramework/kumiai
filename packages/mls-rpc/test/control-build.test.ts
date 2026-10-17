@@ -7,6 +7,7 @@ import {
   decodeClientState,
   encodeClientState,
   encodeGroupAnchor,
+  GroupRestoreError as InvalidCandidateError,
   restoreGroup,
 } from '@kumiai/mls'
 import {
@@ -222,7 +223,7 @@ async function setup(member?: RealMember) {
       runtime: sealRuntime,
       restoreCandidate: async (bytes) => {
         const state = decodeClientState(bytes)
-        if (state === undefined) throw new Error('Invalid candidate')
+        if (state === undefined) throw new InvalidCandidateError('Invalid candidate')
         return restoreGroup({
           state,
           credential: handle.credential,

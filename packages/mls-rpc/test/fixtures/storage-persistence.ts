@@ -8,6 +8,7 @@ import {
   encodeClientState,
   encodeKeyPackage,
   encodePrivateKeyPackage,
+  GroupRestoreError as InvalidCandidateError,
   keyPackageRef,
   restoreGroup,
 } from '@kumiai/mls'
@@ -977,7 +978,7 @@ export async function createControlCrashHarness(mode: 'real-mls' | 'double', see
     )
     const restoreCandidate = async (bytes: Uint8Array) => {
       const state = decodeClientState(bytes)
-      if (state === undefined) throw new Error('Invalid candidate')
+      if (state === undefined) throw new InvalidCandidateError('Invalid candidate')
       const slot = (await control.load()).commitOnce
       return restoreHandle({
         state,

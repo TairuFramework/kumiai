@@ -19,6 +19,7 @@ import {
   deriveRecoverySecret,
   encodeControlJournal,
   type GroupSafety,
+  InvalidCandidateError,
   sealEntries,
   simpleHandleAccess,
 } from '@kumiai/mls-rpc'
@@ -178,13 +179,20 @@ export async function createCapturedRecoveryFixture(params: { timeoutMs?: number
             replace: async (next, write, prepare) => (await opened()).replace(next, write, prepare),
           }
           const restoreCandidate = async (bytes: Uint8Array) => {
-            const saved = decodeStoredValue(bytes) as {
+            let saved: {
               state: Uint8Array
               credential: GroupHandle['credential']
               ledger: Array<string>
             }
+            try {
+              saved = decodeStoredValue(bytes) as typeof saved
+              if (!(saved?.state instanceof Uint8Array))
+                throw new InvalidCandidateError('Invalid candidate state')
+            } catch (cause) {
+              throw new InvalidCandidateError('Invalid candidate envelope', { cause })
+            }
             const state = decodeClientState(saved.state)
-            if (state === undefined) throw new Error('Invalid candidate state')
+            if (state === undefined) throw new InvalidCandidateError('Invalid candidate state')
             return restoreGroup({
               state,
               credential: saved.credential,
@@ -412,13 +420,20 @@ export async function makeCheckpointPeer(
     entrySlot: real.slot,
   })
   const restoreCandidate = async (bytes: Uint8Array) => {
-    const saved = decodeStoredValue(bytes) as {
+    let saved: {
       state: Uint8Array
       credential: GroupHandle['credential']
       ledger: Array<string>
     }
+    try {
+      saved = decodeStoredValue(bytes) as typeof saved
+      if (!(saved?.state instanceof Uint8Array))
+        throw new InvalidCandidateError('Invalid candidate state')
+    } catch (cause) {
+      throw new InvalidCandidateError('Invalid candidate envelope', { cause })
+    }
     const state = decodeClientState(saved.state)
-    if (state === undefined) throw new Error('Invalid candidate state')
+    if (state === undefined) throw new InvalidCandidateError('Invalid candidate state')
     return restoreGroup({
       state,
       credential: saved.credential,

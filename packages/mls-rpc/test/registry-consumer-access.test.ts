@@ -4,6 +4,7 @@ import {
   decodeClientState,
   encodeClientState,
   type GroupHandle,
+  GroupRestoreError as InvalidCandidateError,
   restoreGroup,
 } from '@kumiai/mls'
 import {
@@ -121,7 +122,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         },
         restoreCandidate: async (bytes) => {
           const state = decodeClientState(bytes)
-          if (state === undefined) throw new Error('Invalid candidate')
+          if (state === undefined) throw new InvalidCandidateError('Invalid candidate')
           return access.read((current) =>
             (mode === 'double' ? restoreMemoryControlHandle : restoreGroup)({
               state,

@@ -314,6 +314,10 @@ and validates active state with the supplied recovery options, including exact p
 callbacks and key retention of at least 1000 generations and forward ratchet steps. Hosts must
 apply those options in their `restore` callback. `restoreCandidate` decodes host-serialised control
 journal candidates; cold access never uses candidates as a substitute for stored state.
+Restore adapters throw `InvalidCandidateError` for undecodable or invalid candidates and preserve
+operational failures. This export reuses MLS's `GroupRestoreError`, so `restoreGroup` validation
+failures already have the correct type. Control-build rejects that error and unsupported
+client-state versions before framing or persistence. Other restoration errors propagate.
 
 `recovery.options.keyRetention.retainKeysForEpochs` defaults to `4` and accepts integers from `1`
 through `32`. Other values throw `KeyRetentionRangeError`. Restored state must fit the configured

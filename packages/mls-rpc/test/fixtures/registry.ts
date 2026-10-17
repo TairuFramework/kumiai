@@ -12,6 +12,7 @@ import {
   encodeEpochCheckpoint,
   type GroupHandle,
   type GroupOptions,
+  GroupRestoreError as InvalidCandidateError,
   restoreGroup,
 } from '@kumiai/mls'
 import {
@@ -880,12 +881,16 @@ function hostBytes(handle: GroupHandle) {
   })
 }
 async function restoreHost(fixture: RegistryFixtureBase, bytes: Uint8Array): Promise<GroupHandle> {
-  const host = decodeStoredValue(bytes) as Pick<
-    ReadableGroupState,
-    'state' | 'credential' | 'ledger'
-  >
+  let host: Pick<ReadableGroupState, 'state' | 'credential' | 'ledger'>
+  try {
+    host = decodeStoredValue(bytes) as typeof host
+    if (!(host?.state instanceof Uint8Array)) throw new InvalidCandidateError('Missing host state')
+  } catch (cause) {
+    throw new InvalidCandidateError('Invalid candidate envelope', { cause })
+  }
   const state = host.state === null ? undefined : decodeClientState(host.state)
-  if (state === undefined || host.state === null) throw new Error('Missing host state')
+  if (state === undefined || host.state === null)
+    throw new InvalidCandidateError('Missing host state')
   return registryFixtureRestore(fixture)({
     ...host,
     state: host.state,

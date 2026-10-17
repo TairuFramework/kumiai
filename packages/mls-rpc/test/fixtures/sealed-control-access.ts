@@ -2,6 +2,7 @@ import {
   decodeClientState,
   encodeClientState,
   type GroupHandle,
+  GroupRestoreError as InvalidCandidateError,
   restoreGroup,
   restrictCommitAuthoring,
 } from '@kumiai/mls'
@@ -82,7 +83,7 @@ export async function createSealedControlAccess(
       if (state === null || state.deleted || trust === null)
         throw new Error('Missing adoption source')
       const candidate = decodeClientState(encodeClientState(next.state))
-      if (candidate === undefined) throw new Error('Invalid candidate')
+      if (candidate === undefined) throw new InvalidCandidateError('Invalid candidate')
       if (fault.reuseAuthenticator)
         candidate.keySchedule.epochAuthenticator = state.epochAuthenticator.slice()
       await rows.state.save(

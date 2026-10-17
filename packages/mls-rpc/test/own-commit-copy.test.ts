@@ -5,6 +5,7 @@ import {
   decodeClientState,
   encodeClientState,
   type GroupHandle,
+  GroupRestoreError as InvalidCandidateError,
   ledgerEntryDigest,
   ownCommitDigest,
   restoreGroup,
@@ -104,7 +105,7 @@ async function fixture(named = false, nonempty = false) {
   }
   const restoreCandidate = async (bytes: Uint8Array): Promise<GroupHandle> => {
     const state = decodeClientState(bytes)
-    if (state === undefined) throw new Error('missing candidate')
+    if (state === undefined) throw new InvalidCandidateError('missing candidate')
     return restoreGroup({
       state,
       credential: author.handle.credential,

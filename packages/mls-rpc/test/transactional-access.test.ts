@@ -3,6 +3,7 @@ import {
   commitLedgerEntries,
   decodeClientState,
   encodeClientState,
+  GroupRestoreError as InvalidCandidateError,
   restoreGroup,
   signLedgerEntry,
 } from '@kumiai/mls'
@@ -500,7 +501,7 @@ test('transactional build uses committed open state before delayed publication',
     saveBuilt: store.saveBuilt,
     restoreCandidate: async (bytes) => {
       const state = decodeClientState(bytes)
-      if (state === undefined) throw new Error('Invalid candidate')
+      if (state === undefined) throw new InvalidCandidateError('Invalid candidate')
       return restoreGroup({
         state,
         credential: host.live().credential,
