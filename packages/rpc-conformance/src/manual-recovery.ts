@@ -30,6 +30,7 @@ export type ConformanceManualRecoveryRecord<Position extends string = string> = 
   settlements: Array<ConformanceAcceptedRejoinSettlement<Position>>
   mutationID: string
   abandonedForkRecovery?: string
+  completedSequence?: number
 }
 export type ConformanceSuccessorTombstone = {
   kind: 'successor-tombstone'
@@ -331,6 +332,7 @@ export function testManualRecoveryConformance<
           stage: 'completed',
           destination: key,
           mutationID: expect.any(String),
+          completedSequence: expect.any(Number),
         })
         const after = await fixture.device.groups.ports(key).control.load()
         expect(after).toEqual({

@@ -91,6 +91,8 @@ export type ManualRecoveryRecord = {
   mutationID: string
   /** A fork recovery intent this authorisation abandoned; the device stays known-behind. */
   abandonedForkRecovery?: string
+  /** Per-group completion order, stamped by the completing transaction (ids are unordered). */
+  completedSequence?: number
 }
 export type ManualRecoveryStatus = {
   id: string

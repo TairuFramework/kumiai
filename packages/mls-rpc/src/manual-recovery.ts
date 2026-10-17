@@ -122,6 +122,38 @@ export function hasActiveManualRecovery(records: Array<CheckpointRecord>, key: G
   )
 }
 
+/**
+ * The row a restarted owner resumes: the live (non-superseded) authorised resync for `key`, else
+ * the newest completed choice that ran from or onto `key`. Never list order, which no port defines.
+ */
+export function resumableManualRecovery(
+  records: Array<CheckpointRecord>,
+  key: GroupKey,
+): ManualRecoveryRecord | null {
+  const rows = records.filter((row): row is ManualRow => row.kind === 'manual-recovery')
+  const live = successorChosen(records, key)
+    ? undefined
+    : rows.find((row) => row.value.stage === 'authorised' && sameStoredValue(row.key, key))
+  if (live !== undefined) return copyStoredValue(live.value)
+  let newest: ManualRow | undefined
+  for (const row of rows) {
+    if (
+      row.value.stage !== 'completed' ||
+      !(sameStoredValue(row.key, key) || sameStoredValue(row.value.destination, key))
+    )
+      continue
+    // Rows completed before stamping order by id only to stay deterministic.
+    const order = (candidate: ManualRow) => candidate.value.completedSequence ?? 0
+    if (
+      newest === undefined ||
+      order(row) > order(newest) ||
+      (order(row) === order(newest) && row.id > newest.id)
+    )
+      newest = row
+  }
+  return newest === undefined ? null : copyStoredValue(newest.value)
+}
+
 export function manualRecoveryStatus(
   records: Array<CheckpointRecord>,
   key: GroupKey,
@@ -220,14 +252,28 @@ function assertCandidate(record: ManualRecoveryRecord, attempt: CapturedRejoinRe
 }
 
 export async function saveManualRecovery(
-  stores: { checkpoints: { put(row: CheckpointRecord): Promise<void> } },
+  stores: {
+    checkpoints: {
+      put(row: CheckpointRecord): Promise<void>
+      list(): Promise<Array<CheckpointRecord>>
+    }
+  },
   value: ManualRecoveryRecord,
 ): Promise<void> {
+  const saved = copyStoredValue(value)
+  if (saved.stage === 'completed' && saved.completedSequence === undefined) {
+    // Stamped inside the completing transaction: newest completion wins whatever the list order.
+    let newest = 0
+    for (const row of await stores.checkpoints.list())
+      if (row.kind === 'manual-recovery' && row.key.groupID === saved.source.groupID)
+        newest = Math.max(newest, row.value.completedSequence ?? 0)
+    saved.completedSequence = newest + 1
+  }
   const row: ManualRow = {
     kind: 'manual-recovery',
-    id: value.id,
-    key: { ...value.source },
-    value: copyStoredValue(value),
+    id: saved.id,
+    key: { ...saved.source },
+    value: saved,
   }
   preparations.set(row, copyStoredValue(row))
   await stores.checkpoints.put(row)

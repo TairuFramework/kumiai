@@ -1235,3 +1235,112 @@ for (const mode of ['real-mls', 'double'] as const) {
     }
   })
 }
+
+/** Serves every checkpoint listing to the owner in the given order; the port defines none. */
+function orderListings(fixture: Fixture, order: 'insertion' | 'reversed') {
+  const entry = registrySafety(fixture.registry)?.entry
+  if (entry === undefined) throw new Error('Missing registry capability')
+  const read = entry.read.bind(entry)
+  return vi.spyOn(entry, 'read').mockImplementation((groupID, fn) =>
+    read(groupID, (reads) =>
+      fn(
+        new Proxy(reads, {
+          get(target, property) {
+            if (property === 'checkpoints')
+              return async () => {
+                const rows = await target.checkpoints()
+                return order === 'reversed' ? rows.reverse() : rows
+              }
+            const value = Reflect.get(target, property)
+            return typeof value === 'function' ? value.bind(target) : value
+          },
+        }),
+      ),
+    ),
+  )
+}
+
+async function completeMove(
+  fixture: Fixture,
+  binding: { targetID: string; commitTopicID: string },
+) {
+  const store = fixture.manualRecovery()
+  const saved = await store.authoriseManualRecovery(key, {
+    mode: 'resync',
+    ...binding,
+    allowOpenFork: false,
+  })
+  const access = await fixture.registry.access(key.groupID)
+  const runtime = { stateVersion: access.stateVersion(), ledgerComplete: true }
+  if (!(await store.moveCurrent(saved.id, runtime))) throw new Error('Move did not complete')
+  return saved
+}
+
+for (const mode of ['real-mls', 'double'] as const) {
+  for (const order of ['insertion', 'reversed'] as const) {
+    test(`restart resumes the authorised resync over a completed move / ${mode} / ${order}`, async () => {
+      const fixture = await createRegistryFixture({ mode, groupID: key.groupID, setup: 'seeded' })
+      const hub = watchedHub().hub
+      let active: Awaited<ReturnType<typeof start>> | undefined
+      try {
+        await completeMove(fixture, movedBinding)
+        // Behind after the move, so the second choice must rejoin and stays pending.
+        await mutateControl(fixture, (snapshot) => ({
+          ...snapshot,
+          strand: { reason: 'retention-gap' },
+        }))
+        const pending = await fixture.manualRecovery().authoriseManualRecovery(key, {
+          mode: 'resync',
+          targetID: 'second-hub',
+          commitTopicID: 'second-commits',
+          allowOpenFork: false,
+        })
+        orderListings(fixture, order)
+        active = await start(fixture, async (id) => ({
+          id,
+          hub,
+          commitTopicID: id === 'second-hub' ? 'second-commits' : movedBinding.commitTopicID,
+        }))
+        expect(active.owner.status().kind).not.toBe('failed')
+        expect(active.created[0]?.manualRecovery).toEqual({
+          authorisationID: pending.id,
+          source: key,
+        })
+        expect(active.created[0]?.target).toEqual({
+          targetID: 'second-hub',
+          topicID: 'second-commits',
+        })
+      } finally {
+        vi.restoreAllMocks()
+        active?.owner.dispose()
+        await active?.owner.drained().catch(() => {})
+        await fixture.close()
+      }
+    })
+
+    test(`restart routes to the newest completed move / ${mode} / ${order}`, async () => {
+      const fixture = await createRegistryFixture({ mode, groupID: key.groupID, setup: 'seeded' })
+      const hub = watchedHub().hub
+      let active: Awaited<ReturnType<typeof start>> | undefined
+      try {
+        await completeMove(fixture, movedBinding)
+        await completeMove(fixture, { targetID: 'newest-hub', commitTopicID: 'newest-commits' })
+        orderListings(fixture, order)
+        active = await start(fixture, async (id) => ({
+          id,
+          hub,
+          commitTopicID: id === 'newest-hub' ? 'newest-commits' : movedBinding.commitTopicID,
+        }))
+        expect(active.created[0]?.target).toEqual({
+          targetID: 'newest-hub',
+          topicID: 'newest-commits',
+        })
+      } finally {
+        vi.restoreAllMocks()
+        active?.owner.dispose()
+        await active?.owner.drained().catch(() => {})
+        await fixture.close()
+      }
+    })
+  }
+}

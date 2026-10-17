@@ -27,7 +27,7 @@ import { createRegistryCheckpointService } from './checkpoint.js'
 import {
   type ManualRecoveryStore,
   manualRecoveryAttempt,
-  successorChosen,
+  resumableManualRecovery,
 } from './manual-recovery.js'
 import { copyStoredValue, sameStoredValue } from './memory-incarnation-stores.js'
 import type { RecoveryRouting } from './mls.js'
@@ -177,21 +177,10 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
   } | null = null
   async function discoverManual(): Promise<void> {
     if (manual !== null) return
-    manual = await capability.entry.read(key.groupID, async (reads) => {
-      const records = await reads.checkpoints()
-      // A successor choice is the app's to resume; it also retires any pending resync.
-      const superseded = successorChosen(records, key)
-      const row = [...records]
-        .reverse()
-        .find(
-          (row) =>
-            row.kind === 'manual-recovery' &&
-            ((row.value.stage === 'authorised' && !superseded && sameStoredValue(row.key, key)) ||
-              (row.value.stage === 'completed' &&
-                (sameStoredValue(row.key, key) || sameStoredValue(row.value.destination, key)))),
-        )
-      return row?.kind === 'manual-recovery' ? row.value : null
-    })
+    // A successor choice is the app's to resume; it also retires any pending resync.
+    manual = await capability.entry.read(key.groupID, async (reads) =>
+      resumableManualRecovery(await reads.checkpoints(), key),
+    )
     if (manual !== null) manualStore = coordinator.manualStore(manual.source, params.resolveTarget)
   }
   const manualID = () => manual?.id
