@@ -97,12 +97,14 @@ export type AppLaneParams = {
   onAppWindowPruned?: ((event: AppWindowPruned) => void | Promise<void>) | undefined
   onAppDeliveryStalled?: ((event: AppDeliveryStalled) => void) | undefined
   onAppDeliveryResumed?: ((event: AppDeliveryResumed) => void) | undefined
-  /** Start workers after the caller's serialization boundary; direct lanes start immediately. */
+  /** Queue worker starts outside the caller's synchronous frame; direct lanes start immediately. */
   scheduleDelivery?: ((start: () => void) => void) | undefined
-  /** Run autonomous drains while the caller holds the crypto handle still. */
+  /** Run autonomous drains outside the caller's commit queue. */
   scheduleDrain?: (drain: () => Promise<void>) => Promise<void>
   /** No applicable unapplied commit through the observed head. Direct lanes default to true. */
   commitLaneCaughtUp?: () => boolean
+  /** The last authenticated epoch applied by the commit lane. */
+  appliedEpoch: () => number
   /** Changes when new commit work invalidates a caught-up observation. */
   commitWorkVersion?: () => number
   /** Local monotone milliseconds. Defaults to clamped wall time. */
@@ -124,10 +126,11 @@ export type AppLaneParams = {
 
 export type AppLane = {
   /**
-   * Deliver every buffered app frame the handle can open AT THE EPOCH IT IS AT RIGHT NOW, and
-   * leave the rest buffered. Called before each apply and once more when the walk ends.
+   * Deliver buffered frames at current or retained epochs, leaving future frames buffered.
    */
   deliver: () => Promise<void>
+  /** Request a drain without waiting; an active drain coalesces requests into one rerun. */
+  kick: () => void
   dropFrame: (topicID: string, position: string) => Promise<void>
   /** Wake queued delivery for a topic, or every topic, without waiting for completion. */
   retryDelivery: (topicID?: string) => void
@@ -138,8 +141,7 @@ export type AppLane = {
    * every buffer and cursor rebuilt from here reads the anchor back through {@link
    * AppLaneParams.anchor}.
    *
-   * The walk has drained the old epoch before this reset. Cursors stay in the store, keyed by
-   * topic, while pending records survive in the delivery queue.
+   * Cursors stay in the store, keyed by topic. Pending records survive in the delivery queue.
    */
   reset: () => void
   /** Opened records awaiting the delivery worker. */
@@ -421,8 +423,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
    * Subscribed before pulled: the hub gates a topic fetch on the caller's own subscription, and a
    * segment reached by ROTATING onto it mid-walk has never been subscribed.
    *
-   * A FAILED FETCH RAISES. The caller's walk stops on the failure rather than stepping over an
-   * epoch whose frames were never read, and `fetched` is moved only by pages that arrived.
+   * A failed fetch stops this drain. Only received pages move `fetched`.
    */
   const loadSegment = async (): Promise<void> => {
     if (safetyHold() !== null) return
@@ -709,11 +710,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
    * or a group quiet on the commit lane and busy on the app lane re-delivers its whole backlog on
    * the next restart.
    *
-   * Does NOT deliver: delivery unwraps against the live handle, and this runs outside the commit
-   * mutex where the handle can be mid-ratchet — a frame classified at one epoch and unwrapped at
-   * the next would be wrongly called dead. So the buffer fills and the cursor advances, and
-   * anything still holding bytes waits for {@link deliver}, which runs where the handle is held
-   * still.
+   * Opening and delivery run in a separate drain. Crypto serialises each MLS mutation.
    *
    * COALESCED: a burst of pushes collapses into one pass; the flag clears on entry so a frame
    * arriving mid-pass schedules the next one instead of being left staged.
@@ -879,10 +876,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
             reportBlocked(name, cursor.topicID, frame.position, error)
             throw error
           }
-          // Claimed this epoch and the handle refused it — OR its AAD did not match this topic (a
-          // wrong-topic frame, or a pre-upgrade empty-AAD frame). Either way, dead: the handle
-          // never returns to this epoch and the topic binding never changes. Retained history from
-          // before this bind existed is DELIBERATELY invalidated, not silently re-offered.
+          // A past epoch is not retained. Other refusals also finish without delivery.
           frame.sealed = { state: 'done' }
           resumeBlocked(cursor.topicID, frame.position)
           continue
@@ -949,6 +943,41 @@ export function createAppLane(params: AppLaneParams): AppLane {
     }
   }
 
+  let kickScheduled = false
+  let kickRequested = false
+  const kick = (): void => {
+    if (disposed || safetyHold() !== null) return
+    kickRequested = true
+    if (kickScheduled) return
+    kickScheduled = true
+    kickRequested = false
+    if (retryTimer != null) clearTimeout(retryTimer)
+    retryTimer = undefined
+    const generation = segmentGeneration
+    void Promise.resolve()
+      .then(() => scheduleDrain(() => deliver(generation)))
+      .then(
+        () => {
+          kickScheduled = false
+          retryBackoff = 1000
+          if (kickRequested) kick()
+        },
+        () => {
+          kickScheduled = false
+          if (disposed || safetyHold() !== null) return
+          if (kickRequested) {
+            kick()
+            return
+          }
+          retryTimer = setTimeout(() => {
+            retryTimer = undefined
+            kick()
+          }, retryBackoff)
+          retryBackoff = Math.min(retryBackoff * 2, 60_000)
+        },
+      )
+  }
+
   return {
     dropFrame: (topicID, position) =>
       runAppLane(async () => {
@@ -981,36 +1010,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
         await advanceCursor(name, frames)
       }),
     retryDelivery,
-    /**
-     * MUST run BEFORE the apply, never after: once the commit applies the handle holds different
-     * key material, and those bytes are ciphertext forever. Per-FRAME-EPOCH, not per-rotation:
-     * every epoch inside a segment is dispensed as the walk passes through it.
-     *
-     * Which frames are this epoch's is the open's own answer: `unwrap` refuses another epoch with
-     * `FrameEpochError` before decrypting, and only its "ahead" answer keeps a frame. Future
-     * claims are bounded once the commit lane catches up.
-     *
-     * The buffer is walked whole, not stopped at the first frame that is not this epoch's, since
-     * the front can still hold a frame from an epoch the handle already passed (a journal replay
-     * advances it before this pull runs).
-     *
-     * THE CURSOR ADVANCES over a run of frames this drain is DONE with, stopping dead at the first
-     * it is not — see {@link advanceCursor} for the rule.
-     *
-     * A FAILED PULL STALLS THE WALK: {@link loadSegment} raising propagates and no epoch is passed
-     * unread, since the pull is a retry and the delivery is not.
-     *
-     * NOT delivered: this member's own frames, matching the live fan-out never echoing a publisher
-     * its own broadcast.
-     *
-     * TAKEN UNDER THE APP LANE'S MUTEX, excluding the live lane's own cursor work
-     * ({@link scheduleSync}), which runs off the mux's push loop under no lock at all. Two
-     * deliverers writing one DURABLE read position corrupts it on any interleave: a push splicing
-     * the ordered buffer mid-walk re-reads or steps over a frame, and a sync landing between
-     * {@link advanceCursor}'s read of a done run and its splice silently drops frames.
-     *
-     * The peer starts workers after its commit operation releases; direct lanes start them here.
-     */
+    kick,
+    /** Pulls and non-durable handlers share the app mutex; commit progress never awaits them. */
     deliver,
     note,
     pendingRecords: () => [...pendingRecords],

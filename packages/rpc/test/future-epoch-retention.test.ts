@@ -349,12 +349,13 @@ test('a peer starts hold age only when a paused commit walk catches up', async (
   try {
     const replay = bob.peer.replay()
     await entered.promise
-    expect(bob.crypto.starts.unwrap).toBeGreaterThan(0)
     await vi.advanceTimersByTimeAsync(60_000)
     expect(bob.appCursorStore.stored(topicID)).toBeNull()
     release.resolve()
     await replay
     expect(bob.mls.epoch()).toBe(2)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(bob.crypto.starts.unwrap).toBeGreaterThan(0)
     await vi.advanceTimersByTimeAsync(29_999)
     expect(bob.appCursorStore.stored(topicID)).toBeNull()
     await vi.advanceTimersByTimeAsync(1)
@@ -517,6 +518,7 @@ async function futureLane(
   const create = () => {
     const lane = createAppLane({
       mux: { retainTopic() {}, fetchTopic: fetch } as never,
+      appliedEpoch: () => reader.epoch(),
       crypto: reader,
       localDID: 'bob',
       protocols: { chat },

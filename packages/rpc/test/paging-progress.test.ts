@@ -37,6 +37,7 @@ describe('hub log paging', () => {
           }
         },
       } as never,
+      appliedEpoch: () => 1,
       crypto: createFakeCrypto({ localDID: 'bob' }),
       localDID: 'bob',
       protocols: { chat },

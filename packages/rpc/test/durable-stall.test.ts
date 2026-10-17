@@ -131,6 +131,7 @@ describe('durable storage stall', () => {
           }
         },
       } as never,
+      appliedEpoch: () => 1,
       crypto: createFakeCrypto({
         epoch: 1,
         localDID: 'bob',
@@ -185,6 +186,7 @@ describe('durable storage stall', () => {
           }
         },
       } as never,
+      appliedEpoch: () => 1,
       crypto: createFakeCrypto({
         epoch: 1,
         localDID: 'bob',
@@ -243,6 +245,7 @@ describe('durable storage stall', () => {
           }
         },
       } as never,
+      appliedEpoch: () => reader.epoch(),
       crypto: reader,
       localDID: 'bob',
       protocols: { chat },
@@ -296,6 +299,7 @@ describe('durable storage stall', () => {
           }
         },
       } as never,
+      appliedEpoch: () => 1,
       crypto: createFakeCrypto({
         epoch: 1,
         localDID: 'bob',
@@ -357,6 +361,7 @@ describe('durable storage stall', () => {
         retainTopic() {},
         fetchTopic,
       } as never,
+      appliedEpoch: () => 1,
       crypto: createFakeCrypto({
         epoch: 1,
         localDID: 'bob',
@@ -421,6 +426,7 @@ describe('durable storage stall', () => {
         retainTopic() {},
         fetchTopic,
       } as never,
+      appliedEpoch: () => reader.epoch(),
       crypto: reader,
       localDID: 'bob',
       protocols: { chat },
@@ -482,6 +488,7 @@ describe('durable storage stall', () => {
           }
         },
       } as never,
+      appliedEpoch: () => reader.epoch(),
       crypto: reader,
       localDID: 'bob',
       protocols: { chat },
@@ -533,6 +540,7 @@ describe('durable storage stall', () => {
           }
         },
       } as never,
+      appliedEpoch: () => 1,
       crypto: createFakeCrypto({
         epoch: 1,
         localDID: 'bob',
@@ -586,6 +594,7 @@ describe('durable storage stall', () => {
           }
         },
       } as never,
+      appliedEpoch: () => 1,
       crypto: createFakeCrypto({
         epoch: 1,
         localDID: 'bob',
@@ -632,6 +641,7 @@ describe('durable storage stall', () => {
           }
         },
       } as never,
+      appliedEpoch: () => 1,
       crypto: createFakeCrypto({
         epoch: 1,
         localDID: 'bob',
@@ -693,6 +703,7 @@ describe('durable storage stall', () => {
           }
         },
       } as never,
+      appliedEpoch: () => reader.epoch(),
       crypto: reader,
       localDID: 'bob',
       protocols: { chat },
@@ -737,6 +748,7 @@ describe('durable storage stall', () => {
           return { messages: [], head: null, oldest: null }
         },
       } as never,
+      appliedEpoch: () => 1,
       crypto: createFakeCrypto({
         localDID: 'bob',
         pending: {
@@ -788,6 +800,7 @@ describe('durable storage stall', () => {
           return { messages: [], head: null, oldest: null }
         },
       } as never,
+      appliedEpoch: () => 1,
       crypto: createFakeCrypto({
         localDID: 'bob',
         pending: {

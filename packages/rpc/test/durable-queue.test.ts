@@ -51,6 +51,7 @@ function fixture(
         }
       },
     } as never,
+    appliedEpoch: () => reader.epoch(),
     crypto: reader,
     localDID: 'bob',
     protocols: { chat },
@@ -162,6 +163,7 @@ describe('durable delivery queue', () => {
           return { messages: [], head: null, oldest: null }
         },
       } as never,
+      appliedEpoch: () => 1,
       crypto: createFakeCrypto({
         localDID: 'bob',
         pending: {

@@ -551,7 +551,21 @@ export function createGroupPeerWithControlWalk<
     secret: new Uint8Array(),
     epoch: currentEpoch(),
   }
-  let appNoticeInSerial = false
+  let appliedEpoch = 0
+  let appNotices: Array<() => void> = []
+  let appDrainScheduled = false
+  const drainAppNotices = (): void => {
+    appDrainScheduled = false
+    const batch = appNotices
+    appNotices = []
+    for (const notice of batch) notice()
+  }
+  const enqueueApp = (notice: () => void): void => {
+    appNotices.push(notice)
+    if (appDrainScheduled) return
+    appDrainScheduled = true
+    queueMicrotask(drainAppNotices)
+  }
   let commitLaneCaughtUp = mls == null
   let commitWorkVersion = 0
 
@@ -572,13 +586,12 @@ export function createGroupPeerWithControlWalk<
     safetyHold,
     commitLaneCaughtUp: () => commitLaneCaughtUp,
     commitWorkVersion: () => commitWorkVersion,
+    appliedEpoch: () => appliedEpoch,
     now: createMonotoneClock(),
     scheduleDrain: async (drain) => {
       await ready
       if (disposed) return
-      await runSerial(async () => {
-        if (!disposed && safetyHold() === null) await drain()
-      })
+      if (safetyHold() === null) await drain()
     },
     onSafetyHeld: latchSafetyHold,
     ...(appCursorStore != null ? { appCursorStore } : {}),
@@ -588,15 +601,14 @@ export function createGroupPeerWithControlWalk<
             const notify = () => {
               if (!disposed) notifyHost(onAppWindowPruned, event)
             }
-            if (appNoticeInSerial) hostOutbox.push(notify)
-            else queueMicrotask(notify)
+            enqueueApp(notify)
           },
         }
       : {}),
     ...(params.onAppDeliveryStalled != null
       ? {
           onAppDeliveryStalled: (event: AppDeliveryStalled) => {
-            hostOutbox.push(() => {
+            enqueueApp(() => {
               if (!disposed) notifyHost((value) => params.onAppDeliveryStalled?.(value), event)
             })
           },
@@ -608,15 +620,11 @@ export function createGroupPeerWithControlWalk<
             const notify = () => {
               if (!disposed) notifyHost((value) => params.onAppDeliveryResumed?.(value), event)
             }
-            if (appNoticeInSerial) hostOutbox.push(notify)
-            else queueMicrotask(notify)
+            enqueueApp(notify)
           },
         }
       : {}),
-    scheduleDelivery: (start) => {
-      if (appNoticeInSerial) hostOutbox.push(start)
-      else queueMicrotask(start)
-    },
+    scheduleDelivery: enqueueApp,
   })
 
   let sealBarrier: Promise<void> | undefined
@@ -659,6 +667,7 @@ export function createGroupPeerWithControlWalk<
     await saveResolvedAnchor({ anchor: anchorCapture.anchor })
     if (disposed || safetyHold() !== null) return
     anchor = { secret, epoch }
+    if (mls == null) appliedEpoch = epoch
     anchorCapture = undefined
     anchorPending = undefined
     sealError = undefined
@@ -1270,21 +1279,16 @@ export function createGroupPeerWithControlWalk<
   const runSerial = <T>(fn: () => Promise<T>): Promise<T> => {
     const op = commitTail.then(async () => {
       controlReplayed = false
-      appNoticeInSerial = true
-      try {
-        if (safetyHold() === null && epochNeedsBuild && mls != null && !locallyRemoved)
-          await refreshControl()
-        if (safetyHold() === null && epochNeedsBuild && mls != null && !locallyRemoved) {
-          await resolveAnchorRotation({ port: mls })
-          if (anchorPending == null && epochRuntime.hasInboxLane()) {
-            await rebuildEpoch()
-            epochNeedsBuild = false
-          }
+      if (safetyHold() === null && epochNeedsBuild && mls != null && !locallyRemoved)
+        await refreshControl()
+      if (safetyHold() === null && epochNeedsBuild && mls != null && !locallyRemoved) {
+        await resolveAnchorRotation({ port: mls })
+        if (anchorPending == null && epochRuntime.hasInboxLane()) {
+          await rebuildEpoch()
+          epochNeedsBuild = false
         }
-        return await fn()
-      } finally {
-        appNoticeInSerial = false
       }
+      return await fn()
     })
     commitTail = op.then(
       () => {},
@@ -1691,7 +1695,7 @@ export function createGroupPeerWithControlWalk<
     ledgerWaiters.get(reply.requestID)?.(reply.sealed)
   }
 
-  /** Read the departing epoch's frames and persist its rotation record before ratcheting. */
+  /** Request app work and persist the rotation record before ratcheting. */
   const advanceHandle = async <TResult>(params: AdvanceHandleParams<TResult>): Promise<TResult> => {
     const { port, ratchet, identity, floorPosition } = params
     commitLaneCaughtUp = false
@@ -1712,7 +1716,7 @@ export function createGroupPeerWithControlWalk<
     ) {
       throw new RecoveryRequiredError('an earlier anchor rotation is unresolved')
     }
-    if (!confirmedRecovery) await appLane.deliver()
+    if (!confirmedRecovery) appLane.kick()
     assertLive()
     assertSafetyOpen()
     const rosterBefore =
@@ -1750,6 +1754,7 @@ export function createGroupPeerWithControlWalk<
       assertSafetyOpen()
       const epoch = await port.readEpoch()
       assertSafetyOpen()
+      appliedEpoch = epoch
       if (epoch !== epochBefore) epochNeedsBuild = true
       if (epoch === identity.epochAfter && epoch !== record.epochBefore && floorPosition != null)
         floor = { epoch, position: floorPosition, covered: true }
@@ -1799,7 +1804,7 @@ export function createGroupPeerWithControlWalk<
    * would let the next `commit()` win a compare-and-set at an epoch it had not caught up to.
    * `ahead` steps over its frame and drains to the end. Its strand stops publication.
    */
-  const walkCommits = async (
+  const walkCommitLog = async (
     port: GroupMLS,
     topicID: string,
     search?: ControlWalkRequest,
@@ -2331,14 +2336,18 @@ export function createGroupPeerWithControlWalk<
     }
   }
 
-  /**
-   * The commit walk, with this segment's retained app frames delivered around it.
-   *
-   * The walk reads each epoch's frames ahead of the apply that leaves it; this adds the one epoch
-   * that has no apply after it — the head the walk stops at. Its frames are readable now and
-   * nothing further is coming to prompt them, so a peer whose backlog is entirely at its current
-   * epoch (or whose log held no commits at all) would otherwise never read a thing.
-   */
+  const walkCommits = async (
+    port: GroupMLS,
+    topicID: string,
+    search?: ControlWalkRequest,
+    requireCompletePrefix = false,
+  ): Promise<boolean> => {
+    const advanced = await walkCommitLog(port, topicID, search, requireCompletePrefix)
+    if (!disposed && safetyHold() === null) appliedEpoch = await port.readEpoch()
+    return advanced
+  }
+
+  /** Walk commits, then request app delivery without waiting for pulls or host handlers. */
   const pullCommits = async (requireCompletePrefix = false): Promise<boolean> => {
     commitLaneCaughtUp = mls == null
     if (disposed || safetyHold() !== null || locallyRemoved) return false
@@ -2369,12 +2378,12 @@ export function createGroupPeerWithControlWalk<
     try {
       const advanced = await walkCommits(mls, commitTopicID, undefined, requireCompletePrefix)
       if (disposed) return false
-      await appLane.deliver()
+      appLane.kick()
       if (disposed) return false
       return advanced
     } catch (error) {
       if (disposed) return false
-      // A failed final drain can follow applied commits. Refresh the runtime before a retry.
+      // A failed walk can follow applied commits. Refresh the runtime before a retry.
       if (epochRuntime.hasInboxLane()) {
         const epochAfter = await mls.readEpoch()
         if (disposed) return false
@@ -5320,6 +5329,7 @@ export function createGroupPeerWithControlWalk<
           })
         return
       }
+      if (mls != null) appliedEpoch = await mls.readEpoch()
       if (continuation !== null) {
         const source = await mls?.readRecoverySource()
         if (
@@ -5555,9 +5565,9 @@ export function createGroupPeerWithControlWalk<
       await ready
       assertLive()
       if (params.recoveryOnly) throw new SendNotAdmissibleError('stranded')
+      await appLane.dropFrame(topicID, position)
+      assertLive()
       await runSerial(async () => {
-        assertLive()
-        await appLane.dropFrame(topicID, position)
         assertLive()
         if (safetyHold() !== null) return
         await settleOperations()

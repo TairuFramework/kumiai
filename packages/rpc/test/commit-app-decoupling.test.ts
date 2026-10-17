@@ -1,0 +1,415 @@
+import { encodeEventFrame } from '@kumiai/broadcast'
+import type { HubFetchTopicParams, HubFetchTopicResult } from '@kumiai/hub-tunnel'
+import { afterEach, describe, expect, test, vi } from 'vitest'
+
+import { encodeAppAAD } from '../src/app-aad.js'
+import type * as AppLaneModule from '../src/app-lane.js'
+import { type AppLane, type AppLaneParams, createAppLane } from '../src/app-lane.js'
+import type { PendingAppFrame } from '../src/crypto.js'
+import { APP_TOPIC_LABEL, commitTopic, protocolTopic } from '../src/topic.js'
+import { publishCommit } from './fixtures/commits.js'
+import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
+import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
+import { buildLedgerCommit, chat, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
+
+// Capture the real peer/lane boundary without replacing either scheduler.
+const captured = vi.hoisted(
+  () =>
+    [] as Array<{ lane: AppLane; params: AppLaneParams; queue: { pending: number; peak: number } }>,
+)
+vi.mock('../src/app-lane.js', async (original) => {
+  const module = await original<typeof AppLaneModule>()
+  return {
+    ...module,
+    createAppLane(params: AppLaneParams) {
+      const queue = { pending: 0, peak: 0 }
+      const enqueue = () => {
+        queue.pending += 1
+        queue.peak = Math.max(queue.peak, queue.pending)
+      }
+      const lane = module.createAppLane({
+        ...params,
+        ...(params.onAppDeliveryStalled == null
+          ? {}
+          : {
+              onAppDeliveryStalled: (event) => {
+                enqueue()
+                params.onAppDeliveryStalled?.(event)
+              },
+            }),
+        ...(params.onAppDeliveryResumed == null
+          ? {}
+          : {
+              onAppDeliveryResumed: (event) => {
+                enqueue()
+                params.onAppDeliveryResumed?.(event)
+              },
+            }),
+        scheduleDelivery: (start) => {
+          enqueue()
+          const deliver = () => {
+            queue.pending -= 1
+            start()
+          }
+          if (params.scheduleDelivery == null) deliver()
+          else params.scheduleDelivery(deliver)
+        },
+      })
+      captured.push({ lane, params, queue })
+      return lane
+    },
+  }
+})
+
+const secret = new Uint8Array(32).fill(0xb3)
+const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+const peers: Array<TestPeer> = []
+const lanes: Array<AppLane> = []
+const releases: Array<() => void> = []
+const tasks: Array<Promise<unknown>> = []
+function track<T>(task: Promise<T>): Promise<T> {
+  tasks.push(task)
+  void task.catch(() => {})
+  return task
+}
+
+function gate() {
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  releases.push(release.resolve)
+  return { entered, release }
+}
+
+class GatedHub extends DurableFakeHub {
+  appGate: ReturnType<typeof gate> | undefined
+  controlGate: ReturnType<typeof gate> | undefined
+  override async fetchTopic(params: HubFetchTopicParams): Promise<HubFetchTopicResult> {
+    const pause =
+      params.topicID === topicID
+        ? this.appGate
+        : params.topicID === commitTopic(secret)
+          ? this.controlGate
+          : undefined
+    if (pause != null) {
+      pause.entered.resolve()
+      await pause.release.promise
+    }
+    return super.fetchTopic(params)
+  }
+}
+
+async function setup(options: Parameters<typeof makeMLSPeer>[3] = {}, durable = true) {
+  const hub = new GatedHub()
+  const rows = new Map<string, PendingAppFrame>()
+  const reader = createFakeCrypto({
+    epoch: 1,
+    localDID: 'bob',
+    retainedEpochs: 2,
+    ...(durable
+      ? {
+          pending: {
+            async persistOpened(_state: Uint8Array, record: PendingAppFrame) {
+              rows.set(record.frame.id, record)
+            },
+            async list() {
+              return [...rows.values()]
+            },
+            async complete(id: string) {
+              rows.delete(id)
+            },
+          },
+        }
+      : {}),
+  })
+  const bob = makeMLSPeer(hub, 'bob', secret, {
+    ...options,
+    crypto: reader,
+    ...(options.onAppDeliveryStalled == null
+      ? {}
+      : {
+          onAppDeliveryStalled: (event) => {
+            if (entry != null) entry.queue.pending -= 1
+            options.onAppDeliveryStalled?.(event)
+          },
+        }),
+    ...(options.onAppDeliveryResumed == null
+      ? {}
+      : {
+          onAppDeliveryResumed: (event) => {
+            if (entry != null) entry.queue.pending -= 1
+            options.onAppDeliveryResumed?.(event)
+          },
+        }),
+  })
+  peers.push(bob)
+  const entry = captured.at(-1)
+  if (entry == null) throw new Error('missing peer lane')
+  await bob.peer.protocol('chat').to('alice')
+  await entry.lane.deliver()
+  hub.detach('bob')
+  return { hub, bob, rows, reader, ...entry }
+}
+
+async function append(hub: DurableFakeHub, epoch = 1, text = 'hello') {
+  return hub.publish({
+    topicID,
+    senderDID: 'alice',
+    retain: 'log',
+    payload: await createFakeCrypto({ epoch, localDID: 'alice' }).wrap(
+      encodeEventFrame('chat/posted', { text }),
+      { aad: encodeAppAAD({ topicID, intent: 'log' }) },
+    ),
+  })
+}
+
+async function remoteCommit(f: Awaited<ReturnType<typeof setup>>) {
+  await publishCommit({ hub: f.hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+  const replay = track(f.bob.controlWalk.reconcileCommitPrefix())
+  void replay.catch(() => {})
+  await vi.waitFor(() => expect(f.bob.mls.epoch()).toBe(2), { timeout: 500 })
+  await replay
+}
+
+afterEach(async () => {
+  for (const release of releases.splice(0)) release()
+  await Promise.allSettled(tasks.splice(0))
+  for (const lane of lanes.splice(0)) lane.dispose()
+  for (const member of peers.splice(0)) await member.peer.dispose()
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+  captured.length = 0
+})
+
+describe('app work leaves the commit queue', () => {
+  test('commit applies while an app retry awaits a withheld fetch', async () => {
+    const f = await setup()
+    await append(f.hub, 3)
+    await f.lane.deliver()
+    const pause = gate()
+    f.hub.appGate = pause
+    f.lane.retryDelivery()
+    await pause.entered.promise
+    await remoteCommit(f)
+    pause.release.resolve()
+    await f.lane.deliver()
+  })
+
+  test.each([
+    { durable: false, name: 'non-durable' },
+    { durable: true, name: 'durable' },
+  ])('commit applies while a $name handler never returns', async ({ durable }) => {
+    const pause = gate()
+    const f = await setup(
+      {
+        handlers: {
+          'chat/posted': () => {
+            pause.entered.resolve()
+            return pause.release.promise
+          },
+        },
+      },
+      durable,
+    )
+    await append(f.hub)
+    const retry = track(f.params.scheduleDrain?.(() => f.lane.deliver()) ?? Promise.resolve())
+    await pause.entered.promise
+    await remoteCommit(f)
+    pause.release.resolve()
+    await retry
+  })
+
+  test('dropAppFrame does not hold the commit queue behind app work', async () => {
+    const f = await setup()
+    const frame = await append(f.hub, 3)
+    await f.lane.deliver()
+    const pause = gate()
+    f.hub.appGate = pause
+    // Hold only the app mutex, so this catches dropAppFrame's own serial reservation.
+    const drain = track(f.lane.deliver())
+    await pause.entered.promise
+    let dropped = false
+    const drop = track(f.bob.peer.dropAppFrame(topicID, frame.sequenceID)).then(() => {
+      dropped = true
+    })
+    void drop.catch(() => {})
+    await Promise.resolve()
+    expect(dropped).toBe(false)
+    await remoteCommit(f)
+    pause.release.resolve()
+    await drain
+    await drop
+  })
+
+  test('kicks coalesce', async () => {
+    const pause = gate()
+    let fetches = 0
+    const lane = createAppLane({
+      mux: {
+        retainTopic() {},
+        async fetchTopic() {
+          fetches += 1
+          if (fetches === 1) {
+            pause.entered.resolve()
+            await pause.release.promise
+          }
+          return { messages: [], head: null, oldest: null, gap: false }
+        },
+      } as never,
+      appliedEpoch: () => 1,
+      crypto: createFakeCrypto({ epoch: 1, localDID: 'bob' }),
+      localDID: 'bob',
+      protocols: { chat },
+      eventHandlers: new Map(),
+      retentionSeconds: 60,
+      anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
+      groupID: () => 'group',
+    })
+    lanes.push(lane)
+    const kick = () => lane.kick()
+    expect(kick()).toBeUndefined()
+    await pause.entered.promise
+    for (let i = 0; i < 1_000; i++) expect(kick()).toBeUndefined()
+    pause.release.resolve()
+    await vi.waitFor(() => expect(fetches).toBe(2))
+    await lane.deliver()
+    expect(fetches).toBe(3)
+  })
+
+  test('a failed kick stays detached and retries without new traffic', async () => {
+    const f = await setup()
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    let schedules = 0
+    const lane = createAppLane({
+      ...f.params,
+      scheduleDrain: (drain) => {
+        schedules += 1
+        if (schedules === 1) throw new Error('transient scheduling failure')
+        return drain()
+      },
+    })
+    lanes.push(lane)
+    expect(() => lane.kick()).not.toThrow()
+    await vi.advanceTimersByTimeAsync(999)
+    expect(schedules).toBe(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(schedules).toBe(2)
+  })
+
+  test('a delivery start queued after the last app task still runs', async () => {
+    const seen = vi.fn()
+    const f = await setup({ handlers: { 'chat/posted': seen } })
+    await append(f.hub)
+    await f.params.scheduleDrain?.(() => f.lane.deliver())
+    await vi.waitFor(() => expect(seen).toHaveBeenCalledTimes(1))
+    await vi.waitFor(async () => expect(await f.reader.pending?.list()).toEqual([]))
+    expect(f.rows.size).toBe(0)
+    expect(f.queue.pending).toBe(0)
+  })
+
+  test.each([
+    { gated: false, name: 'stall notices flow without commit activity' },
+    { gated: true, name: 'app delivery proceeds while a serial operation is gated' },
+  ])('$name', async ({ gated }) => {
+    const order: Array<string> = []
+    let callbackCommit: Promise<unknown> | undefined
+    let bob: TestPeer | undefined
+    const seen = vi.fn()
+    const f = await setup({
+      handlers: { 'chat/posted': seen },
+      onAppDeliveryStalled: (event) => {
+        order.push(`stalled:${event.position}`)
+        if (gated && callbackCommit == null && bob != null) {
+          callbackCommit = track(bob.peer.commit(buildLedgerCommit(bob, [])))
+          void callbackCommit.catch(() => {})
+        }
+      },
+      onAppDeliveryResumed: (event) => {
+        order.push(`resumed:${event.position}`)
+      },
+    })
+    bob = f.bob
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    let operation: Promise<unknown> | undefined
+    const pause = gate()
+    if (gated) {
+      f.hub.controlGate = pause
+      operation = track(f.bob.controlWalk.reconcileCommitPrefix())
+      void operation.catch(() => {})
+      await pause.entered.promise
+      const frame = await append(f.hub)
+      await f.lane.deliver()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(seen).toHaveBeenCalledTimes(1)
+      expect(f.rows.size).toBe(0)
+      expect(f.bob.appCursorStore.stored(topicID)).toBe(frame.sequenceID)
+    }
+    const writer = createFakeCrypto({ epoch: 3, localDID: 'alice' })
+    for (let i = 0; i < 200; i++) {
+      const frame = await f.hub.publish({
+        topicID,
+        senderDID: 'alice',
+        retain: 'log',
+        payload: await writer.wrap(encodeEventFrame('chat/posted', {}), {
+          aad: encodeAppAAD({ topicID, intent: 'log' }),
+        }),
+      })
+      await f.lane.deliver()
+      await f.lane.deliver()
+      await Promise.resolve()
+      expect(f.queue.pending).toBe(0)
+      expect(f.queue.peak).toBeLessThanOrEqual(2)
+      expect(order).toHaveLength(i * 2 + 1)
+      expect(order.at(-1)).toBe(`stalled:${frame.sequenceID}`)
+      await vi.advanceTimersByTimeAsync(30_000)
+      if (gated) await f.lane.dropFrame(topicID, frame.sequenceID)
+      await Promise.resolve()
+      expect(f.queue.pending).toBe(0)
+      expect(f.queue.peak).toBeLessThanOrEqual(2)
+      expect(order).toHaveLength(i * 2 + 2)
+      expect(order.at(-1)).toBe(`resumed:${frame.sequenceID}`)
+    }
+    pause.release.resolve()
+    await operation
+    await callbackCommit
+    if (gated) expect(f.bob.mls.epoch()).toBe(2)
+    expect(order).toHaveLength(400)
+  })
+
+  test('applied epoch follows authenticated walks and advancement despite display hints', async () => {
+    const f = await setup()
+    const epoch = f.params.appliedEpoch
+    expect(epoch()).toBe(1)
+    vi.spyOn(f.reader, 'epoch').mockReturnValue(80)
+    await remoteCommit(f)
+    expect(epoch()).toBe(2)
+    await f.bob.peer.commit(buildLedgerCommit(f.bob, []))
+    expect(epoch()).toBe(3)
+  })
+
+  test('departing-epoch frame delivers through retention', async () => {
+    const seen = vi.fn()
+    const f = await setup({ handlers: { 'chat/posted': seen } })
+    await remoteCommit(f)
+    await append(f.hub)
+    await f.lane.deliver()
+    await vi.waitFor(() => expect(seen).toHaveBeenCalledTimes(1))
+    await f.lane.deliver()
+    expect(seen).toHaveBeenCalledTimes(1)
+  })
+
+  test('lag beyond retention leaves frames undelivered without a stall', async () => {
+    const seen = vi.fn()
+    const stalled = vi.fn()
+    const f = await setup({ handlers: { 'chat/posted': seen }, onAppDeliveryStalled: stalled })
+    for (const epoch of [1, 2, 3]) {
+      await publishCommit({ hub: f.hub, senderDID: 'alice', recoverySecret: secret, epoch })
+      await f.bob.controlWalk.reconcileCommitPrefix()
+    }
+    expect(f.bob.mls.epoch()).toBe(4)
+    const frame = await append(f.hub)
+    await f.lane.deliver()
+    expect(f.bob.appCursorStore.stored(topicID)).toBe(frame.sequenceID)
+    expect(seen).not.toHaveBeenCalled()
+    expect(stalled).not.toHaveBeenCalled()
+  })
+})

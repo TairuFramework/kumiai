@@ -56,6 +56,7 @@ function retainedLane() {
         }
       },
     } as never,
+    appliedEpoch: () => reader.epoch(),
     crypto: reader,
     localDID: 'bob',
     protocols: { chat },
@@ -160,6 +161,7 @@ describe('durable retained drain', () => {
           return { messages: [], head: null, oldest: null }
         },
       } as never,
+      appliedEpoch: () => 1,
       crypto: createFakeCrypto({ epoch: 1, localDID: 'bob' }),
       localDID: 'bob',
       protocols: { chat, other: chat },

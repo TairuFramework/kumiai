@@ -328,6 +328,7 @@ describe('the app-lane drain reads from a durable position and reports what aged
     }
     const lane = createAppLane({
       mux: mux as never,
+      appliedEpoch: () => 1,
       crypto: { pending: null, frameEpoch: () => null } as never,
       localDID: 'bob',
       protocols: { chat: {} as never },

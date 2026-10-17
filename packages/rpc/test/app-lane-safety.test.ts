@@ -62,6 +62,7 @@ async function fixture() {
   })
   const lane = createAppLane({
     mux: { retainTopic: retain, fetchTopic: fetch } as never,
+    appliedEpoch: () => reader.epoch(),
     crypto: reader,
     localDID: 'bob',
     protocols: { chat },

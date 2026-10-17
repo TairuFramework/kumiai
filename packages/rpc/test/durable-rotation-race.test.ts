@@ -96,6 +96,7 @@ describe('durable app rotation', () => {
           }
         },
       } as never,
+      appliedEpoch: () => 2,
       crypto: createFakeCrypto({
         epoch: 2,
         localDID: 'alice',
