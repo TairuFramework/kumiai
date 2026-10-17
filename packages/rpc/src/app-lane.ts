@@ -1255,7 +1255,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
     note,
     pendingRecords: () => [...pendingRecords],
     idle: async () => {
-      await Promise.all([...finishingRecords])
+      await Promise.allSettled([...finishingRecords])
     },
     restore: async (records): Promise<void> => {
       await runAppLane(async () => {

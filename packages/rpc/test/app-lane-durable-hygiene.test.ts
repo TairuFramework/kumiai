@@ -1,7 +1,9 @@
 import { encodeEventFrame } from '@kumiai/broadcast'
 import { describe, expect, onTestFinished, test, vi } from 'vitest'
 
+import type { Anchor } from '../src/anchor.js'
 import { encodeAppAAD } from '../src/app-aad.js'
+import * as appLaneModule from '../src/app-lane.js'
 import { createAppLane, frameID } from '../src/app-lane.js'
 import type { PendingAppFrame } from '../src/crypto.js'
 import { adaptBusHandlers } from '../src/handlers.js'
@@ -33,6 +35,87 @@ function pendingStore() {
 }
 
 describe('durable app lane hygiene', () => {
+  test('drained awaits app lane idle after the host boundary drains', async () => {
+    const gate = Promise.withResolvers<void>()
+    const create = appLaneModule.createAppLane
+    const factory = vi.spyOn(appLaneModule, 'createAppLane').mockImplementation((params) => {
+      const lane = create(params)
+      const idle = lane.idle
+      lane.idle = async () => {
+        await gate.promise
+        await idle()
+      }
+      return lane
+    })
+    const bob = makeMLSPeer(new DurableFakeHub(), 'bob', new Uint8Array(32).fill(0xb6))
+    onTestFinished(async () => {
+      gate.resolve()
+      factory.mockRestore()
+      await bob.peer.dispose()
+      await bob.peer.drained()
+    })
+    await bob.peer.protocol('chat').to('alice')
+    await bob.peer.dispose()
+    let drained = false
+    const drain = bob.peer.drained().then(() => {
+      drained = true
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(drained).toBe(false)
+    gate.resolve()
+    await drain
+    expect(drained).toBe(true)
+  })
+
+  test('idle settles after an in-flight cursor save fails during disposal', async () => {
+    const hub = new DurableFakeHub()
+    const mux = createHubMux({ hub, localDID: 'bob', onReceiveEnded() {} })
+    const cursor = createMemoryAppCursorStore()
+    const entered = Promise.withResolvers<void>()
+    const gate = Promise.withResolvers<void>()
+    cursor.save = async () => {
+      entered.resolve()
+      await gate.promise
+      throw new Error('cursor save failed')
+    }
+    const lane = createAppLane({
+      mux,
+      crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending: pendingStore() }),
+      appliedEpoch: () => 1,
+      localDID: 'bob',
+      protocols: { chat },
+      eventHandlers: new Map(),
+      retentionSeconds: 60,
+      appCursorStore: cursor,
+      anchor: () => anchor,
+      groupID: () => 'group',
+    })
+    onTestFinished(() => {
+      gate.resolve()
+      lane.dispose()
+      mux.dispose()
+    })
+    const payload = await createFakeCrypto({ epoch: 1, localDID: 'alice' }).wrap(
+      encodeEventFrame('chat/posted', { text: 'failed save' }),
+      { aad },
+    )
+    await hub.publish({ topicID, senderDID: 'alice', payload, retain: 'log' })
+    await lane.deliver()
+    await entered.promise
+    lane.dispose()
+    let idle = false
+    const drain = lane.idle().then(() => {
+      idle = true
+    })
+    const settled = expect(drain).resolves.toBeUndefined()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(idle).toBe(false)
+    gate.resolve()
+    await settled
+    expect(idle).toBe(true)
+    expect(cursor.stored(topicID)).toBeNull()
+  })
+
   test('idle awaits an in-flight cursor save after disposal', async () => {
     const hub = new DurableFakeHub()
     const mux = createHubMux({ hub, localDID: 'bob', onReceiveEnded() {} })
@@ -187,5 +270,112 @@ describe('durable app lane hygiene', () => {
       position: frame.sequenceID,
       reason: 'future-epoch',
     })
+  })
+
+  test('expiry settles a sealed frame while a different pending record at its position survives', async () => {
+    const hub = new DurableFakeHub()
+    const mux = createHubMux({ hub, localDID: 'bob', onReceiveEnded() {} })
+    const pending = pendingStore()
+    const stalled = vi.fn()
+    const resumed = vi.fn()
+    const entered = Promise.withResolvers<void>()
+    const gate = Promise.withResolvers<void>()
+    const handler = vi.fn(async () => {
+      entered.resolve()
+      await gate.promise
+    })
+    const protocols: Record<string, typeof chat> = {}
+    let currentAnchor: Anchor = anchor
+    let appliedEpoch = 1
+    const reader = createFakeCrypto({ epoch: 1, localDID: 'bob', pending })
+    const lane = createAppLane({
+      mux,
+      crypto: reader,
+      appliedEpoch: () => appliedEpoch,
+      localDID: 'bob',
+      protocols,
+      eventHandlers: new Map([['chat', adaptBusHandlers(chat, { 'chat/posted': handler }).events]]),
+      retentionSeconds: 60,
+      onAppDeliveryStalled: stalled,
+      onAppDeliveryResumed: resumed,
+      anchor: () => currentAnchor,
+      departing: () => (currentAnchor === anchor ? [] : [{ anchor, departedAt: 2 }]),
+      groupID: () => 'group',
+    })
+    onTestFinished(async () => {
+      gate.resolve()
+      lane.dispose()
+      await lane.idle()
+      mux.dispose()
+    })
+    const xSealed = await createFakeCrypto({ epoch: 3, localDID: 'alice' }).wrap(
+      encodeEventFrame('chat/posted', { text: 'X' }),
+      { aad },
+    )
+    const frame = await hub.publish({
+      topicID,
+      senderDID: 'alice',
+      payload: xSealed,
+      retain: 'log',
+    })
+    const yPayload = encodeEventFrame('chat/posted', { text: 'Y' })
+    const ySealed = await createFakeCrypto({ epoch: 1, localDID: 'alice' }).wrap(yPayload, { aad })
+    const record: PendingAppFrame = {
+      frame: {
+        id: frameID(topicID, ySealed),
+        topicID,
+        position: frame.sequenceID,
+        protocol: 'chat',
+        segment: 1,
+      },
+      senderDID: 'alice',
+      payload: yPayload,
+    }
+    pending.rows.set(record.frame.id, record)
+    await lane.restore([record])
+    expect(stalled).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ reason: 'unknown-protocol', position: frame.sequenceID }),
+    )
+    protocols.chat = chat
+    await lane.deliver()
+    await entered.promise
+    expect(stalled).toHaveBeenCalledTimes(2)
+    expect(stalled).toHaveBeenLastCalledWith(
+      expect.objectContaining({ reason: 'future-epoch', position: frame.sequenceID }),
+    )
+
+    currentAnchor = { epoch: 2, secret: fakeEpochSecret(2, APP_TOPIC_LABEL) }
+    appliedEpoch = 2
+    reader.setEpoch(appliedEpoch)
+    await lane.deliver()
+    expect(resumed).not.toHaveBeenCalled()
+    appliedEpoch = 34
+    reader.setEpoch(appliedEpoch)
+    await lane.deliver()
+    expect(resumed).toHaveBeenCalledExactlyOnceWith({
+      settlement: 'expired',
+      groupID: 'group',
+      protocol: 'chat',
+      topicID,
+      position: frame.sequenceID,
+      reason: 'future-epoch',
+    })
+    expect(lane.pendingRecords()).toEqual([record])
+    expect(pending.rows.get(record.frame.id)).toBe(record)
+
+    gate.resolve()
+    await vi.waitFor(() => expect(resumed).toHaveBeenCalledTimes(2))
+    expect(resumed).toHaveBeenLastCalledWith({
+      settlement: 'resumed',
+      groupID: 'group',
+      protocol: 'chat',
+      topicID,
+      position: frame.sequenceID,
+      reason: 'unknown-protocol',
+    })
+    expect(lane.pendingRecords()).toHaveLength(0)
+    expect(pending.rows.size).toBe(0)
+    await lane.deliver()
+    expect(resumed).toHaveBeenCalledTimes(2)
   })
 })
