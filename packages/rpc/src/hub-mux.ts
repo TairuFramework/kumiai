@@ -192,6 +192,8 @@ export type HubMux = {
   rearmRefusedTopics: () => void
   /** Pull a topic's log as the local DID. */
   fetchTopic: (params: MuxFetchTopicParams) => Promise<HubFetchTopicResult>
+  /** Notify when an app fetch slot is available, including availability at registration. */
+  onAppFetchAvailable: (listener: () => void) => () => void
   onInbound: (
     topicID: string,
     listener: InboundListener,
@@ -878,6 +880,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
   }
 
   let outstandingAppFetches = 0
+  const appFetchListeners = new Set<() => void>()
   const fetchTopic = async (params: MuxFetchTopicParams): Promise<HubFetchTopicResult> => {
     // A fetch of a refused topic would die of `NotSubscribedError` — the SYMPTOM, naming the mux's
     // own failure to subscribe as if it were the caller's mistake. The latched refusal is raised
@@ -900,7 +903,10 @@ export function createHubMux(params: HubMuxParams): HubMux {
         })
       } finally {
         // An abort releases the caller, never the underlying request's slot.
-        if (signal != null) outstandingAppFetches -= 1
+        if (signal != null) {
+          outstandingAppFetches -= 1
+          if (!disposed) for (const listener of appFetchListeners) listener()
+        }
       }
     })()
     let abort: (() => void) | undefined
@@ -942,6 +948,23 @@ export function createHubMux(params: HubMuxParams): HubMux {
     rearmTopic,
     rearmRefusedTopics,
     fetchTopic,
+    onAppFetchAvailable: (listener) => {
+      if (disposed) return () => {}
+      appFetchListeners.add(listener)
+      // Capacity may return between the busy rejection and the caller subscribing.
+      queueMicrotask(() => {
+        if (
+          !disposed &&
+          appFetchListeners.has(listener) &&
+          outstandingAppFetches < APP_OUTSTANDING_FETCHES_MAX
+        ) {
+          listener()
+        }
+      })
+      return () => {
+        appFetchListeners.delete(listener)
+      }
+    },
     onInbound,
     suspendPublishing: (): void => {
       publishSuspended = true
@@ -949,6 +972,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
     dispose: () => {
       if (disposePromise != null) return disposePromise
       disposed = true
+      appFetchListeners.clear()
       for (const wake of resumeWaiters) wake()
       resumeWaiters.clear()
       // Belt-and-suspenders: `peer.dispose()` already calls `suspendPublishing()` before this

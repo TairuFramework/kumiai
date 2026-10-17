@@ -250,6 +250,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
   let retryRequested = false
   let retryTimer: ReturnType<typeof setTimeout> | undefined
   let retryBackoff = 1000
+  const busyTopics = new Set<string>()
+  let cancelBusyRetry: (() => void) | undefined
   const caughtUpTimes = new Map<AppFrame, number>()
   const applyCaughtUpTimes = (): void => {
     for (const [frame, time] of caughtUpTimes) {
@@ -443,7 +445,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
   }
 
   /** Snapshot and merge under the app mutex. Hub I/O holds no lane reservation. */
-  const pull = async (): Promise<void> => {
+  const pull = async (onlyTopics?: Set<string>): Promise<void> => {
     if (disposed || safetyHold() !== null) return
     const controller = new AbortController()
     const { signal } = controller
@@ -492,7 +494,9 @@ export function createAppLane(params: AppLaneParams): AppLane {
         const departing: Array<PullTopic> = []
         return [...current, ...departing]
       })
-      const queue = topics.map((topic) => ({ topic, pages: 0 }))
+      const queue = topics
+        .filter((topic) => onlyTopics == null || onlyTopics.has(topic.topicID))
+        .map((topic) => ({ topic, pages: 0 }))
       const fetchNext = async (): Promise<void> => {
         while (queue.length > 0) {
           const item = queue.shift()
@@ -514,8 +518,11 @@ export function createAppLane(params: AppLaneParams): AppLane {
             })
           } catch (error) {
             if (signal.aborted) return
-            if (error instanceof InvalidLogPositionError || error instanceof AppFetchBusyError)
+            if (error instanceof AppFetchBusyError) {
+              if (topic.generation === segmentGeneration) retryBusyPull(topic.topicID)
               continue
+            }
+            if (error instanceof InvalidLogPositionError) continue
             throw error
           }
           const next = await runAppLane(async () => {
@@ -1055,9 +1062,12 @@ export function createAppLane(params: AppLaneParams): AppLane {
   }
 
   let drainingEpoch: number | undefined
-  const deliver = async (generation = segmentGeneration): Promise<void> => {
+  const deliver = async (
+    generation = segmentGeneration,
+    onlyTopics?: Set<string>,
+  ): Promise<void> => {
     try {
-      await pull()
+      await pull(onlyTopics)
       await runAppLane(async () => {
         if (generation !== segmentGeneration || disposed) return
         drainingEpoch = anchor().epoch
@@ -1079,28 +1089,34 @@ export function createAppLane(params: AppLaneParams): AppLane {
 
   let kickScheduled = false
   let kickRequested = false
-  const kick = (): void => {
+  let kickAllTopics = false
+  const kick = (onlyBusyTopics = false): void => {
     if (disposed || safetyHold() !== null) return
     kickRequested = true
+    if (!onlyBusyTopics) kickAllTopics = true
     if (kickScheduled) return
     kickScheduled = true
     kickRequested = false
     if (retryTimer != null) clearTimeout(retryTimer)
     retryTimer = undefined
     const generation = segmentGeneration
+    // A capacity retry must not refetch successful topics while another slot stays occupied.
+    const topics = kickAllTopics ? undefined : new Set(busyTopics)
+    busyTopics.clear()
+    kickAllTopics = false
     void Promise.resolve()
-      .then(() => scheduleDrain(() => deliver(generation)))
+      .then(() => scheduleDrain(() => deliver(generation, topics)))
       .then(
         () => {
           kickScheduled = false
           retryBackoff = 1000
-          if (kickRequested) kick()
+          if (kickRequested) kick(true)
         },
         () => {
           kickScheduled = false
           if (disposed || safetyHold() !== null) return
           if (kickRequested) {
-            kick()
+            kick(true)
             return
           }
           retryTimer = setTimeout(() => {
@@ -1110,6 +1126,17 @@ export function createAppLane(params: AppLaneParams): AppLane {
           retryBackoff = Math.min(retryBackoff * 2, 60_000)
         },
       )
+  }
+
+  const retryBusyPull = (topicID: string): void => {
+    if (disposed || safetyHold() !== null) return
+    busyTopics.add(topicID)
+    if (cancelBusyRetry != null) return
+    cancelBusyRetry = mux.onAppFetchAvailable(() => {
+      cancelBusyRetry?.()
+      cancelBusyRetry = undefined
+      kick(true)
+    })
   }
 
   return {
@@ -1172,6 +1199,9 @@ export function createAppLane(params: AppLaneParams): AppLane {
     },
     dispose: (): void => {
       disposed = true
+      cancelBusyRetry?.()
+      cancelBusyRetry = undefined
+      busyTopics.clear()
       for (const controller of pulls.keys()) controller.abort()
       if (futureTimer != null) clearTimeout(futureTimer)
       if (retryTimer != null) clearTimeout(retryTimer)
@@ -1185,6 +1215,9 @@ export function createAppLane(params: AppLaneParams): AppLane {
         (drainingEpoch != null && drainingEpoch !== anchor().epoch) ||
         [...pulls.values()].some((epoch) => epoch !== anchor().epoch)
       segmentGeneration += 1
+      cancelBusyRetry?.()
+      cancelBusyRetry = undefined
+      busyTopics.clear()
       for (const controller of pulls.keys()) controller.abort()
       reportedPruned.clear()
       if (futureTimer != null) clearTimeout(futureTimer)

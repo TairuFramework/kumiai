@@ -269,6 +269,153 @@ describe('app pulls against a faulty hub', () => {
     expect(fetch).toHaveBeenCalledTimes(3)
   })
 
+  test.each(['resolve', 'reject'])(
+    'busy topics resume without an external trigger when aborted fetches %s',
+    async (settlement) => {
+      vi.useFakeTimers()
+      const f = fixture({ protocols: { chat, other: chat, third: chat, fourth: chat } })
+      const topics = ['chat', 'other', 'third', 'fourth'].map((name) =>
+        protocolTopic(anchor.secret, 1, name),
+      )
+      const messages = new Map(
+        await Promise.all(
+          topics.map(async (topic) => [topic, await f.sealed(topic, 1, topic)] as const),
+        ),
+      )
+      const withheld = Promise.withResolvers<HubFetchTopicResult>()
+      const subscriptions = vi.spyOn(f.mux, 'onAppFetchAvailable')
+      const fetch = vi
+        .spyOn(f.hub, 'fetchTopic')
+        .mockReturnValueOnce(withheld.promise)
+        .mockReturnValueOnce(withheld.promise)
+        .mockImplementation(async ({ topicID: topic }) =>
+          page([{ ...entry('1', messages.get(topic)), topicID: topic }]),
+        )
+      const initial = f.lane.deliver()
+      try {
+        await vi.advanceTimersByTimeAsync(10_000)
+        await initial
+        expect(fetch).toHaveBeenCalledTimes(2)
+        for (let i = 0; i < 50; i++) {
+          f.lane.kick()
+          await flush()
+          expect(f.drains.pending).toBe(0)
+        }
+        expect(fetch).toHaveBeenCalledTimes(2)
+        expect(f.seen).toEqual([])
+        expect(subscriptions).toHaveBeenCalledTimes(1)
+        if (settlement === 'resolve') withheld.resolve(empty())
+        else withheld.reject(new Error('late hub rejection'))
+        await vi.advanceTimersByTimeAsync(0)
+        expect(new Set(f.seen)).toEqual(new Set(topics))
+        expect(fetch).toHaveBeenCalledTimes(6)
+        expect(subscriptions).toHaveBeenCalledTimes(1)
+        expect(f.drains.starts).toBe(51)
+        expect(f.drains.peak).toBe(1)
+        expect(f.drains.pending).toBe(0)
+        for (const topic of topics) expect(f.cursor.stored(topic)).toBe('1')
+      } finally {
+        f.lane.dispose()
+        withheld.resolve(empty())
+        await initial
+      }
+    },
+  )
+
+  test('busy retry observes capacity released before its rejection is handled', async () => {
+    const f = fixture()
+    const withheld = Promise.withResolvers<HubFetchTopicResult>()
+    const fetch = vi
+      .spyOn(f.hub, 'fetchTopic')
+      .mockReturnValueOnce(withheld.promise)
+      .mockReturnValueOnce(withheld.promise)
+      .mockResolvedValue(page([entry('1', await f.sealed('recovered'))]))
+    const controller = new AbortController()
+    const request = { topicID, signal: controller.signal, limit: 100 }
+    const initial = Promise.allSettled([f.mux.fetchTopic(request), f.mux.fetchTopic(request)])
+    controller.abort()
+    await initial
+    const muxFetch = f.mux.fetchTopic
+    vi.spyOn(f.mux, 'fetchTopic').mockImplementation((params) => {
+      const result = muxFetch(params)
+      withheld.resolve(empty())
+      return result
+    })
+    try {
+      await f.lane.deliver()
+      await flush()
+      expect(f.seen).toEqual(['recovered'])
+      expect(fetch).toHaveBeenCalledTimes(3)
+      expect(f.cursor.stored(topicID)).toBe('1')
+    } finally {
+      f.lane.dispose()
+      withheld.resolve(empty())
+    }
+  })
+
+  test('busy recovery visits skipped topics once while another slot remains withheld', async () => {
+    vi.useFakeTimers()
+    const f = fixture({ protocols: { chat, other: chat, third: chat, fourth: chat } })
+    const first = Promise.withResolvers<HubFetchTopicResult>()
+    const second = Promise.withResolvers<HubFetchTopicResult>()
+    let calls = 0
+    const fetch = vi.spyOn(f.hub, 'fetchTopic').mockImplementation(async () => {
+      calls++
+      if (calls === 1) return first.promise
+      // Bound the test even if recovery spins while only one slot is free.
+      if (calls === 2 || calls > 20) return second.promise
+      return empty()
+    })
+    const initial = f.lane.deliver()
+    try {
+      await vi.advanceTimersByTimeAsync(10_000)
+      await initial
+      f.lane.kick()
+      await flush()
+      expect(f.drains.pending).toBe(0)
+      expect(fetch).toHaveBeenCalledTimes(2)
+      first.resolve(empty())
+      await vi.advanceTimersByTimeAsync(0)
+      expect(fetch).toHaveBeenCalledTimes(6)
+      const visited = fetch.mock.calls.slice(2).map(([request]) => request.topicID)
+      expect(new Set(visited).size).toBe(4)
+      expect(f.drains.pending).toBe(0)
+      second.resolve(empty())
+      await vi.advanceTimersByTimeAsync(0)
+      expect(fetch).toHaveBeenCalledTimes(6)
+    } finally {
+      f.lane.dispose()
+      first.resolve(empty())
+      second.resolve(empty())
+      await initial
+    }
+  })
+
+  test.each(['reset', 'dispose'] as const)(
+    '%s cancels the coalesced busy retry before capacity returns',
+    async (action) => {
+      const f = fixture()
+      const withheld = Promise.withResolvers<HubFetchTopicResult>()
+      const fetch = vi.spyOn(f.hub, 'fetchTopic').mockReturnValue(withheld.promise)
+      const controller = new AbortController()
+      const request = { topicID, signal: controller.signal, limit: 100 }
+      const initial = Promise.allSettled([f.mux.fetchTopic(request), f.mux.fetchTopic(request)])
+      controller.abort()
+      await initial
+      try {
+        await f.lane.deliver()
+        f.lane[action]()
+        withheld.resolve(empty())
+        await flush()
+        expect(fetch).toHaveBeenCalledTimes(2)
+        expect(f.drains.starts).toBe(0)
+      } finally {
+        f.lane.dispose()
+        withheld.resolve(empty())
+      }
+    },
+  )
+
   test('oversized pages inspect only the requested prefix before validating entries', async () => {
     const f = fixture()
     let inspected = 0
@@ -521,8 +668,7 @@ describe('app pulls against a faulty hub', () => {
       }
       expect(fetch).toHaveBeenCalledTimes(2)
       withheld.resolve(empty())
-      await flush()
-      await f.lane.deliver()
+      await vi.advanceTimersByTimeAsync(0)
       expect(fetch).toHaveBeenCalledTimes(3)
     } finally {
       withheld.resolve(empty())
