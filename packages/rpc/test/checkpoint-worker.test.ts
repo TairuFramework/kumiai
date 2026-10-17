@@ -231,6 +231,29 @@ test('flood yields after bounded verification', async () => {
   expect(f.service.signInstalled).not.toHaveBeenCalled()
 })
 
+test('full receive pages pace the next turn by at least 250 ms', async () => {
+  const f = setup(0)
+  let next = 1
+  // A hub serving an endless log of fresh junk positions.
+  vi.mocked(f.mux.fetchTopic).mockImplementation(async () => {
+    const messages = Array.from({ length: 32 }, () => frame(next++))
+    return { messages, head: messages.at(-1)?.sequenceID ?? null, oldest: '00000001', gap: false }
+  })
+  await f.create().start()
+  const fetches = () => vi.mocked(f.mux.fetchTopic).mock.calls.length
+  expect(fetches()).toBe(1)
+  // Inbound wakeups cannot shorten the delay.
+  for (let i = 0; i < 24; i++) {
+    f.wake()
+    await vi.advanceTimersByTimeAsync(10)
+  }
+  expect(fetches()).toBe(1)
+  await vi.advanceTimersByTimeAsync(20)
+  expect(fetches()).toBe(2)
+  await vi.advanceTimersByTimeAsync(10_000)
+  expect(fetches()).toBeLessThanOrEqual(2 + 40)
+})
+
 test('checkpoint traffic never moves commit head', async () => {
   const f = setup()
   await f.create().start()
