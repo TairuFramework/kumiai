@@ -767,11 +767,8 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
         // Diagnose spent corruption before a same-key transport move or recovery refusal.
         const diagnoseSpent = !hardHeld
         if (diagnoseSpent) await diagnoseSpentSet()
-        if (diagnoseSpent && capability.held(key) === 'spent-set-corrupt') {
-          await persistSpentCondition(new SpentSetCorruptError({ key }))
-          await refreshCondition()
-          return
-        }
+        if (diagnoseSpent && capability.held(key) === 'spent-set-corrupt')
+          throw new SpentSetCorruptError({ key })
         if (manual?.stage === 'authorised' && (await moveCurrent(manual))) return
         if (
           manual === null &&
