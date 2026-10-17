@@ -15,6 +15,7 @@ import {
 } from 'ts-mls'
 
 import { LEDGER_HEAD_EXTENSION_TYPE } from './anchor.js'
+import { authorPrivateCommit } from './authoring.js'
 import { parseMLSCredentialIdentity } from './credential.js'
 import { verifyDeviceEntry } from './device-proof.js'
 import { encodeControlEnvelope } from './envelope.js'
@@ -192,155 +193,171 @@ export type CommitWithEntriesParams = {
 export async function commitWithEntries(
   params: CommitWithEntriesParams,
 ): Promise<Awaited<ReturnType<typeof createCommit>>> {
-  const { group, extraProposals, enacted } = params
-  if (group.anchor.controller != null && group.findMemberLeafIndex(group.credential.id) == null) {
-    throw new Error('the committer must hold a leaf')
-  }
-  const ratchetTreeExtension = params.ratchetTreeExtension ?? false
-  const requireAdmin = params.requireAdmin ?? true
-  // Same reason createInvite guards the inviter: a non-admin's commit is rejected by
-  // every receiver, so fail here rather than emitting a commit nobody will apply.
-  // Authority-aware: a device of an admin profile commits as that profile. Device-only commits
-  // (register/add/revoke/label) are authorized by proofs, not a role, so they pass requireAdmin:false.
-  if (
-    requireAdmin &&
-    group.anchor.controller == null &&
-    group.roster.roles.get(authority(group.registry, group.credential.id)) !== 'admin'
-  ) {
-    throw new Error('the committer must be an admin in the group roster')
-  }
-
-  // Fold the entries exactly as every receiver will; refuse to author a commit the
-  // group would reject. Without this the write path fails *open*: the committer
-  // advances its own log and head while every receiver rejects the commit, forking
-  // itself off. Being an admin is not enough — an entry's own issuer must hold
-  // authority at the position it lands, so a token signed by a since-demoted admin is
-  // dead paper no matter who commits it.
-  const inputs: Array<FoldInput> = []
-  for (const token of enacted) {
-    const verified = await verifyLedgerEntry(token)
-    if (verified == null) {
-      throw new Error('cannot enact a ledger entry whose signature does not verify')
+  return authorPrivateCommit(params.group, async () => {
+    const { group, extraProposals, enacted } = params
+    const epoch = Number(group.epoch)
+    const authenticatorBefore = group.state.keySchedule.epochAuthenticator.slice()
+    if (group.anchor.controller != null && group.findMemberLeafIndex(group.credential.id) == null) {
+      throw new Error('the committer must hold a leaf')
     }
-    inputs.push({ verified, entryID: ledgerEntryDigest(token) })
-  }
-  const fold = foldEnvelope({
-    baseRoster: group.roster,
-    baseRegistry: group.registry,
-    entries: inputs,
-    groupID: group.groupID,
-    context:
-      group.anchor.controller == null
-        ? undefined
-        : {
-            controllerID: group.anchor.controller,
-            memberController: (did) => group.bindingOfDID(did)?.controller,
-          },
-  })
-  if (!fold.ok) {
-    if (fold.error != null) throw fold.error
-    throw new Error(`cannot enact ledger entry ${fold.entryID}: ${fold.reason}`)
-  }
-
-  // Same reason as the fold guard above: verify device entries against THIS group's tree and
-  // registry so the committer never authors a commit every receiver's own gate will reject.
-  const proofCtx = {
-    bindingOfDID: (d: string) => group.bindingOfDID(d),
-    controllerOf: (d: string) => controllerOf(group.registry, d),
-  }
-  for (const input of inputs) {
-    if (input.verified.entry.type !== DEVICE_ENTRY_TYPE) continue
+    const ratchetTreeExtension = params.ratchetTreeExtension ?? false
+    const requireAdmin = params.requireAdmin ?? true
+    // Same reason createInvite guards the inviter: a non-admin's commit is rejected by
+    // every receiver, so fail here rather than emitting a commit nobody will apply.
+    // Authority-aware: a device of an admin profile commits as that profile. Device-only commits
+    // (register/add/revoke/label) are authorized by proofs, not a role, so they pass requireAdmin:false.
     if (
-      group.anchor.controller != null &&
-      (input.verified.entry.value as DeviceValue).op !== 'beacon'
+      requireAdmin &&
+      group.anchor.controller == null &&
+      group.roster.roles.get(authority(group.registry, group.credential.id)) !== 'admin'
     ) {
-      continue
+      throw new Error('the committer must be an admin in the group roster')
     }
-    const ok = await verifyDeviceEntry(input.verified as VerifiedLedgerEntry<DeviceValue>, proofCtx)
-    if (!ok) {
-      throw new Error(`cannot enact device entry ${input.entryID}: proof verification failed`)
-    }
-  }
 
-  const entryIDs = enacted.map(ledgerEntryDigest)
-
-  const enactedDeviceEntries = inputs
-    .filter((i) => i.verified.entry.type === DEVICE_ENTRY_TYPE)
-    .map((i) => ({
-      subject: normalizeDID(i.verified.entry.subject),
-      op: (i.verified.entry.value as DeviceValue).op,
-    }))
-  const gateContext = buildCommitPolicyContext(group, {
-    baseRoster: group.roster,
-    candidateRoster: fold.roster,
-    entryIDs,
-    enactedDeviceEntries,
-  })
-  const commitState = {
-    ...(params.commitState ?? group.state),
-    unappliedProposals: params.pendingProposals ?? {},
-  }
-
-  const proposals = [...extraProposals]
-  if (entryIDs.length > 0) {
-    proposals.push({
-      proposalType: defaultProposalTypes.group_context_extensions,
-      groupContextExtensions: { extensions: extensionsWithHead(group, entryIDs) },
-    })
-  }
-
-  const gate = await prepareLifecycleGate({
-    group,
-    entries: inputs.map(({ verified }) => verified),
-    candidateRegistry: fold.registry,
-    context: gateContext,
-  })
-  const incoming = {
-    kind: 'commit' as const,
-    senderLeafIndex: group.state.privatePath.leafIndex as LeafIndex,
-    proposals: [
-      ...Object.values(commitState.unappliedProposals),
-      ...proposals.map((proposal) => ({
-        proposal,
-        senderLeafIndex: group.state.privatePath.leafIndex as LeafIndex,
-      })),
-    ],
-  }
-  try {
-    gate.check(incoming)
-  } catch (cause) {
-    if (params.pendingProposals == null) throw cause
-    const error = new CommitRejectedError(
-      incoming.proposals,
-      incoming.senderLeafIndex,
-      rejectionReason(cause),
-    )
-    error.cause = cause
-    throw error
-  }
-  for (const proposal of proposals) {
-    if (proposal.proposalType === defaultProposalTypes.add) {
-      const leaf = proposal.add.keyPackage.leafNode
-      if (
-        isDefaultCredential(leaf.credential) &&
-        leaf.credential.credentialType === defaultCredentialTypes.basic
-      ) {
-        assertBindingAuthorTime(parseMLSCredentialIdentity(leaf.credential.identity).controller)
+    // Fold the entries exactly as every receiver will; refuse to author a commit the
+    // group would reject. Without this the write path fails *open*: the committer
+    // advances its own log and head while every receiver rejects the commit, forking
+    // itself off. Being an admin is not enough — an entry's own issuer must hold
+    // authority at the position it lands, so a token signed by a since-demoted admin is
+    // dead paper no matter who commits it.
+    const inputs: Array<FoldInput> = []
+    for (const token of enacted) {
+      const verified = await verifyLedgerEntry(token)
+      if (verified == null) {
+        throw new Error('cannot enact a ledger entry whose signature does not verify')
       }
-      await validateEntry(group, leaf)
+      inputs.push({ verified, entryID: ledgerEntryDigest(token) })
     }
-  }
-  const result = await createCommit({
-    context: group.context,
-    state: commitState,
-    extraProposals: proposals,
-    ...(ratchetTreeExtension && { ratchetTreeExtension: true }),
-    ...(entryIDs.length > 0 && {
-      authenticatedData: encodeControlEnvelope({ v: 1, entries: entryIDs }),
-    }),
+    const fold = foldEnvelope({
+      baseRoster: group.roster,
+      baseRegistry: group.registry,
+      entries: inputs,
+      groupID: group.groupID,
+      context:
+        group.anchor.controller == null
+          ? undefined
+          : {
+              controllerID: group.anchor.controller,
+              memberController: (did) => group.bindingOfDID(did)?.controller,
+            },
+    })
+    if (!fold.ok) {
+      if (fold.error != null) throw fold.error
+      throw new Error(`cannot enact ledger entry ${fold.entryID}: ${fold.reason}`)
+    }
+
+    // Same reason as the fold guard above: verify device entries against THIS group's tree and
+    // registry so the committer never authors a commit every receiver's own gate will reject.
+    const proofCtx = {
+      bindingOfDID: (d: string) => group.bindingOfDID(d),
+      controllerOf: (d: string) => controllerOf(group.registry, d),
+    }
+    for (const input of inputs) {
+      if (input.verified.entry.type !== DEVICE_ENTRY_TYPE) continue
+      if (
+        group.anchor.controller != null &&
+        (input.verified.entry.value as DeviceValue).op !== 'beacon'
+      ) {
+        continue
+      }
+      const ok = await verifyDeviceEntry(
+        input.verified as VerifiedLedgerEntry<DeviceValue>,
+        proofCtx,
+      )
+      if (!ok) {
+        throw new Error(`cannot enact device entry ${input.entryID}: proof verification failed`)
+      }
+    }
+
+    const entryIDs = enacted.map(ledgerEntryDigest)
+
+    const enactedDeviceEntries = inputs
+      .filter((i) => i.verified.entry.type === DEVICE_ENTRY_TYPE)
+      .map((i) => ({
+        subject: normalizeDID(i.verified.entry.subject),
+        op: (i.verified.entry.value as DeviceValue).op,
+      }))
+    const gateContext = buildCommitPolicyContext(group, {
+      baseRoster: group.roster,
+      candidateRoster: fold.roster,
+      entryIDs,
+      enactedDeviceEntries,
+    })
+    const commitState = {
+      ...(params.commitState ?? group.state),
+      unappliedProposals: params.pendingProposals ?? {},
+    }
+
+    const proposals = [...extraProposals]
+    if (entryIDs.length > 0) {
+      proposals.push({
+        proposalType: defaultProposalTypes.group_context_extensions,
+        groupContextExtensions: { extensions: extensionsWithHead(group, entryIDs) },
+      })
+    }
+
+    const gate = await prepareLifecycleGate({
+      group,
+      entries: inputs.map(({ verified }) => verified),
+      candidateRegistry: fold.registry,
+      context: gateContext,
+    })
+    const incoming = {
+      kind: 'commit' as const,
+      senderLeafIndex: group.state.privatePath.leafIndex as LeafIndex,
+      proposals: [
+        ...Object.values(commitState.unappliedProposals),
+        ...proposals.map((proposal) => ({
+          proposal,
+          senderLeafIndex: group.state.privatePath.leafIndex as LeafIndex,
+        })),
+      ],
+    }
+    try {
+      gate.check(incoming)
+    } catch (cause) {
+      if (params.pendingProposals == null) throw cause
+      const error = new CommitRejectedError(
+        incoming.proposals,
+        incoming.senderLeafIndex,
+        rejectionReason(cause),
+      )
+      error.cause = cause
+      throw error
+    }
+    for (const proposal of proposals) {
+      if (proposal.proposalType === defaultProposalTypes.add) {
+        const leaf = proposal.add.keyPackage.leafNode
+        if (
+          isDefaultCredential(leaf.credential) &&
+          leaf.credential.credentialType === defaultCredentialTypes.basic
+        ) {
+          assertBindingAuthorTime(parseMLSCredentialIdentity(leaf.credential.identity).controller)
+        }
+        await validateEntry(group, leaf)
+      }
+    }
+    const result = await createCommit({
+      context: group.context,
+      state: commitState,
+      extraProposals: proposals,
+      ...(ratchetTreeExtension && { ratchetTreeExtension: true }),
+      ...(entryIDs.length > 0 && {
+        authenticatedData: encodeControlEnvelope({ v: 1, entries: entryIDs }),
+      }),
+    })
+    await gate.postApply(result.newState)
+    return {
+      value: result,
+      receipt: {
+        commit: encode(mlsMessageEncoder, result.commit),
+        referencedProposals: Object.keys(params.pendingProposals ?? {}),
+        epoch,
+        authenticatorBefore,
+        candidateAuthenticator: result.newState.keySchedule.epochAuthenticator,
+      },
+    }
   })
-  await gate.postApply(result.newState)
-  return result
 }
 
 /**
