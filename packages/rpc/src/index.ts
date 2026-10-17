@@ -180,6 +180,7 @@ export {
 export {
   asDeliveryPosition,
   asLogPosition,
+  compareLogPositions,
   type DeliveryPosition,
   type LogPosition,
 } from './cursor.js'

@@ -34,6 +34,11 @@ export function asLogPosition(sequenceID: string): LogPosition {
   return sequenceID as LogPosition
 }
 
+/** Log positions use code-unit lexical order, including opaque tokens. */
+export function compareLogPositions(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0
+}
+
 /** Reject a hub page that cannot move a log cursor forward. */
 export function assertForwardPage(
   after: LogPosition | null,

@@ -2,6 +2,7 @@ import { hmac } from '@noble/hashes/hmac.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { fromUTF, toUTF } from '@sozai/codec'
 
+import { RETAINED_EPOCHS_DEFAULT } from '../../src/app-frame.js'
 import {
   AppFrameStorageError,
   FrameEpochError,
@@ -15,6 +16,7 @@ import { decodeMemoryCommit } from './memory-group-mls.js'
 
 export type FakeCryptoOptions = {
   epoch?: number
+  retainedEpochs?: number
   /** The base `exportSecret` is derived from, per epoch AND per label. Defaults to {@link FAKE_BASE_SECRET}. */
   secret?: Uint8Array
   /** XOR key byte. Must be non-zero to be observable. Shared by all members. */
@@ -165,13 +167,7 @@ export function fakeEpochSecret(
  * each member holds its own copy of every other member's ratchet, so two members opening the same
  * frame is normal and one member opening it twice is not.
  *
- * The epoch is load-bearing, not decoration: an MLS member holds the epoch secret of the
- * epoch it is AT, so bytes sealed under any other epoch will not open for it — including
- * every frame from before it joined. `unwrap` throws for those, which is what a member
- * walking a log full of them has to survive without calling them corrupt.
- *
- * CURRENT EPOCH ONLY: the real adapter now gates past frames before ts-mls's retained-key open,
- * so this double and the real port report the same epoch refusal.
+ * Only current and retained past epochs open. Epochs from before joining are never retained.
  *
  * NOT real encryption. All members in a test share `key` so they can decrypt each other
  * at a shared epoch; different keys model different groups.
@@ -186,10 +182,13 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
       ? null
       : (JSON.parse(toUTF(options.state)) as {
           epoch: number
+          retained?: Array<number>
           generation: number
           spent: Array<string>
         })
   let epoch = restored?.epoch ?? options.epoch ?? 1
+  const retainedEpochs = options.retainedEpochs ?? RETAINED_EPOCHS_DEFAULT
+  let retained = restored?.retained ?? []
   const secret = options.secret ?? FAKE_BASE_SECRET
   const key = options.key ?? 0x5a
   const localDID = options.localDID ?? ''
@@ -215,6 +214,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     fromUTF(
       JSON.stringify({
         epoch,
+        retained,
         generation,
         spent: extraSpent == null ? [...spent] : [...spent, extraSpent],
       }),
@@ -328,7 +328,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     if (headerEnd + didLen + aadLen + TAG_BYTES > framed.length) {
       throw new Error('cannot open: not a well-formed sealed frame')
     }
-    if (sealedAt !== epoch) {
+    if (sealedAt !== epoch && !retained.includes(sealedAt)) {
       throw new FrameEpochError(sealedAt, epoch)
     }
     // Tag-verify BEFORE the expectedAAD compare and BEFORE spending the generation: a tampered or
@@ -486,6 +486,8 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     sealEntries,
     openEntries,
     setEpoch: (n) => {
+      if (n === epoch) return
+      retained = [...retained, epoch].filter((at) => at < n && at >= n - retainedEpochs)
       epoch = n
     },
     saveState: () => saveState(),

@@ -44,6 +44,7 @@ export type PendingCryptoFixture = {
   /** Snapshot the live handle state to check a rejected staged open leaves it untouched. */
   liveState(): Uint8Array
   persistCalls(): number
+  retainedEpochs?: number
   advance(): Promise<void>
 }
 
@@ -75,17 +76,45 @@ export function testPendingGroupCryptoConformance(params: PendingCryptoConforman
       const sealed = await fixture.sender.wrap(bytes.encode('old frame'))
       const frameEpoch = fixture.sender.frameEpoch(sealed)
       if (frameEpoch == null) throw new Error('sender did not frame an epoch')
-      await fixture.advance()
+      const advances = (fixture.retainedEpochs ?? 4) + 1
+      for (let i = 0; i < advances; i++) await fixture.advance()
       const calls = fixture.persistCalls()
       await expect(
         Promise.resolve().then(() => fixture.receiver.unwrap(sealed, { frame: frame('old') })),
       ).rejects.toMatchObject({
         name: 'FrameEpochError',
         frameEpoch,
-        handleEpoch: frameEpoch + 1,
+        handleEpoch: frameEpoch + advances,
       })
       expect(fixture.persistCalls()).toBe(calls)
       expect(await fixture.receiver.pending.list()).toEqual([])
+    })
+
+    test('a retained past-epoch durable unwrap saves one record', async () => {
+      const fixture = await createFixture('retained-success')
+      const payload = bytes.encode('retained')
+      const sealed = await fixture.sender.wrap(payload)
+      const from = fixture.receiver.epoch()
+      const advances = fixture.retainedEpochs ?? 4
+      for (let i = 0; i < advances; i++) await fixture.advance()
+      const calls = fixture.persistCalls()
+      const ref = frame('retained')
+      expect(await fixture.receiver.unwrap(sealed, { frame: ref })).toEqual({
+        payload,
+        senderDID: fixture.senderDID,
+        epoch: from + advances,
+      })
+      expect(fixture.persistCalls()).toBe(calls + 1)
+      expect(await fixture.receiver.pending.list()).toEqual([
+        { frame: ref, payload, senderDID: fixture.senderDID },
+      ])
+      await refuses(() => fixture.receiver.unwrap(sealed, { frame: ref }))
+      const restarted = await fixture.restore()
+      await refuses(() => restarted.unwrap(sealed, { frame: ref }))
+      expect(fixture.persistCalls()).toBe(calls + 1)
+      expect(await restarted.pending.list()).toEqual([
+        { frame: ref, payload, senderDID: fixture.senderDID },
+      ])
     })
 
     test('durable open saves a record and spent state; replay cannot save another', async () => {
@@ -177,9 +206,9 @@ export function testPendingGroupCryptoConformance(params: PendingCryptoConforman
     test('records survive restart, sort by segment and position, and complete idempotently', async () => {
       const fixture = await createFixture('records')
       for (const [id, segment, position] of [
-        ['late', 2, '10'],
-        ['first', 1, '2'],
-        ['middle', 2, '3'],
+        ['late', 2, '000000000010'],
+        ['first', 1, '000000000002'],
+        ['middle', 2, '000000000003'],
       ] as const) {
         const sealed = await fixture.sender.wrap(bytes.encode(id))
         await fixture.receiver.unwrap(sealed, { frame: frame(id, segment, position) })
@@ -199,6 +228,22 @@ export function testPendingGroupCryptoConformance(params: PendingCryptoConforman
       ])
     })
 
+    test.each([
+      { positions: ['a', 'B'], expected: ['B', 'a'] },
+      { positions: ['9', '10'], expected: ['10', '9'] },
+    ])('pending positions use code-unit order: $positions', async ({ positions, expected }) => {
+      const fixture = await createFixture(`positions-${positions.join('-')}`)
+      for (const position of positions) {
+        const sealed = await fixture.sender.wrap(bytes.encode(position))
+        await fixture.receiver.unwrap(sealed, { frame: frame(position, 1, position) })
+      }
+      expect((await fixture.receiver.pending.list()).map((row) => row.frame.position)).toEqual(
+        expected,
+      )
+      const restarted = await fixture.restore()
+      expect((await restarted.pending.list()).map((row) => row.frame.position)).toEqual(expected)
+    })
+
     test('a storage failure is distinct from an unopenable frame', async () => {
       const fixture = await createFixture('dead')
       let failure: unknown
@@ -215,7 +260,10 @@ export function testPendingGroupCryptoConformance(params: PendingCryptoConforman
     test('a below-epoch frame fails closed without persisting or changing live state', async () => {
       const fixture = await createFixture('past-epoch')
       const sealed = await fixture.sender.wrap(bytes.encode('past'))
-      await fixture.advance()
+      const frameEpoch = fixture.sender.frameEpoch(sealed)
+      if (frameEpoch == null) throw new Error('sender did not frame an epoch')
+      const advances = (fixture.retainedEpochs ?? 4) + 1
+      for (let i = 0; i < advances; i++) await fixture.advance()
       const before = fixture.liveState()
       const calls = fixture.persistCalls()
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -225,7 +273,11 @@ export function testPendingGroupCryptoConformance(params: PendingCryptoConforman
         } catch (error) {
           failure = error
         }
-        expect(failure).toBeInstanceOf(Error)
+        expect(failure).toMatchObject({
+          name: 'FrameEpochError',
+          frameEpoch,
+          handleEpoch: frameEpoch + advances,
+        })
         expect(isStorageError(failure)).toBe(false)
         expect(fixture.persistCalls()).toBe(calls)
         expect(fixture.liveState()).toEqual(before)

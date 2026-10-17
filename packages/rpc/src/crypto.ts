@@ -1,6 +1,6 @@
 import type { SafetyHold } from './control/safety.js'
 import type { AdoptionExpected, AdoptionWriteFactory } from './control/types.js'
-import type { LogPosition } from './cursor.js'
+import { compareLogPositions, type LogPosition } from './cursor.js'
 import type { CapturedRecoveryPort } from './recovery-types.js'
 
 /**
@@ -21,8 +21,8 @@ import type { CapturedRecoveryPort } from './recovery-types.js'
  * closure, whilst directed lanes call the two-arg form directly. `unwrap`'s optional `expectedAAD`
  * is compared PRE-OPEN, so a wrong-topic frame costs no ratchet generation.
  *
- * `unwrap` MUST open bytes sealed at the handle's CURRENT epoch, and refuse a readable frame at any
- * other epoch with {@link FrameEpochError} before decrypting.
+ * `unwrap` opens current and retained past epochs. Other readable epochs refuse with
+ * {@link FrameEpochError} before decrypting.
  *
  * `unwrap` throwing is ORDINARY CONTROL FLOW on the read paths, not an error — it means "not my
  * epoch". Readers walk logs full of frames from epochs they don't hold and drop them without
@@ -73,7 +73,7 @@ export type GroupCrypto = {
    *
    * `expectedAAD` is compared PRE-OPEN: authenticating without opening defends against wrong-topic
    * frames that would otherwise burn a ratchet generation (DoS).
-   * A readable frame at another epoch throws {@link FrameEpochError} before decrypting.
+   * A readable frame outside current and retained epochs throws {@link FrameEpochError} before decrypting.
    */
   unwrap(
     bytes: Uint8Array,
@@ -89,7 +89,7 @@ export type GroupCrypto = {
    * bytes that are not a readable sealed frame. Must NOT throw: it is asked about every frame a
    * log holds, most of which are not this handle's to open.
    *
-   * A frame sealed AHEAD can open once the reader catches up; one sealed BELOW cannot. This
+   * A frame sealed AHEAD can open once the reader catches up; one sealed BELOW needs retained keys. This
    * cleartext hint helps route frames before opening. A mismatched open reports the authoritative
    * direction in {@link FrameEpochError}.
    *
@@ -245,17 +245,11 @@ export function isAppFrameStorageError(error: unknown): error is AppFrameStorage
   return error instanceof Error && error.name === 'AppFrameStorageError'
 }
 
-/** Hub positions are numeric strings; retain a stable lexical fallback for opaque hosts. */
-export function sortPendingAppFrames(records: Array<PendingAppFrame>): Array<PendingAppFrame> {
-  return [...records].sort((a, b) => {
+/** Pending frames follow segment and code-unit log-position order. */
+export function sortPendingAppFrames<T extends PendingAppFrame>(frames: Array<T>): Array<T> {
+  return [...frames].sort((a, b) => {
     if (a.frame.segment !== b.frame.segment) return a.frame.segment - b.frame.segment
-    const aPos = a.frame.position
-    const bPos = b.frame.position
-    if (/^\d+$/.test(aPos) && /^\d+$/.test(bPos)) {
-      const difference = BigInt(aPos) - BigInt(bPos)
-      return difference < 0n ? -1 : difference > 0n ? 1 : 0
-    }
-    return aPos < bPos ? -1 : aPos > bPos ? 1 : 0
+    return compareLogPositions(a.frame.position, b.frame.position)
   })
 }
 

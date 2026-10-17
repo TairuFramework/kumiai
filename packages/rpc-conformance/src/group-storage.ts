@@ -391,7 +391,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
               procedure: 'posted',
               topicID,
               segment: seed.state.epoch,
-              position: '11',
+              position: '3',
             },
             payload: utf8('plaintext-sentinel'),
             senderDID: 'did:key:other',
@@ -403,7 +403,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
             async (stores) => {
               await stores.incarnation(1).pending.put([received, received])
               await stores.incarnation(1).pending.complete([received.frame.id])
-              await stores.incarnation(1).cursor.save(topicID, '11')
+              await stores.incarnation(1).cursor.save(topicID, '3')
             },
           )
           const reopened = await fixture.reopen()
@@ -1032,6 +1032,85 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
         await fixture.close()
       }
     })
+    test.each([
+      {
+        name: 'opaque pending positions list and insert without throwing',
+        positions: ['B', 'a'],
+        cursor: 'B',
+        skipped: 'A',
+        expected: ['B', 'a'],
+      },
+      {
+        name: 'unpadded positions use code-unit order',
+        positions: ['9', '10'],
+        cursor: null,
+        skipped: null,
+        expected: ['10', '9'],
+      },
+    ])('$name', async ({ positions, cursor, skipped, expected }) => {
+      const fixture = await params.createFixture(groupID)
+      try {
+        let groups = fixture.ports.device.groups
+        const seed = await storageSeed(fixture.ports)
+        const pendingTopic = 'position-order-topic'
+        const record = (position: string) => ({
+          frame: {
+            ...key,
+            id: `position-${position}`,
+            protocol: 'chat',
+            procedure: 'posted',
+            topicID: pendingTopic,
+            segment: seed.state.epoch,
+            position,
+          },
+          payload: utf8(position),
+          senderDID: seed.state.credential.id,
+          epoch: seed.state.epoch,
+          idempotencyKey: JSON.stringify([
+            'kumiai/frame/v1',
+            groupID,
+            1,
+            pendingTopic,
+            position,
+            'chat',
+            'posted',
+          ]),
+        })
+        for (const pass of ['initial', 'reopened']) {
+          await groups.transition(
+            await storageChange(groups, groupID, `position-order-${pass}`),
+            async (stores) => {
+              const rows = stores.incarnation(1)
+              if (pass === 'initial') {
+                await rows.pending.put(positions.slice(0, 1).map(record))
+              } else {
+                expect(
+                  (await rows.pending.list())
+                    .filter((row) => row.frame.topicID === pendingTopic)
+                    .map((row) => row.frame.position),
+                ).toEqual(expected)
+                await rows.pending.complete(
+                  positions.slice(1).map((position) => record(position).frame.id),
+                )
+              }
+              if (cursor !== null) await rows.cursor.save(pendingTopic, cursor)
+              await rows.pending.put(positions.slice(1).map(record))
+              if (skipped !== null) await rows.pending.put([record(skipped)])
+              expect(
+                (await rows.pending.list())
+                  .filter((row) => row.frame.topicID === pendingTopic)
+                  .map((row) => row.frame.position),
+              ).toEqual(expected)
+              if (cursor !== null) expect(await rows.cursor.load(pendingTopic)).toBe(cursor)
+            },
+          )
+          groups = (await fixture.reopen()).device.groups
+        }
+      } finally {
+        await fixture.close()
+      }
+    })
+
     test('authenticates every physical byte copy and atomically commits side rows', async () => {
       const fixture = await params.createFixture(groupID)
       try {
@@ -1427,7 +1506,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
       }
     })
 
-    test('isolates incarnations, numeric lane ordering and delimiter-bearing topic addresses', async () => {
+    test('isolates incarnations, code-unit lane ordering and delimiter-bearing topic addresses', async () => {
       const fixture = await params.createFixture(groupID)
       const donor = await params.createFixture(groupID)
       try {
@@ -1447,7 +1526,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
             escaped = stores
             expect(
               (await stores.incarnation(1).pending.list()).map((row) => row.frame.position),
-            ).toEqual(['2', '10'])
+            ).toEqual(['10', '2'])
             expect(await stores.incarnation(2).pending.list()).toEqual([])
             expect(await stores.incarnation(2).cursor.load(topicID)).toBeNull()
             await stores.incarnation(2).cursor.save('topic:secret', '2')

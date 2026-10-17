@@ -3,7 +3,9 @@ import {
   type CommitOnceWriteContext,
   type ControlChanges,
   type ControlSnapshot,
+  compareLogPositions,
   forkEventID,
+  isAppLogPosition,
 } from '@kumiai/rpc'
 
 import {
@@ -231,14 +233,13 @@ function laneOrder(
   const a = left.frame
   const b = right.frame
   const topicOrder = a.topicID < b.topicID ? -1 : a.topicID > b.topicID ? 1 : 0
-  const positionOrder =
-    BigInt(a.position) < BigInt(b.position) ? -1 : BigInt(a.position) > BigInt(b.position) ? 1 : 0
+  const positionOrder = compareLogPositions(a.position, b.position)
   return (
     a.incarnation - b.incarnation ||
     a.segment - b.segment ||
     topicOrder ||
     positionOrder ||
-    a.id.localeCompare(b.id)
+    (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
   )
 }
 
@@ -282,7 +283,8 @@ export function createUnlockedIncarnationStores(params: {
   function frameKey(frame: PendingAppFrame['frame'] | AppPoisonRecord['frame']): void {
     if (frame.groupID !== key.groupID || frame.incarnation !== key.incarnation)
       throw new GroupStateConflictError('Frame identity mismatch')
-    if (!/^\d+$/.test(frame.position)) throw new GroupStateConflictError('Invalid lane position')
+    if (!isAppLogPosition(frame.position))
+      throw new GroupStateConflictError('Invalid lane position')
   }
   async function putEvent(event: PersistenceEvent): Promise<void> {
     if (event.groupID !== key.groupID || event.incarnation !== key.incarnation)
@@ -471,7 +473,10 @@ export function createUnlockedIncarnationStores(params: {
           frameKey(record.frame)
           const previous = await pending.load(record.frame.id)
           const position = await cursor.load(await topicLocator(record.frame.topicID))
-          if (position !== null && BigInt(position.position) >= BigInt(record.frame.position))
+          if (
+            position !== null &&
+            compareLogPositions(position.position, record.frame.position) >= 0
+          )
             continue
           if (previous !== null) continue
           await pending.save(record.frame.id, record)

@@ -55,6 +55,7 @@ export type ConformanceCryptoMember = {
 export type ConformanceCryptoGroup = {
   /** One entry per member, all at the same epoch, in a fresh group. */
   members: Array<ConformanceCryptoMember>
+  retainedEpochs?: number
   setEpochHintOffset: (offset: number) => void
   /**
    * Enact a Commit that REMOVES `members[index]`. Every other member advances one epoch; the
@@ -166,6 +167,8 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
         }
         group.setEpochHintOffset(0)
         const oldFrame = await carol.crypto.wrap(bytes)
+        for (let i = 0; i < (group.retainedEpochs ?? 4); i++) await group.advance()
+        const removedEpoch = carol.crypto.epoch()
         await group.removeMember(2)
         const newEpoch = (await alice.crypto.exportSecret(EXPORT_LABEL_A)).epoch
         const newFrame = await alice.crypto.wrap(bytes)
@@ -173,7 +176,7 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
           group.setEpochHintOffset(offset)
           for (const [reader, frame, frameEpoch, handleEpoch] of [
             [alice.crypto, oldFrame, epoch, newEpoch],
-            [carol.crypto, newFrame, newEpoch, epoch],
+            [carol.crypto, newFrame, newEpoch, removedEpoch],
           ] as const) {
             await expect(Promise.resolve().then(() => reader.unwrap(frame))).rejects.toMatchObject({
               name: 'FrameEpochError',
@@ -347,20 +350,39 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
         })
       })
 
-      test('a frame one epoch below the current handle is refused', async () => {
+      test('a retained past-epoch frame opens', async () => {
+        await withGroup(2, 'unwrap-retained', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+          const payload = utf8.encode('retained')
+          const sealed = await alice.crypto.wrap(payload)
+          const from = bob.crypto.epoch()
+          const advances = group.retainedEpochs ?? 4
+          for (let i = 0; i < advances; i++) await group.advance()
+          expect(await bob.crypto.unwrap(sealed)).toEqual({
+            payload,
+            senderDID: alice.did,
+            epoch: from + advances,
+          })
+          await refuses(() => bob.crypto.unwrap(sealed))
+        })
+      })
+
+      test('a frame beyond retained epochs is refused', async () => {
         await withGroup(2, 'unwrap-past', async (group) => {
           const alice = memberAt(group.members, 0)
           const bob = memberAt(group.members, 1)
           const stale = await alice.crypto.wrap(utf8.encode('long ago'))
           const from = bob.crypto.epoch()
-          await group.advance()
-          expect(bob.crypto.epoch()).toBe(from + 1)
+          const advances = (group.retainedEpochs ?? 4) + 1
+          for (let i = 0; i < advances; i++) await group.advance()
+          expect(bob.crypto.epoch()).toBe(from + advances)
           await expect(
             Promise.resolve().then(() => bob.crypto.unwrap(stale)),
           ).rejects.toMatchObject({
             name: 'FrameEpochError',
             frameEpoch: from,
-            handleEpoch: from + 1,
+            handleEpoch: from + advances,
           })
         })
       })

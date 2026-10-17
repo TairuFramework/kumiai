@@ -225,7 +225,11 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
           assertSafety()
           const epoch = Number(group.epoch)
           const frameEpoch = readMessageEpoch(bytes)
-          if (frameEpoch != null && Number(frameEpoch) !== epoch) {
+          if (
+            frameEpoch != null &&
+            Number(frameEpoch) !== epoch &&
+            !group.state.historicalReceiverData.has(frameEpoch)
+          ) {
             throw new FrameEpochError(Number(frameEpoch), epoch)
           }
           const result = await group.decryptStaged(bytes, opts, async (stagedState, result) => {
@@ -273,7 +277,11 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
         assertSafety()
         const epoch = Number(group.epoch)
         const frameEpoch = readMessageEpoch(bytes)
-        if (frameEpoch != null && Number(frameEpoch) !== epoch) {
+        if (
+          frameEpoch != null &&
+          Number(frameEpoch) !== epoch &&
+          !group.state.historicalReceiverData.has(frameEpoch)
+        ) {
           throw new FrameEpochError(Number(frameEpoch), epoch)
         }
         const opened = await group.decrypt(bytes, opts)

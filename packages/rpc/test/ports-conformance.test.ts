@@ -136,7 +136,7 @@ testPendingGroupCryptoConformance({
       persistCalls: () => persistCalls,
       unnamedSender: () => receiver.forceUnnamedSender(),
       advance: async () => {
-        receiver.setEpoch(2)
+        receiver.setEpoch(receiver.epoch() + 1)
       },
     }
   },
