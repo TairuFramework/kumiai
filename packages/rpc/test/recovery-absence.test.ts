@@ -5,7 +5,7 @@ import { controlSafetyHeld as mirrorSafetyHeld } from '../../rpc-conformance/src
 import { controlSafetyHeld, type GroupCondition, type SafetyHold } from '../src/control/safety.js'
 import type { SendAdmission } from '../src/crypto.js'
 import type { LogPosition } from '../src/cursor.js'
-import { GroupNotMemberError, SpentSetCorruptError } from '../src/errors.js'
+import { SpentSetCorruptError } from '../src/errors.js'
 import { createRosterAbsenceMemoryFixture } from './fixtures/memory-captured-recovery.js'
 
 test.each(['clear', 'stranded', 'fork-halted', 'recovery-unavailable'] as const)(
@@ -68,21 +68,20 @@ testRosterAbsenceConformance({
   createFixture: createRosterAbsenceMemoryFixture,
 })
 
-test.each([GroupNotMemberError, SpentSetCorruptError])(
-  'condition errors preserve exact group key: %s',
-  (ErrorType) => {
-    const key = { groupID: 'exact-group', incarnation: 7 }
-    const cause = new Error('diagnostic cause')
-    const error = new ErrorType({ key, cause })
-    key.groupID = 'changed'
-    key.incarnation = 8
-    expect(error.key).toEqual({ groupID: 'exact-group', incarnation: 7 })
-    error.key.incarnation = 9
-    expect(error.key).toEqual({ groupID: 'exact-group', incarnation: 7 })
-    expect(error.cause).toBe(cause)
-    expect(error.name).toBe(ErrorType.name)
-  },
-)
+test('spent corruption error preserves exact group key', () => {
+  const key = { groupID: 'exact-group', incarnation: 7 }
+  const cause = new Error('diagnostic cause')
+  const error = new SpentSetCorruptError({ key, cause })
+  key.groupID = 'changed'
+  key.incarnation = 8
+  expect(error.key).toEqual({ groupID: 'exact-group', incarnation: 7 })
+  const copy = error.key
+  if (copy !== undefined) copy.incarnation = 9
+  expect(error.key).toEqual({ groupID: 'exact-group', incarnation: 7 })
+  expect(error.cause).toBe(cause)
+  expect(error.name).toBe('SpentSetCorruptError')
+  expect(new SpentSetCorruptError().key).toBeUndefined()
+})
 
 test('not member diagnostic adds no admission refusal', async () => {
   type Refusal = Extract<SendAdmission, { admissible: false }>['reason']

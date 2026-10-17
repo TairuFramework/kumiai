@@ -181,7 +181,6 @@ export {
   ControlWriteNotCommittedError,
   type GroupConditionErrorParams,
   GroupControlUnsettledError,
-  GroupNotMemberError,
   GroupSafetyHeldError,
   OperationOutcomeError,
   type OperationOutcomeErrorParams,

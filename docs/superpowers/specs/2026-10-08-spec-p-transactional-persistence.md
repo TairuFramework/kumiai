@@ -1439,8 +1439,8 @@ Exports and fact/coverage access return defensive copies, including retained ret
 
 `GroupMLS.createRecoveryRequest(requestID, deadlineMs?, comparisonEpoch?)` forwards signed comparisonEpoch through real and retained-trust request creation.
 Validate comparisonEpoch as a nonnegative safe integer. Missing retained comparison facts leave ordinary requests available without exception authority.
-`GroupNotMemberError` and `SpentSetCorruptError` take `{key:GroupKey;cause?:unknown}` and expose defensive keys.
-GroupNotMemberError is diagnostic only. Only spent-set-corrupt adds a SendAdmission/SafetyHold restriction.
+`SpentSetCorruptError` (one class, defined in rpc and thrown by mls-rpc) takes `{key?:GroupKey;cause?:unknown}` and exposes a defensive key.
+Not-member has no error class; it is diagnostic only. Only spent-set-corrupt adds a SendAdmission/SafetyHold restriction.
 
 Roster replies use token type `kumiai.recovery-roster`, frame version 1 and HPKE info/AAD domains
 `kumiai/mls/recovery-roster/v1` / `kumiai/mls/recovery-roster-aad/v1`.

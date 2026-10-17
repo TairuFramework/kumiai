@@ -394,7 +394,8 @@ Total key and database loss is not corruption: the app re-invites the device int
 
 Apps should not dispose or delete on first evidence. Wait for another responder DID or for the condition to persist.
 Disposal, deletion and re-invitation are app policy; corroboration is advice, not a protocol threshold.
-`GroupNotMemberError` and `SpentSetCorruptError` carry the exact `key` for hosts mapping conditions to errors.
+`not-member` has no error class: it is a diagnostic condition, never thrown. `SpentSetCorruptError` (also re-exported by
+`@kumiai/mls-rpc`, which throws it) carries the exact `key` when the throw site has one.
 
 ## Host notices for commit strands and recovery
 

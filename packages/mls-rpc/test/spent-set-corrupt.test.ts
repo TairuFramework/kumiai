@@ -1,4 +1,7 @@
-import { recoveryUnavailableEventID } from '@kumiai/rpc'
+import {
+  SpentSetCorruptError as RpcSpentSetCorruptError,
+  recoveryUnavailableEventID,
+} from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
 import { type AccountedGroupObservation, entryCapability } from '../src/entry-capability.js'
@@ -161,6 +164,17 @@ for (const mode of ['real-mls', 'double'] as const) {
           } finally {
             await reopened.close()
           }
+        }))
+      test('seeded corruption throws the documented rpc error class with its key', () =>
+        run(async (f) => {
+          await f.corruptTrust(groupID, 'missing-spent')
+          const error = await f.registry.recoverySource(groupID).then(
+            () => null,
+            (cause: unknown) => cause,
+          )
+          expect(error).toBeInstanceOf(RpcSpentSetCorruptError)
+          expect(SpentSetCorruptError).toBe(RpcSpentSetCorruptError)
+          expect((error as RpcSpentSetCorruptError).key).toEqual(key)
         }))
       test.each(['empty-spent', 'malformed-spent'] as const)(
         'empty or malformed set never becomes empty baseline: %s',

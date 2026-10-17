@@ -448,7 +448,7 @@ The `not-member` arm carries `retrying: true` and an optional `pendingReason` (`
 Do not dispose or delete on first evidence: wait for another responder DID or for the condition to persist.
 That wait is app policy, not a protocol threshold; disposal, deletion and re-invitation stay with the app.
 
-Seed and trust reads throw `SpentSetCorruptError` (optional `key`); `reportFork` under corruption records the condition and throws `GroupSafetyHeldError`.
+Seed and trust reads throw `SpentSetCorruptError` (the `@kumiai/rpc` class, re-exported; optional `key`); `reportFork` under corruption records the condition and throws `GroupSafetyHeldError`.
 `not-member` never refuses sends or admission. While a manual recovery is authorised, resume does not stop on spent-set corruption: movement is rejoin-only.
 The condition is reported again once no manual recovery is pending.
 

@@ -2,33 +2,20 @@ import type { SafetyHold } from './control/safety.js'
 import type { GroupKey, Outcome } from './control/types.js'
 import type { SendAdmission } from './crypto.js'
 
-export type GroupConditionErrorParams = { key: GroupKey; cause?: unknown }
+export type GroupConditionErrorParams = { key?: GroupKey; cause?: unknown }
 
-export class GroupNotMemberError extends Error {
-  override name = 'GroupNotMemberError'
-  #key: GroupKey
-
-  constructor(params: GroupConditionErrorParams) {
-    super('Group membership absence diagnosed', { cause: params.cause })
-    this.#key = { ...params.key }
-  }
-
-  get key(): GroupKey {
-    return { ...this.#key }
-  }
-}
-
+/** `key` is absent only where the throw site has no group binding (the trust-envelope codec). */
 export class SpentSetCorruptError extends Error {
   override name = 'SpentSetCorruptError'
-  #key: GroupKey
+  #key: GroupKey | undefined
 
-  constructor(params: GroupConditionErrorParams) {
-    super('Group spent set is corrupt', { cause: params.cause })
-    this.#key = { ...params.key }
+  constructor(params: GroupConditionErrorParams = {}) {
+    super('Surviving spent set is missing or malformed', { cause: params.cause })
+    this.#key = params.key === undefined ? undefined : { ...params.key }
   }
 
-  get key(): GroupKey {
-    return { ...this.#key }
+  get key(): GroupKey | undefined {
+    return this.#key === undefined ? undefined : { ...this.#key }
   }
 }
 
