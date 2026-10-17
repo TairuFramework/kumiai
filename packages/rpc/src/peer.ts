@@ -762,6 +762,9 @@ export function createGroupPeerWithControlWalk<
   }
   const requestAppPull = (): void => {
     if (safetyHold() !== null) return
+    // A wakeup invalidates catch-up evidence, including an in-flight walk's snapshot.
+    commitLaneCaughtUp = mls == null
+    commitWorkVersion += 1
     appLane.kick()
     appPullNeeded = true
     armAppPull(0)

@@ -329,6 +329,98 @@ describe('app work leaves the commit queue', () => {
     await operation
   })
 
+  test('a live far-future frame waits for missed commits before advancing its cursor', async () => {
+    const seen: Array<string> = []
+    const stalled = vi.fn()
+    const f = await setup({
+      handlers: {
+        'chat/posted': ({ data }: { data: { text: string } }) => void seen.push(data.text),
+      },
+      onAppDeliveryStalled: stalled,
+    })
+    expect(f.params.commitLaneCaughtUp?.()).toBe(true)
+    for (const epoch of [1, 2, 3]) {
+      await publishCommit({ hub: f.hub, senderDID: 'alice', recoverySecret: secret, epoch })
+    }
+    expect(f.bob.mls.epoch()).toBe(1)
+    expect(f.params.commitLaneCaughtUp?.()).toBe(true)
+    const pause = gate()
+    f.hub.controlGate = pause
+    f.hub.reattach('bob')
+    const frame = await append(f.hub, 4, 'epoch four')
+    await pause.entered.promise
+
+    expect(f.bob.appCursorStore.stored(topicID)).toBeNull()
+    expect(seen).toEqual([])
+    expect(stalled).toHaveBeenCalledWith(
+      expect.objectContaining({ topicID, position: frame.sequenceID, reason: 'future-epoch' }),
+    )
+    pause.release.resolve()
+
+    await vi.waitFor(() => expect(f.bob.mls.epoch()).toBe(4))
+    await vi.waitFor(() => expect(seen).toEqual(['epoch four']))
+    await vi.waitFor(() => {
+      expect(f.rows.size).toBe(0)
+      expect(f.bob.appCursorStore.stored(topicID)).toBe(frame.sequenceID)
+    })
+    expect(f.bob.peer.anchorEpoch()).toBe(1)
+    expect(f.queue.pending).toBe(0)
+  })
+
+  test('a live arrival invalidates a commit snapshot already being fetched', async () => {
+    const seen: Array<string> = []
+    const outcome = Promise.withResolvers<'stalled' | 'skipped'>()
+    const f = await setup({
+      handlers: {
+        'chat/posted': ({ data }: { data: { text: string } }) => void seen.push(data.text),
+      },
+      onAppDeliveryStalled: () => outcome.resolve('stalled'),
+    })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    const snapshot = gate()
+    const fetch = f.hub.fetchTopic.bind(f.hub)
+    let holdSnapshot = true
+    vi.spyOn(f.hub, 'fetchTopic').mockImplementation(async (params) => {
+      const result = await fetch(params)
+      if (params.topicID === commitTopic(secret) && holdSnapshot) {
+        holdSnapshot = false
+        snapshot.entered.resolve()
+        await snapshot.release.promise
+      }
+      return result
+    })
+    const operation = track(f.bob.controlWalk.reconcileCommitPrefix())
+    await snapshot.entered.promise
+    for (const epoch of [1, 2, 3]) {
+      await publishCommit({ hub: f.hub, senderDID: 'alice', recoverySecret: secret, epoch })
+    }
+    const app = gate()
+    f.hub.appGate = app
+    const save = f.bob.appCursorStore.save.bind(f.bob.appCursorStore)
+    vi.spyOn(f.bob.appCursorStore, 'save').mockImplementation(async (topic, position) => {
+      await save(topic, position)
+      if (topic === topicID && seen.length === 0) outcome.resolve('skipped')
+    })
+    f.hub.reattach('bob')
+    const frame = await append(f.hub, 4, 'epoch four')
+    await app.entered.promise
+    snapshot.release.resolve()
+    await operation
+    app.release.resolve()
+
+    expect(await outcome.promise).toBe('stalled')
+    expect(f.bob.mls.epoch()).toBe(1)
+    expect(f.bob.appCursorStore.stored(topicID)).toBeNull()
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.waitFor(() => expect(seen).toEqual(['epoch four']))
+    await vi.waitFor(() => {
+      expect(f.rows.size).toBe(0)
+      expect(f.bob.appCursorStore.stored(topicID)).toBe(frame.sequenceID)
+    })
+    expect(f.bob.mls.epoch()).toBe(4)
+    expect(f.bob.peer.anchorEpoch()).toBe(1)
+  })
+
   test.each(['cursor load', 'fetch', 'open'] as const)(
     'anchor rotation during a gated %s reloads the new segment without another wakeup',
     async (boundary) => {
