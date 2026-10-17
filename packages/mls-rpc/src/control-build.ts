@@ -2,6 +2,7 @@ import {
   decodeClientState,
   encodeClientState,
   type GroupHandle,
+  GroupRestoreError,
   type MemberCredential,
   restoreGroup,
   restrictCommitAuthoring,
@@ -26,7 +27,7 @@ import {
 import { sha256 } from '@noble/hashes/sha2.js'
 import { toB64U } from '@sozai/codec'
 import type { Runtime } from '@sozai/runtime'
-import { ciphersuites } from 'ts-mls'
+import { CodecError, ciphersuites } from 'ts-mls'
 
 import type { ControlHandleAccess } from './access.js'
 import { controlCompatible } from './control-compat.js'
@@ -325,6 +326,7 @@ export function createControlBuildPort(params: {
         if (
           receipt === null ||
           !sameStoredValue(receipt.commit, host.commit) ||
+          !sameStoredValue(receipt.welcome, host.welcome?.bytes ?? null) ||
           host.digest !== digestAppliedCommit(receipt.commit) ||
           receipt.epoch !== host.epoch ||
           !sameStoredValue(receipt.authenticatorBefore, host.authenticatorBefore)
@@ -339,9 +341,17 @@ export function createControlBuildPort(params: {
             )
           )
             return rejected()
-        } catch {
-          return rejected()
+        } catch (error) {
+          if (
+            error instanceof GroupRestoreError ||
+            error instanceof CodecError ||
+            (error instanceof Error &&
+              /^decodeClientState: unsupported client-state version \d+$/.test(error.message))
+          )
+            return rejected()
+          throw error
         }
+        // Entry bodies are trusted host output: peers refuse bodies that do not match the commit.
         referencedProposals = receipt.referencedProposals
 
         if (

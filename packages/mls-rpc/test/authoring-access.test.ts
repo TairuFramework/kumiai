@@ -2,12 +2,15 @@ import { randomIdentity } from '@kokuin/token'
 import type { MemberCredential } from '@kumiai/mls'
 import {
   CommitAuthoringRefusedError,
+  commitInvite,
   commitKeyRotation,
+  createInvite,
+  createKeyPackageBundle,
   decodeClientState,
   encodeClientState,
   type GroupHandle,
 } from '@kumiai/mls'
-import type { Operation } from '@kumiai/rpc'
+import { digestAppliedCommit, type Operation } from '@kumiai/rpc'
 import { expect, test, vi } from 'vitest'
 
 import { createControlBuildPort, createPersistenceBuildSaver } from '../src/control-build.js'
@@ -23,6 +26,7 @@ import {
   buildSealedMemoryOperation,
   memoryModel,
   restoreMemoryControlHandle,
+  restoreMemoryControlSource,
 } from './fixtures/sealed-memory-mls.js'
 
 for (const kind of accessKinds) {
@@ -116,6 +120,78 @@ for (const kind of accessKinds) {
     }
   })
 }
+
+test('a cached Welcome is rejected before framing or persistence', async () => {
+  const f = await authoringAccessFixture('simple', 'committer')
+  try {
+    const recipient = randomIdentity()
+    const source = await f.restoreStored((await f.stored()).state)
+    const { invite } = await createInvite({
+      group: source,
+      identity: f.real.committer.identity,
+      recipientDID: recipient.id,
+      permission: 'member',
+    })
+    const bundle = await createKeyPackageBundle(recipient)
+    const cached = await commitInvite(source, bundle.publicPackage, invite)
+    await f.control().apply({ putOperations: [rotationIntent] }, 'intent')
+    const before = await f.control().load()
+    const stored = await f.stored()
+    const frame = vi.fn(async (host) => ({
+      payload: host.commit,
+      publishID: 'cached-welcome',
+      expectedHead: null,
+    }))
+    const port = f.port(async (_op, permitted) => {
+      const actual = await commitInvite(permitted, bundle.publicPackage, invite)
+      expect(actual.welcomeMessage).not.toEqual(cached.welcomeMessage)
+      return {
+        commit: actual.commitMessage,
+        digest: digestAppliedCommit(actual.commitMessage),
+        incarnation: 1,
+        epoch: Number(permitted.epoch),
+        authenticatorBefore: permitted.state.keySchedule.epochAuthenticator.slice(),
+        journal: encodeClientState(actual.newGroup.state),
+        bodies: invite.ledgerEntries,
+        welcome: { bytes: cached.welcomeMessage, recipients: [recipient.id] },
+      }
+    })
+    expect(await port.prepareBuild(rotationIntent, frame)).toMatchObject({ kind: 'rejected' })
+    expect(frame).not.toHaveBeenCalled()
+    expect(await f.control().load()).toEqual(before)
+    expect(await f.stored()).toEqual(stored)
+  } finally {
+    await f.close()
+  }
+})
+
+test('candidate restoration storage faults propagate without rejecting the operation', async () => {
+  const f = await authoringAccessFixture('simple')
+  try {
+    await f.control().apply({ putOperations: [rotationIntent] }, 'intent')
+    const before = await f.control().load()
+    const stored = await f.stored()
+    const failure = new Error('Storage temporarily unavailable')
+    const frame = vi.fn()
+    const port = createControlBuildPort({
+      access: f.access,
+      control: f.control(),
+      build: f.build,
+      restoreCandidate: async () => {
+        throw failure
+      },
+      saveBuilt: createPersistenceBuildSaver({ persistence: f.fixture.device.groups, key: f.key }),
+      now: () => 1,
+      newID: () => crypto.randomUUID(),
+    })
+    await expect(port.prepareBuild(rotationIntent, frame)).rejects.toBe(failure)
+    expect(frame).not.toHaveBeenCalled()
+    expect(await f.control().load()).toEqual(before)
+    expect(await f.stored()).toEqual(stored)
+  } finally {
+    await f.close()
+  }
+})
 
 test.each([
   'off-permit',
@@ -235,7 +311,7 @@ test('overlapping double builds refuse before construction and after model resto
     }) => {
       const decoded = decodeClientState(state)
       if (decoded === undefined) throw new Error('Invalid source')
-      return restoreMemoryControlHandle({
+      return restoreMemoryControlSource({
         state: decoded,
         credential,
         ledgerEntries,
@@ -408,6 +484,11 @@ test('the memory control envelope is stable across restoration', async () => {
       ledgerEntries: record.ledger,
       options: f.environment.options,
     })
+    expect(encodeClientState(handle.state)).toEqual(record.state)
+    const intent = { ...rotationIntent, body: encodeStoredValue({ target: randomIdentity().id }) }
+    await expect(buildSealedMemoryOperation(intent, handle)).rejects.toBeInstanceOf(
+      CommitAuthoringRefusedError,
+    )
     expect(encodeClientState(handle.state)).toEqual(record.state)
   } finally {
     await f.close()

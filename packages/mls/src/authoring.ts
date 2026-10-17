@@ -9,6 +9,7 @@ export class CommitAuthoringRefusedError extends Error {
 
 export type CommitReceipt = {
   commit: Uint8Array
+  welcome: Uint8Array | null
   referencedProposals: Array<string>
   epoch: number
   authenticatorBefore: Uint8Array

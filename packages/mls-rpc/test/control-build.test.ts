@@ -200,7 +200,7 @@ async function setup(member?: RealMember) {
       digest: digestAppliedCommit(rotation.commitMessage),
       bodies: ['body'],
       journal: encodeClientState(rotation.newGroup.state),
-      welcome: { bytes: new Uint8Array([10]), recipients: ['recipient'] },
+      welcome: null,
     }
   }
   const framed = { payload: new Uint8Array([1, 2, 3]), publishID: 'publish', expectedHead: null }
@@ -1169,7 +1169,7 @@ test('build retry ignores an unreferenced source proposal', async () => {
         authenticatorBefore: supplied.state.keySchedule.epochAuthenticator.slice(),
         bodies: invite.ledgerEntries,
         journal: encodeClientState(result.newGroup.state),
-        welcome: null,
+        welcome: { bytes: result.welcomeMessage, recipients: [newcomer.id] },
       }
     },
   )

@@ -23,6 +23,7 @@ import {
   buildSealedMemoryOperation,
   memoryModel,
   restoreMemoryControlHandle,
+  restoreMemoryControlSource,
   seedMemoryControlState,
 } from './fixtures/sealed-memory-mls.js'
 
@@ -57,7 +58,12 @@ async function candidate(handle: GroupHandle, options: GroupOptions = {}) {
       stage: 'intent',
       body: encodeStoredValue({ target: handle.credential.id }),
     },
-    handle,
+    await restoreMemoryControlSource({
+      state: handle.state,
+      credential: handle.credential,
+      ledgerEntries: handle.ledgerTokens,
+      options,
+    }),
   )
   const state = decodeClientState(built.journal)
   if (state === undefined) throw new Error('Missing candidate state')
@@ -361,7 +367,12 @@ describe('independent registry handle', () => {
         stage: 'intent',
         body: encodeStoredValue({ target: invitee.id }),
       },
-      s.handle,
+      await restoreMemoryControlSource({
+        state: s.handle.state,
+        credential: s.handle.credential,
+        ledgerEntries: s.handle.ledgerTokens,
+        options: s.options,
+      }),
     )
     const state = decodeClientState(built.journal)
     if (state === undefined) throw new Error('Missing added state')
@@ -496,7 +507,11 @@ describe('independent registry handle', () => {
           stage: 'intent',
           body: encodeStoredValue({ target: randomIdentity().id }),
         },
-        restored,
+        await restoreMemoryControlSource({
+          state: restored.state,
+          credential: restored.credential,
+          ledgerEntries: restored.ledgerTokens,
+        }),
       ),
     ).rejects.toThrow()
   })

@@ -83,6 +83,7 @@ import {
   buildSealedMemoryOperation,
   memoryModel,
   restoreMemoryControlHandle,
+  restoreMemoryControlSource,
   sealedMemoryValidation,
 } from './sealed-memory-mls.js'
 import {
@@ -1020,7 +1021,11 @@ export async function createControlCrashHarness(mode: 'real-mls' | 'double', see
       restoreSource: async ({ state, credential, ledgerEntries }) => {
         const decoded = decodeClientState(state)
         if (decoded === undefined) throw new TypeError('Invalid control source state')
-        return restoreHandle({ state: decoded, credential, ledgerEntries })
+        return (mode === 'double' ? restoreMemoryControlSource : restoreGroup)({
+          state: decoded,
+          credential,
+          ledgerEntries,
+        })
       },
       saveBuilt,
       now: Date.now,
@@ -1128,7 +1133,11 @@ export async function createControlCrashHarness(mode: 'real-mls' | 'double', see
         restoreSource: async ({ state, credential, ledgerEntries }) => {
           const decoded = decodeClientState(state)
           if (decoded === undefined) throw new TypeError('Invalid control source state')
-          return restoreHandle({ state: decoded, credential, ledgerEntries })
+          return (mode === 'double' ? restoreMemoryControlSource : restoreGroup)({
+            state: decoded,
+            credential,
+            ledgerEntries,
+          })
         },
         saveBuilt: async (_intent, value, source) => {
           slot = value

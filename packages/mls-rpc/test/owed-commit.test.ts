@@ -1,10 +1,10 @@
-import { CommitAuthoringRefusedError, commitKeyRotation } from '@kumiai/mls'
+import { CommitAuthoringRefusedError, commitKeyRotation, readMessageEpoch } from '@kumiai/mls'
 import { type AdoptionWrite, asLogPosition, controlAdoptionAllowed } from '@kumiai/rpc'
 import { expect, test } from 'vitest'
 
 import { createControlAdoptionPort } from '../src/control-adoption.js'
 import { decodeControlJournal } from '../src/control-journal.js'
-import { accessKinds, authoringAccessFixture } from './fixtures/authoring-access.js'
+import { accessKinds, authoringAccessFixture, rotationIntent } from './fixtures/authoring-access.js'
 
 for (const kind of accessKinds) {
   test.each([
@@ -13,10 +13,29 @@ for (const kind of accessKinds) {
     'receive after evidence',
     'foreign proposal after reconstruction',
     'history eviction',
+    'history eviction after reconstruction',
+    'own sends after capture',
   ] as const)(`${kind}: %s after built-save`, async (move) => {
     const f = await authoringAccessFixture(kind)
     try {
-      expect((await f.owe()).kind).toBe('saved')
+      if (move === 'own sends after capture') {
+        await f.control().apply({ putOperations: [rotationIntent] }, 'intent')
+        const port = f.port(async (op, permitted) => {
+          const frame = await f.access.mutate((handle) => handle.encrypt(new Uint8Array([11])))
+          expect(readMessageEpoch(frame)).toBe(permitted.epoch)
+          await f.remote.handle.decrypt(frame)
+          return f.build(op, permitted)
+        })
+        expect(
+          (
+            await port.prepareBuild(rotationIntent, async (host) => ({
+              payload: host.commit,
+              publishID: 'own-send',
+              expectedHead: null,
+            }))
+          ).kind,
+        ).toBe('saved')
+      } else expect((await f.owe()).kind).toBe('saved')
       const slot = (await f.control().load()).commitOnce
       if (slot === null) throw new Error('Missing slot')
       const source = await f.access.readControl(async ({ source }) => source)
@@ -64,11 +83,16 @@ for (const kind of accessKinds) {
         const proposal = await proposer.handle.proposeSelfRemoval()
         await f.access.mutate((handle) => handle.processMessage(proposal.frame))
         if (move.endsWith('reconstruction')) await f.reconstruct()
-      } else if (move === 'history eviction') {
+      } else if (move.startsWith('history eviction')) {
         await f.access.mutate(async (handle) => {
           expect(handle.state.historicalReceiverData.size).toBeGreaterThan(0)
           handle.state.historicalReceiverData.clear()
         })
+        if (move.endsWith('reconstruction')) await f.reconstruct()
+      } else if (move === 'own sends after capture') {
+        const message = await f.access.mutate((handle) => handle.encrypt(new Uint8Array([12])))
+        await f.remote.handle.decrypt(message)
+        await f.remote.handle.processMessage(slot.payload)
       } else {
         const message = await f.remote.handle.encrypt(new Uint8Array([42]))
         await f.access.mutate((handle) => handle.decrypt(message))
@@ -86,11 +110,29 @@ for (const kind of accessKinds) {
       else {
         const adopted = await f.access.read((handle) => handle)
         expect(adopted.state.unappliedProposals).toEqual({})
-        if (move === 'history eviction')
+        if (move.startsWith('history eviction'))
           expect([...adopted.state.historicalReceiverData.keys()]).toEqual([BigInt(slot.epoch)])
         expect(adopted.state.keySchedule.epochAuthenticator).toEqual(
           decodeControlJournal(slot.journal).candidateAuthenticator,
         )
+        if (move === 'own sends after capture') {
+          const leaf = adopted.state.privatePath.leafIndex * 2
+          const retained = adopted.state.historicalReceiverData.get(BigInt(slot.epoch))
+          expect(retained?.secretTree.leafNodes[leaf]?.application.generation).toBe(2)
+          const priorHistory = structuredClone(retained)
+          const message = await f.access.mutate((handle) => handle.encrypt(new Uint8Array([13])))
+          expect(readMessageEpoch(message)).toBe(BigInt(slot.epoch + 1))
+          expect((await f.remote.handle.decrypt(message)).payload).toEqual(new Uint8Array([13]))
+          await f.access.read((handle) => {
+            expect(handle.state.secretTree.leafNodes[leaf]?.application.generation).toBe(1)
+            expect(handle.state.historicalReceiverData.get(BigInt(slot.epoch))).toEqual(
+              priorHistory,
+            )
+            expect(handle.state.secretTree.leafNodes[leaf]?.application.secret).not.toEqual(
+              retained?.secretTree.leafNodes[leaf]?.application.secret,
+            )
+          })
+        }
         await expect(commitKeyRotation(adopted)).rejects.toBeInstanceOf(CommitAuthoringRefusedError)
       }
     } finally {
@@ -110,8 +152,17 @@ test('adoption caller without a callback keeps the exact version', async () => {
       stateVersion: source.stateVersion - 1,
       journal: new Uint8Array([1]),
     }
+    expect(
+      controlAdoptionAllowed(snapshot, source, { ...expected, stateVersion: source.stateVersion }),
+    ).toBe(true)
     expect(controlAdoptionAllowed(snapshot, source, expected)).toBe(false)
     const { journal: _journal, ...nonJournal } = expected
+    expect(
+      controlAdoptionAllowed(snapshot, source, {
+        ...nonJournal,
+        stateVersion: source.stateVersion,
+      }),
+    ).toBe(true)
     expect(controlAdoptionAllowed(snapshot, source, nonJournal)).toBe(false)
     expect(
       controlAdoptionAllowed(snapshot, source, nonJournal, () => {

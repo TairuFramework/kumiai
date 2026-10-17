@@ -351,6 +351,7 @@ export async function commitWithEntries(
       value: result,
       receipt: {
         commit: encode(mlsMessageEncoder, result.commit),
+        welcome: result.welcome == null ? null : encode(mlsMessageEncoder, result.welcome),
         referencedProposals: Object.keys(params.pendingProposals ?? {}),
         epoch,
         authenticatorBefore,

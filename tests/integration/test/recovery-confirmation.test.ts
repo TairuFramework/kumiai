@@ -433,7 +433,7 @@ test('stale GroupInfo external commit is rejected while the survivor progresses'
     return {
       commit: rotated.commitMessage,
       bodies: offered.invite.ledgerEntries,
-      welcome: null,
+      welcome: { bytes: rotated.welcomeMessage, recipients: [offered.invite.recipientDID] },
       epoch: Number(source.epoch),
       authenticatorBefore: source.state.keySchedule.epochAuthenticator.slice(),
       incarnation: 1,

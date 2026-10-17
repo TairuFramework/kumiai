@@ -29,6 +29,7 @@ import { createRegistryFixture } from './fixtures/registry.js'
 import {
   buildSealedMemoryOperation,
   restoreMemoryControlHandle,
+  restoreMemoryControlSource,
 } from './fixtures/sealed-memory-mls.js'
 
 for (const mode of ['real-mls', 'double'] as const) {
@@ -111,7 +112,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         restoreSource: async ({ state, credential, ledgerEntries }) => {
           const decoded = decodeClientState(state)
           if (decoded === undefined) throw new TypeError('Invalid control source state')
-          return (mode === 'double' ? restoreMemoryControlHandle : restoreGroup)({
+          return (mode === 'double' ? restoreMemoryControlSource : restoreGroup)({
             state: decoded,
             credential,
             ledgerEntries,

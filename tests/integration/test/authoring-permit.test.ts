@@ -45,6 +45,23 @@ test('an off-permit host commit is rejected before mux publication', async () =>
     const saved = await member.control.load()
     expect(saved.commitOnce).toBeNull()
     expect(saved.welcomes).toEqual([])
+    await member.peer.commit(
+      customOperation(member, async (_op, permitted) => {
+        const actual = await commitKeyRotation(permitted)
+        return {
+          commit: actual.commitMessage,
+          journal: encodeJournal(actual.newGroup),
+          bodies: [],
+          welcome: null,
+          epoch: Number(permitted.epoch),
+          incarnation: 1,
+          authenticatorBefore: permitted.state.keySchedule.epochAuthenticator.slice(),
+          digest: digestAppliedCommit(actual.commitMessage),
+        }
+      }),
+    )
+    expect(publish).toHaveBeenCalled()
+    expect(member.handle().epoch).toBe(group.epoch + 1n)
   } finally {
     await member.peer.dispose()
     await member.peer.drained()

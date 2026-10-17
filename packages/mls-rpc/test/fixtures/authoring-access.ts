@@ -41,10 +41,13 @@ export const rotationIntent: Operation & { stage: 'intent' } = {
   stage: 'intent',
 }
 
-export async function authoringAccessFixture(kind: AccessKind) {
+export async function authoringAccessFixture(
+  kind: AccessKind,
+  owner: 'member' | 'committer' = 'member',
+) {
   const groupID = `authoring-${kind}`
   const real = await createRealGroup(2, groupID)
-  const member = real.members[0]
+  const member = owner === 'committer' ? real.committer : real.members[0]
   if (member === undefined) throw new Error('Missing member')
   let live = member.handle
   let f = await createRegistryFixture({

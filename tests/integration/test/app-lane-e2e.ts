@@ -395,11 +395,7 @@ export function makeMember(params: MakeMemberParams): Member {
       committed = result
       bodies = body.material.invite.ledgerEntries
       welcome = {
-        bytes: encodeOperationBody({
-          welcome: result.welcomeMessage,
-          invite: body.material.invite,
-          ratchetTree: result.newGroup.state.ratchetTree,
-        }),
+        bytes: result.welcomeMessage,
         recipients: [body.material.invite.recipientDID],
       }
     } else if (body.type === 'remove' && body.target != null) {
@@ -441,8 +437,31 @@ export function makeMember(params: MakeMemberParams): Member {
     access,
     control,
     build,
-    saveBuilt: (intent, built, expected, mutationID) =>
-      stateStore.database.saveBuilt('state', control.key, intent, built, expected, mutationID),
+    saveBuilt: (intent, built, expected, mutationID) => {
+      const body = decodeOperationBody(intent.body) as { material?: InviteMaterial }
+      // Assemble the transport envelope after receipt validation. The Welcome embeds its tree.
+      const retained =
+        built.welcome === null || body.material === undefined
+          ? built
+          : {
+              ...built,
+              welcome: {
+                ...built.welcome,
+                bytes: encodeOperationBody({
+                  welcome: built.welcome.bytes,
+                  invite: body.material.invite,
+                }),
+              },
+            }
+      return stateStore.database.saveBuilt(
+        'state',
+        control.key,
+        intent,
+        retained,
+        expected,
+        mutationID,
+      )
+    },
     now: () => Date.now(),
     newID: () => globalThis.crypto.randomUUID(),
   })

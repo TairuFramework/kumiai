@@ -35,17 +35,12 @@ function wrapped(node: ts.Node): boolean {
 test('the control builder is the only production permit holder and private commits use the gate', async () => {
   const permits: Array<string> = []
   const gates: Array<string> = []
-  for (const pkg of [
-    'mls',
-    'mls-rpc',
-    'rpc',
-    'mls-hub',
-    'hub-client',
-    'hub-server',
-    'hub-tunnel',
-    'hub-wake',
-  ]) {
-    for (const path of await files(new URL(`packages/${pkg}/src/`, root))) {
+  const packages = new URL('packages/', root)
+  for (const pkg of await readdir(packages, { withFileTypes: true })) {
+    if (!pkg.isDirectory()) continue
+    const directories = await readdir(new URL(`${pkg.name}/`, packages), { withFileTypes: true })
+    if (!directories.some((entry) => entry.name === 'src' && entry.isDirectory())) continue
+    for (const path of await files(new URL(`packages/${pkg.name}/src/`, root))) {
       const source = ts.createSourceFile(
         path.pathname,
         await readFile(path, 'utf8'),
@@ -62,6 +57,23 @@ test('the control builder is the only production permit holder and private commi
   }
   expect(permits).toEqual(['packages/mls-rpc/src/control-build.ts'])
   expect(gates).toEqual(['packages/mls/src/group-commit.ts'])
+  const memory = new URL('packages/mls-rpc/test/fixtures/sealed-memory-mls.ts', root)
+  const source = ts.createSourceFile(
+    memory.pathname,
+    await readFile(memory, 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+  )
+  const memoryGates = calls(source).filter(
+    (call) => call.expression.getText() === 'authorPrivateCommit',
+  )
+  expect(
+    memoryGates.map((call) => {
+      let node: ts.Node = call
+      while (!ts.isFunctionDeclaration(node) && node.parent !== undefined) node = node.parent
+      return ts.isFunctionDeclaration(node) ? node.name?.getText() : undefined
+    }),
+  ).toEqual(['buildSealedMemoryOperation'])
 })
 
 test('every access creation site restricts its handle before issuance', async () => {
@@ -92,6 +104,7 @@ test('every access creation site restricts its handle before issuance', async ()
           'params.restoreCandidate',
           'environment.restore',
           'GroupHandle',
+          'MemoryControlHandle',
           'joinGroupExternal',
           'restore',
         ].includes(name)
@@ -103,6 +116,13 @@ test('every access creation site restricts its handle before issuance', async ()
         (path.pathname.endsWith('/control-build.ts') && name === 'restoreGroup')
       )
         continue
+      // The permit requires a fresh bare source, never an ordinarily issued memory handle.
+      if (name === 'restoreGroup' && path.pathname.endsWith('/sealed-memory-mls.ts')) {
+        let node: ts.Node = call
+        while (!ts.isFunctionDeclaration(node) && node.parent !== undefined) node = node.parent
+        if (ts.isFunctionDeclaration(node) && node.name?.getText() === 'restoreMemoryControlSource')
+          continue
+      }
       // This getter-only projection never escapes its getter.
       if (
         name === 'GroupHandle' &&

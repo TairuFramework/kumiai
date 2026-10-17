@@ -520,16 +520,33 @@ export async function restoreMemoryControlHandle(params: {
   const verified = verifiedLedgers.get(mls)
   if (verified === undefined) throw new Error('Missing memory verification cache')
   for (const entry of restored.ledger) verified.set(entry.token, entry.verified)
-  return new MemoryControlHandle({
-    state,
+  return restrictCommitAuthoring(
+    new MemoryControlHandle({
+      state,
+      credential: restored.credential,
+      context: restored.context,
+      ledger: restored.ledger,
+      commitPolicy: options.commitPolicy,
+      resolveLedgerEntries: options.resolveLedgerEntries,
+      onLedgerEntries: options.onLedgerEntries,
+      model: mls,
+    }),
+  )
+}
+
+// Raw-key clone for permit restores and isolated model tests; ordinary restores stay restricted.
+export async function restoreMemoryControlSource(
+  params: Parameters<typeof restoreMemoryControlHandle>[0],
+): Promise<GroupHandle> {
+  const restored = await restoreMemoryControlHandle(params)
+  const source = await restoreGroup({
+    state: restored.state,
     credential: restored.credential,
-    context: restored.context,
-    ledger: restored.ledger,
-    commitPolicy: options.commitPolicy,
-    resolveLedgerEntries: options.resolveLedgerEntries,
-    onLedgerEntries: options.onLedgerEntries,
-    model: mls,
+    ledgerEntries: restored.ledgerTokens,
+    options: params.options,
   })
+  models.set(source, memoryModel(restored))
+  return source
 }
 
 export async function buildSealedMemoryOperation(
@@ -553,9 +570,11 @@ export async function buildSealedMemoryOperation(
     } finally {
       mls.restoreState(before)
     }
+    const welcome = new TextEncoder().encode(target)
     return {
       receipt: {
         commit,
+        welcome: welcome.slice(),
         referencedProposals: [],
         epoch,
         authenticatorBefore,
@@ -565,7 +584,7 @@ export async function buildSealedMemoryOperation(
         commit,
         bodies: [],
         journal: candidate,
-        welcome: { bytes: new TextEncoder().encode(target), recipients: [target] },
+        welcome: { bytes: welcome, recipients: [target] },
         incarnation: 1,
         epoch,
         authenticatorBefore,

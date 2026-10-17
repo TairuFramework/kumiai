@@ -99,15 +99,23 @@ export async function createRegistryRecovery(
   let responder = params.responder
   let capture = responder
   if (responder === undefined) {
+    const state = decodeClientState(encodeClientState(params.source.state))
+    if (state === undefined) throw new Error('Invalid fixture author state')
+    const author = await restoreGroup({
+      state,
+      credential: params.source.credential,
+      ledgerEntries: params.source.ledgerTokens,
+      options: params.options,
+    })
     const member = randomIdentity()
     const bundle = await createKeyPackageBundle(member)
     const { invite } = await createInvite({
-      group: params.source,
+      group: author,
       identity: params.identity,
       recipientDID: member.id,
       permission: 'member',
     })
-    const added = await commitInvite(params.source, bundle.publicPackage, invite)
+    const added = await commitInvite(author, bundle.publicPackage, invite)
     // The retained owner signs the advanced snapshot; the new member cannot attest the origin.
     capture = { identity: params.identity, group: added.newGroup }
     responder = {

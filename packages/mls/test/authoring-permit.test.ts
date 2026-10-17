@@ -355,6 +355,25 @@ test('proposeSelfRemoval refuses under restriction and under a permit', async ()
   })
 })
 
+test('an invite receipt binds independent encoded Welcome bytes from its construction', async () => {
+  const { group, identity } = await pair()
+  const recipient = randomIdentity()
+  const { invite } = await createInvite({
+    group,
+    identity,
+    recipientDID: recipient.id,
+    permission: 'member',
+  })
+  const bundle = await createKeyPackageBundle(recipient)
+  const { value, receipt } = await withCommitPermit(restoreFromBytes(group), (permitted) =>
+    commitInvite(permitted, bundle.publicPackage, invite),
+  )
+  expect(receipt).toHaveProperty('welcome', value.welcomeMessage)
+  const encoded = value.welcomeMessage.slice()
+  value.welcomeMessage.fill(0)
+  expect(receipt).toHaveProperty('welcome', encoded)
+})
+
 test('a permit allows exactly one commit and identifies its encoded bytes', async () => {
   const { group } = await pair()
   let retained = group
@@ -366,6 +385,7 @@ test('a permit allows exactly one commit and identifies its encoded bytes', asyn
   })
   expect(receipt).toEqual({
     commit: value.commitMessage,
+    welcome: null,
     referencedProposals: [],
     epoch: Number(group.epoch),
     authenticatorBefore: group.state.keySchedule.epochAuthenticator,
@@ -386,6 +406,7 @@ test.each(['fulfils', 'rejects'] as const)(
     const { group } = await pair()
     const receipt: CommitReceipt = {
       commit: new Uint8Array([1]),
+      welcome: null,
       referencedProposals: [],
       epoch: Number(group.epoch),
       authenticatorBefore: group.state.keySchedule.epochAuthenticator.slice(),
@@ -455,6 +476,7 @@ test('a permit returns the receipt of an unawaited real MLS builder', async () =
   expect(built.epoch).toBe(group.epoch + 1n)
   expect(receipt).toEqual({
     commit: built.commitMessage,
+    welcome: null,
     referencedProposals: [],
     epoch: Number(group.epoch),
     authenticatorBefore: group.state.keySchedule.epochAuthenticator,
@@ -518,6 +540,7 @@ test('the permit is consumed synchronously before overlapping construction', asy
   const { group } = await pair()
   const receipt: CommitReceipt = {
     commit: new Uint8Array([1]),
+    welcome: null,
     referencedProposals: [],
     epoch: Number(group.epoch),
     authenticatorBefore: group.state.keySchedule.epochAuthenticator,
