@@ -420,7 +420,8 @@ export function branchAbandonmentPreparer(reads: EntryReads) {
         row.kind === 'notice' &&
         sameKey(row.key, source) &&
         row.notice.closedAt === null &&
-        ((split !== undefined && row.notice.splitEpoch <= split) ||
+        (split === undefined ||
+          row.notice.splitEpoch <= split ||
           selected.some(
             ({ fact }) =>
               fact.epoch === row.notice.splitEpoch && fact.authHash === row.notice.deviceAuthHash,

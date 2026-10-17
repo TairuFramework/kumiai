@@ -180,13 +180,17 @@ for (const mode of ['real-mls', 'double'] as const) {
   }
 }
 
-test.each(['commit', 'rollback'] as const)(
-  'earlier notice links later v2 divergence and closes with switch proof: %s',
-  async (outcome) => {
+test.each(
+  ([20, 21] as const).flatMap((captureEpoch) =>
+    (['commit', 'rollback'] as const).map((outcome) => ({ captureEpoch, outcome })),
+  ),
+)(
+  'earlier notice links v2 capture at $captureEpoch and closes with switch proof: $outcome',
+  async ({ captureEpoch, outcome }) => {
     const f = await createForkRecoveryRealFixture(true)
     try {
       const source = f.key
-      await f.reply(20, 'other', true)
+      await f.reply(captureEpoch, 'other', true)
       const responder = await (await f.remote().registry.access(source.groupID)).read(
         (handle) => handle,
       )
@@ -195,6 +199,10 @@ test.each(['commit', 'rollback'] as const)(
       const original = records.find((row) => row.kind === 'notice' && row.id === f.noticeID)
       if (original?.kind !== 'notice') throw new Error('Missing notice')
       expect(original.notice.splitEpoch).toBe(10)
+      const installedSource = await f.local().device.groups.loadState(source)
+      if (installedSource === null || installedSource.deleted) throw new Error('Missing source')
+      expect(installedSource.epoch).toBe(20)
+      expect(Number(responder.epoch)).toBe(captureEpoch)
       await groups.transition(
         await nextChange(groups, source.groupID, crypto.randomUUID()),
         async (stores) => {
@@ -268,8 +276,8 @@ test.each(['commit', 'rollback'] as const)(
         kind: 'branch-abandoned',
         noticeID: f.noticeID,
         epochs: 'unknown',
-        ownMessages: [{ id: 'own-20' }],
-        othersSeen: 1,
+        ownMessages: captureEpoch === 20 ? [{ id: 'own-20' }] : [],
+        othersSeen: captureEpoch === 20 ? 1 : 0,
         membersAdded: [],
         membersRemoved: [],
         coverage: { ancestry: { kind: 'partial', reasons: ['unknown-ancestry'] } },
@@ -300,81 +308,104 @@ test.each(['commit', 'rollback'] as const)(
   },
 )
 
-test('applicable notices use earliest detection then smaller ID and match the abandoned branch', async () => {
-  const f = await createForkRecoveryRealFixture(true)
-  try {
-    const source = f.key
-    await f.reply(20)
-    const responder = await (await f.remote().registry.access(source.groupID)).read(
-      (handle) => handle,
-    )
-    const remoteService = createCheckpointService({
-      registry: f.remote().registry,
-      key: source,
-      identity: f.responderIdentity,
-    })
-    await registryFixtureCapturedRecovery(f.local(), source, {
-      confirm: true,
-      responder: { identity: f.responderIdentity, group: responder },
-      lineage: await remoteService.exportCheckpoints(source),
-    })
-    const records = await f.service().readRecords()
-    const original = records.find((row) => row.kind === 'notice' && row.id === f.noticeID)
-    const tip = records.find((row) => row.kind === 'fact' && row.epoch === 20)
-    if (original?.kind !== 'notice' || tip?.kind !== 'fact') throw new Error('Missing history')
-    type Notice = Extract<CheckpointRecord, { kind: 'notice' }>
-    const notice = (
-      id: string,
-      detectedAt: number,
-      change: Partial<Notice['notice']> = {},
-    ): Notice => ({
-      ...structuredClone(original),
-      id,
-      notice: { ...structuredClone(original.notice), id, detectedAt, ...change },
-    })
-    const earliest = notice('notice-Z', 10)
-    const smaller = notice('notice-A', 10)
-    const cases: Array<{ notices: Array<Notice>; want: string | null }> = [
-      { notices: [notice('notice-A-new', 20), earliest], want: 'notice-Z' },
-      { notices: [earliest, smaller], want: 'notice-A' },
-      { notices: [smaller, earliest], want: 'notice-A' },
-      { notices: [notice('notice-before', 10, { splitEpoch: 9 })], want: 'notice-before' },
-      {
-        notices: [
-          notice('notice-later', 10, {
-            splitEpoch: 20,
-            deviceAuthHash: decodeEpochRosterFact(tip.canonical).authHash,
-          }),
-        ],
-        want: 'notice-later',
-      },
-      { notices: [notice('notice-unrelated', 1, { splitEpoch: 20 })], want: null },
-      { notices: [notice('notice-closed', 1, { closedAt: 2 })], want: null },
-      {
-        notices: [{ ...notice('notice-foreign', 1), key: { ...source, groupID: 'foreign' } }],
-        want: null,
-      },
-      {
-        notices: [{ ...notice('notice-other-incarnation', 1), key: { ...source, incarnation: 2 } }],
-        want: null,
-      },
-    ]
-    const entry = entryCapability(f.local().device.groups)
-    if (entry === null) throw new Error('Missing entry')
-    for (const { notices, want } of cases) {
-      const event = await entry.read(source.groupID, (reads) =>
-        branchAbandonmentPreparer({
-          ...reads,
-          checkpoints: async () => [...records.filter((row) => row.kind !== 'notice'), ...notices],
-        })({ source, destination: { ...source, incarnation: 2 }, mutationID: crypto.randomUUID() }),
+test.each(['known', 'unknown'] as const)(
+  'applicable notices use earliest detection then smaller ID with %s comparison coverage',
+  async (comparison) => {
+    const f = await createForkRecoveryRealFixture(true)
+    try {
+      const source = f.key
+      await f.reply(comparison === 'known' ? 20 : 21)
+      const responder = await (await f.remote().registry.access(source.groupID)).read(
+        (handle) => handle,
       )
-      expect(event?.noticeID, JSON.stringify(notices.map((row) => row.id))).toBe(want)
-      expect(event?.epochs).toEqual({ from: 10, through: 20 })
+      const remoteService = createCheckpointService({
+        registry: f.remote().registry,
+        key: source,
+        identity: f.responderIdentity,
+      })
+      await registryFixtureCapturedRecovery(f.local(), source, {
+        confirm: true,
+        responder: { identity: f.responderIdentity, group: responder },
+        lineage: comparison === 'known' ? await remoteService.exportCheckpoints(source) : undefined,
+      })
+      const records = await f.service().readRecords()
+      const original = records.find((row) => row.kind === 'notice' && row.id === f.noticeID)
+      const tip = records.find((row) => row.kind === 'fact' && row.epoch === 20)
+      if (original?.kind !== 'notice' || tip?.kind !== 'fact') throw new Error('Missing history')
+      type Notice = Extract<CheckpointRecord, { kind: 'notice' }>
+      const notice = (
+        id: string,
+        detectedAt: number,
+        change: Partial<Notice['notice']> = {},
+      ): Notice => ({
+        ...structuredClone(original),
+        id,
+        notice: { ...structuredClone(original.notice), id, detectedAt, ...change },
+      })
+      const earliest = notice('notice-Z', 10)
+      const smaller = notice('notice-A', 10)
+      const cases: Array<{ notices: Array<Notice>; want: string | null }> = [
+        { notices: [notice('notice-A-new', 20), earliest], want: 'notice-Z' },
+        { notices: [earliest, smaller], want: 'notice-A' },
+        { notices: [smaller, earliest], want: 'notice-A' },
+        { notices: [notice('notice-before', 10, { splitEpoch: 9 })], want: 'notice-before' },
+        {
+          notices: [
+            notice('notice-later', 10, {
+              splitEpoch: 20,
+              deviceAuthHash: decodeEpochRosterFact(tip.canonical).authHash,
+            }),
+          ],
+          want: 'notice-later',
+        },
+        {
+          notices: [notice('notice-unrelated', 1, { splitEpoch: 20 })],
+          want: comparison === 'known' ? null : 'notice-unrelated',
+        },
+        { notices: [notice('notice-closed', 1, { closedAt: 2 })], want: null },
+        {
+          notices: [{ ...notice('notice-foreign', 1), key: { ...source, groupID: 'foreign' } }],
+          want: null,
+        },
+        {
+          notices: [
+            { ...notice('notice-other-incarnation', 1), key: { ...source, incarnation: 2 } },
+          ],
+          want: null,
+        },
+      ]
+      const entry = entryCapability(f.local().device.groups)
+      if (entry === null) throw new Error('Missing entry')
+      for (const { notices, want } of cases) {
+        const event = await entry.read(source.groupID, (reads) =>
+          branchAbandonmentPreparer({
+            ...reads,
+            checkpoints: async () => [
+              ...records.filter((row) => row.kind !== 'notice'),
+              ...notices,
+            ],
+          })({
+            source,
+            destination: { ...source, incarnation: 2 },
+            mutationID: crypto.randomUUID(),
+          }),
+        )
+        expect(event?.noticeID, JSON.stringify(notices.map((row) => row.id))).toBe(want)
+        expect(event?.epochs).toEqual(
+          comparison === 'known' ? { from: 10, through: 20 } : 'unknown',
+        )
+        if (comparison === 'unknown') {
+          expect(event?.ownMessages).toEqual([])
+          expect(event?.othersSeen).toBe(0)
+          expect(event?.membersAdded).toEqual([])
+          expect(event?.membersRemoved).toEqual([])
+        }
+      }
+    } finally {
+      await f.close()
     }
-  } finally {
-    await f.close()
-  }
-})
+  },
+)
 
 for (const scenario of ['complete', 'missing-link', 'pre-upgrade'] as const) {
   const holes = scenario === 'missing-link' ? [15] : []
