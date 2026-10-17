@@ -503,10 +503,12 @@ Active rejoin covers ordinary X, a pending fork recovery intent (including one t
 An open fork notice refuses too, unless the saved `allowOpenFork` is true; that override touches nothing else.
 Freshness is the absence of known lag. It proves nothing against a hub that withheld frames.
 
-A current move keeps the GroupKey, MLS state and every hold. It resets hub positions (commit cursor, checkpoint receive cursor)
+A current move keeps the GroupKey, MLS state and every hold. It resets hub positions (commit cursor, checkpoint receive cursor, app-topic cursors)
 and re-queues retained checkpoint publications with their exact frames. The peer restarts on the destination only after the move is proven.
 The first device publishing on an empty topic starts its log at its current state; others compare-and-set after it.
-A current move does not reset app-topic cursors: hosts must reset their app-topic cursors after a current move.
+The same transaction forgets the incarnation's app-topic read positions (`AppCursorStore` from `ports(key).cursor`), so the
+destination drain reads each app topic from its oldest retained frame; a resumed move after restart does the same. No host action is needed.
+A host supplying its own `AppCursorStore` must clear it itself.
 
 Every other device rejoins through captured recovery from destination responders, checked against retained trust.
 It publishes nothing to the destination log before an authenticated reply. A confirmed rejoin installs a fresh incarnation without holds.

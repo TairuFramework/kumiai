@@ -49,7 +49,7 @@ test('README documents the shipped fork and recovery surface', () => {
     /comparisonEpoch/,
     /786432/,
     /seven days/,
-    /does not reset app-topic cursors/,
+    /app-topic positions in its transaction/,
     /fake GroupInfo/,
   ])
     expect(readme).toMatch(required)

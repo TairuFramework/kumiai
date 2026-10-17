@@ -511,6 +511,9 @@ export function createUnlockedIncarnationStores(params: {
         await active()
         await cursor.save(await topicLocator(topicID), { topicID, position })
       },
+      async clear() {
+        for (const id of cursor.ids()) cursor.remove(id)
+      },
     },
     outbox: {
       async list() {
@@ -649,6 +652,7 @@ export function createIncarnationStores(
     cursor: {
       load: memoryOperation(tx, stores.cursor.load),
       save: memoryOperation(tx, stores.cursor.save, 'side'),
+      clear: memoryOperation(tx, stores.cursor.clear, 'side'),
     },
     outbox: {
       list: memoryOperation(tx, stores.outbox.list),

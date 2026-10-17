@@ -233,6 +233,7 @@ export type ConformanceIncarnationStores<Position extends string = string> = {
   cursor: {
     load(topicID: string): Promise<string | null>
     save(topicID: string, position: string): Promise<void>
+    clear(): Promise<void>
   }
   outbox: {
     list(): Promise<Array<ConformanceStorageAppOutboxEntry>>

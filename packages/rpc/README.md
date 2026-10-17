@@ -318,7 +318,8 @@ A crash before writing can lose volatile host evidence, despite in-process stora
 `canMoveCurrent(inputs)` decides whether a device may move to another hub without rejoining (see `@kumiai/mls-rpc` Hub migration).
 It refuses any hold, condition, active rejoin, known lag, unresolved publication or settlement and pending owner work.
 An open fork notice refuses unless `allowOpenFork` is set, which overrides that predicate only.
-A current move resets commit and checkpoint positions but does not reset app-topic cursors; hosts must reset their app-topic cursors after a current move.
+A current move resets commit, checkpoint and app-topic positions in its transaction (app positions in the `@kumiai/mls-rpc` cursor store),
+so the destination drain reads app topics from their oldest retained frame.
 After lost spent trust, the exits are a successor group (new groupID) or, after total key and database loss, a fresh invite into the same group.
 
 ## Checkpoints and fork notices

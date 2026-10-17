@@ -1454,6 +1454,14 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
             await stores.incarnation(2).cursor.save('topic\u0000secret', '10')
             expect(await stores.incarnation(2).cursor.load('topic:secret')).toBe('2')
             expect(await stores.incarnation(2).cursor.load('topic\u0000secret')).toBe('10')
+            const pendingBefore = await stores.incarnation(1).pending.list()
+            // Clearing forgets every app position of that incarnation and nothing else.
+            await stores.incarnation(2).cursor.clear()
+            expect(await stores.incarnation(2).cursor.load('topic:secret')).toBeNull()
+            expect(await stores.incarnation(2).cursor.load('topic\u0000secret')).toBeNull()
+            expect(await stores.incarnation(1).pending.list()).toEqual(pendingBefore)
+            await stores.incarnation(2).cursor.save('topic:secret', '1')
+            expect(await stores.incarnation(2).cursor.load('topic:secret')).toBe('1')
           },
         )
         if (escaped === undefined) throw new Error('Missing stores')

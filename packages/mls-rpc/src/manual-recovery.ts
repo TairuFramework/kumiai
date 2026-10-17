@@ -597,6 +597,8 @@ export function createManualRecoveryStore<TTx extends GroupTransaction>(params: 
           })
           if (!current) return false
           // Hub positions are per hub; MLS state, holds and owed work stay exactly as they were.
+          // App positions too: the destination's log restarts its sequence below them.
+          await target.cursor.clear()
           if (control.cursor !== null && control.cursor.position !== null)
             await target.control.apply(
               { cursor: { position: null, epoch: control.cursor.epoch } },

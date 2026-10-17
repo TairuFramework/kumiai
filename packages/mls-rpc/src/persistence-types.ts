@@ -111,6 +111,8 @@ export type IncarnationStores = {
   cursor: {
     load(topicID: string): Promise<string | null>
     save(topicID: string, position: string): Promise<void>
+    /** Forgets every app read position of this incarnation (hub positions die with the hub). */
+    clear(): Promise<void>
   }
   outbox: {
     list(): Promise<Array<AppOutboxEntry>>

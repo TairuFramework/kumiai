@@ -1,4 +1,5 @@
 import {
+  APP_TOPIC_LABEL,
   type CheckpointRecord,
   type ControlSnapshot,
   canMoveCurrent,
@@ -6,6 +7,7 @@ import {
   type LogHub,
   type LogPosition,
   type MailboxHub,
+  protocolTopic,
 } from '@kumiai/rpc'
 import { expect, test, vi } from 'vitest'
 
@@ -1337,6 +1339,93 @@ for (const mode of ['real-mls', 'double'] as const) {
         })
       } finally {
         vi.restoreAllMocks()
+        active?.owner.dispose()
+        await active?.owner.drained().catch(() => {})
+        await fixture.close()
+      }
+    })
+  }
+}
+
+// Loaded by URL: rpc's fake peer harness is not a published export.
+const rpcFixture = (name: string) =>
+  import(new URL(`../../rpc/test/fixtures/${name}.ts`, import.meta.url).href)
+
+/** A frame published on a fresh destination hub while the moved device is away, then its drain. */
+async function deliveredAfterMove(fixture: Fixture): Promise<Array<unknown>> {
+  const { DurableFakeHub } = await rpcFixture('durable-fake-hub')
+  const { makeMLSPeer } = await rpcFixture('peer')
+  const hub = new DurableFakeHub()
+  const recoverySecret = new Uint8Array(32).fill(0x91)
+  const seen: Array<unknown> = []
+  const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
+  const ports = fixture.device.groups.ports(key)
+  // The device's own durable app positions, exactly as a host wires them.
+  const appCursorStore = {
+    load: (topicID: string) => ports.cursor.load(topicID),
+    save: (topicID: string, position: string) => ports.cursor.save(topicID, position),
+    stored: () => null,
+    history: () => [],
+  }
+  const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
+  const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers, appCursorStore })
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  await bob.peer.dispose()
+  hub.detach('bob')
+  await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'on the new hub' } })
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  const back = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
+  hub.reattach('bob')
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  await alice.peer.dispose()
+  await back.peer.dispose()
+  return seen
+}
+
+for (const mode of ['real-mls', 'double'] as const) {
+  for (const path of ['live', 'restart mid move'] as const) {
+    test(`moved current device receives app frames from a fresh hub / ${mode} / ${path}`, async () => {
+      let fixture = await createRegistryFixture({ mode, groupID: key.groupID, setup: 'seeded' })
+      const destination = watchedHub()
+      let active: Awaited<ReturnType<typeof start>> | undefined
+      try {
+        const { fakeEpochSecret } = await rpcFixture('fake-crypto')
+        const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+        // The old hub's position, far above anything a fresh hub has minted.
+        await fixture.device.groups.ports(key).cursor.save(topicID, '000000099999')
+        if (path === 'live') {
+          active = await start(fixture, async () => {
+            throw new Error('Live binding must be used')
+          })
+          const safety = api.createGroupSafety(await registryFixtureSafetyParams(fixture))
+          expect(
+            await safety.recover(key, {
+              mode: 'resync',
+              target: { ...movedBinding, hub: destination.hub },
+            }),
+          ).toEqual(key)
+        } else {
+          const saved = await fixture.manualRecovery().authoriseManualRecovery(key, {
+            mode: 'resync',
+            ...movedBinding,
+            allowOpenFork: false,
+          })
+          fixture = await fixture.reopen()
+          active = await start(fixture, async (id) => ({
+            id,
+            hub: destination.hub,
+            commitTopicID: movedBinding.commitTopicID,
+          }))
+          expect(await fixture.manualRecovery().readManualRecovery(saved.id)).toMatchObject({
+            stage: 'completed',
+            destination: key,
+          })
+        }
+        active.owner.dispose()
+        await active.owner.drained()
+        active = undefined
+        expect(await deliveredAfterMove(fixture)).toEqual([{ text: 'on the new hub' }])
+      } finally {
         active?.owner.dispose()
         await active?.owner.drained().catch(() => {})
         await fixture.close()

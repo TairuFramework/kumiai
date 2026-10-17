@@ -68,7 +68,7 @@ Export, import and standalone verification keep checkpoints portable.
 Report `branch-abandoned` with own message IDs, others' counts, membership delta and coverage; the app resends its own messages.
 With fork evidence and a transcript-checked lineage, one recovery attempt may adopt the hub's branch below the epoch floor; the ordinary floor never changes.
 Expired evidence stays target-behind until manual resync. Coherent fake GroupInfo plus checkpoint chains remain an accepted insider residual.
-Surface non-terminal `not-member` (distinct responder DIDs and count, optional pendingReason) and `spent-set-corrupt` conditions through status, events and errors.
+Surface non-terminal `not-member` (distinct responder DIDs and count, optional pendingReason) and `spent-set-corrupt` conditions through status and events; `SpentSetCorruptError` is one class, re-exported by mls-rpc.
 Add manual recovery: resync to a registered or call-time target (current move or rejoin) and successor retirement with an app-clearable tombstone.
-A current move does not reset app-topic cursors. `clearHold` lifts only app-reported halts.
+A current move resets app-topic cursors with its other hub positions. `clearHold` lifts only app-reported halts.
 Phase-2.3 crypto, batching, leases, package burn and restore, phase-3 providers and child-process SIGKILL evidence remain excluded.
