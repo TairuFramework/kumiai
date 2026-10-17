@@ -464,8 +464,8 @@ describe('recovery ordering', { concurrent: false }, () => {
         return publish(params)
       })
       await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'rejoined' } })
-      await drainUntil(() => received.length === 1, 'delivered log message')
-      expect(received).toEqual([{ text: 'rejoined' }])
+      await drainUntil(async () => (await bob.appOutbox.list()).length === 0, 'settled log message')
+      expect(received).toEqual([{ text: 'rejoined' }, { text: 'rejoined' }])
       expect(notices[0]).toMatchObject({
         kind: 'retention-gap',
         confidence: 'claimed',
@@ -478,6 +478,8 @@ describe('recovery ordering', { concurrent: false }, () => {
           (m) => m.senderDID === 'bob' && bob.crypto.frameEpoch(m.payload) != null,
         ),
       ).toHaveLength(2)
+      await alice.peer.retryAppDelivery()
+      expect(received).toEqual([{ text: 'rejoined' }, { text: 'rejoined' }])
     },
   )
 
@@ -794,13 +796,18 @@ describe('recovery ordering', { concurrent: false }, () => {
     expect(hub.head(commitTopic(secret))).toBe(removed.sequenceID)
   })
 
-  test.each([1, 2])(
+  test.each([
+    [1, ['first', 'first', 'second'], [1, 2, 2]],
+    [2, ['first', 'first', 'first', 'second'], [1, 2, 3, 3]],
+  ] as const)(
     'ratchet before acknowledgement preserves order across %s replacements',
-    async (changes) => {
+    async (changes, expectedTexts, expectedEpochs) => {
       const hub = new FakeHub()
-      const received: Array<unknown> = []
-      member(hub, 'alice', {
-        handlers: { 'chat/posted': (ctx: { data: unknown }) => received.push(ctx.data) },
+      const received: Array<string> = []
+      const alice = member(hub, 'alice', {
+        handlers: {
+          'chat/posted': (ctx: { data: { text: string } }) => received.push(ctx.data.text),
+        },
       })
       const bob = member(hub, 'bob')
       await flush()
@@ -823,17 +830,21 @@ describe('recovery ordering', { concurrent: false }, () => {
         bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'first' } }),
         bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'second' } }),
       ])
-      await vi.waitFor(() => expect(received).toEqual([{ text: 'first' }, { text: 'second' }]), {
+      // Each reseal is a distinct occurrence; retained attempts also deliver.
+      await vi.waitFor(() => expect(received).toEqual(expectedTexts), {
         timeout: 1700,
       })
-      const epochs = hub.published
-        .filter((m) => m.senderDID === 'bob' && m.topicID !== commitTopic(secret))
-        .map((m) => bob.crypto.frameEpoch(m.payload))
-      expect(epochs).toEqual([
-        ...Array.from({ length: changes }, (_, index) => index + 1),
-        changes + 1,
-        changes + 1,
-      ])
+      await vi.waitFor(async () => expect(await bob.appOutbox.list()).toEqual([]))
+      const apps = hub.published.filter(
+        (m) => m.senderDID === 'bob' && m.topicID !== commitTopic(secret),
+      )
+      expect(apps.map((m) => bob.crypto.frameEpoch(m.payload))).toEqual(expectedEpochs)
+      await alice.peer.retryAppDelivery()
+      await alice.peer.replay()
+      expect(received).toEqual(expectedTexts)
+      for (const topicID of new Set(apps.map((m) => m.topicID))) {
+        expect(alice.appCursorStore.stored(topicID)).toBe(hub.head(topicID))
+      }
     },
   )
 
@@ -1274,7 +1285,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     await bob.peer.dispose()
     release.resolve()
     await bob.peer.drained()
-    expect(received).toEqual([])
+    expect(received).toEqual([{ text: 'at-risk restart' }])
     expect(await store.list()).toHaveLength(1)
     publishSpy.mockRestore()
     const replacement = member(hub, 'bob', { restartOf: bob, appOutbox: store })
@@ -1282,7 +1293,7 @@ describe('recovery ordering', { concurrent: false }, () => {
       async () => (await replacement.appOutbox.list()).length === 0,
       'restart delivery',
     )
-    expect(received).toEqual([{ text: 'at-risk restart' }])
+    expect(received).toEqual([{ text: 'at-risk restart' }, { text: 'at-risk restart' }])
     const current = replacement.anchorStore.stored()
     if (current == null) throw new Error('Missing replacement anchor')
     const topics = [
@@ -1292,6 +1303,8 @@ describe('recovery ordering', { concurrent: false }, () => {
     const apps = hub.published.filter((m) => m.senderDID === 'bob' && topics.includes(m.topicID))
     expect(apps.map((m) => bob.crypto.frameEpoch(m.payload))).toEqual([1, 2])
     expect(await replacement.mls.readEpoch()).toBe(2)
+    await alice.peer.retryAppDelivery()
+    expect(received).toEqual([{ text: 'at-risk restart' }, { text: 'at-risk restart' }])
   })
 
   test('retrying confirmed adoption repairs the floor after the host adopted then threw', async () => {
