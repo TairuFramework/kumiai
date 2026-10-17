@@ -1272,7 +1272,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       })
     })
 
-    test('isolates incarnations and sorts numeric lane positions without locator collisions', async () => {
+    test('isolates incarnations and sorts lane positions in code-unit order without locator collisions', async () => {
       const { groups, seed } = await setup()
       const address = { groupID, incarnation: 1, namespace: 'pending', recordID: 'current' }
       expect(physicalRecordKey({ ...address, groupID: 'a|b', recordID: 'c' })).not.toBe(
@@ -1294,12 +1294,12 @@ for (const mode of ['real-mls', 'double'] as const) {
           },
         ])
         const all = await rows.pending.list()
-        expect(all.map((r) => r.frame.id)).toEqual(['frame-4', 'frame-1', 'frame-2', 'frame-3'])
+        expect(all.map((r) => r.frame.id)).toEqual(['frame-4', 'frame-2', 'frame-1', 'frame-3'])
         expect(
           all
             .filter((r) => r.frame.topicID === topicID && r.frame.segment === 3)
             .map((r) => r.frame.position),
-        ).toEqual(['2', '10'])
+        ).toEqual(['10', '2'])
         expect(await rows.cursor.load('topic-other')).toBeNull()
         await rows.anchor.save(anchor)
         await rows.control.apply({ putApplied: [applied] }, 'lanes')

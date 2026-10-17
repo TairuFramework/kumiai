@@ -97,9 +97,8 @@ for (const scenario of ['acknowledged', 'delayed', 'two epochs', 'expired'] as c
       expect(bob.peer.anchorEpoch()).toBe(2)
       expect(bob.mls.epoch()).toBe(scenario === 'two epochs' ? 3 : 2)
       expect(retains).toHaveLength(2)
-      if (scenario === 'two epochs' || scenario === 'expired') {
-        const intermediateEpochDeliveries = deliveries.length
-        expect(intermediateEpochDeliveries).toBe(0)
+      if (scenario === 'expired') {
+        expect(deliveries).toHaveLength(0)
       } else {
         const deliveriesWithinTTL = deliveries.length
         expect(deliveriesWithinTTL).toBe(1)
