@@ -47,9 +47,9 @@ Four constraints a port implementation is most likely to get wrong, all of which
   returns `epoch`, `processCommit` returns `{ advanced, epochBefore, epochAfter }`, and
   `GroupMLS.readEpoch()` answers when no operation runs. The suite's epoch clauses set the hint one
   behind and one ahead and expect the same answers.
-- **`unwrap` throwing is ordinary control flow**, not an error: it is how a retained frame says "not
-  my epoch". A readable frame at another epoch must throw `FrameEpochError { frameEpoch,
-  handleEpoch }` before anything is decrypted. The lane retains a frame only on that error's
+- **`unwrap` throwing is ordinary control flow**, not an error: a future or no-longer-retained epoch
+  throws `FrameEpochError { frameEpoch, handleEpoch }` before decryption. Retained past epochs open
+  with the authenticated sender from that epoch. The lane retains a frame only on that error's
   "ahead" answer; any other refusal marks it dead.
 - **`readCommitHeader` returning `null` means "these bytes are not a Commit at all"** — never "a
   Commit I could not read". The lane files `null` as poison and steps over it, so a port answering
@@ -96,18 +96,19 @@ restore, or a future-epoch frame once per blocking frame. A missing-protocol rec
 pending and can be delivered after that protocol is registered on a later start. An operator can
 call `retryAppDelivery(topicID?)` to reset backoff and schedule an immediate retained pull and
 matching delivery workers without replacing the peer. It returns when the attempt is scheduled.
-`onAppDeliveryResumed` reports the same group, protocol, topic, position, and optional reason once
-the reported block clears through delivery, drop, dead-frame handling, or segment rotation.
+`onAppDeliveryResumed` reports the same group, protocol, topic, position and optional reason when
+the block settles. Its optional `settlement` is always set by rpc: `'resumed'` for clearance or
+`'expired'` when a departing topic expires. Expiry does not prove delivery.
 Disposal does not report a resume. An operator can
 accept a frame's loss with `dropAppFrame(topicID, position)`; it can explicitly discard a
 missing-protocol record, but refuses a pending frame under a registered protocol. It also refuses
 to drop a sealed frame behind an earlier pending or sealed frame, because the durable cursor cannot
 record that drop until the earlier frame is settled.
 
-Without `GroupCrypto.pending`, retained event handlers run inside the peer's serial lane.
-Those handlers must return before awaiting `commit()`, `replay()`, `recover()` or `drained()` on the same peer.
-Schedule that follow-up work after the handler returns. The lane is not reentrant.
-Durable pending delivery runs handlers outside that lane.
+App pulls, opens and handlers run outside the commit queue. App notices and delivery starts share
+one self-draining FIFO. `AppLane.idle()` awaits a snapshot of durable record completions already
+in flight, including cursor saves. After `dispose()`, `GroupPeer.drained()` awaits the peer boundary,
+then app idle, then the commit tail. It does not guarantee delivery of every retained frame.
 
 Durable delivery is off when `GroupCrypto.pending` is absent. Ephemeral events remain best effort;
 directed traffic and anycast requests and replies keep their existing live completion or expiry
@@ -115,13 +116,12 @@ semantics. Log-intent pushes only wake a retained fetch: pushed bytes and positi
 pending records. The hub must have appended the frame to the topic log before pushing it.
 Frames pruned before a read, or lost after a failed durable open followed by retention expiry,
 cannot be recovered; `onAppWindowPruned` reports a visible gap. A hub that only sends a log frame
-by mailbox also gives no durable guarantee. A frame published at epoch E and first fetched after
-this peer has moved past E is refused: the peer cannot authenticate its sender after that move.
+by mailbox also gives no durable guarantee. Past-epoch frames open while their epoch remains retained.
 A hub can withhold or omit frames. A frame claiming an epoch above this peer's current epoch remains
 retained with the cursor behind it even if a commit fetch omits the matching commit. It opens when the
 peer reaches that epoch, or an operator can explicitly discard it with `dropAppFrame`. A forged
 far-future claim can hold delivery until that drop; `onAppDeliveryStalled` reports the wait once with
-`reason: 'future-epoch'`. A frame below the current epoch remains refused.
+`reason: 'future-epoch'`. A past epoch outside retention is refused.
 The peer persists a pending rotation before adoption and co-commits its landed mark in the same
 transaction as the new MLS state and control changes. At startup, anchor repair uses the target
 epoch's exporter before replay or delivery. If a host advances past that target outside the peer,
@@ -131,6 +131,10 @@ App-frame AAD is `[0x01, intent, ...UTF8(topicID)]`, where intent is `0x01` for 
 for ephemeral. `frameAAD` reads this cleartext routing hint; only `unwrap` with the full expected
 AAD authenticates it. Old bare-topic AAD fails to open, so mixed 0.9/0.10 app peers are
 incompatible. Use `encodeAppAAD` and `decodeAppAAD` for the shared format.
+
+New exports include `decodeAppEventPlaintext`, `AppEventPlaintext`, `appFrameIdempotencyKey`,
+`frameID`, `isAppLogPosition`, `InvalidAppEntryError`, `RETAINED_EPOCHS_DEFAULT` (4),
+`RETAINED_EPOCHS_MAX` (32), `sortPendingAppFrames` and `compareLogPositions`, the shared code-unit comparator.
 
 An `event` procedure in a group protocol may declare `retain: 'log'`, which makes every dispatch of
 it retained by the hub and pullable later, whatever the call site:
@@ -163,6 +167,9 @@ agree natively. A rejoin rotates it as well, on the applied commit's own externa
 member's effective join is its rejoin epoch, and nothing a roster diff can see moves.
 
 `GroupPeer.anchorEpoch()` exposes where it sits.
+`AnchorSlot.departing` persists old anchors with their departure epochs. Their topics retain separate
+segment identities until the authenticated applied epoch reaches departure plus 32. Pulls have page,
+byte and time budgets and bounded outstanding requests. Short pages do not expire departing topics.
 
 ### The returning-member drain
 
@@ -173,10 +180,9 @@ broadcast, and a drain that did would make a returning member the only one to se
 arrive.
 
 The rule that makes the durable cursor safe: **a cursor may only pass a frame that is DELIVERED or
-DEAD.** A frame sealed below the handle's epoch is dead (MLS ratchets forward — those bytes are
-ciphertext forever), as is one that claims this epoch and will not open, as are bytes that are not a
-sealed frame at all. A frame sealed *ahead* of the walk is neither: it opens once the walk gets
-there, so the cursor stops behind it and the frame stays buffered. That distinction is what
+DEAD.** A past-epoch frame outside retention is dead, as is one that claims an available epoch
+and will not open, as are bytes that are not a sealed frame at all. A frame sealed *ahead* of the
+walk is neither: it opens once the walk gets there, so the cursor stops behind it and the frame stays buffered. That distinction is what
 `GroupCrypto.frameEpoch` exists for — `unwrap` throwing says "not my epoch" and cannot say which.
 
 When the hub's retention floor has passed the position a peer had read to, the frames between them

@@ -35,6 +35,9 @@ depend on both.
 - `deriveRecoverySecret`, `RECOVERY_LABEL` — the default recovery secret.
   `GroupMLS.createRecoveryRequest` returns explicit request keys. `applyRecovery` creates candidates,
   and `restoreRecovery(candidate, requestKey)` restores them.
+- `OpenAppInput`, `OpenAppResult`, `PreOpenAppFrameRef`, `PendingAppFrame`, `PendingAppFrames`,
+  `MAX_OPEN_BATCH_FRAMES` (64), `RECEIVE_SAVE_ATTEMPTS` (3), `KeyRetentionRangeError` and
+  `InvalidCandidateError` — registry open and restore contracts. `InvalidAppEntryError` re-exports the rpc class.
 
 ## Share one access instance
 
@@ -44,6 +47,15 @@ adopts an authored commit through `access.replace(next, adoption, prepare)` afte
 The `prepare(current)` callback checks source identity and carries ratchet progress under the
 replacement gate. The adapter saves before publishing the replacement and publishes its synchronous
 epoch hint after a successful save.
+
+Access-issued handles and their derivatives permanently refuse private commit builders and
+`proposeSelfRemoval` with MLS's `CommitAuthoringRefusedError`. This includes a host handle once
+`simpleHandleAccess` issues it. `createControlBuildPort` requires `restoreCandidate` and optionally
+accepts `restoreSource`. Its `build(op, group)` receives a fresh permit handle restored from journal
+`sourceState`. Pass that `group` to `buildRevokeProofOperation`. The receipt binds commit, candidate
+and Welcome. MLS exports `CommitReceipt`, `restrictCommitAuthoring`, `withCommitPermit` and
+`authorPrivateCommit` for this gate. Candidate restore throws exported `InvalidCandidateError`
+for undecodable candidates. Other restore faults propagate.
 
 For a *received* commit there is nothing to adopt: ts-mls's `processMessage` advances the handle in
 place. A host that treated every commit as adopt-later would double-apply received ones.
@@ -119,7 +131,20 @@ A host with its own handle store implements the port instead:
 
 ## Durable logged app delivery
 
-Pass a `pending` adapter to `createGroupCrypto` to opt in. Its `persistOpened(stagedState, record)`
+With `const crypto = createGroupCrypto({ access: await registry.access(groupID) })`, the registry owns
+`crypto.pending` and routes durable singleton `unwrap` through `access.openBatch`.
+`crypto.unwrapBatch(inputs)` accepts up to 64 `OpenAppInput` values and returns one ordered, mixed
+`OpenAppResult` per input after atomic state, pending and poison persistence. Failed storage exposes no results.
+`access.pending.list()` restores uncompleted records, and `complete(id)` is idempotent.
+
+Frame IDs must equal `frameID(topicID, ciphertext)`. Occurrences at or before the durable cursor
+refuse as duplicates before decryption. Opened results include `handleEpoch`, and singleton unwrap's
+`epoch` is that locked handle epoch. Pending records retain the frame's seal epoch.
+Non-safety availability failures, including `RegistryRetiringError`, become retryable `AppFrameStorageError`.
+Every MLS state save uses exact version CAS. Pending, poison and cursor writes leave that clock unchanged,
+and app-cursor writes do not notify registry listeners.
+
+For simple access, pass a `pending` adapter to `createGroupCrypto`. Its `persistOpened(stagedState, record)`
 must write the encoded post-open `ClientState` as the group's handle state **and** insert the
 `PendingAppFrame` in one atomic transaction. `list()` returns all uncompleted records after a
 restart, ordered by `(frame.segment, frame.position)` by this port. `complete(id)` clears one
@@ -148,10 +173,10 @@ const crypto = createGroupCrypto({
 })
 ```
 
-The example's `saveHandleState` must also enforce the host's save ordering and same-epoch
-monotonic version rule. Saves issued before `persistOpened` must finish before it; a delayed
-older state at the same epoch must be rejected. `persistOpened` runs under the handle mutex and
-the peer's commit mutex: it must not call either object. Never hold a transaction or the sole
+For simple access, the example's `saveHandleState` must enforce save ordering and exact version CAS.
+Saves issued before `persistOpened` must finish before it, and stale saves must be rejected.
+`persistOpened` runs under the handle mutex and must not call that handle. App work runs outside
+the peer's commit queue. Never hold a transaction or the sole
 database connection while awaiting a peer or handle call; a handler should commit its own
 transaction before awaiting `commit()` or `dispatch()`. A single-connection host that reverses
 this order can deadlock. Hosts adopting this in Kubun must first remove transaction-then-registry
@@ -291,10 +316,8 @@ leave a peer stepping over frames without ever classifying one and never learnin
 Documented on the factories themselves; the conformance suite in `@kumiai/rpc-conformance` pins each
 one. The ones a host is most likely to trip on:
 
-- **`unwrap` opens only at the current epoch.** A readable frame at any other epoch throws
-  `FrameEpochError` before decryption, under the handle lock. ts-mls could open a few past epochs,
-  but `GroupHandle.decrypt` resolves senders at the current epoch, so such a frame never had a
-  sender.
+- **`unwrap` opens retained past epochs.** It authenticates the sender against that epoch's roster.
+  Future epochs and past epochs outside retention throw `FrameEpochError` under the handle lock.
 - **`exportSecret` derives from MLS exporter state.** The fake uses HMAC to model epoch separation,
   while the real port derives from the handle's exporter secret.
 - **`wrap` mutates.** It consumes a per-message ratchet key, so sealing the same plaintext twice
