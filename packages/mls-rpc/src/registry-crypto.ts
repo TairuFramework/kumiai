@@ -11,7 +11,12 @@ import {
   createGroupCryptoBase,
   type RegistryGroupCryptoParams,
 } from './crypto.js'
-import type { OpenAppInput, OpenAppResult, PendingAppFrames } from './persistence-types.js'
+import {
+  MAX_OPEN_BATCH_FRAMES,
+  type OpenAppInput,
+  type OpenAppResult,
+  type PendingAppFrames,
+} from './persistence-types.js'
 
 export function createRegistryGroupCrypto(params: RegistryGroupCryptoParams): GroupCrypto & {
   pending: PendingAppFrames
@@ -22,10 +27,11 @@ export function createRegistryGroupCrypto(params: RegistryGroupCryptoParams): Gr
 
   async function unwrapBatch(frames: Array<OpenAppInput>): Promise<Array<OpenAppResult>> {
     assertDurableCryptoSafety(access)
+    if (frames.length > MAX_OPEN_BATCH_FRAMES) throw new RangeError('App batch exceeds 64 frames')
     try {
       return await access.openBatch(frames)
     } catch (error) {
-      if (error instanceof GroupSafetyHeldError || error instanceof RangeError) throw error
+      if (error instanceof GroupSafetyHeldError) throw error
       throw new AppFrameStorageError('handle access failed during durable open', { cause: error })
     }
   }

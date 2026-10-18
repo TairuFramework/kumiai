@@ -34,7 +34,7 @@ import { controlCompatible } from './control-compat.js'
 import { decodeControlJournal, encodeControlJournal } from './control-journal.js'
 import { controlBuildContexts } from './control-write-context.js'
 import { deriveEntryKey, sealEntries } from './crypto.js'
-import { sameStoredValue } from './memory-incarnation-stores.js'
+import { copyStoredValue, sameStoredValue } from './memory-incarnation-stores.js'
 import {
   DisplacedGroupHandleError,
   GroupStateConflictError,
@@ -309,7 +309,7 @@ export function createControlBuildPort(params: {
       let built: ControlSlot
       let referencedProposals: Array<string>
       try {
-        const { value: host, receipt } = await withCommitPermit(
+        const { value: output, receipt } = await withCommitPermit(
           () =>
             restoreSource({
               state: sourceState,
@@ -318,6 +318,7 @@ export function createControlBuildPort(params: {
             }),
           (permitted) => params.build(saved, permitted),
         )
+        const host = copyStoredValue(output)
         const rejected = () => ({
           kind: 'rejected' as const,
           operation: saved,

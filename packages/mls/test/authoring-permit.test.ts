@@ -2,12 +2,12 @@ import { createRevoke } from '@kokuin/controller'
 import { randomIdentity } from '@kokuin/token'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
+import { authorPrivateCommit } from '../src/authoring.js'
 import * as envelopeFold from '../src/envelope-fold.js'
 import { deriveGroup } from '../src/group-handle.js'
 import {
   addDevice,
   announceControllerBeacon,
-  authorPrivateCommit,
   CommitAuthoringRefusedError,
   type CommitReceipt,
   commitInvite,

@@ -5,6 +5,7 @@ import {
   createGroup,
   createInvite,
   createKeyPackageBundle,
+  encodeClientState,
   processWelcome,
 } from '@kumiai/mls'
 import {
@@ -23,7 +24,11 @@ import { simpleHandleAccess } from '../src/access.js'
 import { createGroupCrypto, ENTRY_SEAL_LABEL } from '../src/crypto.js'
 import { DisplacedGroupHandleError, RegistryRetiringError } from '../src/persistence-errors.js'
 import { MAX_OPEN_BATCH_FRAMES, type OpenAppInput } from '../src/persistence-types.js'
-import { createRegistryFixture, registryFixtureRetirement } from './fixtures/registry.js'
+import {
+  createRegistryFixture,
+  failRegistrySeal,
+  registryFixtureRetirement,
+} from './fixtures/registry.js'
 import { registryHandle } from './fixtures/registry-welcome.js'
 
 async function setup(mode: 'real-mls' | 'double') {
@@ -251,6 +256,30 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect(await s.snapshot()).toEqual(before)
       }))
 
+    test('transient codec RangeError is retryable storage failure', () =>
+      run(async (s) => {
+        const input = await s.seal()
+        const before = await s.snapshot()
+        const cause = new RangeError('transient codec capacity')
+        failRegistrySeal(s.f, cause)
+        const error = await Promise.resolve(unwrap(s, input)).catch((error: unknown) => error)
+        expect(error).toBeInstanceOf(AppFrameStorageError)
+        expect(error).toHaveProperty('cause', cause)
+        expect(await s.snapshot()).toEqual(before)
+        expect(await unwrap(s, input)).toMatchObject({ senderDID: s.senderDID })
+        expect(await s.crypto.pending.list()).toHaveLength(1)
+      }))
+
+    test('unreadable retained trust becomes a recovery safety hold', () =>
+      run(async (s) => {
+        const input = await s.seal()
+        await s.f.corruptTrust(s.key.groupID)
+        await expect(unwrap(s, input)).rejects.toMatchObject({
+          name: 'GroupSafetyHeldError',
+          reason: 'recovery-unavailable',
+        })
+      }))
+
     test('storage failure is AppFrameStorageError and writes nothing', () =>
       run(async (s) => {
         const input = await s.seal()
@@ -329,6 +358,47 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect(await unwrap(s, input)).toMatchObject({ senderDID: s.senderDID })
       }),
     )
+
+    test('legacy durable codec RangeError keeps the key retryable', () =>
+      run(async (s) => {
+        const input = await s.seal()
+        let handle = await s.access.read((group) => group)
+        const access = simpleHandleAccess({
+          key: s.key,
+          stateVersion: () => s.access.stateVersion(),
+          handle: () => handle,
+          adopt: (next) => {
+            handle = next
+          },
+        })
+        const records: Array<PendingAppFrame> = []
+        const cause = new RangeError('transient legacy codec capacity')
+        let fail = true
+        const crypto = createGroupCrypto({
+          access,
+          pending: {
+            persistOpened: async (_state, record) => {
+              if (fail) {
+                fail = false
+                throw cause
+              }
+              records.push(record)
+            },
+            list: async () => records,
+            complete: async () => {},
+          },
+        })
+        const before = encodeClientState(handle.state)
+        const open = () =>
+          crypto.unwrap(input.ciphertext, { frame: input.frame, expectedAAD: input.expectedAAD })
+        const error = await Promise.resolve(open()).catch((error: unknown) => error)
+        expect(error).toBeInstanceOf(AppFrameStorageError)
+        expect(error).toHaveProperty('cause', cause)
+        expect(records).toEqual([])
+        expect(encodeClientState(handle.state)).toEqual(before)
+        expect(await open()).toMatchObject({ senderDID: s.senderDID })
+        expect(records).toHaveLength(1)
+      }))
 
     test.each(['preflight', 'callback'] as const)(
       'legacy durable %s retirement refusal stays retryable after rollback',
@@ -470,13 +540,10 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect(openBatch).not.toHaveBeenCalled()
       }))
 
-    test('openBatch safety and range rejections pass through unchanged', () =>
+    test('openBatch safety and oversized batch rejections pass through unchanged', () =>
       run(async (s) => {
         const input = await s.seal()
-        for (const error of [
-          new GroupSafetyHeldError('fork-halted'),
-          new RangeError('batch bound'),
-        ]) {
+        for (const error of [new GroupSafetyHeldError('fork-halted')]) {
           vi.spyOn(s.access, 'openBatch').mockRejectedValueOnce(error)
           await expect(unwrap(s, input)).rejects.toBe(error)
         }

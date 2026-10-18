@@ -53,9 +53,9 @@ Access-issued handles and their derivatives permanently refuse private commit bu
 `simpleHandleAccess` issues it. `createControlBuildPort` requires `restoreCandidate` and optionally
 accepts `restoreSource`. Its `build(op, group)` receives a fresh permit handle restored from journal
 `sourceState`. Pass that `group` to `buildRevokeProofOperation`. The receipt binds commit, candidate
-and Welcome. MLS exports `CommitReceipt`, `restrictCommitAuthoring`, `withCommitPermit` and
-`authorPrivateCommit` for this gate. Candidate restore throws exported `InvalidCandidateError`
-for undecodable candidates. Other restore faults propagate.
+and Welcome. MLS exports `CommitReceipt`, `restrictCommitAuthoring` and `withCommitPermit`.
+The commit construction gate is internal and cannot accept host receipts.
+Candidate restore throws exported `InvalidCandidateError` for undecodable candidates. Other restore faults propagate.
 
 For a *received* commit there is nothing to adopt: ts-mls's `processMessage` advances the handle in
 place. A host that treated every commit as adopt-later would double-apply received ones.
@@ -133,6 +133,8 @@ A host with its own handle store implements the port instead:
 
 With `const crypto = createGroupCrypto({ access: await registry.access(groupID) })`, the registry owns
 `crypto.pending` and routes durable singleton `unwrap` through `access.openBatch`.
+Pass the registry incarnation cursor store (`ports(key).cursor`) as the rpc peer’s `appCursorStore`
+so `openBatch` can refuse duplicates at or before the durable cursor.
 `crypto.unwrapBatch(inputs)` accepts up to 64 `OpenAppInput` values and returns one ordered, mixed
 `OpenAppResult` per input after atomic state, pending and poison persistence. Failed storage exposes no results.
 `access.pending.list()` restores uncompleted records, and `complete(id)` is idempotent.

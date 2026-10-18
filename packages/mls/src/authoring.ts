@@ -60,7 +60,7 @@ export async function withCommitPermit<TValue>(
   return { value: outcome.value, receipt: permit.receipt }
 }
 
-/** Throws synchronously on refusal, before invoking construct. */
+/** Internal gate. Never expose callback receipts through package exports. */
 export function authorPrivateCommit<TValue>(
   handle: GroupHandle,
   construct: () => Promise<{ value: TValue; receipt: CommitReceipt }>,

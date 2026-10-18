@@ -109,3 +109,7 @@ The follow-up revocation work will introduce a ledger entry that removes a DID's
 A last-resort key package carries an MLS lifetime of `LAST_RESORT_LIFETIME_DAYS` (90). The inviter validates that lifetime when building the Add, so an expired package is refused at the far end with `Current time not within Lifetime` — and refused *no matter what the hub does*, because the hub stores opaque bytes and cannot see the expiry.
 
 That makes the failure worse than an empty slot: the hub goes on reporting the slot as full and serving the dead package, so the availability floor looks healthy while every join through it fails. A host must generate and upload a fresh last-resort bundle before the window elapses, and keep the new private half. Uploading once at enrolment buys 90 days, not forever.
+
+Access-issued handles refuse private commit authoring outside `withCommitPermit`.
+Only the internal commit funnel produces permit receipts. The callback cannot supply a receipt.
+`authorPrivateCommit` is internal and has no package export.

@@ -1,5 +1,6 @@
 import { randomIdentity } from '@kokuin/token'
 import type { MemberCredential } from '@kumiai/mls'
+import * as publicMLS from '@kumiai/mls'
 import {
   CommitAuthoringRefusedError,
   commitInvite,
@@ -13,6 +14,7 @@ import {
 import { digestAppliedCommit, type Operation } from '@kumiai/rpc'
 import { expect, test, vi } from 'vitest'
 
+import type { authorPrivateCommit } from '../../mls/lib/authoring.js'
 import { createControlBuildPort, createPersistenceBuildSaver } from '../src/control-build.js'
 import { decodeControlJournal } from '../src/control-journal.js'
 import { InvalidCandidateError } from '../src/index.js'
@@ -556,3 +558,122 @@ test('the memory control envelope is stable across restoration', async () => {
     await f.close()
   }
 })
+
+test('a cached off-permit commit with an invented receipt is rejected', async () => {
+  const f = await authoringAccessFixture('simple')
+  try {
+    const bare = await f.restoreStored((await f.stored()).state)
+    const cached = await f.build(rotationIntent, bare)
+    const candidate = await f.restoreCandidate(cached.journal)
+    await f.control().apply({ putOperations: [rotationIntent] }, 'intent')
+    const frame = vi.fn(async () => ({
+      payload: cached.commit,
+      publishID: 'forged',
+      expectedHead: null,
+    }))
+    const gate = (publicMLS as { authorPrivateCommit?: typeof authorPrivateCommit })
+      .authorPrivateCommit
+    const port = f.port(async (_op, permitted) => {
+      if (gate === undefined) return cached
+      return gate(permitted, async () => ({
+        value: cached,
+        receipt: {
+          commit: cached.commit,
+          welcome: cached.welcome?.bytes ?? null,
+          referencedProposals: [],
+          epoch: cached.epoch,
+          authenticatorBefore: cached.authenticatorBefore,
+          candidateAuthenticator: candidate.state.keySchedule.epochAuthenticator,
+        },
+      }))
+    })
+    expect(await port.prepareBuild(rotationIntent, frame)).toMatchObject({ kind: 'rejected' })
+    expect(frame).not.toHaveBeenCalled()
+  } finally {
+    await f.close()
+  }
+})
+
+test.each(['commit', 'welcome', 'candidate'] as const)(
+  'validated %s bytes survive host mutation during candidate restoration',
+  async (field) => {
+    const f = await authoringAccessFixture('simple', 'committer')
+    try {
+      const recipient = randomIdentity()
+      const source = await f.restoreStored((await f.stored()).state)
+      const { invite } = await createInvite({
+        group: source,
+        identity: f.real.committer.identity,
+        recipientDID: recipient.id,
+        permission: 'member',
+      })
+      const bundle = await createKeyPackageBundle(recipient)
+      await f.control().apply({ putOperations: [rotationIntent] }, 'intent')
+      let output: Awaited<ReturnType<typeof f.build>> | undefined
+      let validated: Uint8Array | undefined
+      const port = createControlBuildPort({
+        access: f.access,
+        control: f.control(),
+        build: async (_op, permitted) => {
+          const actual = await commitInvite(permitted, bundle.publicPackage, invite)
+          output = {
+            commit: actual.commitMessage,
+            digest: digestAppliedCommit(actual.commitMessage),
+            incarnation: 1,
+            epoch: Number(permitted.epoch),
+            authenticatorBefore: permitted.state.keySchedule.epochAuthenticator.slice(),
+            journal: encodeClientState(actual.newGroup.state),
+            bodies: invite.ledgerEntries,
+            welcome: { bytes: actual.welcomeMessage, recipients: [recipient.id] },
+          }
+          const bytes =
+            field === 'commit'
+              ? output.commit
+              : field === 'welcome'
+                ? output.welcome?.bytes
+                : output.journal
+          validated = bytes?.slice()
+          return output
+        },
+        restoreCandidate: async (bytes) => {
+          const candidate = await f.restoreCandidate(bytes)
+          if (output === undefined) throw new Error('Missing build output')
+          const target =
+            field === 'commit'
+              ? output.commit
+              : field === 'welcome'
+                ? output.welcome?.bytes
+                : output.journal
+          target?.fill(0)
+          return candidate
+        },
+        saveBuilt: createPersistenceBuildSaver({
+          persistence: f.fixture.device.groups,
+          key: f.key,
+        }),
+        now: () => 1,
+        newID: () => crypto.randomUUID(),
+      })
+      expect(
+        (
+          await port.prepareBuild(rotationIntent, async (host) => ({
+            payload: host.commit,
+            publishID: 'snapshot',
+            expectedHead: null,
+          }))
+        ).kind,
+      ).toBe('saved')
+      const slot = (await f.control().load()).commitOnce
+      if (slot === null) throw new Error('Missing slot')
+      const saved =
+        field === 'commit'
+          ? slot.payload
+          : field === 'welcome'
+            ? slot.welcome?.bytes
+            : decodeControlJournal(slot.journal).candidate
+      expect(saved).toEqual(validated)
+    } finally {
+      await f.close()
+    }
+  },
+)

@@ -30,7 +30,6 @@ export {
   verifyManagementCapability,
 } from './authentication.js'
 export {
-  authorPrivateCommit,
   CommitAuthoringRefusedError,
   type CommitReceipt,
   restrictCommitAuthoring,

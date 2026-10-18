@@ -206,6 +206,13 @@ const restorers = new WeakMap<
 const markerWriters = new WeakMap<RegistryFixtureBase, RegistryStorageFixture['forceOwnerMarker']>()
 const rowRemovers = new WeakMap<RegistryFixtureBase, RegistryStorageFixture['deleteCommittedRow']>()
 
+const sealFaults = new WeakMap<RegistryFixtureBase, (error?: Error) => void>()
+export function failRegistrySeal(fixture: RegistryFixtureBase, error: Error): void {
+  const fail = sealFaults.get(fixture)
+  if (fail === undefined) throw new Error('Missing codec fault control')
+  fail(error)
+}
+
 // Counts trust reads through entry reads; coordinator observation reads are excluded.
 const trustReadCounters = new WeakMap<RegistryFixtureBase, () => number>()
 export function registryFixtureTrustReads(fixture: RegistryFixtureBase): number {
@@ -837,6 +844,7 @@ async function assemble(
     },
   })
   restorers.set(fixture, restore)
+  sealFaults.set(fixture, storage.failNextSeal)
   trustReadCounters.set(fixture, () => trustReads)
   capturedStates.set(fixture, captured)
   markerWriters.set(fixture, storage.forceOwnerMarker)

@@ -1,6 +1,5 @@
 import { getSignatureInfo, normalizeDID } from '@kokuin/token'
 import {
-  authorPrivateCommit,
   buildGroupAnchorExtension,
   buildLedgerHeadExtension,
   type ClientState,
@@ -61,6 +60,7 @@ import {
   wireformats,
 } from 'ts-mls'
 
+import { authorPrivateCommit } from '../../../mls/lib/authoring.js'
 import { decodeControlJournal } from '../../src/control-journal.js'
 import { ENTRY_SEAL_LABEL, openEntries } from '../../src/crypto.js'
 import { decodeStoredValue, encodeStoredValue } from '../../src/persistence-codec.js'
@@ -618,6 +618,8 @@ class MemoryControlHandle extends GroupHandle {
   override async encrypt(plaintext: Uint8Array, opts?: { aad?: Uint8Array }): Promise<Uint8Array> {
     return mutexFor(this).run(async () => {
       const state = this.state
+      if (Object.keys(state.unappliedProposals).length !== 0)
+        throw new Error('Cannot send application message with unapplied proposals')
       if (state.groupActiveState.kind !== 'active') throw new Error('Inactive memory group')
       if (!this.sendAdmission().admissible) throw new LeafLapsedError('lapsed')
       const leaf = state.privatePath.leafIndex
@@ -851,6 +853,8 @@ class MemoryControlHandle extends GroupHandle {
         })
         if (!result.applied) throw new Error('Memory commit refused')
         Object.assign(this.#view, envelope(this.#view, this.#mls))
+        if (removedLeaves.has(this.#view.privatePath.leafIndex))
+          this.#view.groupActiveState = { kind: 'removedFromGroup' }
         await opts?.persist?.(this)
         return null
       } catch (error) {

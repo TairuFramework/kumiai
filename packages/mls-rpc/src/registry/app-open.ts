@@ -4,6 +4,7 @@ import {
   compareLogPositions,
   decodeAppEventPlaintext,
   frameID,
+  GroupSafetyHeldError,
   isAppLogPosition,
   sortPendingAppFrames,
 } from '@kumiai/rpc'
@@ -24,6 +25,7 @@ import {
   RECEIVE_SAVE_ATTEMPTS,
 } from '../persistence-types.js'
 import type { RegistryOwner } from './access.js'
+import { RetainedTrustUnavailableError } from './safety.js'
 import type { ReadableGroupState, RegistryHandleAccess } from './types.js'
 
 function sameOccurrence(a: PreOpenAppFrameRef, b: PreOpenAppFrameRef): boolean {
@@ -223,6 +225,9 @@ export function createRegistryAppOpen<TTx extends GroupTransaction>(params: {
       }
     } catch (error) {
       await params.diagnoseFailure(error)
+      if (error instanceof RetainedTrustUnavailableError)
+        // biome-ignore lint/style/useErrorCause: Mutation boundaries expose the diagnosed safety reason.
+        throw new GroupSafetyHeldError('recovery-unavailable')
       throw error
     } finally {
       params.publish()
