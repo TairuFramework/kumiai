@@ -596,6 +596,27 @@ export type ConformancePendingAppFrames = {
   list(): Promise<Array<ConformanceStoragePendingAppFrame>>
   complete(id: string): Promise<void>
 }
+
+export type RegistryCryptoFixture = {
+  key: ConformanceGroupKey
+  topicID: string
+  senderDID: string
+  access(): Promise<{
+    openBatch(frames: Array<ConformanceOpenAppInput>): Promise<Array<ConformanceOpenAppResult>>
+    pending: ConformancePendingAppFrames
+  }>
+  seal(plaintext: Uint8Array, aad?: Uint8Array): Promise<Uint8Array>
+  sealAhead(plaintext: Uint8Array): Promise<Uint8Array>
+  advanceRegistry(): Promise<void>
+  frame(ciphertext: Uint8Array, position: string): ConformancePreOpenAppFrameRef
+  armNextWorkFault(point: 'after-first-write' | 'commit-then-reject'): {
+    mutationID: Promise<string>
+  }
+  resolve(mutationID: string): Promise<'committed' | 'rolled-back'>
+  inspectRows(): Promise<Record<string, Map<string, unknown>>>
+  reopen(): Promise<RegistryCryptoFixture>
+  close(): Promise<void>
+}
 export type ConformanceStorageAppFrameRef = ConformancePreOpenAppFrameRef & { procedure: string }
 
 export type ConformanceStoragePendingAppFrame = {

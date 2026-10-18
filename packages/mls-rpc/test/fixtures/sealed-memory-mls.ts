@@ -737,6 +737,34 @@ class MemoryControlHandle extends GroupHandle {
     })
   }
 
+  override async processMessage(
+    message: Parameters<GroupHandle['processMessage']>[0],
+    opts?: Parameters<GroupHandle['processMessage']>[1],
+  ): Promise<Uint8Array | null> {
+    if (!(message instanceof Uint8Array) || opts?.commitPolicy || this.commitPolicy)
+      throw new Error('Unsupported memory commit input or policy')
+    return mutexFor(this).run(async () => {
+      const header = await this.#mls.readCommitHeader(message)
+      if (header === null) throw new Error('Invalid memory commit')
+      const previous = this.#mls.serializeState()
+      const view = structuredClone(this.state)
+      try {
+        const result = await this.#mls.processCommit(message, {
+          senderDID: header.committerDID,
+          resolveLedgerEntries: this.resolveLedgerEntries,
+        })
+        if (!result.applied) throw new Error('Memory commit refused')
+        this.state
+        await opts?.persist?.(this)
+        return null
+      } catch (error) {
+        this.#mls.restoreState(previous)
+        Object.assign(this.#view, view)
+        throw error
+      }
+    })
+  }
+
   override async carryReceiveProgress(candidate: GroupHandle): Promise<void> {
     if (!(candidate instanceof MemoryControlHandle))
       throw new Error('Not an independent memory candidate')

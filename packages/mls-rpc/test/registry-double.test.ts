@@ -726,6 +726,42 @@ async function appFrames(sender: GroupHandle, count: number) {
 }
 
 describe('double application frames', () => {
+  test.each(['sync', 'async'] as const)(
+    '%s commit persistence rejection restores the model and projected state for retry',
+    async (rejection) => {
+      const { local, sender } = await appGroup()
+      const payload = new Uint8Array([4, 5, 6])
+      const retained = await sender.encrypt(payload)
+      const before = encodeClientState(local.state)
+      const model = memoryModel(local)
+      const modelBefore = model.serializeState()
+      const epoch = local.epoch
+      const commit = memoryModel(sender).buildCommit()
+      await memoryModel(sender).adopt(commit)
+      const failure = new Error('commit persistence refused')
+      let calls = 0
+      const persist = (handle: GroupHandle) => {
+        calls++
+        expect(handle).toBe(local)
+        expect(handle.epoch).toBe(epoch + 1n)
+        expect(handle.state.keySchedule.epochAuthenticator).toEqual(
+          sender.state.keySchedule.epochAuthenticator,
+        )
+        if (rejection === 'async') return Promise.reject(failure)
+        throw failure
+      }
+      await expect(local.processMessage(commit, { persist })).rejects.toBe(failure)
+      expect(calls).toBe(1)
+      expect(encodeClientState(local.state)).toEqual(before)
+      expect(model.serializeState()).toEqual(modelBefore)
+      expect(local.epoch).toBe(epoch)
+      expect(await local.processMessage(commit, { persist: () => {} })).toBeNull()
+      expect(local.epoch).toBe(epoch + 1n)
+      expect((await local.decrypt(retained)).payload).toEqual(payload)
+      expect((await local.decrypt(await sender.encrypt(payload))).payload).toEqual(payload)
+    },
+  )
+
   test('double private commit authoring advances only the own handshake ratchet', async () => {
     const { local: handle } = await appGroup()
     const source = await restoreMemoryControlSource({

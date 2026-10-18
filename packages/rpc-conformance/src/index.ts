@@ -171,6 +171,10 @@ export {
 } from './pending-group-crypto.js'
 export * from './persistence-fixture.js'
 export { testRegistryConformance, testRegistryCrashConformance } from './registry.js'
+export {
+  type RegistryCryptoConformanceParams,
+  testRegistryCryptoConformance,
+} from './registry-crypto.js'
 export * from './registry-fixture.js'
 export {
   type ConformanceGroupSafety,
