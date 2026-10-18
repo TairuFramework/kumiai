@@ -1,5 +1,4 @@
 import { encodeEventFrame } from '@kumiai/broadcast'
-import type { HubFetchTopicParams, HubFetchTopicResult } from '@kumiai/hub-tunnel'
 import { describe, expect, test, vi } from 'vitest'
 
 import { encodeAppAAD } from '../src/app-aad.js'
@@ -11,37 +10,8 @@ import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 50))
 
-/**
- * A hub whose topic fetch fails ONCE per armed topic, then behaves. The transient outage — the
- * connection dropped between two reads of the same walk — is otherwise unreachable from a test,
- * and it is the only way to ask what a drain does with an epoch it did not manage to read.
- */
-class FlakyFetchHub extends DurableFakeHub {
-  #failOnce = new Set<string>()
-
-  /** Arm the next fetch of this topic to fail. Consumed by that fetch, whoever makes it. */
-  failNextFetch(topicID: string): void {
-    this.#failOnce.add(topicID)
-  }
-
-  override async fetchTopic(params: HubFetchTopicParams): Promise<HubFetchTopicResult> {
-    if (this.#failOnce.delete(params.topicID)) {
-      throw new Error(`the hub is unreachable for ${params.topicID}`)
-    }
-    return super.fetchTopic(params)
-  }
-}
-
-/**
- * What the returning-member drain does with a frame it cannot open yet, an epoch it failed to
- * read, and a frame that lands while it is still walking.
- *
- * One safety property underneath all three: A CURSOR MAY ONLY PASS A FRAME THAT IS DELIVERED OR
- * DEAD, and A HANDLE MAY NOT RATCHET PAST AN EPOCH WHOSE FRAMES WERE NOT READ. Both are one-way
- * doors — the position is durable and the handle never comes back — so every question here is
- * decided before the door shuts, not after.
- */
-describe('the drain retains future claims and passes no epoch it failed to read', () => {
+/** A failed app pull preserves its cursor while commit progress continues through retention. */
+describe('the drain retains unread frames and advances only completed positions', () => {
   /**
    * A caught-up peer completes a far-future claim without an operator drop.
    */
@@ -129,6 +99,12 @@ describe('the drain retains future claims and passes no epoch it failed to read'
       expect(hub.published.filter((item) => item.topicID === topicID)).toHaveLength(2),
     )
 
+    const cursorWrites: Array<{ position: string; delivered: Array<unknown> }> = []
+    const save = bob.appCursorStore.save.bind(bob.appCursorStore)
+    vi.spyOn(bob.appCursorStore, 'save').mockImplementation(async (topic, position) => {
+      if (topic === topicID) cursorWrites.push({ position, delivered: [...seen] })
+      await save(topic, position)
+    })
     const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
     hub.reattach('bob')
 
@@ -136,15 +112,17 @@ describe('the drain retains future claims and passes no epoch it failed to read'
     await vi.waitFor(() => expect(seen).toHaveLength(2))
     expect(seen).toEqual([{ text: 'at epoch one' }, { text: 'at epoch four' }])
 
-    // Every position the store was ever told about, in order: the walk stopped behind the ahead
-    // frame first and only passed it once its epoch arrived. A cursor that had gone straight to
-    // the second position would have passed an undelivered frame on its way there.
     const posted = hub.published.filter((m) => m.topicID === topicID)
     expect(posted).toHaveLength(2)
-    expect(bob.appCursorStore.history(topicID)).toEqual([
-      posted[0]?.sequenceID,
-      posted[1]?.sequenceID,
-    ])
+    await vi.waitFor(() => expect(bob.appCursorStore.stored(topicID)).toBe(posted[1]?.sequenceID))
+    expect(cursorWrites.length).toBeGreaterThan(0)
+    for (const write of cursorWrites) {
+      expect([posted[0]?.sequenceID, posted[1]?.sequenceID]).toContain(write.position)
+      expect(write.delivered).toContainEqual({ text: 'at epoch one' })
+      if (write.position === posted[1]?.sequenceID) {
+        expect(write.delivered).toEqual([{ text: 'at epoch one' }, { text: 'at epoch four' }])
+      }
+    }
 
     await alice.peer.dispose()
     await restarted.peer.dispose()
@@ -207,14 +185,8 @@ describe('the drain retains future claims and passes no epoch it failed to read'
     await restarted.peer.dispose()
   })
 
-  /**
-   * A hub that drops one fetch mid-walk. The pull is a retry and can be made again; the DELIVERY
-   * cannot — the walk that carries on ratchets the handle past every epoch it then passes, and
-   * those frames are ciphertext forever. So a failed pull stalls the walk rather than being
-   * stepped over: no epoch is passed unread, and the retry finds the backlog whole.
-   */
-  test('a drain whose pull fails does not ratchet past the epoch it could not read', async () => {
-    const hub = new FlakyFetchHub()
+  test('a failed app pull preserves its cursor while commits advance, then retries retained frames', async () => {
+    const hub = new DurableFakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x93)
     const seen: Array<unknown> = []
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
@@ -235,26 +207,35 @@ describe('the drain retains future claims and passes no epoch it failed to read'
     await flush()
     expect(alice.mls.epoch()).toBe(2)
 
-    // Bob comes back into an outage: the app topic's first fetch of his life fails, which is the
-    // fetch the drain makes before the commit that would leave epoch 1.
-    hub.failNextFetch(topicID)
+    let unavailable = true
+    let failures = 0
+    const fetch = hub.fetchTopic.bind(hub)
+    vi.spyOn(hub, 'fetchTopic').mockImplementation((params) => {
+      if (unavailable && params.topicID === topicID && params.subscriberDID === 'bob') {
+        failures += 1
+        return Promise.reject(new Error('app topic unavailable'))
+      }
+      return fetch(params)
+    })
     const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
     hub.reattach('bob')
-    await flush()
-
-    // Nothing read, so nothing passed: the handle is still at the epoch whose frames it owes, and
-    // the position was never written. A stalled walk is the accepted cost.
+    await vi.waitFor(() => expect(restarted.mls.epoch()).toBe(2))
+    await vi.waitFor(() => expect(failures).toBeGreaterThan(0))
     expect(seen).toEqual([])
-    expect(restarted.mls.epoch()).toBe(1)
     expect(bob.appCursorStore.stored(topicID)).toBeNull()
 
-    // The next wakeup retries the pull, and the backlog is whole: the epoch-1 frame is still
-    // openable because the handle never left epoch 1.
-    await alice.peer.commit(buildLedgerCommit(alice, []))
-    await flush()
-
-    expect(seen).toEqual([{ text: 'at epoch one' }, { text: 'at epoch two' }])
-    expect(restarted.mls.epoch()).toBe(3)
+    unavailable = false
+    await vi.waitFor(
+      () => {
+        expect(seen).toEqual([{ text: 'at epoch one' }, { text: 'at epoch two' }])
+      },
+      { timeout: 2500 },
+    )
+    const posted = hub.published.filter((message) => message.topicID === topicID)
+    await vi.waitFor(() =>
+      expect(bob.appCursorStore.stored(topicID)).toBe(posted.at(-1)?.sequenceID),
+    )
+    expect(restarted.mls.epoch()).toBe(2)
 
     await alice.peer.dispose()
     await restarted.peer.dispose()

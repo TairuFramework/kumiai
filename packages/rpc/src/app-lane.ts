@@ -1,12 +1,14 @@
 import type { ProtocolDefinition } from '@enkaku/protocol'
 import { normalizeDID } from '@kokuin/token'
 import type { StoredMessage } from '@kumiai/hub-protocol'
+import type { HubFetchTopicResult } from '@kumiai/hub-tunnel'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { fromUTF, toB64U, toUTF } from '@sozai/codec'
 
 import type { Anchor } from './anchor.js'
 import { decodeAppAAD, encodeAppAAD } from './app-aad.js'
 import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
+import { RETAINED_EPOCHS_MAX } from './app-frame.js'
 import { createMonotoneClock } from './clock.js'
 import type { SafetyHold } from './control/safety.js'
 import {
@@ -16,15 +18,28 @@ import {
   isFrameAhead,
   type PendingAppFrame,
 } from './crypto.js'
-import { asLogPosition, assertForwardPage, type LogPosition } from './cursor.js'
-import { GroupSafetyHeldError } from './errors.js'
+import {
+  asLogPosition,
+  compareLogPositions,
+  InvalidLogPositionError,
+  type LogPosition,
+} from './cursor.js'
+import { GroupSafetyHeldError, PeerDisposedError } from './errors.js'
 import type { BusHandlerMaps } from './handlers.js'
 import { notifyHost } from './host-notice.js'
-import type { HubMux } from './hub-mux.js'
+import { APP_OUTSTANDING_FETCHES_MAX, AppFetchBusyError, type HubMux } from './hub-mux.js'
 import { retentionOf } from './protocol.js'
 import { protocolTopic } from './topic.js'
 
+export { APP_OUTSTANDING_FETCHES_MAX } from './hub-mux.js'
+
 const APP_FETCH_LIMIT = 100
+export const APP_PULL_MAX_PAGES = 4
+export const APP_PULL_MAX_BYTES = 4 * 1024 * 1024
+export const APP_PULL_DEADLINE_MS = 10_000
+export const APP_BUFFER_MAX_FRAMES = 1_000
+export const APP_STAGED_MAX_FRAMES = 1_000
+export const APP_PRUNED_NOTICES_MAX = 64
 export const APP_FUTURE_EPOCH_WINDOW = 2
 export const APP_FUTURE_HOLD_MS = 30_000
 
@@ -47,7 +62,9 @@ export type AppDeliveryStalled = {
   reason?: 'unknown-protocol' | 'future-epoch'
 }
 
-export type AppDeliveryResumed = Omit<AppDeliveryStalled, 'error'>
+export type AppDeliveryResumed = Omit<AppDeliveryStalled, 'error'> & {
+  settlement?: 'resumed' | 'expired'
+}
 
 /** A durable pending frame's id: bound to its topic and exact ciphertext. */
 export function frameID(topicID: string, bytes: Uint8Array): string {
@@ -59,19 +76,24 @@ export function frameID(topicID: string, bytes: Uint8Array): string {
   return toB64U(sha256(input))
 }
 
-/**
- * The app lane's TWO read positions for one protocol's CURRENT segment — not the same position,
- * and must not be conflated:
- *
- * - `position` is the DURABLE CURSOR: the last frame this drain is done with, and the last thing
- *   {@link AppCursorStore} was told. Held here so a drain that moved nothing writes nothing.
- * - `fetched` is the LAST-FETCHED POSITION: how far the buffer has been filled from. Runs AHEAD
- *   of the cursor whenever a buffered frame is not done, and is where the next pull resumes — so
- *   a re-pull costs one short page, not the whole tail.
- *
- * Both are per SEGMENT and reset with it, alongside `topicID`.
- */
-type AppCursor = { topicID: string; position: LogPosition | null; fetched: LogPosition | null }
+/** Durable progress, transport paging token, and highest accepted fetched position, per topic. */
+type AppCursor = {
+  topicID: string
+  protocol: string
+  anchorEpoch: number
+  position: LogPosition | null
+  fetched: LogPosition | null
+  accepted: LogPosition | null
+}
+
+type PullTopic = {
+  name: string
+  topicID: string
+  fetched: LogPosition | null
+  position: LogPosition | null
+  generation: number
+  limit: number
+}
 
 type ReportPrunedWindowParams = {
   name: string
@@ -97,12 +119,14 @@ export type AppLaneParams = {
   onAppWindowPruned?: ((event: AppWindowPruned) => void | Promise<void>) | undefined
   onAppDeliveryStalled?: ((event: AppDeliveryStalled) => void) | undefined
   onAppDeliveryResumed?: ((event: AppDeliveryResumed) => void) | undefined
-  /** Start workers after the caller's serialization boundary; direct lanes start immediately. */
+  /** Queue worker starts outside the caller's synchronous frame; direct lanes start immediately. */
   scheduleDelivery?: ((start: () => void) => void) | undefined
-  /** Run autonomous drains while the caller holds the crypto handle still. */
+  /** Run autonomous drains outside the caller's commit queue. */
   scheduleDrain?: (drain: () => Promise<void>) => Promise<void>
   /** No applicable unapplied commit through the observed head. Direct lanes default to true. */
   commitLaneCaughtUp?: () => boolean
+  /** The last authenticated epoch applied by the commit lane. */
+  appliedEpoch: () => number
   /** Changes when new commit work invalidates a caught-up observation. */
   commitWorkVersion?: () => number
   /** Local monotone milliseconds. Defaults to clamped wall time. */
@@ -111,41 +135,33 @@ export type AppLaneParams = {
   safetyHold?: () => SafetyHold
   /** Latch a held refusal. Defaults to a no-op. */
   onSafetyHeld?: (reason: NonNullable<SafetyHold>) => void
-  /**
-   * The live anchor, read rather than held: it moves under the peer, and the topic every buffer
-   * and cursor here belongs to is derived from it. Read once per lazy buffer creation, so a
-   * rotation between two reads is a new segment rather than a torn one — the peer calls
-   * {@link AppLane.reset} on every capture.
-   */
+  /** Topic derivation reads the anchor that belongs to each segment. */
   anchor: () => Anchor
+  departing?: () => Array<{ anchor: Anchor; departedAt: number }>
   /** The group's commit topic, or `undefined` before the control lanes are up. */
   groupID: () => string | undefined
 }
 
 export type AppLane = {
   /**
-   * Deliver every buffered app frame the handle can open AT THE EPOCH IT IS AT RIGHT NOW, and
-   * leave the rest buffered. Called before each apply and once more when the walk ends.
+   * Deliver buffered frames at current or retained epochs, leaving future frames buffered.
    */
   deliver: () => Promise<void>
+  /** Request a drain without waiting; an active drain coalesces requests into one rerun. */
+  kick: () => void
   dropFrame: (topicID: string, position: string) => Promise<void>
   /** Wake queued delivery for a topic, or every topic, without waiting for completion. */
   retryDelivery: (topicID?: string) => void
   /** Record a log-class frame the live lane was pushed, at the moment it arrives. */
   note: (name: string, topicID: string, message: StoredMessage, failure: unknown) => void
-  /**
-   * End the segment the buffer belongs to. Called by the peer AFTER it moves the anchor, since
-   * every buffer and cursor rebuilt from here reads the anchor back through {@link
-   * AppLaneParams.anchor}.
-   *
-   * The walk has drained the old epoch before this reset. Cursors stay in the store, keyed by
-   * topic, while pending records survive in the delivery queue.
-   */
+  /** Clear in-memory lanes for recovery resync; durable cursors and pending records survive. */
   reset: () => void
   /** Opened records awaiting the delivery worker. */
   pendingRecords: () => Array<PendingAppFrame>
   /** Restore durable records before the first retained pull. */
   restore: (records: Array<PendingAppFrame>) => Promise<void>
+  /** Await a snapshot of durable record completions already in flight. */
+  idle: () => Promise<void>
   /** Stop queued retries and prevent new handler calls. */
   dispose: () => void
 }
@@ -162,7 +178,11 @@ export type AppLane = {
  */
 function takeAppFrame(frames: Array<AppFrame>, incoming: AppFrame, durable: boolean): void {
   let index = frames.length
-  while (index > 0 && (frames[index - 1] as AppFrame).position > incoming.position) index -= 1
+  while (
+    index > 0 &&
+    compareLogPositions((frames[index - 1] as AppFrame).position, incoming.position) > 0
+  )
+    index -= 1
   const existing = index > 0 ? (frames[index - 1] as AppFrame) : undefined
   if (existing?.position === incoming.position) {
     if (!durable) {
@@ -206,17 +226,20 @@ export function createAppLane(params: AppLaneParams): AppLane {
     now = createMonotoneClock(),
     onSafetyHeld = () => {},
     anchor,
+    departing = () => [],
     groupID,
   } = params
 
   /**
-   * The current SEGMENT's retained app frames, per protocol, in log order. A segment is the run of
+   * Retained app frames per topic, in log order. A segment is the run of
    * epochs between two roster changes — exactly the run one app topic spans — so it is pulled once
    * (below) and dispensed epoch by epoch as the commit walk passes through it.
    */
   let segment = new Map<string, Array<AppFrame>>()
   let segmentGeneration = 0
   const pendingRecords: Array<PendingAppFrame> = []
+  const finishingRecords = new Set<Promise<void>>()
+  const pulls = new Map<AbortController, number>()
   const reportedPruned = new Map<string, Set<string>>()
   const blockingFrames = new Map<string, AppDeliveryResumed>()
   let disposed = false
@@ -226,6 +249,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
   let retryRequested = false
   let retryTimer: ReturnType<typeof setTimeout> | undefined
   let retryBackoff = 1000
+  const busyTopics = new Set<string>()
+  let cancelBusyRetry: (() => void) | undefined
   const caughtUpTimes = new Map<AppFrame, number>()
   const applyCaughtUpTimes = (): void => {
     for (const [frame, time] of caughtUpTimes) {
@@ -244,28 +269,33 @@ export function createAppLane(params: AppLaneParams): AppLane {
     if (pendingNotices == null) notify()
     else pendingNotices.push(notify)
   }
-  const blockingKey = (topicID: string, position: string): string => `${topicID}\u0000${position}`
-  const resumeBlocked = (topicID: string, position: string): void => {
-    const key = blockingKey(topicID, position)
-    const event = blockingFrames.get(key)
-    if (event == null || disposed) return
-    blockingFrames.delete(key)
-    notifyAppHost(onAppDeliveryResumed, event)
+  const blockingKey = (topicID: string, position: string, id: string): string =>
+    `${topicID}\u0000${position}\u0000${id}`
+  const resumeBlocked = (topicID: string, position: string, id?: string): void => {
+    if (disposed) return
+    const prefix = `${topicID}\u0000${position}\u0000`
+    for (const [key, event] of blockingFrames) {
+      if (id == null ? !key.startsWith(prefix) : key !== blockingKey(topicID, position, id))
+        continue
+      blockingFrames.delete(key)
+      notifyAppHost(onAppDeliveryResumed, { ...event, settlement: 'resumed' })
+    }
   }
   const resumeUnknown = (record: PendingAppFrame): void => {
     const event = reportedUnknown.get(record.frame.id)
     if (event == null || disposed) return
     reportedUnknown.delete(record.frame.id)
-    notifyAppHost(onAppDeliveryResumed, event)
+    notifyAppHost(onAppDeliveryResumed, { ...event, settlement: 'resumed' })
   }
   const reportBlocked = (
     protocol: string,
     topicID: string,
     position: string,
+    id: string,
     error: Error,
     reason?: AppDeliveryStalled['reason'],
   ): void => {
-    const key = blockingKey(topicID, position)
+    const key = blockingKey(topicID, position, id)
     if (disposed || onAppDeliveryStalled == null || blockingFrames.has(key)) return
     const group = groupID()
     if (group == null) return
@@ -314,12 +344,12 @@ export function createAppLane(params: AppLaneParams): AppLane {
     }
   >()
 
-  /** The current segment's read positions, per protocol. See {@link AppCursor}. */
+  /** Read positions per topic. See {@link AppCursor}. */
   let cursors = new Map<string, AppCursor>()
 
   /**
    * Log-class app frames the LIVE lane was pushed and the buffer has not taken in yet, per
-   * protocol, with the topic each was pushed on.
+   * topic.
    *
    * Staged rather than written straight into {@link segment}: the push arrives on the mux's own
    * drain loop, outside every lane operation, and writing there would splice the array
@@ -331,7 +361,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
    */
   let staged = new Map<string, Array<{ topicID: string; frame: AppFrame }>>()
 
-  /** App topics whose retention this segment has already been asked for. See {@link loadSegment}. */
+  /** App topics whose retention this segment has already been asked for. See {@link pull}. */
   let retained = new Set<string>()
 
   /**
@@ -377,120 +407,260 @@ export function createAppLane(params: AppLaneParams): AppLane {
     }
     if (positions.has(cursor)) return
     positions.add(cursor)
+    if (positions.size > APP_PRUNED_NOTICES_MAX) {
+      const oldest = positions.values().next().value
+      if (oldest != null) positions.delete(oldest)
+    }
     notifyAppHost(onAppWindowPruned, { groupID: group, protocol: name, cursor, oldest })
   }
 
   /**
-   * The buffer for one protocol, and the two positions that go with it, created on first use.
+   * The buffer for one topic and its positions, created on first use.
    *
    * Lazy because the LIVE lane can reach the buffer before any drain does — a peer that is online
    * and has walked no commit still has to keep a read position over what it was pushed — so the
    * durable cursor cannot be something only a pull establishes.
    */
-  const laneFor = async (name: string): Promise<{ frames: Array<AppFrame>; cursor: AppCursor }> => {
-    let frames = segment.get(name)
+  const laneFor = async (
+    name: string,
+    at: Anchor,
+  ): Promise<{ frames: Array<AppFrame>; cursor: AppCursor } | undefined> => {
+    const generation = segmentGeneration
+    const topicID = protocolTopic(at.secret, at.epoch, name)
+    let frames = segment.get(topicID)
     if (frames == null) {
       frames = []
-      segment.set(name, frames)
+      segment.set(topicID, frames)
     }
-    let cursor = cursors.get(name)
+    let cursor = cursors.get(topicID)
     if (cursor == null) {
-      const at = anchor()
-      const topicID = protocolTopic(at.secret, at.epoch, name)
       const stored = (await appCursorStore?.load(topicID)) ?? null
-      cursor = { topicID, position: stored != null ? asLogPosition(stored) : null, fetched: null }
-      cursors.set(name, cursor)
+      if (generation !== segmentGeneration) return
+      cursor = {
+        topicID,
+        protocol: name,
+        anchorEpoch: at.epoch,
+        position: stored != null ? asLogPosition(stored) : null,
+        fetched: null,
+        accepted: stored != null ? asLogPosition(stored) : null,
+      }
+      cursors.set(topicID, cursor)
     }
     return { frames, cursor }
   }
 
-  /**
-   * Merge the live lane's staged pushes into the buffer, then pull this segment's log forward from
-   * the LAST-FETCHED position and buffer whatever is new.
-   *
-   * PULLED EVERY DRAIN, not once per segment: the log grows while this peer walks, and a frame
-   * published mid-walk is one a single pull can never see. The push carries its own log position
-   * (`StoredMessage.logPosition`), so {@link takeAppFrame} recognises a frame the buffer already
-   * holds and a re-pull returns only what was genuinely never delivered.
-   *
-   * From `fetched`, not the cursor: the cursor is pinned behind any frame the walk has not
-   * reached, and resuming there would re-read the whole tail every drain. MERGED BEFORE PULLED,
-   * both inside one {@link runAppLane} task: a staged frame merged after the pull would be a
-   * position above the pull's end, which the cursor may not walk past unproven.
-   *
-   * Subscribed before pulled: the hub gates a topic fetch on the caller's own subscription, and a
-   * segment reached by ROTATING onto it mid-walk has never been subscribed.
-   *
-   * A FAILED FETCH RAISES. The caller's walk stops on the failure rather than stepping over an
-   * epoch whose frames were never read, and `fetched` is moved only by pages that arrived.
-   */
-  const loadSegment = async (): Promise<void> => {
-    if (safetyHold() !== null) return
-    // One protocol per lane, sharing nothing (a topic is derived per protocol NAME). Paged
-    // concurrently — otherwise each protocol waits out the previous one's whole pull.
-    const loadOne = async (name: string): Promise<void> => {
-      if (safetyHold() !== null) return
-      const { frames, cursor } = await laneFor(name)
-      if (safetyHold() !== null) return
-      const topicID = cursor.topicID
-      // Carrying the window on the listener-less subscribe too: a member that is AWAY reaches a
-      // segment by rotating onto it mid-walk, pulled here and never listened on.
-      if (!retained.has(topicID)) {
-        retained.add(topicID)
-        mux.retainTopic(topicID, { retention: retentionSeconds })
-      }
-
-      // A push landed on a topic this peer has since rotated off names a position in a log this
-      // segment's cursor knows nothing about. Dropped, not merged.
-      for (const push of staged.get(name) ?? []) {
-        if (push.topicID === topicID) takeAppFrame(frames, push.frame, crypto.pending != null)
-      }
-      staged.delete(name)
-
-      let after: LogPosition | null = cursor.fetched ?? cursor.position
-      while (true) {
-        if (safetyHold() !== null) return
-        const result = await mux.fetchTopic({
-          topicID,
-          ...(after != null ? { after } : {}),
-          limit: APP_FETCH_LIMIT,
-        })
-        assertForwardPage(after, result.messages)
-        if (after != null && result.gap)
-          reportPrunedWindow({ name, topicID, cursor: after, oldest: result.oldest })
-        for (const message of result.messages) {
-          const position = asLogPosition(message.sequenceID)
-          // Positions are per hub: after a move a different frame can sit at a waiting one's place.
-          const restored = pendingRecords.find(
-            (record) =>
-              record.frame.protocol === name &&
-              record.frame.topicID === topicID &&
-              record.frame.position === position &&
-              record.frame.id === frameID(topicID, message.payload),
-          )
-          takeAppFrame(
-            frames,
-            {
-              position,
-              ...(commitLaneCaughtUp() ? { caughtUpAt: now() } : {}),
-              sealed:
-                restored == null
-                  ? { state: 'sealed', bytes: message.payload }
-                  : { state: 'pending', id: restored.frame.id },
-            },
-            crypto.pending != null,
-          )
-          after = position
-        }
-        cursor.fetched = after
-        if (safetyHold() !== null) return
-        if (result.messages.length < APP_FETCH_LIMIT) break
-      }
+  const expireTopic = (topicID: string): void => {
+    for (const frame of segment.get(topicID) ?? []) caughtUpTimes.delete(frame)
+    for (const push of staged.get(topicID) ?? []) caughtUpTimes.delete(push.frame)
+    segment.delete(topicID)
+    cursors.delete(topicID)
+    staged.delete(topicID)
+    reportedPruned.delete(topicID)
+    retained.delete(topicID)
+    busyTopics.delete(topicID)
+    for (const [key, event] of blockingFrames) {
+      if (!key.startsWith(`${topicID}\u0000`)) continue
+      // Opened records survive topic expiry and settle when durable delivery completes.
+      if (
+        pendingRecords.some(
+          (record) =>
+            blockingKey(record.frame.topicID, record.frame.position, record.frame.id) === key,
+        )
+      )
+        continue
+      blockingFrames.delete(key)
+      notifyAppHost(onAppDeliveryResumed, { ...event, settlement: 'expired' })
     }
-    // Keep the app-lane mutex until every fetch has stopped mutating its buffer.
-    const results = await Promise.allSettled(Object.keys(protocols).map(loadOne))
-    const failure = results.find((result) => result.status === 'rejected')
-    if (failure?.status === 'rejected') throw failure.reason
+  }
+
+  const activeAnchors = (): Array<Anchor> => [
+    ...departing()
+      .filter(({ departedAt }) => params.appliedEpoch() - departedAt < RETAINED_EPOCHS_MAX)
+      .map(({ anchor }) => anchor),
+    anchor(),
+  ]
+
+  const expireTopics = (): void => {
+    const active = new Set(
+      activeAnchors().flatMap((at) =>
+        Object.keys(protocols).map((name) => protocolTopic(at.secret, at.epoch, name)),
+      ),
+    )
+    for (const topicID of new Set([
+      ...segment.keys(),
+      ...staged.keys(),
+      ...reportedPruned.keys(),
+    ])) {
+      if (!active.has(topicID)) expireTopic(topicID)
+    }
+  }
+
+  /** Snapshot and merge under the app mutex. Hub I/O holds no lane reservation. */
+  const pull = async (onlyTopics?: Set<string>): Promise<void> => {
+    if (disposed || safetyHold() !== null) return
+    const controller = new AbortController()
+    const { signal } = controller
+    pulls.set(controller, anchor().epoch)
+    let deadline: number | undefined
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const stopped = (): boolean => {
+      if (deadline != null && Date.now() >= deadline) controller.abort()
+      return disposed || signal.aborted || safetyHold() !== null
+    }
+    let bytes = 0
+    try {
+      const topics = await runAppLane(async () => {
+        expireTopics()
+        const topics: Array<PullTopic> = []
+        for (const at of activeAnchors()) {
+          for (const name of Object.keys(protocols)) {
+            if (stopped()) break
+            const generation = segmentGeneration
+            const lane = await laneFor(name, at)
+            if (lane == null || generation !== segmentGeneration || stopped()) break
+            const { frames, cursor } = lane
+            const { topicID } = cursor
+            if (!retained.has(topicID)) {
+              retained.add(topicID)
+              mux.retainTopic(topicID, { retention: retentionSeconds })
+            }
+            for (const push of staged.get(topicID) ?? []) {
+              if (
+                push.topicID === topicID &&
+                frames.length < APP_BUFFER_MAX_FRAMES &&
+                (cursor.position == null ||
+                  compareLogPositions(push.frame.position, cursor.position) > 0)
+              ) {
+                takeAppFrame(frames, push.frame, crypto.pending != null)
+              }
+            }
+            staged.delete(topicID)
+            topics.push({
+              name,
+              topicID,
+              fetched: cursor.fetched ?? cursor.position,
+              position: cursor.position,
+              generation,
+              limit: Math.min(APP_FETCH_LIMIT, APP_BUFFER_MAX_FRAMES - frames.length),
+            })
+          }
+        }
+        return topics
+      })
+      const queue = topics
+        .filter((topic) => onlyTopics == null || onlyTopics.has(topic.topicID))
+        .map((topic) => ({ topic, pages: 0 }))
+      const fetchNext = async (): Promise<void> => {
+        while (queue.length > 0) {
+          const item = queue.shift()
+          if (item == null) return
+          const { topic, pages } = item
+          if (stopped() || bytes >= APP_PULL_MAX_BYTES) return
+          if (topic.limit === 0) continue
+          if (deadline == null) {
+            deadline = Date.now() + APP_PULL_DEADLINE_MS
+            timer = setTimeout(() => controller.abort(), APP_PULL_DEADLINE_MS)
+          }
+          let result: HubFetchTopicResult
+          try {
+            result = await mux.fetchTopic({
+              topicID: topic.topicID,
+              ...(topic.fetched != null ? { after: topic.fetched } : {}),
+              limit: topic.limit,
+              signal,
+            })
+          } catch (error) {
+            if (signal.aborted) return
+            if (error instanceof AppFetchBusyError) {
+              if (topic.generation === segmentGeneration) retryBusyPull(topic.topicID)
+              continue
+            }
+            if (error instanceof InvalidLogPositionError) continue
+            throw error
+          }
+          const next = await runAppLane(async () => {
+            if (stopped() || topic.generation !== segmentGeneration) return
+            expireTopics()
+            const cursor = cursors.get(topic.topicID)
+            const frames = segment.get(topic.topicID)
+            if (
+              cursor?.topicID !== topic.topicID ||
+              frames == null ||
+              (cursor.fetched ?? cursor.position) !== topic.fetched ||
+              cursor.position !== topic.position
+            )
+              return
+            if (topic.fetched != null && result.gap) {
+              reportPrunedWindow({
+                name: topic.name,
+                topicID: topic.topicID,
+                cursor: topic.fetched,
+                oldest: result.oldest,
+              })
+            }
+            for (const message of result.messages) {
+              if (stopped() || frames.length >= APP_BUFFER_MAX_FRAMES) break
+              // A frame larger than an entire fresh budget cannot be legitimate.
+              const oversized = bytes === 0 && message.payload.byteLength > APP_PULL_MAX_BYTES
+              if (!oversized && bytes + message.payload.byteLength > APP_PULL_MAX_BYTES) return
+              if (!oversized) bytes += message.payload.byteLength
+              const position = asLogPosition(message.sequenceID)
+              const fetched = cursor.fetched ?? cursor.position
+              if (fetched == null || compareLogPositions(position, fetched) > 0) {
+                cursor.fetched = position
+              }
+              if (cursor.accepted != null && compareLogPositions(position, cursor.accepted) <= 0)
+                continue
+              const restored = oversized
+                ? undefined
+                : pendingRecords.find(
+                    (record) =>
+                      record.frame.protocol === topic.name &&
+                      record.frame.topicID === topic.topicID &&
+                      record.frame.position === position &&
+                      record.frame.id === frameID(topic.topicID, message.payload),
+                  )
+              takeAppFrame(
+                frames,
+                {
+                  position,
+                  ...(commitLaneCaughtUp() ? { caughtUpAt: now() } : {}),
+                  sealed: oversized
+                    ? { state: 'done' }
+                    : restored == null
+                      ? { state: 'sealed', bytes: message.payload }
+                      : { state: 'pending', id: restored.frame.id },
+                },
+                crypto.pending != null,
+              )
+              cursor.accepted = position
+            }
+            return {
+              ...topic,
+              fetched: cursor.fetched ?? cursor.position,
+              position: cursor.position,
+              limit: Math.min(APP_FETCH_LIMIT, APP_BUFFER_MAX_FRAMES - frames.length),
+            }
+          })
+          if (
+            next != null &&
+            result.messages.length >= topic.limit &&
+            pages + 1 < APP_PULL_MAX_PAGES
+          ) {
+            // Requeue one page at a time so busy topics cannot overtake unvisited topics.
+            queue.push({ topic: next, pages: pages + 1 })
+          }
+        }
+      }
+      const results = await Promise.allSettled(
+        Array.from({ length: Math.min(APP_OUTSTANDING_FETCHES_MAX, topics.length) }, fetchNext),
+      )
+      const failure = results.find((result) => result.status === 'rejected')
+      if (failure?.status === 'rejected') throw failure.reason
+    } finally {
+      clearTimeout(timer)
+      pulls.delete(controller)
+    }
   }
 
   /**
@@ -503,8 +673,9 @@ export function createAppLane(params: AppLaneParams): AppLane {
    * The passed frames are dropped from the buffer here and only here: the cursor is what
    * remembers them from now on.
    */
-  const advanceCursor = async (name: string, frames: Array<AppFrame>): Promise<void> => {
-    const cursor = cursors.get(name)
+  const advanceCursor = async (topicID: string, frames: Array<AppFrame>): Promise<void> => {
+    if (segment.get(topicID) !== frames) return
+    const cursor = cursors.get(topicID)
     if (cursor == null) return
     let passed = 0
     let position: LogPosition | null = null
@@ -515,6 +686,9 @@ export function createAppLane(params: AppLaneParams): AppLane {
     if (position == null || position === cursor.position) return
     await appCursorStore?.save(cursor.topicID, position)
     cursor.position = position
+    if (cursor.accepted == null || compareLogPositions(position, cursor.accepted) > 0) {
+      cursor.accepted = position
+    }
     frames.splice(0, passed)
   }
 
@@ -523,15 +697,25 @@ export function createAppLane(params: AppLaneParams): AppLane {
       .filter((record) => record.frame.protocol === name)
       .sort(
         (a, b) =>
-          a.frame.segment - b.frame.segment || a.frame.position.localeCompare(b.frame.position),
+          a.frame.segment - b.frame.segment ||
+          compareLogPositions(a.frame.position, b.frame.position),
       )
 
   const blockedByEarlierSealed = (record: PendingAppFrame): boolean => {
-    const cursor = cursors.get(record.frame.protocol)
-    if (cursor?.topicID !== record.frame.topicID) return false
-    return (segment.get(record.frame.protocol) ?? []).some(
-      (frame) => frame.position < record.frame.position && frame.sealed.state === 'sealed',
-    )
+    for (const [topicID, cursor] of cursors) {
+      if (cursor.protocol !== record.frame.protocol) continue
+      if (
+        (segment.get(topicID) ?? []).some(
+          (frame) =>
+            frame.sealed.state === 'sealed' &&
+            (cursor.anchorEpoch < record.frame.segment ||
+              (topicID === record.frame.topicID &&
+                compareLogPositions(frame.position, record.frame.position) < 0)),
+        )
+      )
+        return true
+    }
+    return false
   }
 
   const finishRecord = async (record: PendingAppFrame): Promise<void> => {
@@ -541,17 +725,17 @@ export function createAppLane(params: AppLaneParams): AppLane {
     await runAppLane(async () => {
       const index = pendingRecords.findIndex((item) => item.frame.id === record.frame.id)
       if (index !== -1) pendingRecords.splice(index, 1)
-      resumeBlocked(record.frame.topicID, record.frame.position)
+      resumeBlocked(record.frame.topicID, record.frame.position, record.frame.id)
       resumeUnknown(record)
-      const cursor = cursors.get(record.frame.protocol)
+      const cursor = cursors.get(record.frame.topicID)
       if (cursor?.topicID !== record.frame.topicID) return
-      const frames = segment.get(record.frame.protocol)
+      const frames = segment.get(record.frame.topicID)
       if (frames == null) return
       const buffered = frames.find((frame) => frame.position === record.frame.position)
       if (buffered?.sealed.state === 'pending' && buffered.sealed.id === record.frame.id) {
         buffered.sealed = { state: 'done' }
       }
-      await advanceCursor(record.frame.protocol, frames)
+      await advanceCursor(record.frame.topicID, frames)
     })
   }
 
@@ -582,7 +766,15 @@ export function createAppLane(params: AppLaneParams): AppLane {
       }
       await events.emit(prc, event)
     }
-    if (!disposed) await finishRecord(record)
+    if (!disposed) {
+      const finishing = finishRecord(record)
+      finishingRecords.add(finishing)
+      try {
+        await finishing
+      } finally {
+        finishingRecords.delete(finishing)
+      }
+    }
   }
 
   const scheduleWorker = (name: string, delay = 0): void => {
@@ -660,15 +852,17 @@ export function createAppLane(params: AppLaneParams): AppLane {
         if (generation === segmentGeneration && !disposed) await deliver(generation)
       }).then(
         () => {
-          if (generation !== segmentGeneration) return
           retryScheduled = false
           retryBackoff = 1000
           if (retryRequested) retryDelivery()
         },
         () => {
-          if (generation !== segmentGeneration) return
           retryScheduled = false
           if (disposed || safetyHold() !== null) return
+          if (generation !== segmentGeneration) {
+            if (retryRequested) retryDelivery()
+            return
+          }
           retryTimer = setTimeout(() => {
             retryTimer = undefined
             retryDelivery()
@@ -684,7 +878,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
     for (const name of names) {
       if (
         topicID != null &&
-        cursors.get(name)?.topicID !== topicID &&
+        cursors.get(topicID)?.protocol !== name &&
         !pendingRecords.some(
           (record) => record.frame.protocol === name && record.frame.topicID === topicID,
         )
@@ -709,28 +903,33 @@ export function createAppLane(params: AppLaneParams): AppLane {
    * or a group quiet on the commit lane and busy on the app lane re-delivers its whole backlog on
    * the next restart.
    *
-   * Does NOT deliver: delivery unwraps against the live handle, and this runs outside the commit
-   * mutex where the handle can be mid-ratchet — a frame classified at one epoch and unwrapped at
-   * the next would be wrongly called dead. So the buffer fills and the cursor advances, and
-   * anything still holding bytes waits for {@link deliver}, which runs where the handle is held
-   * still.
+   * Opening and delivery run in a separate drain. Crypto serialises each MLS mutation.
    *
-   * COALESCED: a burst of pushes collapses into one pass; the flag clears on entry so a frame
-   * arriving mid-pass schedules the next one instead of being left staged.
+   * Coalesced through snapshot, fetch and merge, with one rerun for mid-pull pushes.
    */
   let syncScheduled = false
+  let syncRequested = false
   const scheduleSync = (): void => {
-    if (syncScheduled || safetyHold() !== null) return
+    if (disposed || safetyHold() !== null) return
+    syncRequested = true
+    if (syncScheduled) return
     syncScheduled = true
-    void runAppLane(async () => {
-      syncScheduled = false
-      if (safetyHold() !== null) return
-      await loadSegment()
-      for (const [name, frames] of segment) await advanceCursor(name, frames)
-    }).catch(() => {
-      // A hub that would not answer leaves the cursor where it is and the frames staged or
-      // buffered; the next push, or the next drain, asks again.
-    })
+    syncRequested = false
+    void pull()
+      .then(() =>
+        runAppLane(async () => {
+          if (safetyHold() !== null || disposed) return
+          for (const [name, frames] of segment) await advanceCursor(name, frames)
+        }),
+      )
+      .finally(() => {
+        syncScheduled = false
+        if (syncRequested) scheduleSync()
+      })
+      .catch(() => {
+        // A hub that would not answer leaves the cursor where it is and the frames staged or
+        // buffered; the next push, or the next drain, asks again.
+      })
   }
 
   /**
@@ -753,7 +952,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
    * because ephemeral and logged app traffic share one topic, and guessing from the topic would
    * move the cursor over frames the log does not contain.
    */
-  const note = (name: string, topicID: string, message: StoredMessage, failure: unknown): void => {
+  const note = (_name: string, topicID: string, message: StoredMessage, failure: unknown): void => {
     if (failure instanceof GroupSafetyHeldError) {
       onSafetyHeld(failure.reason)
       return
@@ -767,11 +966,12 @@ export function createAppLane(params: AppLaneParams): AppLane {
       return
     }
     const ahead = isFrameAhead(failure)
-    let pushes = staged.get(name)
+    let pushes = staged.get(topicID)
     if (pushes == null) {
       pushes = []
-      staged.set(name, pushes)
+      staged.set(topicID, pushes)
     }
+    if (pushes.length >= APP_STAGED_MAX_FRAMES) return
     pushes.push({
       topicID,
       frame: {
@@ -786,23 +986,27 @@ export function createAppLane(params: AppLaneParams): AppLane {
 
   const drain = async (): Promise<void> => {
     if (disposed) return
+    const generation = segmentGeneration
     applyCaughtUpTimes()
-    await loadSegment()
-    applyCaughtUpTimes()
-    for (const [name, frames] of segment) {
+    expireTopics()
+    const lanes = [...cursors.values()].sort((a, b) => a.anchorEpoch - b.anchorEpoch)
+    for (const cursor of lanes) {
+      const name = cursor.protocol
+      const topicID = cursor.topicID
+      const frames = segment.get(topicID) ?? []
       const events = appEventHandlers.get(name)
-      const cursor = cursors.get(name)
-      if (cursor == null || frames.length === 0 || (events == null && crypto.pending == null)) {
+      if (frames.length === 0 || (events == null && crypto.pending == null)) {
         continue
       }
       for (const frame of frames) {
         if (frame.sealed.state !== 'sealed') continue
-        if (disposed || safetyHold() !== null) break
+        if (disposed || generation !== segmentGeneration || safetyHold() !== null) break
         const sealed = frame.sealed.bytes
+        const id = frameID(cursor.topicID, sealed)
         // Unreadable bytes are dead. Past and future are the open's locked answer, below.
         if (crypto.frameEpoch(sealed) == null) {
           frame.sealed = { state: 'done' }
-          resumeBlocked(cursor.topicID, frame.position)
+          resumeBlocked(cursor.topicID, frame.position, id)
           continue
         }
         const aad = crypto.frameAAD(sealed)
@@ -810,7 +1014,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
         if ((aad != null && decoded == null) || crypto.pending != null) {
           if (decoded?.topicID !== cursor.topicID || decoded.intent !== 'log') {
             frame.sealed = { state: 'done' }
-            resumeBlocked(cursor.topicID, frame.position)
+            resumeBlocked(cursor.topicID, frame.position, id)
             continue
           }
         }
@@ -818,10 +1022,10 @@ export function createAppLane(params: AppLaneParams): AppLane {
           crypto.pending == null
             ? undefined
             : {
-                id: frameID(cursor.topicID, sealed),
+                id,
                 topicID: cursor.topicID,
                 protocol: name,
-                segment: anchor().epoch,
+                segment: cursor.anchorEpoch,
                 position: frame.position,
               }
         const caughtUpBefore = commitLaneCaughtUp()
@@ -850,7 +1054,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
                 remaining <= 0
               ) {
                 frame.sealed = { state: 'done' }
-                resumeBlocked(cursor.topicID, frame.position)
+                resumeBlocked(cursor.topicID, frame.position, id)
                 continue
               }
               const deadline = frame.caughtUpAt + APP_FUTURE_HOLD_MS
@@ -869,6 +1073,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
                 name,
                 cursor.topicID,
                 frame.position,
+                id,
                 new Error(`frame claims future epoch ${error.frameEpoch}`),
                 'future-epoch',
               )
@@ -876,15 +1081,12 @@ export function createAppLane(params: AppLaneParams): AppLane {
             continue
           }
           if (crypto.pending != null && isAppFrameStorageError(error)) {
-            reportBlocked(name, cursor.topicID, frame.position, error)
+            reportBlocked(name, cursor.topicID, frame.position, id, error)
             throw error
           }
-          // Claimed this epoch and the handle refused it — OR its AAD did not match this topic (a
-          // wrong-topic frame, or a pre-upgrade empty-AAD frame). Either way, dead: the handle
-          // never returns to this epoch and the topic binding never changes. Retained history from
-          // before this bind existed is DELIBERATELY invalidated, not silently re-offered.
+          // A past epoch is not retained. Other refusals also finish without delivery.
           frame.sealed = { state: 'done' }
-          resumeBlocked(cursor.topicID, frame.position)
+          resumeBlocked(cursor.topicID, frame.position, id)
           continue
         }
         if (ref != null) {
@@ -900,7 +1102,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
         // Opened, so it is done whatever the payload turns out to be — every path below either
         // delivers it or drops it exactly as the live transport would.
         frame.sealed = { state: 'done' }
-        resumeBlocked(cursor.topicID, frame.position)
+        resumeBlocked(cursor.topicID, frame.position, id)
         if (events == null) continue
         // This `unwrap` is its own ingress — not fed by `peer.ts`'s normalized inbound path — so
         // the recovered sender is normalized HERE, once, before either use below: `localDID` (the
@@ -930,14 +1132,25 @@ export function createAppLane(params: AppLaneParams): AppLane {
           // would retry the host's own bug at it, so the frame is consumed.
         }
       }
-      await advanceCursor(name, frames)
+      await advanceCursor(topicID, frames)
     }
   }
 
-  const deliver = async (generation = segmentGeneration): Promise<void> => {
+  let drainingEpoch: number | undefined
+  const deliver = async (
+    generation = segmentGeneration,
+    onlyTopics?: Set<string>,
+  ): Promise<void> => {
     try {
+      await pull(onlyTopics)
       await runAppLane(async () => {
-        if (generation === segmentGeneration) await drain()
+        if (generation !== segmentGeneration || disposed) return
+        drainingEpoch = anchor().epoch
+        try {
+          await drain()
+        } finally {
+          drainingEpoch = undefined
+        }
       })
     } finally {
       if (generation === segmentGeneration && crypto.pending != null && !disposed) {
@@ -949,9 +1162,62 @@ export function createAppLane(params: AppLaneParams): AppLane {
     }
   }
 
+  let kickScheduled = false
+  let kickRequested = false
+  let kickAllTopics = false
+  const kick = (onlyBusyTopics = false): void => {
+    if (disposed || safetyHold() !== null) return
+    kickRequested = true
+    if (!onlyBusyTopics) kickAllTopics = true
+    if (kickScheduled) return
+    kickScheduled = true
+    kickRequested = false
+    if (retryTimer != null) clearTimeout(retryTimer)
+    retryTimer = undefined
+    const generation = segmentGeneration
+    // A capacity retry must not refetch successful topics while another slot stays occupied.
+    const topics = kickAllTopics ? undefined : new Set(busyTopics)
+    busyTopics.clear()
+    kickAllTopics = false
+    void Promise.resolve()
+      .then(() => scheduleDrain(() => deliver(generation, topics)))
+      .then(
+        () => {
+          kickScheduled = false
+          retryBackoff = 1000
+          if (kickRequested) kick(true)
+        },
+        () => {
+          kickScheduled = false
+          if (disposed || safetyHold() !== null) return
+          if (kickRequested) {
+            kick(true)
+            return
+          }
+          retryTimer = setTimeout(() => {
+            retryTimer = undefined
+            kick()
+          }, retryBackoff)
+          retryBackoff = Math.min(retryBackoff * 2, 60_000)
+        },
+      )
+  }
+
+  const retryBusyPull = (topicID: string): void => {
+    if (disposed || safetyHold() !== null) return
+    busyTopics.add(topicID)
+    if (cancelBusyRetry != null) return
+    cancelBusyRetry = mux.onAppFetchAvailable(() => {
+      cancelBusyRetry?.()
+      cancelBusyRetry = undefined
+      kick(true)
+    })
+  }
+
   return {
     dropFrame: (topicID, position) =>
       runAppLane(async () => {
+        if (disposed) throw new PeerDisposedError('Peer is disposed')
         if (crypto.pending == null) throw new Error('durable app delivery is disabled')
         const unknown = pendingRecords.find(
           (record) =>
@@ -965,55 +1231,32 @@ export function createAppLane(params: AppLaneParams): AppLane {
           resumeUnknown(unknown)
           return
         }
-        const entry = [...cursors.entries()].find(([, cursor]) => cursor.topicID === topicID)
-        if (entry == null) throw new Error('app frame is not buffered')
-        const [name] = entry
-        const frames = segment.get(name)
+        const frames = segment.get(topicID)
         const frame = frames?.find((item) => item.position === position)
         if (frames == null || frame == null) throw new Error('app frame is not buffered')
         if (frame.sealed.state === 'pending') throw new Error('app frame is pending')
         if (frame.sealed.state !== 'sealed') throw new Error('app frame is already done')
-        if (frames.some((item) => item.position < position && item.sealed.state !== 'done')) {
+        if (
+          frames.some(
+            (item) =>
+              compareLogPositions(item.position, position) < 0 && item.sealed.state !== 'done',
+          )
+        ) {
           throw new Error('an earlier pending or sealed frame blocks the durable cursor')
         }
         frame.sealed = { state: 'done' }
         resumeBlocked(topicID, position)
-        await advanceCursor(name, frames)
+        await advanceCursor(topicID, frames)
       }),
     retryDelivery,
-    /**
-     * MUST run BEFORE the apply, never after: once the commit applies the handle holds different
-     * key material, and those bytes are ciphertext forever. Per-FRAME-EPOCH, not per-rotation:
-     * every epoch inside a segment is dispensed as the walk passes through it.
-     *
-     * Which frames are this epoch's is the open's own answer: `unwrap` refuses another epoch with
-     * `FrameEpochError` before decrypting, and only its "ahead" answer keeps a frame. Future
-     * claims are bounded once the commit lane catches up.
-     *
-     * The buffer is walked whole, not stopped at the first frame that is not this epoch's, since
-     * the front can still hold a frame from an epoch the handle already passed (a journal replay
-     * advances it before this pull runs).
-     *
-     * THE CURSOR ADVANCES over a run of frames this drain is DONE with, stopping dead at the first
-     * it is not — see {@link advanceCursor} for the rule.
-     *
-     * A FAILED PULL STALLS THE WALK: {@link loadSegment} raising propagates and no epoch is passed
-     * unread, since the pull is a retry and the delivery is not.
-     *
-     * NOT delivered: this member's own frames, matching the live fan-out never echoing a publisher
-     * its own broadcast.
-     *
-     * TAKEN UNDER THE APP LANE'S MUTEX, excluding the live lane's own cursor work
-     * ({@link scheduleSync}), which runs off the mux's push loop under no lock at all. Two
-     * deliverers writing one DURABLE read position corrupts it on any interleave: a push splicing
-     * the ordered buffer mid-walk re-reads or steps over a frame, and a sync landing between
-     * {@link advanceCursor}'s read of a done run and its splice silently drops frames.
-     *
-     * The peer starts workers after its commit operation releases; direct lanes start them here.
-     */
+    kick,
+    /** Fetches run outside the mutex; opening and non-durable handlers reserve the app lane. */
     deliver,
     note,
     pendingRecords: () => [...pendingRecords],
+    idle: async () => {
+      await Promise.allSettled([...finishingRecords])
+    },
     restore: async (records): Promise<void> => {
       await runAppLane(async () => {
         for (const record of records) {
@@ -1024,12 +1267,17 @@ export function createAppLane(params: AppLaneParams): AppLane {
         }
         pendingRecords.sort(
           (a, b) =>
-            a.frame.segment - b.frame.segment || a.frame.position.localeCompare(b.frame.position),
+            a.frame.segment - b.frame.segment ||
+            compareLogPositions(a.frame.position, b.frame.position),
         )
       })
     },
     dispose: (): void => {
       disposed = true
+      cancelBusyRetry?.()
+      cancelBusyRetry = undefined
+      busyTopics.clear()
+      for (const controller of pulls.keys()) controller.abort()
       if (futureTimer != null) clearTimeout(futureTimer)
       if (retryTimer != null) clearTimeout(retryTimer)
       caughtUpTimes.clear()
@@ -1038,25 +1286,34 @@ export function createAppLane(params: AppLaneParams): AppLane {
       }
     },
     reset: (): void => {
+      const interrupted =
+        (drainingEpoch != null && drainingEpoch !== anchor().epoch) ||
+        [...pulls.values()].some((epoch) => epoch !== anchor().epoch)
       segmentGeneration += 1
+      cancelBusyRetry?.()
+      cancelBusyRetry = undefined
+      busyTopics.clear()
+      for (const controller of pulls.keys()) controller.abort()
+      reportedPruned.clear()
       if (futureTimer != null) clearTimeout(futureTimer)
       if (retryTimer != null) clearTimeout(retryTimer)
       retryTimer = undefined
       retryBackoff = 1000
-      retryScheduled = false
+      // Old queued work still occupies its slot. New hints request one replacement.
       retryRequested = false
       caughtUpTimes.clear()
       futureTimer = undefined
       futureDeadline = undefined
       const cleared = [...blockingFrames.values()]
       blockingFrames.clear()
-      if (!disposed) for (const event of cleared) notifyAppHost(onAppDeliveryResumed, event)
+      if (!disposed)
+        for (const event of cleared)
+          notifyAppHost(onAppDeliveryResumed, { ...event, settlement: 'resumed' })
       segment = new Map()
       cursors = new Map()
-      // Staged pushes go with the buffer for the same reason: a rotation mid-push carries its own
-      // topic and is dropped by the merge if it disagrees with the live anchor.
       staged = new Map()
       retained = new Set()
+      if (interrupted) kick()
     },
   }
 }

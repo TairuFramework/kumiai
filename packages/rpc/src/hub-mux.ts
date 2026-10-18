@@ -142,11 +142,18 @@ export type MuxPublishParams = {
   publishID?: string
 }
 
+export const APP_OUTSTANDING_FETCHES_MAX = 2
+
+export class AppFetchBusyError extends Error {
+  override name = 'AppFetchBusyError'
+}
+
 export type MuxFetchTopicParams = {
   topicID: string
   /** Exclusive cursor: entries after this log position. Absent: from the oldest retained. */
   after?: string
   limit?: number
+  signal?: AbortSignal
 }
 
 export type HubMux = {
@@ -185,6 +192,8 @@ export type HubMux = {
   rearmRefusedTopics: () => void
   /** Pull a topic's log as the local DID. */
   fetchTopic: (params: MuxFetchTopicParams) => Promise<HubFetchTopicResult>
+  /** Notify when an app fetch slot is available, including availability at registration. */
+  onAppFetchAvailable: (listener: () => void) => () => void
   onInbound: (
     topicID: string,
     listener: InboundListener,
@@ -870,25 +879,59 @@ export function createHubMux(params: HubMuxParams): HubMux {
     return result
   }
 
+  let outstandingAppFetches = 0
+  const appFetchListeners = new Set<() => void>()
   const fetchTopic = async (params: MuxFetchTopicParams): Promise<HubFetchTopicResult> => {
     // A fetch of a refused topic would die of `NotSubscribedError` — the SYMPTOM, naming the mux's
     // own failure to subscribe as if it were the caller's mistake. The latched refusal is raised
     // instead, so what reaches the host is the reason.
     assertSubscribable(params.topicID)
-    // Called on `hub`, not through a detached reference: a LogHub is often a class, and
-    // an unbound method loses its receiver.
-    const result = await Promise.resolve(
-      hub.fetchTopic({
-        subscriberDID: localDID,
-        topicID: params.topicID,
-        ...(params.after != null ? { after: params.after } : {}),
-        ...(params.limit != null ? { limit: params.limit } : {}),
-      }),
-    )
-    for (const message of result.messages) assertLogPosition(message.sequenceID)
+    const { signal } = params
+    if (signal?.aborted) throw signal.reason
+    // Only cancellable app pulls consume these slots. Commit fetches remain independent.
+    if (signal != null && outstandingAppFetches >= APP_OUTSTANDING_FETCHES_MAX) {
+      throw new AppFetchBusyError('app fetch slots are occupied')
+    }
+    const request = (async () => {
+      if (signal != null) outstandingAppFetches += 1
+      try {
+        return await hub.fetchTopic({
+          subscriberDID: localDID,
+          topicID: params.topicID,
+          ...(params.after != null ? { after: params.after } : {}),
+          ...(params.limit != null ? { limit: params.limit } : {}),
+        })
+      } finally {
+        // An abort releases the caller, never the underlying request's slot.
+        if (signal != null) {
+          outstandingAppFetches -= 1
+          if (!disposed) for (const listener of appFetchListeners) listener()
+        }
+      }
+    })()
+    let abort: (() => void) | undefined
+    let result: HubFetchTopicResult
+    try {
+      result =
+        signal == null
+          ? await request
+          : await Promise.race([
+              request,
+              new Promise<never>((_resolve, reject) => {
+                abort = () => reject(signal.reason)
+                signal.addEventListener('abort', abort, { once: true })
+                if (signal.aborted) abort()
+              }),
+            ])
+    } finally {
+      if (abort != null) signal?.removeEventListener('abort', abort)
+    }
+    // A hub may ignore the requested limit. Bound inspection before validating entries.
+    const messages = params.limit == null ? result.messages : result.messages.slice(0, params.limit)
+    for (const message of messages) assertLogPosition(message.sequenceID)
     if (result.head !== null) assertLogPosition(result.head)
     if (result.oldest !== null) assertLogPosition(result.oldest)
-    return result
+    return { ...result, messages }
   }
 
   if (!params.deferredStart) start()
@@ -905,6 +948,23 @@ export function createHubMux(params: HubMuxParams): HubMux {
     rearmTopic,
     rearmRefusedTopics,
     fetchTopic,
+    onAppFetchAvailable: (listener) => {
+      if (disposed) return () => {}
+      appFetchListeners.add(listener)
+      // Capacity may return between the busy rejection and the caller subscribing.
+      queueMicrotask(() => {
+        if (
+          !disposed &&
+          appFetchListeners.has(listener) &&
+          outstandingAppFetches < APP_OUTSTANDING_FETCHES_MAX
+        ) {
+          listener()
+        }
+      })
+      return () => {
+        appFetchListeners.delete(listener)
+      }
+    },
     onInbound,
     suspendPublishing: (): void => {
       publishSuspended = true
@@ -912,6 +972,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
     dispose: () => {
       if (disposePromise != null) return disposePromise
       disposed = true
+      appFetchListeners.clear()
       for (const wake of resumeWaiters) wake()
       resumeWaiters.clear()
       // Belt-and-suspenders: `peer.dispose()` already calls `suspendPublishing()` before this

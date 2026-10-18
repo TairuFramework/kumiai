@@ -1,5 +1,5 @@
 import { fromUTF } from '@sozai/codec'
-import { describe, expect, test, vi } from 'vitest'
+import { describe, expect, onTestFinished, test, vi } from 'vitest'
 
 import { encodeAppAAD } from '../src/app-aad.js'
 import { createAppLane } from '../src/app-lane.js'
@@ -56,6 +56,7 @@ function retainedLane() {
         }
       },
     } as never,
+    appliedEpoch: () => reader.epoch(),
     crypto: reader,
     localDID: 'bob',
     protocols: { chat },
@@ -137,7 +138,7 @@ describe('durable retained drain', () => {
     expect([...store.records.values()][0]?.frame.position).toBe('000000000001')
   })
 
-  test('a rejected fetch waits for the other protocol before a retry starts', async () => {
+  test('a rejected pull waits for its other protocol without reserving the app lane', async () => {
     const anchor = { epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }
     const chatTopic = protocolTopic(anchor.secret, 1, 'chat')
     let releaseDelayed: (() => void) | undefined
@@ -160,6 +161,7 @@ describe('durable retained drain', () => {
           return { messages: [], head: null, oldest: null }
         },
       } as never,
+      appliedEpoch: () => 1,
       crypto: createFakeCrypto({ epoch: 1, localDID: 'bob' }),
       localDID: 'bob',
       protocols: { chat, other: chat },
@@ -168,13 +170,17 @@ describe('durable retained drain', () => {
       anchor: () => anchor,
       groupID: () => 'group',
     })
+    onTestFinished(() => {
+      releaseDelayed?.()
+      lane.dispose()
+    })
     const first = lane.deliver()
     const failed = expect(first).rejects.toThrow('first fetch failed')
     await new Promise((resolve) => setTimeout(resolve, 0))
     const retry = lane.deliver()
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(chatFetches).toBe(1)
-    expect(otherFetches).toBe(1)
+    expect(chatFetches).toBe(2)
+    expect(otherFetches).toBe(2)
     releaseDelayed?.()
     await failed
     await retry
@@ -182,7 +188,7 @@ describe('durable retained drain', () => {
     expect(otherFetches).toBe(2)
   })
 
-  test('a storage fault before a commit stops the walk until the frame opens', async () => {
+  test('a storage fault preserves the frame while commits advance and the app lane retries', async () => {
     const stalled = vi.fn()
     const hub = new DurableFakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x91)
@@ -206,11 +212,14 @@ describe('durable retained drain', () => {
     store.setFail(true)
     await bob.peer.enqueue(buildLedgerCommit(bob, []))
     await vi.waitFor(() => expect(stalled).toHaveBeenCalledTimes(1))
-    expect(bob.mls.epoch()).toBe(1)
+    await vi.waitFor(() => expect(bob.mls.epoch()).toBe(3))
+    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+    expect(bob.appCursorStore.stored(topicID)).toBeNull()
+    expect(store.records.size).toBe(0)
     store.setFail(false)
-    await bob.peer.replay()
-    await expect.poll(() => bob.mls.epoch()).toBe(3)
-    expect(store.records.size).toBe(1)
+    await vi.waitFor(() => expect(store.records.size).toBe(1), { timeout: 2500 })
+    expect([...store.records.values()][0]?.frame).toMatchObject({ topicID, segment: 1 })
+    expect(bob.appCursorStore.stored(topicID)).toBeNull()
     await alice.peer.dispose()
     await bob.peer.dispose()
   })
@@ -241,7 +250,7 @@ describe('durable retained drain', () => {
     store.setFail(true)
     await bob.peer.enqueue(buildLedgerCommit(bob, []))
     await vi.waitFor(() => expect(stalled).toHaveBeenCalledTimes(1))
-    expect(bob.mls.epoch()).toBe(2)
+    await vi.waitFor(() => expect(bob.mls.epoch()).toBe(3))
     expect(bob.peer.anchorEpoch()).toBe(2)
     hub.reattach('bob')
     await alice.peer.protocol('chat').dispatch('chat/changed', { data: { text: 'after failure' } })

@@ -23,13 +23,13 @@ describe('hub log paging', () => {
       ]),
     ).toThrow(/non-increasing log positions/)
   })
-  test('the app drain rejects a repeated full page after its cursor', async () => {
+  test('the app drain bounds a repeated full page without raising', async () => {
     let fetches = 0
     const lane = createAppLane({
       mux: {
         retainTopic() {},
         async fetchTopic() {
-          if (++fetches > 2) throw new Error('fixture cutoff')
+          if (++fetches > 4) throw new Error('fixture cutoff')
           return {
             messages: repeated,
             head: repeated.at(-1)?.sequenceID,
@@ -37,6 +37,7 @@ describe('hub log paging', () => {
           }
         },
       } as never,
+      appliedEpoch: () => 1,
       crypto: createFakeCrypto({ localDID: 'bob' }),
       localDID: 'bob',
       protocols: { chat },
@@ -45,8 +46,8 @@ describe('hub log paging', () => {
       anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
       groupID: () => 'group',
     })
-    await expect(lane.deliver()).rejects.toThrow(/non-increasing log positions/)
-    expect(fetches).toBe(2)
+    await expect(lane.deliver()).resolves.toBeUndefined()
+    expect(fetches).toBe(4)
     lane.dispose()
   })
 

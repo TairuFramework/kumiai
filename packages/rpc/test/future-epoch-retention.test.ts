@@ -182,7 +182,7 @@ test('an expiry gap observer can await resync without blocking later serial work
   const bob = durableBob(hub, {
     onAppWindowPruned: pruned,
     onAppDeliveryStalled: () => notices.push('stalled'),
-    onAppDeliveryResumed: () => notices.push('resumed'),
+    onAppDeliveryResumed: (event) => notices.push(event.settlement ?? 'missing settlement'),
   })
   await bob.peer.protocol('chat').to('alice')
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
@@ -349,12 +349,13 @@ test('a peer starts hold age only when a paused commit walk catches up', async (
   try {
     const replay = bob.peer.replay()
     await entered.promise
-    expect(bob.crypto.starts.unwrap).toBeGreaterThan(0)
     await vi.advanceTimersByTimeAsync(60_000)
     expect(bob.appCursorStore.stored(topicID)).toBeNull()
     release.resolve()
     await replay
     expect(bob.mls.epoch()).toBe(2)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(bob.crypto.starts.unwrap).toBeGreaterThan(0)
     await vi.advanceTimersByTimeAsync(29_999)
     expect(bob.appCursorStore.stored(topicID)).toBeNull()
     await vi.advanceTimersByTimeAsync(1)
@@ -517,6 +518,7 @@ async function futureLane(
   const create = () => {
     const lane = createAppLane({
       mux: { retainTopic() {}, fetchTopic: fetch } as never,
+      appliedEpoch: () => reader.epoch(),
       crypto: reader,
       localDID: 'bob',
       protocols: { chat },
@@ -657,7 +659,7 @@ describe('caught-up future occurrence bounds', () => {
   })
 
   test.each(['resolve', 'reject'])(
-    'new segment retries proceed while an old queued drain awaits %s',
+    'new segment retries coalesce until an old queued drain settles with %s',
     async (outcome) => {
       const release = Promise.withResolvers<void>()
       let scheduled = 0
@@ -680,9 +682,12 @@ describe('caught-up future occurrence bounds', () => {
       try {
         f.lane.retryDelivery()
         await vi.advanceTimersByTimeAsync(0)
-        expect(f.fetch.mock.calls.length).toBe(fetches + 1)
+        expect(f.fetch.mock.calls.length).toBe(fetches)
+        expect(scheduled).toBe(1)
         release.resolve()
         await vi.advanceTimersByTimeAsync(0)
+        expect(f.fetch.mock.calls.length).toBe(fetches + 1)
+        expect(scheduled).toBe(2)
         expect(vi.getTimerCount()).toBe(1)
         await vi.advanceTimersByTimeAsync(30_000)
         expect(f.cursor.stored(topicID)).toBe('000000000001')

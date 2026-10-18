@@ -6,6 +6,7 @@ import type { AppDeliveryResumed, AppDeliveryStalled } from '../src/app-lane.js'
 import { createAppLane } from '../src/app-lane.js'
 import type { PendingAppFrame } from '../src/crypto.js'
 import { adaptBusHandlers } from '../src/handlers.js'
+import * as hostNotice from '../src/host-notice.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
@@ -89,6 +90,7 @@ describe('durable storage stall', () => {
     await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1))
     await vi.waitFor(() =>
       expect(resumed).toHaveBeenCalledExactlyOnceWith({
+        settlement: 'resumed',
         groupID: expect.any(String),
         protocol: 'chat',
         topicID,
@@ -131,6 +133,7 @@ describe('durable storage stall', () => {
           }
         },
       } as never,
+      appliedEpoch: () => 1,
       crypto: createFakeCrypto({
         epoch: 1,
         localDID: 'bob',
@@ -185,6 +188,7 @@ describe('durable storage stall', () => {
           }
         },
       } as never,
+      appliedEpoch: () => 1,
       crypto: createFakeCrypto({
         epoch: 1,
         localDID: 'bob',
@@ -243,6 +247,7 @@ describe('durable storage stall', () => {
           }
         },
       } as never,
+      appliedEpoch: () => reader.epoch(),
       crypto: reader,
       localDID: 'bob',
       protocols: { chat },
@@ -266,6 +271,7 @@ describe('durable storage stall', () => {
     await vi.waitFor(() => expect(save).toHaveBeenCalledWith(topicID, position))
     await vi.waitFor(() => expect(lane.pendingRecords()).toHaveLength(0))
     expect(resumed).toHaveBeenCalledExactlyOnceWith({
+      settlement: 'resumed',
       groupID: 'group',
       protocol: 'chat',
       topicID,
@@ -296,6 +302,7 @@ describe('durable storage stall', () => {
           }
         },
       } as never,
+      appliedEpoch: () => 1,
       crypto: createFakeCrypto({
         epoch: 1,
         localDID: 'bob',
@@ -327,6 +334,7 @@ describe('durable storage stall', () => {
     await expect(lane.dropFrame(topicID, position)).rejects.toThrow('cursor unavailable')
     expect(save).toHaveBeenCalledWith(topicID, position)
     expect(resumed).toHaveBeenCalledExactlyOnceWith({
+      settlement: 'resumed',
       groupID: 'group',
       protocol: 'chat',
       topicID,
@@ -357,6 +365,7 @@ describe('durable storage stall', () => {
         retainTopic() {},
         fetchTopic,
       } as never,
+      appliedEpoch: () => 1,
       crypto: createFakeCrypto({
         epoch: 1,
         localDID: 'bob',
@@ -421,6 +430,7 @@ describe('durable storage stall', () => {
         retainTopic() {},
         fetchTopic,
       } as never,
+      appliedEpoch: () => reader.epoch(),
       crypto: reader,
       localDID: 'bob',
       protocols: { chat },
@@ -482,6 +492,7 @@ describe('durable storage stall', () => {
           }
         },
       } as never,
+      appliedEpoch: () => reader.epoch(),
       crypto: reader,
       localDID: 'bob',
       protocols: { chat },
@@ -533,6 +544,7 @@ describe('durable storage stall', () => {
           }
         },
       } as never,
+      appliedEpoch: () => 1,
       crypto: createFakeCrypto({
         epoch: 1,
         localDID: 'bob',
@@ -586,6 +598,7 @@ describe('durable storage stall', () => {
           }
         },
       } as never,
+      appliedEpoch: () => 1,
       crypto: createFakeCrypto({
         epoch: 1,
         localDID: 'bob',
@@ -632,6 +645,7 @@ describe('durable storage stall', () => {
           }
         },
       } as never,
+      appliedEpoch: () => 1,
       crypto: createFakeCrypto({
         epoch: 1,
         localDID: 'bob',
@@ -693,6 +707,7 @@ describe('durable storage stall', () => {
           }
         },
       } as never,
+      appliedEpoch: () => reader.epoch(),
       crypto: reader,
       localDID: 'bob',
       protocols: { chat },
@@ -710,6 +725,7 @@ describe('durable storage stall', () => {
     await lane.deliver()
     await vi.waitFor(() =>
       expect(resumed).toHaveBeenCalledExactlyOnceWith({
+        settlement: 'resumed',
         groupID: 'group',
         protocol: 'chat',
         topicID,
@@ -737,6 +753,7 @@ describe('durable storage stall', () => {
           return { messages: [], head: null, oldest: null }
         },
       } as never,
+      appliedEpoch: () => 1,
       crypto: createFakeCrypto({
         localDID: 'bob',
         pending: {
@@ -760,6 +777,7 @@ describe('durable storage stall', () => {
     expect(stalled).toHaveBeenCalledTimes(1)
     await lane.dropFrame(topicID, frame.frame.position)
     expect(resumed).toHaveBeenCalledExactlyOnceWith({
+      settlement: 'resumed',
       groupID: 'group',
       protocol: 'missing',
       topicID,
@@ -788,6 +806,7 @@ describe('durable storage stall', () => {
           return { messages: [], head: null, oldest: null }
         },
       } as never,
+      appliedEpoch: () => 1,
       crypto: createFakeCrypto({
         localDID: 'bob',
         pending: {
@@ -815,6 +834,7 @@ describe('durable storage stall', () => {
     await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1))
     await vi.waitFor(() =>
       expect(resumed).toHaveBeenCalledExactlyOnceWith({
+        settlement: 'resumed',
         groupID: 'group',
         protocol: 'missing',
         topicID,
@@ -867,6 +887,7 @@ describe('durable storage stall', () => {
     expect(bob.appCursorStore.stored(topicID)).toBe(first.sequenceID)
     expect(store.rows.size).toBe(0)
     expect(resumed).toHaveBeenCalledExactlyOnceWith({
+      settlement: 'resumed',
       groupID: expect.any(String),
       protocol: 'chat',
       topicID,
@@ -882,7 +903,7 @@ describe('durable storage stall', () => {
     await bob.peer.dispose()
   })
 
-  test('does not deliver an outbox stall notice after peer disposal', async () => {
+  test('does not deliver a queued stall microtask after peer disposal', async () => {
     const hub = new DurableFakeHub()
     const stalled = vi.fn()
     const bob = makeMLSPeer(hub, 'bob', secret, {
@@ -890,35 +911,29 @@ describe('durable storage stall', () => {
       onAppDeliveryStalled: stalled,
     })
     await bob.peer.protocol('chat').to('alice')
-    hub.detach('bob')
-    await publish(hub, createFakeCrypto({ epoch: 2, localDID: 'alice' }), 'future')
-
-    let enterBuild: (() => void) | undefined
-    const building = new Promise<void>((resolve) => {
-      enterBuild = resolve
-    })
-    let releaseBuild: (() => void) | undefined
-    const held = new Promise<void>((resolve) => {
-      releaseBuild = resolve
-    })
-    const stopped = new Error('stop before publishing')
-    const commit = bob.peer.commit(
-      buildLedgerCommit(bob, [], {
-        onBuild: async () => {
-          enterBuild?.()
-          await held
-          throw stopped
-        },
-      }),
-    )
-    const rejected = expect(commit).rejects.toMatchObject({ name: 'PeerDisposedError' })
-    await building
-    expect(stalled).not.toHaveBeenCalled()
-    const disposing = bob.peer.dispose()
-    releaseBuild?.()
-    await rejected
-    await disposing
-    expect(stalled).not.toHaveBeenCalled()
+    const queued: Array<VoidFunction> = []
+    const realQueueMicrotask = globalThis.queueMicrotask
+    const queueMicrotaskSpy = vi
+      .spyOn(globalThis, 'queueMicrotask')
+      .mockImplementation((callback) => queued.push(callback))
+    const notify = vi.spyOn(hostNotice, 'notifyHost')
+    try {
+      await publish(hub, createFakeCrypto({ epoch: 2, localDID: 'alice' }), 'future')
+      await vi.waitFor(() => expect(queued).toHaveLength(1))
+      expect(stalled).not.toHaveBeenCalled()
+      const disposing = bob.peer.dispose()
+      notify.mockClear()
+      queueMicrotaskSpy.mockRestore()
+      for (const callback of queued) realQueueMicrotask(callback)
+      await disposing
+      await new Promise<void>((resolve) => realQueueMicrotask(resolve))
+      expect(stalled).not.toHaveBeenCalled()
+      expect(notify).not.toHaveBeenCalled()
+    } finally {
+      notify.mockRestore()
+      queueMicrotaskSpy.mockRestore()
+      await bob.peer.dispose()
+    }
   })
 
   test('does not deliver a queued resume microtask after peer disposal', async () => {

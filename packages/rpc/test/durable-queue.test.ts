@@ -1,5 +1,5 @@
 import { fromUTF } from '@sozai/codec'
-import { describe, expect, onTestFinished, test, vi } from 'vitest'
+import { afterEach, describe, expect, onTestFinished, test, vi } from 'vitest'
 
 import { encodeAppAAD } from '../src/app-aad.js'
 import { createAppLane } from '../src/app-lane.js'
@@ -10,6 +10,8 @@ import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { buildLedgerCommit, chat, makeMLSPeer } from './fixtures/peer.js'
+
+afterEach(() => vi.useRealTimers())
 
 const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 const payload = (text: string) =>
@@ -51,6 +53,7 @@ function fixture(
         }
       },
     } as never,
+    appliedEpoch: () => reader.epoch(),
     crypto: reader,
     localDID: 'bob',
     protocols: { chat },
@@ -162,6 +165,7 @@ describe('durable delivery queue', () => {
           return { messages: [], head: null, oldest: null }
         },
       } as never,
+      appliedEpoch: () => 1,
       crypto: createFakeCrypto({
         localDID: 'bob',
         pending: {
@@ -274,7 +278,7 @@ describe('durable delivery queue', () => {
     await bob.peer.dispose()
   })
 
-  test('a pending handler waits for the producing commit operation to release', async () => {
+  test('a pending handler starts before the producing commit operation releases', async () => {
     const hub = new DurableFakeHub()
     const records = new Map<string, PendingAppFrame>()
     const crypto = createFakeCrypto({
@@ -323,15 +327,22 @@ describe('durable delivery queue', () => {
     })
     vi.useFakeTimers()
     const committing = bob.peer.commit(buildLedgerCommit(bob, []))
-    await atRoster
-    await vi.advanceTimersByTimeAsync(0)
-    expect(seen).not.toHaveBeenCalled()
-    release()
-    await committing
-    await vi.advanceTimersByTimeAsync(0)
-    expect(seen).toHaveBeenCalledTimes(1)
-    vi.useRealTimers()
-    await bob.peer.dispose()
+    void committing.catch(() => {})
+    try {
+      await atRoster
+      await vi.advanceTimersByTimeAsync(0)
+      expect(seen).toHaveBeenCalledTimes(1)
+      expect(records.size).toBe(0)
+      expect(bob.mls.epoch()).toBe(1)
+      release()
+      await committing
+      await vi.advanceTimersByTimeAsync(0)
+      expect(seen).toHaveBeenCalledTimes(1)
+    } finally {
+      release()
+      await committing.catch(() => {})
+      await bob.peer.dispose()
+    }
   })
 
   test('dispose during retry backoff prevents another handler call', async () => {

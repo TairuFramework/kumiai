@@ -168,6 +168,7 @@ describe('durable pending restoration', () => {
           }
         },
       } as never,
+      appliedEpoch: () => 2,
       crypto: createFakeCrypto({
         epoch: 2,
         localDID: 'bob',
@@ -247,6 +248,7 @@ describe('durable pending restoration', () => {
             return { messages: [], head: null, oldest: null }
           },
         } as never,
+        appliedEpoch: () => 2,
         crypto: createFakeCrypto({ epoch: 2, localDID: 'bob', pending }),
         localDID: 'bob',
         protocols: registered ? { later: chat } : {},
@@ -372,6 +374,7 @@ describe('durable pending restoration', () => {
             }
           },
         } as never,
+        appliedEpoch: () => 1,
         crypto: createFakeCrypto({
           epoch: 1,
           localDID: 'bob',
