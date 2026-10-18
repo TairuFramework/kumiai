@@ -17,7 +17,10 @@ import type {
   GroupRecoveryTrust,
   GroupStateRecord,
   GroupTransaction,
+  OpenAppInput,
+  OpenAppResult,
   PackageUse,
+  PendingAppFrames,
 } from '../persistence-types.js'
 import type { RecoveryEnvironment } from './validation.js'
 
@@ -39,6 +42,8 @@ export type RegistryHandleAccess = {
   admission(): SendAdmission
   read<T>(fn: (handle: GroupHandle) => T | Promise<T>): Promise<T>
   readControl<T>(fn: (scope: ControlReadScope) => Promise<T>): Promise<T>
+  openBatch(frames: Array<OpenAppInput>): Promise<Array<OpenAppResult>>
+  pending: PendingAppFrames
   mutate: HandleAccess['mutate']
   replace: HandleAccess['replace']
   adopt(

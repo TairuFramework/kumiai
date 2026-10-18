@@ -148,10 +148,13 @@ export type {
   MemoryDatabase,
   MemoryStoreRows,
   MemoryTransaction,
+  OpenAppInput,
+  OpenAppResult,
   OutcomeAwareTransactionOptions,
   OwnershipContextPort,
   PackageUse,
   PendingAppFrame,
+  PendingAppFrames,
   PendingCommitFault,
   PersistenceEvent,
   PersistenceFixture,
@@ -161,6 +164,7 @@ export type {
   TransactionalGroupEffects,
   TransactionHookSettlement,
 } from './persistence-types.js'
+export { MAX_OPEN_BATCH_FRAMES, RECEIVE_SAVE_ATTEMPTS } from './persistence-types.js'
 export {
   type AuthenticateRecoveryReplyParams,
   authenticateRecoveryReply,

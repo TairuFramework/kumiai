@@ -23,7 +23,10 @@ import type {
   ConformanceGroupStateRecord,
   ConformanceGroupStores,
   ConformanceGroupTransaction,
+  ConformanceOpenAppInput,
+  ConformanceOpenAppResult,
   ConformancePackageUse,
+  ConformancePendingAppFrames,
   ConformancePersistenceEvent,
   ConformanceStorageAppOutboxEntry,
 } from './persistence-fixture.js'
@@ -94,6 +97,8 @@ export type ConformanceRegistryAccess<THandle> = {
       },
     ) => Promise<TValue>,
   ): Promise<TValue>
+  openBatch(frames: Array<ConformanceOpenAppInput>): Promise<Array<ConformanceOpenAppResult>>
+  pending: ConformancePendingAppFrames
   mutate<TValue>(
     fn: (handle: THandle, persist: (handle: THandle) => Promise<void>) => Promise<TValue>,
     adoption?: ConformanceRegistryAdoptionFactory,

@@ -44,7 +44,9 @@ import {
   decodeStoredValue,
   encodeStoredValue,
   physicalRecordKey,
+  recordAAD,
   sealRecord,
+  topicLocator,
 } from '../../src/persistence-codec.js'
 import type {
   AppOutboxEntry,
@@ -152,7 +154,15 @@ export type RegistryFixtureBase = {
     fn: (record: GroupStateRecord & { deleted: false; state: Uint8Array }) => Promise<GroupHandle>,
   ): void
   onPhase(
-    phase: 'prepare' | 'work' | 'effects' | 'finalise' | 'account' | 'proof' | 'hook',
+    phase:
+      | 'before-work'
+      | 'prepare'
+      | 'work'
+      | 'effects'
+      | 'finalise'
+      | 'account'
+      | 'proof'
+      | 'hook',
     fn: () => void | Promise<void>,
   ): void
   constructPrepareStores(): GroupStores<MemoryTransaction>
@@ -215,6 +225,27 @@ export function registryFixtureMutateControl(
   const mutate = controlMutators.get(fixture)
   if (mutate === undefined) throw new Error('Unknown registry fixture')
   return mutate(...args)
+}
+
+type AppCursorMutator = (key: GroupKey, topicID: string, position: string) => Promise<void>
+const appCursorMutators = new WeakMap<RegistryFixtureBase, AppCursorMutator>()
+export function registryFixtureMutateAppCursor(
+  fixture: RegistryFixtureBase,
+  ...args: Parameters<AppCursorMutator>
+): Promise<void> {
+  const mutate = appCursorMutators.get(fixture)
+  if (mutate === undefined) throw new Error('Unknown registry fixture')
+  return mutate(...args)
+}
+
+const stateVersionBumpers = new WeakMap<RegistryFixtureBase, (key: GroupKey) => Promise<void>>()
+export function registryFixtureBumpStateVersion(
+  fixture: RegistryFixtureBase,
+  key: GroupKey,
+): Promise<void> {
+  const bump = stateVersionBumpers.get(fixture)
+  if (bump === undefined) throw new Error('Unknown registry fixture')
+  return bump(key)
 }
 
 const controlCorrupters = new WeakMap<RegistryFixtureBase, (key: GroupKey) => Promise<void>>()
@@ -396,6 +427,7 @@ async function assemble(
     effects: params.effects,
     ownershipContext: params.ownershipContext,
   })
+  let beforeWork: (() => void | Promise<void>) | undefined
   const key = { groupID: params.groupID, incarnation: 1 }
   const restoreHolds = new Map<string, Hold>()
   const publicationHolds = new Map<string, Hold>()
@@ -714,7 +746,10 @@ async function assemble(
     overrideRestore: (fn) => {
       override = fn
     },
-    onPhase: storage.onPhase,
+    onPhase: (phase, fn) => {
+      if (phase === 'before-work') beforeWork = fn
+      else storage.onPhase(phase, fn)
+    },
     constructPrepareStores: () => storage.constructPrepareStores(key),
     async reopen() {
       await owner?.dispose()
@@ -774,7 +809,13 @@ async function assemble(
       run: (request, prepare, work) => {
         return capability.run(
           request,
-          (reads) => prepare(faultReads(reads)),
+          async (reads) => {
+            const prepared = await prepare(faultReads(reads))
+            const fault = beforeWork
+            beforeWork = undefined
+            await fault?.()
+            return prepared
+          },
           (stores, prepared) => {
             return work(
               {
@@ -799,6 +840,29 @@ async function assemble(
   capturedStates.set(fixture, captured)
   markerWriters.set(fixture, storage.forceOwnerMarker)
   rowRemovers.set(fixture, storage.deleteCommittedRow)
+  stateVersionBumpers.set(fixture, async (key) => {
+    const location = { ...key, namespace: 'state', recordID: 'current' }
+    const codec = createDeterministicAtRestCodec({ key: new Uint8Array(32).fill(98) })
+    const raw = (await storage.inspectRawBytes()).find(
+      (row) => row.namespace === 'state' && row.key === physicalRecordKey(location),
+    )
+    if (raw === undefined) throw new Error('Missing fixture state')
+    const record = decodeStoredValue(
+      await codec.open(raw.bytes, recordAAD(location)),
+    ) as GroupStateRecord
+    const bytes = await sealRecord(codec, location, { ...record, version: record.version + 1 })
+    await storage.mutateStoredRecord('state', physicalRecordKey(location), () => bytes)
+    await fixture.mutateMetadata(key, (value) => ({
+      ...(value as object),
+      version: record.version + 1,
+    }))
+  })
+  appCursorMutators.set(fixture, async (key, topicID, position) => {
+    const location = { ...key, namespace: 'cursor', recordID: await topicLocator(topicID) }
+    const codec = createDeterministicAtRestCodec({ key: new Uint8Array(32).fill(98) })
+    const bytes = await sealRecord(codec, location, { topicID, position })
+    await storage.mutateStoredRecord('cursor', physicalRecordKey(location), () => bytes)
+  })
   controlMutators.set(fixture, async (target, mutate) => {
     const control = fixture.device.groups.ports(target).control
     const location = { ...target, namespace: 'control', recordID: 'current' }

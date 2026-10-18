@@ -557,6 +557,45 @@ export type ConformancePreOpenAppFrameRef = ConformanceGroupKey & {
   position: string // segment = anchor epoch
 }
 
+export type ConformanceOpenAppInput = {
+  frame: ConformancePreOpenAppFrameRef
+  ciphertext: Uint8Array
+  expectedAAD?: Uint8Array
+}
+export type ConformanceOpenAppResult =
+  | { kind: 'opened'; record: ConformanceStoragePendingAppFrame }
+  | {
+      kind: 'refused'
+      frame: ConformancePreOpenAppFrameRef
+      reason: 'malformed-plaintext'
+      keyConsumed: true
+    }
+  | {
+      kind: 'refused'
+      frame: ConformancePreOpenAppFrameRef
+      reason: 'invalid-ciphertext' | 'wrong-aad' | 'duplicate' | 'invalid-position'
+      keyConsumed: false
+    }
+  | {
+      kind: 'refused'
+      frame: ConformancePreOpenAppFrameRef
+      reason: 'past-epoch'
+      keyConsumed: false
+      frameEpoch: number
+      handleEpoch: number
+    }
+  | {
+      kind: 'held'
+      frame: ConformancePreOpenAppFrameRef
+      reason: 'future-epoch'
+      frameEpoch: number
+      handleEpoch: number
+    }
+  | { kind: 'held'; frame: ConformancePreOpenAppFrameRef; reason: 'unsupported-version' }
+export type ConformancePendingAppFrames = {
+  list(): Promise<Array<ConformanceStoragePendingAppFrame>>
+  complete(id: string): Promise<void>
+}
 export type ConformanceStorageAppFrameRef = ConformancePreOpenAppFrameRef & { procedure: string }
 
 export type ConformanceStoragePendingAppFrame = {

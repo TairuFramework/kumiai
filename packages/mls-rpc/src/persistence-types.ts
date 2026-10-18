@@ -342,6 +342,43 @@ export type PreOpenAppFrameRef = GroupKey & {
   position: string // segment = anchor epoch
 }
 
+export type OpenAppInput = {
+  frame: PreOpenAppFrameRef
+  ciphertext: Uint8Array
+  expectedAAD?: Uint8Array
+}
+export type OpenAppResult =
+  | { kind: 'opened'; record: PendingAppFrame }
+  | { kind: 'refused'; frame: PreOpenAppFrameRef; reason: 'malformed-plaintext'; keyConsumed: true }
+  | {
+      kind: 'refused'
+      frame: PreOpenAppFrameRef
+      reason: 'invalid-ciphertext' | 'wrong-aad' | 'duplicate' | 'invalid-position'
+      keyConsumed: false
+    }
+  | {
+      kind: 'refused'
+      frame: PreOpenAppFrameRef
+      reason: 'past-epoch'
+      keyConsumed: false
+      frameEpoch: number
+      handleEpoch: number
+    }
+  | {
+      kind: 'held'
+      frame: PreOpenAppFrameRef
+      reason: 'future-epoch'
+      frameEpoch: number
+      handleEpoch: number
+    }
+  | { kind: 'held'; frame: PreOpenAppFrameRef; reason: 'unsupported-version' }
+export type PendingAppFrames = {
+  list(): Promise<Array<PendingAppFrame>>
+  complete(id: string): Promise<void>
+}
+export const MAX_OPEN_BATCH_FRAMES = 64
+export const RECEIVE_SAVE_ATTEMPTS = 3
+
 export type AppFrameRef = PreOpenAppFrameRef & { procedure: string }
 // GroupCrypto.unwrap opts.frame changes to PreOpenAppFrameRef (r16 decision).
 

@@ -37,6 +37,7 @@ import type {
   GroupTransaction,
 } from '../persistence-types.js'
 import { clearGroupCondition } from '../safety-conditions.js'
+import { createRegistryAppOpen } from './app-open.js'
 import { type ColdEnvironment, restoreValidated, type ValidatedGroupState } from './cold.js'
 import type { createRegistryRuntime } from './runtime.js'
 import { RetainedTrustUnavailableError, readRetainedTrust } from './safety.js'
@@ -681,6 +682,13 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     }
   }
   return {
+    ...createRegistryAppOpen({
+      ...params,
+      isolated,
+      recordFor,
+      assertSafety,
+      assertWorkSafety,
+    }),
     get key() {
       return { ...owner.key }
     },

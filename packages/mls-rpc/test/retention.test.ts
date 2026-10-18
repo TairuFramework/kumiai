@@ -1,3 +1,4 @@
+import { encodeEventFrame } from '@kumiai/broadcast'
 import {
   commitKeyRotation,
   createGroup,
@@ -9,10 +10,10 @@ import {
 import { describe, expect, test } from 'vitest'
 
 import * as api from '../src/index.js'
-import type { PreOpenAppFrameRef } from '../src/persistence-types.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { registryOptions } from '../src/registry/validation.js'
 import { createRegistryFixture } from './fixtures/registry.js'
+import { restoreMemoryControlHandle } from './fixtures/sealed-memory-mls.js'
 
 test('epoch retention defaults to 4 and caps at 32', () => {
   expect(registryOptions({}).keyRetention?.retainKeysForEpochs).toBe(4)
@@ -96,7 +97,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
-    test.todo('non-default retention is honoured', async () => {
+    test('non-default retention is honoured', async () => {
       const groupID = `retention-window-${mode}`
       const fixture = await createRegistryFixture({
         mode,
@@ -105,16 +106,10 @@ for (const mode of ['real-mls', 'double'] as const) {
         options: { keyRetention: { retainKeysForEpochs: 2 } },
       })
       try {
-        const current = await fixture.registry.access(groupID)
-        // The batch port arrives with durable registry opening.
-        const access = current as typeof current & {
-          openBatch(
-            frames: Array<{ frame: PreOpenAppFrameRef; ciphertext: Uint8Array }>,
-          ): Promise<Array<{ kind: string; reason?: string }>>
-        }
+        const access = await fixture.registry.access(groupID)
         const sender = () => {
           return access.read((handle) =>
-            restoreGroup({
+            (mode === 'real-mls' ? restoreGroup : restoreMemoryControlHandle)({
               state: structuredClone(handle.state),
               credential: handle.credential,
               ledgerEntries: handle.ledgerTokens,
@@ -132,9 +127,7 @@ for (const mode of ['real-mls', 'double'] as const) {
               segment: Number(handle.epoch),
               position,
             },
-            ciphertext: await handle.encrypt(
-              new TextEncoder().encode(JSON.stringify({ procedure: 'posted', data: { position } })),
-            ),
+            ciphertext: await handle.encrypt(encodeEventFrame('posted', { position })),
           }
         }
         const advance = async () => {

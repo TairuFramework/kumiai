@@ -388,6 +388,8 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
           const reason = held(owner.key)
           return reason === null ? admission : { epoch: admission.epoch, admissible: false, reason }
         },
+        openBatch: access.openBatch,
+        pending: access.pending,
         read: access.read,
         readControl: access.readControl,
         mutate: access.mutate,
