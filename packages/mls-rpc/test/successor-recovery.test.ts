@@ -445,14 +445,7 @@ async function heldPeer(
       }),
     createPeer: async (current, options) => {
       const access = await fixture.registry.access(current.groupID)
-      const crypto = api.createGroupCrypto({
-        access: {
-          ...api.createRegistryHandleAccess({ access }),
-          open: async () => {
-            throw new Error('No application opens expected')
-          },
-        },
-      })
+      const crypto = api.createGroupCrypto({ access })
       const ports = fixture.device.groups.ports(current)
       return createGroupPeer({
         hub,

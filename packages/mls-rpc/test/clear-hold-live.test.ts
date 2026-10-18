@@ -1,5 +1,5 @@
 import { forkEventID, GroupSafetyHeldError, type SafetyHold } from '@kumiai/rpc'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import { createCheckpointService } from '../src/checkpoint.js'
 import { createGroupCrypto } from '../src/crypto.js'
@@ -8,7 +8,6 @@ import { registryConsumers } from '../src/registry/consumers.js'
 import { createRegistrySafetyLatch } from '../src/registry/runtime.js'
 import { registrySafety } from '../src/registry/safety.js'
 import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
-import { createRegistryHandleAccess } from '../src/registry-handle-access.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import { createRegistryFixture, type RegistryFixture } from './fixtures/registry.js'
 
@@ -63,14 +62,8 @@ for (const mode of ['real-mls', 'double'] as const) {
       test('clear before proof leaves every live lane closed', () =>
         run(async (f) => {
           const access = await f.registry.access(key.groupID)
-          const cryptoPort = createGroupCrypto({
-            access: {
-              ...createRegistryHandleAccess({ access }),
-              open: async () => {
-                throw new Error('Held opens must not reach storage')
-              },
-            },
-          })
+          const spy = vi.fn(access.openBatch)
+          const cryptoPort = createGroupCrypto({ access: { ...access, openBatch: spy } })
           const { sealed } = await cryptoPort.sealEntries(new Uint8Array([1]))
           const changed: Array<SafetyHold> = []
           consumers(f).onSafetyChanged(key, (reason) => changed.push(reason))
@@ -80,6 +73,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           const proof = f.holdProof(await fault.mutationID)
           try {
             await proof.started
+            const before = await f.inspectRows()
             expect(access.admission()).toMatchObject({ admissible: false, reason: 'fork-halted' })
             await expect(cryptoPort.openEntries(sealed)).rejects.toBeInstanceOf(
               GroupSafetyHeldError,
@@ -87,6 +81,9 @@ for (const mode of ['real-mls', 'double'] as const) {
             await expect(cryptoPort.unwrap(new Uint8Array())).rejects.toBeInstanceOf(
               GroupSafetyHeldError,
             )
+            await expect(cryptoPort.unwrapBatch([])).rejects.toBeInstanceOf(GroupSafetyHeldError)
+            expect(spy).not.toHaveBeenCalled()
+            expect(await f.inspectRows()).toEqual(before)
             expect(changed).toEqual(['fork-halted'])
           } finally {
             proof.release()

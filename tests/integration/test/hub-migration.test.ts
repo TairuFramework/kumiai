@@ -70,14 +70,7 @@ async function start(
     createPeer: async (current, options) => {
       created.push(options)
       const access = await fixture.registry.access(current.groupID)
-      const crypto = api.createGroupCrypto({
-        access: {
-          ...api.createRegistryHandleAccess({ access }),
-          open: async () => {
-            throw new Error('No app traffic expected')
-          },
-        },
-      })
+      const crypto = api.createGroupCrypto({ access })
       const ports = fixture.device.groups.ports(current)
       return createGroupPeer({
         ...options,
@@ -262,17 +255,35 @@ async function liveOwner(
       }),
     createPeer: async (current, options) => {
       const ports = fixture.device.groups.ports(current)
-      const opened = async () =>
-        api.createRegistryHandleAccess({ access: await fixture.registry.access(current.groupID) })
-      const access: api.HandleAccess = {
+      const opened = async () => {
+        const access = await fixture.registry.access(current.groupID)
+        expect(access.key).toEqual(current)
+        return access
+      }
+      const access: api.RegistryHandleAccess = {
+        get key() {
+          return current
+        },
+        get runtime(): never {
+          throw new TypeError('unused')
+        },
+        stateVersion: () => {
+          throw new TypeError('unused')
+        },
+        onRetire: () => {
+          throw new TypeError('unused')
+        },
         epoch: () => options.mls.sendAdmission().epoch,
         admission: () => options.mls.sendAdmission(),
         read: async (fn) => (await opened()).read(fn),
         readControl: async (fn) => (await opened()).readControl(fn),
         mutate: async (fn, write) => (await opened()).mutate(fn, write),
         replace: async (next, write, prepare) => (await opened()).replace(next, write, prepare),
-        open: async () => {
-          throw new Error('No app traffic expected')
+        adopt: async (next, expected, write) => (await opened()).adopt(next, expected, write),
+        openBatch: async (frames) => (await opened()).openBatch(frames),
+        pending: {
+          list: async () => (await opened()).pending.list(),
+          complete: async (id) => (await opened()).pending.complete(id),
         },
       }
       const restoreCandidate = async (bytes: Uint8Array) => {

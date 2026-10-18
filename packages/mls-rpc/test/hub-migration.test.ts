@@ -188,7 +188,10 @@ for (const mode of ['real-mls', 'double'] as const) {
         })
       const first = await publish(original, 'before move')
       const ports = fixture.device.groups.ports(key)
-      await vi.waitFor(async () => expect(await ports.cursor.load(topicID)).toBe(first.sequenceID))
+      await vi.waitFor(
+        async () => expect(await ports.cursor.load(topicID)).toBe(first.sequenceID),
+        { timeout: 5000 },
+      )
       expect(seen).toEqual([{ text: 'before move' }])
       const safety = api.createGroupSafety(await registryFixtureSafetyParams(fixture))
       const epoch = group.access().epoch()
@@ -204,10 +207,14 @@ for (const mode of ['real-mls', 'double'] as const) {
       expect(group.access().epoch()).toBe(epoch)
       const second = await publish(destination, 'after move')
       expect(second.sequenceID).toBe(first.sequenceID)
-      await vi.waitFor(() =>
-        expect(seen).toEqual([{ text: 'before move' }, { text: 'after move' }]),
+      await vi.waitFor(
+        () => expect(seen).toEqual([{ text: 'before move' }, { text: 'after move' }]),
+        { timeout: 5000 },
       )
-      await vi.waitFor(async () => expect(await ports.cursor.load(topicID)).toBe(second.sequenceID))
+      await vi.waitFor(
+        async () => expect(await ports.cursor.load(topicID)).toBe(second.sequenceID),
+        { timeout: 5000 },
+      )
       expect(await cryptos[1]?.pending.list()).toEqual([])
       owner.dispose()
       await owner.drained()

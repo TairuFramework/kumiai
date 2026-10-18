@@ -51,9 +51,8 @@ import {
   createPersistenceBuildSaver,
   createRecoveryContinuationPort,
   createRegistryGroupMLS,
-  createRegistryHandleAccess,
   createRegistryPeer,
-  type HandleAccess,
+  type RegistryHandleAccess,
   type RegistryPeer,
 } from '../../../../packages/mls-rpc/src/index.js'
 import {
@@ -165,11 +164,23 @@ export async function createCapturedRecoveryFixture(params: { timeoutMs?: number
           await hooks.beforePeer?.(current)
           created.push({ key: current, mls: options.mls })
           const ports = control(current.incarnation)
-          const opened = async () =>
-            createRegistryHandleAccess({ access: await fixture.registry.access(groupID) })
-          const access: HandleAccess = {
-            open: async () => {
-              throw new Error('Application opens are outside this control fixture')
+          const opened = async () => {
+            const access = await fixture.registry.access(current.groupID)
+            expect(access.key).toEqual(current)
+            return access
+          }
+          const access: RegistryHandleAccess = {
+            get key() {
+              return current
+            },
+            get runtime(): never {
+              throw new TypeError('unused')
+            },
+            stateVersion: () => {
+              throw new TypeError('unused')
+            },
+            onRetire: () => {
+              throw new TypeError('unused')
             },
             epoch: () => options.mls.sendAdmission().epoch,
             admission: () => options.mls.sendAdmission(),
@@ -177,6 +188,12 @@ export async function createCapturedRecoveryFixture(params: { timeoutMs?: number
             readControl: async (fn) => (await opened()).readControl(fn),
             mutate: async (fn, write) => (await opened()).mutate(fn, write),
             replace: async (next, write, prepare) => (await opened()).replace(next, write, prepare),
+            adopt: async (next, expected, write) => (await opened()).adopt(next, expected, write),
+            openBatch: async (frames) => (await opened()).openBatch(frames),
+            pending: {
+              list: async () => (await opened()).pending.list(),
+              complete: async (id) => (await opened()).pending.complete(id),
+            },
           }
           const restoreCandidate = async (bytes: Uint8Array) => {
             let saved: {

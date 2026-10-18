@@ -721,14 +721,7 @@ async function liveManualPeer(
     },
     createPeer: async (key, options) => {
       const access = await fixture.registry.access(key.groupID)
-      const crypto = api.createGroupCrypto({
-        access: {
-          ...api.createRegistryHandleAccess({ access }),
-          open: async () => {
-            throw new Error('No application opens expected')
-          },
-        },
-      })
+      const crypto = api.createGroupCrypto({ access })
       cryptos.push(crypto)
       const ports = fixture.device.groups.ports(key)
       return createGroupPeer({

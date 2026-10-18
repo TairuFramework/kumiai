@@ -27,7 +27,6 @@ import {
   createLedgerEntrySlot,
   createRecoveryContinuationPort,
   createRegistryGroupMLS,
-  createRegistryHandleAccess,
   createRegistryPeer,
   type RegistryPeerOptions,
   SpentSetCorruptError,
@@ -93,21 +92,12 @@ async function start(
     createPeer: async (current, options) => {
       created.push(options)
       observeMLS?.(options)
-      const access = createRegistryHandleAccess({
-        access: await f.registry.access(current.groupID),
-      })
+      const access = await f.registry.access(current.groupID)
       const ports = f.device.groups.ports(current)
       return createGroupPeer({
         ...options,
         hub,
-        crypto: createGroupCrypto({
-          access: {
-            ...access,
-            open: async () => {
-              throw new Error('No application frames expected')
-            },
-          },
-        }),
+        crypto: createGroupCrypto({ access }),
         control: ports.control,
         anchorStore: ports.anchor,
         appCursorStore: ports.cursor,

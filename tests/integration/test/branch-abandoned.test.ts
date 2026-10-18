@@ -15,9 +15,8 @@ import {
   createLedgerEntrySlot,
   createRecoveryContinuationPort,
   createRegistryGroupMLS,
-  createRegistryHandleAccess,
   createRegistryPeer,
-  type HandleAccess,
+  type RegistryHandleAccess,
   type RegistryPeer,
 } from '../../../packages/mls-rpc/src/index.js'
 import { decodeStoredValue } from '../../../packages/mls-rpc/src/persistence-codec.js'
@@ -148,17 +147,35 @@ async function startPeerOwner(
       }),
     async createPeer(key, options) {
       const ports = fixture.device.groups.ports(key)
-      const opened = async () =>
-        createRegistryHandleAccess({ access: await fixture.registry.access(key.groupID) })
-      const access: HandleAccess = {
+      const opened = async () => {
+        const access = await fixture.registry.access(key.groupID)
+        expect(access.key).toEqual(key)
+        return access
+      }
+      const access: RegistryHandleAccess = {
+        get key() {
+          return key
+        },
+        get runtime(): never {
+          throw new TypeError('unused')
+        },
+        stateVersion: () => {
+          throw new TypeError('unused')
+        },
+        onRetire: () => {
+          throw new TypeError('unused')
+        },
         epoch: () => options.mls.sendAdmission().epoch,
         admission: () => options.mls.sendAdmission(),
         read: async (fn) => (await opened()).read(fn),
         readControl: async (fn) => (await opened()).readControl(fn),
         mutate: async (fn, write) => (await opened()).mutate(fn, write),
         replace: async (next, write, prepare) => (await opened()).replace(next, write, prepare),
-        open: async () => {
-          throw new Error('Application opens are outside recovery')
+        adopt: async (next, expected, write) => (await opened()).adopt(next, expected, write),
+        openBatch: async (frames) => (await opened()).openBatch(frames),
+        pending: {
+          list: async () => (await opened()).pending.list(),
+          complete: async (id) => (await opened()).pending.complete(id),
         },
       }
       const restoreCandidate = async (bytes: Uint8Array) => {

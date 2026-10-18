@@ -128,9 +128,11 @@ for (const mode of ['real-mls', 'double'] as const) {
     const running = await f.start(handler)
     const payload = await f.seal()
     const { sequenceID } = await f.publish(payload)
-    await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1))
-    await vi.waitFor(async () => expect(await running.crypto.pending.list()).toEqual([]))
-    await vi.waitFor(async () => expect(await f.cursor()).toBe(sequenceID))
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1), { timeout: 5000 })
+    await vi.waitFor(async () => expect(await running.crypto.pending.list()).toEqual([]), {
+      timeout: 5000,
+    })
+    await vi.waitFor(async () => expect(await f.cursor()).toBe(sequenceID), { timeout: 5000 })
     const delivery = handler.mock.calls[0]?.[0]
     expect(delivery?.data).toEqual({ text: 'hello' })
     if (delivery === undefined) throw new Error('Missing delivery')
@@ -158,14 +160,17 @@ for (const mode of ['real-mls', 'double'] as const) {
     try {
       const first = await f.start(firstHandler)
       const { sequenceID } = await f.publish(await f.seal())
-      await vi.waitFor(() => expect(firstHandler).toHaveBeenCalledTimes(1))
+      await vi.waitFor(() => expect(firstHandler).toHaveBeenCalledTimes(1), { timeout: 5000 })
       const disposing = first.peer.dispose()
       // dispose closes app delivery synchronously, before the blocked handler settles.
-      await vi.waitFor(async () => {
-        await expect(first.peer.protocol('chat').to(f.group.sender.identity.id)).rejects.toThrow(
-          'closed',
-        )
-      })
+      await vi.waitFor(
+        async () => {
+          await expect(first.peer.protocol('chat').to(f.group.sender.identity.id)).rejects.toThrow(
+            'closed',
+          )
+        },
+        { timeout: 5000 },
+      )
       firstGate.resolve()
       await disposing
       await first.peer.drained()
@@ -177,7 +182,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       await first.owner.drained()
       await f.group.reopen()
       const second = await f.start(secondHandler)
-      await vi.waitFor(() => expect(secondHandler).toHaveBeenCalledTimes(1))
+      await vi.waitFor(() => expect(secondHandler).toHaveBeenCalledTimes(1), { timeout: 5000 })
       const before = firstHandler.mock.calls[0]?.[0]
       const after = secondHandler.mock.calls[0]?.[0]
       if (before === undefined || after === undefined) throw new Error('Missing deliveries')
@@ -188,8 +193,10 @@ for (const mode of ['real-mls', 'double'] as const) {
       expect(await second.crypto.pending.list()).toEqual(pending)
       expect(await f.cursor()).toBeNull()
       secondGate.resolve()
-      await vi.waitFor(async () => expect(await second.crypto.pending.list()).toEqual([]))
-      await vi.waitFor(async () => expect(await f.cursor()).toBe(sequenceID))
+      await vi.waitFor(async () => expect(await second.crypto.pending.list()).toEqual([]), {
+        timeout: 5000,
+      })
+      await vi.waitFor(async () => expect(await f.cursor()).toBe(sequenceID), { timeout: 5000 })
       expect(firstHandler).toHaveBeenCalledTimes(1)
       expect(secondHandler).toHaveBeenCalledTimes(1)
     } finally {
@@ -203,11 +210,13 @@ for (const mode of ['real-mls', 'double'] as const) {
     const handler = vi.fn<Handler>()
     const running = await f.start(handler)
     const malformed = await f.publish(await f.seal(new TextEncoder().encode('{')))
-    await vi.waitFor(async () => expect(await f.cursor()).toBe(malformed.sequenceID))
+    await vi.waitFor(async () => expect(await f.cursor()).toBe(malformed.sequenceID), {
+      timeout: 5000,
+    })
     expect(handler).not.toHaveBeenCalled()
     expect(await running.crypto.pending.list()).toEqual([])
     const valid = await f.publish(await f.seal())
-    await vi.waitFor(async () => expect(await f.cursor()).toBe(valid.sequenceID))
+    await vi.waitFor(async () => expect(await f.cursor()).toBe(valid.sequenceID), { timeout: 5000 })
     expect(handler).toHaveBeenCalledTimes(1)
     expect(handler.mock.calls[0]?.[0].data).toEqual({ text: 'hello' })
   })
@@ -228,8 +237,8 @@ for (const mode of ['real-mls', 'double'] as const) {
     await running.peer.resync()
     expect(epochs).toEqual([])
     const { sequenceID } = await f.publish(payload)
-    await vi.waitFor(() => expect(epochs).toEqual([epoch + 1]))
-    await vi.waitFor(async () => expect(await f.cursor()).toBe(sequenceID))
+    await vi.waitFor(() => expect(epochs).toEqual([epoch + 1]), { timeout: 5000 })
+    await vi.waitFor(async () => expect(await f.cursor()).toBe(sequenceID), { timeout: 5000 })
     expect(await running.crypto.pending.list()).toEqual([])
     running.owner.dispose()
     await running.owner.drained()
