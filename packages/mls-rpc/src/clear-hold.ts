@@ -167,7 +167,14 @@ export function createClearReportedHold<TTx extends GroupTransaction>(params: {
       )
       release?.()
     } catch (error) {
-      if (!(error instanceof ClearNoop)) throw error
+      if (error instanceof ClearNoop) return
+      if (release !== undefined) {
+        const lifetime = await capability.entry
+          .read(key.groupID, (reads) => reads.lifetime())
+          .catch(() => null)
+        if (lifetime?.mutationID === mutationID) release()
+      }
+      throw error
     }
   }
 }
