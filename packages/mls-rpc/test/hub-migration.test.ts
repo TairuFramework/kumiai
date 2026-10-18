@@ -759,7 +759,11 @@ async function movement(
   }))
   const active = await start(fixture, resolver)
   await vi.waitFor(() =>
-    expect(active.created.length > 0 || active.owner.status().kind === 'failed').toBe(true),
+    expect(
+      active.created.length > 0 ||
+        active.owner.status().kind === 'failed' ||
+        active.owner.status().kind === 'spent-set-corrupt',
+    ).toBe(true),
   )
   return { saved, active, resolver }
 }
@@ -790,7 +794,17 @@ for (const [label, apply] of movementRefusals) {
       expect((await fixture.manualRecovery().readManualRecovery(started.saved.id))?.stage).toBe(
         'authorised',
       )
-      expectRejoinOnly(active.created, started.saved.id)
+      if (label === 'spent-set-corrupt latch') {
+        expect(active.owner.status()).toMatchObject({
+          kind: 'spent-set-corrupt',
+          eventID: expect.any(String),
+        })
+        expect(active.created).toEqual([])
+        expect(active.owner.peer()).toBeNull()
+        expect(await fixture.manualRecovery().readManualRecovery(started.saved.id)).toEqual(
+          started.saved,
+        )
+      } else expectRejoinOnly(active.created, started.saved.id)
       expect((await fixture.device.groups.ports(key).control.load()).cursor).toEqual(before.cursor)
     } finally {
       active?.owner.dispose()
