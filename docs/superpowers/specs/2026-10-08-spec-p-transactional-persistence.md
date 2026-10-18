@@ -1,7 +1,7 @@
 # Spec P: transactional persistence — design
 
 Date: 2026-10-08
-Status: draft r25 (2026-10-17)
+Status: draft r26 (2026-10-18)
 Parent: [client host, messaging protocol and multi-device e2e](2026-10-08-client-messaging-e2e-design.md)
 Control baseline: [Spec P2a](2026-10-08-spec-p2a-crash-safe-control-design.md), superseded where amended here.
 
@@ -618,11 +618,29 @@ availability; publish defensive copies and contain listener failures. Simple acc
 
 **Application leases.** Scoped to incarnation/epoch/authenticator: reserve 16 generations, renew below 4, ceiling 500.
 Pre-reserve the first lease with state installation; refill via independent durable work or coalesce with a ready transition.
-Restore skips the committed ceiling before sealing. Failed/unpublished seals and unused skipped generations count.
+Restore needs no skip: reservations advance the committed state. Failed/unpublished seals and unused skipped generations count.
 Same-identity saves retain maximum ceiling/current progress; new epoch resets its ceiling; new incarnation inherits neither.
-Lapsed/removed/suspended/pending-proposal restore permits control/pending replay; defer actual burn until encryption is allowed.
-Every eligible seal discharges its burn obligation. At effective next generation 500, reject new durable acceptance, hold accepted entries
+
+(r26) A reservation advances the committed state.
+
+- A reservation is one transaction. Every acceptance first relinquishes the caller's input: it is send-denied irreversibly, and encryptions already admitted drain. Only then is the input validated, compared or encoded. Divergence found by revalidation is refused. It then snapshots the state at `g = max(own, senderHWM)` and advances the stored sending ratchet by encrypt-and-discard to `min(g + 16, 500)`, saving that.
+- Only after commit proof may the private in-memory send copy, built from the snapshot, use `[g, min(g + 16, 500))`.
+- Invariants: every copy's limit is at most the committed stored own generation, and no send-capable handle other than the copy holds state below it. Memory loss only wastes generations.
+- Every installing write reserves in its own transaction and hands its snapshot to the registry in memory.
+- Renewal below 4 is a new reservation. It extends the copy only when it starts at the copy's limit with unchanged send eligibility; otherwise the copy is replaced or refused.
+- The copy is dropped on owner loss, identity change, send-eligibility change, and a stored version above the one this registry accounted for.
+- Application send policy only narrows. `denyApplicationSend` is irreversible and inherited by derivation; `bindSendCeiling` binds once. Registry-backed access denies every handle it issues or accepts. Control-build permit clones are denied for every host. Simple access otherwise sends as before.
+
+Lapsed/removed/suspended/pending-proposal restore permits control/pending replay; defer the reservation until encryption is allowed. Seals use only committed reserved ranges; there is no per-seal burn.
+At effective next generation 500, reject new durable acceptance, hold accepted entries awaiting a fresh seal
 and schedule one rotation outside the gate. Lapse takes precedence. Directed replies/tunnels obey the same bound.
+
+(r26) Effective next generation is the send copy's own generation when one exists, otherwise the committed stored generation.
+
+- At 500 admission reports `rotation-required` (not recovery-only). GroupMLS applies this at every admission update. New durable acceptance refuses, and a frame sealed below 500 still hands off.
+- The registry peer runs one outside-gate scheduler per identity. Through a private internal enqueue (the public enqueue refuses the namespace), it enqueues a deterministic, non-revoking, library-built auto-rotation whose id lies in the reserved `kumiai/internal/` namespace.
+- Enqueue errors and rejected attempts back off with a cap. Outcomes in that namespace go to the registry, never to the host, across restart.
+- The hub CAS decides: a built loser settles `lost`, an unbuilt stale intent `rejected`.
 
 Registry hosts/doubles require generation retention/forward steps >=1000 through create/restore/Welcome/external join/derive/recovery; ordinary callers keep
 defaults. Non-admin rotation passes lifecycle checks, includes an update path, empty proposals/entries and unchanged roster/ledger; it keeps the app anchor unless
@@ -880,6 +898,7 @@ export type GroupStateRecord = GroupKey & { version: number } & (
       deleted: false; terminal: boolean; epoch: number; epochAuthenticator: Uint8Array
       state: Uint8Array | null; credential: { id: string; groupID: string }; ledger: Array<string>
       senderHWM: number
+      // r26: committed own application generation reserved for this record's epoch; mirrors the stored sending ratchet after a reservation
     }
 )
 ```
@@ -982,12 +1001,21 @@ export type GroupEpochRuntime = { snapshot(): GroupRuntimeSnapshot | null; onEpo
 export type SendAdmission =
   | { epoch: number; admissible: true }
   | { epoch: number; admissible: false; reason: 'lapsed' | 'rotation-required' | 'stranded' | 'fork-halted' | 'terminal' | 'backup-restored' | 'spent-set-corrupt' | 'recovery-unavailable' }
+export type SealedApp = { ciphertext: Uint8Array; epoch: number; generation: number }
+export type ReceiveInput = { ciphertext: Uint8Array; expectedAAD: Uint8Array } // callers with no expectation pass the frame's clear AAD
+export type ReceiveResult =
+  | { kind: 'opened'; payload: Uint8Array; senderDID?: string; aad: Uint8Array; frameEpoch: number; handleEpoch: number }
+  | { kind: 'refused'; reason: 'past-epoch' | 'future-epoch'; frameEpoch: number; handleEpoch: number }
+  | { kind: 'refused'; reason: 'log-intent' | 'consumed' | 'closed-epoch' | 'generation-bound' | 'capacity' | 'invalid'; error?: unknown }
+export class ApplicationLeaseUnavailableError extends Error {} // reason: 'cold' | 'exhausted' | 'deferred'
 export type RegistryHandleAccess = {
   key: GroupKey; runtime: GroupEpochRuntime
   epoch(): number; stateVersion(): number; admission(): SendAdmission
   read<TValue>(fn: (handle: GroupHandle) => TValue | Promise<TValue>): Promise<TValue>
-  seal<TValue>(fn: (handle: GroupHandle) => Promise<TValue>): Promise<TValue>
-  receive<TValue>(fn: (handle: GroupHandle) => Promise<{ result: TValue; accepted: number }>): Promise<TValue>
+  seal(plaintext: Uint8Array, opts: { aad: Uint8Array; intent: 'log' | 'ephemeral' }): Promise<SealedApp>
+  receive(frames: Array<ReceiveInput>): Promise<Array<ReceiveResult>> // <= 64 inputs, else RangeError
+  onRotationRequired(listener: (identity: EpochIdentity) => void): () => void
+  onAdmissionChanged(listener: () => void): () => void // any effective-admission flip, in either direction
   openBatch(frames: Array<OpenAppInput>): Promise<Array<OpenAppResult>>
   adopt(next: GroupHandle, expected: AdoptionExpected, write: AdoptionWrite): Promise<'installed' | 'noop' | 'moved'>
   mutate: HandleAccess['mutate']; replace: HandleAccess['replace']
@@ -1016,7 +1044,9 @@ export type PreOpenAppFrameRef = GroupKey & {
   id: string; protocol: string; topicID: string; segment: number; position: string // segment = anchor epoch
 }
 export type AppFrameRef = PreOpenAppFrameRef & { procedure: string }
-// GroupCrypto.unwrap opts.frame changes to PreOpenAppFrameRef (r16 decision). (r25) Phase 2.3a routes durable unwrap only; wrap and ephemeral unwrap use `mutate` until 2.3b. Until 2.3d, rpc keeps the r14 `AppFrameRef` and narrow `PendingAppFrame` and calls only singleton durable unwrap. Registry crypto binds GroupKey from its incarnation-bound access; a mismatching supplied key refuses as storage failure, never as a dead frame.
+// GroupCrypto.unwrap opts.frame changes to PreOpenAppFrameRef (r16 decision).
+// (r26) Wrap routes to `seal`; frame-less unwrap routes to `receive`, which refuses `log`-intent frames without consuming.
+// Until 2.3d, rpc keeps the r14 `AppFrameRef` and narrow `PendingAppFrame` and calls only singleton durable unwrap. Registry crypto binds GroupKey from its incarnation-bound access; a mismatching supplied key refuses as storage failure, never as a dead frame.
 export type OpenAppInput = { frame: PreOpenAppFrameRef; ciphertext: Uint8Array; expectedAAD?: Uint8Array }
 export type OpenAppResult =
   | { kind: 'opened'; record: PendingAppFrame }
@@ -1041,14 +1071,24 @@ export type DurableHandler<TContext, TTx extends GroupTransaction> =
 export type CommitKeyRotationResult = { commitMessage: Uint8Array; newGroup: GroupHandle; epoch: bigint }
 ```
 
+(r26) Live seal/receive operations join retirement's pre-commit drain; new live work, and any lease wait in progress, is refused from drain start. A reservation composes into a caller's transition: its advanced state is saved by that transition, and its hand-off is used after that transition's proof.
+
 (r25) Private commit construction requires an authoring permit, checked inside @kumiai/mls before the commit is constructed. Every handle an access implementation issues (initial, refreshed, adopted, restored) and every handle derived from one is permanently restricted (CommitAuthoringRefusedError). Only the durable control-build path grants a permit: on a handle restored from the journal's sourceState bytes, for exactly one commit, whose receipt must match the returned commit bytes and candidate; journal, candidate and slot are persisted before the bytes are handed to the network. Public external commits (recovery, rejoin) spend no own handshake generation and are outside the permit.
 
 ```ts
 export function commitKeyRotation(group: GroupHandle): Promise<CommitKeyRotationResult>
 ```
 
-`seal` consumes an already committed application lease. Durable attempt persistence belongs to its caller's transition. `receive` never writes for ephemeral traffic.
-`accepted` counts successful crypto opens, including subsequently malformed plaintext; it is an exact non-negative count. `openBatch` stages in input order and returns one mixed result per input only after atomic
+(r26) `seal` and `receive` are byte-level; no registry handle leaves the registry. Neither opens a provider transaction. Both refuse under a safety hold.
+
+- **Sends.** A cold, exhausted or deferred send rejects with ApplicationLeaseUnavailableError and schedules a reservation outside the call. A `log` seal first waits, bounded, for that reservation; the wait aborts at retirement start. `seal` refuses any non-admissible admission and reports the generation read inside the encryption's serialization.
+- **Cold receive.** A cold `receive` waits once, bounded, for its own scheduled refresh, aborting at retirement start. A cold ephemeral seal rejects at once.
+- **Receive handle.** `receive` uses a private send-denied decrypt-only handle, rebuilt when the committed receive projection changes. A version this registry committed installs its proven record as the base. A higher foreign version clears the base until a cold refresh, which is gated on receive lifecycle and safety, not on send admission.
+- **Per frame,** serialized per group across base rebuilds, `receive` compares the expected AAD before reading sender data. It refuses generations at or above 500, and refuses `(epoch, leaf, generation)` tuples already opened ephemerally in this process.
+- **Consumed set.** Its cap is members × 500 × retained epochs plus slack. Over the cap, the oldest non-current epoch is closed: its bucket is deleted and a closed marker is kept. A current epoch at the cap refuses instead.
+- The count of `opened` results is exact. One replay of an opened ephemeral frame after a restart is accepted. Durable opens are unchanged by the 500 refusal.
+
+`openBatch` stages in input order and returns one mixed result per input only after atomic
 state/pending/poison commit (r16 decision).
 
 (r25) openBatch accepts at most 64 inputs and rejects larger arrays with RangeError before any read.
@@ -1368,7 +1408,8 @@ export type GroupPeerHandlerParams<TProtocols extends Record<string, GroupProtoc
 
 (r25) RegistryHandleAccess has no `open`; `openBatch` replaces it.
 
-Registry `createGroupCrypto` routes wrap to lease-backed seal, ephemeral unwrap to receive, durable unwrap to a singleton openBatch. (r25) Phase 2.3a routes durable unwrap only; wrap and ephemeral unwrap use `mutate` until 2.3b. Until 2.3d, rpc keeps the r14 `AppFrameRef` and narrow `PendingAppFrame` and calls only singleton durable unwrap. Registry crypto binds GroupKey from its incarnation-bound access; a mismatching supplied key refuses as storage failure, never as a dead frame.
+(r26) Wrap routes to `seal`; frame-less unwrap routes to `receive`, which refuses `log`-intent frames without consuming.
+Registry `createGroupCrypto` routes durable unwrap to a singleton openBatch. Until 2.3d, rpc keeps the r14 `AppFrameRef` and narrow `PendingAppFrame` and calls only singleton durable unwrap. Registry crypto binds GroupKey from its incarnation-bound access; a mismatching supplied key refuses as storage failure, never as a dead frame.
 Singleton unwrap maps results to FrameEpochError (past/future), AppFrameStorageError (storage), InvalidAppEntryError (plaintext) or crypto refusal. `unwrapBatch` preserves per-input results; it never rejects valid siblings for crypto refusal.
 GroupMLS/PendingRecovery/GroupPeerMLSParams/OperationDeps use the named replacement port members above; GroupPeerParams adds GroupPeerHandlerParams.
 Registry-injected recovery methods read RegistryRecoverySource through recoveryAdoption without handle access.
@@ -1725,6 +1766,7 @@ export function createBufferedPeerHubView(params: {
   logger?: { warn(message: string, context?: Record<string, unknown>): void }
 }): MailboxHub & { dispose(): void }
 export type MLSEncryptorParams = { access: Pick<RegistryHandleAccess, 'seal' | 'receive' | 'runtime'>; peerDID: string; role: 'dialer' | 'listener' }
+// r26: byte-level seal/receive; empty MLS AAD (kubun wire format); membership from committed runtime snapshots
 export class MLSEncryptor implements Encryptor {
   constructor(params: MLSEncryptorParams)
   encrypt(plaintext: Uint8Array): Promise<Uint8Array>
@@ -1842,7 +1884,7 @@ Phase 6 kills children. After means proven transaction commit, never callback co
 | Fork-halt committed before notification, or recovery switch/Welcome committed before peer restart/consume | halt/event survive without automatic recovery; a completed switch isolates/tombstones records and replays failures; device hub-cleanup survives retirement and resumes without joinRef (r16 decision) |
 | COMMIT rejected while backend unfinished | raw negative reads release nothing; barrier selects final rows and one hook queue, or none with factory fail-stop on ownership conflict |
 | Ownership conflict found by proof (r17 decision) | factory fail-stops before any hook or new transaction; restart replays durable markers, events and obligations; no hook runs for the conflicted mutation |
-| Application lease committed, before seal | restart skips its entire reserved range; no sender generation repeats |
+| Application lease committed, before seal | restart restores the advanced committed state; the lost send copy's range is wasted, with no additional skip or sender generation reuse |
 | Welcome transport accepted, before obligation deletion | delivery repeats at least once; atomic ordinary burn/receipt or last-resort spent admission prevents reinstall |
 | Restore declaration committed, before package invalidation or group failure transactions finish | startup remains held after reconstruction. Resume invalidation/holds/events before resync or any send (r15 decision). |
 
@@ -1927,11 +1969,11 @@ Keep each meaningful existing case. Replace cases tied solely to removed mechani
 | | own recognition and recovery progress | Re-encoded/blob-changed own no-entry commit recognises with the helper. Named entries use the receiver resolver/verification predicate. Failed copies preserve unknown acceptance. Search results never block authenticated recapture. Provider errors retain their identity. |
 | | strand signals / detection limits | Ahead/gap/own-unmerged retain claimed confidence. Missing/identical applied history proves no fork. Current victim-spoof rejection still requires own-signature validation. Host comparisons of exposed authenticators remain available. |
 | | retained recovery trust (r16 decision) | State bytes unreadable, trust intact: request/authenticate/restore without GroupHandle and automatic resync. Unreadable envelope: recovery-unavailable, no automatic reconstruction, manual fresh invitation or admitted successor. Decoded missing/malformed spent data: spent-set-corrupt. Every installing transaction refreshes trust atomically. |
-| | stranded automatic resync | Retention gap/lost MLS state with no safety hold uses retained trust and authenticated GroupInfo. Remove+ExternalInit yields one matching fresh leaf, generation 0 and n+1 after restart. Unknown commit-frame/header versions skip with upgrade-required diagnostics, never new durable holds. Existing persisted unsupported-version holds remain immutable; legacy control-record holds retain their policy. |
+| | stranded automatic resync | Retention gap/lost MLS state with no safety hold uses retained trust and authenticated GroupInfo. Remove+ExternalInit yields one matching fresh leaf and n+1 after restart; installation pre-reserves its application range. Unknown commit-frame/header versions skip with upgrade-required diagnostics, never new durable holds. Existing persisted unsupported-version holds remain immutable; legacy control-record holds retain their policy. |
 | | stale GroupInfo (r19 decision) | Recapture signed applied state: later epoch with X's exact leaf means accepted -> settled. Adopt X only with known position/current-epoch bound confirmation; otherwise atomically preserve accepted-unadoptable X/floor/ledger and build fresh Y removing X's sole identity leaf. Delayed advanced reply, pruned occurrence and settled restart succeed. Wrong leaf/request/group refuse. Later leaf absent includes applied-then-removed and obeys admission/removal policy. Mutation-check leaf matching in Task 14b. |
 | | capture-head retry (r19 decision) | Search mismatch/gap/junk never strands X or decides discard. Fresh recapture keys remain separate. Equal epoch/authenticator means responder prefix lacks X; retry SAME bytes at authenticated head even if lower/inflated previously. Ordinary epoch floor refuses regression and survives settlement/discard/restart. Only bound forkRecovery grants its temporary effective-floor exception. Leaf present means accepted -> settled, adopting X only with bound confirmation; otherwise fresh leaf-replacing Y. Blob-derived negatives remain advisory through wire/replay/cache. Same-epoch lost-state recapture makes zero extra builds. |
 | | manual recovery | no automatic action while halted; chosen target/authorisation reopens across restart, validated resync switches once, refused attempt preserves halt. Already admitted successor permits source retirement without copying state or coordinating routing. |
-| registry / 2 | cold access/leases | concurrent cold load validated before access. Lease reserve/restart/failed seal never reuse generation. Lapsed/removed/suspended/proposals defer burn without blocking control. |
+| registry / 2 | cold access/leases | concurrent cold load validated before access. Lease reserve/restart/failed seal never reuse generation. Lapsed/removed/suspended/proposals defer reservation without blocking control. |
 | | rotation/retention | 500 bound, rejection/hold/resume, non-admin empty rotation, 1000 retention/window through every constructor/derive/recovery. Real/double forward-window parity. Ordinary adoption preserves sender/receive history, no evicted epoch resurrection. |
 | handlers / 2 | registration/adapters (r16/r19 decision) | Public handler policy union + completion runner, legacy functions and mixed-policy refusal. Phase 2.2d supplies control-only registry access/GroupMLS/coordinator/continuation with incarnation/version guards. Full real registry crypto/open/leases and mixed-result application batch remain 2.3. Concrete TPorts and doubles never fabricate a lost-state handle. |
 | | all metadata paths | original authenticated epoch/incarnation on durable/live/anycast/directed kinds. Spoofed wire/header metadata loses. |
@@ -1960,7 +2002,7 @@ Run affected package/integration tests and `pnpm turbo run test:types`. Provider
 
 ## History
 
-Historical entries describe superseded contracts. The r24 decisions and interfaces above govern conflicts.
+Historical entries describe superseded contracts. The current decisions and interfaces above govern conflicts.
 
 - r1: adoptable journal, proof versus acknowledgement, application leases and coordinated status.
 - r2: current-record CAS, retention/rotation, publication positions and mutation markers.
@@ -2008,3 +2050,4 @@ ambiguity/external seams and automatic non-fork stranded resync remain.
   A3 treats pending fork intents as active rejoin and atomically abandons them on manual authorisation. A4 discloses cleartext comparisonEpoch.
   Manual resync remains the exit after evidence expiry or unavailable coverage. Phase 2.3 application crypto and phase 3 providers stay excluded here.
 - r25 (2026-10-17, plan 2.3a): locked epochs, duplicate/invalid-position results; poison only for authenticated malformed plaintext; envelope validation; durable-only registry routing; RegistryHandleAccess drops open; opaque positions with one comparator and occurrence matcher; exact CAS for every MLS state write with app metadata off the version clock; journal control-compatibility for own-commit adoption and build retry; private commit authoring only under a control-build permit; durable departing anchors preserved by every anchor-slot write; 64-frame bound; retained past epochs open; commit progress independent of app work; configurable epoch retention (default 4, cap 32); opened-record drain deferred to 2.3c.
+- r26 (2026-10-18, plan 2.3b): reservation advances committed state with ownership transfer (no restore skip); installation pre-reserve; send copy limited by committed generation; narrowing send policy; byte-level seal/receive; serialized private receive and ephemeral consumed set; retirement drains live work; effective-next rotation-required admission, handoff tolerance, internal auto-rotation; MLSEncryptor lift.
