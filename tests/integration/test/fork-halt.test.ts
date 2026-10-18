@@ -27,8 +27,8 @@ afterEach(async () => {
   vi.useRealTimers()
 })
 
-async function setup() {
-  const fixture = await createForkFixture()
+async function setup(recovery?: Parameters<typeof createForkFixture>[0]) {
+  const fixture = await createForkFixture(recovery)
   fixtures.push(fixture)
   return fixture
 }
@@ -365,7 +365,7 @@ test('certified losing replay remains non-fork with real competing commits', asy
 })
 
 test('ordinary gap recovery still heals and confirms with real MLS', async () => {
-  const f = await setup()
+  const f = await setup({ timeoutMs: 1500, deadlineMs: 15_000, getDelayMs: () => 0 })
   const survivor = await f.survivor()
   const initial = await commitKeyRotation(await bareTestHandle(f.real.committer.handle))
   await survivor.access.replace(initial.newGroup)
@@ -382,12 +382,15 @@ test('ordinary gap recovery still heals and confirms with real MLS', async () =>
   f.hub.trim(f.topic, retained.sequenceID)
   const recoveredEpoch = Number(afterGap.newGroup.epoch) + 1
   await f.restart()
-  await vi.waitFor(() => expect(f.member.access.epoch()).toBe(survivor.access.epoch()))
-  expect(f.member.access.epoch()).toBe(recoveredEpoch)
-  expect((await f.member.control.load()).forkHalt).toBeNull()
-  expect(f.member.controlWalk.safetyHold()).toBeNull()
-  await vi.waitFor(() =>
-    expect(f.onRecovery).toHaveBeenCalledWith(expect.objectContaining({ phase: 'succeeded' })),
+  await vi.waitFor(
+    async () => {
+      expect(f.member.access.epoch()).toBe(survivor.access.epoch())
+      expect(f.member.access.epoch()).toBe(recoveredEpoch)
+      expect((await f.member.control.load()).forkHalt).toBeNull()
+      expect(f.member.controlWalk.safetyHold()).toBeNull()
+      expect(f.onRecovery).toHaveBeenCalledWith(expect.objectContaining({ phase: 'succeeded' }))
+    },
+    { timeout: 15_000 },
   )
   expect(await f.safety().events(f.key)).toEqual([])
   await expect(

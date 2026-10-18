@@ -67,7 +67,12 @@ async function runCase(kind: Case, offset: number) {
   await vi.waitFor(() => expect(fetch).toHaveBeenCalled())
   await bob.peer.replay()
   if (kind === 'future') {
-    await vi.waitFor(() => expect(recoveries.some((event) => event.phase === 'failed')).toBe(true))
+    await vi.waitFor(
+      () => expect(recoveries.some((event) => event.phase === 'failed')).toBe(true),
+      {
+        timeout: 10_000,
+      },
+    )
   }
   const fetchesBeforeWake = fetch.mock.calls.length
   await hub.publish({ senderDID: 'zoe', topicID, payload: new Uint8Array([0]) })

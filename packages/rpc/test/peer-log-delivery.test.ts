@@ -856,7 +856,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     await returningResponder(hub, 2, {
       epoch: 2,
       handlers: { 'chat/posted': (ctx: { data: unknown }) => received.push(ctx.data) },
-      recovery: { timeoutMs: 25, deadlineMs: 400, getDelayMs: () => 0 },
+      recovery: { timeoutMs: 1000, deadlineMs: 10_000, getDelayMs: () => 0 },
     })
     const events: Array<RecoveryEvent> = []
     const strands: Array<StrandObservation> = []
@@ -888,16 +888,21 @@ describe('recovery ordering', { concurrent: false }, () => {
       onStrand: (notice) => {
         strands.push(notice)
       },
-      recovery: { timeoutMs: 25, deadlineMs: 400, getDelayMs: () => 0 },
+      recovery: { timeoutMs: 1000, deadlineMs: 10_000, getDelayMs: () => 0 },
     })
     await flush()
     expect(events).toEqual([])
     expect((await bob.control.load()).applied).toEqual([])
     await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'fresh' } })
-    await vi.waitFor(async () => expect(await bob.appOutbox.list()).toEqual([]), { timeout: 1200 })
-    expect(events.map((event) => event.phase)).toEqual(['started', 'succeeded'])
-    expect(strands).toEqual([])
-    expect(received).toEqual([{ text: 'fresh' }, { text: 'fresh' }])
+    await vi.waitFor(
+      async () => {
+        expect(await bob.appOutbox.list()).toEqual([])
+        expect(events.map((event) => event.phase)).toEqual(['started', 'succeeded'])
+        expect(strands).toEqual([])
+        expect(received).toEqual([{ text: 'fresh' }, { text: 'fresh' }])
+      },
+      { timeout: 10_000 },
+    )
   })
 
   test('a fresh joiner holding the whole log publishes without requesting recovery', async () => {

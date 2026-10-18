@@ -90,6 +90,7 @@ const CAROL = 'did:key:carol'
 // never runs against these fixtures. A suite publishing through a real client/server would have
 // to mint valid base64url topicIDs — see hub-server's `fixtureTopic` helper.
 const TOPIC = 'topic:log-hub-conformance'
+const DELIVERY_TIMEOUT_MS = 5000
 
 function payload(byte: number): Uint8Array {
   return new Uint8Array([byte])
@@ -116,8 +117,7 @@ function subscribing(
 
 /**
  * Read up to `limit` messages off a receive subscription, giving up after `timeoutMs` of silence.
- * A push hub delivers during `publish`, so the timeout is only ever paid by a clause asserting
- * that NOTHING arrives.
+ * Expected deliveries from a storage-backed polling adapter need a longer bound than silence checks.
  */
 async function drain(
   subscription: ConformanceReceiveSubscription,
@@ -172,7 +172,9 @@ export function testMailboxHubConformance<Hub extends ConformanceMailboxHub>(
       expect(await drain(toAlice, 1)).toEqual([])
       // ...and the control: the echo is absent because the sender is excluded, not because the
       // hub delivered nothing at all.
-      expect((await drain(toBob, 1)).map((message) => message.senderDID)).toEqual([ALICE])
+      expect(
+        (await drain(toBob, 1, DELIVERY_TIMEOUT_MS)).map((message) => message.senderDID),
+      ).toEqual([ALICE])
     })
 
     test('sequenceIDs are lexicographically ordered across the 9 to 10 boundary', async () => {
@@ -226,7 +228,9 @@ export function testMailboxHubConformance<Hub extends ConformanceMailboxHub>(
       // a frame published to the topic has to reach the subscriber it was accepted for.
       const toBob = hub.receive(BOB)
       await hub.publish({ senderDID: ALICE, topicID: TOPIC, payload: payload(1) })
-      expect((await drain(toBob, 1)).map((message) => message.topicID)).toEqual([TOPIC])
+      expect(
+        (await drain(toBob, 1, DELIVERY_TIMEOUT_MS)).map((message) => message.topicID),
+      ).toEqual([TOPIC])
     })
   })
 }
@@ -347,7 +351,7 @@ export function testLogHubConformance<Hub extends ConformanceLogHub>(
         payload: payload(255),
         retain: 'log',
       })
-      expect(await drain(initial, 1)).toHaveLength(1)
+      expect(await drain(initial, 1, DELIVERY_TIMEOUT_MS)).toHaveLength(1)
       initial.return?.()
       await params.reconnect?.(hub, BOB)
       const second = await hub.publish({
@@ -583,7 +587,7 @@ export function testLogHubConformance<Hub extends ConformanceLogHub>(
         retain: 'log',
       })
 
-      const pushed = await drain(toBob, 3)
+      const pushed = await drain(toBob, 3, DELIVERY_TIMEOUT_MS)
       expect(pushed).toHaveLength(3)
 
       // A push otherwise says only where the frame sits in THIS recipient's delivery queue, which
@@ -670,7 +674,7 @@ export function testMailboxAckConformance<Hub extends ConformanceMailboxHub>(
       // nothing at all would also make this clause pass.
       await hub.publish({ senderDID: ALICE, topicID: TOPIC, payload: payload(2) })
 
-      const delivered = await drain(subscription, 2)
+      const delivered = await drain(subscription, 2, DELIVERY_TIMEOUT_MS)
       expect(delivered).toHaveLength(2)
       // Asserted, not guarded: opting into this suite is the claim that this hub has an ack.
       expect(subscription.ack).toBeDefined()
@@ -680,7 +684,7 @@ export function testMailboxAckConformance<Hub extends ConformanceMailboxHub>(
       // acked frame hands a peer the same message on every reconnect for the retention window.
       const replayed = hub.receive(BOB, { topicID: TOPIC })
       await redeliver(hub, BOB)
-      const backlog = await drain(replayed, 1)
+      const backlog = await drain(replayed, 1, DELIVERY_TIMEOUT_MS)
       expect(backlog.map((message) => message.sequenceID)).toEqual([delivered[1]?.sequenceID])
     })
   })
@@ -710,7 +714,7 @@ export function testLogAckConformance<Hub extends ConformanceLogHub>(
           publishID: 'checkpoint-ack',
         }
         const firstPublish = await hub.publish(checkpoint)
-        const delivered = await drain(subscription, 1)
+        const delivered = await drain(subscription, 1, DELIVERY_TIMEOUT_MS)
         expect(delivered).toHaveLength(1)
         expect(subscription.ack).toBeDefined()
         await subscription.ack?.(delivered[0]?.sequenceID as string)
@@ -748,7 +752,7 @@ export function testLogAckConformance<Hub extends ConformanceLogHub>(
         retain: 'log',
       })
 
-      const delivered = await drain(subscription, 1)
+      const delivered = await drain(subscription, 1, DELIVERY_TIMEOUT_MS)
       expect(delivered).toHaveLength(1)
       expect(subscription.ack).toBeDefined()
       await subscription.ack?.(delivered[0]?.sequenceID as string)

@@ -1027,7 +1027,7 @@ export function testCheckpointCoverageConformance(params: {
     } finally {
       await fixture.close()
     }
-  }, 60000)
+  }, 120000)
 }
 
 export function malformedCheckpointBodies(

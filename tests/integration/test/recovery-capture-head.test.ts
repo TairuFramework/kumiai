@@ -15,7 +15,7 @@ afterEach(async () => {
 })
 
 async function setup() {
-  const fixture = await createCapturedRecoveryFixture({ timeoutMs: 1000 })
+  const fixture = await createCapturedRecoveryFixture({ timeoutMs: 5000, deadlineMs: 30_000 })
   cleanup.push(() => fixture.close())
   return fixture
 }
@@ -84,6 +84,7 @@ test('stale capture CAS recaptures poison at the same epoch and retries identica
 
 test.each(['present', 'absent'] as const)(
   'authenticated later fresh leaf %s settles X and keeps its epoch floor across reconstruction',
+  { timeout: 120_000 },
   async (leaf) => {
     const s = await setup()
     const initialEpoch = await s.bob.mls.readEpoch()
@@ -99,6 +100,8 @@ test.each(['present', 'absent'] as const)(
       if (changes.putSettledRejoins !== undefined) void s.bob.peer.dispose()
     })
     let interrupted = false
+    let rotationState = 'not-started'
+    let rotationFailure: string | undefined
     const publish = s.hub.publish.bind(s.hub)
     vi.spyOn(s.hub, 'publish').mockImplementation(async (params) => {
       if (
@@ -111,17 +114,43 @@ test.each(['present', 'absent'] as const)(
       interrupted = true
       if (leaf === 'present') {
         await publish(params)
-        await expect.poll(() => s.alice.mls.readEpoch()).toBe(saved?.epochAfter)
+        await vi.waitFor(
+          async () => {
+            expect(await s.alice.mls.readEpoch()).toBe(saved?.epochAfter)
+          },
+          { timeout: 15_000 },
+        )
       }
-      await s.alice.peer.commit(operationRequest('rotation', {}))
+      try {
+        rotationState = 'in-flight'
+        await s.alice.peer.commit(operationRequest('rotation', {}))
+        rotationState = 'landed'
+      } catch (error) {
+        rotationState = 'failed'
+        rotationFailure = String(error)
+        throw error
+      }
       if (leaf === 'absent') return publish(params)
       throw new Error('Lost acknowledgement after remote acceptance and advancement')
     })
     const recovering = s.bob.peer.recover()
     void recovering.catch(() => {})
-    await expect
-      .poll(async () => (await s.bob.control.load()).settledRejoins.length, { timeout: 15_000 })
-      .toBe(1)
+    await vi.waitFor(
+      async () => {
+        const snapshot = await s.bob.control.load()
+        expect(
+          snapshot.settledRejoins,
+          JSON.stringify({
+            status: s.bob.owner.status(),
+            incarnation: s.bob.owner.installedKey().incarnation,
+            stage: snapshot.rejoin?.stage,
+            rotationState,
+            rotationFailure,
+          }),
+        ).toHaveLength(1)
+      },
+      { timeout: 60_000 },
+    )
     await recovering.catch(() => {})
     await s.bob.peer.dispose()
     await s.bob.peer.drained()

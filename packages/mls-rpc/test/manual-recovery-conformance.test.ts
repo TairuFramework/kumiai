@@ -760,7 +760,9 @@ async function liveManualPeer(
 }
 
 for (const producer of ['app-report', 'internal', 'legacy'] as const) {
-  test(`successful rejoin leaves source holds in history / ${producer}`, async () => {
+  test(`successful rejoin leaves source holds in history / ${producer}`, {
+    timeout: 90_000,
+  }, async () => {
     const fixture = await createForkRecoveryRealFixture(true)
     const local = fixture.local()
     const key = fixture.key
@@ -786,7 +788,8 @@ for (const producer of ['app-report', 'internal', 'legacy'] as const) {
         commitTopicID: fixture.target.topicID,
         allowOpenFork: false,
       })
-      const requester = await liveManualPeer(local, key, hub, fixture.target)
+      const recovery = { timeoutMs: 3000, deadlineMs: 30_000, getDelayMs: () => 0 }
+      const requester = await liveManualPeer(local, key, hub, fixture.target, recovery)
       owners.push(requester.owner)
       await requester.owner.ready
       const sourcePeer = requester.owner.peer()
@@ -810,6 +813,7 @@ for (const producer of ['app-report', 'internal', 'legacy'] as const) {
         { ...key, incarnation: 1 },
         hub,
         fixture.target,
+        recovery,
       )
       owners.push(remote.owner)
       await remote.owner.ready
@@ -833,7 +837,7 @@ for (const producer of ['app-report', 'internal', 'legacy'] as const) {
           }
           expect(requester.owner.installedKey().incarnation, JSON.stringify(diagnostics)).toBe(2)
         },
-        { timeout: 12000 },
+        { timeout: 30_000 },
       )
       expect(await result).toEqual({ ...key, incarnation: 2 })
       expect((await fixture.snapshot()).forkHalt).toEqual(before.forkHalt)

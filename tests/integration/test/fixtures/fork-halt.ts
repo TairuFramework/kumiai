@@ -79,7 +79,9 @@ import * as epochModule from '../../../../packages/rpc/src/peer-epoch.js'
 import { FakeHub } from '../../../../packages/rpc/test/fixtures/fake-hub.js'
 import { chat, type Protocols } from '../app-lane-e2e.js'
 
-export async function createCapturedRecoveryFixture(params: { timeoutMs?: number } = {}) {
+export async function createCapturedRecoveryFixture(
+  params: { timeoutMs?: number; deadlineMs?: number } = {},
+) {
   const real = await createRealGroup(2, `captured-recovery-${crypto.randomUUID()}`)
   const admin = real.members[0]
   if (admin === undefined) throw new Error('Missing recovery administrator')
@@ -285,7 +287,7 @@ export async function createCapturedRecoveryFixture(params: { timeoutMs?: number
             },
             recovery: {
               timeoutMs: params.timeoutMs ?? 100,
-              deadlineMs: 10_000,
+              deadlineMs: params.deadlineMs ?? 10_000,
               getDelayMs: () => 0,
             },
           }).peer
@@ -372,6 +374,7 @@ export async function makeCheckpointPeer(
     onStrand?: (event: StrandObservation) => void | Promise<void>
     onRecovery?: (event: RecoveryEvent) => void | Promise<void>
   } = {},
+  recovery = { timeoutMs: 150, deadlineMs: 3000, getDelayMs: () => 0 },
 ) {
   const groups = registry.device.groups
   const key = { groupID: real.handle.groupID, incarnation: 1 }
@@ -495,7 +498,7 @@ export async function makeCheckpointPeer(
     handlers: {
       chat: { 'chat/changed': () => {}, 'chat/posted': () => {}, 'chat/double': () => ({}) },
     },
-    recovery: { timeoutMs: 150, deadlineMs: 3000, getDelayMs: () => 0 },
+    recovery,
   })
   return {
     peer,
@@ -513,7 +516,7 @@ export async function makeCheckpointPeer(
 export type ForkPeer = Awaited<ReturnType<typeof makeCheckpointPeer>>
 export type ForkFixture = Awaited<ReturnType<typeof createForkFixture>>
 
-export async function createForkFixture() {
+export async function createForkFixture(recovery?: Parameters<typeof makeCheckpointPeer>[4]) {
   const groupID = `fork-halt-${crypto.randomUUID()}`
   const real = await createRealGroup(1, groupID)
   const receiver = real.members[0]
@@ -550,11 +553,13 @@ export async function createForkFixture() {
   const onSafetyEvent = vi.fn<(event: GroupSafetyEvent) => void | Promise<void>>()
   const onStrand = vi.fn<(event: StrandObservation) => void>()
   const onRecovery = vi.fn<(event: RecoveryEvent) => void>()
-  let member = await makeCheckpointPeer(registry, receiver, hub, {
-    onSafetyEvent,
-    onStrand,
-    onRecovery,
-  })
+  let member = await makeCheckpointPeer(
+    registry,
+    receiver,
+    hub,
+    { onSafetyEvent, onStrand, onRecovery },
+    recovery,
+  )
   const peers = [member]
   const extraRegistries: Array<RegistryFixture> = []
   await member.peer.replay()
@@ -738,11 +743,13 @@ export async function createForkFixture() {
     ) {
       await fixture.stopPeer()
       registry = await registry.reopen()
-      member = await makeCheckpointPeer(registry, receiver, hub, {
-        onSafetyEvent,
-        onStrand,
-        onRecovery,
-      })
+      member = await makeCheckpointPeer(
+        registry,
+        receiver,
+        hub,
+        { onSafetyEvent, onStrand, onRecovery },
+        recovery,
+      )
       peers.push(member)
       options.beforeReady?.(fixture)
       await member.peer.outcomes()
@@ -757,7 +764,7 @@ export async function createForkFixture() {
       })
       extraRegistries.push(other)
       await install(other, real.committer.handle)
-      const survivor = await makeCheckpointPeer(other, real.committer, hub)
+      const survivor = await makeCheckpointPeer(other, real.committer, hub, {}, recovery)
       peers.push(survivor)
       await survivor.peer.replay()
       return survivor

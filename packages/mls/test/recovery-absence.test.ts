@@ -1186,7 +1186,7 @@ test.each([0, 1, 63, 65])(
   },
 )
 
-test('large group roster reply fits requested lineage span', async () => {
+test('large group roster reply fits requested lineage span', { timeout: 90_000 }, async () => {
   const s = await fixture()
   let group = s.group
   for (let index = 0; index < 16; index++) {

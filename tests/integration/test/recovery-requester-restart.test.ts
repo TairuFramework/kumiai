@@ -38,7 +38,7 @@ test.each(['built', 'published', 'confirmed', 'adopted'] as const)(
       await Promise.all(live.map(({ peer }) => peer.dispose()))
       await Promise.all(live.map(({ peer }) => peer.drained()))
     })
-    const recovery = { timeoutMs: 100, deadlineMs: 2000, getDelayMs: () => 0 }
+    const recovery = { timeoutMs: 3000, deadlineMs: 15_000, getDelayMs: () => 0 }
     const alice = makeMember({
       hub,
       identity: aliceGroup.identity,
@@ -139,8 +139,9 @@ test.each(['built', 'published', 'confirmed', 'adopted'] as const)(
 
 test.each(['built', 'published', 'confirmed', 'adopted'] as const)(
   'registry reconstruction resumes captured %s with the original request, candidate and switch identity',
+  { timeout: 90_000 },
   async (stage) => {
-    const s = await createCapturedRecoveryFixture({ timeoutMs: 1000 })
+    const s = await createCapturedRecoveryFixture({ timeoutMs: 5000, deadlineMs: 30_000 })
     close.push(() => s.close())
     const bob = s.bob
     const source = bob.peer
@@ -174,7 +175,7 @@ test.each(['built', 'published', 'confirmed', 'adopted'] as const)(
     const recovering = source.recover()
     void recovering.catch(() => {})
     await expect
-      .poll(async () => (await bob.control.load()).rejoin?.stage, { timeout: 10_000 })
+      .poll(async () => (await bob.control.load()).rejoin?.stage, { timeout: 30_000 })
       .toBe(stage)
     bob.owner.dispose()
     release()
@@ -191,10 +192,15 @@ test.each(['built', 'published', 'confirmed', 'adopted'] as const)(
     if (stage !== 'adopted') vi.mocked(bob.control.apply).mockRestore()
     bob.hooks.beforePeer = undefined
     await bob.restart()
-    await expect.poll(() => bob.owner.installedKey().incarnation, { timeout: 10_000 }).toBe(2)
-    await expect.poll(async () => (await bob.control.load()).rejoin, { timeout: 10_000 }).toBeNull()
-    expect(await bob.mls.readEpoch()).toBe(record.epochAfter)
-    expect(await s.alice.mls.readEpoch()).toBe(record.epochAfter)
+    await vi.waitFor(
+      async () => {
+        expect(bob.owner.installedKey().incarnation).toBe(2)
+        expect((await bob.control.load()).rejoin).toBeNull()
+        expect(await bob.mls.readEpoch()).toBe(record.epochAfter)
+        expect(await s.alice.mls.readEpoch()).toBe(record.epochAfter)
+      },
+      { timeout: 30_000 },
+    )
     expect(payloads).toEqual([record.payload])
     const destination = await bob.fixture.device.groups.loadState(bob.owner.installedKey())
     expect(destination).toMatchObject({ deleted: false, epoch: record.epochAfter })

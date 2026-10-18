@@ -182,6 +182,7 @@ function recoveryPeer(params: {
   access: HandleAccess
   mls: GroupMLS
   onRecovery?: (event: RecoveryEvent) => void
+  timeoutMs?: number
   deadlineMs?: number
 }) {
   const { hub, identity, access, mls, onRecovery } = params
@@ -199,7 +200,11 @@ function recoveryPeer(params: {
       chat: { 'chat/changed': () => {}, 'chat/posted': () => {}, 'chat/double': () => ({}) },
     },
     onRecovery,
-    recovery: { timeoutMs: 100, deadlineMs: params.deadlineMs ?? 1000, getDelayMs: () => 0 },
+    recovery: {
+      timeoutMs: params.timeoutMs ?? 100,
+      deadlineMs: params.deadlineMs ?? 1000,
+      getDelayMs: () => 0,
+    },
   })
 }
 
@@ -362,8 +367,16 @@ test('a responder floor refusal attempts renewal and invalidates the refused bin
   const hub = createWireHub()
   const events: Array<RecoveryEvent> = []
   const aliceAccess = s.aliceAccess
-  const alice = recoveryPeer({ hub, identity: s.alice, access: aliceAccess, mls: s.responder })
+  const timing = { timeoutMs: 3000, deadlineMs: 15_000 }
+  const alice = recoveryPeer({
+    hub,
+    identity: s.alice,
+    access: aliceAccess,
+    mls: s.responder,
+    ...timing,
+  })
   const bob = recoveryPeer({
+    ...timing,
     hub,
     identity: s.bob,
     access: s.access,
@@ -413,8 +426,16 @@ test('expired binding then floor refusal can call the host twice in one recovery
   offered = await fixture.timedBinding({ identity: s.bob, iat: 250, exp: 350 })
   const hub = createWireHub()
   const events: Array<RecoveryEvent> = []
-  const alice = recoveryPeer({ hub, identity: s.alice, access: s.aliceAccess, mls: s.responder })
+  const timing = { timeoutMs: 3000, deadlineMs: 15_000 }
+  const alice = recoveryPeer({
+    hub,
+    identity: s.alice,
+    access: s.aliceAccess,
+    mls: s.responder,
+    ...timing,
+  })
   const bob = recoveryPeer({
+    ...timing,
     hub,
     identity: s.bob,
     access: s.access,
@@ -459,13 +480,16 @@ test('an authoritative invalid refusal holds automatic recovery until explicit r
   const s = await setup()
   const hub = createWireHub()
   const events: Array<RecoveryEvent> = []
+  const timing = { timeoutMs: 3000, deadlineMs: 15_000 }
   const alice = recoveryPeer({
+    ...timing,
     hub,
     identity: s.alice,
     access: s.aliceAccess,
     mls: s.responder,
   })
   const bob = recoveryPeer({
+    ...timing,
     hub,
     identity: s.bob,
     access: s.access,

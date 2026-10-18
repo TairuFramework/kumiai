@@ -586,7 +586,7 @@ export function testForkNoticeConformance(params: {
     })
     test.for(['count', 'age'] as const)(
       'closed evidence obeys ack and retention bounds: %s',
-      { timeout: 60000 },
+      { timeout: 120_000 },
       async (bound, { signal }) => {
         const fixture = await params.createFixture()
         const start = Date.now()

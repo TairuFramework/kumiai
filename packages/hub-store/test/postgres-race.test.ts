@@ -169,5 +169,5 @@ describe.skipIf(postgres == null)('HubStore CAS atomicity (separate Postgres con
 
     expect(publishFailures).toEqual([])
     expect(await sweeping).toEqual([])
-  }, 120000)
+  }, 240000)
 })

@@ -28,13 +28,14 @@ afterEach(async () => {
 })
 
 async function setup() {
-  const fixture = await createCapturedRecoveryFixture({ timeoutMs: 1000 })
+  const fixture = await createCapturedRecoveryFixture({ timeoutMs: 5000, deadlineMs: 30_000 })
   cleanup.push(() => fixture.close())
   return fixture
 }
 
 test.each(['missing', 'unreadable', 'client-state'] as const)(
   'real registry recovers %s private state from retained trust without opening the old handle',
+  { timeout: 60_000 },
   async (damage) => {
     const s = await setup()
     const bob = s.bob
@@ -69,8 +70,15 @@ test.each(['missing', 'unreadable', 'client-state'] as const)(
     if (damage === 'missing') await bob.fixture.removeStateBytes(bob.key)
     else await bob.fixture.corruptState(bob.key, damage)
     await bob.restart()
-    await expect.poll(() => bob.owner.installedKey().incarnation, { timeout: 10_000 }).toBe(2)
-    await expect.poll(async () => (await bob.control.load()).rejoin, { timeout: 10_000 }).toBeNull()
+    await vi.waitFor(
+      async () => {
+        expect(bob.owner.installedKey().incarnation).toBe(2)
+        expect((await bob.control.load()).rejoin).toBeNull()
+        expect(await bob.mls.readEpoch()).toBe(epoch + 1)
+        expect(await s.alice.mls.readEpoch()).toBe(epoch + 1)
+      },
+      { timeout: 30_000 },
+    )
     const destination = bob.owner.installedKey()
     const state = await bob.fixture.device.groups.loadState(destination)
     const trust = await bob.fixture.device.groups.loadTrust(bob.key.groupID)

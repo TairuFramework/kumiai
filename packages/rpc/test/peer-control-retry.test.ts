@@ -324,11 +324,14 @@ test.each([false, true])(
     const build = vi.fn()
     const request = buildLedgerCommit(author, ['saved-named-entry'], { onBuild: build })
     await author.peer.enqueue(request)
-    await vi.waitFor(async () => {
-      expect(poison).toBeDefined()
-      expect((await author.control.load()).cursor?.position).toBe(poison)
-      expect((await receiver.control.load()).cursor?.position).toBe(poison)
-    })
+    await vi.waitFor(
+      async () => {
+        expect(poison).toBeDefined()
+        expect((await author.control.load()).cursor?.position).toBe(poison)
+        expect((await receiver.control.load()).cursor?.position).toBe(poison)
+      },
+      { timeout: 10_000 },
+    )
     const saved = await author.control.load()
     expect(saved.commitOnce).not.toBeNull()
     expect(saved.operations[0]?.stage).toBe('built')
@@ -343,16 +346,19 @@ test.each([false, true])(
       peers.push(runner)
     }
     allow = true
-    await vi.waitFor(async () => {
-      await runner.peer.resync()
-      await receiver.peer.resync()
-      expect(runner.mls.epoch()).toBe(2)
-      expect(receiver.mls.epoch()).toBe(2)
-    })
-    expect(await receiver.mls.getLedger()).toEqual(['saved-named-entry'])
-    expect(await runner.peer.outcomes()).toEqual([
-      expect.objectContaining({ opID: request.id, kind: 'landed' }),
-    ])
+    await runner.peer.resync()
+    await receiver.peer.resync()
+    await vi.waitFor(
+      async () => {
+        expect(runner.mls.epoch()).toBe(2)
+        expect(receiver.mls.epoch()).toBe(2)
+        expect(await receiver.mls.getLedger()).toEqual(['saved-named-entry'])
+        expect(await runner.peer.outcomes()).toEqual([
+          expect.objectContaining({ opID: request.id, kind: 'landed' }),
+        ])
+      },
+      { timeout: 10_000 },
+    )
     expect(handoffs.length).toBeGreaterThanOrEqual(2)
     for (const handoff of handoffs) {
       expect(handoff.payload).toEqual(saved.commitOnce?.payload)

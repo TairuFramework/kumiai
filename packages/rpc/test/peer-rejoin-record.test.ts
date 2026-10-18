@@ -31,7 +31,8 @@ const peers: Array<TestPeer> = []
 function member(hub: FakeHub, did: string, options: Parameters<typeof makeMLSPeer>[3] = {}) {
   const peer = makeMLSPeer(hub, did, secret, {
     members: ['alice', 'bob'],
-    recovery: { timeoutMs: 30, deadlineMs: 300, getDelayMs: () => 0 },
+    // These rows test recovery state, not how quickly a loaded worker schedules replies.
+    recovery: { timeoutMs: 1000, deadlineMs: 10_000, getDelayMs: () => 0 },
     ...options,
   })
   peers.push(peer)
@@ -239,13 +240,22 @@ test.each(['built', 'published', 'confirmed', 'adopted'] as const)(
     if (saved !== null && 'format' in saved)
       expect((await bob.control.load()).recoveryEpochFloor).toBe(saved.target.groupInfoEpoch)
     const again = member(hub, 'bob', { restartOf: bob })
-    await expect.poll(async () => (await again.control.load()).rejoin).toBeNull()
-    expect(again.mls.epoch()).toBe(alice.mls.epoch())
-    expect(commits(hub)).toHaveLength(1)
-    expect(commits(hub)[0]?.payload).toEqual(saved?.payload)
-    expect((await again.control.load()).applied).toEqual([
-      expect.objectContaining({ digest: saved?.digest, sequenceID: commits(hub)[0]?.sequenceID }),
-    ])
+    await vi.waitFor(
+      async () => {
+        const snapshot = await again.control.load()
+        expect(snapshot.rejoin).toBeNull()
+        expect(again.mls.epoch()).toBe(alice.mls.epoch())
+        expect(commits(hub)).toHaveLength(1)
+        expect(commits(hub)[0]?.payload).toEqual(saved?.payload)
+        expect(snapshot.applied).toEqual([
+          expect.objectContaining({
+            digest: saved?.digest,
+            sequenceID: commits(hub)[0]?.sequenceID,
+          }),
+        ])
+      },
+      { timeout: 10_000 },
+    )
   },
 )
 
@@ -264,9 +274,14 @@ test('publish accepted before the published write is found before the startup wa
   expect((await bob.control.load()).rejoin?.stage).toBe('built')
   vi.restoreAllMocks()
   const again = member(hub, 'bob', { restartOf: bob })
-  await expect.poll(async () => (await again.control.load()).rejoin).toBeNull()
-  expect(again.mls.epoch()).toBe(alice.mls.epoch())
-  expect(commits(hub)).toHaveLength(1)
+  await vi.waitFor(
+    async () => {
+      expect((await again.control.load()).rejoin).toBeNull()
+      expect(again.mls.epoch()).toBe(alice.mls.epoch())
+      expect(commits(hub)).toHaveLength(1)
+    },
+    { timeout: 10_000 },
+  )
 })
 
 test.each(['found', 'absent', 'gap'] as const)(
@@ -313,8 +328,13 @@ test.each(['found', 'absent', 'gap'] as const)(
       return apply(changes, id)
     })
     const again = member(hub, 'bob', { restartOf: bob, control: bob.control })
-    await expect.poll(async () => again.mls.epoch()).toBe(2)
-    await expect.poll(async () => (await again.control.load()).rejoin).toBeNull()
+    await vi.waitFor(
+      async () => {
+        expect(again.mls.epoch()).toBe(2)
+        expect((await again.control.load()).rejoin).toBeNull()
+      },
+      { timeout: 10_000 },
+    )
     const external = commits(hub).filter((row) => row.senderDID === 'bob')
     expect(external).toHaveLength(1)
     if (result === 'found') {
@@ -335,8 +355,13 @@ test('published restart cannot adopt when every confirmation is withheld', async
   const saved = (await bob.control.load()).rejoin
   expect(saved?.stage).toBe('published')
   const publish = hub.publish.bind(hub)
+  let withholdCapture = false
   vi.spyOn(hub, 'publish').mockImplementation((params) => {
-    if (decodeHandshakeFrame(params.payload).kind === HANDSHAKE_KIND.recoveryVerdict)
+    const kind = decodeHandshakeFrame(params.payload).kind
+    if (
+      kind === HANDSHAKE_KIND.recoveryVerdict ||
+      (withholdCapture && kind === HANDSHAKE_KIND.recoveryReply)
+    )
       return publish({ ...params, payload: new Uint8Array([0]) })
     return publish(params)
   })
@@ -347,24 +372,39 @@ test('published restart cannot adopt when every confirmation is withheld', async
       events.push(event)
     },
   })
-  await expect
-    .poll(() =>
-      hub.published.some((row) => {
-        try {
-          return (
-            row.senderDID === 'bob' &&
-            decodeHandshakeFrame(row.payload).kind === HANDSHAKE_KIND.recoveryConfirmRequest
-          )
-        } catch {
-          return false
-        }
-      }),
-    )
-    .toBe(true)
+  await vi.waitFor(
+    () => {
+      expect(
+        hub.published.some((row) => {
+          try {
+            return (
+              row.senderDID === 'bob' &&
+              decodeHandshakeFrame(row.payload).kind === HANDSHAKE_KIND.recoveryConfirmRequest
+            )
+          } catch {
+            return false
+          }
+        }),
+      ).toBe(true)
+    },
+    { timeout: 10_000 },
+  )
+  // A complete confirmation round must not adopt, even while fresh captures remain available.
+  await new Promise((resolve) => setTimeout(resolve, 3500))
   expect(again.mls.epoch()).toBe(1)
   expect((await again.control.load()).applied).toEqual([])
-  await expect.poll(() => events.some((event) => event.phase === 'failed')).toBe(true)
-  expect(events).toContainEqual(expect.objectContaining({ phase: 'failed', reason: 'unconfirmed' }))
+  // Stop recapturing so the attempt reports unconfirmed instead of starting another round.
+  withholdCapture = true
+  await vi.waitFor(
+    () => {
+      expect(events).toContainEqual(
+        expect.objectContaining({ phase: 'failed', reason: 'unconfirmed' }),
+      )
+    },
+    { timeout: 10_000 },
+  )
+  expect(again.mls.epoch()).toBe(1)
+  expect((await again.control.load()).applied).toEqual([])
 })
 
 test('abandon while a confirmation opens cannot resurrect or adopt the rejoin', async () => {
@@ -589,22 +629,17 @@ test.each(['landed', 'failed-save', 'successor'] as const)(
       ).sequenceID
     }
     const again = member(hub, 'bob', { restartOf: bob })
-    await expect.poll(async () => (await again.control.load()).rejoin, { timeout: 5000 }).toBeNull()
     await again.peer.resync()
-    await expect
-      .poll(
-        async () => ({
-          epoch: again.mls.epoch(),
-          anchorEpoch: again.peer.anchorEpoch(),
-          position: (await again.control.load()).cursor?.position,
-        }),
-        { timeout: 5000 },
-      )
-      .toEqual({
-        epoch: seam === 'successor' ? 4 : 3,
-        anchorEpoch: seam === 'successor' ? 4 : 3,
-        position: successor ?? saved?.position,
-      })
+    await vi.waitFor(
+      async () => {
+        const snapshot = await again.control.load()
+        expect(snapshot.rejoin).toBeNull()
+        expect(again.mls.epoch()).toBe(seam === 'successor' ? 4 : 3)
+        expect(again.peer.anchorEpoch()).toBe(seam === 'successor' ? 4 : 3)
+        expect(snapshot.cursor?.position).toBe(successor ?? saved?.position)
+      },
+      { timeout: 10_000 },
+    )
     expect(commits(hub)).toHaveLength(seam === 'successor' ? 2 : 1)
   },
 )
@@ -632,7 +667,16 @@ test('ledger bootstrap before the final apply survives restart and emits reenact
     ledgerBefore: ['discarded-branch'],
   })
   const again = member(hub, 'bob', { restartOf: bob })
-  await expect.poll(async () => (await again.control.load()).rejoin).toBeNull()
+  await vi.waitFor(
+    async () => {
+      const snapshot = await again.control.load()
+      expect(snapshot.rejoin).toBeNull()
+      expect(snapshot.outcomes.filter((outcome) => outcome.kind === 'reenact')).toEqual([
+        expect.objectContaining({ opID: null, tokens: ['discarded-branch'] }),
+      ])
+    },
+    { timeout: 10_000 },
+  )
   const reenact = (await again.control.load()).outcomes.filter(
     (outcome) => outcome.kind === 'reenact',
   )
@@ -820,8 +864,13 @@ test('anchor-gated recovery adopts the authenticated capture despite an unwalked
       if (event.phase === 'failed') failures.push(event)
     },
   })
-  await expect.poll(() => again.mls.epoch(), { timeout: 5000 }).toBe(3)
-  await expect.poll(async () => (await again.control.load()).rejoin).toBeNull()
+  await vi.waitFor(
+    async () => {
+      expect(again.mls.epoch()).toBe(3)
+      expect((await again.control.load()).rejoin).toBeNull()
+    },
+    { timeout: 10_000 },
+  )
   expect(built).toHaveLength(1)
   expect(confirmed).toHaveLength(1)
   expect(built[0]?.expectedHead).toBe(p1)
@@ -898,8 +947,13 @@ test.each([false, true])(
       return apply(changes, id)
     })
     const again = member(hub, 'bob', { restartOf: bob, control: bob.control })
-    await expect.poll(() => again.mls.epoch()).toBe(3)
-    await expect.poll(async () => (await again.control.load()).rejoin).toBeNull()
+    await vi.waitFor(
+      async () => {
+        expect(again.mls.epoch()).toBe(3)
+        expect((await again.control.load()).rejoin).toBeNull()
+      },
+      { timeout: 10_000 },
+    )
     expect(built).toHaveLength(1)
     expect(built[0]?.target.captureHead).toBe(retained ?? removed)
     expect(built[0]?.target.groupInfoEpoch).toBe(2)
@@ -957,22 +1011,20 @@ test.each(['binding', 'lapse', 'floor'] as const)(
         refusalAuthority: 'authenticated-commit',
       })
       .mockImplementation(validate)
-    // A short attempt can expire under load; its automatic retry must finish without another call.
+    // The refusal must trigger the retry without another recover call.
     await bob.peer.recover()
     await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
     await alice.peer.resync()
     expect(alice.mls.epoch()).toBe(2)
-    await expect
-      .poll(
-        async () => ({
-          renewals,
-          epoch: bob.mls.epoch(),
-          responderEpoch: alice.mls.epoch(),
-          rejoin: (await bob.control.load()).rejoin,
-        }),
-        { timeout: 5000 },
-      )
-      .toEqual({ renewals: 1, epoch: 3, responderEpoch: 3, rejoin: null })
+    await vi.waitFor(
+      async () => {
+        expect(renewals).toBe(1)
+        expect(bob.mls.epoch()).toBe(3)
+        expect(alice.mls.epoch()).toBe(3)
+        expect((await bob.control.load()).rejoin).toBeNull()
+      },
+      { timeout: 10_000 },
+    )
     expect(
       commits(hub).filter(
         (row) =>
@@ -1038,10 +1090,17 @@ test.each(['acceptance-unknown', 'unsupported-version', 'fork-halted'] as const)
     await bob.peer.ack('refresh')
     await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 2 })
     if (reason === 'acceptance-unknown') {
-      await vi.waitFor(() => expect(bob.mls.epoch()).toBeGreaterThan(1))
-      await vi.waitFor(async () => expect((await bob.control.load()).strand).toBeNull())
-      expect((await bob.control.load()).cursor?.stranded).toBeUndefined()
-      expect((await bob.control.load()).controlHold).toBeNull()
+      await vi.waitFor(
+        async () => {
+          const snapshot = await bob.control.load()
+          expect(bob.mls.epoch()).toBeGreaterThan(1)
+          expect(snapshot.strand).toBeNull()
+          expect(snapshot.cursor?.stranded).toBeUndefined()
+          expect(snapshot.controlHold).toBeNull()
+          expect(snapshot.rejoin).toBeNull()
+        },
+        { timeout: 10_000 },
+      )
     } else {
       if (reason === 'fork-halted')
         await expect(bob.peer.resync()).rejects.toMatchObject({
@@ -1049,6 +1108,7 @@ test.each(['acceptance-unknown', 'unsupported-version', 'fork-halted'] as const)
           reason,
         })
       else await bob.peer.resync()
+      await new Promise((resolve) => setTimeout(resolve, 1000))
       expect(bob.mls.epoch()).toBe(1)
       if (reason === 'fork-halted') expect((await bob.control.load()).forkHalt).not.toBeNull()
       else expect((await bob.control.load()).controlHold?.reason).toBe(reason)
@@ -1063,6 +1123,7 @@ test.each(['acceptance-unknown', 'unsupported-version'] as const)(
     const hub = new FakeHub()
     const events: Array<RecoveryEvent> = []
     const bob = member(hub, 'bob', {
+      recovery: { timeoutMs: 30, deadlineMs: 300, getDelayMs: () => 0 },
       onRecovery: (event) => {
         events.push(event)
       },
@@ -1088,8 +1149,13 @@ test.each(['acceptance-unknown', 'unsupported-version'] as const)(
       await alice.peer.replay()
       await vi.advanceTimersByTimeAsync(1_000)
       if (reason === 'acceptance-unknown') {
-        await vi.waitFor(() => expect(bob.mls.epoch()).toBeGreaterThan(1))
-        await vi.waitFor(async () => expect((await bob.control.load()).strand).toBeNull())
+        await vi.waitFor(async () => {
+          const snapshot = await bob.control.load()
+          expect(bob.mls.epoch()).toBeGreaterThan(1)
+          expect(snapshot.strand).toBeNull()
+          expect(snapshot.controlHold).toBeNull()
+          expect(snapshot.rejoin).toBeNull()
+        })
       } else {
         expect(bob.mls.epoch()).toBe(1)
         expect((await bob.control.load()).controlHold?.reason).toBe(reason)

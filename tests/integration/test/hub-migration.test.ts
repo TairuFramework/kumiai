@@ -411,7 +411,8 @@ for (const reason of ['legacy halt', 'known behind'] as const) {
       await safety
         .recover(f.key, { mode: 'resync', target: moveTarget(destination, f.target.topicID) })
         .catch(() => {})
-      const requester = await liveOwner(local, { key: f.key, hub: old, target: f.target })
+      const recovery = { timeoutMs: 3000, deadlineMs: 30_000, getDelayMs: () => 0 }
+      const requester = await liveOwner(local, { key: f.key, hub: old, target: f.target, recovery })
       owners.push(requester)
       await vi.waitFor(
         () =>
@@ -437,17 +438,22 @@ for (const reason of ['legacy halt', 'known behind'] as const) {
         key: { ...f.key, incarnation: 1 },
         hub: destination,
         target: f.target,
+        recovery,
       })
       owners.push(remote)
       await remote.owner.ready
-      await vi.waitFor(() => expect(requester.owner.installedKey().incarnation).toBe(2), {
-        timeout: 15000,
-      })
+      await vi.waitFor(
+        async () => {
+          const destinationKey = requester.owner.installedKey()
+          expect(destinationKey.incarnation).toBe(2)
+          expect(await local.manualRecovery().readManualRecovery(choice?.id ?? '')).toMatchObject({
+            stage: 'completed',
+            destination: destinationKey,
+          })
+        },
+        { timeout: 30_000 },
+      )
       const destinationKey = requester.owner.installedKey()
-      expect(await local.manualRecovery().readManualRecovery(choice?.id ?? '')).toMatchObject({
-        stage: 'completed',
-        destination: destinationKey,
-      })
       const sourceAfter = await f.snapshot()
       expect(sourceAfter.forkHalt).toEqual(sourceBefore.forkHalt)
       expect(sourceAfter.strand).toEqual(sourceBefore.strand)

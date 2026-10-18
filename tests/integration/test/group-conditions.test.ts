@@ -51,6 +51,7 @@ async function start(
   hub: FakeHub,
   events: Array<RecoveryEvent> = [],
   observeMLS?: (options: RegistryPeerOptions) => void,
+  recovery = { timeoutMs: 1500, deadlineMs: 15_000, getDelayMs: () => 0 },
 ) {
   const [lifetime] = await f.device.groups.list()
   if (lifetime?.activeIncarnation == null) throw new Error('Missing active fixture')
@@ -121,7 +122,7 @@ async function start(
           throw new Error('No control adoption expected')
         },
         deliverWelcome: async () => {},
-        recovery: { timeoutMs: 500, deadlineMs: 3000, getDelayMs: () => 0 },
+        recovery,
       })
     },
   })
@@ -185,7 +186,7 @@ test('advanced losing device removed on continuing branch surfaces not-member', 
   const before = await f.local().device.groups.ports(f.key).control.load()
   await local.owner.peer()?.recover()
   await expect
-    .poll(() => local.owner.status())
+    .poll(() => local.owner.status(), { timeout: 15_000 })
     .toMatchObject({
       kind: 'not-member',
       evidence: { epoch: 12 },
@@ -215,6 +216,7 @@ test.each([
   { mode: 'double', context: 'absent' },
 ] as const)(
   'no open notice signs oldest retained comparison and diagnoses requester 20 responder 12 / $mode / $context',
+  { timeout: 90_000 },
   async ({ mode, context }) => {
     const { f, hub } = await setup(false, {
       mode,
@@ -233,19 +235,26 @@ test.each([
         throw new Error('Commit delivery temporarily unavailable')
       return await publish(params)
     })
-    const continuing = await start(await f.continuing(), hub)
+    const recovery = { timeoutMs: 1500, deadlineMs: 15_000, getDelayMs: () => 0 }
+    const continuing = await start(await f.continuing(), hub, [], undefined, recovery)
     const events: Array<RecoveryEvent> = []
     const comparisons: Array<number | undefined> = []
-    const local = await start(f.local(), hub, events, (options) => {
-      const create = options.mls.createRecoveryRequest
-      options.mls.createRecoveryRequest = async (...args) => {
-        const held = await create(...args)
-        comparisons.push(
-          (await verifyRecoveryRequest(new TextDecoder().decode(held.request))).comparisonEpoch,
-        )
-        return held
-      }
-    })
+    const local = await start(
+      f.local(),
+      hub,
+      events,
+      (options) => {
+        const create = options.mls.createRecoveryRequest
+        options.mls.createRecoveryRequest = async (...args) => {
+          const held = await create(...args)
+          comparisons.push(
+            (await verifyRecoveryRequest(new TextDecoder().decode(held.request))).comparisonEpoch,
+          )
+          return held
+        }
+      },
+      recovery,
+    )
     blockedTopic = local.target.topicID
     await expect(local.owner.peer()?.recover()).rejects.toThrow(
       'Commit delivery temporarily unavailable',
@@ -257,17 +266,24 @@ test.each([
     continuing.owner.dispose()
     await continuing.owner.drained()
     blockedTopic = undefined
-    await start(f.remote, hub)
+    await start(f.remote, hub, [], undefined, recovery)
     expect(await f.service().forkNotices(f.key.groupID)).toEqual([])
     expect((await f.service().checkpointCoverage(f.key.groupID)).effectiveFloor).toBe(9)
     await local.owner.peer()?.recover()
-    await expect
-      .poll(() => local.owner.status())
-      .toMatchObject({ kind: 'not-member', evidence: { epoch: 12 }, retrying: true })
+    await vi.waitFor(
+      () => {
+        expect(local.owner.status()).toMatchObject({
+          kind: 'not-member',
+          evidence: { epoch: 12 },
+          retrying: true,
+        })
+      },
+      { timeout: 15_000 },
+    )
     expect(comparisons).toEqual(expect.arrayContaining([9]))
     expect(comparisons.every((epoch) => epoch === 9)).toBe(true)
     const count = comparisons.length
-    await expect.poll(() => comparisons.length, { timeout: 5000 }).toBeGreaterThan(count)
+    await expect.poll(() => comparisons.length, { timeout: 15_000 }).toBeGreaterThan(count)
     const after = await f.local().device.groups.ports(f.key).control.load()
     expect(after.rejoin).toEqual(saved.rejoin)
     expect(after.recoveryEpochFloor).toBe(20)
@@ -275,19 +291,35 @@ test.each([
     local.owner.dispose()
     await local.owner.drained()
     await f.restart()
-    const restarted = await start(f.local(), hub, events, (options) => {
-      const create = options.mls.createRecoveryRequest
-      options.mls.createRecoveryRequest = async (...args) => {
-        const held = await create(...args)
-        comparisons.push(
-          (await verifyRecoveryRequest(new TextDecoder().decode(held.request))).comparisonEpoch,
-        )
-        return held
-      }
-    })
+    const restarted = await start(
+      f.local(),
+      hub,
+      events,
+      (options) => {
+        const create = options.mls.createRecoveryRequest
+        options.mls.createRecoveryRequest = async (...args) => {
+          const held = await create(...args)
+          comparisons.push(
+            (await verifyRecoveryRequest(new TextDecoder().decode(held.request))).comparisonEpoch,
+          )
+          return held
+        }
+      },
+      recovery,
+    )
     const restartRequests = comparisons.length
     await restarted.owner.peer()?.recover()
-    await expect.poll(() => comparisons.length, { timeout: 5000 }).toBeGreaterThan(restartRequests)
+    await vi.waitFor(
+      () => {
+        expect(comparisons.length).toBeGreaterThan(restartRequests)
+        expect(restarted.owner.status()).toMatchObject({
+          kind: 'not-member',
+          evidence: { epoch: 12 },
+          retrying: true,
+        })
+      },
+      { timeout: 15_000 },
+    )
     expect(comparisons.every((epoch) => epoch === 9)).toBe(true)
     expect(restarted.owner.status()).toMatchObject({
       kind: 'not-member',
@@ -314,7 +346,7 @@ test('not member retains pending reason', async () => {
   const remote = await start(f.remote, hub)
   const local = await start(f.local(), hub)
   await local.owner.peer()?.recover()
-  await expect.poll(() => local.owner.status().kind).toBe('not-member')
+  await expect.poll(() => local.owner.status().kind, { timeout: 15_000 }).toBe('not-member')
   remote.owner.dispose()
   await remote.owner.drained()
   await local.owner.peer()?.recover()
@@ -331,7 +363,7 @@ test('not member device exits only through an explicit admitted successor', asyn
   const device = f.local()
   const local = await start(device, hub)
   await local.owner.peer()?.recover()
-  await expect.poll(() => local.owner.status().kind).toBe('not-member')
+  await expect.poll(() => local.owner.status().kind, { timeout: 15_000 }).toBe('not-member')
   const { evidence } = await device.safety().status(f.key)
   expect(evidence).not.toBeNull()
   // The diagnosis is non-terminal: kumiai never retires or tombstones on its own.
@@ -442,7 +474,7 @@ test.each([
   const excluding = await start(f.remote, hub)
   await local.owner.peer()?.recover()
   await expect
-    .poll(() => local.owner.status())
+    .poll(() => local.owner.status(), { timeout: 15_000 })
     .toMatchObject({ kind: 'not-member', evidence: { epoch: 13 }, retrying: true })
   const diagnosed = await f.local().device.groups.ports(f.key).control.load()
   expect(diagnosed.rejoin).toEqual(saved.rejoin)
@@ -804,7 +836,12 @@ test('provider failures never enter roster absence fallback', async () => {
 
 test('silence and ineligible replies have distinct hints', async () => {
   const { f, hub } = await setup()
-  const local = await start(f.local(), hub)
+  // Keep reply timers distinct from the 15-second retry cap asserted below.
+  const local = await start(f.local(), hub, [], undefined, {
+    timeoutMs: 500,
+    deadlineMs: 3000,
+    getDelayMs: () => 0,
+  })
   const publish = hub.publish.bind(hub)
   let answer = true
   vi.spyOn(hub, 'publish').mockImplementation(async (params) => {
@@ -1190,7 +1227,7 @@ test('clear app hold preserves not member evidence and resumes retries', async (
   const local = await start(f.local(), hub, events)
   await local.owner.peer()?.recover()
   await expect
-    .poll(() => local.owner.status())
+    .poll(() => local.owner.status(), { timeout: 15_000 })
     .toMatchObject({ kind: 'not-member', retrying: true })
   const safety = f.local().safety()
   const identity = await safety.epochAuthenticator(f.key)
