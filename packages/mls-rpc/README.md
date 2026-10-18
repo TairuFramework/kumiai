@@ -20,6 +20,7 @@ depend on both.
 - `simpleHandleAccess({ handle, adopt, stateVersion, key, persist? })` — serialised access to a live handle; the
   `HandleAccess` type for a host that brings its own.
 - `createGroupCrypto({ access, entryLabel?, runtime?, pending? })` — `GroupCrypto` over that access.
+  Registry access supplies `pending` and `unwrapBatch(frames)` automatically.
 - `createGroupMLS({ access, control, readRecoverySource, identity, entrySlot, recoverySecret?, recoveryBinding? })` — `GroupMLS`
   over the same access.
 - `createGroupSafety({ registry, persistence, mls, resolveTarget })` — incarnation safety reports,
@@ -554,6 +555,28 @@ An open tombstone refuses every Welcome into the source group with `SeedAdmissio
 `clearTombstone(groupID)` releases only that block. Spent-authenticator checks, fork halts and other safety latches still apply to later admissions.
 Hard-held devices never answer recovery requests, and manual resync never opens that lane. When every device is halted, successor retirement is the exit.
 Application code owns successor creation, admission, routing and member migration.
+
+## Registry app crypto
+
+`createGroupCrypto({ access })` accepts registry access and owns its pending store.
+Durable `unwrap(bytes, { frame, expectedAAD })` opens through a singleton `access.openBatch` transition.
+The rpc frame reference needs only `id`, `topicID`, `protocol`, `segment` and `position`.
+Crypto binds the registry access's GroupKey. A different supplied key refuses with `AppFrameStorageError` caused by `DisplacedGroupHandleError`.
+Frame IDs pass through unchanged. A mismatched ciphertext ID refuses as a crypto error.
+
+```ts
+const access = await registry.access(key.groupID)
+const crypto = createGroupCrypto({ access })
+const records = await crypto.pending.list()
+const results = await crypto.unwrapBatch(frames)
+```
+
+Pending records include the GroupKey, authenticated procedure, sender, epoch and idempotency key.
+`pending.complete(id)` completes a saved record. Replaying an uncompleted occurrence returns its saved record without reopening.
+`unwrapBatch` preserves mixed per-input results, so a crypto refusal leaves valid siblings usable.
+Singleton unwrap maps unretained past and future epochs to `FrameEpochError`, and malformed authenticated plaintext to `InvalidAppEntryError`.
+Storage failures become `AppFrameStorageError` with the original cause. Safety and batch-size errors pass through unchanged.
+Other crypto refusals throw plain `Error` instances. `wrap` and frame-less `unwrap` use `mutate`.
 
 ## Captured registry recovery
 

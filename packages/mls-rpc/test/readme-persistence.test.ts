@@ -61,6 +61,7 @@ const checkedSections = [
   'Clearing reported halts',
   'Hub migration',
   'Successor retirement',
+  'Registry app crypto',
 ]
 const sectionExamples = checkedSections.map((heading) => {
   const start = readme.indexOf(`\n## ${heading}\n`)
@@ -99,9 +100,9 @@ test('documented recovery choices compile', () => {
     import { verifyCheckpointPair } from '@kumiai/mls'
     import { GroupSafetyHeldError, type GroupForkEvidence, type GroupMLS } from '@kumiai/rpc'
     import {
-      createCheckpointService, createGroupSafety, SpentSetCorruptError,
+      createCheckpointService, createGroupCrypto, createGroupSafety, SpentSetCorruptError,
       type GroupKey, type GroupPersistence, type GroupSafety, type ManualRecovery, type MemoryTransaction,
-      type RecoveryTarget, type RegistryPeer,
+      type OpenAppInput, type RecoveryTarget, type RegistryPeer,
     } from '../src/index.js'
     type Params = Parameters<typeof createCheckpointService>[0]
     declare const registry: Params['registry']
@@ -109,6 +110,7 @@ test('documented recovery choices compile', () => {
     declare const persistence: GroupPersistence<MemoryTransaction>
     declare const mls: GroupMLS
     declare const key: GroupKey
+    declare const frames: Array<OpenAppInput>
     declare const successorKey: GroupKey
     declare const safety: GroupSafety
     declare const registryPeer: RegistryPeer

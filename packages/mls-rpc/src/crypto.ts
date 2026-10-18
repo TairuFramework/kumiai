@@ -15,6 +15,13 @@ import { xchacha20poly1305 } from '@noble/ciphers/chacha.js'
 import { createRuntime, type Runtime } from '@sozai/runtime'
 
 import type { HandleAccess } from './access.js'
+import type {
+  OpenAppInput,
+  OpenAppResult,
+  PendingAppFrames as RegistryPendingFrames,
+} from './persistence-types.js'
+import type { RegistryHandleAccess } from './registry/types.js'
+import { createRegistryGroupCrypto } from './registry-crypto.js'
 
 /**
  * Label the ledger-entry seal key is exported under. Distinct from any label a caller passes to
@@ -108,6 +115,10 @@ export type GroupCryptoParams = {
   }
 }
 
+export type RegistryGroupCryptoParams = Omit<GroupCryptoParams, 'access' | 'pending'> & {
+  access: RegistryHandleAccess
+}
+
 /**
  * {@link GroupCrypto} over a live {@link GroupHandle} — the real port, against real MLS.
  *
@@ -128,85 +139,29 @@ export type GroupCryptoParams = {
  *    a sealed app frame and a commit — returning `null` (never throwing) for anything ts-mls
  *    won't decode. The fake answers only for its own two encodings.
  */
+export function createGroupCrypto(params: RegistryGroupCryptoParams): GroupCrypto & {
+  pending: RegistryPendingFrames
+  unwrapBatch(frames: Array<OpenAppInput>): Promise<Array<OpenAppResult>>
+}
 export function createGroupCrypto(
   params: GroupCryptoParams & { pending: NonNullable<GroupCryptoParams['pending']> },
 ): GroupCrypto & { pending: PendingAppFrames }
 export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto
-export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
-  const { access, entryLabel = ENTRY_SEAL_LABEL, runtime = createRuntime(), pending } = params
-
-  function assertSafety(): void {
-    const admission = access.admission()
-    if (
-      !admission.admissible &&
-      (admission.reason === 'fork-halted' || admission.reason === 'recovery-unavailable')
-    )
-      throw new GroupSafetyHeldError(admission.reason)
+export function createGroupCrypto(
+  params: GroupCryptoParams | RegistryGroupCryptoParams,
+): GroupCrypto {
+  if ('openBatch' in params.access && typeof params.access.openBatch === 'function') {
+    return createRegistryGroupCrypto(params as RegistryGroupCryptoParams)
   }
+  return createLegacyGroupCrypto(params as GroupCryptoParams)
+}
 
+function createLegacyGroupCrypto(params: GroupCryptoParams): GroupCrypto {
+  const { access, pending } = params
+  const base = createGroupCryptoBase(params)
+  const assertSafety = () => assertCryptoSafety(access)
   return {
-    epoch: () => access.epoch(),
-
-    // Passed straight through to the handle's exporter, except `entryLabel`: reusing it would
-    // not be an independent export — it's the exact exporter call `sealEntries`/`openEntries`
-    // make below (same context, same `SECRET_LENGTH`), so it would hand back the ledger-entry
-    // seal key under another name. Refused here, loudly, rather than left to the doc alone.
-    exportSecret: (label, length = SECRET_LENGTH) => {
-      try {
-        assertSafety()
-      } catch (error) {
-        if (error instanceof GroupSafetyHeldError) return Promise.reject(error)
-        throw error
-      }
-      if (label === entryLabel) {
-        throw new Error(`exportSecret: label '${label}' is reserved for the ledger-entry seal`)
-      }
-      return access.read(async (group) => {
-        assertSafety()
-        return {
-          secret: await group.exportSecret(label, EXPORT_CONTEXT, length),
-          epoch: Number(group.epoch),
-        }
-      })
-    },
-
-    wrap: async (bytes, opts) => {
-      assertSafety()
-      return await access.mutate((group) => {
-        assertSafety()
-        return group.encrypt(bytes, opts)
-      })
-    },
-
-    sealEntries: async (bytes) => {
-      assertSafety()
-      const { key, epoch } = await access.read(async (group) => {
-        assertSafety()
-        return { key: await deriveEntryKey(group, entryLabel), epoch: Number(group.epoch) }
-      })
-      try {
-        assertSafety()
-        return { sealed: sealEntries(key, bytes, runtime), epoch }
-      } finally {
-        key.fill(0)
-      }
-    },
-
-    openEntries: async (sealed) => {
-      assertSafety()
-      assertSealedEntryBlob(sealed)
-      const key = await access.read((group) => {
-        assertSafety()
-        return deriveEntryKey(group, entryLabel)
-      })
-      try {
-        assertSafety()
-        return openEntries(key, sealed)
-      } finally {
-        key.fill(0)
-      }
-    },
-
+    ...base,
     unwrap: async (bytes, opts) => {
       assertSafety()
       if (opts?.frame != null) {
@@ -273,6 +228,100 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
         }
         return { payload: opened.payload, senderDID: opened.senderDID, epoch: opened.epoch }
       }
+      return base.unwrap(bytes, opts)
+    },
+    ...(pending == null
+      ? {}
+      : {
+          pending: {
+            list: async () => sortPendingAppFrames(await pending.list()),
+            complete: (id: string) => pending.complete(id),
+          },
+        }),
+  }
+}
+
+export function assertCryptoSafety(access: Pick<HandleAccess, 'admission'>): void {
+  const admission = access.admission()
+  if (
+    !admission.admissible &&
+    (admission.reason === 'fork-halted' || admission.reason === 'recovery-unavailable')
+  )
+    throw new GroupSafetyHeldError(admission.reason)
+}
+
+export function createGroupCryptoBase(
+  params: Omit<GroupCryptoParams, 'access' | 'pending'> & {
+    access: Pick<HandleAccess, 'epoch' | 'admission' | 'read' | 'mutate'>
+  },
+): GroupCrypto {
+  const { access, entryLabel = ENTRY_SEAL_LABEL, runtime = createRuntime() } = params
+  const assertSafety = () => assertCryptoSafety(access)
+  return {
+    epoch: () => access.epoch(),
+
+    // Passed straight through to the handle's exporter, except `entryLabel`: reusing it would
+    // not be an independent export — it's the exact exporter call `sealEntries`/`openEntries`
+    // make below (same context, same `SECRET_LENGTH`), so it would hand back the ledger-entry
+    // seal key under another name. Refused here, loudly, rather than left to the doc alone.
+    exportSecret: (label, length = SECRET_LENGTH) => {
+      try {
+        assertSafety()
+      } catch (error) {
+        if (error instanceof GroupSafetyHeldError) return Promise.reject(error)
+        throw error
+      }
+      if (label === entryLabel) {
+        throw new Error(`exportSecret: label '${label}' is reserved for the ledger-entry seal`)
+      }
+      return access.read(async (group) => {
+        assertSafety()
+        return {
+          secret: await group.exportSecret(label, EXPORT_CONTEXT, length),
+          epoch: Number(group.epoch),
+        }
+      })
+    },
+
+    wrap: async (bytes, opts) => {
+      assertSafety()
+      return await access.mutate((group) => {
+        assertSafety()
+        return group.encrypt(bytes, opts)
+      })
+    },
+
+    sealEntries: async (bytes) => {
+      assertSafety()
+      const { key, epoch } = await access.read(async (group) => {
+        assertSafety()
+        return { key: await deriveEntryKey(group, entryLabel), epoch: Number(group.epoch) }
+      })
+      try {
+        assertSafety()
+        return { sealed: sealEntries(key, bytes, runtime), epoch }
+      } finally {
+        key.fill(0)
+      }
+    },
+
+    openEntries: async (sealed) => {
+      assertSafety()
+      assertSealedEntryBlob(sealed)
+      const key = await access.read((group) => {
+        assertSafety()
+        return deriveEntryKey(group, entryLabel)
+      })
+      try {
+        assertSafety()
+        return openEntries(key, sealed)
+      } finally {
+        key.fill(0)
+      }
+    },
+
+    unwrap: async (bytes, opts) => {
+      assertSafety()
       const { payload, senderDID, epoch } = await access.mutate(async (group) => {
         assertSafety()
         const epoch = Number(group.epoch)
@@ -299,13 +348,5 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
       return epoch == null ? null : Number(epoch)
     },
     frameAAD: (bytes) => readMessageAAD(bytes),
-    ...(pending == null
-      ? {}
-      : {
-          pending: {
-            list: async () => sortPendingAppFrames(await pending.list()),
-            complete: (id: string) => pending.complete(id),
-          },
-        }),
   }
 }
