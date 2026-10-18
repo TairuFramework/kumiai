@@ -1,5 +1,6 @@
 import {
   decodeClientState,
+  denyApplicationSend,
   encodeClientState,
   type GroupHandle,
   GroupRestoreError as InvalidCandidateError,
@@ -310,12 +311,14 @@ export function createControlBuildPort(params: {
       let referencedProposals: Array<string>
       try {
         const { value: output, receipt } = await withCommitPermit(
-          () =>
-            restoreSource({
-              state: sourceState,
-              credential: sourceCredential,
-              ledgerEntries: sourceLedger,
-            }),
+          async () =>
+            denyApplicationSend(
+              await restoreSource({
+                state: sourceState,
+                credential: sourceCredential,
+                ledgerEntries: sourceLedger,
+              }),
+            ),
           (permitted) => params.build(saved, permitted),
         )
         const host = copyStoredValue(output)
@@ -334,7 +337,9 @@ export function createControlBuildPort(params: {
         )
           return rejected()
         try {
-          const candidate = restrictCommitAuthoring(await params.restoreCandidate(host.journal))
+          const candidate = denyApplicationSend(
+            restrictCommitAuthoring(await params.restoreCandidate(host.journal)),
+          )
           if (
             !sameStoredValue(
               candidate.state.keySchedule.epochAuthenticator,

@@ -1,4 +1,10 @@
-import { type GroupHandle, readMessageAAD, readMessageEpoch } from '@kumiai/mls'
+import {
+  type GroupHandle,
+  type Relinquished,
+  readMessageAAD,
+  readMessageEpoch,
+  relinquishSend,
+} from '@kumiai/mls'
 import {
   appFrameIdempotencyKey,
   compareLogPositions,
@@ -48,7 +54,10 @@ export function createRegistryAppOpen<TTx extends GroupTransaction>(params: {
   owner: RegistryOwner
   capability: EntryCapability<TTx>
   isolated(reads: EntryReads, assertMutationSafety?: () => void): Promise<ControlRead>
-  recordFor(handle: GroupHandle, value: RegistryOwner['value']): ReadableGroupState
+  recordFor(
+    captured: Relinquished,
+    value: RegistryOwner['value'],
+  ): Promise<{ record: ReadableGroupState }>
   assertAvailable(): void
   assertCurrent(): void
   assertSafety(): void
@@ -189,7 +198,13 @@ export function createRegistryAppOpen<TTx extends GroupTransaction>(params: {
               return {
                 expected: lifetime,
                 mutationID,
-                value: { source, record: params.recordFor(handle, value), puts, poisons, results },
+                value: {
+                  source,
+                  record: (await params.recordFor(await relinquishSend(handle), value)).record,
+                  puts,
+                  poisons,
+                  results,
+                },
               }
             },
             async (stores, prepared) => {

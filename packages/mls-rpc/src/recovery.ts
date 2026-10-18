@@ -10,6 +10,7 @@ import {
   createRecoveryRequestFromTrust as createTrustedRequest,
   type DeviceRegistry,
   decodeGroupAnchor,
+  denyApplicationSend,
   type GroupHandle,
   type GroupOptions,
   GroupRestoreError,
@@ -187,7 +188,11 @@ export function knownRecoveryRegistry(
   return { devices, controllers }
 }
 
-export function createRecoveryBindingState(identity: OwnIdentity, host?: RecoveryBinding) {
+export function createRecoveryBindingState(
+  identity: OwnIdentity,
+  host?: RecoveryBinding,
+  denySend = false,
+) {
   let binding: ControllerBinding | undefined
   let asked = false
   let prepared = false
@@ -287,7 +292,10 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
             onLedgerEntries: group.onLedgerEntries,
           },
           ...(group.anchor.controller == null ? {} : { ledgerEntries: reply.ledger }),
-        }).then((result) => ({ ...result, group: restrictCommitAuthoring(result.group) }))
+        }).then((result) => {
+          if (denySend) denyApplicationSend(result.group)
+          return { ...result, group: restrictCommitAuthoring(result.group) }
+        })
       }
       const candidate = async (controller?: ControllerBinding) => {
         const result = await build(controller)
@@ -386,6 +394,7 @@ export function createVerdictJudge(params: VerdictJudgeParams) {
 }
 
 export type CapturedRecoveryEnvironment = RecoveryEnvironment & {
+  denySend?: boolean
   accept: RecoveryAdoptionDependencies['accept']
 }
 
@@ -397,7 +406,11 @@ const capturedBindings = new WeakMap<
 function capturedBindingState(environment: CapturedRecoveryEnvironment) {
   let state = capturedBindings.get(environment)
   if (state === undefined) {
-    state = createRecoveryBindingState(environment.identity, environment.recoveryBinding)
+    state = createRecoveryBindingState(
+      environment.identity,
+      environment.recoveryBinding,
+      environment.denySend,
+    )
     capturedBindings.set(environment, state)
   }
   return state
@@ -505,6 +518,7 @@ async function capturedPending(
       throw new RecoveryCandidateError('Saved recovery state refused', { cause })
     throw cause
   }
+  if (environment.denySend) denyApplicationSend(group)
   const binding = capturedBindingState(environment)
   let judge: ReturnType<typeof createVerdictJudge>
   try {
@@ -601,7 +615,10 @@ export async function buildRecoveryCandidate(params: {
           await assertRecoveryBinding({ group: before, identity: environment.identity, controller })
         }
       },
-    }).then((result) => ({ ...result, group: restrictCommitAuthoring(result.group) }))
+    }).then((result) => {
+      if (environment.denySend) denyApplicationSend(result.group)
+      return { ...result, group: restrictCommitAuthoring(result.group) }
+    })
   let result: Awaited<ReturnType<typeof build>>
   try {
     result = await build()

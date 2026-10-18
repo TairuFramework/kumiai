@@ -51,6 +51,26 @@ async function storageHandle(record: GroupStateRecord & { deleted: false }): Pro
   return restoreGroup({ state, credential: record.credential, ledgerEntries: record.ledger })
 }
 
+export async function ownGenerationRegression(record: GroupStateRecord & { deleted: false }) {
+  const handle = await storageHandle(record)
+  await handle.encrypt(new Uint8Array([1]))
+  const node = handle.state.secretTree.leafNodes[2 * handle.state.privatePath.leafIndex]
+  if (node === undefined) throw new Error('Missing own ratchet')
+  const advanced = {
+    ...record,
+    version: record.version + 1,
+    state: encodeClientState(handle.state),
+    senderHWM: Math.max(record.senderHWM, node.application.generation),
+  }
+  node.application.generation--
+  const regressed = {
+    ...advanced,
+    version: advanced.version + 1,
+    state: encodeClientState(handle.state),
+  }
+  return { advanced, regressed }
+}
+
 export async function cacheAtCurrentGeneration(
   record: GroupStateRecord & { deleted: false },
 ): Promise<GroupStateRecord & { deleted: false }> {

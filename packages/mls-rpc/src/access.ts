@@ -1,4 +1,4 @@
-import { type GroupHandle, restrictCommitAuthoring } from '@kumiai/mls'
+import { type GroupHandle, type HoldingToken, restrictCommitAuthoring } from '@kumiai/mls'
 import {
   type AdoptionExpected,
   type AdoptionWrite,
@@ -13,6 +13,8 @@ import {
 } from '@kumiai/rpc'
 
 import { DisplacedGroupHandleError } from './persistence-errors.js'
+
+export type PersistContext = { holding?: HoldingToken }
 
 type PersistOpened = (stagedState: Uint8Array, record: PendingAppFrame) => Promise<void>
 
@@ -36,7 +38,10 @@ export type HandleAccess = {
   admission(): SendAdmission
   read<TValue>(fn: (handle: GroupHandle) => TValue | Promise<TValue>): Promise<TValue>
   mutate<TValue>(
-    fn: (handle: GroupHandle, persist: (handle: GroupHandle) => Promise<void>) => Promise<TValue>,
+    fn: (
+      handle: GroupHandle,
+      persist: (handle: GroupHandle, ctx?: PersistContext) => Promise<void>,
+    ) => Promise<TValue>,
     adoption?: AdoptionWriteFactory,
   ): Promise<TValue>
   /** Check identity and carry progress under the replacement's persistence gate. */
@@ -148,7 +153,7 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
         }
         const handle = restrictCommitAuthoring(params.handle())
         let saved = false
-        const persist = async (current: GroupHandle): Promise<void> => {
+        const persist = async (current: GroupHandle, _ctx?: PersistContext): Promise<void> => {
           await save(current, adoption)
           saved = true
         }

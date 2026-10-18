@@ -124,7 +124,9 @@ for (const kind of accessKinds) {
           expect(readMessageEpoch(message)).toBe(BigInt(slot.epoch + 1))
           expect((await f.remote.handle.decrypt(message)).payload).toEqual(new Uint8Array([13]))
           await f.access.read((handle) => {
-            expect(handle.state.secretTree.leafNodes[leaf]?.application.generation).toBe(1)
+            expect(handle.state.secretTree.leafNodes[leaf]?.application.generation).toBe(
+              kind === 'registry' ? 17 : 1,
+            )
             expect(handle.state.historicalReceiverData.get(BigInt(slot.epoch))).toEqual(
               priorHistory,
             )

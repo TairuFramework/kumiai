@@ -405,6 +405,14 @@ export function seedMemoryControlState(
   return envelope(seeded, mls)
 }
 
+const encryptBarriers = new WeakMap<GroupHandle, { entered(): void; released: Promise<void> }>()
+export function blockMemoryEncrypt(handle: GroupHandle) {
+  const entered = Promise.withResolvers<void>()
+  const released = Promise.withResolvers<void>()
+  encryptBarriers.set(handle, { entered: entered.resolve, released: released.promise })
+  return { started: entered.promise, release: () => released.resolve() }
+}
+
 const models = new WeakMap<GroupHandle, MemoryMLS>()
 
 export function memoryModel(handle: GroupHandle): MemoryMLS {
@@ -637,6 +645,12 @@ class MemoryControlHandle extends GroupHandle {
       if (state.groupActiveState.kind !== 'active') throw new Error('Inactive memory group')
       if (!this.sendAdmission().admissible) throw new LeafLapsedError('lapsed')
       assertApplicationSend(this)
+      const barrier = encryptBarriers.get(this)
+      if (barrier !== undefined) {
+        encryptBarriers.delete(this)
+        barrier.entered()
+        await barrier.released
+      }
       const leaf = state.privatePath.leafIndex
       const ratchet = state.secretTree.leafNodes[leaf * 2]?.application
       if (ratchet === undefined) throw new Error('Missing memory sender ratchet')

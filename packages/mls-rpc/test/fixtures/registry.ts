@@ -76,6 +76,7 @@ import type {
 import { type RecoveryEnvironment, registryOptions } from '../../src/registry/validation.js'
 import { deferred } from '../../src/runtime.js'
 import { createGroupSafety, type GroupSafety } from '../../src/safety.js'
+import { restoreCommittedSender } from '../../src/testing.js'
 import { createDeterministicAtRestCodec } from './at-rest.js'
 import { createRealGroup, testGroupMLSDependencies, testHandleAccess } from './real-group.js'
 import {
@@ -148,6 +149,8 @@ export type RegistryFixtureBase = {
   holdColdPublication(groupID: string): { started: Promise<void>; release(): void }
   holdRestore(groupID: string): { started: Promise<void>; release(): void }
   holdProof(mutationID: string): { started: Promise<void>; release(): void }
+  restores(): number
+  restoreCommittedSender(groupID?: string): Promise<GroupHandle>
   restoreCount(groupID: string): number
   coldLoadCount(groupID: string): number
   overrideRestore(
@@ -259,7 +262,7 @@ export function registryFixtureBumpStateVersion(
 const controlCorrupters = new WeakMap<RegistryFixtureBase, (key: GroupKey) => Promise<void>>()
 type CapturedFixtureState = { keys: Set<string>; handles: WeakSet<GroupHandle> }
 const capturedStates = new WeakMap<RegistryFixtureBase, CapturedFixtureState>()
-function retainCapturedDestination(
+export function retainCapturedDestination(
   fixture: RegistryFixtureBase,
   recovery: { candidate: GroupHandle; source: { key: GroupKey } },
 ) {
@@ -749,6 +752,9 @@ async function assemble(
     holdColdPublication: (groupID) => hold(publicationHolds, groupID),
     holdRestore: (groupID) => hold(restoreHolds, groupID),
     holdProof: storage.holdProof,
+    restores: () => [...counts.values()].reduce((sum, count) => sum + count, 0),
+    restoreCommittedSender: (groupID = params.groupID) =>
+      restoreCommittedSender(fixture.registry, groupID),
     restoreCount: (groupID) => counts.get(groupID) ?? 0,
     coldLoadCount: (groupID) => coldCounts.get(groupID) ?? 0,
     overrideRestore: (fn) => {
@@ -1113,6 +1119,8 @@ export async function createForkNoticeFixture(params: {
     const before = await fixture.device.groups.loadState(key)
     if (before === null || before.deleted) throw new Error('Missing fork installation')
     const handle = await wrap(local)
+    if (params.mode === 'real-mls')
+      await (await fixture.restoreCommittedSender(key.groupID)).carryReceiveProgress(handle)
     await fixture.installRows({
       key,
       state: {
@@ -1478,6 +1486,8 @@ export async function createNotMemberFixture(
         : proposed
     const previous = await fixture.device.groups.loadState(key)
     if (previous === null || previous.deleted) throw new Error('Missing diagnostic installation')
+    if (fixture !== local || params.mode !== 'double')
+      await (await fixture.restoreCommittedSender(key.groupID)).carryReceiveProgress(handle)
     await fixture.installRows({
       key,
       state: {

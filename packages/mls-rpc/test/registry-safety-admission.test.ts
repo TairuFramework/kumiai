@@ -232,7 +232,9 @@ for (const mode of ['real-mls', 'double'] as const) {
                     : access.adopt(accepted.candidate, accepted.expected, accepted.write)
               await expect(work).rejects.toBeInstanceOf(GroupSafetyHeldError)
               await expect(work).rejects.toMatchObject({ reason })
-              expect(fixture.restoreCount(groupID)).toBe(restores)
+              expect(fixture.restoreCount(groupID)).toBe(
+                restores + (operation === 'mutate' ? 0 : 1),
+              )
               expect(callback).not.toHaveBeenCalled()
               expect(adoption).not.toHaveBeenCalled()
               expect(await fixture.inspectRows()).toEqual(rows)

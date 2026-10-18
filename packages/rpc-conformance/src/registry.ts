@@ -429,11 +429,11 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
         const access = await fixture.registry.access(groupID)
         let finalBytes: Uint8Array | undefined
         await access.mutate(async (handle, persist) => {
-          await persist(handle)
           await fixture.advanceSender(handle)
           finalBytes = fixture.stateBytes(handle)
           await persist(handle)
-          await fixture.advanceSender(handle)
+          await expect(fixture.advanceSender(handle)).rejects.toThrow()
+          await persist(handle)
         })
         const committed = await fixture.device.groups.loadState(key)
         expect(committed).toMatchObject({ senderHWM: 1 })
@@ -1141,7 +1141,11 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
             }
             await fixture.installRows({
               key,
-              state: { ...advancedState, version: advancedState.version + 1, senderHWM: 7 },
+              state: {
+                ...advancedState,
+                version: advancedState.version + 1,
+                senderHWM: Math.max(advancedState.senderHWM, 7),
+              },
               control: sentinels,
               anchor: sourceAnchor,
               outbox: [certified, uncertified],
@@ -1233,8 +1237,8 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
                 'destination starts with fresh sender progress',
               ).toMatchObject({
                 version: 1,
-                senderHWM: 0,
-                state: fixture.stateBytes(recovery.candidate),
+                senderHWM: 16,
+                state: fixture.stateBytes(await fixture.restoreCommittedSender(groupID)),
               })
               const ports = fixture.device.groups.ports(destination)
               expect(
@@ -1378,7 +1382,7 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
           destination,
         )
         expect(hooks).toBe(0)
-        expect(fixture.restoreCount(groupID)).toBe(count)
+        expect(fixture.restoreCount(groupID)).toBe(count + 1)
         expect(await fixture.inspectRows()).toEqual(before)
         expect((await fixture.device.groups.ports(key).control.load()).rejoin).toEqual({
           ...recovery.record,

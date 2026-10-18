@@ -1550,7 +1550,7 @@ describe('double application frames', () => {
             expect(
               advanced.state.historicalReceiverData.get(sourceEpoch)?.secretTree.leafNodes[2]
                 ?.application.generation,
-            ).toBe(1)
+            ).toBe(path === 'registry adoption' ? 17 : 1)
           } finally {
             await fixture.close()
           }

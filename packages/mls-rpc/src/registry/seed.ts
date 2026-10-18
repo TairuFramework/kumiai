@@ -1,4 +1,4 @@
-import { encodeClientState, type GroupHandle } from '@kumiai/mls'
+import { type GroupHandle, relinquishSend } from '@kumiai/mls'
 import { judgeWelcomeAdmission } from '@kumiai/mls-hub'
 import type { SafetyHold } from '@kumiai/rpc'
 
@@ -21,11 +21,13 @@ import type {
 } from '../persistence-types.js'
 import { clearGroupCondition } from '../safety-conditions.js'
 import { openSuccessorTombstone } from '../successor.js'
+import type { ColdEnvironment } from './cold.js'
+import { capturedRecord, reservationEnvelope, reserveFromBytes } from './reserve.js'
 import { retireIncarnation } from './retired.js'
 import type { RegistryRetirement } from './retirement.js'
 import { recoveryTrustFor } from './trust.js'
 import type { RetirementAttempt } from './types.js'
-import { type RecoveryEnvironment, validateRegistryHandle } from './validation.js'
+import { validateRegistryHandle } from './validation.js'
 
 type AdmissionInputs = {
   lifetime: GroupLifetime | null
@@ -175,8 +177,7 @@ async function readAdmission(
 export function createRegistrySeed<TTx extends GroupTransaction>(params: {
   capability: EntryCapability<TTx>
   retirement: RegistryRetirement
-  environment: RecoveryEnvironment
-  ownerDID: string
+  environment: ColdEnvironment
   start(): Promise<void>
   held(key: GroupKey): SafetyHold
 }) {
@@ -184,12 +185,19 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
     group: GroupHandle,
     options: { replace?: boolean; packageUse: PackageUse | null },
   ): Promise<GroupKey> => {
-    const groupID = group.groupID
+    const captured = await relinquishSend(group)
+    const groupID = captured.credential.groupID
+    const reserved = await reserveFromBytes(
+      params.environment,
+      capturedRecord(captured, { groupID, incarnation: 1 }, 1),
+      0,
+    )
+    const installed = reserved.handle
     params.retirement.assertAvailable(groupID)
     await params.start()
     const welcome = {
-      epoch: Number(group.epoch),
-      epochAuthenticator: group.state.keySchedule.epochAuthenticator.slice(),
+      epoch: Number(installed.epoch),
+      epochAuthenticator: installed.state.keySchedule.epochAuthenticator.slice(),
     }
     const replace = options.replace
     const packageUse = options.packageUse === null ? null : { ...options.packageUse }
@@ -236,11 +244,11 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
           : (admission.lifetime?.latestIncarnation ?? 0) + 1,
     }
     validateRegistryHandle({
-      handle: group,
+      handle: installed,
       key,
       trust: admission.trust,
-      environment: params.environment,
-      ownerDID: params.ownerDID,
+      environment: params.environment.recovery,
+      ownerDID: params.environment.ownerDID,
     })
     if (decision === 'alreadyJoined') return key
     const mutationID = crypto.randomUUID()
@@ -272,12 +280,24 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
           const current = await readAdmission(reads, params.held)
           recheck(current)
           validateRegistryHandle({
-            handle: group,
+            handle: installed,
             key,
             trust: current.trust,
-            environment: params.environment,
-            ownerDID: params.ownerDID,
+            environment: params.environment.recovery,
+            ownerDID: params.environment.ownerDID,
           })
+          const record = {
+            ...key,
+            version: 1,
+            deleted: false as const,
+            terminal: installed.state.groupActiveState.kind === 'removedFromGroup',
+            epoch: Number(installed.epoch),
+            epochAuthenticator: installed.state.keySchedule.epochAuthenticator.slice(),
+            state: reserved.state,
+            credential: captured.credential,
+            ledger: captured.ledgerTokens,
+            senderHWM: reserved.senderHWM,
+          }
           return {
             expected: current.lifetime,
             value: {
@@ -285,15 +305,21 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
               packageUse,
               checkpoint: await prepareCheckpointInstallation({
                 key,
-                handle: group,
+                handle: installed,
                 mutationID,
                 stateVersion: 1,
                 previousFact: currentCheckpointFact(await reads.checkpoints())?.canonical ?? null,
               }),
-              state: encodeClientState(group.state),
-              credential: { ...group.credential },
-              ledger: [...group.ledgerTokens],
-              trust: recoveryTrustFor(group, key, current.trust),
+              record,
+              reservation:
+                reserved.reservation === null
+                  ? null
+                  : {
+                      ...reserved.reservation,
+                      identity: { ...reserved.reservation.identity, ...key },
+                      envelope: reservationEnvelope(record),
+                    },
+              trust: recoveryTrustFor(installed, key, current.trust),
             },
           }
         },
@@ -325,31 +351,21 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
             restorePending: false,
           })
           const rows = stores.incarnation(key.incarnation)
-          await rows.state.save({
-            ...key,
-            version: 1,
-            deleted: false,
-            terminal: false,
-            epoch: welcome.epoch,
-            epochAuthenticator: welcome.epochAuthenticator,
-            state: prepared.state,
-            credential: prepared.credential,
-            ledger: prepared.ledger,
-            senderHWM: 0,
-          })
+          await rows.state.save(prepared.record)
           await stores.trust.save(prepared.trust)
           if (source !== null) await clearGroupCondition(stores.checkpoints, source)
           await stores.checkpoints.put(prepared.checkpoint)
-          await stores.checkpoints.put({
-            kind: 'publication',
-            id: `publication:${prepared.checkpoint.id}`,
-            key,
-            factID: prepared.checkpoint.id,
-            frame: null,
-            publishID: null,
-            accepted: false,
-            nextHeartbeatAt: null,
-          })
+          if (!prepared.record.terminal)
+            await stores.checkpoints.put({
+              kind: 'publication',
+              id: `publication:${prepared.checkpoint.id}`,
+              key,
+              factID: prepared.checkpoint.id,
+              frame: null,
+              publishID: null,
+              accepted: false,
+              nextHeartbeatAt: null,
+            })
           await rows.control.apply({ cursor: null }, mutationID)
           await rows.anchor.save(null)
           return key

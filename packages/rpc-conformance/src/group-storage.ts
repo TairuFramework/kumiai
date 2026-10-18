@@ -336,6 +336,31 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
   },
 ): void {
   describe(`Group storage conformance -- ${params.label}`, () => {
+    test('same-epoch own application generation cannot regress', async () => {
+      const fixture = await params.createFixture(groupID)
+      try {
+        const groups = fixture.ports.device.groups
+        const seed = await storageSeed(fixture.ports)
+        const { advanced, regressed } = await params.ownGenerationRegression(seed.state)
+        await groups.transition(
+          await storageChange(groups, groupID, 'advance-own'),
+          async (stores) => stores.incarnation(1).state.save(advanced),
+        )
+        const before = await fixture.inspectRows()
+        await expect(
+          groups.transition(await storageChange(groups, groupID, 'regress-own'), async (stores) =>
+            stores.incarnation(1).state.save(regressed),
+          ),
+        ).rejects.toMatchObject({
+          name: 'GroupStateConflictError',
+          message: 'Ratchet generation regressed',
+        })
+        expect(await fixture.inspectRows()).toEqual(before)
+      } finally {
+        await fixture.close()
+      }
+    })
+
     if (guards !== undefined) {
       for (const [name, candidate, message] of [
         [

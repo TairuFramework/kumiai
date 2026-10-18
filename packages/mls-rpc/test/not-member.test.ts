@@ -352,6 +352,7 @@ test('stale responder below requester join epoch cannot prove absence with a val
     async function install(fixture: typeof local, key: typeof sourceKey, handle: typeof own) {
       const previous = await fixture.device.groups.loadState(key)
       if (previous === null || previous.deleted) throw new Error('Missing installed state')
+      await (await fixture.restoreCommittedSender(key.groupID)).carryReceiveProgress(handle)
       await fixture.installRows({
         key,
         state: {

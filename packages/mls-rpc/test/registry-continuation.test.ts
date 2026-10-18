@@ -104,7 +104,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const s = await setup()
       let fixture = s.fixture
       try {
-        const advanced = await fixture.advance(s.recovery.candidate)
+        const advanced = await fixture.advance(await fixture.restoreCommittedSender(groupID))
         const state = await fixture.device.groups.loadState(destination)
         const trust = await fixture.device.groups.loadTrust(groupID)
         if (state === null || state.deleted) throw new Error('Missing destination')

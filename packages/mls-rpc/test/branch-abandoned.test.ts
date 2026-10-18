@@ -542,6 +542,9 @@ test.each([false, true])(
         responder = (await commitKeyRotation(responder)).newGroup
         const previous = await remote.device.groups.loadState(remoteKey)
         if (previous === null || previous.deleted) throw new Error('Missing responder')
+        await (await remote.restoreCommittedSender(remoteKey.groupID)).carryReceiveProgress(
+          responder,
+        )
         await remote.installRows({
           key: remoteKey,
           state: {
@@ -708,6 +711,7 @@ test.each(['valid', 'invalid-signature', 'shared-addition', 'remote-removal'] as
       async function install(fixture: typeof local, handle: GroupHandle) {
         const state = await fixture.device.groups.loadState(key)
         if (state === null || state.deleted) throw new Error('Missing source')
+        await (await fixture.restoreCommittedSender(key.groupID)).carryReceiveProgress(handle)
         await fixture.installRows({
           key,
           state: {

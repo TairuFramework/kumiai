@@ -11,6 +11,7 @@ import { createStorageFixture, writeSideRow } from './fixtures/storage-persisten
 import {
   cacheAtCurrentGeneration,
   makeStorageSeed,
+  ownGenerationRegression,
   retainedTupleChanged,
 } from './fixtures/storage-seed.js'
 
@@ -21,6 +22,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       ownershipContext: createAsyncLocalOwnershipContext,
       lowerEpochCandidate: (id) => makeStorageSeed({ id, incarnation: 1, epoch: 2, mode }),
       writeSideRow,
+      ownGenerationRegression,
       createFixture: (id, options) => createStorageFixture({ id, mode, ...options }),
     },
     { cacheAtCurrentGeneration, retainedTupleChanged },
@@ -104,7 +106,7 @@ test('senderHWM reads the own node index', async () => {
       await current.encrypt(new Uint8Array([1]))
       await persist(current)
     })
-    expect(await fixture.device.groups.loadState(key)).toMatchObject({ senderHWM: 1 })
+    expect(await fixture.device.groups.loadState(key)).toMatchObject({ senderHWM: 17 })
   } finally {
     await fixture.close()
   }

@@ -10,6 +10,7 @@ import {
   confirmationKey,
   createRecoveryRequest,
   decodeClientState,
+  denyApplicationSend,
   encodeClientState,
   encodeGroupAnchor,
   type GroupHandle,
@@ -203,6 +204,7 @@ export type GroupMLSDependencies = {
 
 export type GroupMLSParams = GroupMLSDependencies & {
   access: ControlHandleAccess
+  denySend?: boolean
   /** This member's signing identity: recovery requests and attestations are signed with it. */
   identity: OwnIdentity
   /** The slot the handle was built with. See {@link LedgerEntrySlot}. */
@@ -261,7 +263,9 @@ export async function deriveRecoverySecret(handle: GroupHandle): Promise<Uint8Ar
  */
 export function createGroupMLS(params: GroupMLSParams): GroupMLS {
   const { access, identity, entrySlot } = params
-  const recovery = createRecoveryBindingState(identity, params.recoveryBinding)
+  const recoveryHandle = (handle: GroupHandle) =>
+    params.denySend ? denyApplicationSend(handle) : handle
+  const recovery = createRecoveryBindingState(identity, params.recoveryBinding, params.denySend)
 
   let acceptances = recoveryAcceptances.get(access)
   if (acceptances == null) {
@@ -339,6 +343,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       ? undefined
       : {
           ...captured.environment,
+          denySend: params.denySend,
           accept: captured.accept,
           recoveryBinding: captured.environment.recoveryBinding ?? params.recoveryBinding,
         }
@@ -804,19 +809,21 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         })
         const state = decodeClientState(snapshot.state)
         if (state == null) throw new Error('Invalid captured state')
-        const group = restrictCommitAuthoring(
-          await restoreGroup({
-            state,
-            credential: snapshot.credential,
-            ledgerEntries: snapshot.ledgerEntries,
-            options: {
-              ciphersuiteName: Object.keys(ciphersuites).find(
-                (name) =>
-                  ciphersuites[name as keyof typeof ciphersuites] === snapshot.cipherSuite.id,
-              ),
-              cryptoProvider: { getCiphersuiteImpl: async () => snapshot.cipherSuite },
-            },
-          }),
+        const group = recoveryHandle(
+          restrictCommitAuthoring(
+            await restoreGroup({
+              state,
+              credential: snapshot.credential,
+              ledgerEntries: snapshot.ledgerEntries,
+              options: {
+                ciphersuiteName: Object.keys(ciphersuites).find(
+                  (name) =>
+                    ciphersuites[name as keyof typeof ciphersuites] === snapshot.cipherSuite.id,
+                ),
+                cryptoProvider: { getCiphersuiteImpl: async () => snapshot.cipherSuite },
+              },
+            }),
+          ),
         )
         return await sealCapturedGroupInfo({
           group,
@@ -895,22 +902,24 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
     async restoreRecovery(bytes, requestKey) {
       const snapshot = decodeRecoveryCandidate(bytes, requestKey)
       const group = await access.read(async (current) => {
-        const restored = restrictCommitAuthoring(
-          await restoreGroup({
-            state: snapshot.state,
-            credential: current.credential,
-            ledgerEntries: current.anchor.controller == null ? [] : snapshot.replyLedger,
-            options: {
-              ciphersuiteName: Object.keys(ciphersuites).find(
-                (name) =>
-                  ciphersuites[name as keyof typeof ciphersuites] ===
-                  current.context.cipherSuite.id,
-              ),
-              commitPolicy: current.commitPolicy,
-              resolveLedgerEntries: current.resolveLedgerEntries,
-              onLedgerEntries: current.onLedgerEntries,
-            },
-          }),
+        const restored = recoveryHandle(
+          restrictCommitAuthoring(
+            await restoreGroup({
+              state: snapshot.state,
+              credential: current.credential,
+              ledgerEntries: current.anchor.controller == null ? [] : snapshot.replyLedger,
+              options: {
+                ciphersuiteName: Object.keys(ciphersuites).find(
+                  (name) =>
+                    ciphersuites[name as keyof typeof ciphersuites] ===
+                    current.context.cipherSuite.id,
+                ),
+                commitPolicy: current.commitPolicy,
+                resolveLedgerEntries: current.resolveLedgerEntries,
+                onLedgerEntries: current.onLedgerEntries,
+              },
+            }),
+          ),
         )
         if (
           restored.groupID !== current.groupID ||
@@ -982,8 +991,8 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         let persisted = false
         try {
           await group.bootstrapLedger(tokens, {
-            persist: async (current) => {
-              await persist(current)
+            persist: async (current, ctx) => {
+              await persist(current, ctx)
               persisted = true
             },
           })

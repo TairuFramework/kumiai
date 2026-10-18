@@ -830,7 +830,7 @@ describe('registry peer recovery coordination', () => {
       owner = undefined
       const state = await s.f.device.groups.loadState(destination)
       if (state === null || state.deleted) throw new Error('Missing destination')
-      const advanced = await s.f.advance(s.recovery.candidate)
+      const advanced = await s.f.advance(await s.f.restoreCommittedSender(groupID))
       const trust = await s.f.device.groups.loadTrust(groupID)
       await s.f.installRows({
         key: destination,

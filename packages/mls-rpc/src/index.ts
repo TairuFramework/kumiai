@@ -43,6 +43,7 @@ export {
   type ControlRead,
   type ControlReadScope,
   type HandleAccess,
+  type PersistContext,
   type SimpleHandleAccessParams,
   simpleHandleAccess,
 } from './access.js'

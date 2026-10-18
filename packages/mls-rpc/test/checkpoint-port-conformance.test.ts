@@ -504,6 +504,8 @@ for (const mode of ['real-mls', 'double'] as const) {
           }),
           options: fixture.environment.options,
         })
+        if (mode === 'real-mls')
+          await (await fixture.restoreCommittedSender(key.groupID)).carryReceiveProgress(handle)
         await fixture.installRows({
           key,
           state: {

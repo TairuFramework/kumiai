@@ -29,6 +29,7 @@ import { createGroupHandleRegistry } from '../src/registry/registry.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import type { RegistrySwitchWrite } from '../src/registry/types.js'
 import { deferred } from '../src/runtime.js'
+import { restoreCommittedSender } from '../src/testing.js'
 import {
   createRegistryFixture,
   type RegistryFixtureBase,
@@ -295,7 +296,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           ).rejects.toMatchObject({ reason: 'restore-pending' })
           expect(begin).not.toHaveBeenCalled()
           expect(await fixture.inspectRows()).toEqual(before)
-          expect(fixture.restoreCount(groupID)).toBe(restores)
+          expect(fixture.restoreCount(groupID)).toBe(restores + 1)
           expect(() => retirement.assertAvailable(groupID)).not.toThrow()
           await owner.dispose()
         } finally {
@@ -333,14 +334,13 @@ for (const mode of ['real-mls', 'double'] as const) {
             },
           }),
         ).toEqual(destination)
-        expect(fixture.restoreCount(groupID)).toBe(restores)
+        expect(fixture.restoreCount(groupID)).toBe(restores + 1)
         expect(await fixture.device.groups.loadState(key)).toMatchObject({ deleted: true })
         expect(await fixture.device.groups.loadState(destination)).toMatchObject({
           version: 1,
           deleted: false,
-          state: encodeClientState(recovery.candidate.state),
           ledger: recovery.candidate.ledgerTokens,
-          senderHWM: 0,
+          senderHWM: 16,
         })
         expect(await fixture.device.groups.ports(key).control.load()).toMatchObject({
           rejoin: { ...recovery.record, stage: 'adopted' },
@@ -407,15 +407,14 @@ for (const mode of ['real-mls', 'double'] as const) {
           ],
         })
         s.params.source = await s.owner.recoverySource(groupID)
-        const candidateBytes = encodeClientState(s.recovery.candidate.state)
         expect(await run(s)).toEqual(destination)
         expect(s.hooks()).toBe(1)
         expect(await groups.loadState(key)).toMatchObject({ deleted: true })
         expect(await groups.loadState(destination)).toMatchObject({
           version: 1,
           deleted: false,
-          state: candidateBytes,
-          senderHWM: 0,
+          state: encodeClientState((await restoreCommittedSender(s.owner, groupID)).state),
+          senderHWM: 16,
           ledger: s.recovery.candidate.ledgerTokens,
         })
         expect(await groups.ports(destination).control.load()).toEqual({
@@ -567,8 +566,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect(state).toMatchObject({
           epoch: 2,
           version: 1,
-          senderHWM: 0,
-          state: encodeClientState(recovery.candidate.state),
+          senderHWM: 16,
         })
         const anchor = await fixture.device.groups.ports(destination).anchor.load()
         expect(anchor?.anchor.epoch).toBe(2)
@@ -677,7 +675,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         s.params.write.mutationID = 'different-replay-mutation'
         expect(await run(s)).toEqual(destination)
         expect(s.hooks()).toBe(1)
-        expect(s.fixture.restoreCount(groupID)).toBe(restores)
+        expect(s.fixture.restoreCount(groupID)).toBe(restores + 2)
         expect(await s.fixture.inspectRows()).toEqual(before)
         s.params.proof = { ...s.params.proof, payloadDigest: 'different' }
         await expect(run(s)).rejects.toThrow()

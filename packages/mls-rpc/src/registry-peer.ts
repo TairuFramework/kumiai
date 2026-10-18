@@ -574,6 +574,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
               reply,
               environment: {
                 ...params.recovery,
+                denySend: true,
                 accept: async () => {
                   throw new Error('Settlement cannot install recovery')
                 },
@@ -669,6 +670,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
       requestKey: record.requestKey,
       environment: {
         ...params.recovery,
+        denySend: true,
         async accept(candidate, input) {
           const staged = {
             incarnation: source.key.incarnation + 1,

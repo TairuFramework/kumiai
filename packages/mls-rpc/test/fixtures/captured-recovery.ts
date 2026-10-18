@@ -368,6 +368,7 @@ export async function createRosterAbsenceRealFixture(
     async function install(handle: typeof current) {
       const previous = await fixture.device.groups.loadState(key)
       if (previous === null || previous.deleted) throw new Error('Missing installed source')
+      await (await fixture.restoreCommittedSender(groupID)).carryReceiveProgress(handle)
       const trust = recoveryTrustFor(
         handle,
         key,
@@ -601,6 +602,7 @@ export async function createForkRecoveryRealFixture(
   async function install(fixture: typeof local, key: typeof remoteKey, handle: GroupHandle) {
     const previous = await fixture.device.groups.loadState(key)
     if (previous === null || previous.deleted) throw new Error('Missing branch installation')
+    await (await fixture.restoreCommittedSender(groupID)).carryReceiveProgress(handle)
     await fixture.installRows({
       key,
       state: {

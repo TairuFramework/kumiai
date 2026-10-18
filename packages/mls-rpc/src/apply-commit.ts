@@ -9,6 +9,7 @@ import {
 } from '@kumiai/mls'
 import type { CommitContext, RecoveryRefusalReason, RosterEntry } from '@kumiai/rpc'
 
+import type { PersistContext } from './access.js'
 import type { LedgerEntrySlot } from './mls.js'
 
 /** Reserved by `@kumiai/mls` for its own control entries; never surfaced to a host. */
@@ -21,7 +22,7 @@ export type ApplyCommitParams = CommitContext & {
   /** This member's DID: its own authenticated commit is never applied as received. */
   ownDID: string
   /** Runs before the handle adopts the new state. */
-  persist?: ((handle: GroupHandle) => Promise<void>) | undefined
+  persist?: ((handle: GroupHandle, ctx?: PersistContext) => Promise<void>) | undefined
 }
 
 export type ApplyCommitResult = {
@@ -129,9 +130,9 @@ export async function applyCommit(params: ApplyCommitParams): Promise<ApplyCommi
   try {
     await handle.processMessage(commit, {
       ...(persist != null && {
-        persist: async (current: GroupHandle) => {
+        persist: async (current: GroupHandle, ctx) => {
           try {
-            await persist(current)
+            await persist(current, ctx)
             persisted = true
           } catch (error) {
             persistFailed = true

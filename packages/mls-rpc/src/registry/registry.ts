@@ -1,4 +1,5 @@
 import { normalizeDID } from '@kokuin/token'
+import { type GroupHandle, restrictCommitAuthoring } from '@kumiai/mls'
 import type { ControlSnapshot, ForkHalt, SafetyHold } from '@kumiai/rpc'
 
 import { bindRegistryCheckpoint } from '../checkpoint.js'
@@ -18,7 +19,7 @@ import {
 } from '../persistence-errors.js'
 import type { GroupKey, GroupStores, GroupTransaction } from '../persistence-types.js'
 import { groupCondition, groupConditionWriter } from '../safety-conditions.js'
-import { createRegistryAccess, type RegistryOwner } from './access.js'
+import { createRegistryAccess, type RegistryOwner, registryCapturedReplacements } from './access.js'
 import { admissionFor, type ColdEnvironment, loadValidatedGroup } from './cold.js'
 import { bindRegistryRecoveryCoordinator } from './recovery-coordinator.js'
 import { deleteIncarnations } from './retired.js'
@@ -50,6 +51,11 @@ type GroupSlot = RetirementSlot & {
 }
 class StaleRegistryGeneration extends Error {}
 class DeleteDrainChanged extends Error {}
+
+export const registrySenderRestorers = new WeakMap<
+  GroupHandleRegistry,
+  (groupID: string) => Promise<GroupHandle>
+>()
 
 const liveRegistries = new WeakMap<object, GroupHandleRegistry>()
 
@@ -397,6 +403,9 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         adopt: access.adopt,
         onRetire: access.onRetire,
       }
+      const replaceCaptured = registryCapturedReplacements.get(access)
+      if (replaceCaptured === undefined) throw new Error('Missing captured replacement boundary')
+      registryCapturedReplacements.set(owner.access, replaceCaptured)
       slot.owner = owner
     } else {
       slot.owner.value = value
@@ -532,8 +541,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   const seed = createRegistrySeed({
     capability,
     retirement,
-    environment: environment.recovery,
-    ownerDID: environment.ownerDID,
+    environment,
     start,
     held,
   })
@@ -541,6 +549,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     persistence: persistence.groups,
     capability,
     retirement,
+    cold: environment,
     recovery: environment.recovery,
     ownerDID: environment.ownerDID,
     // Issued switches remain tracked while disposal closes public admission.
@@ -551,7 +560,6 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     start,
     async seed(group, options) {
       assertOpen()
-      groupSlot(group.groupID)
       try {
         return await track(seed(group, options))
       } catch (error) {
@@ -695,6 +703,17 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   })
   bindRegistryRecoveryCoordinator({ registry, entry: capability, persistence: persistence.groups })
   bindRegistryRetirement(registry, retirement)
+  registrySenderRestorers.set(registry, (groupID) =>
+    capability.read(groupID, async (reads) => {
+      assertOpen()
+      const lifetime = await reads.lifetime()
+      const record =
+        lifetime?.activeIncarnation == null ? null : await reads.state(lifetime.activeIncarnation)
+      if (record === null || record.deleted || record.state === null)
+        throw new GroupUnavailableError({ reason: 'state-unreadable' })
+      return restrictCommitAuthoring(await environment.restore({ ...record, state: record.state }))
+    }),
+  )
   liveRegistries.set(binding, registry)
   return registry
 }

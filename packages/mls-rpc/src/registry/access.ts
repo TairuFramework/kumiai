@@ -1,7 +1,9 @@
 import {
   decodeClientState,
-  encodeClientState,
+  denyApplicationSend,
   type GroupHandle,
+  type Relinquished,
+  relinquishSend,
   restrictCommitAuthoring,
 } from '@kumiai/mls'
 import {
@@ -16,7 +18,7 @@ import {
   type SendAdmission,
 } from '@kumiai/rpc'
 
-import type { ControlRead, ControlReadScope, HandleAccess } from '../access.js'
+import type { ControlRead, ControlReadScope, HandleAccess, PersistContext } from '../access.js'
 import { currentCheckpointFact, prepareCheckpointInstallation } from '../checkpoint-capture.js'
 import { controlCompatible } from '../control-compat.js'
 import { type ControlJournal, decodeControlJournal } from '../control-journal.js'
@@ -39,6 +41,12 @@ import type {
 import { clearGroupCondition } from '../safety-conditions.js'
 import { createRegistryAppOpen } from './app-open.js'
 import { type ColdEnvironment, restoreValidated, type ValidatedGroupState } from './cold.js'
+import {
+  capturedRecord,
+  reservationEnvelope,
+  reserveFromBytes,
+  restoreCaptured,
+} from './reserve.js'
 import type { createRegistryRuntime } from './runtime.js'
 import { RetainedTrustUnavailableError, readRetainedTrust } from './safety.js'
 import { readRecoverySource } from './source.js'
@@ -57,6 +65,15 @@ export type RegistryOwner = {
   hooks: Set<() => Promise<void>>
   access: RegistryHandleAccess | null
 }
+
+export const registryCapturedReplacements = new WeakMap<
+  RegistryHandleAccess,
+  (
+    captured: Relinquished,
+    adoption: Parameters<HandleAccess['replace']>[1],
+    prepare: Parameters<HandleAccess['replace']>[2],
+  ) => Promise<boolean>
+>()
 
 export function createRegistryAccess<TTx extends GroupTransaction>(params: {
   owner: RegistryOwner
@@ -199,7 +216,23 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
       epochAuthenticator: handle.state.keySchedule.epochAuthenticator.slice(),
     }
   }
-  function recordFor(handle: GroupHandle, value: ValidatedGroupState): ReadableGroupState {
+  async function recordFor(
+    captured: Relinquished,
+    value: ValidatedGroupState,
+    privateHandle?: GroupHandle,
+  ) {
+    const base = capturedRecord(captured, value.key, value.record.version + 1)
+    const sameIdentity =
+      base.epoch === value.record.epoch &&
+      sameStoredValue(base.epochAuthenticator, value.record.epochAuthenticator)
+    const restoreEnvironment =
+      privateHandle === undefined
+        ? environment
+        : { ...environment, restore: async () => privateHandle }
+    const reserved = sameIdentity
+      ? null
+      : await reserveFromBytes(restoreEnvironment, { ...base, senderHWM: 0 }, 0)
+    const handle = reserved?.handle ?? privateHandle ?? (await restoreCaptured(environment, base))
     validateRegistryHandle({
       handle,
       key: value.key,
@@ -207,23 +240,23 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
       environment: environment.recovery,
       ownerDID: environment.ownerDID,
     })
-    const generation =
-      handle.state.secretTree.leafNodes[2 * handle.state.privatePath.leafIndex]?.application
-        .generation ?? 0
-    return {
-      ...value.record,
-      version: value.record.version + 1,
+    const record: ReadableGroupState = {
+      ...base,
       epoch: Number(handle.epoch),
       epochAuthenticator: handle.state.keySchedule.epochAuthenticator.slice(),
-      state: encodeClientState(handle.state),
-      credential: { ...handle.credential },
-      ledger: [...handle.ledgerTokens],
+      state: reserved?.state ?? captured.state,
       terminal: value.record.terminal || staged(handle).removed,
       senderHWM:
-        Number(handle.epoch) === value.record.epoch
-          ? Math.max(value.record.senderHWM, generation)
-          : generation,
+        reserved === null ? Math.max(value.record.senderHWM, base.senderHWM) : reserved.senderHWM,
     }
+    const reservation =
+      reserved?.reservation == null
+        ? null
+        : {
+            ...reserved.reservation,
+            envelope: reservationEnvelope(record),
+          }
+    return { record, handle, reservation }
   }
   async function writeState(
     stores: GroupStores<TTx>,
@@ -281,7 +314,9 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     const journal = journalFor(write)
     let destination: GroupHandle
     try {
-      destination = restrictCommitAuthoring(await params.restoreCandidate(journal.candidate))
+      destination = denyApplicationSend(
+        restrictCommitAuthoring(await params.restoreCandidate(journal.candidate)),
+      )
     } catch (cause) {
       throw moved(cause)
     }
@@ -390,11 +425,18 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     return destination
   }
   async function ordinary(
-    next: GroupHandle,
+    captured: Relinquished,
     supplied: { expected: AdoptionExpected; write: AdoptionWrite } | undefined,
     prepare?: Parameters<HandleAccess['replace']>[2],
     adoption?: Parameters<HandleAccess['replace']>[1],
+    restored?: GroupHandle,
   ): Promise<'installed' | 'noop'> {
+    const next =
+      restored ??
+      (await restoreCaptured(
+        environment,
+        capturedRecord(captured, owner.key, owner.value.record.version + 1),
+      ))
     params.assertAvailable()
     assertMutationID(supplied?.write)
     const committed = supplied === undefined ? false : await proved(supplied.write.mutationID)
@@ -459,8 +501,12 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
           assertSafety()
           // The decoded handle is isolated from the caller and only now may carry source progress.
           await current.carryReceiveProgress(destination)
-          const record = recordFor(destination, value)
-          const trust = recoveryTrustFor(destination, value.key, value.trust)
+          const {
+            record,
+            handle: installed,
+            reservation,
+          } = await recordFor(await relinquishSend(destination), value, destination)
+          const trust = recoveryTrustFor(installed, value.key, value.trust)
           return {
             expected: lifetime,
             mutationID: write.mutationID,
@@ -469,9 +515,10 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
               record,
               trust,
               write,
+              reservation,
               checkpoint: await prepareCheckpointInstallation({
                 key: owner.key,
-                handle: destination,
+                handle: installed,
                 mutationID: write.mutationID,
                 stateVersion: record.version,
                 previousFact: currentCheckpointFact(await reads.checkpoints())?.canonical ?? null,
@@ -540,12 +587,18 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
           const lifetime = await reads.lifetime()
           let record: ReadableGroupState | undefined
           let trust: ValidatedGroupState['trust'] | undefined
+          let reservation: Awaited<ReturnType<typeof recordFor>>['reservation'] = null
           let write: AdoptionWrite | undefined
           let checkpoint: CheckpointFactRecord | undefined
           let mutationID: string = fallbackMutationID
           let nooped = false
           let active = true
-          const persist = async (candidate: GroupHandle): Promise<void> => {
+          const persist = async (input: GroupHandle, ctx?: PersistContext): Promise<void> => {
+            const captured = await relinquishSend(input, ctx)
+            const candidate = await restoreCaptured(
+              environment,
+              capturedRecord(captured, value.key, value.record.version + 1),
+            )
             if (!active) throw new Error('Mutation prepare scope has ended')
             assertSafety()
             const proposed = adoption?.(staged(candidate))
@@ -586,8 +639,12 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
               const control = await reads.control(owner.key.incarnation)
               if (control.commitOnce !== null) throw moved()
             }
-            const stagedRecord = recordFor(final, value)
-            const stagedTrust = recoveryTrustFor(final, value.key, value.trust)
+            const saved =
+              final === candidate
+                ? await recordFor(captured, value, candidate)
+                : await recordFor(await relinquishSend(final), value, final)
+            const stagedRecord = saved.record
+            const stagedTrust = recoveryTrustFor(saved.handle, value.key, value.trust)
             if (!active) throw new Error('Mutation prepare scope has ended')
             const stagedMutationID = stagedWrite?.mutationID ?? fallbackMutationID
             const stagedCheckpoint =
@@ -596,7 +653,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
                 ? undefined
                 : await prepareCheckpointInstallation({
                     key: owner.key,
-                    handle: final,
+                    handle: saved.handle,
                     mutationID: stagedMutationID,
                     stateVersion: stagedRecord.version,
                     previousFact:
@@ -604,6 +661,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
                   })
             if (!active) throw new Error('Mutation prepare scope has ended')
             record = stagedRecord
+            reservation = saved.reservation
             trust = stagedTrust
             write = stagedWrite
             mutationID = stagedMutationID
@@ -627,7 +685,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
           return {
             expected: lifetime,
             mutationID,
-            value: { result, record, trust, write, source, checkpoint },
+            value: { result, record, trust, write, source, checkpoint, reservation },
           }
         },
         async (stores, prepared) => {
@@ -664,9 +722,10 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     }
   }
   const replace: HandleAccess['replace'] = async (next, adoption, prepare) => {
+    const captured = await relinquishSend(next)
     params.assertAvailable()
     assertSafety()
-    await ordinary(next, undefined, prepare, adoption)
+    await ordinary(captured, undefined, prepare, adoption)
     next.confirmAdopted()
   }
   async function adopt(
@@ -675,13 +734,13 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     write: AdoptionWrite,
   ): Promise<'installed' | 'noop' | 'moved'> {
     try {
-      return await ordinary(next, { expected, write })
+      return await ordinary(await relinquishSend(next), { expected, write })
     } catch (error) {
       if (error instanceof Error && error.name === 'ControlAdoptionMovedError') return 'moved'
       throw error
     }
   }
-  return {
+  const access: RegistryHandleAccess = {
     ...createRegistryAppOpen({
       ...params,
       isolated,
@@ -721,4 +780,20 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
       }
     },
   }
+  registryCapturedReplacements.set(access, async (captured, adoption, prepare) => {
+    const next = await restoreCaptured(
+      environment,
+      capturedRecord(captured, owner.key, owner.value.record.version + 1),
+    )
+    if (prepare !== undefined) {
+      const current = await readControl(async ({ handle, source }) => ({ handle, source }))
+      if (!(await prepare(current.handle, current.source))) return false
+    }
+    const write = adoption?.(staged(next))
+    if (write?.expected === undefined)
+      throw new RegistryRecoveryReplacementError('Ordinary replacement requires provenance')
+    await ordinary(captured, { expected: write.expected, write }, undefined, undefined, next)
+    return true
+  })
+  return access
 }

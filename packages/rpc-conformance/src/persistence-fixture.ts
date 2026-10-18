@@ -778,6 +778,10 @@ export type GroupStorageConformanceParams<TTx extends ConformanceGroupTransactio
   StorageConformanceParams<TTx>,
   'createFixture'
 > & {
+  ownGenerationRegression(record: ConformanceGroupStateRecord & { deleted: false }): Promise<{
+    advanced: ConformanceGroupStateRecord & { deleted: false }
+    regressed: ConformanceGroupStateRecord & { deleted: false }
+  }>
   createFixture(
     id: string,
     options?: FixtureOptions<TTx>,

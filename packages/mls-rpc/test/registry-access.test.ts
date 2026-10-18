@@ -425,10 +425,21 @@ for (const mode of ['real-mls', 'double'] as const) {
           const before = await evidence(fixture, access)
           const work = vi.fn()
           fixture.onPhase('work', work)
-          expect(await access.adopt(candidate, expected, write)).toBe('moved')
-          await expect(access.replace(candidate, () => write)).rejects.toMatchObject({
-            name: 'ControlAdoptionMovedError',
-          })
+          if (kind === 'credential' && mode === 'double') {
+            await expect(access.adopt(candidate, expected, write)).rejects.toMatchObject({
+              name: 'GroupUnavailableError',
+              reason: 'invalid',
+            })
+            await expect(access.replace(candidate, () => write)).rejects.toMatchObject({
+              name: 'GroupUnavailableError',
+              reason: 'invalid',
+            })
+          } else {
+            expect(await access.adopt(candidate, expected, write)).toBe('moved')
+            await expect(access.replace(candidate, () => write)).rejects.toMatchObject({
+              name: 'ControlAdoptionMovedError',
+            })
+          }
           expect(work).not.toHaveBeenCalled()
           expect(await evidence(fixture, access)).toEqual(before)
         } finally {
@@ -834,7 +845,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           await handle.encrypt(new Uint8Array([7]))
           staged = encodeClientState(handle.state)
           await persist(handle)
-          await handle.encrypt(new Uint8Array([8]))
+          await expect(handle.encrypt(new Uint8Array([8]))).rejects.toThrow()
         })
         expect(await access.read((handle) => encodeClientState(handle.state))).toEqual(staged)
       } finally {

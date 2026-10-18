@@ -22,7 +22,7 @@ import {
   type PendingAppFrame,
 } from '@kumiai/rpc'
 
-import type { ControlRead, HandleAccess } from '../../src/access.js'
+import type { ControlRead, HandleAccess, PersistContext } from '../../src/access.js'
 import type { SaveControlBuild } from '../../src/control-build.js'
 import { controlCompatible } from '../../src/control-compat.js'
 import { decodeControlJournal } from '../../src/control-journal.js'
@@ -470,7 +470,7 @@ export async function createTransactionalAccess(
         await store.settled()
         const row = store.snapshot()
         const working = await restore(row)
-        const save = async (current: GroupHandle) => {
+        const save = async (current: GroupHandle, _ctx?: PersistContext) => {
           const write = adoption?.({
             incarnation: 1,
             epochAfter: Number(current.epoch),
@@ -488,8 +488,8 @@ export async function createTransactionalAccess(
           )
         }
         let saved = false
-        const result = await fn(working, async (current) => {
-          await save(current)
+        const result = await fn(working, async (current, ctx) => {
+          await save(current, ctx)
           saved = true
         })
         if (!saved) {

@@ -43,6 +43,7 @@ import {
   createRegistryFixture,
   registryFixtureRecoverySource,
   registryFixtureRestore,
+  retainCapturedDestination,
 } from './fixtures/registry.js'
 import { createRegistryRecovery } from './fixtures/registry-recovery.js'
 import { registryHandle } from './fixtures/registry-welcome.js'
@@ -204,6 +205,7 @@ async function setup(
     sourceTrust: trust,
     responder: { identity: responder, group: remote },
   })
+  retainCapturedDestination(fixture, recovery)
   await fixture.installRows({ key, control: { putRejoin: recovery.record } })
   const owner = createGroupHandleRegistry({
     persistence: fixture.device,
@@ -557,7 +559,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect(await s.fixture.inspectRows()).toEqual(rows)
         expect(await s.fixture.device.groups.loadState(destination)).toMatchObject({
           version: 1,
-          senderHWM: 0,
+          senderHWM: 16,
           epoch: s.record.epochAfter,
         })
         const installed = await s.fixture.device.groups.loadState(destination)

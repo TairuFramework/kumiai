@@ -1,4 +1,4 @@
-import { encodeClientState, type GroupHandle } from '@kumiai/mls'
+import { type GroupHandle, relinquishSend } from '@kumiai/mls'
 import {
   APP_TOPIC_LABEL,
   type CheckpointRecord,
@@ -32,7 +32,14 @@ import type { GroupPersistence, GroupTransaction } from '../persistence-types.js
 import { decodeCapturedRecoveryCandidate } from '../recovery-codec.js'
 import { recoveryTrustDigest } from '../recovery-trust-digest.js'
 import { clearGroupCondition } from '../safety-conditions.js'
+import type { ColdEnvironment } from './cold.js'
 import { checkForkRecoveryCaptureInReads } from './recovery-coordinator.js'
+import {
+  capturedRecord,
+  reservationEnvelope,
+  reserveFromBytes,
+  restoreCaptured,
+} from './reserve.js'
 import { retireIncarnation } from './retired.js'
 import type { RegistryRetirement } from './retirement.js'
 import { readRecoverySource } from './source.js'
@@ -118,13 +125,21 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
   persistence: GroupPersistence<TTx>
   capability: EntryCapability<TTx>
   retirement: RegistryRetirement
+  cold: ColdEnvironment
   recovery: RecoveryEnvironment
   ownerDID: string
   start(): Promise<void>
   held(key: GroupKey): SafetyHold
 }): GroupHandleRegistry['switchIncarnation'] {
   const { persistence, capability, retirement } = environment
-  return async (candidate: GroupHandle, params) => {
+  return async (input: GroupHandle, params) => {
+    const captured = await relinquishSend(input)
+    const capturedState = capturedRecord(
+      captured,
+      { groupID: captured.credential.groupID, incarnation: params.source.key.incarnation + 1 },
+      1,
+    )
+    const candidate = await restoreCaptured(environment.cold, capturedState)
     validateWrite(params.write)
     // Capture caller input before any await, including values used again in work.
     const { source, rejoinID, proof, write } = copyStoredValue(params)
@@ -276,6 +291,11 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
             environment: environment.recovery,
             ownerDID: environment.ownerDID,
           })
+          const reserved = await reserveFromBytes(
+            { ...environment.cold, restore: async () => candidate },
+            { ...capturedState, senderHWM: 0 },
+            0,
+          )
           const state = {
             ...destination,
             version: 1,
@@ -283,10 +303,10 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
             terminal: candidate.state.groupActiveState.kind === 'removedFromGroup',
             epoch: Number(candidate.epoch),
             epochAuthenticator: candidate.state.keySchedule.epochAuthenticator.slice(),
-            state: encodeClientState(candidate.state),
-            credential: { ...candidate.credential },
-            ledger: [...candidate.ledgerTokens],
-            senderHWM: 0,
+            state: reserved.state,
+            credential: captured.credential,
+            ledger: captured.ledgerTokens,
+            senderHWM: reserved.senderHWM,
           }
           const trust = recoveryTrustFor(candidate, destination, current.trust)
           assertSafety(await reads.control(source.key.incarnation))
@@ -315,6 +335,10 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
               lifetime,
               record,
               state,
+              reservation:
+                reserved.reservation === null
+                  ? null
+                  : { ...reserved.reservation, envelope: reservationEnvelope(state) },
               trust,
               anchor,
               checkpoint: await prepareCheckpointInstallation({

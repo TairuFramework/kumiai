@@ -102,7 +102,18 @@ for (const mode of ['real-mls', 'double'] as const) {
       const fixture = await create()
       try {
         const candidate = await fixture.makeHandle(1)
+        const options = { ...fixture.environment.options }
         fixture.environment.options.commitPolicy = () => 'accept'
+        fixture.overrideRestore(async (record) => {
+          const state = decodeClientState(record.state)
+          if (state === undefined) throw new Error('Missing private state')
+          return restoreGroup({
+            state,
+            credential: record.credential,
+            ledgerEntries: record.ledger,
+            options,
+          })
+        })
         const owner = registry(fixture)
         for (const use of [
           null,

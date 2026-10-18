@@ -8,7 +8,7 @@ import {
 } from '@kumiai/mls'
 import type { AdoptionWrite, ControlStore } from '@kumiai/rpc'
 
-import type { ControlRead, HandleAccess } from '../../src/access.js'
+import type { ControlRead, HandleAccess, PersistContext } from '../../src/access.js'
 import { decodeControlJournal } from '../../src/control-journal.js'
 import { DisplacedGroupHandleError } from '../../src/persistence-errors.js'
 import type { GroupKey, GroupPersistence, MemoryTransaction } from '../../src/persistence-types.js'
@@ -173,7 +173,7 @@ export async function createSealedControlAccess(
       serial(async () => {
         const current = await read()
         let saved = false
-        const save = async (handle: GroupHandle) => {
+        const save = async (handle: GroupHandle, _ctx?: PersistContext) => {
           const write = adoption?.({
             incarnation: key.incarnation,
             epochAfter: Number(handle.epoch),

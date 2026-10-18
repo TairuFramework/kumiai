@@ -4,6 +4,7 @@ import {
   CommitValidationUnavailableError,
   commitValidationReason,
   decodeClientState,
+  denyApplicationSend,
   encodeClientState,
   GroupHandle,
   type GroupOptions,
@@ -107,15 +108,17 @@ export async function validateRecoveryCommit(
       return { epoch }
     const state = decodeClientState(encodeClientState(group.state))
     if (state === undefined) return { epoch }
-    const working = restrictCommitAuthoring(
-      new GroupHandle({
-        state,
-        credential: decodeStoredValue(
-          encodeStoredValue(group.credential),
-        ) as typeof group.credential,
-        context: { ...group.context },
-        ledger: decodeStoredValue(encodeStoredValue(group.ledger)) as typeof group.ledger,
-      }),
+    const working = denyApplicationSend(
+      restrictCommitAuthoring(
+        new GroupHandle({
+          state,
+          credential: decodeStoredValue(
+            encodeStoredValue(group.credential),
+          ) as typeof group.credential,
+          context: { ...group.context },
+          ledger: decodeStoredValue(encodeStoredValue(group.ledger)) as typeof group.ledger,
+        }),
+      ),
     )
     if (normalizeDID(header.committerDID) === normalizeDID(ownDID))
       return { epoch, refusal: 'policy', refusalAuthority: 'authenticated-commit' }
@@ -195,13 +198,15 @@ export function createControlValidationPort(params: {
         ) as typeof journal.sourceCredential
         return {
           slot,
-          group: restrictCommitAuthoring(
-            await restoreGroup({
-              state,
-              credential,
-              ledgerEntries: [...journal.sourceLedger],
-              options: { ...options, resolveLedgerEntries: slot.resolve },
-            }),
+          group: denyApplicationSend(
+            restrictCommitAuthoring(
+              await restoreGroup({
+                state,
+                credential,
+                ledgerEntries: [...journal.sourceLedger],
+                options: { ...options, resolveLedgerEntries: slot.resolve },
+              }),
+            ),
           ),
         }
       }
@@ -250,8 +255,8 @@ export function createControlValidationPort(params: {
           } catch {
             return false
           }
-          const candidate = restrictCommitAuthoring(
-            await params.restoreCandidate(journal.candidate.slice()),
+          const candidate = denyApplicationSend(
+            restrictCommitAuthoring(await params.restoreCandidate(journal.candidate.slice())),
           )
           const history = candidate.state.historicalReceiverData.get(BigInt(identity.epoch))
           return (

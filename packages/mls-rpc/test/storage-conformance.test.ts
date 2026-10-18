@@ -8,7 +8,7 @@ import {
 import type { MemoryTransaction } from '../src/persistence-types.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import { createStorageFixture, writeSideRow } from './fixtures/storage-persistence.js'
-import { makeStorageSeed } from './fixtures/storage-seed.js'
+import { makeStorageSeed, ownGenerationRegression } from './fixtures/storage-seed.js'
 
 for (const mode of ['real-mls', 'double'] as const) {
   const params: GroupStorageConformanceParams<MemoryTransaction> = {
@@ -25,6 +25,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       return candidate
     },
     writeSideRow,
+    ownGenerationRegression,
     createFixture: (
       id: string,
       options?: Pick<Parameters<typeof createStorageFixture>[0], 'effects' | 'ownershipContext'>,

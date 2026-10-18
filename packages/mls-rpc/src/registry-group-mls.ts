@@ -2,6 +2,7 @@ import { normalizeDID } from '@kokuin/token'
 import {
   decodeClientState,
   decodeGroupAnchor,
+  denyApplicationSend,
   publicMembershipFacts,
   restoreGroup,
   restrictCommitAuthoring,
@@ -344,13 +345,15 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
               : [],
           ),
         )
-      const group = restrictCommitAuthoring(
-        await restoreGroup({
-          state,
-          credential: record.credential,
-          ledgerEntries: record.ledger,
-          options: params.recovery.options,
-        }),
+      const group = denyApplicationSend(
+        restrictCommitAuthoring(
+          await restoreGroup({
+            state,
+            credential: record.credential,
+            ledgerEntries: record.ledger,
+            options: params.recovery.options,
+          }),
+        ),
       )
       return await sealRosterAbsenceReply({
         group,
@@ -365,6 +368,7 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
   const groupMLS = createGroupMLS({
     ...params,
     access: lazy,
+    denySend: true,
     control,
     settleForkRecoveryCapture: (input) =>
       registryRecoveryCoordinator(registry).settleForkRecoveryCapture(input, params.recovery),
@@ -468,6 +472,7 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
             reply,
             environment: {
               ...params.recovery,
+              denySend: true,
               accept: async () => {
                 throw new Error('Head reconciliation cannot install')
               },

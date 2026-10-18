@@ -83,6 +83,16 @@ export type ConformanceRegistryAdoptionFactory = (staged: {
   removed: boolean
   epochAuthenticator: Uint8Array
 }) => ConformanceAdoptionWrite<string>
+export type ConformancePersistContext<THandle> = THandle extends {
+  bootstrapLedger(tokens: Array<string>, options?: infer TOptions): unknown
+}
+  ? NonNullable<TOptions> extends { persist?: infer TPersist }
+    ? NonNullable<TPersist> extends (handle: THandle, ctx: infer TContext) => unknown
+      ? TContext
+      : never
+    : never
+  : never
+
 export type ConformanceRegistryAccess<THandle> = {
   key: ConformanceGroupKey
   runtime: ConformanceRegistryRuntime
@@ -100,7 +110,10 @@ export type ConformanceRegistryAccess<THandle> = {
   openBatch(frames: Array<ConformanceOpenAppInput>): Promise<Array<ConformanceOpenAppResult>>
   pending: ConformancePendingAppFrames
   mutate<TValue>(
-    fn: (handle: THandle, persist: (handle: THandle) => Promise<void>) => Promise<TValue>,
+    fn: (
+      handle: THandle,
+      persist: (handle: THandle, ctx?: ConformancePersistContext<THandle>) => Promise<void>,
+    ) => Promise<TValue>,
     adoption?: ConformanceRegistryAdoptionFactory,
   ): Promise<TValue>
   replace(
@@ -225,6 +238,8 @@ export type ConformanceRegistryFixtureBase<
   holdColdPublication(groupID: string): { started: Promise<void>; release(): void }
   holdRestore(groupID: string): { started: Promise<void>; release(): void }
   holdProof(mutationID: string): { started: Promise<void>; release(): void }
+  restores(): number
+  restoreCommittedSender(groupID?: string): Promise<THandle>
   restoreCount(groupID: string): number
   coldLoadCount(groupID: string): number
   overrideRestore(

@@ -465,6 +465,11 @@ export class GroupHandle {
     return this.#admission
   }
 
+  ownLeafLapsed(): boolean {
+    const own = leafAt(this.state.ratchetTree, this.state.privatePath.leafIndex)
+    return own != null && isLapsed(this, own)
+  }
+
   confirmAdopted(): void {
     const pending = this.#pendingControlEvents
     this.#pendingControlEvents = undefined
