@@ -20,7 +20,9 @@ import {
   readMessageEpoch,
   restoreGroup,
   signLedgerEntry,
+  withCommitPermit,
 } from '@kumiai/mls'
+import { digestAppliedCommit } from '@kumiai/rpc'
 import {
   type Commit,
   contentTypes,
@@ -56,6 +58,13 @@ import {
   restoreMemoryControlSource,
   seedMemoryControlState,
 } from './fixtures/sealed-memory-mls.js'
+
+const { tagMemoryCommit, verifyMemoryCommitTag } = (await import(
+  new URL('../../rpc/test/fixtures/memory-group-mls.ts', import.meta.url).href
+)) as {
+  tagMemoryCommit(commit: Uint8Array, authenticator: Uint8Array): Uint8Array
+  verifyMemoryCommitTag(commit: Uint8Array, authenticator: Uint8Array): boolean
+}
 
 async function setup(options: GroupOptions = {}) {
   const identity = randomIdentity()
@@ -802,6 +811,91 @@ async function receivedPublicCommit(
 }
 
 describe.each(['real-mls', 'double'] as const)('received commit gates (%s)', (mode) => {
+  const proposalErrors: Record<string, RegExp> = {
+    'committer self-removal': /Cannot remove memory committer/,
+    'duplicate removal targets': /Duplicate memory removal target/,
+    'unknown removal target': /Unknown memory removal target/,
+  }
+  test.each(['sibling branch', 'tampered tag', 'tampered content', 'missing tag'] as const)(
+    '%s refuses authentication before model mutation or persistence',
+    async (scenario) => {
+      const group = await createRealGroup(1, `commit-authentication-${mode}-${scenario}`)
+      const receiver = group.members[0]
+      if (receiver === undefined) throw new Error('Missing authentication receiver')
+      const local = await registryHandle({ mode, handle: receiver.handle, options: {} })
+      let author = await registryHandle({ mode, handle: group.committer.handle, options: {} })
+      let commit: Uint8Array
+      if (mode === 'double') {
+        const source = memoryModel(author)
+        if (scenario === 'sibling branch') {
+          const first = source.buildCommit()
+          const second = source.buildCommit()
+          expect(first).not.toEqual(second)
+          await local.processMessage(first)
+          await source.adopt(second)
+        }
+        commit = source.buildCommit()
+        if (scenario !== 'sibling branch') {
+          const fake = JSON.parse(new TextDecoder().decode(commit))
+          if (scenario === 'tampered tag')
+            fake.tag = `${fake.tag?.[0] === 'A' ? 'B' : 'A'}${fake.tag?.slice(1) ?? ''}`
+          else if (scenario === 'tampered content') fake.branch = 'tampered-branch'
+          else delete fake.tag
+          commit = new TextEncoder().encode(JSON.stringify(fake))
+        }
+      } else {
+        const rotate = () => {
+          return createCommit({ context: author.context, state: structuredClone(author.state) })
+        }
+        if (scenario === 'sibling branch') {
+          const first = await rotate()
+          const second = await rotate()
+          await local.processMessage(encode(mlsMessageEncoder, first.commit))
+          author = await restoreGroup({
+            state: second.newState,
+            credential: author.credential,
+            ledgerEntries: author.ledgerTokens,
+          })
+        }
+        commit = encode(mlsMessageEncoder, (await rotate()).commit)
+        if (scenario !== 'sibling branch') {
+          commit = rewriteFrame(commit, (frame) => {
+            if (scenario === 'missing tag') frame.ciphertext = frame.ciphertext.slice(0, -16)
+            else
+              flip(frame.ciphertext, scenario === 'tampered tag' ? frame.ciphertext.length - 1 : 0)
+          })
+        }
+      }
+      expect(local.epoch).toBe(author.epoch)
+      expect(local.listMembers().map(({ id, leafIndex }) => ({ id, leafIndex }))).toEqual(
+        author.listMembers().map(({ id, leafIndex }) => ({ id, leafIndex })),
+      )
+      expect(readLedgerHead(local)?.head).toEqual(readLedgerHead(author)?.head)
+      if (scenario === 'sibling branch')
+        expect(local.state.keySchedule.epochAuthenticator).not.toEqual(
+          author.state.keySchedule.epochAuthenticator,
+        )
+      const before = encodeClientState(local.state)
+      const members = local.listMembers()
+      const epoch = local.epoch
+      const model = mode === 'double' ? memoryModel(local) : undefined
+      const modelBefore = model?.serializeState()
+      const process = model === undefined ? undefined : vi.spyOn(model, 'processCommit')
+      const persist = vi.fn()
+      await expect(local.processMessage(commit, { persist })).rejects.toThrow(
+        mode === 'real-mls' ? /invalid tag/ : /Invalid memory commit tag/,
+      )
+      expect(encodeClientState(local.state)).toEqual(before)
+      expect(local.epoch).toBe(epoch)
+      expect(local.listMembers()).toEqual(members)
+      expect(persist).not.toHaveBeenCalled()
+      if (model !== undefined) {
+        expect(model.serializeState()).toEqual(modelBefore)
+        expect(process).not.toHaveBeenCalled()
+      }
+    },
+  )
+
   test.each(['unknown author', 'unauthorized removal'] as const)(
     '%s refuses without changing state or persisting',
     async (scenario) => {
@@ -818,7 +912,10 @@ describe.each(['real-mls', 'double'] as const)('received commit gates (%s)', (mo
           const { encodeMemoryCommit } = (await import(
             new URL('../../rpc/test/fixtures/memory-group-mls.ts', import.meta.url).href
           )) as { encodeMemoryCommit(epoch: number, did: string): Uint8Array }
-          commit = encodeMemoryCommit(Number(local.epoch), stranger.id)
+          commit = tagMemoryCommit(
+            encodeMemoryCommit(Number(local.epoch), stranger.id),
+            author.state.keySchedule.epochAuthenticator,
+          )
         } else {
           commit = memoryModel(author).buildCommit([], { removes: [target.identity.id] })
         }
@@ -929,7 +1026,11 @@ describe.each(['real-mls', 'double'] as const)('received commit gates (%s)', (mo
           fake.invalidContent = true
           break
       }
-      commit = new TextEncoder().encode(JSON.stringify(fake))
+      // Re-authenticate malformed proposals so the epoch tag cannot mask proposal validation.
+      commit = tagMemoryCommit(
+        new TextEncoder().encode(JSON.stringify(fake)),
+        author.state.keySchedule.epochAuthenticator,
+      )
     } else {
       const bundle =
         scenario === 'duplicate additions' || scenario === 'existing member addition'
@@ -1054,7 +1155,9 @@ describe.each(['real-mls', 'double'] as const)('received commit gates (%s)', (mo
     const process = model === undefined ? undefined : vi.spyOn(model, 'processCommit')
     const persist = vi.fn()
     await expect(local.processMessage(commit, { persist })).rejects.toThrow(
-      mode === 'real-mls' ? realError : undefined,
+      mode === 'real-mls'
+        ? realError
+        : (proposalErrors[scenario] ?? /Unsupported memory commit effects/),
     )
     expect(persist).not.toHaveBeenCalled()
     expect(encodeClientState(local.state)).toEqual(before)
@@ -1121,19 +1224,33 @@ describe('double application frames', () => {
     })
     const index = source.state.privatePath.leafIndex * 2
     const before = source.state.secretTree.leafNodes[index]?.handshake.generation ?? 0
-    const built = await buildSealedMemoryOperation(
-      {
-        id: 'handshake',
-        kind: 'invite',
-        revokes: false,
-        seq: 1,
-        enqueuedAt: 0,
-        deadline: 1000,
-        stage: 'intent',
-        body: encodeStoredValue({ target: source.credential.id }),
-      },
-      source,
+    const { value: built, receipt } = await withCommitPermit(
+      async () => source,
+      (permitted) =>
+        buildSealedMemoryOperation(
+          {
+            id: 'handshake',
+            kind: 'invite',
+            revokes: false,
+            seq: 1,
+            enqueuedAt: 0,
+            deadline: 1000,
+            stage: 'intent',
+            body: encodeStoredValue({ target: source.credential.id }),
+          },
+          permitted,
+        ),
     )
+    expect(verifyMemoryCommitTag(built.commit, handle.state.keySchedule.epochAuthenticator)).toBe(
+      true,
+    )
+    expect(receipt?.commit).toEqual(built.commit)
+    expect(built.digest).toBe(digestAppliedCommit(built.commit))
+    const changed = JSON.parse(new TextDecoder().decode(built.commit))
+    changed.tag = `${changed.tag[0] === 'A' ? 'B' : 'A'}${changed.tag.slice(1)}`
+    const tampered = new TextEncoder().encode(JSON.stringify(changed))
+    expect(digestAppliedCommit(tampered)).not.toBe(built.digest)
+    expect(tampered).not.toEqual(receipt?.commit)
     expect(source.state.secretTree.leafNodes[index]?.handshake.generation).toBe(before + 1)
     expect(source.state.secretTree.leafNodes[index]?.application.generation).toBe(0)
     const state = decodeClientState(built.journal)

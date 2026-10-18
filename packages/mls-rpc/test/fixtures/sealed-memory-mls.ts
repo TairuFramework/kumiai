@@ -86,9 +86,10 @@ type MemoryMLS = GroupMLS & {
   adopt(commit: Uint8Array): void | Promise<void>
 }
 
-const { createMemoryGroupMLS, decodeMemoryCommit, memoryCheckpointFrame } = (await import(
+const memoryModule = (await import(
   new URL('../../../rpc/test/fixtures/memory-group-mls.ts', import.meta.url).href
 )) as {
+  verifyMemoryCommitTag(bytes: Uint8Array, authenticator: Uint8Array): boolean
   decodeMemoryCommit(bytes: Uint8Array): {
     committerDID: string
     entryIDs: Array<string>
@@ -114,6 +115,8 @@ const { createMemoryGroupMLS, decodeMemoryCommit, memoryCheckpointFrame } = (awa
     validateLedgerEntries(tokens: Array<string>, previous: Array<string> | null): Promise<void>
   }): MemoryMLS
 }
+const { createMemoryGroupMLS, decodeMemoryCommit, memoryCheckpointFrame, verifyMemoryCommitTag } =
+  memoryModule
 const { verifyDeviceEntry } = (await import(
   new URL('../../../mls/src/device-proof.ts', import.meta.url).href
 )) as {
@@ -772,6 +775,8 @@ class MemoryControlHandle extends GroupHandle {
       const commit = decodeMemoryCommit(message)
       if (header?.committerDID == null || header.epoch !== Number(this.epoch) || commit === null)
         throw new Error('Invalid memory commit')
+      if (!verifyMemoryCommitTag(message, this.#mls.authenticator()))
+        throw new Error('Invalid memory commit tag')
       // A closed wire subset cannot silently discard unsupported proposal or path evidence.
       if (
         this.anchor.controller != null ||
@@ -793,6 +798,7 @@ class MemoryControlHandle extends GroupHandle {
               'removes',
               'head',
               'branch',
+              'tag',
               'invalidContent',
               'missingProposal',
             ].includes(field),

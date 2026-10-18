@@ -54,6 +54,7 @@ import {
   validateCaptureHead,
 } from '../../src/recovery-types.js'
 import { commitTopic } from '../../src/topic.js'
+import { FAKE_BASE_SECRET, fakeEpochSecret } from './fake-crypto.js'
 import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
 
 export type MemoryGroupMLS = GroupMLS & {
@@ -330,6 +331,7 @@ type MemoryCommit = {
   invalidContent?: true
   missingProposal?: true
   branch?: string
+  tag?: string
   /**
    * The roster op this Commit enacts, applied to `leaves` when the commit ADVANCES this handle.
    * The real double has no MLS proposals, so this stands in for the one tree effect a Commit's
@@ -364,6 +366,7 @@ export function encodeMemoryCommit(
     /** Override the signer to forge: the commit claims `committerDID` but is signed by this. */
     signerDID?: string
     branch?: string
+    authenticator?: Uint8Array
   } = {},
 ): Uint8Array {
   // A commit that enacts nothing proposes no head extension: the head it found is the head it
@@ -383,7 +386,23 @@ export function encodeMemoryCommit(
     ...(options.adds != null && options.adds.length > 0 ? { adds: options.adds } : {}),
     ...(options.removes != null && options.removes.length > 0 ? { removes: options.removes } : {}),
   }
-  return fromUTF(JSON.stringify(commit))
+  return tagMemoryCommit(fromUTF(JSON.stringify(commit)), options.authenticator ?? FAKE_BASE_SECRET)
+}
+
+export function tagMemoryCommit(commit: Uint8Array, authenticator: Uint8Array): Uint8Array {
+  const { tag: _tag, ...body } = JSON.parse(toUTF(commit)) as MemoryCommit
+  const key = fakeEpochSecret(body.epoch, 'commit', 32, authenticator)
+  const tag = toB64U(hmac(sha256, key, fromUTF(JSON.stringify(body))))
+  return fromUTF(JSON.stringify({ ...body, tag }))
+}
+
+export function verifyMemoryCommitTag(commit: Uint8Array, authenticator: Uint8Array): boolean {
+  if (decodeMemoryCommit(commit) === null) return false
+  const expected = tagMemoryCommit(commit, authenticator)
+  // Require the exact authenticated encoding, including field order and whitespace.
+  return (
+    commit.length === expected.length && commit.every((byte, index) => byte === expected[index])
+  )
 }
 
 export function decodeMemoryCommit(commit: Uint8Array): MemoryCommit | null {
@@ -396,6 +415,7 @@ export function decodeMemoryCommit(commit: Uint8Array): MemoryCommit | null {
       !Number.isSafeInteger(value?.epoch) ||
       value.epoch < 0 ||
       (value.branch != null && typeof value.branch !== 'string') ||
+      (value.tag != null && typeof value.tag !== 'string') ||
       typeof value?.committerDID !== 'string' ||
       (value.head != null && typeof value.head !== 'string') ||
       (value.external != null && typeof value.external !== 'boolean') ||
@@ -1010,6 +1030,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     // nobody will apply, which is why losing the compare-and-set discards the GroupInfo
     // and not merely the commit.
     const commit = encodeMemoryCommit(info.epoch, localDID ?? '', [], {
+      authenticator:
+        info.authenticator === undefined ? authenticator() : fromB64U(info.authenticator),
       head: info.head,
       external: true,
       // Model a fresh MLS leaf per attempt, preserving bytes on candidate restore.
@@ -1540,6 +1562,10 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
               const { snapshot: saved, held } = readCaptured(record.candidate, record.requestKey)
               const source = validateSource(await capturedDependencies.readSource())
               const commit = encodeMemoryCommit(held.info.epoch, localDID ?? '', [], {
+                authenticator:
+                  held.info.authenticator === undefined
+                    ? authenticator()
+                    : fromB64U(held.info.authenticator),
                 head: held.info.head,
                 external: true,
                 branch: held.freshLeaf,
@@ -2043,6 +2069,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         return id
       })
       return encodeMemoryCommit(epoch, localDID ?? '', entryIDs, {
+        authenticator: authenticator(),
         branch: toB64U(crypto.getRandomValues(new Uint8Array(16))),
         head: computeLedgerHead([...ledger, ...entryIDs]),
         ...(options.adds != null ? { adds: options.adds } : {}),
