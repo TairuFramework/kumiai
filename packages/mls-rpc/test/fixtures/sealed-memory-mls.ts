@@ -620,6 +620,7 @@ class MemoryControlHandle extends GroupHandle {
         privateMessage: frame,
       })
       stepRatchet(ratchet)
+      captureReceiveState(this.#view, this.#mls)
       return bytes
     })
   }
@@ -713,6 +714,8 @@ class MemoryControlHandle extends GroupHandle {
     return mutexFor(this).run(async () => {
       const { staged, opened } = this.#open(message, opts)
       Object.assign(this.#view, staged)
+      // A later envelope rebuild reads retained trees from the model's snapshot.
+      captureReceiveState(this.#view, this.#mls)
       return opened
     })
   }
@@ -729,6 +732,7 @@ class MemoryControlHandle extends GroupHandle {
       const { staged, opened } = this.#open(message, opts)
       await persist(encodeClientState(staged), opened)
       Object.assign(this.#view, staged)
+      captureReceiveState(this.#view, this.#mls)
       return opened
     })
   }

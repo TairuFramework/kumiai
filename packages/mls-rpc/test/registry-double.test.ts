@@ -32,8 +32,9 @@ import { describe, expect, test, vi } from 'vitest'
 
 import { encodeStoredValue } from '../src/persistence-codec.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
-import { validateRegistryHandle } from '../src/registry/validation.js'
+import { registryOptions, validateRegistryHandle } from '../src/registry/validation.js'
 import { createRealGroup } from './fixtures/real-group.js'
+import { createRegistryFixture } from './fixtures/registry.js'
 import {
   buildSealedMemoryOperation,
   memoryModel,
@@ -640,7 +641,10 @@ const appOptions: GroupOptions = {
   },
 }
 
-async function appGroup(mode: 'real-mls' | 'double' = 'double') {
+async function appGroup(
+  mode: 'real-mls' | 'double' = 'double',
+  options: GroupOptions = appOptions,
+) {
   const group = await createRealGroup(1, 'framed-app')
   const member = group.members[0]
   if (member === undefined) throw new Error('Missing member')
@@ -656,36 +660,40 @@ async function appGroup(mode: 'real-mls' | 'double' = 'double') {
           : structuredClone(handle.state),
       credential: handle.credential,
       ledgerEntries: handle.ledgerTokens,
-      options: appOptions,
+      options,
     })
   }
   let sender = await convert(group.committer.handle)
-  const local = await convert(member.handle)
+  let local = await convert(member.handle)
   expect(local.state.privatePath.leafIndex).toBe(1)
   expect(local.memberCount).toBe(2)
   return {
-    local,
+    identity: member.identity,
+    get local() {
+      return local
+    },
     get sender() {
       return sender
     },
-    async advance() {
+    async advance(author: 'sender' | 'local' = 'sender') {
+      const committer = author === 'sender' ? sender : local
+      const receiver = author === 'sender' ? local : sender
       if (mode === 'double') {
-        const commit = memoryModel(sender).buildCommit()
-        await memoryModel(sender).adopt(commit)
+        const commit = memoryModel(committer).buildCommit()
+        await memoryModel(committer).adopt(commit)
         expect(
           (
-            await memoryModel(local).processCommit(commit, {
-              senderDID: sender.credential.id,
+            await memoryModel(receiver).processCommit(commit, {
+              senderDID: committer.credential.id,
               resolveLedgerEntries: async () => [],
             })
           ).applied,
         ).toBe(true)
-        sender.state
-        local.state
       } else {
-        const rotated = await commitKeyRotation(sender)
-        sender = rotated.newGroup
-        await local.processMessage(rotated.commitMessage)
+        const rotated = await commitKeyRotation(committer)
+        if (author === 'sender') sender = rotated.newGroup
+        else local = rotated.newGroup
+        await receiver.processMessage(rotated.commitMessage)
       }
     },
   }
@@ -792,47 +800,88 @@ describe('double application frames', () => {
     )
   })
 
-  test('double tag binds epoch, sender and AAD', async () => {
-    const { local, sender } = await appGroup()
-    const frame = await sender.encrypt(new Uint8Array([42]), { aad: new Uint8Array([7]) })
-    await (async () => {
-      const source = memoryModel(local)
-      const commit = source.buildCommit()
-      await source.adopt(commit)
-      local.state
-    })()
-    const before = encodeClientState(local.state)
-    for (const change of [
-      (pm: PrivateMessage) => {
-        pm.epoch = local.epoch
-      },
-      (pm: PrivateMessage) => {
-        flip(pm.groupId)
-      },
-      (pm: PrivateMessage) => {
-        flip(pm.encryptedSenderData, 3)
-      },
-      (pm: PrivateMessage) => {
-        flip(pm.encryptedSenderData, 7)
-      },
-      (pm: PrivateMessage) => {
-        flip(pm.authenticatedData)
-      },
-      (pm: PrivateMessage) => {
-        flip(pm.ciphertext)
-      },
-      (pm: PrivateMessage) => {
-        flip(pm.ciphertext, pm.ciphertext.length - 1)
-      },
-      (pm: PrivateMessage) => {
-        pm.ciphertext = pm.ciphertext.slice(0, -1)
-      },
-    ]) {
-      await expect(local.decrypt(rewriteFrame(frame, change))).rejects.toThrow()
+  test.each(['decrypt', 'decryptStaged'] as const)(
+    'double %s tag binds epoch, sender and AAD',
+    async (method) => {
+      const { local, sender } = await appGroup()
+      const open = (bytes: Uint8Array) =>
+        method === 'decrypt' ? local.decrypt(bytes) : local.decryptStaged(bytes, {}, async () => {})
+      const frame = await sender.encrypt(new Uint8Array([42]), { aad: new Uint8Array([7]) })
+      await (async () => {
+        const source = memoryModel(local)
+        const commit = source.buildCommit()
+        await source.adopt(commit)
+        local.state
+      })()
+      const before = encodeClientState(local.state)
+      const changes: Array<{
+        change: (pm: PrivateMessage) => void
+        error: string
+      }> = [
+        {
+          change: (pm) => {
+            pm.epoch = local.epoch
+          },
+          error: 'Invalid memory application tag',
+        },
+        {
+          change: (pm) => {
+            pm.epoch = local.epoch + 1n
+          },
+          error: 'Unavailable memory epoch',
+        },
+        {
+          change: (pm) => {
+            flip(pm.groupId)
+          },
+          error: 'Memory group mismatch',
+        },
+        {
+          change: (pm) => {
+            flip(pm.encryptedSenderData, 3)
+          },
+          error: 'Invalid memory application tag',
+        },
+        {
+          change: (pm) => {
+            flip(pm.encryptedSenderData, 7)
+          },
+          error: 'Invalid memory application tag',
+        },
+        {
+          change: (pm) => {
+            flip(pm.authenticatedData)
+          },
+          error: 'Invalid memory application tag',
+        },
+        {
+          change: (pm) => {
+            flip(pm.ciphertext)
+          },
+          error: 'Invalid memory application tag',
+        },
+        {
+          change: (pm) => {
+            flip(pm.ciphertext, pm.ciphertext.length - 1)
+          },
+          error: 'Invalid memory application tag',
+        },
+        {
+          change: (pm) => {
+            pm.ciphertext = pm.ciphertext.slice(0, -1)
+          },
+          error: 'Invalid memory application tag',
+        },
+      ]
+      for (const { change, error } of changes) {
+        await expect(open(rewriteFrame(frame, change))).rejects.toThrow(error)
+        expect(encodeClientState(local.state)).toEqual(before)
+      }
+      await expect(open(frame.slice(0, -1))).rejects.toThrow('Data length exceeds buffer')
       expect(encodeClientState(local.state)).toEqual(before)
-    }
-    expect((await local.decrypt(frame)).payload).toEqual(new Uint8Array([42]))
-  })
+      expect((await open(frame)).payload).toEqual(new Uint8Array([42]))
+    },
+  )
 
   test('double staged failure keeps the key', async () => {
     const { local, sender } = await appGroup()
@@ -866,8 +915,10 @@ describe('double application frames', () => {
     const index = sender.state.privatePath.leafIndex * 2
     const leaf = local.state.ratchetTree[index]
     local.state.ratchetTree[index] = undefined
-    await expect(local.decrypt(frame)).rejects.toThrow()
-    await expect(local.decryptStaged(frame, {}, async () => {})).rejects.toThrow()
+    await expect(local.decrypt(frame)).rejects.toThrow('Unnamed memory sender')
+    await expect(local.decryptStaged(frame, {}, async () => {})).rejects.toThrow(
+      'Unnamed memory sender',
+    )
     local.state.ratchetTree[index] = leaf
     expect((await local.decrypt(frame)).senderDID).toBe(sender.credential.id)
   })
@@ -908,10 +959,150 @@ describe('double application frames', () => {
       new Uint8Array([42]),
     )
   })
+
+  for (const method of ['decrypt', 'decryptStaged'] as const) {
+    for (const epoch of ['current', 'retained'] as const) {
+      test.each(['registry advance', 'control authoring', 'registry adoption'] as const)(
+        `${method} keeps consumed ${epoch} generations across %s`,
+        async (path) => {
+          const options = registryOptions({ keyRetention: { retainKeysForEpochs: 2 } })
+          const f = await appGroup('double', options)
+          const fixture = await createRegistryFixture({
+            mode: 'double',
+            setup: 'empty',
+            groupID: f.local.groupID,
+            identity: f.identity,
+            options,
+          })
+          const open = (handle: GroupHandle, bytes: Uint8Array) =>
+            method === 'decrypt'
+              ? handle.decrypt(bytes)
+              : handle.decryptStaged(bytes, {}, async () => {})
+          const frame = await f.sender.encrypt(new Uint8Array([42]))
+          if (epoch === 'retained') await f.advance()
+          const sourceEpoch = f.local.epoch
+          const consume = async (handle: GroupHandle) => {
+            const own = await handle.encrypt(new Uint8Array([9]))
+            expect((await open(f.sender, own)).payload).toEqual(new Uint8Array([9]))
+            expect((await open(handle, frame)).payload).toEqual(new Uint8Array([42]))
+            return own
+          }
+          try {
+            let advanced: GroupHandle
+            let own: Uint8Array
+            if (path === 'registry adoption') {
+              await fixture.registry.seed(f.local, {
+                packageUse: { sourceID: 'retained', ref: 'member', kind: 'ordinary' },
+              })
+              const access = await fixture.registry.access(f.local.groupID)
+              // Build first so adoption must carry progress committed afterwards.
+              const { candidate, write } = await fixture.acceptedOrdinary(access)
+              own = await access.mutate(async (handle, persist) => {
+                const bytes = await consume(handle)
+                await persist(handle)
+                return bytes
+              })
+              const expected = await access.readControl(async ({ source }) => source)
+              write.expected = { ...write.expected, ...expected }
+              expect(await access.adopt(candidate, expected, write)).toBe('installed')
+              advanced = await access.read((handle) => handle)
+            } else if (path === 'control authoring') {
+              own = await consume(f.local)
+              const source = await restoreMemoryControlSource({
+                state: f.local.state,
+                credential: f.local.credential,
+                ledgerEntries: f.local.ledgerTokens,
+                options,
+              })
+              const built = await buildSealedMemoryOperation(
+                {
+                  id: 'retained',
+                  kind: 'invite',
+                  revokes: false,
+                  seq: 1,
+                  enqueuedAt: 0,
+                  deadline: 1000,
+                  stage: 'intent',
+                  body: encodeStoredValue({ target: source.credential.id }),
+                },
+                source,
+              )
+              const state = decodeClientState(built.journal)
+              if (state === undefined) throw new Error('Missing control candidate')
+              advanced = await restoreMemoryControlHandle({
+                state,
+                credential: source.credential,
+                ledgerEntries: source.ledgerTokens,
+                options,
+              })
+            } else {
+              own = await consume(f.local)
+              advanced = await fixture.advance(f.local)
+            }
+            // The peer also advances directly without a state read after its receive.
+            const peer = memoryModel(f.sender)
+            await peer.adopt(peer.buildCommit())
+            expect(advanced.epoch).toBe(sourceEpoch + 1n)
+            await expect(advanced.decrypt(frame)).rejects.toThrow('Desired gen in the past')
+            await expect(f.sender.decrypt(own)).rejects.toThrow('Desired gen in the past')
+            expect(
+              advanced.state.historicalReceiverData.get(sourceEpoch)?.secretTree.leafNodes[2]
+                ?.application.generation,
+            ).toBe(1)
+          } finally {
+            await fixture.close()
+          }
+        },
+      )
+    }
+  }
 })
 
 for (const mode of ['real-mls', 'double'] as const) {
   describe(`application ratchet limits: ${mode}`, () => {
+    test.each(['sender', 'local'] as const)(
+      'own encrypt keeps consumed generations across direct %s commit adoption',
+      async (author) => {
+        const f = await appGroup(mode)
+        const own = await f.local.encrypt(new Uint8Array([9]))
+        expect((await f.sender.decrypt(own)).payload).toEqual(new Uint8Array([9]))
+        await f.advance(author)
+        await expect(f.sender.decrypt(own)).rejects.toThrow('Desired gen in the past')
+        expect(
+          f.local.state.historicalReceiverData.get(1n)?.secretTree.leafNodes[2]?.application
+            .generation,
+        ).toBe(1)
+      },
+    )
+
+    for (const method of ['decrypt', 'decryptStaged'] as const) {
+      test.each(['sender', 'local'] as const)(
+        `${method} keeps consumed generations across direct %s commit adoption`,
+        async (author) => {
+          const f = await appGroup(mode)
+          const own = await f.local.encrypt(new Uint8Array([9]))
+          const frame = await f.sender.encrypt(new Uint8Array([42]))
+          const retained = await f.sender.encrypt(new Uint8Array([43]))
+          const open = (handle: GroupHandle, bytes: Uint8Array) =>
+            method === 'decrypt'
+              ? handle.decrypt(bytes)
+              : handle.decryptStaged(bytes, {}, async () => {})
+          expect((await open(f.sender, own)).payload).toEqual(new Uint8Array([9]))
+          expect((await open(f.local, frame)).payload).toEqual(new Uint8Array([42]))
+          // No state getter may refresh the receive snapshot before advancing.
+          await f.advance(author)
+          await expect(f.local.decrypt(frame)).rejects.toThrow('Desired gen in the past')
+          await expect(f.sender.decrypt(own)).rejects.toThrow('Desired gen in the past')
+          expect(
+            (await f.sender.decrypt(await f.local.encrypt(new Uint8Array([10])))).payload,
+          ).toEqual(new Uint8Array([10]))
+          expect((await open(f.local, retained)).payload).toEqual(new Uint8Array([43]))
+          await f.advance(author)
+          await expect(f.local.decrypt(retained)).rejects.toThrow('Desired gen in the past')
+        },
+      )
+    }
+
     test('generation beyond the forward limit refuses', async () => {
       const { local, sender } = await appGroup(mode)
       const frames = await appFrames(sender, 5)
