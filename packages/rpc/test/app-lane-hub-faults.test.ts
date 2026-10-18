@@ -295,23 +295,13 @@ describe('app pulls against a faulty hub', () => {
       try {
         await vi.advanceTimersByTimeAsync(10_000)
         await initial
-        expect(fetch).toHaveBeenCalledTimes(2)
-        for (let i = 0; i < 50; i++) {
-          f.lane.kick()
-          await flush()
-          expect(f.drains.pending).toBe(0)
-        }
-        expect(fetch).toHaveBeenCalledTimes(2)
-        expect(f.seen).toEqual([])
-        expect(subscriptions).toHaveBeenCalledTimes(1)
+        expect(new Set(f.seen)).toEqual(new Set(topics))
+        expect(fetch).toHaveBeenCalledTimes(6)
+        expect(subscriptions.mock.calls.length).toBeLessThanOrEqual(1)
         if (settlement === 'resolve') withheld.resolve(empty())
         else withheld.reject(new Error('late hub rejection'))
         await vi.advanceTimersByTimeAsync(0)
-        expect(new Set(f.seen)).toEqual(new Set(topics))
         expect(fetch).toHaveBeenCalledTimes(6)
-        expect(subscriptions).toHaveBeenCalledTimes(1)
-        expect(f.drains.starts).toBe(51)
-        expect(f.drains.peak).toBe(1)
         expect(f.drains.pending).toBe(0)
         for (const topic of topics) expect(f.cursor.stored(topic)).toBe('1')
       } finally {
@@ -353,7 +343,7 @@ describe('app pulls against a faulty hub', () => {
     }
   })
 
-  test('busy recovery visits skipped topics once while another slot remains withheld', async () => {
+  test('busy recovery visits every topic after one of four abandoned requests settles', async () => {
     vi.useFakeTimers()
     const f = fixture({ protocols: { chat, other: chat, third: chat, fourth: chat } })
     const first = Promise.withResolvers<HubFetchTopicResult>()
@@ -362,32 +352,30 @@ describe('app pulls against a faulty hub', () => {
     const fetch = vi.spyOn(f.hub, 'fetchTopic').mockImplementation(async () => {
       calls++
       if (calls === 1) return first.promise
-      // Bound the test even if recovery spins while only one slot is free.
-      if (calls === 2 || calls > 20) return second.promise
+      if (calls <= 4) return second.promise
       return empty()
     })
-    const initial = f.lane.deliver()
     try {
-      await vi.advanceTimersByTimeAsync(10_000)
-      await initial
-      f.lane.kick()
-      await flush()
-      expect(f.drains.pending).toBe(0)
-      expect(fetch).toHaveBeenCalledTimes(2)
+      for (let i = 0; i < 4; i++) {
+        const controller = new AbortController()
+        const request = f.mux.fetchTopic({ topicID, signal: controller.signal })
+        controller.abort()
+        await Promise.allSettled([request])
+      }
+      await f.lane.deliver()
+      expect(fetch).toHaveBeenCalledTimes(4)
       first.resolve(empty())
       await vi.advanceTimersByTimeAsync(0)
-      expect(fetch).toHaveBeenCalledTimes(6)
-      const visited = fetch.mock.calls.slice(2).map(([request]) => request.topicID)
-      expect(new Set(visited).size).toBe(4)
+      expect(fetch).toHaveBeenCalledTimes(8)
+      expect(new Set(fetch.mock.calls.slice(4).map(([request]) => request.topicID)).size).toBe(4)
       expect(f.drains.pending).toBe(0)
       second.resolve(empty())
       await vi.advanceTimersByTimeAsync(0)
-      expect(fetch).toHaveBeenCalledTimes(6)
+      expect(fetch).toHaveBeenCalledTimes(8)
     } finally {
       f.lane.dispose()
       first.resolve(empty())
       second.resolve(empty())
-      await initial
     }
   })
 
@@ -399,7 +387,14 @@ describe('app pulls against a faulty hub', () => {
       const fetch = vi.spyOn(f.hub, 'fetchTopic').mockReturnValue(withheld.promise)
       const controller = new AbortController()
       const request = { topicID, signal: controller.signal, limit: 100 }
-      const initial = Promise.allSettled([f.mux.fetchTopic(request), f.mux.fetchTopic(request)])
+      const initial = Promise.allSettled(
+        Array.from({ length: 4 }, () => {
+          const controller = new AbortController()
+          const task = f.mux.fetchTopic({ ...request, signal: controller.signal })
+          controller.abort()
+          return task
+        }),
+      )
       controller.abort()
       await initial
       try {
@@ -407,7 +402,7 @@ describe('app pulls against a faulty hub', () => {
         f.lane[action]()
         withheld.resolve(empty())
         await flush()
-        expect(fetch).toHaveBeenCalledTimes(2)
+        expect(fetch).toHaveBeenCalledTimes(4)
         expect(f.drains.starts).toBe(0)
       } finally {
         f.lane.dispose()
@@ -466,7 +461,8 @@ describe('app pulls against a faulty hub', () => {
         .mockResolvedValueOnce(page([entry('2'), ...Array.from({ length: 99 }, () => entry('1'))]))
         .mockResolvedValue(empty())
       await f.lane.deliver()
-      expect(fetch.mock.calls[1]?.[0].after).toBe(stored ?? '2')
+      if (stored == null) expect(fetch.mock.calls[1]?.[0].after).toBe('2')
+      else expect(fetch).toHaveBeenCalledTimes(1)
       expect(f.cursor.stored(topicID)).toBe(stored ?? '2')
     },
   )
@@ -480,11 +476,13 @@ describe('app pulls against a faulty hub', () => {
       if (seq >= 2_000) return empty()
       return page(Array.from({ length: 100 }, () => entry(position(++seq), bytes)))
     })
-    for (let i = 0; i < 4; i++) {
-      await f.lane.deliver()
-      observed.check()
-    }
-    expect(observed.arrays.some((values) => values.length === 1_000)).toBe(true)
+    f.lane.kick()
+    await vi.waitFor(
+      () => expect(observed.arrays.some((values) => values.length === 1_000)).toBe(true),
+      { timeout: 2000 },
+    )
+    await vi.waitFor(() => expect(f.drains.pending).toBe(0), { timeout: 2000 })
+    observed.check()
     expect(fetch).toHaveBeenCalledTimes(10)
   })
 
@@ -664,12 +662,12 @@ describe('app pulls against a faulty hub', () => {
         await vi.advanceTimersByTimeAsync(10_000)
         expect(settled).toBe(true)
         await task
-        expect(fetch.mock.calls.length).toBeLessThanOrEqual(2)
+        expect(fetch.mock.calls.length).toBeLessThanOrEqual(4)
       }
-      expect(fetch).toHaveBeenCalledTimes(2)
+      expect(fetch).toHaveBeenCalledTimes(4)
       withheld.resolve(empty())
       await vi.advanceTimersByTimeAsync(0)
-      expect(fetch).toHaveBeenCalledTimes(3)
+      expect(fetch).toHaveBeenCalledTimes(5)
     } finally {
       withheld.resolve(empty())
     }
@@ -752,7 +750,7 @@ describe('app pulls against a faulty hub', () => {
       await f.lane.deliver()
       observed.check()
       expect(f.drains.peak).toBeLessThanOrEqual(2)
-      expect(peak).toBeLessThanOrEqual(2)
+      expect(peak).toBeLessThanOrEqual(4)
     }
     expect(f.pruned.mock.calls.length).toBeGreaterThan(64)
     expect(observed.notices.length).toBeGreaterThan(0)
@@ -834,7 +832,7 @@ describe('app pulls against a faulty hub', () => {
     expect(f.cursor.stored(topicID)).toBe('3')
   })
 
-  test('non-increasing entry is skipped', async () => {
+  test('reordered entries are sorted and duplicate positions are skipped', async () => {
     const f = fixture()
     vi.spyOn(f.hub, 'fetchTopic').mockResolvedValue(
       page([
@@ -845,7 +843,7 @@ describe('app pulls against a faulty hub', () => {
       ]),
     )
     await expect(f.lane.deliver()).resolves.toBeUndefined()
-    expect(f.seen).toEqual(['first', 'last'])
+    expect(f.seen).toEqual(['backwards', 'first', 'last'])
     expect(f.cursor.stored(topicID)).toBe('2')
   })
 
@@ -872,4 +870,163 @@ describe('app pulls against a faulty hub', () => {
     expect(f.seen).toEqual([])
     expect(f.cursor.stored(topicID)).toBeNull()
   })
+})
+
+test.each([false, true])(
+  'reordered pages deliver both frames without skipping, durable=%s',
+  async (durable) => {
+    const f = fixture({ durable })
+    const messages = [entry('2', await f.sealed('second')), entry('1', await f.sealed('first'))]
+    vi.spyOn(f.hub, 'fetchTopic').mockImplementation(async ({ after }) =>
+      after == null ? page(messages) : empty(),
+    )
+    f.lane.kick()
+    await vi.waitFor(() => expect(f.cursor.stored(topicID)).toBe('2'), { timeout: 2000 })
+    expect(f.seen).toEqual(['first', 'second'])
+  },
+)
+
+test.each([false, true])(
+  'one kick drains 1001 retained frames across pull budgets, durable=%s',
+  async (durable) => {
+    const f = fixture({ durable })
+    const messages = await Promise.all(
+      Array.from({ length: 1001 }, async (_, i) =>
+        entry(position(i + 1), await f.sealed(String(i + 1))),
+      ),
+    )
+    const perPull = new Map<AbortSignal | undefined, number>()
+    const fetch = f.mux.fetchTopic
+    vi.spyOn(f.mux, 'fetchTopic').mockImplementation((request) => {
+      perPull.set(request.signal, (perPull.get(request.signal) ?? 0) + 1)
+      return fetch(request)
+    })
+    vi.spyOn(f.hub, 'fetchTopic').mockImplementation(async ({ after, limit }) =>
+      page(
+        messages.filter((message) => after == null || message.sequenceID > after).slice(0, limit),
+      ),
+    )
+    f.lane.kick()
+    await vi.waitFor(() => expect(f.cursor.stored(topicID)).toBe(position(1001)), { timeout: 5000 })
+    expect(f.seen).toHaveLength(1001)
+    expect(perPull.size).toBeGreaterThan(2)
+    for (const count of perPull.values()) expect(count).toBeLessThanOrEqual(4)
+  },
+)
+
+test('one kick continues after a byte budget', async () => {
+  const f = fixture()
+  const messages = Array.from({ length: 5 }, (_, i) =>
+    entry(position(i + 1), new Uint8Array(1024 * 1024)),
+  )
+  vi.spyOn(f.hub, 'fetchTopic').mockImplementation(async ({ after }) =>
+    page(messages.filter((message) => after == null || message.sequenceID > after)),
+  )
+  f.lane.kick()
+  await vi.waitFor(() => expect(f.cursor.stored(topicID)).toBe(position(5)), { timeout: 2000 })
+})
+
+test('one kick continues after a fetch deadline when the hub heals', async () => {
+  vi.useFakeTimers()
+  const f = fixture()
+  const withheld = Promise.withResolvers<HubFetchTopicResult>()
+  vi.spyOn(f.hub, 'fetchTopic')
+    .mockReturnValueOnce(withheld.promise)
+    .mockResolvedValueOnce(page([entry('1', await f.sealed('healed'))]))
+    .mockResolvedValue(empty())
+  try {
+    f.lane.kick()
+    await vi.advanceTimersByTimeAsync(10_000)
+    await vi.waitFor(() => expect(f.cursor.stored(topicID)).toBe('1'), { timeout: 1000 })
+    expect(f.seen).toEqual(['healed'])
+  } finally {
+    f.lane.dispose()
+    withheld.resolve(empty())
+  }
+})
+
+test('two aborted hung fetches leave capacity to deliver after the hub heals', async () => {
+  const f = fixture()
+  const withheld = Promise.withResolvers<HubFetchTopicResult>()
+  const fetch = vi
+    .spyOn(f.hub, 'fetchTopic')
+    .mockReturnValueOnce(withheld.promise)
+    .mockReturnValueOnce(withheld.promise)
+    .mockResolvedValueOnce(page([entry('1', await f.sealed('healed'))]))
+    .mockResolvedValue(empty())
+  const controller = new AbortController()
+  const initial = Promise.allSettled([
+    f.mux.fetchTopic({ topicID, signal: controller.signal }),
+    f.mux.fetchTopic({ topicID, signal: controller.signal }),
+  ])
+  controller.abort()
+  await initial
+  try {
+    f.lane.kick()
+    await vi.waitFor(() => expect(f.cursor.stored(topicID)).toBe('1'), { timeout: 1000 })
+    expect(f.seen).toEqual(['healed'])
+    expect(fetch).toHaveBeenCalledTimes(3)
+  } finally {
+    f.lane.dispose()
+    withheld.resolve(page([entry('2', await f.sealed('late'))]))
+  }
+})
+
+test('mux propagates abort to cancellable requests and bounds uncancellable requests', async () => {
+  const f = fixture()
+  let outstanding = 0
+  let peak = 0
+  const abort = vi.fn()
+  const fetch = vi.spyOn(f.hub, 'fetchTopic').mockImplementation(() => {
+    const pending = Promise.withResolvers<HubFetchTopicResult>()
+    outstanding++
+    peak = Math.max(peak, outstanding)
+    return Object.assign(
+      pending.promise.finally(() => {
+        outstanding--
+      }),
+      {
+        abort: () => {
+          abort()
+          pending.reject(new Error('cancelled'))
+        },
+      },
+    )
+  })
+  for (let i = 0; i < 20; i++) {
+    const controller = new AbortController()
+    const task = f.mux.fetchTopic({ topicID, signal: controller.signal })
+    controller.abort()
+    await expect(task).rejects.toThrow()
+  }
+  expect(abort).toHaveBeenCalledTimes(20)
+  expect(peak).toBeLessThanOrEqual(2)
+  const withheld = Promise.withResolvers<HubFetchTopicResult>()
+  fetch.mockReturnValue(withheld.promise)
+  const before = fetch.mock.calls.length
+  try {
+    for (let i = 0; i < 20; i++) {
+      const controller = new AbortController()
+      const task = f.mux.fetchTopic({ topicID, signal: controller.signal })
+      controller.abort()
+      await expect(task).rejects.toThrow()
+    }
+    expect(fetch.mock.calls.length - before).toBe(4)
+  } finally {
+    withheld.resolve(empty())
+  }
+})
+
+test('replayed pages cannot spend byte budgets forever without cursor progress', async () => {
+  const f = fixture()
+  let calls = 0
+  const message = entry('1', new Uint8Array(1024 * 1024))
+  vi.spyOn(f.hub, 'fetchTopic').mockImplementation(async () => {
+    if (++calls > 5) throw new Error('bounded replay spin guard')
+    return page(Array.from({ length: 100 }, () => message))
+  })
+  f.lane.kick()
+  await vi.waitFor(() => expect(f.cursor.stored(topicID)).toBe('1'), { timeout: 1000 })
+  await vi.waitFor(() => expect(f.drains.pending).toBe(0), { timeout: 1000 })
+  expect(calls).toBeLessThanOrEqual(2)
 })

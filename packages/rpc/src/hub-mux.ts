@@ -880,6 +880,12 @@ export function createHubMux(params: HubMuxParams): HubMux {
   }
 
   let outstandingAppFetches = 0
+  let unsettledAppRequests = 0
+  // Two abandoned, uncancellable requests may coexist with the two live app slots.
+  const maxUnsettledAppRequests = APP_OUTSTANDING_FETCHES_MAX * 2
+  const appFetchAvailable = () =>
+    outstandingAppFetches < APP_OUTSTANDING_FETCHES_MAX &&
+    unsettledAppRequests < maxUnsettledAppRequests
   const appFetchListeners = new Set<() => void>()
   const fetchTopic = async (params: MuxFetchTopicParams): Promise<HubFetchTopicResult> => {
     // A fetch of a refused topic would die of `NotSubscribedError` — the SYMPTOM, naming the mux's
@@ -889,23 +895,37 @@ export function createHubMux(params: HubMuxParams): HubMux {
     const { signal } = params
     if (signal?.aborted) throw signal.reason
     // Only cancellable app pulls consume these slots. Commit fetches remain independent.
-    if (signal != null && outstandingAppFetches >= APP_OUTSTANDING_FETCHES_MAX) {
+    if (signal != null && !appFetchAvailable()) {
       throw new AppFetchBusyError('app fetch slots are occupied')
     }
+    let released = signal == null
+    const notifyAvailable = () => {
+      if (!disposed && appFetchAvailable()) for (const listener of appFetchListeners) listener()
+    }
+    const releaseSlot = () => {
+      if (released) return
+      released = true
+      outstandingAppFetches -= 1
+    }
+    if (signal != null) {
+      outstandingAppFetches += 1
+      unsettledAppRequests += 1
+    }
+    let underlying: Promise<HubFetchTopicResult> | undefined
     const request = (async () => {
-      if (signal != null) outstandingAppFetches += 1
       try {
-        return await hub.fetchTopic({
+        underlying = hub.fetchTopic({
           subscriberDID: localDID,
           topicID: params.topicID,
           ...(params.after != null ? { after: params.after } : {}),
           ...(params.limit != null ? { limit: params.limit } : {}),
         })
+        return await underlying
       } finally {
-        // An abort releases the caller, never the underlying request's slot.
         if (signal != null) {
-          outstandingAppFetches -= 1
-          if (!disposed) for (const listener of appFetchListeners) listener()
+          unsettledAppRequests -= 1
+          releaseSlot()
+          notifyAvailable()
         }
       }
     })()
@@ -918,7 +938,21 @@ export function createHubMux(params: HubMuxParams): HubMux {
           : await Promise.race([
               request,
               new Promise<never>((_resolve, reject) => {
-                abort = () => reject(signal.reason)
+                abort = () => {
+                  releaseSlot()
+                  try {
+                    if (
+                      underlying != null &&
+                      'abort' in underlying &&
+                      typeof underlying.abort === 'function'
+                    )
+                      underlying.abort(signal.reason)
+                  } catch {
+                    // Cancellation may fail. The unsettled-request bound still applies.
+                  }
+                  notifyAvailable()
+                  reject(signal.reason)
+                }
                 signal.addEventListener('abort', abort, { once: true })
                 if (signal.aborted) abort()
               }),
@@ -953,11 +987,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
       appFetchListeners.add(listener)
       // Capacity may return between the busy rejection and the caller subscribing.
       queueMicrotask(() => {
-        if (
-          !disposed &&
-          appFetchListeners.has(listener) &&
-          outstandingAppFetches < APP_OUTSTANDING_FETCHES_MAX
-        ) {
+        if (!disposed && appFetchListeners.has(listener) && appFetchAvailable()) {
           listener()
         }
       })

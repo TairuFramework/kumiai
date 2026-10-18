@@ -47,7 +47,7 @@ describe('hub log paging', () => {
       groupID: () => 'group',
     })
     await expect(lane.deliver()).resolves.toBeUndefined()
-    expect(fetches).toBe(4)
+    expect(fetches).toBe(2)
     lane.dispose()
   })
 

@@ -458,6 +458,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
     reportedPruned.delete(topicID)
     retained.delete(topicID)
     busyTopics.delete(topicID)
+    bufferBlockedTopics.delete(topicID)
     for (const [key, event] of blockingFrames) {
       if (!key.startsWith(`${topicID}\u0000`)) continue
       // Opened records survive topic expiry and settle when durable delivery completes.
@@ -495,16 +496,23 @@ export function createAppLane(params: AppLaneParams): AppLane {
     }
   }
 
+  const bufferBlockedTopics = new Set<string>()
   /** Snapshot and merge under the app mutex. Hub I/O holds no lane reservation. */
-  const pull = async (onlyTopics?: Set<string>): Promise<void> => {
-    if (disposed || safetyHold() !== null) return
+  const pull = async (onlyTopics?: Set<string>): Promise<boolean> => {
+    if (disposed || safetyHold() !== null) return false
     const controller = new AbortController()
     const { signal } = controller
     pulls.set(controller, anchor().epoch)
     let deadline: number | undefined
+    let continuation = false
+    let timedOut = false
+    const timeout = () => {
+      timedOut = true
+      controller.abort()
+    }
     let timer: ReturnType<typeof setTimeout> | undefined
     const stopped = (): boolean => {
-      if (deadline != null && Date.now() >= deadline) controller.abort()
+      if (deadline != null && Date.now() >= deadline) timeout()
       return disposed || signal.aborted || safetyHold() !== null
     }
     let bytes = 0
@@ -555,11 +563,17 @@ export function createAppLane(params: AppLaneParams): AppLane {
           const item = queue.shift()
           if (item == null) return
           const { topic, pages } = item
-          if (stopped() || bytes >= APP_PULL_MAX_BYTES) return
-          if (topic.limit === 0) continue
+          if (stopped() || bytes >= APP_PULL_MAX_BYTES) {
+            if (bytes >= APP_PULL_MAX_BYTES) continuation = true
+            return
+          }
+          if (topic.limit === 0) {
+            bufferBlockedTopics.add(topic.topicID)
+            continue
+          }
           if (deadline == null) {
             deadline = Date.now() + APP_PULL_DEADLINE_MS
-            timer = setTimeout(() => controller.abort(), APP_PULL_DEADLINE_MS)
+            timer = setTimeout(timeout, APP_PULL_DEADLINE_MS)
           }
           let result: HubFetchTopicResult
           try {
@@ -598,19 +612,29 @@ export function createAppLane(params: AppLaneParams): AppLane {
                 oldest: result.oldest,
               })
             }
-            for (const message of result.messages) {
+            const messages = result.messages
+              .slice()
+              .sort((a, b) => compareLogPositions(a.sequenceID, b.sequenceID))
+            for (const message of messages) {
               if (stopped() || frames.length >= APP_BUFFER_MAX_FRAMES) break
+              const position = asLogPosition(message.sequenceID)
+              if (cursor.accepted != null && compareLogPositions(position, cursor.accepted) <= 0) {
+                const fetched = cursor.fetched ?? cursor.position
+                if (fetched == null || compareLogPositions(position, fetched) > 0)
+                  cursor.fetched = position
+                continue
+              }
               // A frame larger than an entire fresh budget cannot be legitimate.
               const oversized = bytes === 0 && message.payload.byteLength > APP_PULL_MAX_BYTES
-              if (!oversized && bytes + message.payload.byteLength > APP_PULL_MAX_BYTES) return
+              if (!oversized && bytes + message.payload.byteLength > APP_PULL_MAX_BYTES) {
+                continuation = true
+                return
+              }
               if (!oversized) bytes += message.payload.byteLength
-              const position = asLogPosition(message.sequenceID)
               const fetched = cursor.fetched ?? cursor.position
               if (fetched == null || compareLogPositions(position, fetched) > 0) {
                 cursor.fetched = position
               }
-              if (cursor.accepted != null && compareLogPositions(position, cursor.accepted) <= 0)
-                continue
               const restored = oversized
                 ? undefined
                 : pendingRecords.find(
@@ -645,10 +669,14 @@ export function createAppLane(params: AppLaneParams): AppLane {
           if (
             next != null &&
             result.messages.length >= topic.limit &&
-            pages + 1 < APP_PULL_MAX_PAGES
+            next.fetched !== topic.fetched
           ) {
-            // Requeue one page at a time so busy topics cannot overtake unvisited topics.
-            queue.push({ topic: next, pages: pages + 1 })
+            if (next.limit === 0) bufferBlockedTopics.add(topic.topicID)
+            if (pages + 1 >= APP_PULL_MAX_PAGES || next.limit === 0) continuation = true
+            else {
+              // Requeue one page at a time so busy topics cannot overtake unvisited topics.
+              queue.push({ topic: next, pages: pages + 1 })
+            }
           }
         }
       }
@@ -657,6 +685,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       )
       const failure = results.find((result) => result.status === 'rejected')
       if (failure?.status === 'rejected') throw failure.reason
+      return continuation || timedOut
     } finally {
       clearTimeout(timer)
       pulls.delete(controller)
@@ -690,6 +719,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       cursor.accepted = position
     }
     frames.splice(0, passed)
+    if (bufferBlockedTopics.delete(topicID)) kick()
   }
 
   const orderedRecords = (name: string): Array<PendingAppFrame> =>
@@ -1142,7 +1172,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
     onlyTopics?: Set<string>,
   ): Promise<void> => {
     try {
-      await pull(onlyTopics)
+      const continuation = await pull(onlyTopics)
       await runAppLane(async () => {
         if (generation !== segmentGeneration || disposed) return
         drainingEpoch = anchor().epoch
@@ -1152,6 +1182,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
           drainingEpoch = undefined
         }
       })
+      if (continuation && generation === segmentGeneration) kick()
     } finally {
       if (generation === segmentGeneration && crypto.pending != null && !disposed) {
         for (const record of pendingRecords) reportUnknown(record)
@@ -1277,6 +1308,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       cancelBusyRetry?.()
       cancelBusyRetry = undefined
       busyTopics.clear()
+      bufferBlockedTopics.clear()
       for (const controller of pulls.keys()) controller.abort()
       if (futureTimer != null) clearTimeout(futureTimer)
       if (retryTimer != null) clearTimeout(retryTimer)
@@ -1293,6 +1325,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       cancelBusyRetry?.()
       cancelBusyRetry = undefined
       busyTopics.clear()
+      bufferBlockedTopics.clear()
       for (const controller of pulls.keys()) controller.abort()
       reportedPruned.clear()
       if (futureTimer != null) clearTimeout(futureTimer)
