@@ -57,7 +57,9 @@ export function testRegistryCryptoConformance(params: RegistryCryptoConformanceP
         expect(frame.frame).not.toHaveProperty('procedure')
         expect(frame.frame).not.toHaveProperty('idempotencyKey')
         const access = await fixture.access()
-        const [record] = opened(await access.openBatch([frame]))
+        const results = await access.openBatch([frame])
+        const [record] = opened(results)
+        expect(results[0]).toMatchObject({ handleEpoch: record?.epoch })
         expect(record).toEqual({
           frame: { ...frame.frame, procedure: 'posted' },
           payload: encode('000000000001'),
@@ -118,12 +120,19 @@ export function testRegistryCryptoConformance(params: RegistryCryptoConformanceP
     test('replay resolves saved pending before reopening', () =>
       run('replay', async (fixture) => {
         const frame = await input(fixture, '000000000001')
-        const records = opened(await (await fixture.access()).openBatch([frame]))
+        const initial = await (await fixture.access()).openBatch([frame])
+        const records = opened(initial)
+        const epoch = records[0]?.epoch
+        if (epoch === undefined) throw new Error('Missing opened frame epoch')
+        expect(initial[0]).toMatchObject({ handleEpoch: epoch })
+        await fixture.advanceRegistry()
         const restarted = await fixture.reopen()
         try {
           const before = await restarted.inspectRows()
           const access = await restarted.access()
-          expect(opened(await access.openBatch([frame]))).toEqual(records)
+          const replay = await access.openBatch([frame])
+          expect(opened(replay)).toEqual(records)
+          expect(replay[0]).toMatchObject({ handleEpoch: epoch + 1, record: { epoch } })
           expect(await access.pending.list()).toEqual(records)
           expect(records[0]?.frame.incarnation).toBe(fixture.key.incarnation)
           expect(await restarted.inspectRows()).toEqual(before)
@@ -186,9 +195,15 @@ export function testRegistryCryptoConformance(params: RegistryCryptoConformanceP
         await fixture.advanceRegistry()
         const current = await input(fixture, '000000000002')
         const access = await fixture.access()
-        const records = opened(await access.openBatch([old, current]))
+        const results = await access.openBatch([old, current])
+        const records = opened(results)
         expect(records).toHaveLength(2)
-        expect(records[1]?.epoch).toBe((records[0]?.epoch ?? -1) + 1)
+        const epoch = records[0]?.epoch
+        if (epoch === undefined) throw new Error('Missing retained frame epoch')
+        expect(results).toMatchObject([
+          { handleEpoch: epoch + 1, record: { epoch } },
+          { handleEpoch: epoch + 1, record: { epoch: epoch + 1 } },
+        ])
         expect(records.map((record) => record.payload)).toEqual([
           encode('000000000001'),
           encode('000000000002'),

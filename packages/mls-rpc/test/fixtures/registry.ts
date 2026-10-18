@@ -168,9 +168,10 @@ export type RegistryFixtureBase = {
   constructPrepareStores(): GroupStores<MemoryTransaction>
   reopen(): Promise<RegistryFixtureBase>
   close(): Promise<void>
-  armNextWorkFault(point: 'pending'): PendingFault & { mutationID: Promise<string> }
+  armNextWorkFault(point: 'pending'): PendingFault & { mutationID: Promise<string>; disarm(): void }
   armNextWorkFault(point: 'after-first-write' | 'before-commit' | 'commit-then-reject'): {
     mutationID: Promise<string>
+    disarm(): void
   }
   armWorkFault(mutationID: string, point: 'pending'): PendingFault
   armWorkFault(

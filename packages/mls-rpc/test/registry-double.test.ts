@@ -21,7 +21,9 @@ import {
 } from '@kumiai/mls'
 import {
   contentTypes,
+  createCommit,
   decode,
+  defaultProposalTypes,
   encode,
   mlsMessageDecoder,
   mlsMessageEncoder,
@@ -35,6 +37,7 @@ import { recoveryTrustFor } from '../src/registry/trust.js'
 import { registryOptions, validateRegistryHandle } from '../src/registry/validation.js'
 import { createRealGroup } from './fixtures/real-group.js'
 import { createRegistryFixture } from './fixtures/registry.js'
+import { registryHandle } from './fixtures/registry-welcome.js'
 import {
   buildSealedMemoryOperation,
   memoryModel,
@@ -717,6 +720,70 @@ function rewriteFrame(bytes: Uint8Array, change: (frame: PrivateMessage) => void
 function flip(bytes: Uint8Array, index = 0): void {
   bytes[index] = (bytes[index] ?? 0) ^ 1
 }
+
+describe.each(['real-mls', 'double'] as const)('received commit gates (%s)', (mode) => {
+  test.each(['unknown author', 'unauthorized removal'] as const)(
+    '%s refuses without changing state or persisting',
+    async (scenario) => {
+      const group = await createRealGroup(3, `received-commit-${mode}-${scenario}`)
+      const [receiver, sender, target] = group.members
+      if (receiver === undefined || sender === undefined || target === undefined)
+        throw new Error('Missing commit gate members')
+      const local = await registryHandle({ mode, handle: receiver.handle, options: {} })
+      const author = await registryHandle({ mode, handle: sender.handle, options: {} })
+      const stranger = randomIdentity()
+      let commit: Uint8Array
+      if (mode === 'double') {
+        if (scenario === 'unknown author') {
+          const { encodeMemoryCommit } = (await import(
+            new URL('../../rpc/test/fixtures/memory-group-mls.ts', import.meta.url).href
+          )) as { encodeMemoryCommit(epoch: number, did: string): Uint8Array }
+          commit = encodeMemoryCommit(Number(local.epoch), stranger.id)
+        } else {
+          commit = memoryModel(author).buildCommit([], { removes: [target.identity.id] })
+        }
+      } else {
+        const state = structuredClone(author.state)
+        if (scenario === 'unknown author') {
+          const node = state.ratchetTree[state.privatePath.leafIndex * 2]
+          if (node?.nodeType !== 1) throw new Error('Missing author leaf')
+          node.leaf.credential = {
+            credentialType: 1,
+            identity: new TextEncoder().encode(JSON.stringify({ v: 1, id: stranger.id })),
+          }
+          node.leaf.signaturePublicKey = stranger.publicKey
+          state.signaturePrivateKey = stranger.privateKey
+        }
+        const built = await createCommit({
+          context: author.context,
+          state,
+          extraProposals:
+            scenario === 'unknown author'
+              ? []
+              : [
+                  {
+                    proposalType: defaultProposalTypes.remove,
+                    remove: { removed: target.handle.state.privatePath.leafIndex },
+                  },
+                ],
+        })
+        commit = encode(mlsMessageEncoder, built.commit)
+      }
+      const before = encodeClientState(local.state)
+      const members = local.listMembers()
+      const epoch = local.epoch
+      const modelBefore = mode === 'double' ? memoryModel(local).serializeState() : undefined
+      const persist = vi.fn()
+      await expect(local.processMessage(commit, { persist })).rejects.toThrow()
+      expect(persist).not.toHaveBeenCalled()
+      expect(encodeClientState(local.state)).toEqual(before)
+      expect(local.epoch).toBe(epoch)
+      expect(local.listMembers()).toEqual(members)
+      if (modelBefore !== undefined)
+        expect(memoryModel(local).serializeState()).toEqual(modelBefore)
+    },
+  )
+})
 
 async function appFrames(sender: GroupHandle, count: number) {
   const frames: Array<Uint8Array> = []

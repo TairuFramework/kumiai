@@ -4,12 +4,14 @@ import {
   buildGroupAnchorExtension,
   buildLedgerHeadExtension,
   type ClientState,
+  type CommitPolicyContext,
   computeHead,
   controllerOf,
   DEVICE_ENTRY_TYPE,
   type DeviceValue,
   decodeClientState,
   decodeGroupAnchor,
+  defaultCommitPolicy,
   encodeClientState,
   foldEnvelope,
   GROUP_ANCHOR_EXTENSION_TYPE,
@@ -47,6 +49,7 @@ import {
   contentTypes,
   decode,
   defaultKeyRetentionConfig,
+  defaultProposalTypes,
   type EpochReceiverData,
   encode,
   type GenerationSecret,
@@ -83,9 +86,16 @@ type MemoryMLS = GroupMLS & {
   adopt(commit: Uint8Array): void | Promise<void>
 }
 
-const { createMemoryGroupMLS, memoryCheckpointFrame } = (await import(
+const { createMemoryGroupMLS, decodeMemoryCommit, memoryCheckpointFrame } = (await import(
   new URL('../../../rpc/test/fixtures/memory-group-mls.ts', import.meta.url).href
 )) as {
+  decodeMemoryCommit(bytes: Uint8Array): {
+    committerDID: string
+    entryIDs: Array<string>
+    external?: boolean
+    adds?: Array<string>
+    removes?: Array<string>
+  } | null
   memoryCheckpointFrame(body: Record<string, unknown>, secret: Uint8Array): Uint8Array
   createMemoryGroupMLS(params: {
     groupID: string
@@ -122,9 +132,20 @@ const { assertSenderNotLapsed } = (await import(
     extensions: ClientState['groupContext']['extensions']
   }): void
 }
-const { mutexFor } = (await import(
+const { buildCommitPolicyContext, mutexFor } = (await import(
   new URL('../../../mls/src/group-handle.ts', import.meta.url).href
-)) as { mutexFor(handle: GroupHandle): { run<T>(fn: () => Promise<T>): Promise<T> } }
+)) as {
+  buildCommitPolicyContext(
+    handle: GroupHandle,
+    args: {
+      baseRoster: GroupHandle['roster']
+      candidateRoster: GroupHandle['roster']
+      entryIDs: Array<string>
+      enactedDeviceEntries: []
+    },
+  ): CommitPolicyContext
+  mutexFor(handle: GroupHandle): { run<T>(fn: () => Promise<T>): Promise<T> }
+}
 const { fakeEpochSecret } = (await import(
   new URL('../../../rpc/test/fixtures/fake-crypto.ts', import.meta.url).href
 )) as {
@@ -745,7 +766,49 @@ class MemoryControlHandle extends GroupHandle {
       throw new Error('Unsupported memory commit input or policy')
     return mutexFor(this).run(async () => {
       const header = await this.#mls.readCommitHeader(message)
-      if (header === null) throw new Error('Invalid memory commit')
+      const commit = decodeMemoryCommit(message)
+      if (header?.committerDID == null || header.epoch !== Number(this.epoch) || commit === null)
+        throw new Error('Invalid memory commit')
+      // This receive path cannot prove new leaf credentials or lifecycle/ledger effects.
+      if (
+        this.anchor.controller != null ||
+        commit.external ||
+        commit.adds?.length ||
+        commit.entryIDs.length
+      )
+        throw new Error('Unsupported memory commit effects')
+      const sender = this.listMembers().find((member) => member.id === header.committerDID)
+      const leaf = sender === undefined ? undefined : this.state.ratchetTree[sender.leafIndex * 2]
+      if (
+        sender === undefined ||
+        !this.roster.roles.has(normalizeDID(sender.id)) ||
+        leaf?.nodeType !== 1 ||
+        !(await this.context.authService.validateCredential(
+          leaf.leaf.credential,
+          leaf.leaf.signaturePublicKey,
+        ))
+      )
+        throw new Error('Unauthenticated memory committer')
+      const proposals = (commit.removes ?? []).map((did) => {
+        const removed = this.findMemberLeafIndex(did)
+        if (removed === undefined) throw new Error('Unknown memory removal target')
+        return {
+          senderLeafIndex: sender.leafIndex,
+          proposal: { proposalType: defaultProposalTypes.remove, remove: { removed } },
+        }
+      })
+      if (
+        defaultCommitPolicy(
+          { kind: 'commit', senderLeafIndex: sender.leafIndex, proposals },
+          buildCommitPolicyContext(this, {
+            baseRoster: this.roster,
+            candidateRoster: this.roster,
+            entryIDs: [],
+            enactedDeviceEntries: [],
+          }),
+        ) !== 'accept'
+      )
+        throw new Error('Memory commit refused by default policy')
       const previous = this.#mls.serializeState()
       const view = structuredClone(this.state)
       try {
@@ -754,7 +817,7 @@ class MemoryControlHandle extends GroupHandle {
           resolveLedgerEntries: this.resolveLedgerEntries,
         })
         if (!result.applied) throw new Error('Memory commit refused')
-        this.state
+        Object.assign(this.#view, envelope(this.#view, this.#mls))
         await opts?.persist?.(this)
         return null
       } catch (error) {

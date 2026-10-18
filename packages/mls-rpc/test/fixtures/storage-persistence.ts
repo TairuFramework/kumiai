@@ -158,8 +158,13 @@ type RegistryStoragePorts = {
 }
 export type RegistryStorageFixture = Omit<PersistenceFixture<RegistryStoragePorts>, 'entry'> & {
   entry(): EntryCapability<MemoryTransaction>
-  armNextWorkFault(point: 'pending'): WorkFaultControl & { mutationID: Promise<string> }
-  armNextWorkFault(point: Exclude<WorkFaultPoint, 'pending'>): { mutationID: Promise<string> }
+  armNextWorkFault(
+    point: 'pending',
+  ): WorkFaultControl & { mutationID: Promise<string>; disarm(): void }
+  armNextWorkFault(point: Exclude<WorkFaultPoint, 'pending'>): {
+    mutationID: Promise<string>
+    disarm(): void
+  }
   armWorkFault(mutationID: string, point: 'pending'): WorkFaultControl
   armWorkFault(mutationID: string, point: Exclude<WorkFaultPoint, 'pending'>): void
   holdProof(mutationID: string): { started: Promise<void>; release(): void }
@@ -615,7 +620,15 @@ export async function createStorageFixture(params: {
       if (nextWorkFault !== undefined) throw new Error('Next work fault already armed')
       const armed = arm(point)
       nextWorkFault = armed
-      return { ...pendingControl(armed), mutationID: armed.mutation.promise }
+      return {
+        ...pendingControl(armed),
+        mutationID: armed.mutation.promise,
+        disarm() {
+          if (nextWorkFault === armed) nextWorkFault = undefined
+          for (const [mutationID, held] of workFaults)
+            if (held === armed) workFaults.delete(mutationID)
+        },
+      }
     },
     armWorkFault(mutationID: string, point: WorkFaultPoint) {
       active()

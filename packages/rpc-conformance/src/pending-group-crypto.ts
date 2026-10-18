@@ -20,9 +20,7 @@ export type PendingCrypto = Omit<ConformanceGroupCrypto, 'unwrap'> & {
   unwrap(
     bytes: Uint8Array,
     opts?: { expectedAAD?: Uint8Array; frame?: ConformanceAppFrameRef },
-  ):
-    | { payload: Uint8Array; senderDID: string }
-    | Promise<{ payload: Uint8Array; senderDID: string }>
+  ): ConformanceUnwrapResult | Promise<ConformanceUnwrapResult>
   pending: {
     list(): Promise<Array<ConformancePendingAppFrame>>
     complete(id: string): Promise<void>
@@ -83,15 +81,26 @@ function reference(
   return fixture.frame?.(ciphertext, ref) ?? ref
 }
 
-async function replay(call: () => unknown, payload: Uint8Array, senderDID: string): Promise<void> {
+async function replay(
+  fixture: PendingCryptoFixture,
+  call: () => unknown,
+  first: ConformanceUnwrapResult,
+): Promise<void> {
+  const calls = fixture.persistCalls()
   let result: unknown
   try {
     result = await call()
   } catch (error) {
     expect(error).toBeInstanceOf(Error)
     return
+  } finally {
+    expect(fixture.persistCalls()).toBe(calls)
   }
-  expect(result).toMatchObject({ payload, senderDID })
+  expect(result).toMatchObject({
+    payload: first.payload,
+    senderDID: first.senderDID,
+    epoch: first.epoch,
+  })
 }
 
 /** Ports may refuse a frame synchronously or through a rejected promise. */
@@ -132,7 +141,8 @@ export function testPendingGroupCryptoConformance(params: PendingCryptoConforman
       for (let i = 0; i < advances; i++) await fixture.advance()
       const calls = fixture.persistCalls()
       const ref = reference(fixture, sealed, 'retained')
-      expect(await fixture.receiver.unwrap(sealed, { frame: ref })).toEqual({
+      const first = await fixture.receiver.unwrap(sealed, { frame: ref })
+      expect(first).toEqual({
         payload,
         senderDID: fixture.senderDID,
         epoch: from + advances,
@@ -141,13 +151,9 @@ export function testPendingGroupCryptoConformance(params: PendingCryptoConforman
       const records = await fixture.receiver.pending.list()
       expect(records).toHaveLength(1)
       expect(records[0]).toMatchObject({ frame: ref, payload, senderDID: fixture.senderDID })
-      await replay(
-        () => fixture.receiver.unwrap(sealed, { frame: ref }),
-        payload,
-        fixture.senderDID,
-      )
+      await replay(fixture, () => fixture.receiver.unwrap(sealed, { frame: ref }), first)
       const restarted = await fixture.restore()
-      await replay(() => restarted.unwrap(sealed, { frame: ref }), payload, fixture.senderDID)
+      await replay(fixture, () => restarted.unwrap(sealed, { frame: ref }), first)
       expect(fixture.persistCalls()).toBe(calls + 1)
       const restoredRecords = await restarted.pending.list()
       expect(restoredRecords).toHaveLength(1)
@@ -165,28 +171,23 @@ export function testPendingGroupCryptoConformance(params: PendingCryptoConforman
       const aad = bytes.encode('topic AAD')
       const sealed = await sender.wrap(payload, { aad })
       const ref = reference(fixture, sealed, 'first')
-      expect(await receiver.unwrap(sealed, { expectedAAD: aad, frame: ref })).toMatchObject({
+      const epoch = receiver.epoch()
+      const first = await receiver.unwrap(sealed, { expectedAAD: aad, frame: ref })
+      expect(first).toMatchObject({
         payload,
         senderDID,
+        epoch,
       })
       const records = await receiver.pending.list()
       expect(records).toHaveLength(1)
       expect(records[0]).toMatchObject({ frame: ref, payload, senderDID })
-      await replay(
-        () => receiver.unwrap(sealed, { expectedAAD: aad, frame: ref }),
-        payload,
-        senderDID,
-      )
+      await replay(fixture, () => receiver.unwrap(sealed, { expectedAAD: aad, frame: ref }), first)
       expect(await receiver.pending.list()).toHaveLength(1)
       await receiver.wrap(encode(fixture, 'later send'))
       await saveHandle()
       const restarted = await restore()
       expect(await restarted.pending.list()).toHaveLength(1)
-      await replay(
-        () => restarted.unwrap(sealed, { expectedAAD: aad, frame: ref }),
-        payload,
-        senderDID,
-      )
+      await replay(fixture, () => restarted.unwrap(sealed, { expectedAAD: aad, frame: ref }), first)
       expect(await restarted.pending.list()).toHaveLength(1)
     })
 
@@ -241,9 +242,16 @@ export function testPendingGroupCryptoConformance(params: PendingCryptoConforman
       expect(fixture.liveContextOwned()).toBe(true)
     })
 
-    test('unnamed sender is rejected before persistence without consuming the key', async () => {
+    test('unnamed sender is rejected before persistence without consuming the key', async ({
+      skip,
+    }) => {
       const fixture = await createFixture('unnamed')
-      if (fixture.unnamedSender == null) return
+      if (fixture.unnamedSender == null) {
+        skip(
+          'No unnamed-sender instrument; substitute coverage: legacy ports-conformance and registry-double unnamed-sender refusal/retry tests',
+        )
+        return
+      }
       const sealed = await fixture.sender.wrap(encode(fixture, 'unnamed'))
       const undo = fixture.unnamedSender()
       try {

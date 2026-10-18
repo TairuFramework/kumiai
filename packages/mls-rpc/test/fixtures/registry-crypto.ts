@@ -1,5 +1,5 @@
 import { commitKeyRotation, decodeClientState, encodeClientState, restoreGroup } from '@kumiai/mls'
-import { frameID } from '@kumiai/rpc'
+import { frameID, isAppLogPosition } from '@kumiai/rpc'
 import type { PendingCryptoFixture, RegistryCryptoFixture } from '@kumiai/rpc-conformance'
 import { onTestFinished } from 'vitest'
 
@@ -171,11 +171,23 @@ export async function createRegistryPendingCryptoFixture(
     const crypto = group.receiver()
     return {
       ...crypto,
+      async wrap(bytes: Uint8Array, opts?: Parameters<typeof crypto.wrap>[1]) {
+        try {
+          return await crypto.wrap(bytes, opts)
+        } finally {
+          await update()
+        }
+      },
       async unwrap(bytes: Uint8Array, opts?: Parameters<typeof crypto.unwrap>[1]) {
-        if (fail && opts?.frame !== undefined) group.fixture().armNextWorkFault('after-first-write')
+        const fault =
+          fail && opts?.frame !== undefined && isAppLogPosition(opts.frame.position)
+            ? group.fixture().armNextWorkFault('after-first-write')
+            : undefined
         try {
           return await crypto.unwrap(bytes, opts)
         } finally {
+          // Saved replay and refused frames can finish without entering work.
+          fault?.disarm()
           await update()
         }
       },
