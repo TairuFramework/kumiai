@@ -14,14 +14,16 @@ import {
   frameID,
   GroupSafetyHeldError,
   InvalidAppEntryError,
+  type PendingAppFrame,
 } from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
 import { isFrameAhead } from '../../rpc/lib/crypto.js'
+import { simpleHandleAccess } from '../src/access.js'
 import { createGroupCrypto, ENTRY_SEAL_LABEL } from '../src/crypto.js'
-import { DisplacedGroupHandleError } from '../src/persistence-errors.js'
+import { DisplacedGroupHandleError, RegistryRetiringError } from '../src/persistence-errors.js'
 import { MAX_OPEN_BATCH_FRAMES, type OpenAppInput } from '../src/persistence-types.js'
-import { createRegistryFixture } from './fixtures/registry.js'
+import { createRegistryFixture, registryFixtureRetirement } from './fixtures/registry.js'
 import { registryHandle } from './fixtures/registry-welcome.js'
 
 async function setup(mode: 'real-mls' | 'double') {
@@ -250,6 +252,130 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect(await unwrap(s, input)).toMatchObject({ senderDID: s.senderDID })
         expect(await s.crypto.pending.list()).toHaveLength(1)
       }))
+
+    test.each(['singleton', 'batch'] as const)(
+      '%s retirement refusal stays retryable after rollback',
+      (kind) =>
+        run(async (s) => {
+          const input = await s.seal()
+          const before = await s.snapshot()
+          const attempt = registryFixtureRetirement(s.f.registry).beginRetirement(s.key)
+          const open = () =>
+            kind === 'singleton' ? unwrap(s, input) : s.crypto.unwrapBatch([batchInput(s, input)])
+          try {
+            const error = await Promise.resolve(open()).catch((error: unknown) => error)
+            expect(error).toBeInstanceOf(AppFrameStorageError)
+            expect(error).toHaveProperty('cause', expect.any(RegistryRetiringError))
+            expect(await s.snapshot()).toEqual(before)
+          } finally {
+            attempt.settle('rolled-back')
+          }
+          const opened = await open()
+          expect(opened).toMatchObject(
+            kind === 'singleton'
+              ? { senderDID: s.senderDID }
+              : [{ kind: 'opened', record: { senderDID: s.senderDID } }],
+          )
+          expect(await s.crypto.pending.list()).toHaveLength(1)
+        }),
+    )
+
+    test.each([new Error('admission unavailable'), new RangeError('admission unavailable')])(
+      'admission failure %s stays a storage error',
+      (cause) =>
+        run(async (s) => {
+          const input = await s.seal()
+          const before = await s.snapshot()
+          vi.spyOn(s.access, 'admission').mockImplementation(() => {
+            throw cause
+          })
+          for (const open of [
+            () => unwrap(s, input),
+            () => s.crypto.unwrapBatch([batchInput(s, input)]),
+          ]) {
+            const error = await Promise.resolve(open()).catch((error: unknown) => error)
+            expect(error).toBeInstanceOf(AppFrameStorageError)
+            expect(error).toHaveProperty('cause', cause)
+          }
+          expect(await s.snapshot()).toEqual(before)
+        }),
+    )
+
+    test.each([0, 2])('singleton refuses %i batch results as a storage invariant', (length) =>
+      run(async (s) => {
+        const input = await s.seal()
+        const before = await s.snapshot()
+        vi.spyOn(s.access, 'openBatch').mockResolvedValueOnce(
+          Array.from({ length }, () => ({
+            kind: 'refused',
+            reason: 'invalid-ciphertext',
+            frame: batchInput(s, input).frame,
+            keyConsumed: false,
+          })),
+        )
+        await expect(unwrap(s, input)).rejects.toBeInstanceOf(AppFrameStorageError)
+        expect(await s.snapshot()).toEqual(before)
+        expect(await unwrap(s, input)).toMatchObject({ senderDID: s.senderDID })
+      }),
+    )
+
+    test.each(['preflight', 'callback'] as const)(
+      'legacy durable %s retirement refusal stays retryable after rollback',
+      (boundary) =>
+        run(async (s) => {
+          const input = await s.seal()
+          let handle = await s.access.read((group) => group)
+          const access = {
+            ...simpleHandleAccess({
+              key: s.key,
+              stateVersion: () => s.access.stateVersion(),
+              handle: () => handle,
+              adopt: (next) => {
+                handle = next
+              },
+            }),
+            admission: () => s.access.admission(),
+          }
+          const records: Array<PendingAppFrame> = []
+          const crypto = createGroupCrypto({
+            access,
+            pending: {
+              persistOpened: async (_state, record) => {
+                records.push(record)
+              },
+              list: async () => records,
+              complete: async () => {},
+            },
+          })
+          const before = await s.snapshot()
+          const retirement = registryFixtureRetirement(s.f.registry)
+          let attempt: ReturnType<typeof retirement.beginRetirement> | undefined
+          if (boundary === 'preflight') attempt = retirement.beginRetirement(s.key)
+          else {
+            const open = access.open
+            vi.spyOn(access, 'open').mockImplementationOnce((fn, persist) => {
+              attempt = retirement.beginRetirement(s.key)
+              return open(fn, persist)
+            })
+          }
+          const open = () =>
+            crypto.unwrap(input.ciphertext, {
+              frame: input.frame,
+              expectedAAD: input.expectedAAD,
+            })
+          try {
+            const error = await Promise.resolve(open()).catch((error: unknown) => error)
+            expect(error).toBeInstanceOf(AppFrameStorageError)
+            expect(error).toHaveProperty('cause', expect.any(RegistryRetiringError))
+            expect(records).toEqual([])
+            expect(await s.snapshot()).toEqual(before)
+          } finally {
+            attempt?.settle('rolled-back')
+          }
+          expect(await open()).toMatchObject({ senderDID: s.senderDID })
+          expect(records).toHaveLength(1)
+        }),
+    )
 
     test.each(['groupID', 'incarnation'] as const)(
       'a frame bound to another %s never completes as dead',

@@ -159,12 +159,11 @@ export function createGroupCrypto(
 function createLegacyGroupCrypto(params: GroupCryptoParams): GroupCrypto {
   const { access, pending } = params
   const base = createGroupCryptoBase(params)
-  const assertSafety = () => assertCryptoSafety(access)
   return {
     ...base,
     unwrap: async (bytes, opts) => {
-      assertSafety()
       if (opts?.frame != null) {
+        assertDurableCryptoSafety(access)
         if (pending == null) throw new Error('unwrap: pending store required for durable open')
         const frame = opts.frame
         // Wrapped here, not inside `fn`: a transactional adapter makes the write after `fn`.
@@ -177,7 +176,7 @@ function createLegacyGroupCrypto(params: GroupCryptoParams): GroupCrypto {
         }
         let openError: unknown
         const open = async (group: GroupHandle, persistStaged: typeof persistOpened) => {
-          assertSafety()
+          assertDurableCryptoSafety(access)
           const epoch = Number(group.epoch)
           const frameEpoch = readMessageEpoch(bytes)
           if (
@@ -248,6 +247,16 @@ export function assertCryptoSafety(access: Pick<HandleAccess, 'admission'>): voi
     (admission.reason === 'fork-halted' || admission.reason === 'recovery-unavailable')
   )
     throw new GroupSafetyHeldError(admission.reason)
+}
+
+export function assertDurableCryptoSafety(access: Pick<HandleAccess, 'admission'>): void {
+  // Admission can fail on a reversible retirement fence before any receive key is spent.
+  try {
+    assertCryptoSafety(access)
+  } catch (error) {
+    if (error instanceof GroupSafetyHeldError || isAppFrameStorageError(error)) throw error
+    throw new AppFrameStorageError('handle admission failed during durable open', { cause: error })
+  }
 }
 
 export function createGroupCryptoBase(

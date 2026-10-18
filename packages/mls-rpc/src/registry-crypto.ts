@@ -7,7 +7,7 @@ import {
 } from '@kumiai/rpc'
 
 import {
-  assertCryptoSafety,
+  assertDurableCryptoSafety,
   createGroupCryptoBase,
   type RegistryGroupCryptoParams,
 } from './crypto.js'
@@ -21,7 +21,7 @@ export function createRegistryGroupCrypto(params: RegistryGroupCryptoParams): Gr
   const base = createGroupCryptoBase(params)
 
   async function unwrapBatch(frames: Array<OpenAppInput>): Promise<Array<OpenAppResult>> {
-    assertCryptoSafety(access)
+    assertDurableCryptoSafety(access)
     try {
       return await access.openBatch(frames)
     } catch (error) {
@@ -35,26 +35,29 @@ export function createRegistryGroupCrypto(params: RegistryGroupCryptoParams): Gr
     pending: access.pending,
     unwrapBatch,
     unwrap: async (bytes, opts) => {
-      assertCryptoSafety(access)
       if (opts?.frame == null) return base.unwrap(bytes, opts)
-      const [result] = await unwrapBatch([
+      const results = await unwrapBatch([
         {
           frame: { ...access.key, ...opts.frame },
           ciphertext: bytes,
           expectedAAD: opts.expectedAAD,
         },
       ])
-      if (result?.kind === 'opened') {
+      const [result] = results
+      if (results.length !== 1 || result == null) {
+        throw new AppFrameStorageError('unwrap: openBatch must return exactly one result')
+      }
+      if (result.kind === 'opened') {
         const { payload, senderDID, epoch } = result.record
         return { payload, senderDID, epoch }
       }
-      if (result?.reason === 'past-epoch' || result?.reason === 'future-epoch') {
+      if (result.reason === 'past-epoch' || result.reason === 'future-epoch') {
         throw new FrameEpochError(result.frameEpoch, result.handleEpoch)
       }
-      if (result?.reason === 'malformed-plaintext') {
+      if (result.reason === 'malformed-plaintext') {
         throw new InvalidAppEntryError('unwrap: malformed app event plaintext')
       }
-      throw new Error(`unwrap: app frame refused (${result?.reason})`)
+      throw new Error(`unwrap: app frame refused (${result.reason})`)
     },
   }
 }
