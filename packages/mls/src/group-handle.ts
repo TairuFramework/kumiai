@@ -97,7 +97,15 @@ import {
   revocationOf,
 } from './registry.js'
 import type { RosterState } from './roster.js'
-import { type PrivateCommitFrame, readSenderLeafIndex } from './sender-data.js'
+import {
+  assertApplicationSend,
+  type HoldingToken,
+  inheritSendPolicy,
+  ownApplicationGeneration,
+  reserveApplicationKernel,
+  withHoldingToken,
+} from './send-policy.js'
+import { type PrivateCommitFrame, readSenderData, readSenderLeafIndex } from './sender-data.js'
 
 /** One serializer per live handle, so its state-mutating operations run one at a
  *  time in issue order. Keyed weakly: the entry is collected with the handle, and
@@ -719,7 +727,9 @@ export class GroupHandle {
    */
   async bootstrapLedger(
     tokens: Array<string>,
-    opts?: { persist?: (handle: GroupHandle) => Promise<void> | void },
+    opts?: {
+      persist?: (handle: GroupHandle, context: { holding: HoldingToken }) => Promise<void> | void
+    },
   ): Promise<void> {
     return mutexFor(this).run(async () => {
       const authenticated = readLedgerHead(this)
@@ -782,7 +792,7 @@ export class GroupHandle {
       this.#registry = folded.registry
       this.#admission = this.#computeAdmission()
       try {
-        await opts?.persist?.(this)
+        await withHoldingToken(this, async (holding) => opts?.persist?.(this, { holding }))
       } catch (error) {
         this.#state = previous.state
         this.#ledger = previous.ledger
@@ -979,9 +989,18 @@ export class GroupHandle {
    * `expectedAAD`) needs no key. Defaults to empty.
    */
   async encrypt(plaintext: Uint8Array, opts?: { aad?: Uint8Array }): Promise<Uint8Array> {
+    return (await this.encryptApplication(plaintext, opts)).ciphertext
+  }
+
+  async encryptApplication(
+    plaintext: Uint8Array,
+    opts?: { aad?: Uint8Array },
+  ): Promise<{ ciphertext: Uint8Array; generation: number }> {
     return mutexFor(this).run(async () => {
       const own = leafAt(this.#state.ratchetTree, this.#state.privatePath.leafIndex)
       if (own != null && isLapsed(this, own)) throw new LeafLapsedError('lapsed')
+      assertApplicationSend(this)
+      const generation = ownApplicationGeneration(this.#state)
       const { newState, message, consumed } = await createApplicationMessage({
         context: this.#context,
         state: this.#state,
@@ -990,8 +1009,48 @@ export class GroupHandle {
       })
       this.#state = newState
       zeroAll(consumed)
-      return encode(mlsMessageEncoder, message)
+      return { ciphertext: encode(mlsMessageEncoder, message), generation }
     })
+  }
+
+  #assertApplicationEligible(): void {
+    const own = leafAt(this.#state.ratchetTree, this.#state.privatePath.leafIndex)
+    if (own != null && isLapsed(this, own)) throw new LeafLapsedError('lapsed')
+    if (Object.keys(this.#state.unappliedProposals).length !== 0)
+      throw new Error('Cannot send application message with unapplied proposals')
+    if (this.#state.groupActiveState.kind !== 'active') throw new Error('Inactive group')
+  }
+
+  async [reserveApplicationKernel](target: number): Promise<void> {
+    this.#assertApplicationEligible()
+    while (ownApplicationGeneration(this.#state) < target) {
+      const { newState, consumed } = await createApplicationMessage({
+        context: this.#context,
+        state: this.#state,
+        message: new Uint8Array(),
+      })
+      this.#state = newState
+      zeroAll(consumed)
+    }
+  }
+
+  async readSenderData(
+    message: Uint8Array,
+  ): Promise<{ epoch: number; leaf: number; generation: number } | null> {
+    const decoded = decode(mlsMessageDecoder, message)
+    const frame = readPrivateFrame(decoded, contentTypes.application)
+    if (frame == null) return null
+    const receiver =
+      frame.epoch === this.epoch ? this.#state : this.#state.historicalReceiverData.get(frame.epoch)
+    if (
+      receiver == null ||
+      frame.groupId.length !== receiver.groupContext.groupId.length ||
+      !frame.groupId.every((value, index) => value === receiver.groupContext.groupId[index])
+    )
+      return null
+    const secret =
+      'keySchedule' in receiver ? receiver.keySchedule.senderDataSecret : receiver.senderDataSecret
+    return readSenderData(this.#context, secret, frame)
   }
 
   /**
@@ -1582,7 +1641,7 @@ export class GroupHandle {
     message: Uint8Array | MlsFramedMessage,
     opts?: {
       commitPolicy?: IncomingMessageCallback
-      persist?: (handle: GroupHandle) => Promise<void> | void
+      persist?: (handle: GroupHandle, context: { holding: HoldingToken }) => Promise<void> | void
     },
   ): Promise<Uint8Array | null> {
     let decoded: unknown = message
@@ -1738,7 +1797,7 @@ export class GroupHandle {
         this.#entryBodies = new Map(previousEntryBodies)
         const notify = applyOnAccept(false)
         try {
-          await opts.persist(this)
+          await withHoldingToken(this, async (holding) => opts.persist?.(this, { holding }))
         } catch (error) {
           this.#state = previousState
           this.#ledger = previousLedger
@@ -1819,5 +1878,6 @@ export function deriveGroup(group: GroupHandle, state: ClientState): GroupHandle
     events: emitterOf(group),
     speculative: true,
   })
+  inheritSendPolicy(group, derived)
   return isCommitAuthoringMarked(group) ? restrictCommitAuthoring(derived) : derived
 }

@@ -9,6 +9,7 @@
  * unchanged; this package's only per-instance glue is a WeakMap keyed by handle.
  */
 export type Mutex = {
+  acquire: () => Promise<() => void>
   run: <T>(fn: () => Promise<T>) => Promise<T>
 }
 
@@ -16,6 +17,11 @@ export function createMutex(): Mutex {
   let chain: Promise<unknown> = Promise.resolve()
   const noop = (): void => {}
   return {
+    acquire(): Promise<() => void> {
+      return new Promise((resolve) => {
+        chain = chain.then(() => new Promise<void>((release) => resolve(release)))
+      })
+    },
     run<T>(fn: () => Promise<T>): Promise<T> {
       const result = chain.then(fn, fn)
       chain = result.then(noop, noop)

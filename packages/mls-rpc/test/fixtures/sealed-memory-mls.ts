@@ -4,6 +4,7 @@ import {
   buildLedgerHeadExtension,
   type ClientState,
   type CommitPolicyContext,
+  CommitValidationUnavailableError,
   computeHead,
   controllerOf,
   DEVICE_ENTRY_TYPE,
@@ -18,6 +19,7 @@ import {
   type GroupHandleParams,
   type GroupMember,
   type GroupOptions,
+  type HoldingToken,
   GroupRestoreError as InvalidCandidateError,
   LEDGER_HEAD_EXTENSION_TYPE,
   type LeafBinding,
@@ -32,6 +34,11 @@ import {
   type VerifiedLedgerEntry,
   verifyLedgerEntry,
 } from '@kumiai/mls'
+import {
+  assertApplicationSend,
+  reserveApplicationKernel,
+  serializeHandle,
+} from '@kumiai/mls/testing'
 import {
   type ControlValidationPort,
   decodeCommitFrame,
@@ -138,7 +145,7 @@ const { assertSenderNotLapsed } = (await import(
     extensions: ClientState['groupContext']['extensions']
   }): void
 }
-const { buildCommitPolicyContext, mutexFor } = (await import(
+const { buildCommitPolicyContext } = (await import(
   new URL('../../../mls/src/group-handle.ts', import.meta.url).href
 )) as {
   buildCommitPolicyContext(
@@ -150,7 +157,6 @@ const { buildCommitPolicyContext, mutexFor } = (await import(
       enactedDeviceEntries: []
     },
   ): CommitPolicyContext
-  mutexFor(handle: GroupHandle): { run<T>(fn: () => Promise<T>): Promise<T> }
 }
 const { fakeEpochSecret } = (await import(
   new URL('../../../rpc/test/fixtures/fake-crypto.ts', import.meta.url).href
@@ -595,12 +601,16 @@ class MemoryControlHandle extends GroupHandle {
 
   override async bootstrapLedger(
     tokens: Array<string>,
-    opts?: { persist?: (handle: GroupHandle) => Promise<void> | void },
+    opts?: {
+      persist?: (handle: GroupHandle, context: { holding: HoldingToken }) => Promise<void> | void
+    },
   ): Promise<void> {
-    await this.#mls.bootstrapLedger(
-      tokens,
-      opts?.persist === undefined ? undefined : () => opts.persist?.(this),
-    )
+    return serializeHandle(this, async (holding) => {
+      await this.#mls.bootstrapLedger(
+        tokens,
+        opts?.persist === undefined ? undefined : () => opts.persist?.(this, { holding }),
+      )
+    })
   }
 
   override sendAdmission(): SendAdmission {
@@ -615,13 +625,17 @@ class MemoryControlHandle extends GroupHandle {
     return exportedSecret(this.#view, this.#mls, label, context, length)
   }
 
-  override async encrypt(plaintext: Uint8Array, opts?: { aad?: Uint8Array }): Promise<Uint8Array> {
-    return mutexFor(this).run(async () => {
+  override async encryptApplication(
+    plaintext: Uint8Array,
+    opts?: { aad?: Uint8Array },
+  ): Promise<{ ciphertext: Uint8Array; generation: number }> {
+    return serializeHandle(this, async () => {
       const state = this.state
       if (Object.keys(state.unappliedProposals).length !== 0)
         throw new Error('Cannot send application message with unapplied proposals')
       if (state.groupActiveState.kind !== 'active') throw new Error('Inactive memory group')
       if (!this.sendAdmission().admissible) throw new LeafLapsedError('lapsed')
+      assertApplicationSend(this)
       const leaf = state.privatePath.leafIndex
       const ratchet = state.secretTree.leafNodes[leaf * 2]?.application
       if (ratchet === undefined) throw new Error('Missing memory sender ratchet')
@@ -650,11 +664,33 @@ class MemoryControlHandle extends GroupHandle {
       })
       stepRatchet(ratchet)
       captureReceiveState(this.#view, this.#mls)
-      return bytes
+      return { ciphertext: bytes, generation }
     })
   }
 
-  #open(message: Uint8Array, opts: { expectedAAD?: Uint8Array }) {
+  override async [reserveApplicationKernel](target: number): Promise<void> {
+    const state = this.state
+    if (Object.keys(state.unappliedProposals).length !== 0)
+      throw new Error('Cannot send application message with unapplied proposals')
+    if (state.groupActiveState.kind !== 'active') throw new Error('Inactive memory group')
+    if (!this.sendAdmission().admissible) throw new LeafLapsedError('lapsed')
+    const ratchet = state.secretTree.leafNodes[state.privatePath.leafIndex * 2]?.application
+    if (ratchet === undefined) throw new Error('Missing memory sender ratchet')
+    while (ratchet.generation < target) stepRatchet(ratchet)
+    captureReceiveState(this.#view, this.#mls)
+  }
+
+  override async readSenderData(message: Uint8Array) {
+    try {
+      const { frame, leaf, generation } = this.#readSenderData(message, {})
+      return { epoch: Number(frame.epoch), leaf, generation }
+    } catch (error) {
+      if (error instanceof CommitValidationUnavailableError) throw error
+      return null
+    }
+  }
+
+  #readSenderData(message: Uint8Array, opts: { expectedAAD?: Uint8Array }) {
     const decoded = decode(mlsMessageDecoder, message)
     if (
       decoded?.wireformat !== wireformats.mls_private_message ||
@@ -664,6 +700,10 @@ class MemoryControlHandle extends GroupHandle {
     const frame = decoded.privateMessage
     if (opts.expectedAAD !== undefined && !sameBytes(frame.authenticatedData, opts.expectedAAD))
       throw new Error('Frame authenticated data does not match expected AAD')
+    if (!(this.#view.keySchedule.resumptionPsk instanceof Uint8Array))
+      throw new CommitValidationUnavailableError('Memory sender data unavailable', {
+        reason: 'missing-key',
+      })
     const state = this.state
     const receiver =
       frame.epoch === state.groupContext.epoch
@@ -690,6 +730,10 @@ class MemoryControlHandle extends GroupHandle {
       leafIndex: leaf,
       extensions: receiver.groupContext.extensions,
     })
+    if (!(receiver.resumptionPsk instanceof Uint8Array))
+      throw new CommitValidationUnavailableError('Memory sender data unavailable', {
+        reason: 'missing-key',
+      })
     const key = appKey(frame.epoch, receiver.resumptionPsk)
     const ciphertext = frame.ciphertext.slice(0, -32)
     if (
@@ -700,7 +744,15 @@ class MemoryControlHandle extends GroupHandle {
       )
     )
       throw new Error('Invalid memory application tag')
-    const staged = structuredClone(state)
+    return { frame, leaf, generation, senderDID, key, ciphertext }
+  }
+
+  #open(message: Uint8Array, opts: { expectedAAD?: Uint8Array }) {
+    const { frame, leaf, generation, senderDID, key, ciphertext } = this.#readSenderData(
+      message,
+      opts,
+    )
+    const staged = structuredClone(this.state)
     const tree =
       frame.epoch === staged.groupContext.epoch
         ? staged.secretTree
@@ -740,7 +792,7 @@ class MemoryControlHandle extends GroupHandle {
   }
 
   override async decrypt(message: Uint8Array, opts: { expectedAAD?: Uint8Array } = {}) {
-    return mutexFor(this).run(async () => {
+    return serializeHandle(this, async () => {
       const { staged, opened } = this.#open(message, opts)
       Object.assign(this.#view, staged)
       // A later envelope rebuild reads retained trees from the model's snapshot.
@@ -757,7 +809,7 @@ class MemoryControlHandle extends GroupHandle {
       opened: { payload: Uint8Array; senderDID: string; aad: Uint8Array },
     ) => Promise<void>,
   ) {
-    return mutexFor(this).run(async () => {
+    return serializeHandle(this, async () => {
       const { staged, opened } = this.#open(message, opts)
       await persist(encodeClientState(staged), opened)
       Object.assign(this.#view, staged)
@@ -772,7 +824,7 @@ class MemoryControlHandle extends GroupHandle {
   ): Promise<Uint8Array | null> {
     if (!(message instanceof Uint8Array) || opts?.commitPolicy || this.commitPolicy)
       throw new Error('Unsupported memory commit input or policy')
-    return mutexFor(this).run(async () => {
+    return serializeHandle(this, async (holding) => {
       const header = await this.#mls.readCommitHeader(message)
       const commit = decodeMemoryCommit(message)
       if (header?.committerDID == null || header.epoch !== Number(this.epoch) || commit === null)
@@ -855,7 +907,7 @@ class MemoryControlHandle extends GroupHandle {
         Object.assign(this.#view, envelope(this.#view, this.#mls))
         if (removedLeaves.has(this.#view.privatePath.leafIndex))
           this.#view.groupActiveState = { kind: 'removedFromGroup' }
-        await opts?.persist?.(this)
+        await opts?.persist?.(this, { holding })
         return null
       } catch (error) {
         this.#mls.restoreState(previous)

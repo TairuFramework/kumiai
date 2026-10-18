@@ -101,15 +101,15 @@ function sample(context: MlsContext, ciphertext: Uint8Array): Uint8Array {
 }
 
 /**
- * Decrypt a PrivateMessage's sender-data and return the committer's leaf index, or `null`
+ * Decrypt a PrivateMessage's sender-data, or return `null`
  * if the AEAD refuses the bytes or the plaintext is malformed. Non-mutating: the
  * sender-data secret is epoch-level and consumes no per-message ratchet key.
  */
-export async function readSenderLeafIndex(
+async function decryptSenderData(
   context: MlsContext,
   senderDataSecret: Uint8Array,
   pm: PrivateCommitFrame,
-): Promise<number | null> {
+): Promise<Uint8Array | null> {
   const { hpke } = context.cipherSuite
   const sampled = sample(context, pm.ciphertext)
   // SenderDataAAD = { opaque group_id<V>; uint64 epoch; ContentType content_type (uint8) }.
@@ -137,7 +137,27 @@ export async function readSenderLeafIndex(
       reason: reason === 'missing-key' ? reason : 'unrecognised',
     })
   }
-  // SenderData = { uint32 leaf_index; uint32 generation; opaque reuse_guard[4] }.
-  if (plaintext.length < 4) return null
+  return plaintext
+}
+
+export async function readSenderLeafIndex(
+  context: MlsContext,
+  senderDataSecret: Uint8Array,
+  pm: PrivateCommitFrame,
+): Promise<number | null> {
+  const plaintext = await decryptSenderData(context, senderDataSecret, pm)
+  if (plaintext === null || plaintext.length < 4) return null
   return new DataView(plaintext.buffer, plaintext.byteOffset, plaintext.byteLength).getUint32(0)
+}
+
+/** Peeks at epoch sender data without consuming a ratchet key. */
+export async function readSenderData(
+  context: MlsContext,
+  senderDataSecret: Uint8Array,
+  pm: PrivateCommitFrame,
+): Promise<{ epoch: number; leaf: number; generation: number } | null> {
+  const plaintext = await decryptSenderData(context, senderDataSecret, pm)
+  if (plaintext === null || plaintext.length < 8) return null
+  const view = new DataView(plaintext.buffer, plaintext.byteOffset, plaintext.byteLength)
+  return { epoch: Number(pm.epoch), leaf: view.getUint32(0), generation: view.getUint32(4) }
 }

@@ -311,5 +311,16 @@ export {
   roleReducer,
 } from './roster.js'
 export { mergeReceiveSecretTree } from './secret-tree.js'
+export {
+  ApplicationSendRefusedError,
+  bindSendCeiling,
+  denyApplicationSend,
+  type HoldingToken,
+  isApplicationSendDenied,
+  ownApplicationGeneration,
+  type Relinquished,
+  relinquishSend,
+  reserveApplicationRange,
+} from './send-policy.js'
 export type { GroupOptions, Invite, KeyPackageBundle } from './types.js'
 export { welcomeKeyPackageRefs } from './welcome-refs.js'
