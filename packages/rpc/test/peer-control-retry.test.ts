@@ -10,6 +10,7 @@ import { APP_TOPIC_LABEL, commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
+import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import {
   buildLedgerCommit,
   makeMLSPeer,
@@ -271,7 +272,15 @@ test('a post-adoption host failure resolves commit from its co-committed landed 
 
 test('a commit lands after skipping an orphaned own copy', async () => {
   const hub = new FakeHub()
-  await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
+  await publishCommit({
+    authenticator: memoryAuthenticator(
+      createMemoryGroupMLS({ recoverySecret: secret, epoch: 1, localDID: 'bob' }),
+    ),
+    hub,
+    senderDID: 'bob',
+    recoverySecret: secret,
+    epoch: 1,
+  })
   const member = makeMLSPeer(hub, 'bob', secret, {
     recovery: { timeoutMs: 20, deadlineMs: 100, getDelayMs: () => 0 },
   })
@@ -289,8 +298,8 @@ test.each([false, true])(
   'tampered own named-entry copy preserves identical retry and receiver application (restart=%s)',
   async (restart) => {
     const hub = new FakeHub()
-    const receiver = makeMLSPeer(hub, 'bob', secret)
-    const author = makeMLSPeer(hub, 'alice', secret)
+    const receiver = makeMLSPeer(hub, 'bob', secret, { members: ['bob', 'alice'] })
+    const author = makeMLSPeer(hub, 'alice', secret, { members: ['bob', 'alice'] })
     peers.push(receiver, author)
     await Promise.all([receiver.peer.replay(), author.peer.replay()])
     const publish = hub.publish.bind(hub)
@@ -342,7 +351,7 @@ test.each([false, true])(
     if (restart) {
       await author.peer.dispose()
       await author.peer.drained()
-      runner = makeMLSPeer(hub, 'alice', secret, { restartOf: author })
+      runner = makeMLSPeer(hub, 'alice', secret, { members: ['bob', 'alice'], restartOf: author })
       peers.push(runner)
     }
     allow = true

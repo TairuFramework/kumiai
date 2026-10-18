@@ -9,6 +9,7 @@ import { commitTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import {
   buildInviteCommit,
   buildLedgerCommit,
@@ -45,6 +46,9 @@ describe('operation compare and set', () => {
       if (params.topicID === commitTopic(secret) && params.senderDID === 'alice' && race) {
         race = false
         await publishCommit({
+          authenticator: memoryAuthenticator(
+            createMemoryGroupMLS({ recoverySecret: secret, epoch: 1, localDID: 'alice' }),
+          ),
           hub: { ...hub, publish } as FakeHub,
           senderDID: 'zoe',
           recoverySecret: secret,
@@ -142,6 +146,9 @@ describe('operation compare and set', () => {
   test('a swept log still uses its retained head as the publish condition', async () => {
     const hub = new FakeHub()
     const installed = await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: secret, epoch: 1, localDID: 'alice' }),
+      ),
       hub,
       senderDID: 'zoe',
       recoverySecret: secret,

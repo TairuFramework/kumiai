@@ -17,7 +17,11 @@ import { publishCommit } from './fixtures/commits.js'
 import { assertCommitPoison } from './fixtures/control-hold.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryGroupMLS, decodeMemoryCommit } from './fixtures/memory-group-mls.js'
+import {
+  createMemoryGroupMLS,
+  decodeMemoryCommit,
+  memoryAuthenticator,
+} from './fixtures/memory-group-mls.js'
 import {
   buildLedgerCommit,
   buildLegacyRejoinRecord,
@@ -480,7 +484,13 @@ test.each(['policy', 'invalid'] as const)(
     expect(commits(hub)).toHaveLength(count)
     vi.spyOn(alice.mls, 'processCommit').mockImplementation(process)
     validation.mockRestore()
-    await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(again.mls),
+      hub,
+      senderDID: 'bob',
+      recoverySecret: secret,
+      epoch: 1,
+    })
     await alice.peer.resync()
     expect(alice.mls.epoch()).toBe(2)
     expect((await again.peer.recover()).advanced).toBe(true)
@@ -620,6 +630,7 @@ test.each(['landed', 'failed-save', 'successor'] as const)(
       await alice.peer.drained()
       successor = (
         await publishCommit({
+          authenticator: memoryAuthenticator(alice.mls),
           hub,
           senderDID: 'alice',
           recoverySecret: secret,
@@ -834,8 +845,15 @@ test('anchor-gated recovery adopts the authenticated capture despite an unwalked
       landed: true,
     },
   })
-  const p1 = (await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 1 }))
-    .sequenceID
+  const p1 = (
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'carol',
+      recoverySecret: secret,
+      epoch: 1,
+    })
+  ).sequenceID
   await alice.peer.resync()
   expect(alice.mls.epoch()).toBe(2)
   const built: Array<CapturedRejoinRecord> = []
@@ -885,10 +903,23 @@ test('an own-unmerged copy advances without creating a recovery attempt', async 
   await bob.peer.dispose()
   await bob.peer.drained()
   const examined = (
-    await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'bob',
+      recoverySecret: secret,
+      epoch: 1,
+    })
   ).sequenceID
-  const tip = (await publishCommit({ hub, senderDID: 'dave', recoverySecret: secret, epoch: 1 }))
-    .sequenceID
+  const tip = (
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'dave',
+      recoverySecret: secret,
+      epoch: 1,
+    })
+  ).sequenceID
   await alice.peer.resync()
   const built: Array<CapturedRejoinRecord> = []
   const apply = bob.control.apply.bind(bob.control)
@@ -919,7 +950,13 @@ test.each([false, true])(
     await bob.peer.dispose()
     await bob.peer.drained()
     const removed = (
-      await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 1 })
+      await publishCommit({
+        authenticator: memoryAuthenticator(bob.mls),
+        hub,
+        senderDID: 'carol',
+        recoverySecret: secret,
+        epoch: 1,
+      })
     ).sequenceID
     await alice.peer.resync()
     const original = hub.published.find((row) => row.sequenceID === removed)
@@ -1013,7 +1050,13 @@ test.each(['binding', 'lapse', 'floor'] as const)(
       .mockImplementation(validate)
     // The refusal must trigger the retry without another recover call.
     await bob.peer.recover()
-    await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(alice.mls),
+      hub,
+      senderDID: 'bob',
+      recoverySecret: secret,
+      epoch: 1,
+    })
     await alice.peer.resync()
     expect(alice.mls.epoch()).toBe(2)
     await vi.waitFor(
@@ -1088,7 +1131,13 @@ test.each(['acceptance-unknown', 'unsupported-version', 'fork-halted'] as const)
       'hold',
     )
     await bob.peer.ack('refresh')
-    await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 2 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'carol',
+      recoverySecret: secret,
+      epoch: 2,
+    })
     if (reason === 'acceptance-unknown') {
       await vi.waitFor(
         async () => {
@@ -1135,7 +1184,13 @@ test.each(['acceptance-unknown', 'unsupported-version'] as const)(
         'weak-hold',
       )
       await bob.peer.ack('refresh')
-      await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 2 })
+      await publishCommit({
+        authenticator: memoryAuthenticator(bob.mls),
+        hub,
+        senderDID: 'carol',
+        recoverySecret: secret,
+        epoch: 2,
+      })
       await vi.waitFor(() => expect(events.some((event) => event.phase === 'failed')).toBe(true))
       expect(bob.mls.epoch()).toBe(1)
       if (reason === 'unsupported-version') {

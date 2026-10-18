@@ -32,8 +32,10 @@ import {
 import {
   createMemoryGroupMLS,
   encodeMemoryCommit,
+  memoryAuthenticator,
   memoryEntryID,
   sealMemoryRecoveryVerdict,
+  tagMemoryCommit,
 } from './fixtures/memory-group-mls.js'
 import { createMemoryAppOutbox } from './fixtures/outbox.js'
 
@@ -188,6 +190,12 @@ testGroupMLSConformance({
     // The committer is OUTSIDE `members`, so every commit the suite hands a port is a RECEIVED
     // one. It keeps its own epoch: building a commit is what advances its author, and nothing
     // else may advance a member.
+    const committer = createMemoryGroupMLS({
+      groupID: id,
+      localDID: COMMITTER_DID,
+      members: roster,
+      bodies: ledgerTokens,
+    })
     let committerEpoch = 0
     // Disambiguates repeated `{ adds: true }` calls within one group's lifetime.
     let addCount = 0
@@ -199,8 +207,9 @@ testGroupMLSConformance({
       committerEpoch,
       COMMITTER_DID,
       ledgerTokens.map(memoryEntryID),
-      {},
+      { authenticator: memoryAuthenticator(committer) },
     )
+    await committer.adopt(seed)
     committerEpoch += 1
     for (const member of members) {
       await member.mls.processCommit(seed, {
@@ -255,14 +264,17 @@ testGroupMLSConformance({
         return member.mls.readEvidence()
       },
       buildUnavailableCommit: async () =>
-        fromUTF(
-          JSON.stringify({
-            epoch: committerEpoch,
-            committerDID: COMMITTER_DID,
-            entryIDs: [],
-            signerDID: COMMITTER_DID,
-            missingProposal: true,
-          }),
+        tagMemoryCommit(
+          fromUTF(
+            JSON.stringify({
+              epoch: committerEpoch,
+              committerDID: COMMITTER_DID,
+              entryIDs: [],
+              signerDID: COMMITTER_DID,
+              missingProposal: true,
+            }),
+          ),
+          memoryAuthenticator(committer),
         ),
       buildCommit: async (options) => {
         const removes = options?.removes == null ? undefined : [didAt(options.removes)]
@@ -272,17 +284,23 @@ testGroupMLSConformance({
         const adds =
           options?.adds === true ? [`did:key:conformance-newcomer-${id}-${addCount++}`] : undefined
         const commit = encodeMemoryCommit(committerEpoch, COMMITTER_DID, [], {
+          authenticator: memoryAuthenticator(committer),
           ...(removes != null && { removes }),
           ...(adds != null && { adds }),
         })
+        await committer.adopt(commit)
         committerEpoch += 1
         return { commit, context: { senderDID: COMMITTER_DID } }
       },
       buildExternalCommit: async ({ rejoining, forgeAs }) => ({
-        genuine: encodeMemoryCommit(committerEpoch, didAt(rejoining), [], { external: true }),
+        genuine: encodeMemoryCommit(committerEpoch, didAt(rejoining), [], {
+          authenticator: memoryAuthenticator(committer),
+          external: true,
+        }),
         // The forgery a publisher holding no key can produce from a frame it observed: the
         // claimed author is rewritten and the signature still belongs to the original signer.
         forged: encodeMemoryCommit(committerEpoch, forgeAs, [], {
+          authenticator: memoryAuthenticator(committer),
           external: true,
           signerDID: didAt(rejoining),
         }),

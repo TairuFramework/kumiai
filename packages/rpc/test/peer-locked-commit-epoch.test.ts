@@ -9,11 +9,11 @@ import {
 } from '../src/handshake.js'
 import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
 import { commitTopic } from '../src/topic.js'
-import { publishCommit } from './fixtures/commits.js'
+import { publishCommit, publishNextCommit } from './fixtures/commits.js'
 import { assertCommitPoison } from './fixtures/control-hold.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { makeMLSPeer } from './fixtures/peer.js'
 
 const recovery = { timeoutMs: 10, deadlineMs: 30, getDelayMs: () => 0 }
@@ -35,6 +35,14 @@ async function runCase(kind: Case, offset: number) {
   } else {
     sequenceID = (
       await publishCommit({
+        authenticator: memoryAuthenticator(
+          createMemoryGroupMLS({
+            recoverySecret: secret,
+            epoch: kind === 'past' ? 1 : kind === 'future' ? 3 : 2,
+            members: ['alice', 'bob', 'carol'],
+            localDID: 'bob',
+          }),
+        ),
         hub,
         senderDID: kind === 'own' ? 'bob' : 'alice',
         recoverySecret: secret,
@@ -120,12 +128,28 @@ describe('commit decisions use the handle epoch', { concurrent: false }, () => {
       hub.acceptAtAnyHead()
       const secret = new Uint8Array(32).fill(0xa2)
       const winner = await publishCommit({
+        authenticator: memoryAuthenticator(
+          createMemoryGroupMLS({
+            recoverySecret: secret,
+            epoch: 1,
+            members: ['alice', 'bob', 'carol'],
+            localDID: 'bob',
+          }),
+        ),
         hub,
         senderDID: 'alice',
         recoverySecret: secret,
         epoch: 1,
       })
       const loser = await publishCommit({
+        authenticator: memoryAuthenticator(
+          createMemoryGroupMLS({
+            recoverySecret: secret,
+            epoch: 1,
+            members: ['alice', 'bob', 'carol'],
+            localDID: 'bob',
+          }),
+        ),
         hub,
         senderDID: 'carol',
         recoverySecret: secret,
@@ -172,18 +196,6 @@ describe('commit decisions use the handle epoch', { concurrent: false }, () => {
   test('a refused apply reclassifies from its returned epoch', async () => {
     const hub = new FakeHub()
     const secret = new Uint8Array(32).fill(0xa3)
-    await publishCommit({
-      hub,
-      senderDID: 'alice',
-      recoverySecret: secret,
-      epoch: 1,
-    })
-    const { sequenceID } = await publishCommit({
-      hub,
-      senderDID: 'carol',
-      recoverySecret: secret,
-      epoch: 2,
-    })
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'bob' })
     const mls = createMemoryGroupMLS({
       recoverySecret: secret,
@@ -192,13 +204,33 @@ describe('commit decisions use the handle epoch', { concurrent: false }, () => {
       members: ['alice', 'bob', 'carol'],
       onAdvance: (next) => crypto.setEpoch(next),
     })
+    const author = createMemoryGroupMLS({
+      recoverySecret: secret,
+      epoch: 1,
+      members: ['alice', 'bob', 'carol'],
+    })
+    const racedCommit = mls.buildCommit()
+    await publishCommit({
+      authenticator: memoryAuthenticator(author),
+      hub,
+      senderDID: 'alice',
+      recoverySecret: secret,
+      epoch: 1,
+    })
+    await author.processCommit(racedCommit, {})
+    const { sequenceID } = await publishNextCommit(author, {
+      hub,
+      senderDID: 'carol',
+      recoverySecret: secret,
+      epoch: 2,
+    })
     const readHeader = vi.spyOn(mls, 'readCommitHeader')
     const originalProcess = mls.processCommit
     let raced = false
     mls.processCommit = async (commit, context) => {
       if (!raced) {
         raced = true
-        mls.adopt(mls.buildCommit())
+        await mls.adopt(racedCommit)
       }
       return originalProcess(commit, context)
     }

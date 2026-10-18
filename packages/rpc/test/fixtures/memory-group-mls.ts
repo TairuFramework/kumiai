@@ -2224,6 +2224,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         if (
           parsed == null ||
           parsed.epoch !== epoch ||
+          !verifyMemoryCommitTag(commit, authenticator()) ||
           parsed.external !== true ||
           parsed.invalidContent === true ||
           parsed.missingProposal === true ||
@@ -2258,6 +2259,16 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         // is never opened, because the entries are never resolved.
         if (parsed.epoch !== epoch) {
           return { applied: false, advanced: false, epochBefore: epoch, epochAfter: epoch }
+        }
+
+        if (!verifyMemoryCommitTag(commit, authenticator())) {
+          return {
+            applied: false,
+            advanced: false,
+            epochBefore: epoch,
+            epochAfter: epoch,
+            refusal: 'invalid' as const,
+          }
         }
 
         // Sender-data authorship and commit-content validity are separate in real MLS. A hub can
@@ -2556,6 +2567,10 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       return recoverySecret
     },
   }
+}
+
+export function memoryAuthenticator(mls: Pick<MemoryGroupMLS, 'authenticator'>): Uint8Array {
+  return mls.authenticator()
 }
 
 export function decodeMemoryGroupIdentity(

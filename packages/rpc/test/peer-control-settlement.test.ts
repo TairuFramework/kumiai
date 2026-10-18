@@ -14,7 +14,7 @@ import { commitTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
-import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import {
   buildInviteCommit,
   buildLedgerCommit,
@@ -427,6 +427,7 @@ test.each([false, true])(
     const op = await seedBuiltOperation(bob, buildInviteCommit(bob, 'invitee'))
     // Suppress push delivery so the runner itself meets the ahead frame in search.
     const ahead = await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'bob',
       committerDID: 'alice',
@@ -470,6 +471,7 @@ test('nested competitor removal keeps its lost outcome when the stale runner exp
   await bob.peer.replay()
   const op = await seedBuiltOperation(bob, buildInviteCommit(bob, 'invitee'))
   await publishCommit({
+    authenticator: memoryAuthenticator(bob.mls),
     hub,
     senderDID: 'bob',
     committerDID: 'alice',
@@ -933,7 +935,13 @@ test('a competitor delivered between runner attempts clears the slot and permits
   await bob.peer.enqueue(request)
   await vi.waitFor(() => expect(attempts).toBeGreaterThan(0))
   expect((await bob.control.load()).operations[0]?.stage).toBe('built')
-  await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+  await publishCommit({
+    authenticator: memoryAuthenticator(bob.mls),
+    hub,
+    senderDID: 'alice',
+    recoverySecret: secret,
+    epoch: 1,
+  })
   await vi.waitFor(() => expect(bob.mls.epoch()).toBe(2))
   expect((await bob.control.load()).commitOnce).toBeNull()
   await vi.advanceTimersByTimeAsync(1_000)
@@ -1002,7 +1010,13 @@ test('a hard hold preserves applied history and keeps the first hard reason', as
   )
   await bob.peer.ack('refresh-saved-hold')
   expect((await bob.control.load()).applied).toEqual([applied])
-  await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
+  await publishCommit({
+    authenticator: memoryAuthenticator(bob.mls),
+    hub,
+    senderDID: 'bob',
+    recoverySecret: secret,
+    epoch: 1,
+  })
   await bob.peer.replay()
   expect((await bob.control.load()).controlHold?.reason).toBe('unsupported-version')
   expect((await bob.control.load()).applied).toEqual([applied])

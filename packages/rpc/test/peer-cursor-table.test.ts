@@ -2,10 +2,15 @@ import { describe, expect, test } from 'vitest'
 
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
-import { publishCommit } from './fixtures/commits.js'
+import { publishCommit, publishNextCommit } from './fixtures/commits.js'
 import { assertCommitPoison } from './fixtures/control-hold.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { encodeMemoryCommit, memoryEntryID } from './fixtures/memory-group-mls.js'
+import {
+  createMemoryGroupMLS,
+  encodeMemoryCommit,
+  memoryAuthenticator,
+  memoryEntryID,
+} from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 import { controlRecoveryClock, drainUntil } from './fixtures/recovery-clock.js'
 
@@ -54,6 +59,9 @@ describe('a peer that meets its own un-merged commit', { concurrent: false }, ()
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x41)
     const occurrence = await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members, localDID: 'bob' }),
+      ),
       hub,
       senderDID: 'alice',
       recoverySecret: rs,
@@ -75,6 +83,9 @@ describe('a peer that meets its own un-merged commit', { concurrent: false }, ()
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x42)
     const occurrence = await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members, localDID: 'bob' }),
+      ),
       hub,
       senderDID: 'alice',
       recoverySecret: rs,
@@ -83,7 +94,16 @@ describe('a peer that meets its own un-merged commit', { concurrent: false }, ()
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: fastRecovery })
     await waitFor(() => bob.mls.epoch() === 2, 'Bob applies the orphaned commit')
     const token = 'signed-token: a valid commit after the own copy'
-    await publishCommit({ hub, senderDID: 'carol', recoverySecret: rs, epoch: 1, entries: [token] })
+    await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members }),
+      ),
+      hub,
+      senderDID: 'carol',
+      recoverySecret: rs,
+      epoch: 1,
+      entries: [token],
+    })
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery: fastRecovery })
     await assertCommitPoison(alice, hub, rs, 'alice', occurrence.sequenceID)
     expect(alice.mls.epoch()).toBe(2)
@@ -105,8 +125,13 @@ describe('a hostile commit cannot make an honest peer do expensive work', {
   test('a removed member’s policy-refused commit is poison, and nobody heals', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x43)
-    const bob = makeMLSPeer(hub, 'bob', rs, { acceptsCommitter: removed, recovery: fastRecovery })
+    const bob = makeMLSPeer(hub, 'bob', rs, {
+      members: ['bob', 'carol'],
+      acceptsCommitter: removed,
+      recovery: fastRecovery,
+    })
     const carol = makeMLSPeer(hub, 'carol', rs, {
+      members: ['bob', 'carol'],
       acceptsCommitter: removed,
       recovery: fastRecovery,
     })
@@ -115,7 +140,13 @@ describe('a hostile commit cannot make an honest peer do expensive work', {
     // One well-formed commit, at the current head, that every honest peer deliberately
     // refuses. It is exactly "a valid frame at my current epoch that I cannot apply" — and
     // that is not a description of a crash victim, it is a description of this.
-    await publishCommit({ hub, senderDID: 'mallory', recoverySecret: rs, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(carol.mls),
+      hub,
+      senderDID: 'mallory',
+      recoverySecret: rs,
+      epoch: 1,
+    })
     // Wait for the read, then give a full recovery deadline for a heal to appear: the claim is
     // that none does, so the window must be at least as long as one would take.
     await waitFor(
@@ -138,7 +169,13 @@ describe('a hostile commit cannot make an honest peer do expensive work', {
     expect(heals(hub, rs)).toHaveLength(0)
 
     // And the lane is not wedged behind the poison: the group's next commit lands and applies.
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(carol.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret: rs,
+      epoch: 1,
+    })
     await waitFor(
       () => bob.mls.epoch() === 2 && carol.mls.epoch() === 2,
       'the honest commit lands behind the poison and applies',
@@ -161,14 +198,25 @@ describe('a hostile commit cannot make an honest peer do expensive work', {
       message.topicID === commitTopic(rs) ? readerDID : message.senderDID,
     )
 
-    const bob = makeMLSPeer(hub, 'bob', rs, { acceptsCommitter: removed, recovery: fastRecovery })
+    const bob = makeMLSPeer(hub, 'bob', rs, {
+      members: ['bob', 'carol'],
+      acceptsCommitter: removed,
+      recovery: fastRecovery,
+    })
     const carol = makeMLSPeer(hub, 'carol', rs, {
+      members: ['bob', 'carol'],
       acceptsCommitter: removed,
       recovery: fastRecovery,
     })
     await flush()
 
-    await publishCommit({ hub, senderDID: 'mallory', recoverySecret: rs, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(carol.mls),
+      hub,
+      senderDID: 'mallory',
+      recoverySecret: rs,
+      epoch: 1,
+    })
     // Wait for the read, then give a full recovery deadline for a heal to appear before asserting
     // none did.
     await waitFor(
@@ -198,8 +246,11 @@ describe('a hostile commit cannot make an honest peer do expensive work', {
   test('a frame whose bodies nobody can supply is poison, and nobody heals', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x45)
-    const bob = makeMLSPeer(hub, 'bob', rs, { recovery: fastRecovery })
-    const carol = makeMLSPeer(hub, 'carol', rs, { recovery: fastRecovery })
+    const bob = makeMLSPeer(hub, 'bob', rs, { members: ['bob', 'carol'], recovery: fastRecovery })
+    const carol = makeMLSPeer(hub, 'carol', rs, {
+      members: ['bob', 'carol'],
+      recovery: fastRecovery,
+    })
     await flush()
 
     // A member publishes a well-formed commit naming an entry whose body it simply leaves out
@@ -208,11 +259,14 @@ describe('a hostile commit cannot make an honest peer do expensive work', {
     // attack the refused-commit row already refuses to fund.
     const orphan = memoryEntryID('a body nobody can supply')
     await publishCommit({
+      authenticator: memoryAuthenticator(carol.mls),
       hub,
       senderDID: 'mallory',
       recoverySecret: rs,
       epoch: 1,
-      commit: encodeMemoryCommit(1, 'mallory', [orphan]),
+      commit: encodeMemoryCommit(1, 'mallory', [orphan], {
+        authenticator: memoryAuthenticator(carol.mls),
+      }),
     })
     // Wait for the read, then give a full recovery deadline for a heal to appear before asserting
     // none did.
@@ -236,7 +290,13 @@ describe('a hostile commit cannot make an honest peer do expensive work', {
 
     // The next honest commit is framed at the same epoch, lands behind the dead frame, and
     // everyone applies it. The lane is not wedged and the group is not stormed.
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(carol.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret: rs,
+      epoch: 1,
+    })
     await waitFor(
       () => bob.mls.epoch() === 2 && carol.mls.epoch() === 2,
       'the honest commit lands behind the dead frame and applies',
@@ -260,17 +320,26 @@ describe('a hostile commit cannot make an honest peer do expensive work', {
     // discover anything new about: one the policy refuses, one whose bodies are nowhere. They
     // arrive separately, so each is the last frame of the pull that reads it — a cursor that
     // failed to step over EITHER is caught, rather than covered for by the other's advance.
-    await publishCommit({ hub, senderDID: 'mallory', recoverySecret: rs, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'mallory',
+      recoverySecret: rs,
+      epoch: 1,
+    })
     await waitFor(() => bob.mls.seen() === 1, 'bob reads the first poison frame')
     expect(bob.mls.seen()).toBe(1)
 
     const orphan = memoryEntryID('a body nobody can supply')
     await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'alice',
       recoverySecret: rs,
       epoch: 1,
-      commit: encodeMemoryCommit(1, 'alice', [orphan]),
+      commit: encodeMemoryCommit(1, 'alice', [orphan], {
+        authenticator: memoryAuthenticator(bob.mls),
+      }),
     })
     await waitFor(() => bob.mls.seen() === 2, 'bob reads the second poison frame')
     expect(bob.mls.seen()).toBe(2)
@@ -284,6 +353,7 @@ describe('a hostile commit cannot make an honest peer do expensive work', {
     // every wakeup it will ever have. Every other assertion in this suite passes for it.
     const token = 'signed-token: carol is an admin'
     await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'alice',
       recoverySecret: rs,
@@ -319,11 +389,14 @@ describe('a hostile commit cannot make an honest peer do expensive work', {
     // an EXTERNAL commit's header needs no secret at all, so this exact frame with `external`
     // set has always reached this row.
     await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'mallory',
       recoverySecret: rs,
       epoch: 0,
-      commit: encodeMemoryCommit(healthy + 999, 'mallory', []),
+      commit: encodeMemoryCommit(healthy + 999, 'mallory', [], {
+        authenticator: memoryAuthenticator(bob.mls),
+      }),
     })
     await waitFor(() => heals(hub, rs).length === 1, 'the forged epoch claim buys exactly one heal')
 
@@ -337,7 +410,13 @@ describe('a hostile commit cannot make an honest peer do expensive work', {
 
     // The lane is not wedged behind it either: the group's next honest commit lands and applies.
     const before = bob.mls.epoch()
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: before })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret: rs,
+      epoch: before,
+    })
     await waitFor(() => bob.mls.epoch() === before + 1, "the group's next honest commit applies")
     expect(bob.mls.epoch()).toBe(before + 1)
     // Still one heal. The forged frame did not come back.
@@ -353,7 +432,15 @@ describe('a peer that must recover before it can commit', { concurrent: false },
     const rs = new Uint8Array(32).fill(0x48)
 
     // An orphaned copy cannot block a later ordinary operation.
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, localDID: 'alice' }),
+      ),
+      hub,
+      senderDID: 'alice',
+      recoverySecret: rs,
+      epoch: 1,
+    })
     const alice = makeMLSPeer(hub, 'alice', rs, {
       epoch: 1,
       recovery: { timeoutMs: 40, getDelayMs: () => 5 },
@@ -381,14 +468,29 @@ describe('a peer the group left behind', { concurrent: false }, () => {
     // that body applies it; a member that does not, cannot. Here the group could, and did.
     const token = 'signed-token: a body bob was never given'
     await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members, localDID: 'carol' }),
+      ),
       hub,
       senderDID: 'alice',
       recoverySecret: rs,
       epoch: 1,
-      commit: encodeMemoryCommit(1, 'alice', [memoryEntryID(token)]),
+      commit: encodeMemoryCommit(1, 'alice', [memoryEntryID(token)], {
+        authenticator: memoryAuthenticator(
+          createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members, localDID: 'carol' }),
+        ),
+      }),
     })
     // ...and the group, now at epoch 2, committed again on top of it.
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 2 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: rs, epoch: 2, members, localDID: 'carol' }),
+      ),
+      hub,
+      senderDID: 'alice',
+      recoverySecret: rs,
+      epoch: 2,
+    })
 
     // A live member, to answer a rendezvous.
     const carol = makeMLSPeer(hub, 'carol', rs, { epoch: 3, members, recovery: fastRecovery })
@@ -427,15 +529,28 @@ describe('a peer the group left behind', { concurrent: false }, () => {
     // The group's whole life, in the log: the commit that added dave (framed at epoch 0, and
     // sealed under an epoch he will never hold), and two more after it.
     const daveRole = 'signed-token: dave is a member'
-    await publishCommit({
+    const author = createMemoryGroupMLS({ recoverySecret: rs, epoch: 0, members: ['dave'] })
+    await publishNextCommit(author, {
       hub,
       senderDID: 'alice',
       recoverySecret: rs,
       epoch: 0,
       entries: [daveRole],
     })
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 1 })
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 2 })
+    const welcome = createMemoryGroupMLS({ recoverySecret: rs, localDID: 'dave' })
+    welcome.restoreState(author.serializeState())
+    await publishNextCommit(author, {
+      hub,
+      senderDID: 'alice',
+      recoverySecret: rs,
+      epoch: 1,
+    })
+    await publishNextCommit(author, {
+      hub,
+      senderDID: 'alice',
+      recoverySecret: rs,
+      epoch: 2,
+    })
 
     // Dave arrives on a Welcome at epoch 1 and reads the log from its oldest frame. He walks
     // frames from below his epoch, applies the ones at it, and RISES with the log — an
@@ -443,6 +558,7 @@ describe('a peer the group left behind', { concurrent: false }, () => {
     // compare-and-sets at the head, so the frames run in non-decreasing epoch order and the
     // next one is never ahead of him.
     const dave = makeMLSPeer(hub, 'dave', rs, {
+      mls: welcome,
       epoch: 1,
       bodies: [daveRole],
       recovery: fastRecovery,

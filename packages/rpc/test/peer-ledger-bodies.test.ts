@@ -5,7 +5,12 @@ import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { encodeMemoryCommit, memoryEntryID } from './fixtures/memory-group-mls.js'
+import {
+  createMemoryGroupMLS,
+  encodeMemoryCommit,
+  memoryAuthenticator,
+  memoryEntryID,
+} from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 
 const flush = (ms = 30) => new Promise((r) => setTimeout(r, ms))
@@ -41,9 +46,9 @@ describe('the bodies ride the commit', () => {
   test('a member that has never seen a body applies the commit that enacts it, first time, with no gather', async () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x21)
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret)
-    const bob = makeMLSPeer(hub, 'bob', recoverySecret)
-    const carol = makeMLSPeer(hub, 'carol', recoverySecret)
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob', 'carol'] })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { members: ['alice', 'bob', 'carol'] })
+    const carol = makeMLSPeer(hub, 'carol', recoverySecret, { members: ['alice', 'bob', 'carol'] })
     await flush()
 
     // Alice enacts a ledger entry. Carol has never seen this body, and nobody published it
@@ -80,6 +85,9 @@ describe('the bodies ride the commit', () => {
     // framed at epoch 0, and its bodies are sealed under epoch 0's secret.
     const daveRole = 'signed-token: dave is a member'
     await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: recoverySecret, epoch: 0, localDID: 'dave' }),
+      ),
       hub,
       senderDID: 'alice',
       recoverySecret,
@@ -89,6 +97,9 @@ describe('the bodies ride the commit', () => {
     // Then, at epoch 1, she enacts another entry. Dave was a member for this one.
     const laterEntry = 'signed-token: dave is an admin'
     await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: recoverySecret, epoch: 1, localDID: 'dave' }),
+      ),
       hub,
       senderDID: 'alice',
       recoverySecret,
@@ -131,11 +142,14 @@ describe('the bodies ride the commit', () => {
     // the group never moves past it. It is dead in the log, and bob steps over it.
     const orphan = memoryEntryID('a body nobody delivered')
     await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'alice',
       recoverySecret,
       epoch: 1,
-      commit: encodeMemoryCommit(1, 'alice', [orphan]),
+      commit: encodeMemoryCommit(1, 'alice', [orphan], {
+        authenticator: memoryAuthenticator(bob.mls),
+      }),
     })
     await flush(80)
 
@@ -148,7 +162,13 @@ describe('the bodies ride the commit', () => {
 
     // And the lane is not wedged behind it: the next honest commit is framed at the same
     // epoch, lands behind the dead frame, and applies.
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret,
+      epoch: 1,
+    })
     await flush(80)
     expect(bob.mls.commits()).toBe(1)
     expect(bob.mls.epoch()).toBe(2)

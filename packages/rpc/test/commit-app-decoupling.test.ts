@@ -9,9 +9,10 @@ import type { PendingAppFrame } from '../src/crypto.js'
 import { adaptBusHandlers } from '../src/handlers.js'
 import { APP_TOPIC_LABEL, commitTopic, protocolTopic } from '../src/topic.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
-import { publishCommit } from './fixtures/commits.js'
+import { publishCommit, publishNextCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
+import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, chat, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
 
 // Capture the real peer/lane boundary without replacing either scheduler.
@@ -165,7 +166,13 @@ async function append(hub: DurableFakeHub, epoch = 1, text = 'hello') {
 }
 
 async function remoteCommit(f: Awaited<ReturnType<typeof setup>>) {
-  await publishCommit({ hub: f.hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+  await publishCommit({
+    authenticator: memoryAuthenticator(f.bob.mls),
+    hub: f.hub,
+    senderDID: 'alice',
+    recoverySecret: secret,
+    epoch: 1,
+  })
   const replay = track(f.bob.controlWalk.reconcileCommitPrefix())
   void replay.catch(() => {})
   await vi.waitFor(() => expect(f.bob.mls.epoch()).toBe(2), { timeout: 500 })
@@ -339,8 +346,15 @@ describe('app work leaves the commit queue', () => {
       onAppDeliveryStalled: stalled,
     })
     expect(f.params.commitLaneCaughtUp?.()).toBe(true)
+    const author = createMemoryGroupMLS({ recoverySecret: secret })
+    author.restoreState(f.bob.mls.serializeState())
     for (const epoch of [1, 2, 3]) {
-      await publishCommit({ hub: f.hub, senderDID: 'alice', recoverySecret: secret, epoch })
+      await publishNextCommit(author, {
+        hub: f.hub,
+        senderDID: 'alice',
+        recoverySecret: secret,
+        epoch,
+      })
     }
     expect(f.bob.mls.epoch()).toBe(1)
     expect(f.params.commitLaneCaughtUp?.()).toBe(true)
@@ -391,8 +405,15 @@ describe('app work leaves the commit queue', () => {
     })
     const operation = track(f.bob.controlWalk.reconcileCommitPrefix())
     await snapshot.entered.promise
+    const author = createMemoryGroupMLS({ recoverySecret: secret })
+    author.restoreState(f.bob.mls.serializeState())
     for (const epoch of [1, 2, 3]) {
-      await publishCommit({ hub: f.hub, senderDID: 'alice', recoverySecret: secret, epoch })
+      await publishNextCommit(author, {
+        hub: f.hub,
+        senderDID: 'alice',
+        recoverySecret: secret,
+        epoch,
+      })
     }
     const app = gate()
     f.hub.appGate = app
@@ -630,8 +651,15 @@ describe('app work leaves the commit queue', () => {
     const seen = vi.fn()
     const stalled = vi.fn()
     const f = await setup({ handlers: { 'chat/posted': seen }, onAppDeliveryStalled: stalled })
+    const author = createMemoryGroupMLS({ recoverySecret: secret })
+    author.restoreState(f.bob.mls.serializeState())
     for (const epoch of [1, 2, 3]) {
-      await publishCommit({ hub: f.hub, senderDID: 'alice', recoverySecret: secret, epoch })
+      await publishNextCommit(author, {
+        hub: f.hub,
+        senderDID: 'alice',
+        recoverySecret: secret,
+        epoch,
+      })
       await f.bob.controlWalk.reconcileCommitPrefix()
     }
     expect(f.bob.mls.epoch()).toBe(4)

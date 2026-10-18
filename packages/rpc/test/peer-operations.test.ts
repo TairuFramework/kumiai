@@ -65,7 +65,7 @@ describe('durable peer operations', () => {
       ).toEqual([])
       await bob.peer.dispose()
       await bob.peer.drained()
-      const again = makeMLSPeer(hub, 'bob', secret, { restartOf: bob })
+      const again = makeMLSPeer(hub, 'bob', secret, { members: ['alice', 'bob'], restartOf: bob })
       await again.peer.replay()
       expect((await again.control.load()).controlHold).toEqual(held.controlHold)
       expect((await again.control.load()).commitOnce).toEqual(held.commitOnce)

@@ -62,8 +62,9 @@ describe('durable storage stall', () => {
     const stalled = vi.fn()
     const resumed = vi.fn()
     const handler = vi.fn()
-    const alice = makeMLSPeer(hub, 'alice', secret, { epoch: 1 })
+    const alice = makeMLSPeer(hub, 'alice', secret, { members: ['alice', 'bob'], epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', secret, {
+      members: ['alice', 'bob'],
       crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending: store.port }),
       handlers: { 'chat/posted': handler },
       onAppDeliveryStalled: stalled,
@@ -853,8 +854,9 @@ describe('durable storage stall', () => {
     const resumed = vi.fn((_event: AppDeliveryResumed) => {
       throw new Error('observer failed')
     })
-    const alice = makeMLSPeer(hub, 'alice', secret, { epoch: 1 })
+    const alice = makeMLSPeer(hub, 'alice', secret, { members: ['alice', 'bob'], epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', secret, {
+      members: ['alice', 'bob'],
       epoch: 1,
       crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending: store.port }),
       onAppDeliveryStalled: notices,
@@ -946,8 +948,9 @@ describe('durable storage stall', () => {
       releaseHandler = resolve
     })
     const handler = vi.fn(async () => held)
-    const alice = makeMLSPeer(hub, 'alice', secret, { epoch: 1 })
+    const alice = makeMLSPeer(hub, 'alice', secret, { members: ['alice', 'bob'], epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', secret, {
+      members: ['alice', 'bob'],
       crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending: store.port }),
       handlers: { 'chat/posted': handler },
       onAppDeliveryStalled: stalled,

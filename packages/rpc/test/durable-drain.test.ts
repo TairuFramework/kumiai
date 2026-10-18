@@ -10,6 +10,7 @@ import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
+import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, chat, makeMLSPeer } from './fixtures/peer.js'
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 50))
@@ -193,8 +194,9 @@ describe('durable retained drain', () => {
     const hub = new DurableFakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x91)
     const store = pendingStore()
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
       epoch: 1,
       handlers: {
         'chat/posted': () => {
@@ -243,7 +245,14 @@ describe('durable retained drain', () => {
     })
     await flush()
     hub.detach('bob')
-    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'admin',
+      recoverySecret,
+      epoch: 1,
+      removes: ['carol'],
+    })
     await flush()
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'new topic' } })
     await flush()

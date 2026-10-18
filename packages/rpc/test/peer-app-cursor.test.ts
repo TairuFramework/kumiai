@@ -8,6 +8,7 @@ import { APP_TOPIC_LABEL, commitTopic, protocolTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
+import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { makeMLSPeer } from './fixtures/peer.js'
 
 const flush = (ms = 50) => new Promise((r) => setTimeout(r, ms))
@@ -36,8 +37,12 @@ describe('the app-lane drain reads from a durable position and reports what aged
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
     const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
-    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      epoch: 1,
+      handlers,
+    })
     await flush()
 
     // Bob's process dies, and the group talks past him. Nothing pushes these at him later — a
@@ -49,7 +54,11 @@ describe('the app-lane drain reads from a durable position and reports what aged
     await flush()
     expect(seen).toEqual([])
 
-    const first = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
+    const first = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      restartOf: bob,
+      handlers,
+    })
     hub.reattach('bob')
     await flush()
     expect(seen).toEqual([{ text: 'one' }, { text: 'two' }])
@@ -63,7 +72,11 @@ describe('the app-lane drain reads from a durable position and reports what aged
     // epoch, so every one of those frames is still openable by him. The position is the only
     // thing standing between the host and a second copy of its own history.
     await first.peer.dispose()
-    const second = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: first, handlers })
+    const second = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      restartOf: first,
+      handlers,
+    })
     hub.reattach('bob')
     await flush()
 
@@ -83,7 +96,15 @@ describe('the app-lane drain reads from a durable position and reports what aged
 
     // Bob's own commit, accepted by the hub at epoch 1, with his process dead before he adopted it
     // and no journal to repair him. He can never apply the frame that is his own commit.
-    const own = await publishCommit({ hub, senderDID: 'bob', recoverySecret, epoch: 1 })
+    const own = await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: recoverySecret, epoch: 1, localDID: 'bob' }),
+      ),
+      hub,
+      senderDID: 'bob',
+      recoverySecret,
+      epoch: 1,
+    })
 
     // Only the current frame can spend its message key.
     const atOne = createFakeCrypto({ epoch: 1, localDID: 'alice' })
@@ -157,8 +178,12 @@ describe('the app-lane drain reads from a durable position and reports what aged
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
     const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
-    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      epoch: 1,
+      handlers,
+    })
     await flush()
 
     await bob.peer.dispose()
@@ -169,7 +194,11 @@ describe('the app-lane drain reads from a durable position and reports what aged
     await flush()
 
     // Bob reads that one and records where he got to. The gap below is measured from here.
-    const first = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
+    const first = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      restartOf: bob,
+      handlers,
+    })
     hub.reattach('bob')
     await flush()
     expect(seen).toEqual([{ text: 'read before the gap' }])
@@ -188,6 +217,7 @@ describe('the app-lane drain reads from a durable position and reports what aged
     expect(hub.oldest(topicID)).toBe(survivor)
 
     const second = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
       restartOf: first,
       handlers,
       onAppWindowPruned: (event) => void pruned.push(event),
@@ -217,8 +247,9 @@ describe('the app-lane drain reads from a durable position and reports what aged
     const recoverySecret = new Uint8Array(32).fill(0x84)
     const pruned: Array<AppWindowPruned> = []
     const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
       epoch: 1,
       handlers: { 'chat/posted': () => {} },
       onAppWindowPruned: (event) => void pruned.push(event),
@@ -241,7 +272,13 @@ describe('the app-lane drain reads from a durable position and reports what aged
     expect(fetch.gap).toBe(false)
 
     hub.reattach('bob')
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret,
+      epoch: 1,
+    })
     await flush()
 
     expect(pruned).toHaveLength(0)
@@ -254,8 +291,9 @@ describe('the app-lane drain reads from a durable position and reports what aged
     const recoverySecret = new Uint8Array(32).fill(0x85)
     const pruned: Array<AppWindowPruned> = []
     const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
       epoch: 1,
       handlers: { 'chat/posted': () => {} },
       onAppWindowPruned: (event) => void pruned.push(event),
@@ -270,12 +308,24 @@ describe('the app-lane drain reads from a durable position and reports what aged
     hub.trim(topicID, '999999999999')
 
     hub.reattach('bob')
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret,
+      epoch: 1,
+    })
     await flush()
 
     expect(pruned).toHaveLength(1)
     expect(pruned[0]?.oldest).toBeNull()
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret,
+      epoch: 1,
+    })
     await flush()
     expect(pruned).toHaveLength(1)
     await alice.peer.dispose()
@@ -287,11 +337,12 @@ describe('the app-lane drain reads from a durable position and reports what aged
     const recoverySecret = new Uint8Array(32).fill(0x86)
     const pruned: Array<AppWindowPruned> = []
     const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'removed' } })
     await flush()
     hub.trim(topicID, '999999999999')
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
       epoch: 1,
       handlers: { 'chat/posted': () => {} },
       onAppWindowPruned: (event) => void pruned.push(event),
@@ -359,8 +410,9 @@ describe('the app-lane drain reads from a durable position and reports what aged
     const recoverySecret = new Uint8Array(32).fill(0x87)
     const pruned: Array<AppWindowPruned> = []
     const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
     const first = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
       epoch: 1,
       handlers: { 'chat/posted': () => {} },
     })
@@ -373,6 +425,7 @@ describe('the app-lane drain reads from a durable position and reports what aged
     const cursor = hub.published.find((message) => message.topicID === topicID)?.sequenceID
     expect(cursor).toBeDefined()
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
       restartOf: first,
       handlers: { 'chat/posted': () => {} },
       onAppWindowPruned: (event) => void pruned.push(event),
@@ -388,7 +441,13 @@ describe('the app-lane drain reads from a durable position and reports what aged
     hub.trim(topicID, appFrames[2]?.sequenceID ?? '999999999999')
 
     hub.reattach('bob')
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret,
+      epoch: 1,
+    })
     await flush()
 
     expect(pruned).toHaveLength(1)

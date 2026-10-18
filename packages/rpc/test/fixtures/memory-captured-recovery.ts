@@ -19,7 +19,11 @@ import type {
   ForkRecoveryAuthorisation,
 } from '../../src/recovery-types.js'
 import type { MemoryGroupInfo } from './memory-group-mls.js'
-import { createMemoryGroupMLS, encodeMemoryCommit } from './memory-group-mls.js'
+import {
+  createMemoryGroupMLS,
+  encodeMemoryCommit,
+  memoryAuthenticator,
+} from './memory-group-mls.js'
 
 export function memoryCapturedRecord(
   pending: CapturedPendingRecovery,
@@ -186,12 +190,12 @@ export async function createRosterAbsenceMemoryFixture(
       'save-rejoin',
     )
   await responder.processCommit(
-    encodeMemoryCommit(
-      1,
-      'alice',
-      [],
-      scenario === 'present' ? { external: true, branch: 'fresh-leaf' } : { removes: ['alice'] },
-    ),
+    encodeMemoryCommit(1, 'alice', [], {
+      ...(scenario === 'present'
+        ? { external: true, branch: 'fresh-leaf' }
+        : { removes: ['alice'] }),
+      authenticator: memoryAuthenticator(responder),
+    }),
     {},
   )
   if (scenario === 'wrong-key' || scenario === 'expired' || scenario === 'imported') {
@@ -272,7 +276,10 @@ export async function createForkRecoveryMemoryFixture(): Promise<ForkRecoveryFix
   await own.persistInitialState()
   await other.persistInitialState()
   for (let epoch = 0; epoch < 9; epoch++) {
-    const commit = encodeMemoryCommit(epoch, 'bob', [], { branch: `common-${epoch}` })
+    const commit = encodeMemoryCommit(epoch, 'bob', [], {
+      authenticator: memoryAuthenticator(other),
+      branch: `common-${epoch}`,
+    })
     const result = await own.processCommit(commit, {})
     if (!result.advanced) throw new Error(`Model common commit refused: ${JSON.stringify(result)}`)
     other.adopt(commit)
@@ -282,14 +289,20 @@ export async function createForkRecoveryMemoryFixture(): Promise<ForkRecoveryFix
   const ownHeads = new Map<number, Uint8Array>([[9, original.serializeState()]])
   const otherHeads = new Map<number, Uint8Array>([[9, other.serializeState()]])
   for (let epoch = 9; epoch < 20; epoch++) {
-    const commit = encodeMemoryCommit(epoch, 'alice', [], { branch: `own-${epoch}` })
+    const commit = encodeMemoryCommit(epoch, 'alice', [], {
+      authenticator: memoryAuthenticator(original),
+      branch: `own-${epoch}`,
+    })
     own.adopt(commit)
     await original.processCommit(commit, {})
     ownHeads.set(epoch + 1, original.serializeState())
   }
   for (let epoch = 9; epoch < 21; epoch++) {
     await other.processCommit(
-      encodeMemoryCommit(epoch, 'alice', [], { branch: `other-${epoch}` }),
+      encodeMemoryCommit(epoch, 'alice', [], {
+        authenticator: memoryAuthenticator(other),
+        branch: `other-${epoch}`,
+      }),
       {},
     )
     otherHeads.set(epoch + 1, other.serializeState())

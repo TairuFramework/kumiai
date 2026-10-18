@@ -8,7 +8,13 @@ import { encodeLedgerEntries } from '../../src/ledger-entries.js'
 import { encodeRecoveryConfirmRequest, type RecoveryConfirmRequest } from '../../src/recovery.js'
 import { commitTopic } from '../../src/topic.js'
 import { createFakeCrypto } from './fake-crypto.js'
-import { encodeMemoryCommit, memoryEntryID, memoryLedgerHead } from './memory-group-mls.js'
+import {
+  encodeMemoryCommit,
+  type MemoryGroupMLS,
+  memoryAuthenticator,
+  memoryEntryID,
+  memoryLedgerHead,
+} from './memory-group-mls.js'
 
 type PublishingHub = { publish: (params: HubPublishParams) => Promise<{ sequenceID: string }> }
 
@@ -22,6 +28,7 @@ export type PublishCommitParams = {
    * separable here because the whole point is that a peer must never confuse them.
    */
   committerDID?: string
+  authenticator: Uint8Array
   recoverySecret: Uint8Array
   /** The epoch this Commit is framed at — the epoch every member that can apply it is at. */
   epoch: number
@@ -60,19 +67,14 @@ export type PublishCommitParams = {
   expectedHead?: string | null
 }
 
-/**
- * A member that is not a peer in the test — an admin off-stage — publishing a commit
- * frame, exactly as a peer's `commit()` builds one: `[commit][sealEntries(bodies)]`, with the
- * bodies sealed under the pre-commit epoch secret.
- */
-export async function publishCommit(params: PublishCommitParams): Promise<{ sequenceID: string }> {
-  const { hub, senderDID, recoverySecret, epoch, entries = [], ledgerBefore = [] } = params
+function encodePublishedCommit(params: PublishCommitParams): Uint8Array {
+  const { senderDID, epoch, entries = [], ledgerBefore = [] } = params
   const committerDID = params.committerDID ?? senderDID
-  const crypto = createFakeCrypto({ epoch, localDID: senderDID })
   const entryIDs = entries.map(memoryEntryID)
-  const commit =
+  return (
     params.commit ??
     encodeMemoryCommit(epoch, committerDID, entryIDs, {
+      authenticator: params.authenticator,
       ...(entryIDs.length > 0
         ? { head: memoryLedgerHead([...ledgerBefore.map(memoryEntryID), ...entryIDs]) }
         : {}),
@@ -81,6 +83,18 @@ export async function publishCommit(params: PublishCommitParams): Promise<{ sequ
       ...(params.external === true ? { external: true } : {}),
       ...(params.signerDID != null ? { signerDID: params.signerDID } : {}),
     })
+  )
+}
+
+/**
+ * A member that is not a peer in the test — an admin off-stage — publishing a commit
+ * frame, exactly as a peer's `commit()` builds one: `[commit][sealEntries(bodies)]`, with the
+ * bodies sealed under the pre-commit epoch secret.
+ */
+export async function publishCommit(params: PublishCommitParams): Promise<{ sequenceID: string }> {
+  const { hub, senderDID, recoverySecret, epoch, entries = [] } = params
+  const crypto = createFakeCrypto({ epoch, localDID: senderDID })
+  const commit = encodePublishedCommit(params)
   const { sealed } = await crypto.sealEntries(encodeLedgerEntries(entries))
   return hub.publish({
     senderDID,
@@ -89,6 +103,21 @@ export async function publishCommit(params: PublishCommitParams): Promise<{ sequ
     retain: 'log',
     ...(params.expectedHead !== undefined ? { expectedHead: params.expectedHead } : {}),
   })
+}
+
+/** Publish an offline history using the exact state produced by its preceding commit. */
+export async function publishNextCommit(
+  source: MemoryGroupMLS,
+  params: Omit<PublishCommitParams, 'authenticator'>,
+): Promise<{ sequenceID: string }> {
+  const authored = { ...params, authenticator: memoryAuthenticator(source) }
+  const commit = encodePublishedCommit(authored)
+  const result = await publishCommit({ ...authored, commit })
+  const applied = await source.processCommit(commit, {
+    resolveLedgerEntries: async () => params.entries ?? [],
+  })
+  if (!applied.applied) throw new Error('Offline source refused its authored commit')
+  return result
 }
 
 /**

@@ -7,6 +7,7 @@ import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
+import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, chat, makeMLSPeer } from './fixtures/peer.js'
 
 describe('durable app rotation', () => {
@@ -25,7 +26,14 @@ describe('durable app rotation', () => {
       }
       return originalExport(label, length)
     })
-    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'admin',
+      recoverySecret,
+      epoch: 1,
+      removes: ['carol'],
+    })
     await bob.peer.enqueue(buildLedgerCommit(bob, []))
     await expect(bob.peer.replay()).rejects.toThrow('export failed')
     const before = hub.published.length
@@ -63,7 +71,14 @@ describe('durable app rotation', () => {
       }
       return originalExport(label, length)
     })
-    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'admin',
+      recoverySecret,
+      epoch: 1,
+      removes: ['carol'],
+    })
     const oldTopic = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
     const newTopic = protocolTopic(fakeEpochSecret(2, APP_TOPIC_LABEL), 2, 'chat')
     const committing = bob.peer.retryAppDelivery()

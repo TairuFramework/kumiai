@@ -12,6 +12,12 @@ import {
 } from './fixtures/storage-persistence.js'
 import { makeStorageSeed } from './fixtures/storage-seed.js'
 
+const { tagMemoryCommit } = (await import(
+  new URL('../../rpc/test/fixtures/memory-group-mls.ts', import.meta.url).href
+)) as {
+  tagMemoryCommit(commit: Uint8Array, authenticator: Uint8Array): Uint8Array
+}
+
 for (const mode of ['double', 'real-mls'] as const) {
   testControlCrashBoundaries(mode)
   testCommitOnceConformance({
@@ -62,15 +68,20 @@ for (const mode of ['double', 'real-mls'] as const) {
       expect(await h.saveBuilt(built.intent, built.slot, built.expected, 'built')).toBe('saved')
       const competitor = real?.members[0]
       if (real !== undefined && competitor === undefined) throw new Error('Missing competitor')
+      const before = await h.groups.loadState(h.key)
+      if (before === null || before.deleted) throw new Error('Missing source state')
       const commit =
         real === undefined || competitor === undefined
-          ? new TextEncoder().encode(
-              JSON.stringify({
-                epoch: 3,
-                committerDID: randomIdentity().id,
-                entryIDs: [],
-                missingProposal: true,
-              }),
+          ? tagMemoryCommit(
+              new TextEncoder().encode(
+                JSON.stringify({
+                  epoch: 3,
+                  committerDID: randomIdentity().id,
+                  entryIDs: [],
+                  missingProposal: true,
+                }),
+              ),
+              before.epochAuthenticator,
             )
           : await buildRealUnavailableCommit({
               ...real,
@@ -95,8 +106,6 @@ for (const mode of ['double', 'real-mls'] as const) {
         payload: built.slot.payload,
         publishID: built.slot.publishID,
       })
-      const before = await h.groups.loadState(h.key)
-      if (before === null || before.deleted) throw new Error('Missing source state')
       await h.controlWalk.stepOperation(built.intent.id)
       const saved = await h.control.load()
       expect(h.observations.ownAdoptions).toBe(0)

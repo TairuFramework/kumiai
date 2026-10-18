@@ -12,6 +12,7 @@ import type {
   RecoveryReconciliation,
 } from '../src/recovery-types.js'
 import { createCapturedMemoryRecovery } from './fixtures/memory-captured-recovery.js'
+import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
 
 async function setup() {
   const fixture = await createCapturedMemoryRecovery()
@@ -389,6 +390,7 @@ test.each(['later-present', 'confirmed-absent'] as const)(
         if (other === null || 'renewalRequired' in other)
           throw new Error('Missing replacement candidate')
         await publishCommit({
+          authenticator: memoryAuthenticator(bob.mls),
           hub,
           senderDID: 'bob',
           recoverySecret: secret,

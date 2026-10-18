@@ -6,7 +6,7 @@ import type { CertifiedControlRange } from '../src/control/search.js'
 import { asLogPosition } from '../src/cursor.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { makeMLSPeer } from './fixtures/peer.js'
 
 test.each(['key', 'epoch', 'position', 'payload'] as const)(
@@ -22,8 +22,15 @@ test.each(['key', 'epoch', 'position', 'payload'] as const)(
     })
     const source = await mls.readRecoverySource()
     if (source.identity === null) throw new Error('Missing source identity')
-    const winner = await publishCommit({ hub, senderDID: 'carol', recoverySecret: rs, epoch: 1 })
+    const winner = await publishCommit({
+      authenticator: memoryAuthenticator(mls),
+      hub,
+      senderDID: 'carol',
+      recoverySecret: rs,
+      epoch: 1,
+    })
     const loser = await publishCommit({
+      authenticator: memoryAuthenticator(mls),
       hub,
       senderDID: 'alice',
       recoverySecret: rs,
@@ -31,6 +38,7 @@ test.each(['key', 'epoch', 'position', 'payload'] as const)(
       external: true,
     })
     const divergent = await publishCommit({
+      authenticator: memoryAuthenticator(mls),
       hub,
       senderDID: 'alice',
       recoverySecret: rs,

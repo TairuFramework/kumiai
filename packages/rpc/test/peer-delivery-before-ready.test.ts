@@ -7,7 +7,7 @@ import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
-import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { makeMLSPeer } from './fixtures/peer.js'
 
 describe('commit delivery during initialization', () => {
@@ -16,6 +16,9 @@ describe('commit delivery during initialization', () => {
     const entry = 'role:delivery-during-init=member'
     const source = new FakeHub()
     await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: recoverySecret, epoch: 1, localDID: 'bob' }),
+      ),
       hub: source,
       senderDID: 'alice',
       recoverySecret,
@@ -207,7 +210,15 @@ describe('commit delivery during initialization', () => {
   test('a seed pull stops before fetching when its epoch read resumes after disposal', async () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0xa5)
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: recoverySecret, epoch: 1, localDID: 'bob' }),
+      ),
+      hub,
+      senderDID: 'alice',
+      recoverySecret,
+      epoch: 1,
+    })
     const mls = createMemoryGroupMLS({ recoverySecret, epoch: 1, localDID: 'bob' })
     const readEpoch = mls.readEpoch.bind(mls)
     let releaseRead = (): void => {}
@@ -246,7 +257,15 @@ describe('commit delivery during initialization', () => {
   test('a seed pull does not apply a fetched commit after disposal', async () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0xa6)
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: recoverySecret, epoch: 1, localDID: 'bob' }),
+      ),
+      hub,
+      senderDID: 'alice',
+      recoverySecret,
+      epoch: 1,
+    })
     const mls = createMemoryGroupMLS({ recoverySecret, epoch: 1, localDID: 'bob' })
     const fetchTopic = hub.fetchTopic.bind(hub)
     let releaseFetch = (): void => {}
@@ -305,7 +324,13 @@ describe('commit delivery during initialization', () => {
       })
       const fetches = vi.spyOn(hub, 'fetchTopic')
       const applies = vi.spyOn(mls, 'processCommit')
-      await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
+      await publishCommit({
+        authenticator: memoryAuthenticator(bob.mls),
+        hub,
+        senderDID: 'alice',
+        recoverySecret,
+        epoch: 1,
+      })
       await vi.waitFor(() => expect(journalRead).toHaveBeenCalled(), { timeout: 1000 })
       await bob.peer.dispose()
       const fetchesAtDisposal = fetches.mock.calls.filter(

@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest'
 import { detectRosterChange } from '../src/roster.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { makeMLSPeer } from './fixtures/peer.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 30))
@@ -36,7 +37,14 @@ describe('a commit that changes the roster or rejoins a member rotates the app-l
     await flush()
     expect(bob.peer.anchorEpoch()).toBe(1)
 
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1, removes: ['carol'] })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret,
+      epoch: 1,
+      removes: ['carol'],
+    })
     await flush()
 
     expect(bob.mls.epoch()).toBe(2) // the commit advanced the epoch
@@ -55,6 +63,7 @@ describe('a commit that changes the roster or rejoins a member rotates the app-l
 
     // The leaf count is unchanged — one out, one in — so only a set comparison sees the change.
     await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'alice',
       recoverySecret,
@@ -76,7 +85,14 @@ describe('a commit that changes the roster or rejoins a member rotates the app-l
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { members: ['bob'] })
     await flush()
 
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1, adds: ['dave'] })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret,
+      epoch: 1,
+      adds: ['dave'],
+    })
     await flush()
 
     expect(bob.mls.epoch()).toBe(2) // it advanced
@@ -95,7 +111,13 @@ describe('a commit that changes the roster or rejoins a member rotates the app-l
     await flush()
 
     // No roster op — the roster is identical before and after — yet the epoch still advances.
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret,
+      epoch: 1,
+    })
     await flush()
 
     expect(bob.mls.epoch()).toBe(2)
@@ -114,6 +136,7 @@ describe('a commit that changes the roster or rejoins a member rotates the app-l
     await flush()
 
     await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'alice',
       committerDID: 'dave',
@@ -147,6 +170,7 @@ describe('a commit that changes the roster or rejoins a member rotates the app-l
     await flush()
 
     await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'alice',
       committerDID: 'dave',

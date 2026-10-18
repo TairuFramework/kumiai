@@ -5,6 +5,7 @@ import { asLogPosition } from '../src/cursor.js'
 import { commitTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import {
   buildInviteCommit,
   makeMLSPeer,
@@ -32,7 +33,13 @@ describe('durable Welcome obligations', () => {
       await member.peer.dispose()
       await member.peer.drained()
       if (condition === 'superseded')
-        await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 1 })
+        await publishCommit({
+          authenticator: memoryAuthenticator(member.mls),
+          hub,
+          senderDID: 'carol',
+          recoverySecret: secret,
+          epoch: 1,
+        })
       else
         await hub.publish({
           senderDID: 'carol',

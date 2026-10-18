@@ -4,6 +4,7 @@ import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { makeMLSPeer } from './fixtures/peer.js'
 
 const flush = (ms = 60) => new Promise((r) => setTimeout(r, ms))
@@ -57,6 +58,7 @@ describe('an external commit cannot name its reader as its author unless it auth
     // at" — which is the one shape that makes a peer heal AND hold its cursor, so left
     // unauthenticated this frame is re-read and re-healed on every pull, forever, for one publish.
     await publishCommit({
+      authenticator: memoryAuthenticator(alice.mls),
       hub,
       senderDID: 'mallory',
       recoverySecret: rs,
@@ -86,7 +88,13 @@ describe('an external commit cannot name its reader as its author unless it auth
     // recovery request whether the cursor stepped over it or is parked on it forever, so counting
     // requests cannot tell the two apart. A genuine commit published BEHIND the forgery can: it
     // is only reachable by a cursor that got past the poison.
-    await publishCommit({ hub, senderDID: 'bob', recoverySecret: rs, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(alice.mls),
+      hub,
+      senderDID: 'bob',
+      recoverySecret: rs,
+      epoch: 1,
+    })
     await flush(200)
     expect(alice.mls.epoch()).toBe(2)
     expect(recoveryRequests(hub, rs)).toHaveLength(afterFirst)
@@ -108,6 +116,7 @@ describe('an external commit cannot name its reader as its author unless it auth
     // Same forgery, naming Bob rather than the reader. It would otherwise reach the port as an
     // applicable commit and rotate the anchor on a rejoin that never happened.
     await publishCommit({
+      authenticator: memoryAuthenticator(alice.mls),
       hub,
       senderDID: 'mallory',
       recoverySecret: rs,
@@ -141,6 +150,7 @@ describe('an external commit cannot name its reader as its author unless it auth
     // Bob genuinely rejoins at the epoch Alice is at: claimed author and signer agree, which is
     // what a member that holds its own leaf key produces and a forger cannot.
     await publishCommit({
+      authenticator: memoryAuthenticator(alice.mls),
       hub,
       senderDID: 'bob',
       recoverySecret: rs,
@@ -177,6 +187,7 @@ describe('an external commit cannot name its reader as its author unless it auth
     await flush()
 
     await publishCommit({
+      authenticator: memoryAuthenticator(alice.mls),
       hub,
       senderDID: 'bob',
       recoverySecret: rs,

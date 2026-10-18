@@ -11,6 +11,7 @@ import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { fakeEpochSecret } from './fixtures/fake-crypto.js'
 import {
   encodeMemoryCommit,
+  memoryAuthenticator,
   memoryEntryID,
   requireCapturedRecovery,
 } from './fixtures/memory-group-mls.js'
@@ -161,16 +162,25 @@ describe('recovery ordering', { concurrent: false }, () => {
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { members })
     await bob.peer.replay()
     await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'alice',
       recoverySecret,
       epoch: 1,
-      commit: encodeMemoryCommit(1, 'alice', [memoryEntryID('missing body')]),
+      commit: encodeMemoryCommit(1, 'alice', [memoryEntryID('missing body')], {
+        authenticator: memoryAuthenticator(bob.mls),
+      }),
     })
     await bob.peer.resync()
     expect(bob.mls.epoch()).toBe(1)
     expect((await bob.anchorStore.load())?.pending).toBeUndefined()
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret,
+      epoch: 1,
+    })
     await bob.peer.resync()
     expect(bob.mls.epoch()).toBe(2)
     expect((await bob.anchorStore.load())?.pending).toBeUndefined()
@@ -267,12 +277,22 @@ describe('recovery ordering', { concurrent: false }, () => {
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, options)
     const dave = makeMLSPeer(hub, 'dave', recoverySecret, options)
     await Promise.all([alice.peer.replay(), bob.peer.replay(), dave.peer.replay()])
-    await publishCommit({ hub, senderDID: 'carol', recoverySecret, epoch: 1, external: true })
+    await publishCommit({
+      authenticator: memoryAuthenticator(dave.mls),
+      hub,
+      senderDID: 'carol',
+      recoverySecret,
+      epoch: 1,
+      external: true,
+    })
     await expect.poll(() => bob.mls.seen()).toBe(1)
     await expect.poll(() => dave.mls.seen()).toBe(1)
     expect((await bob.anchorStore.load())?.pending).toBeUndefined()
     await dave.peer.dispose()
-    const restarted = makeMLSPeer(hub, 'dave', recoverySecret, { restartOf: dave })
+    const restarted = makeMLSPeer(hub, 'dave', recoverySecret, {
+      members: ['alice', 'bob', 'dave'],
+      restartOf: dave,
+    })
     await alice.peer.commit(buildLedgerCommit(alice, []))
     await expect.poll(() => bob.mls.epoch()).toBe(2)
     await expect.poll(() => restarted.mls.epoch()).toBe(2)
@@ -299,7 +319,14 @@ describe('recovery ordering', { concurrent: false }, () => {
       if (refuse) throw new Error('resolver unavailable')
       return process(...args)
     }
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1, removes: ['carol'] })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret,
+      epoch: 1,
+      removes: ['carol'],
+    })
     await bob.peer.enqueue(buildLedgerCommit(bob, []))
     await expect.poll(() => processes).toBe(1)
     const pending = (await bob.anchorStore.load())?.pending
@@ -313,6 +340,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     if (message == null) throw new Error('Missing commit')
     const original = message.payload
     await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub: {
         publish: async (value) => {
           message.payload = value.payload

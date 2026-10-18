@@ -20,7 +20,11 @@ import { rendezvousTopic } from '../src/topic.js'
 import { encodeSignedRecoveryConfirmation, publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryGroupMLS, encodeMemoryCommit } from './fixtures/memory-group-mls.js'
+import {
+  createMemoryGroupMLS,
+  encodeMemoryCommit,
+  memoryAuthenticator,
+} from './fixtures/memory-group-mls.js'
 import type { Protocols, TestPeer } from './fixtures/peer.js'
 import { buildLegacyRejoinRecord, makeMLSPeer } from './fixtures/peer.js'
 
@@ -124,7 +128,10 @@ test('recovery-only peers ignore valid signed confirmation requests without priv
     const bob = createMemoryGroupMLS({ localDID: 'bob', members: ['alice', 'bob'] })
     const requestID = 'lost-state-confirmation'
     const { request } = await bob.createRecoveryRequest(requestID)
-    const commit = encodeMemoryCommit(1, 'bob', [], { external: true })
+    const commit = encodeMemoryCommit(1, 'bob', [], {
+      authenticator: memoryAuthenticator(bob),
+      external: true,
+    })
     const payload = await encodeSignedRecoveryConfirmation(bob, {
       requestID,
       request,
@@ -334,7 +341,13 @@ test.each(
     },
     'retained-intent',
   )
-  await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
+  await publishCommit({
+    authenticator: memoryAuthenticator(mls),
+    hub,
+    senderDID: 'bob',
+    recoverySecret: secret,
+    epoch: 1,
+  })
   const spies = ordinaryMLSMethods.map((name) => [name, vi.spyOn(mls, name)] as const)
   vi.useFakeTimers()
   const member = makeMLSPeer(hub, 'alice', secret, { mls, recoveryOnly: true })
@@ -366,12 +379,21 @@ test.each(
         await expect(result).rejects.toBeInstanceOf(SendNotAdmissibleError)
       else await result
     } else if (entry === 'commit-delivery') {
-      await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
+      await publishCommit({
+        authenticator: memoryAuthenticator(member.mls),
+        hub,
+        senderDID: 'bob',
+        recoverySecret: secret,
+        epoch: 1,
+      })
     } else if (entry !== 'idle-timers') {
       const bob = createMemoryGroupMLS({ localDID: 'bob', members: ['alice', 'bob'] })
       const requestID = 'recovery-only-inbound'
       const { request } = await bob.createRecoveryRequest(requestID)
-      const commit = encodeMemoryCommit(1, 'bob', [], { external: true })
+      const commit = encodeMemoryCommit(1, 'bob', [], {
+        authenticator: memoryAuthenticator(bob),
+        external: true,
+      })
       const frames = {
         'recovery-request': [
           HANDSHAKE_KIND.recoveryRequest,

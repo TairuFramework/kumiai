@@ -20,6 +20,7 @@ import { createCapturedMemoryRecovery } from './fixtures/memory-captured-recover
 import {
   createMemoryGroupMLS,
   encodeMemoryCommit,
+  memoryAuthenticator,
   reattestMemoryCapture,
 } from './fixtures/memory-group-mls.js'
 import { makeMLSPeer } from './fixtures/peer.js'
@@ -39,8 +40,20 @@ describe('recovery ordering', { concurrent: false }, () => {
       const secret = new Uint8Array(32).fill(0x68)
       const position = 'shared'
       let genuine = false
-      const first = encodeMemoryCommit(1, 'carol', [], { external: true })
-      const next = encodeMemoryCommit(kind === 'applied' ? 2 : 1, 'bob', [], { external: true })
+      const author = createMemoryGroupMLS({
+        recoverySecret: secret,
+        epoch: 1,
+        members: ['alice', 'bob', 'carol'],
+      })
+      const first = encodeMemoryCommit(1, 'carol', [], {
+        authenticator: memoryAuthenticator(author),
+        external: true,
+      })
+      if (kind === 'applied') await author.processCommit(first, {})
+      const next = encodeMemoryCommit(author.epoch(), 'bob', [], {
+        authenticator: memoryAuthenticator(author),
+        external: true,
+      })
       const fetch = hub.fetchTopic.bind(hub)
       vi.spyOn(hub, 'fetchTopic').mockImplementation(async (params) =>
         params.topicID === commitTopic(secret)
@@ -102,8 +115,32 @@ describe('recovery ordering', { concurrent: false }, () => {
     async (restart) => {
       const hub = new FakeHub()
       const secret = new Uint8Array(32).fill(0x64)
-      const commit = encodeMemoryCommit(1, 'bob', [], { external: true })
-      await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1, commit })
+      const commit = encodeMemoryCommit(1, 'bob', [], {
+        authenticator: memoryAuthenticator(
+          createMemoryGroupMLS({
+            recoverySecret: secret,
+            epoch: 1,
+            members: ['alice', 'bob', 'carol'],
+            localDID: 'alice',
+          }),
+        ),
+        external: true,
+      })
+      await publishCommit({
+        authenticator: memoryAuthenticator(
+          createMemoryGroupMLS({
+            recoverySecret: secret,
+            epoch: 1,
+            members: ['alice', 'bob', 'carol'],
+            localDID: 'alice',
+          }),
+        ),
+        hub,
+        senderDID: 'bob',
+        recoverySecret: secret,
+        epoch: 1,
+        commit,
+      })
       const options = {
         members: ['alice', 'bob', 'carol'],
         acceptsCommitter: (did: string) => did !== 'bob',
@@ -119,7 +156,12 @@ describe('recovery ordering', { concurrent: false }, () => {
           alice = makeMLSPeer(hub, 'alice', secret, { ...options, restartOf: alice })
           await alice.peer.replay()
         }
-        const bob = createMemoryGroupMLS({ members: options.members, localDID: 'bob' })
+        const bob = createMemoryGroupMLS({
+          recoverySecret: secret,
+          epoch: 1,
+          members: options.members,
+          localDID: 'bob',
+        })
         const requestID = 'request-derived-refusal'
         const { request, requestKey } = await bob.createRecoveryRequest(requestID)
         vi.useFakeTimers()
@@ -175,8 +217,26 @@ describe('recovery ordering', { concurrent: false }, () => {
     async (mode) => {
       const hub = new FakeHub()
       const secret = new Uint8Array(32).fill(0x65)
-      const original = encodeMemoryCommit(1, 'bob', [], { external: true })
+      const original = encodeMemoryCommit(1, 'bob', [], {
+        authenticator: memoryAuthenticator(
+          createMemoryGroupMLS({
+            recoverySecret: secret,
+            epoch: 1,
+            members: ['alice', 'bob', 'carol'],
+            localDID: 'alice',
+          }),
+        ),
+        external: true,
+      })
       await publishCommit({
+        authenticator: memoryAuthenticator(
+          createMemoryGroupMLS({
+            recoverySecret: secret,
+            epoch: 1,
+            members: ['alice', 'bob', 'carol'],
+            localDID: 'alice',
+          }),
+        ),
         hub,
         senderDID: 'bob',
         recoverySecret: secret,
@@ -198,7 +258,17 @@ describe('recovery ordering', { concurrent: false }, () => {
                 payload: encodeHandshakeFrame(
                   HANDSHAKE_KIND.commit,
                   encodeCommitFrame(
-                    encodeMemoryCommit(1, 'carol', [], { external: true }),
+                    encodeMemoryCommit(1, 'carol', [], {
+                      authenticator: memoryAuthenticator(
+                        createMemoryGroupMLS({
+                          recoverySecret: secret,
+                          epoch: 1,
+                          members: ['alice', 'bob', 'carol'],
+                          localDID: 'alice',
+                        }),
+                      ),
+                      external: true,
+                    }),
                     new Uint8Array(),
                   ),
                 ),
@@ -211,7 +281,18 @@ describe('recovery ordering', { concurrent: false }, () => {
                   : `p${String(index).padStart(5, '0')}`
               const commit =
                 mode === 'distinct'
-                  ? encodeMemoryCommit(1, 'bob', [], { external: true, branch: String(index) })
+                  ? encodeMemoryCommit(1, 'bob', [], {
+                      authenticator: memoryAuthenticator(
+                        createMemoryGroupMLS({
+                          recoverySecret: secret,
+                          epoch: 1,
+                          members: ['alice', 'bob', 'carol'],
+                          localDID: 'alice',
+                        }),
+                      ),
+                      external: true,
+                      branch: String(index),
+                    })
                   : original
               return {
                 ...frame,
@@ -242,12 +323,21 @@ describe('recovery ordering', { concurrent: false }, () => {
       let alice = makeMLSPeer(hub, 'alice', secret, options)
       try {
         await alice.peer.replay()
-        const bob = createMemoryGroupMLS({ localDID: 'bob', members: options.members })
+        const bob = createMemoryGroupMLS({
+          recoverySecret: secret,
+          epoch: 1,
+          localDID: 'bob',
+          members: options.members,
+        })
         const requestID = 'flood-refusal'
         const { request, requestKey } = await bob.createRecoveryRequest(requestID)
         const refusedCommit =
           mode === 'distinct'
-            ? encodeMemoryCommit(1, 'bob', [], { external: true, branch: '256' })
+            ? encodeMemoryCommit(1, 'bob', [], {
+                authenticator: memoryAuthenticator(bob),
+                external: true,
+                branch: '256',
+              })
             : original
         vi.useFakeTimers()
         const ask = async () => {
@@ -330,13 +420,22 @@ describe('recovery ordering', { concurrent: false }, () => {
     })
     try {
       await alice.peer.replay()
-      const bob = createMemoryGroupMLS({ members, localDID: 'bob' })
+      const bob = createMemoryGroupMLS({
+        recoverySecret: secret,
+        epoch: 1,
+        members,
+        localDID: 'bob',
+      })
       const requestID = 'memo-authority'
       const { request } = await bob.createRecoveryRequest(requestID)
       const validate = vi.spyOn(alice.mls, 'validateRecoveryCommit')
       const verify = vi.spyOn(alice.mls, 'verifyRecoveryRequest')
       const commit = (index: number) =>
-        encodeMemoryCommit(1, 'bob', [], { external: true, branch: String(index) })
+        encodeMemoryCommit(1, 'bob', [], {
+          authenticator: memoryAuthenticator(bob),
+          external: true,
+          branch: String(index),
+        })
       const verdicts = () =>
         hub.published.filter(
           (row) =>
@@ -381,7 +480,13 @@ describe('recovery ordering', { concurrent: false }, () => {
       await ask(commit(0))
       expect(validate).toHaveBeenCalledTimes(66)
       const count = verdicts().length
-      await alice.mls.processCommit(encodeMemoryCommit(1, 'carol', [], { external: true }), {})
+      await alice.mls.processCommit(
+        encodeMemoryCommit(1, 'carol', [], {
+          authenticator: memoryAuthenticator(bob),
+          external: true,
+        }),
+        {},
+      )
       await ask(commit(0))
       expect(verdicts()).toHaveLength(count)
       expect((await alice.control.load()).responses).toEqual([])
@@ -404,13 +509,19 @@ describe('recovery ordering', { concurrent: false }, () => {
       })
       try {
         await alice.peer.replay()
-        const bob = createMemoryGroupMLS({ members, localDID: 'bob' })
+        const bob = createMemoryGroupMLS({
+          recoverySecret: secret,
+          epoch: 1,
+          members,
+          localDID: 'bob',
+        })
         const requestID = 'unproven-validation'
         const { request } = await bob.createRecoveryRequest(requestID)
         const commit =
           kind === 'malformed'
             ? new Uint8Array([0])
             : encodeMemoryCommit(1, 'bob', [], {
+                authenticator: memoryAuthenticator(bob),
                 external: true,
                 ...(kind === 'forged' ? { signerDID: 'mallory' } : {}),
               })
@@ -457,7 +568,12 @@ describe('recovery ordering', { concurrent: false }, () => {
     const alice = makeMLSPeer(hub, 'alice', secret, { members: ['alice', 'bob'] })
     try {
       await alice.peer.replay()
-      const bob = createMemoryGroupMLS({ localDID: 'bob', members: ['alice', 'bob'] })
+      const bob = createMemoryGroupMLS({
+        recoverySecret: secret,
+        epoch: 1,
+        localDID: 'bob',
+        members: ['alice', 'bob'],
+      })
       const requestID = 'captured-ask'
       const { request } = await bob.createRecoveryRequest(requestID)
       const validate = vi.spyOn(alice.mls, 'validateRecoveryCommit')
@@ -466,12 +582,20 @@ describe('recovery ordering', { concurrent: false }, () => {
         requestID,
         position: 'p',
         commitDigest: digestAppliedCommit(
-          encodeMemoryCommit(1, 'bob', [], { external: true, branch: 'original' }),
+          encodeMemoryCommit(1, 'bob', [], {
+            authenticator: memoryAuthenticator(bob),
+            external: true,
+            branch: 'original',
+          }),
         ),
       })
       vi.useFakeTimers()
       for (let index = 0; index < 70; index++) {
-        const commit = encodeMemoryCommit(1, 'bob', [], { external: true, branch: String(index) })
+        const commit = encodeMemoryCommit(1, 'bob', [], {
+          authenticator: memoryAuthenticator(bob),
+          external: true,
+          branch: String(index),
+        })
         await hub.publish({
           senderDID: 'relay',
           topicID: rendezvousTopic(secret),
@@ -507,7 +631,12 @@ describe('recovery ordering', { concurrent: false }, () => {
     const gate = Promise.withResolvers<void>()
     try {
       await alice.peer.replay()
-      const bob = createMemoryGroupMLS({ localDID: 'bob', members: ['alice', 'bob'] })
+      const bob = createMemoryGroupMLS({
+        recoverySecret: secret,
+        epoch: 1,
+        localDID: 'bob',
+        members: ['alice', 'bob'],
+      })
       const requestID = 'burst'
       const { request } = await bob.createRecoveryRequest(requestID)
       const fetch = vi.spyOn(hub, 'fetchTopic')
@@ -518,7 +647,11 @@ describe('recovery ordering', { concurrent: false }, () => {
           return { epoch: 1, refusal: 'policy', refusalAuthority: 'authenticated-commit' }
         })
       const send = async (index: number) => {
-        const commit = encodeMemoryCommit(1, 'bob', [], { external: true, branch: String(index) })
+        const commit = encodeMemoryCommit(1, 'bob', [], {
+          authenticator: memoryAuthenticator(bob),
+          external: true,
+          branch: String(index),
+        })
         const value = {
           requestID,
           request,
@@ -587,9 +720,17 @@ describe('recovery ordering', { concurrent: false }, () => {
       })
       try {
         await alice.peer.replay()
-        const bob = createMemoryGroupMLS({ localDID: 'bob', members })
+        const bob = createMemoryGroupMLS({
+          recoverySecret: secret,
+          epoch: 1,
+          localDID: 'bob',
+          members,
+        })
         const { request } = await bob.createRecoveryRequest('retry-validation')
-        const commit = encodeMemoryCommit(1, 'bob', [], { external: true })
+        const commit = encodeMemoryCommit(1, 'bob', [], {
+          authenticator: memoryAuthenticator(bob),
+          external: true,
+        })
         const validate = vi.spyOn(alice.mls, 'validateRecoveryCommit')
         if (kind === 'fault') validate.mockRejectedValueOnce(new Error('transient'))
         else if (kind === 'unavailable') validate.mockResolvedValueOnce({ epoch: 1 })
@@ -631,9 +772,17 @@ describe('recovery ordering', { concurrent: false }, () => {
     const gate = Promise.withResolvers<void>()
     try {
       await alice.peer.replay()
-      const bob = createMemoryGroupMLS({ localDID: 'bob', members })
+      const bob = createMemoryGroupMLS({
+        recoverySecret: secret,
+        epoch: 1,
+        localDID: 'bob',
+        members,
+      })
       const { request } = await bob.createRecoveryRequest('late-validation')
-      const commit = encodeMemoryCommit(1, 'bob', [], { external: true })
+      const commit = encodeMemoryCommit(1, 'bob', [], {
+        authenticator: memoryAuthenticator(bob),
+        external: true,
+      })
       const validate = vi
         .spyOn(alice.mls, 'validateRecoveryCommit')
         .mockImplementation(async () => {
@@ -722,6 +871,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     try {
       await alice.peer.replay()
       await publishCommit({
+        authenticator: memoryAuthenticator(alice.mls),
         hub,
         senderDID: 'relay',
         recoverySecret: secret,

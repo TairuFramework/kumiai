@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest'
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
+import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { makeMLSPeer } from './fixtures/peer.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 50))
@@ -54,7 +55,14 @@ describe('a member removed by a commit it applies keeps its anchor', () => {
     hub.detach('bob')
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'owed to bob' } })
     await flush()
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1, removes: ['bob'] })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret,
+      epoch: 1,
+      removes: ['bob'],
+    })
     await flush()
 
     const restarted = makeMLSPeer(hub, 'bob', recoverySecret, {

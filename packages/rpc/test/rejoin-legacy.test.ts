@@ -11,6 +11,7 @@ import {
   createMemoryGroupMLS,
   encodeMemoryCommit,
   type MemoryGroupMLS,
+  memoryAuthenticator,
 } from './fixtures/memory-group-mls.js'
 import { buildRejoinRecord, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
 
@@ -199,7 +200,10 @@ test('destination defers signed confirmation judgment and memoization until head
   const carol = createMemoryGroupMLS({ localDID: 'carol', members: ['bob', 'carol'] })
   const requestID = 'deferred-confirmation'
   const { request } = await carol.createRecoveryRequest(requestID)
-  const commit = encodeMemoryCommit(1, 'carol', [], { external: true })
+  const commit = encodeMemoryCommit(1, 'carol', [], {
+    authenticator: memoryAuthenticator(mls),
+    external: true,
+  })
   const payload = encodeHandshakeFrame(
     HANDSHAKE_KIND.recoveryConfirmRequest,
     await encodeSignedRecoveryConfirmation(carol, {
@@ -240,6 +244,7 @@ test('destination defers signed confirmation judgment and memoization until head
 test('destination bounded commit walks wait for a complete ledger', async () => {
   const s = await setup()
   const published = await publishCommit({
+    authenticator: memoryAuthenticator(s.source.mls),
     hub: s.hub,
     senderDID: 'carol',
     recoverySecret: secret,

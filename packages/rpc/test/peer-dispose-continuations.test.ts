@@ -10,6 +10,7 @@ import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer, seedBuiltOperation } from './fixtures/peer.js'
 
 describe('work resumed after disposal', () => {
@@ -46,6 +47,7 @@ describe('work resumed after disposal', () => {
     const subscribes = vi.spyOn(hub, 'subscribe')
     try {
       await publishCommit({
+        authenticator: memoryAuthenticator(bob.mls),
         hub,
         senderDID: 'alice',
         recoverySecret,

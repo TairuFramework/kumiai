@@ -6,10 +6,14 @@ import { createGroupPeer } from '../src/peer.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
-import { publishCommit } from './fixtures/commits.js'
+import { publishCommit, publishNextCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
-import { createMemoryGroupMLS, memoryEntryID } from './fixtures/memory-group-mls.js'
+import {
+  createMemoryGroupMLS,
+  memoryAuthenticator,
+  memoryEntryID,
+} from './fixtures/memory-group-mls.js'
 import { createMemoryAppOutbox } from './fixtures/outbox.js'
 import { makeMLSPeer, memoryOperationHost } from './fixtures/peer.js'
 
@@ -69,7 +73,13 @@ describe('the commit lane across a disconnect', () => {
     await flush()
 
     // Online: a Commit is delivered, and applied once.
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret,
+      epoch: 1,
+    })
     await flush()
     expect(bob.mls.epoch()).toBe(2)
     expect(bob.mls.commits()).toBe(1)
@@ -84,7 +94,13 @@ describe('the commit lane across a disconnect', () => {
 
     // Offline: a Commit lands while bob is detached, so no push reaches him.
     hub.detach('bob')
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 2 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret,
+      epoch: 2,
+    })
     await flush()
     expect(bob.mls.epoch()).toBe(2)
 
@@ -112,7 +128,8 @@ describe('the commit lane across a disconnect', () => {
 
     // Online for the group's first enacting commit.
     const first = 'role:carol=admin'
-    const landed = await publishCommit({
+    const author = createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members: ['alice', 'bob'] })
+    const landed = await publishNextCommit(author, {
       hub,
       senderDID: 'alice',
       recoverySecret: rs,
@@ -128,7 +145,7 @@ describe('the commit lane across a disconnect', () => {
     const second = 'role:dave=admin'
     const third = 'role:erin=member'
     const fourth = 'role:dave=member'
-    const backlog = await publishCommit({
+    const backlog = await publishNextCommit(author, {
       hub,
       senderDID: 'alice',
       recoverySecret: rs,
@@ -136,7 +153,7 @@ describe('the commit lane across a disconnect', () => {
       entries: [second],
       ledgerBefore: [first],
     })
-    await publishCommit({
+    await publishNextCommit(author, {
       hub,
       senderDID: 'alice',
       recoverySecret: rs,
@@ -144,7 +161,7 @@ describe('the commit lane across a disconnect', () => {
       entries: [third],
       ledgerBefore: [first, second],
     })
-    const tip = await publishCommit({
+    const tip = await publishNextCommit(author, {
       hub,
       senderDID: 'alice',
       recoverySecret: rs,

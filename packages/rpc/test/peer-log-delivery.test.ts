@@ -9,11 +9,15 @@ import { decodeHandshakeFrame } from '../src/handshake.js'
 import { type AppOutboxCleared, createLogDelivery } from '../src/log-delivery.js'
 import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
 import { commitTopic, protocolTopic } from '../src/topic.js'
-import { publishCommit } from './fixtures/commits.js'
+import { publishCommit, publishNextCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryGroupMLS, requireCapturedRecovery } from './fixtures/memory-group-mls.js'
+import {
+  createMemoryGroupMLS,
+  memoryAuthenticator,
+  requireCapturedRecovery,
+} from './fixtures/memory-group-mls.js'
 import { createMemoryAppOutbox } from './fixtures/outbox.js'
 import {
   buildLedgerCommit,
@@ -178,6 +182,7 @@ describe('recovery ordering', { concurrent: false }, () => {
       await flush()
       hub.detach('bob')
       await publishCommit({
+        authenticator: memoryAuthenticator(bob.mls),
         hub,
         senderDID: 'carol',
         recoverySecret: secret,
@@ -217,8 +222,20 @@ describe('recovery ordering', { concurrent: false }, () => {
     const bob = member(hub, 'bob')
     await flush()
     hub.detach('bob')
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 2 })
+    const author = createMemoryGroupMLS({ recoverySecret: secret })
+    author.restoreState(bob.mls.serializeState())
+    await publishNextCommit(author, {
+      hub,
+      senderDID: 'alice',
+      recoverySecret: secret,
+      epoch: 1,
+    })
+    await publishNextCommit(author, {
+      hub,
+      senderDID: 'alice',
+      recoverySecret: secret,
+      epoch: 2,
+    })
     const epochs: Array<number | null> = []
     const wrap = bob.crypto.wrap.bind(bob.crypto)
     vi.spyOn(bob.crypto, 'wrap').mockImplementation(async (...args) => {
@@ -386,7 +403,13 @@ describe('recovery ordering', { concurrent: false }, () => {
     const hub = new DurableFakeHub()
     const bob = member(hub, 'bob')
     await flush()
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret: secret,
+      epoch: 1,
+    })
     await bob.peer.replay()
     hub.detach('bob')
     const publish = hub.publish.bind(hub)
@@ -505,7 +528,13 @@ describe('recovery ordering', { concurrent: false }, () => {
       .protocol('chat')
       .dispatch('chat/posted', { data: { text: 'renewed' } })
     await entered.promise
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret: secret,
+      epoch: 1,
+    })
     await bob.peer.replay()
     const admission = vi
       .spyOn(bob.mls, 'sendAdmission')
@@ -532,6 +561,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     await flush()
     hub.detach('bob')
     await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'alice',
       recoverySecret: secret,
@@ -567,6 +597,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     await flush()
     hub.detach('bob')
     await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'alice',
       recoverySecret: secret,
@@ -749,10 +780,17 @@ describe('recovery ordering', { concurrent: false }, () => {
       },
     })
     await flush()
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret: secret,
+      epoch: 1,
+    })
     await bob.peer.replay()
     hub.detach('bob')
     await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'alice',
       recoverySecret: secret,
@@ -778,6 +816,14 @@ describe('recovery ordering', { concurrent: false }, () => {
   test('fresh uncovered join with no at-risk entry never requests recovery', async () => {
     const hub = new FakeHub()
     const removed = await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({
+          recoverySecret: secret,
+          epoch: 1,
+          members: ['alice', 'bob', 'carol'],
+          localDID: 'bob',
+        }),
+      ),
       hub,
       senderDID: 'alice',
       recoverySecret: secret,
@@ -850,7 +896,20 @@ describe('recovery ordering', { concurrent: false }, () => {
 
   test('an uncovered fresh joiner recovers only after an acknowledged publication is at risk', async () => {
     const hub = new FakeHub()
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({
+          recoverySecret: secret,
+          epoch: 1,
+          members: ['alice', 'bob', 'carol'],
+          localDID: 'bob',
+        }),
+      ),
+      hub,
+      senderDID: 'alice',
+      recoverySecret: secret,
+      epoch: 1,
+    })
     hub.trim(commitTopic(secret), '999999999999')
     const received: Array<unknown> = []
     await returningResponder(hub, 2, {
@@ -907,7 +966,20 @@ describe('recovery ordering', { concurrent: false }, () => {
 
   test('a fresh joiner holding the whole log publishes without requesting recovery', async () => {
     const hub = new FakeHub()
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({
+          recoverySecret: secret,
+          epoch: 1,
+          members: ['alice', 'bob', 'carol'],
+          localDID: 'bob',
+        }),
+      ),
+      hub,
+      senderDID: 'alice',
+      recoverySecret: secret,
+      epoch: 1,
+    })
     const received: Array<unknown> = []
     member(hub, 'alice', {
       epoch: 2,
@@ -948,10 +1020,22 @@ describe('recovery ordering', { concurrent: false }, () => {
       recovery: { timeoutMs: 20, deadlineMs: 100, getDelayMs: () => 0 },
     })
     await flush()
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret: secret,
+      epoch: 1,
+    })
     await bob.peer.replay()
     hub.detach('bob')
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 2 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret: secret,
+      epoch: 2,
+    })
     hub.trim(commitTopic(secret), '999999999999')
     // Recovery deadlines advance only on request, so a slow host cannot fail the retried attempt.
     controlRecoveryClock()
@@ -1159,6 +1243,7 @@ describe('recovery ordering', { concurrent: false }, () => {
       .dispatch('chat/posted', { data: { text: 'pending put' } })
     await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'accepted put' } })
     await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'alice',
       recoverySecret: secret,
@@ -1197,6 +1282,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     await flush()
     hub.detach('bob')
     await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'alice',
       recoverySecret: secret,
@@ -1369,7 +1455,20 @@ describe('recovery ordering', { concurrent: false }, () => {
       // new epoch instead of certifying the earlier publication.
       const base = coverage === 'uncovered' ? 2 : 1
       if (coverage === 'uncovered') {
-        await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+        await publishCommit({
+          authenticator: memoryAuthenticator(
+            createMemoryGroupMLS({
+              recoverySecret: secret,
+              epoch: 1,
+              members: ['alice', 'bob', 'carol'],
+              localDID: 'bob',
+            }),
+          ),
+          hub,
+          senderDID: 'alice',
+          recoverySecret: secret,
+          epoch: 1,
+        })
         hub.trim(commitTopic(secret), '999999999999')
       }
       const received: Array<{ epoch: number; seq: number }> = []
@@ -1392,7 +1491,13 @@ describe('recovery ordering', { concurrent: false }, () => {
       vi.spyOn(bob.crypto, 'wrap').mockImplementation(async (...args) => {
         if (++seals === 2 && during === 'seal') {
           if (coverage === 'uncovered') {
-            await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: base })
+            await publishCommit({
+              authenticator: memoryAuthenticator(bob.mls),
+              hub,
+              senderDID: 'carol',
+              recoverySecret: secret,
+              epoch: base,
+            })
             await bob.peer.resync()
           } else await bob.peer.commit(buildLedgerCommit(bob, []))
           await flush()
@@ -1414,7 +1519,13 @@ describe('recovery ordering', { concurrent: false }, () => {
           if (!injected && params.senderDID === 'bob' && params.topicID === appTopic) {
             injected = true
             if (coverage === 'uncovered') {
-              await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: base })
+              await publishCommit({
+                authenticator: memoryAuthenticator(bob.mls),
+                hub,
+                senderDID: 'carol',
+                recoverySecret: secret,
+                epoch: base,
+              })
               await alice.peer.resync()
             } else await alice.peer.commit(buildLedgerCommit(alice, []))
           }

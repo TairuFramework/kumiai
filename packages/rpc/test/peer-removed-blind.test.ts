@@ -9,7 +9,7 @@ import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { createMemoryAppOutbox } from './fixtures/outbox.js'
 import { memoryOperationHost } from './fixtures/peer.js'
 
@@ -118,6 +118,7 @@ describe('the rotation puts the group on a topic only the post-removal epoch sec
 
     // The eviction. An admin off-stage commits it; every member that can apply it rotates.
     await publishCommit({
+      authenticator: memoryAuthenticator(carol.mls),
       hub,
       senderDID: 'admin',
       recoverySecret,

@@ -11,7 +11,7 @@ import {
   publishedCommitDigest,
 } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 import { controlRecoveryClock, drainUntil } from './fixtures/recovery-clock.js'
 
@@ -30,6 +30,14 @@ describe('recovery rendezvous', { concurrent: false }, () => {
     const hub = new FakeHub()
     const secret = new Uint8Array(32).fill(0x45)
     const winning = await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({
+          recoverySecret: secret,
+          epoch: 1,
+          members: ['alice', 'bob', 'carol'],
+          localDID: 'alice',
+        }),
+      ),
       hub,
       senderDID: 'carol',
       recoverySecret: secret,
@@ -41,18 +49,26 @@ describe('recovery rendezvous', { concurrent: false }, () => {
       recovery: { timeoutMs: 60, deadlineMs: 1000, getDelayMs: () => 0 },
     })
     const bob = createMemoryGroupMLS({
+      epoch: 1,
       localDID: 'bob',
       members: ['alice', 'bob', 'carol'],
       recoverySecret: secret,
     })
     try {
       await alice.peer.resync()
-      await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
+      await publishCommit({
+        authenticator: memoryAuthenticator(alice.mls),
+        hub,
+        senderDID: 'bob',
+        recoverySecret: secret,
+        epoch: 1,
+      })
       await vi.waitFor(() => expect(alice.mls.epoch()).toBe(2))
       const key = vi.spyOn(alice.mls, 'confirmationKey')
       const seal = vi.spyOn(alice.mls, 'sealRecoveryVerdict')
       hub.revealTo('alice', winning.sequenceID)
       const external = await publishCommit({
+        authenticator: memoryAuthenticator(alice.mls),
         hub,
         senderDID: 'bob',
         recoverySecret: secret,
