@@ -95,6 +95,9 @@ const { createMemoryGroupMLS, decodeMemoryCommit, memoryCheckpointFrame } = (awa
     external?: boolean
     adds?: Array<string>
     removes?: Array<string>
+    head?: string
+    invalidContent?: true
+    missingProposal?: true
   } | null
   memoryCheckpointFrame(body: Record<string, unknown>, secret: Uint8Array): Uint8Array
   createMemoryGroupMLS(params: {
@@ -769,12 +772,31 @@ class MemoryControlHandle extends GroupHandle {
       const commit = decodeMemoryCommit(message)
       if (header?.committerDID == null || header.epoch !== Number(this.epoch) || commit === null)
         throw new Error('Invalid memory commit')
-      // This receive path cannot prove new leaf credentials or lifecycle/ledger effects.
+      // A closed wire subset cannot silently discard unsupported proposal or path evidence.
       if (
         this.anchor.controller != null ||
         commit.external ||
         commit.adds?.length ||
-        commit.entryIDs.length
+        commit.entryIDs.length ||
+        (commit.head !== undefined && commit.head !== this.#mls.authenticatedLedgerHead()) ||
+        commit.invalidContent !== undefined ||
+        commit.missingProposal !== undefined ||
+        Object.keys(commit).some(
+          (field) =>
+            ![
+              'epoch',
+              'committerDID',
+              'signerDID',
+              'entryIDs',
+              'external',
+              'adds',
+              'removes',
+              'head',
+              'branch',
+              'invalidContent',
+              'missingProposal',
+            ].includes(field),
+        )
       )
         throw new Error('Unsupported memory commit effects')
       const sender = this.listMembers().find((member) => member.id === header.committerDID)
@@ -789,9 +811,14 @@ class MemoryControlHandle extends GroupHandle {
         ))
       )
         throw new Error('Unauthenticated memory committer')
+      const removedLeaves = new Set<number>()
       const proposals = (commit.removes ?? []).map((did) => {
         const removed = this.findMemberLeafIndex(did)
         if (removed === undefined) throw new Error('Unknown memory removal target')
+        // ts-mls validates the complete proposal set before policy or tree mutations.
+        if (removed === sender.leafIndex) throw new Error('Cannot remove memory committer')
+        if (removedLeaves.has(removed)) throw new Error('Duplicate memory removal target')
+        removedLeaves.add(removed)
         return {
           senderLeafIndex: sender.leafIndex,
           proposal: { proposalType: defaultProposalTypes.remove, remove: { removed } },

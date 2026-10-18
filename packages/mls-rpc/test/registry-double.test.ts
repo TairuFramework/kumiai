@@ -1,10 +1,12 @@
 import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import {
+  buildLedgerHeadExtension,
   CommitAuthoringRefusedError,
   type ControllerBinding,
   commitKeyRotation,
   computeHead,
   createGroup,
+  createKeyPackageBundle,
   decodeClientState,
   encodeClientState,
   GroupHandle,
@@ -20,14 +22,23 @@ import {
   signLedgerEntry,
 } from '@kumiai/mls'
 import {
+  type Commit,
   contentTypes,
   createCommit,
   decode,
+  defaultExtensionTypes,
   defaultProposalTypes,
   encode,
+  type FramedContent,
+  type FramedContentAuthDataCommit,
+  leafNodeSources,
   mlsMessageDecoder,
   mlsMessageEncoder,
   type PrivateMessage,
+  type Proposal,
+  type PublicMessage,
+  proposalOrRefTypes,
+  type Sender,
   wireformats,
 } from 'ts-mls'
 import { describe, expect, test, vi } from 'vitest'
@@ -721,6 +732,75 @@ function flip(bytes: Uint8Array, index = 0): void {
   bytes[index] = (bytes[index] ?? 0) ^ 1
 }
 
+async function receivedPublicCommit(
+  author: GroupHandle,
+  change: (message: PublicMessage) => void,
+): Promise<Uint8Array> {
+  const built = await createCommit({
+    context: author.context,
+    state: structuredClone(author.state),
+    extraProposals: [],
+    wireAsPublicMessage: true,
+  })
+  if (built.commit.wireformat !== wireformats.mls_public_message)
+    throw new Error('Missing public commit')
+  const message = built.commit.publicMessage
+  change(message)
+  if (
+    message.content.contentType !== contentTypes.commit ||
+    message.auth.contentType !== contentTypes.commit
+  )
+    throw new Error('Missing commit content')
+  const { createContentCommitSignature } = (await import(
+    new URL('./framedContent.js', import.meta.resolve('ts-mls')).href
+  )) as {
+    createContentCommitSignature(
+      context: GroupHandle['state']['groupContext'],
+      wireformat: 'mls_public_message',
+      commit: Commit,
+      sender: Sender,
+      aad: Uint8Array,
+      key: Uint8Array,
+      signature: GroupHandle['context']['cipherSuite']['signature'],
+    ): Promise<{ framedContent: FramedContent; signature: Uint8Array }>
+  }
+  const { protectPublicMessage } = (await import(
+    new URL('./messageProtectionPublic.js', import.meta.resolve('ts-mls')).href
+  )) as {
+    protectPublicMessage(
+      membershipKey: Uint8Array,
+      context: GroupHandle['state']['groupContext'],
+      content: { wireformat: number; content: FramedContent; auth: FramedContentAuthDataCommit },
+      cipherSuite: GroupHandle['context']['cipherSuite'],
+    ): Promise<PublicMessage>
+  }
+  // Re-sign malformed proposals so receive validation, rather than a stale signature, refuses them.
+  const signed = await createContentCommitSignature(
+    author.state.groupContext,
+    'mls_public_message',
+    message.content.commit,
+    message.content.sender,
+    message.content.authenticatedData,
+    author.state.signaturePrivateKey,
+    author.context.cipherSuite.signature,
+  )
+  const publicMessage = await protectPublicMessage(
+    author.state.keySchedule.membershipKey,
+    author.state.groupContext,
+    {
+      wireformat: wireformats.mls_public_message,
+      content: signed.framedContent,
+      auth: {
+        contentType: contentTypes.commit,
+        signature: signed.signature,
+        confirmationTag: message.auth.confirmationTag,
+      },
+    },
+    author.context.cipherSuite,
+  )
+  return encode(mlsMessageEncoder, { ...built.commit, publicMessage })
+}
+
 describe.each(['real-mls', 'double'] as const)('received commit gates (%s)', (mode) => {
   test.each(['unknown author', 'unauthorized removal'] as const)(
     '%s refuses without changing state or persisting',
@@ -783,6 +863,208 @@ describe.each(['real-mls', 'double'] as const)('received commit gates (%s)', (mo
         expect(memoryModel(local).serializeState()).toEqual(modelBefore)
     },
   )
+
+  test.each([
+    ['committer self-removal', /removing committer/],
+    ['duplicate removal targets', /multiple update and\/or remove/],
+    ['unknown removal target', /empty leaf node/],
+    ['duplicate additions', /multiple Add proposals/],
+    ['existing member addition', /already in the group/],
+    ['changed ledger head', /^Commit rejected by group commit policy$/],
+    ['multiple group context extensions', /multiple GroupContextExtensions/],
+    ['unsupported required capabilities', /Not all members support required capabilities/],
+    ['committer update proposal', /update proposal sent by committer/],
+    ['missing update path', /Update path is required/],
+    ['missing proposal reference', /proposal with supplied reference/],
+    ['invalid content', /Could not verify membership/],
+  ] as const)('%s refuses before model mutation or persistence', async (scenario, realError) => {
+    const group = await createRealGroup(2, `proposal-validation-${mode}-${scenario}`)
+    const [receiver, target] = group.members
+    if (receiver === undefined || target === undefined) throw new Error('Missing proposal members')
+    const sender = scenario === 'committer self-removal' ? target : group.committer
+    const local = await registryHandle({ mode, handle: receiver.handle, options: {} })
+    const author = await registryHandle({ mode, handle: sender.handle, options: {} })
+    const stranger = randomIdentity()
+    let commit: Uint8Array
+    if (mode === 'double') {
+      const fake = JSON.parse(new TextDecoder().decode(memoryModel(author).buildCommit()))
+      switch (scenario) {
+        case 'committer self-removal':
+          fake.removes = [sender.identity.id]
+          break
+        case 'duplicate removal targets':
+          fake.removes = [target.identity.id, target.identity.id]
+          break
+        case 'unknown removal target':
+          fake.removes = [stranger.id]
+          break
+        case 'duplicate additions':
+          fake.adds = [stranger.id, stranger.id]
+          break
+        case 'existing member addition':
+          fake.adds = [target.identity.id]
+          break
+        case 'changed ledger head':
+          fake.head = 'invalid-ledger-head'
+          break
+        case 'multiple group context extensions':
+          fake.extensions = [
+            author.state.groupContext.extensions,
+            author.state.groupContext.extensions,
+          ]
+          break
+        case 'unsupported required capabilities':
+          fake.requiredCapabilities = { credentialTypes: [0xffff] }
+          break
+        case 'committer update proposal':
+          fake.updates = [sender.identity.id]
+          break
+        case 'missing update path':
+          fake.path = null
+          break
+        case 'missing proposal reference':
+          fake.missingProposal = true
+          break
+        case 'invalid content':
+          fake.invalidContent = true
+          break
+      }
+      commit = new TextEncoder().encode(JSON.stringify(fake))
+    } else {
+      const bundle =
+        scenario === 'duplicate additions' || scenario === 'existing member addition'
+          ? await createKeyPackageBundle(
+              scenario === 'duplicate additions' ? stranger : target.identity,
+            )
+          : undefined
+      commit = await receivedPublicCommit(author, (message) => {
+        if (message.content.contentType !== contentTypes.commit)
+          throw new Error('Missing proposal commit')
+        const content = message.content
+        const body = content.commit
+        const propose = (...proposals: Array<Proposal>) => {
+          body.proposals = proposals.map((proposal) => ({
+            proposalOrRefType: proposalOrRefTypes.proposal,
+            proposal,
+          }))
+        }
+        switch (scenario) {
+          case 'committer self-removal':
+            propose({
+              proposalType: defaultProposalTypes.remove,
+              remove: { removed: author.state.privatePath.leafIndex },
+            })
+            break
+          case 'duplicate removal targets': {
+            const removal = {
+              proposalType: defaultProposalTypes.remove,
+              remove: { removed: target.handle.state.privatePath.leafIndex },
+            }
+            propose(removal, removal)
+            break
+          }
+          case 'unknown removal target':
+            propose({
+              proposalType: defaultProposalTypes.remove,
+              remove: { removed: author.state.ratchetTree.length },
+            })
+            break
+          case 'duplicate additions':
+          case 'existing member addition': {
+            if (bundle === undefined) throw new Error('Missing addition package')
+            const addition = {
+              proposalType: defaultProposalTypes.add,
+              add: { keyPackage: bundle.publicPackage },
+            }
+            propose(...(scenario === 'duplicate additions' ? [addition, addition] : [addition]))
+            break
+          }
+          case 'multiple group context extensions': {
+            const extension = {
+              proposalType: defaultProposalTypes.group_context_extensions,
+              groupContextExtensions: { extensions: author.state.groupContext.extensions },
+            }
+            propose(extension, extension)
+            break
+          }
+          case 'changed ledger head': {
+            const head = buildLedgerHeadExtension(new Uint8Array(32).fill(8))
+            propose({
+              proposalType: defaultProposalTypes.group_context_extensions,
+              groupContextExtensions: {
+                extensions: author.state.groupContext.extensions.map((extension) =>
+                  extension.extensionType === head.extensionType ? head : extension,
+                ),
+              },
+            })
+            break
+          }
+          case 'unsupported required capabilities':
+            propose({
+              proposalType: defaultProposalTypes.group_context_extensions,
+              groupContextExtensions: {
+                extensions: [
+                  {
+                    extensionType: defaultExtensionTypes.required_capabilities,
+                    extensionData: {
+                      credentialTypes: [0xffff],
+                      extensionTypes: [],
+                      proposalTypes: [],
+                    },
+                  },
+                ],
+              },
+            })
+            break
+          case 'committer update proposal':
+            if (body.path === undefined) throw new Error('Missing update leaf')
+            propose({
+              proposalType: defaultProposalTypes.update,
+              update: {
+                leafNode: { ...body.path.leafNode, leafNodeSource: leafNodeSources.update },
+              },
+            })
+            break
+          case 'missing update path':
+            body.path = undefined
+            break
+          case 'missing proposal reference':
+            body.proposals = [
+              {
+                proposalOrRefType: proposalOrRefTypes.reference,
+                reference: new Uint8Array(32).fill(8),
+              },
+            ]
+            break
+        }
+      })
+      if (scenario === 'invalid content') {
+        const message = decode(mlsMessageDecoder, commit)
+        if (message?.wireformat !== wireformats.mls_public_message)
+          throw new Error('Missing signed public commit')
+        flip(message.publicMessage.auth.signature)
+        commit = encode(mlsMessageEncoder, message)
+      }
+    }
+    const before = encodeClientState(local.state)
+    const members = local.listMembers()
+    const epoch = local.epoch
+    const model = mode === 'double' ? memoryModel(local) : undefined
+    const modelBefore = model?.serializeState()
+    const process = model === undefined ? undefined : vi.spyOn(model, 'processCommit')
+    const persist = vi.fn()
+    await expect(local.processMessage(commit, { persist })).rejects.toThrow(
+      mode === 'real-mls' ? realError : undefined,
+    )
+    expect(persist).not.toHaveBeenCalled()
+    expect(encodeClientState(local.state)).toEqual(before)
+    expect(local.epoch).toBe(epoch)
+    expect(local.listMembers()).toEqual(members)
+    if (model !== undefined) {
+      expect(model.serializeState()).toEqual(modelBefore)
+      expect(process).not.toHaveBeenCalled()
+    }
+  })
 })
 
 async function appFrames(sender: GroupHandle, count: number) {
