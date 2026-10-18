@@ -177,6 +177,97 @@ function collections() {
 }
 
 describe('app pulls against a faulty hub', () => {
+  test('refused-frame floods yield to timers and commits at a bounded rate', async () => {
+    const hub = new DurableFakeHub()
+    const bob = makeMLSPeer(hub, 'bob', new Uint8Array(32).fill(0xb4), { epoch: 1 })
+    onTestFinished(() => bob.peer.dispose())
+    await bob.peer.protocol('chat').to('alice')
+    const capturedLane = captured.at(-1)
+    if (capturedLane == null) throw new Error('missing peer lane')
+    const { lane, params } = capturedLane
+    await lane.deliver()
+    hub.detach('bob')
+    const at = params.anchor()
+    const appTopic = protocolTopic(at.secret, at.epoch, 'chat')
+    const fetch = hub.fetchTopic.bind(hub)
+    let requests = 0
+    vi.spyOn(hub, 'fetchTopic').mockImplementation(async (request) => {
+      if (request.topicID !== appTopic) return fetch(request)
+      // Stop a regressed microtask loop so its assertions can still run.
+      if (++requests > 200) return empty()
+      return page(
+        Array.from({ length: 100 }, (_, i) => ({
+          ...entry(position((requests - 1) * 100 + i + 1)),
+          topicID: appTopic,
+        })),
+      )
+    })
+    let timerRequests = 0
+    let timerFired = false
+    let commitApplied = false
+    lane.kick()
+    const commit = new Promise<void>((resolve, reject) => {
+      setTimeout(() => {
+        timerFired = true
+        timerRequests = requests
+        void bob.peer.commit(buildLedgerCommit(bob, [])).then(() => {
+          commitApplied = true
+          resolve()
+        }, reject)
+      }, 0)
+    })
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    expect(timerFired).toBe(true)
+    expect(commitApplied).toBe(true)
+    expect(bob.mls.epoch()).toBe(2)
+    expect(timerRequests).toBeGreaterThan(0)
+    expect(timerRequests).toBeLessThanOrEqual(4)
+    expect(requests).toBeGreaterThan(timerRequests)
+    // The commit also wakes app catch-up as its control walk settles.
+    expect(requests).toBeLessThanOrEqual(40)
+    await commit
+  })
+
+  test.each([false, true])('refused-frame continuation backs off, durable=%s', async (durable) => {
+    vi.useFakeTimers()
+    const f = fixture({ durable })
+    let requests = 0
+    let progress: Uint8Array | undefined
+    vi.spyOn(f.hub, 'fetchTopic').mockImplementation(async () => {
+      if (++requests > 200) return empty()
+      const messages = Array.from({ length: 100 }, (_, i) =>
+        entry(position((requests - 1) * 100 + i + 1)),
+      )
+      if (progress != null) {
+        messages[0] = entry(position((requests - 1) * 100 + 1), progress)
+        progress = undefined
+      }
+      return page(messages)
+    })
+    await f.lane.deliver()
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(requests).toBeGreaterThan(4)
+    expect(requests).toBeLessThanOrEqual(36)
+    const beforeCap = requests
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(requests).toBe(beforeCap + 4)
+    const beforeWake = requests
+    f.lane.kick()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(requests).toBe(beforeWake + 4)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(requests).toBe(beforeWake + 8)
+    await vi.advanceTimersByTimeAsync(5_000)
+    const beforeProgress = requests
+    progress = await f.sealed('progress')
+    await f.lane.deliver()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(f.seen).toEqual(['progress'])
+    expect(requests).toBe(beforeProgress + 8)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(requests).toBe(beforeProgress + 12)
+  })
+
   test('endless increasing junk stays bounded while a commit applies', async () => {
     const hub = new DurableFakeHub()
     const bob = makeMLSPeer(hub, 'bob', new Uint8Array(32).fill(0xb3), { epoch: 1 })
@@ -295,6 +386,7 @@ describe('app pulls against a faulty hub', () => {
       try {
         await vi.advanceTimersByTimeAsync(10_000)
         await initial
+        await vi.advanceTimersByTimeAsync(100)
         expect(new Set(f.seen)).toEqual(new Set(topics))
         expect(fetch).toHaveBeenCalledTimes(6)
         expect(subscriptions.mock.calls.length).toBeLessThanOrEqual(1)

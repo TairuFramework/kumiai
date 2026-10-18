@@ -34,6 +34,9 @@ import { protocolTopic } from './topic.js'
 export { APP_OUTSTANDING_FETCHES_MAX } from './hub-mux.js'
 
 const APP_FETCH_LIMIT = 100
+const APP_CONTINUATION_BACKOFF_MS = 100
+// Retry quiet backlogs within a second while bounding pulls that only consume refused frames.
+const APP_CONTINUATION_BACKOFF_MAX_MS = 1_000
 export const APP_PULL_MAX_PAGES = 4
 export const APP_PULL_MAX_BYTES = 4 * 1024 * 1024
 export const APP_PULL_DEADLINE_MS = 10_000
@@ -249,6 +252,26 @@ export function createAppLane(params: AppLaneParams): AppLane {
   let retryRequested = false
   let retryTimer: ReturnType<typeof setTimeout> | undefined
   let retryBackoff = 1000
+  let continuationTimer: ReturnType<typeof setTimeout> | undefined
+  let continuationBackoff = APP_CONTINUATION_BACKOFF_MS
+  const scheduleContinuation = (progress = false): void => {
+    if (disposed || safetyHold() !== null) return
+    if (progress) {
+      continuationBackoff = APP_CONTINUATION_BACKOFF_MS
+      if (continuationTimer != null) clearTimeout(continuationTimer)
+      continuationTimer = undefined
+    }
+    if (continuationTimer != null) return
+    const delay = progress ? 0 : continuationBackoff
+    if (!progress) {
+      continuationBackoff = Math.min(continuationBackoff * 2, APP_CONTINUATION_BACKOFF_MAX_MS)
+    }
+    // Every autonomous continuation yields, even when hub promises settle synchronously.
+    continuationTimer = setTimeout(() => {
+      continuationTimer = undefined
+      kick(false, false)
+    }, delay)
+  }
   const busyTopics = new Set<string>()
   let cancelBusyRetry: (() => void) | undefined
   const caughtUpTimes = new Map<AppFrame, number>()
@@ -719,7 +742,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       cursor.accepted = position
     }
     frames.splice(0, passed)
-    if (bufferBlockedTopics.delete(topicID)) kick()
+    if (bufferBlockedTopics.delete(topicID)) scheduleContinuation()
   }
 
   const orderedRecords = (name: string): Array<PendingAppFrame> =>
@@ -861,6 +884,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
 
   const retryDelivery = (topicID?: string): void => {
     if (disposed) return
+    continuationBackoff = APP_CONTINUATION_BACKOFF_MS
+    if (continuationTimer != null) kick()
     const frames = [...segment.values()].flat()
     for (const pushes of staged.values()) for (const push of pushes) frames.push(push.frame)
     const retryFrames = frames.filter((frame) => frame.sealed.state !== 'pending')
@@ -1014,8 +1039,9 @@ export function createAppLane(params: AppLaneParams): AppLane {
     if (ahead) retryDelivery()
   }
 
-  const drain = async (): Promise<void> => {
-    if (disposed) return
+  const drain = async (): Promise<boolean> => {
+    if (disposed) return false
+    let progress = false
     const generation = segmentGeneration
     applyCaughtUpTimes()
     expireTopics()
@@ -1127,6 +1153,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
           }
           frame.sealed = { state: 'pending', id: record.frame.id }
           pendingRecords.push(record)
+          progress = true
           continue
         }
         // Opened, so it is done whatever the payload turns out to be — every path below either
@@ -1153,6 +1180,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
         const protocol = protocols[name]
         if (protocol === undefined) continue
         if (retentionOf(protocol, prc) !== 'log') continue
+        progress = true
         try {
           // Same door as the live push: emit the retained frame's plaintext into the
           // per-protocol emitter the live bus is also built from. No listener → no-op.
@@ -1164,6 +1192,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       }
       await advanceCursor(topicID, frames)
     }
+    return progress
   }
 
   let drainingEpoch: number | undefined
@@ -1173,16 +1202,21 @@ export function createAppLane(params: AppLaneParams): AppLane {
   ): Promise<void> => {
     try {
       const continuation = await pull(onlyTopics)
-      await runAppLane(async () => {
+      const progress = await runAppLane(async () => {
         if (generation !== segmentGeneration || disposed) return
         drainingEpoch = anchor().epoch
         try {
-          await drain()
+          return await drain()
         } finally {
           drainingEpoch = undefined
         }
       })
-      if (continuation && generation === segmentGeneration) kick()
+      if (generation === segmentGeneration) {
+        if (progress) continuationBackoff = APP_CONTINUATION_BACKOFF_MS
+        if (continuation || (progress && continuationTimer != null)) {
+          scheduleContinuation(progress)
+        }
+      }
     } finally {
       if (generation === segmentGeneration && crypto.pending != null && !disposed) {
         for (const record of pendingRecords) reportUnknown(record)
@@ -1196,8 +1230,13 @@ export function createAppLane(params: AppLaneParams): AppLane {
   let kickScheduled = false
   let kickRequested = false
   let kickAllTopics = false
-  const kick = (onlyBusyTopics = false): void => {
+  const kick = (onlyBusyTopics = false, externalWakeup = true): void => {
     if (disposed || safetyHold() !== null) return
+    if (externalWakeup) {
+      continuationBackoff = APP_CONTINUATION_BACKOFF_MS
+      if (continuationTimer != null) clearTimeout(continuationTimer)
+      continuationTimer = undefined
+    }
     kickRequested = true
     if (!onlyBusyTopics) kickAllTopics = true
     if (kickScheduled) return
@@ -1312,6 +1351,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       for (const controller of pulls.keys()) controller.abort()
       if (futureTimer != null) clearTimeout(futureTimer)
       if (retryTimer != null) clearTimeout(retryTimer)
+      if (continuationTimer != null) clearTimeout(continuationTimer)
       caughtUpTimes.clear()
       for (const worker of workers.values()) {
         if (worker.timer != null) clearTimeout(worker.timer)
@@ -1330,6 +1370,9 @@ export function createAppLane(params: AppLaneParams): AppLane {
       reportedPruned.clear()
       if (futureTimer != null) clearTimeout(futureTimer)
       if (retryTimer != null) clearTimeout(retryTimer)
+      if (continuationTimer != null) clearTimeout(continuationTimer)
+      continuationTimer = undefined
+      continuationBackoff = APP_CONTINUATION_BACKOFF_MS
       retryTimer = undefined
       retryBackoff = 1000
       // Old queued work still occupies its slot. New hints request one replacement.
