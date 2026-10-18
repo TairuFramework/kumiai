@@ -11,8 +11,10 @@ import { appFrameIdempotencyKey, encodeAppAAD, frameID } from '@kumiai/rpc'
 import { fromUTF } from '@sozai/codec'
 import { describe, expect, test, vi } from 'vitest'
 
+import { createClearReportedHold } from '../src/clear-hold.js'
 import { entryCapability } from '../src/entry-capability.js'
 import type { OpenAppInput } from '../src/persistence-types.js'
+import { registrySafety } from '../src/registry/safety.js'
 import {
   createRegistryFixture,
   type RegistryFixture,
@@ -129,6 +131,9 @@ async function held(f: RegistryFixture, key: Setup['key']) {
     local: trust.installed.authenticator,
     remote,
   })
+  const halt = (await f.device.groups.ports(key).control.load()).forkHalt
+  if (halt === null) throw new Error('Missing reported hold')
+  return halt
 }
 
 for (const mode of ['real-mls', 'double'] as const) {
@@ -233,6 +238,59 @@ for (const mode of ['real-mls', 'double'] as const) {
           { kind: 'opened' },
         ])
         expect(await s.access.openBatch([f])).toMatchObject([{ kind: 'opened' }])
+      }))
+
+    test('substituted ciphertext cannot claim an unseen frame id or consume either key', () =>
+      run(async (s) => {
+        const first = encodeEventFrame('posted', { text: 'first' })
+        const second = encodeEventFrame('posted', { text: 'second' })
+        const c1 = await s.seal(1, first)
+        const c2 = await s.seal(2, second)
+        const substituted = { ...c1, ciphertext: c2.ciphertext }
+        const before = await s.snapshot()
+        expect(await s.access.openBatch([substituted])).toEqual([
+          {
+            kind: 'refused',
+            frame: c1.frame,
+            reason: 'invalid-ciphertext',
+            keyConsumed: false,
+          },
+        ])
+        expect(await s.snapshot()).toEqual(before)
+        for (const [input, payload] of [
+          [c1, first],
+          [c2, second],
+        ] as const) {
+          expect(await s.access.openBatch([input])).toMatchObject([
+            {
+              kind: 'opened',
+              record: {
+                frame: input.frame,
+                payload,
+                idempotencyKey: appFrameIdempotencyKey({ ...input.frame, procedure: 'posted' }),
+              },
+            },
+          ])
+        }
+        expect(await s.access.pending.list()).toHaveLength(2)
+      }))
+
+    test('frame id validation precedes in-batch and saved replay without shadowing valid inputs', () =>
+      run(async (s) => {
+        const c1 = await s.seal(1)
+        const c2 = await s.seal(2)
+        const substituted = { ...c1, ciphertext: c2.ciphertext }
+        expect(await s.access.openBatch([substituted, c1, substituted, c2])).toMatchObject([
+          { kind: 'refused', reason: 'invalid-ciphertext', keyConsumed: false },
+          { kind: 'opened', record: { frame: c1.frame } },
+          { kind: 'refused', reason: 'invalid-ciphertext', keyConsumed: false },
+          { kind: 'opened', record: { frame: c2.frame } },
+        ])
+        const before = await s.snapshot()
+        expect(await s.access.openBatch([substituted])).toMatchObject([
+          { kind: 'refused', reason: 'invalid-ciphertext', keyConsumed: false },
+        ])
+        expect(await s.snapshot()).toEqual(before)
       }))
 
     test('duplicate frame in one batch yields one pending record', () =>
@@ -372,6 +430,31 @@ for (const mode of ['real-mls', 'double'] as const) {
           name: 'GroupSafetyHeldError',
         })
         expect(await s.snapshot()).toEqual(before)
+      }))
+
+    test('safety hold latched after prepare rejects work until authorised clearance', () =>
+      run(async (s) => {
+        const a = await s.seal(1)
+        const halt = await held(s.f, s.key)
+        const clear = createClearReportedHold({
+          registry: s.f.registry,
+          persistence: s.f.device.groups,
+        })
+        await clear(s.key)
+        const safety = registrySafety(s.f.registry)
+        if (safety === null) throw new Error('Missing safety capability')
+        const before = await s.snapshot()
+        s.f.onPhase('before-work', () => safety.reportHold(s.key, halt))
+        await expect(s.access.openBatch([a])).rejects.toMatchObject({
+          name: 'GroupSafetyHeldError',
+        })
+        expect(await s.snapshot()).toEqual(before)
+        await held(s.f, s.key)
+        await clear(s.key)
+        expect(await s.access.openBatch([a])).toMatchObject([
+          { kind: 'opened', record: { frame: a.frame } },
+        ])
+        expect(await s.access.pending.list()).toHaveLength(1)
       }))
 
     test('empty batch and batch bound perform no reads', () =>

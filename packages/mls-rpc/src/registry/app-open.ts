@@ -3,6 +3,7 @@ import {
   appFrameIdempotencyKey,
   compareLogPositions,
   decodeAppEventPlaintext,
+  frameID,
   isAppLogPosition,
   sortPendingAppFrames,
 } from '@kumiai/rpc'
@@ -168,6 +169,15 @@ export function createRegistryAppOpen<TTx extends GroupTransaction>(params: {
                 return { kind: 'opened', record }
               }
               for (const input of frames) {
+                if (input.frame.id !== frameID(input.frame.topicID, input.ciphertext)) {
+                  results.push({
+                    kind: 'refused',
+                    frame: input.frame,
+                    reason: 'invalid-ciphertext',
+                    keyConsumed: false,
+                  })
+                  continue
+                }
                 const result = await open(input)
                 if (!seen.has(input.frame.id))
                   seen.set(input.frame.id, { frame: input.frame, result })

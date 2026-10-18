@@ -7,6 +7,7 @@ import {
   type GroupHandle,
   restoreGroup,
 } from '@kumiai/mls'
+import { frameID } from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
 import * as api from '../src/index.js'
@@ -118,16 +119,18 @@ for (const mode of ['real-mls', 'double'] as const) {
           )
         }
         const seal = async (handle: GroupHandle, position: string) => {
+          const topicID = `app-${handle.epoch}`
+          const ciphertext = await handle.encrypt(encodeEventFrame('posted', { position }))
           return {
             frame: {
               ...access.key,
-              id: `frame-${position}`,
+              id: frameID(topicID, ciphertext),
               protocol: 'chat',
-              topicID: `app-${handle.epoch}`,
+              topicID,
               segment: Number(handle.epoch),
               position,
             },
-            ciphertext: await handle.encrypt(encodeEventFrame('posted', { position })),
+            ciphertext,
           }
         }
         const advance = async () => {
