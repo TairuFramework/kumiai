@@ -842,7 +842,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
-    test.skipIf(mode === 'double')('ordinary candidate carries committed progress', async () => {
+    test('ordinary candidate carries committed progress', async () => {
       const fixture = await create()
       try {
         const access = await registry(fixture).access(groupID)

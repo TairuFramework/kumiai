@@ -27,7 +27,6 @@ import {
 } from '@kumiai/rpc'
 import type { ConformanceControlSearchPort, ForkNoticeFixture } from '@kumiai/rpc-conformance'
 import { ed25519 } from '@noble/curves/ed25519.js'
-import { createApplicationMessage } from 'ts-mls'
 
 import { createCheckpointService } from '../../src/checkpoint.js'
 import { encodeControlJournal } from '../../src/control-journal.js'
@@ -483,18 +482,7 @@ async function assemble(
     },
     stateBytes: (handle) => encodeClientState(handle.state),
     async advanceSender(handle) {
-      if (params.mode === 'real-mls') await handle.encrypt(new Uint8Array([9]))
-      else {
-        // Inherited encrypt updates the superclass state, not the double's exposed projection.
-        const state = handle.state
-        const { newState } = await createApplicationMessage({
-          context: handle.context,
-          state,
-          message: new Uint8Array([9]),
-          authenticatedData: new Uint8Array(),
-        })
-        Object.assign(state, newState)
-      }
+      await handle.encrypt(new Uint8Array([9]))
     },
     async authenticator(handle) {
       return handle.state.keySchedule.epochAuthenticator.slice()

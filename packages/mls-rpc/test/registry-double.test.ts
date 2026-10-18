@@ -1,6 +1,8 @@
-import { randomIdentity } from '@kokuin/token'
+import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import {
+  CommitAuthoringRefusedError,
   type ControllerBinding,
+  commitKeyRotation,
   computeHead,
   createGroup,
   decodeClientState,
@@ -8,17 +10,30 @@ import {
   GroupHandle,
   type GroupOptions,
   ledgerEntryDigest,
+  parseMLSCredentialIdentity,
   readGroupAnchorExtension,
   readLedgerHead,
   readLedgerHeadExtension,
+  readMessageAAD,
+  readMessageEpoch,
   restoreGroup,
   signLedgerEntry,
 } from '@kumiai/mls'
-import { describe, expect, test } from 'vitest'
+import {
+  contentTypes,
+  decode,
+  encode,
+  mlsMessageDecoder,
+  mlsMessageEncoder,
+  type PrivateMessage,
+  wireformats,
+} from 'ts-mls'
+import { describe, expect, test, vi } from 'vitest'
 
 import { encodeStoredValue } from '../src/persistence-codec.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { validateRegistryHandle } from '../src/registry/validation.js'
+import { createRealGroup } from './fixtures/real-group.js'
 import {
   buildSealedMemoryOperation,
   memoryModel,
@@ -557,17 +572,17 @@ describe('independent registry handle', () => {
   test('double carry preserves committed progress without aliasing', async () => {
     const { handle } = await setup()
     const next = await candidate(handle)
-    const live = handle.state.secretTree.intermediateNodes[0]
+    const live = handle.state.secretTree.leafNodes[0]?.application.secret
     if (live === undefined) throw new Error('Missing live progress')
     live.fill(17)
     await handle.carryReceiveProgress(next)
-    expect(next.state.historicalReceiverData.get(0n)?.secretTree.intermediateNodes[0]).toEqual(
-      new Uint8Array(32).fill(17),
-    )
+    expect(
+      next.state.historicalReceiverData.get(0n)?.secretTree.leafNodes[0]?.application.secret,
+    ).toEqual(new Uint8Array(32).fill(17))
     live.fill(23)
-    expect(next.state.historicalReceiverData.get(0n)?.secretTree.intermediateNodes[0]).toEqual(
-      new Uint8Array(32).fill(17),
-    )
+    expect(
+      next.state.historicalReceiverData.get(0n)?.secretTree.leafNodes[0]?.application.secret,
+    ).toEqual(new Uint8Array(32).fill(17))
     const state = decodeClientState(encodeClientState(next.state))
     if (state === undefined) throw new Error('Missing carried durable state')
     const restored = await restoreMemoryControlHandle({
@@ -575,9 +590,9 @@ describe('independent registry handle', () => {
       credential: next.credential,
       ledgerEntries: next.ledgerTokens,
     })
-    expect(restored.state.historicalReceiverData.get(0n)?.secretTree.intermediateNodes[0]).toEqual(
-      new Uint8Array(32).fill(17),
-    )
+    expect(
+      restored.state.historicalReceiverData.get(0n)?.secretTree.leafNodes[0]?.application.secret,
+    ).toEqual(new Uint8Array(32).fill(17))
   })
 
   test('double refuses unrelated progress and invalid restoration', async () => {
@@ -616,3 +631,389 @@ describe('independent registry handle', () => {
     ).rejects.toThrow()
   })
 })
+
+const appOptions: GroupOptions = {
+  keyRetention: {
+    maximumForwardRatchetSteps: 3,
+    retainKeysForGenerations: 2,
+    retainKeysForEpochs: 2,
+  },
+}
+
+async function appGroup(mode: 'real-mls' | 'double' = 'double') {
+  const group = await createRealGroup(1, 'framed-app')
+  const member = group.members[0]
+  if (member === undefined) throw new Error('Missing member')
+  const convert = (handle: GroupHandle) => {
+    return (mode === 'double' ? restoreMemoryControlHandle : restoreGroup)({
+      state:
+        mode === 'double'
+          ? seedMemoryControlState(
+              { ...handle.state, historicalReceiverData: new Map() },
+              handle.credential,
+              handle.ledgerTokens,
+            )
+          : structuredClone(handle.state),
+      credential: handle.credential,
+      ledgerEntries: handle.ledgerTokens,
+      options: appOptions,
+    })
+  }
+  let sender = await convert(group.committer.handle)
+  const local = await convert(member.handle)
+  expect(local.state.privatePath.leafIndex).toBe(1)
+  expect(local.memberCount).toBe(2)
+  return {
+    local,
+    get sender() {
+      return sender
+    },
+    async advance() {
+      if (mode === 'double') {
+        const commit = memoryModel(sender).buildCommit()
+        await memoryModel(sender).adopt(commit)
+        expect(
+          (
+            await memoryModel(local).processCommit(commit, {
+              senderDID: sender.credential.id,
+              resolveLedgerEntries: async () => [],
+            })
+          ).applied,
+        ).toBe(true)
+        sender.state
+        local.state
+      } else {
+        const rotated = await commitKeyRotation(sender)
+        sender = rotated.newGroup
+        await local.processMessage(rotated.commitMessage)
+      }
+    },
+  }
+}
+
+function privateFrame(bytes: Uint8Array): PrivateMessage {
+  const decoded = decode(mlsMessageDecoder, bytes.slice())
+  if (decoded?.wireformat !== wireformats.mls_private_message)
+    throw new Error('Missing private frame')
+  return decoded.privateMessage
+}
+
+function rewriteFrame(bytes: Uint8Array, change: (frame: PrivateMessage) => void): Uint8Array {
+  const decoded = decode(mlsMessageDecoder, bytes.slice())
+  if (decoded?.wireformat !== wireformats.mls_private_message)
+    throw new Error('Missing private frame')
+  change(decoded.privateMessage)
+  return encode(mlsMessageEncoder, decoded)
+}
+
+function flip(bytes: Uint8Array, index = 0): void {
+  bytes[index] = (bytes[index] ?? 0) ^ 1
+}
+
+async function appFrames(sender: GroupHandle, count: number) {
+  const frames: Array<Uint8Array> = []
+  for (let index = 0; index < count; index++)
+    frames.push(await sender.encrypt(new Uint8Array([index])))
+  return frames
+}
+
+describe('double application frames', () => {
+  test('double private commit authoring advances only the own handshake ratchet', async () => {
+    const { local: handle } = await appGroup()
+    const source = await restoreMemoryControlSource({
+      state: handle.state,
+      credential: handle.credential,
+      ledgerEntries: handle.ledgerTokens,
+      options: appOptions,
+    })
+    const index = source.state.privatePath.leafIndex * 2
+    const before = source.state.secretTree.leafNodes[index]?.handshake.generation ?? 0
+    const built = await buildSealedMemoryOperation(
+      {
+        id: 'handshake',
+        kind: 'invite',
+        revokes: false,
+        seq: 1,
+        enqueuedAt: 0,
+        deadline: 1000,
+        stage: 'intent',
+        body: encodeStoredValue({ target: source.credential.id }),
+      },
+      source,
+    )
+    expect(source.state.secretTree.leafNodes[index]?.handshake.generation).toBe(before + 1)
+    expect(source.state.secretTree.leafNodes[index]?.application.generation).toBe(0)
+    const state = decodeClientState(built.journal)
+    expect(
+      state?.historicalReceiverData.get(handle.epoch)?.secretTree.leafNodes[index]?.handshake
+        .generation,
+    ).toBe(before + 1)
+    expect(handle.state.secretTree.leafNodes[index]?.handshake.generation ?? 0).toBe(before)
+  })
+
+  test('double frames parse as MLS private messages', async () => {
+    const { local, sender } = await appGroup()
+    const aad = new Uint8Array([8, 9])
+    const frame = await sender.encrypt(new Uint8Array([42]), { aad })
+    expect(readMessageEpoch(frame)).toBe(local.epoch)
+    expect(readMessageAAD(frame)).toEqual(aad)
+    expect(privateFrame(frame).groupId).toEqual(local.state.groupContext.groupId)
+    expect(privateFrame(frame).contentType).toBe(contentTypes.application)
+    expect(privateFrame(frame).ciphertext).toHaveLength(33)
+  })
+
+  test('double opens a member frame once', async () => {
+    const { local, sender } = await appGroup()
+    const frame = await sender.encrypt(new Uint8Array([42]))
+    expect(await local.decrypt(frame)).toEqual({
+      payload: new Uint8Array([42]),
+      senderDID: sender.credential.id,
+      aad: new Uint8Array(),
+    })
+    await expect(local.decrypt(frame)).rejects.toThrow('Desired gen in the past')
+    await expect(commitKeyRotation(local)).rejects.toBeInstanceOf(CommitAuthoringRefusedError)
+  })
+
+  test('double compares AAD before consuming', async () => {
+    const { local, sender } = await appGroup()
+    const frame = await sender.encrypt(new Uint8Array([42]), { aad: new Uint8Array([7]) })
+    const before = encodeClientState(local.state)
+    await expect(local.decrypt(frame, { expectedAAD: new Uint8Array([8]) })).rejects.toThrow(
+      'expected AAD',
+    )
+    await expect(
+      local.decryptStaged(frame, { expectedAAD: new Uint8Array([8]) }, async () => {
+        throw new Error('Persistence must not run')
+      }),
+    ).rejects.toThrow('expected AAD')
+    expect(encodeClientState(local.state)).toEqual(before)
+    expect((await local.decrypt(frame, { expectedAAD: new Uint8Array([7]) })).payload).toEqual(
+      new Uint8Array([42]),
+    )
+  })
+
+  test('double tag binds epoch, sender and AAD', async () => {
+    const { local, sender } = await appGroup()
+    const frame = await sender.encrypt(new Uint8Array([42]), { aad: new Uint8Array([7]) })
+    await (async () => {
+      const source = memoryModel(local)
+      const commit = source.buildCommit()
+      await source.adopt(commit)
+      local.state
+    })()
+    const before = encodeClientState(local.state)
+    for (const change of [
+      (pm: PrivateMessage) => {
+        pm.epoch = local.epoch
+      },
+      (pm: PrivateMessage) => {
+        flip(pm.groupId)
+      },
+      (pm: PrivateMessage) => {
+        flip(pm.encryptedSenderData, 3)
+      },
+      (pm: PrivateMessage) => {
+        flip(pm.encryptedSenderData, 7)
+      },
+      (pm: PrivateMessage) => {
+        flip(pm.authenticatedData)
+      },
+      (pm: PrivateMessage) => {
+        flip(pm.ciphertext)
+      },
+      (pm: PrivateMessage) => {
+        flip(pm.ciphertext, pm.ciphertext.length - 1)
+      },
+      (pm: PrivateMessage) => {
+        pm.ciphertext = pm.ciphertext.slice(0, -1)
+      },
+    ]) {
+      await expect(local.decrypt(rewriteFrame(frame, change))).rejects.toThrow()
+      expect(encodeClientState(local.state)).toEqual(before)
+    }
+    expect((await local.decrypt(frame)).payload).toEqual(new Uint8Array([42]))
+  })
+
+  test('double staged failure keeps the key', async () => {
+    const { local, sender } = await appGroup()
+    const frame = await sender.encrypt(new Uint8Array([42]))
+    const before = encodeClientState(local.state)
+    await expect(
+      local.decryptStaged(frame, {}, async () => {
+        throw new Error('Disk refused')
+      }),
+    ).rejects.toThrow('Disk refused')
+    expect(encodeClientState(local.state)).toEqual(before)
+    let saved: Uint8Array | undefined
+    const gate = Promise.withResolvers<void>()
+    const entered = Promise.withResolvers<void>()
+    const opening = local.decryptStaged(frame, {}, async (bytes) => {
+      saved = bytes
+      entered.resolve()
+      await gate.promise
+    })
+    await entered.promise
+    expect(encodeClientState(local.state)).toEqual(before)
+    gate.resolve()
+    expect((await opening).payload).toEqual(new Uint8Array([42]))
+    expect(encodeClientState(local.state)).toEqual(saved)
+    await expect(local.decrypt(frame)).rejects.toThrow('Desired gen in the past')
+  })
+
+  test('double unnamed sender refuses', async () => {
+    const { local, sender } = await appGroup()
+    const frame = await sender.encrypt(new Uint8Array([42]))
+    const index = sender.state.privatePath.leafIndex * 2
+    const leaf = local.state.ratchetTree[index]
+    local.state.ratchetTree[index] = undefined
+    await expect(local.decrypt(frame)).rejects.toThrow()
+    await expect(local.decryptStaged(frame, {}, async () => {})).rejects.toThrow()
+    local.state.ratchetTree[index] = leaf
+    expect((await local.decrypt(frame)).senderDID).toBe(sender.credential.id)
+  })
+
+  test('double progress survives encode and restore', async () => {
+    const { local, sender } = await appGroup()
+    const frames = await appFrames(sender, 4)
+    await local.decrypt(frames[3] as Uint8Array)
+    const state = decodeClientState(encodeClientState(local.state))
+    if (state === undefined) throw new Error('Missing state')
+    const durable = JSON.parse(new TextDecoder().decode(state.confirmationTag))
+    expect(durable.receiveState).toBeUndefined()
+    expect(durable.receiveHistory).toBeUndefined()
+    const restored = await restoreMemoryControlHandle({
+      state,
+      credential: local.credential,
+      ledgerEntries: local.ledgerTokens,
+      options: appOptions,
+    })
+    await expect(restored.decrypt(frames[3] as Uint8Array)).rejects.toThrow(
+      'Desired gen in the past',
+    )
+    await expect(restored.decrypt(frames[0] as Uint8Array)).rejects.toThrow(
+      'Desired gen in the past',
+    )
+    expect((await restored.decrypt(frames[1] as Uint8Array)).payload).toEqual(new Uint8Array([1]))
+    expect((await restored.decrypt(frames[2] as Uint8Array)).payload).toEqual(new Uint8Array([2]))
+    const own = await restored.encrypt(new Uint8Array([9]))
+    expect((await sender.decrypt(own)).payload).toEqual(new Uint8Array([9]))
+  })
+
+  test('double opens across an epoch transition', async () => {
+    const f = await appGroup()
+    await f.advance()
+    const own = await f.local.encrypt(new Uint8Array([9]))
+    expect((await f.sender.decrypt(own)).payload).toEqual(new Uint8Array([9]))
+    expect((await f.local.decrypt(await f.sender.encrypt(new Uint8Array([42])))).payload).toEqual(
+      new Uint8Array([42]),
+    )
+  })
+})
+
+for (const mode of ['real-mls', 'double'] as const) {
+  describe(`application ratchet limits: ${mode}`, () => {
+    test('generation beyond the forward limit refuses', async () => {
+      const { local, sender } = await appGroup(mode)
+      const frames = await appFrames(sender, 5)
+      const before = encodeClientState(local.state)
+      await expect(local.decrypt(frames[4] as Uint8Array)).rejects.toThrow(
+        'Desired generation too far in the future',
+      )
+      expect(encodeClientState(local.state)).toEqual(before)
+      expect((await local.decrypt(frames[3] as Uint8Array)).payload).toEqual(new Uint8Array([3]))
+    })
+
+    test('evicted skipped generation refuses', async () => {
+      const { local, sender } = await appGroup(mode)
+      const frames = await appFrames(sender, 4)
+      await local.decrypt(frames[3] as Uint8Array)
+      await expect(local.decrypt(frames[0] as Uint8Array)).rejects.toThrow(
+        'Desired gen in the past',
+      )
+      expect((await local.decrypt(frames[1] as Uint8Array)).payload).toEqual(new Uint8Array([1]))
+      await expect(local.decrypt(frames[1] as Uint8Array)).rejects.toThrow(
+        'Desired gen in the past',
+      )
+    })
+
+    test('retained past epoch opens; an evicted epoch refuses', async () => {
+      const f = await appGroup(mode)
+      const frames = await appFrames(f.sender, 2)
+      await f.advance()
+      await f.advance()
+      expect((await f.local.decrypt(frames[0] as Uint8Array)).payload).toEqual(new Uint8Array([0]))
+      await expect(f.local.decrypt(frames[0] as Uint8Array)).rejects.toThrow(
+        'Desired gen in the past',
+      )
+      await f.advance()
+      expect(f.local.state.historicalReceiverData.size).toBe(2)
+      await expect(f.local.decrypt(frames[1] as Uint8Array)).rejects.toThrow()
+    })
+
+    test('lapsed sender refuses', async () => {
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(100_000)
+      try {
+        const fixture = (await import(
+          new URL('../../mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
+        )) as {
+          pipelineGroup(): Promise<{ group: GroupHandle; identity: OwnIdentity }>
+          lowLevelWelcome(
+            group: GroupHandle,
+            identity: OwnIdentity,
+            binding: ControllerBinding,
+          ): Promise<{ author: GroupHandle; joined: GroupHandle }>
+          timedBinding(params: {
+            identity: OwnIdentity
+            iat: number
+            exp: number
+          }): Promise<ControllerBinding>
+        }
+        const { group } = await fixture.pipelineGroup()
+        const bob = randomIdentity()
+        const pair = await fixture.lowLevelWelcome(
+          group,
+          bob,
+          await fixture.timedBinding({ identity: bob, iat: 90, exp: 110 }),
+        )
+        const convert = (handle: GroupHandle) =>
+          mode === 'real-mls'
+            ? Promise.resolve(handle)
+            : restoreMemoryControlHandle({
+                state: seedMemoryControlState(
+                  { ...handle.state, historicalReceiverData: new Map() },
+                  handle.credential,
+                  handle.ledgerTokens,
+                ),
+                credential: handle.credential,
+                ledgerEntries: handle.ledgerTokens,
+              })
+        const local = await convert(pair.joined)
+        const sender = await convert(pair.author)
+        expect(local.state.privatePath.leafIndex).toBe(1)
+        const frame = await sender.encrypt(new Uint8Array([42]))
+        const clockLeaf = local.state.ratchetTree[2]
+        if (clockLeaf?.nodeType !== 1 || !('identity' in clockLeaf.leaf.credential))
+          throw new Error('Missing clock leaf')
+        const original = clockLeaf.leaf.credential.identity
+        clockLeaf.leaf.credential.identity = new TextEncoder().encode(
+          JSON.stringify({
+            ...parseMLSCredentialIdentity(original),
+            controller: await fixture.timedBinding({ identity: bob, iat: 210, exp: 300 }),
+          }),
+        )
+        const before = encodeClientState(local.state)
+        await expect(local.decrypt(frame)).rejects.toMatchObject({ reason: 'lapsed' })
+        await expect(
+          local.decryptStaged(frame, {}, async () => {
+            throw new Error('Persistence must not run')
+          }),
+        ).rejects.toMatchObject({ reason: 'lapsed' })
+        expect(encodeClientState(local.state)).toEqual(before)
+        clockLeaf.leaf.credential.identity = original
+        expect((await local.decrypt(frame)).payload).toEqual(new Uint8Array([42]))
+      } finally {
+        clock.mockRestore()
+      }
+    })
+  })
+}

@@ -1,7 +1,10 @@
+import { decodeClientState, encodeClientState, restoreGroup } from '@kumiai/mls'
 import type { AdoptionWrite, ControlSlot, FirstValidCommit } from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
+import { restoreMemoryControlHandle } from './sealed-memory-mls.js'
 import { createControlCrashHarness, runControlProofConflict } from './storage-persistence.js'
+import { nextChange } from './storage-seed.js'
 
 function crashAdoptionWrite(slot: ControlSlot, proof: FirstValidCommit): AdoptionWrite {
   return {
@@ -36,8 +39,59 @@ function crashAdoptionWrite(slot: ControlSlot, proof: FirstValidCommit): Adoptio
 
 export function testControlCrashBoundaries(mode: 'real-mls' | 'double'): void {
   describe(`sealed control reconstruction: ${mode}`, () => {
-    if (mode === 'double')
-      test.todo('replay carries native application progress into the saved candidate')
+    test('replay carries native application progress into the saved candidate', async () => {
+      const h = await createControlCrashHarness(mode)
+      try {
+        await h.peer.resync()
+        const op = await h.intent()
+        await h.controlWalk.stepOperation(op.id)
+        await h.close()
+        const slot = (await h.control.load()).commitOnce
+        const row = await h.groups.loadState(h.key)
+        if (slot === null || row === null || row.deleted || row.state === null)
+          throw new Error('Missing saved source')
+        const state = decodeClientState(row.state)
+        if (state === undefined) throw new Error('Invalid saved source')
+        const handle = await (mode === 'double' ? restoreMemoryControlHandle : restoreGroup)({
+          state,
+          credential: row.credential,
+          ledgerEntries: row.ledger,
+        })
+        await handle.encrypt(new Uint8Array([42]))
+        const leaf = 2 * handle.state.privatePath.leafIndex
+        const generation = handle.state.secretTree.leafNodes[leaf]?.application.generation
+        expect(generation).toBeGreaterThan(0)
+        const tree = structuredClone(handle.state.secretTree)
+        await h.groups.transition(
+          await nextChange(h.groups, h.key.groupID, 'saved-application-progress'),
+          async (stores) => {
+            await stores.incarnation(h.key.incarnation).state.save({
+              ...row,
+              version: row.version + 1,
+              state: encodeClientState(handle.state),
+            })
+          },
+        )
+        const reopened = await h.reopen()
+        try {
+          await reopened.peer.replay()
+          expect((await reopened.control.load()).commitOnce).toBeNull()
+          const installed = await reopened.groups.loadState(h.key)
+          if (installed === null || installed.deleted || installed.state === null)
+            throw new Error('Missing installed state')
+          const current = decodeClientState(installed.state)
+          expect(current?.groupContext.epoch).toBe(BigInt(slot.epoch + 1))
+          expect(current?.historicalReceiverData.get(BigInt(slot.epoch))?.secretTree).toEqual(tree)
+          expect(h.observations.ownAdoptions).toBe(1)
+        } finally {
+          await reopened.close()
+        }
+      } finally {
+        await h.close()
+        await h.fixture.close()
+      }
+    })
+
     test('death after preparation before built-save releases no bytes', async () => {
       const h = await createControlCrashHarness(mode)
       try {
@@ -68,8 +122,6 @@ export function testControlCrashBoundaries(mode: 'real-mls' | 'double'): void {
           expect((await reopened.control.load()).commitOnce).toBeNull()
           const secondOp = await reopened.intent()
           expect(secondOp).toEqual(op)
-          // Native application progress is not represented by the memory control projection yet.
-          if (mode === 'double') return
           let second: ControlSlot | undefined
           reopened.hooks.beforeSave = (slot) => {
             second = slot

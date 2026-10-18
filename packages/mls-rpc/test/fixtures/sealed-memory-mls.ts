@@ -20,6 +20,7 @@ import {
   GroupRestoreError as InvalidCandidateError,
   LEDGER_HEAD_EXTENSION_TYPE,
   type LeafBinding,
+  LeafLapsedError,
   ledgerEntryDigest,
   type MemberCredential,
   parseMLSCredentialIdentity,
@@ -39,9 +40,23 @@ import {
   type HostBuilt,
   type Operation,
 } from '@kumiai/rpc'
+import { hmac } from '@noble/hashes/hmac.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { fromB64U, toB64U } from '@sozai/codec'
-import type { EpochReceiverData } from 'ts-mls'
+import {
+  contentTypes,
+  decode,
+  defaultKeyRetentionConfig,
+  type EpochReceiverData,
+  encode,
+  type GenerationSecret,
+  mlsMessageDecoder,
+  mlsMessageEncoder,
+  type PrivateMessage,
+  protocolVersions,
+  type SecretTree,
+  wireformats,
+} from 'ts-mls'
 
 import { decodeControlJournal } from '../../src/control-journal.js'
 import { ENTRY_SEAL_LABEL, openEntries } from '../../src/crypto.js'
@@ -97,6 +112,19 @@ const { verifyDeviceEntry } = (await import(
     },
   ): Promise<boolean>
 }
+const { assertSenderNotLapsed } = (await import(
+  new URL('../../../mls/src/lifecycle.ts', import.meta.url).href
+)) as {
+  assertSenderNotLapsed(params: {
+    group: GroupHandle
+    tree: ClientState['ratchetTree']
+    leafIndex: number
+    extensions: ClientState['groupContext']['extensions']
+  }): void
+}
+const { mutexFor } = (await import(
+  new URL('../../../mls/src/group-handle.ts', import.meta.url).href
+)) as { mutexFor(handle: GroupHandle): { run<T>(fn: () => Promise<T>): Promise<T> } }
 const { fakeEpochSecret } = (await import(
   new URL('../../../rpc/test/fixtures/fake-crypto.ts', import.meta.url).href
 )) as {
@@ -178,7 +206,21 @@ function model(
   verifiedLedgers.set(mls, verified)
   if (restore) {
     try {
-      mls.restoreState(state.confirmationTag)
+      const snapshot = JSON.parse(new TextDecoder().decode(state.confirmationTag))
+      const canonical = decodeClientState(encodeClientState(state))
+      if (canonical === undefined) throw new Error('Invalid memory receive state')
+      mls.restoreState(
+        new TextEncoder().encode(
+          JSON.stringify({
+            ...snapshot,
+            receiveState: toB64U(encodeStoredValue(receiverData(canonical))),
+            receiveHistory: [...canonical.historicalReceiverData].map(([epoch, held]) => [
+              Number(epoch),
+              { identity: toB64U(held.resumptionPsk), state: toB64U(encodeStoredValue(held)) },
+            ]),
+          }),
+        ),
+      )
     } catch (cause) {
       throw new InvalidCandidateError(
         cause instanceof Error ? cause.message : 'Invalid memory state',
@@ -189,6 +231,42 @@ function model(
     }
   }
   return mls
+}
+
+function serializeModel(mls: MemoryMLS): Uint8Array {
+  const snapshot = JSON.parse(new TextDecoder().decode(mls.serializeState()))
+  // Receive secrets belong only to the envelope, outside the control projection.
+  delete snapshot.receiveState
+  delete snapshot.receiveHistory
+  return new TextEncoder().encode(JSON.stringify(snapshot))
+}
+
+function freshSecretTree(mls: MemoryMLS): SecretTree {
+  const slots = mls.memberSlots()
+  const leafNodes: SecretTree['leafNodes'] = {}
+  for (const [index] of slots) {
+    const ratchet = (kind: string): GenerationSecret => ({
+      secret: fakeEpochSecret(mls.epoch(), `${kind}:${index}`, 32, mls.authenticator()),
+      generation: 0,
+      unusedGenerations: {},
+    })
+    leafNodes[index * 2] = { handshake: ratchet('handshake'), application: ratchet('app') }
+  }
+  return {
+    leafWidth: Math.max(1, ...slots.map(([index]) => index + 1)),
+    intermediateNodes: {},
+    leafNodes,
+  }
+}
+
+function receiverData(state: ClientState): EpochReceiverData {
+  return {
+    resumptionPsk: state.keySchedule.resumptionPsk,
+    secretTree: state.secretTree,
+    ratchetTree: state.ratchetTree,
+    senderDataSecret: state.keySchedule.senderDataSecret,
+    groupContext: state.groupContext,
+  }
 }
 
 function envelope(state: ClientState, mls: MemoryMLS): ClientState {
@@ -255,11 +333,7 @@ function envelope(state: ClientState, mls: MemoryMLS): ClientState {
     },
     ...(changingEpoch
       ? {
-          secretTree: {
-            leafWidth: Math.max(1, ...slots.map(([index]) => index + 1)),
-            intermediateNodes: { 0: sha256(mls.authenticator()) },
-            leafNodes: {},
-          },
+          secretTree: freshSecretTree(mls),
         }
       : {}),
     historicalReceiverData: new Map(
@@ -270,11 +344,10 @@ function envelope(state: ClientState, mls: MemoryMLS): ClientState {
           decodeStoredValue(held.state) as EpochReceiverData,
         ]),
     ),
-    // The v2 storage envelope retains the independent double's entire durable state.
-    confirmationTag: mls.serializeState(),
+    confirmationTag: serializeModel(mls),
   }
   captureReceiveState(next, mls)
-  next.confirmationTag = mls.serializeState()
+  next.confirmationTag = serializeModel(mls)
   return next
 }
 
@@ -293,6 +366,7 @@ export function seedMemoryControlState(
       buildGroupAnchorExtension({ creatorDID: credential.id, version: 1 }),
     )
   const mls = model(seeded, credential, false, false, {}, ledgerEntries)
+  seeded.secretTree = freshSecretTree(mls)
   captureReceiveState(seeded, mls)
   return envelope(seeded, mls)
 }
@@ -318,15 +392,56 @@ function captureReceiveState(state: ClientState, mls: MemoryMLS): void {
       },
     ]),
   )
-  mls.setReceiveState(
-    encodeStoredValue({
-      resumptionPsk: mls.authenticator(),
-      secretTree: canonical.secretTree,
-      ratchetTree: canonical.ratchetTree,
-      senderDataSecret: canonical.keySchedule.senderDataSecret,
-      groupContext: canonical.groupContext,
-    }),
+  mls.setReceiveState(encodeStoredValue(receiverData(canonical)))
+}
+
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  return left.length === right.length && left.every((byte, index) => byte === right[index])
+}
+
+function appKey(epoch: bigint, authenticator: Uint8Array): Uint8Array {
+  return fakeEpochSecret(Number(epoch), 'app', 32, authenticator)
+}
+
+function appTag(key: Uint8Array, frame: PrivateMessage, leaf: number, generation: number) {
+  return hmac(
+    sha256,
+    key,
+    new TextEncoder().encode(
+      JSON.stringify([
+        toB64U(frame.groupId),
+        String(frame.epoch),
+        frame.contentType,
+        leaf,
+        generation,
+        toB64U(frame.authenticatedData),
+        toB64U(frame.ciphertext),
+      ]),
+    ),
   )
+}
+
+function appCrypt(key: Uint8Array, leaf: number, generation: number, bytes: Uint8Array) {
+  const result = bytes.slice()
+  for (let offset = 0; offset < result.length; offset += 32) {
+    const stream = hmac(
+      sha256,
+      key,
+      new TextEncoder().encode(JSON.stringify(['stream', leaf, generation, offset / 32])),
+    )
+    for (let index = 0; index < Math.min(32, result.length - offset); index++)
+      result[offset + index] = (result[offset + index] as number) ^ (stream[index] as number)
+  }
+  return result
+}
+
+function stepRatchet(ratchet: GenerationSecret): void {
+  ratchet.secret = hmac(
+    sha256,
+    ratchet.secret,
+    new TextEncoder().encode(`next:${ratchet.generation}`),
+  )
+  ratchet.generation += 1
 }
 
 function exportedSecret(
@@ -370,7 +485,7 @@ class MemoryControlHandle extends GroupHandle {
     ]
     // Keep the live progress buffers visible; only the durable model snapshot is copied.
     captureReceiveState(this.#view, this.#mls)
-    this.#view.confirmationTag = this.#mls.serializeState()
+    this.#view.confirmationTag = serializeModel(this.#mls)
     return this.#view
   }
 
@@ -473,6 +588,151 @@ class MemoryControlHandle extends GroupHandle {
     return exportedSecret(this.#view, this.#mls, label, context, length)
   }
 
+  override async encrypt(plaintext: Uint8Array, opts?: { aad?: Uint8Array }): Promise<Uint8Array> {
+    return mutexFor(this).run(async () => {
+      const state = this.state
+      if (state.groupActiveState.kind !== 'active') throw new Error('Inactive memory group')
+      if (!this.sendAdmission().admissible) throw new LeafLapsedError('lapsed')
+      const leaf = state.privatePath.leafIndex
+      const ratchet = state.secretTree.leafNodes[leaf * 2]?.application
+      if (ratchet === undefined) throw new Error('Missing memory sender ratchet')
+      const generation = ratchet.generation
+      const senderData = new Uint8Array(8)
+      const view = new DataView(senderData.buffer)
+      view.setUint32(0, leaf)
+      view.setUint32(4, generation)
+      const key = appKey(state.groupContext.epoch, this.#mls.authenticator())
+      const frame: PrivateMessage = {
+        groupId: state.groupContext.groupId,
+        epoch: state.groupContext.epoch,
+        contentType: contentTypes.application,
+        authenticatedData: opts?.aad ?? new Uint8Array(),
+        encryptedSenderData: senderData,
+        ciphertext: appCrypt(key, leaf, generation, plaintext),
+      }
+      frame.ciphertext = new Uint8Array([
+        ...frame.ciphertext,
+        ...appTag(key, frame, leaf, generation),
+      ])
+      const bytes = encode(mlsMessageEncoder, {
+        version: protocolVersions.mls10,
+        wireformat: wireformats.mls_private_message,
+        privateMessage: frame,
+      })
+      stepRatchet(ratchet)
+      return bytes
+    })
+  }
+
+  #open(message: Uint8Array, opts: { expectedAAD?: Uint8Array }) {
+    const decoded = decode(mlsMessageDecoder, message)
+    if (
+      decoded?.wireformat !== wireformats.mls_private_message ||
+      decoded.privateMessage.contentType !== contentTypes.application
+    )
+      throw new Error('Not a PrivateMessage application frame')
+    const frame = decoded.privateMessage
+    if (opts.expectedAAD !== undefined && !sameBytes(frame.authenticatedData, opts.expectedAAD))
+      throw new Error('Frame authenticated data does not match expected AAD')
+    const state = this.state
+    const receiver =
+      frame.epoch === state.groupContext.epoch
+        ? receiverData(state)
+        : state.historicalReceiverData.get(frame.epoch)
+    if (receiver === undefined) throw new Error('Unavailable memory epoch')
+    if (!sameBytes(frame.groupId, receiver.groupContext.groupId))
+      throw new Error('Memory group mismatch')
+    if (frame.encryptedSenderData.length !== 8) throw new Error('Invalid memory sender data')
+    const view = new DataView(
+      frame.encryptedSenderData.buffer,
+      frame.encryptedSenderData.byteOffset,
+      frame.encryptedSenderData.byteLength,
+    )
+    const leaf = view.getUint32(0)
+    const generation = view.getUint32(4)
+    const node = receiver.ratchetTree[leaf * 2]
+    if (node?.nodeType !== 1 || !('identity' in node.leaf.credential))
+      throw new Error('Unnamed memory sender')
+    const senderDID = parseMLSCredentialIdentity(node.leaf.credential.identity).id
+    assertSenderNotLapsed({
+      group: this,
+      tree: receiver.ratchetTree,
+      leafIndex: leaf,
+      extensions: receiver.groupContext.extensions,
+    })
+    const key = appKey(frame.epoch, receiver.resumptionPsk)
+    const ciphertext = frame.ciphertext.slice(0, -32)
+    if (
+      frame.ciphertext.length < 32 ||
+      !sameBytes(
+        frame.ciphertext.slice(-32),
+        appTag(key, { ...frame, ciphertext }, leaf, generation),
+      )
+    )
+      throw new Error('Invalid memory application tag')
+    const staged = structuredClone(state)
+    const tree =
+      frame.epoch === staged.groupContext.epoch
+        ? staged.secretTree
+        : staged.historicalReceiverData.get(frame.epoch)?.secretTree
+    const ratchet = tree?.leafNodes[leaf * 2]?.application
+    if (ratchet === undefined) throw new Error('Missing memory receiver ratchet')
+    const config = this.context.clientConfig?.keyRetentionConfig ?? defaultKeyRetentionConfig
+    if (generation < ratchet.generation) {
+      if (ratchet.unusedGenerations[generation] === undefined)
+        throw new Error('Desired gen in the past')
+      delete ratchet.unusedGenerations[generation]
+    } else {
+      if (generation - ratchet.generation > config.maximumForwardRatchetSteps)
+        throw new Error('Desired generation too far in the future')
+      while (ratchet.generation < generation) {
+        ratchet.unusedGenerations[ratchet.generation] = ratchet.secret
+        stepRatchet(ratchet)
+      }
+      const unused = Object.keys(ratchet.unusedGenerations)
+        .map(Number)
+        .sort((a, b) => a - b)
+      for (const old of unused.slice(
+        0,
+        Math.max(0, unused.length - config.retainKeysForGenerations),
+      ))
+        delete ratchet.unusedGenerations[old]
+      stepRatchet(ratchet)
+    }
+    return {
+      staged,
+      opened: {
+        payload: appCrypt(key, leaf, generation, ciphertext),
+        senderDID,
+        aad: frame.authenticatedData,
+      },
+    }
+  }
+
+  override async decrypt(message: Uint8Array, opts: { expectedAAD?: Uint8Array } = {}) {
+    return mutexFor(this).run(async () => {
+      const { staged, opened } = this.#open(message, opts)
+      Object.assign(this.#view, staged)
+      return opened
+    })
+  }
+
+  override async decryptStaged(
+    message: Uint8Array,
+    opts: { expectedAAD?: Uint8Array },
+    persist: (
+      stagedState: Uint8Array,
+      opened: { payload: Uint8Array; senderDID: string; aad: Uint8Array },
+    ) => Promise<void>,
+  ) {
+    return mutexFor(this).run(async () => {
+      const { staged, opened } = this.#open(message, opts)
+      await persist(encodeClientState(staged), opened)
+      Object.assign(this.#view, staged)
+      return opened
+    })
+  }
+
   override async carryReceiveProgress(candidate: GroupHandle): Promise<void> {
     if (!(candidate instanceof MemoryControlHandle))
       throw new Error('Not an independent memory candidate')
@@ -483,7 +743,7 @@ class MemoryControlHandle extends GroupHandle {
       candidate.#view,
       candidate.#mls,
     ).historicalReceiverData
-    candidate.#view.confirmationTag = candidate.#mls.serializeState()
+    candidate.#view.confirmationTag = serializeModel(candidate.#mls)
   }
 }
 
@@ -580,6 +840,10 @@ export async function buildSealedMemoryOperation(
   return authorPrivateCommit(handle, async () => {
     const sourceState = handle.state
     const mls = memoryModel(handle)
+    const own = sourceState.secretTree.leafNodes[2 * sourceState.privatePath.leafIndex]
+    if (own === undefined) throw new Error('Missing memory author ratchet')
+    stepRatchet(own.handshake)
+    captureReceiveState(sourceState, mls)
     const before = mls.serializeState()
     const epoch = mls.epoch()
     const authenticatorBefore = mls.authenticator()
