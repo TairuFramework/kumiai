@@ -22,7 +22,7 @@ for (const port of ['processCommit', 'validateRecoveryCommit'] as const) {
         )
         const advance = source.buildCommit([])
         await source.adopt(advance)
-        await receiver.processCommit(advance, {})
+        await receiver.processCommit(advance, { senderDID: 'alice' })
         const encoded = encodeMemoryCommit(source.epoch(), 'alice', [], {
           external: true,
           adds: ['carol'],
@@ -36,10 +36,12 @@ for (const port of ['processCommit', 'validateRecoveryCommit'] as const) {
               ? tagMemoryCommit(encoded, sibling.authenticator())
               : encoded
         const before = receiver.serializeState()
+        const seenBefore = receiver.seen()
+        const lastSenderBefore = receiver.lastSender()
         const resolveLedgerEntries = vi.fn(async () => [])
         const result =
           port === 'processCommit'
-            ? await receiver.processCommit(commit, { resolveLedgerEntries })
+            ? await receiver.processCommit(commit, { senderDID: 'carol', resolveLedgerEntries })
             : await receiver.validateRecoveryCommit(commit)
         if (kind === 'tagged') {
           expect(result).toMatchObject(
@@ -58,6 +60,10 @@ for (const port of ['processCommit', 'validateRecoveryCommit'] as const) {
               : { epoch: source.epoch() },
           )
           expect(receiver.serializeState()).toEqual(before)
+          expect({ seen: receiver.seen(), lastSender: receiver.lastSender() }).toEqual({
+            seen: seenBefore,
+            lastSender: lastSenderBefore,
+          })
           expect(receiver.commits()).toBe(1)
         }
         expect(resolveLedgerEntries).not.toHaveBeenCalled()
