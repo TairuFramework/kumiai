@@ -105,7 +105,7 @@ export function createRegistryAppOpen<TTx extends GroupTransaction>(params: {
                 if (previous !== undefined) {
                   if (!sameOccurrence(previous, frame)) return refuse('duplicate')
                   return saved.pending !== null
-                    ? { kind: 'opened', record: saved.pending }
+                    ? { kind: 'opened', record: saved.pending, handleEpoch }
                     : { kind: 'refused', frame, reason: 'malformed-plaintext', keyConsumed: true }
                 }
                 const messageEpoch = readMessageEpoch(ciphertext)
@@ -166,7 +166,7 @@ export function createRegistryAppOpen<TTx extends GroupTransaction>(params: {
                   idempotencyKey: appFrameIdempotencyKey(openedFrame),
                 }
                 puts.push(record)
-                return { kind: 'opened', record }
+                return { kind: 'opened', record, handleEpoch }
               }
               for (const input of frames) {
                 if (input.frame.id !== frameID(input.frame.topicID, input.ciphertext)) {

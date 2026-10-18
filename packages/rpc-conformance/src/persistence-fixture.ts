@@ -563,7 +563,7 @@ export type ConformanceOpenAppInput = {
   expectedAAD?: Uint8Array
 }
 export type ConformanceOpenAppResult =
-  | { kind: 'opened'; record: ConformanceStoragePendingAppFrame }
+  | { kind: 'opened'; record: ConformanceStoragePendingAppFrame; handleEpoch: number }
   | {
       kind: 'refused'
       frame: ConformancePreOpenAppFrameRef

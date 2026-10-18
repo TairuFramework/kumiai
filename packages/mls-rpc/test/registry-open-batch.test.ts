@@ -221,7 +221,13 @@ for (const mode of ['real-mls', 'double'] as const) {
         const a = await s.seal(1)
         const epoch = s.access.epoch()
         await s.advance()
-        expect(await s.access.openBatch([a])).toMatchObject([{ kind: 'opened', record: { epoch } }])
+        const [opened] = await s.access.openBatch([a])
+        expect(opened).toMatchObject({ kind: 'opened', handleEpoch: epoch + 1, record: { epoch } })
+        await s.advance()
+        await s.restart()
+        const before = await s.snapshot()
+        expect(await s.access.openBatch([a])).toEqual([{ ...opened, handleEpoch: epoch + 2 }])
+        expect(await s.snapshot()).toEqual(before)
       }))
 
     test('wrong-topic sibling burns no generation and valid siblings open', () =>

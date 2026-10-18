@@ -236,8 +236,19 @@ for (const mode of ['real-mls', 'double'] as const) {
         const input = await s.seal()
         const epoch = s.access.epoch()
         await s.advance()
-        expect(await unwrap(s, input)).toMatchObject({ senderDID: s.senderDID, epoch })
+        expect(await unwrap(s, input)).toMatchObject({
+          senderDID: s.senderDID,
+          epoch: epoch + 1,
+        })
         expect(await s.crypto.pending.list()).toMatchObject([{ epoch }])
+        await s.advance()
+        const before = await s.snapshot()
+        expect(await unwrap(s, input)).toMatchObject({
+          senderDID: s.senderDID,
+          epoch: epoch + 2,
+        })
+        expect(await s.crypto.pending.list()).toMatchObject([{ epoch }])
+        expect(await s.snapshot()).toEqual(before)
       }))
 
     test('storage failure is AppFrameStorageError and writes nothing', () =>

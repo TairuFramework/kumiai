@@ -48,8 +48,8 @@ export function createRegistryGroupCrypto(params: RegistryGroupCryptoParams): Gr
         throw new AppFrameStorageError('unwrap: openBatch must return exactly one result')
       }
       if (result.kind === 'opened') {
-        const { payload, senderDID, epoch } = result.record
-        return { payload, senderDID, epoch }
+        const { payload, senderDID } = result.record
+        return { payload, senderDID, epoch: result.handleEpoch }
       }
       if (result.reason === 'past-epoch' || result.reason === 'future-epoch') {
         throw new FrameEpochError(result.frameEpoch, result.handleEpoch)

@@ -348,7 +348,7 @@ export type OpenAppInput = {
   expectedAAD?: Uint8Array
 }
 export type OpenAppResult =
-  | { kind: 'opened'; record: PendingAppFrame }
+  | { kind: 'opened'; record: PendingAppFrame; handleEpoch: number }
   | { kind: 'refused'; frame: PreOpenAppFrameRef; reason: 'malformed-plaintext'; keyConsumed: true }
   | {
       kind: 'refused'
