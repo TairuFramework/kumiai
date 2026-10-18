@@ -9,13 +9,14 @@ import {
   encodeClientState,
   GroupHandle,
   type HoldingToken,
+  ownApplicationGeneration,
   relinquishSend,
   removeMember,
   reserveApplicationRange,
   restoreGroup,
 } from '@kumiai/mls'
 import * as serializer from '@kumiai/mls/testing'
-import { serializeHandle } from '@kumiai/mls/testing'
+import { reserveApplicationKernel, serializeHandle } from '@kumiai/mls/testing'
 import { decode, encode, mlsMessageDecoder, mlsMessageEncoder, wireformats } from 'ts-mls'
 import { expect, test, vi } from 'vitest'
 
@@ -24,6 +25,39 @@ import { registryHandle } from './fixtures/registry-welcome.js'
 import { memoryModel, restoreMemoryControlHandle } from './fixtures/sealed-memory-mls.js'
 
 for (const mode of ['real-mls', 'double'] as const) {
+  test(`testing reservation shares the encrypt serializer / ${mode}`, async () => {
+    const group = await createRealGroup(1, `reservation-seam-${mode}`)
+    const local = await registryHandle({
+      mode,
+      handle: group.committer.handle,
+      options: { resolveLedgerEntries: group.resolveLedgerEntries },
+    })
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const holder = serializeHandle(local, async () => {
+      entered.resolve()
+      await release.promise
+    })
+    await entered.promise
+    const reservation = local[reserveApplicationKernel](16)
+    const encryption = local.encryptApplication(new Uint8Array([1]))
+    try {
+      for (let i = 0; i < 10; i++) await Promise.resolve()
+      expect(ownApplicationGeneration(local.state)).toBe(0)
+    } finally {
+      release.resolve()
+      await holder
+    }
+    const [, frame] = await Promise.all([reservation, encryption])
+    expect(frame.generation).toBe(16)
+    expect((await local.encryptApplication(new Uint8Array([1]))).generation).toBe(17)
+    const other = group.members[0]?.handle
+    if (other == null) throw new Error('Missing peer')
+    await serializeHandle(other, async (holding) => {
+      await expect(local[reserveApplicationKernel](32, holding)).rejects.toThrow(TypeError)
+    })
+  })
+
   test(`removed local member cannot send, including after restore / ${mode}`, async () => {
     const group = await createRealGroup(1, `send-removal-${mode}`)
     const member = group.members[0]
@@ -204,7 +238,12 @@ for (const mode of ['real-mls', 'double'] as const) {
         peer,
         await timedBinding({ identity: peer, iat: 201, exp: 300 }),
       )
-      const local = await registryHandle({ mode, handle: group, options: {} })
+      const canonical = await restoreGroup({
+        state: group.state,
+        credential: group.credential,
+        ledgerEntries: group.ledgerTokens,
+      })
+      const local = await registryHandle({ mode, handle: canonical, options: {} })
       denyApplicationSend(local)
       const before = encodeClientState(local.state)
       await expect(

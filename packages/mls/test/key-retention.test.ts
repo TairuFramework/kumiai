@@ -23,7 +23,7 @@ import { deriveGroup } from '../src/group-handle.js'
 import type { GroupOptions } from '../src/types.js'
 
 const defaults = {
-  keyRetentionConfig: defaultKeyRetentionConfig,
+  keyRetentionConfig: { ...defaultKeyRetentionConfig, maximumForwardRatchetSteps: 500 },
   lifetimeConfig: defaultLifetimeConfig,
   keyPackageEqualityConfig: defaultKeyPackageEqualityConfig,
   paddingConfig: defaultPaddingConfig,
@@ -37,7 +37,7 @@ const effective = {
 }
 
 describe('MLS key retention', () => {
-  test('normal retention defaults remain unchanged', async () => {
+  test('uses the reservation forward bound with other retention defaults unchanged', async () => {
     const { group } = await createGroup(randomIdentity(), 'retention-defaults')
     expect(group.context.clientConfig).toEqual(defaults)
   })
@@ -46,7 +46,7 @@ describe('MLS key retention', () => {
     const context = await resolveMlsContext({ keyRetention: { retainKeysForGenerations: 1000 } })
     expect(context.clientConfig).toEqual({
       ...defaults,
-      keyRetentionConfig: { ...defaultKeyRetentionConfig, retainKeysForGenerations: 1000 },
+      keyRetentionConfig: { ...defaults.keyRetentionConfig, retainKeysForGenerations: 1000 },
     })
     const direct = createMlsContext(context.cipherSuite, undefined, options)
     expect(direct.clientConfig).toEqual(effective)

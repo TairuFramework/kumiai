@@ -1607,13 +1607,15 @@ for (const mode of ['real-mls', 'double'] as const) {
 
     test('generation beyond the forward limit refuses', async () => {
       const { local, sender } = await appGroup(mode)
-      const frames = await appFrames(sender, 5)
+      const frames = await appFrames(sender, 502)
       const before = encodeClientState(local.state)
-      await expect(local.decrypt(frames[4] as Uint8Array)).rejects.toThrow(
+      await expect(local.decrypt(frames[501] as Uint8Array)).rejects.toThrow(
         'Desired generation too far in the future',
       )
       expect(encodeClientState(local.state)).toEqual(before)
-      expect((await local.decrypt(frames[3] as Uint8Array)).payload).toEqual(new Uint8Array([3]))
+      expect((await local.decrypt(frames[500] as Uint8Array)).payload).toEqual(
+        new Uint8Array([244]),
+      )
     })
 
     test('evicted skipped generation refuses', async () => {

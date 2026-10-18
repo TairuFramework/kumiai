@@ -1,7 +1,7 @@
 import type { ClientState } from './codec.js'
 import { encodeClientState } from './codec.js'
 import type { MemberCredential } from './credential.js'
-import { type GroupHandle, mutexFor } from './group-handle.js'
+import { assertGroupHandle, type GroupHandle, mutexFor } from './group-handle.js'
 
 type SendPolicy = { kind: 'denied' } | { kind: 'bound'; limit: () => number }
 const POLICIES = new WeakMap<GroupHandle, SendPolicy>()
@@ -10,7 +10,7 @@ declare const holdingBrand: unique symbol
 export type HoldingToken = { [holdingBrand]: true }
 const HOLDING = new WeakMap<HoldingToken, GroupHandle>()
 
-/** @internal Test doubles override this kernel under the shared reservation lock. */
+/** Test doubles override this serialized reservation entry, retaining withReservationLock. */
 export const reserveApplicationKernel = Symbol('reserveApplicationKernel')
 
 export class ApplicationSendRefusedError extends Error {
@@ -21,11 +21,13 @@ export class ApplicationSendRefusedError extends Error {
 }
 
 export function denyApplicationSend(handle: GroupHandle): GroupHandle {
+  assertGroupHandle(handle)
   POLICIES.set(handle, { kind: 'denied' })
   return handle
 }
 
 export function bindSendCeiling(handle: GroupHandle, limit: () => number): GroupHandle {
+  assertGroupHandle(handle)
   if (POLICIES.has(handle)) throw new TypeError('Application send policy already set')
   POLICIES.set(handle, { kind: 'bound', limit })
   return handle
@@ -44,6 +46,7 @@ export function ownApplicationGeneration(state: ClientState): number {
 }
 
 export function assertApplicationSend(handle: GroupHandle): void {
+  assertGroupHandle(handle)
   const policy = POLICIES.get(handle)
   if (
     policy?.kind === 'denied' ||
@@ -64,6 +67,20 @@ export async function withHoldingToken<T>(
   } finally {
     HOLDING.delete(holding)
   }
+}
+
+/** A valid token proves this handle's serializer is already held. */
+export function withReservationLock<T>(
+  handle: GroupHandle,
+  holding: HoldingToken | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  assertGroupHandle(handle)
+  if (holding !== undefined) {
+    if (HOLDING.get(holding) !== handle) throw new TypeError('Invalid holding token')
+    return fn()
+  }
+  return mutexFor(handle).run(fn)
 }
 
 export type Relinquished = {
@@ -98,14 +115,19 @@ export async function reserveApplicationRange(
   handle: GroupHandle,
   opts: { floor: number; size: number; cap: number },
 ): Promise<{ pre: Uint8Array; advanced: Uint8Array; start: number; limit: number } | null> {
+  assertGroupHandle(handle)
+  if (!Number.isInteger(opts.floor) || opts.floor < 0)
+    throw new TypeError('Invalid reservation floor')
   if (!isApplicationSendDenied(handle)) throw new TypeError('Reservation requires a denied handle')
-  return mutexFor(handle).run(async () => {
-    const start = Math.max(ownApplicationGeneration(handle.state), opts.floor)
-    if (start >= opts.cap) return null
-    await handle[reserveApplicationKernel](start)
-    const pre = encodeClientState(handle.state)
-    const limit = Math.min(start + opts.size, opts.cap)
-    await handle[reserveApplicationKernel](limit)
-    return { pre, advanced: encodeClientState(handle.state), start, limit }
+  return mutexFor(handle).run(() => {
+    return withHoldingToken(handle, async (holding) => {
+      const start = Math.max(ownApplicationGeneration(handle.state), opts.floor)
+      if (start >= opts.cap) return null
+      await handle[reserveApplicationKernel](start, holding)
+      const pre = encodeClientState(handle.state)
+      const limit = Math.min(start + opts.size, opts.cap)
+      await handle[reserveApplicationKernel](limit, holding)
+      return { pre, advanced: encodeClientState(handle.state), start, limit }
+    })
   })
 }

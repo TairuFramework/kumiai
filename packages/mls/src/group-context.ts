@@ -68,7 +68,15 @@ export function createMlsContext(
     cipherSuite,
     authService,
     clientConfig: {
-      keyRetentionConfig: { ...defaultKeyRetentionConfig, ...options?.keyRetention },
+      keyRetentionConfig: {
+        ...defaultKeyRetentionConfig,
+        ...options?.keyRetention,
+        // Reservations discard up to 16 generations per install. Gaps accumulate to the 500 generation bound.
+        maximumForwardRatchetSteps: Math.max(
+          500,
+          options?.keyRetention?.maximumForwardRatchetSteps ?? 500,
+        ),
+      },
       lifetimeConfig: defaultLifetimeConfig,
       keyPackageEqualityConfig: defaultKeyPackageEqualityConfig,
       paddingConfig: defaultPaddingConfig,

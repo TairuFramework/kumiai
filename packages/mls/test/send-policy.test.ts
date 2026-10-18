@@ -1,7 +1,8 @@
 import { randomIdentity } from '@kokuin/token'
 import { describe, expect, test, vi } from 'vitest'
 
-import { deriveGroup } from '../src/group-handle.js'
+import { createMlsContext } from '../src/group-context.js'
+import { deriveGroup, mutexFor } from '../src/group-handle.js'
 import * as mls from '../src/index.js'
 import {
   ApplicationSendRefusedError,
@@ -20,6 +21,12 @@ import {
 } from '../src/index.js'
 import { createMutex } from '../src/mutex.js'
 import { readSenderData, readSenderLeafIndex } from '../src/sender-data.js'
+import {
+  assertApplicationSend,
+  reserveApplicationKernel,
+  serializeHandle,
+  withReservationLock,
+} from '../src/testing.js'
 import {
   agent,
   lowLevelWelcome,
@@ -114,6 +121,37 @@ describe('owned application reservation', () => {
     await expect(handle.encrypt(payload)).rejects.toBeInstanceOf(ApplicationSendRefusedError)
   })
 
+  test('last generation reserves [499, 500)', async () => {
+    const handle = denyApplicationSend(await fresh())
+    expect(await reserveApplicationRange(handle, { ...range, floor: 499 })).toMatchObject({
+      start: 499,
+      limit: 500,
+    })
+  })
+
+  test.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -1, 0.5])(
+    'invalid floor %s refuses before locking',
+    async (floor) => {
+      const handle = denyApplicationSend(await fresh())
+      const before = encodeClientState(handle.state)
+      const release = await mutexFor(handle).acquire()
+      let outcome: unknown
+      const pending = reserveApplicationRange(handle, { ...range, floor }).catch(
+        (error: unknown) => {
+          outcome = error
+        },
+      )
+      try {
+        for (let i = 0; i < 10; i++) await Promise.resolve()
+        expect(outcome).toBeInstanceOf(TypeError)
+        expect(encodeClientState(handle.state)).toEqual(before)
+      } finally {
+        release()
+        await pending
+      }
+    },
+  )
+
   test('floor skips to 40 and cap truncates at 500', async () => {
     const handle = denyApplicationSend(await fresh())
     expect(await reserveApplicationRange(handle, { ...range, floor: 40 })).toMatchObject({
@@ -157,33 +195,41 @@ describe('exclusive send transfer', () => {
       return sign(...args)
     })
     try {
-      const encrypt = handle.encryptApplication(payload)
+      let encrypted = false
+      const encrypt = handle.encryptApplication(payload).then((frame) => {
+        encrypted = true
+        return frame
+      })
       await entered.promise
       let settled = false
       const transfer = relinquishSend(handle).then((value) => {
+        expect(encrypted).toBe(true)
         settled = true
         return value
       })
       await Promise.resolve()
       expect(settled).toBe(false)
       release.resolve()
-      expect((await encrypt).generation).toBe(0)
+      const admitted = await encrypt
+      expect(admitted.generation).toBe(0)
       const captured = await transfer
       const privateHandle = denyApplicationSend(await restore(handle, captured.state))
-      expect(await reserveApplicationRange(privateHandle, range)).toMatchObject({
-        start: 1,
-        limit: 17,
-      })
+      const reserved = await reserveApplicationRange(privateHandle, range)
+      expect(reserved).toMatchObject({ start: 1, limit: 17 })
+      expect(admitted.generation).toBeLessThan(reserved?.start ?? 0)
+      await expect(handle.encryptApplication(payload)).rejects.toThrow(ApplicationSendRefusedError)
     } finally {
       vi.restoreAllMocks()
     }
   })
 
-  test('does not invoke a mutating method on the supplied object', async () => {
+  test('rejects a proxy before reading, denying or capturing anything', async () => {
     const handle = await fresh()
     const calls: Array<PropertyKey> = []
+    const before = encodeClientState(handle.state)
     const proxy = new Proxy(handle, {
       get(target, key) {
+        calls.push(key)
         const value = Reflect.get(target, key, target)
         if (typeof value !== 'function') return value
         return (...args: Array<unknown>) => {
@@ -192,8 +238,25 @@ describe('exclusive send transfer', () => {
         }
       },
     })
-    await relinquishSend(proxy)
+    await expect(relinquishSend(proxy)).rejects.toThrow(TypeError)
+    expect(() => assertApplicationSend(proxy)).toThrow(TypeError)
+    expect(() => withReservationLock(proxy, undefined, async () => {})).toThrow(TypeError)
+    expect(() => denyApplicationSend(proxy)).toThrow(TypeError)
+    expect(() => bindSendCeiling(proxy, () => 1)).toThrow(TypeError)
+    const optionReads: Array<PropertyKey> = []
+    const options = new Proxy(range, {
+      get(target, key, receiver) {
+        optionReads.push(key)
+        return Reflect.get(target, key, receiver)
+      },
+    })
+    await expect(reserveApplicationRange(proxy, options)).rejects.toThrow(TypeError)
+    expect(optionReads).toEqual([])
     expect(calls).toEqual([])
+    expect(isApplicationSendDenied(proxy)).toBe(false)
+    expect(isApplicationSendDenied(handle)).toBe(false)
+    expect(encodeClientState(handle.state)).toEqual(before)
+    expect((await handle.encryptApplication(payload)).generation).toBe(0)
   })
 })
 
@@ -264,4 +327,79 @@ test('manual acquisition and run share a FIFO queue and release is idempotent', 
   release()
   await Promise.all([rejection, acquired, tail])
   expect(order).toEqual([1, 2, 3])
+})
+
+test('rejects forged handles before reading their state', async () => {
+  const handle = Object.create(mls.GroupHandle.prototype) as GroupHandle
+  await expect(relinquishSend(handle)).rejects.toThrow(TypeError)
+  expect(() => denyApplicationSend(handle)).toThrow(TypeError)
+  expect(() => bindSendCeiling(handle, () => 1)).toThrow(TypeError)
+  await expect(reserveApplicationRange(handle, range)).rejects.toThrow(TypeError)
+  expect(isApplicationSendDenied(handle)).toBe(false)
+})
+
+test('testing reservation and encryption never share a generation', async () => {
+  const handle = await fresh()
+  const [, frame] = await Promise.all([
+    handle[reserveApplicationKernel](16),
+    handle.encryptApplication(payload),
+  ])
+  expect(frame.generation).toBe(16)
+  expect((await handle.encryptApplication(payload)).generation).toBe(17)
+})
+
+test.each([undefined, 100])(
+  'receiver opens a reservation gap above 200 with retention override %s',
+  async (maximumForwardRatchetSteps) => {
+    vi.spyOn(Date, 'now').mockReturnValue(150_000)
+    try {
+      const setup = await pipelineGroup()
+      const peer = agent(62)
+      const { author, joined } = await lowLevelWelcome(
+        setup.group,
+        peer,
+        await timedBinding({ identity: peer, iat: 100, exp: 200 }),
+      )
+      const receiver = await restoreGroup({
+        state: joined.state,
+        credential: joined.credential,
+        ledgerEntries: joined.ledgerTokens,
+        options: {
+          keyRetention: { maximumForwardRatchetSteps },
+          resolveLedgerEntries: setup.group.resolveLedgerEntries,
+        },
+      })
+      await receiver.decrypt(await author.encrypt(payload))
+      const privateHandle = denyApplicationSend(
+        await restore(author, encodeClientState(author.state)),
+      )
+      const reserved = await reserveApplicationRange(privateHandle, { ...range, floor: 490 })
+      if (reserved == null) throw new Error('Missing reservation')
+      const sender = await restore(author, reserved.pre)
+      const frame = await sender.encryptApplication(payload)
+      expect(frame.generation).toBe(490)
+      expect((await receiver.decrypt(frame.ciphertext)).payload).toEqual(payload)
+      expect(receiver.context.clientConfig?.keyRetentionConfig.maximumForwardRatchetSteps).toBe(500)
+      expect(
+        createMlsContext(receiver.context.cipherSuite, undefined, {
+          keyRetention: { maximumForwardRatchetSteps: 600 },
+        }).clientConfig?.keyRetentionConfig.maximumForwardRatchetSteps,
+      ).toBe(600)
+    } finally {
+      vi.restoreAllMocks()
+    }
+  },
+)
+
+test('testing reservation refuses another handle token and an expired token', async () => {
+  const handle = await fresh()
+  const other = await fresh()
+  const before = encodeClientState(handle.state)
+  const saved = await serializeHandle(other, async (holding) => {
+    await expect(handle[reserveApplicationKernel](16, holding)).rejects.toThrow(TypeError)
+    return holding
+  })
+  await expect(other[reserveApplicationKernel](16, saved)).rejects.toThrow(TypeError)
+  expect(encodeClientState(handle.state)).toEqual(before)
+  expect(ownApplicationGeneration(other.state)).toBe(0)
 })

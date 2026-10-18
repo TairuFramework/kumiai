@@ -104,6 +104,7 @@ import {
   ownApplicationGeneration,
   reserveApplicationKernel,
   withHoldingToken,
+  withReservationLock,
 } from './send-policy.js'
 import { type PrivateCommitFrame, readSenderData, readSenderLeafIndex } from './sender-data.js'
 
@@ -111,6 +112,11 @@ import { type PrivateCommitFrame, readSenderData, readSenderLeafIndex } from './
  *  time in issue order. Keyed weakly: the entry is collected with the handle, and
  *  the handle carries no reference back to it. */
 const MUTEXES = new WeakMap<GroupHandle, Mutex>()
+const CONSTRUCTED_HANDLES = new WeakSet<GroupHandle>()
+
+export function assertGroupHandle(handle: GroupHandle): void {
+  if (!CONSTRUCTED_HANDLES.has(handle)) throw new TypeError('Expected a constructed GroupHandle')
+}
 
 export function mutexFor(handle: GroupHandle): Mutex {
   let mutex = MUTEXES.get(handle)
@@ -442,6 +448,7 @@ export class GroupHandle {
     EMITTERS.set(this, params.events ?? new EventEmitter<GroupHandleEvents>())
     this.#pendingControlEvents = params.speculative ? [] : undefined
     this.#admission = this.#computeAdmission()
+    CONSTRUCTED_HANDLES.add(this)
   }
 
   #computeAdmission(): SendAdmission {
@@ -1021,17 +1028,19 @@ export class GroupHandle {
     if (this.#state.groupActiveState.kind !== 'active') throw new Error('Inactive group')
   }
 
-  async [reserveApplicationKernel](target: number): Promise<void> {
-    this.#assertApplicationEligible()
-    while (ownApplicationGeneration(this.#state) < target) {
-      const { newState, consumed } = await createApplicationMessage({
-        context: this.#context,
-        state: this.#state,
-        message: new Uint8Array(),
-      })
-      this.#state = newState
-      zeroAll(consumed)
-    }
+  async [reserveApplicationKernel](target: number, holding?: HoldingToken): Promise<void> {
+    return withReservationLock(this, holding, async () => {
+      this.#assertApplicationEligible()
+      while (ownApplicationGeneration(this.#state) < target) {
+        const { newState, consumed } = await createApplicationMessage({
+          context: this.#context,
+          state: this.#state,
+          message: new Uint8Array(),
+        })
+        this.#state = newState
+        zeroAll(consumed)
+      }
+    })
   }
 
   async readSenderData(

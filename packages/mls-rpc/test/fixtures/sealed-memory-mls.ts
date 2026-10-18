@@ -38,6 +38,7 @@ import {
   assertApplicationSend,
   reserveApplicationKernel,
   serializeHandle,
+  withReservationLock,
 } from '@kumiai/mls/testing'
 import {
   type ControlValidationPort,
@@ -668,16 +669,18 @@ class MemoryControlHandle extends GroupHandle {
     })
   }
 
-  override async [reserveApplicationKernel](target: number): Promise<void> {
-    const state = this.state
-    if (Object.keys(state.unappliedProposals).length !== 0)
-      throw new Error('Cannot send application message with unapplied proposals')
-    if (state.groupActiveState.kind !== 'active') throw new Error('Inactive memory group')
-    if (!this.sendAdmission().admissible) throw new LeafLapsedError('lapsed')
-    const ratchet = state.secretTree.leafNodes[state.privatePath.leafIndex * 2]?.application
-    if (ratchet === undefined) throw new Error('Missing memory sender ratchet')
-    while (ratchet.generation < target) stepRatchet(ratchet)
-    captureReceiveState(this.#view, this.#mls)
+  override async [reserveApplicationKernel](target: number, holding?: HoldingToken): Promise<void> {
+    return withReservationLock(this, holding, async () => {
+      const state = this.state
+      if (Object.keys(state.unappliedProposals).length !== 0)
+        throw new Error('Cannot send application message with unapplied proposals')
+      if (state.groupActiveState.kind !== 'active') throw new Error('Inactive memory group')
+      if (!this.sendAdmission().admissible) throw new LeafLapsedError('lapsed')
+      const ratchet = state.secretTree.leafNodes[state.privatePath.leafIndex * 2]?.application
+      if (ratchet === undefined) throw new Error('Missing memory sender ratchet')
+      while (ratchet.generation < target) stepRatchet(ratchet)
+      captureReceiveState(this.#view, this.#mls)
+    })
   }
 
   override async readSenderData(message: Uint8Array) {
