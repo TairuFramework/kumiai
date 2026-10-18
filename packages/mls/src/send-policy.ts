@@ -9,6 +9,7 @@ const POLICIES = new WeakMap<GroupHandle, SendPolicy>()
 declare const holdingBrand: unique symbol
 export type HoldingToken = { [holdingBrand]: true }
 const HOLDING = new WeakMap<HoldingToken, GroupHandle>()
+const CAPTURED = new WeakSet<HoldingToken>()
 
 /** Test doubles override this serialized reservation entry, retaining withReservationLock. */
 export const reserveApplicationKernel = Symbol('reserveApplicationKernel')
@@ -102,7 +103,11 @@ export async function relinquishSend(
     ledgerTokens: [...handle.ledgerTokens],
     credential: { ...handle.credential },
   })
-  if (opts.holding !== undefined) return capture()
+  // Only the callback's first capture may borrow the held serializer.
+  if (opts.holding !== undefined && !CAPTURED.has(opts.holding)) {
+    CAPTURED.add(opts.holding)
+    return capture()
+  }
   const release = await mutexFor(handle).acquire()
   try {
     return capture()

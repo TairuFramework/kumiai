@@ -12,6 +12,7 @@ import { serializeHandle } from '@kumiai/mls/testing'
 import { encodeAppAAD, frameID } from '@kumiai/rpc'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
+import { entryCapability } from '../src/entry-capability.js'
 import { createLedgerEntrySlot } from '../src/mls.js'
 import { GroupUnavailableError } from '../src/persistence-errors.js'
 import * as reservations from '../src/registry/reserve.js'
@@ -48,6 +49,24 @@ async function stored(fixture: RegistryFixture, incarnation = 1) {
   return { record: { ...record, state: record.state }, generation: ownApplicationGeneration(state) }
 }
 
+function unmodifiedRestore(
+  fixture: RegistryFixture,
+  mode: 'real-mls' | 'double',
+): ReturnType<typeof registryFixtureRestore> {
+  return async (record) => {
+    const { restoreGroup } = await import('@kumiai/mls')
+    const { restoreMemoryControlHandle } = await import('./fixtures/sealed-memory-mls.js')
+    const state = decodeClientState(record.state)
+    if (state === undefined) throw new Error('Invalid test state')
+    return (mode === 'real-mls' ? restoreGroup : restoreMemoryControlHandle)({
+      state,
+      credential: record.credential,
+      ledgerEntries: record.ledger,
+      options: fixture.environment.options,
+    })
+  }
+}
+
 for (const mode of ['real-mls', 'double'] as const) {
   describe(`installation reservations (${mode})`, () => {
     test('seed advances only the stored state and transfers ownership', async () => {
@@ -64,6 +83,27 @@ for (const mode of ['real-mls', 'double'] as const) {
         ApplicationSendRefusedError,
       )
       expect(() => bindSendCeiling(input, () => 100)).toThrow(TypeError)
+    })
+
+    test('later-incarnation seed keeps reservation identity, pre and envelope aligned', async () => {
+      const fixture = await setup(mode)
+      const welcome = await fixture.welcomeHistory('ordinary')
+      await fixture.registry.seed(welcome.exact, { packageUse: welcome.packageUse })
+      const reserve = vi.spyOn(reservations, 'reserveFromBytes')
+      const envelopeFor = vi.spyOn(reservations, 'reservationEnvelope')
+      const key = await fixture.registry.seed(welcome.newer, {
+        replace: true,
+        packageUse: welcome.packageUse,
+      })
+      expect(key.incarnation).toBe(2)
+      const result = await reserve.mock.results[0]?.value
+      expect(result.reservation.identity.incarnation).toBe(key.incarnation)
+      expect(result.reservation.pre.incarnation).toBe(key.incarnation)
+      const saved = (await stored(fixture, key.incarnation)).record
+      const envelope = envelopeFor.mock.results[0]?.value
+      expect(envelope.saved).toEqual(saved)
+      expect(envelope.saved.incarnation).toBe(key.incarnation)
+      expect(result.reservation.pre.epoch).toBe(envelope.saved.epoch)
     })
 
     test('Welcome seed and recovery switch reserve in their installing write', async () => {
@@ -206,6 +246,11 @@ for (const mode of ['real-mls', 'double'] as const) {
         const result = await reserve.mock.results[0]?.value
         expect(result.reservation).toBeNull()
         expect((await stored(fixture)).generation).toBe(0)
+        expect((await stored(fixture)).record.terminal).toBe(false)
+        const capability = entryCapability(fixture.device.groups)
+        if (capability === null) throw new Error('Missing entry capability')
+        const facts = await capability.read('reservation', (reads) => reads.checkpoints())
+        expect(facts.some((fact) => fact.kind === 'publication')).toBe(true)
       },
     )
 
@@ -420,14 +465,11 @@ for (const mode of ['real-mls', 'double'] as const) {
                   configurable: true,
                   get() {
                     if (armed) reads.push(key)
-                    if (key === 'credential')
-                      queueMicrotask(() => {
-                        armed = true
-                      })
                     return typeof value === 'function' ? value.bind(candidate) : value
                   },
                 })
               }
+              armed = true
               try {
                 await persist(candidate, ctx)
               } finally {
@@ -437,11 +479,11 @@ for (const mode of ['real-mls', 'double'] as const) {
           })
           .then(() => {}),
       )
-      expect(reads).toEqual([])
+      expect(reads).toEqual(['state', 'ledgerTokens', 'credential'])
       expect(await fixture.device.groups.loadState(group.key)).toMatchObject({ senderHWM: 16 })
     })
 
-    test.each(['seed', 'switch', 'replace', 'persist', 'persist-journal'] as const)(
+    test.each(['seed', 'switch', 'replace', 'adopt', 'persist', 'persist-journal'] as const)(
       'relinquish-isolation for %s',
       async (path) => {
         const fixture = await setup(mode, path !== 'seed')
@@ -476,17 +518,23 @@ for (const mode of ['real-mls', 'double'] as const) {
           accept = () => fixture.registry.switchIncarnation(input, options)
         } else {
           const access = await fixture.registry.access('reservation')
-          if (path === 'replace' || path === 'persist-journal') {
+          if (path === 'replace' || path === 'adopt' || path === 'persist-journal') {
             const accepted = await fixture.acceptedOrdinary(access)
             input = accepted.candidate
             accept =
               path === 'replace'
                 ? () => access.replace(input, () => accepted.write)
-                : () =>
-                    access.mutate(
-                      async (_current, persist) => persist(input),
-                      () => accepted.write,
-                    )
+                : path === 'adopt'
+                  ? async () => {
+                      if (accepted.write.expected === undefined)
+                        throw new Error('Missing adoption source')
+                      return access.adopt(input, accepted.write.expected, accepted.write)
+                    }
+                  : () =>
+                      access.mutate(
+                        async (_current, persist) => persist(input),
+                        () => accepted.write,
+                      )
           } else {
             input = await access.read((handle) => handle)
             accept = () => access.mutate(async (_handle, persist) => persist(input))
@@ -494,7 +542,6 @@ for (const mode of ['real-mls', 'double'] as const) {
         }
         const reads: Array<string> = []
         let armed = false
-        let watching = false
         // Preserve canonical identity: an outer Proxy would be rejected before transfer.
         for (const key of [
           'state',
@@ -512,18 +559,14 @@ for (const mode of ['real-mls', 'double'] as const) {
             get() {
               // confirmAdopted only flushes queued events; it touches no captured state.
               if (armed && key !== 'confirmAdopted') reads.push(key)
-              if (watching && key === 'credential')
-                queueMicrotask(() => {
-                  armed = true
-                })
               return typeof value === 'function' ? value.bind(input) : value
             },
           })
         }
-        watching = true
+        armed = true
         await accept()
         armed = false
-        expect(reads).toEqual([])
+        expect(reads).toEqual(['state', 'ledgerTokens', 'credential'])
       },
     )
 
@@ -578,6 +621,7 @@ for (const mode of ['real-mls', 'double'] as const) {
                     )
           }
         }
+        const before = await fixture.inspectRows()
         const entered = deferred<void>()
         const released = deferred<void>()
         let unblock: () => void
@@ -624,6 +668,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           expect((await stored(fixture)).generation).toBe(1)
         } else {
           expect(result.installed).toBe(false)
+          expect(await fixture.inspectRows()).toEqual(before)
           if ('error' in result)
             expect(result.error).toMatchObject({
               name: path === 'switch' ? 'RegistryResyncRefusedError' : 'ControlAdoptionMovedError',
@@ -635,17 +680,55 @@ for (const mode of ['real-mls', 'double'] as const) {
       },
     )
 
-    test.each(['replace', 'switch'] as const)(
+    test('switch validates its write before reading the supplied source', async () => {
+      const fixture = await setup(mode, true)
+      const input = await fixture.makeHandle(1)
+      const before = await fixture.inspectRows()
+      const source = vi.fn(() => {
+        throw new Error('source read before validation')
+      })
+      const options = {
+        get source() {
+          return source()
+        },
+        write: {},
+      } as unknown as Parameters<typeof fixture.registry.switchIncarnation>[1]
+      await expect(fixture.registry.switchIncarnation(input, options)).rejects.toThrow(
+        'Restricted registry switch write required',
+      )
+      expect(source).not.toHaveBeenCalled()
+      expect(await fixture.inspectRows()).toEqual(before)
+      await expect(input.encrypt(new Uint8Array([1]))).rejects.toBeInstanceOf(
+        ApplicationSendRefusedError,
+      )
+    })
+
+    test.each(['replace', 'adopt', 'ordinary', 'persist', 'seed', 'switch'] as const)(
       'private restore failure refuses %s without saving',
       async (path) => {
         const fixture = await setup(mode, true)
         const access = await fixture.registry.access('reservation')
         let input: GroupHandle
         let accept: () => Promise<unknown>
-        if (path === 'replace') {
+        if (path === 'seed') {
+          const welcome = await fixture.welcomeHistory('ordinary')
+          input = welcome.newer
+          accept = () =>
+            fixture.registry.seed(input, { replace: true, packageUse: welcome.packageUse })
+        } else if (path !== 'switch') {
           const accepted = await fixture.acceptedOrdinary(access)
           input = accepted.candidate
-          accept = () => access.replace(input, () => accepted.write)
+          accept =
+            path === 'adopt'
+              ? async () => {
+                  if (accepted.write.expected === undefined)
+                    throw new Error('Missing adoption source')
+                  return access.adopt(input, accepted.write.expected, accepted.write)
+                }
+              : path === 'persist'
+                ? () => access.mutate(async (_handle, persist) => persist(input))
+                : () =>
+                    access.replace(input, path === 'ordinary' ? undefined : () => accepted.write)
         } else {
           const recovery = await fixture.confirmedRecovery(access.key, { confirm: true })
           input = recovery.candidate
@@ -669,7 +752,10 @@ for (const mode of ['real-mls', 'double'] as const) {
           accept = () => fixture.registry.switchIncarnation(input, options)
         }
         const before = await fixture.inspectRows()
-        fixture.overrideRestore(async () => {
+        const restore = unmodifiedRestore(fixture, mode)
+        let restores = 0
+        fixture.overrideRestore(async (record) => {
+          if (path === 'persist' && restores++ === 0) return restore(record)
           throw new Error('private restore fault')
         })
         await expect(accept()).rejects.toMatchObject({
@@ -677,9 +763,18 @@ for (const mode of ['real-mls', 'double'] as const) {
           reason: 'invalid',
         })
         expect(await fixture.inspectRows()).toEqual(before)
+        expect(access.runtime.snapshot()).toBeNull()
+        await expect(access.read(() => {})).rejects.toMatchObject({
+          name: 'DisplacedGroupHandleError',
+        })
         await expect(input.encrypt(new Uint8Array([1]))).rejects.toBeInstanceOf(
           ApplicationSendRefusedError,
         )
+        const reopened = await fixture.reopen()
+        fixtures.push(reopened)
+        const current = await reopened.registry.access('reservation')
+        expect(current.runtime.snapshot()?.available).toBe(true)
+        expect(await reopened.inspectRows()).toEqual(before)
       },
     )
 
@@ -723,17 +818,112 @@ for (const mode of ['real-mls', 'double'] as const) {
       await expect(transferred.encrypt(new Uint8Array([1]))).rejects.toBeInstanceOf(
         ApplicationSendRefusedError,
       )
+      expect(access.runtime.snapshot()).toBeNull()
+      await expect(access.read(() => {})).rejects.toMatchObject({
+        name: 'DisplacedGroupHandleError',
+      })
       const reopened = await fixture.reopen()
       fixtures.push(reopened)
-      reopened.overrideRestore(async () => {
-        throw new Error('private restore fault')
-      })
-      await expect(reopened.registry.access(group.key.groupID)).rejects.toMatchObject({
-        name: 'GroupUnavailableError',
-        reason: 'invalid',
-      })
+      expect(
+        (await reopened.registry.access(group.key.groupID)).runtime.snapshot()?.available,
+      ).toBe(true)
       expect(await reopened.device.groups.loadState(group.key)).toEqual(source)
     })
+
+    test.each(['commit', 'rollback'] as const)(
+      'borrowed persist token waits for the bootstrap holder to %s',
+      async (outcome) => {
+        const fixture = await setup(mode, true)
+        const input = await fixture.restoreCommittedSender()
+        const before = await relinquishSend(await fixture.restoreCommittedSender())
+        const entered = deferred<void>()
+        const release = deferred<void>()
+        let borrowed!: Promise<Awaited<ReturnType<typeof relinquishSend>>>
+        let captured = false
+        const holder = input.bootstrapLedger(input.ledgerTokens, {
+          persist: async (candidate, ctx) => {
+            await relinquishSend(candidate, ctx)
+            borrowed = relinquishSend(candidate, ctx).then((value) => {
+              captured = true
+              return value
+            })
+            entered.resolve()
+            await release.promise
+            if (outcome === 'rollback') throw new Error('bootstrap rollback')
+          },
+        })
+        const completion = holder.then(
+          () => null,
+          (error: unknown) => error,
+        )
+        await entered.promise
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 20))
+          expect(captured).toBe(false)
+        } finally {
+          release.resolve()
+        }
+        expect(await completion).toEqual(
+          outcome === 'commit' ? null : new Error('bootstrap rollback'),
+        )
+        expect((await borrowed).state).toEqual(before.state)
+        expect(captured).toBe(true)
+      },
+    )
+
+    test.each(['commit', 'rollback'] as const)(
+      'borrowed persist token waits for the incoming-commit holder to %s',
+      async (outcome) => {
+        const group = await createRegistryCryptoGroup(mode, 'borrowed-incoming', 1)
+        const fixture = group.fixture()
+        fixtures.push(fixture)
+        const { commitKeyRotation } = await import('@kumiai/mls')
+        const { memoryModel } = await import('./fixtures/sealed-memory-mls.js')
+        const commit =
+          mode === 'real-mls'
+            ? (await commitKeyRotation(group.group.committer.handle)).commitMessage
+            : memoryModel(group.group.committer.handle).buildCommit([])
+        const access = group.access()
+        const epoch = access.epoch()
+        const before = await fixture.inspectRows()
+        const entered = deferred<void>()
+        const release = deferred<void>()
+        let borrowed!: Promise<Awaited<ReturnType<typeof relinquishSend>>>
+        let captured = false
+        const holder = access.mutate(async (input, persist) => {
+          await input.processMessage(commit, {
+            persist: async (candidate, ctx) => {
+              await persist(candidate, ctx)
+              borrowed = relinquishSend(candidate, ctx).then((value) => {
+                captured = true
+                return value
+              })
+              entered.resolve()
+              await release.promise
+              if (outcome === 'rollback') throw new Error('receive rollback')
+            },
+          })
+        })
+        const completion = holder.then(
+          () => null,
+          (error: unknown) => error,
+        )
+        await entered.promise
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 20))
+          expect(captured).toBe(false)
+        } finally {
+          release.resolve()
+        }
+        expect(await completion).toEqual(
+          outcome === 'commit' ? null : new Error('receive rollback'),
+        )
+        const state = decodeClientState((await borrowed).state)
+        if (state === undefined) throw new Error('Missing borrowed capture')
+        expect(Number(state.groupContext.epoch)).toBe(outcome === 'commit' ? epoch + 1 : epoch)
+        if (outcome === 'rollback') expect(await fixture.inspectRows()).toEqual(before)
+      },
+    )
 
     test('bootstrapLedger forwards the holding token through the MLS adapter', async () => {
       const fixture = await setup(mode, true)
@@ -1000,6 +1190,117 @@ for (const mode of ['real-mls', 'double'] as const) {
       },
     )
 
+    test('app-open relinquish-isolation starts at acceptance entry', async () => {
+      const group = await createRegistryCryptoGroup(mode, 'open-isolation', 1)
+      const fixture = group.fixture()
+      fixtures.push(fixture)
+      const restore = unmodifiedRestore(fixture, mode)
+      const reads: Array<string> = []
+      fixture.overrideRestore(async (record) => {
+        const handle = await restore(record)
+        const decrypt = handle.decryptStaged.bind(handle)
+        handle.decryptStaged = async (...args) => {
+          const result = await decrypt(...args)
+          for (const key of [
+            'state',
+            'epoch',
+            'groupID',
+            'credential',
+            'ledgerTokens',
+            'listMembers',
+            'exportSecret',
+          ] as const) {
+            const value = Reflect.get(handle, key, handle)
+            Object.defineProperty(handle, key, {
+              configurable: true,
+              get() {
+                reads.push(key)
+                return typeof value === 'function' ? value.bind(handle) : value
+              },
+            })
+          }
+          // Getter setup can itself consult another getter in the memory adapter.
+          reads.length = 0
+          return result
+        }
+        return handle
+      })
+      const aad = encodeAppAAD({ topicID: 'open-topic', intent: 'log' })
+      const ciphertext = await group.sender.handle.encrypt(
+        encodeEventFrame('posted', { text: 'capture' }),
+        { aad },
+      )
+      expect(
+        await group.access().openBatch([
+          {
+            ciphertext,
+            expectedAAD: aad,
+            frame: {
+              ...group.key,
+              topicID: 'open-topic',
+              protocol: 'chat',
+              id: frameID('open-topic', ciphertext),
+              segment: group.access().epoch(),
+              position: '00001',
+            },
+          },
+        ]),
+      ).toMatchObject([{ kind: 'opened' }])
+      expect(reads).toEqual(['state', 'ledgerTokens', 'credential'])
+    })
+
+    test('app-open private restore failure invalidates the advertised owner without saving', async () => {
+      const group = await createRegistryCryptoGroup(mode, 'open-fault', 1)
+      const fixture = group.fixture()
+      fixtures.push(fixture)
+      const access = group.access()
+      const aad = encodeAppAAD({ topicID: 'open-topic', intent: 'log' })
+      const ciphertext = await group.sender.handle.encrypt(
+        encodeEventFrame('posted', { text: 'capture' }),
+        { aad },
+      )
+      const restore = unmodifiedRestore(fixture, mode)
+      let restores = 0
+      let input: GroupHandle | undefined
+      fixture.overrideRestore(async (record) => {
+        if (restores++ !== 0) throw new Error('private restore fault')
+        input = await restore(record)
+        return input
+      })
+      const before = await fixture.inspectRows()
+      await expect(
+        access.openBatch([
+          {
+            ciphertext,
+            expectedAAD: aad,
+            frame: {
+              ...group.key,
+              topicID: 'open-topic',
+              protocol: 'chat',
+              id: frameID('open-topic', ciphertext),
+              segment: access.epoch(),
+              position: '00001',
+            },
+          },
+        ]),
+      ).rejects.toMatchObject({ name: 'GroupUnavailableError', reason: 'invalid' })
+      expect(await fixture.inspectRows()).toEqual(before)
+      expect(access.runtime.snapshot()).toBeNull()
+      await expect(access.read(() => {})).rejects.toMatchObject({
+        name: 'DisplacedGroupHandleError',
+      })
+      if (input === undefined) throw new Error('Missing open input')
+      await expect(input.encrypt(new Uint8Array([1]))).rejects.toBeInstanceOf(
+        ApplicationSendRefusedError,
+      )
+      const reopened = await fixture.reopen()
+      fixtures.push(reopened)
+      expect(
+        (await reopened.registry.access(group.key.groupID)).runtime.snapshot()?.available,
+      ).toBe(true)
+      expect(await reopened.inspectRows()).toEqual(before)
+    })
+
     test('app-open relinquishes after decrypt and drains an already admitted encrypt', async () => {
       const group = await createRegistryCryptoGroup(mode, 'open-capture', 1)
       const fixture = group.fixture()
@@ -1084,7 +1385,13 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
       expect((await sending).generation).toBe(16)
       expect(await opening).toMatchObject([{ kind: 'opened' }])
-      expect(await fixture.device.groups.loadState(group.key)).toMatchObject({ senderHWM: 17 })
+      const record = await fixture.device.groups.loadState(group.key)
+      expect(record).toMatchObject({ senderHWM: 17 })
+      if (record === null || record.deleted || record.state === null)
+        throw new Error('Missing open state')
+      const state = decodeClientState(record.state)
+      if (state === undefined) throw new Error('Invalid open state')
+      expect(ownApplicationGeneration(state)).toBe(17)
       await expect(input.encrypt(new Uint8Array([2]))).rejects.toBeInstanceOf(
         ApplicationSendRefusedError,
       )

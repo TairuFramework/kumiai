@@ -78,7 +78,19 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   const environment: ColdEnvironment = {
     ownerDID: persistence.ownerDID,
     recovery: { ...params.recovery, options: registryOptions(params.recovery.options) },
-    restore: params.restore,
+    restore: async (record) => {
+      try {
+        return await params.restore(record)
+      } catch (cause) {
+        const error = new GroupUnavailableError({ reason: 'invalid', cause })
+        const slot = groupSlot(record.groupID)
+        const previous = slot.owner
+        invalidateAccess(slot, false)
+        publish(slot, previous)
+        await diagnoseFailure(error)
+        throw error
+      }
+    },
   }
   const slots = new Map<string, GroupSlot>()
   const latches = new Map<string, ReturnType<typeof createRegistrySafetyLatch>>()
@@ -286,6 +298,10 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     slot.generation++
     slot.owner = null
   }
+  function invalidateAccess(slot: GroupSlot, displaced: boolean): void {
+    if (slot.retirement !== null && !displaced && slot.owner !== null) slot.owner.cacheValid = false
+    else invalidate(slot)
+  }
   function publish(slot: GroupSlot, previous: RegistryOwner | null): void {
     if (previous !== null && previous !== slot.owner) previous.runtime.publish(null)
     if (slot.owner !== null) slot.owner.runtime.publish(slot.owner.snapshot)
@@ -376,8 +392,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         },
         invalidate: (displaced) => {
           if (slot.owner !== owner) return
-          if (slot.retirement !== null && !displaced) owner.cacheValid = false
-          else invalidate(slot)
+          invalidateAccess(slot, displaced)
         },
       })
       owner.access = {

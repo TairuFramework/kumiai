@@ -607,16 +607,27 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
         if (fault === 'cursor') write.destination.control.cursor.position = 'wrong-position'
         if (fault === 'verdict') proof = { ...proof, verdict: new Uint8Array([0]) }
         const before = await fixture.inspectRows()
-        await expect(
+        const outcome = await caught(
           owner.switchIncarnation(recovery.candidate, {
             source,
             rejoinID: recovery.record.id,
             proof,
             write,
           }),
-        ).rejects.toThrow()
+        )
+        expect(outcome).toHaveProperty('error')
         expect(await fixture.inspectRows()).toEqual(before)
-        expect(await access.read((handle) => handle.groupID)).toBe(groupID)
+        if (
+          'error' in outcome &&
+          outcome.error instanceof Error &&
+          outcome.error.name === 'GroupUnavailableError'
+        ) {
+          expect(access.runtime.snapshot()).toBeNull()
+          await expect(access.read(() => {})).rejects.toMatchObject({
+            name: 'DisplacedGroupHandleError',
+          })
+        }
+        expect(await (await owner.access(groupID)).read((handle) => handle.groupID)).toBe(groupID)
       } finally {
         await fixture.close()
       }

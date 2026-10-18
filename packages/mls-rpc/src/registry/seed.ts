@@ -22,7 +22,12 @@ import type {
 import { clearGroupCondition } from '../safety-conditions.js'
 import { openSuccessorTombstone } from '../successor.js'
 import type { ColdEnvironment } from './cold.js'
-import { capturedRecord, reservationEnvelope, reserveFromBytes } from './reserve.js'
+import {
+  capturedRecord,
+  reservationEnvelope,
+  reserveFromBytes,
+  restoreCaptured,
+} from './reserve.js'
 import { retireIncarnation } from './retired.js'
 import type { RegistryRetirement } from './retirement.js'
 import { recoveryTrustFor } from './trust.js'
@@ -187,12 +192,8 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
   ): Promise<GroupKey> => {
     const captured = await relinquishSend(group)
     const groupID = captured.credential.groupID
-    const reserved = await reserveFromBytes(
-      params.environment,
-      capturedRecord(captured, { groupID, incarnation: 1 }, 1),
-      0,
-    )
-    const installed = reserved.handle
+    const base = capturedRecord(captured, { groupID, incarnation: 1 }, 1)
+    const installed = await restoreCaptured(params.environment, base)
     params.retirement.assertAvailable(groupID)
     await params.start()
     const welcome = {
@@ -243,6 +244,11 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
           ? source.incarnation
           : (admission.lifetime?.latestIncarnation ?? 0) + 1,
     }
+    const reserved = await reserveFromBytes(
+      { ...params.environment, restore: async () => installed },
+      { ...base, ...key },
+      0,
+    )
     validateRegistryHandle({
       handle: installed,
       key,
@@ -290,7 +296,7 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
             ...key,
             version: 1,
             deleted: false as const,
-            terminal: installed.state.groupActiveState.kind === 'removedFromGroup',
+            terminal: false,
             epoch: Number(installed.epoch),
             epochAuthenticator: installed.state.keySchedule.epochAuthenticator.slice(),
             state: reserved.state,
@@ -316,7 +322,6 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
                   ? null
                   : {
                       ...reserved.reservation,
-                      identity: { ...reserved.reservation.identity, ...key },
                       envelope: reservationEnvelope(record),
                     },
               trust: recoveryTrustFor(installed, key, current.trust),
@@ -355,17 +360,16 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
           await stores.trust.save(prepared.trust)
           if (source !== null) await clearGroupCondition(stores.checkpoints, source)
           await stores.checkpoints.put(prepared.checkpoint)
-          if (!prepared.record.terminal)
-            await stores.checkpoints.put({
-              kind: 'publication',
-              id: `publication:${prepared.checkpoint.id}`,
-              key,
-              factID: prepared.checkpoint.id,
-              frame: null,
-              publishID: null,
-              accepted: false,
-              nextHeartbeatAt: null,
-            })
+          await stores.checkpoints.put({
+            kind: 'publication',
+            id: `publication:${prepared.checkpoint.id}`,
+            key,
+            factID: prepared.checkpoint.id,
+            frame: null,
+            publishID: null,
+            accepted: false,
+            nextHeartbeatAt: null,
+          })
           await rows.control.apply({ cursor: null }, mutationID)
           await rows.anchor.save(null)
           return key

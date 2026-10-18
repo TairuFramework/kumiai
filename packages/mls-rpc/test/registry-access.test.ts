@@ -414,7 +414,8 @@ for (const mode of ['real-mls', 'double'] as const) {
       async (kind) => {
         const fixture = await create()
         try {
-          const access = await registry(fixture).access(groupID)
+          const owner = registry(fixture)
+          const access = await owner.access(groupID)
           const { candidate, expected, write } = await accepted(fixture, access)
           if (kind === 'credential')
             Object.defineProperty(candidate, 'credential', {
@@ -430,9 +431,9 @@ for (const mode of ['real-mls', 'double'] as const) {
               name: 'GroupUnavailableError',
               reason: 'invalid',
             })
+            expect(access.runtime.snapshot()).toBeNull()
             await expect(access.replace(candidate, () => write)).rejects.toMatchObject({
-              name: 'GroupUnavailableError',
-              reason: 'invalid',
+              name: 'DisplacedGroupHandleError',
             })
           } else {
             expect(await access.adopt(candidate, expected, write)).toBe('moved')
@@ -441,7 +442,7 @@ for (const mode of ['real-mls', 'double'] as const) {
             })
           }
           expect(work).not.toHaveBeenCalled()
-          expect(await evidence(fixture, access)).toEqual(before)
+          expect(await evidence(fixture, await owner.access(groupID))).toEqual(before)
         } finally {
           await fixture.close()
         }

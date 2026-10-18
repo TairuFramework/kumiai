@@ -134,15 +134,12 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
   const { persistence, capability, retirement } = environment
   return async (input: GroupHandle, params) => {
     const captured = await relinquishSend(input)
-    const capturedState = capturedRecord(
-      captured,
-      { groupID: captured.credential.groupID, incarnation: params.source.key.incarnation + 1 },
-      1,
-    )
-    const candidate = await restoreCaptured(environment.cold, capturedState)
     validateWrite(params.write)
-    // Capture caller input before any await, including values used again in work.
     const { source, rejoinID, proof, write } = copyStoredValue(params)
+    const groupID = source.key.groupID
+    const destination = { groupID, incarnation: source.key.incarnation + 1 }
+    const capturedState = capturedRecord(captured, destination, 1)
+    const candidate = await restoreCaptured(environment.cold, capturedState)
     const cursor = { position: proof.position, epoch: Number(candidate.epoch) }
     if (
       write.source.rejoinID !== rejoinID ||
@@ -150,8 +147,6 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
     )
       throw new RegistryResyncRefusedError({ reason: 'tuple' })
     const authorisationID = write.source.authorisationID
-    const groupID = source.key.groupID
-    const destination = { groupID, incarnation: source.key.incarnation + 1 }
     function assertChoice(records: Array<CheckpointRecord>): void {
       if (authorisationID === undefined && hasActiveManualRecovery(records, source.key))
         throw new GroupStateConflictError('Manual recovery owns the source')
