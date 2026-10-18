@@ -321,19 +321,11 @@ describe('registry peer recovery coordination', () => {
               entrySlot: api.createLedgerEntrySlot(),
             }),
           createPeer: async (key, options) => {
-            const access = await f.registry.access(key.groupID)
             const ports = f.device.groups.ports(key)
             return createGroupPeer({
               ...options,
               hub,
-              crypto: api.createGroupCrypto({
-                access: {
-                  ...api.createRegistryHandleAccess({ access }),
-                  open: async () => {
-                    throw new Error('No app frames expected')
-                  },
-                },
-              }),
+              crypto: api.createGroupCrypto({ access: await f.registry.access(key.groupID) }),
               control: ports.control,
               anchorStore: ports.anchor,
               appCursorStore: ports.cursor,

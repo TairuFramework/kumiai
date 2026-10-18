@@ -23,7 +23,6 @@ import { createLedgerEntrySlot } from '../src/mls.js'
 import { registrySafety } from '../src/registry/safety.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
-import { createRegistryHandleAccess } from '../src/registry-handle-access.js'
 import { createRegistryFixture } from './fixtures/registry.js'
 import {
   memoryModel,
@@ -130,14 +129,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           const handle = await access.read((value) => value)
           const ports = f.device.groups.ports(key)
           const control = ports.control
-          const crypto = createGroupCrypto({
-            access: {
-              ...createRegistryHandleAccess({ access }),
-              open: async () => {
-                throw new Error('No application frames in this witness')
-              },
-            },
-          })
+          const crypto = createGroupCrypto({ access: await f.registry.access(key.groupID) })
           const mls =
             mode === 'real-mls'
               ? await createRegistryGroupMLS({

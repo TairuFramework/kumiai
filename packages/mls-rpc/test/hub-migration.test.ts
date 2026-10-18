@@ -1,8 +1,11 @@
+import { encodeEventFrame } from '@kumiai/broadcast'
 import {
   APP_TOPIC_LABEL,
   type CheckpointRecord,
   type ControlSnapshot,
   canMoveCurrent,
+  createGroupPeer,
+  encodeAppAAD,
   type GroupKey,
   type LogHub,
   type LogPosition,
@@ -22,6 +25,7 @@ import {
   registryFixtureMutateControl,
   registryFixtureSafetyParams,
 } from './fixtures/registry.js'
+import { createRegistryCryptoGroup } from './fixtures/registry-crypto.js'
 
 const key = { groupID: 'hub-migration', incarnation: 1 }
 const binding = { targetID: 'registry-recovery-hub', commitTopicID: `commits/${key.groupID}` }
@@ -89,6 +93,132 @@ async function start(
 }
 
 for (const mode of ['real-mls', 'double'] as const) {
+  test(`moved current device receives app frames from a fresh hub over registry crypto / ${mode}`, async () => {
+    const group = await createRegistryCryptoGroup(mode, 'moved-current-app', 2)
+    const fixture = group.fixture()
+    const key = group.key
+    const { DurableFakeHub } = (await import(
+      new URL('../../rpc/test/fixtures/durable-fake-hub.ts', import.meta.url).href
+    )) as { DurableFakeHub: new () => LogHub }
+    const original = new DurableFakeHub()
+    const destination = new DurableFakeHub()
+    const seen: Array<unknown> = []
+    const created: Array<api.RegistryPeerOptions> = []
+    const cryptos: Array<ReturnType<typeof group.receiver>> = []
+    const chat = {
+      'chat/posted': { type: 'event', retain: 'log', data: { type: 'object' } },
+    } as const
+    const topicID = protocolTopic(
+      await group.sender.handle.exportSecret(APP_TOPIC_LABEL, new Uint8Array(), 32),
+      group.access().epoch(),
+      'chat',
+    )
+    let owner: api.RegistryPeer | undefined
+    try {
+      owner = await api.createRegistryPeer({
+        registry: fixture.registry,
+        key,
+        recovery: fixture.environment,
+        target: { targetID: 'original-hub', topicID: 'original-commits' },
+        continuation: api.createRecoveryContinuationPort({
+          registry: fixture.registry,
+          persistence: fixture.device.groups,
+        }),
+        createMLS: (current, _handoff, options) =>
+          api.createRegistryGroupMLS({
+            registry: fixture.registry,
+            key: current,
+            recovery: fixture.environment,
+            identity: fixture.identity,
+            entrySlot: api.createLedgerEntrySlot(),
+            ...options,
+          }),
+        createPeer: async (current, options) => {
+          created.push(options)
+          const crypto = api.createGroupCrypto({
+            access: await fixture.registry.access(current.groupID),
+          })
+          cryptos.push(crypto)
+          const ports = fixture.device.groups.ports(current)
+          return createGroupPeer({
+            ...options,
+            hub: options.hub ?? original,
+            crypto,
+            control: ports.control,
+            anchorStore: ports.anchor,
+            appCursorStore: ports.cursor,
+            appOutbox: ports.outbox,
+            appOutboxLimit: 16,
+            localDID: fixture.identity.id,
+            protocols: { chat },
+            handlers: {
+              chat: {
+                'chat/posted': ({ data, message, frame }) => {
+                  expect(message.payload).toMatchObject({ iss: group.sender.identity.id })
+                  expect(frame?.topicID).toBe(topicID)
+                  seen.push(data)
+                },
+              },
+            },
+            validation: {
+              restoreValidation: async () => {
+                throw new Error('Unexpected control validation')
+              },
+            },
+            readEvidence: () => fixture.device.groups.readEvidence(current),
+            prepareBuild: async () => {
+              throw new Error('Unexpected control build')
+            },
+            adopt: async () => {
+              throw new Error('Unexpected adoption')
+            },
+            deliverWelcome: async () => {},
+          })
+        },
+      })
+      await owner.ready
+      const publish = async (hub: LogHub, text: string) =>
+        hub.publish({
+          topicID,
+          senderDID: group.sender.identity.id,
+          payload: await group.sender.handle.encrypt(encodeEventFrame('chat/posted', { text }), {
+            aad: encodeAppAAD({ topicID, intent: 'log' }),
+          }),
+          retain: 'log',
+        })
+      const first = await publish(original, 'before move')
+      const ports = fixture.device.groups.ports(key)
+      await vi.waitFor(async () => expect(await ports.cursor.load(topicID)).toBe(first.sequenceID))
+      expect(seen).toEqual([{ text: 'before move' }])
+      const safety = api.createGroupSafety(await registryFixtureSafetyParams(fixture))
+      const epoch = group.access().epoch()
+      expect(
+        await safety.recover(key, {
+          mode: 'resync',
+          target: { ...movedBinding, hub: destination },
+        }),
+      ).toEqual(key)
+      expect(created).toHaveLength(2)
+      expect(created[1]?.hub).toBe(destination)
+      expect(await ports.cursor.load(topicID)).toBeNull()
+      expect(group.access().epoch()).toBe(epoch)
+      const second = await publish(destination, 'after move')
+      expect(second.sequenceID).toBe(first.sequenceID)
+      await vi.waitFor(() =>
+        expect(seen).toEqual([{ text: 'before move' }, { text: 'after move' }]),
+      )
+      await vi.waitFor(async () => expect(await ports.cursor.load(topicID)).toBe(second.sequenceID))
+      expect(await cryptos[1]?.pending.list()).toEqual([])
+      owner.dispose()
+      await owner.drained()
+      expect(seen).toHaveLength(2)
+    } finally {
+      owner?.dispose()
+      await owner?.drained()
+      await group.close()
+    }
+  })
+
   for (const context of ['supplied', 'absent'] as const) {
     test(`unresolvable call time target remains paused / ${mode} / ${context}`, async () => {
       let fixture = await createRegistryFixture({
