@@ -95,16 +95,17 @@ export async function relinquishSend(
   opts: { holding?: HoldingToken } = {},
 ): Promise<Relinquished> {
   denyApplicationSend(handle)
-  if (opts.holding !== undefined && HOLDING.get(opts.holding) !== handle) {
-    throw new TypeError('Invalid holding token')
-  }
   const capture = (): Relinquished => ({
     state: encodeClientState(handle.state),
     ledgerTokens: [...handle.ledgerTokens],
     credential: { ...handle.credential },
   })
-  // Only the callback's first capture may borrow the held serializer.
-  if (opts.holding !== undefined && !CAPTURED.has(opts.holding)) {
+  // Only the minting callback's handle may borrow its held serializer, once.
+  if (
+    opts.holding !== undefined &&
+    HOLDING.get(opts.holding) === handle &&
+    !CAPTURED.has(opts.holding)
+  ) {
     CAPTURED.add(opts.holding)
     return capture()
   }

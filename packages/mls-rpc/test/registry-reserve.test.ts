@@ -5,6 +5,7 @@ import {
   type ControllerBinding,
   decodeClientState,
   type GroupHandle,
+  type HoldingToken,
   ownApplicationGeneration,
   relinquishSend,
 } from '@kumiai/mls'
@@ -778,6 +779,117 @@ for (const mode of ['real-mls', 'double'] as const) {
       },
     )
 
+    test.each(['ordinary', 'persist'] as const)(
+      'noncanonical private restore invalidates %s access without saving',
+      async (path) => {
+        const fixture = await setup(mode, true)
+        const access = await fixture.registry.access('reservation')
+        const accepted = await fixture.acceptedOrdinary(access)
+        const before = await fixture.inspectRows()
+        const restore = unmodifiedRestore(fixture, mode)
+        let restores = 0
+        fixture.overrideRestore(async (record) => {
+          if (path === 'persist' && restores++ === 0) return restore(record)
+          return new Proxy(await restore(record), {})
+        })
+        await expect(
+          path === 'persist'
+            ? access.mutate(async (_handle, persist) => persist(accepted.candidate))
+            : access.replace(accepted.candidate),
+        ).rejects.toMatchObject({ name: 'GroupUnavailableError', reason: 'invalid' })
+        expect(await fixture.inspectRows()).toEqual(before)
+        expect(access.runtime.snapshot()).toBeNull()
+        await expect(access.read(() => {})).rejects.toMatchObject({
+          name: 'DisplacedGroupHandleError',
+        })
+        await expect(accepted.candidate.encrypt(new Uint8Array([1]))).rejects.toBeInstanceOf(
+          ApplicationSendRefusedError,
+        )
+        const reopened = await fixture.reopen()
+        fixtures.push(reopened)
+        expect((await reopened.registry.access('reservation')).runtime.snapshot()?.available).toBe(
+          true,
+        )
+        expect(await reopened.inspectRows()).toEqual(before)
+      },
+    )
+
+    test.each(['reject', 'noncanonical'] as const)(
+      'displaced access private restore %s preserves its replacement owner',
+      async (fault) => {
+        const fixture = await setup(mode, true)
+        const accessA = await fixture.registry.access('reservation')
+        const accepted = await fixture.acceptedOrdinary(accessA)
+        const restore = unmodifiedRestore(fixture, mode)
+        fixture.overrideRestore(async () => {
+          throw new Error('displace first owner')
+        })
+        await expect(accessA.read(() => {})).rejects.toMatchObject({ reason: 'invalid' })
+        fixture.overrideRestore(restore)
+        const accessB = await fixture.registry.access('reservation')
+        expect(accessB).not.toBe(accessA)
+        const before = await fixture.inspectRows()
+        fixture.overrideRestore(async (record) => {
+          if (fault === 'reject') throw new Error('stale private restore fault')
+          return new Proxy(await restore(record), {})
+        })
+        if (accepted.write.expected === undefined) throw new Error('Missing adoption source')
+        await expect(
+          accessA.adopt(accepted.candidate, accepted.write.expected, accepted.write),
+        ).rejects.toMatchObject({ name: 'GroupUnavailableError', reason: 'invalid' })
+        fixture.overrideRestore(restore)
+        expect(accessB.runtime.snapshot()?.available).toBe(true)
+        expect(await fixture.registry.access('reservation')).toBe(accessB)
+        expect(await accessB.read((handle) => handle.credential.id)).toBe(fixture.identity.id)
+        expect(await fixture.inspectRows()).toEqual(before)
+      },
+    )
+
+    test('an unconsumed persist token for another handle waits without consuming authorization', async () => {
+      const fixture = await setup(mode, true)
+      const input = await fixture.restoreCommittedSender()
+      const other = await fixture.restoreCommittedSender()
+      const before = await relinquishSend(await fixture.restoreCommittedSender())
+      const entered = deferred<void>()
+      const release = deferred<void>()
+      const holder = serializeHandle(other, async () => {
+        entered.resolve()
+        await release.promise
+      })
+      await entered.promise
+      let borrowed!: Promise<unknown>
+      let settled = false
+      try {
+        await input.bootstrapLedger(input.ledgerTokens, {
+          persist: async (candidate, ctx) => {
+            borrowed = relinquishSend(other, ctx).then(
+              (value) => {
+                settled = true
+                return value
+              },
+              (error: unknown) => {
+                settled = true
+                return error
+              },
+            )
+            await new Promise((resolve) => setTimeout(resolve, 20))
+            expect(settled).toBe(false)
+            const intended = relinquishSend(candidate, ctx)
+            const bounded = new Promise<never>((_resolve, reject) => {
+              const timer = setTimeout(() => reject(new Error('Persist token deadlock')), 2000)
+              void intended.finally(() => clearTimeout(timer)).catch(() => {})
+            })
+            expect((await Promise.race([intended, bounded])).state).toEqual(before.state)
+            expect(settled).toBe(false)
+          },
+        })
+      } finally {
+        release.resolve()
+        await holder
+      }
+      expect(await borrowed).toMatchObject({ state: before.state })
+    })
+
     test('incoming persist restore failure keeps the committed source and the caller denied', async () => {
       const group = await createRegistryCryptoGroup(mode, 'incoming-fault', 1)
       const fixture = group.fixture()
@@ -828,6 +940,38 @@ for (const mode of ['real-mls', 'double'] as const) {
         (await reopened.registry.access(group.key.groupID)).runtime.snapshot()?.available,
       ).toBe(true)
       expect(await reopened.device.groups.loadState(group.key)).toEqual(source)
+    })
+
+    test('an expired unconsumed persist token waits for the current holder', async () => {
+      const fixture = await setup(mode, true)
+      const input = await fixture.restoreCommittedSender()
+      let context: { holding?: HoldingToken } | undefined
+      await input.bootstrapLedger(input.ledgerTokens, {
+        persist: async (_candidate, ctx) => {
+          context = ctx
+        },
+      })
+      const entered = deferred<void>()
+      const release = deferred<void>()
+      const holder = serializeHandle(input, async () => {
+        entered.resolve()
+        await release.promise
+      })
+      await entered.promise
+      let captured = false
+      const transfer = relinquishSend(input, context).then((value) => {
+        captured = true
+        return value
+      })
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        expect(captured).toBe(false)
+      } finally {
+        release.resolve()
+        await holder
+      }
+      await transfer
+      expect(captured).toBe(true)
     })
 
     test.each(['commit', 'rollback'] as const)(

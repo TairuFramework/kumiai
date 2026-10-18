@@ -65,14 +65,17 @@ export async function restoreCaptured(
   environment: ColdEnvironment,
   record: ReadableGroupState,
 ): Promise<GroupHandle> {
-  try {
-    return denyApplicationSend(
-      restrictCommitAuthoring(await environment.restore(copyRecord(record))),
-    )
-  } catch (cause) {
-    // biome-ignore lint/style/useErrorCause: The constructor forwards params.cause.
-    throw new GroupUnavailableError({ reason: 'invalid', cause })
+  const restore = async () => {
+    try {
+      return denyApplicationSend(
+        restrictCommitAuthoring(await environment.restore(copyRecord(record))),
+      )
+    } catch (cause) {
+      // biome-ignore lint/style/useErrorCause: The constructor forwards params.cause.
+      throw new GroupUnavailableError({ reason: 'invalid', cause })
+    }
   }
+  return environment.withPrivateRestore?.(record, restore) ?? restore()
 }
 
 export function eligibilityOf(state: ClientState, lapsed: boolean): Uint8Array {

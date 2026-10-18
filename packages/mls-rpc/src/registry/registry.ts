@@ -78,19 +78,8 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   const environment: ColdEnvironment = {
     ownerDID: persistence.ownerDID,
     recovery: { ...params.recovery, options: registryOptions(params.recovery.options) },
-    restore: async (record) => {
-      try {
-        return await params.restore(record)
-      } catch (cause) {
-        const error = new GroupUnavailableError({ reason: 'invalid', cause })
-        const slot = groupSlot(record.groupID)
-        const previous = slot.owner
-        invalidateAccess(slot, false)
-        publish(slot, previous)
-        await diagnoseFailure(error)
-        throw error
-      }
-    },
+    restore: params.restore,
+    withPrivateRestore: privateRestoreBoundary(),
   }
   const slots = new Map<string, GroupSlot>()
   const latches = new Map<string, ReturnType<typeof createRegistrySafetyLatch>>()
@@ -136,6 +125,26 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     } catch (failure) {
       if (failure instanceof GroupUnavailableError && failure.reason === 'invalid') throw failure
       // Failed persistence leaves the latch and original trust diagnosis authoritative.
+    }
+  }
+  function privateRestoreBoundary(
+    owner?: RegistryOwner,
+  ): NonNullable<ColdEnvironment['withPrivateRestore']> {
+    return async (record, restore) => {
+      const slot = groupSlot(record.groupID)
+      const generation = slot.generation
+      const previous = owner ?? slot.owner
+      try {
+        return await restore()
+      } catch (error) {
+        // A failed old restore must not clear a replacement owner.
+        if (slot.owner === previous && slot.generation === generation) {
+          invalidateAccess(slot, false)
+          publish(slot, previous)
+        }
+        await diagnoseFailure(error)
+        throw error
+      }
     }
   }
   const diagnosing = new Set<string>()
@@ -364,7 +373,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       const access = createRegistryAccess({
         owner,
         capability,
-        environment,
+        environment: { ...environment, withPrivateRestore: privateRestoreBoundary(owner) },
         restoreCandidate: params.restoreCandidate,
         resolve: (mutationID) => persistence.groups.resolve(groupID, mutationID),
         load: (reads, assertMutationSafety) =>

@@ -395,12 +395,14 @@ for (const mode of ['real-mls', 'double'] as const) {
   }
 
   for (const callback of ['bootstrap', 'process'] as const) {
-    test(`holding token is valid only inside ${callback} persist / ${mode}`, async () => {
+    test(`holding token authorizes its callback handle during ${callback} persist / ${mode}`, async () => {
       const { local, peer, restore, commit } = await fixture()
       let saved: HoldingToken | undefined
       const persist = async (handle: GroupHandle, { holding }: { holding: HoldingToken }) => {
         saved = holding
-        await expect(relinquishSend(peer, { holding })).rejects.toThrow(TypeError)
+        await expect(relinquishSend(peer, { holding })).resolves.toMatchObject({
+          state: encodeClientState(peer.state),
+        })
         const captured = await relinquishSend(handle, { holding })
         const copy = denyApplicationSend(await restore(captured.state))
         expect(await reserveApplicationRange(copy, { floor: 0, size: 16, cap: 500 })).toMatchObject(
@@ -409,7 +411,9 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
       if (callback === 'bootstrap') await local.bootstrapLedger(local.ledgerTokens, { persist })
       else await local.processMessage(await commit(), { persist })
-      await expect(relinquishSend(local, { holding: saved })).rejects.toThrow(TypeError)
+      await expect(relinquishSend(local, { holding: saved })).resolves.toMatchObject({
+        state: encodeClientState(local.state),
+      })
     })
 
     test(`without holding token transfer waits inside ${callback} persist / ${mode}`, async () => {

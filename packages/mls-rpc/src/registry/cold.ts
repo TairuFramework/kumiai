@@ -32,6 +32,10 @@ export type ColdEnvironment = {
   ownerDID: string
   recovery: RecoveryEnvironment
   restore(record: ReadableGroupState): Promise<GroupHandle>
+  withPrivateRestore?(
+    record: ReadableGroupState,
+    restore: () => Promise<GroupHandle>,
+  ): Promise<GroupHandle>
 }
 
 export function copyRecord(record: ReadableGroupState): ReadableGroupState {
@@ -52,21 +56,24 @@ export async function restoreValidated(
   value: ValidatedGroupState,
   environment: ColdEnvironment,
 ): Promise<GroupHandle> {
-  try {
-    const handle = restrictCommitAuthoring(await environment.restore(copyRecord(value.record)))
-    validateRegistryHandle({
-      handle,
-      key: { ...value.key },
-      record: copyRecord(value.record),
-      trust: decodeStoredValue(encodeStoredValue(value.trust)) as GroupRecoveryTrust,
-      environment: environment.recovery,
-      ownerDID: environment.ownerDID,
-    })
-    return handle
-  } catch (cause) {
-    // biome-ignore lint/style/useErrorCause: The constructor forwards params.cause to Error.
-    throw new GroupUnavailableError({ reason: 'invalid', cause })
+  const restore = async () => {
+    try {
+      const handle = restrictCommitAuthoring(await environment.restore(copyRecord(value.record)))
+      validateRegistryHandle({
+        handle,
+        key: { ...value.key },
+        record: copyRecord(value.record),
+        trust: decodeStoredValue(encodeStoredValue(value.trust)) as GroupRecoveryTrust,
+        environment: environment.recovery,
+        ownerDID: environment.ownerDID,
+      })
+      return handle
+    } catch (cause) {
+      // biome-ignore lint/style/useErrorCause: The constructor forwards params.cause to Error.
+      throw new GroupUnavailableError({ reason: 'invalid', cause })
+    }
   }
+  return environment.withPrivateRestore?.(value.record, restore) ?? restore()
 }
 
 export async function loadValidatedGroup(
