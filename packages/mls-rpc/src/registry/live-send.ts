@@ -3,6 +3,7 @@ import {
   bindSendCeiling,
   decodeClientState,
   type GroupHandle,
+  isApplicationSendDenied,
   ownApplicationGeneration,
   restrictCommitAuthoring,
 } from '@kumiai/mls'
@@ -16,7 +17,12 @@ import {
 
 import type { EntryCapability, EntryReads, Prepared } from '../entry-capability.js'
 import { copyStoredValue, sameStoredValue } from '../memory-incarnation-stores.js'
-import { GroupStateConflictError, RegistryRetiringError } from '../persistence-errors.js'
+import {
+  GroupStateConflictError,
+  GroupStateUncertainError,
+  RegistryRetiringError,
+  StorageOutcomeUnknownError,
+} from '../persistence-errors.js'
 import type { EpochIdentity, GroupStores, GroupTransaction } from '../persistence-types.js'
 import type { RegistryOwner } from './access.js'
 import { type ColdEnvironment, copyRecord } from './cold.js'
@@ -148,6 +154,9 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
   const rotationListeners = new Set<(identity: EpochIdentity) => void>()
   const resolutions = new Set<Promise<void>>()
   const checks = new Set<Promise<void>>()
+  const accountingStarts = new Set<() => void>()
+  const unresolved = new Set<OwnProof>()
+  let observedVersion = owner.knownVersion
 
   function available(): boolean {
     if (closed || paused) return false
@@ -178,7 +187,8 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
   function needsMaintenance(): boolean {
     return (
       available() &&
-      owner.expected.size === 0 &&
+      unresolved.size === 0 &&
+      !deferred &&
       owner.admission.admissible &&
       params.safetyHeld() === null &&
       committedGeneration() < LEASE_MAX_GENERATION &&
@@ -223,6 +233,14 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     }
   }
   async function accept(proof: OwnProof): Promise<void> {
+    try {
+      await acceptReservation(proof)
+    } catch {
+      invalidate()
+      schedule()
+    }
+  }
+  async function acceptReservation(proof: OwnProof): Promise<void> {
     const reservation = proof.reservation
     if (reservation == null || !proof.registered || !proof.proven) return
     const saved = reservation.envelope?.saved
@@ -295,91 +313,138 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
       registered: true,
       proven: false,
     }
+    unresolved.add(proof)
     owner.expected.set(record.version, record)
     proofs.set(record, proof)
     return proof
   }
-  function observeOwn(version: number, control: ControlSnapshot | null): void {
-    if (control !== null) owner.latestControl = copyStoredValue(control)
-    const record = owner.expected.get(version)
-    const proof = record === undefined ? undefined : proofs.get(record)
-    if (proof !== undefined) account(proof)
-  }
-  function foreign(version: number): void {
+  function foreign(
+    version: number,
+    record?: ReadableGroupState,
+    control?: ControlSnapshot,
+    eligibility?: Uint8Array,
+  ): void {
+    if (record !== undefined && record.version >= owner.knownVersion) {
+      owner.latestCommitted = copyRecord(record)
+      if (control !== undefined) owner.latestControl = copyStoredValue(control)
+      if (eligibility !== undefined) owner.latestEligibility = eligibility.slice()
+      const state = decodeClientState(record.state)
+      deferred =
+        state !== undefined &&
+        (state.groupActiveState.kind !== 'active' ||
+          Object.keys(state.unappliedProposals).length !== 0)
+    }
     foreignGeneration++
     invalidate()
     owner.knownVersion = Math.max(owner.knownVersion, version)
+    notifyRotation()
     schedule()
   }
   function observed(version: number, stillCurrent: () => boolean): () => void {
+    observedVersion = Math.max(observedVersion, version)
     const capturedGeneration = generation
-    const known = copyRecord(owner.latestCommitted)
-    const control = copyStoredValue(owner.latestControl)
+    const signal = cancellation.signal
+    if (signal.aborted) return () => {}
+    const current = () =>
+      !signal.aborted &&
+      available() &&
+      stillCurrent() &&
+      version >= observedVersion &&
+      version >= owner.knownVersion
     let finish!: () => void
     const pending = new Promise<void>((resolve) => {
       finish = resolve
     })
-    const check = () =>
-      capability.read(owner.key.groupID, async (reads) => {
-        try {
+    let started = false
+    const check = () => {
+      if (started || signal.aborted) return
+      started = true
+      void capability
+        .read(owner.key.groupID, async (reads) => {
+          if (!current()) return
+          const known = copyRecord(owner.latestCommitted)
+          const control = copyStoredValue(owner.latestControl)
           const record = await reads.state(owner.key.incarnation)
           const nextControl = await reads.control(owner.key.incarnation)
+          // A newer observation owns classification, including after an async restore.
+          if (!current() || (record !== null && record.version > version)) return
           if (
             record === null ||
             record.deleted ||
             record.state === null ||
             record.version !== version ||
-            !sameStoredValue(record.state, known.state)
+            decodeClientState(record.state) === undefined
           ) {
             foreign(version)
+            return
+          }
+          const readable = { ...record, state: record.state }
+          const expected = owner.expected.get(version)
+          if (expected === undefined && version <= owner.knownVersion) return
+          const proof = expected === undefined ? undefined : proofs.get(expected)
+          if (proof !== undefined && sameStoredValue(record.state, proof.record.state)) {
+            owner.latestControl = copyStoredValue(nextControl)
+            account(proof)
+            return
+          }
+          if (!sameStoredValue(record.state, known.state)) {
+            foreign(version, readable, nextControl)
             return
           }
           let eligibility = owner.latestEligibility
-          if (
-            !sameStoredValue(nextControl, control) ||
-            !sameStoredValue(record.ledger, known.ledger) ||
-            !sameStoredValue(record.credential, known.credential) ||
-            record.terminal !== known.terminal
-          ) {
-            const handle = restrictCommitAuthoring(
-              await environment.restore(copyRecord({ ...record, state: record.state })),
-            )
-            eligibility = eligibilityOf(handle.state, handle.ownLeafLapsed())
+          try {
+            if (
+              !sameStoredValue(nextControl, control) ||
+              !sameStoredValue(record.ledger, known.ledger) ||
+              !sameStoredValue(record.credential, known.credential) ||
+              record.terminal !== known.terminal
+            ) {
+              const handle = restrictCommitAuthoring(
+                await environment.restore(copyRecord(readable)),
+              )
+              eligibility = eligibilityOf(handle.state, handle.ownLeafLapsed())
+            }
+            if (!current()) return
+            if (
+              generation !== capturedGeneration ||
+              !sameStoredValue(eligibility, owner.send?.eligibility ?? owner.latestEligibility)
+            ) {
+              foreign(version, readable, nextControl, eligibility)
+              return
+            }
+            owner.knownVersion = Math.max(owner.knownVersion, version)
+            owner.latestCommitted = copyRecord(readable)
+            owner.latestControl = copyStoredValue(nextControl)
+            owner.latestEligibility = eligibility.slice()
+          } catch {
+            if (current()) foreign(version, readable, nextControl)
           }
-          if (
-            !stillCurrent() ||
-            !available() ||
-            generation !== capturedGeneration ||
-            !sameStoredValue(eligibility, owner.send?.eligibility ?? owner.latestEligibility)
-          ) {
-            foreign(version)
-            return
-          }
-          owner.knownVersion = Math.max(owner.knownVersion, version)
-          owner.latestCommitted = copyRecord({ ...record, state: record.state })
-          owner.latestControl = copyStoredValue(nextControl)
-          owner.latestEligibility = eligibility.slice()
-        } catch {
-          foreign(version)
-        }
-      })
+        })
+        .then(finish, () => {
+          if (current()) foreign(version)
+          finish()
+        })
+    }
     checks.add(pending)
+    accountingStarts.add(check)
     slot.inflight.add(pending)
+    signal.addEventListener('abort', finish, { once: true })
+    // A microtask can still inherit the provider's active ownership context.
+    const fallback = setTimeout(check, 0)
     void pending.then(() => {
+      clearTimeout(fallback)
+      signal.removeEventListener('abort', finish)
+      accountingStarts.delete(check)
       checks.delete(pending)
       slot.inflight.delete(pending)
     })
-    return () => {
-      void check().then(finish, () => {
-        foreign(version)
-        finish()
-      })
-    }
+    return check
   }
   async function accounting(): Promise<void> {
     while (checks.size !== 0) await Promise.allSettled([...checks])
   }
   async function settle(proof: OwnProof, outcome: 'committed' | 'rolled-back'): Promise<void> {
+    unresolved.delete(proof)
     if (outcome === 'committed') account(proof)
     if (owner.expected.get(proof.record.version) === proof.record)
       owner.expected.delete(proof.record.version)
@@ -408,7 +473,12 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
         try {
           await settle(proof, await params.resolve(mutationID))
           return
-        } catch {
+        } catch (error) {
+          if (error instanceof GroupStateUncertainError) {
+            unresolved.delete(proof)
+            schedule()
+            return
+          }
           backoff = Math.min(backoff * 2, 15_000)
         }
       }
@@ -439,16 +509,24 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
       if (proof !== undefined) await settle(proof, 'committed')
       return result
     } catch (error) {
-      if (proof !== undefined && mutationID !== null) {
-        let outcome: 'committed' | 'rolled-back' | undefined
-        try {
-          outcome = await params.resolve(mutationID)
-        } catch {
-          resolveLater(proof, mutationID)
+      if (proof !== undefined) {
+        if (!(error instanceof StorageOutcomeUnknownError)) await settle(proof, 'rolled-back')
+        else if (mutationID !== null) {
+          let outcome: 'committed' | 'rolled-back' | undefined
+          try {
+            outcome = await params.resolve(mutationID)
+          } catch (failure) {
+            if (failure instanceof GroupStateUncertainError) {
+              unresolved.delete(proof)
+              schedule()
+            } else resolveLater(proof, mutationID)
+          }
+          if (outcome !== undefined) await settle(proof, outcome)
         }
-        if (outcome !== undefined) await settle(proof, outcome)
       }
       throw error
+    } finally {
+      for (const start of accountingStarts) start()
     }
   }
   class NoReservation extends Error {}
@@ -524,6 +602,11 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
               await target.state.save(prepared.record)
             },
           )
+          if (owner.send === null && needsMaintenance()) {
+            await delay(backoff, abort.signal)
+            backoff = Math.min(backoff * 2, 15_000)
+            continue
+          }
           return
         } catch (error) {
           if (error instanceof NoReservation || abort.signal.aborted || !available()) return
@@ -536,14 +619,12 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
       }
     })()
     maintenance = pending
-    void pending.then(
-      () => {
-        if (maintenance === pending) maintenance = null
-      },
-      () => {
-        if (maintenance === pending) maintenance = null
-      },
-    )
+    const finished = () => {
+      if (maintenance !== pending) return
+      maintenance = null
+      if (abort.signal.aborted) schedule()
+    }
+    void pending.then(finished, finished)
     return pending
   }
   async function waitForMaintenance(job: Promise<void> | null): Promise<void> {
@@ -573,6 +654,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
       params.assertAvailable()
       if (decodeAppAAD(opts.aad)?.intent !== opts.intent)
         throw new TypeError('App AAD intent mismatch')
+      assertSeal()
       await accounting()
       for (let attempt = 0; ; attempt++) {
         assertSeal()
@@ -584,7 +666,12 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
             const sealed = await record.copy.encryptApplication(plaintext, { aad: opts.aad })
             return { ...sealed, epoch: record.identity.epoch }
           } catch (error) {
-            if (!(error instanceof ApplicationSendRefusedError)) throw error
+            if (
+              !(error instanceof ApplicationSendRefusedError) ||
+              isApplicationSendDenied(record.copy) ||
+              ownApplicationGeneration(record.copy.state) < record.limit
+            )
+              throw error
             exhausted = true
           } finally {
             schedule()
@@ -617,11 +704,11 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
   return {
     seal,
     run,
-    observeOwn,
     observed,
     accounting,
     invalidate,
     schedule,
+    effectiveNext: () => effectiveNext(owner),
     snapshot() {
       const send = owner.send
       return send === null
@@ -692,8 +779,10 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
       }
     },
     async drain() {
-      await maintenance
-      await Promise.allSettled(resolutions)
+      while (maintenance !== null || resolutions.size !== 0) {
+        await maintenance
+        await Promise.allSettled(resolutions)
+      }
     },
     blockMaintenance() {
       let started!: () => void

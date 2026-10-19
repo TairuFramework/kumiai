@@ -1,14 +1,18 @@
 import {
+  ApplicationSendRefusedError,
   type ControllerBinding,
   createGroup,
   decodeClientState,
   encodeClientState,
   type GroupHandle,
+  ownApplicationGeneration,
 } from '@kumiai/mls'
 import { encodeAppAAD, GroupSafetyHeldError } from '@kumiai/rpc'
 import { afterEach, describe, expect, onTestFinished, test, vi } from 'vitest'
 
 import { entryCapability } from '../src/entry-capability.js'
+import { ApplicationLeaseUnavailableError } from '../src/index.js'
+import { StorageOutcomeUnknownError } from '../src/persistence-errors.js'
 import { registryLiveSend } from '../src/registry/live-send.js'
 import * as reservations from '../src/registry/reserve.js'
 import { registryRetirement } from '../src/registry/retirement.js'
@@ -19,6 +23,7 @@ import {
   isLiveHandle,
   registryLeaseSnapshot,
 } from '../src/testing.js'
+import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import { createRegistryFixture } from './fixtures/registry.js'
 import { createRegistryLeaseFixture } from './fixtures/registry-lease.js'
 
@@ -43,8 +48,282 @@ async function invariant(fixture: Fixture) {
   expect(lease?.limit).toBeLessThanOrEqual(await fixture.storedGeneration())
   expect(await fixture.rawRestoreEncrypt()).toBeGreaterThanOrEqual(lease?.limit ?? 0)
 }
+async function promptly<T>(pending: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      pending,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('Accounting did not settle')), 500)
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
 for (const mode of ['real-mls', 'double'] as const) {
   describe(`live send (${mode})`, () => {
+    test('foreign save at an unknown own version is classified by content', async () => {
+      const fixture = await setup(mode)
+      const gate = gateRegistryMaintenance(fixture.fixture().registry)
+      const capability = entryCapability(fixture.fixture().device.groups)
+      if (capability === null) throw new Error('Missing capability')
+      vi.spyOn(capability, 'run').mockImplementationOnce(async (request, prepare) => {
+        await capability.read(request.groupID, prepare)
+        throw new StorageOutcomeUnknownError('Unknown write outcome')
+      })
+      vi.spyOn(fixture.fixture().device.groups, 'resolve').mockRejectedValue(
+        new Error('Proof temporarily unavailable'),
+      )
+      await expect(fixture.reserveNow()).rejects.toThrow('Unknown write outcome')
+      expect(fixture.lease()?.expectedVersions).toEqual([2])
+      await fixture.writeElsewhere('proposal')
+      expect((await fixture.record()).version).toBe(2)
+      expect(fixture.lease()).toBeNull()
+      await expect(fixture.sealEphemeral()).rejects.toMatchObject({ reason: 'deferred' })
+      gate.release()
+    })
+    test('known rollback releases maintenance without resolving a superseded marker', async () => {
+      const fixture = await setup(mode)
+      const resolve = vi.spyOn(fixture.fixture().device.groups, 'resolve')
+      fixture.fixture().armNextWorkFault('after-first-write')
+      await expect(fixture.reserveNow()).rejects.toThrow()
+      expect(fixture.lease()?.expectedVersions).toEqual([])
+      expect(resolve).not.toHaveBeenCalled()
+      for (let generation = 0; generation < 20; generation++)
+        expect((await fixture.sealDurable()).generation).toBe(generation)
+      expect(fixture.lease()?.limit).toBe(32)
+      await invariant(fixture)
+    })
+    test.each(['immediate', 'delayed'] as const)(
+      'superseded unknown proof stops %s resolution and releases maintenance',
+      async (timing) => {
+        const fixture = await setup(mode)
+        const capability = entryCapability(fixture.fixture().device.groups)
+        if (capability === null) throw new Error('Missing capability')
+        const original = capability.run.bind(capability)
+        vi.spyOn(capability, 'run').mockImplementationOnce(async (...args) => {
+          await original(...args)
+          await fixture
+            .fixture()
+            .device.groups.ports(fixture.key)
+            .control.apply({}, crypto.randomUUID())
+          throw new StorageOutcomeUnknownError('Lost result after marker supersession')
+        })
+        const resolve = vi.spyOn(fixture.fixture().device.groups, 'resolve')
+        if (timing === 'delayed') resolve.mockRejectedValueOnce(new Error('Proof read failed'))
+        await expect(fixture.reserveNow()).rejects.toThrow('Lost result')
+        for (let index = 0; index < 13; index++) await fixture.sealEphemeral()
+        await promptly(fixture.drainMaintenance())
+        expect(resolve).toHaveBeenCalledTimes(timing === 'delayed' ? 2 : 1)
+        expect(fixture.lease()?.limit).toBe(48)
+        expect(fixture.lease()?.expectedVersions).toEqual([2])
+        await invariant(fixture)
+      },
+    )
+    test('accept restore rejection preserves a committed mutation result and schedules warm-up', async () => {
+      const fixture = await setup(mode, 'welcome')
+      const live = registryLiveSend.get(fixture.access())
+      const capability = entryCapability(fixture.fixture().device.groups)
+      if (live === undefined || capability === null) throw new Error('Missing capability')
+      const gate = gateRegistryMaintenance(fixture.fixture().registry)
+      live.invalidate()
+      const original = capability.run.bind(capability)
+      vi.spyOn(capability, 'run').mockImplementationOnce(async (...args) => {
+        const result = await original(...args)
+        fixture.fixture().overrideRestore(async () => {
+          throw new Error('Accept restore rejected')
+        })
+        return result
+      })
+      await expect(fixture.group?.advance()).resolves.toBeUndefined()
+      const state = decodeClientState((await fixture.record()).state)
+      if (state === undefined) throw new Error('Missing committed state')
+      expect(ownApplicationGeneration(state)).toBe(16)
+      expect(fixture.lease()).toBeNull()
+      await promptly(gate.started)
+    })
+    test.each(['supplied', 'absent'] as const)(
+      'accounting progresses when a committed provider skips afterRelease (%s ownership)',
+      async (ownership) => {
+        const id = `missing-release-${mode}-${crypto.randomUUID()}`
+        const base = await createRegistryFixture({
+          mode,
+          setup: 'empty',
+          groupID: id,
+          ownershipContext:
+            ownership === 'supplied' ? createAsyncLocalOwnershipContext() : undefined,
+        })
+        const capability = entryCapability(base.device.groups)
+        if (capability === null) throw new Error('Missing capability')
+        const releases: Array<() => void> = []
+        const observe = capability.observe.bind(capability)
+        vi.spyOn(capability, 'observe').mockImplementation((groupID, onProof, afterRelease) =>
+          observe(groupID, (observation) => {
+            onProof(observation)
+            releases.push(() => afterRelease?.(observation))
+          }),
+        )
+        onTestFinished(async () => {
+          for (const release of releases) release()
+          await base.close()
+        })
+        const key = await base.registry.seed(await base.makeHandle(0), { packageUse: null })
+        const access = await base.registry.access(id)
+        const copy = registryLeaseSnapshot(access)?.copy
+        await base.device.groups.ports(key).control.apply({}, crypto.randomUUID())
+        await expect(
+          promptly(
+            access.seal(new Uint8Array([1]), {
+              aad: encodeAppAAD({ topicID: 'lease-app', intent: 'ephemeral' }),
+              intent: 'ephemeral',
+            }),
+          ),
+        ).resolves.toMatchObject({ generation: 0 })
+        expect(registryLeaseSnapshot(access)?.copy).toBe(copy)
+        await access.mutate(async () => 'committed')
+        await expect(
+          promptly(registryLiveSend.get(access)?.accounting() ?? Promise.resolve()),
+        ).resolves.toBeUndefined()
+      },
+    )
+    test('dispose aborts a seal waiting for accounting and drains the pending check', async () => {
+      const fixture = await setup(mode)
+      const live = registryLiveSend.get(fixture.access())
+      const capability = entryCapability(fixture.fixture().device.groups)
+      if (live === undefined || capability === null) throw new Error('Missing capability')
+      const version = (await fixture.record()).version + 1
+      const blocked = deferred<void>()
+      const read = capability.read.bind(capability)
+      vi.spyOn(capability, 'read').mockImplementationOnce(async (...args) => {
+        await blocked.promise
+        return read(...args)
+      })
+      const release = live.observed(version, () => true)
+      release()
+      const sealing = fixture.sealEphemeral().catch((error: unknown) => error)
+      try {
+        await promptly(fixture.fixture().registry.dispose())
+        expect(await sealing).toMatchObject({ name: 'DisplacedGroupHandleError' })
+      } finally {
+        blocked.resolve()
+        await sealing
+      }
+    })
+    test.each(['reservation', 'mutation'] as const)(
+      'a later own %s observation supersedes a metadata check without wasting generations',
+      async (kind) => {
+        const fixture = await setup(mode)
+        const capability = entryCapability(fixture.fixture().device.groups)
+        if (capability === null) throw new Error('Missing capability')
+        const started = deferred<void>()
+        const blocked = deferred<void>()
+        const read = capability.read.bind(capability)
+        vi.spyOn(capability, 'read').mockImplementationOnce(async (...args) => {
+          started.resolve()
+          await blocked.promise
+          return read(...args)
+        })
+        const copy = fixture.lease()?.copy
+        const before = fixture.transactions()
+        await fixture
+          .fixture()
+          .device.groups.ports(fixture.key)
+          .control.apply({}, crypto.randomUUID())
+        await started.promise
+        try {
+          if (kind === 'reservation') await fixture.reserveNow()
+          else await fixture.access().mutate(async () => 'host-result')
+        } finally {
+          blocked.resolve()
+        }
+        await registryLiveSend.get(fixture.access())?.accounting()
+        await fixture.drainMaintenance()
+        expect(fixture.lease()?.copy).toBe(copy)
+        expect(fixture.lease()?.limit).toBe(kind === 'reservation' ? 32 : 16)
+        expect(await fixture.storedGeneration()).toBe(kind === 'reservation' ? 32 : 16)
+        expect(fixture.transactions() - before).toBe(1)
+        expect((await fixture.sealEphemeral()).generation).toBe(0)
+      },
+    )
+    test('foreign generation 500 never schedules another maintenance transaction', async () => {
+      const fixture = await setup(mode)
+      const live = registryLiveSend.get(fixture.access())
+      if (live === undefined) throw new Error('Missing sender')
+      const rotated: Array<number> = []
+      live.onRotationRequired((identity) => rotated.push(identity.epoch))
+      const before = fixture.transactions()
+      await fixture.forceStoredGeneration(500)
+      await live.accounting()
+      expect(live.effectiveNext()).toBe(500)
+      expect(fixture.lease()).toBeNull()
+      for (let index = 0; index < 3; index++) {
+        await live.schedule()
+        await fixture.drainMaintenance()
+        await expect(fixture.sealEphemeral()).rejects.toBeInstanceOf(
+          ApplicationLeaseUnavailableError,
+        )
+      }
+      expect(fixture.transactions()).toBe(before)
+      expect(rotated.length).toBeGreaterThan(0)
+    })
+    test('deferred seals do not run a transaction on each attempt', async () => {
+      const fixture = await setup(mode)
+      const proposal = await fixture.proposal()
+      await fixture.access().mutate(async (handle) => {
+        handle.state.unappliedProposals = proposal
+      })
+      await fixture.drainMaintenance()
+      const before = fixture.transactions()
+      for (let index = 0; index < 3; index++) {
+        await expect(fixture.sealDurable()).rejects.toMatchObject({ reason: 'deferred' })
+        await fixture.drainMaintenance()
+      }
+      expect(fixture.transactions()).toBe(before)
+    })
+    test('non-bound send policy refusals propagate unchanged', async () => {
+      const fixture = await setup(mode)
+      const copy = fixture.lease()?.copy
+      if (copy === undefined) throw new Error('Missing copy')
+      const error = new ApplicationSendRefusedError()
+      vi.spyOn(copy, 'encryptApplication').mockRejectedValueOnce(error)
+      await expect(fixture.sealEphemeral()).rejects.toBe(error)
+    })
+    test('safety holds refuse before waiting for pending accounting', async () => {
+      const fixture = await setup(mode)
+      const capability = entryCapability(fixture.fixture().device.groups)
+      const live = registryLiveSend.get(fixture.access())
+      if (capability === null || live === undefined) throw new Error('Missing capability')
+      const version = (await fixture.record()).version + 1
+      const read = capability.read.bind(capability)
+      const blocked = deferred<void>()
+      vi.spyOn(capability, 'read').mockImplementationOnce(async (...args) => {
+        await blocked.promise
+        return read(...args)
+      })
+      const release = live.observed(version, () => true)
+      release()
+      await fixture.holdSafety()
+      try {
+        await expect(promptly(fixture.sealEphemeral())).rejects.toBeInstanceOf(GroupSafetyHeldError)
+      } finally {
+        blocked.resolve()
+        await live.accounting()
+      }
+    })
+    test('rollback of retirement restarts an interrupted warm-up', async () => {
+      const fixture = await setup(mode)
+      await fixture.dropOwner()
+      const block = fixture.blockMaintenance()
+      await block.started
+      const live = registryLiveSend.get(fixture.access())
+      const retiring = registryRetirement(fixture.fixture().registry).beginRetirement(fixture.key)
+      retiring.settle('rolled-back')
+      block.release()
+      await live?.drain()
+      await live?.drain()
+      expect(fixture.lease()?.limit).toBe(32)
+    })
     test.each(['seed', 'welcome'] as const)(
       'install hand-off from %s seals without transactions',
       async (source) => {
@@ -778,7 +1057,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const original = capability.run.bind(capability)
       vi.spyOn(capability, 'run').mockImplementationOnce(async (...args) => {
         await original(...args)
-        throw new Error('Lost run result')
+        throw new StorageOutcomeUnknownError('Lost run result')
       })
       vi.spyOn(fixture.fixture().device.groups, 'resolve').mockRejectedValueOnce(
         new Error('Outcome unresolved'),
@@ -801,7 +1080,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const original = capability.run.bind(capability)
       vi.spyOn(capability, 'run').mockImplementationOnce(async (...args) => {
         await original(...args)
-        throw new Error('Lost run result')
+        throw new StorageOutcomeUnknownError('Lost run result')
       })
       vi.spyOn(fixture.fixture().device.groups, 'resolve').mockRejectedValueOnce(
         new Error('Outcome unresolved'),
@@ -889,7 +1168,12 @@ for (const mode of ['real-mls', 'double'] as const) {
     })
     test('rolled-back resolution never accepts the retained reservation', async () => {
       const fixture = await setup(mode)
-      fixture.fixture().armNextWorkFault('after-first-write')
+      const capability = entryCapability(fixture.fixture().device.groups)
+      if (capability === null) throw new Error('Missing capability')
+      vi.spyOn(capability, 'run').mockImplementationOnce(async (request, prepare) => {
+        await capability.read(request.groupID, prepare)
+        throw new StorageOutcomeUnknownError('Unknown rollback')
+      })
       const resolve = vi
         .spyOn(fixture.fixture().device.groups, 'resolve')
         .mockResolvedValue('rolled-back')

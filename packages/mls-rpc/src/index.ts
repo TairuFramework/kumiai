@@ -179,6 +179,7 @@ export {
 } from './recovery.js'
 export { type RegistryConsumers, registryConsumers } from './registry/consumers.js'
 export { createRecoveryContinuationPort } from './registry/continuation.js'
+export { ApplicationLeaseUnavailableError } from './registry/live-send.js'
 export { createGroupHandleRegistry } from './registry/registry.js'
 export {
   ackRetiredOutcome,

@@ -286,7 +286,6 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
             latch(observation.activeKey, 'spent-set-corrupt')
           const previous = observedSlot.owner
           observedSlot.generation++
-          const observedGeneration = observedSlot.generation
           if (previous !== null) previous.cacheValid = false
           const projected = accountedRuntime({
             observation,
@@ -339,13 +338,10 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
           }
           const version = observation.activeVersion
           if (version !== null && observation.activeKey?.incarnation === previous.key.incarnation) {
-            if (previous.expected.has(version))
-              previous.maintenance?.observeOwn(version, observation.control)
-            else if (version > previous.knownVersion) {
+            if (previous.expected.has(version) || version > previous.knownVersion) {
               const check = previous.maintenance?.observed(
                 version,
-                () =>
-                  observedSlot.owner === previous && observedSlot.generation === observedGeneration,
+                () => observedSlot.owner === previous,
               )
               if (check !== undefined) accountingChecks.set(observation, check)
             }
