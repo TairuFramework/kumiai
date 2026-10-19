@@ -15,6 +15,7 @@ import {
   GroupControlUnsettledError,
   GroupStateConflictError,
   GroupUnavailableError,
+  RegistryRetiringError,
   SpentSetCorruptError,
   StorageOutcomeUnknownError,
 } from '../persistence-errors.js'
@@ -22,6 +23,7 @@ import type { GroupKey, GroupStores, GroupTransaction } from '../persistence-typ
 import { groupCondition, groupConditionWriter } from '../safety-conditions.js'
 import { createRegistryAccess, type RegistryOwner, registryCapturedReplacements } from './access.js'
 import { admissionFor, type ColdEnvironment, loadValidatedGroup } from './cold.js'
+import { registryReceiveSlots, setReceiveBase } from './live-receive.js'
 import {
   createLiveSlot,
   type LiveSlot,
@@ -254,8 +256,12 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
           retiring = value
           if (value !== null) {
             slotRef.pendingHandoff = null
+            slotRef.live.cancellation.abort(new RegistryRetiringError({ key: value.key }))
             slotRef.owner?.maintenance?.retire()
-          } else slotRef.owner?.maintenance?.resume()
+          } else {
+            slotRef.live.cancellation = new AbortController()
+            slotRef.owner?.maintenance?.resume()
+          }
         },
         pendingHandoff: null,
         live: createLiveSlot(),
@@ -374,6 +380,10 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
               true,
             )
             observedSlot.pendingHandoff = null
+            observedSlot.live.base = null
+            observedSlot.live.cancellation.abort(
+              new DisplacedGroupHandleError('Registry owner displaced'),
+            )
             observedSlot.owner = null
             const dispatch = previous.runtime.install(null)
             if (dispatch !== undefined) notifications.set(observation, dispatch)
@@ -400,6 +410,8 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   }
   function invalidate(slot: GroupSlot): void {
     slot.generation++
+    slot.live.base = null
+    slot.live.cancellation.abort(new DisplacedGroupHandleError('Registry owner invalidated'))
     slot.owner?.maintenance?.cancel(
       new DisplacedGroupHandleError('Registry owner invalidated'),
       true,
@@ -470,7 +482,9 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     if (value.snapshot.condition === 'spent-set-corrupt') latch(value.key, 'spent-set-corrupt')
     if (admittedOwner !== undefined && value.key.incarnation !== admittedOwner.key.incarnation)
       throw new DisplacedGroupHandleError('Registry access belongs to a retired incarnation')
+    setReceiveBase(slot.live, value.record)
     if (slot.owner === null || slot.owner.key.incarnation !== value.key.incarnation) {
+      slot.live.cancellation = new AbortController()
       // Host registrations survive cache invalidation, but never cross incarnations.
       if (slot.hooks?.key.incarnation !== value.key.incarnation)
         slot.hooks = { key: { ...value.key }, callbacks: new Set() }
@@ -546,6 +560,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
           return reason === null ? admission : { epoch: admission.epoch, admissible: false, reason }
         },
         seal: access.seal,
+        receive: access.receive,
         onRotationRequired: access.onRotationRequired,
         openBatch: access.openBatch,
         pending: access.pending,
@@ -559,6 +574,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       const live = registryLiveSend.get(access)
       if (live === undefined) throw new Error('Missing live sender')
       registryLiveSend.set(owner.access, live)
+      registryReceiveSlots.set(owner.access, slot.live)
       leaseReaders.set(owner.access, live.snapshot)
       const replaceCaptured = registryCapturedReplacements.get(access)
       if (replaceCaptured === undefined) throw new Error('Missing captured replacement boundary')
@@ -659,6 +675,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     closing = true
     for (const slot of slots.values()) {
       slot.pendingHandoff = null
+      slot.live.cancellation.abort(new DisplacedGroupHandleError('Registry is disposed'))
       slot.owner?.maintenance?.cancel(new DisplacedGroupHandleError('Registry is disposed'), true)
     }
     disposal = (async () => {
@@ -892,6 +909,8 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   const onFailure = () => {
     for (const slot of slots.values()) {
       slot.pendingHandoff = null
+      slot.live.base = null
+      slot.live.cancellation.abort(capability.failureSignal?.reason)
       slot.owner?.maintenance?.cancel(capability.failureSignal?.reason, true)
     }
   }

@@ -26,6 +26,7 @@ import {
 import type { EpochIdentity, GroupStores, GroupTransaction } from '../persistence-types.js'
 import type { RegistryOwner } from './access.js'
 import { type ColdEnvironment, copyRecord } from './cold.js'
+import { setReceiveBase } from './live-receive.js'
 import {
   eligibilityOf,
   LEASE_AWAIT_MS,
@@ -58,6 +59,12 @@ export type SendCopy = {
 export type LiveSlot = {
   lock: { run<T>(fn: () => Promise<T>): Promise<T> }
   inflight: Set<Promise<unknown>>
+  base: ReadableGroupState | null
+  receive: GroupHandle | null
+  receiveDigest: Uint8Array | null
+  consumed: { incarnation: number | null; epochs: Map<number, Set<string>>; closed: Set<number> }
+  cancellation: AbortController
+  refresh: (() => Promise<void> | null) | null
 }
 type Saved = {
   record: ReadableGroupState
@@ -102,6 +109,12 @@ export function createLiveSlot(): LiveSlot {
   let tail = Promise.resolve()
   return {
     inflight: new Set(),
+    base: null,
+    receive: null,
+    receiveDigest: null,
+    consumed: { incarnation: null, epochs: new Map(), closed: new Set() },
+    cancellation: new AbortController(),
+    refresh: null,
     lock: {
       async run<T>(fn: () => Promise<T>): Promise<T> {
         const previous = tail
@@ -212,6 +225,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     owner.knownVersion = proof.record.version
     owner.latestCommitted = copyRecord(proof.record)
     owner.latestEligibility = proof.eligibility.slice()
+    setReceiveBase(slot, proof.record)
     if (
       owner.send !== null &&
       (!sameStoredValue(owner.send.identity, identityOf(proof.record)) ||
@@ -336,6 +350,8 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     }
     foreignGeneration++
     invalidate()
+    slot.base = null
+    slot.refresh?.()
     owner.knownVersion = Math.max(owner.knownVersion, version)
     notifyRotation()
     schedule()
@@ -727,6 +743,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     },
     foreign,
     refreshed(record: ReadableGroupState, eligibility: Uint8Array) {
+      setReceiveBase(slot, record)
       owner.knownVersion = Math.max(owner.knownVersion, record.version)
       owner.latestCommitted = copyRecord(record)
       owner.latestEligibility = eligibility.slice()

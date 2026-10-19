@@ -56,6 +56,17 @@ const ENTRY_NONCE_BYTES = 24
  */
 const ENTRY_VERSION = 1
 
+export function assertOpenableEpoch(group: GroupHandle, bytes: Uint8Array): void {
+  const frameEpoch = readMessageEpoch(bytes)
+  const epoch = Number(group.epoch)
+  if (
+    frameEpoch != null &&
+    Number(frameEpoch) !== epoch &&
+    !group.state.historicalReceiverData.has(frameEpoch)
+  )
+    throw new FrameEpochError(Number(frameEpoch), epoch)
+}
+
 export function deriveEntryKey(handle: GroupHandle, label?: string): Promise<Uint8Array> {
   return handle.exportSecret(label ?? ENTRY_SEAL_LABEL, new Uint8Array(), SECRET_LENGTH)
 }
@@ -334,14 +345,7 @@ export function createGroupCryptoBase(
       const { payload, senderDID, epoch } = await access.mutate(async (group) => {
         assertSafety()
         const epoch = Number(group.epoch)
-        const frameEpoch = readMessageEpoch(bytes)
-        if (
-          frameEpoch != null &&
-          Number(frameEpoch) !== epoch &&
-          !group.state.historicalReceiverData.has(frameEpoch)
-        ) {
-          throw new FrameEpochError(Number(frameEpoch), epoch)
-        }
+        assertOpenableEpoch(group, bytes)
         const opened = await group.decrypt(bytes, opts)
         return { ...opened, epoch }
       })

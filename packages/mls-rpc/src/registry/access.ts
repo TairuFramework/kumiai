@@ -41,6 +41,7 @@ import type {
 import { clearGroupCondition } from '../safety-conditions.js'
 import { createRegistryAppOpen } from './app-open.js'
 import { type ColdEnvironment, restoreValidated, type ValidatedGroupState } from './cold.js'
+import { createLiveReceive, registryReceiveSlots } from './live-receive.js'
 import {
   createLiveSend,
   type LiveSlot,
@@ -770,6 +771,18 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     }
   }
   const access: RegistryHandleAccess = {
+    receive: createLiveReceive({
+      ...params,
+      slot: params.live,
+      accounting: live.accounting,
+      refresh: async () => {
+        await capability.read(owner.key.groupID, async (reads) => {
+          params.assertAvailable()
+          await params.load(reads, assertSafety)
+          params.assertAvailable()
+        })
+      },
+    }),
     ...createRegistryAppOpen({
       ...params,
       run: live.run,
@@ -813,6 +826,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     },
   }
   registryLiveSend.set(access, live)
+  registryReceiveSlots.set(access, params.live)
   leaseReaders.set(access, live.snapshot)
   registryCapturedReplacements.set(access, async (captured, adoption, prepare) => {
     const next = await restoreCaptured(

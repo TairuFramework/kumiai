@@ -598,6 +598,70 @@ export type ConformancePendingAppFrames = {
 }
 
 export type RegistryLeaseFixture = {
+  openEphemeral(frames: Array<{ ciphertext: Uint8Array; expectedAAD: Uint8Array }>): Promise<
+    Array<
+      | {
+          kind: 'opened'
+          payload: Uint8Array
+          senderDID?: string
+          aad: Uint8Array
+          frameEpoch: number
+          handleEpoch: number
+        }
+      | {
+          kind: 'refused'
+          reason: 'past-epoch' | 'future-epoch'
+          frameEpoch: number
+          handleEpoch: number
+        }
+      | {
+          kind: 'refused'
+          reason:
+            | 'log-intent'
+            | 'consumed'
+            | 'closed-epoch'
+            | 'generation-bound'
+            | 'capacity'
+            | 'invalid'
+          error?: unknown
+        }
+    >
+  >
+  receiveRebuilds(): number
+  advanceEpoch(): Promise<void>
+  jumpEpochs(count: number): Promise<void>
+  removePeer(): Promise<void>
+  switchIncarnation(): Promise<void>
+  setUnavailable(): Promise<void>
+  peerAccess(): Promise<{
+    key: ConformanceGroupKey
+    epoch(): number
+    seal(
+      plaintext: Uint8Array,
+      opts: { aad: Uint8Array; intent: 'log' | 'ephemeral' },
+    ): ReturnType<RegistryLeaseFixture['sealEphemeral']>
+    receive: RegistryLeaseFixture['openEphemeral']
+    runtime: {
+      snapshot():
+        | (ConformanceEpochIdentity & {
+            available: boolean
+            members: ReadonlySet<string>
+            stateVersion: number
+          })
+        | null
+      onEpochChanged(
+        listener: (
+          snapshot:
+            | (ConformanceEpochIdentity & {
+                available: boolean
+                members: ReadonlySet<string>
+                stateVersion: number
+              })
+            | null,
+        ) => void,
+      ): () => void
+    }
+  }>
   sealEphemeral(
     plaintext?: Uint8Array,
   ): Promise<{ ciphertext: Uint8Array; epoch: number; generation: number }>

@@ -117,10 +117,11 @@ export async function createRegistryCryptoGroup(
       outstanding = await rotate()
       return sender.handle.encrypt(plaintext)
     },
-    async advance(removed?: number) {
+    async advance(removed?: number, applied?: (commit: Uint8Array) => Promise<void>) {
       const commit = outstanding ?? (await rotate(removed))
       await access.mutate((handle, persist) => handle.processMessage(commit, { persist }))
       outstanding = undefined
+      await applied?.(commit)
     },
     async reopen() {
       fixture = await fixture.reopen()

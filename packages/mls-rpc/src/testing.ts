@@ -1,5 +1,6 @@
 import type { GroupHandle } from '@kumiai/mls'
 
+import { receiveInstrumentation, registryReceiveSlots } from './registry/live-receive.js'
 import {
   leaseReaders,
   liveHandles,
@@ -29,6 +30,20 @@ export { ApplicationLeaseUnavailableError } from './registry/live-send.js'
 
 export function registryLeaseSnapshot(access: RegistryHandleAccess) {
   return leaseReaders.get(access)?.() ?? null
+}
+const receiveCounts = new WeakMap<object, number>()
+export function receiveRebuilds(access: RegistryHandleAccess): number {
+  const slot = registryReceiveSlots.get(access)
+  if (slot === undefined) throw new TypeError('Unknown registry access')
+  const instrumentation = receiveInstrumentation.get(slot) ?? {}
+  instrumentation.rebuilt = () => receiveCounts.set(slot, (receiveCounts.get(slot) ?? 0) + 1)
+  receiveInstrumentation.set(slot, instrumentation)
+  return receiveCounts.get(slot) ?? 0
+}
+export function setReceiveCapacity(access: RegistryHandleAccess, cap: number): void {
+  const slot = registryReceiveSlots.get(access)
+  if (slot === undefined) throw new TypeError('Unknown registry access')
+  receiveInstrumentation.set(slot, { ...receiveInstrumentation.get(slot), cap })
 }
 export function hasRegistryPendingHandoff(registry: GroupHandleRegistry, groupID: string) {
   return registryHandoffReaders.get(registry)?.(groupID) ?? false

@@ -1,5 +1,5 @@
 import { encodeEventFrame } from '@kumiai/broadcast'
-import { createGroup, encodeClientState, ownApplicationGeneration } from '@kumiai/mls'
+import { createGroup, encodeClientState, ownApplicationGeneration, restoreGroup } from '@kumiai/mls'
 import { encodeAppAAD, forkEventID, frameID, recoveryUnavailableEventID } from '@kumiai/rpc'
 import type { RegistryLeaseFixture } from '@kumiai/rpc-conformance'
 
@@ -7,10 +7,19 @@ import { entryCapability } from '../../src/entry-capability.js'
 import { registryLiveSend } from '../../src/registry/live-send.js'
 import { reservationEnvelope, reserveFromBytes } from '../../src/registry/reserve.js'
 import { registrySafety } from '../../src/registry/safety.js'
-import type { ReadableGroupState } from '../../src/registry/types.js'
+import type {
+  ReadableGroupState,
+  ReceiveInput,
+  RegistryHandleAccess,
+} from '../../src/registry/types.js'
 import * as testing from '../../src/testing.js'
-import { createRegistryFixture, registryFixtureRestore } from './registry.js'
+import {
+  createRegistryFixture,
+  registryFixtureCapturedRecovery,
+  registryFixtureRestore,
+} from './registry.js'
 import { createRegistryCryptoGroup } from './registry-crypto.js'
+import { restoreMemoryControlHandle } from './sealed-memory-mls.js'
 
 export async function createRegistryLeaseFixture(
   mode: 'real-mls' | 'double',
@@ -18,7 +27,9 @@ export async function createRegistryLeaseFixture(
   initialGeneration = 0,
 ) {
   const id = `lease-${mode}-${crypto.randomUUID()}`
-  const group = source === 'welcome' ? await createRegistryCryptoGroup(mode, id, 1) : null
+  const group = source === 'welcome' ? await createRegistryCryptoGroup(mode, id, 2) : null
+  let peerFixture: Awaited<ReturnType<typeof createRegistryFixture>> | null = null
+  let peer: RegistryHandleAccess | null = null
   let fixture =
     group?.fixture() ?? (await createRegistryFixture({ mode, setup: 'empty', groupID: id }))
   const input = group === null ? await fixture.makeHandle(0) : null
@@ -28,7 +39,7 @@ export async function createRegistryLeaseFixture(
     if (node === undefined) throw new Error('Missing sender ratchet')
     node.application.generation = initialGeneration
   }
-  const key =
+  let key =
     group?.key ??
     (input === null
       ? (() => {
@@ -36,6 +47,7 @@ export async function createRegistryLeaseFixture(
         })()
       : await fixture.registry.seed(input, { packageUse: null }))
   let access = await fixture.registry.access(key.groupID)
+  testing.receiveRebuilds(access)
   let transactions = 0
   const trackTransactions = () => {
     const capability = entryCapability(fixture.device.groups)
@@ -57,7 +69,9 @@ export async function createRegistryLeaseFixture(
     return { ...saved, state: saved.state }
   }
   const result = {
-    key,
+    get key() {
+      return key
+    },
     group,
     fixture: () => fixture,
     access: () => access,
@@ -69,6 +83,90 @@ export async function createRegistryLeaseFixture(
     lease: () => testing.registryLeaseSnapshot(access),
     transactions: () => transactions,
     restores: () => fixture.restores(),
+    receiveRebuilds: () => testing.receiveRebuilds(access),
+    openEphemeral: (frames: Array<ReceiveInput>) => access.receive(frames),
+    async peerAccess() {
+      if (peer !== null) return peer
+      if (group === null) throw new Error('Peer access requires a peer')
+      const member = group.sender
+      peerFixture = await createRegistryFixture({
+        mode,
+        setup: 'empty',
+        groupID: key.groupID,
+        identity: member.identity,
+        options: { ...fixture.environment.options, resolveLedgerEntries: member.slot.resolve },
+      })
+      const handle = await (mode === 'double' ? restoreMemoryControlHandle : restoreGroup)({
+        state: structuredClone(member.handle.state),
+        credential: member.handle.credential,
+        ledgerEntries: member.handle.ledgerTokens,
+        options: peerFixture.environment.options,
+      })
+      await peerFixture.registry.seed(handle, {
+        packageUse: { sourceID: 'lease-peer', ref: 'joined', kind: 'ordinary' },
+      })
+      peer = await peerFixture.registry.access(key.groupID)
+      return peer
+    },
+    async advanceEpoch() {
+      if (group === null) throw new Error('Epoch advance requires a peer')
+      await group.advance(undefined, async (commit) => {
+        await peer?.mutate((handle, persist) => handle.processMessage(commit, { persist }))
+      })
+    },
+    async jumpEpochs(count: number) {
+      for (let index = 0; index < count; index++) await result.advanceEpoch()
+    },
+    async removePeer() {
+      if (group === null) throw new Error('Removal requires a peer')
+      await group.advance(1, async (commit) => {
+        await peer?.mutate((handle, persist) => handle.processMessage(commit, { persist }))
+      })
+    },
+    async switchIncarnation() {
+      const recovery =
+        group === null || mode === 'double'
+          ? await fixture.confirmedRecovery(key, {
+              confirm: true,
+              ...(mode === 'double' ? { format: 'legacy' as const } : {}),
+            })
+          : await registryFixtureCapturedRecovery(fixture, key, {
+              confirm: true,
+              responder: {
+                identity: group.group.committer.identity,
+                group: group.group.committer.handle,
+              },
+            })
+      key = await fixture.registry.switchIncarnation(recovery.candidate, {
+        source: recovery.source,
+        rejoinID: recovery.record.id,
+        proof: recovery.proof,
+        write: {
+          mutationID:
+            'format' in recovery.record
+              ? (recovery.record.switchMutationID ?? crypto.randomUUID())
+              : crypto.randomUUID(),
+          source: { rejoinID: recovery.record.id },
+          destination: {
+            control: {
+              cursor: {
+                position: recovery.proof.position,
+                epoch: Number(recovery.candidate.epoch),
+              },
+            },
+          },
+        },
+      })
+      access = await fixture.registry.access(key.groupID)
+      testing.receiveRebuilds(access)
+    },
+    async setUnavailable() {
+      const saved = await record()
+      await fixture.installRows({
+        key,
+        state: { ...saved, terminal: true, version: saved.version + 1 },
+      })
+    },
     record,
     storedGeneration: async () =>
       ownApplicationGeneration((await fixture.restoreCommittedSender(key.groupID)).state),
@@ -87,6 +185,7 @@ export async function createRegistryLeaseFixture(
     async dropOwner() {
       testing.dropRegistryOwner(access)
       access = await fixture.registry.access(key.groupID)
+      testing.receiveRebuilds(access)
     },
     async reopen() {
       unsubscribe()
@@ -97,6 +196,7 @@ export async function createRegistryLeaseFixture(
       }
       unsubscribe = trackTransactions()
       access = await fixture.registry.access(key.groupID)
+      testing.receiveRebuilds(access)
     },
     async writeElsewhere(kind: 'receive' | 'proposal' | 'control' | 'cursor') {
       try {
@@ -130,17 +230,18 @@ export async function createRegistryLeaseFixture(
       await handle.proposeSelfRemoval()
       return structuredClone(handle.state.unappliedProposals)
     },
-    async openDurable() {
+    async openDurable(input?: ReceiveInput) {
       if (group === null) throw new Error('Durable receive requires a peer')
-      const ciphertext = await group.sender.handle.encrypt(
-        encodeEventFrame('posted', { text: 'hello' }),
-        { aad: result.aad('log') },
-      )
+      const ciphertext =
+        input?.ciphertext ??
+        (await group.sender.handle.encrypt(encodeEventFrame('posted', { text: 'hello' }), {
+          aad: result.aad('log'),
+        }))
       const topicID = 'lease-app'
       return access.openBatch([
         {
           ciphertext,
-          expectedAAD: result.aad('log'),
+          expectedAAD: input?.expectedAAD ?? result.aad('log'),
           frame: {
             ...key,
             topicID,
@@ -258,6 +359,7 @@ export async function createRegistryLeaseFixture(
     },
     async close() {
       unsubscribe()
+      await peerFixture?.close()
       await fixture.close()
     },
   }

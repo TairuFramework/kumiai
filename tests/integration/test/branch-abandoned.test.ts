@@ -173,6 +173,7 @@ async function startPeerOwner(
         replace: async (next, write, prepare) => (await opened()).replace(next, write, prepare),
         adopt: async (next, expected, write) => (await opened()).adopt(next, expected, write),
         seal: async (plaintext, opts) => (await opened()).seal(plaintext, opts),
+        receive: async (frames) => (await opened()).receive(frames),
         onRotationRequired: () => {
           throw new TypeError('unused')
         },

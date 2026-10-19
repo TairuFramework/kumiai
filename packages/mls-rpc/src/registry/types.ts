@@ -35,7 +35,35 @@ export type GroupEpochRuntime = {
   onEpochChanged(listener: (value: GroupRuntimeSnapshot | null) => void): () => void
 }
 export type SealedApp = { ciphertext: Uint8Array; epoch: number; generation: number }
+export type ReceiveInput = { ciphertext: Uint8Array; expectedAAD: Uint8Array }
+export type ReceiveResult =
+  | {
+      kind: 'opened'
+      payload: Uint8Array
+      senderDID?: string
+      aad: Uint8Array
+      frameEpoch: number
+      handleEpoch: number
+    }
+  | {
+      kind: 'refused'
+      reason: 'past-epoch' | 'future-epoch'
+      frameEpoch: number
+      handleEpoch: number
+    }
+  | {
+      kind: 'refused'
+      reason:
+        | 'log-intent'
+        | 'consumed'
+        | 'closed-epoch'
+        | 'generation-bound'
+        | 'capacity'
+        | 'invalid'
+      error?: unknown
+    }
 export type RegistryHandleAccess = {
+  receive(frames: Array<ReceiveInput>): Promise<Array<ReceiveResult>>
   seal(
     plaintext: Uint8Array,
     opts: { aad: Uint8Array; intent: 'log' | 'ephemeral' },
