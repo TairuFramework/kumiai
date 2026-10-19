@@ -169,7 +169,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
   let maintenanceAbort: AbortController | null = null
   let block: { started(): void; release: Promise<void> } | null = null
   const admissionListeners = new Set<() => void>()
-  let pendingAcceptance: OwnProof | null = null
+  let pendingAcceptance: { proof: OwnProof; version: number } | null = null
   let lastAdmission = admission()
   let rotationIdentity: EpochIdentity | null = null
   const rotationListeners = new Set<(identity: EpochIdentity) => void>()
@@ -219,11 +219,11 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
   function currentNext(): number {
     if (
       owner.send === null &&
-      pendingAcceptance?.reservation != null &&
-      pendingAcceptance.generation === foreignGeneration &&
-      pendingAcceptance.record.version === owner.knownVersion
+      pendingAcceptance?.proof.reservation != null &&
+      pendingAcceptance.proof.generation === foreignGeneration &&
+      pendingAcceptance.version === owner.knownVersion
     )
-      return pendingAcceptance.reservation.start
+      return pendingAcceptance.proof.reservation.start
     return effectiveNext(owner)
   }
   function admission(): SendAdmission {
@@ -243,9 +243,9 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
   }
   function changed(): void {
     const next = admission()
+    params.admissionChanged()
     if (!sameStoredValue(lastAdmission, next)) {
       lastAdmission = next
-      params.admissionChanged()
       for (const listener of [...admissionListeners]) {
         try {
           listener()
@@ -271,7 +271,8 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     proof.proven = proof.registered
     if (!available() || !proof.proven || proof.record.version < owner.knownVersion) return
     // Keep usable progress visible while the committed reservation's copy is being restored.
-    if (owner.send === null && proof.reservation != null) pendingAcceptance = proof
+    if (owner.send === null && proof.reservation != null)
+      pendingAcceptance = { proof, version: proof.record.version }
     owner.knownVersion = proof.record.version
     owner.latestCommitted = copyRecord(proof.record)
     owner.latestEligibility = proof.eligibility.slice()
@@ -304,7 +305,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
       invalidate()
       schedule()
     } finally {
-      if (pendingAcceptance === proof) pendingAcceptance = null
+      if (pendingAcceptance?.proof === proof) pendingAcceptance = null
       changed()
     }
   }
@@ -482,6 +483,9 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
               foreign(version, readable, nextControl, eligibility)
               return
             }
+            // Only content-compatible observations can advance pending reservation progress.
+            if (pendingAcceptance?.version === owner.knownVersion)
+              pendingAcceptance.version = version
             owner.knownVersion = Math.max(owner.knownVersion, version)
             owner.latestCommitted = copyRecord(readable)
             owner.latestControl = copyStoredValue(nextControl)

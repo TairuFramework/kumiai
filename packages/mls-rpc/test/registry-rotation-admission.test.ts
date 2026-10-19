@@ -130,55 +130,76 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect(mls.sendAdmission()).toMatchObject({ reason: 'rotation-required' })
       },
     )
-    test('cold copy restore never falsely refuses a concurrent seal or queue acceptance', async () => {
-      const fixture = await setup(mode)
-      const maintenance = await coldFinalRange(fixture)
-      const mls = await groupMLS(fixture)
-      const base = fixture.fixture()
-      const entered = deferred<void>()
-      const released = deferred<void>()
-      let committed = false
-      base.onPhase('account', () => {
-        committed = true
-      })
-      base.overrideRestore(async (record) => {
-        const state = decodeClientState(record.state)
-        if (state === undefined) throw new Error('Invalid restore state')
-        if (committed && ownApplicationGeneration(state) === 496) {
-          entered.resolve()
-          await released.promise
-        }
-        return (mode === 'real-mls' ? restoreGroup : restoreMemoryControlHandle)({
-          state,
-          credential: record.credential,
-          ledgerEntries: record.ledger,
-          options: base.environment.options,
+    test.each([false, true])(
+      'cold copy restore preserves headroom across a compatible version advance (%s)',
+      async (advanceVersion) => {
+        const fixture = await setup(mode)
+        const maintenance = await coldFinalRange(fixture)
+        const mls = await groupMLS(fixture)
+        const base = fixture.fixture()
+        const rotations = vi.fn()
+        fixture.access().onRotationRequired(rotations)
+        const entered = deferred<void>()
+        const released = deferred<void>()
+        let committed = false
+        base.onPhase('account', () => {
+          committed = true
         })
-      })
-      maintenance.release()
-      const draining = fixture.drainMaintenance()
-      const { createAppOutboxAcceptance } = (await import(
-        new URL('../../rpc/src/app-outbox.ts', import.meta.url).href
-      )) as {
-        createAppOutboxAcceptance: (params: AppOutboxAcceptanceParams) => AppOutboxAcceptance
-      }
-      const queue = createAppOutboxAcceptance({
-        outbox: createMemoryAppOutbox(),
-        limit: 4,
-        admission: () => mls.sendAdmission(),
-      })
-      try {
-        await entered.promise
-        await expect.soft(fixture.sealEphemeral()).rejects.toMatchObject({ reason: 'cold' })
-        await expect(
-          queue.accept({ protocol: 'chat', prc: 'posted', data: new Uint8Array([1]) }),
-        ).resolves.toBeUndefined()
-      } finally {
-        released.resolve()
-        await draining
-        queue.close()
-      }
-    })
+        base.overrideRestore(async (record) => {
+          const state = decodeClientState(record.state)
+          if (state === undefined) throw new Error('Invalid restore state')
+          if (committed && ownApplicationGeneration(state) === 496) {
+            entered.resolve()
+            await released.promise
+          }
+          return (mode === 'real-mls' ? restoreGroup : restoreMemoryControlHandle)({
+            state,
+            credential: record.credential,
+            ledgerEntries: record.ledger,
+            options: base.environment.options,
+          })
+        })
+        maintenance.release()
+        const draining = fixture.drainMaintenance()
+        const { createAppOutboxAcceptance } = (await import(
+          new URL('../../rpc/src/app-outbox.ts', import.meta.url).href
+        )) as {
+          createAppOutboxAcceptance: (params: AppOutboxAcceptanceParams) => AppOutboxAcceptance
+        }
+        const queue = createAppOutboxAcceptance({
+          outbox: createMemoryAppOutbox(),
+          limit: 4,
+          admission: () => mls.sendAdmission(),
+        })
+        try {
+          await entered.promise
+          if (advanceVersion) {
+            const record = await fixture.record()
+            await base.installRows({
+              key: fixture.key,
+              state: { ...record, version: record.version + 1 },
+            })
+            await registryLiveSend.get(fixture.access())?.accounting()
+          }
+          expect.soft(rotations).not.toHaveBeenCalled()
+          expect.soft(mls.sendAdmission()).toMatchObject({ admissible: true })
+          await expect.soft(fixture.sealEphemeral()).rejects.toMatchObject({ reason: 'cold' })
+          await expect
+            .soft(queue.accept({ protocol: 'chat', prc: 'posted', data: new Uint8Array([1]) }))
+            .resolves.toBeUndefined()
+        } finally {
+          released.resolve()
+          await draining
+          queue.close()
+        }
+        expect(fixture.lease()).toMatchObject({ own: 496, limit: 500 })
+        expect(rotations).not.toHaveBeenCalled()
+        for (let generation = 496; generation < 500; generation++)
+          expect((await fixture.sealEphemeral()).generation).toBe(generation)
+        expect(rotations).toHaveBeenCalledTimes(1)
+        expect(mls.sendAdmission()).toMatchObject({ reason: 'rotation-required' })
+      },
+    )
     test('a rejected cold copy clears pending headroom and notifies exhaustion', async () => {
       const fixture = await setup(mode)
       const maintenance = await coldFinalRange(fixture)
@@ -326,6 +347,61 @@ for (const mode of ['real-mls', 'double'] as const) {
       dropRegistryOwner(fixture.access())
       expect(fixture.fixture().registry.effectiveNext(fixture.key)).toBeNull()
       expect(mls.sendAdmission()).toMatchObject({ reason: 'rotation-required' })
+    })
+    test.each([499, 500])('ownerless commit refreshes senderHWM %s', async (senderHWM) => {
+      const fixture = await setup(mode)
+      await fixture.reopen(false)
+      const base = fixture.fixture()
+      const mls = await groupMLS(fixture, false)
+      const safety = registrySafety(base.registry)
+      if (safety === null) throw new Error('Missing safety capability')
+      const updates = vi.fn()
+      const unsubscribe = safety.onAdmissionChanged(fixture.key, updates)
+      try {
+        expect(base.registry.effectiveNext(fixture.key)).toBeNull()
+        expect(mls.sendAdmission()).toMatchObject({ admissible: true })
+        const record = await fixture.record()
+        await base.installRows({
+          key: fixture.key,
+          state: { ...record, senderHWM, version: record.version + 1 },
+        })
+        await safety.entry.read(fixture.key.groupID, async () => {})
+        expect(base.registry.effectiveNext(fixture.key)).toBeNull()
+        expect(mls.sendAdmission()).toMatchObject(
+          senderHWM === 500
+            ? { admissible: false, reason: 'rotation-required' }
+            : { admissible: true },
+        )
+        expect(updates).toHaveBeenCalledExactlyOnceWith(senderHWM)
+      } finally {
+        unsubscribe()
+      }
+    })
+    test('committed progress refreshes without an effective admission change', async () => {
+      const fixture = await setup(mode)
+      const gate = gateRegistryMaintenance(fixture.fixture().registry)
+      const mls = await groupMLS(fixture, false)
+      const safety = registrySafety(fixture.fixture().registry)
+      if (safety === null) throw new Error('Missing safety capability')
+      const updates = vi.fn()
+      const changes = vi.fn()
+      const unsubscribe = safety.onAdmissionChanged(fixture.key, updates)
+      const unsubscribeAccess = fixture.access().onAdmissionChanged(changes)
+      try {
+        const record = await fixture.record()
+        await fixture.fixture().installRows({
+          key: fixture.key,
+          state: { ...record, senderHWM: 499, version: record.version + 1 },
+        })
+        await registryLiveSend.get(fixture.access())?.accounting()
+        expect(mls.sendAdmission()).toMatchObject({ admissible: true })
+        expect(changes).not.toHaveBeenCalled()
+        expect(updates).toHaveBeenCalledWith(499)
+      } finally {
+        unsubscribe()
+        unsubscribeAccess()
+        gate.release()
+      }
     })
     test('restored headroom clears the same-identity rotation latch', async () => {
       const fixture = await setup(mode)

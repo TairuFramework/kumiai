@@ -241,6 +241,15 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       starting = null
     }
   }
+  function notifyAdmission(slot: GroupSlot, key: GroupKey, next: number): void {
+    for (const listener of slot.admissionListeners.get(key.incarnation) ?? []) {
+      try {
+        listener(next)
+      } catch {
+        /* Advisory listener. */
+      }
+    }
+  }
   function groupSlot(groupID: string): GroupSlot {
     let slot = slots.get(groupID)
     if (slot === undefined) {
@@ -304,44 +313,64 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
           })
           if (previous === null) {
             const handoff = observedSlot.pendingHandoff
-            if (handoff !== null) {
-              if (observation.activeKey?.incarnation !== handoff.identity.incarnation)
-                observedSlot.pendingHandoff = null
-              else if (
-                observation.activeVersion !== null &&
-                observation.activeVersion > handoff.envelope.version
-              ) {
-                // Read only after lane release, just as owner-version accounting does.
-                accountingChecks.set(observation, () => {
-                  const check = capability
-                    .read(groupID, async (reads) => {
-                      const record = await reads.state(handoff.identity.incarnation)
-                      let keep = false
-                      if (
-                        record !== null &&
-                        !record.deleted &&
-                        record.state !== null &&
-                        sameStoredValue(record.state, handoff.envelope.saved.state)
-                      ) {
-                        const handle = restrictCommitAuthoring(
-                          await environment.restore({ ...record, state: record.state }),
-                        )
-                        keep = sameStoredValue(
-                          eligibilityOf(handle.state, handle.ownLeafLapsed()),
-                          handoff.eligibility,
-                        )
-                      }
-                      if (!keep && observedSlot.pendingHandoff === handoff)
-                        observedSlot.pendingHandoff = null
-                    })
-                    .catch(() => {
-                      if (observedSlot.pendingHandoff === handoff)
-                        observedSlot.pendingHandoff = null
-                    })
-                  observedSlot.live.inflight.add(check)
-                  void check.then(() => observedSlot.live.inflight.delete(check))
-                })
-              }
+            const key = observation.activeKey
+            const generation = observedSlot.generation
+            if (handoff !== null && key?.incarnation !== handoff.identity.incarnation)
+              observedSlot.pendingHandoff = null
+            if (key !== null) {
+              // Read only after lane release, just as owner-version accounting does.
+              accountingChecks.set(observation, () => {
+                const check = capability
+                  .read(groupID, async (reads) => {
+                    const record = await reads.state(key.incarnation)
+                    if (
+                      closing ||
+                      observedSlot.owner !== null ||
+                      observedSlot.generation !== generation
+                    )
+                      return
+                    if (
+                      record !== null &&
+                      !record.deleted &&
+                      record.state !== null &&
+                      record.version === observation.activeVersion
+                    )
+                      notifyAdmission(
+                        observedSlot,
+                        key,
+                        committedNext({ ...record, state: record.state }),
+                      )
+                    if (
+                      handoff === null ||
+                      observedSlot.pendingHandoff !== handoff ||
+                      observation.activeVersion === null ||
+                      observation.activeVersion <= handoff.envelope.version
+                    )
+                      return
+                    let keep = false
+                    if (
+                      record !== null &&
+                      !record.deleted &&
+                      record.state !== null &&
+                      sameStoredValue(record.state, handoff.envelope.saved.state)
+                    ) {
+                      const handle = restrictCommitAuthoring(
+                        await environment.restore({ ...record, state: record.state }),
+                      )
+                      keep = sameStoredValue(
+                        eligibilityOf(handle.state, handle.ownLeafLapsed()),
+                        handoff.eligibility,
+                      )
+                    }
+                    if (!keep && observedSlot.pendingHandoff === handoff)
+                      observedSlot.pendingHandoff = null
+                  })
+                  .catch(() => {
+                    if (observedSlot.pendingHandoff === handoff) observedSlot.pendingHandoff = null
+                  })
+                observedSlot.live.inflight.add(check)
+                void check.then(() => observedSlot.live.inflight.delete(check))
+              })
             }
             return
           }
@@ -525,16 +554,8 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         load: (reads, assertMutationSafety) =>
           load(reads, groupID, slot, slot.generation, owner, assertMutationSafety),
         publish: () => publish(slot, owner),
-        admissionChanged: () => {
-          const next = committedNext(owner.latestCommitted)
-          for (const listener of slot.admissionListeners.get(owner.key.incarnation) ?? []) {
-            try {
-              listener(next)
-            } catch {
-              /* Advisory listener. */
-            }
-          }
-        },
+        admissionChanged: () =>
+          notifyAdmission(slot, owner.key, committedNext(owner.latestCommitted)),
         safetyHeld: () =>
           held(owner.key) ??
           (owner.admission.admissible
