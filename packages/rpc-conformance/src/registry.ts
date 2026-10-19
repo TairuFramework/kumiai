@@ -428,7 +428,9 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
       try {
         const access = await fixture.registry.access(groupID)
         let finalBytes: Uint8Array | undefined
-        await access.mutate(async (handle, persist) => {
+        const handle = await fixture.restoreCommittedSender(groupID)
+        await access.mutate(async (issued, persist) => {
+          await expect(fixture.advanceSender(issued)).rejects.toThrow()
           await fixture.advanceSender(handle)
           finalBytes = fixture.stateBytes(handle)
           await persist(handle)

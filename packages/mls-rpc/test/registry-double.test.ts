@@ -1499,9 +1499,10 @@ describe('double application frames', () => {
               const access = await fixture.registry.access(f.local.groupID)
               // Build first so adoption must carry progress committed afterwards.
               const { candidate, write } = await fixture.acceptedOrdinary(access)
-              own = await access.mutate(async (handle, persist) => {
-                const bytes = await consume(handle)
-                await persist(handle)
+              const sender = await fixture.restoreCommittedSender(f.local.groupID)
+              own = await access.mutate(async (_handle, persist) => {
+                const bytes = await consume(sender)
+                await persist(sender)
                 return bytes
               })
               const expected = await access.readControl(async ({ source }) => source)

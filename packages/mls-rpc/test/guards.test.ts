@@ -102,9 +102,10 @@ test('senderHWM reads the own node index', async () => {
       packageUse: { sourceID: 'own-sender', ref: 'member-package', kind: 'ordinary' },
     })
     const access = await fixture.registry.access(key.groupID)
-    await access.mutate(async (current, persist) => {
-      await current.encrypt(new Uint8Array([1]))
-      await persist(current)
+    const sender = await fixture.restoreCommittedSender(key.groupID)
+    await access.mutate(async (_current, persist) => {
+      await sender.encrypt(new Uint8Array([1]))
+      await persist(sender)
     })
     expect(await fixture.device.groups.loadState(key)).toMatchObject({ senderHWM: 17 })
   } finally {

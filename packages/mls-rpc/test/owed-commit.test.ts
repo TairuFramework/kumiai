@@ -19,10 +19,19 @@ for (const kind of accessKinds) {
   ] as const)(`${kind}: %s after built-save`, async (move) => {
     const f = await authoringAccessFixture(kind, 'member', 'gated')
     try {
+      const send = async (bytes: Uint8Array) => {
+        if (kind !== 'registry') return f.access.mutate((handle) => handle.encrypt(bytes))
+        const sender = await f.fixture.restoreCommittedSender(f.key.groupID)
+        return f.access.mutate(async (_handle, persist) => {
+          const ciphertext = await sender.encrypt(bytes)
+          await persist(sender)
+          return ciphertext
+        })
+      }
       if (move === 'own sends after capture') {
         await f.control().apply({ putOperations: [rotationIntent] }, 'intent')
         const port = f.port(async (op, permitted) => {
-          const frame = await f.access.mutate((handle) => handle.encrypt(new Uint8Array([11])))
+          const frame = await send(new Uint8Array([11]))
           expect(readMessageEpoch(frame)).toBe(permitted.epoch)
           await f.remote.handle.decrypt(frame)
           return f.build(op, permitted)
@@ -91,7 +100,7 @@ for (const kind of accessKinds) {
         })
         if (move.endsWith('reconstruction')) await f.reconstruct()
       } else if (move === 'own sends after capture') {
-        const message = await f.access.mutate((handle) => handle.encrypt(new Uint8Array([12])))
+        const message = await send(new Uint8Array([12]))
         await f.remote.handle.decrypt(message)
         await f.remote.handle.processMessage(slot.payload)
       } else {
@@ -121,7 +130,7 @@ for (const kind of accessKinds) {
           const retained = adopted.state.historicalReceiverData.get(BigInt(slot.epoch))
           expect(retained?.secretTree.leafNodes[leaf]?.application.generation).toBe(2)
           const priorHistory = structuredClone(retained)
-          const message = await f.access.mutate((handle) => handle.encrypt(new Uint8Array([13])))
+          const message = await send(new Uint8Array([13]))
           expect(readMessageEpoch(message)).toBe(BigInt(slot.epoch + 1))
           expect((await f.remote.handle.decrypt(message)).payload).toEqual(new Uint8Array([13]))
           await f.access.read((handle) => {

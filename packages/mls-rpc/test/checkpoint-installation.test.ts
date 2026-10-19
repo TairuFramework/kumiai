@@ -124,8 +124,10 @@ for (const mode of ['real-mls', 'double'] as const) {
           await fixture.registry.seed(await fixture.makeHandle(0), { packageUse: null })
           const before = await records()
           const access = await fixture.registry.access(groupID)
-          await access.mutate(async (handle) => {
-            await fixture.advanceSender(handle)
+          const sender = await fixture.restoreCommittedSender(groupID)
+          await access.mutate(async (_handle, persist) => {
+            await fixture.advanceSender(sender)
+            await persist(sender)
           })
           expect(await records()).toEqual(before)
         } finally {

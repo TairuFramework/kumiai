@@ -51,6 +51,29 @@ for (const mode of ['real-mls', 'double'] as const) {
         await fixture.close()
       }
     })
+    test('every handle handed to host code is denied through read, mutate and readControl', async () => {
+      const fixture = await createRegistryFixture({
+        mode,
+        setup: 'seeded',
+        groupID: 'issued-denial',
+      })
+      try {
+        const access = await fixture.registry.access('issued-denial')
+        const handles = [
+          await access.read((handle) => handle),
+          await access.mutate(async (handle) => handle),
+          await access.readControl(async ({ handle }) => handle),
+        ]
+        for (const handle of handles) {
+          await expect(handle.encrypt(new Uint8Array([1]))).rejects.toBeInstanceOf(
+            ApplicationSendRefusedError,
+          )
+          expect(() => bindSendCeiling(handle, () => 16)).toThrow(TypeError)
+        }
+      } finally {
+        await fixture.close()
+      }
+    })
     test('already joined seed relinquishes its input', async () => {
       const fixture = await createRegistryFixture({ mode, setup: 'empty', groupID: 'denial' })
       try {

@@ -1,5 +1,7 @@
+import { readMessageAAD } from '@kumiai/mls'
 import {
   AppFrameStorageError,
+  decodeAppAAD,
   FrameEpochError,
   type GroupCrypto,
   GroupSafetyHeldError,
@@ -7,6 +9,7 @@ import {
 } from '@kumiai/rpc'
 
 import {
+  assertCryptoSafety,
   assertDurableCryptoSafety,
   createGroupCryptoBase,
   type RegistryGroupCryptoParams,
@@ -38,10 +41,39 @@ export function createRegistryGroupCrypto(params: RegistryGroupCryptoParams): Gr
 
   return {
     ...base,
+    wrap: async (bytes, opts) => {
+      assertCryptoSafety(access)
+      const aad = opts?.aad ?? new Uint8Array()
+      return (await access.seal(bytes, { aad, intent: decodeAppAAD(aad)?.intent ?? 'ephemeral' }))
+        .ciphertext
+    },
     pending: access.pending,
     unwrapBatch,
     unwrap: async (bytes, opts) => {
-      if (opts?.frame == null) return base.unwrap(bytes, opts)
+      if (opts?.frame == null) {
+        assertCryptoSafety(access)
+        const [result] = await access.receive([
+          {
+            ciphertext: bytes,
+            expectedAAD: opts?.expectedAAD ?? readMessageAAD(bytes) ?? new Uint8Array(),
+          },
+        ])
+        if (result == null) throw new Error('unwrap: invalid app frame')
+        if (result.kind === 'opened') {
+          const { payload, senderDID, handleEpoch } = result
+          if (senderDID == null) {
+            throw new Error('unwrap: opened frame has no authenticated sender')
+          }
+          return { payload, senderDID, epoch: handleEpoch }
+        }
+        if (result.reason === 'past-epoch' || result.reason === 'future-epoch') {
+          throw new FrameEpochError(result.frameEpoch, result.handleEpoch)
+        }
+        if (result.reason === 'invalid') {
+          throw result.error ?? new Error('unwrap: invalid app frame')
+        }
+        throw new Error(`unwrap: app frame refused (${result.reason})`)
+      }
       const results = await unwrapBatch([
         {
           frame: { ...access.key, ...opts.frame },

@@ -592,7 +592,8 @@ for (const mode of ['real-mls', 'double'] as const) {
           const fault = kind === 'rollback' ? undefined : fixture.armNextWorkFault('pending')
           if (kind === 'rollback') fixture.armNextWorkFault('before-commit')
           const result = access
-            .mutate(async (handle, persist) => {
+            .mutate(async (source, persist) => {
+              const handle = await restoreHost(fixture, hostBytes(source))
               await handle.encrypt(new Uint8Array([4]))
               await persist(handle)
               return 'callback-result'
@@ -623,7 +624,8 @@ for (const mode of ['real-mls', 'double'] as const) {
         const gate = gateRegistryMaintenance(owner)
         const access = await owner.access(groupID)
         await access.mutate(
-          async (handle, persist) => {
+          async (source, persist) => {
+            const handle = await restoreHost(fixture, hostBytes(source))
             await handle.encrypt(new Uint8Array([6]))
             await persist(handle)
           },
@@ -661,7 +663,8 @@ for (const mode of ['real-mls', 'double'] as const) {
           changes: { cursor: { position: asLogPosition('00002'), epoch: 0 } },
         }))
         expect(
-          await access.mutate(async (handle, persist) => {
+          await access.mutate(async (source, persist) => {
+            const handle = await restoreHost(fixture, hostBytes(source))
             await handle.encrypt(new Uint8Array([6]))
             await persist(handle)
             await persist(handle)
@@ -834,7 +837,8 @@ for (const mode of ['real-mls', 'double'] as const) {
         let attempts = 0
         expect(
           await access.mutate(
-            async (handle, persist) => {
+            async (source, persist) => {
+              const handle = await restoreHost(fixture, hostBytes(source))
               await handle.encrypt(new Uint8Array([6]))
               state = encodeClientState(handle.state)
               await persist(handle)
@@ -883,7 +887,8 @@ for (const mode of ['real-mls', 'double'] as const) {
       try {
         const access = await registry(fixture).access(groupID)
         let staged: Uint8Array | undefined
-        await access.mutate(async (handle, persist) => {
+        await access.mutate(async (source, persist) => {
+          const handle = await restoreHost(fixture, hostBytes(source))
           await handle.encrypt(new Uint8Array([7]))
           staged = encodeClientState(handle.state)
           await persist(handle)
@@ -900,7 +905,8 @@ for (const mode of ['real-mls', 'double'] as const) {
       try {
         const access = await registry(fixture).access(groupID)
         const { candidate, write } = await accepted(fixture, access)
-        await access.mutate(async (handle, persist) => {
+        await access.mutate(async (source, persist) => {
+          const handle = await restoreHost(fixture, hostBytes(source))
           await handle.encrypt(new Uint8Array([5]))
           await persist(handle)
         })

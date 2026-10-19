@@ -669,7 +669,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     const signal = cancellation.signal
     const pending = (async () => {
       params.assertAvailable()
-      if (decodeAppAAD(opts.aad)?.intent !== opts.intent)
+      if ((decodeAppAAD(opts.aad)?.intent ?? 'ephemeral') !== opts.intent)
         throw new TypeError('App AAD intent mismatch')
       assertSeal()
       await accounting()

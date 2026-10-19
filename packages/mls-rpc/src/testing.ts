@@ -19,7 +19,7 @@ export { createMemoryPackageStores } from './memory-package-stores.js'
 export { createMemoryTransaction } from './memory-transaction.js'
 export { createOwnerQueues } from './owner-queue.js'
 
-/** Raw-key restoration exception for tests. Never use this sender alongside registry leases. */
+/** Test-only raw-key restoration exception. Never use this sender alongside registry leases. */
 export function restoreCommittedSender(registry: GroupHandleRegistry, groupID: string) {
   const restore = registrySenderRestorers.get(registry)
   if (restore === undefined) throw new TypeError('Unknown registry')
@@ -107,6 +107,7 @@ export function gateRegistryMaintenance(registry: GroupHandleRegistry) {
 export function dropRegistryOwner(access: RegistryHandleAccess) {
   live(access).dropOwner()
 }
+/** Test-only: injects a fault into the leased sender. */
 export function armLiveEncryptFault(
   access: RegistryHandleAccess,
   when: 'throw-before' | 'throw-after' | 'block',

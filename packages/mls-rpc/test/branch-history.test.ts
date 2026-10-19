@@ -14,7 +14,7 @@ import { createGroupCrypto } from '../src/crypto.js'
 import { entryCapability } from '../src/entry-capability.js'
 import type { AppOutboxEntry, PendingAppFrame } from '../src/persistence-types.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
-import { createRealGroup, testHandleAccess } from './fixtures/real-group.js'
+import { createRealGroup } from './fixtures/real-group.js'
 import { createForkNoticeFixture, createRegistryFixture } from './fixtures/registry.js'
 import { createStorageFixture } from './fixtures/storage-persistence.js'
 import { nextChange } from './fixtures/storage-seed.js'
@@ -193,15 +193,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         try {
           const before = await h.fixture.inspectRows()
           const access = await h.fixture.registry.access(h.key.groupID)
-          let handle = await access.read((handle) => handle)
-          const ephemeral = createGroupCrypto({
-            access: testHandleAccess({
-              handle: () => handle,
-              adopt: (next) => {
-                handle = next
-              },
-            }),
-          })
+          const ephemeral = createGroupCrypto({ access })
           await ephemeral.wrap(new Uint8Array([1]), { aad: new Uint8Array() })
           expect(await h.fixture.inspectRows()).toEqual(before)
         } finally {

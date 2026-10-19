@@ -162,8 +162,9 @@ for (const mode of ['real-mls', 'double'] as const) {
     test('same identity saves keep the capture and lift legacy sender progress', async () => {
       const fixture = await setup(mode, true)
       const access = await fixture.registry.access('reservation')
+      const input = await restoreCommittedSender(fixture.registry, 'reservation')
       const before = fixture.restoreCount('reservation')
-      await access.mutate(async (input, persist) => {
+      await access.mutate(async (_current, persist) => {
         await input.encrypt(new Uint8Array([1]))
         await persist(input)
       })
@@ -341,7 +342,8 @@ for (const mode of ['real-mls', 'double'] as const) {
     test('persist waits for a held serializer before deriving the capture', async () => {
       const fixture = await setup(mode, true)
       const access = await fixture.registry.access('reservation')
-      await access.mutate(async (input, persist) => {
+      const input = await restoreCommittedSender(fixture.registry, 'reservation')
+      await access.mutate(async (_current, persist) => {
         await input.encrypt(new Uint8Array([1]))
         const entered = deferred<void>()
         const released = deferred<void>()
@@ -608,7 +610,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         } else {
           const access = await fixture.registry.access('reservation')
           if (path === 'persist-same') {
-            input = await access.read((handle) => handle)
+            input = await restoreCommittedSender(fixture.registry, 'reservation')
             accept = () => access.mutate(async (_current, persist) => persist(input))
           } else {
             const accepted = await fixture.acceptedOrdinary(access)
@@ -1446,16 +1448,14 @@ for (const mode of ['real-mls', 'double'] as const) {
       expect(await reopened.inspectRows()).toEqual(before)
     })
 
-    test('app-open relinquishes after decrypt and drains an already admitted encrypt', async () => {
+    test('app-open relinquishes after decrypt and drains a serializer on its send-denied handle', async () => {
       const group = await createRegistryCryptoGroup(mode, 'open-capture', 1)
       const fixture = group.fixture()
       fixtures.push(fixture)
       const opened = deferred<GroupHandle>()
       const returning = deferred<void>()
       const { restoreGroup } = await import('@kumiai/mls')
-      const { blockMemoryEncrypt, restoreMemoryControlHandle } = await import(
-        './fixtures/sealed-memory-mls.js'
-      )
+      const { restoreMemoryControlHandle } = await import('./fixtures/sealed-memory-mls.js')
       fixture.overrideRestore(async (record) => {
         const state = decodeClientState(record.state)
         if (state === undefined) throw new Error('Missing open state')
@@ -1500,43 +1500,32 @@ for (const mode of ['real-mls', 'double'] as const) {
           settled = true
         })
       const input = await opened.promise
-      let unblock: () => void
-      let started: Promise<void>
-      if (mode === 'double') {
-        const barrier = blockMemoryEncrypt(input)
-        unblock = barrier.release
-        started = barrier.started
-      } else {
-        const entered = deferred<void>()
-        const released = deferred<void>()
-        const signature = input.context.cipherSuite.signature
-        const sign = signature.sign
-        vi.spyOn(signature, 'sign').mockImplementation(async (...args) => {
-          entered.resolve()
-          await released.promise
-          return sign(...args)
-        })
-        started = entered.promise
-        unblock = () => released.resolve()
-      }
-      const sending = input.encryptApplication(new Uint8Array([1]))
-      await started
+      await expect(input.encryptApplication(new Uint8Array([1]))).rejects.toBeInstanceOf(
+        ApplicationSendRefusedError,
+      )
+      const entered = deferred<void>()
+      const released = deferred<void>()
+      const holding = serializeHandle(input, async () => {
+        entered.resolve()
+        await released.promise
+      })
+      await entered.promise
       returning.resolve()
       try {
         await new Promise((resolve) => setTimeout(resolve, 20))
         expect(settled).toBe(false)
       } finally {
-        unblock()
+        released.resolve()
       }
-      expect((await sending).generation).toBe(16)
+      await holding
       expect(await opening).toMatchObject([{ kind: 'opened' }])
       const record = await fixture.device.groups.loadState(group.key)
-      expect(record).toMatchObject({ senderHWM: 17 })
+      expect(record).toMatchObject({ senderHWM: 16 })
       if (record === null || record.deleted || record.state === null)
         throw new Error('Missing open state')
       const state = decodeClientState(record.state)
       if (state === undefined) throw new Error('Invalid open state')
-      expect(ownApplicationGeneration(state)).toBe(17)
+      expect(ownApplicationGeneration(state)).toBe(16)
       await expect(input.encrypt(new Uint8Array([2]))).rejects.toBeInstanceOf(
         ApplicationSendRefusedError,
       )

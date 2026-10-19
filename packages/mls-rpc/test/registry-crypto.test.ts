@@ -22,6 +22,7 @@ import { describe, expect, test, vi } from 'vitest'
 import { isFrameAhead } from '../../rpc/lib/crypto.js'
 import { simpleHandleAccess } from '../src/access.js'
 import { createGroupCrypto, ENTRY_SEAL_LABEL } from '../src/crypto.js'
+import { entryCapability } from '../src/entry-capability.js'
 import { DisplacedGroupHandleError, RegistryRetiringError } from '../src/persistence-errors.js'
 import { MAX_OPEN_BATCH_FRAMES, type OpenAppInput } from '../src/persistence-types.js'
 import {
@@ -29,6 +30,7 @@ import {
   failRegistrySeal,
   registryFixtureRetirement,
 } from './fixtures/registry.js'
+import { createRegistryLeaseFixture } from './fixtures/registry-lease.js'
 import { registryHandle } from './fixtures/registry-welcome.js'
 
 async function setup(mode: 'real-mls' | 'double') {
@@ -554,23 +556,155 @@ for (const mode of ['real-mls', 'double'] as const) {
         ).rejects.toBeInstanceOf(RangeError)
       }))
 
-    test('wrap and frame-less unwrap retain mutation access', () =>
+    test('wrap and frame-less unwrap use only seal and receive without transactions', () =>
       run(async (s) => {
+        const capability = entryCapability(s.f.device.groups)
+        if (capability === null) throw new Error('Missing entry capability')
+        const transactions = vi.spyOn(capability, 'run')
+        const seal = vi.spyOn(s.access, 'seal')
+        const receive = vi.spyOn(s.access, 'receive')
         const mutate = vi.spyOn(s.access, 'mutate')
         const openBatch = vi.spyOn(s.access, 'openBatch')
         const payload = new Uint8Array([3, 4, 5])
-        const wrapped = await s.crypto.wrap(payload)
+        const aad = encodeAppAAD({ topicID: 'reply', intent: 'ephemeral' })
+        const wrapped = await s.crypto.wrap(payload, { aad })
         expect((await s.sender.decrypt(wrapped)).payload).toEqual(payload)
-        const input = await s.seal()
-        expect(
-          await s.crypto.unwrap(input.ciphertext, { expectedAAD: input.expectedAAD }),
-        ).toMatchObject({
+        const ciphertext = await s.sender.encrypt(payload, { aad })
+        expect(await s.crypto.unwrap(ciphertext, { expectedAAD: aad })).toEqual({
+          payload,
           senderDID: s.senderDID,
+          epoch: s.access.epoch(),
         })
-        expect(mutate).toHaveBeenCalledTimes(2)
+        expect(seal).toHaveBeenCalledExactlyOnceWith(payload, { aad, intent: 'ephemeral' })
+        expect(receive).toHaveBeenCalledExactlyOnceWith([{ ciphertext, expectedAAD: aad }])
+        expect(mutate).not.toHaveBeenCalled()
         expect(openBatch).not.toHaveBeenCalled()
-        expect(await s.crypto.pending.list()).toEqual([])
+        expect(transactions).not.toHaveBeenCalled()
       }))
+
+    test('log-intent frame refuses frame-less unwrap and still opens durably', () =>
+      run(async (s) => {
+        const input = await s.seal()
+        await expect(s.crypto.unwrap(input.ciphertext)).rejects.toThrow(
+          'unwrap: app frame refused (log-intent)',
+        )
+        expect(await unwrap(s, input)).toMatchObject({ senderDID: s.senderDID })
+      }))
+
+    test.each([
+      ['empty', new Uint8Array()],
+      ['unrecognised non-empty', new Uint8Array([9, 8, 7])],
+    ] as const)('wrap treats %s AAD as ephemeral and preserves its bytes', (_label, aad) =>
+      run(async (s) => {
+        const payload = new Uint8Array([7])
+        const ciphertext = await s.crypto.wrap(payload, { aad })
+        expect(s.crypto.frameAAD(ciphertext)).toEqual(aad)
+        expect((await s.sender.decrypt(ciphertext)).payload).toEqual(payload)
+        await expect(s.access.seal(payload, { aad, intent: 'log' })).rejects.toBeInstanceOf(
+          TypeError,
+        )
+      }),
+    )
+
+    test.each(['log', 'ephemeral'] as const)(
+      'seal refuses recognised %s AAD with the opposite intent before consuming a generation',
+      (intent) =>
+        run(async (s) => {
+          const aad = encodeAppAAD({ topicID: 'app-X', intent })
+          const payload = new Uint8Array([7])
+          await expect(
+            s.access.seal(payload, { aad, intent: intent === 'log' ? 'ephemeral' : 'log' }),
+          ).rejects.toBeInstanceOf(TypeError)
+          const sealed = await s.access.seal(payload, { aad, intent })
+          expect(sealed.generation).toBe(0)
+          expect((await s.sender.decrypt(sealed.ciphertext)).payload).toEqual(payload)
+        }),
+    )
+
+    test('wrap forwards log intent to the durable seal', () =>
+      run(async (s) => {
+        const seal = vi.spyOn(s.access, 'seal')
+        const aad = encodeAppAAD({ topicID: 'app-X', intent: 'log' })
+        const payload = new Uint8Array([7])
+        await s.crypto.wrap(payload, { aad })
+        expect(seal).toHaveBeenCalledExactlyOnceWith(payload, { aad, intent: 'log' })
+      }))
+
+    test('frame-less unwrap defaults to the frame AAD and a wrong expectation consumes nothing', () =>
+      run(async (s) => {
+        const payload = new Uint8Array([7])
+        const aad = encodeAppAAD({ topicID: 'reply', intent: 'ephemeral' })
+        const ciphertext = await s.sender.encrypt(payload, { aad })
+        await expect(
+          s.crypto.unwrap(ciphertext, { expectedAAD: new Uint8Array([9]) }),
+        ).rejects.toThrow()
+        expect(await s.crypto.unwrap(ciphertext)).toMatchObject({ payload, senderDID: s.senderDID })
+      }))
+
+    test('frame-less unwrap maps receive results without losing errors or epochs', () =>
+      run(async (s) => {
+        const receive = vi.spyOn(s.access, 'receive')
+        const bytes = new Uint8Array([1])
+        receive.mockResolvedValueOnce([{ kind: 'refused', reason: 'invalid' }])
+        await expect(s.crypto.unwrap(bytes)).rejects.toThrow('unwrap: invalid app frame')
+        const cause = new Error('authenticated open failed')
+        receive.mockResolvedValueOnce([{ kind: 'refused', reason: 'invalid', error: cause }])
+        await expect(s.crypto.unwrap(bytes)).rejects.toBe(cause)
+        for (const reason of ['past-epoch', 'future-epoch'] as const) {
+          receive.mockResolvedValueOnce([
+            { kind: 'refused', reason, frameEpoch: 2, handleEpoch: 9 },
+          ])
+          await expect(s.crypto.unwrap(bytes)).rejects.toMatchObject({
+            name: 'FrameEpochError',
+            frameEpoch: 2,
+            handleEpoch: 9,
+          })
+        }
+        receive.mockResolvedValueOnce([
+          {
+            kind: 'opened',
+            payload: bytes,
+            aad: new Uint8Array(),
+            frameEpoch: 2,
+            handleEpoch: 9,
+          },
+        ])
+        await expect(s.crypto.unwrap(bytes)).rejects.toThrow(
+          'unwrap: opened frame has no authenticated sender',
+        )
+        receive.mockResolvedValueOnce([
+          {
+            kind: 'opened',
+            payload: bytes,
+            senderDID: s.senderDID,
+            aad: new Uint8Array(),
+            frameEpoch: 2,
+            handleEpoch: 9,
+          },
+        ])
+        expect(await s.crypto.unwrap(bytes)).toEqual({
+          payload: bytes,
+          senderDID: s.senderDID,
+          epoch: 9,
+        })
+      }))
+
+    test('directed-reply AAD obeys the generation bound', async () => {
+      const fixture = await createRegistryLeaseFixture(mode, 'seed', 499)
+      try {
+        const crypto = createGroupCrypto({ access: fixture.access() })
+        const aad = encodeAppAAD({ topicID: 'reply/directed', intent: 'ephemeral' })
+        await expect(crypto.wrap(new Uint8Array([1]), { aad })).resolves.toBeInstanceOf(Uint8Array)
+        const transactions = fixture.transactions()
+        await expect(crypto.wrap(new Uint8Array([2]), { aad })).rejects.toMatchObject({
+          name: 'ApplicationLeaseUnavailableError',
+          reason: 'exhausted',
+        })
+        expect(fixture.transactions()).toBe(transactions)
+      } finally {
+        await fixture.close()
+      }
+    })
 
     test('shared exporter, entry seals and frame readers work over registry access', () =>
       run(async (s) => {

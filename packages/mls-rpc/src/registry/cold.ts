@@ -1,6 +1,6 @@
 import { normalizeDID } from '@kokuin/token'
 import type { GroupHandle } from '@kumiai/mls'
-import { restrictCommitAuthoring } from '@kumiai/mls'
+import { denyApplicationSend, restrictCommitAuthoring } from '@kumiai/mls'
 import { type ControlSnapshot, controlSafetyHeld, type SendAdmission } from '@kumiai/rpc'
 
 import type { EntryReads, StateMetadata } from '../entry-capability.js'
@@ -58,7 +58,9 @@ export async function restoreValidated(
 ): Promise<GroupHandle> {
   const restore = async () => {
     try {
-      const handle = restrictCommitAuthoring(await environment.restore(copyRecord(value.record)))
+      const handle = denyApplicationSend(
+        restrictCommitAuthoring(await environment.restore(copyRecord(value.record))),
+      )
       validateRegistryHandle({
         handle,
         key: { ...value.key },
@@ -151,7 +153,9 @@ export async function loadValidatedGroup(
       return { value: cached, control }
     const retainedRecord = copyRecord(readable)
     const retainedTrust = decodeStoredValue(encodeStoredValue(trust)) as GroupRecoveryTrust
-    const handle = restrictCommitAuthoring(await environment.restore(copyRecord(retainedRecord)))
+    const handle = denyApplicationSend(
+      restrictCommitAuthoring(await environment.restore(copyRecord(retainedRecord))),
+    )
     validateRegistryHandle({
       handle,
       key,

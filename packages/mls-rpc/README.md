@@ -355,6 +355,9 @@ owns that token: a second live registry is rejected synchronously before any loa
 subscription. Separately constructed memory devices over one database share the token, even
 though their `groups` objects differ. Spreading or copying a wrapper does not inherit registration.
 
+Every handle the registry hands to host code is send-denied. Application crypto uses byte-level
+`seal` and `receive` access instead of encrypting through host handles.
+
 Cold access shares in-flight validation and caches validated records rather than mutable handles.
 Every `read` and `readControl` guarded-opens current stored state and restores an isolated handle;
 callback mutations are not persisted. Control refresh stays in the same Read entry and expires

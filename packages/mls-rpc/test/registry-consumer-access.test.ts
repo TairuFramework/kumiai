@@ -328,8 +328,13 @@ for (const mode of ['real-mls', 'double'] as const) {
       const bytes = write.expected?.journal
       const proof = write.expected?.acceptance
       if (bytes === undefined || proof === undefined) throw new Error('Missing accepted journal')
-      if (mode === 'real-mls') await registryAccess.mutate((handle) => f.advanceSender(handle))
-      else await f.device.groups.ports(registryAccess.key).control.apply({}, 'source-move')
+      if (mode === 'real-mls') {
+        const sender = await f.restoreCommittedSender(groupID)
+        await registryAccess.mutate(async (_handle, persist) => {
+          await f.advanceSender(sender)
+          await persist(sender)
+        })
+      } else await f.device.groups.ports(registryAccess.key).control.apply({}, 'source-move')
       const receiveTree = await access.read((handle) => structuredClone(handle.state.secretTree))
       const control = f.device.groups.ports(registryAccess.key).control
       const restoreCandidate = async () => candidate
