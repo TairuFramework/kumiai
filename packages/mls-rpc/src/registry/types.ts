@@ -68,6 +68,7 @@ export type RegistryHandleAccess = {
     plaintext: Uint8Array,
     opts: { aad: Uint8Array; intent: 'log' | 'ephemeral' },
   ): Promise<SealedApp>
+  onAdmissionChanged(listener: () => void): () => void
   onRotationRequired(listener: (identity: EpochIdentity) => void): () => void
   key: GroupKey
   runtime: GroupEpochRuntime
@@ -106,6 +107,7 @@ export type RegistrySwitchWrite = {
   destination: { control: { cursor: { position: LogPosition; epoch: number } } }
 }
 export type GroupHandleRegistry = {
+  effectiveNext(key: GroupKey): number | null
   switchIncarnation(
     candidate: GroupHandle,
     params: {

@@ -502,6 +502,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
       if (disposed || generation !== retirementGeneration) return
       const continuation = await params.continuation.loadRecoveryContinuation(requested)
       if (disposed || generation !== retirementGeneration) return
+      const admission = mls.sendAdmission()
       creating = params.createPeer(
         { ...requested },
         {
@@ -520,7 +521,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
             manualSource ||
             control.rejoin !== null ||
             control.forkRecoveryAttempt != null ||
-            !mls.sendAdmission().admissible,
+            (!admission.admissible && admission.reason !== 'rotation-required'),
           target: { ...target },
           onConfirmedRecovery,
           onRecovery,

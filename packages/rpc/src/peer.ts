@@ -942,6 +942,21 @@ export function createGroupPeerWithControlWalk<
             activeRecovery != null ||
             rejoinHeld ||
             !mls.sendAdmission().admissible,
+          handoffHeld: () => {
+            const admission = mls.sendAdmission()
+            return (
+              safetyHold() !== null ||
+              logSendsHeld() ||
+              locallyRemoved ||
+              stranded ||
+              anchorRecoveryPending ||
+              sealBarrier != null ||
+              sealError != null ||
+              activeRecovery != null ||
+              rejoinHeld ||
+              (!admission.admissible && admission.reason !== 'rotation-required')
+            )
+          },
           probe: async () => {
             if (commitTopicID == null) throw new Error('Commit topic is unavailable')
             const result = checkedFetchResult(
@@ -988,7 +1003,10 @@ export function createGroupPeerWithControlWalk<
               const admission = mls.sendAdmission()
               if (anchor !== at || sealBarrier != null || snapshot.epoch !== epoch) continue
               if (sealError != null) throw sealError
-              if (!admission.admissible || admission.epoch !== epoch) {
+              if (
+                (!admission.admissible && admission.reason !== 'rotation-required') ||
+                admission.epoch !== epoch
+              ) {
                 throw new Error('Application admission snapshot moved')
               }
               return { ...frame, floor: snapshot }

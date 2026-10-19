@@ -693,13 +693,13 @@ for (const mode of ['real-mls', 'double'] as const) {
       },
     )
 
-    test.each(['cold', 'deferred', 'exhausted', 'terminal'] as const)(
+    test.each(['cold', 'deferred', 'exhausted', 'rotation-required', 'terminal'] as const)(
       'wrap refuses %s sending through the registry adapter',
       async (reason) => {
         const fixture = await createRegistryLeaseFixture(
           mode,
           'seed',
-          reason === 'exhausted' ? 499 : 0,
+          reason === 'rotation-required' ? 499 : 0,
         )
         const gate = gateRegistryMaintenance(fixture.fixture().registry)
         try {
@@ -713,10 +713,15 @@ for (const mode of ['real-mls', 'double'] as const) {
           if (reason === 'terminal') await fixture.setUnavailable()
           const crypto = createGroupCrypto({ access: fixture.access() })
           const aad = fixture.aad('ephemeral')
-          if (reason === 'exhausted') await crypto.wrap(new Uint8Array([1]), { aad })
+          if (reason === 'rotation-required') await crypto.wrap(new Uint8Array([1]), { aad })
+          if (reason === 'exhausted')
+            for (let generation = 0; generation < 16; generation++)
+              await crypto.wrap(new Uint8Array([1]), { aad })
           await expect(promptly(crypto.wrap(new Uint8Array([2]), { aad }))).rejects.toMatchObject({
             name:
-              reason === 'terminal' ? 'SendNotAdmissibleError' : 'ApplicationLeaseUnavailableError',
+              reason === 'terminal' || reason === 'rotation-required'
+                ? 'SendNotAdmissibleError'
+                : 'ApplicationLeaseUnavailableError',
             reason,
           })
         } finally {
@@ -854,8 +859,8 @@ for (const mode of ['real-mls', 'double'] as const) {
         await expect(crypto.wrap(new Uint8Array([1]), { aad })).resolves.toBeInstanceOf(Uint8Array)
         const transactions = fixture.transactions()
         await expect(promptly(crypto.wrap(new Uint8Array([2]), { aad }))).rejects.toMatchObject({
-          name: 'ApplicationLeaseUnavailableError',
-          reason: 'exhausted',
+          name: 'SendNotAdmissibleError',
+          reason: 'rotation-required',
         })
         expect(fixture.transactions()).toBe(transactions)
       } finally {

@@ -11,7 +11,6 @@ import { encodeAppAAD, GroupSafetyHeldError } from '@kumiai/rpc'
 import { afterEach, describe, expect, onTestFinished, test, vi } from 'vitest'
 
 import { entryCapability } from '../src/entry-capability.js'
-import { ApplicationLeaseUnavailableError } from '../src/index.js'
 import { StorageOutcomeUnknownError } from '../src/persistence-errors.js'
 import { registryLiveSend } from '../src/registry/live-send.js'
 import * as reservations from '../src/registry/reserve.js'
@@ -293,9 +292,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       for (let index = 0; index < 3; index++) {
         await live.schedule()
         await fixture.drainMaintenance()
-        await expect(fixture.sealEphemeral()).rejects.toBeInstanceOf(
-          ApplicationLeaseUnavailableError,
-        )
+        await expect(fixture.sealEphemeral()).rejects.toMatchObject({ reason: 'rotation-required' })
       }
       expect(fixture.transactions()).toBe(before)
       expect(rotated.length).toBeGreaterThan(0)
@@ -701,7 +698,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect((await fixture.sealEphemeral()).generation).toBe(generation)
         await fixture.drainMaintenance()
       }
-      await expect(fixture.sealEphemeral()).rejects.toMatchObject({ reason: 'exhausted' })
+      await expect(fixture.sealEphemeral()).rejects.toMatchObject({ reason: 'rotation-required' })
       await fixture.drainMaintenance()
       expect(fixture.transactions()).toBe(before)
       await invariant(fixture)

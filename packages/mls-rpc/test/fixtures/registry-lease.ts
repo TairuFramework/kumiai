@@ -76,10 +76,11 @@ export async function createRegistryLeaseFixture(
     fixture: () => fixture,
     access: () => access,
     aad: (intent: 'ephemeral' | 'log') => encodeAppAAD({ topicID: 'lease-app', intent }),
-    sealEphemeral: (plaintext = new Uint8Array([1])) =>
+    sealEphemeral: (plaintext: Uint8Array = new Uint8Array([1])) =>
       access.seal(plaintext, { aad: result.aad('ephemeral'), intent: 'ephemeral' }),
-    sealDurable: (plaintext = new Uint8Array([1])) =>
+    sealDurable: (plaintext: Uint8Array = new Uint8Array([1])) =>
       access.seal(plaintext, { aad: result.aad('log'), intent: 'log' }),
+    admission: () => access.admission(),
     lease: () => testing.registryLeaseSnapshot(access),
     transactions: () => transactions,
     restores: () => fixture.restores(),

@@ -814,10 +814,11 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     },
     admission() {
       params.assertAvailable()
-      return { ...owner.admission }
+      return live.admission()
     },
     seal: live.seal,
     onRotationRequired: live.onRotationRequired,
+    onAdmissionChanged: live.onAdmissionChanged,
     read,
     readControl,
     mutate,

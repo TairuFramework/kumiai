@@ -392,6 +392,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
           previous.acceptedTrust = observation.trust
           previous.snapshot = projected.snapshot
           previous.admission = projected.admission
+          previous.maintenance?.changed()
           const dispatch = previous.runtime.install(projected.snapshot)
           if (dispatch !== undefined) notifications.set(observation, dispatch)
         },
@@ -562,6 +563,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         seal: access.seal,
         receive: access.receive,
         onRotationRequired: access.onRotationRequired,
+        onAdmissionChanged: access.onAdmissionChanged,
         openBatch: access.openBatch,
         pending: access.pending,
         read: access.read,
@@ -745,6 +747,12 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   })
   const registry: GroupHandleRegistry = {
     start,
+    effectiveNext(key) {
+      const owner = slots.get(key.groupID)?.owner
+      return owner?.key.incarnation === key.incarnation
+        ? (owner.maintenance?.effectiveNext() ?? null)
+        : null
+    },
     async seed(group, options) {
       assertOpen()
       try {

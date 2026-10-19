@@ -128,8 +128,12 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
         next.reason !== 'recovery-unavailable')
     )
       ordinaryAdmission = { ...next }
+    const effective: SendAdmission =
+      next.admissible && (registry.effectiveNext(key) ?? 0) >= 500
+        ? { epoch: next.epoch, admissible: false, reason: 'rotation-required' }
+        : next
     const reason = capability?.held(key)
-    admission = reason == null ? { ...next } : { epoch: next.epoch, admissible: false, reason }
+    admission = reason == null ? { ...effective } : { epoch: next.epoch, admissible: false, reason }
   }
   function observe(observation: AccountedGroupObservation): void {
     if (!initialised) {
@@ -191,17 +195,19 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
   if (pendingObservation !== undefined) observe(pendingObservation)
   let opening: Promise<ControlHandleAccess> | undefined
   ordinaryAdmission = { ...admission }
+  cache(admission)
   const unsubscribeSafety = capability.onSafetyChanged(key, (reason) => {
-    admission =
-      reason === null
-        ? { ...ordinaryAdmission }
-        : { epoch: admission.epoch, admissible: false, reason }
+    cache(
+      reason === null ? ordinaryAdmission : { epoch: admission.epoch, admissible: false, reason },
+    )
   })
+  let unsubscribeAdmission: (() => void) | undefined
   let unsubscribeRuntime: (() => void) | undefined
   capability.onRetire(key, async () => {
     unsubscribeSafety()
     unsubscribeEntry()
     unsubscribeRuntime?.()
+    unsubscribeAdmission?.()
     cache({ epoch: admission.epoch, admissible: false, reason: 'stranded' })
   })
   async function access(): Promise<ControlHandleAccess> {
@@ -210,6 +216,7 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
         const value = await registry.access(key.groupID)
         assertKey(value)
         cache(value.admission())
+        unsubscribeAdmission = value.onAdmissionChanged(() => cache(value.admission()))
         unsubscribeRuntime = value.runtime.onEpochChanged((snapshot) => {
           if (snapshot === null)
             cache({ epoch: admission.epoch, admissible: false, reason: 'stranded' })

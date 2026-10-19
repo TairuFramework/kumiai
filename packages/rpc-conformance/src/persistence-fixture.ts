@@ -13,6 +13,7 @@ import type {
   ConformanceGroupSafetyEvent,
   ConformanceRecoveryUnavailableEvent,
 } from './control-store.js'
+import type { ConformanceSendAdmission } from './group-mls.js'
 
 export type ConformanceMemberCredential = { id: string; groupID: string }
 export type ConformanceSignedEvent = {
@@ -598,6 +599,7 @@ export type ConformancePendingAppFrames = {
 }
 
 export type RegistryLeaseFixture = {
+  admission(): ConformanceSendAdmission
   openEphemeral(frames: Array<{ ciphertext: Uint8Array; expectedAAD: Uint8Array }>): Promise<
     Array<
       | {

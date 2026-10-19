@@ -26,6 +26,7 @@ export type LogDeliveryParams = {
   ready: () => Promise<void>
   floor: () => EpochFloor
   held: () => boolean
+  handoffHeld?: () => boolean
   safetyHold?: () => SafetyHold
   probe: () => Promise<CoveredFetchResult>
   pull: () => Promise<void>
@@ -44,6 +45,7 @@ export type LogDeliveryParams = {
 
 /** Publication evidence stays in memory. A prepared durable attempt proves nothing. */
 export function createLogDelivery(params: LogDeliveryParams) {
+  const handoffHeld = params.handoffHeld ?? params.held
   const safetyHeld = () => params.safetyHold?.() != null
   const publications = new Map<number, Publication>()
   const proven = new Set<number>()
@@ -123,7 +125,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
       if (next == null || closed || params.held()) return
       const { protocol, prc, data } = next
       const frame = await params.seal({ protocol, prc, data, seq: -1, lastAttempt: null })
-      if (closed || params.held()) return
+      if (closed || handoffHeld()) return
       const submission = params.publish(frame)
       if (submission == null) return
       await submission
@@ -154,7 +156,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
       const floor = params.floor()
       if (publications.get(entry.seq)?.epoch === floor.epoch) continue
       const frame = await params.seal(entry)
-      if (closed || params.held()) return
+      if (closed || handoffHeld()) return
       const needsEarlierPublication = (): boolean =>
         params.queue
           .entries()
@@ -178,7 +180,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
       }
       await params.put(updated)
       params.queue.replace(updated)
-      if (closed || params.held()) return
+      if (closed || handoffHeld()) return
       if (needsEarlierPublication()) {
         immediate = true
         break
