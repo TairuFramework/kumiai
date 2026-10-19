@@ -1,4 +1,5 @@
 import { decodeFrame, encodeEnvelope, encodeFrame, type MailboxHub } from '@kumiai/hub-tunnel'
+import { FrameEpochError } from '@kumiai/rpc'
 import { toB64 } from '@sozai/codec'
 import { describe, expect, onTestFinished, test, vi } from 'vitest'
 
@@ -74,6 +75,141 @@ for (const mode of ['real-mls', 'double'] as const) {
         'MLS sender does not match hub publisher',
       )
     })
+
+    test('rejects a different current member as the scoped publisher', async () => {
+      const { fixture, access, params, remote } = await setup()
+      const peerDID = fixture.fixture().identity.id
+      expect(access.runtime.snapshot()?.members.has(peerDID)).toBe(true)
+      const local = new MLSEncryptor({ ...params, peerDID })
+      await expect(local.decrypt(await remote.encrypt(message()))).rejects.toThrow(
+        'MLS sender does not match hub publisher',
+      )
+    })
+
+    test('removed peer outstanding reply rejects without an active watcher', async () => {
+      const { fixture, access, local, remote } = await setup('dialer')
+      await local.encrypt(message())
+      const reply = await remote.encrypt(message('receive'))
+      await fixture.removePeer()
+      const receive = vi.spyOn(access, 'receive')
+      await expect(local.decrypt(reply)).rejects.toThrow('no longer a group member')
+      expect(await receive.mock.results[0]?.value).toMatchObject([
+        { kind: 'opened', handleEpoch: access.runtime.snapshot()?.epoch },
+      ])
+    })
+
+    test('lagging membership snapshot rejects an old reply after peer removal', async () => {
+      const { fixture, access, local, remote } = await setup('dialer')
+      await local.encrypt(message())
+      const reply = await remote.encrypt(message('receive'))
+      const initial = access.runtime.snapshot()
+      if (initial === null) throw new Error('Missing snapshot')
+      await fixture.removePeer()
+      const current = access.runtime.snapshot()
+      expect(current?.epoch).toBe(initial.epoch + 1)
+      const receive = vi.spyOn(access, 'receive')
+      vi.spyOn(access.runtime, 'snapshot').mockReturnValue(initial)
+      await expect(local.decrypt(reply)).rejects.toThrow()
+      expect(await receive.mock.results[0]?.value).toMatchObject([
+        { kind: 'opened', frameEpoch: initial.epoch, handleEpoch: current?.epoch },
+      ])
+    })
+
+    test('membership snapshot from another incarnation rejects an outstanding reply', async () => {
+      const { fixture, access, local, remote } = await setup('dialer')
+      await local.encrypt(message())
+      const reply = await remote.encrypt(message('receive'))
+      await fixture.advanceEpoch()
+      const current = access.runtime.snapshot()
+      if (current === null) throw new Error('Missing snapshot')
+      vi.spyOn(access.runtime, 'snapshot').mockReturnValue({
+        ...current,
+        incarnation: current.incarnation + 1,
+      })
+      await expect(local.decrypt(reply)).rejects.toThrow()
+    })
+
+    test('watch unsubscribes from runtime when it closes', async () => {
+      const { fixture, access, local } = await setup()
+      const subscribe = access.runtime.onEpochChanged
+      const unsubscribe = vi.fn()
+      vi.spyOn(access.runtime, 'onEpochChanged').mockImplementation((listener) => {
+        unsubscribe.mockImplementation(subscribe(listener))
+        return unsubscribe
+      })
+      const dispose = vi.fn(async () => {})
+      const unwatch = local.watchPeerRemoval(dispose)
+      await fixture.setUnavailable()
+      expect(dispose).toHaveBeenCalledOnce()
+      expect(unsubscribe).toHaveBeenCalledOnce()
+      unwatch()
+      expect(unsubscribe).toHaveBeenCalledOnce()
+    })
+
+    test('initial watch close leaves no runtime subscription', async () => {
+      const { fixture, access, local } = await setup()
+      await fixture.setUnavailable()
+      const subscribe = vi.spyOn(access.runtime, 'onEpochChanged')
+      const dispose = vi.fn(async () => {})
+      local.watchPeerRemoval(dispose)()
+      expect(dispose).toHaveBeenCalledOnce()
+      expect(subscribe).not.toHaveBeenCalled()
+    })
+
+    test('watch epoch regression closes once', async () => {
+      const { fixture, access, local } = await setup()
+      const subscribe = access.runtime.onEpochChanged
+      let notify: ((value: GroupRuntimeSnapshot | null) => void) | undefined
+      vi.spyOn(access.runtime, 'onEpochChanged').mockImplementation((listener) => {
+        notify = listener
+        return subscribe(listener)
+      })
+      const initial = access.runtime.snapshot()
+      const dispose = vi.fn(async () => {})
+      const unwatch = local.watchPeerRemoval(dispose)
+      await fixture.advanceEpoch()
+      expect(dispose).not.toHaveBeenCalled()
+      notify?.(initial)
+      notify?.(initial)
+      expect(dispose).toHaveBeenCalledOnce()
+      unwatch()
+    })
+
+    test('clear during an in-flight seal cannot restore outstanding requests', async () => {
+      const { fixture, access, local, remote } = await setup('dialer')
+      const seal = access.seal
+      const entered = Promise.withResolvers<void>()
+      const blocked = Promise.withResolvers<void>()
+      vi.spyOn(access, 'seal').mockImplementationOnce(async (plaintext, options) => {
+        const sealed = await seal(plaintext, options)
+        entered.resolve()
+        await blocked.promise
+        return sealed
+      })
+      const sending = local.encrypt(message())
+      await entered.promise
+      local.clear()
+      blocked.resolve()
+      await sending
+      const reply = await remote.encrypt(message('receive'))
+      await fixture.advanceEpoch()
+      await expect(local.decrypt(reply)).rejects.toThrow('not an outstanding reply')
+    })
+
+    for (const [reason, frameEpoch] of [
+      ['past-epoch', 0],
+      ['future-epoch', 2],
+    ] as const) {
+      test(`${reason} receive refusal preserves the port FrameEpochError class`, async () => {
+        const { access, local } = await setup()
+        vi.spyOn(access, 'receive').mockResolvedValueOnce([
+          { kind: 'refused', reason, frameEpoch, handleEpoch: 1 },
+        ])
+        const result = local.decrypt(message())
+        await expect(result).rejects.toBeInstanceOf(FrameEpochError)
+        await expect(result).rejects.toMatchObject({ frameEpoch, handleEpoch: 1 })
+      })
+    }
 
     test('decrypt deduplicates in flight, batches in a microtask and opens no transaction', async () => {
       const { fixture, access, local, remote } = await setup()
@@ -368,6 +504,7 @@ function controlledAccess() {
   }
   let listener: ((value: GroupRuntimeSnapshot | null) => void) | undefined
   const access: MLSEncryptorParams['access'] = {
+    key: { groupID: 'controlled', incarnation: 1 },
     seal: vi.fn(async (ciphertext) => ({ ciphertext, epoch: 1, generation: 0 })),
     receive: vi.fn<MLSEncryptorParams['access']['receive']>(async (frames) =>
       frames.map(

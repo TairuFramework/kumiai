@@ -6,12 +6,13 @@ import {
   type HubFrame,
   type MailboxHub,
 } from '@kumiai/hub-tunnel'
+import { FrameEpochError } from '@kumiai/rpc'
 import { toB64 } from '@sozai/codec'
 
 import type { GroupRuntimeSnapshot, RegistryHandleAccess } from './registry/types.js'
 
 export type MLSEncryptorParams = {
-  access: Pick<RegistryHandleAccess, 'seal' | 'receive' | 'runtime'>
+  access: Pick<RegistryHandleAccess, 'seal' | 'receive' | 'runtime' | 'key'>
   peerDID: string
   role: 'dialer' | 'listener'
 }
@@ -36,6 +37,7 @@ export class MLSEncryptor implements Encryptor {
   #access: MLSEncryptorParams['access']
   #peerDID: string
   #role: 'dialer' | 'listener'
+  #clearGeneration = 0
   #outstanding = new Map<string, Set<string>>()
   #pendingPublish = new Map<string, { sessionID: string; rid: string }>()
   #closeForRemoval: (() => void) | undefined
@@ -55,11 +57,12 @@ export class MLSEncryptor implements Encryptor {
 
   async encrypt(plaintext: Uint8Array): Promise<Uint8Array> {
     const frame = decodeFrame(plaintext)
+    const clearGeneration = this.#clearGeneration
     const { ciphertext: encrypted } = await this.#access.seal(plaintext, {
       aad: new Uint8Array(),
       intent: 'ephemeral',
     })
-    if (this.#role === 'dialer') {
+    if (this.#role === 'dialer' && clearGeneration === this.#clearGeneration) {
       const rid = requestID(frame)
       if (rid !== null) {
         const pending = this.#outstanding.get(frame.sessionID) ?? new Set<string>()
@@ -101,6 +104,7 @@ export class MLSEncryptor implements Encryptor {
   }
 
   clear(): void {
+    this.#clearGeneration++
     this.#outstanding.clear()
     this.#pendingPublish.clear()
   }
@@ -124,12 +128,18 @@ export class MLSEncryptor implements Encryptor {
 
   watchPeerRemoval(dispose: () => Promise<void>): () => void {
     let active = true
-    let removed = false
+    let unsubscribe: (() => void) | undefined
+    const unwatch = () => {
+      active = false
+      unsubscribe?.()
+      unsubscribe = undefined
+      if (this.#closeForRemoval === close) this.#closeForRemoval = undefined
+    }
     let observedEpoch: number | undefined
     let incarnation: number | undefined
     const close = () => {
-      if (!active || removed) return
-      removed = true
+      if (!active) return
+      unwatch()
       this.clear()
       try {
         void dispose().catch(() => {})
@@ -139,13 +149,15 @@ export class MLSEncryptor implements Encryptor {
     }
     this.#closeForRemoval = close
     const check = (value: GroupRuntimeSnapshot | null) => {
+      if (!active) return
       try {
         if (
           value === null ||
           !value.available ||
           !value.members.has(this.#peerDID) ||
           (incarnation !== undefined && value.incarnation !== incarnation) ||
-          (observedEpoch !== undefined && value.epoch > observedEpoch + 1)
+          (observedEpoch !== undefined &&
+            (value.epoch < observedEpoch || value.epoch > observedEpoch + 1))
         ) {
           close()
           return
@@ -162,12 +174,11 @@ export class MLSEncryptor implements Encryptor {
     } catch {
       close()
     }
-    const unsubscribe = this.#access.runtime.onEpochChanged(check)
-    return () => {
-      active = false
-      unsubscribe()
-      if (this.#closeForRemoval === close) this.#closeForRemoval = undefined
+    if (active) {
+      unsubscribe = this.#access.runtime.onEpochChanged(check)
+      if (!active) unwatch()
     }
+    return unwatch
   }
 
   decrypt(ciphertext: Uint8Array): Promise<Uint8Array> {
@@ -202,12 +213,22 @@ export class MLSEncryptor implements Encryptor {
         outcomes.forEach((outcome, index) => {
           const item = chunk[index] as (typeof batch)[number]
           try {
-            if (outcome.kind !== 'opened')
+            if (outcome.kind !== 'opened') {
+              if (outcome.reason === 'past-epoch' || outcome.reason === 'future-epoch')
+                throw new FrameEpochError(outcome.frameEpoch, outcome.handleEpoch)
               throw new Error(`MLS receive refused: ${outcome.reason}`, { cause: outcome })
+            }
             const { payload, senderDID, frameEpoch, handleEpoch } = outcome
             if (senderDID !== undefined && normalizeDID(senderDID) !== this.#peerDID)
               throw new Error('MLS sender does not match hub publisher')
-            if (this.#access.runtime.snapshot()?.members.has(this.#peerDID) !== true) {
+            const snapshot = this.#access.runtime.snapshot()
+            if (
+              snapshot === null ||
+              snapshot.incarnation !== this.#access.key.incarnation ||
+              snapshot.epoch < handleEpoch
+            )
+              throw new Error('MLS membership snapshot does not cover the receive handle')
+            if (!snapshot.members.has(this.#peerDID)) {
               this.clear()
               this.#closeForRemoval?.()
               throw new Error('MLS peer is no longer a group member')
