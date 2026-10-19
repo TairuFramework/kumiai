@@ -26,6 +26,7 @@ export const registryReceiveSlots = new WeakMap<RegistryHandleAccess, LiveSlot>(
 export const receiveInstrumentation = new WeakMap<LiveSlot, { rebuilt?(): void; cap?: number }>()
 
 export function setReceiveBase(slot: LiveSlot, record: ReadableGroupState): void {
+  if (slot.consumed.incarnation !== null && record.incarnation < slot.consumed.incarnation) return
   if (
     slot.base !== null &&
     slot.base.incarnation === record.incarnation &&
@@ -127,15 +128,21 @@ export function createLiveReceive(params: {
       expectedAAD: expectedAAD?.slice(),
     }))
     const signal = slot.cancellation.signal
+    function assertCallAvailable(): void {
+      if (signal.aborted) throw signal.reason
+      assertAvailable()
+    }
+    function unavailable(error: unknown): ReceiveResult {
+      return { kind: 'refused', reason: 'invalid', error }
+    }
     return track(
       (async () => {
         for (let attempt = 0; ; attempt++) {
           let cold: Promise<void> | null = null
           const results = await slot.lock.run(async () => {
-            if (signal.aborted) throw signal.reason
-            assertAvailable()
+            assertCallAvailable()
             await params.accounting()
-            assertAvailable()
+            assertCallAvailable()
             if (slot.base === null) {
               cold = refresh()
               if (attempt !== 0) throw new ApplicationLeaseUnavailableError('cold')
@@ -149,6 +156,11 @@ export function createLiveReceive(params: {
               const handle = denyApplicationSend(
                 restrictCommitAuthoring(await params.environment.restore(copyRecord(base))),
               )
+              try {
+                assertCallAvailable()
+              } catch (error) {
+                return frames.map(() => unavailable(error))
+              }
               slot.receive = handle
               slot.receiveDigest = digest
               receiveInstrumentation.get(slot)?.rebuilt?.()
@@ -228,6 +240,12 @@ export function createLiveReceive(params: {
               } catch {
                 sender = null
               }
+              try {
+                assertCallAvailable()
+              } catch (error) {
+                results.push(...frames.slice(results.length).map(() => unavailable(error)))
+                break
+              }
               if (sender === null) {
                 results.push(refuse('invalid'))
                 continue
@@ -264,6 +282,12 @@ export function createLiveReceive(params: {
                 })
               } catch (error) {
                 results.push({ kind: 'refused', reason: 'invalid', error })
+              }
+              try {
+                assertCallAvailable()
+              } catch (error) {
+                results.push(...frames.slice(results.length).map(() => unavailable(error)))
+                break
               }
             }
             return results

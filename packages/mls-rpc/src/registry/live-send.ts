@@ -221,7 +221,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
   }
   function account(proof: OwnProof): void {
     proof.proven = proof.registered
-    if (!proof.proven || proof.record.version < owner.knownVersion) return
+    if (!available() || !proof.proven || proof.record.version < owner.knownVersion) return
     owner.knownVersion = proof.record.version
     owner.latestCommitted = copyRecord(proof.record)
     owner.latestEligibility = proof.eligibility.slice()

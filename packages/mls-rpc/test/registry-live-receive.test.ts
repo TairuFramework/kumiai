@@ -1,10 +1,11 @@
 import { encodeAppAAD, GroupSafetyHeldError } from '@kumiai/rpc'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
+import { entryCapability } from '../src/entry-capability.js'
 import { registryReceiveSlots, setReceiveBase } from '../src/registry/live-receive.js'
 import { registryRetirement } from '../src/registry/retirement.js'
 import { deferred } from '../src/runtime.js'
-import { receiveRebuilds, setReceiveCapacity } from '../src/testing.js'
+import { dropRegistryOwner, receiveRebuilds, setReceiveCapacity } from '../src/testing.js'
 import { createRegistryLeaseFixture } from './fixtures/registry-lease.js'
 
 type Fixture = Awaited<ReturnType<typeof createRegistryLeaseFixture>>
@@ -96,6 +97,67 @@ for (const mode of ['real-mls', 'double'] as const) {
         { kind: 'refused', reason: 'invalid' },
       ])
     })
+    test('an older incarnation cannot clear the current consumed set even with no base', async () => {
+      const fixture = await setup(mode)
+      const older = await fixture.record()
+      const current = { ...older, incarnation: older.incarnation + 1 }
+      const input = await frame(fixture)
+      setReceiveBase(slot(fixture), current)
+      expect(await fixture.openEphemeral([input])).toMatchObject([{ kind: 'opened' }])
+      slot(fixture).base = null
+      setReceiveBase(slot(fixture), older)
+      setReceiveBase(slot(fixture), current)
+      expect(await fixture.openEphemeral([input])).toMatchObject([
+        { kind: 'refused', reason: 'consumed' },
+      ])
+    })
+    test.each(['drop', 'switch'] as const)(
+      'a late proof from a retired owner installs and clears nothing after %s',
+      async (transition) => {
+        const fixture = await setup(mode)
+        await fixture.drainMaintenance()
+        const capability = entryCapability(fixture.fixture().device.groups)
+        if (capability === null) throw new Error('Missing capability')
+        const original = capability.run.bind(capability)
+        const entered = deferred<void>()
+        const release = deferred<void>()
+        vi.spyOn(capability, 'run').mockImplementationOnce(async (...args) => {
+          const result = await original(...args)
+          entered.resolve()
+          await release.promise
+          return result
+        })
+        const proving = fixture.reserveNow()
+        await entered.promise
+        try {
+          if (transition === 'switch') await fixture.switchIncarnation()
+          else await fixture.dropOwner()
+          const input =
+            transition === 'switch'
+              ? {
+                  ciphertext: await (
+                    await fixture.fixture().restoreCommittedSender(fixture.key.groupID)
+                  ).encrypt(new Uint8Array([7]), { aad: fixture.aad('ephemeral') }),
+                  expectedAAD: fixture.aad('ephemeral'),
+                }
+              : await frame(fixture)
+          expect(await fixture.openEphemeral([input])).toMatchObject([{ kind: 'opened' }])
+          const live = slot(fixture)
+          const base = live.base
+          const consumed = live.consumed
+          release.resolve()
+          await proving
+          expect(live.base).toBe(base)
+          expect(live.consumed).toBe(consumed)
+          expect(await fixture.openEphemeral([input])).toMatchObject([
+            { kind: 'refused', reason: 'consumed' },
+          ])
+        } finally {
+          release.resolve()
+          await proving
+        }
+      },
+    )
     test('a new incarnation clears consumed tuples even when epoch numbers coincide', async () => {
       const fixture = await setup(mode)
       const input = await frame(fixture)
@@ -309,6 +371,100 @@ for (const mode of ['real-mls', 'double'] as const) {
         { kind: 'refused', reason: 'invalid' },
       ])
     })
+    test.each(['warm', 'cold', 'reopened'] as const)(
+      'terminal membership with valid MLS bytes refuses receive (%s)',
+      async (temperature) => {
+        const fixture = await setup(mode)
+        const input = await frame(fixture)
+        await warm(fixture)
+        await fixture.setUnavailable()
+        if (temperature === 'cold') {
+          await foreignWithoutRefresh(fixture, 'proposal')
+          expect(slot(fixture).base).toBeNull()
+        } else if (temperature === 'reopened') await fixture.reopen()
+        await expect(fixture.openEphemeral([input])).rejects.toMatchObject({
+          name: 'GroupUnavailableError',
+        })
+      },
+    )
+    test.each(
+      (['restore', 'readSenderData', 'decrypt'] as const).flatMap((boundary) =>
+        (['drop', 'retire'] as const).map((transition) => ({ boundary, transition })),
+      ),
+    )(
+      '$transition during $boundary stops the batch without opening remaining frames',
+      async ({ boundary, transition }) => {
+        const fixture = await setup(mode)
+        const inputs = [await frame(fixture), await frame(fixture), await frame(fixture)]
+        await warm(fixture)
+        const live = slot(fixture)
+        const handle = live.receive
+        if (handle === null) throw new Error('Missing receiver')
+        const readSenderData = handle.readSenderData.bind(handle)
+        const senderReads = vi.spyOn(handle, 'readSenderData')
+        const entered = deferred<void>()
+        const release = deferred<void>()
+        let heldRestore: ReturnType<ReturnType<Fixture['fixture']>['holdRestore']> | undefined
+        if (boundary === 'restore') {
+          live.receive = null
+          heldRestore = fixture.fixture().holdRestore(fixture.key.groupID)
+        } else {
+          let calls = 0
+          async function held<T>(result: T): Promise<T> {
+            calls++
+            if (calls === (boundary === 'readSenderData' ? 2 : 1)) {
+              entered.resolve()
+              await release.promise
+            }
+            return result
+          }
+          if (boundary === 'readSenderData') {
+            senderReads.mockImplementation(async (...args) => held(await readSenderData(...args)))
+          } else {
+            const original = handle.decrypt.bind(handle)
+            vi.spyOn(handle, 'decrypt').mockImplementation(async (...args) =>
+              held(await original(...args)),
+            )
+          }
+        }
+        const receiving = fixture.openEphemeral(inputs)
+        await (heldRestore?.started ?? entered.promise)
+        try {
+          if (transition === 'drop') dropRegistryOwner(fixture.access())
+          else {
+            const attempt = registryRetirement(fixture.fixture().registry).beginRetirement(
+              fixture.key,
+            )
+            attempt.settle('rolled-back')
+          }
+          heldRestore?.release()
+          release.resolve()
+          if (transition === 'drop') await fixture.dropOwner()
+          const refused = {
+            kind: 'refused',
+            reason: 'invalid',
+            error: {
+              name: transition === 'drop' ? 'DisplacedGroupHandleError' : 'RegistryRetiringError',
+            },
+          }
+          expect(await receiving).toMatchObject(
+            boundary === 'restore'
+              ? [refused, refused, refused]
+              : [{ kind: 'opened' }, refused, refused],
+          )
+          if (boundary === 'restore') expect(live.receive).toBeNull()
+          else expect(senderReads).toHaveBeenCalledTimes(boundary === 'decrypt' ? 1 : 2)
+          expect(await fixture.openEphemeral(inputs)).toMatchObject(
+            boundary === 'restore'
+              ? [{ kind: 'opened' }, { kind: 'opened' }, { kind: 'opened' }]
+              : [{ kind: 'refused', reason: 'consumed' }, { kind: 'opened' }, { kind: 'opened' }],
+          )
+        } finally {
+          heldRestore?.release()
+          release.resolve()
+        }
+      },
+    )
     test('peer access is registry-backed across rotation and same-epoch unavailability', async () => {
       const fixture = await setup(mode)
       const peer = await fixture.peerAccess()
@@ -472,11 +628,34 @@ for (const mode of ['real-mls', 'double'] as const) {
         await expect(fixture.access().receive([input])).rejects.toBeInstanceOf(GroupSafetyHeldError)
       },
     )
-    test('first receive after reopen opens without a manual maintenance drain', async () => {
+    test('first receive after reopen waits for its cold refresh and opens', async () => {
       const fixture = await setup(mode)
       const input = await frame(fixture)
       await fixture.reopen()
-      expect(await fixture.access().receive([input])).toMatchObject([{ kind: 'opened' }])
+      await foreignWithoutRefresh(fixture, 'proposal')
+      expect(slot(fixture).base).toBeNull()
+      const hold = fixture.fixture().holdRestore(fixture.key.groupID)
+      let finished = false
+      const receiving = fixture.openEphemeral([input]).then(
+        (results) => {
+          finished = true
+          return results
+        },
+        (error: unknown) => {
+          finished = true
+          return error
+        },
+      )
+      try {
+        await hold.started
+        await new Promise<void>((resolve) => setTimeout(resolve, 20))
+        expect(finished).toBe(false)
+        expect(slot(fixture).base).toBeNull()
+        hold.release()
+        expect(await receiving).toMatchObject([{ kind: 'opened' }])
+      } finally {
+        hold.release()
+      }
     })
     test('cold receive needs no send eligibility with a pending proposal', async () => {
       const fixture = await setup(mode)

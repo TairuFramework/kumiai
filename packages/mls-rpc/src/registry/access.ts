@@ -770,16 +770,23 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
       throw error
     }
   }
+  function assertReceiveAvailable(): void {
+    params.assertAvailable()
+    assertSafety()
+    if (owner.latestCommitted.terminal || !owner.snapshot.available)
+      throw new GroupUnavailableError({ reason: 'invalid' })
+  }
   const access: RegistryHandleAccess = {
     receive: createLiveReceive({
       ...params,
       slot: params.live,
       accounting: live.accounting,
+      assertAvailable: assertReceiveAvailable,
       refresh: async () => {
         await capability.read(owner.key.groupID, async (reads) => {
-          params.assertAvailable()
+          assertReceiveAvailable()
           await params.load(reads, assertSafety)
-          params.assertAvailable()
+          assertReceiveAvailable()
         })
       },
     }),
