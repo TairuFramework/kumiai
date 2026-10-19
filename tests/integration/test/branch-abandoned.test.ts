@@ -172,6 +172,10 @@ async function startPeerOwner(
         mutate: async (fn, write) => (await opened()).mutate(fn, write),
         replace: async (next, write, prepare) => (await opened()).replace(next, write, prepare),
         adopt: async (next, expected, write) => (await opened()).adopt(next, expected, write),
+        seal: async (plaintext, opts) => (await opened()).seal(plaintext, opts),
+        onRotationRequired: () => {
+          throw new TypeError('unused')
+        },
         openBatch: async (frames) => (await opened()).openBatch(frames),
         pending: {
           list: async () => (await opened()).pending.list(),

@@ -76,7 +76,7 @@ import type {
 import { type RecoveryEnvironment, registryOptions } from '../../src/registry/validation.js'
 import { deferred } from '../../src/runtime.js'
 import { createGroupSafety, type GroupSafety } from '../../src/safety.js'
-import { restoreCommittedSender } from '../../src/testing.js'
+import { gateRegistryMaintenance, restoreCommittedSender } from '../../src/testing.js'
 import { createDeterministicAtRestCodec } from './at-rest.js'
 import { createRealGroup, testGroupMLSDependencies, testHandleAccess } from './real-group.js'
 import {
@@ -195,6 +195,7 @@ type FixtureParams = {
   options?: GroupOptions
   effects?: TransactionalGroupEffects<MemoryTransaction>
   ownershipContext?: OwnershipContextPort
+  backgroundMaintenance?: 'gated'
 }
 type Hold = {
   started: ReturnType<typeof deferred<void>>
@@ -415,6 +416,10 @@ export async function registryFixtureSafety(fixture: RegistryFixture): Promise<G
   return fixture.safety()
 }
 
+export function createGatedRegistryFixture(params: FixtureParams): Promise<RegistryFixture> {
+  return createRegistryFixture({ ...params, backgroundMaintenance: 'gated' })
+}
+
 export async function createRegistryFixture(params: FixtureParams): Promise<RegistryFixture> {
   return assemble(params, params.identity ?? randomIdentity())
 }
@@ -487,7 +492,8 @@ async function assemble(
   const fixture: RegistryFixture = {
     get registry() {
       if (closed) throw new Error('Closed registry fixture')
-      owner ??= createGroupHandleRegistry({
+      if (owner !== undefined) return owner
+      owner = createGroupHandleRegistry({
         persistence: fixture.device,
         providerID: fixture.device.providerID,
         recovery: environment,
@@ -497,6 +503,7 @@ async function assemble(
         },
         restoreCandidate: (bytes) => restoreHost(fixture, bytes),
       })
+      if (params.backgroundMaintenance === 'gated') gateRegistryMaintenance(owner)
       return owner
     },
     device: storage.ports.device,
@@ -1073,6 +1080,7 @@ async function acceptedOrdinary(
 export async function createForkNoticeFixture(params: {
   mode: 'real-mls' | 'double'
   ownershipContext?: OwnershipContextPort
+  backgroundMaintenance?: 'gated'
   deferSplit?: boolean
 }): Promise<
   ForkNoticeFixture<LogPosition> & {
@@ -1347,6 +1355,7 @@ export async function createNotMemberFixture(
     splitEpoch?: number
     mode?: 'real-mls' | 'double'
     ownershipContext?: OwnershipContextPort
+    backgroundMaintenance?: 'gated'
   } = {},
 ) {
   const { createCapturedFormerMember } = await import('./captured-recovery.js')

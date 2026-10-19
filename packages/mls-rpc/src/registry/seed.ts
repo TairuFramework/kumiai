@@ -24,6 +24,7 @@ import { openSuccessorTombstone } from '../successor.js'
 import type { ColdEnvironment } from './cold.js'
 import {
   capturedRecord,
+  type Reservation,
   reservationEnvelope,
   reserveFromBytes,
   restoreCaptured,
@@ -189,7 +190,7 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
   return async (
     group: GroupHandle,
     options: { replace?: boolean; packageUse: PackageUse | null },
-  ): Promise<GroupKey> => {
+  ): Promise<{ key: GroupKey; reservation: Reservation | null }> => {
     const captured = await relinquishSend(group)
     const groupID = captured.credential.groupID
     const base = capturedRecord(captured, { groupID, incarnation: 1 }, 1)
@@ -256,7 +257,7 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
       environment: params.environment.recovery,
       ownerDID: params.environment.ownerDID,
     })
-    if (decision === 'alreadyJoined') return key
+    if (decision === 'alreadyJoined') return { key, reservation: null }
     const mutationID = crypto.randomUUID()
     let attempt: RetirementAttempt | null = null
     let expectedAdmission = admission
@@ -372,7 +373,7 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
           })
           await rows.control.apply({ cursor: null }, mutationID)
           await rows.anchor.save(null)
-          return key
+          return { key, reservation: prepared.reservation }
         },
       )
       attempt?.settle('committed')

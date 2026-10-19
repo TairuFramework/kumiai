@@ -34,7 +34,13 @@ export type GroupEpochRuntime = {
   snapshot(): GroupRuntimeSnapshot | null
   onEpochChanged(listener: (value: GroupRuntimeSnapshot | null) => void): () => void
 }
+export type SealedApp = { ciphertext: Uint8Array; epoch: number; generation: number }
 export type RegistryHandleAccess = {
+  seal(
+    plaintext: Uint8Array,
+    opts: { aad: Uint8Array; intent: 'log' | 'ephemeral' },
+  ): Promise<SealedApp>
+  onRotationRequired(listener: (identity: EpochIdentity) => void): () => void
   key: GroupKey
   runtime: GroupEpochRuntime
   epoch(): number

@@ -19,14 +19,17 @@ import {
   createMemoryGroupPersistence,
   createMemoryTransaction,
   createOwnerQueues,
+  drainRegistryMaintenance,
+  gateRegistryMaintenance,
   memoryFaults,
 } from '../src/testing.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
 import {
-  createRegistryFixture,
+  createGatedRegistryFixture as createRegistryFixture,
   type RegistryFixtureBase,
   registryFixtureRestore,
 } from './fixtures/registry.js'
+import { testRegistryBackgroundWarmup } from './fixtures/registry-maintenance.js'
 import { installSeed, makeStorageSeed } from './fixtures/storage-seed.js'
 
 function hostBytes(handle: GroupHandle) {
@@ -60,13 +63,15 @@ function registry(
   fixture: RegistryFixtureBase,
   restoreCandidate?: (bytes: Uint8Array) => Promise<GroupHandle>,
 ) {
-  return createGroupHandleRegistry({
+  const owner = createGroupHandleRegistry({
     persistence: fixture.device,
     providerID: fixture.device.providerID,
     recovery: fixture.environment,
     restore: registryFixtureRestore(fixture),
     restoreCandidate: restoreCandidate ?? ((bytes) => restoreHost(fixture, bytes)),
   })
+  gateRegistryMaintenance(owner)
+  return owner
 }
 async function accepted(
   fixture: RegistryFixtureBase,
@@ -611,6 +616,42 @@ for (const mode of ['real-mls', 'double'] as const) {
       },
     )
 
+    test('maintenance supersedes a proven mutation marker without changing its control writes', async () => {
+      const fixture = await create()
+      try {
+        const owner = registry(fixture)
+        const gate = gateRegistryMaintenance(owner)
+        const access = await owner.access(groupID)
+        await access.mutate(
+          async (handle, persist) => {
+            await handle.encrypt(new Uint8Array([6]))
+            await persist(handle)
+          },
+          () => ({
+            mutationID: 'superseded-control',
+            changes: { cursor: { position: asLogPosition('00002'), epoch: 0 } },
+          }),
+        )
+        expect(await fixture.device.groups.resolve(groupID, 'superseded-control')).toBe('committed')
+        const control = fixture.device.groups.ports(access.key).control
+        const before = await control.load()
+        const version = access.stateVersion()
+        gate.release()
+        await drainRegistryMaintenance(access)
+        expect(access.stateVersion()).toBe(version + 1)
+        await expect(
+          fixture.device.groups.resolve(groupID, 'superseded-control'),
+        ).rejects.toMatchObject({
+          name: 'GroupStateUncertainError',
+        })
+        expect(await control.load()).toEqual(before)
+        expect(before.cursor?.position).toBe('00002')
+        expect(await control.lastMutation()).toBe('superseded-control')
+      } finally {
+        await fixture.close()
+      }
+    })
+
     test('mutate stages ordinary control writes without replacement provenance', async () => {
       const fixture = await create()
       try {
@@ -876,3 +917,5 @@ for (const mode of ['real-mls', 'double'] as const) {
     })
   })
 }
+
+testRegistryBackgroundWarmup('access')

@@ -5,6 +5,7 @@ import { expect, test } from 'vitest'
 import { createControlAdoptionPort } from '../src/control-adoption.js'
 import { decodeControlJournal } from '../src/control-journal.js'
 import { accessKinds, authoringAccessFixture, rotationIntent } from './fixtures/authoring-access.js'
+import { testRegistryBackgroundWarmup } from './fixtures/registry-maintenance.js'
 
 for (const kind of accessKinds) {
   test.each([
@@ -16,7 +17,7 @@ for (const kind of accessKinds) {
     'history eviction after reconstruction',
     'own sends after capture',
   ] as const)(`${kind}: %s after built-save`, async (move) => {
-    const f = await authoringAccessFixture(kind)
+    const f = await authoringAccessFixture(kind, 'member', 'gated')
     try {
       if (move === 'own sends after capture') {
         await f.control().apply({ putOperations: [rotationIntent] }, 'intent')
@@ -218,3 +219,5 @@ test('registry ordinary destination refuses a moved control source before work',
     await f.close()
   }
 })
+
+testRegistryBackgroundWarmup('owed-commit')

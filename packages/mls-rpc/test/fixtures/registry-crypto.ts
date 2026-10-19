@@ -1,4 +1,10 @@
-import { commitKeyRotation, decodeClientState, encodeClientState, restoreGroup } from '@kumiai/mls'
+import {
+  commitKeyRotation,
+  decodeClientState,
+  encodeClientState,
+  type GroupOptions,
+  restoreGroup,
+} from '@kumiai/mls'
 import { frameID, isAppLogPosition } from '@kumiai/rpc'
 import type { PendingCryptoFixture, RegistryCryptoFixture } from '@kumiai/rpc-conformance'
 import { onTestFinished } from 'vitest'
@@ -13,16 +19,22 @@ import { createStorageFixture } from './storage-persistence.js'
 
 type Mode = 'real-mls' | 'double'
 
-export async function createRegistryCryptoGroup(mode: Mode, id: string, size: number) {
+export async function createRegistryCryptoGroup(
+  mode: Mode,
+  id: string,
+  size: number,
+  config: { backgroundMaintenance?: 'gated'; options?: GroupOptions } = {},
+) {
   const group = await createRealGroup(size, `registry-crypto-conformance-${mode}-${id}`)
   const local = group.members[0]
   if (local === undefined) throw new Error('Missing registry crypto member')
   let fixture = await createRegistryFixture({
     mode,
+    backgroundMaintenance: config.backgroundMaintenance,
     setup: 'empty',
     groupID: local.handle.groupID,
     identity: local.identity,
-    options: { resolveLedgerEntries: local.slot.resolve },
+    options: { ...config.options, resolveLedgerEntries: local.slot.resolve },
   })
   for (const member of [group.committer, ...group.members]) {
     const options = { ...fixture.environment.options, resolveLedgerEntries: member.slot.resolve }
@@ -121,8 +133,9 @@ export async function createRegistryCryptoGroup(mode: Mode, id: string, size: nu
 export async function createRegistryCryptoFixture(
   mode: Mode,
   id: string,
+  backgroundMaintenance?: 'gated',
 ): Promise<RegistryCryptoFixture> {
-  const group = await createRegistryCryptoGroup(mode, id, 2)
+  const group = await createRegistryCryptoGroup(mode, id, 2, { backgroundMaintenance })
   const topicID = 'app-topic'
   const result: RegistryCryptoFixture = {
     key: group.key,
@@ -155,8 +168,9 @@ export async function createRegistryCryptoFixture(
 export async function createRegistryPendingCryptoFixture(
   mode: Mode,
   id: string,
+  backgroundMaintenance?: 'gated',
 ): Promise<PendingCryptoFixture> {
-  const group = await createRegistryCryptoGroup(mode, `pending-${id}`, 2)
+  const group = await createRegistryCryptoGroup(mode, `pending-${id}`, 2, { backgroundMaintenance })
   onTestFinished(group.close)
   const sender = group.members[1]
   if (sender === undefined) throw new Error('Missing pending crypto sender')

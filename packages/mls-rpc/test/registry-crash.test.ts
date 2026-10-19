@@ -1,7 +1,8 @@
 import { testRegistryCrashConformance } from '@kumiai/rpc-conformance'
 
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
-import { createRegistryFixture } from './fixtures/registry.js'
+import { createGatedRegistryFixture as createRegistryFixture } from './fixtures/registry.js'
+import { testRegistryBackgroundWarmup } from './fixtures/registry-maintenance.js'
 
 for (const mode of ['real-mls', 'double'] as const) {
   for (const context of ['supplied', 'absent'] as const) {
@@ -16,3 +17,5 @@ for (const mode of ['real-mls', 'double'] as const) {
     })
   }
 }
+
+testRegistryBackgroundWarmup('crash')

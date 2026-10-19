@@ -29,14 +29,19 @@ import { createGroupHandleRegistry } from '../src/registry/registry.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import type { RegistrySwitchWrite } from '../src/registry/types.js'
 import { deferred } from '../src/runtime.js'
-import { restoreCommittedSender } from '../src/testing.js'
 import {
-  createRegistryFixture,
+  drainRegistryMaintenance,
+  gateRegistryMaintenance,
+  restoreCommittedSender,
+} from '../src/testing.js'
+import {
+  createGatedRegistryFixture as createRegistryFixture,
   type RegistryFixtureBase,
   registryFixtureCapturedRecovery,
   registryFixtureRestore,
   registryFixtureRetirement,
 } from './fixtures/registry.js'
+import { testRegistryBackgroundWarmup } from './fixtures/registry-maintenance.js'
 import { createRegistryRecovery } from './fixtures/registry-recovery.js'
 import { registryHandle } from './fixtures/registry-welcome.js'
 import { nextChange } from './fixtures/storage-seed.js'
@@ -47,7 +52,7 @@ const destination = { groupID, incarnation: 2 }
 const utf8 = (value: string) => new TextEncoder().encode(value)
 
 function registry(fixture: RegistryFixtureBase) {
-  return createGroupHandleRegistry({
+  const owner = createGroupHandleRegistry({
     persistence: fixture.device,
     providerID: fixture.device.providerID,
     recovery: fixture.environment,
@@ -56,6 +61,8 @@ function registry(fixture: RegistryFixtureBase) {
       throw new Error('Switch must not restore a candidate')
     },
   })
+  gateRegistryMaintenance(owner)
+  return owner
 }
 
 for (const mode of ['real-mls', 'double'] as const) {
@@ -706,6 +713,32 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
+    test('registry maintenance moves a captured switch source and preserves recovery evidence', async () => {
+      const s = await setup()
+      try {
+        await s.fixture.device.groups
+          .ports(key)
+          .control.apply({ deleteOutcomes: [] }, s.params.write.mutationID)
+        const control = s.fixture.device.groups.ports(key).control
+        const before = await control.load()
+        const version = s.access.stateVersion()
+        gateRegistryMaintenance(s.owner).release()
+        await drainRegistryMaintenance(s.access)
+        expect(s.access.stateVersion()).toBe(version + 1)
+        await expect(
+          s.fixture.device.groups.resolve(groupID, s.params.write.mutationID),
+        ).rejects.toMatchObject({
+          name: 'GroupStateUncertainError',
+        })
+        await unchanged(s, 'RegistrySourceMovedError')
+        expect(await control.load()).toEqual(before)
+        expect(await control.lastMutation()).toBe(s.params.write.mutationID)
+        expect(s.hooks()).toBe(1)
+      } finally {
+        await s.fixture.close()
+      }
+    })
+
     test('committed marker without adopted evidence refuses conflict', async () => {
       const s = await setup()
       try {
@@ -970,3 +1003,5 @@ for (const mode of ['real-mls', 'double'] as const) {
     })
   })
 }
+
+testRegistryBackgroundWarmup('switch')

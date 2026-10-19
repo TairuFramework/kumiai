@@ -11,7 +11,8 @@ import * as api from '../src/index.js'
 import * as recovery from '../src/recovery.js'
 import { registrySafety } from '../src/registry/safety.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
-import { createRegistryFixture } from './fixtures/registry.js'
+import { createGatedRegistryFixture as createRegistryFixture } from './fixtures/registry.js'
+import { testRegistryBackgroundWarmup } from './fixtures/registry-maintenance.js'
 
 for (const damage of ['null', 'unreadable', 'client-state', 'identity'] as const) {
   test(`registry requests and authentication never restore ${damage} private state`, async () => {
@@ -551,3 +552,5 @@ for (const opened of [false, true]) {
     }
   })
 }
+
+testRegistryBackgroundWarmup('recovery-consumer')

@@ -16,11 +16,12 @@ import { entryCapability } from '../src/entry-capability.js'
 import type { OpenAppInput } from '../src/persistence-types.js'
 import { registrySafety } from '../src/registry/safety.js'
 import {
-  createRegistryFixture,
+  createGatedRegistryFixture as createRegistryFixture,
   type RegistryFixture,
   registryFixtureBumpStateVersion,
   registryFixtureMutateAppCursor,
 } from './fixtures/registry.js'
+import { testRegistryBackgroundWarmup } from './fixtures/registry-maintenance.js'
 import { registryHandle } from './fixtures/registry-welcome.js'
 import { nextChange } from './fixtures/storage-seed.js'
 
@@ -545,3 +546,5 @@ for (const mode of ['real-mls', 'double'] as const) {
       }))
   })
 }
+
+testRegistryBackgroundWarmup('open-batch')

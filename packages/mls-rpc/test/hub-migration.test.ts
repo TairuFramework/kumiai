@@ -21,11 +21,12 @@ import { registrySafety } from '../src/registry/safety.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import {
   createNotMemberFixture,
-  createRegistryFixture,
+  createGatedRegistryFixture as createRegistryFixture,
   registryFixtureMutateControl,
   registryFixtureSafetyParams,
 } from './fixtures/registry.js'
 import { createRegistryCryptoGroup } from './fixtures/registry-crypto.js'
+import { testRegistryBackgroundWarmup } from './fixtures/registry-maintenance.js'
 
 const key = { groupID: 'hub-migration', incarnation: 1 }
 const binding = { targetID: 'registry-recovery-hub', commitTopicID: `commits/${key.groupID}` }
@@ -1584,3 +1585,5 @@ for (const mode of ['real-mls', 'double'] as const) {
     })
   }
 }
+
+testRegistryBackgroundWarmup('hub-migration')

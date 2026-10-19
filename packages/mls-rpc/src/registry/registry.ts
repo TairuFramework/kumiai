@@ -1,5 +1,5 @@
 import { normalizeDID } from '@kokuin/token'
-import { type GroupHandle, restrictCommitAuthoring } from '@kumiai/mls'
+import { decodeClientState, type GroupHandle, restrictCommitAuthoring } from '@kumiai/mls'
 import type { ControlSnapshot, ForkHalt, SafetyHold } from '@kumiai/rpc'
 
 import { bindRegistryCheckpoint } from '../checkpoint.js'
@@ -9,6 +9,7 @@ import {
   type EntryReads,
   entryCapability,
 } from '../entry-capability.js'
+import { copyStoredValue, sameStoredValue } from '../memory-incarnation-stores.js'
 import {
   DisplacedGroupHandleError,
   GroupControlUnsettledError,
@@ -21,7 +22,15 @@ import type { GroupKey, GroupStores, GroupTransaction } from '../persistence-typ
 import { groupCondition, groupConditionWriter } from '../safety-conditions.js'
 import { createRegistryAccess, type RegistryOwner, registryCapturedReplacements } from './access.js'
 import { admissionFor, type ColdEnvironment, loadValidatedGroup } from './cold.js'
+import {
+  createLiveSlot,
+  type LiveSlot,
+  leaseReaders,
+  registryLiveSend,
+  registryMaintenanceGates,
+} from './live-send.js'
 import { bindRegistryRecoveryCoordinator } from './recovery-coordinator.js'
+import { eligibilityOf, type Reservation } from './reserve.js'
 import { deleteIncarnations } from './retired.js'
 import {
   bindRegistryRetirement,
@@ -47,7 +56,14 @@ import type {
 import { registryOptions } from './validation.js'
 
 type GroupSlot = RetirementSlot & {
+  pendingHandoff: Reservation | null
+  live: LiveSlot
   load: { generation: number; promise: Promise<RegistryHandleAccess> } | null
+}
+function decodedState(bytes: Uint8Array) {
+  const state = decodeClientState(bytes)
+  if (state === undefined) throw new GroupUnavailableError({ reason: 'invalid' })
+  return state
 }
 class StaleRegistryGeneration extends Error {}
 class DeleteDrainChanged extends Error {}
@@ -55,6 +71,10 @@ class DeleteDrainChanged extends Error {}
 export const registrySenderRestorers = new WeakMap<
   GroupHandleRegistry,
   (groupID: string) => Promise<GroupHandle>
+>()
+export const registryHandoffReaders = new WeakMap<
+  GroupHandleRegistry,
+  (groupID: string) => boolean
 >()
 
 const liveRegistries = new WeakMap<object, GroupHandleRegistry>()
@@ -220,17 +240,33 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   function groupSlot(groupID: string): GroupSlot {
     let slot = slots.get(groupID)
     if (slot === undefined) {
+      let retiring: RetirementSlot['retirement'] = null
+      let slotRef!: GroupSlot
       slot = {
         generation: 0,
         retirementGeneration: 0,
         lastRetirementKey: null,
-        retirement: null,
+        // Retirement starts before its drain, so waiting seals must be cancelled here.
+        get retirement() {
+          return retiring
+        },
+        set retirement(value) {
+          retiring = value
+          if (value !== null) {
+            slotRef.pendingHandoff = null
+            slotRef.owner?.maintenance?.retire()
+          } else slotRef.owner?.maintenance?.resume()
+        },
+        pendingHandoff: null,
+        live: createLiveSlot(),
         owner: null,
         hooks: null,
         load: null,
       }
+      slotRef = slot
       slots.set(groupID, slot)
       const observedSlot = slot
+      const accountingChecks = new WeakMap<AccountedGroupObservation, () => void>()
       const notifications = new WeakMap<AccountedGroupObservation, () => void>()
       const unsubscribe = capability.observe(
         groupID,
@@ -250,6 +286,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
             latch(observation.activeKey, 'spent-set-corrupt')
           const previous = observedSlot.owner
           observedSlot.generation++
+          const observedGeneration = observedSlot.generation
           if (previous !== null) previous.cacheValid = false
           const projected = accountedRuntime({
             observation,
@@ -257,7 +294,62 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
             ownerDID: environment.ownerDID,
             previous: previous?.acceptedTrust ?? null,
           })
-          if (previous === null) return
+          if (previous === null) {
+            const handoff = observedSlot.pendingHandoff
+            if (handoff !== null) {
+              if (observation.activeKey?.incarnation !== handoff.identity.incarnation)
+                observedSlot.pendingHandoff = null
+              else if (
+                observation.activeVersion !== null &&
+                observation.activeVersion > handoff.envelope.version
+              ) {
+                // Read only after lane release, just as owner-version accounting does.
+                accountingChecks.set(observation, () => {
+                  const check = capability
+                    .read(groupID, async (reads) => {
+                      const record = await reads.state(handoff.identity.incarnation)
+                      let keep = false
+                      if (
+                        record !== null &&
+                        !record.deleted &&
+                        record.state !== null &&
+                        sameStoredValue(record.state, handoff.envelope.saved.state)
+                      ) {
+                        const handle = restrictCommitAuthoring(
+                          await environment.restore({ ...record, state: record.state }),
+                        )
+                        keep = sameStoredValue(
+                          eligibilityOf(handle.state, handle.ownLeafLapsed()),
+                          handoff.eligibility,
+                        )
+                      }
+                      if (!keep && observedSlot.pendingHandoff === handoff)
+                        observedSlot.pendingHandoff = null
+                    })
+                    .catch(() => {
+                      if (observedSlot.pendingHandoff === handoff)
+                        observedSlot.pendingHandoff = null
+                    })
+                  observedSlot.live.inflight.add(check)
+                  void check.then(() => observedSlot.live.inflight.delete(check))
+                })
+              }
+            }
+            return
+          }
+          const version = observation.activeVersion
+          if (version !== null && observation.activeKey?.incarnation === previous.key.incarnation) {
+            if (previous.expected.has(version))
+              previous.maintenance?.observeOwn(version, observation.control)
+            else if (version > previous.knownVersion) {
+              const check = previous.maintenance?.observed(
+                version,
+                () =>
+                  observedSlot.owner === previous && observedSlot.generation === observedGeneration,
+              )
+              if (check !== undefined) accountingChecks.set(observation, check)
+            }
+          }
           if (
             observation.activeKey?.incarnation === previous.key.incarnation &&
             observation.trustStatus === 'spent-set-corrupt'
@@ -281,6 +373,11 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
             observation.trust === null ||
             projected.snapshot.incarnation !== previous.key.incarnation
           ) {
+            previous.maintenance?.cancel(
+              new DisplacedGroupHandleError('Registry owner displaced'),
+              true,
+            )
+            observedSlot.pendingHandoff = null
             observedSlot.owner = null
             const dispatch = previous.runtime.install(null)
             if (dispatch !== undefined) notifications.set(observation, dispatch)
@@ -293,6 +390,8 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
           if (dispatch !== undefined) notifications.set(observation, dispatch)
         },
         (observation) => {
+          accountingChecks.get(observation)?.()
+          accountingChecks.delete(observation)
           const dispatch = notifications.get(observation)
           notifications.delete(observation)
           dispatch?.()
@@ -305,6 +404,10 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   }
   function invalidate(slot: GroupSlot): void {
     slot.generation++
+    slot.owner?.maintenance?.cancel(
+      new DisplacedGroupHandleError('Registry owner invalidated'),
+      true,
+    )
     slot.owner = null
   }
   function invalidateAccess(slot: GroupSlot, displaced: boolean): void {
@@ -317,10 +420,18 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   }
   const retirement = createRegistryRetirement({
     slot: groupSlot,
-    drain: (groupID) => capability.read(groupID, async () => {}),
+    async drain(groupID) {
+      const slot = groupSlot(groupID)
+      await Promise.all([
+        capability.read(groupID, async () => {}),
+        Promise.allSettled([...slot.live.inflight]),
+      ])
+    },
     displace(slot, key) {
       const previous = slot.owner
       if (previous?.key.incarnation === key.incarnation) {
+        previous.maintenance?.cancel(new DisplacedGroupHandleError('Registry owner retired'), true)
+        groupSlot(key.groupID).pendingHandoff = null
         slot.owner = null
         previous.runtime.publish(null)
       }
@@ -342,11 +453,19 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       } else if (slot.generation !== generation) throw new StaleRegistryGeneration()
     }
     assertLoadCurrent()
+    let restoredLapsed: boolean | undefined
     const { value, control } = await loadValidatedGroup(
       reads,
       groupID,
       slot.owner?.cacheValid ? slot.owner.value : null,
-      environment,
+      {
+        ...environment,
+        restore: async (record) => {
+          const handle = restrictCommitAuthoring(await environment.restore(record))
+          restoredLapsed = handle.ownLeafLapsed()
+          return handle
+        },
+      },
       assertMutationSafety,
     )
     assertLoadCurrent()
@@ -369,9 +488,21 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         runtime: createRegistryRuntime(),
         hooks: slot.hooks.callbacks,
         access: null,
+        send: null,
+        knownVersion: value.record.version,
+        expected: new Map(),
+        latestCommitted: value.record,
+        latestControl: copyStoredValue(control),
+        latestEligibility: eligibilityOf(decodedState(value.record.state), restoredLapsed ?? false),
+        maintenance: null,
       }
       const access = createRegistryAccess({
         owner,
+        live: slot.live,
+        dropOwner: () => {
+          if (slot.owner === owner) invalidate(slot)
+        },
+        waitForMaintenanceGate: (signal) => registryMaintenanceGates.get(registry)?.(signal),
         capability,
         environment: { ...environment, withPrivateRestore: privateRestoreBoundary(owner) },
         restoreCandidate: params.restoreCandidate,
@@ -418,6 +549,8 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
           const reason = held(owner.key)
           return reason === null ? admission : { epoch: admission.epoch, admissible: false, reason }
         },
+        seal: access.seal,
+        onRotationRequired: access.onRotationRequired,
         openBatch: access.openBatch,
         pending: access.pending,
         read: access.read,
@@ -427,6 +560,10 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         adopt: access.adopt,
         onRetire: access.onRetire,
       }
+      const live = registryLiveSend.get(access)
+      if (live === undefined) throw new Error('Missing live sender')
+      registryLiveSend.set(owner.access, live)
+      leaseReaders.set(owner.access, live.snapshot)
       const replaceCaptured = registryCapturedReplacements.get(access)
       if (replaceCaptured === undefined) throw new Error('Missing captured replacement boundary')
       registryCapturedReplacements.set(owner.access, replaceCaptured)
@@ -437,7 +574,16 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       slot.owner.cacheValid = true
       slot.owner.snapshot = value.snapshot
       slot.owner.admission = admissionFor(value, control)
+      if (restoredLapsed !== undefined) {
+        const state = decodeClientState(value.record.state)
+        if (state !== undefined)
+          slot.owner.maintenance?.refreshed(value.record, eligibilityOf(state, restoredLapsed))
+      }
     }
+    const handoff = slot.pendingHandoff
+    slot.pendingHandoff = null
+    if (handoff !== null) await slot.owner?.maintenance?.handoff(handoff)
+    slot.owner?.maintenance?.schedule()
     return value
   }
   async function deleteGroup(requestedKey: GroupKey): Promise<void> {
@@ -515,6 +661,10 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   function dispose(): Promise<void> {
     if (disposal !== null) return disposal
     closing = true
+    for (const slot of slots.values()) {
+      slot.pendingHandoff = null
+      slot.owner?.maintenance?.cancel(new DisplacedGroupHandleError('Registry is disposed'), true)
+    }
     disposal = (async () => {
       try {
         await Promise.allSettled([...(starting === null ? [] : [starting]), ...inflight])
@@ -585,7 +735,9 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     async seed(group, options) {
       assertOpen()
       try {
-        return await track(seed(group, options))
+        const result = await track(seed(group, options))
+        groupSlot(result.key.groupID).pendingHandoff = closing ? null : result.reservation
+        return result.key
       } catch (error) {
         await diagnoseFailure(error)
         throw error
@@ -593,7 +745,9 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     },
     async switchIncarnation(candidate, options) {
       assertOpen()
-      return await track(switchIncarnation(candidate, options))
+      const result = await track(switchIncarnation(candidate, options))
+      groupSlot(result.key.groupID).pendingHandoff = closing ? null : result.reservation
+      return result.key
     },
     delete(key) {
       return track(deleteGroup(key))
@@ -738,6 +892,15 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       return restrictCommitAuthoring(await environment.restore({ ...record, state: record.state }))
     }),
   )
+  registryHandoffReaders.set(registry, (groupID) => slots.get(groupID)?.pendingHandoff != null)
+  const onFailure = () => {
+    for (const slot of slots.values()) {
+      slot.pendingHandoff = null
+      slot.owner?.maintenance?.cancel(capability.failureSignal?.reason, true)
+    }
+  }
+  capability.failureSignal?.addEventListener('abort', onFailure, { once: true })
+  observers.add(() => capability.failureSignal?.removeEventListener('abort', onFailure))
   liveRegistries.set(binding, registry)
   return registry
 }

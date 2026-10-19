@@ -16,17 +16,19 @@ import { createGroupHandleRegistry } from '../src/registry/registry.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import type { RetirementAttempt } from '../src/registry/types.js'
 import { deferred } from '../src/runtime.js'
+import { gateRegistryMaintenance } from '../src/testing.js'
 import {
-  createRegistryFixture,
+  createGatedRegistryFixture as createRegistryFixture,
   type RegistryFixtureBase,
   registryFixtureForceOwnerMarker,
   registryFixtureRestore,
   registryFixtureRetirement as registryRetirement,
 } from './fixtures/registry.js'
+import { testRegistryBackgroundWarmup } from './fixtures/registry-maintenance.js'
 import { writeInstallationCheckpoint } from './fixtures/storage-seed.js'
 
 function registry(fixture: RegistryFixtureBase) {
-  return createGroupHandleRegistry({
+  const owner = createGroupHandleRegistry({
     persistence: fixture.device,
     providerID: fixture.device.providerID,
     recovery: fixture.environment,
@@ -35,6 +37,8 @@ function registry(fixture: RegistryFixtureBase) {
       throw new Error('Retirement must not restore a candidate')
     },
   })
+  gateRegistryMaintenance(owner)
+  return owner
 }
 
 test('activity counts queued Combined admission and cancelled completion', async () => {
@@ -690,3 +694,5 @@ for (const mode of ['real-mls', 'double'] as const) {
     })
   })
 }
+
+testRegistryBackgroundWarmup('retirement')

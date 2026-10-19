@@ -8,17 +8,18 @@ import { createMemoryDevicePersistence } from '../src/memory-device-persistence.
 import { createOwnerQueues } from '../src/owner-queue.js'
 import type { GroupKey, GroupStateRecord } from '../src/persistence-types.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
-import { createMemoryTransaction } from '../src/testing.js'
+import { createMemoryTransaction, gateRegistryMaintenance } from '../src/testing.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
 import {
-  createRegistryFixture,
+  createGatedRegistryFixture as createRegistryFixture,
   type RegistryFixtureBase,
   registryFixtureRestore,
 } from './fixtures/registry.js'
+import { testRegistryBackgroundWarmup } from './fixtures/registry-maintenance.js'
 import { writeInstallationCheckpoint } from './fixtures/storage-seed.js'
 
 function registry(fixture: RegistryFixtureBase) {
-  return createGroupHandleRegistry({
+  const owner = createGroupHandleRegistry({
     persistence: fixture.device,
     providerID: fixture.device.providerID,
     recovery: fixture.environment,
@@ -27,6 +28,8 @@ function registry(fixture: RegistryFixtureBase) {
       throw new Error('Cold access must not restore a candidate')
     },
   })
+  gateRegistryMaintenance(owner)
+  return owner
 }
 async function recordFor(fixture: RegistryFixtureBase, key: GroupKey) {
   const record = await fixture.device.groups.loadState(key)
@@ -855,3 +858,5 @@ test('copied unregistered wrapper and foreign provider refuse synchronously', as
     await fixture.close()
   }
 })
+
+testRegistryBackgroundWarmup('cold')

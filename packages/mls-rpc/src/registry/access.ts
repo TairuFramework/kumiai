@@ -42,7 +42,15 @@ import { clearGroupCondition } from '../safety-conditions.js'
 import { createRegistryAppOpen } from './app-open.js'
 import { type ColdEnvironment, restoreValidated, type ValidatedGroupState } from './cold.js'
 import {
+  createLiveSend,
+  type LiveSlot,
+  leaseReaders,
+  registryLiveSend,
+  type SendCopy,
+} from './live-send.js'
+import {
   capturedRecord,
+  eligibilityOf,
   reservationEnvelope,
   reserveFromBytes,
   restoreCaptured,
@@ -64,6 +72,13 @@ export type RegistryOwner = {
   runtime: ReturnType<typeof createRegistryRuntime>
   hooks: Set<() => Promise<void>>
   access: RegistryHandleAccess | null
+  send: SendCopy | null
+  knownVersion: number
+  expected: Map<number, ReadableGroupState>
+  latestCommitted: ReadableGroupState
+  latestControl: ControlSnapshot
+  latestEligibility: Uint8Array
+  maintenance: ReturnType<typeof createLiveSend> | null
 }
 
 export const registryCapturedReplacements = new WeakMap<
@@ -77,6 +92,9 @@ export const registryCapturedReplacements = new WeakMap<
 
 export function createRegistryAccess<TTx extends GroupTransaction>(params: {
   owner: RegistryOwner
+  live: LiveSlot
+  dropOwner(): void
+  waitForMaintenanceGate(signal: AbortSignal): Promise<void> | undefined
   capability: EntryCapability<TTx>
   environment: ColdEnvironment
   restoreCandidate(candidate: Uint8Array): Promise<GroupHandle>
@@ -99,6 +117,8 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     if (reason !== null) throw new GroupSafetyHeldError(reason)
     assertSafety()
   }
+  const live = createLiveSend({ ...params, slot: params.live, assertWorkSafety })
+  owner.maintenance = live
   async function isolated(
     reads: EntryReads,
     assertMutationSafety?: () => void,
@@ -256,7 +276,12 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
             ...reserved.reservation,
             envelope: reservationEnvelope(record),
           }
-    return { record, handle, reservation }
+    return {
+      record,
+      handle,
+      reservation,
+      eligibility: eligibilityOf(handle.state, handle.ownLeafLapsed()),
+    }
   }
   async function writeState(
     stores: GroupStores<TTx>,
@@ -441,7 +466,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     assertMutationID(supplied?.write)
     const committed = supplied === undefined ? false : await proved(supplied.write.mutationID)
     try {
-      return await capability.run(
+      return await live.run(
         { groupID: owner.key.groupID, mutationID: supplied?.write.mutationID ?? null },
         async (reads) => {
           if (supplied !== undefined && (committed || params.safetyHeld() !== null)) {
@@ -505,6 +530,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
             record,
             handle: installed,
             reservation,
+            eligibility,
           } = await recordFor(await relinquishSend(destination), value, destination)
           const trust = recoveryTrustFor(installed, value.key, value.trust)
           return {
@@ -516,6 +542,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
               trust,
               write,
               reservation,
+              eligibility,
               checkpoint: await prepareCheckpointInstallation({
                 key: owner.key,
                 handle: installed,
@@ -574,7 +601,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     const fallbackMutationID = crypto.randomUUID()
     let noopResult: { value: Awaited<ReturnType<typeof fn>> } | undefined
     try {
-      return await capability.run(
+      return await live.run(
         {
           groupID: owner.key.groupID,
           mutationID: adoption === undefined ? fallbackMutationID : null,
@@ -587,6 +614,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
           const lifetime = await reads.lifetime()
           let record: ReadableGroupState | undefined
           let trust: ValidatedGroupState['trust'] | undefined
+          let eligibility: Uint8Array | undefined
           let reservation: Awaited<ReturnType<typeof recordFor>>['reservation'] = null
           let write: AdoptionWrite | undefined
           let checkpoint: CheckpointFactRecord | undefined
@@ -661,6 +689,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
                   })
             if (!active) throw new Error('Mutation prepare scope has ended')
             record = stagedRecord
+            eligibility = saved.eligibility
             reservation = saved.reservation
             trust = stagedTrust
             write = stagedWrite
@@ -680,12 +709,12 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
             noopResult = { value: result }
             throw new Noop()
           }
-          if (record === undefined || trust === undefined)
+          if (record === undefined || trust === undefined || eligibility === undefined)
             throw new Error('Mutation state was not staged')
           return {
             expected: lifetime,
             mutationID,
-            value: { result, record, trust, write, source, checkpoint, reservation },
+            value: { result, record, trust, write, source, checkpoint, reservation, eligibility },
           }
         },
         async (stores, prepared) => {
@@ -743,6 +772,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
   const access: RegistryHandleAccess = {
     ...createRegistryAppOpen({
       ...params,
+      run: live.run,
       isolated,
       recordFor,
       assertSafety,
@@ -766,6 +796,8 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
       params.assertAvailable()
       return { ...owner.admission }
     },
+    seal: live.seal,
+    onRotationRequired: live.onRotationRequired,
     read,
     readControl,
     mutate,
@@ -780,6 +812,8 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
       }
     },
   }
+  registryLiveSend.set(access, live)
+  leaseReaders.set(access, live.snapshot)
   registryCapturedReplacements.set(access, async (captured, adoption, prepare) => {
     const next = await restoreCaptured(
       environment,

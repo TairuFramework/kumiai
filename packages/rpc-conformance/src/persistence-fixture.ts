@@ -597,6 +597,37 @@ export type ConformancePendingAppFrames = {
   complete(id: string): Promise<void>
 }
 
+export type RegistryLeaseFixture = {
+  sealEphemeral(
+    plaintext?: Uint8Array,
+  ): Promise<{ ciphertext: Uint8Array; epoch: number; generation: number }>
+  sealDurable(
+    plaintext?: Uint8Array,
+  ): Promise<{ ciphertext: Uint8Array; epoch: number; generation: number }>
+  failNextEncrypt(when: 'throw-before' | 'throw-after'): void
+  blockNextEncrypt(): { started: Promise<void>; release(): void }
+  openDurable(): Promise<Array<ConformanceOpenAppResult>>
+  lease(): {
+    identity: ConformanceEpochIdentity
+    limit: number
+    own: number
+    storedGeneration: number
+  } | null
+  storedGeneration(): Promise<number>
+  rawRestoreEncrypt(): Promise<number>
+  transactions(): number
+  restores(): number
+  inspectRows(): Promise<ConformanceMemoryStoreRows>
+  dropOwner(): Promise<void>
+  reopen(): Promise<void>
+  close(): Promise<void>
+  drainMaintenance(): Promise<void>
+  blockMaintenance(): { started: Promise<void>; release(): void }
+  forceStoredGeneration(generation: number): Promise<void>
+  writeElsewhere(kind: 'receive' | 'proposal' | 'control' | 'cursor'): Promise<void>
+  holdSafety(reason: 'fork-halted' | 'recovery-unavailable' | 'spent-set-corrupt'): Promise<void>
+}
+
 export type RegistryCryptoFixture = {
   key: ConformanceGroupKey
   topicID: string

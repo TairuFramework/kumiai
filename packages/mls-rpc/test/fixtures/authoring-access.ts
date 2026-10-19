@@ -45,6 +45,7 @@ export const rotationIntent: Operation & { stage: 'intent' } = {
 export async function authoringAccessFixture(
   kind: AccessKind,
   owner: 'member' | 'committer' = 'member',
+  backgroundMaintenance?: 'gated',
 ) {
   const groupID = `authoring-${kind}`
   const real = await createRealGroup(2, groupID)
@@ -53,6 +54,7 @@ export async function authoringAccessFixture(
   let live = member.handle
   let f = await createRegistryFixture({
     mode: 'real-mls',
+    backgroundMaintenance,
     setup: 'empty',
     groupID,
     identity: member.identity,

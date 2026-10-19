@@ -3,6 +3,7 @@ import {
   decodeClientState,
   encodeClientState,
   type GroupHandle,
+  ownApplicationGeneration,
   restoreGroup,
 } from '@kumiai/mls'
 import { InvalidCandidateError } from '@kumiai/mls-rpc'
@@ -280,6 +281,10 @@ async function liveOwner(
         mutate: async (fn, write) => (await opened()).mutate(fn, write),
         replace: async (next, write, prepare) => (await opened()).replace(next, write, prepare),
         adopt: async (next, expected, write) => (await opened()).adopt(next, expected, write),
+        seal: async (plaintext, opts) => (await opened()).seal(plaintext, opts),
+        onRotationRequired: () => {
+          throw new TypeError('unused')
+        },
         openBatch: async (frames) => (await opened()).openBatch(frames),
         pending: {
           list: async () => (await opened()).pending.list(),
@@ -635,11 +640,23 @@ test('partial migration diverges without notice / real-mls', async () => {
       )
       expect(learned.filter((frame) => crossed.includes(frame))).toEqual([])
     }
-    // Startup bookkeeping may bump the row version; MLS bytes and epoch never roll back.
-    expect(mlsBytes(await f.local().device.groups.loadState(f.key))).toEqual(mlsBytes(localState))
-    expect(mlsBytes(await f.remote().device.groups.loadState(remoteKey))).toEqual(
-      mlsBytes(remoteState),
-    )
+    // Warm-up may advance the own ratchet; MLS state never rolls back.
+    for (const [fixture, key, snapshot] of [
+      [f.local(), f.key, localState],
+      [f.remote(), remoteKey, remoteState],
+    ] as const) {
+      const before = mlsBytes(snapshot)
+      const after = mlsBytes(await fixture.device.groups.loadState(key))
+      expect(after.epoch).toBe(before.epoch)
+      expect(after.epochAuthenticator).toEqual(before.epochAuthenticator)
+      const beforeState = decodeClientState(before.state)
+      const afterState = decodeClientState(after.state)
+      if (beforeState === undefined || afterState === undefined)
+        throw new Error('Invalid MLS state')
+      expect(ownApplicationGeneration(afterState)).toBeGreaterThanOrEqual(
+        ownApplicationGeneration(beforeState),
+      )
+    }
   } finally {
     for (const owner of owners) await owner.close()
     await f.close()
@@ -647,7 +664,8 @@ test('partial migration diverges without notice / real-mls', async () => {
 }, 60000)
 
 function mlsBytes(record: Awaited<ReturnType<RegistryFixture['device']['groups']['loadState']>>) {
-  if (record === null || record.deleted) throw new Error('Missing MLS state')
+  if (record === null || record.deleted || record.state === null)
+    throw new Error('Missing MLS state')
   return { state: record.state, epoch: record.epoch, epochAuthenticator: record.epochAuthenticator }
 }
 

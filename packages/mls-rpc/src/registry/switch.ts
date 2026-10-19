@@ -36,6 +36,7 @@ import type { ColdEnvironment } from './cold.js'
 import { checkForkRecoveryCaptureInReads } from './recovery-coordinator.js'
 import {
   capturedRecord,
+  type Reservation,
   reservationEnvelope,
   reserveFromBytes,
   restoreCaptured,
@@ -130,7 +131,10 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
   ownerDID: string
   start(): Promise<void>
   held(key: GroupKey): SafetyHold
-}): GroupHandleRegistry['switchIncarnation'] {
+}): (
+  input: GroupHandle,
+  params: Parameters<GroupHandleRegistry['switchIncarnation']>[1],
+) => Promise<{ key: GroupKey; reservation: Reservation | null }> {
   const { persistence, capability, retirement } = environment
   return async (input: GroupHandle, params) => {
     const captured = await relinquishSend(input)
@@ -195,7 +199,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
       confirmedRecord(record, rejoinID)
       return false
     })
-    if (replay) return destination
+    if (replay) return { key: destination, reservation: null }
 
     retirement.assertAvailable(groupID)
     await environment.start()
@@ -442,7 +446,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
             write.mutationID,
           )
           await rows.anchor.save(prepared.anchor)
-          return destination
+          return { key: destination, reservation: prepared.reservation }
         },
       )
     } catch (error) {

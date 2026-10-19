@@ -31,6 +31,8 @@ import {
   RECEIVE_SAVE_ATTEMPTS,
 } from '../persistence-types.js'
 import type { RegistryOwner } from './access.js'
+import type { createLiveSend } from './live-send.js'
+import type { Reservation } from './reserve.js'
 import { RetainedTrustUnavailableError } from './safety.js'
 import type { ReadableGroupState, RegistryHandleAccess } from './types.js'
 
@@ -53,11 +55,16 @@ class Noop extends Error {
 export function createRegistryAppOpen<TTx extends GroupTransaction>(params: {
   owner: RegistryOwner
   capability: EntryCapability<TTx>
+  run: ReturnType<typeof createLiveSend<TTx>>['run']
   isolated(reads: EntryReads, assertMutationSafety?: () => void): Promise<ControlRead>
   recordFor(
     captured: Relinquished,
     value: RegistryOwner['value'],
-  ): Promise<{ record: ReadableGroupState }>
+  ): Promise<{
+    record: ReadableGroupState
+    reservation: Reservation | null
+    eligibility: Uint8Array
+  }>
   assertAvailable(): void
   assertCurrent(): void
   assertSafety(): void
@@ -81,7 +88,7 @@ export function createRegistryAppOpen<TTx extends GroupTransaction>(params: {
         const mutationID = crypto.randomUUID()
         let receiveConflict: GroupStateConflictError | undefined
         try {
-          return await capability.run(
+          return await params.run(
             { groupID: owner.key.groupID, mutationID },
             async (reads) => {
               params.assertSafety()
@@ -200,7 +207,7 @@ export function createRegistryAppOpen<TTx extends GroupTransaction>(params: {
                 mutationID,
                 value: {
                   source,
-                  record: (await params.recordFor(await relinquishSend(handle), value)).record,
+                  ...(await params.recordFor(await relinquishSend(handle), value)),
                   puts,
                   poisons,
                   results,

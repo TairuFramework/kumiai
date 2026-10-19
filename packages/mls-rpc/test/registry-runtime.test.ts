@@ -28,18 +28,20 @@ import { publicRuntimeFacts } from '../src/registry/runtime-facts.js'
 import { registrySafety } from '../src/registry/safety.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { deferred } from '../src/runtime.js'
+import { gateRegistryMaintenance } from '../src/testing.js'
 import {
-  createRegistryFixture,
+  createGatedRegistryFixture as createRegistryFixture,
   type RegistryFixtureBase,
   registryFixtureObserve,
   registryFixtureRemoveTrust,
   registryFixtureRestore,
 } from './fixtures/registry.js'
+import { testRegistryBackgroundWarmup } from './fixtures/registry-maintenance.js'
 import { registryHandle } from './fixtures/registry-welcome.js'
 import { nextChange, writeInstallationCheckpoint } from './fixtures/storage-seed.js'
 
 function registry(fixture: RegistryFixtureBase) {
-  return createGroupHandleRegistry({
+  const owner = createGroupHandleRegistry({
     persistence: fixture.device,
     providerID: fixture.device.providerID,
     recovery: fixture.environment,
@@ -48,6 +50,8 @@ function registry(fixture: RegistryFixtureBase) {
       throw new Error('Unexpected candidate restoration')
     },
   })
+  gateRegistryMaintenance(owner)
+  return owner
 }
 async function installNext(fixture: RegistryFixtureBase, key: GroupKey) {
   const record = await fixture.device.groups.loadState(key)
@@ -920,3 +924,5 @@ for (const mode of ['real-mls', 'double'] as const) {
     })
   })
 }
+
+testRegistryBackgroundWarmup('runtime')

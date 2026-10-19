@@ -22,11 +22,12 @@ import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
 import { deferred } from '../src/runtime.js'
 import { restoreCommittedSender } from '../src/testing.js'
 import {
-  createRegistryFixture,
+  createGatedRegistryFixture as createRegistryFixture,
   type RegistryFixture,
   registryFixtureRestore,
 } from './fixtures/registry.js'
 import { createRegistryCryptoGroup } from './fixtures/registry-crypto.js'
+import { testRegistryBackgroundWarmup } from './fixtures/registry-maintenance.js'
 
 const fixtures: Array<RegistryFixture> = []
 afterEach(async () => {
@@ -1560,3 +1561,5 @@ for (const mode of ['real-mls', 'double'] as const) {
     })
   })
 }
+
+testRegistryBackgroundWarmup('reserve')

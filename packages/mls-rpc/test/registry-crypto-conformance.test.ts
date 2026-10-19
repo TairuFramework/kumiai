@@ -12,6 +12,7 @@ import {
   createRegistryCryptoGroup,
   createRegistryPendingCryptoFixture,
 } from './fixtures/registry-crypto.js'
+import { testRegistryBackgroundWarmup } from './fixtures/registry-maintenance.js'
 
 for (const mode of ['real-mls', 'double'] as const) {
   test(`invalid-position unwrap leaves persistence faults for write-staging calls (${mode})`, async () => {
@@ -25,7 +26,11 @@ for (const mode of ['real-mls', 'double'] as const) {
         return fixture
       })
     try {
-      const fixture = await createRegistryPendingCryptoFixture(mode, 'invalid-position-fault')
+      const fixture = await createRegistryPendingCryptoFixture(
+        mode,
+        'invalid-position-fault',
+        'gated',
+      )
       const payload = fixture.encode?.('retry')
       if (payload === undefined) throw new Error('Missing event encoder')
       const sealed = await fixture.sender.wrap(payload)
@@ -60,13 +65,15 @@ for (const mode of ['real-mls', 'double'] as const) {
 
   testRegistryCryptoConformance({
     label: `registry / ${mode}`,
-    createFixture: (id) => createRegistryCryptoFixture(mode, id),
+    createFixture: (id) => createRegistryCryptoFixture(mode, id, 'gated'),
   })
 
   testGroupCryptoConformance({
     label: `registry / ${mode}`,
     createGroup: async (size, id) => {
-      const group = await createRegistryCryptoGroup(mode, id, size)
+      const group = await createRegistryCryptoGroup(mode, id, size, {
+        backgroundMaintenance: 'gated',
+      })
       return {
         members: group.members,
         setEpochHintOffset: group.setEpochHintOffset,
@@ -80,6 +87,8 @@ for (const mode of ['real-mls', 'double'] as const) {
   testPendingGroupCryptoConformance({
     label: `registry / ${mode}`,
     isStorageError: isAppFrameStorageError,
-    createFixture: (id) => createRegistryPendingCryptoFixture(mode, id),
+    createFixture: (id) => createRegistryPendingCryptoFixture(mode, id, 'gated'),
   })
 }
+
+testRegistryBackgroundWarmup('crypto-conformance')

@@ -26,7 +26,13 @@ import {
 } from '../src/entry-capability.js'
 import { encodeStoredValue } from '../src/persistence-codec.js'
 import { createRegistryHandleAccess } from '../src/registry-handle-access.js'
-import { createRegistryFixture } from './fixtures/registry.js'
+import {
+  drainRegistryMaintenance,
+  dropRegistryOwner,
+  gateRegistryMaintenance,
+} from '../src/testing.js'
+import { createGatedRegistryFixture as createRegistryFixture } from './fixtures/registry.js'
+import { testRegistryBackgroundWarmup } from './fixtures/registry-maintenance.js'
 import {
   buildSealedMemoryOperation,
   restoreMemoryControlHandle,
@@ -154,6 +160,43 @@ for (const mode of ['real-mls', 'double'] as const) {
       expect(build).toHaveBeenCalledTimes(1)
       expect(frame).toHaveBeenCalledTimes(1)
       expect((await control.load()).commitOnce).toEqual(prepared[0])
+    } finally {
+      await f.close()
+    }
+  })
+
+  test(`maintenance after pending adoption proof retains control and applied evidence (${mode})`, async () => {
+    const groupID = `superseded-adoption-${mode}`
+    const f = await createRegistryFixture({ mode, groupID, setup: 'seeded' })
+    try {
+      const gate = gateRegistryMaintenance(f.registry)
+      const registryAccess = await f.registry.access(groupID)
+      const access = createRegistryHandleAccess({ access: registryAccess })
+      const { candidate, write } = await f.acceptedOrdinary(registryAccess)
+      const mutationID = `adoption-${mode}`
+      const fault = f.armNextWorkFault('pending')
+      const replacing = access.replace(candidate, () => ({ ...write, mutationID }))
+      await fault.rejected
+      await fault.finish('commit')
+      await replacing
+      expect(await f.device.groups.resolve(groupID, mutationID)).toBe('committed')
+      const control = f.device.groups.ports(registryAccess.key).control
+      const before = await control.load()
+      expect(before.applied.length).toBeGreaterThan(0)
+      const version = registryAccess.stateVersion()
+      // Reopening removes the installed hand-off, so load must reserve again.
+      dropRegistryOwner(registryAccess)
+      const reloaded = await f.registry.access(groupID)
+      gate.release()
+      await drainRegistryMaintenance(reloaded)
+      expect(reloaded.stateVersion()).toBe(version + 1)
+      await expect(f.device.groups.resolve(groupID, mutationID)).rejects.toMatchObject({
+        name: 'GroupStateUncertainError',
+      })
+      expect(await control.load()).toEqual(before)
+      expect(await control.lastMutation()).toBe(mutationID)
+      expect((await f.device.groups.loadTrust(groupID))?.installed.epoch).toBe(1)
+      expect(reloaded.epoch()).toBe(1)
     } finally {
       await f.close()
     }
@@ -312,3 +355,5 @@ for (const mode of ['real-mls', 'double'] as const) {
     }
   })
 }
+
+testRegistryBackgroundWarmup('consumer-access')

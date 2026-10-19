@@ -14,7 +14,7 @@ import * as api from '../src/index.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { registryOptions } from '../src/registry/validation.js'
 import { createRegistryFixture } from './fixtures/registry.js'
-import { restoreMemoryControlHandle } from './fixtures/sealed-memory-mls.js'
+import { createRegistryCryptoGroup } from './fixtures/registry-crypto.js'
 
 test('epoch retention defaults to 4 and caps at 32', () => {
   expect(registryOptions({}).keyRetention?.retainKeysForEpochs).toBe(4)
@@ -100,24 +100,13 @@ for (const mode of ['real-mls', 'double'] as const) {
 
     test('non-default retention is honoured', async () => {
       const groupID = `retention-window-${mode}`
-      const fixture = await createRegistryFixture({
-        mode,
-        setup: 'seeded',
-        groupID,
+      const group = await createRegistryCryptoGroup(mode, groupID, 1, {
         options: { keyRetention: { retainKeysForEpochs: 2 } },
       })
+      const fixture = group.fixture()
       try {
-        const access = await fixture.registry.access(groupID)
-        const sender = () => {
-          return access.read((handle) =>
-            (mode === 'real-mls' ? restoreGroup : restoreMemoryControlHandle)({
-              state: structuredClone(handle.state),
-              credential: handle.credential,
-              ledgerEntries: handle.ledgerTokens,
-              options: fixture.environment.options,
-            }),
-          )
-        }
+        const access = group.access()
+        const sender = () => group.sender.handle
         const seal = async (handle: GroupHandle, position: string) => {
           const topicID = `app-${handle.epoch}`
           const ciphertext = await handle.encrypt(encodeEventFrame('posted', { position }))
@@ -133,10 +122,7 @@ for (const mode of ['real-mls', 'double'] as const) {
             ciphertext,
           }
         }
-        const advance = async () => {
-          const { candidate, expected, write } = await fixture.acceptedOrdinary(access)
-          expect(await access.adopt(candidate, expected, write)).toBe('installed')
-        }
+        const advance = () => group.advance()
         const epoch = access.epoch()
         const first = await sender()
         const f0 = await seal(first, '00000')

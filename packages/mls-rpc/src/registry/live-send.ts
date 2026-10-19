@@ -1,0 +1,712 @@
+import {
+  ApplicationSendRefusedError,
+  bindSendCeiling,
+  decodeClientState,
+  type GroupHandle,
+  ownApplicationGeneration,
+  restrictCommitAuthoring,
+} from '@kumiai/mls'
+import {
+  type ControlSnapshot,
+  decodeAppAAD,
+  GroupSafetyHeldError,
+  type SafetyHold,
+  SendNotAdmissibleError,
+} from '@kumiai/rpc'
+
+import type { EntryCapability, EntryReads, Prepared } from '../entry-capability.js'
+import { copyStoredValue, sameStoredValue } from '../memory-incarnation-stores.js'
+import { GroupStateConflictError, RegistryRetiringError } from '../persistence-errors.js'
+import type { EpochIdentity, GroupStores, GroupTransaction } from '../persistence-types.js'
+import type { RegistryOwner } from './access.js'
+import { type ColdEnvironment, copyRecord } from './cold.js'
+import {
+  eligibilityOf,
+  LEASE_AWAIT_MS,
+  LEASE_MAX_GENERATION,
+  LEASE_RENEW_BELOW,
+  type Reservation,
+  reservationEnvelope,
+  reserveFromBytes,
+} from './reserve.js'
+import type { GroupHandleRegistry, ReadableGroupState, RegistryHandleAccess } from './types.js'
+
+export class ApplicationLeaseUnavailableError extends Error {
+  #reason: 'cold' | 'exhausted' | 'deferred'
+  constructor(reason: 'cold' | 'exhausted' | 'deferred') {
+    super(`Application lease unavailable: ${reason}`)
+    this.name = 'ApplicationLeaseUnavailableError'
+    this.#reason = reason
+  }
+  get reason() {
+    return this.#reason
+  }
+}
+
+export type SendCopy = {
+  copy: GroupHandle
+  identity: EpochIdentity
+  limit: number
+  eligibility: Uint8Array
+}
+export type LiveSlot = {
+  lock: { run<T>(fn: () => Promise<T>): Promise<T> }
+  inflight: Set<Promise<unknown>>
+}
+type Saved = {
+  record: ReadableGroupState
+  reservation?: Reservation | null
+  eligibility: Uint8Array
+}
+type OwnProof = Saved & { generation: number; registered: boolean; proven: boolean }
+
+export const registryMaintenanceGates = new WeakMap<
+  GroupHandleRegistry,
+  (signal: AbortSignal) => Promise<void>
+>()
+
+export const leaseReaders = new WeakMap<
+  RegistryHandleAccess,
+  () => {
+    copy: GroupHandle
+    identity: EpochIdentity
+    limit: number
+    own: number
+    storedGeneration: number
+    knownVersion: number
+    expectedVersions: Array<number>
+  } | null
+>()
+export const liveHandles = new WeakSet<GroupHandle>()
+export const registryLiveSend = new WeakMap<
+  RegistryHandleAccess,
+  ReturnType<typeof createLiveSend>
+>()
+
+export function effectiveNext(owner: RegistryOwner): number {
+  if (owner.send !== null) return ownApplicationGeneration(owner.send.copy.state)
+  const state = decodeClientState(owner.latestCommitted.state)
+  return Math.max(
+    state === undefined ? 0 : ownApplicationGeneration(state),
+    owner.latestCommitted.senderHWM,
+  )
+}
+
+export function createLiveSlot(): LiveSlot {
+  let tail = Promise.resolve()
+  return {
+    inflight: new Set(),
+    lock: {
+      async run<T>(fn: () => Promise<T>): Promise<T> {
+        const previous = tail
+        let release!: () => void
+        tail = new Promise<void>((resolve) => {
+          release = resolve
+        })
+        await previous
+        try {
+          return await fn()
+        } finally {
+          release()
+        }
+      },
+    },
+  }
+}
+
+export function createLiveSend<TTx extends GroupTransaction>(params: {
+  owner: RegistryOwner
+  slot: LiveSlot
+  capability: EntryCapability<TTx>
+  environment: ColdEnvironment
+  resolve(mutationID: string): Promise<'committed' | 'rolled-back'>
+  assertAvailable(): void
+  assertCurrent(): void
+  assertWorkSafety(stores: GroupStores<TTx>): Promise<void>
+  safetyHeld(): SafetyHold
+  diagnoseFailure(error: unknown): Promise<void>
+  publish(): void
+  dropOwner(): void
+  waitForMaintenanceGate(signal: AbortSignal): Promise<void> | undefined
+}) {
+  const { owner, slot, capability, environment } = params
+  const proofs = new WeakMap<ReadableGroupState, OwnProof>()
+  let generation = 0
+  let foreignGeneration = 0
+  let closed = false
+  let paused = false
+  const initial = decodeClientState(owner.latestCommitted.state)
+  let deferred =
+    initial !== undefined &&
+    (initial.groupActiveState.kind !== 'active' ||
+      Object.keys(initial.unappliedProposals).length !== 0)
+  let cancellation = new AbortController()
+  const closing = new AbortController()
+  let maintenance: Promise<void> | null = null
+  let maintenanceAbort: AbortController | null = null
+  let block: { started(): void; release: Promise<void> } | null = null
+  const rotationListeners = new Set<(identity: EpochIdentity) => void>()
+  const resolutions = new Set<Promise<void>>()
+  const checks = new Set<Promise<void>>()
+
+  function available(): boolean {
+    if (closed || paused) return false
+    try {
+      params.assertAvailable()
+      return true
+    } catch {
+      return false
+    }
+  }
+  function assertSeal(): void {
+    params.assertAvailable()
+    const safety = params.safetyHeld()
+    if (safety !== null) throw new GroupSafetyHeldError(safety)
+    if (!owner.admission.admissible) throw new SendNotAdmissibleError(owner.admission.reason)
+  }
+  function invalidate(): void {
+    generation++
+    owner.send = null
+  }
+  function committedGeneration(): number {
+    const state = decodeClientState(owner.latestCommitted.state)
+    return Math.max(
+      owner.latestCommitted.senderHWM,
+      state === undefined ? 0 : ownApplicationGeneration(state),
+    )
+  }
+  function needsMaintenance(): boolean {
+    return (
+      available() &&
+      owner.expected.size === 0 &&
+      owner.admission.admissible &&
+      params.safetyHeld() === null &&
+      committedGeneration() < LEASE_MAX_GENERATION &&
+      effectiveNext(owner) < LEASE_MAX_GENERATION &&
+      (owner.send === null || owner.send.limit - effectiveNext(owner) < LEASE_RENEW_BELOW)
+    )
+  }
+  function notifyRotation(): void {
+    if (effectiveNext(owner) < LEASE_MAX_GENERATION) return
+    for (const listener of rotationListeners) {
+      try {
+        listener({ ...owner.snapshot, authenticator: owner.snapshot.authenticator.slice() })
+      } catch {
+        /* Advisory listener. */
+      }
+    }
+  }
+  function account(proof: OwnProof): void {
+    proof.proven = proof.registered
+    if (!proof.proven || proof.record.version < owner.knownVersion) return
+    owner.knownVersion = proof.record.version
+    owner.latestCommitted = copyRecord(proof.record)
+    owner.latestEligibility = proof.eligibility.slice()
+    if (
+      owner.send !== null &&
+      (!sameStoredValue(owner.send.identity, identityOf(proof.record)) ||
+        !sameStoredValue(owner.send.eligibility, proof.eligibility))
+    )
+      invalidate()
+    const state = decodeClientState(proof.record.state)
+    deferred =
+      state !== undefined &&
+      (state.groupActiveState.kind !== 'active' ||
+        Object.keys(state.unappliedProposals).length !== 0)
+  }
+  function identityOf(record: ReadableGroupState): EpochIdentity {
+    return {
+      groupID: record.groupID,
+      incarnation: record.incarnation,
+      epoch: record.epoch,
+      authenticator: record.epochAuthenticator,
+    }
+  }
+  async function accept(proof: OwnProof): Promise<void> {
+    const reservation = proof.reservation
+    if (reservation == null || !proof.registered || !proof.proven) return
+    const saved = reservation.envelope?.saved
+    const proven = saved === undefined ? undefined : decodeClientState(saved.state)
+    const valid = () =>
+      available() &&
+      proof.generation === foreignGeneration &&
+      sameStoredValue(owner.key, {
+        groupID: reservation.identity.groupID,
+        incarnation: reservation.identity.incarnation,
+      }) &&
+      sameStoredValue(identityOf(owner.latestCommitted), reservation.identity) &&
+      sameStoredValue(owner.latestEligibility, reservation.eligibility)
+    if (
+      saved === undefined ||
+      proven === undefined ||
+      reservation.envelope.version !== saved.version ||
+      saved.version !== proof.record.version ||
+      !sameStoredValue(saved.state, proof.record.state) ||
+      !sameStoredValue(identityOf(saved), reservation.identity) ||
+      reservation.limit > ownApplicationGeneration(proven) ||
+      !valid()
+    ) {
+      if (available() && proof.generation === foreignGeneration) invalidate()
+      return
+    }
+    params.assertCurrent()
+    const current = owner.send
+    if (current !== null && sameStoredValue(current.identity, reservation.identity)) {
+      if (
+        !sameStoredValue(current.eligibility, reservation.eligibility) ||
+        reservation.start < current.limit
+      ) {
+        invalidate()
+        return
+      }
+      if (reservation.start === current.limit) {
+        current.limit = reservation.limit
+        deferred = false
+        return
+      }
+    }
+    const capturedGeneration = generation
+    const copy = restrictCommitAuthoring(await environment.restore(copyRecord(reservation.pre)))
+    if (
+      !valid() ||
+      generation !== capturedGeneration ||
+      !sameStoredValue(eligibilityOf(copy.state, copy.ownLeafLapsed()), reservation.eligibility) ||
+      ownApplicationGeneration(copy.state) !== reservation.start
+    )
+      return
+    const record: SendCopy = {
+      copy,
+      identity: reservation.identity,
+      limit: reservation.limit,
+      eligibility: reservation.eligibility.slice(),
+    }
+    bindSendCeiling(copy, () => record.limit)
+    liveHandles.add(copy)
+    owner.send = record
+    deferred = false
+  }
+  function register(saved: Saved): OwnProof {
+    const record = copyRecord(saved.record)
+    const proof = {
+      ...saved,
+      record,
+      eligibility: saved.eligibility.slice(),
+      generation: foreignGeneration,
+      registered: true,
+      proven: false,
+    }
+    owner.expected.set(record.version, record)
+    proofs.set(record, proof)
+    return proof
+  }
+  function observeOwn(version: number, control: ControlSnapshot | null): void {
+    if (control !== null) owner.latestControl = copyStoredValue(control)
+    const record = owner.expected.get(version)
+    const proof = record === undefined ? undefined : proofs.get(record)
+    if (proof !== undefined) account(proof)
+  }
+  function foreign(version: number): void {
+    foreignGeneration++
+    invalidate()
+    owner.knownVersion = Math.max(owner.knownVersion, version)
+    schedule()
+  }
+  function observed(version: number, stillCurrent: () => boolean): () => void {
+    const capturedGeneration = generation
+    const known = copyRecord(owner.latestCommitted)
+    const control = copyStoredValue(owner.latestControl)
+    let finish!: () => void
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve
+    })
+    const check = () =>
+      capability.read(owner.key.groupID, async (reads) => {
+        try {
+          const record = await reads.state(owner.key.incarnation)
+          const nextControl = await reads.control(owner.key.incarnation)
+          if (
+            record === null ||
+            record.deleted ||
+            record.state === null ||
+            record.version !== version ||
+            !sameStoredValue(record.state, known.state)
+          ) {
+            foreign(version)
+            return
+          }
+          let eligibility = owner.latestEligibility
+          if (
+            !sameStoredValue(nextControl, control) ||
+            !sameStoredValue(record.ledger, known.ledger) ||
+            !sameStoredValue(record.credential, known.credential) ||
+            record.terminal !== known.terminal
+          ) {
+            const handle = restrictCommitAuthoring(
+              await environment.restore(copyRecord({ ...record, state: record.state })),
+            )
+            eligibility = eligibilityOf(handle.state, handle.ownLeafLapsed())
+          }
+          if (
+            !stillCurrent() ||
+            !available() ||
+            generation !== capturedGeneration ||
+            !sameStoredValue(eligibility, owner.send?.eligibility ?? owner.latestEligibility)
+          ) {
+            foreign(version)
+            return
+          }
+          owner.knownVersion = Math.max(owner.knownVersion, version)
+          owner.latestCommitted = copyRecord({ ...record, state: record.state })
+          owner.latestControl = copyStoredValue(nextControl)
+          owner.latestEligibility = eligibility.slice()
+        } catch {
+          foreign(version)
+        }
+      })
+    checks.add(pending)
+    slot.inflight.add(pending)
+    void pending.then(() => {
+      checks.delete(pending)
+      slot.inflight.delete(pending)
+    })
+    return () => {
+      void check().then(finish, () => {
+        foreign(version)
+        finish()
+      })
+    }
+  }
+  async function accounting(): Promise<void> {
+    while (checks.size !== 0) await Promise.allSettled([...checks])
+  }
+  async function settle(proof: OwnProof, outcome: 'committed' | 'rolled-back'): Promise<void> {
+    if (outcome === 'committed') account(proof)
+    if (owner.expected.get(proof.record.version) === proof.record)
+      owner.expected.delete(proof.record.version)
+    if (outcome === 'committed') await accept(proof)
+    notifyRotation()
+    schedule()
+  }
+  async function delay(ms: number, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer)
+        signal.removeEventListener('abort', done)
+        resolve()
+      }
+      const timer = setTimeout(done, ms)
+      signal.addEventListener('abort', done, { once: true })
+    })
+  }
+  function resolveLater(proof: OwnProof, mutationID: string): void {
+    const pending = (async () => {
+      let backoff = 100
+      while (!closed) {
+        await delay(backoff, closing.signal)
+        if (closed) return
+        try {
+          await settle(proof, await params.resolve(mutationID))
+          return
+        } catch {
+          backoff = Math.min(backoff * 2, 15_000)
+        }
+      }
+    })()
+    resolutions.add(pending)
+    void pending.finally(() => {
+      resolutions.delete(pending)
+    })
+  }
+  async function run<P extends Saved, T>(
+    request: { groupID: string; mutationID: string | null },
+    prepare: (reads: EntryReads) => Promise<Prepared<P>>,
+    work: (stores: GroupStores<TTx>, prepared: P) => Promise<T>,
+  ): Promise<T> {
+    let proof: OwnProof | undefined
+    let mutationID = request.mutationID
+    try {
+      const result = await capability.run(
+        request,
+        async (reads) => {
+          const prepared = await prepare(reads)
+          mutationID = prepared.mutationID ?? mutationID
+          proof = register(prepared.value)
+          return prepared
+        },
+        work,
+      )
+      if (proof !== undefined) await settle(proof, 'committed')
+      return result
+    } catch (error) {
+      if (proof !== undefined && mutationID !== null) {
+        let outcome: 'committed' | 'rolled-back' | undefined
+        try {
+          outcome = await params.resolve(mutationID)
+        } catch {
+          resolveLater(proof, mutationID)
+        }
+        if (outcome !== undefined) await settle(proof, outcome)
+      }
+      throw error
+    }
+  }
+  class NoReservation extends Error {}
+  function schedule(): Promise<void> | null {
+    if (maintenance !== null) return maintenance
+    if (!needsMaintenance()) return null
+    const abort = new AbortController()
+    maintenanceAbort = abort
+    const pending = (async () => {
+      await delay(0, abort.signal)
+      let backoff = 100
+      while (!abort.signal.aborted && needsMaintenance()) {
+        await params.waitForMaintenanceGate(abort.signal)
+        const blocked = block
+        if (blocked !== null) {
+          block = null
+          blocked.started()
+          await Promise.race([
+            blocked.release,
+            new Promise<void>((resolve) =>
+              abort.signal.addEventListener('abort', () => resolve(), { once: true }),
+            ),
+          ])
+        }
+        if (abort.signal.aborted || !needsMaintenance()) return
+        try {
+          await run(
+            { groupID: owner.key.groupID, mutationID: crypto.randomUUID() },
+            async (reads) => {
+              params.assertAvailable()
+              if (!needsMaintenance() || abort.signal.aborted) throw new NoReservation()
+              const lifetime = await reads.lifetime()
+              const record = await reads.state(owner.key.incarnation)
+              if (
+                lifetime?.activeIncarnation !== owner.key.incarnation ||
+                record === null ||
+                record.deleted ||
+                record.state === null
+              )
+                throw new NoReservation()
+              const reserved = await reserveFromBytes(
+                environment,
+                { ...record, state: record.state },
+                record.senderHWM,
+              )
+              if (reserved.reservation === null) {
+                deferred = true
+                throw new NoReservation()
+              }
+              const saved: ReadableGroupState = {
+                ...record,
+                state: reserved.state,
+                version: record.version + 1,
+                senderHWM: reserved.senderHWM,
+              }
+              return {
+                expected: lifetime,
+                value: {
+                  record: saved,
+                  eligibility: reserved.reservation.eligibility,
+                  reservation: { ...reserved.reservation, envelope: reservationEnvelope(saved) },
+                },
+              }
+            },
+            async (stores, prepared) => {
+              params.assertAvailable()
+              if (abort.signal.aborted) throw new NoReservation()
+              await params.assertWorkSafety(stores)
+              const target = stores.incarnation(owner.key.incarnation)
+              const current = await target.state.load()
+              if (current?.version !== prepared.record.version - 1)
+                throw new GroupStateConflictError('Lease source moved')
+              await target.state.save(prepared.record)
+            },
+          )
+          return
+        } catch (error) {
+          if (error instanceof NoReservation || abort.signal.aborted || !available()) return
+          await params.diagnoseFailure(error)
+          await delay(backoff, abort.signal)
+          backoff = Math.min(backoff * 2, 15_000)
+        } finally {
+          params.publish()
+        }
+      }
+    })()
+    maintenance = pending
+    void pending.then(
+      () => {
+        if (maintenance === pending) maintenance = null
+      },
+      () => {
+        if (maintenance === pending) maintenance = null
+      },
+    )
+    return pending
+  }
+  async function waitForMaintenance(job: Promise<void> | null): Promise<void> {
+    if (job === null) return
+    const signal = cancellation.signal
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let abort!: () => void
+    try {
+      await Promise.race([
+        job,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, LEASE_AWAIT_MS)
+        }),
+        new Promise<never>((_resolve, reject) => {
+          abort = () => reject(signal.reason)
+          if (signal.aborted) abort()
+          else signal.addEventListener('abort', abort, { once: true })
+        }),
+      ])
+    } finally {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', abort)
+    }
+  }
+  function seal(plaintext: Uint8Array, opts: { aad: Uint8Array; intent: 'log' | 'ephemeral' }) {
+    const pending = (async () => {
+      params.assertAvailable()
+      if (decodeAppAAD(opts.aad)?.intent !== opts.intent)
+        throw new TypeError('App AAD intent mismatch')
+      await accounting()
+      for (let attempt = 0; ; attempt++) {
+        assertSeal()
+        const record = owner.send
+        let exhausted =
+          record !== null && ownApplicationGeneration(record.copy.state) >= record.limit
+        if (record !== null && !exhausted) {
+          try {
+            const sealed = await record.copy.encryptApplication(plaintext, { aad: opts.aad })
+            return { ...sealed, epoch: record.identity.epoch }
+          } catch (error) {
+            if (!(error instanceof ApplicationSendRefusedError)) throw error
+            exhausted = true
+          } finally {
+            schedule()
+            notifyRotation()
+          }
+        }
+        const reason = deferred ? 'deferred' : exhausted ? 'exhausted' : 'cold'
+        const job = schedule()
+        if (opts.intent !== 'log' || attempt !== 0)
+          throw new ApplicationLeaseUnavailableError(reason)
+        await waitForMaintenance(job)
+      }
+    })()
+    slot.inflight.add(pending)
+    void pending.then(
+      () => slot.inflight.delete(pending),
+      () => slot.inflight.delete(pending),
+    )
+    return pending
+  }
+  function cancel(reason: unknown, permanent = false): void {
+    paused = true
+    foreignGeneration++
+    closed ||= permanent
+    if (permanent) closing.abort(reason)
+    maintenanceAbort?.abort(reason)
+    cancellation.abort(reason)
+    invalidate()
+  }
+  return {
+    seal,
+    run,
+    observeOwn,
+    observed,
+    accounting,
+    invalidate,
+    schedule,
+    snapshot() {
+      const send = owner.send
+      return send === null
+        ? null
+        : {
+            copy: send.copy,
+            identity: { ...send.identity, authenticator: send.identity.authenticator.slice() },
+            limit: send.limit,
+            own: ownApplicationGeneration(send.copy.state),
+            storedGeneration: committedGeneration(),
+            knownVersion: owner.knownVersion,
+            expectedVersions: [...owner.expected.keys()],
+          }
+    },
+    foreign,
+    refreshed(record: ReadableGroupState, eligibility: Uint8Array) {
+      owner.knownVersion = Math.max(owner.knownVersion, record.version)
+      owner.latestCommitted = copyRecord(record)
+      owner.latestEligibility = eligibility.slice()
+      const state = decodeClientState(record.state)
+      deferred =
+        state !== undefined &&
+        (state.groupActiveState.kind !== 'active' ||
+          Object.keys(state.unappliedProposals).length !== 0)
+      if (
+        owner.send !== null &&
+        (!sameStoredValue(owner.send.identity, identityOf(record)) ||
+          !sameStoredValue(owner.send.eligibility, eligibility))
+      )
+        invalidate()
+    },
+    async handoff(reservation: Reservation) {
+      const record = reservation.envelope?.saved
+      if (record === undefined) return
+      const loaded = owner.latestCommitted
+      if (
+        !sameStoredValue(identityOf(loaded), reservation.identity) ||
+        loaded.version < reservation.envelope.version ||
+        !sameStoredValue(loaded.state, record.state)
+      )
+        return
+      const state = decodeClientState(loaded.state)
+      if (state === undefined || reservation.limit > ownApplicationGeneration(state)) return
+      await accept({
+        record,
+        reservation,
+        eligibility: reservation.eligibility,
+        generation: foreignGeneration,
+        registered: true,
+        proven: true,
+      })
+    },
+    cancel,
+    retire() {
+      cancel(new RegistryRetiringError({ key: owner.key }))
+    },
+    resume() {
+      if (!closed) {
+        paused = false
+        cancellation = new AbortController()
+        schedule()
+      }
+    },
+    onRotationRequired(listener: (identity: EpochIdentity) => void) {
+      rotationListeners.add(listener)
+      return () => {
+        rotationListeners.delete(listener)
+      }
+    },
+    async drain() {
+      await maintenance
+      await Promise.allSettled(resolutions)
+    },
+    blockMaintenance() {
+      let started!: () => void
+      let release!: () => void
+      const entered = new Promise<void>((resolve) => {
+        started = resolve
+      })
+      const released = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      block = { started, release: released }
+      return { started: entered, release }
+    },
+    dropOwner: params.dropOwner,
+  }
+}
