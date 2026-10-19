@@ -210,6 +210,39 @@ for (const mode of ['real-mls', 'double'] as const) {
         await sealing
       }
     })
+    test('retirement cancellation survives immediate rollback while accounting is pending', async () => {
+      const fixture = await setup(mode)
+      const live = registryLiveSend.get(fixture.access())
+      const capability = entryCapability(fixture.fixture().device.groups)
+      if (live === undefined || capability === null) throw new Error('Missing capability')
+      const version = (await fixture.record()).version + 1
+      const storedGeneration = await fixture.storedGeneration()
+      const transactions = fixture.transactions()
+      const gate = gateRegistryMaintenance(fixture.fixture().registry)
+      const blocked = deferred<void>()
+      const read = capability.read.bind(capability)
+      vi.spyOn(capability, 'read').mockImplementationOnce(async (...args) => {
+        await blocked.promise
+        return read(...args)
+      })
+      const release = live.observed(version, () => true)
+      release()
+      const sealing = fixture.sealDurable().catch((error: unknown) => error)
+      const retirement = registryRetirement(fixture.fixture().registry).beginRetirement(fixture.key)
+      retirement.settle('rolled-back')
+      try {
+        await expect(promptly(sealing)).resolves.toMatchObject({ name: 'RegistryRetiringError' })
+        expect(await fixture.storedGeneration()).toBe(storedGeneration)
+        expect(fixture.transactions()).toBe(transactions)
+        gate.release()
+        expect((await fixture.sealDurable()).generation).toBe(storedGeneration)
+        expect(await fixture.storedGeneration()).toBe(storedGeneration + 16)
+      } finally {
+        blocked.resolve()
+        gate.release()
+        await sealing
+      }
+    })
     test.each(['reservation', 'mutation'] as const)(
       'a later own %s observation supersedes a metadata check without wasting generations',
       async (kind) => {

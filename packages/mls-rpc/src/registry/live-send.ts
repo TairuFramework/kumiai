@@ -650,6 +650,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     }
   }
   function seal(plaintext: Uint8Array, opts: { aad: Uint8Array; intent: 'log' | 'ephemeral' }) {
+    const signal = cancellation.signal
     const pending = (async () => {
       params.assertAvailable()
       if (decodeAppAAD(opts.aad)?.intent !== opts.intent)
@@ -657,6 +658,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
       assertSeal()
       await accounting()
       for (let attempt = 0; ; attempt++) {
+        if (signal.aborted) throw signal.reason
         assertSeal()
         const record = owner.send
         let exhausted =
