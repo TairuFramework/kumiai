@@ -29,7 +29,11 @@ export function accountedRuntime(params: {
   groupID: string
   ownerDID: string
   previous: GroupRecoveryTrust | null
-}): { snapshot: GroupRuntimeSnapshot; admission: SendAdmission } | null {
+}): {
+  snapshot: GroupRuntimeSnapshot
+  admission: SendAdmission
+  baseAdmission: SendAdmission
+} | null {
   const { observation: value, groupID, ownerDID } = params
   if (
     value.lifetimeStatus !== 'readable' ||
@@ -105,7 +109,16 @@ export function accountedRuntime(params: {
     })
     const epoch = trust.installed.epoch
     const safety = controlSafetyHeld(control, value.condition)
+    const baseAdmission: SendAdmission =
+      terminal || !facts.ownPresent
+        ? { epoch, admissible: false, reason: 'terminal' }
+        : control.strand !== null
+          ? { epoch, admissible: false, reason: 'stranded' }
+          : facts.lapsed
+            ? { epoch, admissible: false, reason: 'lapsed' }
+            : { epoch, admissible: true }
     return {
+      baseAdmission,
       snapshot: {
         ...trust.installed,
         condition: value.condition ?? null,
@@ -114,16 +127,7 @@ export function accountedRuntime(params: {
         members: new Set(facts.members),
         available: facts.ownPresent && !terminal,
       },
-      admission:
-        safety !== null
-          ? { epoch, admissible: false, reason: safety }
-          : terminal || !facts.ownPresent
-            ? { epoch, admissible: false, reason: 'terminal' }
-            : control.strand !== null
-              ? { epoch, admissible: false, reason: 'stranded' }
-              : facts.lapsed
-                ? { epoch, admissible: false, reason: 'lapsed' }
-                : { epoch, admissible: true },
+      admission: safety === null ? baseAdmission : { epoch, admissible: false, reason: safety },
     }
   } catch {
     return null

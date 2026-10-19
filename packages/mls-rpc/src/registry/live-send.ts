@@ -97,13 +97,15 @@ export const registryLiveSend = new WeakMap<
   ReturnType<typeof createLiveSend>
 >()
 
+export function committedNext(record: ReadableGroupState): number {
+  const state = decodeClientState(record.state)
+  return Math.max(state === undefined ? 0 : ownApplicationGeneration(state), record.senderHWM)
+}
+
 export function effectiveNext(owner: RegistryOwner): number {
-  if (owner.send !== null) return ownApplicationGeneration(owner.send.copy.state)
-  const state = decodeClientState(owner.latestCommitted.state)
-  return Math.max(
-    state === undefined ? 0 : ownApplicationGeneration(state),
-    owner.latestCommitted.senderHWM,
-  )
+  return owner.send === null
+    ? committedNext(owner.latestCommitted)
+    : ownApplicationGeneration(owner.send.copy.state)
 }
 
 export function createLiveSlot(): LiveSlot {
@@ -146,6 +148,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
   safetyHeld(): SafetyHold
   diagnoseFailure(error: unknown): Promise<void>
   publish(): void
+  admissionChanged(): void
   dropOwner(): void
   waitForMaintenanceGate(signal: AbortSignal): Promise<void> | undefined
 }) {
@@ -166,6 +169,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
   let maintenanceAbort: AbortController | null = null
   let block: { started(): void; release: Promise<void> } | null = null
   const admissionListeners = new Set<() => void>()
+  let pendingAcceptance: OwnProof | null = null
   let lastAdmission = admission()
   let rotationIdentity: EpochIdentity | null = null
   const rotationListeners = new Set<(identity: EpochIdentity) => void>()
@@ -193,15 +197,12 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
   }
   function invalidate(): void {
     generation++
+    pendingAcceptance = null
     owner.send = null
     changed()
   }
   function committedGeneration(): number {
-    const state = decodeClientState(owner.latestCommitted.state)
-    return Math.max(
-      owner.latestCommitted.senderHWM,
-      state === undefined ? 0 : ownApplicationGeneration(state),
-    )
+    return committedNext(owner.latestCommitted)
   }
   function needsMaintenance(): boolean {
     return (
@@ -211,15 +212,25 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
       owner.admission.admissible &&
       params.safetyHeld() === null &&
       committedGeneration() < LEASE_MAX_GENERATION &&
-      effectiveNext(owner) < LEASE_MAX_GENERATION &&
-      (owner.send === null || owner.send.limit - effectiveNext(owner) < LEASE_RENEW_BELOW)
+      currentNext() < LEASE_MAX_GENERATION &&
+      (owner.send === null || owner.send.limit - currentNext() < LEASE_RENEW_BELOW)
     )
+  }
+  function currentNext(): number {
+    if (
+      owner.send === null &&
+      pendingAcceptance?.reservation != null &&
+      pendingAcceptance.generation === foreignGeneration &&
+      pendingAcceptance.record.version === owner.knownVersion
+    )
+      return pendingAcceptance.reservation.start
+    return effectiveNext(owner)
   }
   function admission(): SendAdmission {
     const base = owner.admission
     const reason = params.safetyHeld()
     if (reason !== null) return { epoch: base.epoch, admissible: false, reason }
-    return base.admissible && effectiveNext(owner) >= LEASE_MAX_GENERATION
+    return base.admissible && currentNext() >= LEASE_MAX_GENERATION
       ? { epoch: base.epoch, admissible: false, reason: 'rotation-required' }
       : { ...base }
   }
@@ -234,6 +245,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     const next = admission()
     if (!sameStoredValue(lastAdmission, next)) {
       lastAdmission = next
+      params.admissionChanged()
       for (const listener of [...admissionListeners]) {
         try {
           listener()
@@ -246,15 +258,20 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
   }
   function notifyRotation(): void {
     const identity = identityOf(owner.latestCommitted)
-    if (rotationIdentity !== null && !sameStoredValue(rotationIdentity, identity))
+    if (
+      currentNext() < LEASE_MAX_GENERATION ||
+      (rotationIdentity !== null && !sameStoredValue(rotationIdentity, identity))
+    )
       rotationIdentity = null
-    if (effectiveNext(owner) < LEASE_MAX_GENERATION || rotationIdentity !== null) return
+    if (currentNext() < LEASE_MAX_GENERATION || rotationIdentity !== null) return
     rotationIdentity = { ...identity, authenticator: identity.authenticator.slice() }
     for (const listener of rotationListeners) supplyRotation(listener, identity)
   }
   function account(proof: OwnProof): void {
     proof.proven = proof.registered
     if (!available() || !proof.proven || proof.record.version < owner.knownVersion) return
+    // Keep usable progress visible while the committed reservation's copy is being restored.
+    if (owner.send === null && proof.reservation != null) pendingAcceptance = proof
     owner.knownVersion = proof.record.version
     owner.latestCommitted = copyRecord(proof.record)
     owner.latestEligibility = proof.eligibility.slice()
@@ -287,6 +304,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
       invalidate()
       schedule()
     } finally {
+      if (pendingAcceptance === proof) pendingAcceptance = null
       changed()
     }
   }
@@ -764,7 +782,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     accounting,
     invalidate,
     schedule,
-    effectiveNext: () => effectiveNext(owner),
+    effectiveNext: () => currentNext(),
     admission,
     changed,
     onAdmissionChanged(listener: () => void) {

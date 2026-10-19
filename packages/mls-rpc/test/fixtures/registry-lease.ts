@@ -5,7 +5,11 @@ import type { RegistryLeaseFixture } from '@kumiai/rpc-conformance'
 
 import { entryCapability } from '../../src/entry-capability.js'
 import { registryLiveSend } from '../../src/registry/live-send.js'
-import { reservationEnvelope, reserveFromBytes } from '../../src/registry/reserve.js'
+import {
+  type Reservation,
+  reservationEnvelope,
+  reserveFromBytes,
+} from '../../src/registry/reserve.js'
 import { registrySafety } from '../../src/registry/safety.js'
 import type {
   ReadableGroupState,
@@ -188,7 +192,7 @@ export async function createRegistryLeaseFixture(
       access = await fixture.registry.access(key.groupID)
       testing.receiveRebuilds(access)
     },
-    async reopen() {
+    async reopen(open = true) {
       unsubscribe()
       if (group === null) fixture = await fixture.reopen()
       else {
@@ -196,8 +200,10 @@ export async function createRegistryLeaseFixture(
         fixture = group.fixture()
       }
       unsubscribe = trackTransactions()
-      access = await fixture.registry.access(key.groupID)
-      testing.receiveRebuilds(access)
+      if (open) {
+        access = await fixture.registry.access(key.groupID)
+        testing.receiveRebuilds(access)
+      }
     },
     async writeElsewhere(kind: 'receive' | 'proposal' | 'control' | 'cursor') {
       try {
@@ -256,6 +262,7 @@ export async function createRegistryLeaseFixture(
     },
     async reserveNow(
       fault?: 'persist-pre' | 'envelope-pre' | 'no-envelope' | 'overlap' | 'pre-start',
+      captured?: (reservation: Reservation) => void,
     ) {
       const live = registryLiveSend.get(access)
       if (live === undefined) throw new Error('Missing sender')
@@ -294,6 +301,7 @@ export async function createRegistryLeaseFixture(
           if (fault === 'envelope-pre')
             reservation.envelope = reservationEnvelope({ ...saved, state: reservation.pre.state })
           if (fault === 'no-envelope') Reflect.deleteProperty(reservation, 'envelope')
+          captured?.(reservation)
           // Bind the envelope to the intentionally defective saved row for the proof check.
           if (fault === 'persist-pre') reservation.envelope = reservationEnvelope(saved)
           return {

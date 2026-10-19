@@ -23,6 +23,7 @@ import { assertRecoverySourceTrust } from './source-trust.js'
 import type { GroupHandleRegistry } from './types.js'
 
 export type RegistrySafetyCapability<TTx extends GroupTransaction> = RegistryConsumers & {
+  onAdmissionChanged(key: GroupKey, listener: (committedNext: number) => void): () => void
   binding: object
   entry: EntryCapability<TTx>
   latch(key: GroupKey, reason: NonNullable<SafetyHold>): void

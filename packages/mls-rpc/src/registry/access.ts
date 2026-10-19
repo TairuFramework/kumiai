@@ -102,6 +102,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
   resolve(mutationID: string): Promise<'committed' | 'rolled-back'>
   load(reads: EntryReads, assertMutationSafety?: () => void): Promise<ValidatedGroupState>
   publish(): void
+  admissionChanged(): void
   invalidate(displaced: boolean): void
   assertCurrent(): void
   assertAvailable(): void

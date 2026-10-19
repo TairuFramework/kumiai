@@ -25,6 +25,7 @@ import { createRegistryAccess, type RegistryOwner, registryCapturedReplacements 
 import { admissionFor, type ColdEnvironment, loadValidatedGroup } from './cold.js'
 import { registryReceiveSlots, setReceiveBase } from './live-receive.js'
 import {
+  committedNext,
   createLiveSlot,
   type LiveSlot,
   leaseReaders,
@@ -58,6 +59,7 @@ import type {
 import { registryOptions } from './validation.js'
 
 type GroupSlot = RetirementSlot & {
+  admissionListeners: Map<number, Set<(committedNext: number) => void>>
   pendingHandoff: Reservation | null
   live: LiveSlot
   load: { generation: number; promise: Promise<RegistryHandleAccess> } | null
@@ -263,6 +265,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
             slotRef.owner?.maintenance?.resume()
           }
         },
+        admissionListeners: new Map(),
         pendingHandoff: null,
         live: createLiveSlot(),
         owner: null,
@@ -366,6 +369,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
               admissible: false,
               reason: held(previous.key) ?? 'spent-set-corrupt',
             }
+            previous.maintenance?.changed()
             const dispatch = previous.runtime.install(previous.snapshot)
             if (dispatch !== undefined) notifications.set(observation, dispatch)
             return
@@ -521,6 +525,16 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         load: (reads, assertMutationSafety) =>
           load(reads, groupID, slot, slot.generation, owner, assertMutationSafety),
         publish: () => publish(slot, owner),
+        admissionChanged: () => {
+          const next = committedNext(owner.latestCommitted)
+          for (const listener of slot.admissionListeners.get(owner.key.incarnation) ?? []) {
+            try {
+              listener(next)
+            } catch {
+              /* Advisory listener. */
+            }
+          }
+        },
         safetyHeld: () =>
           held(owner.key) ??
           (owner.admission.admissible
@@ -593,6 +607,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         if (state !== undefined)
           slot.owner.maintenance?.refreshed(value.record, eligibilityOf(state, restoredLapsed))
       }
+      slot.owner.maintenance?.changed()
     }
     const handoff = slot.pendingHandoff
     slot.pendingHandoff = null
@@ -718,6 +733,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         for (const slot of slots.values()) {
           const previous = slot.owner
           invalidate(slot)
+          slot.admissionListeners.clear()
           slot.hooks?.callbacks.clear()
           slot.hooks = null
           previous?.runtime.publish(null)
@@ -864,6 +880,19 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     retire: (key, work, afterDrain) =>
       track(retireGroup(key, 'Inactive retirement source', work, afterDrain)),
     safetyHold: held,
+    onAdmissionChanged(key, listener) {
+      assertOpen()
+      const slot = groupSlot(key.groupID)
+      let listeners = slot.admissionListeners.get(key.incarnation)
+      if (listeners === undefined) {
+        listeners = new Set()
+        slot.admissionListeners.set(key.incarnation, listeners)
+      }
+      listeners.add(listener)
+      return () => {
+        listeners.delete(listener)
+      }
+    },
     onSafetyChanged(key, sink) {
       assertOpen()
       groupSlot(key.groupID)

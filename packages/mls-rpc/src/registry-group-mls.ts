@@ -31,6 +31,7 @@ import {
 import { DisplacedGroupHandleError, GroupUnavailableError } from './persistence-errors.js'
 import type { GroupKey, GroupTransaction } from './persistence-types.js'
 import { reconcileRecoveryCapture } from './recovery.js'
+import { committedNext } from './registry/live-send.js'
 import {
   checkForkRecoveryCaptureInReads,
   registryRecoveryCoordinator,
@@ -116,24 +117,23 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
     return source
   }
   let admission: SendAdmission
-  let ordinaryAdmission: SendAdmission
+  let baseAdmission: SendAdmission
+  let storedNext = 0
   let initialised = false
   let pendingObservation: AccountedGroupObservation | undefined
-  function cache(next: SendAdmission): void {
-    // Runtime reads can carry the hold projection. Preserve the underlying admission.
-    if (
-      next.admissible ||
-      (next.reason !== 'fork-halted' &&
-        next.reason !== 'spent-set-corrupt' &&
-        next.reason !== 'recovery-unavailable')
-    )
-      ordinaryAdmission = { ...next }
+  function recompute(): SendAdmission {
+    const next = baseAdmission
     const effective: SendAdmission =
-      next.admissible && (registry.effectiveNext(key) ?? 0) >= 500
+      next.admissible && (registry.effectiveNext(key) ?? storedNext) >= 500
         ? { epoch: next.epoch, admissible: false, reason: 'rotation-required' }
         : next
     const reason = capability?.held(key)
     admission = reason == null ? { ...effective } : { epoch: next.epoch, admissible: false, reason }
+    return { ...admission }
+  }
+  function cache(next: SendAdmission): void {
+    baseAdmission = { ...next }
+    recompute()
   }
   function observe(observation: AccountedGroupObservation): void {
     if (!initialised) {
@@ -146,7 +146,7 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
       ownerDID: params.identity.id,
       previous: null,
     })
-    if (projected?.snapshot.incarnation === key.incarnation) cache(projected.admission)
+    if (projected?.snapshot.incarnation === key.incarnation) cache(projected.baseAdmission)
     else {
       const terminal =
         (!admission.admissible && admission.reason === 'terminal') ||
@@ -159,14 +159,17 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
     }
   }
   // Subscribe before the read so a committed change cannot fall between snapshot and subscription.
+  const unsubscribeAdmission = capability.onAdmissionChanged(key, (committed) => {
+    storedNext = committed
+    if (initialised) recompute()
+  })
   const unsubscribeEntry = capability.entry.observe(key.groupID, observe)
   try {
-    admission = await capability.entry.read(key.groupID, async (reads) => {
+    baseAdmission = await capability.entry.read(key.groupID, async (reads) => {
       const source = await readSource(reads)
       const control = await reads.control(key.incarnation)
       const epoch = source.trust.installed.epoch
-      const safety = capability.held(key) ?? controlSafetyHeld(control)
-      if (safety !== null) return { epoch, admissible: false, reason: safety } as const
+      capability.observeHold(key, control)
       const anchor = decodeGroupAnchor(source.trust.genesisAnchor)
       if (anchor === null) throw new GroupUnavailableError({ reason: 'invalid' })
       const facts = publicMembershipFacts({
@@ -179,6 +182,8 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
       const status = await reads.diagnoseState(key.incarnation)
       const state =
         status === 'readable' || status === 'null' ? await reads.state(key.incarnation) : null
+      if (state !== null && !state.deleted && state.state !== null)
+        storedNext = committedNext({ ...state, state: state.state })
       if (state !== null && !state.deleted && state.terminal)
         return { epoch, admissible: false, reason: 'terminal' } as const
       // Private state loss strands ordinary sends, while retained trust still permits recovery.
@@ -189,25 +194,22 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
     })
   } catch (error) {
     unsubscribeEntry()
+    unsubscribeAdmission()
     throw error
   }
+  recompute()
   initialised = true
   if (pendingObservation !== undefined) observe(pendingObservation)
   let opening: Promise<ControlHandleAccess> | undefined
-  ordinaryAdmission = { ...admission }
-  cache(admission)
-  const unsubscribeSafety = capability.onSafetyChanged(key, (reason) => {
-    cache(
-      reason === null ? ordinaryAdmission : { epoch: admission.epoch, admissible: false, reason },
-    )
+  const unsubscribeSafety = capability.onSafetyChanged(key, () => {
+    recompute()
   })
-  let unsubscribeAdmission: (() => void) | undefined
   let unsubscribeRuntime: (() => void) | undefined
   capability.onRetire(key, async () => {
     unsubscribeSafety()
     unsubscribeEntry()
     unsubscribeRuntime?.()
-    unsubscribeAdmission?.()
+    unsubscribeAdmission()
     cache({ epoch: admission.epoch, admissible: false, reason: 'stranded' })
   })
   async function access(): Promise<ControlHandleAccess> {
@@ -215,12 +217,11 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
       opening = (async () => {
         const value = await registry.access(key.groupID)
         assertKey(value)
-        cache(value.admission())
-        unsubscribeAdmission = value.onAdmissionChanged(() => cache(value.admission()))
+        recompute()
         unsubscribeRuntime = value.runtime.onEpochChanged((snapshot) => {
           if (snapshot === null)
             cache({ epoch: admission.epoch, admissible: false, reason: 'stranded' })
-          else cache(value.admission())
+          else recompute()
         })
         return createRegistryHandleAccess({ access: value })
       })().catch((error: unknown) => {
@@ -228,7 +229,7 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
         cache({
           epoch: admission.epoch,
           admissible: false,
-          reason: admission.admissible ? 'stranded' : admission.reason,
+          reason: baseAdmission.admissible ? 'stranded' : baseAdmission.reason,
         })
         throw error
       })
@@ -237,7 +238,8 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
   }
   function refreshAdmission(value: ControlHandleAccess): void {
     try {
-      cache(value.admission())
+      value.admission()
+      recompute()
     } catch (error) {
       if (!(error instanceof DisplacedGroupHandleError)) throw error
       // Invalidation already removed the runtime snapshot. Preserve the operation's storage error.
@@ -247,7 +249,7 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
   let lineageScope: ControlReadScope | undefined
   const lazy: ControlHandleAccess = {
     epoch: () => admission.epoch,
-    admission: () => ({ ...admission }),
+    admission: recompute,
     async read(fn) {
       const value = await access()
       try {

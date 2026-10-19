@@ -171,6 +171,7 @@ export async function createCapturedRecoveryFixture(
             expect(access.key).toEqual(current)
             return access
           }
+          const notificationAccess = options.recoveryOnly ? null : await opened()
           const access: RegistryHandleAccess = {
             get key() {
               return current
@@ -193,7 +194,10 @@ export async function createCapturedRecoveryFixture(
             adopt: async (next, expected, write) => (await opened()).adopt(next, expected, write),
             seal: async (plaintext, opts) => (await opened()).seal(plaintext, opts),
             receive: async (frames) => (await opened()).receive(frames),
-            onAdmissionChanged: () => () => {},
+            onAdmissionChanged: (listener) => {
+              if (notificationAccess === null) throw new TypeError('unused onAdmissionChanged')
+              return notificationAccess.onAdmissionChanged(listener)
+            },
             onRotationRequired: () => {
               throw new TypeError('unused')
             },
