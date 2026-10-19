@@ -671,6 +671,9 @@ importers:
       '@kokuin/token':
         specifier: 'catalog:'
         version: 0.5.1(@logtape/logtape@2.4.0)
+      '@kumiai/hub-tunnel':
+        specifier: workspace:^
+        version: link:../hub-tunnel
       '@kumiai/mls':
         specifier: workspace:^
         version: link:../mls
@@ -683,6 +686,9 @@ importers:
       '@noble/ciphers':
         specifier: 'catalog:'
         version: 2.4.0
+      '@sozai/codec':
+        specifier: 'catalog:'
+        version: 0.4.2
       '@sozai/runtime':
         specifier: 'catalog:'
         version: 0.1.0
