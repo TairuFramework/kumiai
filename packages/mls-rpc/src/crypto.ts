@@ -131,24 +131,19 @@ export type RegistryGroupCryptoParams = Omit<GroupCryptoParams, 'access' | 'pend
 }
 
 /**
- * {@link GroupCrypto} over a live {@link GroupHandle} — the real port, against real MLS.
+ * {@link GroupCrypto} over MLS. Each wrap consumes a fresh application ratchet key.
+ * Registry access uses its private leased sender. Simple access mutates its sending handle.
  *
- * ## Where this diverges from the fake in `@kumiai/rpc`'s test fixtures
+ * Registry `wrap` derives intent from AAD (empty/unrecognised means ephemeral).
+ * Ephemeral sends immediately throw `ApplicationLeaseUnavailableError` for cold, deferred
+ * (including pending own proposals) or exhausted leases. Log sends take one bounded wait.
+ * Inadmissible admissions throw `SendNotAdmissibleError`. Safety holds refuse separately.
  *
- * 1. `unwrap` gates the frame epoch before ts-mls's bounded past-window decrypt.
+ * Frame-less registry `unwrap` checks intent, then AAD, then epoch before touching the ratchet.
+ * An AAD mismatch therefore wins over a future-epoch refusal. Durable unwrap uses openBatch.
  *
- * 2. `exportSecret` is one-way; the fake's is not. The fake XORs epoch and label into a fixed
- *    base, so one epoch's bytes yield every other epoch's for that label. This exports from the
- *    MLS epoch's exporter secret, which a removed member cannot reach forward from — the entire
- *    security property the app-lane topic (and anything else a caller labels) rests on.
- *
- * 3. `wrap` mutates: it consumes a per-message ratchet key from the handle's sending chain, so
- *    sealing the same plaintext twice gives different bytes. The fake's `wrap` is pure — don't
- *    assert byte equality between two seals of the same message.
- *
- * 4. `frameEpoch` reads the cleartext epoch field every MLSMessage carries — the same field for
- *    a sealed app frame and a commit — returning `null` (never throwing) for anything ts-mls
- *    won't decode. The fake answers only for its own two encodings.
+ * Exported secrets derive from the MLS epoch exporter. Frame readers return null for
+ * undecodable messages. Ciphertext bytes differ even when plaintext is identical.
  */
 export function createGroupCrypto(params: RegistryGroupCryptoParams): GroupCrypto & {
   pending: RegistryPendingFrames

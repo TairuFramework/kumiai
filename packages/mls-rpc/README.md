@@ -355,7 +355,8 @@ owns that token: a second live registry is rejected synchronously before any loa
 subscription. Separately constructed memory devices over one database share the token, even
 though their `groups` objects differ. Spreading or copying a wrapper does not inherit registration.
 
-Every handle the registry hands to host code is send-denied. Application crypto uses byte-level
+Every handle the registry hands to host code is send-denied, except the explicit test-only
+raw-key and live-sender seams on `@kumiai/mls-rpc/testing`. Application crypto uses byte-level
 `seal` and `receive` access instead of encrypting through host handles.
 
 Cold access shares in-flight validation and caches validated records rather than mutable handles.

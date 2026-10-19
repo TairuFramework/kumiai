@@ -7,12 +7,14 @@ import {
 } from '@kumiai/mls'
 import { describe, expect, test, vi } from 'vitest'
 
+import { entryCapability } from '../src/entry-capability.js'
+import { loadValidatedGroup } from '../src/registry/cold.js'
 import { accessKinds, authoringAccessFixture, rotationIntent } from './fixtures/authoring-access.js'
 import {
   createCapturedRealRecovery,
   createForkRecoveryRealFixture,
 } from './fixtures/captured-recovery.js'
-import { createRegistryFixture } from './fixtures/registry.js'
+import { createRegistryFixture, registryFixtureRestore } from './fixtures/registry.js'
 
 const recoveryHandles = vi.hoisted(() => [] as Array<GroupHandle>)
 vi.mock('@kumiai/mls', async (importOriginal) => {
@@ -51,7 +53,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         await fixture.close()
       }
     })
-    test('every handle handed to host code is denied through read, mutate and readControl', async () => {
+    test('every handle handed to host code is denied through read, mutate, readControl, refresh and replacement prepare', async () => {
       const fixture = await createRegistryFixture({
         mode,
         setup: 'seeded',
@@ -62,9 +64,48 @@ for (const mode of ['real-mls', 'double'] as const) {
         const handles = [
           await access.read((handle) => handle),
           await access.mutate(async (handle) => handle),
-          await access.readControl(async ({ handle }) => handle),
+          ...(await access.readControl(async ({ handle, refresh }) => [
+            handle,
+            (await refresh()).handle,
+          ])),
         ]
+        const { candidate, write } = await fixture.acceptedOrdinary(access)
+        const prepared = vi.fn(async (current: GroupHandle) => {
+          handles.push(current)
+          return true
+        })
+        await access.replace(candidate, () => write, prepared)
+        expect(prepared).toHaveBeenCalledOnce()
         for (const handle of handles) {
+          await expect(handle.encrypt(new Uint8Array([1]))).rejects.toBeInstanceOf(
+            ApplicationSendRefusedError,
+          )
+          expect(() => bindSendCeiling(handle, () => 16)).toThrow(TypeError)
+        }
+      } finally {
+        await fixture.close()
+      }
+    })
+    test('cold validation denies its internal restored handle', async () => {
+      const fixture = await createRegistryFixture({ mode, setup: 'seeded', groupID: 'cold-denial' })
+      try {
+        const capability = entryCapability(fixture.device.groups)
+        if (capability === null) throw new Error('Missing entry capability')
+        const restored: Array<GroupHandle> = []
+        const restore = registryFixtureRestore(fixture)
+        await capability.read('cold-denial', (reads) =>
+          loadValidatedGroup(reads, 'cold-denial', null, {
+            ownerDID: fixture.identity.id,
+            recovery: fixture.environment,
+            restore: async (record) => {
+              const handle = await restore(record)
+              restored.push(handle)
+              return handle
+            },
+          }),
+        )
+        expect(restored).toHaveLength(1)
+        for (const handle of restored) {
           await expect(handle.encrypt(new Uint8Array([1]))).rejects.toBeInstanceOf(
             ApplicationSendRefusedError,
           )

@@ -666,10 +666,13 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     }
   }
   function seal(plaintext: Uint8Array, opts: { aad: Uint8Array; intent: 'log' | 'ephemeral' }) {
+    const bytes = new Uint8Array(plaintext)
+    const aad = new Uint8Array(opts.aad)
+    const intent = opts.intent
     const signal = cancellation.signal
     const pending = (async () => {
       params.assertAvailable()
-      if ((decodeAppAAD(opts.aad)?.intent ?? 'ephemeral') !== opts.intent)
+      if ((decodeAppAAD(aad)?.intent ?? 'ephemeral') !== intent)
         throw new TypeError('App AAD intent mismatch')
       assertSeal()
       await accounting()
@@ -681,7 +684,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
           record !== null && ownApplicationGeneration(record.copy.state) >= record.limit
         if (record !== null && !exhausted) {
           try {
-            const sealed = await record.copy.encryptApplication(plaintext, { aad: opts.aad })
+            const sealed = await record.copy.encryptApplication(bytes, { aad })
             return { ...sealed, epoch: record.identity.epoch }
           } catch (error) {
             if (
@@ -698,8 +701,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
         }
         const reason = deferred ? 'deferred' : exhausted ? 'exhausted' : 'cold'
         const job = schedule()
-        if (opts.intent !== 'log' || attempt !== 0)
-          throw new ApplicationLeaseUnavailableError(reason)
+        if (intent !== 'log' || attempt !== 0) throw new ApplicationLeaseUnavailableError(reason)
         await waitForMaintenance(job)
       }
     })()

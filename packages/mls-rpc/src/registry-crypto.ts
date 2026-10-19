@@ -21,6 +21,7 @@ import {
   type PendingAppFrames,
 } from './persistence-types.js'
 
+/** Registry crypto uses byte-level seal/receive and owns durable pending frames. */
 export function createRegistryGroupCrypto(params: RegistryGroupCryptoParams): GroupCrypto & {
   pending: PendingAppFrames
   unwrapBatch(frames: Array<OpenAppInput>): Promise<Array<OpenAppResult>>
@@ -41,6 +42,11 @@ export function createRegistryGroupCrypto(params: RegistryGroupCryptoParams): Gr
 
   return {
     ...base,
+    /**
+     * Cold, deferred and exhausted ephemeral sends throw ApplicationLeaseUnavailableError at once.
+     * Log intent waits once, bounded, for maintenance. Inadmissible admission throws
+     * SendNotAdmissibleError (safety holds refuse separately).
+     */
     wrap: async (bytes, opts) => {
       assertCryptoSafety(access)
       const aad = opts?.aad ?? new Uint8Array()
@@ -49,6 +55,7 @@ export function createRegistryGroupCrypto(params: RegistryGroupCryptoParams): Gr
     },
     pending: access.pending,
     unwrapBatch,
+    /** Frame-less receive checks intent, AAD, then epoch. Wrong AAD wins over future epoch. */
     unwrap: async (bytes, opts) => {
       if (opts?.frame == null) {
         assertCryptoSafety(access)

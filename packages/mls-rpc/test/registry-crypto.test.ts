@@ -25,6 +25,7 @@ import { createGroupCrypto, ENTRY_SEAL_LABEL } from '../src/crypto.js'
 import { entryCapability } from '../src/entry-capability.js'
 import { DisplacedGroupHandleError, RegistryRetiringError } from '../src/persistence-errors.js'
 import { MAX_OPEN_BATCH_FRAMES, type OpenAppInput } from '../src/persistence-types.js'
+import { gateRegistryMaintenance } from '../src/testing.js'
 import {
   createRegistryFixture,
   failRegistrySeal,
@@ -32,6 +33,20 @@ import {
 } from './fixtures/registry.js'
 import { createRegistryLeaseFixture } from './fixtures/registry-lease.js'
 import { registryHandle } from './fixtures/registry-welcome.js'
+
+async function promptly<T>(pending: T | PromiseLike<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      pending,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('Lease refusal did not settle promptly')), 500)
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
 
 async function setup(mode: 'real-mls' | 'double') {
   const groupID = `registry-crypto-${mode}`
@@ -580,6 +595,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect(mutate).not.toHaveBeenCalled()
         expect(openBatch).not.toHaveBeenCalled()
         expect(transactions).not.toHaveBeenCalled()
+        expect(await s.crypto.pending.list()).toEqual([])
       }))
 
     test('log-intent frame refuses frame-less unwrap and still opens durably', () =>
@@ -618,6 +634,147 @@ for (const mode of ['real-mls', 'double'] as const) {
           const sealed = await s.access.seal(payload, { aad, intent })
           expect(sealed.generation).toBe(0)
           expect((await s.sender.decrypt(sealed.ciphertext)).payload).toEqual(payload)
+        }),
+    )
+
+    test.each(
+      (['log', 'ephemeral'] as const).flatMap((intent) =>
+        (['aad-bytes', 'options', 'plaintext'] as const).map((mutation) => ({ intent, mutation })),
+      ),
+    )('seal snapshots $intent inputs before caller mutates $mutation', ({ intent, mutation }) =>
+      run(async (s) => {
+        const aad = encodeAppAAD({ topicID: 'reply', intent })
+        const originalAAD = aad.slice()
+        const plaintext = new Uint8Array([7, 8])
+        const opts = { aad, intent }
+        const pending = s.access.seal(plaintext, opts)
+        const opposite = intent === 'log' ? 'ephemeral' : 'log'
+        if (mutation === 'aad-bytes') aad.set(encodeAppAAD({ topicID: 'reply', intent: opposite }))
+        if (mutation === 'options') {
+          opts.aad = encodeAppAAD({ topicID: 'changed', intent: opposite })
+          opts.intent = opposite
+        }
+        if (mutation === 'plaintext') plaintext.fill(9)
+        const sealed = await pending
+        expect(s.crypto.frameAAD(sealed.ciphertext)).toEqual(originalAAD)
+        expect((await s.sender.decrypt(sealed.ciphertext)).payload).toEqual(new Uint8Array([7, 8]))
+      }),
+    )
+
+    test.each(['log', 'ephemeral'] as const)(
+      'seal snapshots %s intent for cold lease waits',
+      async (intent) => {
+        const fixture = await createRegistryLeaseFixture(mode)
+        const gate = gateRegistryMaintenance(fixture.fixture().registry)
+        try {
+          await fixture.dropOwner()
+          const opts = { aad: fixture.aad(intent), intent }
+          const pending = fixture.access().seal(new Uint8Array([7]), opts)
+          const outcome = pending.then(
+            (value) => ({ value }),
+            (error: unknown) => ({ error }),
+          )
+          opts.intent = intent === 'log' ? 'ephemeral' : 'log'
+          opts.aad = fixture.aad(opts.intent)
+          await gate.started
+          if (intent === 'ephemeral') {
+            await expect(promptly(outcome)).resolves.toMatchObject({
+              error: { name: 'ApplicationLeaseUnavailableError', reason: 'cold' },
+            })
+          }
+          gate.release()
+          if (intent === 'log')
+            await expect(outcome).resolves.toMatchObject({ value: { generation: 16 } })
+          else await outcome
+        } finally {
+          gate.release()
+          await fixture.close()
+        }
+      },
+    )
+
+    test.each(['cold', 'deferred', 'exhausted', 'terminal'] as const)(
+      'wrap refuses %s sending through the registry adapter',
+      async (reason) => {
+        const fixture = await createRegistryLeaseFixture(
+          mode,
+          'seed',
+          reason === 'exhausted' ? 499 : 0,
+        )
+        const gate = gateRegistryMaintenance(fixture.fixture().registry)
+        try {
+          if (reason === 'cold') await fixture.dropOwner()
+          if (reason === 'deferred') {
+            const proposal = await fixture.proposal()
+            await fixture.access().mutate(async (handle) => {
+              handle.state.unappliedProposals = proposal
+            })
+          }
+          if (reason === 'terminal') await fixture.setUnavailable()
+          const crypto = createGroupCrypto({ access: fixture.access() })
+          const aad = fixture.aad('ephemeral')
+          if (reason === 'exhausted') await crypto.wrap(new Uint8Array([1]), { aad })
+          await expect(promptly(crypto.wrap(new Uint8Array([2]), { aad }))).rejects.toMatchObject({
+            name:
+              reason === 'terminal' ? 'SendNotAdmissibleError' : 'ApplicationLeaseUnavailableError',
+            reason,
+          })
+        } finally {
+          gate.release()
+          await fixture.close()
+        }
+      },
+    )
+
+    test('wrap with log intent waits for cold maintenance', async () => {
+      const fixture = await createRegistryLeaseFixture(mode)
+      const gate = gateRegistryMaintenance(fixture.fixture().registry)
+      try {
+        await fixture.dropOwner()
+        const crypto = createGroupCrypto({ access: fixture.access() })
+        let settled = false
+        const pending = Promise.resolve(
+          crypto.wrap(new Uint8Array([7]), { aad: fixture.aad('log') }),
+        )
+        void pending.then(
+          () => {
+            settled = true
+          },
+          () => {
+            settled = true
+          },
+        )
+        await gate.started
+        expect(settled).toBe(false)
+        gate.release()
+        await expect(pending).resolves.toBeInstanceOf(Uint8Array)
+      } finally {
+        gate.release()
+        await fixture.close()
+      }
+    })
+
+    test('frame-less unwrap checks AAD before a future epoch', () =>
+      run(async (s) => {
+        const future = await s.f.advance(await s.access.read((handle) => handle))
+        const aad = encodeAppAAD({ topicID: 'reply', intent: 'ephemeral' })
+        const ciphertext = await future.encrypt(new Uint8Array([7]), { aad })
+        await expect(
+          s.crypto.unwrap(ciphertext, { expectedAAD: new Uint8Array([9]) }),
+        ).rejects.toThrow('unwrap: invalid app frame')
+        await expect(s.crypto.unwrap(ciphertext, { expectedAAD: aad })).rejects.toBeInstanceOf(
+          FrameEpochError,
+        )
+      }))
+
+    test.each(['consumed', 'closed-epoch', 'capacity', 'generation-bound'] as const)(
+      'frame-less unwrap reports the %s refusal',
+      (reason) =>
+        run(async (s) => {
+          vi.spyOn(s.access, 'receive').mockResolvedValueOnce([{ kind: 'refused', reason }])
+          await expect(s.crypto.unwrap(new Uint8Array([1]))).rejects.toThrow(
+            `unwrap: app frame refused (${reason})`,
+          )
         }),
     )
 
@@ -696,7 +853,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         const aad = encodeAppAAD({ topicID: 'reply/directed', intent: 'ephemeral' })
         await expect(crypto.wrap(new Uint8Array([1]), { aad })).resolves.toBeInstanceOf(Uint8Array)
         const transactions = fixture.transactions()
-        await expect(crypto.wrap(new Uint8Array([2]), { aad })).rejects.toMatchObject({
+        await expect(promptly(crypto.wrap(new Uint8Array([2]), { aad }))).rejects.toMatchObject({
           name: 'ApplicationLeaseUnavailableError',
           reason: 'exhausted',
         })
