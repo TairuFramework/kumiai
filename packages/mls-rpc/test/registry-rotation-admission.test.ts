@@ -145,12 +145,212 @@ for (const mode of ['real-mls', 'double'] as const) {
           restored.ownLeafLapsed = () => true
           return restored
         })
+        expect(fixture.lease()).not.toBeNull()
+        // Unknown eligibility forces classification against the published control.
+        await live.refreshed({ ...original, version: original.version + 1 }, undefined, control)
+        expect(fixture.lease()).toBeNull()
+      } finally {
+        gate.release()
+      }
+    })
+    test.each(['implicit', 'explicit'] as const)(
+      'a delayed refresh and an equal-version retry keep newer observed control (%s)',
+      async (source) => {
+        const fixture = await setup(mode)
+        const base = fixture.fixture()
+        const gate = gateRegistryMaintenance(base.registry)
+        const live = registryLiveSend.get(fixture.access())
+        if (live === undefined) throw new Error('Missing sender')
+        const original = await fixture.record()
+        const handle = await base.restoreCommittedSender()
+        const eligibility = eligibilityOf(handle.state, handle.ownLeafLapsed())
+        const control = await base.device.groups.ports(fixture.key).control.load()
+        const next = { ...original, version: original.version + 1, terminal: true }
+        const entered = deferred<void>()
+        const released = deferred<void>()
+        let first = true
+        base.overrideRestore(async (record) => {
+          if (first) {
+            first = false
+            entered.resolve()
+            await released.promise
+          }
+          const state = decodeClientState(record.state)
+          if (state === undefined) throw new Error('Invalid state')
+          return (mode === 'real-mls' ? restoreGroup : restoreMemoryControlHandle)({
+            state,
+            credential: record.credential,
+            ledgerEntries: record.ledger,
+            options: base.environment.options,
+          })
+        })
+        const refreshing = live.refreshed(
+          next,
+          undefined,
+          source === 'explicit' ? control : undefined,
+        )
+        try {
+          await entered.promise
+          await base.installRows({
+            key: fixture.key,
+            state: next,
+            control: { cursor: { position: null, epoch: 0 } },
+          })
+          await live.accounting()
+          released.resolve()
+          await refreshing
+          await live.refreshed(next, eligibility)
+          // If C1 replaced C2, this control-only difference would require a restore.
+          base.overrideRestore(async () => {
+            throw new Error('Newer control was lost')
+          })
+          const candidate = { ...next, version: next.version + 1 }
+          await live.refreshed(candidate, undefined, {
+            ...control,
+            cursor: { position: null, epoch: 0 },
+          })
+          expect(fixture.lease()).not.toBeNull()
+        } finally {
+          released.resolve()
+          await refreshing
+          gate.release()
+        }
+      },
+    )
+    test.each(['cancel', 'retire'] as const)(
+      'handoff after %s does not change admission',
+      async (operation) => {
+        const fixture = await setup(mode)
+        const gate = await coldFinalRange(fixture)
+        const live = registryLiveSend.get(fixture.access())
+        if (live === undefined) throw new Error('Missing sender')
+        let reservation: Reservation | undefined
+        await fixture.reserveNow(undefined, (value) => {
+          reservation = value
+        })
+        if (reservation === undefined) throw new Error('Missing reservation')
+        if (operation === 'cancel') live.cancel(new Error('Cancelled'))
+        else live.retire()
+        const changes = vi.fn()
+        const updates = vi.fn()
+        const unsubscribe = registrySafety(fixture.fixture().registry)?.onAdmissionChanged(
+          fixture.key,
+          updates,
+        )
+        fixture.access().onAdmissionChanged(changes)
+        try {
+          await live.handoff(reservation)
+          expect(changes).not.toHaveBeenCalled()
+          expect(updates).not.toHaveBeenCalled()
+          expect(fixture.admission()).toMatchObject({ reason: 'rotation-required' })
+        } finally {
+          unsubscribe?.()
+          gate.release()
+        }
+      },
+    )
+    test('a failed handoff preserves exhausted admission and notifies rotation only once', async () => {
+      const fixture = await setup(mode)
+      const gate = await coldFinalRange(fixture)
+      const base = fixture.fixture()
+      const live = registryLiveSend.get(fixture.access())
+      if (live === undefined) throw new Error('Missing sender')
+      let reservation: Reservation | undefined
+      await fixture.reserveNow(undefined, (value) => {
+        reservation = value
+      })
+      if (reservation === undefined) throw new Error('Missing reservation')
+      live.invalidate()
+      const rotations = vi.fn()
+      fixture.access().onRotationRequired(rotations)
+      expect(rotations).toHaveBeenCalledTimes(1)
+      const admissions: Array<boolean> = [fixture.admission().admissible]
+      fixture.access().onAdmissionChanged(() => admissions.push(fixture.admission().admissible))
+      base.overrideRestore(async () => {
+        admissions.push(fixture.admission().admissible)
+        throw new Error('Handoff restore failed')
+      })
+      try {
+        await live.handoff(reservation)
+        expect.soft(rotations).toHaveBeenCalledTimes(1)
+        expect(admissions).toEqual([false, false])
+        expect(fixture.lease()).toBeNull()
+      } finally {
+        gate.release()
+      }
+    })
+    test('a refused handoff resumes maintenance without another seal', async () => {
+      const fixture = await setup(mode)
+      const base = fixture.fixture()
+      const gate = gateRegistryMaintenance(base.registry)
+      const live = registryLiveSend.get(fixture.access())
+      if (live === undefined) throw new Error('Missing sender')
+      let reservation: Reservation | undefined
+      await fixture.reserveNow(undefined, (value) => {
+        reservation = value
+      })
+      if (reservation === undefined) throw new Error('Missing reservation')
+      live.invalidate()
+      let first = true
+      base.overrideRestore(async (record) => {
+        const state = decodeClientState(record.state)
+        if (state === undefined) throw new Error('Invalid state')
+        const handle = await (mode === 'real-mls' ? restoreGroup : restoreMemoryControlHandle)({
+          state,
+          credential: record.credential,
+          ledgerEntries: record.ledger,
+          options: base.environment.options,
+        })
+        if (first) {
+          first = false
+          handle.ownLeafLapsed = () => true
+        }
+        return handle
+      })
+      try {
+        await live.handoff(reservation)
+        expect(fixture.lease()).toBeNull()
+        gate.release()
+        await vi.waitFor(() => expect(fixture.lease()).not.toBeNull())
+        expect((await fixture.sealEphemeral()).generation).toBe(32)
+      } finally {
+        gate.release()
+      }
+    })
+    test('repeated invalidations terminate classification and publish the exhausted version', async () => {
+      const fixture = await setup(mode)
+      const base = fixture.fixture()
+      const gate = gateRegistryMaintenance(base.registry)
+      const live = registryLiveSend.get(fixture.access())
+      if (live === undefined) throw new Error('Missing sender')
+      const original = await fixture.record()
+      const next = { ...original, version: original.version + 1, senderHWM: 500 }
+      let attempts = 0
+      base.overrideRestore(async (record) => {
+        if (record.version === next.version && ++attempts <= 20) live.invalidate()
+        const state = decodeClientState(record.state)
+        if (state === undefined) throw new Error('Invalid state')
+        return (mode === 'real-mls' ? restoreGroup : restoreMemoryControlHandle)({
+          state,
+          credential: record.credential,
+          ledgerEntries: record.ledger,
+          options: base.environment.options,
+        })
+      })
+      const rotations = vi.fn()
+      fixture.access().onRotationRequired(rotations)
+      try {
         await base.installRows({
           key: fixture.key,
-          state: { ...original, version: original.version + 1 },
+          state: next,
+          control: { cursor: { position: null, epoch: 0 } },
         })
         await live.accounting()
-        expect(fixture.lease()).toBeNull()
+        expect.soft(attempts).toBeLessThanOrEqual(8)
+        expect(live.classifiedVersion).toBe(next.version)
+        expect(live.committedRecord).toEqual(next)
+        expect(fixture.admission()).toMatchObject({ reason: 'rotation-required' })
+        expect(rotations).toHaveBeenCalledTimes(1)
       } finally {
         gate.release()
       }

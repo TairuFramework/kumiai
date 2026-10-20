@@ -318,6 +318,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     version: number,
     candidate: ReadableGroupState | undefined,
     evidence: CommittedEvidence,
+    attempt = 0,
   ): Promise<void> {
     const previous = committed
     const fence = generation
@@ -327,6 +328,20 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
       (evidence.current?.() ?? true) &&
       (previous === undefined || version >= committed.classifiedVersion)
     if (!current()) return
+    const retry = () => {
+      // A same-version successor owns its newer control snapshot.
+      const nextEvidence =
+        committed !== previous && version === committed.classifiedVersion
+          ? { ...evidence, control: undefined }
+          : evidence
+      // Four restores at most. Unstable compatibility is foreign, never reusable headroom.
+      return advanceCommitted(
+        version,
+        candidate,
+        attempt < 3 ? nextEvidence : { ...nextEvidence, kind: 'foreign' },
+        attempt + 1,
+      )
+    }
     const expected = owner.expected.get(version)
     const proof = evidence.proof ?? (expected === undefined ? undefined : proofs.get(expected))
     const own =
@@ -366,21 +381,19 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
           if (!current()) return
           if (generation !== fence || foreignGeneration !== foreignFence) {
             schedule()
-            return advanceCommitted(version, candidate, evidence)
+            return retry()
           }
-          if (committed !== previous) return advanceCommitted(version, candidate, evidence)
+          if (committed !== previous) return retry()
           compatible = sendCompatible(previous.record, candidate, previous.eligibility, eligibility)
         }
       } catch {
         if (!current()) return
-        if (generation !== fence || foreignGeneration !== foreignFence)
-          return advanceCommitted(version, candidate, evidence)
+        if (generation !== fence || foreignGeneration !== foreignFence) return retry()
       }
     }
     if (!current()) return
-    if (generation !== fence || foreignGeneration !== foreignFence)
-      return advanceCommitted(version, candidate, evidence)
-    if (committed !== previous) return advanceCommitted(version, candidate, evidence)
+    if (generation !== fence || foreignGeneration !== foreignFence) return retry()
+    if (committed !== previous) return retry()
     let headroom: Headroom = previous?.headroom ?? { kind: 'cold' }
     const foreign = previous !== undefined && !own && !compatible
     if (foreign) {
@@ -895,10 +908,15 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     get committedRecord() {
       return committed.record
     },
-    refreshed(record: ReadableGroupState, eligibility: Uint8Array, control = committed.control) {
+    refreshed(
+      record: ReadableGroupState,
+      eligibility: Uint8Array | undefined,
+      control?: ControlSnapshot,
+    ) {
       return advanceCommitted(record.version, record, { kind: 'refresh', eligibility, control })
     },
     async handoff(reservation: Reservation) {
+      if (!available()) return
       const record = reservation.envelope?.saved
       if (record === undefined) return
       const loaded = committed.record
@@ -918,11 +936,13 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
         registered: true,
         proven: true,
       }
-      if (committed.headroom.kind === 'cold') {
+      // Announced exhaustion reopens only after the copy has actually restored.
+      if (committed.headroom.kind === 'cold' && rotationIdentity === null) {
         committed.headroom = { kind: 'pending', proof, fence: generation }
         changed()
       }
       await accept(proof)
+      schedule()
     },
     cancel,
     retire() {
