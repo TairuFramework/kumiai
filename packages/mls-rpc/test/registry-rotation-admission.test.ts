@@ -12,10 +12,11 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import type { AppOutboxAcceptance, AppOutboxAcceptanceParams } from '../../rpc/lib/app-outbox.js'
 import type { LogDeliveryParams } from '../../rpc/lib/log-delivery.js'
+import { entryCapability } from '../src/entry-capability.js'
 import { createLedgerEntrySlot } from '../src/index.js'
 import { registryReceiveSlots } from '../src/registry/live-receive.js'
 import { registryLiveSend } from '../src/registry/live-send.js'
-import type { Reservation } from '../src/registry/reserve.js'
+import { eligibilityOf, type Reservation } from '../src/registry/reserve.js'
 import { registrySafety } from '../src/registry/safety.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
@@ -128,11 +129,12 @@ for (const mode of ['real-mls', 'double'] as const) {
         }
         expect(rotations).toHaveBeenCalledTimes(1)
         expect(mls.sendAdmission()).toMatchObject({ reason: 'rotation-required' })
+        await expect(fixture.sealEphemeral()).rejects.toMatchObject({ reason: 'rotation-required' })
       },
     )
-    test.each([false, true])(
+    test.each(['unchanged', 'account-first', 'read-first', 'own-read-first'] as const)(
       'cold copy restore preserves headroom across a compatible version advance (%s)',
-      async (advanceVersion) => {
+      async (ordering) => {
         const fixture = await setup(mode)
         const maintenance = await coldFinalRange(fixture)
         const mls = await groupMLS(fixture)
@@ -142,9 +144,26 @@ for (const mode of ['real-mls', 'double'] as const) {
         const entered = deferred<void>()
         const released = deferred<void>()
         let committed = false
-        base.onPhase('account', () => {
+        let ownRead: Promise<unknown> | undefined
+        const ownAccount = deferred<void>()
+        const releaseAccount = deferred<void>()
+        base.onPhase('account', async () => {
           committed = true
+          if (ordering === 'own-read-first') {
+            ownAccount.resolve()
+            await releaseAccount.promise
+          }
         })
+        if (ordering === 'own-read-first') {
+          const capability = entryCapability(base.device.groups)
+          if (capability === null) throw new Error('Missing capability')
+          const run = capability.run.bind(capability)
+          vi.spyOn(capability, 'run').mockImplementationOnce(async (...args) => {
+            const result = await run(...args)
+            await ownRead
+            return result
+          })
+        }
         base.overrideRestore(async (record) => {
           const state = decodeClientState(record.state)
           if (state === undefined) throw new Error('Invalid restore state')
@@ -161,6 +180,11 @@ for (const mode of ['real-mls', 'double'] as const) {
         })
         maintenance.release()
         const draining = fixture.drainMaintenance()
+        if (ordering === 'own-read-first') {
+          await ownAccount.promise
+          ownRead = fixture.access().read(() => {})
+          releaseAccount.resolve()
+        }
         const { createAppOutboxAcceptance } = (await import(
           new URL('../../rpc/src/app-outbox.ts', import.meta.url).href
         )) as {
@@ -173,13 +197,33 @@ for (const mode of ['real-mls', 'double'] as const) {
         })
         try {
           await entered.promise
-          if (advanceVersion) {
+          await ownRead
+          if (ordering !== 'unchanged') {
+            let queuedRead: Promise<unknown> | undefined
+            const accountEntered = deferred<void>()
+            const accountRelease = deferred<void>()
+            if (ordering === 'read-first')
+              base.onPhase('account', async () => {
+                accountEntered.resolve()
+                await accountRelease.promise
+              })
             const record = await fixture.record()
-            await base.installRows({
+            const writing = base.installRows({
               key: fixture.key,
               state: { ...record, version: record.version + 1 },
             })
+            if (ordering === 'read-first') {
+              await accountEntered.promise
+              queuedRead = fixture.access().read(() => {})
+              accountRelease.resolve()
+            }
+            await writing
+            await queuedRead
             await registryLiveSend.get(fixture.access())?.accounting()
+            for (let repeat = 0; repeat < 3; repeat++) {
+              await fixture.access().read(() => {})
+              await registryLiveSend.get(fixture.access())?.accounting()
+            }
           }
           expect.soft(rotations).not.toHaveBeenCalled()
           expect.soft(mls.sendAdmission()).toMatchObject({ admissible: true })
@@ -198,6 +242,169 @@ for (const mode of ['real-mls', 'double'] as const) {
           expect((await fixture.sealEphemeral()).generation).toBe(generation)
         expect(rotations).toHaveBeenCalledTimes(1)
         expect(mls.sendAdmission()).toMatchObject({ reason: 'rotation-required' })
+      },
+    )
+    test.each([
+      'bytes',
+      'bytes-back',
+      'bytes-read',
+      'eligibility',
+      'invalidate',
+      'retire',
+      'failure',
+      'epoch',
+      'incarnation',
+      'epoch-failure',
+      'incarnation-failure',
+    ] as const)('a gated final copy cannot survive a %s fence', async (change) => {
+      const fixture = await setup(mode, 'welcome')
+      const maintenance = await coldFinalRange(fixture)
+      const mls = await groupMLS(fixture)
+      const base = fixture.fixture()
+      const live = registryLiveSend.get(fixture.access())
+      if (live === undefined) throw new Error('Missing sender')
+      const entered = deferred<void>()
+      const released = deferred<void>()
+      const oldEpoch = fixture.access().epoch()
+      let committed = false
+      let lapse = false
+      base.onPhase('account', () => {
+        committed = true
+      })
+      base.overrideRestore(async (record) => {
+        const state = decodeClientState(record.state)
+        if (state === undefined) throw new Error('Invalid state')
+        if (
+          committed &&
+          Number(state.groupContext.epoch) === oldEpoch &&
+          ownApplicationGeneration(state) === 496
+        ) {
+          entered.resolve()
+          await released.promise
+          if (change === 'failure' || change.endsWith('-failure'))
+            throw new Error('Restore rejected')
+        }
+        const handle = await (mode === 'real-mls' ? restoreGroup : restoreMemoryControlHandle)({
+          state,
+          credential: record.credential,
+          ledgerEntries: record.ledger,
+          options: base.environment.options,
+        })
+        if (lapse) handle.ownLeafLapsed = () => true
+        return handle
+      })
+      const rotations = vi.fn()
+      fixture.access().onRotationRequired(rotations)
+      maintenance.release()
+      const draining = fixture.drainMaintenance()
+      try {
+        await entered.promise
+        if (change === 'bytes' || change === 'bytes-back' || change === 'bytes-read') {
+          const saved = await fixture.record()
+          const state = decodeClientState(saved.state)
+          if (state === undefined) throw new Error('Invalid state')
+          const ratchet = state.secretTree.leafNodes[state.privatePath.leafIndex * 2]
+          if (ratchet === undefined) throw new Error('Missing ratchet')
+          ratchet.application.secret = ratchet.application.secret.map((byte) => byte ^ 1)
+          const accountEntered = deferred<void>()
+          const accountReleased = deferred<void>()
+          if (change === 'bytes-read')
+            base.onPhase('account', async () => {
+              accountEntered.resolve()
+              await accountReleased.promise
+            })
+          const writing = base.installRows({
+            key: fixture.key,
+            state: { ...saved, state: encodeClientState(state), version: saved.version + 1 },
+          })
+          let read: Promise<unknown> | undefined
+          if (change === 'bytes-read') {
+            await accountEntered.promise
+            read = fixture.access().read(() => {})
+            accountReleased.resolve()
+          }
+          await writing
+          await read
+          await live.accounting()
+          if (change === 'bytes-back') {
+            await base.installRows({
+              key: fixture.key,
+              state: { ...saved, version: saved.version + 2 },
+            })
+            await live.accounting()
+          }
+        } else if (change === 'eligibility') {
+          lapse = true
+          await base.device.groups
+            .ports(fixture.key)
+            .control.apply({ cursor: { position: null, epoch: oldEpoch } }, crypto.randomUUID())
+          await live.accounting()
+        } else if (change === 'invalidate') live.invalidate()
+        else if (change === 'retire') live.retire()
+        else if (change === 'epoch' || change === 'epoch-failure') await fixture.advanceEpoch()
+        else if (change === 'incarnation' || change === 'incarnation-failure')
+          await fixture.switchIncarnation()
+        if (['bytes', 'bytes-back', 'bytes-read', 'eligibility', 'invalidate'].includes(change))
+          expect(live.effectiveNext()).toBe(500)
+      } finally {
+        released.resolve()
+        await draining
+      }
+      if (change === 'epoch' || change === 'incarnation' || change.endsWith('-failure')) {
+        expect(fixture.lease()?.identity).not.toMatchObject({ epoch: oldEpoch, incarnation: 1 })
+        expect((await fixture.sealEphemeral()).generation).toBe(0)
+        expect(mls.sendAdmission().epoch).toBeGreaterThanOrEqual(oldEpoch)
+        if (change === 'epoch' || change === 'epoch-failure')
+          expect(rotations).not.toHaveBeenCalled()
+        else {
+          const nextRotations = vi.fn()
+          fixture.access().onRotationRequired(nextRotations)
+          expect(nextRotations).not.toHaveBeenCalled()
+        }
+        const newRotations = vi.fn()
+        fixture.access().onRotationRequired(newRotations)
+        await finalRange(fixture)
+        expect(newRotations).not.toHaveBeenCalled()
+        expect((await fixture.sealEphemeral()).generation).toBe(499)
+        expect(newRotations).toHaveBeenCalledTimes(1)
+      } else {
+        expect(fixture.lease()).toBeNull()
+        if (change !== 'retire') await expect(fixture.sealEphemeral()).rejects.toThrow()
+      }
+    })
+    test.each(['compatible', 'foreign', 'invalidate'] as const)(
+      'a paused eligibility check cannot overwrite a newer %s transition',
+      async (change) => {
+        const fixture = await setup(mode)
+        const maintenance = gateRegistryMaintenance(fixture.fixture().registry)
+        const base = fixture.fixture()
+        const live = registryLiveSend.get(fixture.access())
+        if (live === undefined) throw new Error('Missing sender')
+        const original = await fixture.record()
+        const handle = await base.restoreCommittedSender()
+        const eligibility = eligibilityOf(handle.state, handle.ownLeafLapsed())
+        const hold = base.holdRestore(fixture.key.groupID)
+        await base.device.groups
+          .ports(fixture.key)
+          .control.apply({ cursor: { position: null, epoch: 0 } }, crypto.randomUUID())
+        await hold.started
+        try {
+          if (change === 'invalidate') live.invalidate()
+          else {
+            const next = { ...original, version: original.version + 2 }
+            if (change === 'foreign') {
+              live.foreign(next.version, next)
+            } else await live.refreshed(next, eligibility)
+          }
+        } finally {
+          hold.release()
+          await live.accounting()
+          maintenance.release()
+        }
+        if (change === 'compatible') {
+          expect(fixture.lease()?.knownVersion).toBe(original.version + 2)
+          expect((await fixture.sealEphemeral()).generation).toBe(0)
+        } else expect(fixture.lease()).toBeNull()
       },
     )
     test('a rejected cold copy clears pending headroom and notifies exhaustion', async () => {

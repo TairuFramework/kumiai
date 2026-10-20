@@ -9,7 +9,7 @@ import {
   type EntryReads,
   entryCapability,
 } from '../entry-capability.js'
-import { copyStoredValue, sameStoredValue } from '../memory-incarnation-stores.js'
+import { sameStoredValue } from '../memory-incarnation-stores.js'
 import {
   DisplacedGroupHandleError,
   GroupControlUnsettledError,
@@ -31,6 +31,7 @@ import {
   leaseReaders,
   registryLiveSend,
   registryMaintenanceGates,
+  sendCompatible,
 } from './live-send.js'
 import { bindRegistryRecoveryCoordinator } from './recovery-coordinator.js'
 import { eligibilityOf, type Reservation } from './reserve.js'
@@ -357,10 +358,16 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
                       const handle = restrictCommitAuthoring(
                         await environment.restore({ ...record, state: record.state }),
                       )
-                      keep = sameStoredValue(
-                        eligibilityOf(handle.state, handle.ownLeafLapsed()),
-                        handoff.eligibility,
-                      )
+                      keep =
+                        sendCompatible(
+                          handoff.envelope.saved,
+                          { ...record, state: record.state },
+                          handoff.eligibility,
+                          eligibilityOf(handle.state, handle.ownLeafLapsed()),
+                        ) &&
+                        !closing &&
+                        observedSlot.owner === null &&
+                        observedSlot.generation === generation
                     }
                     if (!keep && observedSlot.pendingHandoff === handoff)
                       observedSlot.pendingHandoff = null
@@ -376,7 +383,10 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
           }
           const version = observation.activeVersion
           if (version !== null && observation.activeKey?.incarnation === previous.key.incarnation) {
-            if (previous.expected.has(version) || version > previous.knownVersion) {
+            if (
+              previous.expected.has(version) ||
+              version > (previous.maintenance?.classifiedVersion ?? 0)
+            ) {
               const check = previous.maintenance?.observed(
                 version,
                 () => observedSlot.owner === previous,
@@ -532,16 +542,16 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         runtime: createRegistryRuntime(),
         hooks: slot.hooks.callbacks,
         access: null,
-        send: null,
-        knownVersion: value.record.version,
         expected: new Map(),
-        latestCommitted: value.record,
-        latestControl: copyStoredValue(control),
-        latestEligibility: eligibilityOf(decodedState(value.record.state), restoredLapsed ?? false),
         maintenance: null,
       }
       const access = createRegistryAccess({
         owner,
+        initialControl: control,
+        initialEligibility: eligibilityOf(
+          decodedState(value.record.state),
+          restoredLapsed ?? false,
+        ),
         live: slot.live,
         dropOwner: () => {
           if (slot.owner === owner) invalidate(slot)
@@ -555,7 +565,11 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
           load(reads, groupID, slot, slot.generation, owner, assertMutationSafety),
         publish: () => publish(slot, owner),
         admissionChanged: () =>
-          notifyAdmission(slot, owner.key, committedNext(owner.latestCommitted)),
+          notifyAdmission(
+            slot,
+            owner.key,
+            committedNext(owner.maintenance?.committedRecord ?? value.record),
+          ),
         safetyHeld: () =>
           held(owner.key) ??
           (owner.admission.admissible
@@ -626,7 +640,11 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       if (restoredLapsed !== undefined) {
         const state = decodeClientState(value.record.state)
         if (state !== undefined)
-          slot.owner.maintenance?.refreshed(value.record, eligibilityOf(state, restoredLapsed))
+          await slot.owner.maintenance?.refreshed(
+            value.record,
+            eligibilityOf(state, restoredLapsed),
+            control,
+          )
       }
       slot.owner.maintenance?.changed()
     }

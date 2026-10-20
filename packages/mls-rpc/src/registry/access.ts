@@ -42,13 +42,7 @@ import { clearGroupCondition } from '../safety-conditions.js'
 import { createRegistryAppOpen } from './app-open.js'
 import { type ColdEnvironment, restoreValidated, type ValidatedGroupState } from './cold.js'
 import { createLiveReceive, registryReceiveSlots } from './live-receive.js'
-import {
-  createLiveSend,
-  type LiveSlot,
-  leaseReaders,
-  registryLiveSend,
-  type SendCopy,
-} from './live-send.js'
+import { createLiveSend, type LiveSlot, leaseReaders, registryLiveSend } from './live-send.js'
 import {
   capturedRecord,
   eligibilityOf,
@@ -73,12 +67,7 @@ export type RegistryOwner = {
   runtime: ReturnType<typeof createRegistryRuntime>
   hooks: Set<() => Promise<void>>
   access: RegistryHandleAccess | null
-  send: SendCopy | null
-  knownVersion: number
   expected: Map<number, ReadableGroupState>
-  latestCommitted: ReadableGroupState
-  latestControl: ControlSnapshot
-  latestEligibility: Uint8Array
   maintenance: ReturnType<typeof createLiveSend> | null
 }
 
@@ -93,6 +82,8 @@ export const registryCapturedReplacements = new WeakMap<
 
 export function createRegistryAccess<TTx extends GroupTransaction>(params: {
   owner: RegistryOwner
+  initialControl: ControlSnapshot
+  initialEligibility: Uint8Array
   live: LiveSlot
   dropOwner(): void
   waitForMaintenanceGate(signal: AbortSignal): Promise<void> | undefined
@@ -774,7 +765,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
   function assertReceiveAvailable(): void {
     params.assertAvailable()
     assertSafety()
-    if (owner.latestCommitted.terminal || !owner.snapshot.available)
+    if (live.committedRecord.terminal || !owner.snapshot.available)
       throw new GroupUnavailableError({ reason: 'invalid' })
   }
   const access: RegistryHandleAccess = {

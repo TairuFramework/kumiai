@@ -102,10 +102,45 @@ export function committedNext(record: ReadableGroupState): number {
   return Math.max(state === undefined ? 0 : ownApplicationGeneration(state), record.senderHWM)
 }
 
-export function effectiveNext(owner: RegistryOwner): number {
-  return owner.send === null
-    ? committedNext(owner.latestCommitted)
-    : ownApplicationGeneration(owner.send.copy.state)
+export function sendCompatible(
+  previous: ReadableGroupState,
+  candidate: ReadableGroupState,
+  previousEligibility: Uint8Array,
+  eligibility: Uint8Array,
+): boolean {
+  return (
+    sameStoredValue(identityOf(previous), identityOf(candidate)) &&
+    sameStoredValue(previous.state, candidate.state) &&
+    sameStoredValue(previousEligibility, eligibility)
+  )
+}
+
+function identityOf(record: ReadableGroupState): EpochIdentity {
+  return {
+    groupID: record.groupID,
+    incarnation: record.incarnation,
+    epoch: record.epoch,
+    authenticator: record.epochAuthenticator,
+  }
+}
+
+type Headroom =
+  | { kind: 'cold' }
+  | { kind: 'pending'; proof: OwnProof; fence: number }
+  | { kind: 'live'; copy: SendCopy; fence: number }
+type CommittedSend = {
+  classifiedVersion: number
+  record: ReadableGroupState
+  control: ControlSnapshot
+  eligibility: Uint8Array
+  headroom: Headroom
+}
+type CommittedEvidence = {
+  kind: 'initial' | 'own' | 'observed' | 'refresh' | 'foreign'
+  control?: ControlSnapshot
+  eligibility?: Uint8Array
+  proof?: OwnProof
+  current?: () => boolean
 }
 
 export function createLiveSlot(): LiveSlot {
@@ -138,6 +173,8 @@ export function createLiveSlot(): LiveSlot {
 
 export function createLiveSend<TTx extends GroupTransaction>(params: {
   owner: RegistryOwner
+  initialControl: ControlSnapshot
+  initialEligibility: Uint8Array
   slot: LiveSlot
   capability: EntryCapability<TTx>
   environment: ColdEnvironment
@@ -158,18 +195,19 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
   let foreignGeneration = 0
   let closed = false
   let paused = false
-  const initial = decodeClientState(owner.latestCommitted.state)
-  let deferred =
-    initial !== undefined &&
-    (initial.groupActiveState.kind !== 'active' ||
-      Object.keys(initial.unappliedProposals).length !== 0)
+  let committed!: CommittedSend
+  let deferred = false
   let cancellation = new AbortController()
   const closing = new AbortController()
   let maintenance: Promise<void> | null = null
   let maintenanceAbort: AbortController | null = null
   let block: { started(): void; release: Promise<void> } | null = null
   const admissionListeners = new Set<() => void>()
-  let pendingAcceptance: { proof: OwnProof; version: number } | null = null
+  void advanceCommitted(owner.value.record.version, owner.value.record, {
+    kind: 'initial',
+    control: params.initialControl,
+    eligibility: params.initialEligibility,
+  })
   let lastAdmission = admission()
   let rotationIdentity: EpochIdentity | null = null
   const rotationListeners = new Set<(identity: EpochIdentity) => void>()
@@ -177,7 +215,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
   const checks = new Set<Promise<void>>()
   const accountingStarts = new Set<() => void>()
   const unresolved = new Set<OwnProof>()
-  let observedVersion = owner.knownVersion
+  let observedVersion = committed.classifiedVersion
 
   function available(): boolean {
     if (closed || paused) return false
@@ -197,14 +235,15 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
   }
   function invalidate(): void {
     generation++
-    pendingAcceptance = null
-    owner.send = null
+    foreignGeneration++
+    committed.headroom = { kind: 'cold' }
     changed()
   }
   function committedGeneration(): number {
-    return committedNext(owner.latestCommitted)
+    return committedNext(committed.record)
   }
   function needsMaintenance(): boolean {
+    const copy = sendCopy()
     return (
       available() &&
       unresolved.size === 0 &&
@@ -213,18 +252,19 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
       params.safetyHeld() === null &&
       committedGeneration() < LEASE_MAX_GENERATION &&
       currentNext() < LEASE_MAX_GENERATION &&
-      (owner.send === null || owner.send.limit - currentNext() < LEASE_RENEW_BELOW)
+      (copy === null || copy.limit - currentNext() < LEASE_RENEW_BELOW)
     )
   }
+  function sendCopy(): SendCopy | null {
+    return committed.headroom.kind === 'live' ? committed.headroom.copy : null
+  }
   function currentNext(): number {
-    if (
-      owner.send === null &&
-      pendingAcceptance?.proof.reservation != null &&
-      pendingAcceptance.proof.generation === foreignGeneration &&
-      pendingAcceptance.version === owner.knownVersion
-    )
-      return pendingAcceptance.proof.reservation.start
-    return effectiveNext(owner)
+    const headroom = committed.headroom
+    if (headroom.kind === 'pending' && headroom.proof.reservation != null)
+      return headroom.proof.reservation.start
+    return headroom.kind === 'live'
+      ? ownApplicationGeneration(headroom.copy.copy.state)
+      : committedGeneration()
   }
   function admission(): SendAdmission {
     const base = owner.admission
@@ -257,7 +297,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     notifyRotation()
   }
   function notifyRotation(): void {
-    const identity = identityOf(owner.latestCommitted)
+    const identity = identityOf(committed.record)
     if (
       currentNext() < LEASE_MAX_GENERATION ||
       (rotationIdentity !== null && !sameStoredValue(rotationIdentity, identity))
@@ -267,45 +307,131 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     rotationIdentity = { ...identity, authenticator: identity.authenticator.slice() }
     for (const listener of rotationListeners) supplyRotation(listener, identity)
   }
-  function account(proof: OwnProof): void {
-    proof.proven = proof.registered
-    if (!available() || !proof.proven || proof.record.version < owner.knownVersion) return
-    // Keep usable progress visible while the committed reservation's copy is being restored.
-    if (owner.send === null && proof.reservation != null)
-      pendingAcceptance = { proof, version: proof.record.version }
-    owner.knownVersion = proof.record.version
-    owner.latestCommitted = copyRecord(proof.record)
-    owner.latestEligibility = proof.eligibility.slice()
-    setReceiveBase(slot, proof.record)
-    if (
-      owner.send !== null &&
-      (!sameStoredValue(owner.send.identity, identityOf(proof.record)) ||
-        !sameStoredValue(owner.send.eligibility, proof.eligibility))
-    )
-      invalidate()
-    const state = decodeClientState(proof.record.state)
-    deferred =
-      state !== undefined &&
-      (state.groupActiveState.kind !== 'active' ||
-        Object.keys(state.unappliedProposals).length !== 0)
-    changed()
+  async function account(proof: OwnProof): Promise<void> {
+    if (!available() || !proof.registered || proof.generation !== foreignGeneration) return
+    proof.proven = true
+    await advanceCommitted(proof.record.version, proof.record, { kind: 'own', proof })
   }
-  function identityOf(record: ReadableGroupState): EpochIdentity {
-    return {
-      groupID: record.groupID,
-      incarnation: record.incarnation,
-      epoch: record.epoch,
-      authenticator: record.epochAuthenticator,
+
+  // Publish the frontier, its snapshot and all headroom decisions together.
+  async function advanceCommitted(
+    version: number,
+    candidate: ReadableGroupState | undefined,
+    evidence: CommittedEvidence,
+  ): Promise<void> {
+    const previous = committed
+    const fence = generation
+    const foreignFence = foreignGeneration
+    const current = () =>
+      (evidence.kind === 'initial' || available()) &&
+      (evidence.current?.() ?? true) &&
+      (previous === undefined || version >= committed.classifiedVersion)
+    if (!current()) return
+    const expected = owner.expected.get(version)
+    const proof = evidence.proof ?? (expected === undefined ? undefined : proofs.get(expected))
+    const own =
+      candidate !== undefined &&
+      proof?.registered &&
+      proof.generation === foreignGeneration &&
+      sameStoredValue(candidate.state, proof.record.state) &&
+      sameStoredValue(identityOf(candidate), identityOf(proof.record))
+    if (own) proof.proven = true
+    if (
+      previous !== undefined &&
+      version === previous.classifiedVersion &&
+      evidence.kind !== 'foreign' &&
+      (evidence.eligibility === undefined ||
+        sameStoredValue(evidence.eligibility, previous.eligibility))
+    )
+      return
+    let eligibility = evidence.eligibility ?? (own ? proof.eligibility : previous.eligibility)
+    const control = evidence.control ?? previous.control
+    let compatible = false
+    if (previous !== undefined && candidate !== undefined && !own && evidence.kind !== 'foreign') {
+      try {
+        if (sameStoredValue(previous.record.state, candidate.state)) {
+          if (
+            evidence.eligibility === undefined &&
+            (!sameStoredValue(control, previous.control) ||
+              !sameStoredValue(candidate.ledger, previous.record.ledger) ||
+              !sameStoredValue(candidate.credential, previous.record.credential) ||
+              candidate.terminal !== previous.record.terminal)
+          ) {
+            const handle = restrictCommitAuthoring(await environment.restore(copyRecord(candidate)))
+            eligibility = eligibilityOf(handle.state, handle.ownLeafLapsed())
+          }
+          if (!current()) return
+          if (generation !== fence || foreignGeneration !== foreignFence) {
+            schedule()
+            return
+          }
+          if (committed !== previous) return advanceCommitted(version, candidate, evidence)
+          compatible = sendCompatible(previous.record, candidate, previous.eligibility, eligibility)
+        }
+      } catch {
+        if (!current() || generation !== fence || foreignGeneration !== foreignFence) return
+      }
     }
+    if (!current()) return
+    if (generation !== fence || foreignGeneration !== foreignFence) return
+    if (committed !== previous) return advanceCommitted(version, candidate, evidence)
+    let headroom: Headroom = previous?.headroom ?? { kind: 'cold' }
+    const foreign = previous !== undefined && !own && !compatible
+    if (foreign) {
+      foreignGeneration++
+      generation++
+      headroom = { kind: 'cold' }
+    } else if (own) {
+      if (
+        previous !== undefined &&
+        (!sameStoredValue(identityOf(previous.record), identityOf(proof.record)) ||
+          !sameStoredValue(previous.eligibility, eligibility))
+      ) {
+        generation++
+        headroom = { kind: 'cold' }
+      }
+      if (headroom.kind !== 'live' && proof.reservation != null)
+        headroom = { kind: 'pending', proof, fence: generation }
+    }
+    if (candidate === undefined) {
+      committed = { ...previous, classifiedVersion: version, headroom }
+    } else {
+      committed = {
+        classifiedVersion: version,
+        record: copyRecord(candidate),
+        control: copyStoredValue(control),
+        eligibility: eligibility.slice(),
+        headroom,
+      }
+      const state = decodeClientState(candidate.state)
+      deferred =
+        state !== undefined &&
+        (state.groupActiveState.kind !== 'active' ||
+          Object.keys(state.unappliedProposals).length !== 0)
+      if (evidence.kind !== 'observed' && evidence.kind !== 'foreign')
+        setReceiveBase(slot, candidate)
+    }
+    if (evidence.kind === 'initial') return
+    if (foreign && evidence.kind !== 'refresh') {
+      slot.base = null
+      slot.refresh?.()
+    }
+    changed()
+    if (foreign) schedule()
   }
   async function accept(proof: OwnProof): Promise<void> {
+    const headroom = committed.headroom
+    const fence = headroom.kind === 'cold' ? generation : headroom.fence
     try {
       await acceptReservation(proof)
     } catch {
-      invalidate()
-      schedule()
+      if (generation === fence && committed.headroom === headroom) {
+        invalidate()
+        schedule()
+      }
     } finally {
-      if (pendingAcceptance?.proof === proof) pendingAcceptance = null
+      if (committed.headroom.kind === 'pending' && committed.headroom.proof === proof)
+        committed.headroom = { kind: 'cold' }
       changed()
     }
   }
@@ -321,8 +447,8 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
         groupID: reservation.identity.groupID,
         incarnation: reservation.identity.incarnation,
       }) &&
-      sameStoredValue(identityOf(owner.latestCommitted), reservation.identity) &&
-      sameStoredValue(owner.latestEligibility, reservation.eligibility)
+      sameStoredValue(identityOf(committed.record), reservation.identity) &&
+      sameStoredValue(committed.eligibility, reservation.eligibility)
     if (
       saved === undefined ||
       proven === undefined ||
@@ -337,7 +463,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
       return
     }
     params.assertCurrent()
-    const current = owner.send
+    const current = sendCopy()
     if (current !== null && sameStoredValue(current.identity, reservation.identity)) {
       if (
         !sameStoredValue(current.eligibility, reservation.eligibility) ||
@@ -352,7 +478,8 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
         return
       }
     }
-    const capturedGeneration = generation
+    const headroom = committed.headroom
+    const capturedGeneration = headroom.kind === 'cold' ? generation : headroom.fence
     const copy = restrictCommitAuthoring(await environment.restore(copyRecord(reservation.pre)))
     if (
       !valid() ||
@@ -369,7 +496,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     }
     bindSendCeiling(copy, () => record.limit)
     liveHandles.add(copy)
-    owner.send = record
+    committed.headroom = { kind: 'live', copy: record, fence: generation }
     deferred = false
   }
   function register(saved: Saved): OwnProof {
@@ -392,28 +519,11 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     record?: ReadableGroupState,
     control?: ControlSnapshot,
     eligibility?: Uint8Array,
-  ): void {
-    if (record !== undefined && record.version >= owner.knownVersion) {
-      owner.latestCommitted = copyRecord(record)
-      if (control !== undefined) owner.latestControl = copyStoredValue(control)
-      if (eligibility !== undefined) owner.latestEligibility = eligibility.slice()
-      const state = decodeClientState(record.state)
-      deferred =
-        state !== undefined &&
-        (state.groupActiveState.kind !== 'active' ||
-          Object.keys(state.unappliedProposals).length !== 0)
-    }
-    foreignGeneration++
-    invalidate()
-    slot.base = null
-    slot.refresh?.()
-    owner.knownVersion = Math.max(owner.knownVersion, version)
-    changed()
-    schedule()
+  ): Promise<void> {
+    return advanceCommitted(version, record, { kind: 'foreign', control, eligibility })
   }
   function observed(version: number, stillCurrent: () => boolean): () => void {
     observedVersion = Math.max(observedVersion, version)
-    const capturedGeneration = generation
     const signal = cancellation.signal
     if (signal.aborted) return () => {}
     const current = () =>
@@ -421,7 +531,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
       available() &&
       stillCurrent() &&
       version >= observedVersion &&
-      version >= owner.knownVersion
+      version >= committed.classifiedVersion
     let finish!: () => void
     const pending = new Promise<void>((resolve) => {
       finish = resolve
@@ -433,8 +543,6 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
       void capability
         .read(owner.key.groupID, async (reads) => {
           if (!current()) return
-          const known = copyRecord(owner.latestCommitted)
-          const control = copyStoredValue(owner.latestControl)
           const record = await reads.state(owner.key.incarnation)
           const nextControl = await reads.control(owner.key.incarnation)
           // A newer observation owns classification, including after an async restore.
@@ -446,54 +554,18 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
             record.version !== version ||
             decodeClientState(record.state) === undefined
           ) {
-            foreign(version)
+            await foreign(version)
             return
           }
-          const readable = { ...record, state: record.state }
-          const expected = owner.expected.get(version)
-          if (expected === undefined && version <= owner.knownVersion) return
-          const proof = expected === undefined ? undefined : proofs.get(expected)
-          if (proof !== undefined && sameStoredValue(record.state, proof.record.state)) {
-            owner.latestControl = copyStoredValue(nextControl)
-            account(proof)
-            return
-          }
-          if (!sameStoredValue(record.state, known.state)) {
-            foreign(version, readable, nextControl)
-            return
-          }
-          let eligibility = owner.latestEligibility
-          try {
-            if (
-              !sameStoredValue(nextControl, control) ||
-              !sameStoredValue(record.ledger, known.ledger) ||
-              !sameStoredValue(record.credential, known.credential) ||
-              record.terminal !== known.terminal
-            ) {
-              const handle = restrictCommitAuthoring(
-                await environment.restore(copyRecord(readable)),
-              )
-              eligibility = eligibilityOf(handle.state, handle.ownLeafLapsed())
-            }
-            if (!current()) return
-            if (
-              generation !== capturedGeneration ||
-              !sameStoredValue(eligibility, owner.send?.eligibility ?? owner.latestEligibility)
-            ) {
-              foreign(version, readable, nextControl, eligibility)
-              return
-            }
-            // Only content-compatible observations can advance pending reservation progress.
-            if (pendingAcceptance?.version === owner.knownVersion)
-              pendingAcceptance.version = version
-            owner.knownVersion = Math.max(owner.knownVersion, version)
-            owner.latestCommitted = copyRecord(readable)
-            owner.latestControl = copyStoredValue(nextControl)
-            owner.latestEligibility = eligibility.slice()
-            changed()
-          } catch {
-            if (current()) foreign(version, readable, nextControl)
-          }
+          await advanceCommitted(
+            version,
+            { ...record, state: record.state },
+            {
+              kind: 'observed',
+              control: nextControl,
+              current,
+            },
+          )
         })
         .then(finish, () => {
           if (current()) foreign(version)
@@ -520,7 +592,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
   }
   async function settle(proof: OwnProof, outcome: 'committed' | 'rolled-back'): Promise<void> {
     unresolved.delete(proof)
-    if (outcome === 'committed') account(proof)
+    if (outcome === 'committed') await account(proof)
     if (owner.expected.get(proof.record.version) === proof.record)
       owner.expected.delete(proof.record.version)
     if (outcome === 'committed') await accept(proof)
@@ -676,7 +748,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
               await target.state.save(prepared.record)
             },
           )
-          if (owner.send === null && needsMaintenance()) {
+          if (sendCopy() === null && needsMaintenance()) {
             await delay(backoff, abort.signal)
             backoff = Math.min(backoff * 2, 15_000)
             continue
@@ -737,7 +809,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
       for (let attempt = 0; ; attempt++) {
         if (signal.aborted) throw signal.reason
         assertSeal()
-        const record = owner.send
+        const record = sendCopy()
         let exhausted =
           record !== null && ownApplicationGeneration(record.copy.state) >= record.limit
         if (record !== null && !exhausted) {
@@ -796,7 +868,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
       }
     },
     snapshot() {
-      const send = owner.send
+      const send = sendCopy()
       return send === null
         ? null
         : {
@@ -805,37 +877,27 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
             limit: send.limit,
             own: ownApplicationGeneration(send.copy.state),
             storedGeneration: committedGeneration(),
-            knownVersion: owner.knownVersion,
+            knownVersion: committed.classifiedVersion,
             expectedVersions: [...owner.expected.keys()],
           }
     },
     foreign,
-    refreshed(record: ReadableGroupState, eligibility: Uint8Array) {
-      setReceiveBase(slot, record)
-      owner.knownVersion = Math.max(owner.knownVersion, record.version)
-      owner.latestCommitted = copyRecord(record)
-      owner.latestEligibility = eligibility.slice()
-      const state = decodeClientState(record.state)
-      deferred =
-        state !== undefined &&
-        (state.groupActiveState.kind !== 'active' ||
-          Object.keys(state.unappliedProposals).length !== 0)
-      if (
-        owner.send !== null &&
-        (!sameStoredValue(owner.send.identity, identityOf(record)) ||
-          !sameStoredValue(owner.send.eligibility, eligibility))
-      )
-        invalidate()
-      changed()
+    get classifiedVersion() {
+      return committed.classifiedVersion
+    },
+    get committedRecord() {
+      return committed.record
+    },
+    refreshed(record: ReadableGroupState, eligibility: Uint8Array, control = committed.control) {
+      return advanceCommitted(record.version, record, { kind: 'refresh', eligibility, control })
     },
     async handoff(reservation: Reservation) {
       const record = reservation.envelope?.saved
       if (record === undefined) return
-      const loaded = owner.latestCommitted
+      const loaded = committed.record
       if (
-        !sameStoredValue(identityOf(loaded), reservation.identity) ||
         loaded.version < reservation.envelope.version ||
-        !sameStoredValue(loaded.state, record.state)
+        !sendCompatible(record, loaded, reservation.eligibility, committed.eligibility)
       )
         return
       const state = decodeClientState(loaded.state)
