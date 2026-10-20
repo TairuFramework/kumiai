@@ -96,6 +96,10 @@
   dir: packages/hub-protocol
   intents:
     - bound-leaf-and-log-delivery
+"@kumiai/hub-protocol@0.10.2":
+  dir: packages/hub-protocol
+  intents:
+    - hub-rate-limited-error
 "@kumiai/hub-protocol@0.5.0":
   dir: packages/hub-protocol
   intents:
@@ -134,6 +138,10 @@
   dir: packages/hub-server
   intents:
     - warm-hub-lifecycle
+"@kumiai/hub-server@0.10.4":
+  dir: packages/hub-server
+  intents:
+    - hub-rate-limited-error
 "@kumiai/hub-server@0.5.0":
   dir: packages/hub-server
   intents:
@@ -217,6 +225,10 @@
   dir: packages/mls-hub
   intents:
     - durable-app-delivery
+"@kumiai/mls-hub@0.10.1":
+  dir: packages/mls-hub
+  intents:
+    - hub-rate-limited-error
 "@kumiai/mls-hub@0.5.0":
   dir: packages/mls-hub
   intents:

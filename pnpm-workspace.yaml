@@ -16,19 +16,19 @@ catalog:
   '@noble/curves': ^2.4.0
   '@noble/hashes': ^2.4.0
   'ts-mls': 2.0.0-rc.13
-  'vitest': ^5.0.3
-  '@enkaku/client': ^0.21.3
-  '@enkaku/http-fetch': ^0.21.4
-  '@enkaku/http-serve': ^0.21.4
-  '@enkaku/protocol': ^0.21.4
-  '@enkaku/server': ^0.21.4
-  '@enkaku/transport': ^0.21.3
-  '@kokuin/capability': ^0.4.1
+  'vitest': ^5.0.5
+  '@enkaku/client': ^0.21.5
+  '@enkaku/http-fetch': ^0.21.5
+  '@enkaku/http-serve': ^0.21.5
+  '@enkaku/protocol': ^0.21.5
+  '@enkaku/server': ^0.21.5
+  '@enkaku/transport': ^0.21.5
+  '@kokuin/capability': ^0.4.2
   '@kokuin/controller': ^0.1.0
   '@kokuin/token': ^0.5.1
   '@sozai/async': ^0.4.0
-  '@sozai/codec': ^0.4.2
-  '@sozai/event': ^0.1.5
+  '@sozai/codec': ^0.4.3
+  '@sozai/event': ^0.1.6
   '@sozai/http-server': ^0.1.1
   '@sozai/log': ^0.4.0
   '@sozai/result': ^0.2.2
@@ -44,7 +44,7 @@ catalog:
   '@types/react': ^19.2.18
   'typescript': ^6.0.3
   '@hozon/adapter': ^0.1.0
-  '@hozon/db': ^0.2.2
+  '@hozon/db': ^0.2.3
   '@hozon/node-sqlite': ^0.1.0
   '@hozon/postgres': ^0.1.0
   '@hozon/provider': ^0.1.1
@@ -52,7 +52,7 @@ catalog:
   '@teikyo/enkaku': ^0.1.1
   '@teikyo/hozon': ^0.1.1
   '@teikyo/rate-limit': ^0.1.0
-  '@testcontainers/postgresql': ^12.1.0
+  '@testcontainers/postgresql': ^12.2.1
   'testcontainers': ^12.1.0
 
 minimumReleaseAgeExclude:

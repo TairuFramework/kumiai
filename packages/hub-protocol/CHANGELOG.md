@@ -1,5 +1,11 @@
 # @kumiai/hub-protocol
 
+## 0.10.2
+
+### Patch Changes
+
+- The hub refuses a request over its per-DID or per-topic rate limit with `HUB_RATE_LIMITED` instead of enkaku's generic `EK01`, so a client can tell a transient refusal from any other handler error. `hub-protocol` exports `RateLimitedError`, rebuilt by `hubErrorFromCode`. `mls-hub` classifies it as retryable. A client matching `EK01` for rate limits must also accept `HUB_RATE_LIMITED`.
+
 ## 0.10.1
 
 ### Patch Changes
