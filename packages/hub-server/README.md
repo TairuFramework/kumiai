@@ -90,6 +90,7 @@ flood.
 
 Publish rate limits are per DID (20/s, burst 50) and per topic (100/s, burst 200), merged over
 `DEFAULT_RATE_LIMITS`; `hub/v1/keypackage/fetch` has its own request quota per requester DID.
+A request over a limit is refused with `HUB_RATE_LIMITED` (`RateLimitedError`) before it takes effect, so the caller waits and retries it.
 
 ## A store failure that is not a request failure
 

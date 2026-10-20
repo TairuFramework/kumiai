@@ -60,9 +60,9 @@ retired the "hub-tunnel re-declares the store surface" finding.
   (`as RequestHandler<...>`), suppressing type errors between protocol schema and
   implementation. Fix: type the handlers map as `ProcedureHandlers<HubProtocol>` without
   per-member casts.
-- `packages/hub-server/src/handlers.ts:57,93,151` — plain `Error` mixed with
-  `HandlerError`; `EK01` doubles for rate-limit and writer-conflict. Fix: `HandlerError`
-  with distinct codes throughout.
+- `packages/hub-server/src/handlers.ts` — a plain `Error` for an unauthenticated message among
+  `HandlerError`s (rate limits now refuse with `HUB_RATE_LIMITED`). Fix: `HandlerError` with a
+  distinct code.
 - `packages/hub-client/src/client.ts:57-65` — `receive()` returns the raw `ChannelCall`;
   correct at-least-once consumption requires hand-crafting `channel.send({ ack: [...] })`.
   Fix: expose an async-iterator wrapper with `ack(sequenceID)`.

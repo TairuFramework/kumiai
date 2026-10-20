@@ -416,10 +416,16 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         })
       }
       if (!didLimiter.tryConsume(senderDID)) {
-        throw new HandlerError({ code: 'EK01', message: 'Publish rate limit exceeded for DID' })
+        throw new HandlerError({
+          code: HUB_ERROR_CODES.rateLimited,
+          message: 'Publish rate limit exceeded for DID',
+        })
       }
       if (!topicLimiter.tryConsume(topicID)) {
-        throw new HandlerError({ code: 'EK01', message: 'Publish rate limit exceeded for topic' })
+        throw new HandlerError({
+          code: HUB_ERROR_CODES.rateLimited,
+          message: 'Publish rate limit exceeded for topic',
+        })
       }
       let sequenceID: string
       let deduped: boolean
@@ -506,7 +512,10 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         })
       }
       if (!didLimiter.tryConsume(clientDID)) {
-        throw new HandlerError({ code: 'EK01', message: 'Subscribe rate limit exceeded for DID' })
+        throw new HandlerError({
+          code: HUB_ERROR_CODES.rateLimited,
+          message: 'Subscribe rate limit exceeded for DID',
+        })
       }
       try {
         await store.subscribe({ subscriberDID: clientDID, topicID, retention })
@@ -552,7 +561,10 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       const { topicID } = ctx.param
       const clientDID = getClientDID(ctx)
       if (!didLimiter.tryConsume(clientDID)) {
-        throw new HandlerError({ code: 'EK01', message: 'Unsubscribe rate limit exceeded for DID' })
+        throw new HandlerError({
+          code: HUB_ERROR_CODES.rateLimited,
+          message: 'Unsubscribe rate limit exceeded for DID',
+        })
       }
       try {
         await store.unsubscribe({ subscriberDID: clientDID, topicID })
@@ -811,7 +823,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       }
       if (!didLimiter.tryConsume(clientDID)) {
         throw new HandlerError({
-          code: 'EK01',
+          code: HUB_ERROR_CODES.rateLimited,
           message: 'Key package upload rate limit exceeded for DID',
         })
       }
@@ -951,7 +963,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       }
       if (!didLimiter.tryConsume(clientDID)) {
         throw new HandlerError({
-          code: 'EK01',
+          code: HUB_ERROR_CODES.rateLimited,
           message: 'Key package status rate limit exceeded for DID',
         })
       }
@@ -996,7 +1008,10 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         })
       }
       if (!didLimiter.tryConsume(clientDID)) {
-        throw new HandlerError({ code: 'EK01', message: 'Wake rate limit exceeded for DID' })
+        throw new HandlerError({
+          code: HUB_ERROR_CODES.rateLimited,
+          message: 'Wake rate limit exceeded for DID',
+        })
       }
       // The param schema bounds the length (`minLength: 1`, `maxLength: 128`/`64`) but not the
       // shape, which accepts key material the hub can never seal to. Storing it answers
@@ -1053,7 +1068,10 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       // Matches `register` above and the subscribe/unsubscribe pair: both halves of a pair cost
       // the same, or the uncounted half is the one an abusive caller uses.
       if (!didLimiter.tryConsume(clientDID)) {
-        throw new HandlerError({ code: 'EK01', message: 'Wake rate limit exceeded for DID' })
+        throw new HandlerError({
+          code: HUB_ERROR_CODES.rateLimited,
+          message: 'Wake rate limit exceeded for DID',
+        })
       }
       let existed: boolean
       try {

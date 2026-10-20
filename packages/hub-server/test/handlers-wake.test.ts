@@ -610,7 +610,7 @@ describe('hub/v1/wake/unregister', () => {
       unregistered: false,
     })
     await expect(client.request('hub/v1/wake/unregister', { param: {} })).rejects.toMatchObject({
-      code: 'EK01',
+      code: HUB_ERROR_CODES.rateLimited,
     })
     await dispose()
   })

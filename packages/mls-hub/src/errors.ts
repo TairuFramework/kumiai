@@ -77,6 +77,7 @@ const CODE_BY_NAME: Readonly<Record<string, HubErrorCode>> = {
   KeyPackageFetchLimitError: HUB_ERROR_CODES.keyPackageFetchLimit,
   KeyPackageQuotaExceededError: HUB_ERROR_CODES.keyPackageQuota,
   NotSubscribedError: HUB_ERROR_CODES.notSubscribed,
+  RateLimitedError: HUB_ERROR_CODES.rateLimited,
   RetentionExceededError: HUB_ERROR_CODES.retentionExceeded,
   SubscriptionQuotaExceededError: HUB_ERROR_CODES.subscriptionQuota,
 }

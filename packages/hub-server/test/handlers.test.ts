@@ -135,7 +135,7 @@ describe('rate limits on mutating operations', () => {
       (handlers['hub/v1/keypackage/upload'] as any)(
         reqCtx('hub/v1/keypackage/upload', { keyPackages: ['c'] }),
       ),
-    ).rejects.toMatchObject({ code: 'EK01' })
+    ).rejects.toMatchObject({ code: HUB_ERROR_CODES.rateLimited })
   })
 
   test('subscribe is throttled by the per-DID limiter', async () => {
@@ -143,7 +143,7 @@ describe('rate limits on mutating operations', () => {
     await (handlers['hub/v1/subscribe'] as any)(reqCtx('hub/v1/subscribe', { topicID: 't1' }))
     await expect(
       (handlers['hub/v1/subscribe'] as any)(reqCtx('hub/v1/subscribe', { topicID: 't2' })),
-    ).rejects.toMatchObject({ code: 'EK01' })
+    ).rejects.toMatchObject({ code: HUB_ERROR_CODES.rateLimited })
   })
 })
 
@@ -267,7 +267,7 @@ describe('last-resort key package upload', () => {
     const seen: Array<AuthorizeRequest> = []
     // burst: 1 makes the per-DID budget observable: if the guard ran after tryConsume, the
     // malformed request would spend the only token and the valid follow-up below would be
-    // refused with EK01 instead of succeeding.
+    // refused with HUB_RATE_LIMITED instead of succeeding.
     const { store, handlers } = setup({
       authorize: (req) => {
         seen.push(req)

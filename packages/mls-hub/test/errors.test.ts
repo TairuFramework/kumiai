@@ -1,5 +1,9 @@
 import { ErrorCodes } from '@enkaku/protocol'
-import { AuthorizationDeniedError, KeyPackageQuotaExceededError } from '@kumiai/hub-protocol'
+import {
+  AuthorizationDeniedError,
+  KeyPackageQuotaExceededError,
+  RateLimitedError,
+} from '@kumiai/hub-protocol'
 import { describe, expect, test } from 'vitest'
 
 import { attempt, HubRefusedError, HubRetryableError, toRetryableOrThrow } from '../src/errors.js'
@@ -39,6 +43,16 @@ describe('toRetryableOrThrow', () => {
 
     expect(error).toBeInstanceOf(HubRetryableError)
     expect(error.code).toBe('HUB_KEYPACKAGE_QUOTA')
+  })
+
+  test('a rate-limited answer is retryable, by code and by class', () => {
+    const wire = Object.assign(new Error('slow down'), { code: 'HUB_RATE_LIMITED' })
+    expect(toRetryableOrThrow(wire, 'upload').code).toBe('HUB_RATE_LIMITED')
+    const named = Object.assign(new Error('slow down'), { name: 'RateLimitedError' })
+    expect(toRetryableOrThrow(named, 'upload').code).toBe('HUB_RATE_LIMITED')
+    expect(toRetryableOrThrow(new RateLimitedError('slow down'), 'upload').code).toBe(
+      'HUB_RATE_LIMITED',
+    )
   })
 
   test('the real hub-protocol class is identified', () => {
