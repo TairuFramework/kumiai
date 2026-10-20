@@ -19,9 +19,11 @@ import { registryLiveSend } from '../src/registry/live-send.js'
 import { eligibilityOf, type Reservation } from '../src/registry/reserve.js'
 import { registrySafety } from '../src/registry/safety.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
+import type { RegistryHandleAccess } from '../src/registry/types.js'
 import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
 import { deferred } from '../src/runtime.js'
 import { dropRegistryOwner, gateRegistryMaintenance } from '../src/testing.js'
+import { createRegistryFixture } from './fixtures/registry.js'
 import { createRegistryLeaseFixture } from './fixtures/registry-lease.js'
 import { restoreMemoryControlHandle } from './fixtures/sealed-memory-mls.js'
 
@@ -85,6 +87,240 @@ async function finalRange(fixture: Awaited<ReturnType<typeof setup>>) {
 }
 for (const mode of ['real-mls', 'double'] as const) {
   describe(`rotation admission (${mode})`, () => {
+    test('successful refresh recovers exhaustion after one failed observation read', async () => {
+      const fixture = await setup(mode)
+      const base = fixture.fixture()
+      const gate = gateRegistryMaintenance(base.registry)
+      const live = registryLiveSend.get(fixture.access())
+      const capability = entryCapability(base.device.groups)
+      if (live === undefined || capability === null) throw new Error('Missing sender capability')
+      const handle = await base.restoreCommittedSender()
+      const eligibility = eligibilityOf(handle.state, handle.ownLeafLapsed())
+      const original = await fixture.record()
+      const next = { ...original, senderHWM: 500, version: original.version + 1 }
+      const rotations = vi.fn()
+      fixture.access().onRotationRequired(rotations)
+      try {
+        vi.spyOn(capability, 'read').mockRejectedValueOnce(new Error('Observation read failed'))
+        await base.installRows({ key: fixture.key, state: next })
+        await live.accounting()
+        expect(live.classifiedVersion).toBe(next.version)
+        expect(live.committedRecord.version).toBe(original.version)
+        expect(rotations).not.toHaveBeenCalled()
+        await live.refreshed(next, eligibility)
+        expect.soft(live.committedRecord).toMatchObject({ version: next.version, senderHWM: 500 })
+        expect.soft(fixture.admission()).toMatchObject({ reason: 'rotation-required' })
+        expect.soft(rotations).toHaveBeenCalledTimes(1)
+        await live.refreshed(next, eligibility)
+        await fixture.access().read(() => {})
+        expect(rotations).toHaveBeenCalledTimes(1)
+      } finally {
+        gate.release()
+      }
+    })
+    test('same-version refresh installs control for the next eligibility classification', async () => {
+      const fixture = await setup(mode)
+      const base = fixture.fixture()
+      const gate = gateRegistryMaintenance(base.registry)
+      const live = registryLiveSend.get(fixture.access())
+      if (live === undefined) throw new Error('Missing sender')
+      const original = await fixture.record()
+      const handle = await base.restoreCommittedSender()
+      const eligibility = eligibilityOf(handle.state, handle.ownLeafLapsed())
+      try {
+        const control = await base.device.groups.ports(fixture.key).control.load()
+        await live.refreshed(original, eligibility, {
+          ...control,
+          cursor: { position: null, epoch: 0 },
+        })
+        base.overrideRestore(async (record) => {
+          const state = decodeClientState(record.state)
+          if (state === undefined) throw new Error('Invalid state')
+          const restored = await (mode === 'real-mls' ? restoreGroup : restoreMemoryControlHandle)({
+            state,
+            credential: record.credential,
+            ledgerEntries: record.ledger,
+            options: base.environment.options,
+          })
+          restored.ownLeafLapsed = () => true
+          return restored
+        })
+        await base.installRows({
+          key: fixture.key,
+          state: { ...original, version: original.version + 1 },
+        })
+        await live.accounting()
+        expect(fixture.lease()).toBeNull()
+      } finally {
+        gate.release()
+      }
+    })
+    test('invalidation during eligibility restore still classifies committed exhaustion', async () => {
+      const fixture = await setup(mode)
+      const base = fixture.fixture()
+      const gate = gateRegistryMaintenance(base.registry)
+      const live = registryLiveSend.get(fixture.access())
+      if (live === undefined) throw new Error('Missing sender')
+      const original = await fixture.record()
+      const hold = base.holdRestore(fixture.key.groupID)
+      const rotations = vi.fn()
+      fixture.access().onRotationRequired(rotations)
+      const writing = base.installRows({
+        key: fixture.key,
+        state: { ...original, senderHWM: 500, version: original.version + 1 },
+        control: { cursor: { position: null, epoch: 0 } },
+      })
+      await hold.started
+      live.invalidate()
+      expect(rotations).not.toHaveBeenCalled()
+      hold.release()
+      try {
+        await writing
+        await live.accounting()
+        const saved = await fixture.record()
+        expect.soft(live.classifiedVersion).toBe(saved.version)
+        expect.soft(live.committedRecord).toEqual(saved)
+        expect.soft(fixture.lease()).toBeNull()
+        expect.soft(fixture.admission()).toMatchObject({ reason: 'rotation-required' })
+        expect.soft(rotations).toHaveBeenCalledTimes(1)
+        await live.accounting()
+        expect(rotations).toHaveBeenCalledTimes(1)
+      } finally {
+        gate.release()
+      }
+    })
+    test('cold load handoff keeps admission open until the final range is sealed', async () => {
+      const base = await createRegistryFixture({
+        mode,
+        setup: 'empty',
+        groupID: `handoff-${crypto.randomUUID()}`,
+      })
+      const gate = gateRegistryMaintenance(base.registry)
+      const rotations = vi.fn()
+      const admissions: Array<boolean> = []
+      let captured: RegistryHandleAccess | undefined
+      const install = registryLiveSend.set.bind(registryLiveSend)
+      const spy = vi.spyOn(registryLiveSend, 'set').mockImplementation((access, live) => {
+        captured = access
+        return install(access, live)
+      })
+      try {
+        const input = await base.makeHandle(0)
+        await input.encryptApplication(new Uint8Array([0]))
+        const ratchet = input.state.secretTree.leafNodes[input.state.privatePath.leafIndex * 2]
+        if (ratchet === undefined) throw new Error('Missing ratchet')
+        ratchet.application.generation = 496
+        const key = await base.registry.seed(input, { packageUse: null })
+        base.overrideRestore(async (record) => {
+          const state = decodeClientState(record.state)
+          if (state === undefined) throw new Error('Invalid state')
+          if (ownApplicationGeneration(state) === 496) {
+            const access = captured
+            if (access === undefined) throw new Error('Missing loading access')
+            admissions.push(access.admission().admissible)
+            access.onAdmissionChanged(() => admissions.push(access.admission().admissible))
+            access.onRotationRequired(rotations)
+          }
+          return (mode === 'real-mls' ? restoreGroup : restoreMemoryControlHandle)({
+            state,
+            credential: record.credential,
+            ledgerEntries: record.ledger,
+            options: base.environment.options,
+          })
+        })
+        const access = await base.registry.access(key.groupID)
+        expect.soft(admissions).toEqual([true])
+        expect.soft(rotations).not.toHaveBeenCalled()
+        for (let generation = 496; generation < 500; generation++)
+          expect(
+            (await access.seal(new Uint8Array([1]), { aad: new Uint8Array(), intent: 'ephemeral' }))
+              .generation,
+          ).toBe(generation)
+        expect.soft(admissions).toEqual([true, false])
+        expect(rotations).toHaveBeenCalledTimes(1)
+      } finally {
+        spy.mockRestore()
+        gate.release()
+        await base.close()
+      }
+    })
+    test('handoff cannot resurrect a copy across an unreadable foreign version', async () => {
+      const fixture = await setup(mode)
+      const gate = gateRegistryMaintenance(fixture.fixture().registry)
+      const live = registryLiveSend.get(fixture.access())
+      if (live === undefined) throw new Error('Missing sender')
+      try {
+        let reservation: Reservation | undefined
+        await fixture.reserveNow(undefined, (value) => {
+          reservation = value
+        })
+        if (reservation === undefined) throw new Error('Missing reservation')
+        await live.foreign(live.classifiedVersion + 1)
+        await live.handoff(reservation)
+        expect(fixture.lease()).toBeNull()
+      } finally {
+        gate.release()
+      }
+    })
+    test('a settling restore cannot overwrite headroom installed by a concurrent handoff', async () => {
+      const fixture = await setup(mode)
+      const base = fixture.fixture()
+      const gate = gateRegistryMaintenance(base.registry)
+      const live = registryLiveSend.get(fixture.access())
+      if (live === undefined) throw new Error('Missing sender')
+      live.invalidate()
+      const entered = deferred<void>()
+      const released = deferred<void>()
+      let first = true
+      let committed = false
+      base.onPhase('account', () => {
+        committed = true
+      })
+      base.overrideRestore(async (record) => {
+        const state = decodeClientState(record.state)
+        if (state === undefined) throw new Error('Invalid state')
+        if (committed && ownApplicationGeneration(state) === 16 && first) {
+          first = false
+          entered.resolve()
+          await released.promise
+        }
+        return (mode === 'real-mls' ? restoreGroup : restoreMemoryControlHandle)({
+          state,
+          credential: record.credential,
+          ledgerEntries: record.ledger,
+          options: base.environment.options,
+        })
+      })
+      let reservation: Reservation | undefined
+      const settling = fixture.reserveNow(undefined, (value) => {
+        reservation = value
+      })
+      try {
+        await entered.promise
+        if (reservation === undefined) throw new Error('Missing reservation')
+        await live.handoff(reservation)
+        expect((await fixture.sealEphemeral()).generation).toBe(16)
+      } finally {
+        released.resolve()
+        await settling
+        gate.release()
+      }
+      expect((await fixture.sealEphemeral()).generation).toBe(17)
+    })
+    test('rotation listeners added during notification receive exactly one replay', async () => {
+      const fixture = await setup(mode)
+      await finalRange(fixture)
+      const first = vi.fn(() => {
+        fixture.access().onRotationRequired(late)
+      })
+      const late = vi.fn()
+      fixture.access().onRotationRequired(first)
+      expect(first).not.toHaveBeenCalled()
+      expect(late).not.toHaveBeenCalled()
+      await fixture.sealEphemeral()
+      expect(first).toHaveBeenCalledTimes(1)
+      expect(late).toHaveBeenCalledTimes(1)
+    })
     test('final lease is usable and seal 499 closes GroupMLS acceptance', async () => {
       const fixture = await setup(mode)
       const mls = await groupMLS(fixture)
@@ -299,6 +535,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const draining = fixture.drainMaintenance()
       try {
         await entered.promise
+        expect(rotations).not.toHaveBeenCalled()
         if (change === 'bytes' || change === 'bytes-back' || change === 'bytes-read') {
           const saved = await fixture.record()
           const state = decodeClientState(saved.state)
@@ -369,7 +606,11 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect(newRotations).toHaveBeenCalledTimes(1)
       } else {
         expect(fixture.lease()).toBeNull()
+        expect(rotations).toHaveBeenCalledTimes(1)
         if (change !== 'retire') await expect(fixture.sealEphemeral()).rejects.toThrow()
+        await live.accounting()
+        live.changed()
+        expect(rotations).toHaveBeenCalledTimes(1)
       }
     })
     test.each(['compatible', 'foreign', 'invalidate'] as const)(

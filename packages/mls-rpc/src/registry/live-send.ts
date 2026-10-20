@@ -305,7 +305,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
       rotationIdentity = null
     if (currentNext() < LEASE_MAX_GENERATION || rotationIdentity !== null) return
     rotationIdentity = { ...identity, authenticator: identity.authenticator.slice() }
-    for (const listener of rotationListeners) supplyRotation(listener, identity)
+    for (const listener of [...rotationListeners]) supplyRotation(listener, identity)
   }
   async function account(proof: OwnProof): Promise<void> {
     if (!available() || !proof.registered || proof.generation !== foreignGeneration) return
@@ -339,7 +339,10 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     if (
       previous !== undefined &&
       version === previous.classifiedVersion &&
+      previous.record.version === version &&
+      sameStoredValue(candidate, previous.record) &&
       evidence.kind !== 'foreign' &&
+      (evidence.control === undefined || sameStoredValue(evidence.control, previous.control)) &&
       (evidence.eligibility === undefined ||
         sameStoredValue(evidence.eligibility, previous.eligibility))
     )
@@ -363,17 +366,20 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
           if (!current()) return
           if (generation !== fence || foreignGeneration !== foreignFence) {
             schedule()
-            return
+            return advanceCommitted(version, candidate, evidence)
           }
           if (committed !== previous) return advanceCommitted(version, candidate, evidence)
           compatible = sendCompatible(previous.record, candidate, previous.eligibility, eligibility)
         }
       } catch {
-        if (!current() || generation !== fence || foreignGeneration !== foreignFence) return
+        if (!current()) return
+        if (generation !== fence || foreignGeneration !== foreignFence)
+          return advanceCommitted(version, candidate, evidence)
       }
     }
     if (!current()) return
-    if (generation !== fence || foreignGeneration !== foreignFence) return
+    if (generation !== fence || foreignGeneration !== foreignFence)
+      return advanceCommitted(version, candidate, evidence)
     if (committed !== previous) return advanceCommitted(version, candidate, evidence)
     let headroom: Headroom = previous?.headroom ?? { kind: 'cold' }
     const foreign = previous !== undefined && !own && !compatible
@@ -484,6 +490,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     if (
       !valid() ||
       generation !== capturedGeneration ||
+      committed.headroom !== headroom ||
       !sameStoredValue(eligibilityOf(copy.state, copy.ownLeafLapsed()), reservation.eligibility) ||
       ownApplicationGeneration(copy.state) !== reservation.start
     )
@@ -896,20 +903,26 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
       if (record === undefined) return
       const loaded = committed.record
       if (
+        loaded.version !== committed.classifiedVersion ||
         loaded.version < reservation.envelope.version ||
         !sendCompatible(record, loaded, reservation.eligibility, committed.eligibility)
       )
         return
       const state = decodeClientState(loaded.state)
       if (state === undefined || reservation.limit > ownApplicationGeneration(state)) return
-      await accept({
+      const proof: OwnProof = {
         record,
         reservation,
         eligibility: reservation.eligibility,
         generation: foreignGeneration,
         registered: true,
         proven: true,
-      })
+      }
+      if (committed.headroom.kind === 'cold') {
+        committed.headroom = { kind: 'pending', proof, fence: generation }
+        changed()
+      }
+      await accept(proof)
     },
     cancel,
     retire() {
