@@ -72,8 +72,9 @@ function varLen(data: Uint8Array): Uint8Array {
 /**
  * MLS `ExpandWithLabel(Secret, Label, Context, Length)`: `KDF.Expand` over the KDFLabel
  * struct `{ uint16 length; opaque label<V> = "MLS 1.0 " + Label; opaque context<V> }`.
+ * Shared with the sender ratchet advance in `secret-tree.ts`.
  */
-function expandWithLabel(
+export function expandWithLabel(
   context: MlsContext,
   secret: Uint8Array,
   label: string,
