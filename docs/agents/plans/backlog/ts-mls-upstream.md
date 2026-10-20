@@ -98,4 +98,6 @@ per generation) and the guard is mirrored with the same `UsageError` messages. A
 is still derived by ts-mls itself (one discarded empty encrypt). `test/advance-sender-generation.test.ts`
 pins byte equality with N empty encrypts.
 
-On any upgrade: rerun that test; if ts-mls exports a ratchet-advance or `deriveTreeSecret`, delegate.
+On any upgrade: that test pins the ts-mls version the send check was copied from, so it fails until
+the copy is re-diffed against `clientState.js` `checkCanSend*` and the pin moved. If ts-mls exports a
+ratchet-advance or `deriveTreeSecret`, delegate.

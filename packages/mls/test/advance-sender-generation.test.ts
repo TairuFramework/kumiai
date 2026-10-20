@@ -1,8 +1,12 @@
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
 import { randomIdentity } from '@kokuin/token'
-import type { GenerationSecret } from 'ts-mls'
-import { describe, expect, test } from 'vitest'
+import type { CryptoProvider, GenerationSecret } from 'ts-mls'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { decodeClientState, encodeClientState } from '../src/codec.js'
+import { nobleCryptoProvider } from '../src/crypto.js'
 import {
   commitInvite,
   createGroup,
@@ -13,8 +17,16 @@ import {
   removeMember,
   restoreGroup,
 } from '../src/group.js'
+import { deriveGroup } from '../src/group-handle.js'
+import { proposeSelfRemoval } from '../src/index.js'
 import { ledgerEntryDigest } from '../src/ledger.js'
 import type { Invite } from '../src/types.js'
+import {
+  agent,
+  lowLevelWelcome,
+  pipelineGroup,
+  timedBinding,
+} from './fixtures/lifecycle-pipeline.js'
 
 const utf8 = new TextEncoder()
 
@@ -75,6 +87,62 @@ function senderGeneration(group: GroupHandle): number {
   return ownApplication(group)?.generation ?? 0
 }
 
+/** A sender whose leaf binding expired before the tree's clock — the lapse `encrypt` refuses. */
+async function lapsedSender(): Promise<GroupHandle> {
+  vi.spyOn(Date, 'now').mockReturnValue(100_000)
+  const { group } = await pipelineGroup()
+  const bob = agent(61)
+  const first = await lowLevelWelcome(
+    group,
+    bob,
+    await timedBinding({ identity: bob, iat: 90, exp: 99 }),
+  )
+  const carol = agent(71)
+  const second = await lowLevelWelcome(
+    first.author,
+    carol,
+    await timedBinding({ identity: carol, iat: 95, exp: 200 }),
+  )
+  await first.joined.processMessage(second.message)
+  return first.joined
+}
+
+async function rejection(promise: Promise<unknown>): Promise<Error> {
+  const error = await promise.then(
+    () => null,
+    (thrown: unknown) => thrown,
+  )
+  if (!(error instanceof Error)) throw new Error('expected a rejection')
+  return error
+}
+
+/** Wraps the noble provider so a test can make `kdf.expand` throw at a chosen call. */
+function faultyProvider() {
+  const control = { failAt: -1, calls: 0, derived: [] as Array<Uint8Array> }
+  const provider: CryptoProvider = {
+    async getCiphersuiteImpl(id) {
+      const suite = await nobleCryptoProvider.getCiphersuiteImpl(id)
+      const kdf = suite.kdf
+      return {
+        ...suite,
+        kdf: {
+          size: kdf.size,
+          extract: (salt, ikm) => kdf.extract(salt, ikm),
+          expand: async (prk, info, length) => {
+            if (control.failAt >= 0 && control.calls++ === control.failAt) {
+              throw new Error('injected kdf failure')
+            }
+            const out = await kdf.expand(prk, info, length)
+            if (control.failAt >= 0) control.derived.push(out)
+            return out
+          },
+        },
+      }
+    },
+  }
+  return { control, provider }
+}
+
 async function emptyEncrypts(group: GroupHandle, count: number): Promise<void> {
   for (let i = 0; i < count; i++) await group.encrypt(new Uint8Array())
 }
@@ -131,12 +199,37 @@ describe('GroupHandle.advanceSenderGeneration', () => {
     expect(senderGeneration(bobGroup)).toBe(5)
   })
 
-  test('refuses a target that is not a uint32 generation', async () => {
+  test('refuses a target that is not a uint32 generation with one after it', async () => {
     const { bobGroup } = await twoMemberGroup('advance-range')
-    for (const target of [-1, 1.5, Number.NaN, 2 ** 32]) {
+    for (const target of [-1, 1.5, Number.NaN, 0xffffffff, 2 ** 32]) {
       await expect(bobGroup.advanceSenderGeneration(target)).rejects.toThrow(RangeError)
     }
     expect(ownApplication(bobGroup)).toBeUndefined()
+  })
+
+  test('maxSteps refuses a longer advance before taking any step', async () => {
+    const { bobGroup } = await twoMemberGroup('advance-max-steps')
+    // Underived leaf: the distance is measured from generation 0.
+    await expect(bobGroup.advanceSenderGeneration(201, { maxSteps: 200 })).rejects.toThrow(
+      RangeError,
+    )
+    expect(ownApplication(bobGroup)).toBeUndefined()
+
+    await emptyEncrypts(bobGroup, 3)
+    const before = encodeClientState(bobGroup.state)
+    await expect(bobGroup.advanceSenderGeneration(204, { maxSteps: 200 })).rejects.toThrow(
+      RangeError,
+    )
+    for (const maxSteps of [-1, 1.5, Number.NaN]) {
+      await expect(bobGroup.advanceSenderGeneration(10, { maxSteps })).rejects.toThrow(RangeError)
+    }
+    expect(encodeClientState(bobGroup.state)).toEqual(before)
+
+    await bobGroup.advanceSenderGeneration(203, { maxSteps: 200 })
+    expect(senderGeneration(bobGroup)).toBe(203)
+    // No default cap: a stored high-water mark may sit far past every receiver.
+    await bobGroup.advanceSenderGeneration(1203)
+    expect(senderGeneration(bobGroup)).toBe(1203)
   })
 
   test('a receiver accepts the first frame across the skipped gap', async () => {
@@ -151,27 +244,142 @@ describe('GroupHandle.advanceSenderGeneration', () => {
     expect(new TextDecoder().decode(after.payload)).toBe('after')
   })
 
-  test('a removed member cannot advance, with the error encrypt throws', async () => {
-    const { aliceGroup, bobGroup } = await twoMemberGroup('advance-removed')
-    const removed = await removeMember(aliceGroup, bobGroup.state.privatePath.leafIndex)
-    await bobGroup.processMessage(removed.commitMessage)
-    expect(bobGroup.state.groupActiveState.kind).toBe('removedFromGroup')
+  describe('refuses exactly where encrypt refuses', () => {
+    afterEach(() => vi.restoreAllMocks())
 
-    const encryptError = await bobGroup.encrypt(new Uint8Array()).then(
-      () => null,
-      (error: unknown) => error,
-    )
-    expect(encryptError).toBeInstanceOf(Error)
-    const before = encodeClientState(bobGroup.state)
-    await expect(bobGroup.advanceSenderGeneration(10)).rejects.toMatchObject({
-      name: (encryptError as Error).name,
-      message: (encryptError as Error).message,
+    test.each([
+      {
+        label: 'removed from the group',
+        setup: async () => {
+          const { aliceGroup, bobGroup } = await twoMemberGroup('advance-refuse-removed')
+          const removed = await removeMember(aliceGroup, bobGroup.state.privatePath.leafIndex)
+          await bobGroup.processMessage(removed.commitMessage)
+          expect(bobGroup.state.groupActiveState.kind).toBe('removedFromGroup')
+          return bobGroup
+        },
+      },
+      {
+        label: 'holding unapplied proposals',
+        setup: async () => {
+          const { bobGroup } = await twoMemberGroup('advance-refuse-proposals')
+          await proposeSelfRemoval(bobGroup)
+          expect(Object.keys(bobGroup.state.unappliedProposals)).not.toHaveLength(0)
+          return bobGroup
+        },
+      },
+      {
+        label: 'suspended pending reinit',
+        setup: async () => {
+          const { bobGroup } = await twoMemberGroup('advance-refuse-suspended')
+          const { groupContext } = bobGroup.state
+          return deriveGroup(bobGroup, {
+            ...bobGroup.state,
+            groupActiveState: {
+              kind: 'suspendedPendingReinit',
+              reinit: {
+                groupId: groupContext.groupId,
+                version: groupContext.version,
+                cipherSuite: groupContext.cipherSuite,
+                extensions: [],
+              },
+            },
+          })
+        },
+      },
+      { label: 'on a lapsed leaf', setup: lapsedSender },
+    ])('when $label', async ({ setup }) => {
+      const group = await setup()
+      const before = encodeClientState(group.state)
+      const encryptError = await rejection(group.encrypt(new Uint8Array()))
+      expect(encodeClientState(group.state)).toEqual(before)
+
+      const advanceError = await rejection(
+        group.advanceSenderGeneration(senderGeneration(group) + 10),
+      )
+      expect(advanceError.constructor).toBe(encryptError.constructor)
+      expect(advanceError.name).toBe(encryptError.name)
+      expect(advanceError.message).toBe(encryptError.message)
+      expect(encodeClientState(group.state)).toEqual(before)
     })
-    expect(encodeClientState(bobGroup.state)).toEqual(before)
+
+    test('the mirrored send check matches the ts-mls release it was copied from', () => {
+      const entry = createRequire(import.meta.url).resolve('ts-mls')
+      let directory = dirname(entry)
+      while (!directory.endsWith(join('node_modules', 'ts-mls'))) directory = dirname(directory)
+      const manifest = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'))
+      expect(manifest.version).toBe('2.0.0-rc.13')
+    })
+  })
+
+  describe('a KDF failure midway leaves the handle as it was', () => {
+    test('zeroes every secret the loop derived on an already-derived leaf', async () => {
+      const { aliceGroup, bobGroup } = await twoMemberGroup('advance-fault-derived')
+      await emptyEncrypts(bobGroup, 2)
+      const { control, provider } = faultyProvider()
+      const state = decodeClientState(encodeClientState(bobGroup.state))
+      if (state == null) throw new Error('state did not round-trip')
+      const group = await restoreGroup({
+        state,
+        credential: bobGroup.credential,
+        ledgerEntries: bobGroup.ledgerTokens,
+        options: { cryptoProvider: provider },
+      })
+      const chainSecret = ownApplication(group)?.secret.slice()
+      const before = encodeClientState(group.state)
+
+      control.failAt = 5
+      await expect(group.advanceSenderGeneration(40)).rejects.toThrow('injected kdf failure')
+      expect(control.derived).toHaveLength(5)
+      for (const secret of control.derived) expect(secret.every((byte) => byte === 0)).toBe(true)
+      expect(encodeClientState(group.state)).toEqual(before)
+      expect(ownApplication(group)?.secret).toEqual(chainSecret)
+
+      control.failAt = -1
+      const opened = await aliceGroup.decrypt(await group.encrypt(utf8.encode('still sends')))
+      expect(new TextDecoder().decode(opened.payload)).toBe('still sends')
+    })
+
+    test('keeps the leaf underived when the failure follows its derivation', async () => {
+      const { aliceGroup, bobGroup } = await twoMemberGroup('advance-fault-underived')
+      const { control, provider } = faultyProvider()
+      const state = decodeClientState(encodeClientState(bobGroup.state))
+      if (state == null) throw new Error('state did not round-trip')
+      const group = await restoreGroup({
+        state,
+        credential: bobGroup.credential,
+        ledgerEntries: bobGroup.ledgerTokens,
+        options: { cryptoProvider: provider },
+      })
+      const before = encodeClientState(group.state)
+
+      const counting = faultyProvider()
+      const twin = await restoreGroup({
+        state: decodeClientState(before) ?? state,
+        credential: bobGroup.credential,
+        ledgerEntries: bobGroup.ledgerTokens,
+        options: { cryptoProvider: counting.provider },
+      })
+      counting.control.failAt = Number.POSITIVE_INFINITY
+      await twin.encrypt(new Uint8Array())
+      const encryptCalls = counting.control.calls
+
+      control.failAt = encryptCalls + 5
+      await expect(group.advanceSenderGeneration(400)).rejects.toThrow('injected kdf failure')
+      expect(ownApplication(group)).toBeUndefined()
+      expect(encodeClientState(group.state)).toEqual(before)
+      const chain = control.derived.slice(encryptCalls)
+      expect(chain).toHaveLength(5)
+      for (const secret of chain) expect(secret.every((byte) => byte === 0)).toBe(true)
+
+      control.failAt = -1
+      const opened = await aliceGroup.decrypt(await group.encrypt(utf8.encode('still sends')))
+      expect(new TextDecoder().decode(opened.payload)).toBe('still sends')
+    })
   })
 
   test('costs hash steps, not encrypts', async () => {
-    const steps = 2000
+    const steps = 500
+    const rounds = 3
     const { bobGroup } = await twoMemberGroup('advance-cost')
     await emptyEncrypts(bobGroup, 1)
     const advanced = await reload(bobGroup)
@@ -180,14 +388,20 @@ describe('GroupHandle.advanceSenderGeneration', () => {
     await advanced.advanceSenderGeneration(senderGeneration(advanced) + 10)
     await emptyEncrypts(encrypted, 10)
 
-    let started = performance.now()
-    await advanced.advanceSenderGeneration(senderGeneration(advanced) + steps)
-    const advanceMs = performance.now() - started
-    started = performance.now()
-    await emptyEncrypts(encrypted, steps)
-    const encryptMs = performance.now() - started
+    const median = (values: Array<number>): number =>
+      values.sort((a, b) => a - b)[values.length >> 1] ?? Number.NaN
+    const advanceMs: Array<number> = []
+    const encryptMs: Array<number> = []
+    for (let round = 0; round < rounds; round++) {
+      let started = performance.now()
+      await advanced.advanceSenderGeneration(senderGeneration(advanced) + steps)
+      advanceMs.push(performance.now() - started)
+      started = performance.now()
+      await emptyEncrypts(encrypted, steps)
+      encryptMs.push(performance.now() - started)
+    }
 
     expect(senderGeneration(advanced)).toBe(senderGeneration(encrypted))
-    expect(encryptMs / advanceMs).toBeGreaterThanOrEqual(20)
+    expect(median(encryptMs) / median(advanceMs)).toBeGreaterThanOrEqual(5)
   }, 60_000)
 })

@@ -72,6 +72,7 @@ function nextRatchetSecret(
  * per sent frame: the secret advances, the generation increments, and `unusedGenerations`
  * is untouched (a sender keeps no skipped keys for itself). Non-mutating; the returned
  * `consumed` are the retired chain secrets, for the caller to zero once it adopts the result.
+ * On a throw, the secrets derived so far are zeroed and the input ratchet is left intact.
  */
 export async function advanceSendingRatchet(
   context: MlsContext,
@@ -80,10 +81,19 @@ export async function advanceSendingRatchet(
 ): Promise<{ ratchet: GenerationSecret; consumed: Array<Uint8Array> }> {
   const consumed: Array<Uint8Array> = []
   let { secret, generation } = ratchet
-  while (generation < target) {
-    consumed.push(secret)
-    secret = await nextRatchetSecret(context, secret, generation)
-    generation++
+  try {
+    while (generation < target) {
+      consumed.push(secret)
+      secret = await nextRatchetSecret(context, secret, generation)
+      generation++
+    }
+  } catch (error) {
+    // The input chain secret still belongs to the caller's state; everything derived from
+    // it is unreachable once this throws, so wipe it rather than leave it for GC.
+    for (const derived of [...consumed.slice(1), secret]) {
+      if (derived !== ratchet.secret) derived.fill(0)
+    }
+    throw error
   }
   return { ratchet: { ...ratchet, secret, generation }, consumed }
 }

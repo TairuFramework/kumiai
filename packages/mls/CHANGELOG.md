@@ -1,5 +1,11 @@
 # @kumiai/mls
 
+## 0.10.5
+
+### Patch Changes
+
+- Add `GroupHandle.advanceSenderGeneration(target, { maxSteps? })`: move this member's own application ratchet so the next `encrypt` uses generation `target`, at one KDF step per skipped generation instead of one empty encrypt each. The resulting state is the one the same number of empty encrypts leaves (retired chain secrets zeroed, epoch and other members untouched); a target at or below the current generation is a no-op, it refuses exactly where `encrypt` does, and `maxSteps` optionally bounds the distance. A failed advance leaves the handle unchanged.
+
 ## 0.10.4
 
 ### Patch Changes
