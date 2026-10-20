@@ -3,7 +3,7 @@
 **Priority:** backlog — every item here waits on an upstream release. Nothing in this repo unblocks
 them.
 **Merged 2026-07-28** from `ts-mls-v2-stable-upgrade.md` and `peer4-mls-leaf-rotation.md`. Both were
-one thing: ts-mls does not export what `@kumiai/mls` needs. Check all three items together whenever
+one thing: ts-mls does not export what `@kumiai/mls` needs. Check all four items together whenever
 a new ts-mls lands.
 
 > **Relocated from enkaku** (0.18 stack split, 2026-06-30): MLS moved to `@kumiai/mls`,
@@ -87,3 +87,17 @@ Single-key peer4 self-rotation (alice rotates, bob receives the Update, alice's 
 subsequent messages); multi-sig peer4 rotating the primary key while preserving a secondary;
 concurrent rotation at one epoch (one commit wins, the other rebases); rotation across cached
 resolver state.
+
+## 4. The sender-ratchet step and send guard are not exported — so we reimplemented them
+
+`GroupHandle.advanceSenderGeneration` (`packages/mls/src/group-handle.ts`, step in
+`packages/mls/src/secret-tree.ts`) moves the own application ratchet without encrypting. ts-mls
+keeps `consumeRatchet` / `deriveTreeSecret` and `checkCanSendApplicationMessages` internal, so the step
+reuses `sender-data.ts`'s `expandWithLabel` (one `DeriveTreeSecret(secret, "secret", generation, Nh)`
+per generation) and the guard is mirrored with the same `UsageError` messages. An underived own leaf
+is still derived by ts-mls itself (one discarded empty encrypt). `test/advance-sender-generation.test.ts`
+pins byte equality with N empty encrypts.
+
+On any upgrade: that test pins the ts-mls version the send check was copied from, so it fails until
+the copy is re-diffed against `clientState.js` `checkCanSend*` and the pin moved. If ts-mls exports a
+ratchet-advance or `deriveTreeSecret`, delegate.

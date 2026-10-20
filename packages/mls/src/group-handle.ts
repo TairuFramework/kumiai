@@ -22,7 +22,9 @@ import {
   nodeTypes,
   type ProcessMessageResult,
   type ProposalWithSender,
+  type SecretTree,
   senderTypes,
+  UsageError,
   wireformats,
 } from 'ts-mls'
 
@@ -83,6 +85,7 @@ import {
   revocationOf,
 } from './registry.js'
 import type { RosterState } from './roster.js'
+import { advanceSendingRatchet } from './secret-tree.js'
 import { type PrivateCommitFrame, readSenderLeafIndex } from './sender-data.js'
 
 /** One serializer per live handle, so its state-mutating operations run one at a
@@ -133,6 +136,35 @@ export function emitterOf(group: GroupHandle): EventEmitter<GroupHandleEvents> {
  *  material does not linger in the heap after the state that used it is replaced. */
 function zeroAll(buffers: Array<Uint8Array>): void {
   for (const buffer of buffers) buffer.fill(0)
+}
+
+/** Zero the secrets `next` holds that `prior` does not: what a discarded derivation produced. */
+function zeroFreshSecrets(prior: SecretTree, next: SecretTree): void {
+  const held = new Set<Uint8Array>()
+  for (const secret of Object.values(prior.intermediateNodes)) held.add(secret)
+  for (const leaf of Object.values(prior.leafNodes)) {
+    held.add(leaf.application.secret)
+    held.add(leaf.handshake.secret)
+  }
+  const fresh = [...Object.values(next.intermediateNodes)]
+  for (const leaf of Object.values(next.leafNodes)) {
+    fresh.push(leaf.application.secret, leaf.handshake.secret)
+  }
+  for (const secret of fresh) if (!held.has(secret)) secret.fill(0)
+}
+
+/** ts-mls's guard ahead of every application send, which its index does not export.
+ *  Same checks, same errors, so a ratchet-only advance refuses exactly as encrypt does. */
+function checkCanSendApplicationMessages(state: ClientState): void {
+  if (Object.keys(state.unappliedProposals).length !== 0) {
+    throw new UsageError('Cannot send application message with unapplied proposals')
+  }
+  if (state.groupActiveState.kind === 'suspendedPendingReinit') {
+    throw new UsageError('Cannot send messages while Group is suspended pending reinit')
+  }
+  if (state.groupActiveState.kind === 'removedFromGroup') {
+    throw new UsageError('Cannot send messages after being removed from group')
+  }
 }
 
 /** AAD is not secret, so a length/byte compare is enough — no constant-time need. */
@@ -1013,6 +1045,93 @@ export class GroupHandle {
       this.#state = newState
       zeroAll(consumed)
       return encode(mlsMessageEncoder, message)
+    })
+  }
+
+  /**
+   * Move this member's own application ratchet forward so the next {@link encrypt} uses
+   * generation `target` — the generation read from
+   * `state.secretTree.leafNodes[2 * leafIndex].application.generation` (0 before the leaf
+   * secret is derived). The resulting state is the one `target - current` empty encrypts
+   * would leave, with no frame produced: the retired chain secrets are zeroed, and the
+   * epoch and every other member's ratchet are untouched. A target at or below the current
+   * generation is a no-op; the ratchet never moves back.
+   *
+   * For a host that restores a persisted state and must not reuse a generation it may have
+   * sent from before a crash. Each skipped generation costs one KDF step, not an encrypt.
+   * Receivers must still cross the gap: ts-mls refuses a jump beyond its forward-ratchet
+   * window (`maximumForwardRatchetSteps`, 200 by default).
+   *
+   * No cap by default: a host catching up a stored high-water mark may legitimately step
+   * far past any receiver's position (a receiver's window counts from the last generation
+   * it processed, not from this state). With `opts.maxSteps`, an advance whose
+   * `target - current` exceeds it throws a `RangeError` before any step.
+   *
+   * Refuses exactly as {@link encrypt} would: a lapsed leaf, unapplied proposals, a
+   * removed or suspended member. `target` must be below 0xffffffff, the last generation.
+   * On any throw the handle state is unchanged and the secrets derived so far are zeroed.
+   */
+  async advanceSenderGeneration(target: number, opts?: { maxSteps?: number }): Promise<void> {
+    // 0xffffffff is the last uint32 generation: no frame could follow it.
+    if (!Number.isInteger(target) || target < 0 || target >= 0xffffffff) {
+      throw new RangeError(`advanceSenderGeneration: ${target} is not a sendable uint32 generation`)
+    }
+    const maxSteps = opts?.maxSteps
+    if (maxSteps != null && (!Number.isInteger(maxSteps) || maxSteps < 0)) {
+      throw new RangeError(`advanceSenderGeneration: maxSteps ${maxSteps} is not a step count`)
+    }
+    return mutexFor(this).run(async () => {
+      const own = leafAt(this.#state.ratchetTree, this.#state.privatePath.leafIndex)
+      if (own != null && isLapsed(this, own)) throw new LeafLapsedError('lapsed')
+      checkCanSendApplicationMessages(this.#state)
+      const node = Number(this.#state.privatePath.leafIndex) * 2
+      const current = this.#state.secretTree.leafNodes[node]?.application.generation ?? 0
+      if (target <= current) return
+      if (maxSteps != null && target - current > maxSteps) {
+        throw new RangeError(
+          `advanceSenderGeneration: ${target - current} steps exceed maxSteps ${maxSteps}`,
+        )
+      }
+      const prior = this.#state
+      let base = prior
+      let retired: Array<Uint8Array> = []
+      if (prior.secretTree.leafNodes[node] == null) {
+        // The leaf secret is still folded into an ancestor. Deriving it walks the tree
+        // (and seeds the handshake ratchet), so let ts-mls do it the one way it does:
+        // one empty encrypt, whose frame is discarded unsent. It consumes generation 0.
+        // Its retired secrets are still referenced by `prior`, so they are zeroed only
+        // once the advanced state is adopted.
+        const { newState, consumed } = await createApplicationMessage({
+          context: this.#context,
+          state: prior,
+          message: new Uint8Array(),
+          authenticatedData: new Uint8Array(),
+        })
+        base = newState
+        retired = consumed
+      }
+      const secretTree = base.secretTree
+      const leaf = secretTree.leafNodes[node]
+      if (leaf == null) throw new Error('unreachable: an encrypt derives the sender leaf')
+      let advanced: Awaited<ReturnType<typeof advanceSendingRatchet>>
+      try {
+        advanced = await advanceSendingRatchet(this.#context, leaf.application, target)
+      } catch (error) {
+        if (base !== prior) zeroFreshSecrets(prior.secretTree, secretTree)
+        throw error
+      }
+      this.#state = {
+        ...base,
+        secretTree: {
+          ...secretTree,
+          leafNodes: {
+            ...secretTree.leafNodes,
+            [node]: { ...leaf, application: advanced.ratchet },
+          },
+        },
+      }
+      zeroAll(retired)
+      zeroAll(advanced.consumed)
     })
   }
 
