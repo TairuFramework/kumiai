@@ -15,6 +15,7 @@ import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
+import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import {
   buildInviteCommit,
   buildLedgerCommit,
@@ -317,7 +318,13 @@ describe('departing app topics', () => {
     await bob.peer.replay()
     const { params } = currentLane()
     hub.detach('bob')
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret,
+      epoch: 1,
+    })
     const read = bob.mls.readEpoch.bind(bob.mls)
     let failures = 0
     vi.spyOn(bob.mls, 'readEpoch').mockImplementation(async () => {
@@ -336,7 +343,13 @@ describe('departing app topics', () => {
     const { bob, hub } = peerFixture()
     await bob.peer.replay()
     hub.detach('bob')
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret,
+      epoch: 1,
+    })
     const walkError = new Error('walk observation failed')
     const refreshError = new Error('final epoch refresh failed')
     const read = bob.mls.readEpoch.bind(bob.mls)

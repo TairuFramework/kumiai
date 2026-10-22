@@ -15,6 +15,7 @@ import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
+import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import {
   buildInviteCommit,
   buildLedgerCommit,
@@ -278,7 +279,13 @@ test('abandon deletes obligations explicitly and later competitor consumption pr
   await bob.peer.abandon()
   expect((await bob.control.load()).welcomes).toEqual([])
   await bob.control.apply({ putWelcomes: [owed] }, 'owed-later')
-  await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+  await publishCommit({
+    authenticator: memoryAuthenticator(bob.mls),
+    hub,
+    senderDID: 'alice',
+    recoverySecret: secret,
+    epoch: 1,
+  })
   await bob.controlWalk.walkCommits()
   expect((await bob.control.load()).welcomes).toEqual([owed])
   expect((await bob.control.load()).spentSource).toBeNull()
@@ -294,6 +301,7 @@ test.each([false, true])(
     const op = await seedBuiltOperation(bob, buildInviteCommit(bob, 'invitee'))
     // The ordinary walker must meet the ahead frame before attempting own installation.
     const ahead = await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'bob',
       committerDID: 'alice',
@@ -336,6 +344,7 @@ test('nested competitor removal keeps its terminal unknown when the stale runner
   await bob.peer.replay()
   const op = await seedBuiltOperation(bob, buildInviteCommit(bob, 'invitee'))
   await publishCommit({
+    authenticator: memoryAuthenticator(bob.mls),
     hub,
     senderDID: 'bob',
     committerDID: 'alice',
@@ -652,7 +661,13 @@ test('abandon interrupts a revoke submission drain and keeps earlier submissions
     expect(await bob.peer.outcomes()).toMatchObject([{ opID: saved.id, kind: 'unknown' }])
     expect((await bob.appOutbox.list()).length).toBe(1)
     // A later revoke must still drain the original, unresolved application submission.
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret: secret,
+      epoch: 1,
+    })
     await bob.controlWalk.walkCommits()
     const next = await seedBuiltOperation(bob, buildLedgerCommit(bob, ['again'], { revokes: true }))
     let completed = false
@@ -774,7 +789,13 @@ test('a competitor delivered between runner attempts clears the slot and settles
   await bob.peer.enqueue(request)
   await vi.waitFor(() => expect(attempts).toBeGreaterThan(0))
   expect((await bob.control.load()).commitOnce?.opID).toBe(request.id)
-  await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+  await publishCommit({
+    authenticator: memoryAuthenticator(bob.mls),
+    hub,
+    senderDID: 'alice',
+    recoverySecret: secret,
+    epoch: 1,
+  })
   await vi.waitFor(() => expect(bob.mls.epoch()).toBe(2))
   expect((await bob.control.load()).commitOnce).toBeNull()
   await vi.advanceTimersByTimeAsync(1_000)
@@ -827,7 +848,13 @@ test('a hard hold preserves applied history and keeps the first hard reason', as
   )
   await bob.peer.ack('refresh-saved-hold')
   expect((await bob.control.load()).applied).toEqual([applied])
-  await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
+  await publishCommit({
+    authenticator: memoryAuthenticator(bob.mls),
+    hub,
+    senderDID: 'bob',
+    recoverySecret: secret,
+    epoch: 1,
+  })
   await bob.peer.replay()
   expect((await bob.control.load()).controlHold?.reason).toBe('unsupported-version')
   expect((await bob.control.load()).applied).toEqual([applied])

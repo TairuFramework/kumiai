@@ -15,10 +15,14 @@ import type {
 import { asLogPosition, type LogPosition } from '../src/cursor.js'
 import type { StrandObservation } from '../src/peer.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
-import { publishCommit } from './fixtures/commits.js'
+import { publishCommit, publishNextCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
-import { memoryEntryID } from './fixtures/memory-group-mls.js'
+import {
+  createMemoryGroupMLS,
+  memoryAuthenticator,
+  memoryEntryID,
+} from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
 
 const empty = (): ControlSnapshot => ({
@@ -218,14 +222,25 @@ afterEach(async () => {
 describe('durable fork halts', () => {
   test('past divergence preserves history after a cursor-write crash and restart', async () => {
     const hub = new FakeHub()
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+    const author = createMemoryGroupMLS({
+      recoverySecret: secret,
+      epoch: 1,
+      members: ['alice', 'bob'],
+    })
+    await publishNextCommit(author, {
+      hub,
+      senderDID: 'alice',
+      recoverySecret: secret,
+      epoch: 1,
+    })
     const hidden = await publishCommit({
+      authenticator: memoryAuthenticator(author),
       hub,
       senderDID: 'alice',
       recoverySecret: secret,
       epoch: 2,
     })
-    const applied = await publishCommit({
+    const applied = await publishNextCommit(author, {
       hub,
       senderDID: 'carol',
       recoverySecret: secret,
@@ -276,16 +291,43 @@ describe('durable fork halts', () => {
 
   test('later past divergence leaves all applied history unchanged', async () => {
     const hub = new FakeHub()
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+    const author = createMemoryGroupMLS({
+      recoverySecret: secret,
+      epoch: 1,
+      members: ['alice', 'bob'],
+    })
+    await publishNextCommit(author, {
+      hub,
+      senderDID: 'alice',
+      recoverySecret: secret,
+      epoch: 1,
+    })
     const hidden = await publishCommit({
+      authenticator: memoryAuthenticator(author),
       hub,
       senderDID: 'alice',
       recoverySecret: secret,
       epoch: 2,
     })
-    await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 2 })
-    const later = await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 3 })
-    const last = await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 3 })
+    await publishNextCommit(author, {
+      hub,
+      senderDID: 'carol',
+      recoverySecret: secret,
+      epoch: 2,
+    })
+    const later = await publishCommit({
+      authenticator: memoryAuthenticator(author),
+      hub,
+      senderDID: 'alice',
+      recoverySecret: secret,
+      epoch: 3,
+    })
+    const last = await publishNextCommit(author, {
+      hub,
+      senderDID: 'carol',
+      recoverySecret: secret,
+      epoch: 3,
+    })
     hub.hideFrom('bob', hidden.sequenceID)
     hub.hideFrom('bob', later.sequenceID)
     const observations: Array<StrandObservation> = []

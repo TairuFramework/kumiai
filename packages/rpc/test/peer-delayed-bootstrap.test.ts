@@ -8,7 +8,11 @@ import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryGroupMLS, requireCapturedRecovery } from './fixtures/memory-group-mls.js'
+import {
+  createMemoryGroupMLS,
+  memoryAuthenticator,
+  requireCapturedRecovery,
+} from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer, seedBuiltOperation } from './fixtures/peer.js'
 
 const members = ['alice', 'bob', 'carol']
@@ -99,6 +103,7 @@ describe('delayed ledger bootstrap', () => {
       await alice.database.saveState('memory-group', incomplete)
       alice.mls.restoreState(incomplete)
       await publishCommit({
+        authenticator: memoryAuthenticator(bob.mls),
         hub,
         senderDID: 'bob',
         recoverySecret: rs,
@@ -245,6 +250,7 @@ describe('delayed ledger bootstrap', () => {
       }
     })
     const competing = await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'carol',
       recoverySecret: rs,
@@ -352,6 +358,7 @@ describe('delayed ledger bootstrap', () => {
       return save(anchor)
     })
     await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub: state.hub,
       senderDID: 'alice',
       committerDID: 'carol',
@@ -552,6 +559,7 @@ describe('delayed ledger bootstrap', () => {
     const requestsBefore = recoveryRequests()
     state.stopLying()
     await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'bob',
       committerDID: 'zoe',

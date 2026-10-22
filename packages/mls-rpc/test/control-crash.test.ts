@@ -1,13 +1,23 @@
-import { decodeClientState } from '@kumiai/mls'
+import { randomIdentity } from '@kokuin/token'
+import { decodeClientState, encodeClientState, encodeGroupAnchor } from '@kumiai/mls'
+import { asLogPosition, encodeCommitFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '@kumiai/rpc'
 import { testCommitOnceConformance } from '@kumiai/rpc-conformance'
 import { expect, test } from 'vitest'
 
 import { testControlCrashBoundaries } from './fixtures/control-crash.js'
+import { buildRealUnavailableCommit, createRealGroup } from './fixtures/real-group.js'
 import {
   createControlCrashHarness,
   runControlProofConflict,
   runControlSlotGuards,
 } from './fixtures/storage-persistence.js'
+import { makeStorageSeed } from './fixtures/storage-seed.js'
+
+const { tagMemoryCommit } = (await import(
+  new URL('../../rpc/test/fixtures/memory-group-mls.ts', import.meta.url).href
+)) as {
+  tagMemoryCommit(commit: Uint8Array, authenticator: Uint8Array): Uint8Array
+}
 
 for (const mode of ['double', 'real-mls'] as const) {
   testControlCrashBoundaries(mode)
@@ -16,6 +26,113 @@ for (const mode of ['double', 'real-mls'] as const) {
     scenarios: ['ownership-conflict', 'slot-guards'],
     run: (scenario) =>
       scenario === 'slot-guards' ? runControlSlotGuards(mode) : runControlProofConflict(mode),
+  })
+  test(`unavailable authenticated earlier frame strands before own installation or Welcome (${mode})`, async () => {
+    const real = mode === 'real-mls' ? await createRealGroup(3, 'control-crash') : undefined
+    const seed =
+      real === undefined
+        ? undefined
+        : await makeStorageSeed({ id: 'control-crash', incarnation: 1, epoch: 3, mode })
+    if (seed !== undefined && real !== undefined) {
+      const handle = real.committer.handle
+      seed.confirmedTranscriptHash = handle.state.groupContext.confirmedTranscriptHash.slice()
+      seed.state = {
+        ...seed.state,
+        state: encodeClientState(handle.state),
+        epochAuthenticator: handle.state.keySchedule.epochAuthenticator,
+        credential: handle.credential,
+        ledger: handle.ledgerTokens,
+      }
+      seed.trust = {
+        ...seed.trust,
+        genesisAnchor: encodeGroupAnchor(handle.anchor),
+        installed: {
+          ...seed.key,
+          epoch: 3,
+          authenticator: handle.state.keySchedule.epochAuthenticator,
+        },
+        signerTree: handle.state.ratchetTree,
+        registry: handle.registry,
+        credential: handle.credential,
+        ledger: handle.ledgerTokens,
+        spentEpochAuthenticators: [handle.state.keySchedule.epochAuthenticator],
+      }
+    }
+    const h = await createControlCrashHarness(mode, seed)
+    try {
+      await h.peer.resync()
+      const built = await h.build()
+      expect(await h.saveBuilt(built.intent, built.slot, built.expected, 'built')).toBe('saved')
+      const controlBefore = await h.control.load()
+      const competitor = real?.members[0]
+      if (real !== undefined && competitor === undefined) throw new Error('Missing competitor')
+      const before = await h.groups.loadState(h.key)
+      if (before === null || before.deleted) throw new Error('Missing source state')
+      const commit =
+        real === undefined || competitor === undefined
+          ? tagMemoryCommit(
+              new TextEncoder().encode(
+                JSON.stringify({
+                  epoch: 3,
+                  committerDID: randomIdentity().id,
+                  entryIDs: [],
+                  missingProposal: true,
+                }),
+              ),
+              before.epochAuthenticator,
+            )
+          : await buildRealUnavailableCommit({
+              ...real,
+              committer: competitor,
+              members: [real.committer],
+            })
+      const topicID = await h.topic()
+      const prefixPayload = encodeHandshakeFrame(
+        HANDSHAKE_KIND.commit,
+        encodeCommitFrame(commit, new Uint8Array()),
+      )
+      const prefix = await h.hub.publish({
+        senderDID: h.localDID,
+        topicID,
+        retain: 'log',
+        payload: prefixPayload,
+      })
+      await h.hub.publish({
+        senderDID: h.localDID,
+        topicID,
+        retain: 'log',
+        payload: built.slot.payload,
+        publishID: built.slot.publishID,
+      })
+      await h.controlWalk.walkCommits()
+      const saved = await h.control.load()
+      expect(h.observations.ownAdoptions).toBe(0)
+      expect(saved.controlHold).toBeNull()
+      expect(saved.strand).toEqual({ reason: 'unprocessable-gap' })
+      expect(saved.commitOnce).toEqual(built.slot)
+      expect(saved.applied).toEqual([])
+      expect(saved.welcomes).toEqual([])
+      expect(saved.outcomes).toEqual(controlBefore.outcomes)
+      expect(await h.groups.loadState(h.key)).toMatchObject({
+        epoch: before.epoch,
+        epochAuthenticator: before.epochAuthenticator,
+        state: before.state,
+      })
+      expect(h.observations.welcomeDeliveries).toBe(0)
+      const validation = await h.validation.restoreValidation(built.slot)
+      expect(
+        await validation?.validateFrame(
+          {
+            position: asLogPosition(prefix.sequenceID),
+            payload: prefixPayload,
+            senderDID: h.localDID,
+          },
+          built.slot,
+        ),
+      ).toEqual({ kind: 'unavailable', reason: 'missing-proposal' })
+    } finally {
+      await h.fixture.close()
+    }
   })
 }
 

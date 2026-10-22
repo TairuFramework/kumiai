@@ -7,7 +7,7 @@ import { replyWithReconciledGroupInfo } from '../src/recovery-capture.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { latchPeerSafety, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
 
 const secret = new Uint8Array(32).fill(93)
@@ -80,7 +80,13 @@ test('a responder applies queued commits before handing off its reply', async ()
     return await process(...args)
   })
   try {
-    await publishCommit({ hub: f.hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(f.member.mls),
+      hub: f.hub,
+      senderDID: 'alice',
+      recoverySecret: secret,
+      epoch: 1,
+    })
     await entered.promise
     vi.useFakeTimers()
     const replying = f.ask()
@@ -104,7 +110,13 @@ test.each(['gap', 'unproven-tip', 'regressed-null'] as const)(
   async (fault) => {
     const f = await fixture()
     if (fault === 'regressed-null') {
-      await publishCommit({ hub: f.hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+      await publishCommit({
+        authenticator: memoryAuthenticator(f.member.mls),
+        hub: f.hub,
+        senderDID: 'alice',
+        recoverySecret: secret,
+        epoch: 1,
+      })
       await f.member.peer.replay()
     }
     const fetch = f.hub.fetchTopic.bind(f.hub)
@@ -176,7 +188,13 @@ test('a cursor that moves after reconciliation refuses the sampled capture head'
   const f = await fixture()
   const prefix = await f.member.controlWalk.reconcileCommitPrefix()
   expect(prefix).toMatchObject({ kind: 'complete', head: null })
-  await publishCommit({ hub: f.hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+  await publishCommit({
+    authenticator: memoryAuthenticator(f.member.mls),
+    hub: f.hub,
+    senderDID: 'alice',
+    recoverySecret: secret,
+    epoch: 1,
+  })
   await f.member.peer.replay()
   await expect(f.member.mls.sealGroupInfo(f.request, null)).rejects.toThrow()
   const next = await f.member.controlWalk.reconcileCommitPrefix()
@@ -285,6 +303,7 @@ test('authenticated progress repairs capture coverage after a retained gap', asy
   const f = await retainedGap()
   expect(await f.ask()).toBe(false)
   await publishCommit({
+    authenticator: memoryAuthenticator(f.member.mls),
     hub: f.hub,
     senderDID: 'bob',
     committerDID: 'alice',

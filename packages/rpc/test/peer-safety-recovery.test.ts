@@ -27,7 +27,7 @@ import {
   publishedCommitDigest,
 } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import {
   buildRejoinRecord,
   latchPeerSafety,
@@ -66,6 +66,7 @@ async function responderRequest(
   let digest = 'external'
   if (kind === 'verdict') {
     const row = await publishCommit({
+      authenticator: memoryAuthenticator(member.mls),
       hub,
       senderDID: 'alice',
       recoverySecret: secret,
@@ -217,7 +218,13 @@ test.each(
     const recovering =
       trigger === 'consumer' ? member.peer.recover().catch((error: unknown) => error) : undefined
     if (trigger === 'automatic')
-      await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 3 })
+      await publishCommit({
+        authenticator: memoryAuthenticator(member.mls),
+        hub,
+        senderDID: 'alice',
+        recoverySecret: secret,
+        epoch: 3,
+      })
     await entered.promise
     latchPeerSafety(member, reason)
     const error =
@@ -351,7 +358,13 @@ test.each(reasons)(
       return request
     })
     const apply = vi.spyOn(member.mls.capturedRecovery ?? member.mls, 'applyRecovery')
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 3 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(member.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret: secret,
+      epoch: 3,
+    })
     await entered.promise
     latchPeerSafety(member, reason)
     const publish = vi.spyOn(hub, 'publish')
@@ -484,7 +497,13 @@ test.each(reasons)('automatic recovery stops after a reply wait (%s)', async (re
     created.resolve({ requestID, request: result.request })
     return result
   })
-  await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 3 })
+  await publishCommit({
+    authenticator: memoryAuthenticator(member.mls),
+    hub,
+    senderDID: 'alice',
+    recoverySecret: secret,
+    epoch: 3,
+  })
   const { requestID, request } = await created.promise
   await vi.waitFor(() => expect(hub.published.some((row) => row.senderDID === 'bob')).toBe(true))
   const alice = createMemoryGroupMLS({
@@ -640,7 +659,13 @@ test.each(reasons)(
     })
     const apply = vi.spyOn(member.mls.capturedRecovery ?? member.mls, 'applyRecovery')
     const restore = vi.spyOn(member.mls.capturedRecovery ?? member.mls, 'restoreRecovery')
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 3 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(alice),
+      hub,
+      senderDID: 'alice',
+      recoverySecret: secret,
+      epoch: 3,
+    })
     await entered.promise
     latchPeerSafety(member, reason)
     const sent = hub.published.filter((row) => row.senderDID === 'bob').length
@@ -661,6 +686,7 @@ test.each(reasons)(
     const fetch = vi.spyOn(hub, 'fetchTopic')
     const verdict = vi.spyOn(member.mls, 'sealRecoveryVerdict')
     await publishCommit({
+      authenticator: memoryAuthenticator(member.mls),
       hub,
       senderDID: 'alice',
       recoverySecret: secret,

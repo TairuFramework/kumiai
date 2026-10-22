@@ -172,6 +172,7 @@ describe('peer host drain', { concurrent: false }, () => {
       return save(...args)
     }
     const bob = makeMLSPeer(hub, 'bob', secret, {
+      members: ['bob', 'alice'],
       appCursorStore,
       handlers: {
         'chat/posted': () => {
@@ -179,7 +180,7 @@ describe('peer host drain', { concurrent: false }, () => {
         },
       },
     })
-    const alice = makeMLSPeer(hub, 'alice', secret)
+    const alice = makeMLSPeer(hub, 'alice', secret, { members: ['bob', 'alice'] })
     try {
       await alice.peer
         .protocol('chat')

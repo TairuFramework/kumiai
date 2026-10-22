@@ -8,7 +8,11 @@ import { assertFrameFits, FrameTooLargeError } from '../src/index.js'
 import { encodeLedgerEntries } from '../src/ledger-entries.js'
 import { encodeRecoveryReply } from '../src/recovery.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import {
+  createMemoryGroupMLS,
+  memoryAuthenticator,
+  tagMemoryCommit,
+} from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 
 test('measures final base64 at the hub boundary', () => {
@@ -44,7 +48,10 @@ test('frameCapBeforeSideEffects', async () => {
           const data = JSON.parse(new TextDecoder().decode(built.commit)) as Record<string, unknown>
           const empty = new TextEncoder().encode(JSON.stringify({ ...data, padding: '' }))
           const padding = 'x'.repeat(rawFrameBytes - empty.length - sealed.sealed.length - 9)
-          const commit = new TextEncoder().encode(JSON.stringify({ ...data, padding }))
+          const commit = tagMemoryCommit(
+            new TextEncoder().encode(JSON.stringify({ ...data, padding })),
+            memoryAuthenticator(member.mls),
+          )
           const candidate = createMemoryGroupMLS({ recoverySecret: new Uint8Array(32).fill(31) })
           candidate.restoreState(member.mls.serializeState())
           await candidate.processCommit(commit, {})

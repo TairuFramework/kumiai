@@ -5,7 +5,11 @@ import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { encodeMemoryCommit } from './fixtures/memory-group-mls.js'
+import {
+  createMemoryGroupMLS,
+  encodeMemoryCommit,
+  memoryAuthenticator,
+} from './fixtures/memory-group-mls.js'
 import { makeMLSPeer } from './fixtures/peer.js'
 
 const flush = (ms = 60) => new Promise((r) => setTimeout(r, ms))
@@ -74,6 +78,7 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     // Bob genuinely rejoins at Alice's epoch: claimed author and signer agree. She applies it and
     // rotates the anchor, which is the baseline the replay is measured against.
     const { sequenceID: original } = await publishCommit({
+      authenticator: memoryAuthenticator(alice.mls),
       hub,
       senderDID: 'bob',
       recoverySecret: rs,
@@ -151,6 +156,14 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
 
     // Both copies land before any peer exists, so nobody has recorded applying either.
     const { sequenceID: original } = await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({
+          recoverySecret: rs,
+          epoch: 1,
+          members: ['alice', 'bob', 'carol'],
+          localDID: 'carol',
+        }),
+      ),
       hub,
       senderDID: 'bob',
       recoverySecret: rs,
@@ -216,6 +229,14 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     // alone — which is the whole point. The hub-conformance floor bounds where a replay's
     // sequenceID lands; it says nothing about the order a reader is handed the log.
     const { sequenceID: original } = await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({
+          recoverySecret: rs,
+          epoch: 1,
+          members: ['alice', 'bob'],
+          localDID: 'alice',
+        }),
+      ),
       hub,
       senderDID: 'bob',
       recoverySecret: rs,
@@ -287,6 +308,14 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     // do by breaking its own compare-and-set. Bob's lands first, so it carries the lower
     // sequenceID and is the branch that stands.
     const { sequenceID: loserSeq } = await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({
+          recoverySecret: rs,
+          epoch: 1,
+          members: ['alice', 'bob'],
+          localDID: 'alice',
+        }),
+      ),
       hub,
       senderDID: 'bob',
       recoverySecret: rs,
@@ -295,6 +324,14 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
       external: true,
     })
     const { sequenceID: winnerSeq } = await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({
+          recoverySecret: rs,
+          epoch: 1,
+          members: ['alice', 'bob'],
+          localDID: 'alice',
+        }),
+      ),
       hub,
       senderDID: 'yolanda',
       recoverySecret: rs,
@@ -358,8 +395,26 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     // signed as part of it. Only the Commit itself is authenticated; the digest this branch keys
     // the fork check on has to track that boundary, or a re-seal that changes nothing MLS cares
     // about would read as a different commit and fork the whole group on it.
-    const commit = encodeMemoryCommit(1, 'bob', [], { external: true })
+    const commit = encodeMemoryCommit(1, 'bob', [], {
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({
+          recoverySecret: rs,
+          epoch: 1,
+          members: ['alice', 'bob'],
+          localDID: 'alice',
+        }),
+      ),
+      external: true,
+    })
     const { sequenceID: original } = await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({
+          recoverySecret: rs,
+          epoch: 1,
+          members: ['alice', 'bob'],
+          localDID: 'alice',
+        }),
+      ),
       hub,
       senderDID: 'bob',
       recoverySecret: rs,
@@ -370,6 +425,14 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
       entries: ['e1'],
     })
     const { sequenceID: resealed } = await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({
+          recoverySecret: rs,
+          epoch: 1,
+          members: ['alice', 'bob'],
+          localDID: 'alice',
+        }),
+      ),
       hub,
       senderDID: 'bob',
       recoverySecret: rs,

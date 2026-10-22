@@ -21,8 +21,9 @@ describe('the live lane replays a reconnecting member its mailbox backlog', () =
     const recoverySecret = new Uint8Array(32).fill(0x37)
     const seen: Array<unknown> = []
 
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
       epoch: 1,
       handlers: { 'chat/changed': (ctx: { data: unknown }) => void seen.push(ctx.data) },
     })

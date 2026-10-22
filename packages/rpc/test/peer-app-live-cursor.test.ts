@@ -35,7 +35,7 @@ describe('the live lane and the drain share one read position', () => {
     const seen: Array<unknown> = []
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
 
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
     await flush()
 
     // No roster change anywhere here, so the anchor never moves and there is one app topic for the
@@ -70,7 +70,11 @@ describe('the live lane and the drain share one read position', () => {
     // Bob comes up at epoch 1 and walks to 5. He is not subscribed when Alice publishes above, and
     // the hub pushes nothing to a member it has never had a live channel for, so the pull is the
     // only thing that can deliver this.
-    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      epoch: 1,
+      handlers,
+    })
     await flush()
     await flush()
 
@@ -98,8 +102,12 @@ describe('the live lane and the drain share one read position', () => {
     const seen: Array<unknown> = []
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
 
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
-    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      epoch: 1,
+      handlers,
+    })
     await flush()
 
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'read live' } })
@@ -113,7 +121,11 @@ describe('the live lane and the drain share one read position', () => {
     // The process dies and comes back over the same handle, journal, anchor and cursor store — a
     // restart, not a new member.
     await bob.peer.dispose()
-    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
+    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      restartOf: bob,
+      handlers,
+    })
     await flush()
     await flush()
 

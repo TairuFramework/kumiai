@@ -17,6 +17,7 @@ import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import {
   buildInviteCommit,
   buildLedgerCommit,
@@ -516,7 +517,13 @@ test.each(
     })
   }
   if (path === 'pre-adoption')
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(member.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret: secret,
+      epoch: 1,
+    })
   const entered = Promise.withResolvers<void>()
   const release = Promise.withResolvers<void>()
   const open = reader.unwrap.bind(reader)

@@ -1,8 +1,16 @@
 import { describe, expect, test, vi } from 'vitest'
 
 import type { WelcomeObligation } from '../src/control/types.js'
+import { commitTopic } from '../src/topic.js'
+import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { buildInviteCommit, makeMLSPeer, reconstructMemoryPeer } from './fixtures/peer.js'
+import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
+import {
+  buildInviteCommit,
+  makeMLSPeer,
+  reconstructMemoryPeer,
+  seedBuiltOperation,
+} from './fixtures/peer.js'
 
 const secret = new Uint8Array(32).fill(0x48)
 const obligation: WelcomeObligation = {
@@ -12,6 +20,73 @@ const obligation: WelcomeObligation = {
 }
 
 describe('durable Welcome obligations', () => {
+  test.each(['superseded', 'gap', 'unavailable'] as const)(
+    'a %s occurrence never releases a speculative Welcome after restart',
+    async (condition) => {
+      const hub = new FakeHub()
+      const member = makeMLSPeer(hub, 'alice', secret, { members: ['alice', 'carol'] })
+      let restarted: typeof member | undefined
+      try {
+        await member.peer.resync()
+        const op = await seedBuiltOperation(member, buildInviteCommit(member, 'bob'))
+        await member.peer.dispose()
+        await member.peer.drained()
+        if (condition === 'superseded') {
+          await publishCommit({
+            authenticator: memoryAuthenticator(member.mls),
+            hub,
+            senderDID: 'carol',
+            recoverySecret: secret,
+            epoch: op.slot.epoch,
+          })
+        } else {
+          await hub.publish({
+            senderDID: 'carol',
+            topicID: commitTopic(secret),
+            payload: new Uint8Array([0]),
+            retain: 'log',
+          })
+        }
+        const occurrence = await hub.publish({
+          senderDID: 'alice',
+          topicID: commitTopic(secret),
+          payload: op.slot.payload,
+          publishID: op.slot.publishID,
+          expectedHead: hub.head(commitTopic(secret)),
+          retain: 'log',
+        })
+        if (condition === 'gap') hub.trim(commitTopic(secret), occurrence.sequenceID)
+        restarted = await reconstructMemoryPeer(hub, 'alice', secret, member.database, {
+          welcomes: member.welcomes,
+        })
+        if (condition === 'unavailable') {
+          vi.spyOn(restarted.validation, 'restoreValidation').mockResolvedValue(null)
+        }
+        await restarted.peer.replay()
+        const snapshot = await restarted.control.load()
+        expect(restarted.welcomes).toEqual([])
+        expect(snapshot.welcomes).toEqual([])
+        expect(snapshot.controlHold).toBeNull()
+        if (condition === 'unavailable') {
+          expect(snapshot.commitOnce?.opID).toBe(op.id)
+          expect(snapshot.outcomes.some((row) => row.kind === 'landed')).toBe(false)
+          expect(restarted.mls.epoch()).toBe(op.slot.epoch)
+        } else {
+          expect(snapshot.commitOnce).toBeNull()
+          expect(snapshot.outcomes).toMatchObject([
+            { opID: op.id, kind: condition === 'superseded' ? 'lost' : 'unknown' },
+          ])
+          expect(restarted.mls.epoch()).toBe(op.slot.epoch + 1)
+        }
+      } finally {
+        await restarted?.peer.dispose()
+        await restarted?.peer.drained()
+        await member.peer.dispose()
+        await member.peer.drained()
+      }
+    },
+  )
+
   test('Welcome remains owed after landed outcome acknowledgement', async () => {
     const hub = new FakeHub()
     let attempts = 0

@@ -9,7 +9,11 @@ import { createMemoryAppCursorStore, type MemoryAppCursorStore } from './fixture
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto, type FakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryGroupMLS, type MemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import {
+  createMemoryGroupMLS,
+  type MemoryGroupMLS,
+  memoryAuthenticator,
+} from './fixtures/memory-group-mls.js'
 import { createMemoryAppOutbox } from './fixtures/outbox.js'
 import { makeMLSPeer, memoryOperationHost } from './fixtures/peer.js'
 
@@ -108,9 +112,16 @@ describe('the app-lane anchor survives a restart', () => {
     // Drift the group PAST the anchor: an update/no-op commit and a ledger-only commit, neither
     // touching the roster. The live epoch reaches 3; the anchor stays at 1, where the group's
     // topic is. Without this the restart below would prove nothing.
-    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'admin',
+      recoverySecret,
+      epoch: 1,
+    })
     await flush()
     await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'admin',
       recoverySecret,
@@ -188,6 +199,7 @@ describe('the app-lane anchor survives a restart', () => {
     // A Remove: the roster moves, so the anchor rotates to the post-commit epoch — and the store
     // must have it, or the restart below walks back onto the topic the evicted member holds.
     await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'admin',
       recoverySecret,
@@ -199,7 +211,13 @@ describe('the app-lane anchor survives a restart', () => {
     expect(bob.anchorStore.stored()?.epoch).toBe(2)
 
     // Drift past the rotated anchor, so the restart cannot land on it by accident.
-    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 2 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'admin',
+      recoverySecret,
+      epoch: 2,
+    })
     await flush()
     expect(bob.mls.epoch()).toBe(3)
 
@@ -243,10 +261,23 @@ describe('the app-lane anchor survives a restart', () => {
     // A Remove moves the roster, so the anchor rotates to the post-commit epoch — and only the
     // store holds it. Then drift past it, so a re-seeding restart lands somewhere else and says
     // so, rather than landing back on the anchor by luck.
-    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['alice'] })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'admin',
+      recoverySecret,
+      epoch: 1,
+      removes: ['alice'],
+    })
     await flush()
     expect(bob.peer.anchorEpoch()).toBe(2)
-    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 2 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'admin',
+      recoverySecret,
+      epoch: 2,
+    })
     await flush()
     expect(bob.mls.epoch()).toBe(3)
 

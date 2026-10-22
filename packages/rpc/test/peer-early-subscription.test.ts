@@ -6,6 +6,7 @@ import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { fakeEpochSecret } from './fixtures/fake-crypto.js'
+import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { makeMLSPeer } from './fixtures/peer.js'
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
@@ -64,12 +65,25 @@ for (const scenario of ['acknowledged', 'delayed', 'two epochs', 'expired'] as c
     try {
       await Promise.all([alice.peer.replay(), bob.peer.replay()])
       fake.detach('bob')
-      await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
+      await publishCommit({
+        authenticator: memoryAuthenticator(alice.mls),
+        hub,
+        senderDID: 'admin',
+        recoverySecret,
+        epoch: 1,
+        removes: ['carol'],
+      })
       await flush()
       await alice.peer.replay()
       if (scenario === 'two epochs') {
         fake.detach('alice')
-        await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 2 })
+        await publishCommit({
+          authenticator: memoryAuthenticator(alice.mls),
+          hub,
+          senderDID: 'admin',
+          recoverySecret,
+          epoch: 2,
+        })
       }
       fake.reattach('bob')
       fake.redeliver('bob')

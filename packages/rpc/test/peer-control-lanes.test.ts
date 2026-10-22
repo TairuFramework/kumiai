@@ -11,7 +11,7 @@ import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { createMemoryAppOutbox } from './fixtures/outbox.js'
 import {
   buildLedgerCommit,
@@ -71,7 +71,14 @@ describe('control lane lifecycle', () => {
     expect(hub.subscriberCount(chatTopic(1))).toBe(1)
 
     // Evicting carol is what rotates the app lane: the topic moves, both control topics stay.
-    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
+    await publishCommit({
+      authenticator: memoryAuthenticator(mls),
+      hub,
+      senderDID: 'admin',
+      recoverySecret,
+      epoch: 1,
+      removes: ['carol'],
+    })
     await flush()
 
     expect(hub.subscriberCount(commits)).toBe(1)
@@ -219,7 +226,14 @@ describe('control lane lifecycle', () => {
     // Evicting carol rotates the anchor: the group's messages move to a topic this peer reaches
     // by PULLING it — the drain subscribes the segment it rotated onto before anything listens
     // there. That subscribe is the one a member that is away makes, and it asks for the window.
-    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
+    await publishCommit({
+      authenticator: memoryAuthenticator(mls),
+      hub,
+      senderDID: 'admin',
+      recoverySecret,
+      epoch: 1,
+      removes: ['carol'],
+    })
     await flush()
 
     expect(hub.subscriberCount(protocolTopic(fakeEpochSecret(2, APP_TOPIC_LABEL), 2, 'chat'))).toBe(
@@ -275,14 +289,20 @@ describe('control lane lifecycle', () => {
   test('a Commit advances and resyncs every receiver', async () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x44)
-    const bob = makeMLSPeer(hub, 'bob', recoverySecret)
-    const carol = makeMLSPeer(hub, 'carol', recoverySecret)
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { members: ['bob', 'carol'] })
+    const carol = makeMLSPeer(hub, 'carol', recoverySecret, { members: ['bob', 'carol'] })
     await flush()
 
     const { secret } = await bob.crypto.exportSecret(APP_TOPIC_LABEL)
     expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(2)
 
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(carol.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret,
+      epoch: 1,
+    })
     await flush()
 
     expect(bob.mls.epoch()).toBe(2)
@@ -309,6 +329,7 @@ describe('control lane lifecycle', () => {
     const { secret } = await bob.crypto.exportSecret(APP_TOPIC_LABEL)
     // A Commit with no bytes: read as a frame, but nothing a member can apply.
     await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'alice',
       recoverySecret,
@@ -327,8 +348,8 @@ describe('control lane lifecycle', () => {
   test('an accepted commit appends to the log and resyncs the sender', async () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x55)
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret)
-    const bob = makeMLSPeer(hub, 'bob', recoverySecret)
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'] })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { members: ['alice', 'bob'] })
     await flush()
 
     const { secret } = await alice.crypto.exportSecret(APP_TOPIC_LABEL)

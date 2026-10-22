@@ -7,7 +7,7 @@ import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 import { controlRecoveryClock, drainUntil } from './fixtures/recovery-clock.js'
 
@@ -153,7 +153,15 @@ describe('recovery lifecycle', { concurrent: false }, () => {
     controlRecoveryClock(40)
     const hub = new FakeHub()
     const rs = secret(0xb5)
-    await publishCommit({ hub, senderDID: 'carol', recoverySecret: rs, epoch: 3 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: rs, epoch: 3, members, localDID: 'carol' }),
+      ),
+      hub,
+      senderDID: 'carol',
+      recoverySecret: rs,
+      epoch: 3,
+    })
     const carol = makeMLSPeer(hub, 'carol', rs, {
       epoch: 3,
       members,
@@ -176,6 +184,7 @@ describe('recovery lifecycle', { concurrent: false }, () => {
     expect(events[0]).toMatchObject({ trigger: 'automatic', groupID: commitTopic(rs) })
     expect(strands).toHaveLength(1)
     const next = await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'zoe',
       recoverySecret: rs,
@@ -423,7 +432,15 @@ describe('recovery lifecycle', { concurrent: false }, () => {
   test('an automatic attempt and consumer call share one terminal event', async () => {
     const hub = new FakeHub()
     const rs = secret(0xb8)
-    await publishCommit({ hub, senderDID: 'zoe', recoverySecret: rs, epoch: 3 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: rs, epoch: 3, members, localDID: 'bob' }),
+      ),
+      hub,
+      senderDID: 'zoe',
+      recoverySecret: rs,
+      epoch: 3,
+    })
     const events: Array<RecoveryEvent> = []
     const bob = makeMLSPeer(hub, 'bob', rs, {
       members,
@@ -527,7 +544,13 @@ describe('recovery lifecycle', { concurrent: false }, () => {
     const hidden = hub.published.filter((row) => row.topicID === commitTopic(rs)).at(-1)
     if (hidden === undefined) throw new Error('Missing withheld rotation')
     hub.hideFrom('bob', hidden.sequenceID)
-    await publishCommit({ hub, senderDID: 'carol', recoverySecret: rs, epoch: 3 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(carol.mls),
+      hub,
+      senderDID: 'carol',
+      recoverySecret: rs,
+      epoch: 3,
+    })
 
     const bobCrypto = createFakeCrypto({ epoch: 1, localDID: 'bob' })
     const bobMLS = createMemoryGroupMLS({
@@ -602,7 +625,13 @@ describe('recovery lifecycle', { concurrent: false }, () => {
       },
     })
     await bob.peer.replay()
-    await publishCommit({ hub, senderDID: 'bob', recoverySecret: rs, epoch: 3 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'bob',
+      recoverySecret: rs,
+      epoch: 3,
+    })
     await expect(
       bob.peer.commit(buildLedgerCommit(bob, ['role:alice=admin'])),
     ).rejects.toBeInstanceOf(PeerDisposedError)

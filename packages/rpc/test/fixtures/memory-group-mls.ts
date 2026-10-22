@@ -2252,6 +2252,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         if (
           parsed == null ||
           parsed.epoch !== epoch ||
+          !verifyMemoryCommitTag(commit, authenticator()) ||
           parsed.external !== true ||
           parsed.invalidContent === true ||
           parsed.missingProposal === true ||
@@ -2274,8 +2275,6 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       }),
     processCommit: (commit: Uint8Array, context: CommitContext) =>
       serialise(async () => {
-        lastSender = context.senderDID
-        seen += 1
         const parsed = decodeMemoryCommit(commit)
         if (parsed == null) {
           return { applied: false, advanced: false, epochBefore: epoch, epochAfter: epoch }
@@ -2287,6 +2286,19 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         if (parsed.epoch !== epoch) {
           return { applied: false, advanced: false, epochBefore: epoch, epochAfter: epoch }
         }
+
+        if (!verifyMemoryCommitTag(commit, authenticator())) {
+          return {
+            applied: false,
+            advanced: false,
+            epochBefore: epoch,
+            epochAfter: epoch,
+            refusal: 'invalid' as const,
+          }
+        }
+
+        lastSender = context.senderDID
+        seen += 1
 
         // Sender-data authorship and commit-content validity are separate in real MLS. A hub can
         // change ciphertext beyond the sampled prefix without breaking the sender-data read.
@@ -2588,6 +2600,10 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       return recoverySecret
     },
   }
+}
+
+export function memoryAuthenticator(mls: Pick<MemoryGroupMLS, 'authenticator'>): Uint8Array {
+  return mls.authenticator()
 }
 
 export function decodeMemoryGroupIdentity(

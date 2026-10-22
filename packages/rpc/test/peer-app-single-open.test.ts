@@ -35,8 +35,9 @@ describe('the app lane opens each live frame once', () => {
       },
     }
 
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
       epoch: 1,
       crypto: counting,
       handlers: { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) },

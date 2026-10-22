@@ -16,6 +16,7 @@ import {
   createMemoryGroupMLS,
   decodeMemoryCommit,
   encodeMemoryCommit,
+  memoryAuthenticator,
 } from './fixtures/memory-group-mls.js'
 import { makeMLSPeer } from './fixtures/peer.js'
 
@@ -53,7 +54,13 @@ describe('commit strand observations', () => {
       epochAfter: 1,
       refusal: 'invalid',
     })
-    const frame = await publishCommit({ hub, senderDID: 'carol', recoverySecret: rs, epoch: 1 })
+    const frame = await publishCommit({
+      authenticator: memoryAuthenticator(mls),
+      hub,
+      senderDID: 'carol',
+      recoverySecret: rs,
+      epoch: 1,
+    })
     const onStrand = vi.fn()
     const bob = makeMLSPeer(hub, 'bob', rs, { mls, members, onStrand })
     try {
@@ -93,7 +100,13 @@ describe('commit strand observations', () => {
           epochAfter: 1,
           validation: 'unavailable',
         })
-      const frame = await publishCommit({ hub, senderDID: 'carol', recoverySecret: rs, epoch: 1 })
+      const frame = await publishCommit({
+        authenticator: memoryAuthenticator(mls),
+        hub,
+        senderDID: 'carol',
+        recoverySecret: rs,
+        epoch: 1,
+      })
       const observations: Array<StrandObservation> = []
       const bob = makeMLSPeer(hub, 'bob', rs, {
         mls,
@@ -123,6 +136,9 @@ describe('commit strand observations', () => {
       hub.acceptAtAnyHead()
       const rs = secret(branch === 'losing' ? 0x97 : 0x98)
       const winner = await publishCommit({
+        authenticator: memoryAuthenticator(
+          createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members, localDID: 'bob' }),
+        ),
         hub,
         senderDID: 'carol',
         recoverySecret: rs,
@@ -130,6 +146,9 @@ describe('commit strand observations', () => {
         entries: ['role:carol=admin'],
       })
       const loser = await publishCommit({
+        authenticator: memoryAuthenticator(
+          createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members, localDID: 'bob' }),
+        ),
         hub,
         senderDID: 'alice',
         recoverySecret: rs,
@@ -176,6 +195,9 @@ describe('commit strand observations', () => {
     const hub = new FakeHub()
     const rs = secret(0x91)
     const { sequenceID } = await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members, localDID: 'bob' }),
+      ),
       hub,
       senderDID: 'bob',
       recoverySecret: rs,
@@ -220,7 +242,13 @@ describe('commit strand observations', () => {
   test('tampered own content without a valid content signature is skipped without recovery', async () => {
     const hub = new FakeHub()
     const rs = secret(0x9a)
-    const original = decodeMemoryCommit(encodeMemoryCommit(1, 'bob'))
+    const original = decodeMemoryCommit(
+      encodeMemoryCommit(1, 'bob', [], {
+        authenticator: memoryAuthenticator(
+          createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members, localDID: 'bob' }),
+        ),
+      }),
+    )
     if (original == null) throw new Error('missing memory commit')
     // The port double models a ciphertext edit beyond the sender-data sample: authorship is
     // still readable, while the commit content is invalid and cannot be processed.
@@ -230,6 +258,7 @@ describe('commit strand observations', () => {
     expect(await reader.processCommit(tampered, {})).toMatchObject({ advanced: false })
 
     const { sequenceID } = await publishCommit({
+      authenticator: memoryAuthenticator(reader),
       hub,
       senderDID: 'zoe',
       recoverySecret: rs,
@@ -266,8 +295,24 @@ describe('commit strand observations', () => {
   test('many ahead frames across pulls report one claimed observation', async () => {
     const hub = new FakeHub()
     const rs = secret(0x92)
-    const first = await publishCommit({ hub, senderDID: 'zoe', recoverySecret: rs, epoch: 3 })
-    const second = await publishCommit({ hub, senderDID: 'zoe', recoverySecret: rs, epoch: 4 })
+    const first = await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: rs, epoch: 3, members, localDID: 'bob' }),
+      ),
+      hub,
+      senderDID: 'zoe',
+      recoverySecret: rs,
+      epoch: 3,
+    })
+    const second = await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: rs, epoch: 4, members, localDID: 'bob' }),
+      ),
+      hub,
+      senderDID: 'zoe',
+      recoverySecret: rs,
+      epoch: 4,
+    })
     const observations: Array<StrandObservation> = []
     const recoveries: Array<RecoveryEvent> = []
     const bob = makeMLSPeer(hub, 'bob', rs, {
@@ -293,7 +338,13 @@ describe('commit strand observations', () => {
     await vi.waitFor(() =>
       expect(recoveries.filter((event) => event.phase === 'failed')).toHaveLength(1),
     )
-    await publishCommit({ hub, senderDID: 'zoe', recoverySecret: rs, epoch: 5 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'zoe',
+      recoverySecret: rs,
+      epoch: 5,
+    })
     await vi.waitFor(() =>
       expect(recoveries.filter((event) => event.phase === 'failed')).toHaveLength(2),
     )
@@ -338,7 +389,15 @@ describe('commit strand observations', () => {
   test('later own evidence upgrades an open ahead episode once', async () => {
     const hub = new FakeHub()
     const rs = secret(0x95)
-    await publishCommit({ hub, senderDID: 'zoe', recoverySecret: rs, epoch: 3 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: rs, epoch: 3, members, localDID: 'bob' }),
+      ),
+      hub,
+      senderDID: 'zoe',
+      recoverySecret: rs,
+      epoch: 3,
+    })
     const observations: Array<StrandObservation> = []
     const bob = makeMLSPeer(hub, 'bob', rs, {
       members,
@@ -348,7 +407,13 @@ describe('commit strand observations', () => {
       },
     })
     await vi.waitFor(() => expect(observations).toHaveLength(1))
-    await publishCommit({ hub, senderDID: 'bob', recoverySecret: rs, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'bob',
+      recoverySecret: rs,
+      epoch: 1,
+    })
     await hub.publish({ senderDID: 'zoe', topicID: commitTopic(rs), payload: new Uint8Array([0]) })
     await vi.waitFor(() => expect(observations).toHaveLength(2))
     expect(observations.map((o) => o.kind)).toEqual(['ahead', 'own-unmerged'])
@@ -389,7 +454,15 @@ describe('commit strand observations', () => {
   test('applied commits and replayed history never open an episode', async () => {
     const hub = new FakeHub()
     const rs = secret(0x99)
-    const first = await publishCommit({ hub, senderDID: 'carol', recoverySecret: rs, epoch: 1 })
+    const first = await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members, localDID: 'bob' }),
+      ),
+      hub,
+      senderDID: 'carol',
+      recoverySecret: rs,
+      epoch: 1,
+    })
     const original = hub.published.find((message) => message.sequenceID === first.sequenceID)
     if (original == null) throw new Error('missing published commit')
     await hub.publish({
@@ -419,12 +492,24 @@ test('a later ordinary strand replaces the previous durable reason at the same e
   const bob = makeMLSPeer(hub, 'bob', rs, { members, recovery })
   try {
     await bob.peer.replay()
-    await publishCommit({ hub, senderDID: 'zoe', recoverySecret: rs, epoch: 3 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'zoe',
+      recoverySecret: rs,
+      epoch: 3,
+    })
     await vi.waitFor(async () => expect((await bob.control.load()).strand?.reason).toBe('ahead'))
     bob.mls.readCommitHeader = async () => {
       throw Object.assign(new Error('missing key'), { name: 'CommitValidationUnavailableError' })
     }
-    await publishCommit({ hub, senderDID: 'carol', recoverySecret: rs, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'carol',
+      recoverySecret: rs,
+      epoch: 1,
+    })
     await vi.waitFor(async () =>
       expect((await bob.control.load()).strand?.reason).toBe('unprocessable-gap'),
     )

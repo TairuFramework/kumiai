@@ -23,9 +23,13 @@ describe('GroupMLS port', () => {
     const older = createMemoryGroupMLS({ recoverySecret: new Uint8Array(32).fill(1), epoch: 1 })
     // A commit framed at an epoch this member is not at is not one it can apply — real MLS
     // cannot even decrypt it. It is history, not a failure.
-    expect(await mls.processCommit(older.buildCommit(), {})).toMatchObject({ advanced: false })
+    expect(await mls.processCommit(older.buildCommit(), { senderDID: 'alice' })).toMatchObject({
+      applied: false,
+      advanced: false,
+    })
     expect(mls.epoch()).toBe(2)
-    expect(mls.seen()).toBe(1)
+    expect(mls.seen()).toBe(0)
+    expect(mls.lastSender()).toBeUndefined()
   })
 
   test('a commit says who wrote it, and at what epoch, without being applied', async () => {
@@ -64,11 +68,13 @@ describe('GroupMLS port', () => {
       recoverySecret: new Uint8Array(32).fill(1),
       epoch: 1,
       localDID: 'mallory',
+      members: ['mallory', 'bob'],
     })
     const bob = createMemoryGroupMLS({
       recoverySecret: new Uint8Array(32).fill(1),
       epoch: 1,
       localDID: 'bob',
+      members: ['mallory', 'bob'],
       acceptsCommitter: (did) => did !== 'mallory',
     })
     // A refusal is a `{ advanced: false }`, never a throw: the lane's rule is that a throw
@@ -76,6 +82,7 @@ describe('GroupMLS port', () => {
     // is a commit that will be refused every time.
     expect(await bob.processCommit(removed.buildCommit(), { senderDID: 'mallory' })).toMatchObject({
       advanced: false,
+      refusal: 'policy',
     })
     expect(bob.epoch()).toBe(1)
     expect(bob.seen()).toBe(1)
