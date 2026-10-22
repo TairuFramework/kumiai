@@ -67,9 +67,9 @@ for (const mode of ['real-mls', 'double'] as const) {
       return { fixture, recovery }
     }
 
-    // R3 owns source-build closure and final outcome routing before continuation work.
     test('switch closes the acknowledged source build before destination completion', async () => {
-      const { fixture } = await setup('captured', true)
+      const initial = await setup('captured', true)
+      let fixture = initial.fixture
       try {
         const control = await fixture.device.groups.ports(source).control.load()
         expect(control.operations).toEqual([])
@@ -80,6 +80,10 @@ for (const mode of ['real-mls', 'double'] as const) {
           { id: expect.any(String), opID: 'rotation', at: expect.any(Number), kind: 'unknown' },
         ])
         expect(control.outcomes[1]?.id).not.toBe('rotation')
+        expect(control.welcomes).toEqual([welcome])
+        fixture = await fixture.reopen()
+        expect(await fixture.device.groups.ports(source).control.load()).toEqual(control)
+        expect((await fixture.device.groups.ports(destination).control.load()).welcomes).toEqual([])
       } finally {
         await fixture.close()
       }

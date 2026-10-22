@@ -20,6 +20,7 @@ import { commitTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import {
+  buildInviteCommit,
   buildLedgerCommit,
   makeMLSPeer,
   seedBuiltOperation,
@@ -50,8 +51,88 @@ async function fixture(onSafetyEvent = vi.fn()) {
   return { member, hub, onSafetyEvent }
 }
 
-// R3: independent Welcome service must honour safety/lifecycle routing without historical validation.
-test.todo('independent Welcome service observes durable safety and lifecycle routing before retry')
+test.each(['fork-halted', 'recovery-unavailable'] as const)(
+  'independent Welcome service delivers owed work under durable %s without historical validation',
+  async (reason) => {
+    const { member, hub } = await fixture()
+    await member.peer.dispose()
+    await member.peer.drained()
+    const obligation = {
+      opID: 'owed-invite',
+      welcome: new Uint8Array([4, 5, 6]),
+      recipients: ['guest'],
+      committed: true as const,
+    }
+    await member.control.apply(
+      {
+        putWelcomes: [obligation],
+        ...(reason === 'fork-halted'
+          ? { forkHalt: { eventID: forkEventID(member.control.key), evidence, detectedAt: 1 } }
+          : {
+              recoveryUnavailable: {
+                ...member.control.key,
+                id: recoveryUnavailableEventID(member.control.key),
+                kind: 'group:recovery-unavailable' as const,
+                reason: 'trust-unreadable' as const,
+              },
+            }),
+      },
+      'owed-under-halt',
+    )
+    const validation = vi.fn(async (): Promise<never> => {
+      throw new Error('Historical validation unavailable')
+    })
+    const deliverWelcome = vi.fn(async () => {})
+    const again = makeMLSPeer(hub, 'alice', secret, {
+      restartOf: member,
+      readEvidence: validation,
+      adopt: validation,
+      deliverWelcome,
+    })
+    peers.push(again)
+    const process = vi.spyOn(again.mls, 'processCommit')
+    await again.peer.replay()
+    expect(again.controlWalk.safetyHold()).toBe(reason)
+    expect(deliverWelcome).toHaveBeenCalledExactlyOnceWith(obligation)
+    expect((await again.control.load()).welcomes).toEqual([])
+    expect((await again.control.load()).outcomes).toEqual([])
+    expect(validation).not.toHaveBeenCalled()
+    expect(process).not.toHaveBeenCalled()
+  },
+)
+
+test('disposal after owed Welcome acceptance retains its bytes for the next owner', async () => {
+  const { member, hub } = await fixture()
+  await member.peer.dispose()
+  await member.peer.drained()
+  const obligation = {
+    opID: 'owed-before-disposal',
+    welcome: new Uint8Array([7, 8, 9]),
+    recipients: ['guest'],
+    committed: true as const,
+  }
+  await member.control.apply({ putWelcomes: [obligation] }, 'owed-before-disposal')
+  const attempts: Array<unknown> = []
+  const stopping = makeMLSPeer(hub, 'alice', secret, {
+    restartOf: member,
+    deliverWelcome: async (row) => {
+      attempts.push(structuredClone(row))
+      void stopping.peer.dispose()
+    },
+  })
+  peers.push(stopping)
+  await stopping.peer.replay().catch(() => {})
+  await stopping.peer.dispose()
+  await stopping.peer.drained()
+  expect(attempts).toEqual([obligation])
+  expect((await stopping.control.load()).welcomes).toEqual([obligation])
+  const deliverWelcome = vi.fn(async () => {})
+  const again = makeMLSPeer(hub, 'alice', secret, { restartOf: stopping, deliverWelcome })
+  peers.push(again)
+  await again.peer.replay()
+  expect(deliverWelcome).toHaveBeenCalledExactlyOnceWith(obligation)
+  expect((await again.control.load()).welcomes).toEqual([])
+})
 
 test('fork halt latches immediately, persists only safety, and notifies once after proof', async () => {
   const { member, onSafetyEvent } = await fixture()
@@ -335,9 +416,61 @@ test.each(['handshake', 'commit-frame', 'sealed-entries'] as const)(
   },
 )
 
-// R3: clock-only provisional reporting under safety halt retains the build and reports once.
-test.todo(
-  'live-build deadlines report provisional unknown under a halt using storage only across restart',
+test.each(['fork-halted', 'recovery-unavailable'] as const)(
+  'live-build deadlines report once under %s using storage only across restart and ack',
+  async (reason) => {
+    const { member, hub } = await fixture()
+    const saved = await seedBuiltOperation(member, buildInviteCommit(member, 'guest'))
+    await member.control.apply(
+      reason === 'fork-halted'
+        ? { forkHalt: { eventID: forkEventID(member.control.key), evidence, detectedAt: 1 } }
+        : {
+            recoveryUnavailable: {
+              ...member.control.key,
+              id: recoveryUnavailableEventID(member.control.key),
+              kind: 'group:recovery-unavailable',
+              reason: 'trust-unreadable',
+            },
+          },
+      'held-live-build',
+    )
+    vi.useFakeTimers()
+    vi.setSystemTime(saved.slot.deadline)
+    const fetch = vi.spyOn(hub, 'fetchTopic')
+    const publish = vi.spyOn(hub, 'publish')
+    const epoch = vi.spyOn(member.mls, 'readEpoch')
+    const validation = vi.spyOn(member.validation, 'restoreValidation')
+    const prepare = vi.spyOn(member.mls, 'createRecoveryRequest')
+    await member.peer.replay()
+    const before = await member.control.load()
+    expect(before.commitOnce).toEqual({ ...saved.slot, reported: true })
+    expect(before.outcomes).toEqual([
+      { id: expect.any(String), opID: saved.id, kind: 'unknown', at: saved.slot.deadline },
+    ])
+    const report = before.outcomes[0]
+    if (report === undefined) throw new Error('Missing deadline report')
+    await member.peer.ack(report.id)
+    await member.peer.replay()
+    expect((await member.control.load()).outcomes).toEqual([])
+    expect(fetch).not.toHaveBeenCalled()
+    expect(publish).not.toHaveBeenCalled()
+    expect(epoch).not.toHaveBeenCalled()
+    expect(validation).not.toHaveBeenCalled()
+    expect(prepare).not.toHaveBeenCalled()
+    await member.peer.dispose()
+    await member.peer.drained()
+    const again = makeMLSPeer(hub, 'alice', secret, { restartOf: member })
+    peers.push(again)
+    await again.peer.replay()
+    const after = await again.control.load()
+    expect(after.commitOnce).toEqual(before.commitOnce)
+    expect(after.outcomes).toEqual([])
+    expect(after.welcomes).toEqual([])
+    expect(after.forkHalt).toEqual(before.forkHalt)
+    expect(after.recoveryUnavailable).toEqual(before.recoveryUnavailable)
+    expect(fetch).not.toHaveBeenCalled()
+    expect(publish).not.toHaveBeenCalled()
+  },
 )
 
 test('control publication rechecks safety after suspended source evidence', async () => {

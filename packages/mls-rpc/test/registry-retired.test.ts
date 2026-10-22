@@ -77,7 +77,6 @@ for (const mode of ['real-mls', 'double'] as const) {
   describe(`retired storage service (${mode})`, () => {
     const create = () => createRegistryFixture({ mode, groupID: key.groupID, setup: 'seeded' })
 
-    // R3 owns independent Welcome delivery outside ownership and durable deletion.
     test('independent obligations deliver outside ownership then delete', async () => {
       const fixture = await create()
       try {
@@ -109,7 +108,6 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
-    // R3 owns obligation replay after transport acceptance and failed durable deletion.
     test('transport accepted crash before deletion repeats identical Welcome after durable reopen', async () => {
       let fixture = await create()
       try {
@@ -129,18 +127,27 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect(first.delivered).toEqual([])
         expect(first.remaining).toEqual(['invite'])
         expect(first.failures).toHaveLength(1)
+        expect((await fixture.device.groups.ports(key).control.load()).welcomes).toEqual([
+          { ...welcome, committed: true },
+        ])
         fixture = await fixture.reopen()
+        expect((await fixture.device.groups.ports(key).control.load()).commitOnce).toBeNull()
         expect(await serve()).toEqual({ delivered: ['invite'], remaining: [], failures: [] })
         expect(accepted).toEqual([
           { ...welcome, committed: true },
           { ...welcome, committed: true },
         ])
+        fixture = await fixture.reopen()
+        expect((await fixture.device.groups.ports(key).control.load()).welcomes).toEqual([])
+        expect(
+          (await fixture.device.groups.ports({ ...key, incarnation: 2 }).control.load()).welcomes,
+        ).toEqual([])
+        expect(fixture.restoreCount(key.groupID)).toBe(0)
       } finally {
         await fixture.close()
       }
     })
 
-    // R3 owns independent Welcome delivery and per-obligation failure isolation.
     test('one failed delivery does not block other obligations', async () => {
       const fixture = await create()
       try {
@@ -165,7 +172,6 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
-    // R3 owns retired outcome acknowledgement and obligation-service admission.
     test('retired outcome ack is fixed-key and idempotent; active keys refuse', async () => {
       const fixture = await create()
       try {
@@ -190,6 +196,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         await ackRetiredOutcome({ ...params, id: 'owed' })
         await ackRetiredOutcome({ ...params, id: 'owed' })
         expect(await listRetiredOutcomes(params)).toEqual([])
+        expect((await fixture.device.groups.ports(key).control.load()).welcomes).toEqual([welcome])
         expect(
           (await fixture.device.groups.ports({ ...key, incarnation: 2 }).control.load()).outcomes,
         ).toEqual([outcome])

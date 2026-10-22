@@ -97,6 +97,7 @@ export type {
   ControlValidationPort,
 } from './control/search.js'
 export {
+  type BuildClosure,
   type ControlSlotDeps,
   closeControlBuild,
   consumeOwnOccurrence,

@@ -173,7 +173,7 @@ function host(): ConformanceControlHost {
         else
           await identityTable.save('current', {
             ...after,
-            deleted: false,
+            deleted: after.deleted ?? false,
             epochAuthenticator: after.authenticator,
           })
         if (write !== undefined) {

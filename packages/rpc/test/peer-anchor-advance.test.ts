@@ -167,20 +167,18 @@ describe('a peer that adopts a journalled roster change reads its backlog and ro
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, members: MEMBERS, handlers })
     await flush()
 
-    // The hub takes Bob's eviction of Carol and the process dies before he adopts it. The slot
-    // carries the sequenceID it landed as, so the restart adopts straight out of it.
-
-    await bob.peer.enqueue(
-      buildRemoveCommit(bob, 'carol', {
-        onAdopt: async () => {
-          throw new Error('the process died here')
-        },
-      }),
-    )
-    await expect.poll(async () => (await bob.control.load()).operations[0]?.stage).toBe('accepted')
+    // The hub accepts the build before adoption fails. Restart installs it through the ordinary walk.
+    const request = buildRemoveCommit(bob, 'carol', {
+      onAdopt: async () => {
+        throw new Error('the process died here')
+      },
+    })
+    await bob.peer.enqueue(request)
+    await expect.poll(async () => (await bob.control.load()).commitOnce?.acceptedAs).toBeDefined()
     expect(bob.mls.epoch()).toBe(1) // it never adopted
     expect(bob.peer.anchorEpoch()).toBe(1)
-    expect(((await bob.control.load()).operations[0] ?? null)?.stage).toBe('accepted')
+    expect((await bob.control.load()).commitOnce).toMatchObject({ opID: request.id, epoch: 1 })
+    expect((await bob.control.load()).operations).toEqual([])
 
     await bob.peer.dispose()
     hub.detach('bob')
@@ -210,7 +208,8 @@ describe('a peer that adopts a journalled roster change reads its backlog and ro
     // And he took the anchor the roster change moved — the same one every member applying his
     // commit from the log reaches.
     expect(restarted.peer.anchorEpoch()).toBe(2)
-    expect((await restarted.control.load()).operations[0] ?? null).toBeNull()
+    expect((await restarted.control.load()).commitOnce).toBeNull()
+    expect((await restarted.control.load()).operations).toEqual([])
 
     await restarted.peer.dispose()
   })

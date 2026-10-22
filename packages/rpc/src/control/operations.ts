@@ -19,6 +19,7 @@ const publicationHeads = new WeakMap<
   ControlStore,
   { publishID: string; heads: Set<LogPosition | null> }
 >()
+const pendingReports = new WeakMap<ControlStore, Promise<void>>()
 
 export function landedChanges(
   op: Operation,
@@ -60,6 +61,7 @@ export type OperationDeps = {
   operationTimeoutMs?: number
   newID(): string
   emit(outcome: Outcome): void
+  scheduleReport?(deadline: number): void
 }
 
 export async function enqueueOperation(
@@ -113,12 +115,15 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
   return result.kind === 'saved' ? null : op
 }
 
-/** Replay is transport bookkeeping. Only the ordinary walk can consume and settle this build. */
-export async function stepLiveBuild(deps: OperationDeps): Promise<void> {
-  let snapshot = await deps.control.load()
-  let built = snapshot.commitOnce
-  if (built === null) return
-  if (deps.now() >= built.deadline && !built.reported) {
+/** Storage-only clock work stays independent of an unfinished publication or walk. */
+export function reportLiveBuild(
+  deps: Pick<OperationDeps, 'control' | 'now' | 'newID' | 'signal' | 'emit'>,
+): Promise<void> {
+  const pending = pendingReports.get(deps.control)
+  if (pending !== undefined) return pending
+  const reporting = (async () => {
+    const built = (await deps.control.load()).commitOnce
+    if (built === null || built.reported || deps.now() < built.deadline) return
     const outcome: Outcome = { id: deps.newID(), opID: built.opID, at: deps.now(), kind: 'unknown' }
     await applyResolved(
       deps.control,
@@ -128,7 +133,18 @@ export async function stepLiveBuild(deps: OperationDeps): Promise<void> {
       deps.signal,
     )
     deps.emit(outcome)
-  }
+  })().finally(() => pendingReports.delete(deps.control))
+  pendingReports.set(deps.control, reporting)
+  return reporting
+}
+
+/** Replay is transport bookkeeping. Only the ordinary walk can consume and settle this build. */
+export async function stepLiveBuild(deps: OperationDeps): Promise<void> {
+  let snapshot = await deps.control.load()
+  let built = snapshot.commitOnce
+  if (built === null) return
+  if (!built.reported) deps.scheduleReport?.(built.deadline)
+  await reportLiveBuild(deps)
   if (deps.safetyHold() !== null || controlSafetyHeld(snapshot) !== null) return
   try {
     await deps.pullToHead()

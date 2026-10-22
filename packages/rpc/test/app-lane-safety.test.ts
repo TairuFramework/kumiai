@@ -124,6 +124,154 @@ test.each(reasons)('two-frame drain stops at next open under %s', async (reason)
   expect(f.cursor.stored(f.topicID)).toBe('000000000002')
 })
 
+test('terminal plaintext completion ignores sealed predecessors without fetching or opening', async () => {
+  vi.useFakeTimers()
+  const f = await fixture()
+  try {
+    const first = f.messages[0]
+    if (first === undefined) throw new Error('Missing frame')
+    first.payload = await createFakeCrypto({ epoch: 2, localDID: 'alice' }).wrap(
+      encodeEventFrame('chat/posted', { sealed: true }),
+      { aad: encodeAppAAD({ topicID: f.topicID, intent: 'log' }) },
+    )
+    f.fetch.mockImplementation(async ({ after }) => ({
+      messages: after == null ? [first] : [],
+      head: first.sequenceID,
+      oldest: first.sequenceID,
+      gap: false,
+    }))
+    await f.lane.deliver()
+    const record = {
+      frame: {
+        id: 'already-opened',
+        topicID: f.topicID,
+        protocol: 'chat',
+        segment: 1,
+        position: '000000000002',
+      },
+      senderDID: 'alice',
+      payload: encodeEventFrame('chat/posted', { opened: true }),
+    }
+    f.records.set(record.frame.id, record)
+    await f.lane.restore([record])
+    const fetches = f.fetch.mock.calls.length
+    const opens = f.reader.starts.unwrap
+    let completed = false
+    const completing = f.lane.completeOpened().then(() => {
+      completed = true
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(f.fetch).toHaveBeenCalledTimes(fetches)
+    expect(f.reader.starts.unwrap).toBe(opens)
+    expect(completed).toBe(true)
+    expect(f.records.size).toBe(0)
+    expect(f.emit).toHaveBeenCalledExactlyOnceWith(
+      'chat/posted',
+      expect.objectContaining({ data: { opened: true } }),
+    )
+    await completing
+  } finally {
+    f.lane.dispose()
+    vi.useRealTimers()
+  }
+})
+
+test('terminal completion awaits an already committed open whose result is still pending', async () => {
+  vi.useFakeTimers()
+  const f = await fixture()
+  const opened = Promise.withResolvers<void>()
+  const returning = Promise.withResolvers<void>()
+  const handler = Promise.withResolvers<void>()
+  const unwrap = f.reader.unwrap.bind(f.reader)
+  vi.spyOn(f.reader, 'unwrap').mockImplementation(async (...args) => {
+    const result = await unwrap(...args)
+    opened.resolve()
+    await returning.promise
+    return result
+  })
+  f.emit.mockImplementation(async () => {
+    await handler.promise
+  })
+  const draining = f.lane.deliver()
+  try {
+    await opened.promise
+    expect(f.records.size).toBe(1)
+    let completed = false
+    const completing = f.lane.completeOpened().then(() => {
+      completed = true
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(completed).toBe(false)
+    returning.resolve()
+    await draining
+    await vi.advanceTimersByTimeAsync(0)
+    expect(completed).toBe(false)
+    expect(f.emit).toHaveBeenCalledOnce()
+    handler.resolve()
+    await vi.advanceTimersByTimeAsync(0)
+    await completing
+    expect(f.reader.starts.unwrap).toBe(1)
+    expect(f.records.size).toBe(0)
+  } finally {
+    returning.resolve()
+    handler.resolve()
+    await draining
+    f.lane.dispose()
+    vi.useRealTimers()
+  }
+})
+
+test.each([false, true])(
+  'completed plaintext drains even when the later cursor save rejects, terminal=%s',
+  async (terminal) => {
+    vi.useFakeTimers()
+    const f = await fixture()
+    try {
+      const first = f.messages[0]
+      if (first === undefined) throw new Error('Missing frame')
+      f.fetch.mockResolvedValue({
+        messages: [first],
+        head: first.sequenceID,
+        oldest: first.sequenceID,
+        gap: false,
+      })
+      const save = f.cursor.save
+      let failures = 0
+      let blocked = true
+      f.cursor.save = async (topic, position) => {
+        failures++
+        if (blocked) throw new Error('Cursor save unavailable')
+        await save(topic, position)
+      }
+      await f.lane.deliver()
+      let completed = false
+      const completing = terminal
+        ? f.lane.completeOpened().then(() => {
+            completed = true
+          })
+        : Promise.resolve()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(failures).toBeGreaterThanOrEqual(1)
+      expect(f.emit).toHaveBeenCalledOnce()
+      expect(f.complete).toHaveBeenCalledOnce()
+      expect(f.lane.pendingRecords()).toEqual([])
+      expect(completed).toBe(terminal)
+      expect(f.cursor.stored(f.topicID)).toBeNull()
+      blocked = false
+      if (!terminal) {
+        await f.lane.deliver()
+        expect(f.cursor.stored(f.topicID)).toBe(first.sequenceID)
+      }
+      expect(f.emit).toHaveBeenCalledOnce()
+      expect(f.complete).toHaveBeenCalledOnce()
+      await completing
+    } finally {
+      f.lane.dispose()
+      vi.useRealTimers()
+    }
+  },
+)
+
 test.each(reasons.flatMap((reason) => [false, true].map((delayed) => [reason, delayed] as const)))(
   'safety unwrap refusal stays retryable under %s (access await=%s)',
   async (reason, delayed) => {

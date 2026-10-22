@@ -21,7 +21,7 @@ const flush = () => new Promise((r) => setTimeout(r, 50))
  * double models it that way for the same reason.
  *
  * Count saves carrying a different anchor, excluding pre-advance records and their clears.
- * A capture also clears the segment buffer, which must survive this non-ratcheting removal.
+ * Terminal removal keeps the existing anchor and drains only already opened plaintext.
  */
 describe('a member removed by a commit it applies keeps its anchor', () => {
   test('the removal writes no new anchor, because nothing rotated', async () => {
@@ -80,9 +80,8 @@ describe('a member removed by a commit it applies keeps its anchor', () => {
     expect(anchorStore.stored()?.epoch).toBe(1)
     expect(anchorStore.stored()?.secret).toEqual(anchoredAt?.secret)
 
-    // The control: the drain ran and delivered, so the silence about the anchor is the gate and
-    // not a peer that did nothing.
-    expect(seen).toEqual([{ text: 'owed to bob' }])
+    // The terminal transaction forbids opening the encrypted backlog after removal.
+    expect(seen).toEqual([])
 
     await alice.peer.dispose()
     await restarted.peer.dispose()

@@ -1,6 +1,13 @@
 import { encodeEventFrame } from '@kumiai/broadcast'
 import { createGroup, encodeClientState, ownApplicationGeneration, restoreGroup } from '@kumiai/mls'
-import { encodeAppAAD, forkEventID, frameID, recoveryUnavailableEventID } from '@kumiai/rpc'
+import {
+  asLogPosition,
+  digestAppliedCommit,
+  encodeAppAAD,
+  forkEventID,
+  frameID,
+  recoveryUnavailableEventID,
+} from '@kumiai/rpc'
 import type { RegistryLeaseFixture } from '@kumiai/rpc-conformance'
 
 import { entryCapability } from '../../src/entry-capability.js'
@@ -16,6 +23,7 @@ import type {
   ReceiveInput,
   RegistryHandleAccess,
 } from '../../src/registry/types.js'
+import { createRegistryGroupMLS } from '../../src/registry-group-mls.js'
 import * as testing from '../../src/testing.js'
 import {
   createRegistryFixture,
@@ -125,7 +133,38 @@ export async function createRegistryLeaseFixture(
     async removePeer() {
       if (group === null) throw new Error('Removal requires a peer')
       await group.advance(1, async (commit) => {
-        await peer?.mutate((handle, persist) => handle.processMessage(commit, { persist }))
+        if (peer === null || peerFixture === null) return
+        const epoch = peer.epoch()
+        const position = asLogPosition(String(epoch + 1).padStart(6, '0'))
+        const digest = digestAppliedCommit(commit)
+        const mls = await createRegistryGroupMLS({
+          registry: peerFixture.registry,
+          key: peer.key,
+          identity: peerFixture.identity,
+          entrySlot: group.sender.slot,
+          recovery: peerFixture.environment,
+          target: { targetID: 'lease-hub', topicID: 'lease-commits' },
+        })
+        const removal = await mls.processCommit(commit, {
+          adoption: (candidate) => ({
+            mutationID: crypto.randomUUID(),
+            changes: {
+              commitOnce: null,
+              putApplied: [
+                {
+                  epoch,
+                  digest,
+                  payloadDigest: digest,
+                  sequenceID: position,
+                  opID: null,
+                  removed: true,
+                },
+              ],
+              cursor: { position, epoch: candidate.epochAfter },
+            },
+          }),
+        })
+        if (!removal.applied) throw new Error('Peer removal was not applied')
       })
     },
     async switchIncarnation() {

@@ -385,9 +385,8 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
-    // R3 owns retirement closure, independent revoke release and owed-work preservation.
     test('retirement closes live and queued operations while preserving owed artifacts', async () => {
-      const fixture = await create()
+      let fixture = await create()
       try {
         const state = await fixture.device.groups.loadState(source)
         if (state === null || state.deleted || state.state === null)
@@ -508,12 +507,16 @@ for (const mode of ['real-mls', 'double'] as const) {
         const final = (await control.load()).outcomes.find(({ opID }) => opID === 'old-operation')
         expect(final?.id).not.toBe('prior-report')
         expect(final?.id).not.toBe('old-operation')
+        const closed = await control.load()
+        expect(closed.welcomes).toEqual(before.welcomes)
         await expect(control.apply({ putRejoin: record }, 'retired-put')).rejects.toMatchObject({
           name: 'DisplacedGroupHandleError',
         })
         await expect(control.apply({ deleteRejoin: true }, 'retired-delete')).rejects.toMatchObject(
           { name: 'DisplacedGroupHandleError' },
         )
+        fixture = await fixture.reopen()
+        expect(await fixture.device.groups.ports(source).control.load()).toEqual(closed)
       } finally {
         await fixture.close()
       }

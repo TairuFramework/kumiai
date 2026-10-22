@@ -49,7 +49,7 @@ test('restart after remote acceptance searches before own walk', async () => {
   }
 })
 
-test('accepted restart rechecks checkpoint suffix before adoption or Welcome', async () => {
+test('restart retains an acknowledged build across a missing prefix without releasing its Welcome', async () => {
   const hub = new FakeHub()
   const original = makeMLSPeer(hub, 'alice', secret)
   await original.peer.resync()
@@ -60,6 +60,8 @@ test('accepted restart rechecks checkpoint suffix before adoption or Welcome', a
     buildInviteCommit(original, 'bob'),
     '000000000001',
   )
+  const savedBuild = (await original.control.load()).commitOnce
+  expect(savedBuild).toMatchObject({ acceptedAs: '000000000001' })
   await hub.publish({
     senderDID: 'alice',
     topicID: commitTopic(secret),
@@ -71,8 +73,12 @@ test('accepted restart rechecks checkpoint suffix before adoption or Welcome', a
   try {
     await restarted.peer.replay()
     expect(restarted.mls.epoch()).toBe(1)
-    expect((await restarted.control.load()).commitOnce).toEqual(operation.slot)
-    expect((await restarted.control.load()).controlHold?.reason).toBe('acceptance-unknown')
+    const snapshot = await restarted.control.load()
+    expect(snapshot.commitOnce).toEqual(savedBuild)
+    expect(snapshot.controlHold).toBeNull()
+    expect(snapshot.cursor).toMatchObject({ incomplete: true })
+    expect(snapshot.outcomes).toEqual([])
+    expect(snapshot.welcomes).toEqual([])
     expect(restarted.welcomes).toEqual([])
     expect(hub.published.filter((row) => row.topicID === rendezvousTopic(secret))).toEqual([])
   } finally {

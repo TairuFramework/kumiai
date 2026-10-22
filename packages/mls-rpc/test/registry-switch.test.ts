@@ -426,7 +426,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         })
         expect(await groups.ports(destination).control.load()).toEqual({
           commitOnce: null,
-          commitOnceAcceptance: null,
+          spentSource: null,
           controlHold: null,
           forkHalt: null,
           forkRecoveryAttempt: null,

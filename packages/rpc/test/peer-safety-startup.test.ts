@@ -561,9 +561,12 @@ test.each(reasons.flatMap((reason) => [false, true].map((restart) => [reason, re
 )
 
 test.each(reasons.flatMap((reason) => [false, true].map((restart) => [reason, restart] as const)))(
-  'committed Welcome handoff alone is allowed under %s, restart=%s',
+  'Welcome obligations survive failed handoff under %s, restart=%s',
   async (reason, restart) => {
-    const deliver = vi.fn(async (_row: WelcomeObligation) => {})
+    let available = false
+    const deliver = vi.fn(async (row: WelcomeObligation) => {
+      if (row.opID === 'legacy' && !available) throw new Error('transport unavailable')
+    })
     const { hub, member } = await seed({ deliverWelcome: deliver })
     const owed: WelcomeObligation = {
       opID: 'committed',
@@ -572,7 +575,7 @@ test.each(reasons.flatMap((reason) => [false, true].map((restart) => [reason, re
       committed: true,
     }
     const blocked: WelcomeObligation = {
-      opID: 'uncommitted',
+      opID: 'legacy',
       welcome: new Uint8Array([2, 4, 6]),
       recipients: ['carol'],
     }
@@ -595,14 +598,25 @@ test.each(reasons.flatMap((reason) => [false, true].map((restart) => [reason, re
     await runner.peer.outcomes()
     if (!restart) await runner.peer.replay()
     await vi.waitFor(async () => expect((await runner.control.load()).welcomes).toEqual([blocked]))
-    expect(deliver).toHaveBeenCalledExactlyOnceWith(owed)
+    expect(deliver).toHaveBeenNthCalledWith(1, owed)
+    expect(deliver).toHaveBeenNthCalledWith(2, blocked)
+    const attempts = deliver.mock.calls.length
+    expect(deliver.mock.calls.filter(([row]) => row.opID === owed.opID)).toHaveLength(1)
+    expect(deliver.mock.calls.slice(1)).toEqual(
+      Array.from({ length: attempts - 1 }, () => [blocked]),
+    )
+    available = true
+    await runner.peer.replay()
+    expect(deliver).toHaveBeenNthCalledWith(attempts + 1, blocked)
+    expect(deliver).toHaveBeenCalledTimes(attempts + 1)
+    expect((await runner.control.load()).welcomes).toEqual([])
     assertZero(network)
     assertZero(work)
   },
 )
 
 test.each(reasons)(
-  'held restart retries failed cleanup under %s without network',
+  'held restart retries failed deadline reporting under %s without network',
   async (reason) => {
     const onOutcome = vi.fn()
     const deliver = vi.fn(async (_row: WelcomeObligation) => {})
@@ -610,8 +624,6 @@ test.each(reasons)(
     const op = await seedBuiltOperation(member, buildLedgerCommit(member, []))
     await member.peer.dispose()
     await member.peer.drained()
-    const position = asLogPosition('000001')
-    const outcome = { id: op.id, opID: op.id, at: 1, kind: 'landed' as const, position }
     const owed: WelcomeObligation = {
       opID: 'separately-committed',
       welcome: new Uint8Array([1, 3, 5]),
@@ -620,19 +632,6 @@ test.each(reasons)(
     }
     await member.control.apply(
       {
-        cursor: { epoch: 99, position, stranded: true },
-        strand: { reason: 'ahead' },
-        putApplied: [
-          {
-            epoch: op.slot.epoch,
-            digest: op.slot.digest,
-            payloadDigest: op.slot.payloadDigest,
-            sequenceID: position,
-            opID: op.id,
-            removed: false,
-          },
-        ],
-        putOutcomes: [outcome],
         putWelcomes: [owed],
       },
       'cleanup-and-welcome',
@@ -641,13 +640,13 @@ test.each(reasons)(
     const before = await member.control.load()
     const apply = member.control.apply
     let available = false
-    const cleanup = vi.fn()
-    const error = new Error('cleanup storage unavailable')
+    const report = vi.fn()
+    const error = new Error('report storage unavailable')
     const control: ControlStore = {
       ...member.control,
       apply: async (changes, mutationID) => {
-        if (changes.deleteOperations?.includes(op.id)) {
-          cleanup()
+        if (changes.commitOnce?.reported) {
+          report()
           if (!available) throw error
         }
         await apply(changes, mutationID)
@@ -659,26 +658,38 @@ test.each(reasons)(
     const runner = makePeer(hub, { restartOf: member, control, onOutcome, deliverWelcome: deliver })
     const work = { ...observeWork(runner), ...runtime }
     peers.push(runner)
-    expect(await runner.peer.outcomes().catch((failure: unknown) => failure)).toEqual([outcome])
-    expect(cleanup).toHaveBeenCalledOnce()
-    expect((await control.load()).operations).toHaveLength(1)
+    expect(await runner.peer.outcomes()).toEqual([])
+    expect(report).not.toHaveBeenCalled()
+    expect((await control.load()).operations).toEqual([])
+    expect((await control.load()).commitOnce).toEqual(before.commitOnce)
+    expect(deliver).toHaveBeenCalledExactlyOnceWith(owed)
+    expect((await control.load()).welcomes).toEqual([])
+    await vi.advanceTimersByTimeAsync(op.deadline - Date.now())
+    const failedReports = report.mock.calls.length
+    expect(failedReports).toBeGreaterThanOrEqual(1)
+    expect(await runner.peer.outcomes()).toEqual([])
+    expect((await control.load()).commitOnce).toEqual(before.commitOnce)
     assertZero(network)
     assertZero(work)
 
     available = true
     await vi.advanceTimersByTimeAsync(1_000)
-    expect(cleanup).toHaveBeenCalledTimes(2)
+    expect(report).toHaveBeenCalledTimes(failedReports + 1)
     expect((await control.load()).operations).toEqual([])
-    expect(deliver).toHaveBeenCalledExactlyOnceWith(owed)
-    expect((await control.load()).welcomes).toEqual([])
-    expect(onOutcome).toHaveBeenCalledWith(outcome)
+    const outcomes = await runner.peer.outcomes()
+    expect(outcomes).toEqual([expect.objectContaining({ opID: op.id, kind: 'unknown' })])
+    const outcome = outcomes[0]
+    if (outcome === undefined) throw new Error('Missing deadline outcome')
+    expect(onOutcome).toHaveBeenCalledExactlyOnceWith(outcome)
     expect(await runner.peer.outcomes()).toEqual([outcome])
     await runner.peer.ack(outcome.id)
     await runner.peer.replay()
     await vi.advanceTimersByTimeAsync(60_000)
     const after = await control.load()
     expect(after.outcomes).toEqual([])
-    expect(after.commitOnce).toEqual(before.commitOnce)
+    expect(after.commitOnce).toEqual({ ...before.commitOnce, reported: true })
+    expect(report).toHaveBeenCalledTimes(failedReports + 1)
+    expect(onOutcome).toHaveBeenCalledExactlyOnceWith(outcome)
     expect(after.applied).toEqual(before.applied)
     expect(after.cursor).toEqual(before.cursor)
     expect(after.strand).toEqual(before.strand)

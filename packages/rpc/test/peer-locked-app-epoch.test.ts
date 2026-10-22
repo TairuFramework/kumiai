@@ -112,13 +112,11 @@ describe('app delivery, anchors and sealing ignore the epoch hint', () => {
         }),
       )
       await expect
-        .poll(async () => (await alice.control.load()).operations[0]?.stage)
-        .toBe('accepted')
+        .poll(async () => (await alice.control.load()).commitOnce?.acceptedAs)
+        .toBeDefined()
 
-      expect((await alice.control.load()).operations[0]).toMatchObject({
-        stage: 'accepted',
-        built: { epoch: 1 },
-      })
+      expect((await alice.control.load()).commitOnce).toMatchObject({ epoch: 1 })
+      expect((await alice.control.load()).operations).toEqual([])
       await alice.peer.dispose()
     },
   )

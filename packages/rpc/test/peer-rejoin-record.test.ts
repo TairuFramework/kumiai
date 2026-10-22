@@ -12,7 +12,7 @@ import { asLogPosition } from '../src/cursor.js'
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { RecoveryEvent } from '../src/peer-types.js'
 import type { CapturedRejoinRecord } from '../src/recovery-types.js'
-import { commitTopic, rendezvousTopic } from '../src/topic.js'
+import { commitTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { assertCommitPoison } from './fixtures/control-hold.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
@@ -739,7 +739,7 @@ test('an ambiguous recovery state save is read back without a second adoption', 
   expect(commits(hub)).toHaveLength(1)
 })
 
-test('a built operation settles before the rejoin built record is saved', async () => {
+test('a rejoin build leaves saved source work live until recovery adoption closes it', async () => {
   const { bob } = await setup()
   const op = await seedBuiltOperation(bob, buildLedgerCommit(bob, ['settled-first']))
   let settled = false
@@ -748,18 +748,23 @@ test('a built operation settles before the rejoin built record is saved', async 
     if (changes.putRejoin?.stage === 'built') {
       const snapshot = await bob.control.load()
       expect(snapshot.operations).toEqual([])
-      expect(snapshot.outcomes).toContainEqual(
-        expect.objectContaining({ opID: op.id, kind: 'landed' }),
-      )
+      expect(snapshot.commitOnce).toMatchObject({ opID: op.id, epoch: op.slot.epoch })
+      expect(snapshot.outcomes.filter((row) => row.opID === op.id)).toEqual([])
       settled = true
     }
     return apply(changes, id)
   })
   expect((await bob.peer.recover()).advanced).toBe(true)
   expect(settled).toBe(true)
+  const snapshot = await bob.control.load()
+  expect(snapshot.commitOnce).toBeNull()
+  expect(snapshot.operations).toEqual([])
+  expect(snapshot.outcomes.filter((row) => row.opID === op.id)).toEqual([
+    expect.objectContaining({ opID: op.id, kind: 'unknown' }),
+  ])
 })
 
-test('anchor recovery holds missing acceptance evidence before writing a rejoin record', async () => {
+test('a source advance cannot leave an unresolved build behind for anchor recovery', async () => {
   const hub = new FakeHub()
   const alice = member(hub, 'alice', { epoch: 2 })
   const bob = member(hub, 'bob')
@@ -768,48 +773,17 @@ test('anchor recovery holds missing acceptance evidence before writing a rejoin 
   const op = await seedBuiltOperation(bob, buildLedgerCommit(bob, ['saved-build']))
   await bob.peer.dispose()
   await bob.peer.drained()
+  const state = await bob.database.loadState('bob')
+  const control = await bob.control.load()
+  const anchor = await bob.anchorStore.load()
   bob.mls.adopt(bob.mls.buildCommit([]))
-  await bob.database.saveState('bob', bob.mls.serializeState())
-  const slot = await bob.anchorStore.load()
-  if (slot == null) throw new Error('Missing anchor')
-  await bob.anchorStore.save({
-    anchor: slot.anchor,
-    pending: {
-      epochBefore: 1,
-      epochAfter: 3,
-      rosterBefore: ['alice', 'bob'],
-      forced: true,
-      advance: 'unresolved-rotation',
-      landed: true,
-    },
-  })
-  const apply = bob.control.apply.bind(bob.control)
-  let stage: string | undefined
-  vi.spyOn(bob.control, 'apply').mockImplementation(async (changes, id) => {
-    if (changes.putRejoin?.stage === 'built')
-      stage = (await bob.control.load()).operations[0]?.stage
-    return apply(changes, id)
-  })
-  const again = member(hub, 'bob', { restartOf: bob, control: bob.control })
-  await again.peer.replay()
-  const held = await again.control.load()
-  expect(held.controlHold).toMatchObject({ reason: 'acceptance-unknown' })
-  expect(held.commitOnce?.opID).toBe(op.id)
-  expect(held.operations[0]?.id).toBe(op.id)
-  expect(held.outcomes).toEqual([])
-  expect(held.rejoin).toBeNull()
-  expect(stage).toBeUndefined()
-  expect(
-    hub.published.filter(
-      (message) => message.topicID === rendezvousTopic(secret) && message.senderDID === 'bob',
-    ),
-  ).toEqual([])
-  await again.peer.dispose()
-  await again.peer.drained()
-  const restarted = member(hub, 'bob', { restartOf: again })
-  await restarted.peer.replay()
-  expect((await restarted.control.load()).controlHold).toEqual(held.controlHold)
-  expect((await restarted.control.load()).commitOnce).toEqual(held.commitOnce)
+  await expect(bob.database.saveState('bob', bob.mls.serializeState())).rejects.toThrow(
+    'Source consumption requires atomic control closure',
+  )
+  expect(await bob.database.loadState('bob')).toEqual(state)
+  expect(await bob.control.load()).toEqual(control)
+  expect(control.commitOnce?.opID).toBe(op.id)
+  expect(await bob.anchorStore.load()).toEqual(anchor)
 })
 
 test('anchor-gated recovery adopts the authenticated capture despite an unwalked source commit', async () => {
@@ -1059,38 +1033,40 @@ test('confirmed rejoin replay retains its record under a freshly persisted stron
   expect((await bob.control.load()).rejoin).toEqual(record)
 })
 
-test.each(['acceptance-unknown', 'unsupported-version', 'fork-halted'] as const)(
-  'an ordinary ahead gap heals only through a weak control hold: %s',
+test.each([null, 'unsupported-version', 'fork-halted'] as const)(
+  'an ordinary ahead gap heals only without a strong control hold: %s',
   async (reason) => {
     const hub = new FakeHub()
     const alice = member(hub, 'alice', { epoch: 3 })
     const bob = member(hub, 'bob')
     await alice.peer.replay()
     await bob.peer.replay()
-    await bob.control.apply(
-      reason === 'fork-halted'
-        ? {
-            forkHalt: {
-              eventID: JSON.stringify([
-                'group:fork',
-                bob.control.key.groupID,
-                bob.control.key.incarnation,
-              ]),
-              detectedAt: 1,
-              evidence: {
-                kind: 'unexplained-own-commit',
-                epoch: 1,
-                position: '1',
-                digest: 'foreign',
+    if (reason !== null) {
+      await bob.control.apply(
+        reason === 'fork-halted'
+          ? {
+              forkHalt: {
+                eventID: JSON.stringify([
+                  'group:fork',
+                  bob.control.key.groupID,
+                  bob.control.key.incarnation,
+                ]),
+                detectedAt: 1,
+                evidence: {
+                  kind: 'unexplained-own-commit',
+                  epoch: 1,
+                  position: '1',
+                  digest: 'foreign',
+                },
               },
-            },
-          }
-        : { controlHold: { reason, position: null } },
-      'hold',
-    )
+            }
+          : { controlHold: { reason, position: null } },
+        'hold',
+      )
+    }
     await bob.peer.ack('refresh')
     await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 2 })
-    if (reason === 'acceptance-unknown') {
+    if (reason === null) {
       await vi.waitFor(
         async () => {
           const snapshot = await bob.control.load()
@@ -1117,7 +1093,7 @@ test.each(['acceptance-unknown', 'unsupported-version', 'fork-halted'] as const)
   },
 )
 
-test.each(['acceptance-unknown', 'unsupported-version'] as const)(
+test.each([null, 'unsupported-version'] as const)(
   'an ordinary gap retry resumes under %s without a new delivery',
   async (reason) => {
     vi.useFakeTimers()
@@ -1131,10 +1107,6 @@ test.each(['acceptance-unknown', 'unsupported-version'] as const)(
     })
     try {
       await bob.peer.replay()
-      await bob.control.apply(
-        { controlHold: { reason: 'acceptance-unknown', position: null } },
-        'weak-hold',
-      )
       await bob.peer.ack('refresh')
       await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 2 })
       await vi.waitFor(() => expect(events.some((event) => event.phase === 'failed')).toBe(true))
@@ -1149,7 +1121,7 @@ test.each(['acceptance-unknown', 'unsupported-version'] as const)(
       const alice = member(hub, 'alice', { epoch: 3 })
       await alice.peer.replay()
       await vi.advanceTimersByTimeAsync(1_000)
-      if (reason === 'acceptance-unknown') {
+      if (reason === null) {
         await vi.waitFor(async () => {
           const snapshot = await bob.control.load()
           expect(bob.mls.epoch()).toBeGreaterThan(1)
@@ -1195,7 +1167,7 @@ test('a hold committed while rereading confirmed capture preserves its bytes', a
   expect((await again.control.load()).rejoin).toEqual(record)
 })
 
-test('authenticated legacy recovery retains an unresolved built source slot outside the executable FIFO', async () => {
+test('authenticated legacy recovery closes a source build and preserves its independent Welcome', async () => {
   const { bob } = await setup()
   const op = await seedBuiltOperation(bob, buildInviteCommit(bob, 'invitee'))
   const record = {
@@ -1205,11 +1177,11 @@ test('authenticated legacy recovery retains an unresolved built source slot outs
   }
   await bob.peer.dispose()
   await bob.peer.drained()
+  const owed = { opID: op.id, welcome: new Uint8Array([9]), recipients: ['invitee'] }
   await bob.control.apply(
     {
       putRejoin: record,
-      controlHold: { reason: 'acceptance-unknown', position: null, cause: 'unavailable' },
-      putWelcomes: [{ opID: op.id, welcome: new Uint8Array([9]), recipients: ['invitee'] }],
+      putWelcomes: [owed],
     },
     'confirmed-recovery',
   )
@@ -1237,14 +1209,7 @@ test('authenticated legacy recovery retains an unresolved built source slot outs
   await stepRejoin(deps, record)
   const snapshot = await bob.control.load()
   expect(snapshot.commitOnce).toBeNull()
-  expect(snapshot.operations).toMatchObject([
-    {
-      id: op.id,
-      reconciliation: {
-        slot: { publishID: op.slot.publishID },
-        uncertainty: { cause: 'unavailable', at: null },
-      },
-    },
-  ])
-  expect(snapshot.welcomes.map((row) => row.opID)).toEqual([op.id])
+  expect(snapshot.operations).toEqual([])
+  expect(snapshot.outcomes).toEqual([expect.objectContaining({ opID: op.id, kind: 'unknown' })])
+  expect(snapshot.welcomes).toEqual([owed])
 })

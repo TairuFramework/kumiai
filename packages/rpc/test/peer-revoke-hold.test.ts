@@ -242,10 +242,15 @@ test('unknown publication restores the hold before startup delivery', async () =
     return publish(params)
   }
   const member = makeMLSPeer(hub, 'alice', secret)
-  await member.peer.enqueue(buildLedgerCommit(member, ['proof'], { revokes: true }))
+  const request = buildLedgerCommit(member, ['proof'], { revokes: true })
+  await member.peer.enqueue(request)
   await vi.waitFor(async () =>
-    expect((await member.control.load()).operations[0]?.stage).toBe('built'),
+    expect((await member.control.load()).commitOnce).toMatchObject({
+      opID: request.id,
+      revokes: true,
+    }),
   )
+  expect((await member.control.load()).operations).toEqual([])
   await member.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'restart' } })
   await close(member)
   const replacement = makeMLSPeer(hub, 'alice', secret, { restartOf: member })

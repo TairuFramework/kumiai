@@ -480,7 +480,8 @@ test.each([
   expect(diagnosed.rejoin).toEqual(saved.rejoin)
   expect(diagnosed.recoveryEpochFloor).toBe(saved.recoveryEpochFloor)
   const requests = events.length
-  await expect.poll(() => events.length, { timeout: 5000 }).toBeGreaterThan(requests)
+  // Recovery retries can already be at their 15-second backoff cap.
+  await expect.poll(() => events.length, { timeout: 20_000 }).toBeGreaterThan(requests)
   excluding.owner.dispose()
   await excluding.owner.drained()
   const resumed = await start(continuing, hub)

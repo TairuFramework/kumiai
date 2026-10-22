@@ -185,6 +185,13 @@ export function createMemoryStateStore(
   const database =
     retainedDatabase ??
     createMemoryHostDatabase({
+      isTerminal: (blob) => {
+        const journal = JSON.parse(new TextDecoder().decode(blob)) as { state: Array<number> }
+        return (
+          decodeClientState(Uint8Array.from(journal.state))?.groupActiveState.kind ===
+          'removedFromGroup'
+        )
+      },
       readIdentity: (blob, key) => {
         const journal = JSON.parse(new TextDecoder().decode(blob)) as { state: Array<number> }
         const state = decodeClientState(Uint8Array.from(journal.state))
@@ -817,6 +824,20 @@ export async function runRealCommitOnceScenario(
     group.committer.handle = committed.newGroup
     for (const member of group.members) await member.handle.processMessage(committed.commitMessage)
   }
+  let pastPrefix: Uint8Array | undefined
+  if (scenario === 'poison-head' || scenario === 'built-restart') {
+    const author = group.members[0]
+    if (author === undefined) throw new Error('Missing prefix author')
+    const rotated = await commitKeyRotation(author.handle)
+    pastPrefix = encodeHandshakeFrame(
+      HANDSHAKE_KIND.commit,
+      encodeCommitFrame(rotated.commitMessage, new Uint8Array()),
+    )
+    for (const member of [group.committer, ...group.members]) {
+      if (member === author) member.handle = rotated.newGroup
+      else await member.handle.processMessage(rotated.commitMessage)
+    }
+  }
   const wire = createWireHub()
   const publisher = wire.connect(identity)
   const secret = await deriveRecoverySecret(group.committer.handle)
@@ -857,10 +878,11 @@ export async function runRealCommitOnceScenario(
                   )
                 if (params.topicID === topicID && failPublish) {
                   failPublish = false
+                  if (pastPrefix === undefined) throw new Error('Missing earlier-epoch prefix')
                   await connection.publish({
                     topicID,
                     senderDID: identity.id,
-                    payload: new Uint8Array([255, 255]),
+                    payload: pastPrefix,
                     retain: 'log',
                   })
                 }
@@ -977,6 +999,11 @@ export async function runRealCommitOnceScenario(
                 entrySlot: receiver.slot,
               })
               const crypto = createGroupCrypto({ access })
+              if (pastPrefix !== undefined) {
+                const prior = decodeCommitFrame(decodeHandshakeFrame(pastPrefix).payload)
+                const skipped = await mls.processCommit(prior.commit, {})
+                if (skipped.applied) throw new Error('Earlier-epoch prefix applied twice')
+              }
               for (const payload of competitors) {
                 const prior = decodeCommitFrame(decodeHandshakeFrame(payload).payload)
                 await mls.processCommit(prior.commit, {

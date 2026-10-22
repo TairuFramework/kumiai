@@ -444,6 +444,72 @@ function mutateControl<Position extends string>(
   }
   const owned = cloneValue(ordinary)
   const slot = owned.commitOnce === undefined ? snapshot.commitOnce : owned.commitOnce
+  if (context?.kind === 'abandon' && snapshot.commitOnce !== null) {
+    owned.deleteOutcomes = [
+      ...new Set([
+        ...(owned.deleteOutcomes ?? []),
+        ...snapshot.outcomes
+          .filter((row) => row.opID === snapshot.commitOnce?.opID && row.kind === 'unknown')
+          .map((row) => row.id),
+      ]),
+    ]
+  }
+  const replacesReport =
+    slot === null &&
+    snapshot.commitOnce !== null &&
+    owned.putOutcomes?.some(
+      (row) =>
+        row.opID === snapshot.commitOnce?.opID &&
+        !snapshot.outcomes.some((old) => old.id === row.id),
+    ) === true
+  if (snapshot.commitOnce !== null && slot?.reported === true) {
+    const built = snapshot.commitOnce
+    const reports = owned.putOutcomes?.filter((row) => row.opID === built.opID) ?? []
+    if (!built.reported) {
+      if (
+        context?.kind !== 'report' ||
+        reports.length !== 1 ||
+        reports[0]?.kind !== 'unknown' ||
+        reports[0].id === built.opID ||
+        snapshot.outcomes.some((row) => row.id === reports[0]?.id)
+      )
+        throw new Error('Report requires one fresh provisional unknown')
+    } else if (reports.some((row) => !snapshot.outcomes.some((old) => equal(row, old))))
+      throw new Error('Build already reported')
+  }
+  if (context?.kind === 'abandon') {
+    const built = snapshot.commitOnce
+    const reports = owned.putOutcomes?.filter((row) => row.opID === built?.opID) ?? []
+    if (
+      built === null ||
+      slot !== null ||
+      owned.spentSource?.epoch !== built.epoch ||
+      reports.length !== 1 ||
+      reports[0]?.kind !== 'unknown' ||
+      reports[0].id === built.opID ||
+      snapshot.outcomes.some(
+        (row) =>
+          row.id === reports[0]?.id ||
+          (row.opID === built.opID &&
+            (row.kind !== 'unknown' || !owned.deleteOutcomes?.includes(row.id))),
+      )
+    )
+      throw new Error('Abandonment requires fresh unknown and matching spent source')
+  }
+  if (owned.spentSource !== undefined && !equal(snapshot.spentSource, owned.spentSource)) {
+    if (owned.spentSource === null) {
+      if (
+        context?.kind !== 'retirement' &&
+        !(
+          context?.kind === 'adoption' &&
+          !context.removed &&
+          context.after !== null &&
+          context.after.epoch > context.before.epoch
+        )
+      )
+        throw new Error('Only consumption clears spent source')
+    } else if (context?.kind !== 'abandon') throw new Error('Only abandonment writes spent source')
+  }
   if (
     slot !== null &&
     (context?.kind === 'retirement' ||
@@ -468,7 +534,12 @@ function mutateControl<Position extends string>(
   )
     throw new Error('Skipped requires an advancing cursor')
   removeRows(snapshot.operations, (row) => owned.deleteOperations?.includes(row.id) === true)
-  removeRows(snapshot.outcomes, (row) => owned.deleteOutcomes?.includes(row.id) === true)
+  removeRows(
+    snapshot.outcomes,
+    (row) =>
+      owned.deleteOutcomes?.includes(row.id) === true ||
+      (replacesReport && snapshot.commitOnce !== null && row.opID === snapshot.commitOnce.opID),
+  )
   removeRows(snapshot.welcomes, (row) => owned.deleteWelcomes?.includes(row.opID) === true)
   removeRows(snapshot.applied, (row) => {
     return owned.deleteAppliedBelow != null && row.epoch < owned.deleteAppliedBelow
@@ -732,19 +803,21 @@ export function createMemoryControlStore<Position extends string = string>(
       mutateControl(
         next.control,
         changes,
-        source === null
+        source === null || source.deleted
           ? null
           : {
               kind:
-                changes.cursor !== undefined
-                  ? 'cursor'
-                  : changes.commitOnce?.reported === true &&
-                      next.control.commitOnce?.reported !== true
-                    ? 'report'
-                    : changes.commitOnce?.acceptedAs !== undefined &&
-                        next.control.commitOnce?.acceptedAs === undefined
-                      ? 'ack'
-                      : 'head',
+                changes.commitOnce === null && changes.spentSource != null
+                  ? 'abandon'
+                  : changes.cursor !== undefined
+                    ? 'cursor'
+                    : changes.commitOnce?.reported === true &&
+                        next.control.commitOnce?.reported !== true
+                      ? 'report'
+                      : changes.commitOnce?.acceptedAs !== undefined &&
+                          next.control.commitOnce?.acceptedAs === undefined
+                        ? 'ack'
+                        : 'head',
               source,
             },
         fixedKey,

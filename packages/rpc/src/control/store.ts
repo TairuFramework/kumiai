@@ -12,6 +12,7 @@ import {
   type ForkRecoveryAttempt,
   raiseRecoveryEpochFloor,
 } from '../recovery-types.js'
+import { closeControlBuild } from './closure.js'
 import type { ForkHalt, RecoveryUnavailableEvent } from './safety.js'
 import { controlSafetyHeld, forkEventID, recoveryUnavailableEventID } from './safety.js'
 import type {
@@ -483,6 +484,68 @@ export function applyChanges(
       throw new ControlSafetyImmutableError(field)
   }
   const nextSlot = changes.commitOnce === undefined ? snapshot.commitOnce : changes.commitOnce
+  const deleteOutcomes = new Set(changes.deleteOutcomes)
+  if (context?.kind === 'abandon' && snapshot.commitOnce !== null) {
+    for (const row of snapshot.outcomes) {
+      if (row.opID === snapshot.commitOnce.opID && row.kind === 'unknown')
+        deleteOutcomes.add(row.id)
+    }
+  }
+  const replacesBuildReport =
+    nextSlot === null &&
+    snapshot.commitOnce !== null &&
+    changes.putOutcomes?.some(
+      (row) =>
+        row.opID === snapshot.commitOnce?.opID &&
+        !snapshot.outcomes.some((old) => old.id === row.id),
+    ) === true
+  if (snapshot.commitOnce !== null && nextSlot?.reported === true) {
+    const built = snapshot.commitOnce
+    const reports = changes.putOutcomes?.filter((row) => row.opID === built.opID) ?? []
+    if (
+      (!built.reported &&
+        (context?.kind !== 'report' ||
+          reports.length !== 1 ||
+          reports[0]?.kind !== 'unknown' ||
+          reports[0].id === built.opID ||
+          snapshot.outcomes.some((row) => row.id === reports[0]?.id))) ||
+      (built.reported &&
+        reports.some((row) => !snapshot.outcomes.some((old) => sameValue(row, old))))
+    )
+      throw new ControlStoreInvariantError('Reported requires one fresh provisional unknown')
+  }
+  if (context?.kind === 'abandon') {
+    const built = snapshot.commitOnce
+    const final = changes.putOutcomes?.filter((row) => row.opID === built?.opID) ?? []
+    if (
+      built === null ||
+      nextSlot !== null ||
+      changes.spentSource?.epoch !== built.epoch ||
+      final.length !== 1 ||
+      final[0]?.kind !== 'unknown' ||
+      final[0].id === built.opID ||
+      snapshot.outcomes.some(
+        (row) =>
+          row.id === final[0]?.id ||
+          (row.opID === built.opID && (row.kind !== 'unknown' || !deleteOutcomes.has(row.id))),
+      )
+    )
+      throw new ControlStoreInvariantError(
+        'Abandonment requires a fresh final report and source fuse',
+      )
+  }
+  if (changes.spentSource !== undefined && !sameValue(snapshot.spentSource, changes.spentSource)) {
+    const canClear =
+      context?.kind === 'retirement' ||
+      (context?.kind === 'adoption' &&
+        context.after !== null &&
+        context.after.epoch > context.before.epoch &&
+        !context.removed)
+    if (changes.spentSource === null ? !canClear : context?.kind !== 'abandon')
+      throw new ControlStoreInvariantError(
+        'Spent source requires abandonment or authenticated consumption',
+      )
+  }
   const consumes =
     context?.kind === 'retirement' ||
     (context?.kind === 'adoption' &&
@@ -528,7 +591,15 @@ export function applyChanges(
         : raiseRecoveryEpochFloor(snapshot.recoveryEpochFloor ?? null, changes.recoveryEpochFloor),
     settledRejoins: cumulativeSettlements(snapshot.settledRejoins ?? [], changes.putSettledRejoins),
     outcomes: putRows(
-      snapshot.outcomes.filter((row) => !changes.deleteOutcomes?.includes(row.id)),
+      snapshot.outcomes.filter(
+        (row) =>
+          !deleteOutcomes.has(row.id) &&
+          !(
+            replacesBuildReport &&
+            snapshot.commitOnce !== null &&
+            row.opID === snapshot.commitOnce.opID
+          ),
+      ),
       changes.putOutcomes,
       (row) => row.id,
     ),
@@ -578,13 +649,14 @@ export function controlSettled(snapshot: ControlSnapshot): boolean {
 /** The host co-commits this reset with the joined state and a cleared anchor slot. */
 export function readmissionChanges(snapshot: ControlSnapshot): ControlChanges {
   const at = Date.now()
+  const closure = closeControlBuild(snapshot, { kind: 'unknown' }, at, crypto.randomUUID())
   const outcomes: Array<Outcome> = snapshot.operations.map(({ id }) => ({
     id,
     opID: id,
     at,
     kind: 'unknown',
   }))
-  if (snapshot.rejoin != null) {
+  if (snapshot.rejoin != null && snapshot.rejoin.stage !== 'refused') {
     outcomes.push({ id: snapshot.rejoin.id, opID: null, at, kind: 'unknown' })
   }
   let newestResponseEpoch = 0
@@ -592,12 +664,13 @@ export function readmissionChanges(snapshot: ControlSnapshot): ControlChanges {
     newestResponseEpoch = Math.max(newestResponseEpoch, epoch)
   }
   return {
+    ...closure,
     ...deleteOperationChanges(
       snapshot,
       snapshot.operations.map(({ id }) => id),
     ),
     deleteRejoin: true,
-    putOutcomes: outcomes,
+    putOutcomes: [...(closure.putOutcomes ?? []), ...outcomes],
     deleteAppliedBelow: Number.MAX_SAFE_INTEGER + 1,
     deleteResponsesBelow: newestResponseEpoch + 1,
     cursor: null,
@@ -623,6 +696,16 @@ export async function applyResolved(
     )
       throw error
   }
+  await resolveControlMutation(store, mutationID, sleep, signal)
+}
+
+/** Read completion proof without repeating the state-changing transaction. */
+export async function resolveControlMutation(
+  store: ControlStore,
+  mutationID: string,
+  sleep?: (delay: number) => Promise<void>,
+  signal?: AbortSignal,
+): Promise<void> {
   let delay = 100
   for (;;) {
     throwIfAborted(signal)

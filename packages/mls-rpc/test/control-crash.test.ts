@@ -6,14 +6,16 @@ import { testControlCrashBoundaries } from './fixtures/control-crash.js'
 import {
   createControlCrashHarness,
   runControlProofConflict,
+  runControlSlotGuards,
 } from './fixtures/storage-persistence.js'
 
 for (const mode of ['double', 'real-mls'] as const) {
   testControlCrashBoundaries(mode)
   testCommitOnceConformance({
     label: `sealed provider: ${mode}`,
-    scenarios: ['ownership-conflict'],
-    run: () => runControlProofConflict(mode),
+    scenarios: ['ownership-conflict', 'slot-guards'],
+    run: (scenario) =>
+      scenario === 'slot-guards' ? runControlSlotGuards(mode) : runControlProofConflict(mode),
   })
 }
 

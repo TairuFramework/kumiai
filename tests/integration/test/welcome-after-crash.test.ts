@@ -16,7 +16,7 @@ import {
 } from '@kumiai/mls'
 import { createLedgerEntrySlot } from '@kumiai/mls-rpc'
 import { forkEventID, type WelcomeObligation } from '@kumiai/rpc'
-import { afterEach, expect, it, test, vi } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 
 import { judgeWelcomeAdmission } from '../../../packages/mls-hub/src/admission.js'
 import { type BundleSource, openWelcome } from '../../../packages/mls-hub/src/join.js'
@@ -180,9 +180,74 @@ test('Welcome after crash: restart delivers the complete invitation after instal
   }
 })
 
-it.todo(
-  'R3: restart after handoff acknowledgement walks the own invite before Welcome delivery -- startup must recover the pending anchor before walking',
-)
+test('restart after handoff acknowledgement walks the own invite before Welcome delivery', async () => {
+  const ctx = await setup()
+  let restarted: ReturnType<typeof makeMember> | undefined
+  try {
+    const request = buildInviteCommit(ctx.member, ctx.material, () => {
+      throw new Error('Dead process callback invoked')
+    })
+    const stopAtAcknowledged = () => {
+      ctx.member.stateStore.database.seam('after-apply', async () => {
+        if ((await ctx.member.control.load()).commitOnce?.acceptedAs !== undefined)
+          void ctx.member.peer.dispose()
+        else stopAtAcknowledged()
+      })
+    }
+    stopAtAcknowledged()
+    const epochBefore = Number(ctx.member.handle().epoch)
+    await ctx.member.peer.enqueue(request)
+    await expect
+      .poll(async () => (await ctx.member.control.load()).commitOnce?.acceptedAs)
+      .toBeDefined()
+    await ctx.member.peer.dispose()
+    await ctx.member.peer.drained()
+    await ctx.member.disconnect()
+    const acknowledged = await ctx.member.control.load()
+    expect(acknowledged.outcomes).toEqual([])
+    expect(acknowledged.welcomes).toEqual([])
+    expect(Number(ctx.member.handle().epoch)).toBe(epochBefore)
+    const speculative = acknowledged.commitOnce?.welcome
+    if (speculative == null) throw new Error('Missing saved invitation')
+    const accepted: Array<WelcomeObligation> = []
+    restarted = makeMember({
+      hub: ctx.hub,
+      identity: ctx.member.identity,
+      group: await restoreMemberHandle(ctx.member, ctx.entrySlot),
+      entrySlot: ctx.entrySlot,
+      restartOf: ctx.member,
+      deliverWelcome: async (row) => {
+        const control = await restarted?.control.load()
+        expect(control?.commitOnce).toBeNull()
+        expect(control?.outcomes).toMatchObject([{ opID: request.id, kind: 'landed' }])
+        expect(Number(restarted?.handle().epoch)).toBe(epochBefore + 1)
+        accepted.push(structuredClone(row))
+      },
+    })
+    await restarted.peer.resync()
+    expect(accepted).toEqual([
+      {
+        opID: request.id,
+        welcome: speculative.bytes,
+        recipients: speculative.recipients,
+        committed: true,
+      },
+    ])
+    expect((await restarted.control.load()).welcomes).toEqual([])
+    const opened = await openWelcome([ctx.source], {
+      identity: ctx.invitee,
+      ...decodeArtifact(speculative.bytes),
+    })
+    if (!('joined' in opened)) throw new Error('Expected fresh join')
+    expect(opened.joined.group.findMemberLeafIndex(ctx.invitee.id)).not.toBeNull()
+  } finally {
+    await restarted?.peer.dispose()
+    await restarted?.peer.drained()
+    await ctx.member.peer.dispose()
+    await ctx.member.peer.drained()
+    await ctx.hub.dispose()
+  }
+})
 
 test.each(['joined-before-consume', 'consume-mid-transaction', 'consumed-before-ack'] as const)(
   'invitee crash boundary: %s',

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 
-import type { ConformanceControlSlot } from './control-store.js'
+import type { ConformanceControlSlot, ConformanceOutcome } from './control-store.js'
 
 export type CommitOnceScenario =
   | 'alternate-id-replay'
@@ -29,6 +29,12 @@ export type CommitOnceEvidence = {
   expectedHeads: Array<string | null>
   searchFrom: string | null
   slotAfterAck: ConformanceControlSlot | null
+  abandonment?: {
+    sourceEpoch: number
+    provisionalID: string
+    outcomes: Array<ConformanceOutcome>
+    spentSourceAfterAck: { epoch: number } | null
+  }
   winnerFollowed: boolean
   candidateMatchesReceiver: boolean
   progressPreserved: boolean
@@ -59,7 +65,7 @@ const scenarios: Array<[CommitOnceScenario, string]> = [
   ],
   ['deadline', 'deadline survives reconstruction with changed configuration'],
   ['progress', 'ordinary adoption preserves committed sender and receiver progress'],
-  ['slot-guards', 'rejection abandon and generic deletion retain the slot'],
+  ['slot-guards', 'rejection and deletion retain the build while abandon leaves a spent source'],
   [
     'terminal-winner',
     'first-valid removal follows the winner without installing the own candidate',
@@ -121,7 +127,6 @@ export function testCommitOnceConformance(params: {
             expect(evidence.cursor).toBe(evidence.searchFrom)
             break
           case 'deadline':
-          case 'slot-guards':
             expect(evidence.outcome).toBe('unknown')
             expect(evidence.builds).toBe(1)
             expect(evidence.ownAdoptions).toBe(0)
@@ -129,6 +134,23 @@ export function testCommitOnceConformance(params: {
             expect(evidence.slotAfterAck).not.toBeNull()
             expect(evidence.payloads).toEqual([])
             break
+          case 'slot-guards': {
+            expect(evidence.outcome).toBe('unknown')
+            expect(evidence.builds).toBe(1)
+            expect(evidence.ownAdoptions).toBe(0)
+            expect(evidence.welcomeDeliveries).toBe(0)
+            expect(evidence.slotAfterAck).toBeNull()
+            expect(evidence.payloads).toEqual([])
+            const abandoned = evidence.abandonment
+            expect(abandoned).toBeDefined()
+            if (abandoned === undefined) throw new Error('Missing abandonment evidence')
+            expect(abandoned.spentSourceAfterAck).toEqual({ epoch: abandoned.sourceEpoch })
+            expect(abandoned.outcomes).toEqual([
+              expect.objectContaining({ id: expect.any(String), kind: 'unknown' }),
+            ])
+            expect(abandoned.outcomes[0]?.id).not.toBe(abandoned.provisionalID)
+            break
+          }
           case 'ownership-conflict':
             expect(evidence.ownAdoptions).toBe(0)
             expect(evidence.welcomeDeliveries).toBe(0)

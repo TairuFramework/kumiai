@@ -167,6 +167,7 @@ export const peerHostFields = {
   onRecovery: 'callback',
   onNotMember: 'callback',
   onOutcome: 'callback',
+  onInternalOutcome: 'callback',
   onControlPublishError: 'callback',
   onAppDeliveryStalled: 'callback',
   onAppDeliveryResumed: 'callback',

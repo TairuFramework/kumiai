@@ -15,6 +15,7 @@ import {
 import { FakeHub } from './fixtures/fake-hub.js'
 import { encodeMemoryCommit, memoryEntryID } from './fixtures/memory-group-mls.js'
 import {
+  buildInviteCommit,
   buildLedgerCommit,
   buildRejoinRecord,
   makeMLSPeer,
@@ -221,7 +222,7 @@ test('an unresolvable external commit saves cursor progress without a response r
   })
 })
 
-test('self-removal committed before its effect is terminal on restart', async () => {
+test.each([false, true])('terminal restart closes build, off-epoch=%s', async (offEpoch) => {
   const hub = new FakeHub()
   const bob = member(hub)
   await bob.peer.replay()
@@ -232,6 +233,105 @@ test('self-removal committed before its effect is terminal on restart', async ()
     data: new Uint8Array([1]),
     lastAttempt: null,
   })
+  const request = buildLedgerCommit(bob, [])
+  const built = await seedBuiltOperation(bob, buildInviteCommit(bob, 'dave'))
+  const rejoin = await buildRejoinRecord(bob)
+  const owed = {
+    opID: 'previously-landed',
+    welcome: new Uint8Array([3, 4, 5]),
+    recipients: ['carol'],
+    committed: true as const,
+  }
+  await bob.control.apply(
+    {
+      putOperations: [
+        {
+          ...request,
+          stage: 'intent',
+          seq: 2,
+          enqueuedAt: Date.now(),
+          deadline: Date.now() + 30_000,
+        },
+      ],
+      putRejoin: rejoin,
+      putWelcomes: [owed],
+    },
+    'pre-removal-work',
+  )
+  bob.database.seam('after-save', () => {
+    void bob.peer.dispose()
+  })
+  if (offEpoch) {
+    // Normal writes bind builds to their source epoch. Inject a stale snapshot at the store seam.
+    const load = bob.control.load.bind(bob.control)
+    vi.spyOn(bob.control, 'load').mockImplementation(async () => {
+      const snapshot = await load()
+      return snapshot.commitOnce === null
+        ? snapshot
+        : {
+            ...snapshot,
+            commitOnce: { ...snapshot.commitOnce, epoch: snapshot.commitOnce.epoch + 1 },
+          }
+    })
+  }
+  await publishCommit({
+    hub,
+    senderDID: 'alice',
+    recoverySecret: secret,
+    epoch: 1,
+    removes: ['bob'],
+  })
+  await bob.controlWalk.walkCommits().catch((error: unknown) => {
+    if (!(error instanceof Error) || error.name !== 'PeerDisposedError') throw error
+  })
+  await vi.waitFor(async () => expect((await bob.control.load()).applied).toHaveLength(1))
+  await bob.peer.dispose()
+  await bob.peer.drained()
+  const terminal = await bob.control.load()
+  expect(terminal.applied).toEqual([expect.objectContaining({ epoch: 1, removed: true })])
+  expect(terminal.commitOnce).toBeNull()
+  expect(terminal.operations).toEqual([])
+  expect(terminal.rejoin).toBeNull()
+  expect(terminal.outcomes).toEqual([
+    expect.objectContaining({ opID: built.id, kind: 'unknown' }),
+    expect.objectContaining({ opID: request.id, kind: 'rejected', reason: 'removed' }),
+    expect.objectContaining({ opID: null, kind: 'unknown' }),
+  ])
+  expect(terminal.welcomes).toEqual([owed])
+  expect(await bob.appOutbox.list()).toHaveLength(1)
+  expect((await bob.anchorStore.load())?.pending?.landed).toBeUndefined()
+  const cleared = vi.fn()
+  const subscribe = vi.spyOn(hub, 'subscribe')
+  const publish = vi.spyOn(hub, 'publish')
+  const fetch = vi.spyOn(hub, 'fetchTopic')
+  const again = member(hub, {
+    restartOf: bob,
+    onAppOutboxCleared: cleared,
+    deliverWelcome: async () => {
+      throw new Error('Invitation transport unavailable')
+    },
+  })
+  const exported = vi.spyOn(again.crypto, 'exportSecret')
+  await again.peer.outcomes()
+  await vi.waitFor(async () => expect(await again.appOutbox.list()).toEqual([]))
+  expect(await again.control.load()).toEqual(terminal)
+  expect(await again.database.loadState('bob')).not.toBeNull()
+  expect(cleared).toHaveBeenCalledTimes(1)
+  expect(exported).not.toHaveBeenCalled()
+  expect(again.crypto.starts.wrap).toBe(0)
+  expect(again.crypto.starts.unwrap).toBe(0)
+  expect(subscribe).not.toHaveBeenCalled()
+  expect(publish).not.toHaveBeenCalled()
+  expect(fetch).not.toHaveBeenCalled()
+  await expect(again.peer.enqueue(buildLedgerCommit(again, []))).rejects.toMatchObject({
+    name: 'PeerRemovedError',
+  })
+})
+
+test('terminal effects do not settle control rows introduced after consumption', async () => {
+  const hub = new FakeHub()
+  const bob = member(hub)
+  await bob.peer.replay()
   bob.database.seam('after-save', () => {
     void bob.peer.dispose()
   })
@@ -245,11 +345,8 @@ test('self-removal committed before its effect is terminal on restart', async ()
   await vi.waitFor(async () => expect((await bob.control.load()).applied).toHaveLength(1))
   await bob.peer.dispose()
   await bob.peer.drained()
-  expect((await bob.control.load()).applied).toEqual([
-    expect.objectContaining({ epoch: 1, removed: true }),
-  ])
-  expect((await bob.anchorStore.load())?.pending?.landed).toBeUndefined()
   const request = buildLedgerCommit(bob, [])
+  // Legacy or corrupt leftovers require migration, never delayed terminal settlement.
   await bob.control.apply(
     {
       putOperations: [
@@ -262,21 +359,12 @@ test('self-removal committed before its effect is terminal on restart', async ()
         },
       ],
     },
-    'post-removal-intent',
+    'terminal-leftover',
   )
-  const cleared = vi.fn()
-  const again = member(hub, { restartOf: bob, onAppOutboxCleared: cleared })
-  await again.peer.outcomes()
-  await vi.waitFor(async () => expect(await again.appOutbox.list()).toEqual([]))
-  expect(await again.peer.outcomes()).toEqual([
-    expect.objectContaining({ opID: request.id, kind: 'unknown' }),
-  ])
-  expect((await again.control.load()).operations).toEqual([])
-  expect(await again.database.loadState('bob')).not.toBeNull()
-  expect(cleared).toHaveBeenCalledTimes(1)
-  await expect(again.peer.enqueue(buildLedgerCommit(again, []))).rejects.toMatchObject({
-    name: 'PeerRemovedError',
-  })
+  const before = await bob.control.load()
+  const again = member(hub, { restartOf: bob })
+  expect(await again.peer.outcomes()).toEqual([])
+  expect(await again.control.load()).toEqual(before)
 })
 
 test('live self-removal keeps the anchor and clears its pending rotation', async () => {
@@ -361,7 +449,7 @@ test('host deletion is refused until abandon and outcome acknowledgement', async
   await bob.peer.abandon()
   expect(await bob.control.load()).toMatchObject({
     operations: [],
-    welcomes: [{ opID: request.id, committed: true }],
+    welcomes: [],
     rejoin: null,
   })
   const outcomes = await bob.peer.outcomes()
@@ -470,36 +558,41 @@ test('adoptions retain exactly the newest 64 epochs of rows and responses', asyn
 })
 
 test.each([false, true])(
-  'terminal removal settles a pending rejoin before Welcome delivery, accepted=%s',
+  'terminal restart services outcomes and Welcomes settled at removal, accepted=%s',
   async (accepted) => {
     const hub = new FakeHub()
     const bob = member(hub)
     await bob.peer.replay()
     const rejoin = await buildRejoinRecord(bob)
     expect(rejoinSourceEpoch(rejoin)).toBe(bob.mls.epoch())
-    await bob.peer.dispose()
-    await bob.peer.drained()
     await bob.control.apply(
       {
         putRejoin: rejoin,
         putWelcomes: [
           { opID: rejoin.id, welcome: rejoin.payload, recipients: ['carol'], committed: true },
         ],
-        putApplied: [
-          {
-            epoch: 1,
-            digest: rejoin.digest,
-            payloadDigest: rejoin.payloadDigest,
-            sequenceID: '000000000001',
-            opID: null,
-            removed: true,
-          },
-        ],
       },
-      'terminal-rejoin',
+      'pre-removal-rejoin',
     )
-    bob.mls.adopt(bob.mls.buildCommit([], { removes: ['bob'] }))
-    await bob.database.saveState('bob', bob.mls.serializeState())
+    bob.database.seam('after-save', () => {
+      void bob.peer.dispose()
+    })
+    await publishCommit({
+      hub,
+      senderDID: 'alice',
+      recoverySecret: secret,
+      epoch: 1,
+      removes: ['bob'],
+    })
+    await bob.controlWalk.walkCommits().catch((error: unknown) => {
+      if (!(error instanceof Error) || error.name !== 'PeerDisposedError') throw error
+    })
+    await vi.waitFor(async () => expect((await bob.control.load()).applied).toHaveLength(1))
+    await bob.peer.dispose()
+    await bob.peer.drained()
+    const terminal = await bob.control.load()
+    expect(terminal.rejoin).toBeNull()
+    expect(terminal.outcomes).toEqual([expect.objectContaining({ opID: null, kind: 'unknown' })])
     const settledBeforeDelivery = vi.fn()
     const subscribe = vi.spyOn(hub, 'subscribe')
     const again = member(hub, {
@@ -510,13 +603,12 @@ test.each([false, true])(
       },
     })
     const exported = vi.spyOn(again.crypto, 'exportSecret')
-    const outcome = { id: rejoin.id, opID: null, kind: 'unknown' }
-    expect(await again.peer.outcomes()).toEqual([expect.objectContaining(outcome)])
+    expect(await again.peer.outcomes()).toEqual(terminal.outcomes)
     await vi.waitFor(() => expect(settledBeforeDelivery).toHaveBeenCalledTimes(1))
     expect(settledBeforeDelivery).toHaveBeenCalledWith(
       expect.objectContaining({
         rejoin: null,
-        outcomes: [expect.objectContaining(outcome)],
+        outcomes: terminal.outcomes,
         welcomes: [expect.objectContaining({ opID: rejoin.id })],
       }),
     )

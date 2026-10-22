@@ -187,7 +187,7 @@ test('a cursor that moves after reconciliation refuses the sampled capture head'
   })
 })
 
-test('an empty gap waits without inventing a cursor and a fresh complete read permits retry', async () => {
+test('an empty gap durably prevents capture despite later unflagged reads', async () => {
   const f = await fixture()
   vi.useFakeTimers()
   const fetch = f.hub.fetchTopic.bind(f.hub)
@@ -210,11 +210,20 @@ test('an empty gap waits without inventing a cursor and a fresh complete read pe
   expect(await respond()).toBe(false)
   expect(fetches).toBe(1)
   expect(replies).toEqual([])
-  expect((await f.member.control.load()).cursor).toBeNull()
+  expect((await f.member.control.load()).cursor).toEqual({
+    position: null,
+    epoch: 1,
+    incomplete: true,
+  })
   gap = false
-  expect(await respond()).toBe(true)
+  expect(await respond()).toBe(false)
   expect(fetches).toBe(2)
-  expect(replies).toHaveLength(1)
+  expect(replies).toEqual([])
+  expect((await f.member.control.load()).cursor).toEqual({
+    position: null,
+    epoch: 1,
+    incomplete: true,
+  })
 })
 
 async function retainedGap() {

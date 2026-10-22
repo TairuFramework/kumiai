@@ -300,7 +300,7 @@ export type ConformanceControlAdoptionPort<Position extends string = string> = {
 }
 
 export function encodeControlFixtureState(
-  identity: ConformanceEpochIdentity & { terminal?: boolean },
+  identity: ConformanceEpochIdentity & { terminal?: boolean; deleted?: boolean },
 ): Uint8Array {
   return new TextEncoder().encode(
     JSON.stringify({ ...identity, authenticator: Array.from(identity.authenticator) }),
@@ -308,7 +308,7 @@ export function encodeControlFixtureState(
 }
 export function decodeControlFixtureState(
   bytes: Uint8Array,
-): (ConformanceEpochIdentity & { terminal?: boolean }) | null {
+): (ConformanceEpochIdentity & { terminal?: boolean; deleted?: boolean }) | null {
   try {
     const value = JSON.parse(new TextDecoder().decode(bytes)) as ConformanceEpochIdentity & {
       authenticator: Array<number>
@@ -1427,7 +1427,17 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
     test('build material survives defensive reads and rollback while ack never installs', async () => {
       const host = await params.open()
       const { slot, source } = await prepareSlot(host)
-      const expected = structuredClone(slot)
+      const expected = {
+        ...slot,
+        authenticatorBefore: slot.authenticatorBefore.slice(),
+        payload: slot.payload.slice(),
+        bodies: [...slot.bodies],
+        journal: slot.journal.slice(),
+        welcome:
+          slot.welcome === null
+            ? null
+            : { bytes: slot.welcome.bytes.slice(), recipients: [...slot.welcome.recipients] },
+      }
       const refreshed = { ...slot, acceptedAs: 'ack' }
       await host.control.apply({ commitOnce: refreshed }, 'ack')
       expected.acceptedAs = 'ack'
@@ -1460,7 +1470,15 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       )
       const skipped = (await host.control.load()).commitOnce
       if (skipped === null) throw new Error('Missing build')
-      await host.control.apply({ commitOnce: { ...skipped, reported: true } }, 'report')
+      await host.control.apply(
+        {
+          commitOnce: { ...skipped, reported: true },
+          putOutcomes: [
+            { id: 'provisional', opID: skipped.opID, at: skipped.deadline, kind: 'unknown' },
+          ],
+        },
+        'report',
+      )
       const marked = (await host.control.load()).commitOnce
       if (marked === null) throw new Error('Missing build')
       await host.control.apply({ commitOnce: { ...marked, expectedHead: 'refresh' } }, 'head')
@@ -1479,6 +1497,256 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
         expect(await host.control.load()).toEqual(saved)
       }
     })
+    test.each(['missing', 'owner', 'final', 'reused', 'repeat'] as const)(
+      'report marking requires a fresh once-only provisional unknown: %s',
+      async (mutation) => {
+        const host = await params.open()
+        const { slot } = await prepareSlot(host)
+        const outcome = { id: 'clock', opID: slot.opID, at: 1, kind: 'unknown' as const }
+        if (mutation === 'reused') await host.control.apply({ putOutcomes: [outcome] }, 'previous')
+        if (mutation === 'repeat')
+          await host.control.apply(
+            { commitOnce: { ...slot, reported: true }, putOutcomes: [outcome] },
+            'first',
+          )
+        const before = await host.control.load()
+        await expect(
+          host.control.apply(
+            {
+              commitOnce: { ...slot, reported: true },
+              putOutcomes:
+                mutation === 'missing'
+                  ? []
+                  : [
+                      mutation === 'owner'
+                        ? { ...outcome, opID: 'other' }
+                        : mutation === 'final'
+                          ? { ...outcome, kind: 'lost' }
+                          : mutation === 'repeat'
+                            ? { ...outcome, id: 'second' }
+                            : outcome,
+                    ],
+            },
+            'invalid',
+          ),
+        ).rejects.toThrow()
+        expect(await host.control.load()).toEqual(before)
+      },
+    )
+    test('abandonment removes a provisional report committed after its closure snapshot', async () => {
+      const host = await params.open()
+      const { slot } = await prepareSlot(host)
+      const final = { id: 'abandon-final', opID: slot.opID, at: 2, kind: 'unknown' as const }
+      const prepared = {
+        commitOnce: null,
+        spentSource: { epoch: slot.epoch },
+        deleteOutcomes: [],
+        putOutcomes: [final],
+      }
+      await host.control.apply(
+        {
+          commitOnce: { ...slot, reported: true },
+          putOutcomes: [{ id: 'clock', opID: slot.opID, at: 1, kind: 'unknown' }],
+        },
+        'clock',
+      )
+      await host.control.apply(prepared, 'abandon')
+      const closed = await (await params.reopen()).control.load()
+      expect(closed.commitOnce).toBeNull()
+      expect(closed.spentSource).toEqual({ epoch: slot.epoch })
+      expect(closed.outcomes).toEqual([final])
+      await host.control.apply({ deleteOutcomes: ['clock'] }, 'late-ack')
+      expect((await host.control.load()).outcomes).toEqual([final])
+    })
+    test('clearing a build without a final report preserves its provisional outcome', async () => {
+      const host = await params.open()
+      const { slot, source } = await prepareSlot(host)
+      await host.control.apply(
+        {
+          commitOnce: { ...slot, reported: true },
+          putOutcomes: [{ id: 'clock', opID: slot.opID, at: 1, kind: 'unknown' }],
+        },
+        'clock',
+      )
+      await host.saveState(
+        encodeControlFixtureState({ ...source.identity, epoch: slot.epoch + 1 }),
+        { mutationID: 'incomplete-closure', changes: { commitOnce: null } },
+      )
+      expect((await (await params.reopen()).control.load()).outcomes).toEqual([
+        { id: 'clock', opID: slot.opID, at: 1, kind: 'unknown' },
+      ])
+    })
+    test('consumption removes a provisional report written after the closure was prepared', async () => {
+      const host = await params.open()
+      const { slot, source } = await prepareSlot(host)
+      const final = { id: 'fresh-final', opID: slot.opID, at: 2, kind: 'lost' as const }
+      const prepared = {
+        mutationID: 'consume',
+        changes: { commitOnce: null, putOutcomes: [final] },
+      }
+      await host.control.apply(
+        {
+          commitOnce: { ...slot, reported: true },
+          putOutcomes: [{ id: 'clock', opID: slot.opID, at: 1, kind: 'unknown' }],
+        },
+        'clock',
+      )
+      await host.saveState(
+        encodeControlFixtureState({ ...source.identity, epoch: slot.epoch + 1 }),
+        prepared,
+      )
+      expect((await (await params.reopen()).control.load()).outcomes).toEqual([final])
+    })
+    test.each(['absent', 'epoch', 'report', 'clear', 'reuse'] as const)(
+      'raw control writes cannot change spent-source authority: %s',
+      async (mutation) => {
+        const host = await params.open()
+        const { slot } = await prepareSlot(host)
+        const close: ConformanceControlChanges = {
+          commitOnce: null,
+          spentSource: { epoch: slot.epoch },
+          putOutcomes: [{ id: 'final', opID: slot.opID, at: 1, kind: 'unknown' }],
+        }
+        if (mutation === 'clear' || mutation === 'absent')
+          await host.control.apply(close, 'abandon')
+        if (mutation === 'reuse')
+          await host.control.apply({ putOutcomes: close.putOutcomes }, 'prior')
+        const before = await host.control.load()
+        const changes =
+          mutation === 'clear'
+            ? { spentSource: null }
+            : mutation === 'absent'
+              ? { spentSource: { epoch: slot.epoch + 1 } }
+              : mutation === 'epoch'
+                ? { ...close, spentSource: { epoch: slot.epoch + 1 } }
+                : mutation === 'report'
+                  ? { ...close, putOutcomes: [] }
+                  : close
+        await expect(host.control.apply(changes, 'invalid')).rejects.toThrow()
+        expect(await host.control.load()).toEqual(before)
+      },
+    )
+    test.each(['missing', 'deleted'] as const)(
+      'abandonment refuses when persisted state is %s',
+      async (state) => {
+        const host = await params.open()
+        const { slot, source } = await prepareSlot(host)
+        await host.saveState(
+          state === 'missing'
+            ? new Uint8Array()
+            : encodeControlFixtureState({ ...source.identity, deleted: true }),
+        )
+        const before = await host.control.load()
+        await expect(
+          host.control.apply(
+            {
+              commitOnce: null,
+              spentSource: { epoch: slot.epoch },
+              putOutcomes: [{ id: 'final', opID: slot.opID, at: 2, kind: 'unknown' }],
+            },
+            'invalid-abandon',
+          ),
+        ).rejects.toThrow()
+        expect(await host.control.load()).toEqual(before)
+      },
+    )
+    test('abandonment closes executable work with a durable epoch-only fuse and preserves obligations', async () => {
+      const host = await params.open()
+      const { slot, source, intent } = await prepareSlot(host)
+      const obligation = { opID: 'owed', welcome: new Uint8Array([8]), recipients: ['guest'] }
+      await host.control.apply(
+        {
+          putWelcomes: [obligation],
+          putOutcomes: [{ id: 'provisional', opID: slot.opID, at: 1, kind: 'unknown' }],
+        },
+        'owed',
+      )
+      await host.control.apply(
+        {
+          commitOnce: null,
+          spentSource: { epoch: slot.epoch },
+          deleteOutcomes: ['provisional'],
+          putOutcomes: [{ id: 'final', opID: slot.opID, at: 2, kind: 'unknown' }],
+        },
+        'abandon',
+      )
+      const again = await params.reopen()
+      expect((await again.control.load()).commitOnce).toBeNull()
+      expect((await again.control.load()).welcomes).toEqual([obligation])
+      await again.control.apply({ deleteOutcomes: ['final'], putOperations: [intent] }, 'ack')
+      expect(
+        await again.saveBuilt(
+          intent,
+          slot,
+          {
+            ...source,
+            stateVersion: await again.loadVersion(),
+          },
+          'blocked',
+        ),
+      ).not.toBe('saved')
+      expect((await again.control.load()).spentSource).toEqual({ epoch: slot.epoch })
+      await again.saveState(
+        encodeControlFixtureState({ ...source.identity, epoch: slot.epoch + 1 }),
+        {
+          mutationID: 'consume-spent',
+          changes: { spentSource: null },
+        },
+      )
+      expect((await (await params.reopen()).control.load()).spentSource).toBeNull()
+    })
+    test('a stale spent marker permits a later-source build and clears at its next consumption', async () => {
+      const host = await params.open()
+      const { slot, source, intent } = await prepareSlot(host)
+      await host.control.apply(
+        {
+          commitOnce: null,
+          spentSource: { epoch: slot.epoch },
+          putOutcomes: [{ id: 'abandoned', opID: slot.opID, at: 1, kind: 'unknown' }],
+        },
+        'abandon',
+      )
+      const later = {
+        ...source.identity,
+        epoch: slot.epoch + 1,
+        authenticator: new Uint8Array([43]),
+      }
+      await host.saveState(encodeControlFixtureState(later))
+      const successor = { ...intent, id: 'successor' }
+      await host.control.apply(
+        { putOperations: [successor], cursor: { position: null, epoch: later.epoch } },
+        'later-intent',
+      )
+      const next = {
+        ...slot,
+        opID: successor.id,
+        epoch: later.epoch,
+        authenticatorBefore: later.authenticator,
+        publishID: 'later-publication',
+      }
+      expect(
+        await host.saveBuilt(
+          successor,
+          next,
+          {
+            key: host.control.key,
+            identity: later,
+            stateVersion: await host.loadVersion(),
+          },
+          'later-build',
+        ),
+      ).toBe('saved')
+      expect((await host.control.load()).spentSource).toEqual({ epoch: slot.epoch })
+      await host.saveState(encodeControlFixtureState({ ...later, epoch: later.epoch + 1 }), {
+        mutationID: 'consume-later',
+        changes: {
+          commitOnce: null,
+          spentSource: null,
+          putOutcomes: [{ id: 'later-final', opID: successor.id, at: 2, kind: 'unknown' }],
+        },
+      })
+      expect((await (await params.reopen()).control.load()).spentSource).toBeNull()
+    })
     test.each(['incomplete', 'stranded', 'spent'] as const)(
       'build refuses an %s source',
       async (condition) => {
@@ -1492,6 +1760,29 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
           authenticator: slot.authenticatorBefore,
         }
         await host.saveState(encodeControlFixtureState(identity))
+        if (condition === 'spent') {
+          await host.control.apply({ putOperations: [original] }, 'intent')
+          expect(
+            await host.saveBuilt(
+              original,
+              slot,
+              {
+                key: host.control.key,
+                identity,
+                stateVersion: await host.loadVersion(),
+              },
+              'saved',
+            ),
+          ).toBe('saved')
+          await host.control.apply(
+            {
+              commitOnce: null,
+              spentSource: { epoch: slot.epoch },
+              putOutcomes: [{ id: 'abandoned', opID: slot.opID, at: 1, kind: 'unknown' }],
+            },
+            'abandon',
+          )
+        }
         await host.control.apply(
           {
             putOperations: [original],

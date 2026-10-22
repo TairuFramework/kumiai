@@ -6,6 +6,7 @@ import type { ControlSnapshot } from '../src/control/types.js'
 import { PeerDisposedError } from '../src/errors.js'
 import { FrameTooLargeError } from '../src/frame-size.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
+import { encodeLedgerEntries } from '../src/ledger-entries.js'
 import { APP_TOPIC_LABEL, commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
@@ -282,10 +283,122 @@ test('a commit lands after skipping an orphaned own copy', async () => {
   await member.peer.dispose()
 })
 
-// R3: own-local input failures need bounded retry and D1 backstop; classified copy failure forbids identical replay.
-test.todo(
-  'own-local named-entry unavailability retries the held occurrence with capped backoff before D1 resync',
+test.each(
+  [false, true].flatMap((recovers) =>
+    ['missing', 'restore', 'verify'].map((failure) => ({ recovers, failure })),
+  ),
+)(
+  'own-local failure holds the occurrence before bounded retry or compulsory resync ($failure, recovers=$recovers)',
+  async ({ recovers, failure }) => {
+    vi.useFakeTimers()
+    const hub = new FakeHub()
+    const author = makeMLSPeer(hub, 'alice', secret)
+    peers.push(author)
+    await author.peer.replay()
+    const saved = await seedBuiltOperation(author, buildLedgerCommit(author, ['saved-entry']))
+    const restore = author.validation.restoreValidation.bind(author.validation)
+    let failures = 0
+    vi.spyOn(author.validation, 'restoreValidation').mockImplementation(async (built) => {
+      failures++
+      if (recovers && failures > 1) return restore(built)
+      if (failure === 'restore') throw new Error('Temporary local storage failure')
+      if (failure === 'verify') {
+        const local = await restore(built)
+        if (local === null) throw new Error('Missing source validation')
+        return {
+          ...local,
+          validateFrame: async () => {
+            throw new Error('Temporary local verification failure')
+          },
+        }
+      }
+      return null
+    })
+    await hub.publish({
+      senderDID: 'alice',
+      topicID: commitTopic(secret),
+      retain: 'log',
+      payload: saved.slot.payload,
+      publishID: saved.slot.publishID,
+    })
+    await author.controlWalk.walkCommits()
+    expect((await author.control.load()).strand).toBeNull()
+    expect((await author.control.load()).cursor?.position ?? null).toBe(saved.slot.head)
+    expect((await author.control.load()).commitOnce).toEqual(saved.slot)
+    await author.controlWalk.walkCommits()
+    expect(failures).toBe(1)
+    for (let attempt = 0; attempt < 5 && author.mls.epoch() === 1; attempt++) {
+      vi.setSystemTime(Date.now() + 1000)
+      await author.controlWalk.walkCommits()
+      if ((await author.control.load()).strand !== null) break
+    }
+    const result = await author.control.load()
+    if (recovers) {
+      expect(author.mls.epoch()).toBe(2)
+      expect(result.commitOnce).toBeNull()
+      expect(result.outcomes).toMatchObject([{ opID: saved.id, kind: 'landed' }])
+    } else {
+      expect(failures).toBeLessThanOrEqual(4)
+      expect(result.strand).toEqual({ reason: 'unprocessable-gap' })
+      expect(result.cursor?.stranded).toBe(true)
+      expect(result.commitOnce?.skipped).toBeUndefined()
+    }
+  },
 )
+
+test('a changed own blob holds on unavailable header input and installs after local retry', async () => {
+  const hub = new FakeHub()
+  const author = makeMLSPeer(hub, 'alice', secret)
+  peers.push(author)
+  await author.peer.replay()
+  vi.useFakeTimers()
+  const saved = await seedBuiltOperation(author, buildLedgerCommit(author, ['saved-entry']))
+  const frame = decodeCommitFrame(decodeHandshakeFrame(saved.slot.payload).payload)
+  const resealed = await author.crypto.sealEntries(
+    encodeLedgerEntries([...saved.slot.bodies, 'unreferenced-body']),
+  )
+  const payload = encodeHandshakeFrame(
+    HANDSHAKE_KIND.commit,
+    encodeCommitFrame(frame.commit, resealed.sealed),
+  )
+  expect(payload).not.toEqual(saved.slot.payload)
+  expect(author.mls.ownCommitDigest(frame.commit)).toBe(
+    author.mls.ownCommitDigest(decodeCommitFrame(decodeHandshakeFrame(payload).payload).commit),
+  )
+  const unavailable = Object.assign(new Error('Local source read unavailable'), {
+    name: 'CommitValidationUnavailableError',
+  })
+  vi.spyOn(author.mls, 'readCommitHeader').mockRejectedValueOnce(unavailable)
+  const receive = vi.spyOn(author.mls, 'processCommit')
+  const before = await author.control.load()
+  const occurrence = await hub.publish({
+    senderDID: 'replayer',
+    topicID: commitTopic(secret),
+    retain: 'log',
+    payload,
+  })
+  await author.controlWalk.walkCommits()
+  const held = await author.control.load()
+  expect(held.strand).toBeNull()
+  expect(held.cursor).toEqual(before.cursor)
+  expect(held.commitOnce).toEqual(saved.slot)
+  expect(held.applied).toEqual([])
+  expect(held.outcomes).toEqual([])
+  expect(author.mls.epoch()).toBe(1)
+  await author.controlWalk.walkCommits()
+  expect(await author.control.load()).toEqual(held)
+  vi.setSystemTime(Date.now() + 100)
+  await author.controlWalk.walkCommits()
+  const installed = await author.control.load()
+  expect(installed.commitOnce).toBeNull()
+  expect(installed.strand).toBeNull()
+  expect(installed.cursor?.position).toBe(occurrence.sequenceID)
+  expect(installed.applied).toMatchObject([{ opID: saved.id, sequenceID: occurrence.sequenceID }])
+  expect(installed.outcomes).toMatchObject([{ opID: saved.id, kind: 'landed' }])
+  expect(author.mls.epoch()).toBe(2)
+  expect(await author.mls.getLedger()).toEqual(['saved-entry'])
+  expect(receive).not.toHaveBeenCalled()
+})
 
 test.each([false, true])(
   'a classified altered own copy prevents identical retry and later own installation closes unknown (restart=%s)',

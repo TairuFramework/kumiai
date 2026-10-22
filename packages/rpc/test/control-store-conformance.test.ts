@@ -73,7 +73,10 @@ describe('memory host database', () => {
   testControlStoreConformance({
     open: async () => {
       db = createMemoryHostDatabase({
-        readIdentity: (state) => decodeControlFixtureState(state),
+        readIdentity: (state) => {
+          const identity = decodeControlFixtureState(state)
+          return identity?.deleted ? null : identity
+        },
         isTerminal: (state) => decodeControlFixtureState(state)?.terminal === true,
       })
       return host()

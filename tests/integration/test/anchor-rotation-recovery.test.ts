@@ -3,6 +3,7 @@ import { commitInvite, decodeClientState, restoreGroup, signLedgerEntry } from '
 import { createLedgerEntrySlot } from '@kumiai/mls-rpc'
 import {
   APP_TOPIC_LABEL,
+  closeControlBuild,
   commitTopic,
   digestAppliedCommit,
   encodeCommitFrame,
@@ -188,7 +189,7 @@ test.each([false, true])(
   },
 )
 
-test('fresh startup with a lost anchor secret retains unexplained acceptance while ordinary recovery runs', async () => {
+test('fresh startup with a lost anchor secret keeps consumed work closed while ordinary recovery runs', async () => {
   const state = await setup({ deadlineMs: 10_000, adminBob: true })
   const { alice, bob, carolID, received, events } = state
   const original = bob.anchorStore.stored()
@@ -232,9 +233,17 @@ test('fresh startup with a lost anchor secret retains unexplained acceptance whi
       return pending
     }),
   )
-  await bob.handle().processMessage(removedCommit)
-  await bob.adopt(bob.handle())
-  // Both advances happened outside peer settlement; the saved source has no applied evidence.
+  const snapshot = await bob.control.load()
+  await bob.mls.processCommit(removedCommit, {
+    adoption: () => ({
+      mutationID: crypto.randomUUID(),
+      changes: closeControlBuild(snapshot, { kind: 'unknown' }, Date.now(), crypto.randomUUID()),
+    }),
+  })
+  // An out-of-walker adoption has no coverage proof, but must still close its consumed source.
+  const closed = await bob.control.load()
+  expect(closed.commitOnce).toBeNull()
+  expect(closed.outcomes).toMatchObject([{ opID: retained.opID, kind: 'unknown' }])
   const next = await alice.build(
     operationIntent(buildLedgerCommit(alice, alice.identity, bob.identity.id, 'member')),
   )
@@ -274,13 +283,11 @@ test('fresh startup with a lost anchor secret retains unexplained acceptance whi
   })
   const restarted = await state.restart()
   await restarted.peer.replay()
-  await expect
-    .poll(async () => (await restarted.control.load()).controlHold)
-    .toMatchObject({ reason: 'acceptance-unknown', position: null })
   const held = await restarted.control.load()
-  expect(held.commitOnce).toEqual(retained)
-  expect(held.operations[0]?.id).toBe(deferred.id)
-  expect(held.outcomes).toEqual([])
+  expect(held.controlHold).toBeNull()
+  expect(held.commitOnce).toBeNull()
+  expect(held.operations).toEqual([])
+  expect(held.outcomes).toEqual(closed.outcomes)
   expect(events).toContainEqual(expect.objectContaining({ phase: 'started', trigger: 'automatic' }))
   expect(Number(restarted.handle().epoch)).toBe(epochBefore + 2)
   expect(restarted.peer.anchorEpoch()).toBe(original.epoch)
@@ -289,7 +296,8 @@ test('fresh startup with a lost anchor secret retains unexplained acceptance whi
   const again = await state.restart(restarted)
   await again.peer.replay()
   expect((await again.control.load()).controlHold).toEqual(held.controlHold)
-  expect((await again.control.load()).commitOnce).toEqual(retained)
+  expect((await again.control.load()).commitOnce).toBeNull()
+  expect((await again.control.load()).outcomes).toEqual(closed.outcomes)
   expect(events).toContainEqual(expect.objectContaining({ phase: 'started', trigger: 'automatic' }))
 })
 

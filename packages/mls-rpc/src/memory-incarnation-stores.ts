@@ -369,8 +369,20 @@ export function createUnlockedIncarnationStores(params: {
         )
         const previous = (await control.load('current'))?.snapshot ?? emptyControl()
         let context: CommitOnceWriteContext | null = controlBuildContexts.get(tx) ?? null
-        if (owned.commitOnce === null && context === null)
+        if ((owned.commitOnce === null || owned.spentSource === null) && context === null)
           context = (await params.adoptionContext?.()) ?? null
+        if (owned.commitOnce === null && owned.spentSource != null && context === null) {
+          const state = await stateStores.state(key.incarnation).load()
+          if (state !== null && !state.deleted)
+            context = {
+              kind: 'abandon',
+              source: {
+                ...key,
+                epoch: state.epoch,
+                authenticator: state.epochAuthenticator,
+              },
+            }
+        }
         if (owned.commitOnce != null && context === null) {
           const state = await stateStores.state(key.incarnation).load()
           if (state !== null && !state.deleted)

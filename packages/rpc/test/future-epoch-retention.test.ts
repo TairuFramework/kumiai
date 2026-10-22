@@ -395,12 +395,29 @@ test('a local commit awaiting its publication acknowledgement suspends app expir
       }
       return result
     })
-    committing = bob.peer.commit(buildLedgerCommit(bob, []))
+    const request = buildLedgerCommit(bob, [])
+    committing = bob.peer.commit(request).catch((error: unknown) => error)
     await entered.promise
     await vi.advanceTimersByTimeAsync(30_000)
     expect(bob.appCursorStore.stored(topicID)).toBeNull()
+    expect(await committing).toMatchObject({
+      name: 'OperationOutcomeError',
+      outcome: { opID: request.id, kind: 'unknown' },
+    })
+    expect((await bob.control.load()).commitOnce).toMatchObject({
+      opID: request.id,
+      reported: true,
+    })
+    const provisionalID = (await bob.control.load()).outcomes[0]?.id
+    expect(provisionalID).toBeDefined()
     release.resolve()
-    await committing
+    await bob.peer.replay()
+    const snapshot = await bob.control.load()
+    expect(snapshot.commitOnce).toBeNull()
+    expect(snapshot.outcomes).toEqual([
+      expect.objectContaining({ opID: request.id, kind: 'landed' }),
+    ])
+    expect(snapshot.outcomes[0]?.id).not.toBe(provisionalID)
     await vi.advanceTimersByTimeAsync(0)
     expect(bob.appCursorStore.stored(topicID)).toBe(frame.sequenceID)
   } finally {

@@ -5,7 +5,12 @@ import { OperationOutcomeError } from '../src/errors.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
-import { buildInviteCommit, buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
+import {
+  buildInviteCommit,
+  buildLedgerCommit,
+  makeMLSPeer,
+  seedBuiltOperation,
+} from './fixtures/peer.js'
 
 const secret = new Uint8Array(32).fill(0x76)
 
@@ -209,10 +214,37 @@ describe('durable peer operations', () => {
     clock.mockRestore()
   })
 
-  // R3: expired built work reports provisional unknown, retains the build and original deadline, and never publishes.
-  test.todo(
-    'restart reports expired live-build unknown once and preserves its original deadline and executable material',
-  )
+  test('restart reports expired live-build unknown once and preserves its original deadline and executable material', async () => {
+    const hub = new FakeHub()
+    const seed = makeMLSPeer(hub, 'alice', secret)
+    await seed.peer.replay()
+    const saved = await seedBuiltOperation(seed, buildLedgerCommit(seed, ['expired']))
+    await seed.peer.dispose()
+    await seed.peer.drained()
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(saved.deadline)
+    const again = makeMLSPeer(hub, 'alice', secret, {
+      restartOf: seed,
+      operationTimeoutMs: 1_000_000,
+    })
+    try {
+      await again.peer.replay()
+      const report = (await again.peer.outcomes())[0]
+      expect(report).toMatchObject({ opID: saved.id, kind: 'unknown' })
+      expect((await again.control.load()).commitOnce).toMatchObject({
+        ...saved.slot,
+        reported: true,
+      })
+      expect(hub.published.filter((row) => row.topicID === commitTopic(secret))).toEqual([])
+      if (report === undefined) throw new Error('Missing provisional')
+      await again.peer.ack(report.id)
+      await again.peer.replay()
+      expect(await again.peer.outcomes()).toEqual([])
+    } finally {
+      await again.peer.dispose()
+      await again.peer.drained()
+      clock.mockRestore()
+    }
+  })
 
   test('commit rejects with the durable lost outcome', async () => {
     const hub = new FakeHub()

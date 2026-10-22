@@ -1293,6 +1293,113 @@ export async function createControlCrashHarness(mode: 'real-mls' | 'double', see
   ) as typeof attached & { fixture: typeof fixture; reopen(): ReturnType<typeof attach> }
 }
 
+export async function runControlSlotGuards(
+  mode: 'real-mls' | 'double',
+): Promise<CommitOnceEvidence> {
+  const h = await createControlCrashHarness(mode)
+  try {
+    await h.peer.resync()
+    const op = await h.intent()
+    await h.controlWalk.stepOperation(op.id)
+    const slot = (await h.control.load()).commitOnce
+    if (slot === null) throw new Error('Missing saved slot')
+    h.fixture.setTime(slot.deadline)
+    await h.controlWalk.stepOperation(op.id)
+    const reported = await h.control.load()
+    const provisional = reported.outcomes.find((row) => row.opID === op.id)
+    if (provisional?.kind !== 'unknown') throw new Error('Missing provisional report')
+    expect(reported.commitOnce).toEqual({ ...slot, reported: true })
+    await h.peer.ack(provisional.id)
+    expect((await h.control.load()).commitOnce).toEqual(reported.commitOnce)
+    const queued: Operation = {
+      ...op,
+      id: crypto.randomUUID(),
+      seq: op.seq + 1,
+      enqueuedAt: slot.deadline,
+      deadline: slot.deadline + 30_000,
+    }
+    await h.control.apply({ putOperations: [queued] }, crypto.randomUUID())
+    await h.controlWalk.stepOperation(queued.id)
+    await h.control.apply(
+      {
+        deleteOperations: [queued.id],
+        putOutcomes: [
+          {
+            id: crypto.randomUUID(),
+            opID: queued.id,
+            kind: 'rejected',
+            at: slot.deadline,
+            reason: 'Host authorization changed',
+          },
+        ],
+      },
+      crypto.randomUUID(),
+    )
+    expect((await h.control.load()).commitOnce).toEqual(reported.commitOnce)
+    const beforeDeletion = await h.fixture.inspectRows()
+    await expect(
+      h.groups.transition(
+        await nextChange(h.groups, h.key.groupID, 'delete-live-transport'),
+        (stores) => stores.incarnation(h.key.incarnation).clearTransport(),
+      ),
+    ).rejects.toMatchObject({
+      name: 'GroupStateConflictError',
+      message: 'Live control build prevents transport clearing',
+    })
+    expect(await h.fixture.inspectRows()).toEqual(beforeDeletion)
+    await h.control.apply(
+      { putOperations: [{ ...queued, id: crypto.randomUUID(), seq: queued.seq + 1 }] },
+      crypto.randomUUID(),
+    )
+    await h.peer.abandon()
+    await h.peer.ack(provisional.id)
+    const refused: Operation = { ...queued, id: crypto.randomUUID(), seq: queued.seq + 2 }
+    await h.control.apply({ putOperations: [refused] }, crypto.randomUUID())
+    await h.controlWalk.stepOperation(refused.id)
+    expect((await h.control.load()).commitOnce).toBeNull()
+    await h.close()
+    const reopened = await h.reopen()
+    try {
+      await reopened.peer.replay()
+      const facts = (await reopened.control.load()).outcomes
+      for (const outcome of facts) await reopened.peer.ack(outcome.id)
+      const after = await reopened.control.load()
+      const current = await reopened.groups.readEvidence(reopened.key)
+      return {
+        outcome: 'unknown',
+        builds: h.observations.builds,
+        ownAdoptions: h.observations.ownAdoptions,
+        welcomeDeliveries: h.observations.welcomeDeliveries,
+        payloads: h.publications.map((row) => row.payload),
+        publishIDs: h.publications.map((row) => {
+          if (row.publishID === undefined) throw new Error('Missing control publish ID')
+          return row.publishID
+        }),
+        expectedHeads: h.publications.map((row) => row.expectedHead),
+        searchFrom: slot.head,
+        slotAfterAck: after.commitOnce,
+        abandonment: {
+          sourceEpoch: slot.epoch,
+          provisionalID: provisional.id,
+          outcomes: facts.filter((row) => row.opID === op.id),
+          spentSourceAfterAck: after.spentSource,
+        },
+        winnerFollowed: false,
+        candidateMatchesReceiver: false,
+        progressPreserved: false,
+        cursor: after.cursor?.position ?? null,
+        terminal: current.terminal,
+        publicationsBeforeProof: 0,
+      }
+    } finally {
+      await reopened.close()
+    }
+  } finally {
+    await h.close()
+    await h.fixture.close()
+  }
+}
+
 export async function runControlProofConflict(
   mode: 'real-mls' | 'double',
   stage: 'built' | 'accepted' | 'adoption' = 'built',

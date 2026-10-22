@@ -26,6 +26,7 @@ import { searchOccurrence } from './control/occurrence.js'
 import {
   enqueueOperation,
   type OperationDeps,
+  reportLiveBuild,
   revokeHeld,
   stepLiveBuild,
   stepOperation,
@@ -91,6 +92,7 @@ import {
   ControlSafetyImmutableError,
   GroupSafetyHeldError,
   OperationOutcomeError,
+  OperationRejectedError,
   PeerDisposedError,
   PeerRemovedError,
   RecoveryTargetBehindError,
@@ -1027,7 +1029,13 @@ export function createGroupPeerWithControlWalk<
             }
           },
           remove: (seq) => params.appOutbox.remove(seq),
-          clear: () => params.appOutbox.clear(),
+          clear: async () => {
+            // An early safety exit must not make unrestored records look completed.
+            if (!pendingRestored) throw new Error('Pending application records are not restored')
+            await appLane.completeOpened()
+            assertLive()
+            await params.appOutbox.clear()
+          },
           cleared: (notice) => notifyHost(params.onAppOutboxCleared, notice),
           deliveredWindowMs: appLogRetentionSeconds * 1000,
           deliveredLimit: params.appOutboxLimit,
@@ -1842,6 +1850,12 @@ export function createGroupPeerWithControlWalk<
    * would let the next `commit()` win a compare-and-set at an epoch it had not caught up to.
    * `ahead` steps over its frame and drains to the end. Its strand stops publication.
    */
+  let ownLocalRetry: {
+    position: LogPosition
+    publishID: string
+    attempts: number
+    nextAt: number
+  } | null = null
   const walkCommitLog = async (
     port: GroupMLS,
     topicID: string,
@@ -1852,6 +1866,7 @@ export function createGroupPeerWithControlWalk<
     if (safetyHold() !== null) return false
     const saved = await control?.load()
     const live = saved?.commitOnce
+    if (ownLocalRetry !== null && ownLocalRetry.publishID !== live?.publishID) ownLocalRetry = null
     if (live != null) {
       const source = await port.readRecoverySource()
       const identity = source.identity
@@ -1912,6 +1927,26 @@ export function createGroupPeerWithControlWalk<
         kind: 'unprocessable-gap',
         confidence: 'claimed',
       })
+      return advancedEpoch
+    }
+    const ownUnavailable = async (
+      position: LogPosition,
+      commitDigest: string,
+      epoch: number,
+      claimedEpoch: number | null,
+      publishID: string,
+    ): Promise<boolean> => {
+      const attempts = ownLocalRetry?.position === position ? ownLocalRetry.attempts + 1 : 1
+      if (attempts >= 4) {
+        ownLocalRetry = null
+        return unprocessable(position, commitDigest, epoch, claimedEpoch)
+      }
+      ownLocalRetry = {
+        position,
+        publishID,
+        attempts,
+        nextAt: Date.now() + Math.min(100 * 2 ** (attempts - 1), 1000),
+      }
       return advancedEpoch
     }
     let covered = true
@@ -2013,6 +2048,8 @@ export function createGroupPeerWithControlWalk<
         // operation carries that across a restart); meeting its own commit here means its saved operation
         // was lost or never written.
         const position = asLogPosition(message.sequenceID)
+        if (ownLocalRetry?.position === position && Date.now() < ownLocalRetry.nextAt)
+          return advancedEpoch
         if (rejoinPosition != null && position >= rejoinPosition) return advancedEpoch
         let frame: ReturnType<typeof decodeHandshakeFrame>
         try {
@@ -2094,8 +2131,29 @@ export function createGroupPeerWithControlWalk<
             readHeader = await port.readCommitHeader(commitFrame.commit)
           } catch (error) {
             if (safetyRefusal(error) || safetyHold() !== null) return advancedEpoch
-            if (error instanceof Error && error.name === 'CommitValidationUnavailableError')
+            if (error instanceof Error && error.name === 'CommitValidationUnavailableError') {
+              const built = (await control?.load())?.commitOnce
+              const savedCommit =
+                built == null
+                  ? null
+                  : decodeCommitFrame(decodeHandshakeFrame(built.payload).payload).commit
+              const savedRecognition =
+                savedCommit === null ? null : (mls?.ownCommitDigest(savedCommit) ?? null)
+              const deliveredRecognition = mls?.ownCommitDigest(commitFrame.commit) ?? null
+              if (
+                built != null &&
+                (built.payloadDigest === toB64U(sha256(message.payload)) ||
+                  (savedRecognition !== null && savedRecognition === deliveredRecognition))
+              )
+                return ownUnavailable(
+                  position,
+                  commitDigest,
+                  localEpoch,
+                  localEpoch,
+                  built.publishID,
+                )
               return unprocessable(position, commitDigest, localEpoch, localEpoch)
+            }
             throw error
           }
           if (disposed || safetyHold() !== null) return false
@@ -2134,6 +2192,7 @@ export function createGroupPeerWithControlWalk<
               const result = await consumeOwnOccurrence(
                 {
                   control,
+                  signal: controlAbort.signal,
                   validation,
                   adoption: { adopt: operationDeps().adopt },
                   now: Date.now,
@@ -2143,6 +2202,7 @@ export function createGroupPeerWithControlWalk<
                 { position, payload: message.payload, senderDID: message.senderDID },
               )
               if (result === 'installed' || result === 'noop') {
+                ownLocalRetry = null
                 advancedEpoch = true
                 reconciledHead = position
                 await refreshControl()
@@ -2158,7 +2218,13 @@ export function createGroupPeerWithControlWalk<
                 return advancedEpoch
               }
               if (result === 'unavailable')
-                return unprocessable(position, commitDigest, localEpoch, header?.epoch ?? null)
+                return ownUnavailable(
+                  position,
+                  commitDigest,
+                  localEpoch,
+                  header?.epoch ?? null,
+                  slot.publishID,
+                )
             }
             await saveCommitCursor(position, undefined, header?.epoch)
             if (commitTopicID != null)
@@ -2700,20 +2766,65 @@ export function createGroupPeerWithControlWalk<
       waiter.resolve(outcome)
     outcomeWaiters.delete(outcome.opID ?? outcome.id)
   }
-  const emitOutcome = (outcome: Outcome): void => {
+  const emitOutcome = (outcome: Outcome, immediate = false): void => {
     const fingerprint = JSON.stringify(outcome, Object.keys(outcome).sort())
     if (emittedOutcomes.get(outcome.id) === fingerprint) return
     emittedOutcomes.set(outcome.id, fingerprint)
-    hostOutbox.push(() => {
-      resolveOutcomeWaiters(outcome)
-      notifyHost((value) => params.onOutcome?.(value), outcome)
-    })
+    const notice = () => {
+      if (outcome.opID?.startsWith('kumiai/internal/')) {
+        notifyHost((value) => params.onInternalOutcome?.(value), outcome)
+      } else {
+        resolveOutcomeWaiters(outcome)
+        notifyHost((value) => params.onOutcome?.(value), outcome)
+      }
+    }
+    if (immediate) notice()
+    else hostOutbox.push(notice)
   }
   let slotEvidenceStamp: string | null = null
+  let reportTimer: ReturnType<typeof setTimeout> | undefined
+  let reportDue = Number.POSITIVE_INFINITY
+  let reportRunning = false
+  function scheduleBuildReport(deadline: number): void {
+    if (disposed || control == null || reportRunning || reportDue <= deadline) return
+    if (reportTimer !== undefined) clearTimeout(reportTimer)
+    reportDue = deadline
+    reportTimer = setTimeout(
+      () => {
+        reportTimer = undefined
+        reportDue = Number.POSITIVE_INFINITY
+        reportRunning = true
+        void Promise.resolve()
+          .then(() => {
+            return reportLiveBuild({
+              ...operationDeps(),
+              emit: (outcome) => emitOutcome(outcome, true),
+            })
+          })
+          .catch(() => {
+            // A rolled-back or moved write re-reads the live build before retrying.
+          })
+          .finally(() => {
+            reportRunning = false
+            if (disposed || control == null) return
+            void control
+              .load()
+              .then((snapshot) => {
+                if (snapshot.commitOnce !== null && !snapshot.commitOnce.reported)
+                  scheduleBuildReport(Math.max(Date.now() + 100, snapshot.commitOnce.deadline))
+              })
+              .catch(() => scheduleBuildReport(Date.now() + 1000))
+          })
+      },
+      Math.max(0, deadline - Date.now()),
+    )
+  }
   const refreshControl = async (freshEvidence?: ControlEvidenceSnapshot): Promise<void> => {
     if (control == null) return
     const generation = safetyGeneration
     const snapshot = await control.load()
+    if (snapshot.commitOnce !== null && !snapshot.commitOnce.reported)
+      scheduleBuildReport(snapshot.commitOnce.deadline)
     if (generation !== safetyGeneration) return await refreshControl(freshEvidence)
     for (const [id, buffers] of ownedRecoveryBuffers) {
       if (snapshot.rejoin?.id === id) continue
@@ -2842,7 +2953,7 @@ export function createGroupPeerWithControlWalk<
       at: Date.now(),
       kind: 'unknown',
     }))
-    if (snapshot.rejoin != null)
+    if (snapshot.rejoin != null && snapshot.rejoin.stage !== 'refused')
       outcomes.push({
         id: snapshot.rejoin.id,
         opID: null,
@@ -2859,20 +2970,14 @@ export function createGroupPeerWithControlWalk<
     }
   }
 
+  const reportedEvidenceErrors = new Set<string>()
   const removalEffect = async (): Promise<void> => {
     if (control == null || safetyHold() !== null) return
-    const snapshot = await control.load()
-    if (safetyHold() !== null) return
     const evidence = await params.readEvidence?.()
     if (safetyHold() !== null || !evidence?.terminal) return
-    if (snapshot.operations.length > 0 || snapshot.rejoin != null) {
-      const changes = unknownChanges(snapshot)
-      await applyResolved(control, changes, newPublishID())
-      for (const outcome of changes.putOutcomes) emitOutcome(outcome)
-      await refreshControl()
-    }
     if (!locallyRemoved) {
       locallyRemoved = true
+      appLane.stopOpening()
       logDelivery?.removed()
     }
   }
@@ -2895,7 +3000,7 @@ export function createGroupPeerWithControlWalk<
       if (reason !== null) throw new GroupSafetyHeldError(reason)
       const at = Date.now()
       const settled =
-        clearsSlot && (staged.removed || staged.epochAfter > epoch)
+        owningSlot !== null && (staged.removed || (clearsSlot && staged.epochAfter > epoch))
           ? closeControlBuild(
               snapshot,
               {
@@ -2911,6 +3016,7 @@ export function createGroupPeerWithControlWalk<
           : {}
       if (staged.removed) {
         settled.commitOnce = null
+        settled.spentSource = snapshot.spentSource
         settled.deleteOperations = snapshot.operations.map((op) => op.id)
         settled.putOutcomes = [
           ...(settled.putOutcomes ?? []),
@@ -3112,6 +3218,8 @@ export function createGroupPeerWithControlWalk<
   }
 
   const reportedControlInvariants = new Set<string>()
+  let publicationAbort: AbortController | null = null
+  let abandonmentRequests = 0
   const operationDeps = (): OperationDeps => {
     if (control == null || prepareBuild == null || adopt == null || mls == null)
       throw new Error('commit: this peer has no MLS ports')
@@ -3182,44 +3290,68 @@ export function createGroupPeerWithControlWalk<
         return { payload, publishID: newPublishID(), expectedHead: commitLogHead }
       },
       publish: async (payload, publishID, expectedHead) => {
-        assertLive()
-        if (revokeHold) await settleLogSubmissions()
-        assertLive()
-        const snapshot = await control.load()
-        const operation = snapshot.commitOnce
-        if (
-          operation == null ||
-          Date.now() >= operation.deadline ||
-          safetyHold() !== null ||
-          controlSafetyHeld(snapshot) !== null ||
-          (snapshot.controlHold !== null && snapshot.controlHold.reason !== 'acceptance-unknown') ||
-          stranded ||
-          snapshot.strand !== null ||
-          snapshot.cursor?.stranded === true
-        )
-          throw new RecoveryRequiredError('Control publication is held or expired')
-        const slot = snapshot.commitOnce
-        const evidence = await params.readEvidence()
-        const identity = evidence.source.identity
-        if (
-          slot === null ||
-          slot.opID !== operation.opID ||
-          slot.publishID !== publishID ||
-          evidence.terminal ||
-          identity === null ||
-          evidence.source.key.groupID !== control.key.groupID ||
-          evidence.source.key.incarnation !== slot.incarnation ||
-          identity.epoch !== slot.epoch ||
-          identity.authenticator.length !== slot.authenticatorBefore.length ||
-          identity.authenticator.some((byte, index) => byte !== slot.authenticatorBefore[index]) ||
-          Date.now() >= operation.deadline ||
-          topicID == null
-        )
-          throw new RecoveryRequiredError('Control source moved before publication')
-        const safety = safetyHold()
-        if (safety !== null) throw new GroupSafetyHeldError(safety)
-        commitLaneCaughtUp = false
-        return mux.publish({ topicID, payload, publishID, expectedHead, retain: 'log' })
+        if (abandonmentRequests !== 0)
+          throw new RecoveryRequiredError('Control publication abandoned')
+        const controller = new AbortController()
+        publicationAbort = controller
+        let onAbort: (() => void) | undefined
+        const cancelled = new Promise<never>((_resolve, reject) => {
+          onAbort = () => reject(controller.signal.reason)
+          controller.signal.addEventListener('abort', onAbort, { once: true })
+          if (controller.signal.aborted) onAbort()
+        })
+        void cancelled.catch(() => {})
+        try {
+          assertLive()
+          if (revokeHold) await Promise.race([settleLogSubmissions(), cancelled])
+          assertLive()
+          if (controller.signal.aborted) throw controller.signal.reason
+          const snapshot = await control.load()
+          const operation = snapshot.commitOnce
+          if (
+            operation == null ||
+            Date.now() >= operation.deadline ||
+            safetyHold() !== null ||
+            controlSafetyHeld(snapshot) !== null ||
+            (snapshot.controlHold !== null &&
+              snapshot.controlHold.reason !== 'acceptance-unknown') ||
+            stranded ||
+            snapshot.strand !== null ||
+            snapshot.cursor?.stranded === true
+          )
+            throw new RecoveryRequiredError('Control publication is held or expired')
+          const slot = snapshot.commitOnce
+          const evidence = await params.readEvidence()
+          const identity = evidence.source.identity
+          if (
+            slot === null ||
+            slot.opID !== operation.opID ||
+            slot.publishID !== publishID ||
+            evidence.terminal ||
+            identity === null ||
+            evidence.source.key.groupID !== control.key.groupID ||
+            evidence.source.key.incarnation !== slot.incarnation ||
+            identity.epoch !== slot.epoch ||
+            identity.authenticator.length !== slot.authenticatorBefore.length ||
+            identity.authenticator.some(
+              (byte, index) => byte !== slot.authenticatorBefore[index],
+            ) ||
+            Date.now() >= operation.deadline ||
+            topicID == null
+          )
+            throw new RecoveryRequiredError('Control source moved before publication')
+          const safety = safetyHold()
+          if (safety !== null) throw new GroupSafetyHeldError(safety)
+          if (controller.signal.aborted) throw controller.signal.reason
+          commitLaneCaughtUp = false
+          return await Promise.race([
+            mux.publish({ topicID, payload, publishID, expectedHead, retain: 'log' }),
+            cancelled,
+          ])
+        } finally {
+          if (onAbort !== undefined) controller.signal.removeEventListener('abort', onAbort)
+          if (publicationAbort === controller) publicationAbort = null
+        }
       },
       publishFailed: (opID, error) => {
         hostOutbox.push(() =>
@@ -3237,13 +3369,20 @@ export function createGroupPeerWithControlWalk<
         if (safetyHold() !== null) return
         await reconcileCommits()
         assertLive()
-        if (stranded || anchorRecoveryPending || rejoinHeld || activeRecovery != null)
+        if (
+          stranded ||
+          ownLocalRetry !== null ||
+          anchorRecoveryPending ||
+          rejoinHeld ||
+          activeRecovery != null
+        )
           throw new RecoveryRequiredError('commit: group control requires recovery')
       },
       now: Date.now,
       operationTimeoutMs,
       newID: newPublishID,
       emit: emitOutcome,
+      scheduleReport: scheduleBuildReport,
     }
   }
   function hasUnresolvedControlSlot(
@@ -3644,6 +3783,8 @@ export function createGroupPeerWithControlWalk<
   }
 
   const enqueue = async (request: OperationRequest): Promise<void> => {
+    if (request.id.startsWith('kumiai/internal/'))
+      throw new OperationRejectedError('Operation ID uses the reserved internal namespace')
     assertSafetyOpen()
     if (params.recoveryOnly) throw new SendNotAdmissibleError('stranded')
     await ready
@@ -3687,7 +3828,11 @@ export function createGroupPeerWithControlWalk<
   const outcomes = async (): Promise<Array<Outcome>> => {
     await ready
     assertLive()
-    return control == null ? [] : (await control.load()).outcomes
+    return control == null
+      ? []
+      : (await control.load()).outcomes.filter(
+          (outcome) => !outcome.opID?.startsWith('kumiai/internal/'),
+        )
   }
   const ack = async (id: string): Promise<void> => {
     await ready
@@ -3700,26 +3845,43 @@ export function createGroupPeerWithControlWalk<
     scheduleControlSlotRetry(0)
   }
   const abandon = async (): Promise<void> => {
-    await ready
-    assertLive()
-    if (params.recoveryOnly) throw new SendNotAdmissibleError('stranded')
-    await runSerial(async () => {
-      if (control == null) return
-      const snapshot = await control.load()
-      const changes = {
-        ...unknownChanges(snapshot),
-      }
-      await applyResolved(control, changes, newPublishID())
-      await refreshControl()
-      pendingRecovery = null
-      awaitingBootstrap = null
-      inFlightEntries = null
-      healRequested = false
-      clearRecoveryRetry()
-      recoveryGeneration += 1
-      for (const outcome of changes.putOutcomes) emitOutcome(outcome)
-    })
-    scheduleControlSlotRetry(0)
+    abandonmentRequests++
+    publicationAbort?.abort(new RecoveryRequiredError('Control publication abandoned'))
+    try {
+      await ready
+      assertLive()
+      if (params.recoveryOnly) throw new SendNotAdmissibleError('stranded')
+      await runSerial(async () => {
+        if (control == null) return
+        const snapshot = await control.load()
+        if (
+          snapshot.commitOnce === null &&
+          snapshot.operations.length === 0 &&
+          snapshot.rejoin === null &&
+          snapshot.welcomes.length === 0
+        )
+          return
+        const closure = closeControlBuild(snapshot, { kind: 'abandon' }, Date.now(), newPublishID())
+        const changes = {
+          ...unknownChanges(snapshot),
+          ...closure,
+          putOutcomes: [...unknownChanges(snapshot).putOutcomes, ...(closure.putOutcomes ?? [])],
+          deleteWelcomes: snapshot.welcomes.map(({ opID }) => opID),
+        }
+        await applyResolved(control, changes, newPublishID())
+        await refreshControl()
+        pendingRecovery = null
+        awaitingBootstrap = null
+        inFlightEntries = null
+        healRequested = false
+        clearRecoveryRetry()
+        recoveryGeneration += 1
+        for (const outcome of changes.putOutcomes) emitOutcome(outcome)
+      })
+      scheduleControlSlotRetry(0)
+    } finally {
+      abandonmentRequests--
+    }
   }
   const commit = async (request: OperationRequest): Promise<{ position: LogPosition }> => {
     let resolve!: (outcome: Outcome) => void
@@ -5215,7 +5377,6 @@ export function createGroupPeerWithControlWalk<
         )
           throw new TypeError('Recovery continuation belongs to another destination')
       }
-      mux.start()
       const stored = await anchorStore?.load()
       if (stopped()) return
       if (stored != null) {
@@ -5223,8 +5384,40 @@ export function createGroupPeerWithControlWalk<
         departing = stored.departing ?? []
         anchorPending = stored.pending
       }
-      await removalEffect()
-      if (stopped() || locallyRemoved || hardControlHeld()) return
+      let evidenceBackoff = 100
+      while (!stopped()) {
+        try {
+          await removalEffect()
+          break
+        } catch (error) {
+          if (safetyRefusal(error)) throw error
+          if (stopped()) return
+          const fingerprint =
+            error instanceof Error ? JSON.stringify([error.name, error.message]) : String(error)
+          if (!reportedEvidenceErrors.has(fingerprint)) {
+            reportedEvidenceErrors.add(fingerprint)
+            notifyHost(params.onControlPublishError, { opID: null, error })
+          }
+          // Readiness stays pending during retries: terminal evidence must precede mux network work.
+          await Promise.race([
+            new Promise<void>((resolve) => {
+              pendingRestoreTimer = setTimeout(resolve, evidenceBackoff)
+            }),
+            pendingRestoreAborted,
+          ])
+          pendingRestoreTimer = undefined
+          evidenceBackoff = Math.min(evidenceBackoff * 2, 15_000)
+        }
+      }
+      if (stopped()) return
+      if (locallyRemoved) {
+        await restorePending()
+        pendingRestored = true
+        appLane.retryDelivery()
+        return
+      }
+      mux.start()
+      if (hardControlHeld()) return
       let anchorBackoff = 100
       while (!stopped()) {
         try {
@@ -5511,6 +5704,7 @@ export function createGroupPeerWithControlWalk<
       const checkpointDrain = checkpointWorker?.dispose()
       unsubscribeSafety?.()
       controlAbort.abort(new PeerDisposedError('Peer is disposed'))
+      if (reportTimer !== undefined) clearTimeout(reportTimer)
       if (operationTimer != null) clearTimeout(operationTimer)
       cancelControlSlotRetry()
       if (welcomeTimer != null) clearTimeout(welcomeTimer)

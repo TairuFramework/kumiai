@@ -1,5 +1,11 @@
 import { setImmediate as waitForTurn } from 'node:timers/promises'
-import { GroupControlUnsettledError } from '@kumiai/rpc'
+import {
+  closeControlBuild,
+  controlSettled,
+  deliverObligations,
+  GroupControlUnsettledError,
+  type WelcomeObligation,
+} from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
 import {
@@ -98,6 +104,91 @@ function overrideCapability(fixture: RegistryFixtureBase, value: ReturnType<type
 for (const mode of ['real-mls', 'double'] as const) {
   describe(`registry deletion and disposal -- ${mode}`, () => {
     const create = () => createRegistryFixture({ mode, setup: 'seeded', groupID })
+
+    test('terminal deletion resumes after drain rollback once outcomes and Welcomes settle', async () => {
+      let fixture = await create()
+      try {
+        await fixture.acceptedOrdinary(await fixture.registry.access(groupID))
+        const sourceControl = fixture.device.groups.ports(key).control
+        await sourceControl.apply(
+          closeControlBuild(
+            await sourceControl.load(),
+            { kind: 'abandon' },
+            Date.now(),
+            'terminal-build-closed',
+          ),
+          'abandon-terminal-source',
+        )
+        const state = await fixture.device.groups.loadState(key)
+        if (state === null || state.deleted) throw new Error('Missing source state')
+        await fixture.installRows({
+          key,
+          state: { ...state, version: state.version + 1, terminal: true, state: null },
+          control: {
+            putOutcomes: [outcome],
+            putWelcomes: [welcome],
+          },
+          outbox: [entry()],
+        })
+        const trust = await fixture.device.groups.loadTrust(groupID)
+        const owed = await fixture.device.groups.ports(key).control.load()
+        expect(owed.commitOnce).toBeNull()
+        expect(owed.operations).toEqual([])
+        expect(owed.rejoin).toBeNull()
+        fixture = await fixture.reopen()
+        await expect(fixture.registry.delete(key)).rejects.toBeInstanceOf(
+          GroupControlUnsettledError,
+        )
+        const control = fixture.device.groups.ports(key).control
+        expect(await control.load()).toEqual(owed)
+        await control.apply(
+          { deleteOutcomes: owed.outcomes.map(({ id }) => id) },
+          'ack-terminal-outcomes',
+        )
+        await expect(fixture.registry.delete(key)).rejects.toBeInstanceOf(
+          GroupControlUnsettledError,
+        )
+        const accepted: Array<WelcomeObligation> = []
+        await deliverObligations(
+          {
+            control: fixture.device.groups.ports(key).control,
+            canDeliver: async () => true,
+            deliverWelcome: async (row) => {
+              accepted.push(structuredClone(row))
+            },
+          },
+          await fixture.device.groups.ports(key).control.load(),
+        )
+        expect(accepted).toEqual(owed.welcomes)
+        const settled = await control.load()
+        expect(settled.outcomes).toEqual([])
+        expect(settled.welcomes).toEqual([])
+        expect(settled.spentSource).toEqual({ epoch: state.epoch })
+        expect(controlSettled(settled)).toBe(true)
+        fixture.armNextWorkFault('before-commit')
+        await expect(fixture.registry.delete(key)).rejects.toThrow('Injected before-commit failure')
+        fixture = await fixture.reopen()
+        expect(await fixture.device.groups.loadState(key)).toMatchObject({
+          deleted: false,
+          terminal: true,
+          state: null,
+        })
+        expect(await fixture.device.groups.ports(key).control.load()).toEqual(settled)
+        expect(await fixture.device.groups.ports(key).outbox.list()).toEqual([entry()])
+        expect(await fixture.device.groups.ports(key).outbox.events()).toEqual([])
+        await fixture.registry.delete(key)
+        fixture = await fixture.reopen()
+        expect(await fixture.device.groups.loadState(key)).toMatchObject({ deleted: true })
+        expect(await fixture.device.groups.ports(key).outbox.list()).toEqual([])
+        expect(await fixture.device.groups.ports(key).outbox.events()).toMatchObject([
+          { kind: 'failed', reason: 'deleted', entry: { ...entry(), status: 'failed' } },
+        ])
+        expect(await fixture.device.groups.loadTrust(groupID)).toEqual(trust)
+      } finally {
+        await fixture.close()
+      }
+    })
+
     test.each(['legacy', 'captured'] as const)(
       '%s recovery remains unsettled through reopen and deletion refusal',
       async (format) => {

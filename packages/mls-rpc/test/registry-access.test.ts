@@ -746,8 +746,8 @@ for (const mode of ['real-mls', 'double'] as const) {
         try {
           const access = await registry(fixture).access(groupID)
           const { candidate, expected, write } = await accepted(fixture, access)
-          if (kind === 'marker' || kind === 'control mutation') write.changes.putApplied = []
           expect(await access.adopt(candidate, expected, write)).toBe('installed')
+          if (kind === 'marker' || kind === 'control mutation') write.changes.putApplied = []
           if (kind === 'applied') {
             await fixture.installRows({
               key: access.key,
@@ -761,6 +761,12 @@ for (const mode of ['real-mls', 'double'] as const) {
               control: { deleteAppliedBelow: Number.MAX_SAFE_INTEGER + 1 },
             })
           }
+          if (kind === 'marker')
+            expect((await fixture.device.groups.load(groupID))?.mutationID).toBe(write.mutationID)
+          if (kind === 'control mutation')
+            expect(await fixture.device.groups.ports(access.key).control.lastMutation()).toBe(
+              write.mutationID,
+            )
           const before = await evidence(fixture, access)
           const work = vi.fn()
           fixture.onPhase('work', work)

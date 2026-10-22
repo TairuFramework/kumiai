@@ -338,7 +338,10 @@ const controlHost = () => ({
 testControlStoreConformance({
   open: async () => {
     controlDatabase = createMemoryHostDatabase({
-      readIdentity: (state) => decodeControlFixtureState(state),
+      readIdentity: (state) => {
+        const source = decodeControlFixtureState(state)
+        return source?.deleted === true ? null : source
+      },
     })
     return controlHost()
   },

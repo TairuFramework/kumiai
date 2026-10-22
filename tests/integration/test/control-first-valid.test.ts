@@ -1,5 +1,6 @@
 import { randomIdentity } from '@kokuin/token'
 import {
+  CommitValidationUnavailableError,
   commitInvite,
   commitKeyRotation,
   createInvite,
@@ -26,7 +27,7 @@ import {
 } from '@kumiai/rpc'
 import { stepLiveBuild } from '@kumiai/rpc/testing'
 import { createCommit, defaultProposalTypes, encode, mlsMessageEncoder } from 'ts-mls'
-import { afterEach, expect, it, test, vi } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 
 import {
   buildRealUnavailableCommit,
@@ -228,6 +229,11 @@ test('a classified past-epoch prefix refreshes CAS and retries identical saved b
     f.deps.publish = attempts
     await stepLiveBuild(f.deps)
     expect((await f.member.control.load()).commitOnce?.skipped).not.toBe(true)
+    const proposer = f.group.members[0]
+    if (proposer === undefined) throw new Error('Missing proposer')
+    const proposal = await proposer.handle.proposeSelfRemoval()
+    await f.member.mutate((handle) => handle.processMessage(proposal.frame))
+    expect(Object.keys(f.member.handle().state.unappliedProposals)).toHaveLength(1)
     await stepLiveBuild(f.deps)
     expect(attempts.mock.calls).toEqual([
       [f.slot.payload, f.slot.publishID, null],
@@ -460,9 +466,107 @@ test('a lost invite never reopens or owes a Welcome when its own copy arrives la
   }
 })
 
-it.todo(
-  'R3: abandoned invite cannot install or deliver on later own replay -- abandon and spentSource authority are not implemented',
-)
-it.todo(
-  'R3: own local storage failure retries before installation -- bounded retry and D1 backstop remain reporting/lifecycle work',
+test('abandoned invite cannot install or deliver on later own replay', async () => {
+  const f = await firstValidRunner()
+  try {
+    const before = encodeClientState(f.member.handle().state)
+    await f.member.peer.abandon()
+    const abandoned = await f.member.control.load()
+    expect(abandoned.commitOnce).toBeNull()
+    expect(abandoned.spentSource).toEqual({ epoch: f.slot.epoch })
+    expect(abandoned.outcomes).toMatchObject([{ opID: f.op.id, kind: 'unknown' }])
+    expect(abandoned.welcomes).toEqual([])
+    const outcome = abandoned.outcomes[0]
+    if (outcome === undefined) throw new Error('Missing abandonment outcome')
+    await f.member.peer.ack(outcome.id)
+    const occurrence = await f.append(f.slot.payload)
+    await f.member.controlWalk.walkCommits()
+    const replayed = await f.member.control.load()
+    expect(replayed.commitOnce).toBeNull()
+    expect(replayed.spentSource).toEqual({ epoch: f.slot.epoch })
+    expect(replayed.cursor?.position).toBe(occurrence.sequenceID)
+    expect(replayed.applied).toEqual([])
+    expect(replayed.outcomes).toEqual([])
+    expect(replayed.welcomes).toEqual([])
+    expect(encodeClientState(f.member.handle().state)).toEqual(before)
+    expect(f.welcomes).toEqual([])
+    await f.member.peer.abandon()
+    expect(await f.member.control.load()).toEqual(replayed)
+    expect(f.builds).toHaveBeenCalledTimes(1)
+  } finally {
+    await f.close()
+  }
+})
+
+test.each(['transient', 'persistent'] as const)(
+  'own local validation failure holds its occurrence before %s retry completion',
+  async (failure) => {
+    const f = await firstValidRunner()
+    try {
+      let now = Date.now()
+      vi.spyOn(Date, 'now').mockImplementation(() => now)
+      const unavailable = new CommitValidationUnavailableError('Local source read unavailable', {
+        reason: 'missing-key',
+      })
+      const read = vi.spyOn(f.member.mls, 'readCommitHeader')
+      if (failure === 'persistent') read.mockRejectedValue(unavailable)
+      else read.mockRejectedValueOnce(unavailable)
+      const receive = vi.spyOn(f.member.mls, 'processCommit')
+      const before = await f.member.control.load()
+      const occurrence = await f.append(f.slot.payload)
+      await f.member.controlWalk.walkCommits()
+      const held = await f.member.control.load()
+      expect(held.commitOnce).toEqual(before.commitOnce)
+      expect(held.cursor).toEqual(before.cursor)
+      expect(held.strand).toBeNull()
+      expect(held.applied).toEqual([])
+      expect(held.outcomes).toEqual([])
+      expect(held.welcomes).toEqual([])
+      expect(f.member.handle().epoch).toBe(BigInt(f.slot.epoch))
+      await f.member.controlWalk.walkCommits()
+      expect(await f.member.control.load()).toEqual(held)
+      now += 100
+      await f.member.controlWalk.walkCommits()
+      if (failure === 'persistent') {
+        expect((await f.member.control.load()).strand).toBeNull()
+        now += 200
+        await f.member.controlWalk.walkCommits()
+        expect((await f.member.control.load()).strand).toBeNull()
+        now += 400
+        await f.member.controlWalk.walkCommits()
+        const exhausted = await f.member.control.load()
+        expect(exhausted.strand?.reason).toBe('unprocessable-gap')
+        expect(exhausted.cursor?.position).toBe(before.cursor?.position ?? null)
+        expect(exhausted.commitOnce).toEqual(before.commitOnce)
+        expect(exhausted.outcomes).toEqual([])
+        expect(exhausted.welcomes).toEqual([])
+        expect(f.member.handle().epoch).toBe(BigInt(f.slot.epoch))
+      } else {
+        const installed = await f.member.control.load()
+        expect(installed.commitOnce).toBeNull()
+        expect(installed.strand).toBeNull()
+        expect(installed.cursor?.position).toBe(occurrence.sequenceID)
+        expect(installed.applied).toMatchObject([
+          { opID: f.op.id, sequenceID: occurrence.sequenceID },
+        ])
+        expect(installed.outcomes).toMatchObject([{ opID: f.op.id, kind: 'landed' }])
+        expect(installed.welcomes).toEqual([
+          {
+            opID: f.op.id,
+            welcome: f.slot.welcome?.bytes,
+            recipients: f.slot.welcome?.recipients,
+            committed: true,
+          },
+        ])
+        expect(f.member.handle().state.keySchedule.epochAuthenticator).toEqual(
+          f.candidate().state.keySchedule.epochAuthenticator,
+        )
+      }
+      expect(receive).not.toHaveBeenCalled()
+      expect(f.builds).toHaveBeenCalledTimes(1)
+      expect(f.welcomes).toEqual([])
+    } finally {
+      await f.close()
+    }
+  },
 )

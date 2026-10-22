@@ -1373,10 +1373,7 @@ export async function createNotMemberFixture(
     handle: GroupHandle
     fixture: RegistryFixture | null
   }> = []
-  for (const identity of [
-    ...(alternate === undefined ? [] : [alternate]),
-    ...(params.additionalResponder ? [randomIdentity()] : []),
-  ]) {
+  for (const identity of params.additionalResponder ? [randomIdentity()] : []) {
     const { createInvite, commitInvite, createKeyPackageBundle, processWelcome } = await import(
       '@kumiai/mls'
     )
@@ -1519,6 +1516,74 @@ export async function createNotMemberFixture(
       await additional.handle.processMessage(rotation.commitMessage)
       await install(additional.fixture, remoteKey, additional.handle)
     }
+  }
+  if (alternate !== undefined) {
+    const { createInvite, commitInvite, createKeyPackageBundle, processWelcome } = await import(
+      '@kumiai/mls'
+    )
+    const { bindingFor, trustedGrant } = (await import(
+      new URL('../../../mls/test/fixtures/lifecycle-ledger.ts', import.meta.url).href
+    )) as {
+      bindingFor(
+        identity: OwnIdentity,
+        prefix?: ControllerBinding['prefix'],
+        issuer?: { identity: OwnIdentity; parent: string },
+      ): Promise<ControllerBinding>
+      trustedGrant(identity: OwnIdentity): Promise<string>
+    }
+    const fork = (
+      await createGroup(alternate, own.groupID, { controller: await bindingFor(alternate) })
+    ).group
+    const bundle = await createKeyPackageBundle(base.requester.identity, {
+      controller: await bindingFor(base.requester.identity, undefined, {
+        identity: alternate,
+        parent: await trustedGrant(alternate),
+      }),
+    })
+    const { invite } = await createInvite({
+      group: fork,
+      identity: alternate,
+      recipientDID: base.requester.identity.id,
+    })
+    const added = await commitInvite(fork, bundle.publicPackage, invite)
+    const requester = (
+      await processWelcome({
+        identity: base.requester.identity,
+        invite,
+        welcome: added.welcomeMessage,
+        keyPackageBundle: bundle,
+        options: registryOptions({}),
+      })
+    ).group
+    let handle = added.newGroup
+    const fixture = await createRegistryFixture({
+      mode: 'real-mls',
+      setup: 'empty',
+      groupID: own.groupID,
+      identity: alternate,
+    })
+    const key = await fixture.registry.seed(await clone(handle), {
+      packageUse: { sourceID: 'diagnostic', ref: 'alternate-key-responder', kind: 'ordinary' },
+    })
+    const additional = { identity: alternate, handle, fixture }
+    additionals.unshift(additional)
+    while (Number(handle.epoch) < splitEpoch - 1) {
+      const rotation = await commitKeyRotation(handle)
+      handle = rotation.newGroup
+      await requester.processMessage(rotation.commitMessage)
+      await install(fixture, key, handle)
+    }
+    const removal = await proposeSelfRemoval(requester)
+    await handle.processMessage(removal.frame)
+    const removed = await commitSelfRemovals(handle)
+    if (removed === null) throw new Error('Missing alternate-key responder exclusion')
+    handle = removed.newGroup
+    await install(fixture, key, handle)
+    while (Number(handle.epoch) < remoteEpoch) {
+      handle = (await commitKeyRotation(handle)).newGroup
+      await install(fixture, key, handle)
+    }
+    additional.handle = handle
   }
   while (Number(own.epoch) < localEpoch) {
     const rotation = await commitKeyRotation(own)

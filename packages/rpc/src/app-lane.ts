@@ -165,6 +165,10 @@ export type AppLane = {
   restore: (records: Array<PendingAppFrame>) => Promise<void>
   /** Await a snapshot of durable record completions already in flight. */
   idle: () => Promise<void>
+  /** Await all restored plaintext handlers and their durable completions. */
+  completeOpened: () => Promise<void>
+  /** Permanently stop network pulls and new opens after terminal removal. */
+  stopOpening: () => void
   /** Stop queued retries and prevent new handler calls. */
   dispose: () => void
 }
@@ -242,10 +246,17 @@ export function createAppLane(params: AppLaneParams): AppLane {
   let segmentGeneration = 0
   const pendingRecords: Array<PendingAppFrame> = []
   const finishingRecords = new Set<Promise<void>>()
+  const openedWaiters = new Set<() => void>()
+  const notifyOpened = (): void => {
+    if (pendingRecords.length !== 0 && !disposed) return
+    for (const resolve of openedWaiters) resolve()
+    openedWaiters.clear()
+  }
   const pulls = new Map<AbortController, number>()
   const reportedPruned = new Map<string, Set<string>>()
   const blockingFrames = new Map<string, AppDeliveryResumed>()
   let disposed = false
+  let openedOnly = false
   let futureTimer: ReturnType<typeof setTimeout> | undefined
   let futureDeadline: number | undefined
   let retryScheduled = false
@@ -522,7 +533,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
   const bufferBlockedTopics = new Set<string>()
   /** Snapshot and merge under the app mutex. Hub I/O holds no lane reservation. */
   const pull = async (onlyTopics?: Set<string>): Promise<boolean> => {
-    if (disposed || safetyHold() !== null) return false
+    if (disposed || openedOnly || safetyHold() !== null) return false
     const controller = new AbortController()
     const { signal } = controller
     pulls.set(controller, anchor().epoch)
@@ -536,7 +547,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
     let timer: ReturnType<typeof setTimeout> | undefined
     const stopped = (): boolean => {
       if (deadline != null && Date.now() >= deadline) timeout()
-      return disposed || signal.aborted || safetyHold() !== null
+      return disposed || openedOnly || signal.aborted || safetyHold() !== null
     }
     let bytes = 0
     try {
@@ -780,15 +791,16 @@ export function createAppLane(params: AppLaneParams): AppLane {
       if (index !== -1) pendingRecords.splice(index, 1)
       resumeBlocked(record.frame.topicID, record.frame.position, record.frame.id)
       resumeUnknown(record)
+      notifyOpened()
       const cursor = cursors.get(record.frame.topicID)
-      if (cursor?.topicID !== record.frame.topicID) return
       const frames = segment.get(record.frame.topicID)
-      if (frames == null) return
-      const buffered = frames.find((frame) => frame.position === record.frame.position)
-      if (buffered?.sealed.state === 'pending' && buffered.sealed.id === record.frame.id) {
-        buffered.sealed = { state: 'done' }
+      if (cursor?.topicID === record.frame.topicID && frames != null) {
+        const buffered = frames.find((frame) => frame.position === record.frame.position)
+        if (buffered?.sealed.state === 'pending' && buffered.sealed.id === record.frame.id) {
+          buffered.sealed = { state: 'done' }
+        }
+        await advanceCursor(record.frame.topicID, frames)
       }
-      await advanceCursor(record.frame.topicID, frames)
     })
   }
 
@@ -853,7 +865,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
             if (
               record == null ||
               protocols[record.frame.protocol] == null ||
-              (await runAppLane(async () => blockedByEarlierSealed(record)))
+              (!openedOnly && (await runAppLane(async () => blockedByEarlierSealed(record))))
             )
               break
             if (disposed) break
@@ -884,6 +896,11 @@ export function createAppLane(params: AppLaneParams): AppLane {
 
   const retryDelivery = (topicID?: string): void => {
     if (disposed) return
+    if (openedOnly) {
+      for (const name of new Set(pendingRecords.map((record) => record.frame.protocol)))
+        scheduleWorker(name)
+      return
+    }
     continuationBackoff = APP_CONTINUATION_BACKOFF_MS
     if (continuationTimer != null) kick()
     const frames = [...segment.values()].flat()
@@ -1008,6 +1025,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
    * move the cursor over frames the log does not contain.
    */
   const note = (_name: string, topicID: string, message: StoredMessage, failure: unknown): void => {
+    if (openedOnly) return
     if (failure instanceof GroupSafetyHeldError) {
       onSafetyHeld(failure.reason)
       return
@@ -1040,7 +1058,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
   }
 
   const drain = async (): Promise<boolean> => {
-    if (disposed) return false
+    if (disposed || openedOnly) return false
     let progress = false
     const generation = segmentGeneration
     applyCaughtUpTimes()
@@ -1056,7 +1074,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
       }
       for (const frame of frames) {
         if (frame.sealed.state !== 'sealed') continue
-        if (disposed || generation !== segmentGeneration || safetyHold() !== null) break
+        if (disposed || openedOnly || generation !== segmentGeneration || safetyHold() !== null)
+          break
         const sealed = frame.sealed.bytes
         const id = frameID(cursor.topicID, sealed)
         // Unreadable bytes are dead. Past and future are the open's locked answer, below.
@@ -1203,7 +1222,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
     try {
       const continuation = await pull(onlyTopics)
       const progress = await runAppLane(async () => {
-        if (generation !== segmentGeneration || disposed) return
+        if (generation !== segmentGeneration || disposed || openedOnly) return
         drainingEpoch = anchor().epoch
         try {
           return await drain()
@@ -1284,6 +1303,15 @@ export function createAppLane(params: AppLaneParams): AppLane {
     })
   }
 
+  const stopOpening = (): void => {
+    openedOnly = true
+    for (const controller of pulls.keys()) controller.abort()
+    if (futureTimer != null) clearTimeout(futureTimer)
+    if (retryTimer != null) clearTimeout(retryTimer)
+    if (continuationTimer != null) clearTimeout(continuationTimer)
+    retryDelivery()
+  }
+
   return {
     dropFrame: (topicID, position) =>
       runAppLane(async () => {
@@ -1299,6 +1327,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
           await crypto.pending.complete(unknown.frame.id)
           pendingRecords.splice(pendingRecords.indexOf(unknown), 1)
           resumeUnknown(unknown)
+          notifyOpened()
           return
         }
         const frames = segment.get(topicID)
@@ -1324,6 +1353,15 @@ export function createAppLane(params: AppLaneParams): AppLane {
     deliver,
     note,
     pendingRecords: () => [...pendingRecords],
+    stopOpening,
+    completeOpened: async () => {
+      stopOpening()
+      // An open can have committed plaintext before returning its record to the lane.
+      await runAppLane(async () => {})
+      retryDelivery()
+      if (pendingRecords.length === 0 || disposed) return
+      await new Promise<void>((resolve) => openedWaiters.add(resolve))
+    },
     idle: async () => {
       await Promise.allSettled([...finishingRecords])
     },
@@ -1344,6 +1382,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
     },
     dispose: (): void => {
       disposed = true
+      notifyOpened()
       cancelBusyRetry?.()
       cancelBusyRetry = undefined
       busyTopics.clear()

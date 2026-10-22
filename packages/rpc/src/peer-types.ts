@@ -275,8 +275,11 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
   onAppWindowPruned?: (event: AppWindowPruned) => void | Promise<void>
   onSafetyEvent?: (event: GroupSafetyEvent) => void | Promise<void>
   onStrand?: (observation: StrandObservation) => void | Promise<void>
-  onControlPublishError?: (notice: { opID: string; error: unknown }) => void | Promise<void>
+  /** Startup evidence failures use a null operation ID and leave readiness pending while retrying. */
+  onControlPublishError?: (notice: { opID: string | null; error: unknown }) => void | Promise<void>
   onOutcome?: (outcome: Outcome) => void | Promise<void>
+  /** Receives registry-owned outcomes. The registry acknowledges their durable rows. */
+  onInternalOutcome?: (outcome: Outcome) => void | Promise<void>
   onNotMember?: (params: {
     evidence: Uint8Array
     requestID: string

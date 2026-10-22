@@ -84,15 +84,60 @@ describe('durable Welcome obligations', () => {
     }
   })
 
-  // R3: a crash after own installation preserves the exact independent obligation for restart.
-  test.todo(
-    'a crash after own installation leaves the exact independent obligation deliverable on restart',
-  )
+  test('a crash after own installation leaves the exact independent obligation deliverable on restart', async () => {
+    const hub = new FakeHub()
+    const member = makeMLSPeer(hub, 'alice', secret)
+    let restarted: ReturnType<typeof makeMLSPeer> | undefined
+    try {
+      await member.peer.resync()
+      const request = buildInviteCommit(member, 'bob', {
+        transform: (built) => ({
+          ...built,
+          welcome: { bytes: obligation.welcome.slice(), recipients: ['bob'] },
+        }),
+      })
+      const stopAtInstalled = () => {
+        member.database.seam('after-save', async () => {
+          if ((await member.control.load()).welcomes.length !== 0) void member.peer.dispose()
+          else stopAtInstalled()
+        })
+      }
+      stopAtInstalled()
+      await member.peer.enqueue(request)
+      await expect
+        .poll(async () => (await member.control.load()).welcomes)
+        .toEqual([{ ...obligation, opID: request.id }])
+      await member.peer.dispose()
+      await member.peer.drained()
+      const installed = await member.control.load()
+      expect(installed.commitOnce).toBeNull()
+      expect(installed.operations).toEqual([])
+      expect(installed.outcomes).toMatchObject([{ opID: request.id, kind: 'landed' }])
+      expect(member.welcomes).toEqual([])
+      const seen: Array<WelcomeObligation> = []
+      restarted = await reconstructMemoryPeer(hub, 'alice', secret, member.database, {
+        deliverWelcome: async (row) => {
+          seen.push(structuredClone(row))
+        },
+      })
+      await restarted.peer.resync()
+      expect(seen).toEqual([{ ...obligation, opID: request.id }])
+      expect((await restarted.control.load()).welcomes).toEqual([])
+      expect(restarted.mls.epoch()).toBe(2)
+    } finally {
+      await restarted?.peer.dispose()
+      await restarted?.peer.drained()
+      await member.peer.dispose()
+      await member.peer.drained()
+    }
+  })
 
   test('Welcome delivery repeats after acceptance-before-delete crash', async () => {
     const hub = new FakeHub()
+    const accepted: Array<WelcomeObligation> = []
     const member = makeMLSPeer(hub, 'alice', secret, {
       deliverWelcome: async (row) => {
+        accepted.push(structuredClone(row))
         member.welcomes.push(row.opID)
         void member.peer.dispose()
       },
@@ -106,10 +151,16 @@ describe('durable Welcome obligations', () => {
     expect((await member.control.load()).welcomes).toHaveLength(1)
     const restarted = await reconstructMemoryPeer(hub, 'alice', secret, member.database, {
       welcomes: member.welcomes,
+      deliverWelcome: async (row) => {
+        accepted.push(structuredClone(row))
+        member.welcomes.push(row.opID)
+      },
     })
     try {
       await restarted.peer.resync()
       expect(restarted.welcomes).toEqual([request.id, request.id])
+      expect(accepted).toHaveLength(2)
+      expect(accepted[1]).toEqual(accepted[0])
       expect((await restarted.control.load()).welcomes).toEqual([])
     } finally {
       await restarted.peer.dispose()

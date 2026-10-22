@@ -3,7 +3,7 @@ import { createGroupPeerWithControlWalk } from '@kumiai/rpc/testing'
 import type { CommitOnceEvidence, CommitOnceScenario } from '@kumiai/rpc-conformance'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { toB64U } from '@sozai/codec'
-import { vi } from 'vitest'
+import { expect, vi } from 'vitest'
 
 import type { AppWindowPruned } from '../../src/app-cursor.js'
 import type { AppDeliveryResumed, AppDeliveryStalled } from '../../src/app-lane.js'
@@ -167,7 +167,8 @@ export type MakeMLSPeerOptions = {
   onSafetyEvent?: (event: GroupSafetyEvent) => void | Promise<void>
   onStrand?: (observation: StrandObservation) => void | Promise<void>
   onOutcome?: (outcome: Outcome) => void | Promise<void>
-  onControlPublishError?: (notice: { opID: string; error: unknown }) => void | Promise<void>
+  onInternalOutcome?: (outcome: Outcome) => void | Promise<void>
+  onControlPublishError?: (notice: { opID: string | null; error: unknown }) => void | Promise<void>
   onRecovery?: (event: RecoveryEvent) => void | Promise<void>
   onConfirmedRecovery?: (handoff: ConfirmedRecoveryHandoff) => void
   settleAcceptedRecovery?: GroupPeerMLSParams['settleAcceptedRecovery']
@@ -309,6 +310,7 @@ export function makeMLSPeer(
     ...(options.onStrand != null ? { onStrand: options.onStrand } : {}),
     ...(options.onRecovery != null ? { onRecovery: options.onRecovery } : {}),
     ...(options.onOutcome != null ? { onOutcome: options.onOutcome } : {}),
+    ...(options.onInternalOutcome != null ? { onInternalOutcome: options.onInternalOutcome } : {}),
     ...(options.onControlPublishError != null
       ? { onControlPublishError: options.onControlPublishError }
       : {}),
@@ -826,6 +828,7 @@ export async function runCommitOnceHost(
       retain: 'log',
     })
   let progressPreserved = false
+  let abandoned: { sourceEpoch: number; provisionalID: string } | undefined
   let checkProgress: (() => Promise<boolean>) | undefined
   try {
     await host.peer.resync()
@@ -896,6 +899,12 @@ export async function runCommitOnceHost(
     }
     if (scenario === 'slot-guards') {
       await host.controlWalk.stepOperation(op.id)
+      const reported = await host.control.load()
+      const provisional = reported.outcomes.find((row) => row.opID === op.id)
+      if (provisional?.kind !== 'unknown') throw new Error('Missing provisional report')
+      expect(reported.commitOnce).toEqual({ ...slot, reported: true })
+      await host.peer.ack(provisional.id)
+      expect((await host.control.load()).commitOnce).toEqual(reported.commitOnce)
       const queued: Operation & { stage: 'intent' } = {
         ...op,
         id: crypto.randomUUID(),
@@ -920,16 +929,23 @@ export async function runCommitOnceHost(
         },
         crypto.randomUUID(),
       )
+      expect((await host.control.load()).commitOnce).toEqual(reported.commitOnce)
+      await expect(host.deleteGroup()).rejects.toMatchObject({
+        name: 'GroupControlUnsettledError',
+      })
+      expect((await host.control.load()).commitOnce).toEqual(reported.commitOnce)
       await host.control.apply(
         { putOperations: [{ ...queued, id: crypto.randomUUID(), seq: 3 }] },
         crypto.randomUUID(),
       )
       await host.peer.abandon()
-      try {
-        await host.deleteGroup()
-      } catch (error) {
-        if (!(error instanceof Error) || error.name !== 'GroupControlUnsettledError') throw error
-      }
+      abandoned = { sourceEpoch: slot.epoch, provisionalID: provisional.id }
+      await host.peer.ack(provisional.id)
+      const refused: Operation = { ...queued, id: crypto.randomUUID(), seq: 4 }
+      await host.control.apply({ putOperations: [refused] }, crypto.randomUUID())
+      await host.controlWalk.stepOperation(refused.id)
+      expect((await host.control.load()).commitOnce).toBeNull()
+      operation = null
     }
     if (scenario === 'built-restart' && operation !== null)
       await host.controlWalk.stepOperation(op.id)
@@ -938,12 +954,14 @@ export async function runCommitOnceHost(
       scenario === 'built-restart' ||
       scenario === 'accepted-restart' ||
       scenario === 'deadline' ||
-      scenario === 'late-acked-slot'
+      scenario === 'late-acked-slot' ||
+      scenario === 'slot-guards'
     ) {
       await host.close()
       host = await host.reopen()
       await host.peer.replay()
-      operation = (await host.control.load()).operations[0] ?? null
+      operation =
+        scenario === 'slot-guards' ? null : ((await host.control.load()).operations[0] ?? null)
     }
     if (scenario === 'late-acked-slot') {
       await host.peer.replay()
@@ -971,6 +989,15 @@ export async function runCommitOnceHost(
       expectedHeads,
       searchFrom,
       slotAfterAck: (await host.control.load()).commitOnce,
+      ...(abandoned === undefined
+        ? {}
+        : {
+            abandonment: {
+              ...abandoned,
+              outcomes: facts.filter((row) => row.opID === op.id),
+              spentSourceAfterAck: (await host.control.load()).spentSource,
+            },
+          }),
       winnerFollowed: winner !== null && evidence.applied.some((row) => row.sequenceID === winner),
       candidateMatchesReceiver:
         outcome === 'landed' &&

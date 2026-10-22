@@ -409,7 +409,7 @@ function ledgerLogEntry(
   verified: VerifiedLedgerEntry,
 ): LedgerLogEntry {
   const held = { entryID, token, verified }
-  VERIFIED_LEDGER_ENTRIES.set(verified, { token, verified: structuredClone(verified) })
+  VERIFIED_LEDGER_ENTRIES.set(verified, { token, verified: cloneData(verified) })
   return held
 }
 
@@ -768,7 +768,7 @@ export class GroupHandle {
           } catch {
             continue
           }
-          verified = structuredClone(held.verified)
+          verified = cloneData(held.verified)
         } else {
           verified = await verifyLedgerEntry(token)
         }

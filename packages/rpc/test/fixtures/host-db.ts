@@ -187,15 +187,17 @@ export function createMemoryHostDatabase(
                 ? null
                 : {
                     kind:
-                      ownedChanges.cursor !== undefined
-                        ? 'cursor'
-                        : ownedChanges.commitOnce?.reported === true &&
-                            next.control.commitOnce?.reported !== true
-                          ? 'report'
-                          : ownedChanges.commitOnce?.acceptedAs !== undefined &&
-                              next.control.commitOnce?.acceptedAs === undefined
-                            ? 'ack'
-                            : 'head',
+                      ownedChanges.commitOnce === null && ownedChanges.spentSource != null
+                        ? 'abandon'
+                        : ownedChanges.cursor !== undefined
+                          ? 'cursor'
+                          : ownedChanges.commitOnce?.reported === true &&
+                              next.control.commitOnce?.reported !== true
+                            ? 'report'
+                            : ownedChanges.commitOnce?.acceptedAs !== undefined &&
+                                next.control.commitOnce?.acceptedAs === undefined
+                              ? 'ack'
+                              : 'head',
                     source,
                   },
               fixedKey,
@@ -293,11 +295,12 @@ export function createMemoryHostDatabase(
         next.initialState = ownedState.slice()
         next.state = ownedState
         if (replace) {
+          const key = keys.get(groupID)
           next.control = applyChanges(
             next.control,
             readmissionChanges(next.control),
-            null,
-            keys.get(groupID),
+            key === undefined ? null : { kind: 'retirement', key },
+            key,
           )
           next.anchorSlot = null
         }

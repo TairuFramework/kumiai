@@ -2,6 +2,7 @@ import { afterEach, expect, test, vi } from 'vitest'
 
 import { stepLegacyRejoin } from '../src/control/rejoin.js'
 import { forkEventID, recoveryUnavailableEventID } from '../src/control/safety.js'
+import { closeControlBuild } from '../src/control/slot.js'
 import { applyChanges, readmissionChanges } from '../src/control/store.js'
 import type { ControlSnapshot } from '../src/control/types.js'
 import { asLogPosition } from '../src/cursor.js'
@@ -17,8 +18,21 @@ import {
 } from './fixtures/peer.js'
 
 const peers: Array<TestPeer> = []
-test.todo(
-  'closeControlBuild and same-incarnation rejoin/peer switches clear spentSource after authenticated consumption (R3: abandon owns the marker writer)',
+
+test.each([false, true])(
+  'authenticated build closure clears spentSource with a live build present=%s',
+  async (live) => {
+    const member = makeMLSPeer(new FakeHub(), 'bob', new Uint8Array(32).fill(0x96))
+    peers.push(member)
+    await member.peer.replay()
+    if (live) await seedBuiltOperation(member, buildInviteCommit(member, 'invitee'))
+    const before = { ...(await member.control.load()), spentSource: { epoch: 1 } }
+    const changes = closeControlBuild(before, { kind: 'unknown' }, 123, 'consumed')
+    expect(changes.spentSource).toBeNull()
+    expect(
+      applyChanges(before, changes, { kind: 'retirement', key: member.control.key }).spentSource,
+    ).toBeNull()
+  },
 )
 afterEach(async () => {
   await Promise.all(peers.map(({ peer }) => peer.dispose()))
@@ -53,7 +67,11 @@ test.each([false, true])(
       committed: true as const,
     }
     await member.control.apply(
-      { putRejoin: record, putOutcomes: [provisional], putWelcomes: [obligation] },
+      {
+        putRejoin: record,
+        putOutcomes: [provisional],
+        putWelcomes: [obligation],
+      },
       'pending-readmission',
     )
     const pending = await member.mls.restoreRecovery(record.candidate, record.requestKey)
@@ -87,6 +105,7 @@ test.each([false, true])(
     expect(member.mls.epoch()).toBe(record.epochAfter)
     expect(next?.stage).toBe('adopted')
     expect(after.commitOnce).toBeNull()
+    expect(after.spentSource).toBeNull()
     expect(after.operations).toEqual([])
     expect(after.outcomes).toEqual([
       { id: expect.any(String), opID: saved.id, at: 1234, kind: 'unknown' },
@@ -128,12 +147,39 @@ test('the peer recovery switch closes its acknowledged build with a fresh final 
   expect((await bob.peer.recover()).advanced).toBe(true)
   const after = await bob.control.load()
   expect(after.commitOnce).toBeNull()
+  expect(after.spentSource).toBeNull()
   const outcome = after.outcomes.find(({ opID }) => opID === saved.id)
   expect(outcome).toMatchObject({ kind: 'unknown', id: expect.any(String) })
   expect(outcome?.id).not.toBe('prior-report')
   expect(outcome?.id).not.toBe(saved.id)
   expect(after.outcomes.some(({ id }) => id === 'prior-report')).toBe(false)
   expect(after.welcomes.some(({ opID }) => opID === saved.id)).toBe(false)
+})
+
+test('same-incarnation recovery clears an abandoned source marker without a live build', async () => {
+  const hub = new FakeHub()
+  const secret = new Uint8Array(32).fill(0x97)
+  const options = {
+    members: ['alice', 'bob'],
+    recovery: { timeoutMs: 1000, deadlineMs: 10_000, getDelayMs: () => 0 },
+  }
+  const alice = makeMLSPeer(hub, 'alice', secret, options)
+  const bob = makeMLSPeer(hub, 'bob', secret, options)
+  peers.push(alice, bob)
+  await alice.peer.replay()
+  await bob.peer.replay()
+  await seedBuiltOperation(bob, buildInviteCommit(bob, 'invitee'))
+  const sourceEpoch = bob.mls.epoch()
+  await bob.peer.abandon()
+  const before = await bob.control.load()
+  expect(before.commitOnce).toBeNull()
+  expect(before.spentSource).toEqual({ epoch: sourceEpoch })
+  expect((await bob.peer.recover()).advanced).toBe(true)
+  const after = await bob.control.load()
+  expect(bob.control.key).toEqual(alice.control.key)
+  expect(bob.mls.epoch()).toBeGreaterThan(sourceEpoch)
+  expect(after.spentSource).toBeNull()
+  expect(after.outcomes).toEqual(before.outcomes)
 })
 
 function unsettled(): ControlSnapshot {

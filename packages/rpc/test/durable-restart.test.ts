@@ -7,6 +7,7 @@ import type { PendingAppFrame } from '../src/crypto.js'
 import { adaptBusHandlers } from '../src/handlers.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
+import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { chat, makeMLSPeer } from './fixtures/peer.js'
@@ -18,6 +19,137 @@ const payload = (text: string) =>
   fromUTF(JSON.stringify({ payload: { typ: 'event', prc: 'chat/posted', data: { text } } }))
 
 describe('durable pending restoration', () => {
+  test('terminal restart completes an already opened frame without crypto or network work', async () => {
+    const hub = new DurableFakeHub()
+    const rows = new Map<string, PendingAppFrame>()
+    let cryptoState: Uint8Array | undefined
+    const pending = {
+      async persistOpened(state: Uint8Array, record: PendingAppFrame) {
+        cryptoState = state.slice()
+        rows.set(record.frame.id, structuredClone(record))
+      },
+      async list() {
+        return [...rows.values()]
+      },
+      async complete(id: string) {
+        rows.delete(id)
+      },
+    }
+    const firstSeen: Array<string> = []
+    const first = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending }),
+      handlers: {
+        'chat/posted': ({ data }: { data: { text: string } }) => {
+          firstSeen.push(data.text)
+        },
+      },
+    })
+    let second: ReturnType<typeof makeMLSPeer> | undefined
+    const handler = Promise.withResolvers<void>()
+    try {
+      await first.peer.protocol('chat').to('alice')
+      hub.detach('bob')
+      const alice = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+      const plaintext = payload('opened before removal')
+      const aad = encodeAppAAD({ topicID: oldTopic, intent: 'log' })
+      const sealed = await alice.wrap(plaintext, { aad })
+      const occurrence = await hub.publish({
+        topicID: oldTopic,
+        senderDID: 'alice',
+        payload: sealed,
+        retain: 'log',
+      })
+      const frame = {
+        id: frameID(oldTopic, sealed),
+        topicID: oldTopic,
+        protocol: 'chat',
+        segment: 1,
+        position: occurrence.sequenceID,
+      }
+      await first.crypto.unwrap(sealed, { expectedAAD: aad, frame })
+      const opened = { frame, payload: plaintext, senderDID: 'alice' }
+      expect([...rows.values()]).toEqual([opened])
+      expect(firstSeen).toEqual([])
+      first.database.seam('after-save', () => {
+        void first.peer.dispose()
+      })
+      await publishCommit({
+        hub,
+        senderDID: 'alice',
+        recoverySecret,
+        epoch: 1,
+        removes: ['bob'],
+      })
+      await first.controlWalk.walkCommits().catch((error: unknown) => {
+        if (!(error instanceof Error) || error.name !== 'PeerDisposedError') throw error
+      })
+      await first.peer.dispose()
+      await first.peer.drained()
+      const terminal = await first.control.load()
+      expect(terminal.applied).toMatchObject([{ epoch: 1, removed: true }])
+      expect([...rows.values()]).toEqual([opened])
+      expect(firstSeen).toEqual([])
+      await first.appOutbox.put({
+        seq: 1,
+        protocol: 'chat',
+        prc: 'chat/posted',
+        data: payload('retained transport work'),
+        lastAttempt: null,
+      })
+      const retained = await first.appOutbox.list()
+      expect(retained).toHaveLength(1)
+      const subscribe = vi.spyOn(hub, 'subscribe')
+      const publish = vi.spyOn(hub, 'publish')
+      const fetch = vi.spyOn(hub, 'fetchTopic')
+      const receive = vi.spyOn(hub, 'receive')
+      const crypto = createFakeCrypto({ localDID: 'bob', state: cryptoState, pending })
+      const exported = vi.spyOn(crypto, 'exportSecret')
+      const seen: Array<{ text: string; frame: PendingAppFrame['frame'] }> = []
+      second = makeMLSPeer(hub, 'bob', recoverySecret, {
+        restartOf: first,
+        crypto,
+        handlers: {
+          'chat/posted': async ({
+            data,
+            frame,
+          }: {
+            data: { text: string }
+            frame: PendingAppFrame['frame']
+          }) => {
+            seen.push({ text: data.text, frame })
+            await handler.promise
+          },
+        },
+      })
+      await second.peer.outcomes()
+      await vi.waitFor(() =>
+        expect(seen).toEqual([{ text: 'opened before removal', frame: opened.frame }]),
+      )
+      expect([...rows.values()]).toEqual([opened])
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      expect(await second.appOutbox.list()).toEqual(retained)
+      handler.resolve()
+      await vi.waitFor(() => expect(rows.size).toBe(0))
+      await vi.waitFor(async () => expect(await second?.appOutbox.list()).toEqual([]))
+      expect(await second.control.load()).toEqual(terminal)
+      expect(exported).not.toHaveBeenCalled()
+      expect(crypto.starts.wrap).toBe(0)
+      expect(crypto.starts.unwrap).toBe(0)
+      expect(subscribe).not.toHaveBeenCalled()
+      expect(publish).not.toHaveBeenCalled()
+      expect(fetch).not.toHaveBeenCalled()
+      expect(receive).not.toHaveBeenCalled()
+    } finally {
+      handler.resolve()
+      await second?.peer.dispose()
+      await second?.peer.drained()
+      await first.peer.dispose()
+      await first.peer.drained()
+      vi.restoreAllMocks()
+    }
+  })
+
   test('a crash after the atomic open restores the record, applies it once, then opens the next frame', async () => {
     const hub = new DurableFakeHub()
     const rows = new Map<string, PendingAppFrame>()
