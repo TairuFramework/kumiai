@@ -323,5 +323,6 @@ export {
   relinquishSend,
   reserveApplicationRange,
 } from './send-policy.js'
+export { DuplicateMemberLeafError } from './stale-leaf.js'
 export type { GroupOptions, Invite, KeyPackageBundle } from './types.js'
 export { welcomeKeyPackageRefs } from './welcome-refs.js'
