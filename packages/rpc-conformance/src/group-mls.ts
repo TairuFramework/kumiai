@@ -108,6 +108,7 @@ export type ConformanceGroupMLS = {
   sendAdmission: () => ConformanceSendAdmission
   readEpoch: () => Promise<number>
   prepareCommitBuild?: () => Promise<void>
+  commitBuildFramed?: () => Promise<void>
   rosterEntries: () => Promise<Array<ConformanceRosterEntry>>
   readCommitHeader: (commit: Uint8Array) => Promise<ConformanceCommitHeader | null>
   processCommit: (
@@ -236,8 +237,13 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         const admission = mls.sendAdmission()
         const roster = await mls.rosterEntries()
         const ledger = await mls.getLedger()
-        await mls.prepareCommitBuild?.()
-        await mls.prepareCommitBuild?.()
+        if (mls.prepareCommitBuild == null) return
+        await expect(mls.prepareCommitBuild()).resolves.toBeUndefined()
+        await expect(mls.prepareCommitBuild()).resolves.toBeUndefined()
+        if (mls.commitBuildFramed != null) {
+          await expect(mls.commitBuildFramed()).resolves.toBeUndefined()
+          await expect(mls.prepareCommitBuild()).resolves.toBeUndefined()
+        }
         expect(await mls.readEpoch()).toBe(epoch)
         expect(mls.sendAdmission()).toEqual(admission)
         expect(await mls.rosterEntries()).toEqual(roster)

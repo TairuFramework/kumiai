@@ -64,6 +64,7 @@ export const mlsHostMembers = {
   sendAdmission: 'host',
   readEpoch: 'host',
   prepareCommitBuild: 'host',
+  commitBuildFramed: 'host',
   rosterEntries: 'host',
   readCommitHeader: 'host',
   processCommit: 'host',

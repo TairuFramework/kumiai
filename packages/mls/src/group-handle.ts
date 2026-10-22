@@ -1,12 +1,12 @@
 import { assertTimeClaimsValid, decodeSignedToken, normalizeDID } from '@kokuin/token'
 import { EventEmitter, type EventsSource } from '@sozai/event'
 import {
-  type ClientState,
   contentTypes,
   createApplicationMessage,
   createProposal,
   decode,
   defaultCredentialTypes,
+  defaultKeyRetentionConfig,
   defaultProposalTypes,
   encode,
   type IncomingMessageAction,
@@ -30,7 +30,7 @@ import {
 
 import { type GroupAnchor, readGroupAnchor } from './anchor.js'
 import { verifyLeafCredential } from './authentication.js'
-import { encodeClientState } from './codec.js'
+import { type ClientState, encodeClientState } from './codec.js'
 import {
   didFromCredential,
   type GroupMember,
@@ -40,7 +40,12 @@ import {
 import { type LeafBinding, verifyDeviceEntry } from './device-proof.js'
 import { decodeControlEnvelope } from './envelope.js'
 import { foldEnvelope, GROUP_TYPE_PREFIX } from './envelope-fold.js'
-import { LeafBindingError, LeafLapsedError, RevokeProofError } from './errors.js'
+import {
+  HandshakeWindowError,
+  LeafBindingError,
+  LeafLapsedError,
+  RevokeProofError,
+} from './errors.js'
 import type { FoldInput } from './fold.js'
 import { createMlsContext, deviceDenyHolderFor } from './group-context.js'
 import { readMessageEpoch } from './group-info.js'
@@ -93,6 +98,9 @@ import { type PrivateCommitFrame, readSenderLeafIndex } from './sender-data.js'
  *  the handle carries no reference back to it. */
 const MUTEXES = new WeakMap<GroupHandle, Mutex>()
 
+/** Leave half the configured receiver window unused. */
+const HANDSHAKE_WINDOW_DIVISOR = 2
+
 export function mutexFor(handle: GroupHandle): Mutex {
   let mutex = MUTEXES.get(handle)
   if (mutex === undefined) {
@@ -139,14 +147,20 @@ function zeroAll(buffers: Array<Uint8Array>): void {
 }
 
 /** Zero the secrets `next` holds that `prior` does not: what a discarded derivation produced. */
-function zeroFreshSecrets(prior: SecretTree, next: SecretTree): void {
+function zeroFreshSecrets(
+  prior: SecretTree,
+  next: SecretTree,
+  consumed: Array<Uint8Array> = [],
+): void {
   const held = new Set<Uint8Array>()
   for (const secret of Object.values(prior.intermediateNodes)) held.add(secret)
   for (const leaf of Object.values(prior.leafNodes)) {
     held.add(leaf.application.secret)
     held.add(leaf.handshake.secret)
+    for (const secret of Object.values(leaf.application.unusedGenerations)) held.add(secret)
+    for (const secret of Object.values(leaf.handshake.unusedGenerations)) held.add(secret)
   }
-  const fresh = [...Object.values(next.intermediateNodes)]
+  const fresh = [...Object.values(next.intermediateNodes), ...consumed]
   for (const leaf of Object.values(next.leafNodes)) {
     fresh.push(leaf.application.secret, leaf.handshake.secret)
   }
@@ -1170,12 +1184,12 @@ export class GroupHandle {
   }
 
   /**
-   * Reserve a fresh handshake generation before building a commit from this handle.
-   * Persist the advanced source before framing, even on the first build after restart.
+   * Reserve a handshake generation before building a commit from this handle.
+   * Reuse only a persisted, unconsumed reservation at the current epoch and generation.
    * The epoch, application ratchet, ledger and pending proposals remain unchanged.
    * `persist` runs under the handle mutex and must not re-enter this handle.
    * A failed persist restores the source and wipes newly derived secrets.
-   * Receivers still enforce their forward-ratchet window (200 steps by default).
+   * Consume the reservation durably before journalling any returned commit for publication.
    */
   async reserveHandshakeGeneration(
     persist: (handle: GroupHandle) => Promise<void> | void,
@@ -1191,6 +1205,27 @@ export class GroupHandle {
       const node = Number(prior.privatePath.leafIndex) * 2
       const leaf = prior.secretTree.leafNodes[node]
       const current = leaf?.handshake.generation ?? 0
+      const reservation = prior.handshakeReservation
+      if (
+        reservation?.epoch === this.epoch &&
+        reservation.generation === current &&
+        !reservation.consumed
+      ) {
+        await persist(this)
+        return
+      }
+      // Every accepted MLS handshake commit moves the epoch. Epoch start is therefore a
+      // conservative baseline, even when a receiver refused or missed earlier frames.
+      // rc.13: MlsContext.clientConfig.keyRetentionConfig.maximumForwardRatchetSteps
+      // defaults to defaultKeyRetentionConfig.maximumForwardRatchetSteps (200).
+      const window =
+        this.#context.clientConfig?.keyRetentionConfig.maximumForwardRatchetSteps ??
+        defaultKeyRetentionConfig.maximumForwardRatchetSteps
+      const limit = Math.floor(
+        Math.min(window, defaultKeyRetentionConfig.maximumForwardRatchetSteps) /
+          HANDSHAKE_WINDOW_DIVISOR,
+      )
+      if (current + 1 > limit) throw new HandshakeWindowError()
       if (current >= 0xfffffffe) throw new RangeError('handshake sender generation exhausted')
       let tree: SecretTree
       let consumed: Array<Uint8Array>
@@ -1218,15 +1253,41 @@ export class GroupHandle {
         }
         consumed = advanced.consumed
       }
-      this.#state = { ...prior, secretTree: tree }
+      this.#state = {
+        ...prior,
+        secretTree: tree,
+        handshakeReservation: { epoch: this.epoch, generation: current + 1, consumed: false },
+      }
       try {
         await persist(this)
       } catch (error) {
         this.#state = prior
-        zeroFreshSecrets(prior.secretTree, tree)
+        zeroFreshSecrets(prior.secretTree, tree, consumed)
         throw error
       }
       zeroAll(consumed)
+    })
+  }
+
+  /** Persist consumption before any commit journal can permit publication. */
+  async consumeHandshakeReservation(
+    persist: (handle: GroupHandle) => Promise<void> | void,
+  ): Promise<void> {
+    return mutexFor(this).run(async () => {
+      const prior = this.#state
+      const reservation = prior.handshakeReservation
+      const current =
+        prior.secretTree.leafNodes[Number(prior.privatePath.leafIndex) * 2]?.handshake.generation
+      if (
+        reservation == null ||
+        reservation.epoch !== this.epoch ||
+        reservation.generation !== current
+      ) {
+        throw new Error('No handshake reservation for this epoch')
+      }
+      this.#state = { ...prior, handshakeReservation: { ...reservation, consumed: true } }
+      // Keep consumed evidence in memory on failure. No journal write can follow rejection.
+      await persist(this)
     })
   }
 

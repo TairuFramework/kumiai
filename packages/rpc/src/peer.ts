@@ -2153,6 +2153,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         assertLive()
         const pending = wrapPendingCommit(boundary, await build())
         assertLive()
+        await mls.commitBuildFramed?.()
+        assertLive()
 
         // 3. Journal BEFORE publishing, durably: from here to the hub's answer is the crash
         //    window, and the slot is the only thing that survives it.

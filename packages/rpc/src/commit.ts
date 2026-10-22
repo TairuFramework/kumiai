@@ -15,7 +15,8 @@ export type CommitKind = 'ledger' | 'invite' | 'remove'
  * this commit is at.
  *
  * When GroupMLS.prepareCommitBuild is absent, the host builder must durably reserve a
- * higher handshake generation before every build, including after restart and failed CAS.
+ * handshake generation before every build and consume it durably before publication.
+ * Only durable proof that no frame could have left the device permits reservation reuse.
  */
 export type PendingCommit = {
   /** Framed MLSMessage(Commit) bytes. */

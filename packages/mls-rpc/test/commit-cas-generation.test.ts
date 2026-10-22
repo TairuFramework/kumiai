@@ -5,6 +5,7 @@ import {
   decodeClientState,
   encodeClientState,
   type GroupHandle,
+  HandshakeWindowError,
   ledgerEntryDigest,
   restoreGroup,
   signLedgerEntry,
@@ -26,6 +27,7 @@ import {
 import {
   createCommit,
   decode,
+  defaultKeyRetentionConfig,
   encode,
   mlsMessageDecoder,
   mlsMessageEncoder,
@@ -270,3 +272,224 @@ for (const winner of ['policy-refused', 'historical', 'malformed', 'applied'] as
     },
   )
 }
+
+// A non-saving access implementation pins persistence inside the reservation itself.
+async function reservationPeer(name: string, loseCAS: boolean) {
+  const group = await createRealGroup(1, name)
+  const author = group.committer
+  const receiver = group.members[0]
+  if (receiver == null) throw new Error('missing receiver')
+  const credential = author.handle.credential
+  const ledgerEntries = author.handle.ledgerTokens
+  let saved = encodeClientState(author.handle.state)
+  let saves = 0
+  let failConsumptionSave = false
+  const access = simpleHandleAccess({
+    handle: () => author.handle,
+    adopt: (next) => {
+      author.handle = next
+    },
+    persist: (handle) => {
+      saved = encodeClientState(handle.state)
+      saves++
+    },
+  })
+  // Deliberately no implicit save after fn: the hook must call its persist argument.
+  access.mutate = async (fn) =>
+    await fn(author.handle, async (handle) => {
+      if (failConsumptionSave && handle.state.handshakeReservation?.consumed)
+        throw new Error('consumption disk failed')
+      saved = encodeClientState(handle.state)
+      saves++
+    })
+  const crypto = createGroupCrypto({ access })
+  const mls = createGroupMLS({
+    access,
+    identity: author.identity,
+    entrySlot: author.slot,
+    recoverySecret: async () => new Uint8Array(32).fill(0x63),
+  })
+  const hub = new FakeHub()
+  const journal = createMemoryCommitJournal()
+  const frames: Array<Uint8Array> = []
+  const generations: Array<number> = []
+  let publishes = 0
+  let strands = 0
+  const peer = createGroupPeer({
+    hub: {
+      ...hub,
+      publish: async (params) => {
+        if (params.publishID != null) {
+          publishes++
+          if (loseCAS) {
+            const { sealed } = await crypto.sealEntries(encodeLedgerEntries([]))
+            await hub.publish({
+              senderDID: receiver.identity.id,
+              topicID: params.topicID,
+              retain: 'log',
+              payload: encodeHandshakeFrame(
+                HANDSHAKE_KIND.commit,
+                encodeCommitFrame(new Uint8Array(), sealed),
+              ),
+            })
+          }
+        }
+        return await hub.publish(params)
+      },
+      subscribe: (...args) => hub.subscribe(...args),
+      unsubscribe: async (...args) => {
+        await hub.unsubscribe?.(...args)
+      },
+      receive: (...args) => hub.receive(...args),
+      fetchTopic: (...args) => hub.fetchTopic(...args),
+    },
+    crypto,
+    mls,
+    journal,
+    anchorStore: createMemoryAnchorStore(),
+    appCursorStore: createMemoryAppCursorStore(),
+    appOutbox: createMemoryAppOutbox(),
+    appOutboxLimit: 128,
+    localDID: author.identity.id,
+    protocols: {},
+    handlers: {},
+    adoptJournalled: async () => {},
+    commitDeadlineMs: 60_000,
+    onStrand: () => {
+      strands++
+    },
+  })
+  const build = async () => {
+    const built = await createCommit({ context: author.handle.context, state: author.handle.state })
+    const commit = encode(mlsMessageEncoder, built.commit)
+    frames.push(commit)
+    generations.push(await generation(author.handle, commit))
+    return {
+      commit,
+      bodies: [],
+      kind: 'ledger' as const,
+      journal: encodeClientState(built.newState),
+      onAccepted: async () => {
+        await access.replace(
+          await restoreGroup({ state: built.newState, credential, ledgerEntries }),
+        )
+      },
+    }
+  }
+  return {
+    peer,
+    build,
+    frames,
+    generations,
+    receiver,
+    author,
+    journal,
+    mls,
+    failConsumption: (fail: boolean) => {
+      failConsumptionSave = fail
+    },
+    saves: () => saves,
+    publishes: () => publishes,
+    strands: () => strands,
+    restartHandle: async () => {
+      const state = decodeClientState(saved)
+      if (state == null) throw new Error('missing durable state')
+      author.handle = await restoreGroup({ state, credential, ledgerEntries })
+    },
+  }
+}
+
+test('non-framing builder failures reuse the durable reservation after restart', async () => {
+  const f = await reservationPeer('non-framing-peer', false)
+  try {
+    for (let i = 0; i < 202; i++) {
+      await expect(
+        f.peer.commit(async () => {
+          throw new Error('builder refused')
+        }),
+      ).rejects.toThrow('builder refused')
+      expect(f.saves()).toBeGreaterThan(0)
+      await f.restartHandle()
+    }
+    expect(f.publishes()).toBe(0)
+    await f.peer.commit(f.build)
+    expect(f.generations).toEqual([1])
+    await f.receiver.handle.processMessage(f.frames[0] as Uint8Array)
+  } finally {
+    await f.peer.dispose()
+  }
+}, 60_000)
+
+test('lost CAS stops with a typed window operation failure before an unreceivable frame', async () => {
+  const f = await reservationPeer('window-peer', true)
+  try {
+    await expect(f.peer.commit(f.build)).rejects.toThrow(HandshakeWindowError)
+    const limit = Math.floor(defaultKeyRetentionConfig.maximumForwardRatchetSteps / 2)
+    expect(f.generations).toEqual(Array.from({ length: limit }, (_, i) => i + 1))
+    expect(f.publishes()).toBe(limit)
+    expect(f.strands()).toBe(0)
+    expect(await f.journal.get()).toBeNull()
+    const last = f.frames.at(-1)
+    if (last == null) throw new Error('missing last frame')
+    await f.receiver.handle.processMessage(last)
+    await f.restartHandle()
+    await expect(f.peer.commit(f.build)).rejects.toThrow(HandshakeWindowError)
+    expect(f.frames).toHaveLength(limit)
+  } finally {
+    await f.peer.dispose()
+  }
+}, 60_000)
+
+test('a journalled frame consumes its durable reservation across restart', async () => {
+  const f = await reservationPeer('journalled-restart', false)
+  const put = f.journal.put.bind(f.journal)
+  f.journal.put = async (entry) => {
+    await put(entry)
+    throw new Error('crash after journal')
+  }
+  try {
+    await expect(f.peer.commit(f.build)).rejects.toThrow('crash after journal')
+    expect(await f.journal.get()).not.toBeNull()
+    expect(f.publishes()).toBe(0)
+    await f.peer.dispose()
+    await f.restartHandle()
+    if (f.mls.prepareCommitBuild == null) throw new Error('missing reservation hook')
+    await f.mls.prepareCommitBuild()
+    await f.build()
+    expect(f.generations).toEqual([1, 2])
+  } finally {
+    await f.peer.dispose()
+  }
+})
+
+test('consumption persistence failure blocks journalling and publication', async () => {
+  const f = await reservationPeer('consumption-save-failure', false)
+  let journalWrites = 0
+  const put = f.journal.put.bind(f.journal)
+  f.journal.put = async (entry) => {
+    journalWrites++
+    await put(entry)
+  }
+  try {
+    f.failConsumption(true)
+    await expect(f.peer.commit(f.build)).rejects.toThrow('consumption disk failed')
+    expect(journalWrites).toBe(0)
+    expect(f.publishes()).toBe(0)
+    expect(await f.journal.get()).toBeNull()
+    await expect(f.peer.commit(f.build)).rejects.toThrow('consumption disk failed')
+    expect(f.generations).toEqual([1, 2])
+    // The durable checkpoint still proves that generation 2 never permitted publication.
+    await f.restartHandle()
+    f.failConsumption(false)
+    await f.peer.commit(f.build)
+    expect(f.generations).toEqual([1, 2, 2])
+    expect(journalWrites).toBe(1)
+    expect(f.publishes()).toBe(1)
+    const frame = f.frames.at(-1)
+    if (frame == null) throw new Error('missing accepted frame')
+    await f.receiver.handle.processMessage(frame)
+    expect(f.author.handle.epoch).toBe(f.receiver.handle.epoch)
+  } finally {
+    await f.peer.dispose()
+  }
+})

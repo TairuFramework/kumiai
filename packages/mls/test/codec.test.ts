@@ -35,7 +35,7 @@ describe('sanitizeRatchetTree', () => {
 })
 
 describe('encodeClientState / decodeClientState', () => {
-  test('round trip preserves the state', async () => {
+  test('v1 round trip preserves state without a reservation', async () => {
     const alice = randomIdentity()
     const { group } = await createGroup(alice, 'codec-round-trip')
 
@@ -44,7 +44,35 @@ describe('encodeClientState / decodeClientState', () => {
 
     expect(decoded).toBeDefined()
     expect(encoded[0]).toBe(1)
+    expect(decoded?.handshakeReservation).toBeUndefined()
     expect(decoded?.groupContext.groupId).toEqual(group.state.groupContext.groupId)
+  })
+
+  test.each([false, true])(
+    'v3 round trip preserves reservation evidence (consumed: %s)',
+    async (consumed) => {
+      const { group } = await createGroup(randomIdentity(), 'codec-reservation-round-trip')
+      const reservation = { epoch: 0x100000001n, generation: 257, consumed }
+      const encoded = encodeClientState({ ...group.state, handshakeReservation: reservation })
+
+      expect(encoded[0]).toBe(3)
+      const decoded = decodeClientState(encoded)
+      expect(decoded?.handshakeReservation).toEqual(reservation)
+      expect(decoded?.groupContext.groupId).toEqual(group.state.groupContext.groupId)
+    },
+  )
+
+  test('refuses v2 before decoding its incompatible layout', async () => {
+    const { group } = await createGroup(randomIdentity(), 'codec-v2-refused')
+    const encoded = encodeClientState({
+      ...group.state,
+      handshakeReservation: { epoch: 0n, generation: 1, consumed: false },
+    })
+    encoded[0] = 2
+
+    expect(() => decodeClientState(encoded)).toThrow(
+      'decodeClientState: unsupported client-state version 2',
+    )
   })
 
   test('the decoded state does not alias the encoded bytes', async () => {
@@ -61,7 +89,7 @@ describe('encodeClientState / decodeClientState', () => {
     expect(encoded).toEqual(copy)
   })
 
-  test('refuses a blob whose version byte is not 1, even though the rest decodes fine', async () => {
+  test('refuses a blob whose version byte is unsupported, even though the rest decodes fine', async () => {
     const alice = randomIdentity()
     const { group } = await createGroup(alice, 'codec-unknown-version')
 
@@ -69,7 +97,7 @@ describe('encodeClientState / decodeClientState', () => {
     expect(encoded[0]).toBe(1) // sanity: this really is a v1 blob before we tamper with it
 
     const tampered = encoded.slice()
-    tampered[0] = 2
+    tampered[0] = 4
 
     // Not merely falsy: this must be the version guard rejecting the blob before it ever
     // reaches the decoder, not an incidental decode failure. The payload after byte 0 is
@@ -77,7 +105,7 @@ describe('encodeClientState / decodeClientState', () => {
     // would succeed here. It must not. Asserting on the thrown message (not just "it threw")
     // means this test fails differently than a "garbage bytes" case would.
     expect(() => decodeClientState(tampered)).toThrow(
-      'decodeClientState: unsupported client-state version 2',
+      'decodeClientState: unsupported client-state version 4',
     )
   })
 
