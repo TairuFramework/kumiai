@@ -13,6 +13,12 @@ export type CommitKind = 'ledger' | 'invite' | 'remove'
  * derived handle and never advance the source — so the host's live handle is still the
  * pre-commit one, which is what lets the peer seal the bodies under the epoch every receiver of
  * this commit is at.
+ *
+ * GroupMLS.prepareCommitBuild and commitBuildFramed must be supplied together or both omitted.
+ * Without hooks, the host builder must durably reserve a handshake generation before every build.
+ * It must durably consume that reservation after building, before returning this PendingCommit for journalling or publication.
+ * With @kumiai/mls, call group.consumeHandshakeReservation(persist) on the source handle.
+ * Only durable proof that no frame could have left the device permits reservation reuse.
  */
 export type PendingCommit = {
   /** Framed MLSMessage(Commit) bytes. */

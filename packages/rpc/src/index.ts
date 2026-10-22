@@ -80,6 +80,7 @@ export {
 export {
   AppEntryTooLargeError,
   AppOutboxFullError,
+  CommitBuildHooksError,
   PeerDisposedError,
   PeerRemovedError,
   SendNotAdmissibleError,

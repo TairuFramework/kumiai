@@ -36,6 +36,32 @@ Both factories take the same `access` instance. The adapter reads the current ha
 adopts an authored commit through `access.replace(next)` after acceptance. The adapter saves before
 publishing the replacement and publishes its synchronous epoch hint after a successful save.
 
+Before every host commit build, `createGroupMLS` persists a handshake reservation through `access.mutate`.
+The epoch and application ratchet stay unchanged, including when a discarded CAS winner never applies.
+A durable unconsumed reservation is reused after a non-framing failure or restart.
+After a builder returns, `commitBuildFramed` persists consumption before the peer writes its journal or publishes.
+An ambiguous reservation burns a fresh generation. Journal replay republishes the existing frame.
+Builders must return their frame to the peer before any publication.
+Direct publishers must call `group.consumeHandshakeReservation(persist)` after the build and before any journalling or publication.
+Calling reserve alone reuses an unconsumed generation.
+The peer requires both `prepareCommitBuild` and `commitBuildFramed`, or neither, and rejects incomplete pairs with `CommitBuildHooksError`.
+
+`HandshakeWindowError` rejects the operation before another reservation exceeds half the receiver window, capped at 100 generations.
+It does not strand the peer or request recovery. A received epoch advance permits new reservations.
+The baseline is epoch start: every accepted MLS handshake commit advances the epoch, resetting this budget.
+The deadline and attempt ceiling still apply.
+
+In ts-mls 2.0.0-rc.13, `defaultKeyRetentionConfig.maximumForwardRatchetSteps` is 200.
+Its configuration path is `MlsContext.clientConfig.keyRetentionConfig.maximumForwardRatchetSteps`.
+The sender uses half the smaller of its configured window and that default. Members must use compatible receiver windows.
+Missing key retention configuration uses the default window. A window below 2 throws `HandshakeWindowConfigError` on reservation.
+Consuming a stale reservation throws `HandshakeReservationError`, including after an epoch advance.
+Reservation checkpoints use client-state format v3. The decoder accepts v1, whose missing evidence never permits reservation reuse.
+The decoder refuses v2, which belongs to an incompatible layout, and unknown versions. Older decoders refuse v3 checkpoints.
+Each framed attempt adds a consumption save before journalling.
+Durable hosts must supply `simpleHandleAccess.persist` or an equivalent transactional `HandleAccess`.
+Persistence must resolve after a durable write and reject without changing storage.
+
 For a *received* commit there is nothing to adopt: ts-mls's `processMessage` advances the handle in
 place. A host that treated every commit as adopt-later would double-apply received ones.
 
@@ -54,7 +80,7 @@ A host with its own handle store implements the port instead:
 
 - `read(fn)` lends the handle for the callback only. `mutate(fn)` serialises with every other
   operation and resolves after the state is stored; `fn`'s `persist` argument goes to
-  `processMessage` and `bootstrapLedger`. `replace(next)` stores before publishing. A transactional
+  `processMessage`, `bootstrapLedger` and `reserveHandshakeGeneration`. `replace(next)` stores before publishing. A transactional
   host may restore a fresh handle per mutation, discard it on rollback, and publish on commit.
 - `epoch()` is a synchronous hint. Publish it only after the outermost successful commit, and restore
   it on rollback. No port decision reads it: every one uses an epoch read under the lock.

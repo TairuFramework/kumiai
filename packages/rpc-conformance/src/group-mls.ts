@@ -107,6 +107,8 @@ export type ConformanceGroupMLS = {
   ) => Promise<ConformanceOpenedRecoveryVerdict | null>
   sendAdmission: () => ConformanceSendAdmission
   readEpoch: () => Promise<number>
+  prepareCommitBuild?: () => Promise<void>
+  commitBuildFramed?: () => Promise<void>
   rosterEntries: () => Promise<Array<ConformanceRosterEntry>>
   readCommitHeader: (commit: Uint8Array) => Promise<ConformanceCommitHeader | null>
   processCommit: (
@@ -226,6 +228,38 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
   }
 
   describe(`GroupMLS conformance — ${label}`, () => {
+    test('commit build hooks are both present or both absent', async () => {
+      await withGroup(2, 'commit-build-hook-pair', async (group) => {
+        for (const { mls } of group.members) {
+          expect(typeof mls.prepareCommitBuild === 'function').toBe(
+            typeof mls.commitBuildFramed === 'function',
+          )
+        }
+      })
+    })
+
+    test('commit preparation preserves epoch, admission, roster and ledger', async () => {
+      await withGroup(1, 'prepare-commit', async (group) => {
+        const member = group.members[0]
+        if (member == null) throw new Error('missing member')
+        const { mls } = member
+        const epoch = await mls.readEpoch()
+        const admission = mls.sendAdmission()
+        const roster = await mls.rosterEntries()
+        const ledger = await mls.getLedger()
+        if (mls.prepareCommitBuild == null) return
+        if (mls.commitBuildFramed == null) throw new Error('missing commitBuildFramed hook')
+        await expect(mls.prepareCommitBuild()).resolves.toBeUndefined()
+        await expect(mls.prepareCommitBuild()).resolves.toBeUndefined()
+        await expect(mls.commitBuildFramed()).resolves.toBeUndefined()
+        await expect(mls.prepareCommitBuild()).resolves.toBeUndefined()
+        expect(await mls.readEpoch()).toBe(epoch)
+        expect(mls.sendAdmission()).toEqual(admission)
+        expect(await mls.rosterEntries()).toEqual(roster)
+        expect(await mls.getLedger()).toEqual(ledger)
+      })
+    })
+
     test('send admission is synchronous and follows only accepted epoch advances', async () => {
       await withGroup(1, 'send-admission', async (group) => {
         const member = memberAt(group.members, 0)

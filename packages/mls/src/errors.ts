@@ -75,3 +75,25 @@ export class RevokeProofError extends Error {
     return this.#reason
   }
 }
+
+/** The sender must wait for an epoch advance before building another private commit. */
+export class HandshakeWindowError extends Error {
+  constructor() {
+    super('Handshake sender generation reached the safe receiver window for this epoch')
+    this.name = 'HandshakeWindowError'
+  }
+}
+
+export class HandshakeWindowConfigError extends Error {
+  constructor() {
+    super('Handshake receiver window must be at least 2')
+    this.name = 'HandshakeWindowConfigError'
+  }
+}
+
+export class HandshakeReservationError extends Error {
+  constructor() {
+    super('No matching handshake reservation for the current epoch and generation')
+    this.name = 'HandshakeReservationError'
+  }
+}

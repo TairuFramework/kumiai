@@ -2148,7 +2148,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
 
         // 2. Build against the host's CURRENT handle, adopting nothing. `build` closes over that
         //    handle, so a rebased retry frames at the rebased epoch.
+        // Reserve durably before framing: the CAS winner may never advance our epoch.
+        await mls.prepareCommitBuild?.()
+        assertLive()
         const pending = wrapPendingCommit(boundary, await build())
+        assertLive()
+        await mls.commitBuildFramed?.()
         assertLive()
 
         // 3. Journal BEFORE publishing, durably: from here to the hub's answer is the crash

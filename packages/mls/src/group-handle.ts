@@ -1,12 +1,12 @@
-import { normalizeDID } from '@kokuin/token'
+import { assertTimeClaimsValid, decodeSignedToken, normalizeDID } from '@kokuin/token'
 import { EventEmitter, type EventsSource } from '@sozai/event'
 import {
-  type ClientState,
   contentTypes,
   createApplicationMessage,
   createProposal,
   decode,
   defaultCredentialTypes,
+  defaultKeyRetentionConfig,
   defaultProposalTypes,
   encode,
   type IncomingMessageAction,
@@ -30,7 +30,7 @@ import {
 
 import { type GroupAnchor, readGroupAnchor } from './anchor.js'
 import { verifyLeafCredential } from './authentication.js'
-import { encodeClientState } from './codec.js'
+import { type ClientState, encodeClientState } from './codec.js'
 import {
   didFromCredential,
   type GroupMember,
@@ -40,7 +40,14 @@ import {
 import { type LeafBinding, verifyDeviceEntry } from './device-proof.js'
 import { decodeControlEnvelope } from './envelope.js'
 import { foldEnvelope, GROUP_TYPE_PREFIX } from './envelope-fold.js'
-import { LeafBindingError, LeafLapsedError, RevokeProofError } from './errors.js'
+import {
+  HandshakeReservationError,
+  HandshakeWindowConfigError,
+  HandshakeWindowError,
+  LeafBindingError,
+  LeafLapsedError,
+  RevokeProofError,
+} from './errors.js'
 import type { FoldInput } from './fold.js'
 import { createMlsContext, deviceDenyHolderFor } from './group-context.js'
 import { readMessageEpoch } from './group-info.js'
@@ -93,6 +100,9 @@ import { type PrivateCommitFrame, readSenderLeafIndex } from './sender-data.js'
  *  the handle carries no reference back to it. */
 const MUTEXES = new WeakMap<GroupHandle, Mutex>()
 
+/** Leave half the configured receiver window unused. */
+const HANDSHAKE_WINDOW_DIVISOR = 2
+
 export function mutexFor(handle: GroupHandle): Mutex {
   let mutex = MUTEXES.get(handle)
   if (mutex === undefined) {
@@ -139,14 +149,20 @@ function zeroAll(buffers: Array<Uint8Array>): void {
 }
 
 /** Zero the secrets `next` holds that `prior` does not: what a discarded derivation produced. */
-function zeroFreshSecrets(prior: SecretTree, next: SecretTree): void {
+function zeroFreshSecrets(
+  prior: SecretTree,
+  next: SecretTree,
+  consumed: Array<Uint8Array> = [],
+): void {
   const held = new Set<Uint8Array>()
   for (const secret of Object.values(prior.intermediateNodes)) held.add(secret)
   for (const leaf of Object.values(prior.leafNodes)) {
     held.add(leaf.application.secret)
     held.add(leaf.handshake.secret)
+    for (const secret of Object.values(leaf.application.unusedGenerations)) held.add(secret)
+    for (const secret of Object.values(leaf.handshake.unusedGenerations)) held.add(secret)
   }
-  const fresh = [...Object.values(next.intermediateNodes)]
+  const fresh = [...Object.values(next.intermediateNodes), ...consumed]
   for (const leaf of Object.values(next.leafNodes)) {
     fresh.push(leaf.application.secret, leaf.handshake.secret)
   }
@@ -358,6 +374,20 @@ export type HeldLedgerEntry = {
 /** A held entry paired with its content id — one position in the ledger log. */
 export type LedgerLogEntry = HeldLedgerEntry & { entryID: string }
 
+const VERIFIED_LEDGER_ENTRIES = new WeakMap<VerifiedLedgerEntry, HeldLedgerEntry>()
+const VERIFIED_LEDGER_TOKENS = new WeakMap<Array<string>, Array<HeldLedgerEntry | undefined>>()
+
+// Record provenance before exposing claims; re-enactments keep the original snapshot.
+function ledgerLogEntry(
+  entryID: string,
+  token: string,
+  verified: VerifiedLedgerEntry,
+): LedgerLogEntry {
+  const held = { entryID, token, verified }
+  VERIFIED_LEDGER_ENTRIES.set(verified, { token, verified: structuredClone(verified) })
+  return held
+}
+
 /** Project lifecycle tree re-admissions from the full ledger fold, never a previous projection.
  * A lapsed re-admitted leaf and a leaf inserted after expiry are indistinguishable here;
  * a genuine expired post-reset package can activate a leaf for a Welcome joiner or an
@@ -567,11 +597,15 @@ export class GroupHandle {
 
   /** The ordered signed tokens this handle holds, repeats included — the ledger's
    *  canonical persistent/wire form, and the list the authenticated head folds over.
-   *  Feeds createInvite, restoreGroup, and host persistence. The verified entries are
-   *  a derived cache with no export form: the only way in is applyLedgerEntries,
-   *  which re-verifies. */
+   *  Feeds createInvite, restoreGroup, and host persistence. In-process clones inherit
+   *  verification through the returned array; serialised tokens must verify afresh. */
   get ledgerTokens(): Array<string> {
-    return this.#ledger.map(({ token }) => token)
+    const tokens = this.#ledger.map(({ token }) => token)
+    VERIFIED_LEDGER_TOKENS.set(
+      tokens,
+      this.#ledger.map(({ verified }) => VERIFIED_LEDGER_ENTRIES.get(verified)),
+    )
+    return tokens
   }
 
   /** The control roster folded from the anchor and every applied ledger entry. */
@@ -679,8 +713,8 @@ export class GroupHandle {
    * Verify signed ledger tokens, append the valid ones in the order given, and
    * refold the roster. Tokens that fail verification or whose groupID mismatches are
    * dropped (defensive — the strict admin-issuer enforcement is the commit pre-pass).
-   * Every token is re-verified on the way in: no entry enters a ledger unverified,
-   * whatever the import path.
+   * Exact token bytes can reuse verification on the same array or a handle's export.
+   * did:key and embedded peer:4 keys are immutable; time claims still check on reuse.
    *
    * A token the log already holds is appended again, not skipped: the log records
    * what each commit enacted, not a set of claims, and a repeat is the only way to
@@ -691,14 +725,30 @@ export class GroupHandle {
   async applyLedgerEntries(tokens: Array<string>): Promise<Array<VerifiedLedgerEntry>> {
     return mutexFor(this).run(async () => {
       const appended: Array<VerifiedLedgerEntry> = []
-      for (const token of tokens) {
-        const verified = await verifyLedgerEntry(token)
+      const memo = VERIFIED_LEDGER_TOKENS.get(tokens)
+      const nextMemo: Array<HeldLedgerEntry | undefined> = []
+      for (const [index, token] of tokens.entries()) {
+        const held = memo?.[index]
+        let verified: VerifiedLedgerEntry | null
+        if (held?.token === token) {
+          try {
+            assertTimeClaimsValid(decodeSignedToken(token).payload)
+          } catch {
+            continue
+          }
+          verified = structuredClone(held.verified)
+        } else {
+          verified = await verifyLedgerEntry(token)
+        }
         if (verified == null || verified.entry.groupID !== this.groupID) continue
         const entryID = ledgerEntryDigest(token)
-        this.#ledger.push({ entryID, token, verified })
+        const entry = ledgerLogEntry(entryID, token, verified)
+        this.#ledger.push(entry)
+        nextMemo[index] = VERIFIED_LEDGER_ENTRIES.get(verified)
         this.#entryBodies.set(entryID, { token, verified })
         appended.push(verified)
       }
+      VERIFIED_LEDGER_TOKENS.set(tokens, nextMemo)
       const folded = foldLedgerControl(this.#ledger, this.#anchor, this.groupID)
       this.#roster = folded.roster
       this.#registry = registryWithTreeBindings(
@@ -806,7 +856,7 @@ export class GroupHandle {
             'bootstrapLedger: the gathered ledger holds an unverifiable or cross-group entry',
           )
         }
-        log.push({ entryID: entryIDs[index] as string, token, verified })
+        log.push(ledgerLogEntry(entryIDs[index] as string, token, verified))
       }
 
       // What this bootstrap ADDS, in log order, minus the reserved `kumiai.*` types the fold
@@ -1136,6 +1186,115 @@ export class GroupHandle {
   }
 
   /**
+   * Reserve a handshake generation before building a commit from this handle.
+   * Reuse only a persisted, unconsumed reservation at the current epoch and generation.
+   * The epoch, application ratchet, ledger and pending proposals remain unchanged.
+   * `persist` runs under the handle mutex and must not re-enter this handle.
+   * A failed persist restores the source and wipes newly derived secrets.
+   * Consume the reservation durably before journalling any returned commit for publication.
+   */
+  async reserveHandshakeGeneration(
+    persist: (handle: GroupHandle) => Promise<void> | void,
+  ): Promise<void> {
+    return mutexFor(this).run(async () => {
+      const prior = this.#state
+      if (prior.groupActiveState.kind === 'suspendedPendingReinit') {
+        throw new UsageError('Cannot send messages while Group is suspended pending reinit')
+      }
+      if (prior.groupActiveState.kind === 'removedFromGroup') {
+        throw new UsageError('Cannot send messages after being removed from group')
+      }
+      const node = Number(prior.privatePath.leafIndex) * 2
+      const leaf = prior.secretTree.leafNodes[node]
+      const current = leaf?.handshake.generation ?? 0
+      const reservation = prior.handshakeReservation
+      if (
+        reservation?.epoch === this.epoch &&
+        reservation.generation === current &&
+        !reservation.consumed
+      ) {
+        await persist(this)
+        return
+      }
+      // Every accepted MLS handshake commit moves the epoch. Epoch start is therefore a
+      // conservative baseline, even when a receiver refused or missed earlier frames.
+      // rc.13: MlsContext.clientConfig.keyRetentionConfig.maximumForwardRatchetSteps
+      // defaults to defaultKeyRetentionConfig.maximumForwardRatchetSteps (200).
+      const window =
+        this.#context.clientConfig?.keyRetentionConfig?.maximumForwardRatchetSteps ??
+        defaultKeyRetentionConfig.maximumForwardRatchetSteps
+      const limit = Math.floor(
+        Math.min(window, defaultKeyRetentionConfig.maximumForwardRatchetSteps) /
+          HANDSHAKE_WINDOW_DIVISOR,
+      )
+      if (limit < 1) throw new HandshakeWindowConfigError()
+      if (current + 1 > limit) throw new HandshakeWindowError()
+      if (current >= 0xfffffffe) throw new RangeError('handshake sender generation exhausted')
+      let tree: SecretTree
+      let consumed: Array<Uint8Array>
+      if (leaf == null) {
+        // ts-mls does not export leaf derivation. Discard an unsent proposal and retain
+        // only its advanced tree, without adding the proposal to the source state.
+        const result = await createProposal({
+          context: this.#context,
+          state: prior,
+          proposal: {
+            proposalType: defaultProposalTypes.remove,
+            remove: { removed: prior.privatePath.leafIndex },
+          },
+        })
+        tree = result.newState.secretTree
+        consumed = result.consumed
+      } else {
+        const advanced = await advanceSendingRatchet(this.#context, leaf.handshake, current + 1)
+        tree = {
+          ...prior.secretTree,
+          leafNodes: {
+            ...prior.secretTree.leafNodes,
+            [node]: { ...leaf, handshake: advanced.ratchet },
+          },
+        }
+        consumed = advanced.consumed
+      }
+      this.#state = {
+        ...prior,
+        secretTree: tree,
+        handshakeReservation: { epoch: this.epoch, generation: current + 1, consumed: false },
+      }
+      try {
+        await persist(this)
+      } catch (error) {
+        this.#state = prior
+        zeroFreshSecrets(prior.secretTree, tree, consumed)
+        throw error
+      }
+      zeroAll(consumed)
+    })
+  }
+
+  /** Persist consumption before any commit journal can permit publication. */
+  async consumeHandshakeReservation(
+    persist: (handle: GroupHandle) => Promise<void> | void,
+  ): Promise<void> {
+    return mutexFor(this).run(async () => {
+      const prior = this.#state
+      const reservation = prior.handshakeReservation
+      const current =
+        prior.secretTree.leafNodes[Number(prior.privatePath.leafIndex) * 2]?.handshake.generation
+      if (
+        reservation == null ||
+        reservation.epoch !== this.epoch ||
+        reservation.generation !== current
+      ) {
+        throw new HandshakeReservationError()
+      }
+      this.#state = { ...prior, handshakeReservation: { ...reservation, consumed: true } }
+      // Keep consumed evidence in memory on failure. No journal write can follow rejection.
+      await persist(this)
+    })
+  }
+
+  /**
    * Open an application message sealed for the group and recover WHO SENT IT — the
    * counterpart to {@link encrypt}, and the read half of the group's application lane.
    *
@@ -1328,7 +1487,7 @@ export class GroupHandle {
               if (resolved.has(id) || !missing.includes(id)) continue
               const verified = await verifyLedgerEntry(token)
               if (verified == null) continue
-              resolved.set(id, { token, verified, entryID: id })
+              resolved.set(id, ledgerLogEntry(id, token, verified))
             }
             const stillMissing = missing.filter((id) => !resolved.has(id))
             if (stillMissing.length > 0) {

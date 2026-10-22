@@ -407,6 +407,21 @@ export type GroupMLS = {
   /** Read the current handle epoch under the host's handle lock. */
   readEpoch(): Promise<number>
   /**
+   * Durably reserve a handshake sender generation before EVERY host build.
+   * Reuse only durable evidence of a reservation that has never permitted publication.
+   * Keep the epoch, ledger and application ratchet unchanged.
+   * Resolve only after persistence. On failure the peer must not invoke the builder.
+   * Implement both build hooks or neither. An incomplete pair throws CommitBuildHooksError at construction.
+   * Without hooks, builders must reserve and consume durably before returning their frame.
+   */
+  prepareCommitBuild?(): Promise<void>
+  /**
+   * Persist reservation consumption after build, before journalling or publishing its frame.
+   * Required whenever prepareCommitBuild is present, including when preparation always burns a generation.
+   * Builders must return their frame before publishing it.
+   */
+  commitBuildFramed?(): Promise<void>
+  /**
    * The leaves this handle's ratchet tree currently holds, one {@link RosterEntry} per leaf, in
    * ascending `leafIndex` order. Purely local: reads no secret, advances nothing.
    *

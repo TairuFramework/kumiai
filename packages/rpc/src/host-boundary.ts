@@ -3,7 +3,7 @@ import type { GatherOptions } from '@kumiai/broadcast'
 import type { AnchorStore } from './anchor.js'
 import type { PendingCommit } from './commit.js'
 import type { GroupCrypto, GroupMLS, PendingAppFrames, PendingRecovery } from './crypto.js'
-import { PeerDisposedError } from './errors.js'
+import { CommitBuildHooksError, PeerDisposedError } from './errors.js'
 import type { GroupPeerMLSParams, GroupPeerParams } from './peer-types.js'
 import type { GroupProtocolDefinition } from './protocol.js'
 
@@ -63,6 +63,8 @@ export const mlsHostMembers = {
   openRecoveryVerdict: 'host',
   sendAdmission: 'host',
   readEpoch: 'host',
+  prepareCommitBuild: 'host',
+  commitBuildFramed: 'host',
   rosterEntries: 'host',
   readCommitHeader: 'host',
   processCommit: 'host',
@@ -300,9 +302,16 @@ export function wrapPeerHost<TParams extends object>(
       })
     } else if (key === 'anchorStore')
       selected = selectHostMembers(boundary, value as AnchorStore, anchorStoreHostMembers)
-    else if (kind === 'mls')
-      selected = selectHostMembers(boundary, value as GroupMLS, mlsHostMembers)
-    else if (kind === 'handlers') {
+    else if (kind === 'mls') {
+      const mls = value as GroupMLS
+      if (
+        (typeof mls.prepareCommitBuild === 'function') !==
+        (typeof mls.commitBuildFramed === 'function')
+      ) {
+        throw new CommitBuildHooksError()
+      }
+      selected = selectHostMembers(boundary, mls, mlsHostMembers)
+    } else if (kind === 'handlers') {
       selected = Object.fromEntries(
         Object.entries(value as Record<string, object>).map(([name, handlers]) => [
           name,
