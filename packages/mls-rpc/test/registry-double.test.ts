@@ -911,11 +911,17 @@ describe.each(['real-mls', 'double'] as const)('received commit gates (%s)', (mo
         if (scenario === 'unknown author') {
           const { encodeMemoryCommit } = (await import(
             new URL('../../rpc/test/fixtures/memory-group-mls.ts', import.meta.url).href
-          )) as { encodeMemoryCommit(epoch: number, did: string): Uint8Array }
-          commit = tagMemoryCommit(
-            encodeMemoryCommit(Number(local.epoch), stranger.id),
-            author.state.keySchedule.epochAuthenticator,
-          )
+          )) as {
+            encodeMemoryCommit(
+              epoch: number,
+              did: string,
+              entries: Array<string>,
+              options: { authenticator: Uint8Array },
+            ): Uint8Array
+          }
+          commit = encodeMemoryCommit(Number(local.epoch), stranger.id, [], {
+            authenticator: author.state.keySchedule.epochAuthenticator,
+          })
         } else {
           commit = memoryModel(author).buildCommit([], { removes: [target.identity.id] })
         }
