@@ -30,7 +30,7 @@ the lock was for — a matched band is a coherent set — without that cost. Und
 ## Why the rule is a script and not configuration
 
 Neither pnpm setting expresses it. `versioning.fixed` locks the trailing segment too — the churn the
-band exists to avoid. `versioning.epics` bands *majors* only, and numerically (`M*100 … M*100+99`) —
+band exists to avoid. `versioning.epics` bands _majors_ only, and numerically (`M*100 … M*100+99`) —
 wrong axis pre-1.0 and wrong shape. So the band is a repo convention that
 `scripts/check-versions.mjs` makes true: ~50 lines, no dependencies, wired into `pnpm test` and as
 the first step of `pnpm release`.
@@ -52,7 +52,7 @@ outcome check does not.
   propagation reached it and it appeared in every release plan.
 - `publishConfig: { access: public }` on all eleven manifests. Changesets' `"access": "public"` has
   no pnpm counterpart, and a scoped package defaults to **restricted** under `pnpm publish -r` —
-  which only surfaces as a failure on a package's *first* publish.
+  which only surfaces as a failure on a package's _first_ publish.
 - `mls-hub` from `0.0.0` to `0.4.0`, plus one intent naming all eleven `minor`. Without it the
   pending set would have sent some packages to 0.5.0 and left patch-only ones at 0.4.x, breaking the
   band on the first release under its own rule.

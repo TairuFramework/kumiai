@@ -23,7 +23,7 @@ frame carried no cryptographic binding to where it belonged.
 
 - **Topic binding is receiver-enforced.** ts-mls reconstructs the AEAD's AAD from the frame's own
   carried `authenticatedData`, so a byte-for-byte replay still opens cryptographically. The topic
-  binding is enforced by the *receiver* comparing the frame's carried AAD against the topic it
+  binding is enforced by the _receiver_ comparing the frame's carried AAD against the topic it
   expects. The sender binds `AAD = fromUTF(topicID)` at every wrap site; the receiver passes
   `expectedAAD = fromUTF(<same topicID>)` at every unwrap site. No topic derivation changed — the
   bound value is the topicID as derived today, encoded to bytes.
@@ -31,7 +31,7 @@ frame carried no cryptographic binding to where it belonged.
 - **Pre-open comparison, to avoid a ratchet-burn DoS.** `decrypt` reads the frame's cleartext
   `authenticatedData` from the decoded `PrivateMessage` and compares it to `expectedAAD` **before**
   `mlsProcessMessage` runs. `processMessage` accepts no externally-expected AAD, so a comparison
-  done *after* the open would have consumed a ratchet generation and mutated handle state — a
+  done _after_ the open would have consumed a ratchet generation and mutated handle state — a
   wrong-topic frame would be a ratchet-burning denial of service rather than a cheap reject. The
   compare joins the existing pattern that reads the sender leaf index before opening so a frame that
   then fails to open has cost nothing. `readPrivateFrame` was widened to surface
@@ -52,7 +52,7 @@ frame carried no cryptographic binding to where it belonged.
   drain's `expectedAAD` is the cursor's authoritative topicID, not the current MLS epoch.
 
 - **Unconditional-enforcement rollout; retained history deliberately invalidated.** AAD lives in the
-  frame, not the topic, so no topic rotation. But the app *retained* log is durable and a
+  frame, not the topic, so no topic rotation. But the app _retained_ log is durable and a
   pre-upgrade retained frame has empty AAD. An upgraded drain enforcing `expectedAAD` rejects such a
   frame, marks it dead, and permanently advances the durable cursor past it — so pre-upgrade
   retained app history is dropped when a reader upgrades. Accepted at pre-1.0 over a compatibility

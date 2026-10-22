@@ -57,7 +57,16 @@ and Welcome. MLS exports `CommitReceipt`, `restrictCommitAuthoring` and `withCom
 The commit construction gate is internal and cannot accept host receipts.
 Candidate restore throws exported `InvalidCandidateError` for undecodable candidates. Other restore faults propagate.
 
-For a *received* commit there is nothing to adopt: ts-mls's `processMessage` advances the handle in
+Private commits use the durable control-build port described above.
+One saved build occupies its source epoch across CAS loss and restart.
+Retries preserve the saved bytes and publish ID. Abandonment leaves a spent-source marker.
+All checkpoints use client-state format v2, including optional reservation evidence and leaf-zero proposal sender references.
+The decoder refuses every other version. There is no client-state migration path.
+Every handle constructor advances past an imported current-epoch reservation and clears the field, including every restore path.
+The permit repeats this preparation before authoring, normally as a no-op.
+Crash replay repeats that advance from the saved source. No reservation method or paired build hook is required.
+
+For a _received_ commit there is nothing to adopt: ts-mls's `processMessage` advances the handle in
 place. A host that treated every commit as adopt-later would double-apply received ones.
 
 Migrating from 0.9: build one adapter and pass it to both factories. Replace the old one-argument
@@ -102,7 +111,6 @@ Plain construction preserves ordinary operations and the explicit legacy recover
 ### A host's own `HandleAccess`
 
 A host with its own handle store implements the port instead:
-
 - `readControl(fn)` owns the existing access gate and supplies a coherent handle and `AdoptionExpected` source.
   Its `refresh()` repeats the owned read without entering the gate again.
   A transactional host waits for issued storage writes, then restores one row's state and version together.
@@ -157,7 +165,9 @@ const access = simpleHandleAccess({
   key: store.control.key,
   handle: () => handle,
   stateVersion: () => store.loadVersion(groupID),
-  adopt: (next) => { handle = next },
+  adopt: (next) => {
+    handle = next
+  },
   persist: (current, write) => store.save(current, write),
 })
 const crypto = createGroupCrypto({
@@ -198,10 +208,15 @@ with 0.10 peers. See the `@kumiai/rpc` README for the delivery and retention bou
 `GroupMLS.processCommit` is handed a `resolveLedgerEntries` scoped to **one** commit's frame — the
 signed ledger-entry bodies ride that frame and nowhere else. But `GroupHandle` takes its resolver
 once, in `GroupOptions`, and offers no way to change it afterwards. So the indirection has to be
-installed when the group is *built*:
+installed when the group is _built_:
 
 ```ts
-import { createGroupCrypto, createGroupMLS, createLedgerEntrySlot, simpleHandleAccess } from '@kumiai/mls-rpc'
+import {
+  createGroupCrypto,
+  createGroupMLS,
+  createLedgerEntrySlot,
+  simpleHandleAccess,
+} from '@kumiai/mls-rpc'
 
 const entrySlot = createLedgerEntrySlot()
 // Every construction site: createGroup / processWelcome / restoreGroup.
@@ -214,7 +229,9 @@ const access = simpleHandleAccess({
   key: store.control.key,
   handle: () => handle,
   stateVersion: () => store.loadVersion(groupID),
-  adopt: (next) => { handle = next },
+  adopt: (next) => {
+    handle = next
+  },
   persist: (current, write) => store.save(current, write),
 })
 const crypto = createGroupCrypto({ access })
@@ -267,9 +284,9 @@ const result = await applyCommit({
     const write = adoption?.({
       incarnation: key.incarnation,
       epochAfter: Number(staged.epoch),
-      removed: !staged.listMembers().some(
-        (member) => member.leafIndex === staged.state.privatePath.leafIndex,
-      ),
+      removed: !staged
+        .listMembers()
+        .some((member) => member.leafIndex === staged.state.privatePath.leafIndex),
       epochAuthenticator: staged.state.keySchedule.epochAuthenticator.slice(),
     })
     await store.save(staged, write)
@@ -309,15 +326,14 @@ The two use different exporter labels deliberately: the topic secret names a top
 anything that derives one, while the entry key opens the group's control-ledger bodies.
 
 The sealed blob is `[ VERSION(1) | NONCE(24) | CIPHERTEXT ]`, XChaCha20-Poly1305. The version byte
-sits inside the blob rather than in the frame header so that an unknown version fails the *open* —
-survivable, the commit is filed as poison and stepped over — rather than the *decode*, which would
+sits inside the blob rather than in the frame header so that an unknown version fails the _open_ —
+survivable, the commit is filed as poison and stepped over — rather than the _decode_, which would
 leave a peer stepping over frames without ever classifying one and never learning the group moved on.
 
 ## Where this diverges from the doubles
 
 Documented on the factories themselves; the conformance suite in `@kumiai/rpc-conformance` pins each
 one. The ones a host is most likely to trip on:
-
 - **`unwrap` opens retained past epochs.** It authenticates the sender against that epoch's roster.
   Future epochs and past epochs outside retention throw `FrameEpochError` under the handle lock.
 - **`exportSecret` derives from MLS exporter state.** The fake uses HMAC to model epoch separation,
@@ -422,7 +438,8 @@ const checkpoints = createCheckpointService({
 // Unacknowledged events replay after restart.
 for (const event of await checkpoints.events(key.groupID)) app.notify(event.kind, event.notice)
 for (const notice of await checkpoints.forkNotices(key.groupID)) {
-  if (notice.closedAt === null) app.review(notice.splitEpoch, notice.branches, notice.atRisk, notice.coverage)
+  if (notice.closedAt === null)
+    app.review(notice.splitEpoch, notice.branches, notice.atRisk, notice.coverage)
   await checkpoints.ackForkNotice(key.groupID, notice.id, notice.revision)
 }
 
@@ -432,7 +449,11 @@ await checkpoints.importCheckpoint(key, theirFrame)
 const fact = await checkpoints.checkpointFact(key, epoch)
 const ours = frames[0]
 if (fact !== null && ours !== undefined) {
-  const comparison = await verifyCheckpointPair({ first: ours, second: theirFrame, localRosterFact: fact })
+  const comparison = await verifyCheckpointPair({
+    first: ours,
+    second: theirFrame,
+    localRosterFact: fact,
+  })
   app.notify(comparison.kind)
 }
 const coverage = await checkpoints.checkpointCoverage(key.groupID)
@@ -453,7 +474,10 @@ Format, budgets, retention and detection limits are in the `@kumiai/rpc` README.
 for (const event of await safety.events(key)) {
   if (event.kind !== 'branch-abandoned') continue
   // Resend own messages from the app's copy; plaintext is not retained.
-  await app.resend(event.ownMessages.map((message) => message.id), event.coverage.ownMessages)
+  await app.resend(
+    event.ownMessages.map((message) => message.id),
+    event.coverage.ownMessages,
+  )
   app.redoMembership(event.membersAdded, event.membersRemoved, event.epochs)
   await safety.ackEvent(key, event.id)
 }
@@ -621,14 +645,15 @@ const registryPeer = await createRegistryPeer({
   recovery,
   target,
   continuation: createRecoveryContinuationPort({ registry, persistence }),
-  createMLS: (current) => createRegistryGroupMLS({
-    registry,
-    key: current,
-    recovery,
-    target,
-    identity,
-    entrySlot: createLedgerEntrySlot(),
-  }),
+  createMLS: (current) =>
+    createRegistryGroupMLS({
+      registry,
+      key: current,
+      recovery,
+      target,
+      identity,
+      entrySlot: createLedgerEntrySlot(),
+    }),
   createPeer: createPeerForIncarnation,
 })
 await registryPeer.ready

@@ -46,7 +46,7 @@ post-dispose publish guard.
   self-deadlocks. Guarding the funnel awaits nothing — the in-flight op rejects with
   `PeerDisposedError`, matching the existing "disposed op rejects" idiom.
 - **Accepted, documented boundaries (guard the entrance, not the in-flight call).**
-  Both #6 and #7 stop work that has *not yet entered* the shared resource; they cannot recall
+  Both #6 and #7 stop work that has _not yet entered_ the shared resource; they cannot recall
   a call already in flight. For #7, a publish already awaiting `hub.publish` is on the wire.
   For #6, an `openSealedLedger`/`bootstrapLedger` already entered can complete its host write
   after dispose returns — and because the waiter stays registered until `finish(true)`,

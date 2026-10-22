@@ -6,7 +6,7 @@
 
 ## Context
 
-Receive *payload* delivery is now gated per topic by the `authorize` hook (see
+Receive _payload_ delivery is now gated per topic by the `authorize` hook (see
 `docs/agents/plans/completed/2026-08-30-hub-receive-authorization.complete.md`). That change closes
 the payload leak: a group member removed from a topic no longer receives that topic's frames.
 
@@ -14,7 +14,7 @@ It does **not** gate wake notifications. On the publish path, every stored subsc
 channel is notified via the wake dispatcher with `{ did, topicID, sequenceID }` — metadata only,
 never a payload. So a removed member's device can still be woken for a topic it can no longer read,
 learning that a `sequenceID` advanced on that topic. The wake authorization is decided only by the
-*publisher's* action, not the *recipient's* current topic access.
+_publisher's_ action, not the _recipient's_ current topic access.
 
 ## Requested change
 

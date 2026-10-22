@@ -16,6 +16,7 @@ export {
   KeyPackageFetchLimitError,
   KeyPackageQuotaExceededError,
   NotSubscribedError,
+  RateLimitedError,
   RetentionExceededError,
   SubscriptionQuotaExceededError,
   WakeNotSupportedError,

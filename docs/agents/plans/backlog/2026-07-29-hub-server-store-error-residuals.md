@@ -7,11 +7,11 @@ on 2026-07-29; see `docs/agents/plans/completed/`. Background:
 ## 1. The consequence text is keyed by method but describes a call site
 
 `STORE_ERROR_CONSEQUENCE` is keyed by the `method` union, but its `fetchLastResortKeyPackage` entry
-describes the *top-up call site* specifically. That method is called at three places in
+describes the _top-up call site_ specifically. That method is called at three places in
 `handlers.ts` and only one reports; if either of the others is ever wired, it silently inherits a
 sentence that is false for it. A comment records this at the map. The trigger is not "a fourth
 site" — one arrived on 2026-07-29 (`getSubscribers`) and a method-keyed union discriminated it
-correctly. The trigger is a *second reporting call site of one method*: the moment either of the
+correctly. The trigger is a _second reporting call site of one method_: the moment either of the
 other two `fetchLastResortKeyPackage` calls starts reporting, it inherits a sentence that is false
 for it, and the fix is a site discriminator alongside `method`.
 

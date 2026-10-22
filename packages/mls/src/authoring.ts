@@ -1,4 +1,5 @@
 import type { GroupHandle } from './group-handle.js'
+import { clearImportedReservation } from './secret-tree.js'
 
 export class CommitAuthoringRefusedError extends Error {
   constructor(message = 'Private commit authoring requires the control-build permit') {
@@ -49,6 +50,13 @@ export async function withCommitPermit<TValue>(
   AUTHORING.set(permitted, permit)
   let outcome: PromiseSettledResult<TValue>
   try {
+    if (permitted.state.handshakeReservation !== undefined) {
+      // Fence authoring while reservation preparation owns the restored handle.
+      permit.consumed = true
+      clearImportedReservation(permitted.state, permitted.context)
+      if (AUTHORING.get(permitted) !== permit) throw new CommitAuthoringRefusedError()
+      permit.consumed = false
+    }
     outcome = { status: 'fulfilled', value: await fn(permitted) }
   } catch (reason) {
     outcome = { status: 'rejected', reason }

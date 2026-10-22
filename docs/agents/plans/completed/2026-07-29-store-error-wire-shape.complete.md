@@ -44,9 +44,9 @@ pins that a conforming store writes delivery rows at publish time for the log cl
 mailbox class, so the swallow is sound for any implementation, not just `memoryStore`.
 
 **A method-keyed union, not a site-keyed one.** The earlier residual predicted that "a fourth site"
-would force a site discriminator. A fourth site did arrive, but it was a distinct *method*, which a
+would force a site discriminator. A fourth site did arrive, but it was a distinct _method_, which a
 method-keyed union discriminates correctly. A `site` field would have been derivable from `method`
-for every variant. The real trigger — a second *reporting* call site of one method — has still not
+for every variant. The real trigger — a second _reporting_ call site of one method — has still not
 fired and stays filed in `backlog/2026-07-29-hub-server-store-error-residuals.md`.
 
 **`unsubscribe`'s wrap is defence, not a port change.** `HubStore.unsubscribe` deliberately declares
@@ -64,7 +64,7 @@ The one substantive finding was in operator-facing text, not code. The swallow's
 and comment said a subscriber recovers the skipped frame "on its next receive drain" — but the
 receive channel drains once at open and then goes live permanently, with nothing polling. For the
 exact population live fan-out targets, currently-connected subscribers, the recovery point is the
-next *reconnect*, which on a healthy connection may be days away. Read as written, an operator would
+next _reconnect_, which on a healthy connection may be days away. Read as written, an operator would
 have deprioritised what is in fact a delivery stall for connected clients. Reworded in the comment,
 the consequence map, and the changeset.
 

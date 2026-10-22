@@ -27,7 +27,6 @@ Reference docs (persistent contracts): `docs/reference/mls-lifecycle.md`, `docs/
 ## Key design decisions
 
 **Bound-leaf lifecycle**
-
 - **Clock-free verification.** A leaf credential pins issuer and subject and is judged against tree time,
   a monotonic value only the controller can advance, never against a member's wall clock. Every honest
   member applying the same hub-ordered log therefore reaches the same verdict, which is what lets one
@@ -65,7 +64,6 @@ Reference docs (persistent contracts): `docs/reference/mls-lifecycle.md`, `docs/
   so it agrees on whether the removal was authorised; the only effect is an early leave.
 
 **Recovery**
-
 - **Confirm before adopt.** Hub acceptance of a rejoin never authorises adoption. A rejoiner adopts only on
   a counted confirmation from a signer that passes the gate (a bound leaf in the pending tree, neither it
   nor its issuer revoked, generation at the floor, leaf live at the later of tree time and now minus 300 s).
@@ -79,7 +77,6 @@ Reference docs (persistent contracts): `docs/reference/mls-lifecycle.md`, `docs/
   ledger processes no commits and re-requests the ledger on a 1 to 60 second backoff.
 
 **Durable log delivery**
-
 - **Durable `AppOutbox`, resolve at durable acceptance.** A log dispatch resolves once the host has
   durably accepted the entry, not when a hub frame lands. The worker seals at the current epoch, persists a
   prepared state, publishes, then probes the commit head. A safe probe or a covered complete walk after

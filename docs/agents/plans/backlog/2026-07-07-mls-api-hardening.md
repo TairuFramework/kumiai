@@ -63,12 +63,11 @@ application-message bytes is now covered. See `completed/2026-07-07-test-gaps.co
 Folded in from `next/2026-07-20-deferred-api-findings.md` at the 2026-07-23 triage. Origin: the four
 API-surface audits of 2026-07-20 that preceded
 `../completed/2026-07-21-forward-compatibility.complete.md`, which took only the items where
-deferring makes the later fix *impossible* and left these. Line numbers are as of `5eb220a`.
+deferring makes the later fix _impossible_ and left these. Line numbers are as of `5eb220a`.
 
 Every item marked **breaking** costs a `minor` bump while `@kumiai/mls` is 0.x and a `major` after
 1.0 — see `../milestones/pre-1.0-breaking-api.md` for the deadline that implies. None is a
 correctness bug; each is a shape a filed consumer would force a break to fix, and none has one yet.
-
 - **A third `GroupPermission`** (breaking). **Left 2026-09-25** for 0.10: no consumer needs one. The
   signed `kumiai.role` value, the folded roster and Kubun's role types all name only `admin` and
   `member`; a new role needs a defined authority rule and coordinated peer and consumer changes.
@@ -87,15 +86,15 @@ correctness bug; each is a shape a filed consumer would force a break to fix, an
 - **The `0xf102` hatch opens narrower than it reads** (non-breaking — documentation; the one item in
   this doc indexed on `../milestones/non-breaking-api.md` rather than the pre-1.0 one). `@kumiai/mls`
   reserves and advertises the third control extension type, so a future control extension can be
-  *installed* into a live group without re-admitting members — but only empty.
+  _installed_ into a live group without re-admitting members — but only empty.
   `packages/mls/src/policy.ts:99-118` permits the added entry solely when it is not already
   installed, the list grew by exactly one, and its data is a zero-length `Uint8Array`; the entry is
   then stripped before the compare. Every later change to the GroupContext extension list goes
   through the same
   positional compare (`evaluateGroupContextExtensions`), requiring byte-identical data at every
-  position bar the ledger head. So *populating* `0xf102` — the step that makes it useful — remains a
+  position bar the ledger head. So _populating_ `0xf102` — the step that makes it useful — remains a
   policy change every peer must ship before any peer can commit it. The reservation buys the
-  extension *type* surviving into existing groups' extension lists and every member's capabilities;
+  extension _type_ surviving into existing groups' extension lists and every member's capabilities;
   it does not buy a data channel openable later without a flag day. Worth stating plainly at the
   reservation, because the changeset's "escape hatches with a closing window" framing invites the
   stronger read.
@@ -107,7 +106,7 @@ ship-before-needed rather than deferrable debt, and **shipped 2026-07-24**, see
 ## Added 2026-07-11 — GroupContext extension-data compare is fail-closed on default-typed extensions
 
 `policy.ts`'s `group_context_extensions` rule byte-compares each extension's `extensionData`, which
-requires both sides to be `Uint8Array`. ts-mls decodes *default-typed* extensions (`external_senders`,
+requires both sides to be `Uint8Array`. ts-mls decodes _default-typed_ extensions (`external_senders`,
 `required_capabilities`) into objects, and does not re-export its own `extensionsEqual`. So a group
 that ever anchors such an extension would have every honest ledger-head move rejected — fail-closed
 liveness, not a security gap, and unreachable today because nothing in this repo adds one. Fix when

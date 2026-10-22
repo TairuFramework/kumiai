@@ -17,7 +17,6 @@ host-passed, so a post-dispose write through a leaked drain or stale lane can co
 ## What was built
 
 Four interacting slices settled onto one branch (five code/test commits plus the fix wave):
-
 - **Slice 1 — `peer.dispose()` always reaches `mux.dispose()`.** `teardownEpoch()` disposes every child
   concurrently and throws an `AggregateError` if any child-disposal rejects. Previously that throw
   aborted `dispose()` before `mux.dispose()` ran, leaking the hub drain, listeners, sinks, and sleepers.
@@ -26,7 +25,7 @@ Four interacting slices settled onto one branch (five code/test commits plus the
   `AggregateError('Peer dispose failed')`. A bare `try/finally` was rejected on review — a throw from
   `finally` replaces the `try` error, and `mux.dispose()` can now throw too (Slice 2), so both errors
   must be collected rather than sequenced. `teardownEpoch()`'s own throw is left intact because it is
-  also called from the epoch-rotation path, where a child-disposal failure *should* surface.
+  also called from the epoch-rotation path, where a child-disposal failure _should_ surface.
 
 - **Slice 2 — every teardown path runs the full cleanup, and the receive drain is closed fire-and-forget
   on every path.** Both the mux and the transport drain a hub subscription through an async iterator.
@@ -35,12 +34,12 @@ Four interacting slices settled onto one branch (five code/test commits plus the
   teardown paths (readable-pull `next()` rejection, `result.done`, remote `session-end`) cleared only
   the idle timer and skipped the reconnect timer, the hub-status listener, the abort listener, and
   `hub.unsubscribe`. Folded findings: a construction race that registered the hub-status listener
-  *after* a pre-aborted teardown already ran, now guarded with `!torndown` (Finding A); exception-safety
+  _after_ a pre-aborted teardown already ran, now guarded with `!torndown` (Finding A); exception-safety
   wrappers so a synchronous throw from an unrestricted call (`unsubscribeEvents()` or `iterator.return()`)
   cannot strand the rest of the cleanup (Finding E); and the drain-close decision below (Finding D).
 
   **Drain-close decision — fire-and-forget, corrected during CI.** An intermediate version of this
-  branch made `dispose()` *await* the drain close (`await iterator.return?.()` in the mux; the
+  branch made `dispose()` _await_ the drain close (`await iterator.return?.()` in the mux; the
   transport's `'disposed'` listener `await`ing a captured close promise), so `dispose()` would resolve
   only after the receive resource actually closed. That version passed every unit test and three review
   passes but **deadlocked the `@kumiai/integration-tests` suite against the real wire hub**: the drain
@@ -52,7 +51,7 @@ Four interacting slices settled onto one branch (five code/test commits plus the
   unhandled-rejection path). This is not merely a rollback: the residual-#7 `publishSuspended` guards
   already block every post-dispose write independently of whether the drain has closed, so awaiting the
   close bought no correctness — it was belt-and-suspenders that only ever held against fake hubs. The
-  mux still *rejects* if `return()` throws **synchronously** (it runs that call un-`try/caught` as its
+  mux still _rejects_ if `return()` throws **synchronously** (it runs that call un-`try/caught` as its
   last act), so Slice 1's aggregation second arm stays reachable.
 
 - **Slice 3 — clear the stale `inboxLane` reference on dispose.** `inboxLane` closes over the mux and was
@@ -73,11 +72,11 @@ Four interacting slices settled onto one branch (five code/test commits plus the
 
 ## Finding D and the drain-close asymmetry
 
-The spec asserted that `transport.dispose()` *rejects* if the drain close fails, "like `mux.dispose()`
+The spec asserted that `transport.dispose()` _rejects_ if the drain close fails, "like `mux.dispose()`
 and `peer.dispose()`." **That premise was wrong.** enkaku's `Transport` extends `@sozai/async`'s
 `Disposer`, whose `dispose()` catches a rejecting dispose callback, routes it to `console.warn`, and
 **always resolves** — it never rejects, unlike the hand-rolled `mux.dispose()` / `peer.dispose()` which
-have no Disposer layer. (`@sozai/event`'s `emit` *does* rethrow a rejecting listener, but the `Disposer`
+have no Disposer layer. (`@sozai/event`'s `emit` _does_ rethrow a rejecting listener, but the `Disposer`
 one layer up still swallows it — a lesson captured in agent memory.)
 
 With the drain close now **fire-and-forget on every path** (the corrected Slice 2 decision above), the
@@ -85,7 +84,7 @@ rejection question collapses: `releaseResources()` attaches a no-op `.catch()` t
 promise and nothing awaits it, so a rejecting async `return()` is swallowed on both the voluntary
 dispose path and the involuntary (idle/abort/error/completion/remote-session-end) paths alike — it
 reaches neither the caller, nor the `console.warn` channel, nor the unhandled-rejection handler. The
-only close failure that still *rejects* a `dispose()` is a **synchronous** throw from `return()` on the
+only close failure that still _rejects_ a `dispose()` is a **synchronous** throw from `return()` on the
 hand-rolled `mux.dispose()` / `peer.dispose()`, which run that call un-`try/caught`; the transport wraps
 it, so it never rejects there.
 

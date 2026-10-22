@@ -14,7 +14,7 @@ rendezvous responder lane with no post-dispose check at all.
 schedule a `setTimeout` whose callback deletes itself from its pending set (`pendingReplies` /
 `pendingLedgerReplies`) as its FIRST act, then runs an async IIFE through real MLS awaits
 (`sealGroupInfo` / `sealLedger`) before `mux.publish`. A timer that has already fired when
-`dispose()` runs is therefore *gone from the set the `clearTimeout` sweep walks* — too late by
+`dispose()` runs is therefore _gone from the set the `clearTimeout` sweep walks_ — too late by
 construction, not by race. `mux.publish` carries no disposed check of its own. The result was a
 sealed GroupInfo, or the group's whole sealed ledger, published from a peer its host had torn down.
 
@@ -51,12 +51,12 @@ then disposed, the gate released, and the test asserts the peer wrote nothing to
   recovery guard alone fails only the group-info test. Both were re-run independently of the
   implementer's report.
 - **An anti-vacuity witness needs to cover the whole window, not its opening.** Both tests
-  originally latched a flag when the seal was *entered*, before dispose. That proves the window
+  originally latched a flag when the seal was _entered_, before dispose. That proves the window
   opened; it says nothing about whether the parked continuation ever resumed to reach the guard — so
   a continuation that silently never ran would leave the recording empty and the test would pass for
   nothing. The final review caught it. A second latch, set after the gate and asserted after the
   post-gate flush, closes it.
-- **Do not swap that flush for a poll on the new witness.** Unguarded, the publish lands *after* the
+- **Do not swap that flush for a poll on the new witness.** Unguarded, the publish lands _after_ the
   resumed flag flips, so asserting the moment it goes true can observe an empty recording before the
   publish arrives — a false pass worse than the defect. The witness is an added assertion, never a
   replacement for waiting.

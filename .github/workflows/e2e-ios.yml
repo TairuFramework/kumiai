@@ -9,4 +9,4 @@ jobs:
     with:
       working-directory: tests/e2e-expo
       runs-on: macos-26
-      node-version: '24'
+      node-version: "24"

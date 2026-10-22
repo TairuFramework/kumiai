@@ -4,7 +4,6 @@
 
 `createGroupPeer` is one large closure. Its types and the epoch runtime now live in `peer-types.ts` and
 `peer-epoch.ts`. Two large concerns remain inline:
-
 - **Recovery** (about 900 lines): the rendezvous handlers, `requestGroupInfo`, `attemptBody`,
   `runRecovery`, `recover`, and the waiter, timer and verdict caches.
 - **Commit lane** (about 1,000 lines): `walkCommits`, `pullCommits`, `reconcileCommits`, commit

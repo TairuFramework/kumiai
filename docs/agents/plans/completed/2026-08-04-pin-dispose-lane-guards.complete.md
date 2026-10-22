@@ -28,7 +28,7 @@ stopped any of it.
 
 **1. The two lane guards are pinned** (`packages/rpc/test/peer-dispose-race.test.ts`). Each test
 asserts both the refusal and that the peer wrote nothing to the hub. Each carries two independent
-bites: `replay()` and `recover()` both *resolve* with their guards deleted, so the
+bites: `replay()` and `recover()` both _resolve_ with their guards deleted, so the
 `rejects.toThrow(/disposed/i)` assertion fails on its own regardless of what the recorder saw.
 
 `recover()`'s test needed one ordering decision worth keeping: unguarded, it does not reject
@@ -44,14 +44,14 @@ delivery has no caller to reject, and the surrounding `.catch(() => {})` would s
 Staging its test took two attempts, and the failed one is the more useful record. **Gating subscribes
 to hold `ready` pending does not work** — `retain` is synchronous and fires `void attemptSubscribe(...)`,
 so `buildEpoch` never awaits a subscribe. The working mechanism is the commit mutex: `onCommitDelivery`
-puts its `await ready` *inside* the `runSerial` callback, so a held mutex stops the callback starting
+puts its `await ready` _inside_ the `runSerial` callback, so a held mutex stops the callback starting
 at all. The holder must be hub-silent or its own traffic lands in the recording, and `replay()` over
 an empty journal with a complete ledger is exactly that — so the gate goes on `journal.get()`, and the
 assertion stays a bare `toEqual([])` with no filtering.
 
 **3. A shared recording-hub fixture** (`packages/rpc/test/fixtures/recording-hub.ts`), reversing two
 earlier rulings against extracting one. Those rulings guarded against a shared recorder gaining a
-parameter per caller; all three tests here need the *same* wrapper, so it takes none. The package's
+parameter per caller; all three tests here need the _same_ wrapper, so it takes none. The package's
 three pre-existing inline wrappers stay as they are — they record different fields.
 
 ## What the process caught, worth remembering
@@ -62,7 +62,7 @@ three pre-existing inline wrappers stay as they are — they record different fi
   post-dispose commit-log fetches.
 - **The in-flight-subscribe test did not depend on the hole.** Its comment named `onCommitDelivery`'s
   unguarded rebuild as load-bearing, and the plan reserved a reshape/re-point/retire decision for the
-  user. With the guard removed that test still *passed* — proving the claim false — so only the
+  user. With the guard removed that test still _passed_ — proving the claim false — so only the
   comment was rewritten. Nothing was patched to make anything pass.
 - **The final review's two findings were both false claims this branch itself wrote**, which is the
   same failure that produced the work. The `assertLive` doc block said the inbound side was refused

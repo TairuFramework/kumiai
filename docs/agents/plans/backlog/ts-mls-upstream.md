@@ -3,7 +3,7 @@
 **Priority:** backlog — every item here waits on an upstream release. Nothing in this repo unblocks
 them.
 **Merged 2026-07-28** from `ts-mls-v2-stable-upgrade.md` and `peer4-mls-leaf-rotation.md`. Both were
-one thing: ts-mls does not export what `@kumiai/mls` needs. Check all three items together whenever
+one thing: ts-mls does not export what `@kumiai/mls` needs. Check all four items together whenever
 a new ts-mls lands.
 
 > **Relocated from enkaku** (0.18 stack split, 2026-06-30): MLS moved to `@kumiai/mls`,
@@ -40,7 +40,6 @@ the relocation note above, not this one.
 ts-mls (as of 2026-05-27) does not export `signLeafNodeUpdate` — only `signLeafNodeCommit` and
 `signLeafNodeKeyPackage`. Building a `LeafNodeUpdate` requires the same
 `signWithLabel("LeafNodeTBS", ...)` operation, but the public surface omits it. Paths forward:
-
 1. File an issue / PR upstream to expose `signLeafNodeUpdate` (and `signWithLabel`).
 2. Vendor a small internal sign helper inside `@kumiai/mls`. Risk: TBS encoding tied to ts-mls
    internals; needs a version pin plus a compat test.
@@ -54,7 +53,6 @@ Defer until path 1 lands, or paths 2/3 become acceptable.
 Let a peer4 member rotate their identity (new keypair → new short form / longForm) without leaving
 and rejoining. Today an identity change requires Remove + external rejoin; the native MLS Update
 proposal is not wired for credential changes.
-
 - **`proposeUpdate(group, newIdentity, options?)`** — wraps ts-mls's Update proposal. The new
   `LeafNode` carries `makeMLSCredential(newIdentity)` and a new signature key, signed by the old
   leaf's signature key (continuity proof at the MLS layer).
@@ -65,7 +63,7 @@ proposal is not wired for credential changes.
   ledger question, not a capability-chain one.
 - **`processMessage`** — on receipt of an Update commit, pre-populate the cache with the new peer4
   document via `populateCacheFromCredential`. Auth service unchanged (each leaf is validated against
-  its own credential). Write the new document to cache only *after* the commit's signature verifies.
+  its own credential). Write the new document to cache only _after_ the commit's signature verifies.
 - **`findMemberLeafIndex(oldID)` post-rotation** returns `undefined` (the leaf now binds to the new
   id); `findMemberLeafIndex(newID)` works as expected.
 
@@ -87,3 +85,17 @@ Single-key peer4 self-rotation (alice rotates, bob receives the Update, alice's 
 subsequent messages); multi-sig peer4 rotating the primary key while preserving a secondary;
 concurrent rotation at one epoch (one commit wins, the other rebases); rotation across cached
 resolver state.
+
+## 4. The sender-ratchet step and send guard are not exported — so we reimplemented them
+
+`GroupHandle.advanceSenderGeneration` (`packages/mls/src/group-handle.ts`, step in
+`packages/mls/src/secret-tree.ts`) moves the own application ratchet without encrypting. ts-mls
+keeps `consumeRatchet` / `deriveTreeSecret` and `checkCanSendApplicationMessages` internal, so the step
+reuses `sender-data.ts`'s `expandWithLabel` (one `DeriveTreeSecret(secret, "secret", generation, Nh)`
+per generation) and the guard is mirrored with the same `UsageError` messages. An underived own leaf
+is still derived by ts-mls itself (one discarded empty encrypt). `test/advance-sender-generation.test.ts`
+pins byte equality with N empty encrypts.
+
+On any upgrade: that test pins the ts-mls version the send check was copied from, so it fails until
+the copy is re-diffed against `clientState.js` `checkCanSend*` and the pin moved. If ts-mls exports a
+ratchet-advance or `deriveTreeSecret`, delegate.

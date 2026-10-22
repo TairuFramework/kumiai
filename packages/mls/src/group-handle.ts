@@ -1,16 +1,17 @@
-import { normalizeDID } from '@kokuin/token'
+import { assertTimeClaimsValid, decodeSignedToken, normalizeDID } from '@kokuin/token'
 import { EventEmitter, type EventsSource } from '@sozai/event'
 import {
-  type ClientState,
   CodecError,
   contentTypes,
   createApplicationMessage,
   createProposal,
   decode,
+  defaultCredentialTypes,
   defaultProposalTypes,
   encode,
   type IncomingMessageAction,
   type IncomingMessageCallback,
+  isDefaultCredential,
   type LeafNode,
   type MlsContext,
   type MlsFramedMessage,
@@ -22,7 +23,9 @@ import {
   type ProcessMessageResult,
   type ProposalWithSender,
   processPublicMessage,
+  type SecretTree,
   senderTypes,
+  UsageError,
   ValidationError,
   wireformats,
 } from 'ts-mls'
@@ -35,7 +38,7 @@ import {
   restrictCommitAuthoring,
 } from './authoring.js'
 import { cloneData } from './clone.js'
-import { decodeClientState, encodeClientState } from './codec.js'
+import { type ClientState, decodeClientState, encodeClientState } from './codec.js'
 import {
   didFromCredential,
   type GroupMember,
@@ -94,9 +97,11 @@ import {
   denySetOf,
   foldControl,
   isDeviceValue,
+  mayReadmitResetDevice,
   revocationOf,
 } from './registry.js'
 import type { RosterState } from './roster.js'
+import { advanceSendingRatchet, clearImportedReservation } from './secret-tree.js'
 import {
   assertApplicationSend,
   type HoldingToken,
@@ -161,6 +166,41 @@ export function emitterOf(group: GroupHandle): EventEmitter<GroupHandleEvents> {
  *  material does not linger in the heap after the state that used it is replaced. */
 function zeroAll(buffers: Array<Uint8Array>): void {
   for (const buffer of buffers) buffer.fill(0)
+}
+
+/** Zero the secrets `next` holds that `prior` does not: what a discarded derivation produced. */
+function zeroFreshSecrets(
+  prior: SecretTree,
+  next: SecretTree,
+  consumed: Array<Uint8Array> = [],
+): void {
+  const held = new Set<Uint8Array>()
+  for (const secret of Object.values(prior.intermediateNodes)) held.add(secret)
+  for (const leaf of Object.values(prior.leafNodes)) {
+    held.add(leaf.application.secret)
+    held.add(leaf.handshake.secret)
+    for (const secret of Object.values(leaf.application.unusedGenerations)) held.add(secret)
+    for (const secret of Object.values(leaf.handshake.unusedGenerations)) held.add(secret)
+  }
+  const fresh = [...Object.values(next.intermediateNodes), ...consumed]
+  for (const leaf of Object.values(next.leafNodes)) {
+    fresh.push(leaf.application.secret, leaf.handshake.secret)
+  }
+  for (const secret of fresh) if (!held.has(secret)) secret.fill(0)
+}
+
+/** ts-mls's guard ahead of every application send, which its index does not export.
+ *  Same checks, same errors, so a ratchet-only advance refuses exactly as encrypt does. */
+function checkCanSendApplicationMessages(state: ClientState): void {
+  if (Object.keys(state.unappliedProposals).length !== 0) {
+    throw new UsageError('Cannot send application message with unapplied proposals')
+  }
+  if (state.groupActiveState.kind === 'suspendedPendingReinit') {
+    throw new UsageError('Cannot send messages while Group is suspended pending reinit')
+  }
+  if (state.groupActiveState.kind === 'removedFromGroup') {
+    throw new UsageError('Cannot send messages after being removed from group')
+  }
 }
 
 /** AAD is not secret, so a length/byte compare is enough — no constant-time need. */
@@ -359,6 +399,60 @@ export type HeldLedgerEntry = {
 /** A held entry paired with its content id — one position in the ledger log. */
 export type LedgerLogEntry = HeldLedgerEntry & { entryID: string }
 
+const VERIFIED_LEDGER_ENTRIES = new WeakMap<VerifiedLedgerEntry, HeldLedgerEntry>()
+const VERIFIED_LEDGER_TOKENS = new WeakMap<Array<string>, Array<HeldLedgerEntry | undefined>>()
+
+// Record provenance before exposing claims; re-enactments keep the original snapshot.
+function ledgerLogEntry(
+  entryID: string,
+  token: string,
+  verified: VerifiedLedgerEntry,
+): LedgerLogEntry {
+  const held = { entryID, token, verified }
+  VERIFIED_LEDGER_ENTRIES.set(verified, { token, verified: structuredClone(verified) })
+  return held
+}
+
+/** Project lifecycle tree re-admissions from the full ledger fold, never a previous projection.
+ * A lapsed re-admitted leaf and a leaf inserted after expiry are indistinguishable here;
+ * a genuine expired post-reset package can activate a leaf for a Welcome joiner or an
+ * external rejoiner adopting a fork existing members reject. Ordinary commit admission
+ * still enforces expiry.
+ */
+function registryWithTreeBindings(
+  registry: DeviceRegistry,
+  tree: ClientState['ratchetTree'],
+  anchor: GroupAnchor,
+): DeviceRegistry {
+  if (anchor.controller == null) return registry
+  const devices = new Map(registry.devices)
+  for (const node of tree) {
+    if (
+      node?.nodeType !== nodeTypes.leaf ||
+      !isDefaultCredential(node.leaf.credential) ||
+      node.leaf.credential.credentialType !== defaultCredentialTypes.basic
+    )
+      continue
+    let parsed: ReturnType<typeof parseMLSCredentialIdentity>
+    try {
+      parsed = parseMLSCredentialIdentity(node.leaf.credential.identity)
+    } catch {
+      // An unparseable leaf cannot supply reset re-admission evidence.
+      continue
+    }
+    if (!mayReadmitResetDevice(registry, parsed)) continue
+    const did = normalizeDID(parsed.id)
+    const record = devices.get(did)
+    if (record == null) continue
+    devices.set(did, {
+      controller: record.controller,
+      status: 'active',
+      ...(record.label == null ? {} : { label: record.label }),
+    })
+  }
+  return { ...registry, devices }
+}
+
 /**
  * Project a held ledger into BOTH the roster and the device registry in one ordered pass
  * (see {@link foldControl}), so a role entry's authority resolves against the registry-so-far.
@@ -435,11 +529,16 @@ export class GroupHandle {
     )
     const folded = foldLedgerControl(this.#ledger, anchor, this.groupID)
     this.#roster = folded.roster
-    this.#registry = folded.registry
+    this.#registry = registryWithTreeBindings(
+      folded.registry,
+      this.#state.ratchetTree,
+      this.#anchor,
+    )
     // Authentication reads only this handle's registry and lifetime limits.
     const denyHolder = deviceDenyHolderFor(this.#context)
     if (denyHolder != null) {
       denyHolder.provider = () => this.currentDenySet()
+      denyHolder.registry = () => (anchor.controller == null ? undefined : this.registry)
       denyHolder.leafLifetime =
         anchor.controller == null ? undefined : (anchor.leafLifetime ?? 86_400)
       denyHolder.trustedGrantLifetime =
@@ -448,6 +547,7 @@ export class GroupHandle {
     EMITTERS.set(this, params.events ?? new EventEmitter<GroupHandleEvents>())
     this.#pendingControlEvents = params.speculative ? [] : undefined
     this.#admission = this.#computeAdmission()
+    clearImportedReservation(this.#state, this.#context)
     CONSTRUCTED_HANDLES.add(this)
   }
 
@@ -529,11 +629,15 @@ export class GroupHandle {
 
   /** The ordered signed tokens this handle holds, repeats included — the ledger's
    *  canonical persistent/wire form, and the list the authenticated head folds over.
-   *  Feeds createInvite, restoreGroup, and host persistence. The verified entries are
-   *  a derived cache with no export form: the only way in is applyLedgerEntries,
-   *  which re-verifies. */
+   *  Feeds createInvite, restoreGroup, and host persistence. In-process clones inherit
+   *  verification through the returned array; serialised tokens must verify afresh. */
   get ledgerTokens(): Array<string> {
-    return this.#ledger.map(({ token }) => token)
+    const tokens = this.#ledger.map(({ token }) => token)
+    VERIFIED_LEDGER_TOKENS.set(
+      tokens,
+      this.#ledger.map(({ verified }) => VERIFIED_LEDGER_ENTRIES.get(verified)),
+    )
+    return tokens
   }
 
   /** The control roster folded from the anchor and every applied ledger entry. */
@@ -641,8 +745,8 @@ export class GroupHandle {
    * Verify signed ledger tokens, append the valid ones in the order given, and
    * refold the roster. Tokens that fail verification or whose groupID mismatches are
    * dropped (defensive — the strict admin-issuer enforcement is the commit pre-pass).
-   * Every token is re-verified on the way in: no entry enters a ledger unverified,
-   * whatever the import path.
+   * Exact token bytes can reuse verification on the same array or a handle's export.
+   * did:key and embedded peer:4 keys are immutable; time claims still check on reuse.
    *
    * A token the log already holds is appended again, not skipped: the log records
    * what each commit enacted, not a set of claims, and a repeat is the only way to
@@ -653,17 +757,37 @@ export class GroupHandle {
   async applyLedgerEntries(tokens: Array<string>): Promise<Array<VerifiedLedgerEntry>> {
     return mutexFor(this).run(async () => {
       const appended: Array<VerifiedLedgerEntry> = []
-      for (const token of tokens) {
-        const verified = await verifyLedgerEntry(token)
+      const memo = VERIFIED_LEDGER_TOKENS.get(tokens)
+      const nextMemo: Array<HeldLedgerEntry | undefined> = []
+      for (const [index, token] of tokens.entries()) {
+        const held = memo?.[index]
+        let verified: VerifiedLedgerEntry | null
+        if (held?.token === token) {
+          try {
+            assertTimeClaimsValid(decodeSignedToken(token).payload)
+          } catch {
+            continue
+          }
+          verified = structuredClone(held.verified)
+        } else {
+          verified = await verifyLedgerEntry(token)
+        }
         if (verified == null || verified.entry.groupID !== this.groupID) continue
         const entryID = ledgerEntryDigest(token)
-        this.#ledger.push({ entryID, token, verified })
+        const entry = ledgerLogEntry(entryID, token, verified)
+        this.#ledger.push(entry)
+        nextMemo[index] = VERIFIED_LEDGER_ENTRIES.get(verified)
         this.#entryBodies.set(entryID, { token, verified })
         appended.push(verified)
       }
+      VERIFIED_LEDGER_TOKENS.set(tokens, nextMemo)
       const folded = foldLedgerControl(this.#ledger, this.#anchor, this.groupID)
       this.#roster = folded.roster
-      this.#registry = folded.registry
+      this.#registry = registryWithTreeBindings(
+        folded.registry,
+        this.#state.ratchetTree,
+        this.#anchor,
+      )
       this.#admission = this.#computeAdmission()
       if (this.#pendingControlEvents != null) {
         this.emitControlEvents(appended.filter(({ entry }) => entry.type === DEVICE_ENTRY_TYPE))
@@ -766,7 +890,7 @@ export class GroupHandle {
             'bootstrapLedger: the gathered ledger holds an unverifiable or cross-group entry',
           )
         }
-        log.push({ entryID: entryIDs[index] as string, token, verified })
+        log.push(ledgerLogEntry(entryIDs[index] as string, token, verified))
       }
 
       // What this bootstrap ADDS, in log order, minus the reserved `kumiai.*` types the fold
@@ -801,7 +925,11 @@ export class GroupHandle {
         log.map(({ entryID, token, verified }) => [entryID, { token, verified }]),
       )
       this.#roster = folded.roster
-      this.#registry = folded.registry
+      this.#registry = registryWithTreeBindings(
+        folded.registry,
+        this.#state.ratchetTree,
+        this.#anchor,
+      )
       this.#admission = this.#computeAdmission()
       try {
         await withHoldingToken(this, async (holding) => opts?.persist?.(this, { holding }))
@@ -1068,6 +1196,94 @@ export class GroupHandle {
   }
 
   /**
+   * Move this member's own application ratchet forward so the next {@link encrypt} uses
+   * generation `target` — the generation read from
+   * `state.secretTree.leafNodes[2 * leafIndex].application.generation` (0 before the leaf
+   * secret is derived). The resulting state is the one `target - current` empty encrypts
+   * would leave, with no frame produced: the retired chain secrets are zeroed, and the
+   * epoch and every other member's ratchet are untouched. A target at or below the current
+   * generation is a no-op; the ratchet never moves back.
+   *
+   * For a host that restores a persisted state and must not reuse a generation it may have
+   * sent from before a crash. Each skipped generation costs one KDF step, not an encrypt.
+   * Receivers must still cross the gap: ts-mls refuses a jump beyond its forward-ratchet
+   * window (`maximumForwardRatchetSteps`).
+   *
+   * No cap by default: a host catching up a stored high-water mark may legitimately step
+   * far past any receiver's position (a receiver's window counts from the last generation
+   * it processed, not from this state). With `opts.maxSteps`, an advance whose
+   * `target - current` exceeds it throws a `RangeError` before any step.
+   *
+   * Refuses exactly as {@link encrypt} would: a lapsed leaf, unapplied proposals, a
+   * removed or suspended member. `target` must be below 0xffffffff, the last generation.
+   * On any throw the handle state is unchanged and the secrets derived so far are zeroed.
+   */
+  async advanceSenderGeneration(target: number, opts?: { maxSteps?: number }): Promise<void> {
+    // 0xffffffff is the last uint32 generation: no frame could follow it.
+    if (!Number.isInteger(target) || target < 0 || target >= 0xffffffff) {
+      throw new RangeError(`advanceSenderGeneration: ${target} is not a sendable uint32 generation`)
+    }
+    const maxSteps = opts?.maxSteps
+    if (maxSteps != null && (!Number.isInteger(maxSteps) || maxSteps < 0)) {
+      throw new RangeError(`advanceSenderGeneration: maxSteps ${maxSteps} is not a step count`)
+    }
+    return mutexFor(this).run(async () => {
+      const own = leafAt(this.#state.ratchetTree, this.#state.privatePath.leafIndex)
+      if (own != null && isLapsed(this, own)) throw new LeafLapsedError('lapsed')
+      checkCanSendApplicationMessages(this.#state)
+      assertApplicationSend(this)
+      const node = Number(this.#state.privatePath.leafIndex) * 2
+      const current = this.#state.secretTree.leafNodes[node]?.application.generation ?? 0
+      if (target <= current) return
+      if (maxSteps != null && target - current > maxSteps) {
+        throw new RangeError(
+          `advanceSenderGeneration: ${target - current} steps exceed maxSteps ${maxSteps}`,
+        )
+      }
+      const prior = this.#state
+      let base = prior
+      let retired: Array<Uint8Array> = []
+      if (prior.secretTree.leafNodes[node] == null) {
+        // The leaf secret is still folded into an ancestor. Deriving it walks the tree
+        // (and seeds the handshake ratchet), so let ts-mls do it the one way it does:
+        // one empty encrypt, whose frame is discarded unsent. It consumes generation 0.
+        // Its retired secrets are still referenced by `prior`, so they are zeroed only
+        // once the advanced state is adopted.
+        const { newState, consumed } = await createApplicationMessage({
+          context: this.#context,
+          state: prior,
+          message: new Uint8Array(),
+          authenticatedData: new Uint8Array(),
+        })
+        base = newState
+        retired = consumed
+      }
+      const secretTree = base.secretTree
+      const leaf = secretTree.leafNodes[node]
+      if (leaf == null) throw new Error('unreachable: an encrypt derives the sender leaf')
+      let advanced: Awaited<ReturnType<typeof advanceSendingRatchet>>
+      try {
+        advanced = await advanceSendingRatchet(this.#context, leaf.application, target)
+      } catch (error) {
+        if (base !== prior) zeroFreshSecrets(prior.secretTree, secretTree)
+        throw error
+      }
+      this.#state = {
+        ...base,
+        secretTree: {
+          ...secretTree,
+          leafNodes: {
+            ...secretTree.leafNodes,
+            [node]: { ...leaf, application: advanced.ratchet },
+          },
+        },
+      }
+      zeroAll(retired)
+      zeroAll(advanced.consumed)
+    })
+  }
+
+  /**
    * Open an application message sealed for the group and recover WHO SENT IT — the
    * counterpart to {@link encrypt}, and the read half of the group's application lane.
    *
@@ -1260,7 +1476,7 @@ export class GroupHandle {
               if (resolved.has(id) || !missing.includes(id)) continue
               const verified = await verifyLedgerEntry(token)
               if (verified == null) continue
-              resolved.set(id, { token, verified, entryID: id })
+              resolved.set(id, ledgerLogEntry(id, token, verified))
             }
             const stillMissing = missing.filter((id) => !resolved.has(id))
             if (stillMissing.length > 0) {
@@ -1385,7 +1601,12 @@ export class GroupHandle {
         this.#entryBodies.set(entryID, { token, verified })
       }
       this.#roster = candidateRoster
-      this.#registry = candidateRegistry
+      const folded = foldLedgerControl(this.#ledger, this.#anchor, this.groupID)
+      this.#registry = registryWithTreeBindings(
+        folded.registry,
+        this.#state.ratchetTree,
+        this.#anchor,
+      )
       this.#admission = this.#computeAdmission()
       const emit = () => {
         this.#notifyAccepted(
@@ -1708,6 +1929,8 @@ export class GroupHandle {
                 try {
                   await verifyLeafCredential(credential, key, {
                     deviceDenySet: () => this.currentDenySet(),
+                    deviceRegistry: () =>
+                      this.#anchor.controller == null ? undefined : this.registry,
                     // MLS re-validates the committer's path leaf after its proposals are judged:
                     // an evidenced child keeps a denied issuer only with the credential it
                     // already holds at that leaf.

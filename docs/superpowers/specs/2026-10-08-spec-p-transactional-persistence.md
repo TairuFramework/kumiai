@@ -17,7 +17,6 @@ Detection-only in-band checkpoints reveal attributed conflicting views within re
 Full partition, withholding and expired comparison history can prevent detection. Local export/import/verification supports later out-of-band comparison.
 Host reportFork/authenticator comparison and genuinely local storage invariants retain their halt contracts.
 See [RFC 9750 §5.2–5.2.1](https://www.rfc-editor.org/rfc/rfc9750.html#section-5.2).
-
 1. **Incarnation monotonicity (r14 decision).** Key local state by `(groupID, incarnation)`.
    Epochs never decrease or change same-number authenticator; recovery atomically installs `n+1` and tombstones `n`.
    This removes in-place rollback, recovery progress merges and anchor ordinals.
@@ -42,18 +41,18 @@ phase 3 supplies database providers. P2a remains the control stage machine, with
 
 Keep `onStrand` observations and their confidence. Classify evidence before selecting recovery:
 
-| Observation | Action |
-|---|---|
-| Competing past-epoch commit digest divergence, on either classifier branch | diagnostic poison; skip, never halt or frame-trigger automatic resync |
-| Host reports different authenticators for the same group/epoch | durable fork halt |
-| `own-unmerged` | recognise saved own work (exact bytes or the receiver predicate), never apply it as a received commit; a recognised occurrence installs the saved candidate (D4 r28c); mismatch skips/advances cursor, sets `skipped` and keeps the build live, with no identical retry (D4 r28d); with no live build at that epoch (after `abandon()` or closure) a diagnostic skip that keeps the spent marker |
-| `ahead`, retention gap or unprocessable gap, without a local safety hold | catch up or use authenticated resync with bounded retry; a delivery fault never permanently strands the device |
-| Unknown/unsupported commit-frame or handshake-header version | diagnostic poison plus `upgrade-required` host diagnostic; skip, never create a durable hold |
-| Lost MLS state, retained recovery trust readable | stranded; automatic resync (r16 decision) |
-| Recovery trust also missing/unreadable | retain `recovery-unavailable`; no automatic reconstruction; manual fresh invitation or admitted successor |
-| Eligible unequal checkpoint testimony | detection-only fork notice; never halt, discard, rebuild, strand or switch |
-| Request-bound authenticated roster absence | non-terminal `not-member`; existing admission rules and capped-backoff recovery continue |
-| Successfully decoded trust envelope with missing/malformed spent set | durable `spent-set-corrupt`; refuse admission, never substitute an empty set |
+| Observation                                                                | Action                                                                                                                                                                                                                                                                                                                                                                                           |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Competing past-epoch commit digest divergence, on either classifier branch | diagnostic poison; skip, never halt or frame-trigger automatic resync                                                                                                                                                                                                                                                                                                                            |
+| Host reports different authenticators for the same group/epoch             | durable fork halt                                                                                                                                                                                                                                                                                                                                                                                |
+| `own-unmerged`                                                             | recognise saved own work (exact bytes or the receiver predicate), never apply it as a received commit; a recognised occurrence installs the saved candidate (D4 r28c); mismatch skips/advances cursor, sets `skipped` and keeps the build live, with no identical retry (D4 r28d); with no live build at that epoch (after `abandon()` or closure) a diagnostic skip that keeps the spent marker |
+| `ahead`, retention gap or unprocessable gap, without a local safety hold   | catch up or use authenticated resync with bounded retry; a delivery fault never permanently strands the device                                                                                                                                                                                                                                                                                   |
+| Unknown/unsupported commit-frame or handshake-header version               | diagnostic poison plus `upgrade-required` host diagnostic; skip, never create a durable hold                                                                                                                                                                                                                                                                                                     |
+| Lost MLS state, retained recovery trust readable                           | stranded; automatic resync (r16 decision)                                                                                                                                                                                                                                                                                                                                                        |
+| Recovery trust also missing/unreadable                                     | retain `recovery-unavailable`; no automatic reconstruction; manual fresh invitation or admitted successor                                                                                                                                                                                                                                                                                        |
+| Eligible unequal checkpoint testimony                                      | detection-only fork notice; never halt, discard, rebuild, strand or switch                                                                                                                                                                                                                                                                                                                       |
+| Request-bound authenticated roster absence                                 | non-terminal `not-member`; existing admission rules and capped-backoff recovery continue                                                                                                                                                                                                                                                                                                         |
+| Successfully decoded trust envelope with missing/malformed spent set       | durable `spent-set-corrupt`; refuse admission, never substitute an empty set                                                                                                                                                                                                                                                                                                                     |
 
 **Delivery faults (r19 decision, Q0/Q1).** Competing past-epoch commits, including refused signed CAS losers, are diagnostic poison on both classifier branches.
 Skip with claimed `past-epoch-divergence` observation. Advance the skipped cursor without applied rewrite, fork event/latch or frame-triggered resync.
@@ -504,11 +503,11 @@ Control build/publish/fetch/confirm and Welcome delivery always run outside tran
 
 **Adaptive group commit (r14 decision).** Take whatever compatible work is ready; flush at the first applicable cap/bound:
 
-| Host option | Default | Meaning |
-|---|---|---|
-| `maxBatchFrames` | 64 | maximum streaming opens/completions/settlements per transaction |
-| `maxBatchDelayMs` | 2 ms | maximum coalescing delay once work is ready, excluding an already active transition |
-| `maxBatchWorkMs` | 8 ms | stop adding work at the next operation boundary after this staging/work budget |
+| Host option       | Default | Meaning                                                                             |
+| ----------------- | ------- | ----------------------------------------------------------------------------------- |
+| `maxBatchFrames`  | 64      | maximum streaming opens/completions/settlements per transaction                     |
+| `maxBatchDelayMs` | 2 ms    | maximum coalescing delay once work is ready, excluding an already active transition |
+| `maxBatchWorkMs`  | 8 ms    | stop adding work at the next operation boundary after this staging/work budget      |
 
 An idle group starts immediately: a lone frame waits for neither a timer nor a full batch. Arrivals during active work coalesce for the next batch. Bursts of
 hundreds–thousands split into bounded transactions; steady streams and interleaved low-rate commands use the same scheduler. One transaction may open/settle N
@@ -567,7 +566,7 @@ abandonment without advancement, an own-unmerged frame with no live build at its
 reported, the marker stays; it cannot reopen the operation or install the deleted candidate), and later frames follow the ordinary `ahead`/strand rules of D1,
 with the availability concession's ghost-member consequence if the group moved on that commit.
 
-**Settlement by adoption (r28 decision, supersedes r19 mismatch/restart and r27 retained builds).** One log reader settles a build: the *walker*, the inbound
+**Settlement by adoption (r28 decision, supersedes r19 mismatch/restart and r27 retained builds).** One log reader settles a build: the _walker_, the inbound
 commit-lane reader that adopts the log in order from the durable cursor (P2a D5), validating every foreign frame with normal MLS/proposal/policy checks against
 the state at its framed epoch. (r28d) An own occurrence never advances state through received-commit application (the committer holds no copath secret for
 its own update path, RFC 9420 §12.4.2; `apply-commit.ts` refuses an own non-external commit); authentication-only processing on disposable retained state
@@ -579,7 +578,7 @@ is that build and nothing more) and no applied row, cursor, outcome or obligatio
 The authenticated transaction that consumes a build's source epoch settles it, and nothing else does:
 - (r28c) every recognised own occurrence uses the saved-candidate installation path. After recognition, receiver reference verification and the r25
   compatibility recheck succeed, the installation transaction atomically consumes the build: it installs the saved candidate, preserves ratchet progress,
-  writes the applied row with opID and the cursor, and deletes the build. With *complete coverage* (below) it is the FIRST valid commit at its framed epoch:
+  writes the applied row with opID and the cursor, and deletes the build. With _complete coverage_ (below) it is the FIRST valid commit at its framed epoch:
   the outcome is `landed` and the Welcome obligation (below) is written. With incomplete coverage (a retention gap or `skipped === true`) the outcome is
   terminal `unknown`, the speculative Welcome is deleted and no obligation is created: the skipped frame is non-delivery per the Model, so the device does not
   strand on its own commit, and this is the availability concession below. (r28d) An own frame's validation inputs are local: the missing references are
@@ -598,45 +597,45 @@ The authenticated transaction that consumes a build's source epoch settles it, a
 - any other consumption: terminal `unknown`; the candidate, journal and speculative Welcome are deleted in that transaction. This includes a competitor behind
   incomplete coverage, any rejoin adoption (a retirement), retirement (D2 :477; recovery, readmission and resync are retirements) and authenticated
   self-removal (below). Host `abandon()` closes a build the same way without consuming its epoch (One source-epoch slot).
-(r28c) Authenticated self-removal is consumption even without epoch advance: its adoption transaction closes every live build terminal `unknown`, closes every
-unbuilt intent `rejected` with `reason: 'removed'` (nothing left the device) and any rejoin record `unknown` (a record already at `refused` carries its
-outcome and is deleted without a second one), deletes speculative material and releases revoke holds; obligations survive. A terminal group therefore holds
-no build, intent or rejoin record; deletion needs acks plus delivery or `abandon()` of the remaining Welcome obligations, never `abandon()` of control (D7).
-This supersedes P2a D5's later removal-effect `apply`, which then settles nothing.
-*Coverage (r28c).* `BuiltCommit.head` is the immutable cursor position at built-save (`expectedHead` is separate retry bookkeeping); null `head` denotes the
-empty prefix. A build is refused while the cursor carries `incomplete`, so `head` always lies inside covered history. The build carries a durable `skipped`
-flag, set in the same transaction as, and before, any cursor advance past a commit-lane occurrence after `head` that the walker did not adopt, unless that
-occurrence is positively classified as a frame whose readable framed epoch differs from the build's, a duplicate position or an application frame. An
-unreadable epoch counts as a skip: poison, an unrecognised or altered own copy, an unknown handshake or frame version, a refused external commit and an
-unparseable frame all set it. A retention gap discovered in the same fetch is durably recorded (the cursor's `incomplete` mark, set in the same transaction as
-the cursor advance) before any occurrence from that fetch is adopted, so the consuming transaction's pre-state includes it. Restart and head refresh never
-clear `skipped`. *Complete coverage* at a consuming transaction means, in that transaction's pre-state: no `incomplete` cursor mark, `skipped` unset and the
-winner at or after `head`. Incomplete coverage never yields `lost`. Coverage is relative to the served log (Model): a hub withholding frames without a visible
-gap still yields complete coverage, so `lost` is branch-relative as P2a D3 says; no local predicate proves global non-acceptance. A match proves occurrence
-only. Replay by ANY party able to publish to the commit topic obeys this rule, including another publishID.
-See [RFC 9750 §5.2.1](https://www.rfc-editor.org/rfc/rfc9750.html#section-5.2.1).
-Hub bytes, head movement, elapsed time, acknowledgement, absence and validation failure never delete saved work before consumption, prove loss or create a
-durable safety hold.
-(r28b) After consumption, later own copies are past-epoch diagnostics (D1 :46): they never reopen the operation or create an obligation, and a stale prepared
-adoption writes nothing. A build and an applied row at its epoch with a different payloadDigest cannot coexist; finding both, or an own occurrence whose saved
-candidate fails the r25 control-compatibility check while the frame validates, is a conflicting trusted local installation record and follows D1's
-local-invariant halt. No fork outcome kind exists for a build.
-(r28d) With unchanged incarnation/epoch/authenticator, before the deadline and with `skipped` unset, a refused handoff (no occurrence met) permits
-identical-byte/ID retry at a refreshed expectedHead. An unrecognised or altered own copy is non-delivery (D1) and sets `skipped`: the build stays live, no
-retry is attempted (an honest hub would dedup it behind the cursor; a hub that lost its record would take a duplicate every member skips), and its own
-occurrence, if one is met, installs and closes `unknown` (availability concession); otherwise consumption or `abandon()` closes it. Neither case proves
-lost/absent/superseded or permits rebuilding.
-A head/proposal/stateVersion change alone never permits rebuild. A late handoff completion applies only to the same live build identity; it never resurrects
-consumed or abandoned work.
-(r28c) Availability concession. A possibly accepted build closed without own first-valid proof loses its speculative Welcome; terminal `unknown` asserts
-uncertainty, never absence. This covers both a build closed by a competitor or retirement and an own occurrence installed behind incomplete coverage: in the
-latter the Add is on the device's own branch with no Welcome held for it. The host learns `unknown` and may re-invite; if the Add did land, the invitee is a
-ghost member the target guard refuses to re-add until the host removes it and re-invites with a fresh key package. This is the accepted boundary of
-epoch-scoped settlement.
-(r28) Epoch advancement never rebuilds saved bytes. An unbuilt intent revalidates at the current epoch and builds only if still eligible; stale internal intents settle `rejected` (D5).
-Only the host re-enacts a settled build, under a new operation ID. (r28c) After an internal rotation closes, the registry re-evaluates admission under D5. It never replaces a live build. Abandonment does not permit another build at the spent source epoch.
-Same-number trusted local authenticator divergence remains a local-invariant halt. Retirement settles old work without rebuilding there.
-Recovery attempts keep D1's authenticated recapture; it is a rejoin mechanism, never a control-build one. Host/local-invariant fork halts still forbid automatic rejoin.
+  (r28c) Authenticated self-removal is consumption even without epoch advance: its adoption transaction closes every live build terminal `unknown`, closes every
+  unbuilt intent `rejected` with `reason: 'removed'` (nothing left the device) and any rejoin record `unknown` (a record already at `refused` carries its
+  outcome and is deleted without a second one), deletes speculative material and releases revoke holds; obligations survive. A terminal group therefore holds
+  no build, intent or rejoin record; deletion needs acks plus delivery or `abandon()` of the remaining Welcome obligations, never `abandon()` of control (D7).
+  This supersedes P2a D5's later removal-effect `apply`, which then settles nothing.
+  _Coverage (r28c)._ `BuiltCommit.head` is the immutable cursor position at built-save (`expectedHead` is separate retry bookkeeping); null `head` denotes the
+  empty prefix. A build is refused while the cursor carries `incomplete`, so `head` always lies inside covered history. The build carries a durable `skipped`
+  flag, set in the same transaction as, and before, any cursor advance past a commit-lane occurrence after `head` that the walker did not adopt, unless that
+  occurrence is positively classified as a frame whose readable framed epoch differs from the build's, a duplicate position or an application frame. An
+  unreadable epoch counts as a skip: poison, an unrecognised or altered own copy, an unknown handshake or frame version, a refused external commit and an
+  unparseable frame all set it. A retention gap discovered in the same fetch is durably recorded (the cursor's `incomplete` mark, set in the same transaction as
+  the cursor advance) before any occurrence from that fetch is adopted, so the consuming transaction's pre-state includes it. Restart and head refresh never
+  clear `skipped`. _Complete coverage_ at a consuming transaction means, in that transaction's pre-state: no `incomplete` cursor mark, `skipped` unset and the
+  winner at or after `head`. Incomplete coverage never yields `lost`. Coverage is relative to the served log (Model): a hub withholding frames without a visible
+  gap still yields complete coverage, so `lost` is branch-relative as P2a D3 says; no local predicate proves global non-acceptance. A match proves occurrence
+  only. Replay by ANY party able to publish to the commit topic obeys this rule, including another publishID.
+  See [RFC 9750 §5.2.1](https://www.rfc-editor.org/rfc/rfc9750.html#section-5.2.1).
+  Hub bytes, head movement, elapsed time, acknowledgement, absence and validation failure never delete saved work before consumption, prove loss or create a
+  durable safety hold.
+  (r28b) After consumption, later own copies are past-epoch diagnostics (D1 :46): they never reopen the operation or create an obligation, and a stale prepared
+  adoption writes nothing. A build and an applied row at its epoch with a different payloadDigest cannot coexist; finding both, or an own occurrence whose saved
+  candidate fails the r25 control-compatibility check while the frame validates, is a conflicting trusted local installation record and follows D1's
+  local-invariant halt. No fork outcome kind exists for a build.
+  (r28d) With unchanged incarnation/epoch/authenticator, before the deadline and with `skipped` unset, a refused handoff (no occurrence met) permits
+  identical-byte/ID retry at a refreshed expectedHead. An unrecognised or altered own copy is non-delivery (D1) and sets `skipped`: the build stays live, no
+  retry is attempted (an honest hub would dedup it behind the cursor; a hub that lost its record would take a duplicate every member skips), and its own
+  occurrence, if one is met, installs and closes `unknown` (availability concession); otherwise consumption or `abandon()` closes it. Neither case proves
+  lost/absent/superseded or permits rebuilding.
+  A head/proposal/stateVersion change alone never permits rebuild. A late handoff completion applies only to the same live build identity; it never resurrects
+  consumed or abandoned work.
+  (r28c) Availability concession. A possibly accepted build closed without own first-valid proof loses its speculative Welcome; terminal `unknown` asserts
+  uncertainty, never absence. This covers both a build closed by a competitor or retirement and an own occurrence installed behind incomplete coverage: in the
+  latter the Add is on the device's own branch with no Welcome held for it. The host learns `unknown` and may re-invite; if the Add did land, the invitee is a
+  ghost member the target guard refuses to re-add until the host removes it and re-invites with a fresh key package. This is the accepted boundary of
+  epoch-scoped settlement.
+  (r28) Epoch advancement never rebuilds saved bytes. An unbuilt intent revalidates at the current epoch and builds only if still eligible; stale internal intents settle `rejected` (D5).
+  Only the host re-enacts a settled build, under a new operation ID. (r28c) After an internal rotation closes, the registry re-evaluates admission under D5. It never replaces a live build. Abandonment does not permit another build at the spent source epoch.
+  Same-number trusted local authenticator divergence remains a local-invariant halt. Retirement settles old work without rebuilding there.
+  Recovery attempts keep D1's authenticated recapture; it is a rejoin mechanism, never a control-build one. Host/local-invariant fork halts still forbid automatic rejoin.
 
 Retain candidate/journal and needed proposals/decryption keys while the build lives; nothing survives closure but outcomes, obligations and, after `abandon()`, the spent marker.
 Delivered references/keys/resolver failures never create a durable safety hold or, before consumption, authorise erasing saved work.
@@ -661,12 +660,12 @@ Discovery, transport and validation-input failures are unavailable evidence and 
 A definitely rolled-back storage transition changes nothing and is retried; an ambiguous commit follows D7/D8 completion proof before retry or release.
 While storage completion cannot be established, no outcome is written and holds persist, indefinitely if need be.
 
-**Terms (r28b).** *Reported* means an outcome row was durably committed, not host receipt or ack. A build is *closed* (settled) when consumption, retirement or
+**Terms (r28b).** _Reported_ means an outcome row was durably committed, not host receipt or ack. A build is _closed_ (settled) when consumption, retirement or
 `abandon()` ends it with `landed`, `lost` or terminal `unknown`; a provisional `unknown` is a report, not a closure, and the build stays live. A build's epoch is
-*consumed* by the authenticated transaction that advances the device past its source epoch within the incarnation, sets the incarnation's terminal flag
-(self-removal), or retires the incarnation. *Owed work* is outcomes and Welcome obligations (Model :15); a *speculative* Welcome is a field of its build and
-is not owed; an *obligation* is the independent row the own-occurrence adoption writes with `landed`. (r28c) *Installation* is the saved candidate becoming the
-device's state; it follows recognition and is distinct from `landed`, which additionally needs complete coverage. The *walker* is defined above.
+_consumed_ by the authenticated transaction that advances the device past its source epoch within the incarnation, sets the incarnation's terminal flag
+(self-removal), or retires the incarnation. _Owed work_ is outcomes and Welcome obligations (Model :15); a _speculative_ Welcome is a field of its build and
+is not owed; an _obligation_ is the independent row the own-occurrence adoption writes with `landed`. (r28c) _Installation_ is the saved candidate becoming the
+device's state; it follows recognition and is distinct from `landed`, which additionally needs complete coverage. The _walker_ is defined above.
 
 **Migration (r28d).** Migration is one version-marked transaction per incarnation ControlSnapshot (the mark lives on that snapshot; each incarnation migrates
 independently, a retired incarnation's rows under the closure bullet), run once before workers start and idempotent on restart (a restart before its commit
@@ -738,6 +737,13 @@ Decode a copied body, then restore zero. Duplicate/unknown refs, non-absent body
 `consumed` byte other than 0 or 1 and trailing bytes refuse. Empty/truncated input returns undefined. The codec reads v2 only and writes v2 only; v1, v3,
 v4 and unknown version bytes are refused (throw). The merge carries this identical codec; phase 2 adds the flags byte and the reservation fields to its v2
 layout at merge, and the handshake-reservation semantics travel in that field. No rewrite, legacy decode rule or client-state migration exists.
+**Imported reservation (r28g, user decision).** Phase 2 never writes a reservation (it writes flags 0). A state written by `main` 0.10.x may carry
+`{epoch E, generation g, consumed}`: that device may already have framed and handed off a commit at (E, g) and lost the CAS, with no phase-2 build
+record. On every restore of such a state (restricted and unrestricted handles alike, so no proposal or direct build can reuse (E, g)), and again
+inside the commit permit before constructing any commit (then a no-op): if the reservation's epoch equals the handle's current epoch, the handshake ratchet
+advances past g (whether `consumed` is true or false; a ratchet already past g is unchanged); a reservation at any other epoch is ignored. The field
+is then cleared and the permit's state save writes flags 0. This burns at most one generation, never stalls, exports no reservation API and
+changes no codec rule; a crash before the save repeats the same idempotent advance.
 
 Recovery candidate v3 uses AAD `kumiai/recovery-candidate/v3` and complete
 `sourceState = encodeClientState({...snapshot.state, ratchetTree: snapshot.sourceTree})`.
@@ -759,7 +765,6 @@ Restore needs no skip: reservations advance the committed state. Failed/unpublis
 Same-identity saves retain maximum ceiling/current progress; new epoch resets its ceiling; new incarnation inherits neither.
 
 (r26) A reservation advances the committed state.
-
 - A reservation is one transaction. Every acceptance first relinquishes the caller's input: it is send-denied irreversibly, and encryptions already admitted drain. Only then is the input validated, compared or encoded. Divergence found by revalidation is refused. It then snapshots the state at `g = max(own, senderHWM)` and advances the stored sending ratchet by encrypt-and-discard to `min(g + 16, 500)`, saving that.
 - Only after commit proof may the private in-memory send copy, built from the snapshot, use `[g, min(g + 16, 500))`.
 - Invariants: every copy's limit is at most the committed stored own generation, and no send-capable handle other than the copy holds state below it. Memory loss only wastes generations.
@@ -773,7 +778,6 @@ At effective next generation 500, reject new durable acceptance, hold accepted e
 and schedule one rotation outside the gate. Lapse takes precedence. Directed replies/tunnels obey the same bound.
 
 (r26) Effective next generation is the send copy's own generation when one exists, otherwise the committed stored generation.
-
 - At 500 admission reports `rotation-required` (not recovery-only). GroupMLS applies this at every admission update. New durable acceptance refuses, and a frame sealed below 500 still hands off.
 - The registry peer runs one outside-gate scheduler per identity. Through a private internal enqueue (the public enqueue refuses the namespace), it enqueues a deterministic, non-revoking, library-built auto-rotation whose id lies in the reserved `kumiai/internal/` namespace.
 - Enqueue errors and rejected attempts back off with a cap. Outcomes in that namespace go to the registry, never to the host, across restart.
@@ -893,18 +897,18 @@ the group waiter and releases the device slot; a group grant racing that cancell
 
 **Phases.** An entry moves strictly through, never overlapping:
 
-| Phase | Provider tx | Domain writes (state, trust, lifetime, incarnation, ownership, spent) | Side writes (control, anchor, pending, cursor, outbox/meta, events, package/receipt/cleanup/restore, host effect rows) | Reads |
-|---|---|---|---|---|
-| queued | none | refuse | refuse | refuse |
-| prepare | none | refuse | refuse | entry-bound reads of own scopes |
-| work | open | allowed | allowed | allowed |
-| finalise | open | coordinator only | coordinator only | coordinator only |
-| effects | open | refuse with `PersistencePhaseError` | allowed | allowed |
-| account | open | coordinator only | coordinator only | coordinator only |
-| outcome | closing | every supplied store and entry capability expires | | |
-| ambiguous/proof | fresh proof tx only | refuse | refuse | refuse |
-| settled | none | refuse | refuse | refuse |
-| released | none | | | |
+| Phase           | Provider tx         | Domain writes (state, trust, lifetime, incarnation, ownership, spent) | Side writes (control, anchor, pending, cursor, outbox/meta, events, package/receipt/cleanup/restore, host effect rows) | Reads                           |
+| --------------- | ------------------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| queued          | none                | refuse                                                                | refuse                                                                                                                 | refuse                          |
+| prepare         | none                | refuse                                                                | refuse                                                                                                                 | entry-bound reads of own scopes |
+| work            | open                | allowed                                                               | allowed                                                                                                                | allowed                         |
+| finalise        | open                | coordinator only                                                      | coordinator only                                                                                                       | coordinator only                |
+| effects         | open                | refuse with `PersistencePhaseError`                                   | allowed                                                                                                                | allowed                         |
+| account         | open                | coordinator only                                                      | coordinator only                                                                                                       | coordinator only                |
+| outcome         | closing             | every supplied store and entry capability expires                     |                                                                                                                        |                                 |
+| ambiguous/proof | fresh proof tx only | refuse                                                                | refuse                                                                                                                 | refuse                          |
+| settled         | none                | refuse                                                                | refuse                                                                                                                 | refuse                          |
+| released        | none                |                                                                       |                                                                                                                        |                                 |
 
 Refusals apply to every store or transaction access bound to the entry's provider transaction, however constructed, not only supplied wrappers.
 `prepare` holds the owner slot outside any provider transaction for crypto preparation and, per owner scope, the first entry of any kind
@@ -948,8 +952,8 @@ and `effects` need (the effects record's callable fields and any getter results)
 host code under coordinator authority. Capability validation, transaction participation, scope ordering, prepare reads, proof execution
 and joining, Combined participation, hook settlement and fail-stop use explicit entry and transaction bindings, never ambient context.
 
-**Exceptions.** A transactional *effect* (awaited in `effects`) that throws rolls back the whole transition, including its rows. A completion
-*hook* (`onCommit`/`onRollback`, run in `settled`) that throws is contained; remaining hooks still run and the outcome stands.
+**Exceptions.** A transactional _effect_ (awaited in `effects`) that throws rolls back the whole transition, including its rows. A completion
+_hook_ (`onCommit`/`onRollback`, run in `settled`) that throws is contained; remaining hooks still run and the outcome stands.
 
 **Outcome and proof.** The provider reports `committed`, `rolledBack` or `unknown`. Known outcomes settle exactly one hook queue, then
 release. `unknown` keeps the entry at its queue head in `ambiguous`, retaining slots, the started-operation set, a settlement token and both
@@ -1025,36 +1029,56 @@ export type GroupKey = { groupID: string; incarnation: number }
 export type EpochIdentity = GroupKey & { epoch: number; authenticator: Uint8Array }
 export type PackageUse = { sourceID: string; ref: string; kind: 'ordinary' | 'last-resort' }
 export type GroupLifetime = {
-  groupID: string; latestIncarnation: number; activeIncarnation: number | null
-  revision: number; mutationID: string
+  groupID: string
+  latestIncarnation: number
+  activeIncarnation: number | null
+  revision: number
+  mutationID: string
   restorePending: boolean // (r15 decision) cleared only by fresh-incarnation resync
 }
 export type GroupStateRecord = GroupKey & { version: number } & (
-  | { deleted: true }
-  | {
-      deleted: false; terminal: boolean; epoch: number; epochAuthenticator: Uint8Array
-      state: Uint8Array | null; credential: { id: string; groupID: string }; ledger: Array<string>
-      senderHWM: number
-      // r26: committed own application generation reserved for this record's epoch; mirrors the stored sending ratchet after a reservation
-    }
-)
+    | { deleted: true }
+    | {
+        deleted: false
+        terminal: boolean
+        epoch: number
+        epochAuthenticator: Uint8Array
+        state: Uint8Array | null
+        credential: { id: string; groupID: string }
+        ledger: Array<string>
+        senderHWM: number
+        // r26: committed own application generation reserved for this record's epoch; mirrors the stored sending ratchet after a reservation
+      }
+  )
 ```
 
 (r25) `GroupOptions.keyRetention.retainKeysForEpochs` is host-configurable: default 4, an integer from 1 to 32; anything else throws KeyRetentionRangeError. Registry handles and storage guards enforce the configured epoch count, and every skipped-key index is a safe integer below its ratchet's generation.
 
 ```ts
-export type GroupTransaction = { providerID: string; groupID: string | null; onCommit(fn: () => void): void; onRollback(fn: () => void): void }
+export type GroupTransaction = {
+  providerID: string
+  groupID: string | null
+  onCommit(fn: () => void): void
+  onRollback(fn: () => void): void
+}
 export type IncarnationStores = {
   state: { load(): Promise<GroupStateRecord | null>; save(record: GroupStateRecord): Promise<void> }
-  control: { load(): Promise<ControlSnapshot>; apply(changes: ControlChanges, mutationID: string): Promise<void> }
+  control: {
+    load(): Promise<ControlSnapshot>
+    apply(changes: ControlChanges, mutationID: string): Promise<void>
+  }
   anchor: { load(): Promise<AnchorSlot | null>; save(slot: AnchorSlot | null): Promise<void> }
   pending: {
     list(): Promise<Array<PendingAppFrame>>
     put(records: Array<PendingAppFrame>): Promise<void>
-    poison(records: Array<AppPoisonRecord>): Promise<void>; listPoison(): Promise<Array<AppPoisonRecord>>
+    poison(records: Array<AppPoisonRecord>): Promise<void>
+    listPoison(): Promise<Array<AppPoisonRecord>>
     complete(ids: Array<string>): Promise<void>
   }
-  cursor: { load(topicID: string): Promise<string | null>; save(topicID: string, position: string): Promise<void> }
+  cursor: {
+    load(topicID: string): Promise<string | null>
+    save(topicID: string, position: string): Promise<void>
+  }
   outbox: {
     list(): Promise<Array<AppOutboxEntry>>
     put(entries: Array<AppOutboxEntry>): Promise<void>
@@ -1070,24 +1094,56 @@ export type IncarnationStores = {
   }
   clearTransport(): Promise<void> // preserves owed outcomes/Welcomes, fork evidence and unacked events
 }
-export type GroupStores<TTx extends GroupTransaction> = { tx: TTx; lifetime: { load(): Promise<GroupLifetime | null>; save(value: GroupLifetime): Promise<void> }; trust: { load(): Promise<GroupRecoveryTrust | null>; save(value: GroupRecoveryTrust): Promise<void> }; incarnation(incarnation: number): IncarnationStores }
-export type GroupTransition = { groupID: string; mutationID: string; expected: { revision: number; activeIncarnation: number | null } | null }
+export type GroupStores<TTx extends GroupTransaction> = {
+  tx: TTx
+  lifetime: { load(): Promise<GroupLifetime | null>; save(value: GroupLifetime): Promise<void> }
+  trust: {
+    load(): Promise<GroupRecoveryTrust | null>
+    save(value: GroupRecoveryTrust): Promise<void>
+  }
+  incarnation(incarnation: number): IncarnationStores
+}
+export type GroupTransition = {
+  groupID: string
+  mutationID: string
+  expected: { revision: number; activeIncarnation: number | null } | null
+}
 export type GroupPersistence<TTx extends GroupTransaction> = {
   load(groupID: string): Promise<GroupLifetime | null>
   loadState(key: GroupKey): Promise<GroupStateRecord | null>
   loadTrust(groupID: string): Promise<GroupRecoveryTrust | null>
   list(): Promise<Array<GroupLifetime>>
   ports(key: GroupKey): GroupPersistencePorts
-  transition<TValue>(change: GroupTransition,
-    work: (stores: GroupStores<TTx>) => Promise<TValue>): Promise<TValue>
+  transition<TValue>(
+    change: GroupTransition,
+    work: (stores: GroupStores<TTx>) => Promise<TValue>,
+  ): Promise<TValue>
   resolve(groupID: string, mutationID: string): Promise<'committed' | 'rolled-back'>
 }
-export type GroupPersistencePorts = { key: GroupKey; control: ControlStore; outbox: AppOutbox; anchor: AnchorStore; cursor: AppCursorStore }
-export type AtRestCodec = { seal(plaintext: Uint8Array, aad: Uint8Array): Promise<Uint8Array>; open(ciphertext: Uint8Array, aad: Uint8Array): Promise<Uint8Array> }
+export type GroupPersistencePorts = {
+  key: GroupKey
+  control: ControlStore
+  outbox: AppOutbox
+  anchor: AnchorStore
+  cursor: AppCursorStore
+}
+export type AtRestCodec = {
+  seal(plaintext: Uint8Array, aad: Uint8Array): Promise<Uint8Array>
+  open(ciphertext: Uint8Array, aad: Uint8Array): Promise<Uint8Array>
+}
 export type TransactionHookSettlement = { settle(outcome: 'committed' | 'rolled-back'): void }
-export type OutcomeAwareTransactionOptions = { onUnknown(settlement: TransactionHookSettlement): void }
-export type GroupBatchOptions = { maxBatchFrames?: number; maxBatchDelayMs?: number; maxBatchWorkMs?: number }
-export type OwnershipContextPort = { run<T>(token: object, fn: () => T): T; get(): object | undefined }
+export type OutcomeAwareTransactionOptions = {
+  onUnknown(settlement: TransactionHookSettlement): void
+}
+export type GroupBatchOptions = {
+  maxBatchFrames?: number
+  maxBatchDelayMs?: number
+  maxBatchWorkMs?: number
+}
+export type OwnershipContextPort = {
+  run<T>(token: object, fn: () => T): T
+  get(): object | undefined
+}
 ```
 
 Transition-bound methods never transact or join an owner queue; the coordinator owns validation/sealing/hooks and completion proof.
@@ -1097,28 +1153,64 @@ Enforce incarnation/epoch/authenticator/spent rules independently of CAS. Stores
 ### Device persistence and retained trust (r16 decision)
 
 ```ts
-export type GroupRecoveryTrust = { groupID: string; genesisAnchor: Uint8Array; installed: EpochIdentity; signerTree: ClientState['ratchetTree']; registry: DeviceRegistry; credential: MemberCredential; binding: ControllerBinding | null; ledger: Array<string>; ciphersuiteName: string; spentEpochAuthenticators: Array<Uint8Array> }
-export type HubCleanupRow = PackageUse & { id: string; ownerDID: string; groupID: string | null; notAfter: number }
-export type RestoreWork = { id: string; stage: 'invalidate' | 'rotate' | 'groups'; remainingGroups: Array<string> }
+export type GroupRecoveryTrust = {
+  groupID: string
+  genesisAnchor: Uint8Array
+  installed: EpochIdentity
+  signerTree: ClientState['ratchetTree']
+  registry: DeviceRegistry
+  credential: MemberCredential
+  binding: ControllerBinding | null
+  ledger: Array<string>
+  ciphersuiteName: string
+  spentEpochAuthenticators: Array<Uint8Array>
+}
+export type HubCleanupRow = PackageUse & {
+  id: string
+  ownerDID: string
+  groupID: string | null
+  notAfter: number
+}
+export type RestoreWork = {
+  id: string
+  stage: 'invalidate' | 'rotate' | 'groups'
+  remainingGroups: Array<string>
+}
 export type DeviceRecord = { revision: number; mutationID: string; restoreWork: RestoreWork | null }
 export type DeviceStores<TTx extends GroupTransaction> = {
-  tx: TTx; group: GroupStores<TTx> | null
+  tx: TTx
+  group: GroupStores<TTx> | null
   ordinary(sourceID: string): KeyPackagePoolStore
   lastResort(sourceID: string): LastResortStore
-  cleanup: { list(): Promise<Array<HubCleanupRow>>; put(row: HubCleanupRow): Promise<void>; remove(id: string): Promise<void> }
+  cleanup: {
+    list(): Promise<Array<HubCleanupRow>>
+    put(row: HubCleanupRow): Promise<void>
+    remove(id: string): Promise<void>
+  }
   restore: { load(): Promise<RestoreWork | null>; save(work: RestoreWork | null): Promise<void> }
 }
 export type DevicePersistence<TTx extends GroupTransaction> = {
-  providerID: string; ownerDID: string; groups: GroupPersistence<TTx>
+  providerID: string
+  ownerDID: string
+  groups: GroupPersistence<TTx>
   load(): Promise<DeviceRecord>
-  transition<TValue>(change: { mutationID: string; expectedRevision: number; group: GroupTransition | null },
-    work: (stores: DeviceStores<TTx>) => Promise<TValue>): Promise<TValue>
+  transition<TValue>(
+    change: { mutationID: string; expectedRevision: number; group: GroupTransition | null },
+    work: (stores: DeviceStores<TTx>) => Promise<TValue>,
+  ): Promise<TValue>
   resolve(mutationID: string): Promise<'committed' | 'rolled-back'>
 }
 export type DevicePackageAdapters = {
-  providerID: string; ownerDID: string
+  providerID: string
+  ownerDID: string
   sources: Array<BundleSource & { kind: PackageUse['kind']; providerID: string; ownerDID: string }>
-  stores: Array<{ sourceID: string; kind: PackageUse['kind']; providerID: string; ownerDID: string; store: KeyPackagePoolStore | LastResortStore }>
+  stores: Array<{
+    sourceID: string
+    kind: PackageUse['kind']
+    providerID: string
+    ownerDID: string
+    store: KeyPackagePoolStore | LastResortStore
+  }>
   rotateAvailability(): Promise<void> // durable fresh provisioning; uploads stay outside transactions
   cleanup(row: HubCleanupRow): Promise<'removed' | 'expired' | 'retry' | 'unsupported'>
 }
@@ -1133,79 +1225,202 @@ lifetime locators.
 ### Registry, control and handlers
 
 ```ts
-export type GroupRuntimeSnapshot = EpochIdentity & { stateVersion: number; members: ReadonlySet<string>; available: boolean }
-export type GroupEpochRuntime = { snapshot(): GroupRuntimeSnapshot | null; onEpochChanged(listener: (value: GroupRuntimeSnapshot | null) => void): () => void }
+export type GroupRuntimeSnapshot = EpochIdentity & {
+  stateVersion: number
+  members: ReadonlySet<string>
+  available: boolean
+}
+export type GroupEpochRuntime = {
+  snapshot(): GroupRuntimeSnapshot | null
+  onEpochChanged(listener: (value: GroupRuntimeSnapshot | null) => void): () => void
+}
 export type SendAdmission =
   | { epoch: number; admissible: true }
-  | { epoch: number; admissible: false; reason: 'lapsed' | 'rotation-required' | 'stranded' | 'fork-halted' | 'terminal' | 'backup-restored' | 'spent-set-corrupt' | 'recovery-unavailable' }
+  | {
+      epoch: number
+      admissible: false
+      reason:
+        | 'lapsed'
+        | 'rotation-required'
+        | 'stranded'
+        | 'fork-halted'
+        | 'terminal'
+        | 'backup-restored'
+        | 'spent-set-corrupt'
+        | 'recovery-unavailable'
+    }
 export type SealedApp = { ciphertext: Uint8Array; epoch: number; generation: number }
 export type ReceiveInput = { ciphertext: Uint8Array; expectedAAD: Uint8Array } // callers with no expectation pass the frame's clear AAD
 export type ReceiveResult =
-  | { kind: 'opened'; payload: Uint8Array; senderDID?: string; aad: Uint8Array; frameEpoch: number; handleEpoch: number }
-  | { kind: 'refused'; reason: 'past-epoch' | 'future-epoch'; frameEpoch: number; handleEpoch: number }
-  | { kind: 'refused'; reason: 'log-intent' | 'consumed' | 'closed-epoch' | 'generation-bound' | 'capacity' | 'invalid'; error?: unknown }
+  | {
+      kind: 'opened'
+      payload: Uint8Array
+      senderDID?: string
+      aad: Uint8Array
+      frameEpoch: number
+      handleEpoch: number
+    }
+  | {
+      kind: 'refused'
+      reason: 'past-epoch' | 'future-epoch'
+      frameEpoch: number
+      handleEpoch: number
+    }
+  | {
+      kind: 'refused'
+      reason:
+        | 'log-intent'
+        | 'consumed'
+        | 'closed-epoch'
+        | 'generation-bound'
+        | 'capacity'
+        | 'invalid'
+      error?: unknown
+    }
 export class ApplicationLeaseUnavailableError extends Error {} // reason: 'cold' | 'exhausted' | 'deferred'
 export type RegistryHandleAccess = {
-  key: GroupKey; runtime: GroupEpochRuntime
-  epoch(): number; stateVersion(): number; admission(): SendAdmission
+  key: GroupKey
+  runtime: GroupEpochRuntime
+  epoch(): number
+  stateVersion(): number
+  admission(): SendAdmission
   read<TValue>(fn: (handle: GroupHandle) => TValue | Promise<TValue>): Promise<TValue>
-  seal(plaintext: Uint8Array, opts: { aad: Uint8Array; intent: 'log' | 'ephemeral' }): Promise<SealedApp>
+  seal(
+    plaintext: Uint8Array,
+    opts: { aad: Uint8Array; intent: 'log' | 'ephemeral' },
+  ): Promise<SealedApp>
   receive(frames: Array<ReceiveInput>): Promise<Array<ReceiveResult>> // <= 64 inputs, else RangeError
   onRotationRequired(listener: (identity: EpochIdentity) => void): () => void
   onAdmissionChanged(listener: () => void): () => void // any effective-admission flip, in either direction
   openBatch(frames: Array<OpenAppInput>): Promise<Array<OpenAppResult>>
-  adopt(next: GroupHandle, expected: AdoptionExpected, write: AdoptionWrite): Promise<'installed' | 'noop' | 'moved'>
-  mutate: HandleAccess['mutate']; replace: HandleAccess['replace']
+  adopt(
+    next: GroupHandle,
+    expected: AdoptionExpected,
+    write: AdoptionWrite,
+  ): Promise<'installed' | 'noop' | 'moved'>
+  mutate: HandleAccess['mutate']
+  replace: HandleAccess['replace']
   pending: PendingAppFrames
 }
 export type GroupHandleRegistry = {
   declareRestoredFromBackup(): Promise<void> // commits restore-work (r16 decision)
   start(): Promise<void> // finishes restore-work idempotently before access/network work
   access(groupID: string): Promise<RegistryHandleAccess>
-  seed(group: GroupHandle, params: { replace?: boolean; packageUse: PackageUse | null }): Promise<GroupKey>
+  seed(
+    group: GroupHandle,
+    params: { replace?: boolean; packageUse: PackageUse | null },
+  ): Promise<GroupKey>
   recoverySource(groupID: string): Promise<RegistryRecoverySource>
-  switchIncarnation(candidate: GroupHandle, params: {
-    source: RegistryRecoverySource
-    rejoinID: string; proof: ResyncProof; write: RegistrySwitchWrite
-  }): Promise<GroupKey>
+  switchIncarnation(
+    candidate: GroupHandle,
+    params: {
+      source: RegistryRecoverySource
+      rejoinID: string
+      proof: ResyncProof
+      write: RegistrySwitchWrite
+    },
+  ): Promise<GroupKey>
   delete(key: GroupKey): Promise<void>
   dispose(): Promise<void>
 }
 export function createGroupHandleRegistry<TTx extends GroupTransaction>(params: {
-  persistence: DevicePersistence<TTx>; providerID: string; packages: DevicePackageAdapters
+  persistence: DevicePersistence<TTx>
+  providerID: string
+  packages: DevicePackageAdapters
   recovery: RecoveryEnvironment
-  restore: (record: GroupStateRecord & { deleted: false; state: Uint8Array }) => Promise<GroupHandle>
+  restore: (
+    record: GroupStateRecord & { deleted: false; state: Uint8Array },
+  ) => Promise<GroupHandle>
   batch?: GroupBatchOptions
 }): GroupHandleRegistry
 export type PreOpenAppFrameRef = GroupKey & {
-  id: string; protocol: string; topicID: string; segment: number; position: string // segment = anchor epoch
+  id: string
+  protocol: string
+  topicID: string
+  segment: number
+  position: string // segment = anchor epoch
 }
 export type AppFrameRef = PreOpenAppFrameRef & { procedure: string }
 // GroupCrypto.unwrap opts.frame changes to PreOpenAppFrameRef (r16 decision).
 // (r26) Wrap routes to `seal`; frame-less unwrap routes to `receive`, which refuses `log`-intent frames without consuming.
 // Until 2.3d, rpc keeps the r14 `AppFrameRef` and narrow `PendingAppFrame` and calls only singleton durable unwrap. Registry crypto binds GroupKey from its incarnation-bound access; a mismatching supplied key refuses as storage failure, never as a dead frame.
-export type OpenAppInput = { frame: PreOpenAppFrameRef; ciphertext: Uint8Array; expectedAAD?: Uint8Array }
+export type OpenAppInput = {
+  frame: PreOpenAppFrameRef
+  ciphertext: Uint8Array
+  expectedAAD?: Uint8Array
+}
 export type OpenAppResult =
   | { kind: 'opened'; record: PendingAppFrame }
   | { kind: 'refused'; frame: PreOpenAppFrameRef; reason: 'malformed-plaintext'; keyConsumed: true }
-  | { kind: 'refused'; frame: PreOpenAppFrameRef; reason: 'invalid-ciphertext' | 'wrong-aad' | 'duplicate' | 'invalid-position'; keyConsumed: false }
-  | { kind: 'refused'; frame: PreOpenAppFrameRef; reason: 'past-epoch'; keyConsumed: false; frameEpoch: number; handleEpoch: number } // not retained
-  | { kind: 'held'; frame: PreOpenAppFrameRef; reason: 'future-epoch'; frameEpoch: number; handleEpoch: number }
+  | {
+      kind: 'refused'
+      frame: PreOpenAppFrameRef
+      reason: 'invalid-ciphertext' | 'wrong-aad' | 'duplicate' | 'invalid-position'
+      keyConsumed: false
+    }
+  | {
+      kind: 'refused'
+      frame: PreOpenAppFrameRef
+      reason: 'past-epoch'
+      keyConsumed: false
+      frameEpoch: number
+      handleEpoch: number
+    } // not retained
+  | {
+      kind: 'held'
+      frame: PreOpenAppFrameRef
+      reason: 'future-epoch'
+      frameEpoch: number
+      handleEpoch: number
+    }
   | { kind: 'held'; frame: PreOpenAppFrameRef; reason: 'unsupported-version' } // legacy/read-only; never produced
 // r25: locked epochs, duplicate, invalid-position; past-epoch only for epochs no longer retained
 // r25: only authenticated malformed plaintext (keyConsumed:true) persists an AppPoisonRecord. Crypto refusals, duplicates, invalid positions, outer-version faults and window/age expiry persist no row; durable cursor completion records them.
 export type AppPoisonRecord = { frame: PreOpenAppFrameRef; reason: string; keyConsumed: boolean } // r25: new rows always carry keyConsumed:true; legacy rows may carry false.
-export type PendingAppFrame = { frame: AppFrameRef; payload: Uint8Array; senderDID: string; epoch: number; idempotencyKey: string }
-export type PendingAppFrames = { list(): Promise<Array<PendingAppFrame>>; complete(id: string): Promise<void> }
-export type GroupHandlerMetadata = { epoch: number; incarnation: number; frame?: AppFrameRef; idempotencyKey?: string }
+export type PendingAppFrame = {
+  frame: AppFrameRef
+  payload: Uint8Array
+  senderDID: string
+  epoch: number
+  idempotencyKey: string
+}
+export type PendingAppFrames = {
+  list(): Promise<Array<PendingAppFrame>>
+  complete(id: string): Promise<void>
+}
+export type GroupHandlerMetadata = {
+  epoch: number
+  incarnation: number
+  frame?: AppFrameRef
+  idempotencyKey?: string
+}
 export type DurableHandler<TContext, TTx extends GroupTransaction> =
-  | { mode?: 'at-least-once'; handle(context: TContext & GroupHandlerMetadata & {
-      frame: AppFrameRef; idempotencyKey: string
-    }): Promise<void> }
-  | { mode: 'transactional'; handle(context: TContext & GroupHandlerMetadata & {
-      frame: AppFrameRef; idempotencyKey: string; tx: TTx
-    }): Promise<void> }
-export type CommitKeyRotationResult = { commitMessage: Uint8Array; newGroup: GroupHandle; epoch: bigint }
+  | {
+      mode?: 'at-least-once'
+      handle(
+        context: TContext &
+          GroupHandlerMetadata & {
+            frame: AppFrameRef
+            idempotencyKey: string
+          },
+      ): Promise<void>
+    }
+  | {
+      mode: 'transactional'
+      handle(
+        context: TContext &
+          GroupHandlerMetadata & {
+            frame: AppFrameRef
+            idempotencyKey: string
+            tx: TTx
+          },
+      ): Promise<void>
+    }
+export type CommitKeyRotationResult = {
+  commitMessage: Uint8Array
+  newGroup: GroupHandle
+  epoch: bigint
+}
 ```
 
 (r26) Live seal/receive operations join retirement's pre-commit drain; new live work, and any lease wait in progress, is refused from drain start. A reservation composes into a caller's transition: its advanced state is saved by that transition, and its hand-off is used after that transition's proof.
@@ -1217,7 +1432,6 @@ export function commitKeyRotation(group: GroupHandle): Promise<CommitKeyRotation
 ```
 
 (r26) `seal` and `receive` are byte-level; no registry handle leaves the registry. Neither opens a provider transaction. Both refuse under a safety hold.
-
 - **Sends.** A cold, exhausted or deferred send rejects with ApplicationLeaseUnavailableError and schedules a reservation outside the call. A `log` seal first waits, bounded, for that reservation; the wait aborts at retirement start. `seal` refuses any non-admissible admission and reports the generation read inside the encryption's serialization.
 - **Cold receive.** A cold `receive` waits once, bounded, for its own scheduled refresh, aborting at retirement start. A cold ephemeral seal rejects at once.
 - **Receive handle.** `receive` uses a private send-denied decrypt-only handle, rebuilt when the committed receive projection changes. A version this registry committed installs its proven record as the base. A higher foreign version clears the base until a cold refresh, which is gated on receive lifecycle and safety, not on send admission.
@@ -1255,18 +1469,29 @@ lifetime/version/trust independently of state bytes. Recovery uses switchIncarna
 
 ```ts
 export type BuiltCommit = {
-  opID: string; kind: 'invite' | 'remove' | 'ledger' | 'rotation'; revokes: boolean // (r28c) the owning operation; its intent row left the FIFO at built-save
-  enqueuedAt: number; deadline: number // (r28c) persisted deadline, unchanged by restart/retry
-  incarnation: number; epoch: number; authenticatorBefore: Uint8Array
-  publishID: string; expectedHead: LogPosition | null
+  opID: string
+  kind: 'invite' | 'remove' | 'ledger' | 'rotation'
+  revokes: boolean // (r28c) the owning operation; its intent row left the FIFO at built-save
+  enqueuedAt: number
+  deadline: number // (r28c) persisted deadline, unchanged by restart/retry
+  incarnation: number
+  epoch: number
+  authenticatorBefore: Uint8Array
+  publishID: string
+  expectedHead: LogPosition | null
   head: LogPosition | null // (r28b) immutable cursor position at built-save; coverage origin; null is the empty prefix
-  payload: Uint8Array; payloadDigest: string; digest: string; bodies: Array<string>
-  journal: Uint8Array; welcome: { bytes: Uint8Array; recipients: Array<string> } | null
+  payload: Uint8Array
+  payloadDigest: string
+  digest: string
+  bodies: Array<string>
+  journal: Uint8Array
+  welcome: { bytes: Uint8Array; recipients: Array<string> } | null
   acceptedAs?: LogPosition // (r28b) hub ack; retry evidence only
   skipped?: true // (r28c) an occurrence after head at this epoch, or of unreadable epoch, was skipped; never cleared
   reported?: true // (r28b) provisional deadline `unknown` written once
 }
-export type HostBuilt = Pick<BuiltCommit,
+export type HostBuilt = Pick<
+  BuiltCommit,
   'incarnation' | 'epoch' | 'authenticatorBefore' | 'digest' | 'bodies' | 'journal' | 'welcome'
 > & { commit: Uint8Array }
 ```
@@ -1326,9 +1551,17 @@ No private builder exports a handshake reservation API or generation budget.
 ### Registry adapters and handler registration (r16 decision)
 
 ```ts
-export type AdoptionExpected = { key: GroupKey; stateVersion: number; identity: EpochIdentity | null }
+export type AdoptionExpected = {
+  key: GroupKey
+  stateVersion: number
+  identity: EpochIdentity | null
+}
 // @kumiai/rpc owns the portable recovery generic:
-export type RecoverySource<TTrust = unknown> = AdoptionExpected & { trust: TTrust; trustDigest: string; lifetimeRevision: number }
+export type RecoverySource<TTrust = unknown> = AdoptionExpected & {
+  trust: TTrust
+  trustDigest: string
+  lifetimeRevision: number
+}
 // @kumiai/mls-rpc owns this specialisation and imports rpc ResyncProof:
 export type RegistryRecoverySource = RecoverySource<GroupRecoveryTrust>
 // Task 1a renames rpc control/rejoin.ts:16 local RecoverySource to SourceScanIdentity.
@@ -1343,22 +1576,36 @@ export function recoveryTrustDigest(trust: GroupRecoveryTrust): string
 // Store trustDigest with the saved source record/candidate. rpc compares digest strings only.
 // Reordered equivalent trust hashes equally; authority/key/ledger/spent changes differ.
 // SHA-256 base64url digest uses 43 characters. Size accounting includes full trust plus sealed record/candidate and duplicated trust/sourceState.
-export type ControlHandleAccess = Pick<HandleAccess, 'epoch' | 'admission' | 'read' | 'readControl' | 'mutate' | 'replace'>
-export function createRegistryHandleAccess(params: { access: RegistryHandleAccess }): ControlHandleAccess
+export type ControlHandleAccess = Pick<
+  HandleAccess,
+  'epoch' | 'admission' | 'read' | 'readControl' | 'mutate' | 'replace'
+>
+export function createRegistryHandleAccess(params: {
+  access: RegistryHandleAccess
+}): ControlHandleAccess
 // Build/adoption and GroupMLS consume ControlHandleAccess; full registry crypto/open/leases remain 2.3.
 // ControlReadScope adds loadControl(control?: ControlStore): Promise<ControlSnapshot>.
 // Registry scopes check supplied control.key against entry groupID/incarnation before reading; foreign keys throw DisplacedGroupHandleError.
 // Simple/transactional scopes use the real supplied ControlStore; loadControl expires exactly with refresh, including after await.
 // Ordinary adoption may select an ID when mutationID is null.
 // Recovery adoption always uses saved switchMutationID; build reads/sealing release their entry before root save/retry.
-export function createGroupCrypto(params: Omit<GroupCryptoParams, 'access' | 'pending'> & {
-  access: RegistryHandleAccess
-}): GroupCrypto & { pending: PendingAppFrames; unwrapBatch(frames: Array<OpenAppInput>): Promise<Array<OpenAppResult>> }
+export function createGroupCrypto(
+  params: Omit<GroupCryptoParams, 'access' | 'pending'> & {
+    access: RegistryHandleAccess
+  },
+): GroupCrypto & {
+  pending: PendingAppFrames
+  unwrapBatch(frames: Array<OpenAppInput>): Promise<Array<OpenAppResult>>
+}
 export type RecoveryRouting = { targetID: string; topicID: string }
 export type RecoveryAdoptionDependencies = {
-  target: RecoveryRouting; environment: RecoveryEnvironment
+  target: RecoveryRouting
+  environment: RecoveryEnvironment
   readRecoverySource(): Promise<RegistryRecoverySource>
-  accept(candidate: GroupHandle, params: { source: RegistryRecoverySource; proof: ResyncProof; write: AdoptionWriteFactory }): Promise<void>
+  accept(
+    candidate: GroupHandle,
+    params: { source: RegistryRecoverySource; proof: ResyncProof; write: AdoptionWriteFactory },
+  ): Promise<void>
 }
 export type GroupMLSDependencies = {
   control: ControlStore
@@ -1374,11 +1621,18 @@ export type GroupMLSDependencies = {
 // Compatibility helpers retain explicit legacy names/types; no active requester produces legacy records after activation.
 // Ordinary source readers return identity-only AdoptionExpected, never fabricated trust/lifetimeRevision.
 // Only registry-injected recoveryAdoption supplies the trusted recovery source. Absent recoveryAdoption refuses captured recovery only.
-export function createRegistryGroupMLS(params: Omit<GroupMLSParams,
-  'access' | 'control' | 'readRecoverySource' | 'recoveryAdoption' | 'onSafetyHold'> & {
-  registry: GroupHandleRegistry; key: GroupKey; recovery: RecoveryEnvironment; target: RecoveryRouting
-  onConfirmedRecovery(handoff: ConfirmedRecoveryHandoff): void
-}): Promise<GroupMLS>
+export function createRegistryGroupMLS(
+  params: Omit<
+    GroupMLSParams,
+    'access' | 'control' | 'readRecoverySource' | 'recoveryAdoption' | 'onSafetyHold'
+  > & {
+    registry: GroupHandleRegistry
+    key: GroupKey
+    recovery: RecoveryEnvironment
+    target: RecoveryRouting
+    onConfirmedRecovery(handoff: ConfirmedRecoveryHandoff): void
+  },
+): Promise<GroupMLS>
 // r20: async because sendAdmission() is synchronous and registry.access() is async and restores private state.
 // Construction validates params (sink TypeError) before any await, then reads an initial cached SendAdmission from
 // registry entry/control/safety reads plus the persisted trust's installed epoch, never restoring private state.
@@ -1398,21 +1652,42 @@ export function ownCommitDigest(commit: Uint8Array): string | null
 // (r28d) A failed own copy sets `skipped` and keeps the build live; no identical retry follows it. Identical retry exists only after a refused handoff with `skipped` unset and unchanged incarnation/epoch/authenticator; deadline reports unknown once.
 // StrandKind adds 'past-epoch-divergence' with claimed confidence, diagnostic-only. Existing fork signal names remain compatibility types only.
 export type LegacyRejoinRecord = {
-  id: string; stage: 'built' | 'published' | 'confirmed' | 'adopted' | 'refused'
-  publishID: string; expectedHead: LogPosition | null; payload: Uint8Array; payloadDigest: string
-  requestID: string; request: Uint8Array; requestKey: Uint8Array; candidate: Uint8Array
+  id: string
+  stage: 'built' | 'published' | 'confirmed' | 'adopted' | 'refused'
+  publishID: string
+  expectedHead: LogPosition | null
+  payload: Uint8Array
+  payloadDigest: string
+  requestID: string
+  request: Uint8Array
+  requestKey: Uint8Array
+  candidate: Uint8Array
   source: { key: GroupKey; epoch: number; authenticator: Uint8Array; head: LogPosition | null }
-  digest: string; epochAfter: number; ledgerBefore: Array<string>; conflictEpoch: number | null
-  position?: LogPosition; verdict?: Uint8Array; refusal?: RecoveryRefusal
+  digest: string
+  epochAfter: number
+  ledgerBefore: Array<string>
+  conflictEpoch: number | null
+  position?: LogPosition
+  verdict?: Uint8Array
+  refusal?: RecoveryRefusal
 }
 export type RecoveryTargetCapture = {
-  targetID: string; topicID: string; groupInfoEpoch: number; groupInfoAuthenticator: Uint8Array; captureHead: LogPosition | null
+  targetID: string
+  topicID: string
+  groupInfoEpoch: number
+  groupInfoAuthenticator: Uint8Array
+  captureHead: LogPosition | null
 }
 export type CapturedRejoinRecord = Omit<LegacyRejoinRecord, 'source' | 'conflictEpoch'> & {
-  format: 2; source: RecoverySource; target: RecoveryTargetCapture
-  captureHead: LogPosition | null; searchFrom: LogPosition | null
-  trigger: 'automatic' | 'manual'; authorisationID: string | null
-  switchMutationID: string | null; destinationKey: GroupKey | null
+  format: 2
+  source: RecoverySource
+  target: RecoveryTargetCapture
+  captureHead: LogPosition | null
+  searchFrom: LogPosition | null
+  trigger: 'automatic' | 'manual'
+  authorisationID: string | null
+  switchMutationID: string | null
+  destinationKey: GroupKey | null
   forkRecovery?: ForkRecoveryAuthorisation
 }
 export type RejoinRecord = CapturedRejoinRecord
@@ -1421,24 +1696,47 @@ export type StoredRejoinRecord = LegacyRejoinRecord | CapturedRejoinRecord
 // Captured records never enter legacy execution. Proven adopted legacy continuations never reinstall.
 // Portable mirrors use RecoverySource<unknown>; mls-rpc alone narrows trust.
 export type ForkRecoveryAuthorisation = {
-  attemptID: string; noticeID: string; splitEpoch: number; otherAuthHash: string
-  responderKeyHash: string; source: GroupKey; evidence: Uint8Array
+  attemptID: string
+  noticeID: string
+  splitEpoch: number
+  otherAuthHash: string
+  responderKeyHash: string
+  source: GroupKey
+  evidence: Uint8Array
 }
-export type ForkRecoveryAttempt = { id: string; source: GroupKey; forkRecovery: ForkRecoveryAuthorisation }
+export type ForkRecoveryAttempt = {
+  id: string
+  source: GroupKey
+  forkRecovery: ForkRecoveryAuthorisation
+}
 export type AcceptedRejoinSettlement = {
-  id: string; origin: { sourceKey: GroupKey; target: RecoveryTargetCapture; searchFrom: LogPosition | null }
+  id: string
+  origin: { sourceKey: GroupKey; target: RecoveryTargetCapture; searchFrom: LogPosition | null }
   ledgerBefore: Array<string>
 } & (
-  | { kind: 'accepted-unadoptable'; digest: string; payloadDigest: string
-      epochAfter: number; acceptedEpoch: number; leafDigest: string }
+  | {
+      kind: 'accepted-unadoptable'
+      digest: string
+      payloadDigest: string
+      epochAfter: number
+      acceptedEpoch: number
+      leafDigest: string
+    }
   | { kind: 'not-accepted'; epoch: number }
   | { kind: 'superseded-branch'; epoch: number }
 )
 // Ordinary settlements omit secret work. Superseded-branch retains exact X in sealed checkpoint history.
-export function effectiveRecoveryEpochFloor(snapshot: ControlSnapshot,
-  attempt: { id: string; source: GroupKey }): number | null
+export function effectiveRecoveryEpochFloor(
+  snapshot: ControlSnapshot,
+  attempt: { id: string; source: GroupKey },
+): number | null
 // E only for the privately authorised Y binding. Otherwise return the ordinary stored floor.
-export type CapturedRecapture = { sealed: Uint8Array; requestID: string; requestKey: Uint8Array; epochFloor: number | null }
+export type CapturedRecapture = {
+  sealed: Uint8Array
+  requestID: string
+  requestKey: Uint8Array
+  epochFloor: number | null
+}
 export type RecoveryReconciliation =
   | { kind: 'accepted'; epoch: number; leafDigest: string }
   | { kind: 'head-only'; head: LogPosition | null }
@@ -1446,57 +1744,114 @@ export type RecoveryReconciliation =
   | { kind: 'superseded-branch'; epoch: number; authorisation: ForkRecoveryAuthorisation }
   | { kind: 'retry' | 'held' }
 // held = local safety/missing retained trust only. retry = different authenticator, below-floor capture or transient failure.
-export type LegacyPendingRecovery = Pick<PendingRecovery, 'epoch' | 'markBindingUnusable' | 'confirmationKey' | 'judgeVerdict' | 'commit' | 'serialize'> & {
+export type LegacyPendingRecovery = Pick<
+  PendingRecovery,
+  'epoch' | 'markBindingUnusable' | 'confirmationKey' | 'judgeVerdict' | 'commit' | 'serialize'
+> & {
   onAccepted(write: AdoptionWriteFactory): Promise<void>
 }
 export type CapturedPendingRecovery = Omit<LegacyPendingRecovery, 'onAccepted'> & {
-  source: RecoverySource<unknown>; target: RecoveryTargetCapture
-  onAccepted(expected: RecoverySource<unknown>, proof: ResyncProof, write: AdoptionWriteFactory): Promise<void>
+  source: RecoverySource<unknown>
+  target: RecoveryTargetCapture
+  onAccepted(
+    expected: RecoverySource<unknown>,
+    proof: ResyncProof,
+    write: AdoptionWriteFactory,
+  ): Promise<void>
 }
 export type CapturedAppliedRecovery = CapturedPendingRecovery | { renewalRequired: true } | null
 export type CapturedRecoveryPort = {
-  applyRecovery(sealed: Uint8Array, requestID: string, requestKey: Uint8Array): Promise<CapturedAppliedRecovery>
+  applyRecovery(
+    sealed: Uint8Array,
+    requestID: string,
+    requestKey: Uint8Array,
+  ): Promise<CapturedAppliedRecovery>
   restoreRecovery(candidate: Uint8Array, requestKey: Uint8Array): Promise<CapturedPendingRecovery>
-  reconcileCapture(record: CapturedRejoinRecord, reply: CapturedRecapture): Promise<RecoveryReconciliation>
+  reconcileCapture(
+    record: CapturedRejoinRecord,
+    reply: CapturedRecapture,
+  ): Promise<RecoveryReconciliation>
   sealGroupInfo(request: Uint8Array, captureHead: LogPosition | null): Promise<Uint8Array>
-  checkRosterAbsence?(evidence: Uint8Array, requestID: string, requestKey: Uint8Array): Promise<AuthenticatedRosterAbsence | null>
-  sealRosterAbsence?(request: Uint8Array, captureHead: LogPosition | null): Promise<Uint8Array | null>
-  authoriseForkRecovery?(reply: CapturedRecapture, noticeID: string): Promise<ForkRecoveryAuthorisation | null>
+  checkRosterAbsence?(
+    evidence: Uint8Array,
+    requestID: string,
+    requestKey: Uint8Array,
+  ): Promise<AuthenticatedRosterAbsence | null>
+  sealRosterAbsence?(
+    request: Uint8Array,
+    captureHead: LogPosition | null,
+  ): Promise<Uint8Array | null>
+  authoriseForkRecovery?(
+    reply: CapturedRecapture,
+    noticeID: string,
+  ): Promise<ForkRecoveryAuthorisation | null>
 }
 // GroupMLS.capturedRecovery supplies production captured recovery; legacy direct factories may omit optional authority.
 // Initial apply returns genuine immutable source. reconcileCapture authenticates request/group/target/origin/floor and exact LeafNode against saved X without building.
 // Leaf/tree checks stay in MLS/mls-rpc. rpc sees typed reconciliation, never opaque trust internals. Fresh keys never overwrite X's original tuple.
 // Same-lineage recapture, including lost private state, makes zero extra candidate builds. A different-branch Y needs private forkRecovery authority.
 export type RegistrySwitchWrite = {
-  mutationID: string; source: { rejoinID: string; authorisationID?: string }
+  mutationID: string
+  source: { rejoinID: string; authorisationID?: string }
   destination: { control: { cursor: { position: LogPosition; epoch: number } } }
 }
 export type ConfirmedRecoveryHandoff = { record: CapturedRejoinRecord; completion: Promise<void> }
-export type RecoveryContinuation = { source: GroupKey; destination: GroupKey; record: StoredRejoinRecord }
+export type RecoveryContinuation = {
+  source: GroupKey
+  destination: GroupKey
+  record: StoredRejoinRecord
+}
 // Legacy adopted continuations require independently proven installation; never fabricate capture metadata or rewrite the saved record.
-export type RecoveryCompletion = (params: { ledger: Array<string>; mutationID: string }) => Promise<void>
+export type RecoveryCompletion = (params: {
+  ledger: Array<string>
+  mutationID: string
+}) => Promise<void>
 export type RecoveryContinuationPort = {
   loadRecoveryContinuation(destination: GroupKey): Promise<RecoveryContinuation | null>
-  finishRecoveryContinuation(params: { continuation: RecoveryContinuation; ledger: Array<string>; mutationID: string }): Promise<void>
+  finishRecoveryContinuation(params: {
+    continuation: RecoveryContinuation
+    ledger: Array<string>
+    mutationID: string
+  }): Promise<void>
 }
 export function createRecoveryContinuationPort<TTx extends GroupTransaction>(params: {
-  registry: GroupHandleRegistry; persistence: GroupPersistence<TTx>
+  registry: GroupHandleRegistry
+  persistence: GroupPersistence<TTx>
 }): RecoveryContinuationPort
 export type RegistryPeerOptions = {
-  mls: GroupMLS; recoveryOnly: boolean; target: RecoveryRouting
+  mls: GroupMLS
+  recoveryOnly: boolean
+  target: RecoveryRouting
   onConfirmedRecovery(handoff: ConfirmedRecoveryHandoff): void
-  continuation: RecoveryContinuation | null; completion: RecoveryCompletion | null
+  continuation: RecoveryContinuation | null
+  completion: RecoveryCompletion | null
 }
 export type RegistryPeer = {
   peer(): GroupPeer<Record<string, GroupProtocolDefinition>> | null
-  installedKey(): GroupKey; ready: Promise<void>; dispose(): void; drained(): Promise<void>
+  installedKey(): GroupKey
+  ready: Promise<void>
+  dispose(): void
+  drained(): Promise<void>
 }
 export function createRegistryPeer(params: {
-  registry: GroupHandleRegistry; key: GroupKey; recovery: RecoveryEnvironment; target: RecoveryRouting
+  registry: GroupHandleRegistry
+  key: GroupKey
+  recovery: RecoveryEnvironment
+  target: RecoveryRouting
   continuation: RecoveryContinuationPort
-  settleAcceptedRecovery?: (record: CapturedRejoinRecord, acceptedEpoch: number, leafDigest: string) => Promise<void>
-  createMLS(key: GroupKey, onConfirmedRecovery: (handoff: ConfirmedRecoveryHandoff) => void): GroupMLS
-  createPeer(key: GroupKey, options: RegistryPeerOptions): Promise<GroupPeer<Record<string, GroupProtocolDefinition>>>
+  settleAcceptedRecovery?: (
+    record: CapturedRejoinRecord,
+    acceptedEpoch: number,
+    leafDigest: string,
+  ) => Promise<void>
+  createMLS(
+    key: GroupKey,
+    onConfirmedRecovery: (handoff: ConfirmedRecoveryHandoff) => void,
+  ): GroupMLS
+  createPeer(
+    key: GroupKey,
+    options: RegistryPeerOptions,
+  ): Promise<GroupPeer<Record<string, GroupProtocolDefinition>>>
 }): Promise<RegistryPeer>
 // GroupPeerMLSParams adds onConfirmedRecovery?, continuation? and completion? with these exact types.
 // Continuation/completion must both be present or both absent/null.
@@ -1508,7 +1863,11 @@ export function createRecoverySwitchFactory(record: CapturedRejoinRecord): Adopt
 export type GroupMLSRecoverySourcePort = { readRecoverySource(): Promise<AdoptionExpected> }
 // Ordinary certificates use identity-only source. Trust/lifetimeRevision belong only to registry recoveryAdoption.
 export type RecoveryAdoptionPort = {
-  onAccepted(expected: RecoverySource<unknown>, proof: ResyncProof, write: AdoptionWriteFactory): Promise<void>
+  onAccepted(
+    expected: RecoverySource<unknown>,
+    proof: ResyncProof,
+    write: AdoptionWriteFactory,
+  ): Promise<void>
 }
 // After source completion/host-boundary exit, coordinator rereads confirmed X, restores raw candidate and builds saved proof/factory, never retaining a proxy.
 // Defensive confirmed+null startup first assigns switchMutationID under ownership; never fabricates capture/source metadata.
@@ -1538,21 +1897,52 @@ export type RecoveryAdoptionPort = {
 export type ControlAdoptionPort = {
   // (r28c) `occurrence` is the walker's validated own occurrence; the port installs the saved candidate for both coverage values and never runs MLS
   // receive processing on an own frame. `write` carries `landed` plus the obligation for complete coverage, terminal `unknown` without obligation otherwise.
-  adopt(journal: Uint8Array, expected: AdoptionExpected & { occurrence: OwnOccurrence }, write: AdoptionWrite): Promise<'installed' | 'noop' | 'moved'>
+  adopt(
+    journal: Uint8Array,
+    expected: AdoptionExpected & { occurrence: OwnOccurrence },
+    write: AdoptionWrite,
+  ): Promise<'installed' | 'noop' | 'moved'>
 }
-export type MetadataHandler<THandler> = THandler extends (context: infer TContext) => infer TResult ? (context: TContext & GroupHandlerMetadata) => TResult : never
-export type GroupProcedureHandlers<TProtocol extends GroupProtocolDefinition, TTx extends GroupTransaction> = {
-  [TProcedure in keyof TProtocol & string]: TProtocol[TProcedure] extends { type: 'event'; retain: 'log' }
-    ? DurableHandler<EventHandlerContext<TProtocol, TProcedure>, TTx>
-      | ((context: EventHandlerContext<TProtocol, TProcedure> & GroupHandlerMetadata) => void | Promise<void>)
+export type MetadataHandler<THandler> = THandler extends (context: infer TContext) => infer TResult
+  ? (context: TContext & GroupHandlerMetadata) => TResult
+  : never
+export type GroupProcedureHandlers<
+  TProtocol extends GroupProtocolDefinition,
+  TTx extends GroupTransaction,
+> = {
+  [TProcedure in keyof TProtocol & string]: TProtocol[TProcedure] extends {
+    type: 'event'
+    retain: 'log'
+  }
+    ?
+        | DurableHandler<EventHandlerContext<TProtocol, TProcedure>, TTx>
+        | ((
+            context: EventHandlerContext<TProtocol, TProcedure> & GroupHandlerMetadata,
+          ) => void | Promise<void>)
     : MetadataHandler<ProcedureHandlers<TProtocol>[TProcedure]>
 }
-export function adaptBusHandlers<TProtocol extends GroupProtocolDefinition, TTx extends GroupTransaction>(
-  protocol: TProtocol, handlers: GroupProcedureHandlers<TProtocol, TTx>, options: { completion: HandlerCompletion<TTx>; suppress?: SuppressConfig }
+export function adaptBusHandlers<
+  TProtocol extends GroupProtocolDefinition,
+  TTx extends GroupTransaction,
+>(
+  protocol: TProtocol,
+  handlers: GroupProcedureHandlers<TProtocol, TTx>,
+  options: { completion: HandlerCompletion<TTx>; suppress?: SuppressConfig },
 ): BusHandlerMaps
-export type HandlerCompletion<TTx extends GroupTransaction> = { key: GroupKey; complete(ids: Array<string>): Promise<void>; transact(ids: Array<string>, handle: (tx: TTx, records: Array<PendingAppFrame>) => Promise<void>): Promise<void> }
-export type GroupPeerHandlerParams<TProtocols extends Record<string, GroupProtocolDefinition>, TTx extends GroupTransaction> = {
-  handlers: { [K in keyof TProtocols]: GroupProcedureHandlers<TProtocols[K], TTx> }; completion: HandlerCompletion<TTx>
+export type HandlerCompletion<TTx extends GroupTransaction> = {
+  key: GroupKey
+  complete(ids: Array<string>): Promise<void>
+  transact(
+    ids: Array<string>,
+    handle: (tx: TTx, records: Array<PendingAppFrame>) => Promise<void>,
+  ): Promise<void>
+}
+export type GroupPeerHandlerParams<
+  TProtocols extends Record<string, GroupProtocolDefinition>,
+  TTx extends GroupTransaction,
+> = {
+  handlers: { [K in keyof TProtocols]: GroupProcedureHandlers<TProtocols[K], TTx> }
+  completion: HandlerCompletion<TTx>
 }
 ```
 
@@ -1579,28 +1969,58 @@ Functions remain default at-least-once registrations. Transactional policy is va
 
 ```ts
 type EpochCheckpointBodyV1 = {
-  v: 1; type: 'kumiai/checkpoint/v1'; groupID: string; genesisHash: string
-  ciphersuite: number; epoch: number; authHash: string; parentAuthHash: string | null
-  keyHash: string; leafIndex: number
+  v: 1
+  type: 'kumiai/checkpoint/v1'
+  groupID: string
+  genesisHash: string
+  ciphersuite: number
+  epoch: number
+  authHash: string
+  parentAuthHash: string | null
+  keyHash: string
+  leafIndex: number
 }
 type CheckpointMember = {
-  signerDID: string; keyHash: string; leafIndex: number; signaturePublicKey: string
+  signerDID: string
+  keyHash: string
+  leafIndex: number
+  signaturePublicKey: string
 }
 type EpochRosterFactV1 = {
-  v: 1; key: GroupKey; genesisHash: string; ciphersuite: number
-  epoch: number; authHash: string; parentAuthHash: string | null; confirmedTranscriptHash: string
-  members: Array<CheckpointMember>; installation: { mutationID: string; stateVersion: number }
+  v: 1
+  key: GroupKey
+  genesisHash: string
+  ciphersuite: number
+  epoch: number
+  authHash: string
+  parentAuthHash: string | null
+  confirmedTranscriptHash: string
+  members: Array<CheckpointMember>
+  installation: { mutationID: string; stateVersion: number }
 }
 type CheckpointComparison =
   | { kind: 'agreement'; epoch: number; signerDID: string; keyHash: string }
-  | { kind: 'conflict'; epoch: number; signerDID: string; keyHash: string;
-      localAuthHash: string; remoteAuthHash: string; parentAuthHash: string | null }
+  | {
+      kind: 'conflict'
+      epoch: number
+      signerDID: string
+      keyHash: string
+      localAuthHash: string
+      remoteAuthHash: string
+      parentAuthHash: string | null
+    }
   | { kind: 'invalid' | 'coverage-gap' }
 type CheckpointCoverage = {
-  groupID: string; current: { key: GroupKey; epoch: number } | null
+  groupID: string
+  current: { key: GroupKey; epoch: number } | null
   retained: Array<{ key: GroupKey; from: number; through: number }>
   effectiveFloor: number | null
-  gaps: Array<{ key: GroupKey; from: number; through: number; reason: 'pre-join' | 'skipped' | 'expired' }>
+  gaps: Array<{
+    key: GroupKey
+    from: number
+    through: number
+    reason: 'pre-join' | 'skipped' | 'expired'
+  }>
 }
 type CheckpointPort = {
   signInstalled(factID: string): Promise<Uint8Array | null>
@@ -1611,50 +2031,93 @@ type CheckpointPort = {
 }
 type OwnBranchMessage = { id: string; epoch: number; authHash: string }
 type CoverageGapReason =
-  | 'pre-journal-history' | 'retention-gap' | 'unknown-ancestry' | 'ephemeral-uncovered'
+  | 'pre-journal-history'
+  | 'retention-gap'
+  | 'unknown-ancestry'
+  | 'ephemeral-uncovered'
 type ReportCoverage = { kind: 'complete' } | { kind: 'partial'; reasons: Array<CoverageGapReason> }
 type BranchReportCoverage = {
-  ancestry: ReportCoverage; ownMessages: ReportCoverage; othersSeen: ReportCoverage
-  membership: ReportCoverage; ephemeral: ReportCoverage
+  ancestry: ReportCoverage
+  ownMessages: ReportCoverage
+  othersSeen: ReportCoverage
+  membership: ReportCoverage
+  ephemeral: ReportCoverage
 }
 type AbandonedEpochRange = { from: number; through: number } | 'unknown'
 type ForkBranch = {
-  authHash: string; signers: Array<{ signerDID: string; keyHash: string }>
-  firstSeenAt: number; lastCheckpointAt: number
+  authHash: string
+  signers: Array<{ signerDID: string; keyHash: string }>
+  firstSeenAt: number
+  lastCheckpointAt: number
 }
 type ForkNotice = {
-  id: string; groupID: string; splitEpoch: number; branches: Array<ForkBranch>
-  deviceAuthHash: string; detectedAt: number; lastEvidenceAt: number
-  atRisk: Array<OwnBranchMessage>; revision: number; acknowledgedRevision: number
+  id: string
+  groupID: string
+  splitEpoch: number
+  branches: Array<ForkBranch>
+  deviceAuthHash: string
+  detectedAt: number
+  lastEvidenceAt: number
+  atRisk: Array<OwnBranchMessage>
+  revision: number
+  acknowledgedRevision: number
   acknowledgedAt: number | null
   coverage: { evidence: ReportCoverage; ownMessages: ReportCoverage; ephemeral: ReportCoverage }
-  closedAt: number | null; equivocations: Array<{ signerDID: string; keyHash: string }>
+  closedAt: number | null
+  equivocations: Array<{ signerDID: string; keyHash: string }>
 }
 type ForkNoticeEvent = { id: string; kind: 'fork-detected' | 'fork-updated'; notice: ForkNotice }
 export type BranchAbandonedEvent = GroupKey & {
-  id: string; kind: 'branch-abandoned'; noticeID: string | null; epochs: AbandonedEpochRange
-  ownMessages: Array<OwnBranchMessage>; othersSeen: number
-  membersAdded: Array<string>; membersRemoved: Array<string>; coverage: BranchReportCoverage
+  id: string
+  kind: 'branch-abandoned'
+  noticeID: string | null
+  epochs: AbandonedEpochRange
+  ownMessages: Array<OwnBranchMessage>
+  othersSeen: number
+  membersAdded: Array<string>
+  membersRemoved: Array<string>
+  coverage: BranchReportCoverage
 }
 export type GroupCondition = 'not-member' | 'spent-set-corrupt'
 export type NotMemberEvidence = {
-  responderKeyHash: string; epoch: number; authHash: string; observedAt: number
-  responderDIDs: Array<string>; responderCount: number
+  responderKeyHash: string
+  epoch: number
+  authHash: string
+  observedAt: number
+  responderDIDs: Array<string>
+  responderCount: number
 }
 export type GroupConditionEvent = GroupKey & {
-  id: string; kind: GroupCondition; detectedAt: number; evidence: NotMemberEvidence | null
+  id: string
+  kind: GroupCondition
+  detectedAt: number
+  evidence: NotMemberEvidence | null
 }
-export type RecoveryPendingReason = 'no-reply' | 'no-eligible-responder' | 'target-behind' | 'target-unresolved'
+export type RecoveryPendingReason =
+  | 'no-reply'
+  | 'no-eligible-responder'
+  | 'target-behind'
+  | 'target-unresolved'
 // RegistryPeerStatus includes this diagnostic arm and uses the same reasons in its pending arm.
 export type NotMemberStatus = {
-  kind: 'not-member'; eventID: string; evidence: NotMemberEvidence
-  retrying: true; pendingReason?: RecoveryPendingReason
+  kind: 'not-member'
+  eventID: string
+  evidence: NotMemberEvidence
+  retrying: true
+  pendingReason?: RecoveryPendingReason
 }
 export type AuthenticatedRosterAbsence = {
-  groupID: string; requesterDID: string; requestID: string; epoch: number
-  captureHead: string | null; groupInfoAuthenticator: Uint8Array; confirmedTranscriptHash: string
-  responderDID: string; responderKeyHash: string
-  lineage: Array<{ epoch: number; authHash: string }>; evidence: Uint8Array
+  groupID: string
+  requesterDID: string
+  requestID: string
+  epoch: number
+  captureHead: string | null
+  groupInfoAuthenticator: Uint8Array
+  confirmedTranscriptHash: string
+  responderDID: string
+  responderKeyHash: string
+  lineage: Array<{ epoch: number; authHash: string }>
+  evidence: Uint8Array
 }
 ```
 
@@ -1708,45 +2171,104 @@ export type StrandedReason = 'retention-gap' | 'unprocessable-gap' | 'lost-state
 // New digest-divergence/unexplained-own-commit evidence is host-report-only. Existing persisted evidence remains readable and immutable.
 // Delivered competitors/copies/versions produce diagnostic poison, never these durable halt bodies.
 export type GroupForkEvidence =
-  | { kind: 'digest-divergence'; epoch: number; position: string; localDigest: string; remoteDigest: string }
+  | {
+      kind: 'digest-divergence'
+      epoch: number
+      position: string
+      localDigest: string
+      remoteDigest: string
+    }
   | { kind: 'epoch-authenticator'; epoch: number; local: Uint8Array; remote: Uint8Array }
   | { kind: 'unexplained-own-commit'; epoch: number; position: string; digest: string }
-export type ForkHalt = { eventID: string; evidence: GroupForkEvidence; detectedAt: number; producer?: 'app-report' | 'internal' }
+export type ForkHalt = {
+  eventID: string
+  evidence: GroupForkEvidence
+  detectedAt: number
+  producer?: 'app-report' | 'internal'
+}
 // Every new record supplies producer. Optionality reads legacy records only; never invent provenance.
 export type GroupSafetyEvent = GroupKey & { id: string; kind: 'group:fork'; halt: ForkHalt }
-export type RecoveryUnavailableEvent = GroupKey & { id: string; kind: 'group:recovery-unavailable'; reason: 'trust-unreadable' }
-export type PersistenceEvent = AppStatusEvent | GroupSafetyEvent | RecoveryUnavailableEvent | GroupConditionEvent | ForkNoticeEvent | BranchAbandonedEvent
+export type RecoveryUnavailableEvent = GroupKey & {
+  id: string
+  kind: 'group:recovery-unavailable'
+  reason: 'trust-unreadable'
+}
+export type PersistenceEvent =
+  | AppStatusEvent
+  | GroupSafetyEvent
+  | RecoveryUnavailableEvent
+  | GroupConditionEvent
+  | ForkNoticeEvent
+  | BranchAbandonedEvent
 export type RecoveryTarget = { id: string; commitTopicID: string; hub: LogHub & MailboxHub }
 // (r28c) The walker's validated own occurrence, supplied to the own-candidate adoption with explicit coverage; replaces FirstValidCommit.
 // No search port or CommitSearchResult exists.
-export type OwnOccurrence = { source: AdoptionExpected; position: LogPosition; payloadDigest: string; coverage: 'complete' | 'incomplete' }
+export type OwnOccurrence = {
+  source: AdoptionExpected
+  position: LogPosition
+  payloadDigest: string
+  coverage: 'complete' | 'incomplete'
+}
 export type ResyncProof = {
-  targetID: string; topicID: string; groupInfoEpoch: number; groupInfoAuthenticator: Uint8Array
+  targetID: string
+  topicID: string
+  groupInfoEpoch: number
+  groupInfoAuthenticator: Uint8Array
   captureHead: LogPosition | null // authenticated reply's immutable head
-  position: LogPosition; payloadDigest: string; verdict: Uint8Array
+  position: LogPosition
+  payloadDigest: string
+  verdict: Uint8Array
 }
 export type ManualRecovery =
   | { mode: 'resync'; targetID: string; allowOpenFork?: boolean }
-  | { mode: 'resync'; target: { targetID: string; hub: LogHub & MailboxHub; commitTopicID: string }; allowOpenFork?: boolean }
+  | {
+      mode: 'resync'
+      target: { targetID: string; hub: LogHub & MailboxHub; commitTopicID: string }
+      allowOpenFork?: boolean
+    }
   | { mode: 'successor'; successor: GroupKey }
 export type PersistedManualRecovery =
   | { mode: 'resync'; targetID: string; commitTopicID: string; allowOpenFork: boolean }
   | { mode: 'successor'; successor: GroupKey }
 export type ManualRecoveryRecord = {
-  id: string; source: GroupKey; choice: PersistedManualRecovery; stage: 'authorised' | 'completed'
-  pauseReason: 'target-unresolved' | null; destination: GroupKey | null; attempt: CapturedRejoinRecord | null
-  epochFloor: number | null; settlements: Array<AcceptedRejoinSettlement>; mutationID: string
+  id: string
+  source: GroupKey
+  choice: PersistedManualRecovery
+  stage: 'authorised' | 'completed'
+  pauseReason: 'target-unresolved' | null
+  destination: GroupKey | null
+  attempt: CapturedRejoinRecord | null
+  epochFloor: number | null
+  settlements: Array<AcceptedRejoinSettlement>
+  mutationID: string
 }
-export type ManualRecoveryStatus = { id: string; kind: 'pending' | 'paused' | 'completed'; reason: 'target-unresolved' | null }
+export type ManualRecoveryStatus = {
+  id: string
+  kind: 'pending' | 'paused' | 'completed'
+  reason: 'target-unresolved' | null
+}
 export type SuccessorTombstone = {
-  kind: 'successor-tombstone'; id: string; source: GroupKey; successor: GroupKey
-  authorisationID: string; retiredAt: number; clearedAt: number | null
+  kind: 'successor-tombstone'
+  id: string
+  source: GroupKey
+  successor: GroupKey
+  authorisationID: string
+  retiredAt: number
+  clearedAt: number | null
 }
 export function canMoveCurrent(params: {
-  control: ControlSnapshot; activity: { pending: number }; stateReadable: boolean
-  ledgerComplete: boolean; walkComplete: boolean; outboxUnresolved: boolean; settlementUnresolved: boolean
-  hardHold: SafetyHold; condition: GroupCondition | null; openForkNotice: boolean
-  activeRejoin: boolean; allowOpenFork: boolean
+  control: ControlSnapshot
+  activity: { pending: number }
+  stateReadable: boolean
+  ledgerComplete: boolean
+  walkComplete: boolean
+  outboxUnresolved: boolean
+  settlementUnresolved: boolean
+  hardHold: SafetyHold
+  condition: GroupCondition | null
+  openForkNotice: boolean
+  activeRejoin: boolean
+  allowOpenFork: boolean
 }): boolean
 export type GroupSafety = {
   epochAuthenticator(key: GroupKey): Promise<EpochIdentity | null>
@@ -1756,14 +2278,28 @@ export type GroupSafety = {
   onSafetyChanged(key: GroupKey, sink: (reason: SafetyHold) => void): () => void
   clearTombstone(groupID: string): Promise<void>
   status(key: GroupKey): Promise<{
-    hold: SafetyHold; condition: GroupCondition | null; evidence: NotMemberEvidence | null
+    hold: SafetyHold
+    condition: GroupCondition | null
+    evidence: NotMemberEvidence | null
     manualRecovery: ManualRecoveryStatus | null
   }>
-  events(key: GroupKey): Promise<Array<GroupSafetyEvent | RecoveryUnavailableEvent | GroupConditionEvent | ForkNoticeEvent | BranchAbandonedEvent>>
+  events(
+    key: GroupKey,
+  ): Promise<
+    Array<
+      | GroupSafetyEvent
+      | RecoveryUnavailableEvent
+      | GroupConditionEvent
+      | ForkNoticeEvent
+      | BranchAbandonedEvent
+    >
+  >
   ackEvent(key: GroupKey, id: string): Promise<void>
 }
 export function createGroupSafety<TTx extends GroupTransaction>(params: {
-  registry: GroupHandleRegistry; persistence: GroupPersistence<TTx>; mls: GroupMLS
+  registry: GroupHandleRegistry
+  persistence: GroupPersistence<TTx>
+  mls: GroupMLS
   resolveTarget: (targetID: string) => Promise<RecoveryTarget>
 }): GroupSafety
 ```
@@ -1795,77 +2331,167 @@ Preserve all existing durable halt bodies/events without reinterpretation, inclu
 
 ```ts
 export type OpenWelcomeParams = Omit<ProcessWelcomeParams, 'keyPackageBundle'>
-export type JoinedWelcome = { group: GroupHandle; credential: MemberCredential; sourceErrors?: Array<Error> }
+export type JoinedWelcome = {
+  group: GroupHandle
+  credential: MemberCredential
+  sourceErrors?: Array<Error>
+}
 export type OpenWelcomeResult =
   | { joined: JoinedWelcome; packageUse: PackageUse }
   | { refused: 'package-consumed'; packageUse: PackageUse } // (r16 decision) receipt never claims Welcome admission
-export function openWelcome(sources: Array<BundleSource>, welcome: OpenWelcomeParams): Promise<OpenWelcomeResult>
-export type WelcomeAdmissionParams = { held: { incarnation: number; epoch: number | null; deleted: boolean; forkHalted: boolean } | null; spentEpochAuthenticators: Array<Uint8Array>; welcome: { epoch: number; epochAuthenticator: Uint8Array } }
-export function judgeWelcomeAdmission(params: WelcomeAdmissionParams): 'join' | 'alreadyJoined' | 'replace' | 'refused'
-export type AppAttempt = { incarnation: number; epoch: number; floor: string | null; attempts: number; publishID: string; segment: number; topicID: string }
-export type AppOutboxEntry = { seq: number; protocol: string; prc: string; data: Uint8Array; lastAttempt: AppAttempt | null; status: 'accepted' | 'failed' }
-export type AppPublicationOutcome = { incarnation: number; segment: number; topicID: string; position: string }
-export type AppSettlementObligation = { sequenceID: string; attemptID: string; topicID: string; outcome: 'published' }
-export type AppSettlementExpected = { identity: EpochIdentity; stateVersion: number; attemptID: string }
+export function openWelcome(
+  sources: Array<BundleSource>,
+  welcome: OpenWelcomeParams,
+): Promise<OpenWelcomeResult>
+export type WelcomeAdmissionParams = {
+  held: { incarnation: number; epoch: number | null; deleted: boolean; forkHalted: boolean } | null
+  spentEpochAuthenticators: Array<Uint8Array>
+  welcome: { epoch: number; epochAuthenticator: Uint8Array }
+}
+export function judgeWelcomeAdmission(
+  params: WelcomeAdmissionParams,
+): 'join' | 'alreadyJoined' | 'replace' | 'refused'
+export type AppAttempt = {
+  incarnation: number
+  epoch: number
+  floor: string | null
+  attempts: number
+  publishID: string
+  segment: number
+  topicID: string
+}
+export type AppOutboxEntry = {
+  seq: number
+  protocol: string
+  prc: string
+  data: Uint8Array
+  lastAttempt: AppAttempt | null
+  status: 'accepted' | 'failed'
+}
+export type AppPublicationOutcome = {
+  incarnation: number
+  segment: number
+  topicID: string
+  position: string
+}
+export type AppSettlementObligation = {
+  sequenceID: string
+  attemptID: string
+  topicID: string
+  outcome: 'published'
+}
+export type AppSettlementExpected = {
+  identity: EpochIdentity
+  stateVersion: number
+  attemptID: string
+}
 export type AppSettlementResult =
   | { recorded: true }
-  | { recorded: false; reason: 'identity-changed' | 'state-version-changed' | 'attempt-changed' | 'entry-missing' }
+  | {
+      recorded: false
+      reason: 'identity-changed' | 'state-version-changed' | 'attempt-changed' | 'entry-missing'
+    }
 export type AppStatusEvent = GroupKey & { id: string; entry: AppOutboxEntry } & (
-  | { kind: 'accepted' }
-  | { kind: 'published'; occurrence: AppPublicationOutcome }
-  | { kind: 'failed'; reason: 'incarnation-abandoned' | 'removed' | 'deleted' | 'database-restored'; nextIncarnation?: number }
-)
+    | { kind: 'accepted' }
+    | { kind: 'published'; occurrence: AppPublicationOutcome }
+    | {
+        kind: 'failed'
+        reason: 'incarnation-abandoned' | 'removed' | 'deleted' | 'database-restored'
+        nextIncarnation?: number
+      }
+  )
 export type AppOutbox = {
   put(entry: AppOutboxEntry): Promise<void>
   list(): Promise<Array<AppOutboxEntry>>
-  recordSettlement(seq: number, obligation: AppSettlementObligation,
-    expected: AppSettlementExpected): Promise<AppSettlementResult>
+  recordSettlement(
+    seq: number,
+    obligation: AppSettlementObligation,
+    expected: AppSettlementExpected,
+  ): Promise<AppSettlementResult>
   loadSettlement(seq: number): Promise<AppSettlementObligation | null>
   remove(seq: number, outcome?: AppPublicationOutcome): Promise<void>
   clear(): Promise<void>
   events(): Promise<Array<AppStatusEvent>>
   ackEvent(id: string): Promise<void>
 }
-export type TransactionalGroupEffects<TTx extends GroupTransaction> = { outbox?(tx: TTx, event: AppStatusEvent): Promise<void>; delete?(tx: TTx, key: GroupKey): Promise<void> }
+export type TransactionalGroupEffects<TTx extends GroupTransaction> = {
+  outbox?(tx: TTx, event: AppStatusEvent): Promise<void>
+  delete?(tx: TTx, key: GroupKey): Promise<void>
+}
 export function decodeAppEntry(entry: AppOutboxEntry): { procedure: string; payload: unknown }
 export type MlsContextOptions = { keyRetention?: Partial<KeyRetentionConfig> }
 // GroupOptions adds keyRetention?: Partial<KeyRetentionConfig>.
 // resolveMlsContext/options, createGroup, restoreGroup, processWelcome, joinGroupExternal and derive inherit it.
 // createMlsContext sets context.clientConfig = { ...defaultClientConfig, keyRetentionConfig: mergedRetention }.
 // deriveGroup/staged clones preserve it; recovery restoration rebuilds it from registry options.
-export type RecoveryEnvironment = { identity: OwnIdentity; options: GroupOptions; recoveryBinding?: RecoveryBinding }
+export type RecoveryEnvironment = {
+  identity: OwnIdentity
+  options: GroupOptions
+  recoveryBinding?: RecoveryBinding
+}
 // @kumiai/mls primitives: no rpc or registry dependency.
 export type RecoveryTrustInputs = {
-  groupID: string; genesisAnchor: Uint8Array; signerTree: ClientState['ratchetTree']; registry: DeviceRegistry
-  credential: MemberCredential; binding: ControllerBinding | null; ledger: Array<string>; ciphersuiteName: string
+  groupID: string
+  genesisAnchor: Uint8Array
+  signerTree: ClientState['ratchetTree']
+  registry: DeviceRegistry
+  credential: MemberCredential
+  binding: ControllerBinding | null
+  ledger: Array<string>
+  ciphersuiteName: string
 }
 export function createRecoveryRequestFromTrust(params: {
-  trust: RecoveryTrustInputs; identity: OwnIdentity; requestID: string; deadlineMs?: number
+  trust: RecoveryTrustInputs
+  identity: OwnIdentity
+  requestID: string
+  deadlineMs?: number
 }): Promise<{ request: string; requestKey: Uint8Array }>
 export function authenticateRecoveryReply(params: {
-  trust: RecoveryTrustInputs; sealed: Uint8Array; requestID: string; requestKey: Uint8Array; options: GroupOptions
+  trust: RecoveryTrustInputs
+  sealed: Uint8Array
+  requestID: string
+  requestKey: Uint8Array
+  options: GroupOptions
 }): Promise<RecoveryGroupInfo | null>
 export function openRecoveryVerdictFromTrust(params: {
-  trust: RecoveryTrustInputs; sealed: Uint8Array; requestID: string; requestKey: Uint8Array; options: GroupOptions
+  trust: RecoveryTrustInputs
+  sealed: Uint8Array
+  requestID: string
+  requestKey: Uint8Array
+  options: GroupOptions
 }): Promise<OpenedRecoveryVerdict>
 // @kumiai/mls-rpc facade: convert GroupRecoveryTrust to RecoveryTrustInputs; GroupMLS request bytes are UTF-8 of primitive request.
-export type CapturedRecoveryEnvironment = RecoveryEnvironment & { accept: RecoveryAdoptionDependencies['accept'] }
+export type CapturedRecoveryEnvironment = RecoveryEnvironment & {
+  accept: RecoveryAdoptionDependencies['accept']
+}
 export function buildRecoveryCandidate(params: {
-  source: RegistryRecoverySource; sealed: Uint8Array; requestID: string; requestKey: Uint8Array
-  target: RecoveryRouting; environment: CapturedRecoveryEnvironment
+  source: RegistryRecoverySource
+  sealed: Uint8Array
+  requestID: string
+  requestKey: Uint8Array
+  target: RecoveryRouting
+  environment: CapturedRecoveryEnvironment
 }): Promise<CapturedAppliedRecovery>
 export function restoreRecoveryCandidate(params: {
-  source: RegistryRecoverySource; candidate: Uint8Array; requestKey: Uint8Array; environment: CapturedRecoveryEnvironment
+  source: RegistryRecoverySource
+  candidate: Uint8Array
+  requestKey: Uint8Array
+  environment: CapturedRecoveryEnvironment
 }): Promise<CapturedPendingRecovery>
 // buildRecoveryCandidate authenticates sealed under source trust itself and keeps those exact bytes as attestedReply;
 // a parsed reply never travels apart from its attestation. onAccepted delegates to environment.accept (r21).
-export function deriveRecoverySecretFromTrust(trust: GroupRecoveryTrust, options?: GroupOptions): Promise<Uint8Array>
+export function deriveRecoverySecretFromTrust(
+  trust: GroupRecoveryTrust,
+  options?: GroupOptions,
+): Promise<Uint8Array>
 // Default: suite KDF.expand(KDF.extract(UTF8(groupID), genesisAnchor), UTF8('kumiai/recovery/v1'), 32), exactly packages/mls-rpc/src/mls.ts:129-136.
 // genesisAnchor is the existing encoded anchor. Trust's ciphersuiteName selects the same configured suite/provider.
 // Registry recovery construction with custom recoverySecret but no recoverySecretFromTrust throws TypeError before requests/hold writes.
 // When live state is available, compare trust/live bytes and commit/rendezvous topics. Never silently change derivation or topics.
 export function createMlsContext(
-  cipherSuite: MlsContext['cipherSuite'], anchor?: GroupAnchor, options?: MlsContextOptions
+  cipherSuite: MlsContext['cipherSuite'],
+  anchor?: GroupAnchor,
+  options?: MlsContextOptions,
 ): MlsContext
 ```
 
@@ -1875,12 +2501,24 @@ Registry constructors enforce retainKeysForGenerations and maximumForwardRatchet
 Normal MLS defaults remain; options flow through every listed path. Reply/restore checks bind trust anchor/tree/registry and candidate ownership.
 Unknown complete/remove succeeds; byte/nested values are defensive copies.
 ```ts
-export class GroupStateConflictError extends Error { override name = 'GroupStateConflictError' }
-export class GroupStateUncertainError extends Error { override name = 'GroupStateUncertainError' }
-export class DisplacedGroupHandleError extends Error { override name = 'DisplacedGroupHandleError' }
-export class OutboxReplacementError extends Error { override name = 'OutboxReplacementError' }
-export class InvalidAppEntryError extends Error { override name = 'InvalidAppEntryError' }
-export class NonRootProviderError extends Error { override name = 'NonRootProviderError' }
+export class GroupStateConflictError extends Error {
+  override name = 'GroupStateConflictError'
+}
+export class GroupStateUncertainError extends Error {
+  override name = 'GroupStateUncertainError'
+}
+export class DisplacedGroupHandleError extends Error {
+  override name = 'DisplacedGroupHandleError'
+}
+export class OutboxReplacementError extends Error {
+  override name = 'OutboxReplacementError'
+}
+export class InvalidAppEntryError extends Error {
+  override name = 'InvalidAppEntryError'
+}
+export class NonRootProviderError extends Error {
+  override name = 'NonRootProviderError'
+}
 ```
 
 These inherit `(message?: string, options?: ErrorOptions)`.
@@ -1892,29 +2530,51 @@ Re-export canonical rpc StorageOutcomeUnknownError and GroupControlUnsettledErro
 export type MemoryStoreRows = Record<string, Map<string, unknown>>
 export type MemoryTransaction = GroupTransaction & { rows: MemoryStoreRows }
 export type MemoryDatabase = {
-  transact<TValue>(scope: { groupID: string | null; devicePackages: boolean }, fn: (tx: MemoryTransaction) => Promise<TValue>,
-    options?: OutcomeAwareTransactionOptions): Promise<TValue>
+  transact<TValue>(
+    scope: { groupID: string | null; devicePackages: boolean },
+    fn: (tx: MemoryTransaction) => Promise<TValue>,
+    options?: OutcomeAwareTransactionOptions,
+  ): Promise<TValue>
   completionBarrier(scope: { groupID: string | null; devicePackages: boolean }): Promise<void>
   snapshot(): MemoryStoreRows
 }
 export function createMemoryTransaction(params: { rows: MemoryStoreRows }): MemoryDatabase
 export function createMemoryDevicePersistence(params: {
-  db: MemoryDatabase; atRest: AtRestCodec; providerID: string; ownerDID: string; effects?: TransactionalGroupEffects<MemoryTransaction>
+  db: MemoryDatabase
+  atRest: AtRestCodec
+  providerID: string
+  ownerDID: string
+  effects?: TransactionalGroupEffects<MemoryTransaction>
   ownershipContext?: OwnershipContextPort
 }): DevicePersistence<MemoryTransaction>
 // Phase 3. GroupProviderTransaction forwards this root callback's StoreProvider.
 export type GroupProviderTransaction = StoreProvider & GroupTransaction
 export function createDevicePersistence(params: {
-  db: HozonDB; atRest: AtRestCodec; providerID: string; ownerDID: string; effects?: TransactionalGroupEffects<GroupProviderTransaction>
+  db: HozonDB
+  atRest: AtRestCodec
+  providerID: string
+  ownerDID: string
+  effects?: TransactionalGroupEffects<GroupProviderTransaction>
   ownershipContext?: OwnershipContextPort
 }): DevicePersistence<GroupProviderTransaction>
-export type BufferedEpochInspection = { inspectEpoch(ciphertext: Uint8Array): bigint | undefined; currentEpoch(): number | null; onEpochChanged(listener: () => void): () => void }
+export type BufferedEpochInspection = {
+  inspectEpoch(ciphertext: Uint8Array): bigint | undefined
+  currentEpoch(): number | null
+  onEpochChanged(listener: () => void): () => void
+}
 export function createBufferedPeerHubView(params: {
-  hub: MailboxHub; peerDID: string; groupID: string; epochs: BufferedEpochInspection
+  hub: MailboxHub
+  peerDID: string
+  groupID: string
+  epochs: BufferedEpochInspection
   reconnectTimeoutMs?: number
   logger?: { warn(message: string, context?: Record<string, unknown>): void }
 }): MailboxHub & { dispose(): void }
-export type MLSEncryptorParams = { access: Pick<RegistryHandleAccess, 'seal' | 'receive' | 'runtime'>; peerDID: string; role: 'dialer' | 'listener' }
+export type MLSEncryptorParams = {
+  access: Pick<RegistryHandleAccess, 'seal' | 'receive' | 'runtime'>
+  peerDID: string
+  role: 'dialer' | 'listener'
+}
 // r26: byte-level seal/receive; empty MLS AAD (kubun wire format); membership from committed runtime snapshots
 export class MLSEncryptor implements Encryptor {
   constructor(params: MLSEncryptorParams)
@@ -1929,15 +2589,39 @@ export type UnwrapResult = { payload: Uint8Array; senderDID?: string; epoch?: nu
 export type BusEvent = { data: unknown; senderDID?: string; epoch?: number }
 export type BroadcastHandlerContext = { senderDID?: string; epoch?: number; signal?: AbortSignal }
 // BroadcastMessage adds epoch?: number; BroadcastHandler takes BroadcastHandlerContext.
-export type DirectedHandlerMetadata = { epoch: number; incarnation: number; message: { header: { 'kumiai/epoch': number } } }
+export type DirectedHandlerMetadata = {
+  epoch: number
+  incarnation: number
+  message: { header: { 'kumiai/epoch': number } }
+}
 // OpenedInbound adds epoch: number. Every Enkaku event/request/stream/channel context adds DirectedHandlerMetadata.
-export type RawStoredRecord = { groupID: string; incarnation: number | null; namespace: string; recordID: string; key: string; bytes: Uint8Array }
-export type PendingCommitFault = { rejected: Promise<void>; barrierWaiting: Promise<void>; finish(outcome: 'commit' | 'rollback'): Promise<void> }
+export type RawStoredRecord = {
+  groupID: string
+  incarnation: number | null
+  namespace: string
+  recordID: string
+  key: string
+  bytes: Uint8Array
+}
+export type PendingCommitFault = {
+  rejected: Promise<void>
+  barrierWaiting: Promise<void>
+  finish(outcome: 'commit' | 'rollback'): Promise<void>
+}
 export type PersistenceTestPorts<TTx extends GroupTransaction> = {
-  device: DevicePersistence<TTx>; registry: GroupHandleRegistry; safety: GroupSafety; packages: DevicePackageAdapters
+  device: DevicePersistence<TTx>
+  registry: GroupHandleRegistry
+  safety: GroupSafety
+  packages: DevicePackageAdapters
   access(groupID: string): Promise<RegistryHandleAccess>
-  crypto(key: GroupKey): Promise<GroupCrypto & { pending: PendingAppFrames; unwrapBatch(frames: Array<OpenAppInput>): Promise<Array<OpenAppResult>> }>
-  mls(key: GroupKey): GroupMLS; completion(key: GroupKey): HandlerCompletion<TTx>
+  crypto(key: GroupKey): Promise<
+    GroupCrypto & {
+      pending: PendingAppFrames
+      unwrapBatch(frames: Array<OpenAppInput>): Promise<Array<OpenAppResult>>
+    }
+  >
+  mls(key: GroupKey): GroupMLS
+  completion(key: GroupKey): HandlerCompletion<TTx>
 }
 export type PersistenceFixture<TPorts> = {
   ports: TPorts
@@ -1948,16 +2632,26 @@ export type PersistenceFixture<TPorts> = {
   inspectRows(): Promise<MemoryStoreRows>
   inspectRawBytes(): Promise<Array<RawStoredRecord>>
   inspectSideRow(key: string): Promise<Uint8Array | null>
-  mutateStoredRecord(namespace: string, key: string,
-    mutate: (bytes: Uint8Array) => Uint8Array): Promise<void>
+  mutateStoredRecord(
+    namespace: string,
+    key: string,
+    mutate: (bytes: Uint8Array) => Uint8Array,
+  ): Promise<void>
   swapStoredRecords(namespace: string, keyA: string, keyB: string): Promise<void>
   setTime(now: number): void
   advanceTime(ms: number): Promise<void>
   close(): Promise<void>
 }
-export type PersistenceConformanceParams<TTx extends GroupTransaction> = { label: string; writeSideRow(tx: TTx, key: string, bytes: Uint8Array): Promise<void>; createFixture(id: string, effects?: TransactionalGroupEffects<TTx>): Promise<PersistenceFixture<PersistenceTestPorts<TTx>>> }
+export type PersistenceConformanceParams<TTx extends GroupTransaction> = {
+  label: string
+  writeSideRow(tx: TTx, key: string, bytes: Uint8Array): Promise<void>
+  createFixture(
+    id: string,
+    effects?: TransactionalGroupEffects<TTx>,
+  ): Promise<PersistenceFixture<PersistenceTestPorts<TTx>>>
+}
 export function testGroupPersistenceConformance<TTx extends GroupTransaction>(
-  params: PersistenceConformanceParams<TTx>
+  params: PersistenceConformanceParams<TTx>,
 ): void
 ```
 
@@ -1978,31 +2672,31 @@ through all constructors/derive/restore paths.
 
 Reverified for r16 on 2026-10-10, feat/spec-p-phase-2. These are implementation boundaries, not completion claims.
 
-| Boundary | Current source |
-|---|---|
-| Pull/build/save; absent mismatch currently returns to intent | `packages/rpc/src/control/operations.ts:144`, `:194` |
-| Match-before-coverage and direct adoption need first-valid validation (r16 decision) | `packages/rpc/src/peer.ts:2128`, `packages/rpc/src/control/operations.ts:192`, `:235` |
-| Head is separate publication metadata; MLS AAD binds no log position | `packages/rpc/src/peer.ts:2106`, `packages/hub-client/src/client.ts:94`, `node_modules/ts-mls/dist/src/messageProtection.js:69` |
-| Discarded protection tree; empty control proposals | `node_modules/ts-mls/dist/src/createCommit.js:77`, `packages/mls/src/group-commit.ts:279` |
-| Referenced proposals required; omitted proposals cleared | `node_modules/ts-mls/dist/src/clientState.js:398`, `node_modules/ts-mls/dist/src/processMessages.js:219` |
-| SQL mismatch rolls back ID claim; memory needs topic-scoped dedup | `packages/hub-store/src/store.ts:226`, `:310`, `packages/hub-server/src/memoryStore.ts:216` |
-| Divergence/ahead/own-unmerged classifier and strand observations | `packages/rpc/src/classify.ts:255`, `:282`, `packages/rpc/src/peer-types.ts:112` |
-| Losing forks currently heal; shared automatic recovery trigger | `packages/rpc/src/peer.ts:1512`, `:3053` |
-| Existing resync wrapper, producer, sealed reply and replacement gate | `packages/mls/src/group-welcome.ts:203`, `packages/mls-rpc/src/recovery.ts:144`, `packages/mls/src/recovery.ts:538`, `packages/mls/src/lifecycle.ts:445` |
-| Current reply v1, attestation layout/authentication and missing captureHead | `packages/mls/src/recovery.ts:35`, `:251`, `:261`, `:566`, `:618`, `:711`, `packages/rpc/src/peer.ts:1092`, `packages/mls-rpc/src/mls.ts:397` |
-| KeyPackage secrets generated independently, encoded and held in host source stores | `node_modules/ts-mls/dist/src/keyPackage.js:62`, `packages/mls/src/group-credential.ts:71`, `packages/mls/src/key-package-codec.ts:91`, `packages/mls-hub/src/pool.ts:117`, `packages/mls-hub/src/provisioner.ts:135`, `packages/mls-hub/src/pool-store.ts:24`, `packages/mls-hub/src/store.ts:21` |
-| Welcome private-key input and restored bundles | `packages/mls/src/group-welcome.ts:95`, `packages/mls-hub/src/records.ts:161` |
-| Hub KeyPackage surface has no revocation, last-resort upload replaces its slot | `packages/hub-protocol/src/protocol.ts:193`, `:241`, `:262`, `packages/hub-client/src/client.ts:186` |
-| Fresh resync tree/history and zero generations | `node_modules/ts-mls/dist/src/createCommit.js:289`, `node_modules/ts-mls/dist/src/secretTree.js:241` |
-| Ordinary adoption progress carry | `packages/mls/src/group-handle.ts:910` |
-| Current v1 codec and recovery source-tree splice | `packages/mls/src/codec.ts:25`, `packages/mls-rpc/src/recovery-codec.ts:36` |
-| Sender-zero encoding loss | `node_modules/ts-mls/dist/src/unappliedProposals.js:8`, `node_modules/ts-mls/dist/src/codec/optional.js:4` |
-| Separate pending completion/cursor; terminal startup precedes pending restore | `packages/rpc/src/app-lane.ts:498`, `:513`, `packages/rpc/src/peer.ts:3111`, `:3137` |
-| Ordinary cross-group reuse before consume; source metadata persists late consumption | `packages/mls-hub/src/join.ts:46`, `packages/mls-hub/test/join.test.ts:167`, `packages/mls-hub/README.md:166`, `packages/mls-hub/src/pool-store.ts:54` |
-| Recovery requires last-known tree/anchor; current consumers require a handle | `packages/mls/src/recovery.ts:658`, `:675`, `packages/mls-rpc/src/mls.ts:386`, `:416`, `:466` |
-| Existing access/crypto, handlers and pre-open ref need adapters | `packages/mls-rpc/src/access.ts:12`, `packages/mls-rpc/src/crypto.ts:87`, `packages/rpc/src/handlers.ts:19`, `packages/rpc/src/app-lane.ts:724`, `:517`, `../kubun/packages/plugin-p2p/src/groups/group-handle-access.ts:24` |
-| Reconnecting lift must replay retention (r16 decision) | `../kubun/packages/plugin-p2p/src/hub/hub-like.ts:529`, `:1033` |
-| Provider lacks explicit scope and ambiguous-completion hook retention | `../hozon/packages/db/src/db.ts:31`, `:275`, `:286` |
+| Boundary                                                                             | Current source                                                                                                                                                                                                                                                                                     |
+| ------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pull/build/save; absent mismatch currently returns to intent                         | `packages/rpc/src/control/operations.ts:144`, `:194`                                                                                                                                                                                                                                               |
+| Match-before-coverage and direct adoption need first-valid validation (r16 decision) | `packages/rpc/src/peer.ts:2128`, `packages/rpc/src/control/operations.ts:192`, `:235`                                                                                                                                                                                                              |
+| Head is separate publication metadata; MLS AAD binds no log position                 | `packages/rpc/src/peer.ts:2106`, `packages/hub-client/src/client.ts:94`, `node_modules/ts-mls/dist/src/messageProtection.js:69`                                                                                                                                                                    |
+| Discarded protection tree; empty control proposals                                   | `node_modules/ts-mls/dist/src/createCommit.js:77`, `packages/mls/src/group-commit.ts:279`                                                                                                                                                                                                          |
+| Referenced proposals required; omitted proposals cleared                             | `node_modules/ts-mls/dist/src/clientState.js:398`, `node_modules/ts-mls/dist/src/processMessages.js:219`                                                                                                                                                                                           |
+| SQL mismatch rolls back ID claim; memory needs topic-scoped dedup                    | `packages/hub-store/src/store.ts:226`, `:310`, `packages/hub-server/src/memoryStore.ts:216`                                                                                                                                                                                                        |
+| Divergence/ahead/own-unmerged classifier and strand observations                     | `packages/rpc/src/classify.ts:255`, `:282`, `packages/rpc/src/peer-types.ts:112`                                                                                                                                                                                                                   |
+| Losing forks currently heal; shared automatic recovery trigger                       | `packages/rpc/src/peer.ts:1512`, `:3053`                                                                                                                                                                                                                                                           |
+| Existing resync wrapper, producer, sealed reply and replacement gate                 | `packages/mls/src/group-welcome.ts:203`, `packages/mls-rpc/src/recovery.ts:144`, `packages/mls/src/recovery.ts:538`, `packages/mls/src/lifecycle.ts:445`                                                                                                                                           |
+| Current reply v1, attestation layout/authentication and missing captureHead          | `packages/mls/src/recovery.ts:35`, `:251`, `:261`, `:566`, `:618`, `:711`, `packages/rpc/src/peer.ts:1092`, `packages/mls-rpc/src/mls.ts:397`                                                                                                                                                      |
+| KeyPackage secrets generated independently, encoded and held in host source stores   | `node_modules/ts-mls/dist/src/keyPackage.js:62`, `packages/mls/src/group-credential.ts:71`, `packages/mls/src/key-package-codec.ts:91`, `packages/mls-hub/src/pool.ts:117`, `packages/mls-hub/src/provisioner.ts:135`, `packages/mls-hub/src/pool-store.ts:24`, `packages/mls-hub/src/store.ts:21` |
+| Welcome private-key input and restored bundles                                       | `packages/mls/src/group-welcome.ts:95`, `packages/mls-hub/src/records.ts:161`                                                                                                                                                                                                                      |
+| Hub KeyPackage surface has no revocation, last-resort upload replaces its slot       | `packages/hub-protocol/src/protocol.ts:193`, `:241`, `:262`, `packages/hub-client/src/client.ts:186`                                                                                                                                                                                               |
+| Fresh resync tree/history and zero generations                                       | `node_modules/ts-mls/dist/src/createCommit.js:289`, `node_modules/ts-mls/dist/src/secretTree.js:241`                                                                                                                                                                                               |
+| Ordinary adoption progress carry                                                     | `packages/mls/src/group-handle.ts:910`                                                                                                                                                                                                                                                             |
+| Current v1 codec and recovery source-tree splice                                     | `packages/mls/src/codec.ts:25`, `packages/mls-rpc/src/recovery-codec.ts:36`                                                                                                                                                                                                                        |
+| Sender-zero encoding loss                                                            | `node_modules/ts-mls/dist/src/unappliedProposals.js:8`, `node_modules/ts-mls/dist/src/codec/optional.js:4`                                                                                                                                                                                         |
+| Separate pending completion/cursor; terminal startup precedes pending restore        | `packages/rpc/src/app-lane.ts:498`, `:513`, `packages/rpc/src/peer.ts:3111`, `:3137`                                                                                                                                                                                                               |
+| Ordinary cross-group reuse before consume; source metadata persists late consumption | `packages/mls-hub/src/join.ts:46`, `packages/mls-hub/test/join.test.ts:167`, `packages/mls-hub/README.md:166`, `packages/mls-hub/src/pool-store.ts:54`                                                                                                                                             |
+| Recovery requires last-known tree/anchor; current consumers require a handle         | `packages/mls/src/recovery.ts:658`, `:675`, `packages/mls-rpc/src/mls.ts:386`, `:416`, `:466`                                                                                                                                                                                                      |
+| Existing access/crypto, handlers and pre-open ref need adapters                      | `packages/mls-rpc/src/access.ts:12`, `packages/mls-rpc/src/crypto.ts:87`, `packages/rpc/src/handlers.ts:19`, `packages/rpc/src/app-lane.ts:724`, `:517`, `../kubun/packages/plugin-p2p/src/groups/group-handle-access.ts:24`                                                                       |
+| Reconnecting lift must replay retention (r16 decision)                               | `../kubun/packages/plugin-p2p/src/hub/hub-like.ts:529`, `:1033`                                                                                                                                                                                                                                    |
+| Provider lacks explicit scope and ambiguous-completion hook retention                | `../hozon/packages/db/src/db.ts:31`, `:275`, `:286`                                                                                                                                                                                                                                                |
 
 Supplied Resync/C probes report fresh-member resync and exact-byte retry; neither was rerun or tested capture-head/database-loss rules. Resync's assembled
 integration was blocked. D1/D4 specify validation/key/progress requirements without implementation claims.
@@ -2012,30 +2706,30 @@ integration was blocked. D1/D4 specify validation/key/progress requirements with
 Wrap providers/hub clients only in tests. Phase 2 reconstructs runtime. Phase 3 faults real providers.
 Phase 6 kills children. After means proven transaction commit, never callback completion.
 
-| Seam | Recovery assertion |
-|---|---|
-| Installed state/fact/publication debt committed, before signing | restart signs that exact proven installation; progress-only saves create no fact; rollback releases nothing |
-| Exact checkpoint frame saved, before publish or after ambiguous handoff | retry identical bytes/publishID; persist heartbeat deadline/ID; stale workers never follow a replacement incarnation |
-| Notice/condition/event committed, before notification or after acknowledgement | replay/coalesce material evidence, not heartbeats; checkpoint input never creates a hold or recovery transition |
-| Checkpoint expiry before restart or late acknowledgement | group-wide 256/seven-day bounds prune evidence even unacknowledged; summary/coverage exposes holes without clock refresh |
-| Superseded X/history cleared to bound Y intent, before construction or after restart | exact X and obligations survive for every saved stage; ordinary floor unchanged; only the same Y gets E; every capture rechecks lineage/transcript |
-| Authorised manual attempt replaces pending forkRecovery intent | abandonment removes Y's exception atomically; pending intents count as active rejoin before replacement |
-| Manual target persisted, before resolver/move/rejoin proof | resume exact ID/topic/override only; mismatch pauses visibly without fallback; source/routing/holds remain until proof |
-| clearHold before/after proven commit, including ambiguity | keep hold before proof; clear only matching app provenance; retain exact evidence/history and unrelated conditions |
-| Successor retirement/tombstone committed, before routing notification | source stays retired, old Welcome refuses across restart; no state/messages copied; owed work remains serviceable |
-| Decrypted missing/malformed spent set observed by warm or cold registry | persist spent-set-corrupt through safety-only writes; unreadable envelopes remain recovery-unavailable; precedence survives restart |
-| Inside a group transition/batch, after its first logical write | all affected namespaces and transactional effects commit together or remain unchanged |
-| Built-save/manual authorisation committed, before publish or after remote acceptance | only the selected recovery target resumes; exact saved bytes/ID/candidate survive; the walk settles, never a pre-walk search (r28b) |
-| Open batch committed, before default handler; default effect before completion commit | every opened frame redelivers with the same key until completion; no cursor-only loss |
-| Transactional completion before/after COMMIT | host effect, pending completion and cursor all roll back or all persist |
-| Self-removal committed, before opened handlers drain | terminal restart drains persisted records without new crypto/network work before clearing |
-| Certification committed, before removal/terminal/switch | frozen obligation survives; original sealed topicID reports published exactly once |
+| Seam                                                                                                      | Recovery assertion                                                                                                                                                                                    |
+| --------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Installed state/fact/publication debt committed, before signing                                           | restart signs that exact proven installation; progress-only saves create no fact; rollback releases nothing                                                                                           |
+| Exact checkpoint frame saved, before publish or after ambiguous handoff                                   | retry identical bytes/publishID; persist heartbeat deadline/ID; stale workers never follow a replacement incarnation                                                                                  |
+| Notice/condition/event committed, before notification or after acknowledgement                            | replay/coalesce material evidence, not heartbeats; checkpoint input never creates a hold or recovery transition                                                                                       |
+| Checkpoint expiry before restart or late acknowledgement                                                  | group-wide 256/seven-day bounds prune evidence even unacknowledged; summary/coverage exposes holes without clock refresh                                                                              |
+| Superseded X/history cleared to bound Y intent, before construction or after restart                      | exact X and obligations survive for every saved stage; ordinary floor unchanged; only the same Y gets E; every capture rechecks lineage/transcript                                                    |
+| Authorised manual attempt replaces pending forkRecovery intent                                            | abandonment removes Y's exception atomically; pending intents count as active rejoin before replacement                                                                                               |
+| Manual target persisted, before resolver/move/rejoin proof                                                | resume exact ID/topic/override only; mismatch pauses visibly without fallback; source/routing/holds remain until proof                                                                                |
+| clearHold before/after proven commit, including ambiguity                                                 | keep hold before proof; clear only matching app provenance; retain exact evidence/history and unrelated conditions                                                                                    |
+| Successor retirement/tombstone committed, before routing notification                                     | source stays retired, old Welcome refuses across restart; no state/messages copied; owed work remains serviceable                                                                                     |
+| Decrypted missing/malformed spent set observed by warm or cold registry                                   | persist spent-set-corrupt through safety-only writes; unreadable envelopes remain recovery-unavailable; precedence survives restart                                                                   |
+| Inside a group transition/batch, after its first logical write                                            | all affected namespaces and transactional effects commit together or remain unchanged                                                                                                                 |
+| Built-save/manual authorisation committed, before publish or after remote acceptance                      | only the selected recovery target resumes; exact saved bytes/ID/candidate survive; the walk settles, never a pre-walk search (r28b)                                                                   |
+| Open batch committed, before default handler; default effect before completion commit                     | every opened frame redelivers with the same key until completion; no cursor-only loss                                                                                                                 |
+| Transactional completion before/after COMMIT                                                              | host effect, pending completion and cursor all roll back or all persist                                                                                                                               |
+| Self-removal committed, before opened handlers drain                                                      | terminal restart drains persisted records without new crypto/network work before clearing                                                                                                             |
+| Certification committed, before removal/terminal/switch                                                   | frozen obligation survives; original sealed topicID reports published exactly once                                                                                                                    |
 | Fork-halt committed before notification, or recovery switch/Welcome committed before peer restart/consume | halt/event survive without automatic recovery; a completed switch isolates/tombstones records and replays failures; device hub-cleanup survives retirement and resumes without joinRef (r16 decision) |
-| COMMIT rejected while backend unfinished | raw negative reads release nothing; barrier selects final rows and one hook queue, or none with factory fail-stop on ownership conflict |
-| Ownership conflict found by proof (r17 decision) | factory fail-stops before any hook or new transaction; restart replays durable markers, events and obligations; no hook runs for the conflicted mutation |
-| Application lease committed, before seal | restart restores the advanced committed state; the lost send copy's range is wasted, with no additional skip or sender generation reuse |
-| Welcome transport accepted, before obligation deletion | delivery repeats at least once; atomic ordinary burn/receipt or last-resort spent admission prevents reinstall |
-| Restore declaration committed, before package invalidation or group failure transactions finish | startup remains held after reconstruction. Resume invalidation/holds/events before resync or any send (r15 decision). |
+| COMMIT rejected while backend unfinished                                                                  | raw negative reads release nothing; barrier selects final rows and one hook queue, or none with factory fail-stop on ownership conflict                                                               |
+| Ownership conflict found by proof (r17 decision)                                                          | factory fail-stops before any hook or new transaction; restart replays durable markers, events and obligations; no hook runs for the conflicted mutation                                              |
+| Application lease committed, before seal                                                                  | restart restores the advanced committed state; the lost send copy's range is wasted, with no additional skip or sender generation reuse                                                               |
+| Welcome transport accepted, before obligation deletion                                                    | delivery repeats at least once; atomic ordinary burn/receipt or last-resort spent admission prevents reinstall                                                                                        |
+| Restore declaration committed, before package invalidation or group failure transactions finish           | startup remains held after reconstruction. Resume invalidation/holds/events before resync or any send (r15 decision).                                                                                 |
 
 There is no pending-complete/cursor seam, state/control/anchor split seam or handshake-reservation seam.
 Remaining external P2a publish/confirm/bootstrap/Welcome seams use its stage replay. Frame-driven past divergence becomes diagnostic poison.
@@ -2050,102 +2744,102 @@ Checkpoint core includes the real split witness. Absence and floor contracts imm
 Both real MLS port runners exercise registry authority and transcript checks through ordinary adapters, without capability replacement.
 Keep each meaningful existing case. Replace cases tied solely to removed mechanisms with the equivalent invariant below.
 
-| Suite / phase | Case | Required assertion |
-|---|---|---|
-| codec / 2 | lossless sender | zero/one/absent clone/save/reopen, malformed sidecar. v2 only: flags 0 and 1 round-trip the reservation fields exactly; v1, v3, v4 and unknown version bytes throw; flags or consumed byte above 1 and trailing bytes refuse. Zero regression fails against current codec. |
-| recovery codec / 2 | complete sourceState and captured origin | differing source/candidate trees, empty proposals and zero/one/absent senders. Persisted v3 candidate/key restores bound verdict and immutable authenticated source/target/capture/search origin. V1/v2 adoption refuses. Legacy unadopted/conflictEpoch records hold without mutation or fabricated metadata; proven adopted continuations never reinstall. |
-| checkpoints / 2,3 | canonical installed-only authority | Strict Ed25519/canonical bytes/4096-byte bound, exact hashes/parents and immutable provenance. Speculative/rolled-back/fabricated facts cannot sign. Every installation site captures transcript/roster/debt, progress never does. Fence stale workers. Real MLS and independent double, supplied/absent ownership context. |
-| | real split view and refused loser | Independently install valid divergent states under shared signers. Exchange only checkpoints, withholding competing commits. Both sides notify without halt/switch/stranding. CAS loser/re-encoding cannot manufacture installation facts. Lone fabricated testimony only notifies. |
-| | eligibility and comparison coverage | DID+key pre-split eligibility with compared-epoch fallback, leaf differences and equivocation attribution. Expose group-wide effectiveFloor/ranges/holes after skipped/pre-join/expired epochs and restart. Summary-only epochs never restore coverage. |
-| | bounded transport/storage | Separate checkpoint/commit heads and cursors, identical authorize gates, subscribe-before-drain, retained fetch, exact retry, deadlines/jitter and rate/receive budgets. Current included in 256; supersession age and count prune even unacknowledged evidence. No roster truncation or replay clock refresh. |
-| | notices and journal reports | Material-only coalescing/quiet close, local clocks, ack/history and partial summaries. Prospective own IDs/other counters, zero ephemeral rows. Unknown ancestry reports unknown/partial without delaying authenticated switch. Real/double report and retirement seams. |
-| roster absence / 2,3 | disclosure and complete proof | Historical DID AND key gate, never-seen/expired silence, bounded requestID dedupe/budgets. Bind request/head/tree/complete ledger/lineage. Changed leaf with present DID is never absence. No secret/message or historical roster disclosure. Real/double and restart rows. |
-| | bounded signed span | Reject comparisonEpoch tampering/unsafe values and cross-domain/spliced replies. Select [max(comparisonEpoch, responder oldest retained), F]. Keep total reply <=786432 bytes including overhead by trimming older lineage frames, retaining those nearest F and always F's frame. Large-group full history exceeds the bound; its bounded suffix verifies without truncating public tree/ledger. Compare the newest common retained epoch in the suffix. Missing E refuses fork-floor authority even when common-epoch absence qualifies. |
-| | no-open-notice 20/12 diagnosis | Requester installed through 20 with no open notice signs its OLDEST retained epoch. Eligible former-member responder on the different branch at 12 returns the bounded retained span through 12. Newest common retained epoch comparison verifies unequal lineage and own-DID absence: surface not-member, keep retries running and X/floor unchanged. No fork-floor authority follows from this diagnosis alone. Real/double and restart rows. |
-| | lineage-relative diagnosis | Advanced losing device at 20, continuing branch at 12, split 10: verified unequal lineage permits not-member. Older/equal same-lineage proof refuses. Fresh losing-branch absence only diagnoses, retries continue; later install/head-only/re-anchor clears active condition and preserves evidence. No new admission refusal. |
-| | status and app policy | Defensive responder keyHash/epoch/observedAt/DIDs/count; retrying:true with optional pendingReason. Distinguish no-reply/no-eligible-responder. Events coalesce per new evidence. Disposal/deletion remains app policy, never terminal continuation authority. |
-| fork recovery / 2,3 | saved X and no-X | Eligible non-equivocating open E testimony plus same reply key's matching E checkpoint/pre-E roster and MLS lineage/transcript. Settle built/published/confirmed/adopted-incomplete X to superseded-branch with exact sealed history, never not-accepted. Union obligations and persist bound Y intent atomically, or no-X intent without invented settlement. |
-| | every capture and restart | Real adapter apply/restore/recapture rechecks E-lineage and transcript for Y, including restart after settlement. Own-lineage stale capture refuses even above E. Ordinary floor unchanged; settlement/abandonment removes only Y's exception. Two-member healing needs no second DID. |
-| | coverage and best-known split | F >= best-known E. Below oldest or retained-range hole stays target-behind. Earlier-moving notice re-enables authorisation for head in [S,E). Hole waits for a retained epoch or beyond newest; evidence expiry stays target-behind. Manual resync exits. |
-| | real adapter authority | Both real port runners exercise no-X and saved-X healing through original adapters. Registry facts reach ordinary v3 sealing; host injection cannot supply private authority/disclosure/floor inputs. V2/missing authority preserves X/floor and retries. |
-| manual recovery / 2,3 | current move restrictions | Require freshness/readability/complete ledger/walk and no lag/slot/operation/unresolved publications/settlements/pending owner work. Reject every hard hold/condition/open notice/active rejoin, including pending forkRecoveryAttempt. allowOpenFork overrides only open notice. Real/double and restart rows. |
-| | selected-target rejoin | Call-time/registered exact ID/topic/override persists. Resolver mismatch visibly pauses without fallback. Same-key move preserves holds. Rejoin needs bound external confirmation and creates hold-free n+1. Failed/pending proof preserves source/routing/holds. Hard-held responders stay silent; all-held exit is successor. |
-| | intent abandonment and partial migration | Manual authorisation atomically abandons pending forkRecovery intent. Partial migration may split hubs undetectably; ahead arrival stays target-behind absent restricted authority. Empty targets never bypass current-move exclusions. |
-| | successor and scoped clear | Already admitted successor retires source atomically with tombstone/failures/routing; never copies state/messages. Newer unspent old Welcome still refuses, including restart. Explicit clearTombstone preserves spent checks. Matching app-report clearHold preserves history, refuses internal/legacy/unrelated holds, and resumes ordinary walk without forced resync. |
-| spent diagnosis / 2,3 | cold/warm/restore paths | Successfully decoded missing/malformed sets yield typed spent-set-corrupt/event/status; unreadable envelopes retain recovery-unavailable. No empty fallback. Warm observation persists across restart. Preserve precedence/evidence and ordinary admission. Total-loss fresh invitation and already admitted successor remain available. |
-| recovery reply / 2 | authenticated captureHead (r15 decision) | Responder exports a complete reconciled snapshot/cursor pair; empty gap or moved snapshot never certifies a head. String/null and captured authenticator round-trip in attestation; missing/wrong-type/tampered/invalid fields and v1 refuse before build. Restart retains original captureHead/target/search origin and initial CAS head. |
-| persistence / 2,3 | CAS and monotonicity | Stale revision/version, tombstone-as-absent, lower epoch, same-number different authenticator or same-identity progress/ceiling regression reject unchanged. Non-root factories refuse. |
-| | incarnation switch atomicity/isolation | Source A4 in n to accepted external-resync state in n+1. Mid-write rollback changes neither record. Commit tombstones n and installs n+1 with fresh progress/anchor/cursors/control. Old applied rows cannot mask new-incarnation self-removal. |
-| | source/candidate guards | stale incarnation/version/source, unaccepted/refused/spent resync result reject. Ambiguous successful switch resolves once. Adopted replay never reinstalls. |
-| | spent authenticators across incarnations | A3 to A4 to fresh resync in n+1, reconstruct, exact and alternate valid A3 both refuse for ordinary/last-resort sources. Same authenticator/different bytes cannot evade admission. |
-| | cross-group ordinary Welcome (r16 decision) | Concurrent Welcomes name one ordinary source/ref. Exactly one group installs/burns it, including COMMIT ambiguity; loser installs nothing. Retired winner cannot make the key reusable. |
-| | device cleanup retirement (r16 decision) | Install/burn, fail hub cleanup, retire/tombstone, reconstruct. Cleanup-capable adapter retries to confirmed removal; local key never returns. Current hub records unsupported/expiry residual. |
-| | lifetime/tombstone admission | every installation appends once. Rollback spends nothing. Delete/reopen keeps set. Unspent Welcome below an abandoned incarnation's epoch can create the next incarnation. Receipt-only replay never installs. |
-| | total database loss (r15 decision) | Lose group/spent state and all ordinary/last-resort private records together. Exact/alternate old Welcomes cannot decrypt/install, despite retained signing identity and hub copies. For same-group admission/reconstruction, retained-trust resync or manual fresh invitation succeeds; absent trust permits only fresh invitation. Already admitted successor retirement remains an exit. Separately surviving key stores violate/refuse the provider-scope contract. |
-| | declared backup restore/participants (r16 decision) | Restore an older snapshot, declare before startup. All groups hold durable/ephemeral sends across restart; discard/rotate restored ordinary and retained last-resort keys. Only fresh-leaf external resync switches each group once and enables sends. Missing old leaf refuses. Declare commits restore-work once; restart resumes registered participants/stages, rejects foreign providers and deletes work only after completion. Test revocation failure/residual. |
-| | restore outbox/crash (r16 decision) | All restored entries, including certified obligations, fail with database-restored events retaining data. Mid-write rollback exposes none; committed events replay until ack. Crash during declaration/invalidation/holds keeps startup blocked. No restored publish/reseal. Undeclared rollback is explicitly outside the guarantee. |
-| | failed-outbox event | switch atomically fails each unproven old entry/status and persists incarnation-abandoned event. Restart replays same ID/data until ack. No automatic reseal. Certified entries remain published. |
-| | order/read isolation | A4 occurrence (n,4,10) precedes resynced occurrence (n+1,2,20). Prior local watermark leaves it unread. Host history stays. Old-anchor peer receipt covers no new anchor. |
-| | pre-open/mixed batch (r16 decision) | Reference has no procedure; valid siblings install with derived keys, malformed plaintext burns/records poison without handler invocation, crypto refusals consume no key, future frames hold. Ambiguity exposes no partial result. |
-| | open N, crash mid-batch | all N key advances/pending records commit or none. Rollback leaves keys usable and emits no plaintext/ack. Duplicate frame creates one pending record. |
-| | batching latency/fairness | idle lone frame commits without advancing batching timer. Sustained lane A burst allows low-rate B and ready control adoption within three total A/B/control batches, including active A. Enqueue also receives service. |
-| | group independence | held/pending group A transition does not block B. Concurrent memory group commits preserve both groups' rows. |
-| | completion/cursors | pending completion and contiguous cursor atomic. Unknown/double completion harmless. Future/unopenable records cannot advance cursor. Code-unit position ordering survives reopen (r25). |
-| | transactional exactly-once effect | side-row effect plus completion/cursor rolls back mid-transaction. Commit then crash/redelivery leaves one effect and no handler invocation for completed record. |
-| | stable idempotency key | default handler effect before completion crash causes redelivery with byte-identical key/sender/epoch/incarnation. Semantic chat dedup keeps first content on conflicting reuse. |
-| | terminal opened drain | opened batch, self-removal, kill before handlers. Restart awaits all handlers/completions before clear. Failures retain pending. No decrypt/publish. Live path matches. |
-| | transition visibility/hooks | state/control/anchor/pending/outbox/cursor and supplied side row share commit/rollback. Unknown queues remain zero until proof. Exactly one matching hook queue before caller release for non-conflicted outcomes; none on factory fail-stop. |
-| | late completion/barrier | insert/open/Welcome/switch/delete and control-only/anchor/cursor/outbox transitions reject before backend completion. Initially absent owner covered. Late commit/rollback settles all rows before lifecycle handoff. |
-| | at-rest all namespaces | inspect every physical byte copy for plaintext/spans, anchor secrets and topicIDs. Same-codec reopen succeeds. Wrong group/incarnation/namespace/record AAD, mutations and swaps reject through adapters. |
-| | deletion/lifecycle | stopped/drained owner, unsettled-control refusal, atomic tombstone/effects, no late writes. Retired outcomes/Welcomes/events remain serviceable until ack/delivery. |
-| ownership-phases / 2,3 (r17 decision) | phase capabilities | Domain write in effects, account-time host access or after outcome refuses with PersistencePhaseError and changes nothing, through supplied stores, independently constructed stores and exposed transaction access alike. Side writes in effects commit with the transition. Mutation-check each refusal. |
-| | operation lock | Suspend an async store operation mid-write, start a second operation and finalisation: they run one at a time and validation sees both. Two concurrent updates of the same record (control outcomes) both persist. A rejected abandoned seal makes the transition roll back. A late operation from a revoked attempt writes nothing. An operation called behind a suspended one before closure still drains; stores supplied in work keep working in effects; private writer operations complete in account. A suspended abandoned open followed by Read failure releases at once and the next same-scope operation completes. Device loads (initial and existing), device transitions, package reads and Combined participation complete without `ownershipContext`. Corrupt-state and corrupt-trust safety events and control obligations still commit; failed required opens and seals roll back. Effect side write to another incarnation is accounted (version advances) or refused. |
-| | effect store calls/exceptions | Outbox effect then lifetime load, and delete effect then clearTransport, complete within bound. A throwing effect rolls back transition and effect rows. A throwing onCommit/onRollback hook is contained, other hooks run, outcome stands. |
-| | ambiguous transition fence | Unknown Transition, both before backend completion and after commit with proof delayed: every read path (group/facade/device/package) and same-group Transition wait until proof; independent group commits meanwhile. Zero hooks before proof, exactly one queue after unless proof fail-stops the factory. |
-| | ambiguous read releases | Fault on a root Read, both commit-then-reject and unfinished backend: read rejects; next same-group Read and Transition complete, on every read path. Providers with connections: the failed read transaction is completed and the next writer acquires the writer lock. |
-| | proof classification/join | committed and rolledBack settle once; external resolve (group and device APIs) joins pending proof; repeated settlement idempotent. Conflicting marker: no hook queue runs, factory fail-stops, caller and every queued or later entry on any scope reject GroupStateConflictError. With another scope already ambiguous or mid-work, that entry, its joined resolvers and any drain awaiting it also reject, its hooks never run and its open backend transaction is rolled back or disposed. Fallback resolve after a later mutation superseded M throws GroupStateUncertainError. Barrier-created owner row classifies as absent. Certification rollback retry keeps its slot; queued terminal work cannot pass it. Combined classifies both owners, including competing ordinary-package installation. |
-| | ordering/reentrancy/deletion | Combined holds device then waits group; cancelled wait withdraws its group waiter and releases device, and the group then progresses; group-holding entry refuses device slot. Root call from prepare/work/finalise/effects/account/proof/hook rejects ReentrantOwnershipError without waiting, after `await` with the `ownershipContext` port and in the synchronous segment without it; suite runs both ways. Concurrent unrelated callers stay unbound; nested port bindings restore after a throwing callback; hook-scheduled roots after release succeed. Codec, effect-getter and accessor callbacks during finalise/account cannot read or write. Deletion with a running handler drains, then deletes; reads made by that handler succeed meanwhile; work opened during the drain causes a re-drain, three failures refuse GroupControlUnsettledError. After refusal the runtime owner can be created again. |
-| | restart before proof | First entry of any kind per owner scope after restart runs barrier and marker check; resolve fallback runs the barrier, never a raw negative read. |
-| | storage guard witnesses | Partial-loss spent reinstall at incarnation 1 refuses; unreadable source state with readable trust retires to a fresh incarnation, corrupt trust refuses; internally consistent lower-epoch state refuses with epoch regression. |
-| | real database integration | Per provider, the D8 provider-evidence cases (a)-(g) with fault milestones, second-connection visibility, hook-queue and connection-identity assertions. SQLite, PostgreSQL, Expo (or explicit blocked reason) in 3. |
-| control / 2,3 | delayed own replay (r28 decision) | Competitor wins CAS at E, saved own message later appears under another publishID. The walker's competitor adoption with complete coverage settles `lost`; the later copy is past-epoch poison and skips. A coverage gap settles terminal `unknown`; never a halt or rebuild. |
-| | commit-once poison head | a positively classified other-epoch frame or refused handoff changes head without epoch move and leaves `skipped` unset: retry has identical payload/ID/handshake generation. An unreadable-epoch or source-epoch poison sets `skipped` (D4): no retry, the build settles by consumption or `abandon()`. Real receiver processes the poison prefix then applies the saved commit and matches candidate authenticator. Extra pending proposal is omitted, missing referenced proposal refuses. |
-| | commit-once restart (ordinary lane) | reconstruct after built-save/mismatch and after hub acceptance. Saved bytes/candidate survive. Refresh expectedHead only; the walk, not a search, settles. No same-epoch build after deadline/outcome ack or from a second queued intent. |
-| | epoch move/deadline (ordinary lane, r28d) | Settlement only in the consuming adoption: own first-valid gives `landed` plus obligation; validated winner with complete coverage gives `lost`; skip at E before the winner, rejoin, self-removal, retirement or abandon gives terminal `unknown` with candidate and speculative Welcome deleted and obligations kept; `skipped` survives restart. An own copy behind a gap or an unreadable-epoch skip installs the candidate, closes `unknown`, writes no obligation and never runs MLS receive processing. An own copy after `abandon()` skips with the marker kept; a later higher-epoch frame strands `ahead` as usual. Self-removal closes queued intents `rejected` (`reason: 'removed'`) and a rejoin record `unknown`; the terminal group deletes after acks and Welcome delivery or abandon of the remaining obligations. An altered own copy sets `skipped`, keeps the build live and triggers no identical retry; a refused handoff with `skipped` unset retries once. Local-input failure on an own frame holds the cursor with capped backoff, then D1's unprocessable-gap resync closes the build `unknown` if it retires the source. Deadline writes provisional `unknown` once (`reported`); ack then restart gives no second report; later consumption or abandon replaces it under a fresh identity even after ack; repeated abandon writes nothing. Abandon leaves the spent marker: no same-source build until epoch change; a stale marker below the epoch does not block. After the deadline an own occurrence installs once (`landed` or `unknown` by coverage). No retained row survives consumption; no same-epoch rebuild. |
-| | legacy migration (r28d) | One version-marked transaction per incarnation, idempotent across a restart before and after its commit. Every legacy Welcome row, committed or not, becomes an obligation with exact bytes and none is deleted with a build; a retained row proven by its applied row closes `landed`, terminal-incarnation intents `rejected`, others `unknown` under fresh IDs with provisional rows deleted; a current-epoch `built`/`accepted` stage becomes the live build with `head = searchFrom` (null is the empty prefix), `reported`, `acceptedAs`, and `skipped` unless the cursor equals `searchFrom` with no gap, hold or uncertainty; an ownerless current-source slot becomes the spent marker with no outcome; intents stay intents; the acceptance-unknown hold is removed and recovery state kept; a `main` CommitJournal entry reports `LostCommit` under `unknown` and releases `holdsLogSends`. |
-| | adoption/removal/resync | full-payload poison, moved, accepted-before-walk, refusal/holder evidence, exact-external-commit confirmation, revoke-hold/two-revoke and Welcome cases remain; source guard is incarnation/version. Replace obsolete checkpoint-halt/source-prefix assertions with detection-only notices and authenticated, attempt-scoped forkRecovery assertions. |
-| safety / 2,3 | host fork halt live/restart | Host reportFork/authenticator comparison co-writes halt/evidence/event and new producer provenance. Live peers latch before proof, including failed writes. Ack never clears halt. Matching app-report clearHold preserves evidence. Legacy/internal holds refuse clearing. |
-| | hub-fault audit | Both past divergence branches, signed CAS losers, own-slot contradictions, tampering, junk and unknown versions skip/diagnose. Advance skipped cursor, keep saved work, no new durable hold/halt, discard/rebuild or owed-work deletion. Host/local-storage invariant paths retain their contracts. |
-| | own recognition and recovery progress | Re-encoded/blob-changed own no-entry commit recognises with the helper. Named entries use the receiver reference-verification predicate on the frame's own blob, never the host resolver. Failed copies skip, set `skipped` and keep the build live; no identical retry. Recovery recapture (D1) is independent of control settlement. Provider errors retain their identity. |
-| | strand signals / detection limits | Ahead/gap/own-unmerged retain claimed confidence. Missing/identical applied history proves no fork. Current victim-spoof rejection still requires own-signature validation. Host comparisons of exposed authenticators remain available. |
-| | retained recovery trust (r16 decision) | State bytes unreadable, trust intact: request/authenticate/restore without GroupHandle and automatic resync. Unreadable envelope: recovery-unavailable, no automatic reconstruction, manual fresh invitation or admitted successor. Decoded missing/malformed spent data: spent-set-corrupt. Every installing transaction refreshes trust atomically. |
-| | stranded automatic resync | Retention gap/lost MLS state with no safety hold uses retained trust and authenticated GroupInfo. Remove+ExternalInit yields one matching fresh leaf and n+1 after restart; installation pre-reserves its application range. Unknown commit-frame/header versions skip with upgrade-required diagnostics, never new durable holds. Existing persisted unsupported-version holds remain immutable; legacy control-record holds retain their policy. |
-| | stale GroupInfo (r19 decision) | Recapture signed applied state: later epoch with X's exact leaf means accepted -> settled. Adopt X only with known position/current-epoch bound confirmation; otherwise atomically preserve accepted-unadoptable X/floor/ledger and build fresh Y removing X's sole identity leaf. Delayed advanced reply, pruned occurrence and settled restart succeed. Wrong leaf/request/group refuse. Later leaf absent includes applied-then-removed and obeys admission/removal policy. Mutation-check leaf matching in Task 14b. |
-| | capture-head retry (r19 decision) | Search mismatch/gap/junk never strands X or decides discard. Fresh recapture keys remain separate. Equal epoch/authenticator means responder prefix lacks X; retry SAME bytes at authenticated head even if lower/inflated previously. Ordinary epoch floor refuses regression and survives settlement/discard/restart. Only bound forkRecovery grants its temporary effective-floor exception. Leaf present means accepted -> settled, adopting X only with bound confirmation; otherwise fresh leaf-replacing Y. Blob-derived negatives remain advisory through wire/replay/cache. Same-epoch lost-state recapture makes zero extra builds. |
-| | manual recovery | no automatic action while halted; chosen target/authorisation reopens across restart, validated resync switches once, refused attempt preserves halt. Already admitted successor permits source retirement without copying state or coordinating routing. |
-| registry / 2 | cold access/leases | concurrent cold load validated before access. Lease reserve/restart/failed seal never reuse generation. Lapsed/removed/suspended/proposals defer reservation without blocking control. |
-| | rotation/retention | 500 bound, rejection/hold/resume, non-admin empty rotation, 1000 retention/window through every constructor/derive/recovery. Real/double forward-window parity. Ordinary adoption preserves sender/receive history, no evicted epoch resurrection. |
-| handlers / 2 | registration/adapters (r16/r19 decision) | Public handler policy union + completion runner, legacy functions and mixed-policy refusal. Phase 2.2d supplies control-only registry access/GroupMLS/coordinator/continuation with incarnation/version guards. Full real registry crypto/open/leases and mixed-result application batch remain 2.3. Concrete TPorts and doubles never fabricate a lost-state handle. |
-| | all metadata paths | original authenticated epoch/incarnation on durable/live/anycast/directed kinds. Spoofed wire/header metadata loses. |
-| ephemeral / 2 | persists nothing | warmed pre-reserved lease, requests/responses/signals and decrypt batches: zero outbox/pending/cursor rows and zero transaction calls. Exhausted lease rejects without a transaction. |
-| outbox / 2,3 | attempt/settlement | all required topicIDs/identity/version round-trip. Inside-gate mismatch changes nothing. Test both proof paths and both queued orderings, attempt changes and version-only changes. |
-| | frozen result/restart | remove rollback then terminal/switch/restart reports original published occurrence/topicID once. Obligations co-delete, cannot change attempt, conflicting result rejects. Others fail. |
-| | retries/decoder | same-process bytes/ID retry, active-incarnation restart new app ID, immutable entry, unknown removal, invalid UTF-8/version/type/procedure and side-row rollback. |
-| lifted runtimes / 2 | encryptor/buffer | exact receive counts, ephemeral memory-only batches, sequential rotation keeps tunnel, committed membership/incarnation change closes once. Buffered wake, unsubscribe and retention reconnect/retry. |
-| hub-conformance / 2,3 | dedup scope/expiry | same ID on two topics, rejected ID reusable, accepted ID original position, inclusive 365-day cutoff and no timestamp refresh. Memory and SQL. |
-| integration / 2 then 3 | real HTTP smoke | injected server DID, real MLS/registry, invite/join, durable send/epoch/proof, rotation, fork halt, stranded/manual resync and reconstruction. Providers replace memory in 3. |
-| client/messaging / 4,5 | host integration | device cleanup sweep, lifecycle, failure events/programmatic retry, transactional/idempotent MessageStore and receipt order. |
-| e2e / 6 | every listed seam | child SIGKILL evidence, including N-frame batch, transactional effect and incarnation switch. Reconstruction alone does not satisfy this row. |
+| Suite / phase                         | Case                                                | Required assertion                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ------------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| codec / 2                             | lossless sender                                     | zero/one/absent clone/save/reopen, malformed sidecar. v2 only: flags 0 and 1 round-trip the reservation fields exactly; v1, v3, v4 and unknown version bytes throw; flags or consumed byte above 1 and trailing bytes refuse. Zero regression fails against current codec.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| recovery codec / 2                    | complete sourceState and captured origin            | differing source/candidate trees, empty proposals and zero/one/absent senders. Persisted v3 candidate/key restores bound verdict and immutable authenticated source/target/capture/search origin. V1/v2 adoption refuses. Legacy unadopted/conflictEpoch records hold without mutation or fabricated metadata; proven adopted continuations never reinstall.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| checkpoints / 2,3                     | canonical installed-only authority                  | Strict Ed25519/canonical bytes/4096-byte bound, exact hashes/parents and immutable provenance. Speculative/rolled-back/fabricated facts cannot sign. Every installation site captures transcript/roster/debt, progress never does. Fence stale workers. Real MLS and independent double, supplied/absent ownership context.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+|                                       | real split view and refused loser                   | Independently install valid divergent states under shared signers. Exchange only checkpoints, withholding competing commits. Both sides notify without halt/switch/stranding. CAS loser/re-encoding cannot manufacture installation facts. Lone fabricated testimony only notifies.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+|                                       | eligibility and comparison coverage                 | DID+key pre-split eligibility with compared-epoch fallback, leaf differences and equivocation attribution. Expose group-wide effectiveFloor/ranges/holes after skipped/pre-join/expired epochs and restart. Summary-only epochs never restore coverage.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+|                                       | bounded transport/storage                           | Separate checkpoint/commit heads and cursors, identical authorize gates, subscribe-before-drain, retained fetch, exact retry, deadlines/jitter and rate/receive budgets. Current included in 256; supersession age and count prune even unacknowledged evidence. No roster truncation or replay clock refresh.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+|                                       | notices and journal reports                         | Material-only coalescing/quiet close, local clocks, ack/history and partial summaries. Prospective own IDs/other counters, zero ephemeral rows. Unknown ancestry reports unknown/partial without delaying authenticated switch. Real/double report and retirement seams.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| roster absence / 2,3                  | disclosure and complete proof                       | Historical DID AND key gate, never-seen/expired silence, bounded requestID dedupe/budgets. Bind request/head/tree/complete ledger/lineage. Changed leaf with present DID is never absence. No secret/message or historical roster disclosure. Real/double and restart rows.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+|                                       | bounded signed span                                 | Reject comparisonEpoch tampering/unsafe values and cross-domain/spliced replies. Select [max(comparisonEpoch, responder oldest retained), F]. Keep total reply <=786432 bytes including overhead by trimming older lineage frames, retaining those nearest F and always F's frame. Large-group full history exceeds the bound; its bounded suffix verifies without truncating public tree/ledger. Compare the newest common retained epoch in the suffix. Missing E refuses fork-floor authority even when common-epoch absence qualifies.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+|                                       | no-open-notice 20/12 diagnosis                      | Requester installed through 20 with no open notice signs its OLDEST retained epoch. Eligible former-member responder on the different branch at 12 returns the bounded retained span through 12. Newest common retained epoch comparison verifies unequal lineage and own-DID absence: surface not-member, keep retries running and X/floor unchanged. No fork-floor authority follows from this diagnosis alone. Real/double and restart rows.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+|                                       | lineage-relative diagnosis                          | Advanced losing device at 20, continuing branch at 12, split 10: verified unequal lineage permits not-member. Older/equal same-lineage proof refuses. Fresh losing-branch absence only diagnoses, retries continue; later install/head-only/re-anchor clears active condition and preserves evidence. No new admission refusal.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+|                                       | status and app policy                               | Defensive responder keyHash/epoch/observedAt/DIDs/count; retrying:true with optional pendingReason. Distinguish no-reply/no-eligible-responder. Events coalesce per new evidence. Disposal/deletion remains app policy, never terminal continuation authority.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| fork recovery / 2,3                   | saved X and no-X                                    | Eligible non-equivocating open E testimony plus same reply key's matching E checkpoint/pre-E roster and MLS lineage/transcript. Settle built/published/confirmed/adopted-incomplete X to superseded-branch with exact sealed history, never not-accepted. Union obligations and persist bound Y intent atomically, or no-X intent without invented settlement.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+|                                       | every capture and restart                           | Real adapter apply/restore/recapture rechecks E-lineage and transcript for Y, including restart after settlement. Own-lineage stale capture refuses even above E. Ordinary floor unchanged; settlement/abandonment removes only Y's exception. Two-member healing needs no second DID.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+|                                       | coverage and best-known split                       | F >= best-known E. Below oldest or retained-range hole stays target-behind. Earlier-moving notice re-enables authorisation for head in [S,E). Hole waits for a retained epoch or beyond newest; evidence expiry stays target-behind. Manual resync exits.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+|                                       | real adapter authority                              | Both real port runners exercise no-X and saved-X healing through original adapters. Registry facts reach ordinary v3 sealing; host injection cannot supply private authority/disclosure/floor inputs. V2/missing authority preserves X/floor and retries.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| manual recovery / 2,3                 | current move restrictions                           | Require freshness/readability/complete ledger/walk and no lag/slot/operation/unresolved publications/settlements/pending owner work. Reject every hard hold/condition/open notice/active rejoin, including pending forkRecoveryAttempt. allowOpenFork overrides only open notice. Real/double and restart rows.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+|                                       | selected-target rejoin                              | Call-time/registered exact ID/topic/override persists. Resolver mismatch visibly pauses without fallback. Same-key move preserves holds. Rejoin needs bound external confirmation and creates hold-free n+1. Failed/pending proof preserves source/routing/holds. Hard-held responders stay silent; all-held exit is successor.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+|                                       | intent abandonment and partial migration            | Manual authorisation atomically abandons pending forkRecovery intent. Partial migration may split hubs undetectably; ahead arrival stays target-behind absent restricted authority. Empty targets never bypass current-move exclusions.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+|                                       | successor and scoped clear                          | Already admitted successor retires source atomically with tombstone/failures/routing; never copies state/messages. Newer unspent old Welcome still refuses, including restart. Explicit clearTombstone preserves spent checks. Matching app-report clearHold preserves history, refuses internal/legacy/unrelated holds, and resumes ordinary walk without forced resync.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| spent diagnosis / 2,3                 | cold/warm/restore paths                             | Successfully decoded missing/malformed sets yield typed spent-set-corrupt/event/status; unreadable envelopes retain recovery-unavailable. No empty fallback. Warm observation persists across restart. Preserve precedence/evidence and ordinary admission. Total-loss fresh invitation and already admitted successor remain available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| recovery reply / 2                    | authenticated captureHead (r15 decision)            | Responder exports a complete reconciled snapshot/cursor pair; empty gap or moved snapshot never certifies a head. String/null and captured authenticator round-trip in attestation; missing/wrong-type/tampered/invalid fields and v1 refuse before build. Restart retains original captureHead/target/search origin and initial CAS head.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| persistence / 2,3                     | CAS and monotonicity                                | Stale revision/version, tombstone-as-absent, lower epoch, same-number different authenticator or same-identity progress/ceiling regression reject unchanged. Non-root factories refuse.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+|                                       | incarnation switch atomicity/isolation              | Source A4 in n to accepted external-resync state in n+1. Mid-write rollback changes neither record. Commit tombstones n and installs n+1 with fresh progress/anchor/cursors/control. Old applied rows cannot mask new-incarnation self-removal.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+|                                       | source/candidate guards                             | stale incarnation/version/source, unaccepted/refused/spent resync result reject. Ambiguous successful switch resolves once. Adopted replay never reinstalls.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+|                                       | spent authenticators across incarnations            | A3 to A4 to fresh resync in n+1, reconstruct, exact and alternate valid A3 both refuse for ordinary/last-resort sources. Same authenticator/different bytes cannot evade admission.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+|                                       | cross-group ordinary Welcome (r16 decision)         | Concurrent Welcomes name one ordinary source/ref. Exactly one group installs/burns it, including COMMIT ambiguity; loser installs nothing. Retired winner cannot make the key reusable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+|                                       | device cleanup retirement (r16 decision)            | Install/burn, fail hub cleanup, retire/tombstone, reconstruct. Cleanup-capable adapter retries to confirmed removal; local key never returns. Current hub records unsupported/expiry residual.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+|                                       | lifetime/tombstone admission                        | every installation appends once. Rollback spends nothing. Delete/reopen keeps set. Unspent Welcome below an abandoned incarnation's epoch can create the next incarnation. Receipt-only replay never installs.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+|                                       | total database loss (r15 decision)                  | Lose group/spent state and all ordinary/last-resort private records together. Exact/alternate old Welcomes cannot decrypt/install, despite retained signing identity and hub copies. For same-group admission/reconstruction, retained-trust resync or manual fresh invitation succeeds; absent trust permits only fresh invitation. Already admitted successor retirement remains an exit. Separately surviving key stores violate/refuse the provider-scope contract.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+|                                       | declared backup restore/participants (r16 decision) | Restore an older snapshot, declare before startup. All groups hold durable/ephemeral sends across restart; discard/rotate restored ordinary and retained last-resort keys. Only fresh-leaf external resync switches each group once and enables sends. Missing old leaf refuses. Declare commits restore-work once; restart resumes registered participants/stages, rejects foreign providers and deletes work only after completion. Test revocation failure/residual.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+|                                       | restore outbox/crash (r16 decision)                 | All restored entries, including certified obligations, fail with database-restored events retaining data. Mid-write rollback exposes none; committed events replay until ack. Crash during declaration/invalidation/holds keeps startup blocked. No restored publish/reseal. Undeclared rollback is explicitly outside the guarantee.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+|                                       | failed-outbox event                                 | switch atomically fails each unproven old entry/status and persists incarnation-abandoned event. Restart replays same ID/data until ack. No automatic reseal. Certified entries remain published.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+|                                       | order/read isolation                                | A4 occurrence (n,4,10) precedes resynced occurrence (n+1,2,20). Prior local watermark leaves it unread. Host history stays. Old-anchor peer receipt covers no new anchor.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+|                                       | pre-open/mixed batch (r16 decision)                 | Reference has no procedure; valid siblings install with derived keys, malformed plaintext burns/records poison without handler invocation, crypto refusals consume no key, future frames hold. Ambiguity exposes no partial result.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+|                                       | open N, crash mid-batch                             | all N key advances/pending records commit or none. Rollback leaves keys usable and emits no plaintext/ack. Duplicate frame creates one pending record.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+|                                       | batching latency/fairness                           | idle lone frame commits without advancing batching timer. Sustained lane A burst allows low-rate B and ready control adoption within three total A/B/control batches, including active A. Enqueue also receives service.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+|                                       | group independence                                  | held/pending group A transition does not block B. Concurrent memory group commits preserve both groups' rows.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+|                                       | completion/cursors                                  | pending completion and contiguous cursor atomic. Unknown/double completion harmless. Future/unopenable records cannot advance cursor. Code-unit position ordering survives reopen (r25).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+|                                       | transactional exactly-once effect                   | side-row effect plus completion/cursor rolls back mid-transaction. Commit then crash/redelivery leaves one effect and no handler invocation for completed record.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+|                                       | stable idempotency key                              | default handler effect before completion crash causes redelivery with byte-identical key/sender/epoch/incarnation. Semantic chat dedup keeps first content on conflicting reuse.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+|                                       | terminal opened drain                               | opened batch, self-removal, kill before handlers. Restart awaits all handlers/completions before clear. Failures retain pending. No decrypt/publish. Live path matches.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+|                                       | transition visibility/hooks                         | state/control/anchor/pending/outbox/cursor and supplied side row share commit/rollback. Unknown queues remain zero until proof. Exactly one matching hook queue before caller release for non-conflicted outcomes; none on factory fail-stop.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+|                                       | late completion/barrier                             | insert/open/Welcome/switch/delete and control-only/anchor/cursor/outbox transitions reject before backend completion. Initially absent owner covered. Late commit/rollback settles all rows before lifecycle handoff.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+|                                       | at-rest all namespaces                              | inspect every physical byte copy for plaintext/spans, anchor secrets and topicIDs. Same-codec reopen succeeds. Wrong group/incarnation/namespace/record AAD, mutations and swaps reject through adapters.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+|                                       | deletion/lifecycle                                  | stopped/drained owner, unsettled-control refusal, atomic tombstone/effects, no late writes. Retired outcomes/Welcomes/events remain serviceable until ack/delivery.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ownership-phases / 2,3 (r17 decision) | phase capabilities                                  | Domain write in effects, account-time host access or after outcome refuses with PersistencePhaseError and changes nothing, through supplied stores, independently constructed stores and exposed transaction access alike. Side writes in effects commit with the transition. Mutation-check each refusal.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+|                                       | operation lock                                      | Suspend an async store operation mid-write, start a second operation and finalisation: they run one at a time and validation sees both. Two concurrent updates of the same record (control outcomes) both persist. A rejected abandoned seal makes the transition roll back. A late operation from a revoked attempt writes nothing. An operation called behind a suspended one before closure still drains; stores supplied in work keep working in effects; private writer operations complete in account. A suspended abandoned open followed by Read failure releases at once and the next same-scope operation completes. Device loads (initial and existing), device transitions, package reads and Combined participation complete without `ownershipContext`. Corrupt-state and corrupt-trust safety events and control obligations still commit; failed required opens and seals roll back. Effect side write to another incarnation is accounted (version advances) or refused.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+|                                       | effect store calls/exceptions                       | Outbox effect then lifetime load, and delete effect then clearTransport, complete within bound. A throwing effect rolls back transition and effect rows. A throwing onCommit/onRollback hook is contained, other hooks run, outcome stands.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+|                                       | ambiguous transition fence                          | Unknown Transition, both before backend completion and after commit with proof delayed: every read path (group/facade/device/package) and same-group Transition wait until proof; independent group commits meanwhile. Zero hooks before proof, exactly one queue after unless proof fail-stops the factory.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+|                                       | ambiguous read releases                             | Fault on a root Read, both commit-then-reject and unfinished backend: read rejects; next same-group Read and Transition complete, on every read path. Providers with connections: the failed read transaction is completed and the next writer acquires the writer lock.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+|                                       | proof classification/join                           | committed and rolledBack settle once; external resolve (group and device APIs) joins pending proof; repeated settlement idempotent. Conflicting marker: no hook queue runs, factory fail-stops, caller and every queued or later entry on any scope reject GroupStateConflictError. With another scope already ambiguous or mid-work, that entry, its joined resolvers and any drain awaiting it also reject, its hooks never run and its open backend transaction is rolled back or disposed. Fallback resolve after a later mutation superseded M throws GroupStateUncertainError. Barrier-created owner row classifies as absent. Certification rollback retry keeps its slot; queued terminal work cannot pass it. Combined classifies both owners, including competing ordinary-package installation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+|                                       | ordering/reentrancy/deletion                        | Combined holds device then waits group; cancelled wait withdraws its group waiter and releases device, and the group then progresses; group-holding entry refuses device slot. Root call from prepare/work/finalise/effects/account/proof/hook rejects ReentrantOwnershipError without waiting, after `await` with the `ownershipContext` port and in the synchronous segment without it; suite runs both ways. Concurrent unrelated callers stay unbound; nested port bindings restore after a throwing callback; hook-scheduled roots after release succeed. Codec, effect-getter and accessor callbacks during finalise/account cannot read or write. Deletion with a running handler drains, then deletes; reads made by that handler succeed meanwhile; work opened during the drain causes a re-drain, three failures refuse GroupControlUnsettledError. After refusal the runtime owner can be created again.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+|                                       | restart before proof                                | First entry of any kind per owner scope after restart runs barrier and marker check; resolve fallback runs the barrier, never a raw negative read.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+|                                       | storage guard witnesses                             | Partial-loss spent reinstall at incarnation 1 refuses; unreadable source state with readable trust retires to a fresh incarnation, corrupt trust refuses; internally consistent lower-epoch state refuses with epoch regression.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+|                                       | real database integration                           | Per provider, the D8 provider-evidence cases (a)-(g) with fault milestones, second-connection visibility, hook-queue and connection-identity assertions. SQLite, PostgreSQL, Expo (or explicit blocked reason) in 3.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| control / 2,3                         | delayed own replay (r28 decision)                   | Competitor wins CAS at E, saved own message later appears under another publishID. The walker's competitor adoption with complete coverage settles `lost`; the later copy is past-epoch poison and skips. A coverage gap settles terminal `unknown`; never a halt or rebuild.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+|                                       | commit-once poison head                             | a positively classified other-epoch frame or refused handoff changes head without epoch move and leaves `skipped` unset: retry has identical payload/ID/handshake generation. An unreadable-epoch or source-epoch poison sets `skipped` (D4): no retry, the build settles by consumption or `abandon()`. Real receiver processes the poison prefix then applies the saved commit and matches candidate authenticator. Extra pending proposal is omitted, missing referenced proposal refuses.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+|                                       | commit-once restart (ordinary lane)                 | reconstruct after built-save/mismatch and after hub acceptance. Saved bytes/candidate survive. Refresh expectedHead only; the walk, not a search, settles. No same-epoch build after deadline/outcome ack or from a second queued intent.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+|                                       | epoch move/deadline (ordinary lane, r28d)           | Settlement only in the consuming adoption: own first-valid gives `landed` plus obligation; validated winner with complete coverage gives `lost`; skip at E before the winner, rejoin, self-removal, retirement or abandon gives terminal `unknown` with candidate and speculative Welcome deleted and obligations kept; `skipped` survives restart. An own copy behind a gap or an unreadable-epoch skip installs the candidate, closes `unknown`, writes no obligation and never runs MLS receive processing. An own copy after `abandon()` skips with the marker kept; a later higher-epoch frame strands `ahead` as usual. Self-removal closes queued intents `rejected` (`reason: 'removed'`) and a rejoin record `unknown`; the terminal group deletes after acks and Welcome delivery or abandon of the remaining obligations. An altered own copy sets `skipped`, keeps the build live and triggers no identical retry; a refused handoff with `skipped` unset retries once. Local-input failure on an own frame holds the cursor with capped backoff, then D1's unprocessable-gap resync closes the build `unknown` if it retires the source. Deadline writes provisional `unknown` once (`reported`); ack then restart gives no second report; later consumption or abandon replaces it under a fresh identity even after ack; repeated abandon writes nothing. Abandon leaves the spent marker: no same-source build until epoch change; a stale marker below the epoch does not block. After the deadline an own occurrence installs once (`landed` or `unknown` by coverage). No retained row survives consumption; no same-epoch rebuild. |
+|                                       | legacy migration (r28d)                             | One version-marked transaction per incarnation, idempotent across a restart before and after its commit. Every legacy Welcome row, committed or not, becomes an obligation with exact bytes and none is deleted with a build; a retained row proven by its applied row closes `landed`, terminal-incarnation intents `rejected`, others `unknown` under fresh IDs with provisional rows deleted; a current-epoch `built`/`accepted` stage becomes the live build with `head = searchFrom` (null is the empty prefix), `reported`, `acceptedAs`, and `skipped` unless the cursor equals `searchFrom` with no gap, hold or uncertainty; an ownerless current-source slot becomes the spent marker with no outcome; intents stay intents; the acceptance-unknown hold is removed and recovery state kept; a `main` CommitJournal entry reports `LostCommit` under `unknown` and releases `holdsLogSends`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+|                                       | adoption/removal/resync                             | full-payload poison, moved, accepted-before-walk, refusal/holder evidence, exact-external-commit confirmation, revoke-hold/two-revoke and Welcome cases remain; source guard is incarnation/version. Replace obsolete checkpoint-halt/source-prefix assertions with detection-only notices and authenticated, attempt-scoped forkRecovery assertions.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| safety / 2,3                          | host fork halt live/restart                         | Host reportFork/authenticator comparison co-writes halt/evidence/event and new producer provenance. Live peers latch before proof, including failed writes. Ack never clears halt. Matching app-report clearHold preserves evidence. Legacy/internal holds refuse clearing.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+|                                       | hub-fault audit                                     | Both past divergence branches, signed CAS losers, own-slot contradictions, tampering, junk and unknown versions skip/diagnose. Advance skipped cursor, keep saved work, no new durable hold/halt, discard/rebuild or owed-work deletion. Host/local-storage invariant paths retain their contracts.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+|                                       | own recognition and recovery progress               | Re-encoded/blob-changed own no-entry commit recognises with the helper. Named entries use the receiver reference-verification predicate on the frame's own blob, never the host resolver. Failed copies skip, set `skipped` and keep the build live; no identical retry. Recovery recapture (D1) is independent of control settlement. Provider errors retain their identity.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+|                                       | strand signals / detection limits                   | Ahead/gap/own-unmerged retain claimed confidence. Missing/identical applied history proves no fork. Current victim-spoof rejection still requires own-signature validation. Host comparisons of exposed authenticators remain available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+|                                       | retained recovery trust (r16 decision)              | State bytes unreadable, trust intact: request/authenticate/restore without GroupHandle and automatic resync. Unreadable envelope: recovery-unavailable, no automatic reconstruction, manual fresh invitation or admitted successor. Decoded missing/malformed spent data: spent-set-corrupt. Every installing transaction refreshes trust atomically.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+|                                       | stranded automatic resync                           | Retention gap/lost MLS state with no safety hold uses retained trust and authenticated GroupInfo. Remove+ExternalInit yields one matching fresh leaf and n+1 after restart; installation pre-reserves its application range. Unknown commit-frame/header versions skip with upgrade-required diagnostics, never new durable holds. Existing persisted unsupported-version holds remain immutable; legacy control-record holds retain their policy.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+|                                       | stale GroupInfo (r19 decision)                      | Recapture signed applied state: later epoch with X's exact leaf means accepted -> settled. Adopt X only with known position/current-epoch bound confirmation; otherwise atomically preserve accepted-unadoptable X/floor/ledger and build fresh Y removing X's sole identity leaf. Delayed advanced reply, pruned occurrence and settled restart succeed. Wrong leaf/request/group refuse. Later leaf absent includes applied-then-removed and obeys admission/removal policy. Mutation-check leaf matching in Task 14b.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+|                                       | capture-head retry (r19 decision)                   | Search mismatch/gap/junk never strands X or decides discard. Fresh recapture keys remain separate. Equal epoch/authenticator means responder prefix lacks X; retry SAME bytes at authenticated head even if lower/inflated previously. Ordinary epoch floor refuses regression and survives settlement/discard/restart. Only bound forkRecovery grants its temporary effective-floor exception. Leaf present means accepted -> settled, adopting X only with bound confirmation; otherwise fresh leaf-replacing Y. Blob-derived negatives remain advisory through wire/replay/cache. Same-epoch lost-state recapture makes zero extra builds.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+|                                       | manual recovery                                     | no automatic action while halted; chosen target/authorisation reopens across restart, validated resync switches once, refused attempt preserves halt. Already admitted successor permits source retirement without copying state or coordinating routing.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| registry / 2                          | cold access/leases                                  | concurrent cold load validated before access. Lease reserve/restart/failed seal never reuse generation. Lapsed/removed/suspended/proposals defer reservation without blocking control.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+|                                       | rotation/retention                                  | 500 bound, rejection/hold/resume, non-admin empty rotation, 1000 retention/window through every constructor/derive/recovery. Real/double forward-window parity. Ordinary adoption preserves sender/receive history, no evicted epoch resurrection.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| handlers / 2                          | registration/adapters (r16/r19 decision)            | Public handler policy union + completion runner, legacy functions and mixed-policy refusal. Phase 2.2d supplies control-only registry access/GroupMLS/coordinator/continuation with incarnation/version guards. Full real registry crypto/open/leases and mixed-result application batch remain 2.3. Concrete TPorts and doubles never fabricate a lost-state handle.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+|                                       | all metadata paths                                  | original authenticated epoch/incarnation on durable/live/anycast/directed kinds. Spoofed wire/header metadata loses.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ephemeral / 2                         | persists nothing                                    | warmed pre-reserved lease, requests/responses/signals and decrypt batches: zero outbox/pending/cursor rows and zero transaction calls. Exhausted lease rejects without a transaction.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| outbox / 2,3                          | attempt/settlement                                  | all required topicIDs/identity/version round-trip. Inside-gate mismatch changes nothing. Test both proof paths and both queued orderings, attempt changes and version-only changes.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+|                                       | frozen result/restart                               | remove rollback then terminal/switch/restart reports original published occurrence/topicID once. Obligations co-delete, cannot change attempt, conflicting result rejects. Others fail.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+|                                       | retries/decoder                                     | same-process bytes/ID retry, active-incarnation restart new app ID, immutable entry, unknown removal, invalid UTF-8/version/type/procedure and side-row rollback.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| lifted runtimes / 2                   | encryptor/buffer                                    | exact receive counts, ephemeral memory-only batches, sequential rotation keeps tunnel, committed membership/incarnation change closes once. Buffered wake, unsubscribe and retention reconnect/retry.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| hub-conformance / 2,3                 | dedup scope/expiry                                  | same ID on two topics, rejected ID reusable, accepted ID original position, inclusive 365-day cutoff and no timestamp refresh. Memory and SQL.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| integration / 2 then 3                | real HTTP smoke                                     | injected server DID, real MLS/registry, invite/join, durable send/epoch/proof, rotation, fork halt, stranded/manual resync and reconstruction. Providers replace memory in 3.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| client/messaging / 4,5                | host integration                                    | device cleanup sweep, lifecycle, failure events/programmatic retry, transactional/idempotent MessageStore and receipt order.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| e2e / 6                               | every listed seam                                   | child SIGKILL evidence, including N-frame batch, transactional effect and incarnation switch. Reconstruction alone does not satisfy this row.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
 ## Phase split
 
-| Phase | Deliverable / gate |
-|---|---|
-| 2 | ClientState codec v2 and recovery candidate v3 codecs first. D8 owner queue/phases with memory as reference provider and the ownership-phases suite. Memory group coordinator, registry/incarnations/spent admission, detection-only in-band checkpoints/notices, non-terminal absence evidence, attempt-scoped forkRecovery, manual target recovery/current movement/successor tombstones, provenance-restricted clearHold, spent diagnosis and automatic stranded resync with authenticated captureHead, commit-once runner, fair adaptive batching and handler metadata/policies. DevicePersistence/package adapters, atomic Welcome burn, retained recovery trust and durable restore-work (r16 decision). Application leases/rotation, encrypted namespaces, durable settlements/events and mutation/side-row/fault fixtures. hub-client lifts and mls-rpc encryptor. Both contract suites on real MLS and doubles. Real HTTP smoke with injected DID. |
-| 3 | rpc-store sqlite/postgres providers and Expo support or explicit blocked reason. Each provider implements D8 primitives and passes ownership-phases plus its real-database integration row. Group/device-package transaction scope, root discriminator and outcome-aware Hozon hooks (including deferred rollback-hook settlement) are prerequisites. Provider CAS/barrier/late-COMMIT/raw-encryption/side-row tests. SQLite device reconstruction. |
-| 4 | client ownership, identity/Spec I, Spec H/hub policy, inventory/device cleanup, lifecycle and rotation scheduling. |
-| 5 | messaging protocols/MessageStore, transactional or idempotent handlers, durable status events, programmatic failed-send retry and per-anchor receipts. Expo bundle CI. |
-| 6 | Child-process driver and SIGKILL at every external/transaction seam. |
+| Phase | Deliverable / gate                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2     | ClientState codec v2 and recovery candidate v3 codecs first. D8 owner queue/phases with memory as reference provider and the ownership-phases suite. Memory group coordinator, registry/incarnations/spent admission, detection-only in-band checkpoints/notices, non-terminal absence evidence, attempt-scoped forkRecovery, manual target recovery/current movement/successor tombstones, provenance-restricted clearHold, spent diagnosis and automatic stranded resync with authenticated captureHead, commit-once runner, fair adaptive batching and handler metadata/policies. DevicePersistence/package adapters, atomic Welcome burn, retained recovery trust and durable restore-work (r16 decision). Application leases/rotation, encrypted namespaces, durable settlements/events and mutation/side-row/fault fixtures. hub-client lifts and mls-rpc encryptor. Both contract suites on real MLS and doubles. Real HTTP smoke with injected DID. |
+| 3     | rpc-store sqlite/postgres providers and Expo support or explicit blocked reason. Each provider implements D8 primitives and passes ownership-phases plus its real-database integration row. Group/device-package transaction scope, root discriminator and outcome-aware Hozon hooks (including deferred rollback-hook settlement) are prerequisites. Provider CAS/barrier/late-COMMIT/raw-encryption/side-row tests. SQLite device reconstruction.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| 4     | client ownership, identity/Spec I, Spec H/hub policy, inventory/device cleanup, lifecycle and rotation scheduling.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| 5     | messaging protocols/MessageStore, transactional or idempotent handlers, durable status events, programmatic failed-send retry and per-anchor receipts. Expo bundle CI.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| 6     | Child-process driver and SIGKILL at every external/transaction seam.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 Phase 2 creates no client/messaging/MessageStore/Hozon provider/child driver; use opaque side rows for handler/status conformance.
 Run affected package/integration tests and `pnpm turbo run test:types`. Provider isolation/failure evidence belongs to phase 3.
@@ -2153,7 +2847,6 @@ Run affected package/integration tests and `pnpm turbo run test:types`. Provider
 ## History
 
 Historical entries describe superseded contracts. The current decisions and interfaces above govern conflicts.
-
 - r1: adoptable journal, proof versus acknowledgement, application leases and coordinated status.
 - r2: current-record CAS, retention/rotation, publication positions and mutation markers.
 - r3: save-before-consume, recovery identity, separate Welcome obligations and deletion hooks.
@@ -2172,9 +2865,7 @@ Historical entries describe superseded contracts. The current decisions and inte
 Commit-once removes handshake reservations/HWM/budgets/errors, baseline readers and staging-clone rules. Group transactions remove cross-store ordering/chat-only
 coordination. Strongly consistent DS replaces automatic fork healing with halt/manual recovery. Spent authenticators, at-rest protection, publication obligations,
 ambiguity/external seams and automatic non-fork stranded resync remain.
-
 - r15 (r15 decision): authenticated GroupInfo captureHead, stale-epoch CAS refusal and proven identical-byte poison retry. Total-loss KeyPackage co-storage and explicit backup-restore resync/rotation/outbox failure. Unclassifiable encrypted prefix: discard on proven absence, request fresh GroupInfo.
-
 
 - r16 (r16 decision): first-valid own adoption/Welcome guard; atomic cross-group ordinary-package burn and device cleanup; retained handle-independent recovery trust; DevicePersistence/restore-work wiring; pre-open/mixed crypto results; concrete adapters, handler registration/completion, metadata/retention and conformance.
 - r17 (r17 decision): D8 single ownership model — per-device/per-group FIFO owner queues, typed entries (Transition, Combined, never-ambiguous Read), strict phases with phase-derived store capabilities, proof inside the retained entry with a conflicted outcome that fail-stops the factory, drain-before-slot deletion, post-effects account step, reentrancy refusal and per-provider primitives including absent-owner upsert barriers and quarantined-connection completion; ownership-phases conformance and real-database integration evidence for every provider. Replaces layered barrier/store-lock/gate/fence mechanisms after recurring deadlock, post-validation write and retained-read findings.
@@ -2208,3 +2899,4 @@ ambiguity/external seams and automatic non-fork stranded resync remain.
 - r28d (2026-10-22, after two re-reviews of r28c): own-frame inputs are local; local failure is hold-and-retry with capped backoff, then D1's unprocessable-gap resync as the backstop (retirement closes the build `unknown`, Welcome deleted). Identical retry only after a refused handoff with `skipped` unset; an altered own copy sets `skipped` and never retries. Every legacy Welcome row is an obligation; ownerless current-source slot maps to the spent marker (migration is its second writer); missing coverage evidence maps to `skipped`; terminal intents `rejected`; per-incarnation version mark; `main` CommitJournal entry reported as `LostCommit` under `unknown`. Merged codec: reads 1/2/3/4, writes 4, drop-absent-sender decode rule, v3 reservation rewrite with one extra handshake advance at the body's epoch/generation, reservation APIs retired; Model/D5 reconciled. Terminal-group deletion needs acks and no live Welcome obligations. Minors: received-commit application versus authentication-only processing, `'moved'`/stranded cursor on an own occurrence, `reason: 'removed'`, refused-stage rejoin, null `searchFrom`, post-deadline install wording, "spent" wording.
 - r28e (2026-10-22, user decision on the codec, superseding r28d's merge contract): version 2 is the only client-state format on `main` 0.10.7 and phase 2: `u8 2 || u8 flags || [u64 epoch, u32 generation, u8 consumed if flags = 1] || u32 bodyLength || body || u32 refCount || refs`, no trailing bytes; reads and writes v2 only, v1/v3/v4/unknown throw; no v4, no v3 rewrite, no v1 decode rule, no client-state migration; the merge carries the identical codec and phase 2 adds the reservation fields to its v2 layout at merge.
 - r28f (2026-10-22, redesign gap analysis): poison-head conformance row narrowed to D4 — identical retry only for a positively classified other-epoch frame or refused handoff with `skipped` unset; unreadable-epoch or source-epoch poison sets `skipped`, no retry.
+- r28g (2026-10-22, user decision at the `main` merge): an imported `main` reservation at the current epoch makes the commit permit advance the handshake ratchet past its generation (consumed or not) before construction, then clears the field; other epochs are ignored. `main`'s reservation methods, paired build hooks and `HandshakeWindowError` stay retired.

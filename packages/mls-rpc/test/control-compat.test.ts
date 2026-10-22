@@ -51,6 +51,38 @@ test('an own self-removal proposal breaks control compatibility', async () => {
   expect(controlCompatible(source, local.state)).toBe(false)
 })
 
+test.each([
+  { consumed: false, epochDelta: 0n },
+  { consumed: true, epochDelta: 0n },
+  { consumed: true, epochDelta: -1n },
+])(
+  'restoring a reservation keeps compatibility (consumed: $consumed, epoch delta: $epochDelta)',
+  async (params) => {
+    const { local } = await setup()
+    const source = copy({
+      ...local.state,
+      handshakeReservation: {
+        epoch: local.epoch + params.epochDelta,
+        generation: 3,
+        consumed: params.consumed,
+      },
+    })
+    const bytes = encodeClientState(source)
+    expect(bytes[1]).toBe(1)
+    const restored = await restoreGroup({
+      state: copy(source),
+      credential: local.credential,
+      ledgerEntries: local.ledgerTokens,
+    })
+    expect(encodeClientState(restored.state)[1]).toBe(0)
+    expect(controlCompatible(source, restored.state)).toBe(true)
+    expect(controlCompatible(restored.state, source)).toBe(true)
+    expect(encodeClientState(source)).toEqual(bytes)
+    await restored.proposeSelfRemoval()
+    expect(controlCompatible(source, restored.state)).toBe(false)
+  },
+)
+
 test('a received foreign proposal keeps control compatibility', async () => {
   const { local, foreign } = await setup()
   const source = copy(local.state)

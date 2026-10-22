@@ -8,6 +8,7 @@ import {
   InvalidPayloadError,
   KeyPackageFetchLimitError,
   KeyPackageQuotaExceededError,
+  RateLimitedError,
   SubscriptionQuotaExceededError,
   WakeNotSupportedError,
 } from '../src/errors.js'
@@ -76,5 +77,17 @@ describe('WakeNotSupportedError', () => {
     const rebuilt = hubErrorFromCode(HUB_ERROR_CODES.wakeNotSupported, 'no wake')
     expect(rebuilt).toBeInstanceOf(WakeNotSupportedError)
     expect(rebuilt?.message).toBe('no wake')
+  })
+})
+
+describe('RateLimitedError', () => {
+  test('crosses the wire as HUB_RATE_LIMITED', () => {
+    // The literal: a client on an older build compares against this string, and before it the
+    // limiters answered with enkaku's generic EK01, which says nothing about retrying.
+    expect(HUB_ERROR_CODES.rateLimited).toBe('HUB_RATE_LIMITED')
+    expect(hubErrorCodeOf(new RateLimitedError('slow down'))).toBe('HUB_RATE_LIMITED')
+    const rebuilt = hubErrorFromCode('HUB_RATE_LIMITED', 'slow down')
+    expect(rebuilt).toBeInstanceOf(RateLimitedError)
+    expect(rebuilt?.message).toBe('slow down')
   })
 })

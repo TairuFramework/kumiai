@@ -28,7 +28,7 @@
   swallowed entirely; a transport whose subscribe fails looks healthy but never receives.
   Fix: surface via `teardown(error)` or an observability event.
 - `packages/hub-tunnel/src/transport.ts:276-288` — `frame.seq < expectedSeq` drops any
-  *reordered* frame as `'dedup'` while forward gaps are accepted — neither ordering nor
+  _reordered_ frame as `'dedup'` while forward gaps are accepted — neither ordering nor
   completeness. Fix: track a seen-seq window or buffer out-of-order frames up to a bound.
 
 ### Low

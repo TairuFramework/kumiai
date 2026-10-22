@@ -20,7 +20,6 @@ re-exported from `index.ts`, referenced by nothing in this repo or any sibling. 
 **`HubClient` no longer exposes `rawClient`** (`hub-client/src/client.ts:73`). The filed reason was
 encapsulation — the getter let a caller bypass the typed surface and anything later layered onto it.
 Two facts found at removal time made it cheaper than filed:
-
 - `HubClient` has one method per `HubProtocol` procedure, all eight. The "anything not wrapped" the
   getter existed to reach is empty.
 - `HubClientParams` takes the `Client<HubProtocol>` in. The caller constructed it and still holds
@@ -36,7 +35,6 @@ the `rawClient` locals in the integration tests are the callers' own variables, 
 `../backlog/2026-07-07-hub-protocol-server-cleanup.md` both said the type "sits beside upload-side
 limits its name excludes", a claim added 2026-07-28 after the caps work shipped without the rename.
 Checked against the source:
-
 - All four fields are fetch-side — `maxCount`, `maxRequests`, `maxPerTargetConsumed`, `windowMs`
   (`hub-server/src/handlers.ts:168`).
 - Every read of them is on the fetch path (`handlers.ts:271-321`).
@@ -45,7 +43,7 @@ Checked against the source:
   own per-DID cap.
 
 `KeyPackageFetchLimits` names exactly what it holds. `KeyPackageLimits` would name more than it
-holds, so the rename made the surface *less* accurate, not more. Dropped from the milestone with
+holds, so the rename made the surface _less_ accurate, not more. Dropped from the milestone with
 that reasoning recorded in both docs; refile only if upload-side limits are ever folded into one
 config type, motivated by that work rather than by this note.
 

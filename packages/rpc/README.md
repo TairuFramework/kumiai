@@ -16,7 +16,6 @@ already aborted resolves `[]` without sending, including while the peer waits fo
 
 group-rpc never imports MLS. It owns transport and orchestration; the consumer supplies the crypto
 half through two ports:
-
 - **`GroupCrypto`** — a synchronous epoch hint, `exportSecret(label, length?)` for as many epoch-bound,
   domain-separated exported secrets as there are labels, `wrap`/`unwrap` for app traffic,
   `frameEpoch` and `frameAAD` to read a sealed frame's cleartext metadata, optional `pending`
@@ -39,7 +38,6 @@ hand-rolled seal keyed off anything but the epoch secret round-trips, throws not
 removed member open the ledger-entry blobs of commits enacted after its removal.
 
 Four constraints a port implementation is most likely to get wrong, all of which the suite pins:
-
 - **`epoch()` is a hint; decisions use the epoch a result reports.** A host's published epoch can
   lag its handle or, after a rolled-back transaction, run ahead of it. So every port result that
   acted on the handle carries the epoch it acted at, read under the host's handle lock:
@@ -151,7 +149,7 @@ type rejects it too, so an erased type cannot slip one past. Correlation traffic
 request re-fires its responder, and the rid/timeout/quorum machinery has no meaning outside its
 original round.
 
-Retention is the *protocol's* word, never the frame's. A retained frame naming an ephemeral
+Retention is the _protocol's_ word, never the frame's. A retained frame naming an ephemeral
 procedure was published `retain: 'log'` by a member whose dispatch would not do that, and the drain
 drops it.
 
@@ -173,7 +171,7 @@ byte and time budgets and bounded outstanding requests. Short pages do not expir
 
 ### The returning-member drain
 
-A peer that was away pulls each app topic's retained segment and delivers it through the *same*
+A peer that was away pulls each app topic's retained segment and delivers it through the _same_
 handlers the live bus server is built from, so a drained frame and a pushed one reach the host by the
 same door. Its own frames are not delivered — the live fan-out never echoes a publisher its own
 broadcast, and a drain that did would make a returning member the only one to see its own messages
@@ -181,7 +179,7 @@ arrive.
 
 The rule that makes the durable cursor safe: **a cursor may only pass a frame that is DELIVERED or
 DEAD.** A past-epoch frame outside retention is dead, as is one that claims an available epoch
-and will not open, as are bytes that are not a sealed frame at all. A frame sealed *ahead* of the
+and will not open, as are bytes that are not a sealed frame at all. A frame sealed _ahead_ of the
 walk is neither: it opens once the walk gets there, so the cursor stops behind it and the frame stays buffered. That distinction is what
 `GroupCrypto.frameEpoch` exists for — `unwrap` throwing says "not my epoch" and cannot say which.
 
@@ -197,11 +195,11 @@ real gap.
 and `deliverWelcome` arrive together — the params type requires the complete commit lane.
 The stores preserve different durable state:
 
-| | Without it |
-| --- | --- |
-| `control` — FIFO operations, rejoin, outcomes, Welcome obligations, applied commits, external responses and commit cursor | accepted control work and branch evidence are lost on restart |
-| `anchorStore` — one slot, overwritten on every rotation, read once at construction | the peer re-seeds the anchor at its live epoch on the next restart and silently partitions from its own group, deriving topics no member that stayed up is on |
-| `appCursorStore` — a read position per topic, written as each drain finishes | the peer re-reads its app history from the hub's oldest retained frame every restart, re-delivers what it already delivered, and has nowhere to notice the retention floor passing it |
+|                                                                                                                           | Without it                                                                                                                                                                            |
+| ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `control` — FIFO operations, rejoin, outcomes, Welcome obligations, applied commits, external responses and commit cursor | accepted control work and branch evidence are lost on restart                                                                                                                         |
+| `anchorStore` — one slot, overwritten on every rotation, read once at construction                                        | the peer re-seeds the anchor at its live epoch on the next restart and silently partitions from its own group, deriving topics no member that stayed up is on                         |
+| `appCursorStore` — a read position per topic, written as each drain finishes                                              | the peer re-reads its app history from the hub's oldest retained frame every restart, re-delivers what it already delivered, and has nowhere to notice the retention floor passing it |
 
 Neither the anchor nor the cursor can be re-derived. The anchor sits at an epoch the live handle then
 runs past, and MLS ratchets forward, so a rebooted handle can never re-export it.
@@ -418,13 +416,13 @@ Each `StrandObservation` names the stable commit-topic `groupID`, the frame's lo
 peer's `localEpoch`, a `kind`, and a `confidence`. `claimedEpoch` comes from the cleartext header;
 `commitDigest` identifies the commit bytes. Both are `null` for an unreadable future version.
 
-| Kind | Confidence | What the evidence establishes |
-| --- | --- | --- |
-| `own-unmerged` | `authenticated` | Sender data identifies this device. Unrecognised copies diagnose and skip, preserving saved work and unknown acceptance. |
-| `past-epoch-divergence` | `claimed` | Delivered bytes differ from local applied history. Skip without rewriting history or halting. |
-| `ahead` | `claimed` | A frame's cleartext epoch is ahead of this peer. A commit-topic publisher can forge that claim. |
-| `unknown-version` | `claimed` | A frame's handshake or commit-frame version cannot be read by this build. Its epoch and commit bytes are unavailable. |
-| `retention-gap` | `observed` | The hub reports a gap beyond the covered commit cursor. The peer cannot prove the missing range contained no membership changes. |
+| Kind                    | Confidence      | What the evidence establishes                                                                                                    |
+| ----------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `own-unmerged`          | `authenticated` | Sender data identifies this device. Unrecognised copies diagnose and skip, preserving saved work and unknown acceptance.         |
+| `past-epoch-divergence` | `claimed`       | Delivered bytes differ from local applied history. Skip without rewriting history or halting.                                    |
+| `ahead`                 | `claimed`       | A frame's cleartext epoch is ahead of this peer. A commit-topic publisher can forge that claim.                                  |
+| `unknown-version`       | `claimed`       | A frame's handshake or commit-frame version cannot be read by this build. Its epoch and commit bytes are unavailable.            |
+| `retention-gap`         | `observed`      | The hub reports a gap beyond the covered commit cursor. The peer cannot prove the missing range contained no membership changes. |
 
 Past divergence, including signed CAS losers, never creates a durable halt or frame-triggered recovery.
 Unknown versions emit `upgrade-required` diagnostics and advance as poison.

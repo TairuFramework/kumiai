@@ -22,7 +22,7 @@ error taxonomy and from the fact that an unreachable hub costs a user nothing wh
 
 ## What to decide
 
-- Which failures elsewhere in the stack are genuinely *expected* — a caller picks between outcomes —
+- Which failures elsewhere in the stack are genuinely _expected_ — a caller picks between outcomes —
   rather than invariant violations.
 - Whether `@kumiai/rpc`'s existing `isPermanentSubscribeFailure` (`packages/rpc/src/hub-mux.ts:255`)
   should be expressed the same way, given it already encodes the identical rule internally.

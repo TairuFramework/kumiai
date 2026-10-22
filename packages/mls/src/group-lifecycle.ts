@@ -31,7 +31,7 @@ import {
   isExemptMember,
   verifyLifecycleProof,
 } from './lifecycle-proof.js'
-import { DEVICE_ENTRY_TYPE, type DeviceValue, type RevokedEffect } from './registry.js'
+import { DEVICE_ENTRY_TYPE, type DeviceValue, isResetOnly, type RevokedEffect } from './registry.js'
 
 export type CommitResult = DeviceWriteResult
 
@@ -306,7 +306,8 @@ function proofFor(params: ProofForParams): Array<SignedEvent> {
  * from evidenced children, which its revocation never removes.
  */
 function isFullyRevoked(group: GroupHandle, subject: string): boolean {
-  if (group.registry.devices.get(subject)?.status !== 'revoked') return false
+  const record = group.registry.devices.get(subject)
+  if (record?.status !== 'revoked' || isResetOnly(record)) return false
   if (group.findMemberLeafIndex(subject) != null) return false
   return !group.listMembers().some((member) => {
     const capability = group.bindingOfDID(member.id)?.capability

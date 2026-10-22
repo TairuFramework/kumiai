@@ -109,7 +109,7 @@ describe('operation compare and set', () => {
     } catch (error) {
       expect(error).toBeInstanceOf(OperationOutcomeError)
       expect((error as OperationOutcomeError).outcome).toMatchObject({
-        id: request.id,
+        opID: request.id,
         kind: 'lost',
       })
     }

@@ -1,5 +1,11 @@
 # @kumiai/mls-hub
 
+## 0.10.1
+
+### Patch Changes
+
+- The hub refuses a request over its per-DID or per-topic rate limit with `HUB_RATE_LIMITED` instead of enkaku's generic `EK01`, so a client can tell a transient refusal from any other handler error. `hub-protocol` exports `RateLimitedError`, rebuilt by `hubErrorFromCode`. `mls-hub` classifies it as retryable. A client matching `EK01` for rate limits must also accept `HUB_RATE_LIMITED`.
+
 ## 0.10.0
 
 ### Minor Changes
@@ -111,7 +117,6 @@
   who derives the epoch secrets, while the ledger grants the role to BOB.
 
   **Breaking.**
-
   - `HubStore.countKeyPackages(ownerDID)` is a **new required method**. `storeKeyPackage` takes an
     optional `notAfter`; an expired entry must be neither served, counted, nor charged against the cap.
   - `KeyPackagePool.ensureStocked()` and `LastResortProvisioner.ensureProvisioned()` return an
@@ -147,7 +152,6 @@
 
   **Breaking.** Two dead exports removed while the band break makes it cheap, both unreachable in
   practice:
-
   - `@kumiai/mls` no longer exports the `GroupSyncScope` type — referenced by nothing, here or in any
     consumer.
   - `HubClient` no longer exposes the `rawClient` getter. `HubClient` now has one method per

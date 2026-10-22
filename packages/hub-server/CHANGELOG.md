@@ -1,5 +1,11 @@
 # @kumiai/hub-server
 
+## 0.10.4
+
+### Patch Changes
+
+- The hub refuses a request over its per-DID or per-topic rate limit with `HUB_RATE_LIMITED` instead of enkaku's generic `EK01`, so a client can tell a transient refusal from any other handler error. `hub-protocol` exports `RateLimitedError`, rebuilt by `hubErrorFromCode`. `mls-hub` classifies it as retryable. A client matching `EK01` for rate limits must also accept `HUB_RATE_LIMITED`.
+
 ## 0.10.3
 
 ### Patch Changes
@@ -20,7 +26,6 @@
   - Every lifecycle peer must run this release.
 
   **Lifecycle (`@kumiai/mls`)**
-
   - Groups can carry a controller. Its agents hold bound leaves that are verified against tree time, not a wall clock.
     - Genesis adds `controller`, `leafLifetime` and `trustedGrantLifetime`.
     - Creation, key packages and external joins accept a `ControllerBinding`.
@@ -35,14 +40,12 @@
   - `foldEnvelope` takes a single `FoldEnvelopeParams` object.
 
   **Recovery (`@kumiai/mls-rpc`, `@kumiai/rpc`)**
-
   - A recovery is adopted only after counted confirmation through signed verdicts. This adds new rendezvous kinds.
   - Binding renewal uses `recoveryBinding` and `prepareRecovery`.
   - `applyRecovery` can return `{ renewalRequired: true }`.
   - `PendingRecovery` adds `epoch`, `confirmationKey`, `judgeVerdict` and `markBindingUnusable()`.
 
   **Durable log delivery (`@kumiai/rpc`)**
-
   - `GroupPeerMLSParams` requires an `AppOutbox` and `appOutboxLimit`.
   - Log dispatch resolves at durable acceptance. Delivery is at least once and in per-sender order, across epoch changes and restarts.
   - Hosts persist a commit cursor `{ position, epoch, stranded? }` through `getCommitCursor()` and `putCommitCursor()`.
@@ -53,7 +56,6 @@
   - One live peer per group owns the outbox, the journal and the anchor store. To hand over, call `dispose()`, await `drained()`, then start the replacement.
 
   **Hub**
-
   - Every fetch result requires `gap: boolean`.
   - Log purge removes only a prefix of each topic, by position.
   - `AppWindowPruned.oldest` may be `null`.
@@ -203,7 +205,6 @@
   who derives the epoch secrets, while the ledger grants the role to BOB.
 
   **Breaking.**
-
   - `HubStore.countKeyPackages(ownerDID)` is a **new required method**. `storeKeyPackage` takes an
     optional `notAfter`; an expired entry must be neither served, counted, nor charged against the cap.
   - `KeyPackagePool.ensureStocked()` and `LastResortProvisioner.ensureProvisioned()` return an
@@ -239,7 +240,6 @@
 
   **Breaking.** Two dead exports removed while the band break makes it cheap, both unreachable in
   practice:
-
   - `@kumiai/mls` no longer exports the `GroupSyncScope` type — referenced by nothing, here or in any
     consumer.
   - `HubClient` no longer exposes the `rawClient` getter. `HubClient` now has one method per

@@ -17,7 +17,6 @@ matching `session-end` frame or acceptor dispose. The per-session tunnel is buil
 `idleTimeoutMs`, so idle sessions never GC, and there is no cap on concurrent sessions.
 
 Under the branch's own threat model (malicious hub), an adversary can:
-
 - suppress a legitimate `session-end` so the session leaks for the epoch's life, and/or
 - replay a captured `session-open` frame (same epoch) to resurrect a zombie session bound to the real
   sender — potentially re-executing a request.
@@ -26,7 +25,6 @@ Result: unbounded per-epoch resource growth. Cross-epoch replay is already block
 this is a same-epoch lever.
 
 **Options (decide during design):**
-
 - **Per-sender session cap** — reject new `session-open` beyond N concurrent sessions per
   authenticated `senderDID`. Bounds accumulation without touching idle behaviour, so long-lived idle
   channels are unaffected. Needs a policy default.

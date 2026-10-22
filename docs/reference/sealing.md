@@ -9,7 +9,7 @@ with `sealEntries`/`openEntries` under a key derived from the epoch's MLS export
 (RFC 9420 §8.5), which is epoch-level, one-way and derivable by every member at that epoch with
 nothing exchanged.
 
-The separation is forced by *where* the blob is opened. The resolver runs **inside** the MLS port's
+The separation is forced by _where_ the blob is opened. The resolver runs **inside** the MLS port's
 apply of the very commit carrying the blob, so an open that spent a ratchet generation or touched
 handle state would be unsound however it was scheduled. The exporter read is pure and re-entrant,
 and it sees the pre-commit epoch — the epoch the blob was sealed under.
@@ -18,8 +18,8 @@ and it sees the pre-commit epoch — the epoch the blob was sealed under.
 
 The blob carries a leading version byte, **inside the blob, never in the frame header**.
 
-An unknown *blob* version fails the open, which a peer survives: the commit files as poison and the
-next frame strands it into a heal. An unknown *frame* version fails the decode before the frame is
+An unknown _blob_ version fails the open, which a peer survives: the commit files as poison and the
+next frame strands it into a heal. An unknown _frame_ version fails the decode before the frame is
 ever classified — and a peer that steps over every frame without classifying one never learns the
 group moved past it, so it would sit at a dead epoch forever, silently.
 
@@ -38,7 +38,7 @@ under RFC 8291 `aes128gcm` to a device's own P-256 key rather than to anything M
 no home in this document's distinction, because that distinction — ratchet-consuming open vs. pure
 exporter read — is a question about an MLS handle, and the wake seal has no MLS handle on either
 end. It opens outside a group entirely, in a device's push extension, against a key the group never
-sees and MLS never issues. It carries no version *byte* at all: its version is a field inside the
+sees and MLS never issues. It carries no version _byte_ at all: its version is a field inside the
 sealed JSON, unreadable and untamperable by the push provider, which is the point. It follows the
 same never-best-effort-parse rule as the two above, but that is where the kinship ends.
 

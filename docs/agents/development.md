@@ -10,7 +10,6 @@ Eleven packages sharing one version band — the same minor while pre-1.0 (`0.X`
 1.0 (`X`). Trailing segments diverge freely, so a package taking a patch release on its own churns
 nobody. Raising the band is a group act: every package takes that bump, in one release.
 `pnpm run check:versions` enforces it, and runs as part of `pnpm test` and `pnpm release`.
-
 - **Core** — `mls`, `broadcast`, `rpc`
 - **Hub subsystem** — `hub-protocol`, `hub-client`, `hub-server`, `hub-tunnel`
 - **Port implementation** — `mls-rpc`, the real implementation of rpc's consumer ports over a live

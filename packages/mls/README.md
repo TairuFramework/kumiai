@@ -2,6 +2,36 @@
 
 Credential-aware MLS (RFC 9420) group lifecycle for enkaku. Wraps [`ts-mls`](https://github.com/LukaJCB/ts-mls) with DID-based identity and a signed control ledger, giving every member a `MemberCredential` that ties their MLS leaf to their DID, and a group-wide roster that decides who may add, remove, and rotate.
 
+## Publishing commits directly
+
+Commit builders return a derived handle without advancing the source handle's epoch.
+Durable hosts use `@kumiai/mls-rpc`'s control-build port, which grants a permit for one private commit.
+It saves exact bytes and the candidate before publication, with one durable slot per source epoch.
+A lost compare-and-set retries those bytes or settles the build through authenticated adoption.
+Abandonment leaves a spent-source marker until epoch advancement, preventing a second build at the same epoch.
+Client-state reservation evidence remains serialisable, independently of the control-build API.
+Every handle construction, including direct `new GroupHandle` and restore, advances past an imported current-epoch reservation and clears the evidence.
+The skip applies regardless of the consumed flag and finishes before the constructor returns.
+It ignores reservations from other epochs. The commit permit repeats this preparation, normally as a no-op.
+Restored, permit and candidate state saves use flags `0`.
+
+## Persisted client state
+
+`encodeClientState` and `decodeClientState` support only format v2. Other versions throw an unsupported-version error.
+Malformed or truncated v2 blobs return `undefined`, as does empty input.
+There is no migration path from another client-state format.
+
+The layout is a version byte (`2`), flags byte (`0` or `1`), optional reservation, body, and proposal references.
+Flag `1` includes a uint64 epoch, uint32 generation, and consumed byte (`0` or `1`).
+The ts-mls body has a uint32 byte length and a 64,000,000-byte decoding limit.
+A uint32 count precedes UTF-8 references, each with a uint32 byte length.
+References ascend strictly by JS string (UTF-16 code unit) ordering.
+References preserve unapplied proposals whose sender is exactly leaf zero, working around ts-mls rc.13 dropping optional numeric zero.
+All integers are big-endian. Invalid flags, consumed bytes, references, or trailing bytes make the blob malformed.
+Decoding copies the body so ratcheting cannot zero secrets in stored bytes.
+Decoding requires the body's canonical re-encoding to match its stored bytes before restoring leaf-zero senders.
+`encodeClientState` throws `ClientStateReservationError` unless the reservation epoch is a uint64 bigint and its generation a uint32 integer.
+
 ## Capabilities
 
 - `createGroup` — creator opens a new group as its sole member and first admin
@@ -41,11 +71,10 @@ may be held while awaiting a handle or peer operation. The real `@kumiai/mls-rpc
 ## Authority model
 
 Authority is a **roster**, folded from a signed **control ledger** and rooted at a genesis anchor installed in the GroupContext when the group is created. There is no capability chain: a member's right to act is decided by the roster every peer computes independently, not by a token the member carries.
-
 - **The ledger is an ordered log of enactments.** Each entry is a token signed by its issuer (a `kumiai.role` entry names a subject DID and grants it `admin` or `member` of the group). The log is replayable and position-dependent: the same claim recurring later is meaningful — a demotion back to a previously-held role is exactly that.
-- **The roster is the fold.** `foldRoster` applies each entry only if its issuer was an admin *in the state so far, at that entry's own position*. A token signed by a since-demoted admin is dead paper whoever carries it. The fold starts from the anchor (`{creator: 'admin'}`), so no one can promote themselves by padding an invite.
+- **The roster is the fold.** `foldRoster` applies each entry only if its issuer was an admin _in the state so far, at that entry's own position_. A token signed by a since-demoted admin is dead paper whoever carries it. The fold starts from the anchor (`{creator: 'admin'}`), so no one can promote themselves by padding an invite.
 - **Enactment is admin-only, structurally.** Entries reach the group inside a commit, and a commit that enacts entries must extend the GroupContext ledger-head extension by exactly those ids, in order. Moving the head needs a `group_context_extensions` proposal, which needs admin. A plain member's only permitted proposal is `update`; attaching an envelope to it fails for want of a head move. The write path runs the receivers' own fold before authoring, so it never builds a commit the group would reject.
-- **`GroupPermission` is `'admin' | 'member'` — there is no read-only tier.** It cannot exist: a group member holds the epoch secrets, which is what membership *is* in MLS. A `read` member derives the same application keys as any other member and can decrypt everything. Read-only observers do not belong in the group; gate them outside MLS, at the transport or storage layer.
+- **`GroupPermission` is `'admin' | 'member'` — there is no read-only tier.** It cannot exist: a group member holds the epoch secrets, which is what membership _is_ in MLS. A `read` member derives the same application keys as any other member and can decrypt everything. Read-only observers do not belong in the group; gate them outside MLS, at the transport or storage layer.
 
 The invite carries the full ordered ledger plus the invitee's new role entry last, so a joiner folds the same roster the group holds and cannot fork from a role change made before it joined.
 
@@ -64,9 +93,9 @@ const { groupInfo } = await exportGroupInfo({ group: aliceGroup })
 // On the stale device:
 import { joinGroupExternal } from '@kumiai/mls'
 const { commitMessage, group } = await joinGroupExternal({
-  identity: bob,                    // OwnIdentity from @kokuin/token
-  groupInfo,                        // bytes received from the healthy member
-  credential: bobStoredCredential,  // cached from the original processWelcome
+  identity: bob, // OwnIdentity from @kokuin/token
+  groupInfo, // bytes received from the healthy member
+  credential: bobStoredCredential, // cached from the original processWelcome
   resync: true,
 })
 // Broadcast commitMessage (Uint8Array) to the other members; each decodes and calls
@@ -93,8 +122,7 @@ An external commit is enforced as a **resync of an existing roster member**, nev
 
 ### ⚠️ Security: removal is not revocation
 
-MLS has no cryptographic member revocation. `removeMember` evicts a leaf; it does not erase the removed DID's `kumiai.role` grant — its role in the group — which lives in the roster independently of MLS membership. So a device that retains its `MemberCredential` can rejoin via `joinGroupExternal` **even after being removed** — its DID is still a roster member, so the external-commit policy admits the resync — provided it can still obtain a fresh `GroupInfo`. (The policy stops *strangers*, who are in no roster; it does not stop a removed member.) Consumers must assume a removed member can rejoin until role revocation lands in a follow-up spec. Mitigations available today:
-
+MLS has no cryptographic member revocation. `removeMember` evicts a leaf; it does not erase the removed DID's `kumiai.role` grant — its role in the group — which lives in the roster independently of MLS membership. So a device that retains its `MemberCredential` can rejoin via `joinGroupExternal` **even after being removed** — its DID is still a roster member, so the external-commit policy admits the resync — provided it can still obtain a fresh `GroupInfo`. (The policy stops _strangers_, who are in no roster; it does not stop a removed member.) Consumers must assume a removed member can rejoin until role revocation lands in a follow-up spec. Mitigations available today:
 - Rotate the group: create a new group, migrate non-removed members via fresh invites, abandon the old group.
 - Enforce access control outside MLS: block the removed device at the transport layer (e.g. hub auth).
 
@@ -106,7 +134,7 @@ The follow-up revocation work will introduce a ledger entry that removes a DID's
 
 ### ⚠️ Security: rotate the last-resort bundle before it expires
 
-A last-resort key package carries an MLS lifetime of `LAST_RESORT_LIFETIME_DAYS` (90). The inviter validates that lifetime when building the Add, so an expired package is refused at the far end with `Current time not within Lifetime` — and refused *no matter what the hub does*, because the hub stores opaque bytes and cannot see the expiry.
+A last-resort key package carries an MLS lifetime of `LAST_RESORT_LIFETIME_DAYS` (90). The inviter validates that lifetime when building the Add, so an expired package is refused at the far end with `Current time not within Lifetime` — and refused _no matter what the hub does_, because the hub stores opaque bytes and cannot see the expiry.
 
 That makes the failure worse than an empty slot: the hub goes on reporting the slot as full and serving the dead package, so the availability floor looks healthy while every join through it fails. A host must generate and upload a fresh last-resort bundle before the window elapses, and keep the new private half. Uploading once at enrolment buys 90 days, not forever.
 

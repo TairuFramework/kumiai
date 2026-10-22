@@ -15,7 +15,7 @@ whose `epoch` parameter is a `number`. So an epoch at or above `2^53` is rejecte
 
 - **It fails closed, and it fixed a worse bug.** Before this guard, an epoch at or above `2^53`
   would round to a colliding float inside `Number(...)`/`encodeEpoch` and two distinct uint64 epochs
-  could derive the *same* topic silently. The guard converts that silent collision into a loud
+  could derive the _same_ topic silently. The guard converts that silent collision into a loud
   throw. Rejecting the unrepresentable range is the correct behaviour for the current `number` API.
 - **The range is astronomically unreachable.** The epoch advances once per commit; `2^53` is ~9
   quadrillion commits on one group.

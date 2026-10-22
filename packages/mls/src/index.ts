@@ -94,6 +94,7 @@ export {
 } from './envelope-fold.js'
 export {
   CarryIdentityError,
+  ClientStateReservationError,
   CommitValidationUnavailableError,
   type CommitValidationUnavailableReason,
   commitValidationReason,

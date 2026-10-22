@@ -5,7 +5,6 @@
 ## Races between two locked reads
 
 `@kumiai/rpc` takes every commit-path and app-lane decision from an epoch read under the host's handle lock, but some decisions combine two separate locked reads. A host that moves the handle between them (outside the peer, which serialises its own movers) can mislead the peer:
-
 - The commit walk reads `GroupMLS.readEpoch()` and `readCommitHeader()` under separate locks (`packages/rpc/src/peer.ts`, ordinary classifier). An epoch move in between can classify an applicable frame as `ahead`, causing a spurious strand and heal.
 - `captureAnchor` pairs secret and epoch from one `exportSecret`, but does not compare that epoch with the applied `epochAfter`, and the roster before/after reads are separate. A concurrent move anchors at a later epoch than the rest of the group.
 

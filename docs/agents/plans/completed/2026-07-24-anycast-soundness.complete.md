@@ -20,7 +20,7 @@ hand-rolled listener fan-out.
 
 - **High — error replies suppressed healthy responders.** Suppressible anycast collapses a storm of
   responders to one reply by having a responder that observes another's reply stop replying. The
-  suppression fired on **any** observed reply, errors included, so one fast *failing* responder
+  suppression fired on **any** observed reply, errors included, so one fast _failing_ responder
   suppressed every healthy one and the client timed out — the group looked dead when one member was
   broken. Resolved by gating both mark-replied sites (a responder's own reply, and an observed peer
   reply) on `err == null`. First-writer-wins on the suppress timer is preserved, so a late success

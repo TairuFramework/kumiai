@@ -8,8 +8,15 @@ export function ownHandshakeGeneration(state: ClientState): number {
 }
 
 function projectedState(state: ClientState): ClientState {
+  const { handshakeReservation, ...rest } = state
+  const generation = ownHandshakeGeneration(state)
+  // Compare stored main bytes with the same logical state after restore-time normalisation.
+  const restoredGeneration =
+    handshakeReservation?.epoch === state.groupContext.epoch
+      ? Math.max(generation, handshakeReservation.generation + 1)
+      : generation
   return {
-    ...state,
+    ...rest,
     secretTree: {
       leafWidth: state.secretTree.leafWidth,
       intermediateNodes: {},
@@ -17,7 +24,7 @@ function projectedState(state: ClientState): ClientState {
         [2 * state.privatePath.leafIndex]: {
           handshake: {
             secret: new Uint8Array(),
-            generation: ownHandshakeGeneration(state),
+            generation: restoredGeneration,
             unusedGenerations: {},
           },
           application: { secret: new Uint8Array(), generation: 0, unusedGenerations: {} },

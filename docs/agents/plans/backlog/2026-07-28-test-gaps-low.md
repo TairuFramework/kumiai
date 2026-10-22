@@ -7,7 +7,6 @@ against current source. The Highs and Mediums that survived stayed there; this i
 
 Each entry below was re-checked on 2026-07-28 — what is written is the state then, not the 2026-07-02
 audit's.
-
 - **Async-unwrap ordering.** `broadcast/test/sender.test.ts` and `transport.test.ts` pass only a
   synchronous `unwrap` (`recoverUnwrap`). An `unwrap` returning a promise can reorder delivery
   relative to a synchronous one, and nothing pins which order the transport guarantees.

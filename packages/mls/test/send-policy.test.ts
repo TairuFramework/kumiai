@@ -331,6 +331,8 @@ test('manual acquisition and run share a FIFO queue and release is idempotent', 
 
 test('rejects forged handles before reading their state', async () => {
   const handle = Object.create(mls.GroupHandle.prototype) as GroupHandle
+  await expect(mls.commitKeyRotation(handle)).rejects.toThrow(TypeError)
+  await expect(handle.proposeSelfRemoval()).rejects.toThrow(TypeError)
   await expect(relinquishSend(handle)).rejects.toThrow(TypeError)
   expect(() => denyApplicationSend(handle)).toThrow(TypeError)
   expect(() => bindSendCeiling(handle, () => 1)).toThrow(TypeError)

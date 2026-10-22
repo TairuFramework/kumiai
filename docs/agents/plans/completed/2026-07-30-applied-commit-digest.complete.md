@@ -12,7 +12,7 @@
 The commit lane's `fork` row means "two different commits at one epoch" — something a hub can only
 produce by serving different logs to different members — and it triggers a heal: recovery, rejoin via
 an external commit, and an app-lane anchor rotation for every member of the group. It did not check
-that. `appliedByEpoch` mapped each epoch to the *sequenceID* the peer enacted there, and
+that. `appliedByEpoch` mapped each epoch to the _sequenceID_ the peer enacted there, and
 `classifyCommit` settled the row by comparing positions, so "a different commit" was proxied by "a
 different sequenceID" — and the same commit, re-published verbatim, lands at a new sequenceID and
 satisfies the proxy.
@@ -24,8 +24,8 @@ against `reconciledHead`. So a hub that re-published a genuine commit frame and 
 the commit for that epoch, then read the original as the LOSING side of a fork. One group-wide heal
 and topic rotation per replay, for bytes the group had already delivered once.
 
-The hub-conformance clause *a re-published payload under a fresh publishID never lands below the
-original* bounds where a replay's sequenceID can land. It says nothing about the order a reader is
+The hub-conformance clause _a re-published payload under a fresh publishID never lands below the
+original_ bounds where a replay's sequenceID can land. It says nothing about the order a reader is
 served, which was the second premise.
 
 ## What was built
@@ -53,7 +53,7 @@ cursor treatment, not a taxonomy.
 replay, and a type that cannot express one without the other cannot drift.
 
 **No ordering check was added to `walkCommits`.** Rejecting frames at or below `reconciledHead` looks
-cheap and is worse on its own terms: it would silently drop a *genuine* fork frame served out of
+cheap and is worse on its own terms: it would silently drop a _genuine_ fork frame served out of
 order — the exact case the row exists for — trading a false heal for a missed one.
 
 **`appliedByEpoch` stays in memory, deliberately.** A restarted peer holds no record, reads `history`,
@@ -70,7 +70,6 @@ callers, since `classifyCommit` is exported.
 ## The property this buys
 
 **The change is monotonically heal-reducing.** Exactly three verdicts move:
-
 1. digest equal at a different position: `fork` → `history`
 2. digest different at an equal position: `history` → `fork`/`winning`
 3. no digest at a different position: `fork` → `history` (direct callers only, never the lane)
@@ -99,7 +98,6 @@ turbo.
 
 The load-bearing tests were written red first and mutation-checked — each guard was broken and the
 covering test confirmed to fail before the source was restored:
-
 - **The out-of-order replay test failed before the change**, on the recovery-request assertion, with
   both premises (`replayed > original`, and the peer having actually applied the replay) verified
   first, so the red was for the stated reason rather than a broken fixture.
@@ -109,11 +107,11 @@ covering test confirmed to fail before the source was restored:
   and different sealed blobs. This one is worth remembering. The first draft of the test did not
   catch the frame-wide mutant at all — it applied the frames in sequenceID order, which routes the
   mutant into the unobservable `fork`/`winning` branch. It had to be restructured to serve the
-  lower-sequenceID frame *after* the higher one is applied so the mutant reaches `fork`/`losing` and
+  lower-sequenceID frame _after_ the higher one is applied so the mutant reaches `fork`/`losing` and
   produces a visible heal. A test guarding an invariant along the wrong axis looks exactly like one
   that works.
 
-The test that expects a heal polls for the recovery request; the tests asserting an *absence* keep a
+The test that expects a heal polls for the recovery request; the tests asserting an _absence_ keep a
 bounded wait, which is the correct shape for each.
 
 ## Residue knowingly accepted

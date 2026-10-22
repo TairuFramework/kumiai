@@ -40,6 +40,7 @@ import {
   type DeviceRegistry,
   type DeviceValue,
   denySetOf,
+  mayReadmitResetDevice,
 } from './registry.js'
 
 export type CommitRejectionReason = 'binding' | 'lapse' | 'floor' | 'policy' | 'invalid'
@@ -223,7 +224,8 @@ function checkBinding(
   )
     throw new LeafBindingError('controller-mismatch')
   const denied = denySetOf(group.registry)
-  if (denied.has(normalizeDID(parsed.id))) throw new LeafBindingError('denied-id')
+  if (denied.has(normalizeDID(parsed.id)) && !mayReadmitResetDevice(group.registry, parsed))
+    throw new LeafBindingError('denied-id')
   const record = group.registry.devices.get(normalizeDID(parsed.id))
   if (record != null && (binding == null || normalizeDID(binding.id) !== record.controller))
     throw new LeafBindingError('controller-mismatch')
@@ -305,6 +307,7 @@ async function validateBoundLeaf(
   checkBinding(group, leaf, previous, welcome)
   await verifyLeafCredential(leaf.credential, leaf.signaturePublicKey, {
     deviceDenySet: () => denySetOf(group.registry),
+    deviceRegistry: () => (group.anchor.controller == null ? undefined : group.registry),
     mayKeepDeniedIssuer: () => welcome && group.anchor.controller != null,
     leafLifetime: () =>
       group.anchor.controller == null ? undefined : (group.anchor.leafLifetime ?? 86_400),
@@ -356,7 +359,8 @@ function checkSurvivors(
   for (const [position, node] of tree.entries()) {
     if (node?.nodeType !== nodeTypes.leaf) continue
     const parsed = identity(node.leaf)
-    if (denied.has(normalizeDID(parsed.id))) throw new LeafBindingError('denied-id')
+    if (denied.has(normalizeDID(parsed.id)) && !mayReadmitResetDevice(registry, parsed))
+      throw new LeafBindingError('denied-id')
     if (parsed.controller == null) {
       if (controller != null) throw new LeafBindingError('floating-refused')
       continue

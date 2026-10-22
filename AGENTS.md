@@ -19,7 +19,6 @@ act, but a patch release within the band is not.
 ## Guardrails
 
 See the `kigu:conventions` skill — canonical, do not restate here. Repo-specific only:
-
 - pnpm only.
 - Do not edit generated files (`lib/`).
 - Cross-repo deps (`@sozai/*`, `@kokuin/*`, `@enkaku/*`) go through the workspace catalog as

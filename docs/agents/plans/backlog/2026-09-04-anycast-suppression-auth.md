@@ -8,14 +8,14 @@ observe path exactly as it found it.
 ## The concern
 
 `@kumiai/broadcast`'s responder suppresses a healthy responder when it observes another responder's
-*success* reply for the same request id: `createBroadcastResponder`'s inbound loop calls
+_success_ reply for the same request id: `createBroadcastResponder`'s inbound loop calls
 `markReplied(data.rid, ...)` on an observed `res` frame gated only on `data.err == null`
 (`packages/broadcast/src/responder.ts`, the `typ === 'ctrl'` / `kind === 'res'` branch). That branch
 keys on `rid` alone — it does **not** consult the transport-level `senderDID`.
 
 So on an authenticating transport, a peer can suppress a healthy responder for a chosen `rid` by
 writing a forged success `res` under that `rid`: the healthy responder observes it and marks the rid
-replied, and stays silent. The client's *collect* path is not the weak point — `BroadcastClient`
+replied, and stays silent. The client's _collect_ path is not the weak point — `BroadcastClient`
 already drops replies the transport cannot attribute (`client.ts`, the `senderDID` guard) — the
 weakness is that a responder's decision to stay quiet is driven by an unauthenticated observation.
 

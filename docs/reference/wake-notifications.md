@@ -64,7 +64,6 @@ value — rejected outright, never best-effort parsed — not in where it sits.
 
 A burst of frames for the same offline device does not mean a burst of pings. The dispatcher
 coalesces per DID on a **leading edge**:
-
 1. The first frame for an offline DID pings immediately, sealed with that frame's `topicID` and
    `count: 1`.
 2. Further pings are suppressed for `debounceMs` (default 10 000).
@@ -86,11 +85,11 @@ to members who are online and waiting on their live channel.
 `WakeSender.send` never throws at its caller — it resolves to a verdict, and the verdict is what
 decides what happens to the registration:
 
-| Verdict | Hub action |
-| --- | --- |
-| `delivered` | Nothing. |
-| `gone` | The registration is **deleted**. Web Push answers 404/410, Expo answers `DeviceNotRegistered` — either way the endpoint is permanently dead, and a dead endpoint retained forever is a stale identifier the hub keeps volunteering to a provider. |
-| `retry` | The ping is dropped and reported through the same hook shape as `onStoreError`. There is no retry queue: the next frame re-triggers a ping on its own, and a queue would be a second delivery system with its own durability story to get right. |
+| Verdict     | Hub action                                                                                                                                                                                                                                        |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `delivered` | Nothing.                                                                                                                                                                                                                                          |
+| `gone`      | The registration is **deleted**. Web Push answers 404/410, Expo answers `DeviceNotRegistered` — either way the endpoint is permanently dead, and a dead endpoint retained forever is a stale identifier the hub keeps volunteering to a provider. |
+| `retry`     | The ping is dropped and reported through the same hook shape as `onStoreError`. There is no retry queue: the next frame re-triggers a ping on its own, and a queue would be a second delivery system with its own durability story to get right.  |
 
 ## The iOS section
 
@@ -113,7 +112,6 @@ foreground.
 
 `createHub({ wake })` takes a `registry` (a `WakeRegistry`) and a `sender` (a `WakeSender`), plus
 an optional `debounceMs`. Both are host choices:
-
 - **`registry`** — durable storage for one registration per DID. `@kumiai/hub-wake` ships an
   in-memory reference implementation; a production host wants a durable one, checked against
   `testWakeRegistryConformance` from `@kumiai/hub-conformance`. Nothing unusable reaches it:
@@ -136,7 +134,6 @@ an optional `debounceMs`. Both are host choices:
 
 Two costs worth knowing before you wire a durable registry. Neither leaks anything; both are
 operator-relevant:
-
 - The dispatcher does a `registry.get(did)` on the **leading edge for every offline subscriber**,
   registered or not. On a busy topic that is one durable-store read per offline DID per debounce
   window, including for the DIDs that will never have a registration.

@@ -43,7 +43,7 @@ one subscription per service-worker registration; per-registration endpoints exi
 UnifiedPush, but then the distributor counts the user's groups and watches each one's rhythm — the
 exact linkage this design denies it.
 
-**The hub never parses `endpoint`.** It is an opaque string, and `kind` is an opaque tag the *sender*
+**The hub never parses `endpoint`.** It is an opaque string, and `kind` is an opaque tag the _sender_
 switches on. A hub that understood endpoint URLs would grow provider-specific behaviour it has no
 business having. This is why the endpoint-policy check landed as an `allowEndpoint` predicate on the
 Web Push sender rather than as validation at registration.

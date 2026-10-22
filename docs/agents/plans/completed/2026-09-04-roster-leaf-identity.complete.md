@@ -11,7 +11,7 @@ carries no leaf identity."
 ## Goal
 
 `GroupMLS.rosterDIDs(): Promise<Array<string>>` was documented as "one entry per leaf," so a DID
-holding two leaves appeared twice — but nothing said *which* leaf each entry was: no leaf index, no
+holding two leaves appeared twice — but nothing said _which_ leaf each entry was: no leaf index, no
 per-leaf metadata. Not a correctness bug (no filed consumer needed to disambiguate two leaves for the
 same DID), but the return shape would have to widen the moment one did, and widening it later is a
 breaking change. Taken now because the 0.x window is the last cheap moment to spend that break, and
@@ -61,14 +61,14 @@ because moving to an object return is what lets any later per-leaf field ride in
   `test:types` run.
 - **Adjacent fix, `@kumiai/mls`:** `group-handle.ts`'s `listMembers` doc comment overstated that an
   external-commit rejoin always takes "the leftmost blank — the one just blanked," implying the
-  member's leaf index never changes. Corrected: if an earlier blank exists, the rejoin takes *that*
+  member's leaf index never changes. Corrected: if an earlier blank exists, the rejoin takes _that_
   one instead, moving the index. The rejoin-invisibility argument the comment supports still holds via
   the DID set and `CommitHeader.external`; this was a comment-accuracy fix, not a behavior change.
 
 ## Known coverage gap (deliberately scoped out)
 
 The double addresses roster removal by DID and blanks every slot matching that DID; real MLS removal
-is leaf-index-addressed and can remove *one* of two leaves a single DID holds — the exact case
+is leaf-index-addressed and can remove _one_ of two leaves a single DID holds — the exact case
 `leafIndex` exists to disambiguate. Making the double faithful to that case would mean rewriting its
 commit representation to leaf-index-addressed removal, raising the conformance bar for every external
 double, for a semantic no consumer uses today (the lane rotates on `CommitHeader.external`, not on

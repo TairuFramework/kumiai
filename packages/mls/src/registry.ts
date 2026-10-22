@@ -1,7 +1,8 @@
-import type { SignedEvent } from '@kokuin/controller'
+import { foldLog, type SignedEvent } from '@kokuin/controller'
 import { normalizeDID } from '@kokuin/token'
 
 import type { GroupAnchor } from './anchor.js'
+import type { MLSCredentialIdentity } from './credential.js'
 import type { FoldDrop, FoldInput } from './fold.js'
 import type { GroupHandle } from './group-handle.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
@@ -48,7 +49,7 @@ export type Revocation = {
   cascadedFrom?: string
 }
 
-/** A folded device binding or permanent revocation. */
+/** A folded device binding or revocation. Reset-only removal permits fresh admission. */
 export type DeviceRecord = {
   controller: string
   status: 'active' | 'revoked'
@@ -184,7 +185,8 @@ export function registryApply(
       })
       for (const revoked of value.revoked ?? []) {
         const did = normalizeDID(revoked.did)
-        if (devices.get(did)?.status === 'revoked') continue
+        const held = devices.get(did)
+        if (held?.status === 'revoked' && (value.op === 'reset' || !isResetOnly(held))) continue
         devices.set(did, {
           controller,
           status: 'revoked',
@@ -201,11 +203,8 @@ export function registryApply(
   switch (value.op) {
     case 'register':
     case 'add': {
-      // Terminal revocation: once a subject is revoked, no later register/add re-activates it. The
-      // fold only ever subtracts authority — to re-authorize a device, a fresh device DID is minted.
-      // The record is left frozen at 'revoked' (the acceptance gate still verified the entry, but the
-      // fold does not resurrect a revoked binding). Keeps determinism: every member applies this rule.
-      if (existing?.status === 'revoked') {
+      // Acceptance checks fresh evidence before reactivating a reset-only binding.
+      if (existing?.status === 'revoked' && !isResetOnly(existing)) {
         return { devices, controllers }
       }
       // `controller` is structurally guaranteed present for register/add by isDeviceValue.
@@ -223,7 +222,8 @@ export function registryApply(
     }
     case 'revoke': {
       if (existing == null) return { devices, controllers }
-      devices.set(subject, { ...existing, status: 'revoked' })
+      const { reason: _reason, ...terminal } = existing
+      devices.set(subject, { ...terminal, status: 'revoked' })
       return { devices, controllers }
     }
     case 'reset':
@@ -248,6 +248,32 @@ export function registryApply(
       return { devices, controllers }
     }
   }
+}
+
+/** Only reset removal without a cascade permits a later admission. */
+export function isResetOnly(record: DeviceRecord): boolean {
+  return record.status === 'revoked' && record.reason === 'reset' && record.cascadedFrom == null
+}
+
+/** Structural admission exception. Callers still authenticate the capability and holder grant. */
+export function mayReadmitResetDevice(
+  registry: DeviceRegistry,
+  parsed: MLSCredentialIdentity,
+): boolean {
+  const record = registry.devices.get(normalizeDID(parsed.id))
+  const binding = parsed.controller
+  if (
+    record == null ||
+    !isResetOnly(record) ||
+    binding == null ||
+    normalizeDID(binding.id) !== record.controller
+  )
+    return false
+  const folded = foldLog(binding.id, binding.prefix)
+  return (
+    folded.ok &&
+    (folded.states.at(-1)?.gen ?? 0) >= (registry.controllers.get(record.controller)?.genFloor ?? 0)
+  )
 }
 
 /** The profile a device is bound to in the folded registry, or undefined — the authority input. */
@@ -277,9 +303,9 @@ export function denySetOf(registry: DeviceRegistry): ReadonlySet<string> {
 
 /**
  * The universal rule: an ACTIVE binding resolves the issuer to its controller; anything else
- * resolves to the issuer itself. A revoked binding confers no authority — terminal revocation only
- * ever subtracts — so a revoked device re-entering as a floating leaf, or a role entry it signed
- * before revocation but enacted after, must not resolve to its former controller. (Note the split:
+ * resolves to the issuer itself. A revoked binding confers no authority until accepted re-entry.
+ * Floating leaves and entries enacted while revoked cannot resolve to the former controller.
+ * (Note the split:
  * {@link controllerOf} is the RAW lookup, deliberately status-blind, since the deviceRevoked event
  * emission and the revoke/label gate read the surviving binding of a just-revoked device.)
  */
@@ -370,7 +396,7 @@ export function foldControl(
   return { roster, registry }
 }
 
-/** A permanent ledger revocation, independent of the controller's current log deny set. */
+/** A ledger revocation, independent of the controller's current log deny set. */
 export function revocationOf(group: GroupHandle, did: string): Revocation | null {
   const record = group.registry.devices.get(normalizeDID(did))
   if (record?.status !== 'revoked' || record.logPosition === undefined) return null

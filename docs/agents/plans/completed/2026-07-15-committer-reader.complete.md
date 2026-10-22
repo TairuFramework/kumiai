@@ -56,7 +56,7 @@ mutex. So the method could not stay synchronous or handle-less.
 ## Design decisions preserved
 
 - **Committer by authorship, from the commit, not the transport sender.** The storm-prevention
-  rule in `classify` fires only on a peer's *own authored* commit; feeding it the hub's
+  rule in `classify` fires only on a peer's _own authored_ commit; feeding it the hub's
   `senderDID` would let a hub that stamps each recipient's own DID onto one poison frame heal
   the whole group at will. R1 recovers the committer MLS authenticated, member-side, with the
   epoch secret the member already holds — the committer is never leaked to the hub.
@@ -82,7 +82,7 @@ mutex. So the method could not stay synchronous or handle-less.
 ## Critical found and fixed in final review
 
 `GroupHandle.readCommitHeader`'s top-level `decode(mlsMessageDecoder, commit)` was unwrapped.
-ts-mls `decode` *throws* `CodecError` on malformed/truncated frames (not just returns null), and
+ts-mls `decode` _throws_ `CodecError` on malformed/truncated frames (not just returns null), and
 the rpc lane calls the port method outside any try/catch on raw, un-decoded bytes handed over by
 `decodeCommitFrame`. A hub-injected frame with a valid outer wrapper but garbage inner-commit
 bytes would throw, `pullCommits` would reject, the cursor would never advance past that frame,

@@ -45,7 +45,7 @@ seal record's raw byte headroom rather than a live hazard.
   every inbound client message is validated against the schema. A topicID outside the pattern is
   rejected with enkaku error `EK08` ("Invalid protocol message") before any handler runs; the
   seal-time throw is a second, deeper backstop. (An early read of `hub.ts` alone suggested "no
-  validator wired" because none is passed *explicitly*; the auto-derivation from `protocol` was
+  validator wired" because none is passed _explicitly_; the auto-derivation from `protocol` was
   missed, and a stale `lib/` build let a scoped test run pass before `--force` rebuilt it. The final
   full `turbo … --force` caught it, and a second code review then caught the integration gap below.)
   Consequence: production callers are unaffected (they mint 43-char base64url topics), but every
@@ -72,7 +72,7 @@ seal record's raw byte headroom rather than a live hazard.
   43/43. (Standing lesson, already in the `kumiai-test-verification` memory.)
 - Lint clean (biome). Typecheck clean across hub-protocol and all dependents plus the integration
   package; full-band `build:types` passed in the pre-commit hook.
-- Doubles: the only topicID *schema* in the repo is this one; `HubStore` types topicID as bare
+- Doubles: the only topicID _schema_ in the repo is this one; `HubStore` types topicID as bare
   `string` (a shape-agnostic key-value boundary, not the RPC port), so no double is more permissive
   than its port.
 

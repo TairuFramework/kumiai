@@ -18,7 +18,7 @@ The retired audit-remediation milestone is a separate document —
   convergent between peers. The MLS core already treated the ledger as authoritative — a commit's
   envelope names the entries it enacts, and `foldEnvelope` refuses any commit whose entries were not
   admin-authored at their own position — but the envelope is cleartext AAD carrying ids only, so a
-  receiver that had never seen an entry *body* threw `MissingLedgerEntriesError` and stalled
+  receiver that had never seen an entry _body_ threw `MissingLedgerEntriesError` and stalled
   permanently. The lane gets bodies from author to member, resolves concurrent commits
   deterministically, and heals a peer that fell off the group's line, without a host-side store and
   without weakening the MLS authority model. Breaking release.
@@ -26,7 +26,7 @@ The retired audit-remediation milestone is a separate document —
 - **conformance-suite-runs-against-one-implementation** (2026-07-19, closed) — `hub-conformance`
   was the contract for a hub and ran against exactly one implementation (`createMemoryStore`) while
   every peer- and tunnel-level test in the repo ran against a double. Closed on
-  `feat/app-lane-delivery`: both suites now run against every implementation *and* every double.
+  `feat/app-lane-delivery`: both suites now run against every implementation _and_ every double.
   The principle outlived the fix — it is why the repo now treats a double answering where its real
   port refuses as the defect class to design against.
 
@@ -55,7 +55,7 @@ The retired audit-remediation milestone is a separate document —
 
 - **add-proposal-roster-binding** (2026-07-26, complete) — `commitInvite` refused to author a commit
   whose key package disagreed with the roster that same commit grants, but the invariant held only
-  where the commit was *authored*. A receiver could not see the divergence: `defaultCommitPolicy`
+  where the commit was _authored_. A receiver could not see the divergence: `defaultCommitPolicy`
   accepted any Add from an admin sender without looking at the added leaf. This closed the receive
   side, so a modified or buggy write path cannot land what the send side refuses to build.
 

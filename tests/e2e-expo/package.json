@@ -17,9 +17,9 @@
     "@kokuin/token": "catalog:",
     "@kumiai/mls": "workspace:^",
     "@sozai/runtime-expo": "catalog:",
-    "expo": "catalog:",
-    "expo-status-bar": "catalog:",
-    "react": "catalog:",
+    "expo": "~58.0.17",
+    "expo-status-bar": "~58.0.4",
+    "react": "19.3.0",
     "react-native": "catalog:"
   },
   "devDependencies": {

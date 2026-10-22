@@ -24,7 +24,6 @@ A guard inside `commitInvite`, after `entriesAddedByInvite` and before the Add p
 so a wrong package costs no commit. It verifies the invite's newly-enacted ledger tokens, takes the
 `subject` of the **last** `kumiai.role` entry for this group, and compares it against the DID
 parsed from the key package's basic credential — both sides folded through `normalizeDID`.
-
 - A mismatch throws the new exported `InviteRecipientMismatchError`, carrying `groupID`,
   `expectedDID`, and `actualDID`.
 - An invite enacting no role entry for the group, and a key package carrying a non-`basic`
@@ -36,7 +35,7 @@ mutation-checked.
 ## Design decisions worth keeping
 
 **The recipient comes from the enacted role entry, not a new `Invite` field.** That entry is the
-grant this same commit applies to the roster, so binding the MLS leaf to it *is* the invariant —
+grant this same commit applies to the roster, so binding the MLS leaf to it _is_ the invariant —
 roster and membership cannot disagree — with no type change and no new input. An explicit
 `Invite.recipientDID` would be self-declared data that can drift from the ledger it travels with,
 so it would have needed its own consistency check against the same entry to be worth anything.
@@ -45,13 +44,13 @@ so it would have needed its own consistency check against the same entry to be w
 that `createInvite` produces exactly one. That premise was false: `packages/mls/test/group.test.ts`
 carries two tests ("the control: an admin committing the same Add and promotion is accepted", and
 "a member-signed entry smuggled into an invite is refused before it is committed") that commit an
-invite carrying a promotion for an existing member *plus* the invitee's grant in one commit. Both
+invite carrying a promotion for an existing member _plus_ the invitee's grant in one commit. Both
 keep the invitee's grant last, which is what `createInvite` itself does and documents ("The whole
 log, new role entry last"). Reading the last entry gets the same answer wherever exactly-one was
 right, and keeps working where it was not.
 
 **The ordering is load-bearing, not stylistic.** A hand-assembled invite whose invitee grant is not
-last binds to whichever role entry *is* last, and a key package for that subject is accepted — the
+last binds to whichever role entry _is_ last, and a key package for that subject is accepted — the
 leaf that joins is not the one the inviter meant to add, and the intended invitee gets a roster
 grant without ever joining. The admitted party always holds a grant enacted by the same commit, so
 this is not the original hole (an identity with no grant at all deriving the epoch secrets), but it
@@ -73,7 +72,7 @@ function returns `false` on every failure path, where a wrong cast degrades to a
 one admits a member to a group, and the compiler can prove the narrow here.
 
 **The guard is only sound in combination with credential authentication.** On its own it checks a
-*claimed* DID — anyone can mint a key package carrying another DID's credential bytes with their
+_claimed_ DID — anyone can mint a key package carrying another DID's credential bytes with their
 own signing key. What makes the pair sound is `createDIDAuthenticationService`
 (`packages/mls/src/authentication.ts`), which ts-mls invokes on the Add's leaf during
 `createCommit`: it binds the credential DID to control of the leaf's signature key. Together they
@@ -86,7 +85,7 @@ affected either — `commitInvite` is not a port member, and neither contract su
 ## Known follow-up
 
 The invariant is still local to the inviter. `defaultCommitPolicy`'s add rule accepts any admin's
-Add without checking the added leaf's credential DID against `candidateRoster`, so a *receiver*
+Add without checking the added leaf's credential DID against `candidateRoster`, so a _receiver_
 still cannot notice the divergence from its own state — only an honest inviter now refuses to
 produce one. Tracked in `archive/2026-07-archive-summary.md` (add-proposal-roster-binding, shipped 2026-07-26), which
 would also close the ordering residual described above, from the other side.

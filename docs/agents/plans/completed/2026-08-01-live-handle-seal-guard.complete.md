@@ -20,16 +20,15 @@ and disproving it is the main result of this work.
 Three mutations modelling the defect were applied to source during design, each run against the
 suites, then reverted:
 
-| Mutation | Suite | Result |
-| --- | --- | --- |
-| `crypto.ts` `wrap` snapshots `handle()` at construction | `packages/mls-rpc` | 2 failed / 48 |
-| same mutation, built to `lib/` | `tests/integration` | 2 failed / 35 |
-| `peer.ts` `buildEpoch` never refreshes the cached `epoch` | `packages/rpc` | 35 failed / 391 |
-| `peer.ts` `captureAnchor` reuses the previous anchor | `packages/rpc` | 49 failed / 391 |
+| Mutation                                                  | Suite               | Result          |
+| --------------------------------------------------------- | ------------------- | --------------- |
+| `crypto.ts` `wrap` snapshots `handle()` at construction   | `packages/mls-rpc`  | 2 failed / 48   |
+| same mutation, built to `lib/`                            | `tests/integration` | 2 failed / 35   |
+| `peer.ts` `buildEpoch` never refreshes the cached `epoch` | `packages/rpc`      | 35 failed / 391 |
+| `peer.ts` `captureAnchor` reuses the previous anchor      | `packages/rpc`      | 49 failed / 391 |
 
 Every stale-capture point the entry named or hedged about bites today. Two further facts settled
 the rest of it:
-
 - **`epoch` and `exportSecret` following `adopt` were already pinned explicitly**, with a comment
   naming the defect — `packages/mls-rpc/test/crypto.test.ts`, in the export test: "A crypto closing
   over the handle it was built with would still be exporting the line above."
@@ -44,15 +43,15 @@ There was no hiding place for the defect. What survived was smaller and true.
 
 **1. The `wrap` guard, said out loud** (`packages/mls-rpc/test/crypto.test.ts`).
 
-`wrap`'s staleness was guarded only as a *side effect* of two tests named for other properties —
+`wrap`'s staleness was guarded only as a _side effect_ of two tests named for other properties —
 unwrap's epoch refusal, and `frameEpoch` reading cleartext. Nothing stated the property, so an edit
 preserving either test's stated intent could have dropped the guard silently. One test now states
 it: Alice adds Carol (epoch 2), adopts, and seals; **Carol opens it, Bob — left at epoch 1 — cannot.**
 
 The design decision worth keeping: **Carol, not a Bob who applied the same commit.** `unwrap` opens
-a bounded window *below* the live epoch out of ts-mls's retained key material — this port's
+a bounded window _below_ the live epoch out of ts-mls's retained key material — this port's
 documented divergence from the fake. A member who walked from 1 to 2 might therefore still open an
-epoch-1 frame and let a stale seal pass. Carol joins *at* epoch 2 and holds nothing below it, so her
+epoch-1 frame and let a stale seal pass. Carol joins _at_ epoch 2 and holds nothing below it, so her
 refusal of a stale frame is structural rather than a property of how much ts-mls happens to retain.
 The fixture gained an `addMember` helper for the third member.
 
@@ -66,7 +65,6 @@ authored one produces a new handle object the peer swaps in from `onAccepted`, a
 replaces the reference `createGroupCrypto` reads.
 
 Two decisions inside it:
-
 - **Alice restarts, not Bob.** Only an admin may author a ledger or remove commit, and Bob holds
   `member`. Alice is the founding admin.
 - **A ledger commit, not a roster change.** The app-lane anchor rotates only on a roster change, so
@@ -80,8 +78,8 @@ asserts it is the post-commit epoch — not merely that a frame arrived.
 
 - **The mutation attempt recorded, not assumed.** The plan predicted the integration test would bite
   on nothing, and required the outcome be written down either way. It was wrong: the mutation caught
-  the new test *as well as* the two pre-existing ones — 3 failures. The recorded conclusion stands
-  regardless, and is the honest one: its failure is not evidence of anything it *uniquely* guards,
+  the new test _as well as_ the two pre-existing ones — 3 failures. The recorded conclusion stands
+  regardless, and is the honest one: its failure is not evidence of anything it _uniquely_ guards,
   and it is kept for the composition coverage.
 - **Assertion order decides whether a guard is visible.** The whole-branch review found the
   integration test asserted delivery but never the seal epoch its own name promised. Fixing that

@@ -8,7 +8,7 @@ Phase 1 item 2. Landed on `feat/mls-permission-enforcement`.
 
 `GroupPermission` existed as a type but nothing enforced it. A modified client could remove
 anyone from any group and every peer would accept the commit — the admin check lived only at
-the sender API. Make authority real, and enforce it on the *receiving* side, so a peer refuses
+the sender API. Make authority real, and enforce it on the _receiving_ side, so a peer refuses
 a commit whose author lacks the permission for it regardless of what the sender's client does.
 
 ## What was built
@@ -17,7 +17,6 @@ The library now owns a generic authority layer: a **signed, anchor-rooted contro
 folded into a **roster**, enforced as a **receiving-side commit policy** on both the
 PrivateMessage and the external-join (PublicMessage) paths. The capability-delegation chain
 that predated it is deleted outright.
-
 - **Anchor** — an immutable group-context extension naming the creator; seeded at construction.
   A handle without one throws (fail-closed). It carries an opaque `app` slot the library never
   reads.
@@ -32,7 +31,7 @@ that predated it is deleted outright.
   the head against the authenticated group context, so an omitted, reordered, or truncated
   ledger is rejected (`LedgerIncompleteError`).
 - **Commit policy** — each peer folds a candidate roster off its own pre-commit state and checks
-  every proposal against *its own sender*, not the committer, so an admin cannot launder a
+  every proposal against _its own sender_, not the committer, so an admin cannot launder a
   non-admin's Remove by committing it.
 
 ## Key design decisions (rationale preserved)
@@ -45,7 +44,7 @@ that predated it is deleted outright.
   source of truth with no additional power — and the chain made only the group creator able to
   serve an invite. Any admin can now invite; authority is decided by the live roster.
 - **Authority is judged from state-so-far.** While folding an envelope's entries in order, each
-  entry's issuer must be an admin in the state accumulated from *strictly earlier* entries. So
+  entry's issuer must be an admin in the state accumulated from _strictly earlier_ entries. So
   `[promote Bob, Bob-issued-entry]` in one envelope is valid, while an entry cannot authorize
   itself.
 - **Order comes from the MLS epoch chain, not a clock.** Entries are ordered by the commits that
@@ -55,7 +54,7 @@ that predated it is deleted outright.
 - **Removal is not revocation.** `removeMember` evicts the MLS leaf but does not erase the
   removed DID's roster grant. Eviction is nonetheless complete: rejoining requires a prior leaf
   in the tree, which a removed member no longer has (see `../backlog/mls-roster-grants-and-revocation.md`).
-- **A caller-supplied commit policy *replaces* the default** rather than composing with it. This
+- **A caller-supplied commit policy _replaces_ the default** rather than composing with it. This
   is the documented override contract, but it means a host that sets one for any reason silently
   disables all permission enforcement — called out on the option's type.
 
@@ -63,7 +62,7 @@ that predated it is deleted outright.
 
 - **Authenticated-griefing stall (the significant one).** ts-mls absorbs pending by-reference
   proposals into the next commit. A non-admin could broadcast a standalone proposal that every
-  honest committer then folded in, causing every peer to reject *that committer's* commit —
+  honest committer then folded in, causing every peer to reject _that committer's_ commit —
   permanently stalling the group and blocking even an admin's attempt to evict the proposer. Now
   closed on both sides: a received standalone proposal is judged by the same commit policy (so it
   is rejected on receipt and never stored), and the commit producers filter the pending set

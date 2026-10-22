@@ -19,7 +19,6 @@ pinned or documented the new failure mode in either direction.
 ## Why the split is by mechanism
 
 Classification is by what the caller must do, not by where the error came from:
-
 - **Retryable** — retrying later can succeed and nothing needs changing. Returned as an error
   `Result`, never thrown.
 - **Refused** — the hub has answered settled; the app or its operator must change something.
@@ -35,7 +34,7 @@ while it lasts. Every message path is a hub call, and an inviter fetches key pac
 same hub, so a top-up that fails during an outage denies nobody anything. All the damage is
 deferred and lands on someone else — a low pool means the next inviter silently falls back to the
 last-resort slot, and a lost last-resort slot means the user is unaddable, a failure that surfaces
-at the *inviter* days later with nothing on the affected user's own device. Against that, throwing
+at the _inviter_ days later with nothing on the affected user's own device. Against that, throwing
 would block a host from opening an app that otherwise works fully offline.
 
 Nothing on a failure path writes state that suppresses a later check, so the next successful call
@@ -43,7 +42,7 @@ self-corrects — **provided the host calls on a cadence rather than only at sta
 obligation is stated in the README because the self-healing depends on it.
 
 The same rule already existed in the codebase as `@kumiai/rpc`'s `isPermanentSubscribeFailure`
-(`packages/rpc/src/hub-mux.ts`): *"Permanent means the hub has ANSWERED, not that it failed."*
+(`packages/rpc/src/hub-mux.ts`): _"Permanent means the hub has ANSWERED, not that it failed."_
 
 ## The classifier, and the thing that nearly broke it
 
@@ -88,14 +87,14 @@ doomed batch on every call forever.
 
 ## Changes made during review, worth remembering
 
-- **Pruning runs before classification**, not after. The classifier *throws* on a refusal, so
+- **Pruning runs before classification**, not after. The classifier _throws_ on a refusal, so
   calling it first meant pruning was silently skipped on every refused call while the doc comment
   claimed otherwise. Pruning is local housekeeping and owes nothing to the hub; a refusal is
   precisely the case where the next successful call may be days away. The in-catch prunes are
   individually wrapped so a store failure during prune can never displace the hub error the caller
   needs to see.
 - **The provisioner's upload helper was split.** It had bundled the hub call with the `uploadedAt`
-  store write, so a failing `store.put` was classified as a retryable *hub* error — contradicting
+  store write, so a failing `store.put` was classified as a retryable _hub_ error — contradicting
   the contract above, and a regression against pre-branch behaviour. The pool never had this bug.
   A regression test now fails if the two are folded back together.
 - **Three tests that passed for the wrong reason were rebuilt.** Two asserted that records survive a

@@ -13,6 +13,7 @@ export const HUB_ERROR_CODES = {
   subscriptionQuota: 'HUB_SUBSCRIPTION_QUOTA',
   keyPackageFetchLimit: 'HUB_KEYPACKAGE_FETCH_LIMIT',
   wakeNotSupported: 'HUB_WAKE_NOT_SUPPORTED',
+  rateLimited: 'HUB_RATE_LIMITED',
 } as const
 
 export type HubErrorCode = (typeof HUB_ERROR_CODES)[keyof typeof HUB_ERROR_CODES]
@@ -72,6 +73,14 @@ export class WakeNotSupportedError extends Error {
   override name = 'WakeNotSupportedError'
 }
 
+/**
+ * A per-DID or per-topic rate limit refused the request before it took effect. Transient, unlike
+ * the quotas: the same request succeeds once the limiter refills, so a caller waits and retries.
+ */
+export class RateLimitedError extends Error {
+  override name = 'RateLimitedError'
+}
+
 /** The wire code a hub error crosses as, or null if it is not one of the named hub errors. */
 export function hubErrorCodeOf(error: unknown): HubErrorCode | null {
   if (error instanceof HeadMismatchError) return HUB_ERROR_CODES.headMismatch
@@ -83,6 +92,7 @@ export function hubErrorCodeOf(error: unknown): HubErrorCode | null {
   if (error instanceof SubscriptionQuotaExceededError) return HUB_ERROR_CODES.subscriptionQuota
   if (error instanceof KeyPackageFetchLimitError) return HUB_ERROR_CODES.keyPackageFetchLimit
   if (error instanceof WakeNotSupportedError) return HUB_ERROR_CODES.wakeNotSupported
+  if (error instanceof RateLimitedError) return HUB_ERROR_CODES.rateLimited
   return null
 }
 
@@ -111,6 +121,8 @@ export function hubErrorFromCode(code: string, message: string): Error | null {
       return new KeyPackageFetchLimitError(message)
     case HUB_ERROR_CODES.wakeNotSupported:
       return new WakeNotSupportedError(message)
+    case HUB_ERROR_CODES.rateLimited:
+      return new RateLimitedError(message)
     default:
       return null
   }

@@ -64,11 +64,10 @@ So a returning member's held mail is drained into a mux with no holders for it.
 left pending and pruned unacked by the TTL sweep, so the hub keeps them and redelivers on the next
 reconnect. Data loss became delay. That is where the branch left it, deliberately.
 
-**What is still wrong.** The frames are dropped *for that session*. A member returning after
+**What is still wrong.** The frames are dropped _for that session_. A member returning after
 downtime does not see its held mail until something forces a reconnect, which nothing does promptly.
 
 **Options, none costed:**
-
 - **Buffer and replay in the mux.** Hold messages that match no holder for an opening window and
   replay them to a listener that registers for that topic. Closes it fully; adds buffering state to
   the drain's hot path, and needs a bound of its own.
@@ -78,7 +77,7 @@ downtime does not see its held mail until something forces a reconnect, which no
 - **Leave it.** Delay-until-reconnect may simply be acceptable, in which case say so where the
   behaviour is documented rather than leaving it implicit.
 
-Pick deliberately. The reason this is worth revisiting is that the *shape* of the bug — "nothing is
+Pick deliberately. The reason this is worth revisiting is that the _shape_ of the bug — "nothing is
 listening yet, so nothing ever will be" — is what produced the one critical regression that branch
 had to fix.
 
