@@ -14,9 +14,9 @@ import {
 import { deriveGroup } from '../src/group-handle.js'
 import * as ledger from '../src/ledger.js'
 
-async function fixture() {
+async function fixture(groupID = 'ledger-memo') {
   const identity = randomIdentity()
-  const { group } = await createGroup(identity, 'ledger-memo')
+  const { group } = await createGroup(identity, groupID)
   const restore = (tokens: Array<string>) => {
     const state = decodeClientState(encodeClientState(group.state))
     if (state == null) throw new Error('invalid stored state')
@@ -98,6 +98,39 @@ describe('verified ledger replay', () => {
     if (held == null) throw new Error('missing entry')
     held.verified.entry.value = 'forged'
     expect((await restore(first.ledgerTokens)).ledger[0]?.verified.entry.value).toBe('one')
+  })
+
+  test('mutating a memo hit cannot poison a later replay', async () => {
+    const { restore, sign } = await fixture()
+    const first = await restore([await sign('one')])
+    const tokens = first.ledgerTokens
+    const verify = vi.spyOn(ledger, 'verifyLedgerEntry')
+    const reopened = await restore(tokens)
+    expect(verify).not.toHaveBeenCalled()
+    const held = reopened.ledger[0]
+    if (held == null) throw new Error('missing entry')
+    held.verified.entry.value = 'forged'
+    expect((await restore(first.ledgerTokens)).ledger[0]?.verified.entry.value).toBe('one')
+    expect(verify).not.toHaveBeenCalled()
+  })
+
+  test('a memo hit still rejects entries from another group', async () => {
+    const alice = await fixture()
+    const bob = await fixture('other-ledger-memo')
+    expect(alice.group.groupID).not.toBe(bob.group.groupID)
+    const token = await alice.sign('one')
+    const first = await alice.restore([token])
+    expect(first.ledgerTokens).toEqual([token])
+    const tokens = first.ledgerTokens
+    const verify = vi.spyOn(ledger, 'verifyLedgerEntry')
+
+    const memoised = await bob.restore(tokens)
+    expect(verify).not.toHaveBeenCalled()
+    const uncached = await bob.restore([...tokens])
+    expect(verify).toHaveBeenCalledTimes(1)
+    expect(uncached.ledger).toEqual([])
+    expect(memoised.ledger).toEqual(uncached.ledger)
+    expect(memoised.ledgerTokens).toEqual([])
   })
 
   test('re-enacting a token cannot memoise a mutated public claim', async () => {
