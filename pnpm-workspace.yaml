@@ -21,12 +21,12 @@ catalog:
   '@noble/hashes': ^2.4.0
   'ts-mls': 2.0.0-rc.13
   'vitest': ^5.0.5
-  '@enkaku/client': ^0.21.5
-  '@enkaku/http-fetch': ^0.21.5
-  '@enkaku/http-serve': ^0.21.5
-  '@enkaku/protocol': ^0.21.5
-  '@enkaku/server': ^0.21.5
-  '@enkaku/transport': ^0.21.5
+  '@enkaku/client': ^0.21.6
+  '@enkaku/http-fetch': ^0.21.6
+  '@enkaku/http-serve': ^0.21.6
+  '@enkaku/protocol': ^0.21.6
+  '@enkaku/server': ^0.21.6
+  '@enkaku/transport': ^0.21.6
   '@kokuin/capability': ^0.4.2
   '@kokuin/controller': ^0.1.0
   '@kokuin/token': ^0.5.1
