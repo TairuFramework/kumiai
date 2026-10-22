@@ -1127,6 +1127,7 @@ export function sealedMemoryValidation(): ControlValidationPort {
       const source = () => model(state, journal.sourceCredential, true, true)
       const check = async (payload: Uint8Array) => {
         const { commit, sealedEntries } = decodeCommitFrame(decodeHandshakeFrame(payload).payload)
+        if (!verifyMemoryCommitTag(commit, identity.authenticator)) return null
         const working = source()
         const result = await working.processCommit(commit, {
           resolveLedgerEntries: async () =>
@@ -1147,6 +1148,7 @@ export function sealedMemoryValidation(): ControlValidationPort {
           const candidate = decodeClientState(journal.candidate)
           if (candidate === undefined) return false
           const checked = await check(value.payload)
+          if (checked === null) return false
           return (
             checked.result.applied &&
             checked.header?.external !== true &&
@@ -1158,7 +1160,9 @@ export function sealedMemoryValidation(): ControlValidationPort {
         },
         validateFrame: async (frame) => {
           try {
-            const { result, header } = await check(frame.payload)
+            const checked = await check(frame.payload)
+            if (checked === null) return { kind: 'invalid', reason: 'policy' }
+            const { result, header } = checked
             if (result.validation === 'unavailable')
               return { kind: 'unavailable', reason: 'missing-proposal' }
             if (!result.applied || header === null) return { kind: 'invalid', reason: 'policy' }

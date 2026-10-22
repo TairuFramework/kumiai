@@ -78,6 +78,7 @@ import { createMemoryGroupPersistence } from '../src/memory-group-persistence.js
 import { createMemoryTransaction } from '../src/memory-transaction.js'
 import { createGroupMLS, createLedgerEntrySlot } from '../src/mls.js'
 import { createOwnerQueues } from '../src/owner-queue.js'
+import { encodeStoredValue } from '../src/persistence-codec.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
 import {
   buildRealCommit,
@@ -85,6 +86,12 @@ import {
   testGroupMLSDependencies,
   testHandleAccess,
 } from './fixtures/real-group.js'
+import { registryHandle } from './fixtures/registry-welcome.js'
+import {
+  buildSealedMemoryOperation,
+  restoreMemoryControlSource,
+  sealedMemoryValidation,
+} from './fixtures/sealed-memory-mls.js'
 import { installSeed, makeStorageSeed } from './fixtures/storage-seed.js'
 import { createTransactionalStore } from './fixtures/transactional-access.js'
 
@@ -220,6 +227,214 @@ async function fixture(
   })
   return { group, member, built, source, state, port, frame }
 }
+
+async function commitAuthenticationFixture(mode: 'double' | 'real-mls') {
+  const group = await createRealGroup(1, 'commit-authentication')
+  const left = (await commitKeyRotation(group.committer.handle)).newGroup
+  const right = (await commitKeyRotation(group.committer.handle)).newGroup
+  expect(left.epoch).toBe(right.epoch)
+  expect(left.state.keySchedule.epochAuthenticator).not.toEqual(
+    right.state.keySchedule.epochAuthenticator,
+  )
+  const wrap = async (handle: GroupHandle) => {
+    const wrapped = await registryHandle({ mode, handle, options: {} })
+    return mode === 'real-mls'
+      ? wrapped
+      : restoreMemoryControlSource({
+          state: wrapped.state,
+          credential: wrapped.credential,
+          ledgerEntries: wrapped.ledgerTokens,
+        })
+  }
+  const source = await wrap(left)
+  const sibling = await wrap(right)
+  const author = async (handle: GroupHandle) => {
+    if (mode === 'double') {
+      const built = await buildSealedMemoryOperation(
+        {
+          id: 'rotation',
+          kind: 'rotation',
+          revokes: false,
+          body: encodeStoredValue({}),
+          seq: 1,
+          enqueuedAt: 0,
+          deadline: 30000,
+          stage: 'intent',
+        },
+        handle,
+      )
+      return { commit: built.commit, candidate: built.journal }
+    }
+    const built = await createCommit({
+      context: handle.context,
+      state: handle.state,
+      wireAsPublicMessage: true,
+      authenticatedData: encodeControlEnvelope({ v: 1 }),
+    })
+    return {
+      commit: encode(mlsMessageEncoder, built.commit),
+      candidate: encodeClientState(built.newState),
+    }
+  }
+  const own = await author(source)
+  const journal = {
+    version: 1 as const,
+    source: {
+      key: { groupID: source.groupID, incarnation: 1 },
+      stateVersion: 1,
+      identity: {
+        groupID: source.groupID,
+        incarnation: 1,
+        epoch: Number(source.epoch),
+        authenticator: source.state.keySchedule.epochAuthenticator.slice(),
+      },
+    },
+    checkpoint: asLogPosition('000100'),
+    sourceState: encodeClientState(source.state),
+    sourceCredential: source.credential,
+    sourceLedger: source.ledgerTokens,
+    candidate: own.candidate,
+  }
+  const payload = encodeHandshakeFrame(
+    HANDSHAKE_KIND.commit,
+    encodeCommitFrame(own.commit, new Uint8Array()),
+  )
+  const built: BuiltCommit = {
+    opID: 'own',
+    kind: 'rotation',
+    revokes: false,
+    enqueuedAt: 0,
+    deadline: 30000,
+    epoch: Number(source.epoch),
+    incarnation: 1,
+    authenticatorBefore: journal.source.identity.authenticator.slice(),
+    head: journal.checkpoint,
+    expectedHead: journal.checkpoint,
+    publishID: 'own',
+    payload,
+    payloadDigest: toB64U(sha256(payload)),
+    digest: digestAppliedCommit(own.commit),
+    bodies: [],
+    welcome: null,
+    journal: encodeControlJournal(journal),
+  }
+  const port =
+    mode === 'double'
+      ? sealedMemoryValidation()
+      : createControlValidationPort({
+          identity: group.committer.identity,
+          options: {},
+          restoreCandidate: async (bytes) => {
+            const state = decodeClientState(bytes)
+            if (state === undefined) throw new InvalidCandidateError('Missing candidate')
+            return restoreGroup({
+              state,
+              credential: source.credential,
+              ledgerEntries: source.ledgerTokens,
+            })
+          },
+        })
+  return { source, sibling, author, own, journal, built, port }
+}
+
+for (const mode of ['double', 'real-mls'] as const) {
+  // Missing tags are parity-only: the inner memory validator also rejects them.
+  test.each([
+    { kind: 'matching', coverage: 'matching' },
+    { kind: 'untagged', coverage: mode === 'double' ? 'untagged (parity-only)' : 'untagged' },
+    { kind: 'sibling', coverage: 'sibling' },
+  ] as const)(
+    `saved control validation authenticates the source epoch: $coverage / ${mode}`,
+    async ({ kind }) => {
+      const f = await commitAuthenticationFixture(mode)
+      const authored = kind === 'sibling' ? await f.author(f.sibling) : f.own
+      let commit = authored.commit
+      if (kind === 'untagged') {
+        if (mode === 'double') {
+          const { tag: _tag, ...body } = JSON.parse(new TextDecoder().decode(commit))
+          commit = new TextEncoder().encode(JSON.stringify(body))
+        } else {
+          const message = decode(mlsMessageDecoder, commit)
+          if (message?.wireformat !== wireformats.mls_public_message)
+            throw new Error('Expected public commit')
+          message.publicMessage.auth.signature = new Uint8Array()
+          commit = encode(mlsMessageEncoder, message)
+        }
+      }
+      const payload = encodeHandshakeFrame(
+        HANDSHAKE_KIND.commit,
+        encodeCommitFrame(commit, new Uint8Array()),
+      )
+      let sourceState = f.journal.sourceState
+      if (mode === 'double' && kind === 'sibling') {
+        const state = decodeClientState(encodeClientState(f.sibling.state))
+        if (state === undefined) throw new Error('Missing sibling state')
+        // The snapshot accepts this commit. Only the saved-identity guard can refuse it.
+        state.keySchedule.epochAuthenticator = f.journal.source.identity.authenticator.slice()
+        sourceState = encodeClientState(state)
+      }
+      const built = {
+        ...f.built,
+        payload,
+        payloadDigest: toB64U(sha256(payload)),
+        digest: digestAppliedCommit(commit),
+        journal: encodeControlJournal({ ...f.journal, sourceState, candidate: authored.candidate }),
+      }
+      const validation = await f.port.restoreValidation(built)
+      if (validation === null) throw new Error('Missing validation')
+      const result = await validation.validateFrame(
+        {
+          position: asLogPosition('000101'),
+          senderDID: f.source.credential.id,
+          payload,
+        },
+        built,
+      )
+      if (kind === 'matching') expect(result).toMatchObject({ kind: 'valid', own: true })
+      else if (mode === 'double') expect(result).toEqual({ kind: 'invalid', reason: 'policy' })
+      else expect(result).toEqual({ kind: 'invalid', reason: 'authentication' })
+      expect(await validation.verifyOwn(built)).toBe(kind === 'matching')
+    },
+  )
+}
+
+test.each(['validateFrame', 'verifyOwn'] as const)(
+  'sealed-memory %s authenticates against the saved identity before processing',
+  async (method) => {
+    const f = await commitAuthenticationFixture('double')
+    const authenticator = f.sibling.state.keySchedule.epochAuthenticator.slice()
+    const sourceState = decodeClientState(f.journal.sourceState)
+    if (sourceState === undefined) throw new Error('Missing source state')
+    // The journal identity must take precedence over the embedded memory snapshot.
+    sourceState.keySchedule.epochAuthenticator = authenticator
+    const built = {
+      ...f.built,
+      authenticatorBefore: authenticator,
+      journal: encodeControlJournal({
+        ...f.journal,
+        sourceState: encodeClientState(sourceState),
+        source: {
+          ...f.journal.source,
+          identity: { ...f.journal.source.identity, authenticator },
+        },
+      }),
+    }
+    const validation = await f.port.restoreValidation(built)
+    if (validation === null) throw new Error('Missing validation')
+    if (method === 'verifyOwn') expect(await validation.verifyOwn(built)).toBe(false)
+    else
+      expect(
+        await validation.validateFrame(
+          {
+            position: asLogPosition('000101'),
+            senderDID: f.source.credential.id,
+            payload: built.payload,
+          },
+          built,
+        ),
+      ).toEqual({ kind: 'invalid', reason: 'policy' })
+  },
+)
 
 test('wrong-epoch recovery bytes are rejected before copying state', async () => {
   const f = await fixture()
