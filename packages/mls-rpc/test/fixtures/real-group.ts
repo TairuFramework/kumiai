@@ -97,6 +97,25 @@ export async function buildRealUnavailableCommit(group: RealGroup): Promise<Uint
   return encode(mlsMessageEncoder, result.commit)
 }
 
+export async function loadLifecyclePipelineFixture() {
+  return (await import(
+    new URL('../../../mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
+  )) as {
+    agent(byte: number): OwnIdentity
+    pipelineGroup(): Promise<{ group: GroupHandle; identity: OwnIdentity }>
+    timedBinding(params: {
+      identity: OwnIdentity
+      iat: number
+      exp: number
+    }): Promise<ControllerBinding>
+    lowLevelWelcome(
+      group: GroupHandle,
+      identity: OwnIdentity,
+      binding: ControllerBinding,
+    ): Promise<{ author: GroupHandle; joined: GroupHandle }>
+  }
+}
+
 export async function createRealBoundRecovery(
   makeAccess: (
     member: RealMember,
@@ -110,16 +129,7 @@ export async function createRealBoundRecovery(
     return { access, control: testGroupMLSDependencies(access).control }
   },
 ) {
-  const fixture = (await import(
-    new URL('../../../mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
-  )) as {
-    agent: (byte: number) => OwnIdentity
-    timedBinding: (params: {
-      identity: OwnIdentity
-      iat: number
-      exp: number
-    }) => Promise<ControllerBinding>
-  }
+  const fixture = await loadLifecyclePipelineFixture()
   const now = Math.floor(Date.now() / 1000)
   const alice = fixture.agent(41)
   const bob = fixture.agent(61)

@@ -25,6 +25,30 @@ import { registryHandle } from './fixtures/registry-welcome.js'
 import { memoryModel, restoreMemoryControlHandle } from './fixtures/sealed-memory-mls.js'
 
 for (const mode of ['real-mls', 'double'] as const) {
+  test(`sender advancement is visible to encryption and restoration / ${mode}`, async () => {
+    const group = await createRealGroup(1, `advance-visible-${mode}`)
+    const local = await registryHandle({ mode, handle: group.committer.handle, options: {} })
+    await local.advanceSenderGeneration(484)
+    expect(ownApplicationGeneration(local.state)).toBe(484)
+    const restored = await (mode === 'double' ? restoreMemoryControlHandle : restoreGroup)({
+      state: decodeClientState(encodeClientState(local.state)) ?? local.state,
+      credential: local.credential,
+      ledgerEntries: local.ledgerTokens,
+      options: {},
+    })
+    expect((await restored.encryptApplication(new Uint8Array([1]))).generation).toBe(484)
+    expect((await local.encryptApplication(new Uint8Array([2]))).generation).toBe(484)
+    const before = encodeClientState(local.state)
+    await expect(local.advanceSenderGeneration(Number.NaN)).rejects.toThrow(RangeError)
+    await expect(local.advanceSenderGeneration(485, { maxSteps: Number.NaN })).rejects.toThrow(
+      RangeError,
+    )
+    await expect(local.advanceSenderGeneration(500, { maxSteps: 1 })).rejects.toThrow(RangeError)
+    expect(encodeClientState(local.state)).toEqual(before)
+    denyApplicationSend(local)
+    await expect(local.advanceSenderGeneration(500)).rejects.toThrow(ApplicationSendRefusedError)
+  })
+
   test(`testing reservation shares the encrypt serializer / ${mode}`, async () => {
     const group = await createRealGroup(1, `reservation-seam-${mode}`)
     const local = await registryHandle({
@@ -77,6 +101,7 @@ for (const mode of ['real-mls', 'double'] as const) {
     expect(local.state.groupActiveState.kind).toBe('removedFromGroup')
     const before = encodeClientState(local.state)
     await expect(local.encrypt(new Uint8Array([1]))).rejects.toThrow()
+    await expect(local.advanceSenderGeneration(1)).rejects.toThrow()
     expect(encodeClientState(local.state)).toEqual(before)
     denyApplicationSend(local)
     await expect(reserveApplicationRange(local, { floor: 0, size: 16, cap: 500 })).rejects.toThrow()
@@ -105,6 +130,7 @@ for (const mode of ['real-mls', 'double'] as const) {
     })
     expect(Object.keys(local.state.unappliedProposals).length).toBeGreaterThan(0)
     const before = encodeClientState(local.state)
+    await expect(local.advanceSenderGeneration(1)).rejects.toThrow()
     await expect(local.encrypt(new Uint8Array([1]))).rejects.toThrow(
       'Cannot send application message with unapplied proposals',
     )
@@ -244,6 +270,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         ledgerEntries: group.ledgerTokens,
       })
       const local = await registryHandle({ mode, handle: canonical, options: {} })
+      await expect(local.advanceSenderGeneration(1)).rejects.toThrow()
       denyApplicationSend(local)
       const before = encodeClientState(local.state)
       await expect(

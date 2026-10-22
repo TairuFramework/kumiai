@@ -206,6 +206,14 @@ const restorers = new WeakMap<
   RegistryFixtureBase,
   (record: GroupStateRecord & { deleted: false; state: Uint8Array }) => Promise<GroupHandle>
 >()
+const decryptObservers = new WeakMap<RegistryFixtureBase, (ciphertext: Uint8Array) => void>()
+export function registryFixtureObserveDecrypts(
+  fixture: RegistryFixtureBase,
+  observe: (ciphertext: Uint8Array) => void,
+): void {
+  decryptObservers.set(fixture, observe)
+}
+
 const markerWriters = new WeakMap<RegistryFixtureBase, RegistryStorageFixture['forceOwnerMarker']>()
 const rowRemovers = new WeakMap<RegistryFixtureBase, RegistryStorageFixture['deleteCommittedRow']>()
 
@@ -480,6 +488,14 @@ async function assemble(
       options: environment.options,
     })
     if (real) captured.handles.add(handle)
+    const observe = decryptObservers.get(fixture)
+    if (observe !== undefined) {
+      const decrypt = handle.decrypt.bind(handle)
+      handle.decrypt = (ciphertext, options) => {
+        observe(ciphertext)
+        return decrypt(ciphertext, options)
+      }
+    }
     return handle
   }
   function hold(map: Map<string, Hold>, id: string) {

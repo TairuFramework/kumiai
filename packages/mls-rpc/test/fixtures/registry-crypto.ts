@@ -10,6 +10,7 @@ import type { PendingCryptoFixture, RegistryCryptoFixture } from '@kumiai/rpc-co
 import { onTestFinished } from 'vitest'
 
 import { createGroupCrypto } from '../../src/crypto.js'
+import type { OwnershipContextPort } from '../../src/persistence-types.js'
 import { createGroupHandleRegistry } from '../../src/registry/registry.js'
 import { createRealGroup, testHandleAccess } from './real-group.js'
 import { createRegistryFixture } from './registry.js'
@@ -23,7 +24,11 @@ export async function createRegistryCryptoGroup(
   mode: Mode,
   id: string,
   size: number,
-  config: { backgroundMaintenance?: 'gated'; options?: GroupOptions } = {},
+  config: {
+    backgroundMaintenance?: 'gated'
+    options?: GroupOptions
+    ownershipContext?: OwnershipContextPort
+  } = {},
 ) {
   const group = await createRealGroup(size, `registry-crypto-conformance-${mode}-${id}`)
   const local = group.members[0]
@@ -31,6 +36,7 @@ export async function createRegistryCryptoGroup(
   let fixture = await createRegistryFixture({
     mode,
     backgroundMaintenance: config.backgroundMaintenance,
+    ownershipContext: config.ownershipContext,
     setup: 'empty',
     groupID: local.handle.groupID,
     identity: local.identity,

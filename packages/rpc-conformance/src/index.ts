@@ -189,6 +189,7 @@ export {
   testRegistryCryptoConformance,
 } from './registry-crypto.js'
 export * from './registry-fixture.js'
+export * from './registry-lease.js'
 export {
   type ConformanceGroupSafety,
   type ConformanceManualRecovery,
