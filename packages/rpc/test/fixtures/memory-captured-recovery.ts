@@ -328,7 +328,7 @@ export async function createForkRecoveryMemoryFixture(): Promise<ForkRecoveryFix
     if (
       snapshot.forkHalt !== null ||
       snapshot.recoveryUnavailable !== null ||
-      (snapshot.controlHold !== null && snapshot.controlHold.reason !== 'acceptance-unknown') ||
+      snapshot.controlHold !== null ||
       attempt.id !== auth.attemptID ||
       attempt.source.groupID !== key.groupID ||
       attempt.source.incarnation !== key.incarnation ||

@@ -439,6 +439,7 @@ export async function createStorageFixture(params: {
     let device: ReturnType<typeof createMemoryDevicePersistence>
     try {
       device = createMemoryDevicePersistence({
+        legacyCommitJournal: null,
         db: database,
         atRest,
         providerID,

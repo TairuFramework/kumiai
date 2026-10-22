@@ -1,3 +1,6 @@
+import type { MigrationFixture } from '../../../rpc-conformance/src/control-migration.js'
+import { migrateMemoryControl } from '../../../rpc-conformance/src/memory-control-migration.js'
+import type { MemoryMigrationBackend } from '../../../rpc-conformance/src/memory-migration-backend.js'
 import type { AnchorSlot, AnchorStore } from '../../src/anchor.js'
 import { controlSafetyHeld } from '../../src/control/safety.js'
 import {
@@ -79,6 +82,7 @@ function emptyRecord(): GroupRecord {
     anchorSlot: null,
     mutationID: null,
     control: {
+      schemaVersion: 1,
       commitOnce: null,
       spentSource: null,
       controlHold: null,
@@ -101,6 +105,8 @@ function emptyRecord(): GroupRecord {
 
 export function createMemoryHostDatabase(
   options: {
+    legacy?: MigrationFixture
+    migration?: MemoryMigrationBackend
     readIdentity?: (state: Uint8Array, key: GroupKey) => EpochIdentity | null
     isTerminal?: (state: Uint8Array) => boolean
   } = {},
@@ -110,6 +116,21 @@ export function createMemoryHostDatabase(
   const readIdentity = (storageID: string, state: Uint8Array, key: GroupKey) =>
     (readers.get(storageID) ?? options.readIdentity)?.(state, key) ?? null
   const groups = new Map<string, GroupRecord>()
+  let legacy = options.legacy === undefined ? undefined : structuredClone(options.legacy)
+  let migration = options.migration
+  async function activate(storageID: string): Promise<void> {
+    if (migration !== undefined && migration.key.groupID === storageID) {
+      const next = groups.get(storageID) ?? emptyRecord()
+      next.control = structuredClone(await migration.activate()) as unknown as ControlSnapshot
+      groups.set(storageID, next)
+      migration = undefined
+    }
+    if (legacy === undefined || legacy.source.key.groupID !== storageID) return
+    const next = groups.get(storageID) ?? emptyRecord()
+    next.control = structuredClone(migrateMemoryControl(legacy)) as unknown as ControlSnapshot
+    groups.set(storageID, next)
+    legacy = undefined
+  }
   const keys = new Map<string, GroupKey>()
   const seams = new Map<string, () => void | Promise<void>>()
   let failure: FailurePoint | undefined
@@ -145,18 +166,33 @@ export function createMemoryHostDatabase(
       readers.set(storageID, reader)
     },
     control: (storageID, key) => {
+      const legacyKey = options.legacy?.source.key ?? options.migration?.key
+      if (
+        legacyKey?.groupID === storageID &&
+        (legacyKey.groupID !== key.groupID || legacyKey.incarnation !== key.incarnation)
+      )
+        throw new TypeError('Migration source does not bind this control store')
       const fixedKey = { ...key }
       keys.set(storageID, fixedKey)
       return {
         get key() {
           return { ...fixedKey }
         },
-        load: async () => ({
-          ...structuredClone(read(storageID).control),
-          forkRecoveryAttempt: structuredClone(read(storageID).control.forkRecoveryAttempt ?? null),
-        }),
-        lastMutation: async () => read(storageID).mutationID,
+        load: async () => {
+          await activate(storageID)
+          return {
+            ...structuredClone(read(storageID).control),
+            forkRecoveryAttempt: structuredClone(
+              read(storageID).control.forkRecoveryAttempt ?? null,
+            ),
+          }
+        },
+        lastMutation: async () => {
+          await activate(storageID)
+          return read(storageID).mutationID
+        },
         apply: async (changes, mutationID) => {
+          await activate(storageID)
           if ('clearAppHold' in changes)
             throw new TypeError('App hold release requires coordinator authority')
           const { forkHalt, recoveryUnavailable, ...ordinary } = changes
@@ -208,6 +244,7 @@ export function createMemoryHostDatabase(
       }
     },
     saveBuilt: async (storageID, key, intent, built, expected, mutationID) => {
+      await activate(storageID)
       let result: 'saved' | 'moved' | 'occupied' = 'moved'
       const unchanged = new Error('Unchanged build')
       try {
@@ -266,17 +303,28 @@ export function createMemoryHostDatabase(
       return result
     },
     anchorStore: (groupID) => ({
-      load: async () => structuredClone(read(groupID).anchorSlot),
+      load: async () => {
+        await activate(groupID)
+        return structuredClone(read(groupID).anchorSlot)
+      },
       save: async (slot) => {
+        await activate(groupID)
         const ownedSlot = structuredClone(slot)
         await transact(groupID, 'anchor', (next) => {
           next.anchorSlot = ownedSlot
         })
       },
     }),
-    loadVersion: async (groupID) => read(groupID).version,
-    loadState: async (groupID) => read(groupID).state?.slice() ?? null,
+    loadVersion: async (groupID) => {
+      await activate(groupID)
+      return read(groupID).version
+    },
+    loadState: async (groupID) => {
+      await activate(groupID)
+      return read(groupID).state?.slice() ?? null
+    },
     snapshot: async (groupID) => {
+      await activate(groupID)
       const row = read(groupID)
       return {
         version: row.version,
@@ -285,6 +333,7 @@ export function createMemoryHostDatabase(
       }
     },
     seed: async (groupID, state, options) => {
+      await activate(groupID)
       const ownedState = state.slice()
       const replace = options?.replace === true
       const expectedVersion = options?.replace === true ? options.expectedVersion : undefined
@@ -307,6 +356,7 @@ export function createMemoryHostDatabase(
       })
     },
     saveState: async (groupID, state, write) => {
+      await activate(groupID)
       const ownedState = state.slice()
       const proof = write === undefined ? undefined : inboundStates.get(write)
       if (write !== undefined) inboundStates.delete(write)
@@ -400,6 +450,7 @@ export function createMemoryHostDatabase(
       })
     },
     delete: async (groupID) => {
+      await activate(groupID)
       if (!controlSettled(read(groupID).control)) {
         throw new GroupControlUnsettledError('Group has unsettled control records')
       }

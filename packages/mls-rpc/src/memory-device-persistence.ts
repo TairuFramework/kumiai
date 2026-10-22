@@ -1,3 +1,4 @@
+import type { LegacyCommitJournalBoundary } from './legacy-control-migration.js'
 import { createMemoryGroupCoordinator, memoryGroupOwnerQueues } from './memory-group-persistence.js'
 import {
   bindMemoryOwner,
@@ -83,6 +84,7 @@ export function createMemoryDevicePersistence(params: {
   ownerDID: string
   effects?: TransactionalGroupEffects<MemoryTransaction>
   ownershipContext?: OwnershipContextPort
+  legacyCommitJournal?: LegacyCommitJournalBoundary<MemoryTransaction> | null
 }): DevicePersistence<MemoryTransaction> {
   const { db, atRest, providerID, ownerDID, effects } = params
   if (atRest == null || typeof atRest.seal !== 'function' || typeof atRest.open !== 'function')
@@ -109,6 +111,7 @@ export function createMemoryDevicePersistence(params: {
     providerID,
     effects,
     ownershipContext: params.ownershipContext,
+    legacyCommitJournal: params.legacyCommitJournal,
   })
   bindings.set(db, binding)
   const { groups } = coordinator
@@ -147,6 +150,7 @@ export function createMemoryDevicePersistence(params: {
       }
       for (const key of keys) owners.markStarted(key)
     }
+    if (entry.scopes.groupID !== null) await coordinator.activate(entry.scopes.groupID)
   }
   async function prepare(entry: OwnerEntry): Promise<void> {
     await prepareBarrier(entry)

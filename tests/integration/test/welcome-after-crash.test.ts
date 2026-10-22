@@ -230,7 +230,6 @@ test('restart after handoff acknowledgement walks the own invite before Welcome 
         opID: request.id,
         welcome: speculative.bytes,
         recipients: speculative.recipients,
-        committed: true,
       },
     ])
     expect((await restarted.control.load()).welcomes).toEqual([])

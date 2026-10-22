@@ -901,8 +901,6 @@ export function createAppLane(params: AppLaneParams): AppLane {
         scheduleWorker(name)
       return
     }
-    continuationBackoff = APP_CONTINUATION_BACKOFF_MS
-    if (continuationTimer != null) kick()
     const frames = [...segment.values()].flat()
     for (const pushes of staged.values()) for (const push of pushes) frames.push(push.frame)
     const retryFrames = frames.filter((frame) => frame.sealed.state !== 'pending')

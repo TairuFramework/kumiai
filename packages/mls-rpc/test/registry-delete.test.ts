@@ -52,7 +52,6 @@ const welcome = {
   recipients: ['recipient'],
   epoch: 0,
   epochAfter: 1,
-  committed: true as const,
 }
 const forkHalt = {
   eventID: JSON.stringify(['group:fork', groupID, 1]),

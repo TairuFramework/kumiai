@@ -1899,12 +1899,7 @@ export function createGroupPeerWithControlWalk<
       })
       return false
     }
-    if (
-      safetyHold() !== null ||
-      anchorRecoveryPending ||
-      locallyRemoved ||
-      (controlHold !== null && controlHold.reason !== 'acceptance-unknown')
-    )
+    if (safetyHold() !== null || anchorRecoveryPending || locallyRemoved || controlHold !== null)
       return false
     if (!(await port.isLedgerComplete())) return false
     let advancedEpoch = false
@@ -2840,7 +2835,7 @@ export function createGroupPeerWithControlWalk<
     const safety = controlSafetyHeld(snapshot)
     if (safety !== null) latchSafetyHold(safety)
     if (!controlHoldPresent()) controlHold = snapshot.controlHold
-    if (controlHold !== null && controlHold.reason !== 'acceptance-unknown') {
+    if (controlHold !== null) {
       stranded = true
       healRequested = false
     }
@@ -3042,9 +3037,6 @@ export function createGroupPeerWithControlWalk<
           ...pruneWindow(snapshot, epoch),
           ...settled,
           ...(!staged.removed && staged.epochAfter > epoch ? { spentSource: null } : {}),
-          ...(controlHold?.reason === 'acceptance-unknown' && staged.epochAfter > epoch
-            ? { controlHold: null }
-            : {}),
           putApplied: [
             {
               epoch,
@@ -3313,8 +3305,7 @@ export function createGroupPeerWithControlWalk<
             Date.now() >= operation.deadline ||
             safetyHold() !== null ||
             controlSafetyHeld(snapshot) !== null ||
-            (snapshot.controlHold !== null &&
-              snapshot.controlHold.reason !== 'acceptance-unknown') ||
+            snapshot.controlHold !== null ||
             stranded ||
             snapshot.strand !== null ||
             snapshot.cursor?.stranded === true
@@ -4565,9 +4556,6 @@ export function createGroupPeerWithControlWalk<
                         epochAfter: record.epochAfter,
                       },
                     ],
-                    ...(before.controlHold?.reason === 'acceptance-unknown'
-                      ? { controlHold: null }
-                      : {}),
                     cursor: { position, epoch: staged.epochAfter, stranded: true },
                   },
                 }),

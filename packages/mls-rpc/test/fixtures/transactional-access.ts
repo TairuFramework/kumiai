@@ -93,6 +93,7 @@ export function createTransactionalStore(
       mutationID: null,
       anchorSlot: structuredClone(anchorSlot),
       control: {
+        schemaVersion: 1,
         commitOnce: null,
         spentSource: null,
         controlHold: null,
@@ -305,9 +306,7 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
         // its first record; the key is still consumed once, by this state.
         if (
           controlSafetyHeld(row.control) !== null ||
-          (write !== undefined &&
-            row.control.controlHold !== null &&
-            row.control.controlHold.reason !== 'acceptance-unknown')
+          (write !== undefined && row.control.controlHold !== null)
         )
           throw new RevisionConflictError(expected, row.revision)
         if (

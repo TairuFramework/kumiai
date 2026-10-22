@@ -27,14 +27,15 @@ export function closeControlBuild(
         ...(result.kind === 'abandon' ? { kind: 'unknown' as const } : result),
       },
     ],
-    ...(result.kind === 'landed' && built.welcome !== null
+    ...(result.kind === 'landed' &&
+    built.welcome !== null &&
+    !snapshot.welcomes.some((row) => row.opID === built.opID)
       ? {
           putWelcomes: [
             {
               opID: built.opID,
               welcome: built.welcome.bytes,
               recipients: built.welcome.recipients,
-              committed: true as const,
             },
           ],
         }

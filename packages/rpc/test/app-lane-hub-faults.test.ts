@@ -228,6 +228,35 @@ describe('app pulls against a faulty hub', () => {
     await commit
   })
 
+  test.each([false, true])(
+    'delivery retries preserve refused-frame pull backoff, durable=%s',
+    async (durable) => {
+      vi.useFakeTimers()
+      const f = fixture({ durable })
+      let requests = 0
+      vi.spyOn(f.hub, 'fetchTopic').mockImplementation(async () => {
+        requests++
+        return page(
+          Array.from({ length: 100 }, (_, i) => entry(position((requests - 1) * 100 + i + 1))),
+        )
+      })
+      await f.lane.deliver()
+      await vi.advanceTimersByTimeAsync(100)
+      expect(requests).toBe(8)
+      f.lane.retryDelivery()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(requests).toBe(8)
+      await vi.advanceTimersByTimeAsync(199)
+      expect(requests).toBe(8)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(requests).toBe(12)
+      await vi.advanceTimersByTimeAsync(399)
+      expect(requests).toBe(12)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(requests).toBe(16)
+    },
+  )
+
   test.each([false, true])('refused-frame continuation backs off, durable=%s', async (durable) => {
     vi.useFakeTimers()
     const f = fixture({ durable })

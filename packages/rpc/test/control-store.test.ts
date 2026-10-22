@@ -73,6 +73,7 @@ test('legacy negative aliases cannot erase an applied response during compaction
 })
 
 const empty = (): ControlSnapshot => ({
+  schemaVersion: 1,
   commitOnce: null,
   spentSource: null,
   controlHold: null,

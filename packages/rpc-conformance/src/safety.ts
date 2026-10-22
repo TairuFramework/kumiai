@@ -926,7 +926,6 @@ export function runGroupSafetyContract<THandle extends ConformanceRegistryHandle
         opID: 'owed-welcome',
         welcome: new Uint8Array([12]),
         recipients: [fixture.identity.id],
-        committed: true as const,
       }
       await fixture.installRows({
         key,

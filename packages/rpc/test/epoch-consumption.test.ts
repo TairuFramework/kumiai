@@ -544,7 +544,6 @@ test('incomplete own Add installs the member without losing an independent Welco
       opID: 'prior-invite',
       welcome: new Uint8Array([7]),
       recipients: ['prior-guest'],
-      committed: true as const,
     }
     await member.control.apply({ putWelcomes: [owed] }, 'prior-obligation')
     const fetch = hub.fetchTopic.bind(hub)

@@ -64,7 +64,6 @@ test.each([false, true])(
       opID: 'owed',
       welcome: new Uint8Array([9]),
       recipients: ['recipient'],
-      committed: true as const,
     }
     await member.control.apply(
       {
@@ -135,7 +134,6 @@ test('the peer recovery switch closes its acknowledged build with a fresh final 
     opID: 'owed',
     welcome: new Uint8Array([9]),
     recipients: ['recipient'],
-    committed: true as const,
   }
   await bob.control.apply(
     {
@@ -191,6 +189,7 @@ function unsettled(): ControlSnapshot {
     deadline: 30_100,
   }
   return {
+    schemaVersion: 1,
     commitOnce: null,
     spentSource: null,
     controlHold: null,
@@ -230,9 +229,7 @@ function unsettled(): ControlSnapshot {
     forkRecoveryAttempt: null,
     settledRejoins: [],
     outcomes: [{ id: 'settled', opID: 'settled', at: 50, kind: 'lost' }],
-    welcomes: [
-      { opID: 'accepted', welcome: new Uint8Array([10]), recipients: ['carol'], committed: true },
-    ],
+    welcomes: [{ opID: 'accepted', welcome: new Uint8Array([10]), recipients: ['carol'] }],
     applied: [
       {
         epoch: 1,

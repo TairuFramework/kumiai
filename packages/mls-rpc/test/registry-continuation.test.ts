@@ -21,7 +21,6 @@ const welcome = {
   opID: 'owed',
   welcome: new Uint8Array([9]),
   recipients: ['member'],
-  committed: true as const,
 }
 
 function port(fixture: RegistryFixture) {

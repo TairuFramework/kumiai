@@ -22,6 +22,7 @@ const unavailable = (): Rpc.RecoveryUnavailableEvent => ({
   reason: 'trust-unreadable',
 })
 const empty = (): Rpc.ControlSnapshot => ({
+  schemaVersion: 1,
   commitOnce: null,
   spentSource: null,
   controlHold: null,

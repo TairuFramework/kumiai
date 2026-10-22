@@ -12,6 +12,7 @@ import {
 import {
   createRegistryFixture,
   type RegistryFixtureBase,
+  registryFixtureMutateControl,
   registryFixtureRestore,
 } from './fixtures/registry.js'
 import {
@@ -77,11 +78,45 @@ for (const mode of ['real-mls', 'double'] as const) {
   describe(`retired storage service (${mode})`, () => {
     const create = () => createRegistryFixture({ mode, groupID: key.groupID, setup: 'seeded' })
 
+    test('retired startup promotes a legacy Welcome before serving it under its origin', async () => {
+      const fixture = await create()
+      let reopened: Awaited<ReturnType<typeof fixture.reopen>> | undefined
+      try {
+        await setup(fixture)
+        await retire(fixture, mode)
+        await registryFixtureMutateControl(
+          fixture,
+          key,
+          (snapshot) =>
+            ({
+              ...snapshot,
+              schemaVersion: undefined,
+              welcomes: [{ ...welcome, committed: false }],
+            }) as unknown as typeof snapshot,
+        )
+        reopened = await fixture.reopen()
+        const seen: Array<WelcomeObligation> = []
+        const result = await serveRetiredObligations({
+          persistence: reopened.device.groups,
+          key,
+          deliverWelcome: async (owed) => {
+            seen.push(owed)
+          },
+        })
+        expect(seen).toEqual([welcome])
+        expect(result).toEqual({ delivered: ['invite'], remaining: [], failures: [] })
+        expect((await reopened.device.groups.ports(key).control.load()).schemaVersion).toBe(1)
+      } finally {
+        await reopened?.close()
+        await fixture.close()
+      }
+    })
+
     test('independent obligations deliver outside ownership then delete', async () => {
       const fixture = await create()
       try {
         await setup(fixture, {
-          putWelcomes: [welcome, { ...welcome, opID: 'committed', committed: true }],
+          putWelcomes: [welcome, { ...welcome, opID: 'committed' }],
         })
         await retire(fixture, mode)
         const capability = entryCapability(fixture.device.groups)
@@ -111,7 +146,7 @@ for (const mode of ['real-mls', 'double'] as const) {
     test('transport accepted crash before deletion repeats identical Welcome after durable reopen', async () => {
       let fixture = await create()
       try {
-        await setup(fixture, { putWelcomes: [{ ...welcome, committed: true }] })
+        await setup(fixture, { putWelcomes: [{ ...welcome }] })
         await retire(fixture, mode)
         fixture.armNextWorkFault('before-commit')
         const accepted: Array<WelcomeObligation> = []
@@ -128,15 +163,12 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect(first.remaining).toEqual(['invite'])
         expect(first.failures).toHaveLength(1)
         expect((await fixture.device.groups.ports(key).control.load()).welcomes).toEqual([
-          { ...welcome, committed: true },
+          { ...welcome },
         ])
         fixture = await fixture.reopen()
         expect((await fixture.device.groups.ports(key).control.load()).commitOnce).toBeNull()
         expect(await serve()).toEqual({ delivered: ['invite'], remaining: [], failures: [] })
-        expect(accepted).toEqual([
-          { ...welcome, committed: true },
-          { ...welcome, committed: true },
-        ])
+        expect(accepted).toEqual([{ ...welcome }, { ...welcome }])
         fixture = await fixture.reopen()
         expect((await fixture.device.groups.ports(key).control.load()).welcomes).toEqual([])
         expect(
@@ -152,10 +184,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const fixture = await create()
       try {
         await setup(fixture, {
-          putWelcomes: [
-            { ...welcome, committed: true },
-            { ...welcome, opID: 'other', committed: true },
-          ],
+          putWelcomes: [{ ...welcome }, { ...welcome, opID: 'other' }],
         })
         await retire(fixture, mode)
         const failure = new Error('transport failed')

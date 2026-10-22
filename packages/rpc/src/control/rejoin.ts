@@ -191,7 +191,7 @@ export async function stepLegacyRejoin(
       const hold = snapshot.controlHold
       return (
         controlSafetyHeld(snapshot) !== null ||
-        (hold !== null && hold.reason !== 'acceptance-unknown') ||
+        hold !== null ||
         (deps.canAdopt !== undefined && !(await deps.canAdopt()))
       )
     }
@@ -224,7 +224,6 @@ export async function stepLegacyRejoin(
           : {}),
         putApplied: [row],
         putRejoin: next,
-        ...(snapshot.controlHold?.reason === 'acceptance-unknown' ? { controlHold: null } : {}),
         cursor: { position, epoch: staged.epochAfter, stranded: true },
         putResponses: [
           {

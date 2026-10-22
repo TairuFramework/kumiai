@@ -61,7 +61,6 @@ test.each(['fork-halted', 'recovery-unavailable'] as const)(
       opID: 'owed-invite',
       welcome: new Uint8Array([4, 5, 6]),
       recipients: ['guest'],
-      committed: true as const,
     }
     await member.control.apply(
       {
@@ -109,7 +108,6 @@ test('disposal after owed Welcome acceptance retains its bytes for the next owne
     opID: 'owed-before-disposal',
     welcome: new Uint8Array([7, 8, 9]),
     recipients: ['guest'],
-    committed: true as const,
   }
   await member.control.apply({ putWelcomes: [obligation] }, 'owed-before-disposal')
   const attempts: Array<unknown> = []

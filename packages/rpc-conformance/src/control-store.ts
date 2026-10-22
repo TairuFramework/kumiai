@@ -76,7 +76,7 @@ export type ConformanceRecoveryUnavailableEvent = ConformanceGroupKey & {
 }
 
 export type ConformanceControlHold<Position extends string = string> = {
-  reason: 'acceptance-unknown' | 'unsupported-version'
+  reason: 'unsupported-version'
   position: Position | null
 }
 export type ConformanceControlBuildRef<Position extends string = string> = Pick<
@@ -89,6 +89,7 @@ export type ConformanceHostBuilt<Position extends string = string> = Pick<
 > & { commit: Uint8Array }
 
 export type ConformanceControlSnapshot<Position extends string = string> = {
+  schemaVersion: 1
   commitOnce: ConformanceControlSlot<Position> | null
   spentSource: { epoch: number } | null
   controlHold: ConformanceControlHold<Position> | null
@@ -206,7 +207,12 @@ export type ConformanceOutcome<Position extends string = string> = {
 } & (
   | { kind: 'landed'; position: Position }
   | { kind: 'lost' } // absent from the branch this device follows
-  | { kind: 'unknown' } // absence not provable, or touched by a fork (D5)
+  | {
+      kind: 'unknown'
+      lostCommit?:
+        | { kind: 'ledger'; tokens: Array<string>; journal: Uint8Array }
+        | { kind: 'invite' | 'remove'; journal: Uint8Array }
+    }
   | { kind: 'reenact'; tokens: Array<string> } // ledger tokens missing after a rejoin
   | { kind: 'rejected'; reason: string } // build refused, e.g. not authorised
   | { kind: 'refused'; reason: ConformanceRecoveryRefusal } // a rejoin refused by policy (D6)
@@ -258,7 +264,6 @@ export type ConformanceWelcomeObligation = {
   opID: string
   welcome: Uint8Array
   recipients: Array<string>
-  committed?: true
 }
 export type ConformanceAppliedCommit = {
   epoch: number
@@ -1984,6 +1989,7 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       await host.control.apply(changes, 'durable')
       const reopened = await params.reopen()
       expect(await reopened.control.load()).toEqual({
+        schemaVersion: 1,
         commitOnce: null,
         spentSource: null,
         controlHold: null,

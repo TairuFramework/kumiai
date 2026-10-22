@@ -572,6 +572,7 @@ export function applyChanges(
   )
     throw new ControlStoreInvariantError('Skipped requires an advancing cursor')
   return cloneControlValue({
+    schemaVersion: snapshot.schemaVersion,
     commitOnce: changes.commitOnce === undefined ? snapshot.commitOnce : changes.commitOnce,
     spentSource: changes.spentSource === undefined ? snapshot.spentSource : changes.spentSource,
     controlHold: changes.controlHold === undefined ? snapshot.controlHold : changes.controlHold,

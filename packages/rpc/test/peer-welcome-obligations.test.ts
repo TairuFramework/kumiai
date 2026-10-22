@@ -9,7 +9,6 @@ const obligation: WelcomeObligation = {
   opID: crypto.randomUUID(),
   welcome: new Uint8Array([1, 2, 3]),
   recipients: ['bob'],
-  committed: true,
 }
 
 describe('durable Welcome obligations', () => {
@@ -40,7 +39,7 @@ describe('durable Welcome obligations', () => {
       expect((await member.control.load()).operations).toEqual([])
       expect((await member.control.load()).applied).toEqual([])
       expect((await member.control.load()).welcomes).toEqual([
-        expect.objectContaining({ opID: request.id, committed: true }),
+        expect.objectContaining({ opID: request.id }),
       ])
       await vi.waitFor(() => expect(attempts).toBe(2), { timeout: 3000 })
       expect((await member.control.load()).welcomes).toHaveLength(1)
@@ -63,7 +62,6 @@ describe('durable Welcome obligations', () => {
         expect(member.mls.epoch()).toBe(2)
         expect((await member.control.load()).operations).toEqual([])
         expect((await member.control.load()).applied[0]?.opID).toBe(row.opID)
-        expect(row.committed).toBe(true)
         expect((await member.control.load()).welcomes).toEqual([row])
         seen.push(structuredClone(row))
       },

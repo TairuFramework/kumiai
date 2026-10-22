@@ -70,6 +70,11 @@ export {
   openEntries,
   sealEntries,
 } from './crypto.js'
+export {
+  type LegacyCommitJournalBoundary,
+  LegacyControlActivationError,
+  LegacyJournalDecisionRequiredError,
+} from './legacy-control-migration.js'
 export { createManualRecoveryStore, type ManualRecoveryStore } from './manual-recovery.js'
 export {
   createGroupMLS,

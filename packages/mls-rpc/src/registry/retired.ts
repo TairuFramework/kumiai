@@ -120,9 +120,6 @@ export async function retireIncarnation<TTx extends GroupTransaction>(
       control,
       abandoned.map(({ id }) => id),
     ),
-    ...(switchedRejoinID !== undefined && control.controlHold?.reason === 'acceptance-unknown'
-      ? { controlHold: null }
-      : {}),
   }
   if (rejoin !== null && manualRejoinID === undefined) {
     if (switchedRejoinID !== undefined && nextIncarnation !== null)

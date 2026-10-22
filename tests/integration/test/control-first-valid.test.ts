@@ -410,7 +410,6 @@ test.each([false, true])(
                 opID: f.op.id,
                 welcome: f.slot.welcome?.bytes,
                 recipients: f.slot.welcome?.recipients,
-                committed: true,
               },
             ],
       )
@@ -418,7 +417,7 @@ test.each([false, true])(
       await deliverObligations(
         {
           control: f.member.control,
-          canDeliver: async (owed) => owed.committed === true,
+          canDeliver: async () => true,
           deliverWelcome,
         },
         saved,
@@ -555,7 +554,6 @@ test.each(['transient', 'persistent'] as const)(
             opID: f.op.id,
             welcome: f.slot.welcome?.bytes,
             recipients: f.slot.welcome?.recipients,
-            committed: true,
           },
         ])
         expect(f.member.handle().state.keySchedule.epochAuthenticator).toEqual(

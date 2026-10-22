@@ -22,6 +22,10 @@ import {
   type StateMetadata,
 } from './entry-capability.js'
 import {
+  activateLegacyControl,
+  type LegacyCommitJournalBoundary,
+} from './legacy-control-migration.js'
+import {
   bindMemoryGroupPorts,
   createMemoryGroupPorts,
   UnchangedGroupResult,
@@ -105,6 +109,7 @@ type Binding = {
   owners: OwnerQueues
   proofs: Map<string, Proof>
   observers: Map<string, Set<Observer>>
+  migratedGroups: Set<string>
 }
 const bindings = new WeakMap<MemoryDatabase, Binding>()
 const proofKey = (groupID: string, mutationID: string) => JSON.stringify([groupID, mutationID])
@@ -196,13 +201,20 @@ export function createMemoryGroupCoordinator(params: {
   providerID: string
   effects?: TransactionalGroupEffects<MemoryTransaction>
   ownershipContext?: OwnershipContextPort
+  legacyCommitJournal?: LegacyCommitJournalBoundary<MemoryTransaction> | null
 }) {
   const { db, owners, atRest, providerID, effects } = params
   if (atRest == null || typeof atRest.seal !== 'function' || typeof atRest.open !== 'function')
     throw new TypeError('Expected callable at-rest seal and open')
   let binding = bindings.get(db)
   if (binding === undefined) {
-    binding = { providerID, owners, proofs: new Map(), observers: new Map() }
+    binding = {
+      providerID,
+      owners,
+      proofs: new Map(),
+      observers: new Map(),
+      migratedGroups: new Set(),
+    }
     bindings.set(db, binding)
   } else if (binding.providerID !== providerID)
     throw new GroupStateConflictError('Persistence provider mismatch')
@@ -211,6 +223,17 @@ export function createMemoryGroupCoordinator(params: {
   owners.bindOwnershipContext(params.ownershipContext)
   const proofs = binding.proofs
   const observers = binding.observers
+  const migratedGroups = binding.migratedGroups
+  async function activate(groupID: string): Promise<void> {
+    if (migratedGroups.has(groupID)) return
+    await activateLegacyControl({
+      db,
+      atRest,
+      groupID,
+      legacyCommitJournal: params.legacyCommitJournal,
+    })
+    migratedGroups.add(groupID)
+  }
   const boundTx = (tx: MemoryTransaction, entry?: OwnerEntry): MemoryTransaction => {
     if (entry !== undefined) bindMemoryOwner(tx, entry, owners)
     return {
@@ -243,6 +266,7 @@ export function createMemoryGroupCoordinator(params: {
       }
       owners.markStarted(key)
     }
+    await activate(groupID)
   }
   async function prepare(entry: OwnerEntry, groupID: string): Promise<void> {
     await prepareBarrier(entry, groupID)
@@ -414,7 +438,7 @@ export function createMemoryGroupCoordinator(params: {
     const pending = owners.joinProof({ groupID }, mutationID)
     if (pending !== null) return await pending
     return await owners.run('read', { groupID, ownerDID: null }, async (entry) => {
-      await entry.enter('prepare')
+      await prepareBarrier(entry, groupID)
       await db.completionBarrier(scope(groupID))
       if (owners.failure !== null) throw owners.failure
       let marker: GroupOwnerMarker | null
@@ -424,7 +448,6 @@ export function createMemoryGroupCoordinator(params: {
         if (error instanceof GroupStateConflictError) owners.failStop(error)
         throw error
       }
-      owners.markStarted(JSON.stringify(['group', groupID]))
       await entry.enter('outcome')
       if (marker?.mutationID === mutationID) return 'committed' as const
       throw new GroupStateUncertainError('Group mutation is superseded or unclassifiable')
@@ -827,8 +850,7 @@ export function createMemoryGroupCoordinator(params: {
                           (prior.terminal !== owned.terminal ||
                             prior.epoch !== owned.epoch ||
                             !sameStoredValue(prior.epochAuthenticator, owned.epochAuthenticator)) &&
-                          snapshot.controlHold !== null &&
-                          snapshot.controlHold.reason !== 'acceptance-unknown')
+                          snapshot.controlHold !== null)
                       ) {
                         const error = new Error('Adoption source or control proof moved')
                         error.name = 'ControlAdoptionMovedError'
@@ -1504,6 +1526,7 @@ export function createMemoryGroupCoordinator(params: {
   })
   return {
     groups,
+    activate,
     transitionInTransaction<TValue>(
       tx: MemoryTransaction,
       change: GroupTransition,
@@ -1523,6 +1546,7 @@ export function createMemoryGroupPersistence(params: {
   providerID: string
   effects?: TransactionalGroupEffects<MemoryTransaction>
   ownershipContext?: OwnershipContextPort
+  legacyCommitJournal?: LegacyCommitJournalBoundary<MemoryTransaction> | null
 }): GroupPersistence<MemoryTransaction> {
   params.owners.bindOwnershipContext(params.ownershipContext)
   return createMemoryGroupCoordinator(params).groups

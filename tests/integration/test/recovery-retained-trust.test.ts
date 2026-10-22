@@ -114,7 +114,6 @@ test('source drainage gates switching and a destination bootstrap crash preserve
     opID: 'owed-invite',
     welcome: new Uint8Array([1, 2, 3]),
     recipients: [s.alice.identity.id],
-    committed: true as const,
   }
   await bob.fixture.installRows({
     key: bob.key,

@@ -34,6 +34,8 @@ export type HostBuilt = Pick<
 > & { commit: Uint8Array }
 
 export type ControlSnapshot = {
+  /** Set atomically by the pre-worker legacy migration. */
+  schemaVersion: 1
   commitOnce: ControlSlot | null
   spentSource: { epoch: number } | null
   controlHold: ControlHold | null
@@ -97,6 +99,7 @@ export type ControlAdoptionPort = {
 }
 export type ControlStore = {
   key: GroupKey
+  /** Resolves legacy migration and storage completion before exposing any snapshot to workers. */
   load(): Promise<ControlSnapshot>
   /** All or nothing. On an ambiguous commit, rejects with `StorageOutcomeUnknownError`. */
   apply(changes: ControlChanges, mutationID: string): Promise<void>
@@ -154,10 +157,14 @@ export type BuiltCommit = {
   welcome: { bytes: Uint8Array; recipients: Array<string> } | null
 }
 
+export type HostLostCommit =
+  | { kind: 'ledger'; tokens: Array<string>; journal: Uint8Array }
+  | { kind: 'invite' | 'remove'; journal: Uint8Array }
+
 export type Outcome = { id: string; opID: string | null; at: number } & (
   | { kind: 'landed'; position: LogPosition }
   | { kind: 'lost' } // absent from the branch this device follows
-  | { kind: 'unknown' } // absence not provable, or touched by a fork (D5)
+  | { kind: 'unknown'; lostCommit?: HostLostCommit }
   | { kind: 'reenact'; tokens: Array<string> } // ledger tokens missing after a rejoin
   | { kind: 'rejected'; reason: string } // build refused, e.g. not authorised
   | { kind: 'refused'; reason: RecoveryRefusal } // a rejoin refused by policy (D6)
@@ -203,7 +210,6 @@ export type WelcomeObligation = {
   opID: string
   welcome: Uint8Array
   recipients: Array<string>
-  committed?: true
 }
 export type AppliedCommit = {
   epoch: number

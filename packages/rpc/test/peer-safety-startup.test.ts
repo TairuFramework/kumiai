@@ -411,7 +411,6 @@ test('a halt discovered by the startup pull stops later runtime stages', async (
     opID: 'owed-mid-startup',
     welcome: new Uint8Array([7]),
     recipients: ['bob'],
-    committed: true,
   }
   await again.control.apply(
     {
@@ -572,7 +571,6 @@ test.each(reasons.flatMap((reason) => [false, true].map((restart) => [reason, re
       opID: 'committed',
       welcome: new Uint8Array([1, 3, 5]),
       recipients: ['bob'],
-      committed: true,
     }
     const blocked: WelcomeObligation = {
       opID: 'legacy',
@@ -628,7 +626,6 @@ test.each(reasons)(
       opID: 'separately-committed',
       welcome: new Uint8Array([1, 3, 5]),
       recipients: ['bob'],
-      committed: true,
     }
     await member.control.apply(
       {
@@ -708,7 +705,6 @@ test('held storage failure preserves the startup error and retries without ready
     opID: 'owed-after-startup-error',
     welcome: new Uint8Array([7, 9]),
     recipients: ['bob'],
-    committed: true,
   }
   await member.control.apply({ putWelcomes: [owed] }, 'owed-after-startup-error')
   const startupError = new Error('anchor load failed')

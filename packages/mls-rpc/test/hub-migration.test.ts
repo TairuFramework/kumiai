@@ -541,6 +541,7 @@ for (const mode of ['real-mls', 'double'] as const) {
 type Fixture = Awaited<ReturnType<typeof createRegistryFixture>>
 const movedBinding = { targetID: 'destination-hub', commitTopicID: `moved/${key.groupID}` }
 const freshControl: ControlSnapshot = {
+  schemaVersion: 1,
   commitOnce: null,
   spentSource: null,
   controlHold: null,
@@ -808,8 +809,8 @@ const movementRefusals: Array<[string, (fixture: Fixture) => Promise<void>]> = [
     mutate(() => ({ cursor: { position: '0001' as LogPosition, epoch: 0, stranded: true } })),
   ],
   [
-    'acceptance unknown',
-    mutate(() => ({ controlHold: { reason: 'acceptance-unknown', position: null } })),
+    'unsupported control version',
+    mutate(() => ({ controlHold: { reason: 'unsupported-version', position: null } })),
   ],
   ['cursor epoch lag', mutate(() => ({ cursor: { position: '0001' as LogPosition, epoch: 1 } }))],
   [

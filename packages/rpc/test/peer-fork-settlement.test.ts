@@ -22,6 +22,7 @@ import { memoryEntryID } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
 
 const empty = (): ControlSnapshot => ({
+  schemaVersion: 1,
   commitOnce: null,
   spentSource: null,
   controlHold: null,

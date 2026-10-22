@@ -182,7 +182,8 @@ export function statusEventID(
 
 export type ControlRecord = { snapshot: ControlSnapshot; mutationID: string }
 
-const emptyControl = (): ControlSnapshot => ({
+export const emptyControl = (): ControlSnapshot => ({
+  schemaVersion: 1,
   commitOnce: null,
   spentSource: null,
   controlHold: null,
@@ -353,6 +354,8 @@ export function createUnlockedIncarnationStores(params: {
     control: {
       async load() {
         const snapshot = (await control.load('current'))?.snapshot ?? emptyControl()
+        if (snapshot.schemaVersion !== 1)
+          throw new GroupStateConflictError('Control snapshot requires migration mark')
         return {
           ...snapshot,
           forkRecoveryAttempt: snapshot.forkRecoveryAttempt ?? null,

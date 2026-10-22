@@ -71,7 +71,6 @@ test.each([
             opID: 'owed-invite',
             welcome: new Uint8Array([7]),
             recipients: ['dave'],
-            committed: true,
           },
         ],
       },

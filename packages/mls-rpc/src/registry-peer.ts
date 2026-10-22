@@ -263,12 +263,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
                 isHardControlHold(snapshot.controlHold)
               )
                 throw new GroupStateConflictError('Accepted recovery moved before settlement')
-              const settled = {
-                ...changes,
-                ...(snapshot.controlHold?.reason === 'acceptance-unknown'
-                  ? { controlHold: null }
-                  : {}),
-              }
+              const settled = changes
               if (snapshot.forkRecoveryAttempt?.id === record.id)
                 recoveryCompletionContexts.set(stores.tx, {
                   key: sourceKey,

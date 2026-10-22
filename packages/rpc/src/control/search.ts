@@ -38,7 +38,6 @@ export type ControlEvidenceSnapshot = {
 }
 export type { GroupForkEvidence } from './safety.js'
 export type ControlHold = {
-  reason: 'acceptance-unknown' | 'unsupported-version'
+  reason: 'unsupported-version'
   position: LogPosition | null
-  cause?: 'unavailable' | 'gap' | 'ahead' | 'copy-mismatch'
 }

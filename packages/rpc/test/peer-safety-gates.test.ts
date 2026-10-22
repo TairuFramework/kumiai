@@ -597,7 +597,7 @@ test.each(reasons)(
     vi.useFakeTimers()
     await member.peer.commit(buildInviteCommit(member, 'alice'))
     const before = (await member.control.load()).welcomes[0]
-    expect(before?.committed).toBe(true)
+    expect(before).toBeDefined()
     latch(member, reason)
     await persist(member, reason)
     available = true

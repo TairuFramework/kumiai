@@ -72,6 +72,13 @@ export type {
   PrepareControlResult,
   SaveControlBuild,
 } from './control/build.js'
+export type {
+  LegacyControlOperation,
+  LegacyControlSlot,
+  LegacyControlSnapshot,
+  LegacyMainJournal,
+} from './control/legacy-input.js'
+export { type ControlMigrationSource, migrateLegacyControl } from './control/legacy-migration.js'
 export { searchOccurrence } from './control/occurrence.js'
 export type { HostBuilt, OperationDeps } from './control/operations.js'
 export {
@@ -134,6 +141,7 @@ export type {
   EpochIdentity,
   ExternalResponse,
   GroupKey,
+  HostLostCommit,
   LegacyRejoinRecord,
   Operation,
   OperationRequest,

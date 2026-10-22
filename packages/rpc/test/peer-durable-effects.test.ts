@@ -240,7 +240,6 @@ test.each([false, true])('terminal restart closes build, off-epoch=%s', async (o
     opID: 'previously-landed',
     welcome: new Uint8Array([3, 4, 5]),
     recipients: ['carol'],
-    committed: true as const,
   }
   await bob.control.apply(
     {
@@ -439,9 +438,7 @@ test('host deletion is refused until abandon and outcome acknowledgement', async
           stage: 'intent',
         },
       ],
-      putWelcomes: [
-        { opID: request.id, welcome: new Uint8Array([1]), recipients: ['carol'], committed: true },
-      ],
+      putWelcomes: [{ opID: request.id, welcome: new Uint8Array([1]), recipients: ['carol'] }],
     },
     'unsettled',
   )
@@ -568,9 +565,7 @@ test.each([false, true])(
     await bob.control.apply(
       {
         putRejoin: rejoin,
-        putWelcomes: [
-          { opID: rejoin.id, welcome: rejoin.payload, recipients: ['carol'], committed: true },
-        ],
+        putWelcomes: [{ opID: rejoin.id, welcome: rejoin.payload, recipients: ['carol'] }],
       },
       'pre-removal-rejoin',
     )

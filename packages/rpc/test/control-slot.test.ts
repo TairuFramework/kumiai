@@ -238,7 +238,6 @@ test.each(['landed', 'lost', 'unknown'] as const)(
         opID: 'prior-invite',
         welcome: new Uint8Array([7]),
         recipients: ['prior-guest'],
-        committed: true as const,
       }
       await member.control.apply({ putOutcomes: [provisional], putWelcomes: [obligation] }, 'owed')
       const snapshot = await member.control.load()
@@ -259,7 +258,6 @@ test.each(['landed', 'lost', 'unknown'] as const)(
                 opID: saved.id,
                 welcome: saved.slot.welcome?.bytes,
                 recipients: saved.slot.welcome?.recipients,
-                committed: true,
               },
             ]
           : undefined,

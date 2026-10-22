@@ -54,6 +54,19 @@ export {
   peerCommitOnceScenarios,
   testCommitOnceConformance,
 } from './commit-once.js'
+export {
+  legacyMigrationFixture,
+  legacyMigrationOperation,
+  legacyMigrationSlot,
+  type MigrationFixture,
+  type MigrationResult,
+  testLegacyControlMapping,
+} from './control-migration.js'
+export {
+  type MigrationActivationHost,
+  type MigrationPending,
+  testControlMigrationActivation,
+} from './control-migration-activation.js'
 export { type ControlSafetyFixture, runControlSafetyContract } from './control-safety.js'
 export {
   type ConformanceAcceptedRejoinSettlement,

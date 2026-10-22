@@ -1,5 +1,6 @@
 import type { ConformanceAnchorSlot, ConformanceAnchorStore } from './anchor-store.js'
 import type { ConformanceCheckpointRecord } from './checkpoint.js'
+import type { MigrationFixture } from './control-migration.js'
 import type {
   ConformanceAcceptedRejoinSettlement,
   ConformanceAdoptionExpected,
@@ -21,6 +22,8 @@ import type {
 } from './control-store.js'
 import { decodeControlFixtureState } from './control-store.js'
 import type { ConformanceRecoveryReconciliation } from './group-mls.js'
+import { migrateMemoryControl } from './memory-control-migration.js'
+import type { MemoryMigrationBackend } from './memory-migration-backend.js'
 
 export type MemoryControlStore<Position extends string = string> =
   ConformanceControlStore<Position> & {
@@ -580,8 +583,15 @@ function mutateControl<Position extends string>(
 
 export function createMemoryControlStore<Position extends string = string>(
   key: ConformanceGroupKey,
+  options?: { legacy?: MigrationFixture; migration?: MemoryMigrationBackend },
 ): MemoryControlStore<Position> {
   const fixedKey = { ...key }
+  const legacyKey = options?.legacy?.source.key ?? options?.migration?.key
+  if (
+    legacyKey !== undefined &&
+    (legacyKey.groupID !== key.groupID || legacyKey.incarnation !== key.incarnation)
+  )
+    throw new TypeError('Migration source does not bind this control store')
   let record: {
     holdRecords: Array<ConformanceCheckpointRecord>
     forkContinuation: ConformanceControlSnapshot<Position> | null
@@ -602,6 +612,7 @@ export function createMemoryControlStore<Position extends string = string>(
     anchor: null,
     mutationID: null,
     control: {
+      schemaVersion: 1,
       commitOnce: null,
       spentSource: null,
       controlHold: null,
@@ -622,6 +633,21 @@ export function createMemoryControlStore<Position extends string = string>(
   }
   let failure: 'mid-apply' | 'mid-save' | undefined
   let ambiguous: 'apply' | 'save' | undefined
+  let legacy = options?.legacy === undefined ? undefined : cloneValue(options.legacy)
+  let migration = options?.migration
+  async function activate(): Promise<void> {
+    if (migration !== undefined) {
+      record.control = cloneValue(
+        await migration.activate(),
+      ) as unknown as ConformanceControlSnapshot<Position>
+      migration = undefined
+    }
+    if (legacy === undefined) return
+    record.control = cloneValue(
+      migrateMemoryControl(legacy),
+    ) as unknown as ConformanceControlSnapshot<Position>
+    legacy = undefined
+  }
   const finish = (next: typeof record, point: 'apply' | 'save') => {
     if (failure === (point === 'apply' ? 'mid-apply' : 'mid-save')) {
       failure = undefined
@@ -637,6 +663,7 @@ export function createMemoryControlStore<Position extends string = string>(
   }
   return {
     async reportAppHold(halt, reportMutationID) {
+      await activate()
       if (record.control.forkHalt !== null) return
       if (halt.producer !== 'app-report') throw new TypeError('App report required')
       const next = cloneValue(record)
@@ -662,6 +689,7 @@ export function createMemoryControlStore<Position extends string = string>(
       finish(next, 'apply')
     },
     async clearReportedHold() {
+      await activate()
       const halt = record.control.forkHalt
       if (halt?.producer !== 'app-report') return
       const provenance = record.holdRecords.find(
@@ -692,8 +720,12 @@ export function createMemoryControlStore<Position extends string = string>(
       next.mutationID = crypto.randomUUID()
       finish(next, 'apply')
     },
-    holdRecords: async () => cloneValue(record.holdRecords),
+    holdRecords: async () => {
+      await activate()
+      return cloneValue(record.holdRecords)
+    },
     async retainForkContinuation(snapshot) {
+      await activate()
       const saved = snapshot.rejoin
       if (
         saved === null ||
@@ -707,6 +739,7 @@ export function createMemoryControlStore<Position extends string = string>(
       finish(next, 'apply')
     },
     async authoriseFork(attempt) {
+      await activate()
       if (
         !equal(attempt.source, fixedKey) ||
         attempt.id !== attempt.forkRecovery.attemptID ||
@@ -750,8 +783,12 @@ export function createMemoryControlStore<Position extends string = string>(
       next.mutationID = attempt.id
       finish(next, 'apply')
     },
-    forkHistory: async () => cloneValue(record.forkHistory),
+    forkHistory: async () => {
+      await activate()
+      return cloneValue(record.forkHistory)
+    },
     async settleFork(saved, result) {
+      await activate()
       if (
         (result.kind !== 'accepted' && result.kind !== 'unapplied-later') ||
         record.control.forkRecoveryAttempt?.id !== saved.id ||
@@ -784,6 +821,7 @@ export function createMemoryControlStore<Position extends string = string>(
       finish(next, 'apply')
     },
     async abandonFork() {
+      await activate()
       const next = cloneValue(record)
       next.control.forkRecoveryAttempt = null
       next.control.rejoin = null
@@ -792,12 +830,19 @@ export function createMemoryControlStore<Position extends string = string>(
     get key() {
       return { ...fixedKey }
     },
-    load: async () => ({
-      ...cloneValue(record.control),
-      forkRecoveryAttempt: cloneValue(record.control.forkRecoveryAttempt ?? null),
-    }),
-    lastMutation: async () => record.mutationID,
+    load: async () => {
+      await activate()
+      return {
+        ...cloneValue(record.control),
+        forkRecoveryAttempt: cloneValue(record.control.forkRecoveryAttempt ?? null),
+      }
+    },
+    lastMutation: async () => {
+      await activate()
+      return record.mutationID
+    },
     apply: async (changes, mutationID) => {
+      await activate()
       const next = cloneValue(record)
       const source = next.state === null ? null : decodeControlFixtureState(next.state)
       mutateControl(
@@ -825,8 +870,12 @@ export function createMemoryControlStore<Position extends string = string>(
       next.mutationID = mutationID
       finish(next, 'apply')
     },
-    loadVersion: async () => record.version,
+    loadVersion: async () => {
+      await activate()
+      return record.version
+    },
     saveBuilt: async (intent, built, expected, mutationID) => {
+      await activate()
       const next = cloneValue(record)
       const identity = next.state === null ? null : decodeControlFixtureState(next.state)
       if (
@@ -874,8 +923,12 @@ export function createMemoryControlStore<Position extends string = string>(
       finish(next, 'apply')
       return 'saved'
     },
-    loadState: async () => record.state?.slice() ?? null,
+    loadState: async () => {
+      await activate()
+      return record.state?.slice() ?? null
+    },
     saveState: async (state, write) => {
+      await activate()
       const next = cloneValue(record)
       const before = next.state === null ? null : decodeControlFixtureState(next.state)
       const after = decodeControlFixtureState(state)
@@ -953,8 +1006,12 @@ export function createMemoryControlStore<Position extends string = string>(
       finish(next, 'save')
     },
     anchor: {
-      load: async () => cloneValue(record.anchor),
+      load: async () => {
+        await activate()
+        return cloneValue(record.anchor)
+      },
       save: async (slot) => {
+        await activate()
         const next = cloneValue(record)
         next.anchor = cloneValue(slot)
         record = next

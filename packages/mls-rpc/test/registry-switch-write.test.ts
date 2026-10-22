@@ -664,7 +664,6 @@ for (const mode of ['real-mls', 'double'] as const) {
                 opID: 'owed-welcome',
                 welcome: new Uint8Array([9]),
                 recipients: ['recipient'],
-                committed: true,
               },
             ],
             putApplied: [

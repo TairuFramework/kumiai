@@ -13,6 +13,7 @@ import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
 import {
   createGatedRegistryFixture as createRegistryFixture,
   type RegistryFixtureBase,
+  registryFixtureMutateControl,
   registryFixtureRestore,
 } from './fixtures/registry.js'
 import { testRegistryBackgroundWarmup } from './fixtures/registry-maintenance.js'
@@ -81,6 +82,48 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect(a.runtime.snapshot()?.members).toEqual(new Set([fixture.identity.id]))
         expect(await a.read((handle) => handle.groupID)).toBe(groupID)
       } finally {
+        await fixture.close()
+      }
+    })
+
+    test('cold access migrates legacy control before admission without rewriting client state', async () => {
+      const fixture = await create()
+      let reopened: Awaited<ReturnType<typeof fixture.reopen>> | undefined
+      try {
+        await fixture.installRows({ key, control: {} })
+        const state = await fixture.device.groups.loadState(key)
+        await registryFixtureMutateControl(
+          fixture,
+          key,
+          (snapshot) =>
+            ({
+              ...snapshot,
+              schemaVersion: undefined,
+              controlHold: { reason: 'acceptance-unknown', position: null },
+              welcomes: [
+                {
+                  opID: 'old-proof',
+                  welcome: new Uint8Array([0, 255]),
+                  recipients: ['recipient'],
+                  committed: false,
+                },
+              ],
+            }) as unknown as typeof snapshot,
+        )
+        reopened = await fixture.reopen()
+        const owner = registry(reopened)
+        const access = await owner.access(groupID)
+        expect(access.admission()).toMatchObject({ admissible: true })
+        expect(await reopened.device.groups.loadState(key)).toEqual(state)
+        expect(await reopened.device.groups.ports(key).control.load()).toMatchObject({
+          schemaVersion: 1,
+          controlHold: null,
+          welcomes: [
+            { opID: 'old-proof', welcome: new Uint8Array([0, 255]), recipients: ['recipient'] },
+          ],
+        })
+      } finally {
+        await reopened?.close()
         await fixture.close()
       }
     })

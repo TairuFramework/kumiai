@@ -425,6 +425,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           ledger: s.recovery.candidate.ledgerTokens,
         })
         expect(await groups.ports(destination).control.load()).toEqual({
+          schemaVersion: 1,
           commitOnce: null,
           spentSource: null,
           controlHold: null,
@@ -796,9 +797,7 @@ for (const mode of ['real-mls', 'double'] as const) {
 
     test('switch revision-only drift refuses', async () => {
       const s = await setup({
-        putWelcomes: [
-          { opID: 'owed', welcome: utf8('welcome'), recipients: ['recipient'], committed: true },
-        ],
+        putWelcomes: [{ opID: 'owed', welcome: utf8('welcome'), recipients: ['recipient'] }],
       })
       try {
         await run(s)

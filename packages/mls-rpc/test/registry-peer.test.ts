@@ -293,11 +293,14 @@ describe('registry peer recovery coordination', () => {
     }
   })
 
-  test.each(['acceptance-unknown', 'unsupported-version'] as const)(
+  test.each([null, 'unsupported-version'] as const)(
     'restart with %s preserves hold policy through normal delivery',
     async (reason) => {
       const s = await setup(false)
-      await s.f.installRows({ key: source, control: { controlHold: { reason, position: null } } })
+      await s.f.installRows({
+        key: source,
+        control: { controlHold: reason === null ? null : { reason, position: null } },
+      })
       const f = await s.f.reopen()
       let owner: api.RegistryPeer | undefined
       try {
@@ -363,9 +366,7 @@ describe('registry peer recovery coordination', () => {
           const peer = owner.peer()
           if (peer === null) throw new Error('Restart did not start a peer')
           await peer.replay()
-          expect((await f.device.groups.ports(source).control.load()).controlHold?.reason).toBe(
-            reason,
-          )
+          expect((await f.device.groups.ports(source).control.load()).controlHold).toBeNull()
           const rotation = await commitKeyRotation(s.responder)
           const topicID = commitTopic(await api.deriveRecoverySecret(s.responder))
           await hub.publish({
@@ -393,8 +394,8 @@ describe('registry peer recovery coordination', () => {
   )
 
   test.each([
-    ['acceptance-unknown', false],
-    ['acceptance-unknown', true],
+    [null, false],
+    [null, true],
     ['unsupported-version', false],
     ['unsupported-version', true],
   ] as const)(
@@ -409,7 +410,10 @@ describe('registry peer recovery coordination', () => {
         }
         await s.f.installRows({
           key: source,
-          control: { putRejoin: record, controlHold: { reason, position: null } },
+          control: {
+            putRejoin: record,
+            controlHold: reason === null ? null : { reason, position: null },
+          },
         })
         const before = await s.f.inspectRows()
         owner = await s.start()
@@ -442,7 +446,7 @@ describe('registry peer recovery coordination', () => {
     },
   )
 
-  test.each(['acceptance-unknown', 'unsupported-version'] as const)(
+  test.each([null, 'unsupported-version'] as const)(
     'accepted-unadoptable settlement with %s obeys hold policy in one transition',
     async (reason) => {
       const s = await setup(false)
@@ -455,14 +459,13 @@ describe('registry peer recovery coordination', () => {
           key: source,
           control: {
             putRejoin: record,
-            controlHold: { reason, position: null },
+            controlHold: reason === null ? null : { reason, position: null },
             putOutcomes: [{ id: 'prior', opID: null, at: 1, kind: 'unknown' }],
             putWelcomes: [
               {
                 opID: 'owed',
                 welcome: new Uint8Array([7]),
                 recipients: ['member'],
-                committed: true,
               },
             ],
           },
@@ -661,9 +664,7 @@ describe('registry peer recovery coordination', () => {
         },
         trust: recoveryTrustFor(advanced, source, trust),
         control: {
-          putWelcomes: [
-            { opID: 'owed', welcome: new Uint8Array([9]), recipients: ['member'], committed: true },
-          ],
+          putWelcomes: [{ opID: 'owed', welcome: new Uint8Array([9]), recipients: ['member'] }],
           putOutcomes: [{ id: 'old', opID: null, at: 1, kind: 'unknown' }],
         },
       })
@@ -1025,9 +1026,7 @@ describe('registry peer recovery coordination', () => {
         key: source,
         control: {
           putRejoin: record,
-          putWelcomes: [
-            { opID: 'owed', welcome: new Uint8Array([7]), recipients: ['member'], committed: true },
-          ],
+          putWelcomes: [{ opID: 'owed', welcome: new Uint8Array([7]), recipients: ['member'] }],
           putOutcomes: [{ id: 'prior', opID: null, at: 1, kind: 'unknown' }],
         },
       })

@@ -459,7 +459,6 @@ for (const mode of ['real-mls', 'double'] as const) {
               opID: 'owed',
               welcome: utf8('owed-welcome'),
               recipients: ['recipient'],
-              committed: true,
             },
           ],
           putResponses: [

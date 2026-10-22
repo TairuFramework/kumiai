@@ -2031,15 +2031,10 @@ test.each([
       expect(searched.result.kind).toBe('unknown')
     else expect(searched.result.kind).toBe('first-valid')
     const control = await searched.store.control.load()
-    expect(searched.hold.mock.calls.every(([value]) => value.reason === 'acceptance-unknown')).toBe(
-      true,
-    )
     expect(searched.haltFork).not.toHaveBeenCalled()
     expect(control.forkHalt).toBeNull()
     expect(control.recoveryUnavailable).toBeNull()
-    expect(
-      control.controlHold === null || control.controlHold.reason === 'acceptance-unknown',
-    ).toBe(true)
+    expect(control.controlHold).toBeNull()
     expect(control.commitOnce?.payload).toEqual(f.built.payload)
     expect(control.commitOnce?.journal).toEqual(f.built.journal)
     expect(control.operations).toEqual([])

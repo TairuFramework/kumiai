@@ -1120,7 +1120,6 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
                   opID: 'old-welcome',
                   welcome: new Uint8Array([12]),
                   recipients: [fixture.identity.id],
-                  committed: true,
                 },
               ],
               putApplied: [
@@ -1490,7 +1489,6 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
           opID: 'owed-welcome',
           welcome: new Uint8Array([7, 8, 9]),
           recipients: ['recipient'],
-          committed: true,
         }
         await fixture.installRows({ key, control: { putWelcomes: [welcome] } })
         await fixture.registry.seed(history.newer, {

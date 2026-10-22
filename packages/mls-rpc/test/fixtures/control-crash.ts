@@ -42,7 +42,6 @@ function crashAdoptionWrite(slot: ControlSlot, proof: OwnOccurrence): AdoptionWr
                 opID: slot.opID,
                 welcome: slot.welcome.bytes,
                 recipients: slot.welcome.recipients,
-                committed: true,
               },
             ],
           }),
