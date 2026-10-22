@@ -1,7 +1,7 @@
 # Spec P: transactional persistence — design
 
 Date: 2026-10-08
-Status: draft r26 (2026-10-18)
+Status: draft r28 (2026-10-22)
 Parent: [client host, messaging protocol and multi-device e2e](2026-10-08-client-messaging-e2e-design.md)
 Control baseline: [Spec P2a](2026-10-08-spec-p2a-crash-safe-control-design.md), superseded where amended here.
 
@@ -12,7 +12,7 @@ It may withhold, delay, reorder, replay or selectively deliver bytes. Non-delive
 Peers are trusted in intent but may be buggy. No single peer may roll the group back or steer it.
 The continuing branch is whatever log the hub keeps. Checkpoints supply no continuation authority.
 The hub cannot forge MLS content. Drop, delay, reorder, replay, byte tampering, junk and unknown frame versions mean non-delivery.
-Skip or diagnose such frames. Never derive a durable halt/hold, discard, rebuild, owed-work deletion or permanent stranding from them.
+Skip or diagnose such frames. Never derive a durable halt/hold, discard, rebuild, owed-work (outcomes, Welcome obligations) deletion or permanent stranding from them.
 Detection-only in-band checkpoints reveal attributed conflicting views within retained coverage. They never select a winner, halt or switch.
 Full partition, withholding and expired comparison history can prevent detection. Local export/import/verification supports later out-of-band comparison.
 Host reportFork/authenticator comparison and genuinely local storage invariants retain their halt contracts.
@@ -24,8 +24,11 @@ See [RFC 9750 §5.2–5.2.1](https://www.rfc-editor.org/rfc/rfc9750.html#section
    Recovery lineage and the attempt-scoped floor exception below never change an installed incarnation in place.
 2. **Commit-once (r14 decision).** Durably save exact control bytes, publishID and candidate before publication.
    Head-only retries reuse them. Ordinary builds resume only after epoch change.
+   (r28) The device's own in-order adoption of the commit log is the only settlement authority for a build; a hub acknowledgement is retry evidence.
+   A build lives until the authenticated transaction that consumes its source epoch settles it, or until retirement or `abandon()` closes it (D4).
+   (r28c) Own frames never advance state through received-commit application; a recognised own occurrence of a live build installs the saved candidate.
    Restricted different-branch recovery creates a new bound attempt, never an in-place rebuild.
-   This removes handshake reservations, burn budgets, baseline readers and staging-clone rules.
+   This removes handshake reservations, burn budgets, baseline readers and staging-clone rules (the client-state codec's v2 flags field still carries `main`'s reservation fields, D5 r28e).
 3. **One transaction per transition (r14 decision).** All affected group namespaces share one provider transaction.
    Bounded adaptive batches amortise commits and release the group scope between batches.
    This removes internal cross-store ordering seams and chat-specific coordination.
@@ -43,7 +46,7 @@ Keep `onStrand` observations and their confidence. Classify evidence before sele
 |---|---|
 | Competing past-epoch commit digest divergence, on either classifier branch | diagnostic poison; skip, never halt or frame-trigger automatic resync |
 | Host reports different authenticators for the same group/epoch | durable fork halt |
-| `own-unmerged` | recognise and validate saved own work with the receiver predicate; mismatch skips/advances cursor and preserves slot/unknown acceptance |
+| `own-unmerged` | recognise saved own work (exact bytes or the receiver predicate), never apply it as a received commit; a recognised occurrence installs the saved candidate (D4 r28c); mismatch skips/advances cursor, sets `skipped` and keeps the build live, with no identical retry (D4 r28d); with no live build at that epoch (after `abandon()` or closure) a diagnostic skip that keeps the spent marker |
 | `ahead`, retention gap or unprocessable gap, without a local safety hold | catch up or use authenticated resync with bounded retry; a delivery fault never permanently strands the device |
 | Unknown/unsupported commit-frame or handshake-header version | diagnostic poison plus `upgrade-required` host diagnostic; skip, never create a durable hold |
 | Lost MLS state, retained recovery trust readable | stranded; automatic resync (r16 decision) |
@@ -54,21 +57,21 @@ Keep `onStrand` observations and their confidence. Classify evidence before sele
 
 **Delivery faults (r19 decision, Q0/Q1).** Competing past-epoch commits, including refused signed CAS losers, are diagnostic poison on both classifier branches.
 Skip with claimed `past-epoch-divergence` observation. Advance the skipped cursor without applied rewrite, fork event/latch or frame-triggered resync.
-Own-slot mismatches and delivery-driven search contradictions also skip/advance cursor, preserving saved work and unknown acceptance.
-Recovery acceptance-unknown permits authenticated recapture with bounded retry. Ordinary unknown slots permit identical bytes/ID at a fresh head with unchanged incarnation/epoch/authenticator.
+Own-slot mismatches also skip/advance cursor, preserving saved work; the walker is the only reader that settles a build (D4 r28).
+Unconfirmed recovery acceptance (a rejoin-X state, D1 below; not a control hold) permits authenticated recapture with bounded retry. Ordinary live builds permit identical bytes/ID at a fresh head after a refused handoff, with unchanged incarnation/epoch/authenticator and `skipped` unset (D4 r28d).
 Neither condition becomes a durable safety hold. An unrecognised/tampered ordinary own-copy frame means non-delivery, never lost/absent/superseded.
 Commit-once retry is idempotent. Unresolved deadline outcome is unknown.
 No encoding, unsigned tag, sealed-entries blob, padding, position or frame-version difference supplies adverse acceptance evidence.
-Audit peer/classify, control search/slot/operations/store, mls-rpc control-validation/safety and registry producers, including their catch mappings.
+Audit peer/classify, control slot/operations/store, the walker's own-occurrence path, mls-rpc control-validation/safety and registry producers, including their catch mappings.
 Only host reports/authenticator comparisons and genuine local storage inconsistency can produce new durable safety halts.
-slot.ts:94-110 and search.ts:242-252 compare trusted local committed identities. Retain these local-invariant halts.
+The slot's and the walker's trusted local committed-identity comparisons remain local-invariant halts.
 Fresh responder authenticator disagreement is a diagnostic retry, not a local-invariant halt.
 Existing persisted halts/unsupported-version holds remain readable. Evidence stays immutable.
 Only the provenance-restricted clearHold or completed manual retirement below can release applicable holds. Legacy control-record version holds retain their separate policy.
 Unsupported sealed-entries outer/inner versions propagate through crypto/resolver/walker as poison plus upgrade-required diagnostics, advancing cursor without strand/heal.
 HEAD packages/mls-rpc/src/crypto.ts:76-84,200-209 -> packages/rpc/src/ledger-entries.ts:104-117 -> packages/rpc/src/peer.ts:1897-1930.
 Tasks 5a-5e own complete HEAD behavioural closures. Each unit changes implementation and conflicting assertions together, preserving restart/history/outcomes/Welcomes.
-Task 5a owns past divergence, 5b own/search contradictions, 5c frame/blob versions, 5d real validation/local registry guards and 5e app bounds.
+Historical task labels: 5a owned past divergence, 5b own/search contradictions, 5c frame/blob versions, 5d real validation/local registry guards and 5e app bounds.
 Every unit runs Control/Safety/full Port gates, both contract families on real implementations and doubles. Task 5c precedes Task 8a ledger-entries changes. Task 8b separately owns negative refusalAuthority through wire/replay/cache.
 Missing/unreadable retained local trust remains recovery-unavailable. Delivered bytes and provider/configuration failures cannot manufacture that condition.
 Already owed outcomes/Welcomes and source history remain serviceable. Independently MLS-validated applied state may settle work normally.
@@ -109,9 +112,9 @@ Exact bytes provide positive evidence. A mismatch means nothing learned, never a
 One helper decodes then re-encodes the MLS-message commit half and hashes it. Malformed input returns null, never a fatal encoding exception.
 Match saved/delivered helper results only when both are non-null. Reconstruction serves recognition only, never application or publication.
 No-entry commits ignore blobs on author and receiver. Re-encoded/blob-changed copies can therefore recognise saved work.
-Named-entry commits use normal MLS validation and the receiver's own resolver/reference-verification predicate under retained pre-state.
-A different blob that passes that predicate can recognise saved work. Failed verification only skips/advances cursor and preserves unknown acceptance.
-Normal first-valid proof still gates own adoption/Welcome release. Saved payloadDigest binds saved work after recognition, without schema migration.
+Named-entry commits use the receiver's own resolver/reference-verification predicate under retained pre-state, never MLS receive processing (D4 r28c).
+A different blob that passes that predicate can recognise saved work. Failed verification only skips/advances cursor, sets `skipped` and keeps the build live (D4 r28d).
+Recognition installs the saved candidate; first-valid proof with complete coverage gates `landed` and Welcome release (D4 r28c). Saved payloadDigest binds saved work after recognition, without schema migration.
 No canonical intake gate, identity-version migration, equivalence taxonomy or competitor-authentication API is introduced.
 Only refusal of the authenticated commit itself authorises terminal negative verdicts.
 Transport/blob/framing/unsigned-field/copy-eligibility failures remain advisory, including verdict caches.
@@ -168,14 +171,14 @@ A capture position is explicit null or a nonempty opaque string of at most 64 Ja
 
 Persist immutable captureHead/searchFrom/target and exact external bytes/ID/candidate/request key before publication.
 Initial expectedHead equals authenticated captureHead, including null. Search may accelerate bound confirmation under applied-state settlement authority.
-After mismatch or unknown acceptance, recapture authenticated responder state without replacing X or building another candidate.
+After mismatch or unconfirmed acceptance, recapture authenticated responder state without replacing X or building another candidate.
 Equal epoch/authenticator means responder prefix lacks X: retry SAME bytes at its authenticated head, even if lower or after an inflated prior head.
 Later epoch with X's exact leaf means accepted -> settled. Adopt X only with bound confirmation; otherwise preserve accepted-unadoptable X and build leaf-replacing Y.
 Later epoch without X's leaf permits discard/build subject to admission/removal policy, including applied-then-removed. Log absence never decides discard.
 
 **Reconciliation limit (r19 decision).** Public GroupInfo and fresh external candidates lack old receiver secrets and referenced proposals.
 Unclassifiable frames cannot prove non-acceptance. Follow applied-state settlement authority rather than log-derived discard.
-Recapture remains available with gaps, byte mismatches or unknown acceptance. Preserve X and its immutable request/key/confirmation tuple.
+Recapture remains available with gaps, byte mismatches or unconfirmed acceptance. Preserve X and its immutable request/key/confirmation tuple.
 Fresh recapture keys remain separate. Head regression only diagnoses; member-signed recoveryEpochFloor survives settlement/discard/restart.
 Equal epoch/authenticator means responder prefix lacks X and retries SAME bytes at fresh head, including lower heads.
 Equal epoch/different authenticator diagnoses and recaptures without a durable hold.
@@ -538,7 +541,7 @@ Every other handler runs outside a transaction. No transaction callback awaits a
 completion policy. The frame key is JSON of `['kumiai/frame/v1', groupID, incarnation, topicID, position, protocol, procedure]`, stable across restart/redelivery.
 Different occurrences have different keys; applications also dedup semantic message identity. MessageStore/status effects use this common boundary.
 
-**Terminal drain.** Commit self-removal's terminal flag and applied/control changes even without epoch advancement.
+**Terminal drain.** Commit self-removal's terminal flag and applied/control changes even without epoch advancement; that transaction closes every live build, unbuilt intent and rejoin record (D4 r28c).
 Block new opens/seals/publication, restore all already opened records and await their handlers/completion transactions.
 Drain persisted plaintext without decrypting/fetching/opening more frames. Starting workers is not awaiting completion.
 Then one clearing transaction settles certified entries, fails others and clears transport rows.
@@ -552,55 +555,189 @@ payload, publishID, candidate/journal, required proposal/key material and comple
 Retry a rolled-back save with the already prepared bytes. Death before built-save permits preparation again; no payload escaped.
 
 **One source-epoch slot (r14 decision).** All private control/rotation builders share one durable commit-once slot per incarnation/epoch. Direct calls, queue
-changes, outcome ack and deadline expiry cannot free it or create a second same-epoch build. Retain until epoch advancement/retirement to prevent protection-tree
-generation reuse.
+changes, outcome ack and deadline expiry cannot free it or create a second same-epoch build. It ends only in the authenticated transaction that consumes its
+epoch, on retirement, or on `abandon()`, to prevent protection-tree generation reuse.
+(r28c) Closing a live build by `abandon()` uses the final-report rule (Deadline/outcomes): atomically delete any surviving provisional report, write terminal
+`unknown` under a fresh outcome ID, delete the build's executable material (candidate, journal, speculative Welcome) and write the durable spent-source marker
+`spentSource: { epoch }` for that incarnation. Repeated `abandon()` of already closed work writes nothing. Ack and restart preserve the marker. No control build is
+permitted while `spentSource.epoch` equals the source epoch; a marker below the current epoch is dead and is cleared by the next consumption, as is a matching one
+by authenticated epoch advancement or retirement (self-removal leaves it, moot on a terminal group). Welcome obligations are a separate `abandon()` deletion, as
+P2a D1 says. Authenticated consumption and host abandonment are distinct closure causes: after advancement, later own copies are past-epoch diagnostics; after
+abandonment without advancement, an own-unmerged frame with no live build at its epoch is a past-own diagnostic skip (cursor advances, nothing is installed or
+reported, the marker stays; it cannot reopen the operation or install the deleted candidate), and later frames follow the ordinary `ahead`/strand rules of D1,
+with the availability concession's ghost-member consequence if the group moved on that commit.
 
-**Mismatch/restart (r19 decision).** Search from the immutable original build head for positive evidence of saved own work.
-Exact bytes suffice for recognition. Use the own-commit helper and receiver predicate for a changed copy. Mismatch alone decides nothing.
-A match proves occurrence only. Adoption and Welcome release require that occurrence to be the FIRST valid commit at its framed epoch.
-Validate the full prefix, including the already reconciled build checkpoint, through the occurrence with normal MLS/proposal/policy checks.
-Earlier valid competitor: settle `lost` (superseded), follow its state/cursor, never install our candidate or release its Welcome.
-Incomplete coverage or unavailable validation inputs preserve unknown acceptance, never a durable safety hold. Deadline yields unknown.
-Normal first-valid proof cannot bypass missing coverage. Authenticated recapture remains available for recovery attempts.
-Ordinary unchanged incarnation/epoch/authenticator permits identical-byte/ID retry after an unrecognised copy, without adverse settlement.
-Replay by ANY party able to publish to the commit topic obeys this rule, including another publishID.
+**Settlement by adoption (r28 decision, supersedes r19 mismatch/restart and r27 retained builds).** One log reader settles a build: the *walker*, the inbound
+commit-lane reader that adopts the log in order from the durable cursor (P2a D5), validating every foreign frame with normal MLS/proposal/policy checks against
+the state at its framed epoch. (r28d) An own occurrence never advances state through received-commit application (the committer holds no copath secret for
+its own update path, RFC 9420 §12.4.2; `apply-commit.ts` refuses an own non-external commit); authentication-only processing on disposable retained state
+(the existing signature-verification helper) is permitted, and installation always uses the saved candidate. Its validity is recognition (exact bytes, or the
+own-commit helper and receiver reference-verification predicate for a changed copy) plus the r25 source/control-compatibility recheck of the saved candidate
+against the current state; the candidate's validation at build time is its MLS proof. There is no historical search from the build head, no stored acceptance uncertainty, no retained
+reconciliation set and no applied-window pinning. A hub acknowledgement is retry evidence only: it writes `acceptedAs` on the live build (P2a's `accepted` stage
+is that build and nothing more) and no applied row, cursor, outcome or obligation.
+The authenticated transaction that consumes a build's source epoch settles it, and nothing else does:
+- (r28c) every recognised own occurrence uses the saved-candidate installation path. After recognition, receiver reference verification and the r25
+  compatibility recheck succeed, the installation transaction atomically consumes the build: it installs the saved candidate, preserves ratchet progress,
+  writes the applied row with opID and the cursor, and deletes the build. With *complete coverage* (below) it is the FIRST valid commit at its framed epoch:
+  the outcome is `landed` and the Welcome obligation (below) is written. With incomplete coverage (a retention gap or `skipped === true`) the outcome is
+  terminal `unknown`, the speculative Welcome is deleted and no obligation is created: the skipped frame is non-delivery per the Model, so the device does not
+  strand on its own commit, and this is the availability concession below. (r28d) An own frame's validation inputs are local: the missing references are
+  opened from the frame's own sealed blob under a locally derived key, and the host resolver is not consulted; the only unavailability is storage or a
+  transient local failure (key derivation, entry verification throwing). Two stages, in order. Stage one, hold-and-retry: the cursor stays at the occurrence,
+  nothing advances, nothing is skipped, no strand is written, the build stays live, and the walker re-reads the occurrence on the next pull under capped
+  backoff; the deadline reports once meanwhile. Stage two, the liveness backstop, never disabled: when the bounded retry is exhausted the occurrence becomes
+  D1's unprocessable gap (strand, automatic resync with bounded retry); if that resync retires the source, the switch transaction closes the build terminal
+  `unknown` with the speculative Welcome deleted (availability concession). A foreign frame's unavailable inputs are D1's unprocessable gap from the start.
+  The port recomputes coverage from the snapshot it captures, not from the argument, and refuses installation (`'moved'`) while the cursor is stranded; on
+  `'moved'` the walker advances nothing and re-evaluates the occurrence under the refreshed state (an advanced epoch makes it a past-epoch diagnostic; a
+  strand or hold keeps the walk at the occurrence). The "retention gap" leg of incomplete coverage is the prefix-loss gap that writes `incomplete` without
+  stranding; a mid-walk gap strands first, so that own occurrence is not installed and the resync closes its build;
+- validated competitor at that epoch, other than a removal of this device, with complete coverage: `lost` (superseded); follow its state/cursor, never install
+  our candidate or release its Welcome;
+- any other consumption: terminal `unknown`; the candidate, journal and speculative Welcome are deleted in that transaction. This includes a competitor behind
+  incomplete coverage, any rejoin adoption (a retirement), retirement (D2 :477; recovery, readmission and resync are retirements) and authenticated
+  self-removal (below). Host `abandon()` closes a build the same way without consuming its epoch (One source-epoch slot).
+(r28c) Authenticated self-removal is consumption even without epoch advance: its adoption transaction closes every live build terminal `unknown`, closes every
+unbuilt intent `rejected` with `reason: 'removed'` (nothing left the device) and any rejoin record `unknown` (a record already at `refused` carries its
+outcome and is deleted without a second one), deletes speculative material and releases revoke holds; obligations survive. A terminal group therefore holds
+no build, intent or rejoin record; deletion needs acks plus delivery or `abandon()` of the remaining Welcome obligations, never `abandon()` of control (D7).
+This supersedes P2a D5's later removal-effect `apply`, which then settles nothing.
+*Coverage (r28c).* `BuiltCommit.head` is the immutable cursor position at built-save (`expectedHead` is separate retry bookkeeping); null `head` denotes the
+empty prefix. A build is refused while the cursor carries `incomplete`, so `head` always lies inside covered history. The build carries a durable `skipped`
+flag, set in the same transaction as, and before, any cursor advance past a commit-lane occurrence after `head` that the walker did not adopt, unless that
+occurrence is positively classified as a frame whose readable framed epoch differs from the build's, a duplicate position or an application frame. An
+unreadable epoch counts as a skip: poison, an unrecognised or altered own copy, an unknown handshake or frame version, a refused external commit and an
+unparseable frame all set it. A retention gap discovered in the same fetch is durably recorded (the cursor's `incomplete` mark, set in the same transaction as
+the cursor advance) before any occurrence from that fetch is adopted, so the consuming transaction's pre-state includes it. Restart and head refresh never
+clear `skipped`. *Complete coverage* at a consuming transaction means, in that transaction's pre-state: no `incomplete` cursor mark, `skipped` unset and the
+winner at or after `head`. Incomplete coverage never yields `lost`. Coverage is relative to the served log (Model): a hub withholding frames without a visible
+gap still yields complete coverage, so `lost` is branch-relative as P2a D3 says; no local predicate proves global non-acceptance. A match proves occurrence
+only. Replay by ANY party able to publish to the commit topic obeys this rule, including another publishID.
 See [RFC 9750 §5.2.1](https://www.rfc-editor.org/rfc/rfc9750.html#section-5.2.1).
-Only validated first-valid acceptance records an obligation and adopts before walking our own occurrence; retained accepted stages recheck that proof.
-With unchanged incarnation/epoch/authenticator, an unrecognised/tampered own-copy frame permits identical-byte/ID retry at a refreshed expectedHead.
-The copy counts as non-delivery for retry eligibility. Commit-once remains idempotent; unresolved deadline outcome is unknown.
-It never proves lost/absent/superseded or permits rebuilding.
-A head/proposal/stateVersion change alone never permits rebuild.
-Epoch advancement permits a fresh build only after independent authenticated settlement and intent revalidation.
+Hub bytes, head movement, elapsed time, acknowledgement, absence and validation failure never delete saved work before consumption, prove loss or create a
+durable safety hold.
+(r28b) After consumption, later own copies are past-epoch diagnostics (D1 :46): they never reopen the operation or create an obligation, and a stale prepared
+adoption writes nothing. A build and an applied row at its epoch with a different payloadDigest cannot coexist; finding both, or an own occurrence whose saved
+candidate fails the r25 control-compatibility check while the frame validates, is a conflicting trusted local installation record and follows D1's
+local-invariant halt. No fork outcome kind exists for a build.
+(r28d) With unchanged incarnation/epoch/authenticator, before the deadline and with `skipped` unset, a refused handoff (no occurrence met) permits
+identical-byte/ID retry at a refreshed expectedHead. An unrecognised or altered own copy is non-delivery (D1) and sets `skipped`: the build stays live, no
+retry is attempted (an honest hub would dedup it behind the cursor; a hub that lost its record would take a duplicate every member skips), and its own
+occurrence, if one is met, installs and closes `unknown` (availability concession); otherwise consumption or `abandon()` closes it. Neither case proves
+lost/absent/superseded or permits rebuilding.
+A head/proposal/stateVersion change alone never permits rebuild. A late handoff completion applies only to the same live build identity; it never resurrects
+consumed or abandoned work.
+(r28c) Availability concession. A possibly accepted build closed without own first-valid proof loses its speculative Welcome; terminal `unknown` asserts
+uncertainty, never absence. This covers both a build closed by a competitor or retirement and an own occurrence installed behind incomplete coverage: in the
+latter the Add is on the device's own branch with no Welcome held for it. The host learns `unknown` and may re-invite; if the Add did land, the invitee is a
+ghost member the target guard refuses to re-add until the host removes it and re-invites with a fresh key package. This is the accepted boundary of
+epoch-scoped settlement.
+(r28) Epoch advancement never rebuilds saved bytes. An unbuilt intent revalidates at the current epoch and builds only if still eligible; stale internal intents settle `rejected` (D5).
+Only the host re-enacts a settled build, under a new operation ID. (r28c) After an internal rotation closes, the registry re-evaluates admission under D5. It never replaces a live build. Abandonment does not permit another build at the spent source epoch.
 Same-number trusted local authenticator divergence remains a local-invariant halt. Retirement settles old work without rebuilding there.
-Gaps, missing validation inputs and copy mismatches preserve unknown acceptance. They never discard possibly accepted work or delete owed outcomes/Welcomes.
-Recovery unknown acceptance permits authenticated recapture under applied-state settlement authority. Host/local-invariant fork halts still forbid automatic rejoin.
+Recovery attempts keep D1's authenticated recapture; it is a rejoin mechanism, never a control-build one. Host/local-invariant fork halts still forbid automatic rejoin.
 
-Retain candidate/journal and needed proposals/decryption keys. Missing inputs preserve unknown acceptance. Recovery attempts retain authenticated recapture; ordinary slots retain identical retry under unchanged identity.
-Delivered references/keys/resolver failures never create a durable safety hold or authorise erasing saved work.
+Retain candidate/journal and needed proposals/decryption keys while the build lives; nothing survives closure but outcomes, obligations and, after `abandon()`, the spent marker.
+Delivered references/keys/resolver failures never create a durable safety hold or, before consumption, authorise erasing saved work.
 Extra proposals do not invalidate saved bytes; omitted proposals are cleared on adoption and require reproposal.
 Control builders pass `pendingProposals: {}`; rotation uses empty proposals/entries and refuses local pending proposals.
-Reconciliation and ordinary adoption preserve current sender/receive ratchet progress in matching retained history, including after restart.
+Own-candidate installation and ordinary adoption preserve current sender/receive ratchet progress in matching retained history, including after restart.
 Never resurrect evicted epochs. Incarnation switches carry no progress.
 
 **Deadline/outcomes.** Persist `enqueuedAt + operationTimeoutMs` (default 30 s), unchanged by restart/retry. Before expiry retry transport failures with backoff. At
-expiry stop new publication handoffs and settle in-flight acceptance. Proven first-valid recognition can land after expiry.
-Authenticated applied winner state can prove supersession. Complete absence gives lost only without unresolved acceptance; copy mismatches/gaps remain unknown.
-Expired never-built intent loses without building. Outcomes persist until ack; none releases the source-epoch slot. An unknown build cannot be automatically
-replaced, including by a new operation ID. Other intents wait for epoch change; a host may manually resync/readmit if no survivor advances. Once ordering trust
-fails, outcomes assert only locally observed facts.
+expiry stop new publication handoffs; one already in flight may still land. (r28d) After expiry a validated own occurrence still installs once: complete
+coverage produces `landed` and its obligation, incomplete coverage terminal `unknown` without a new obligation.
+(r28b) Expiry is a clock event over a live build only. If the build exists and carries no `reported` mark, one transaction writes a provisional `unknown` and sets
+the durable once-only `reported` mark on the build, with no search, hub read or network completion; the build stays in its slot. A `reported` build is never
+reported again, whatever ack did to the row; no clock event touches an operation whose build no longer exists. Ack deletes only the given outcome ID.
+Consumption always writes its final outcome (`landed`, `lost` or terminal `unknown`) under a fresh outcome identity, even if the provisional one was acked,
+deleting any surviving provisional row; an ack of the earlier ID never deletes the later result. Duplicate consumption writes no additional report.
+`landed`/`lost` never change.
+Expired never-built intent loses without building. Outcomes persist until ack; none releases the source-epoch slot. A reported build cannot be automatically
+replaced, including by a new operation ID. Other intents wait for epoch change; a host may manually resync/readmit or `abandon()` if no survivor advances. Once
+ordering trust fails, outcomes assert only locally observed facts.
+Discovery, transport and validation-input failures are unavailable evidence and never prove loss. Local-invariant failures keep their halt contracts.
+A definitely rolled-back storage transition changes nothing and is retried; an ambiguous commit follows D7/D8 completion proof before retry or release.
+While storage completion cannot be established, no outcome is written and holds persist, indefinitely if need be.
+
+**Terms (r28b).** *Reported* means an outcome row was durably committed, not host receipt or ack. A build is *closed* (settled) when consumption, retirement or
+`abandon()` ends it with `landed`, `lost` or terminal `unknown`; a provisional `unknown` is a report, not a closure, and the build stays live. A build's epoch is
+*consumed* by the authenticated transaction that advances the device past its source epoch within the incarnation, sets the incarnation's terminal flag
+(self-removal), or retires the incarnation. *Owed work* is outcomes and Welcome obligations (Model :15); a *speculative* Welcome is a field of its build and
+is not owed; an *obligation* is the independent row the own-occurrence adoption writes with `landed`. (r28c) *Installation* is the saved candidate becoming the
+device's state; it follows recognition and is distinct from `landed`, which additionally needs complete coverage. The *walker* is defined above.
+
+**Migration (r28d).** Migration is one version-marked transaction per incarnation ControlSnapshot (the mark lives on that snapshot; each incarnation migrates
+independently, a retired incarnation's rows under the closure bullet), run once before workers start and idempotent on restart (a restart before its commit
+runs it again from the legacy snapshot; after its commit the mark skips it). Its mapping is total over the legacy ControlSnapshot (`control/types.ts`):
+- Every operation row present is open work by construction (legacy closure deleted its row). Existing outcome rows and their acknowledgement state are untouched.
+- Welcomes: every legacy `welcomes` row is proof-backed (the legacy slot wrote it only after first-valid proof, `committed` or not) and becomes an obligation
+  with its exact bytes and recipients, idempotently by originating incarnation and `opID`; no legacy `welcomes` row is ever deleted with a build. The walker's
+  later `landed` for the same operation writes no second row. Only a build's embedded speculative Welcome follows build deletion. Proof material
+  (`commitOnceAcceptance`, `accepted.acceptance`, `reconciliation.acceptance`) is deleted only after this step.
+- Closure: a `reconciliation` row, and any row whose source epoch is advanced, terminal or retired, closes; an `accepted` stage never overrides that
+  classification. A row whose `applied` row at its epoch carries its `payloadDigest` closes `landed` at that row's position, never `unknown`; on a terminal
+  incarnation an `intent` row closes `rejected` with `reason: 'removed'` as the self-removal rule says; every other closes terminal `unknown`. Each closure
+  follows the final-report rule: any surviving provisional row (`unknownReported`) is deleted and one final outcome is written under a fresh ID; candidate,
+  journal and embedded speculative Welcome are deleted.
+- Live build: only a current, non-terminal source retains one. A legacy `built` or `accepted` stage whose `commitOnce` is at the current epoch becomes the
+  build (Interfaces), with `opID`, `kind`, `revokes`, `enqueuedAt` and `deadline` copied from its operation row and the row removed from the FIFO;
+  `hubAcceptedAt` or the `accepted` stage's position becomes `acceptedAs`; `unknownReported` becomes `reported`; `head` is the legacy `searchFrom`, where
+  `null` is the empty prefix, not unavailable (only a record whose `searchFrom` field is missing falls back to the cursor position at migration).
+  Coverage: the migrated build starts with `skipped` set unless trusted persisted evidence establishes the coverage predicate through its current cursor;
+  absence of a legacy uncertainty field is not evidence. The cursor equal to `searchFrom`, with no `incomplete` mark, no `acceptance-unknown` hold and no
+  `uncertainty`, is the one case that needs no reconstruction and starts with `skipped` unset.
+- Ownerless slot: a legacy current-source `commitOnce` with no owning operation row is already closed work (legacy closure left the slot in place). It becomes
+  `spentSource: { epoch }` (migration is the marker's second writer), reopening no publication and creating no outcome; its `welcomes` row, if any, is an
+  obligation per the Welcomes bullet and its embedded speculative Welcome is deleted. An advanced or retired ownerless slot is deleted without a marker.
+- A `built` row without a matching `commitOnce` (crash before the slot write) and every `intent` row on a non-terminal incarnation stay FIFO intents;
+  `pendingPublish` is dropped (`expectedHead` lives on the build).
+- No other spent-source marker is created: a consumed legacy `commitOnce` with an owner is closed above, and the marker only guards the matching source epoch.
+- The `acceptance-unknown` control hold is removed; recovery-X state, the ordinary floor, settled rejoins and every other safety hold are preserved.
+- `main`'s `CommitJournal` slot (`main:packages/rpc/src/commit.ts`, one host-provided pending commit: `publishID`, `expectedHead`, framed `epoch`,
+  `holdsLogSends`, `acceptedAs`, `commit`, `bodies`, `kind`, host-opaque `journal`) is not a build: its journal is the host's blob, not a control journal.
+  The migration transaction reports a non-empty slot to the host as `main`'s `LostCommit` (`kind`, `journal`; `ledger` carries its tokens) under a terminal
+  `unknown` with a fresh ID, releases `holdsLogSends` and clears the slot; the host delivers its Welcome or re-issues. An entry carrying `acceptedAs` is
+  reported the same way: hub acceptance is retry evidence, not adoption (D4).
+
+**Welcome lifetime (r28 decision).** Once first-valid acceptance is durably proven, the complete Welcome is atomically persisted as an independent delivery
+obligation. Only durable transport acceptance or host `abandon()` ends it; recovery, readmission, retirement (D2 :477), pruning, outcome ack and build deletion
+preserve it under its originating incarnation, without re-validation. Any other Welcome lives exactly as long as its build and is deleted in the transaction that
+deletes the build. No transaction may leave a Welcome without a build or obligation.
+
+**Revoke hold (r28b decision).** A revoke holds retained log submissions (P2a D3 scope, never ephemeral traffic) while its intent or build exists. The transaction
+that consumes its epoch, retires it or abandons it releases its hold whatever the outcome, as P2a's outcome-ends-hold rule: the host learns it may not have
+landed and re-enacts it. A provisional `unknown` is not a settlement and does not release it: its bytes may already be at the hub, in flight, or in a copy the
+walker has not yet met, so the revoke may still be adopted at its epoch. A built revoke therefore holds indefinitely when its source epoch never moves,
+including after the deadline; host `abandon()` or authorised retirement is the exit. Rejected or expired unbuilt intents release their own holds.
+The released fact survives ack and restart. Other holds are unaffected.
+Release proves nothing about revocation: the target may still read later traffic until a re-enacted revoke lands.
 
 **Adoption (r16 decision).** One transaction installs state/recovery trust/spent authenticator, applied row, external response when relevant, control cursor/outcome,
 anchor changes and coupled settled outbox work. Recheck expected incarnation/identity/version inside the gate.
 Already committed mutation or matching validated saved-work proof is idempotent. Hub acknowledgement alone writes no applied row/cursor.
+(r28) An incoming commit whose payload is the saved build, at any stage, is the own-occurrence case above; P2a D5's "matches an `accepted` operation" reads so.
+(r28b) Superseded P2a text: D3 step 3's head-mismatch search, `lost`/`unknown` and return-to-intent; D3 step 4's adopt-on-`accepted` and `moved` branch;
+D4's obligation written with `accepted`; D5 startup step 7's settle-before-walk (startup only republishes a live build whose epoch is current and deadline
+not reached, skipping one that carries `acceptedAs`, then walks; the walk settles); D5's post-removal `apply` for leftover operations; (r28c) D6's "settle operations first" before a rejoin `built`
+(a `built` operation republished or searched, an `accepted` one adopted or kept on `moved`): the peer instead runs the eligible identical retry, then the
+ordinary walk, and the rejoin's switch transaction closes whatever is still live. Recovery never depends on a search or an adopt-on-`accepted` path. The
+source-switch transaction, not RecoveryCompletion, closes every live build of the source (terminal `unknown`, speculative Welcome deleted, obligations kept);
+RecoveryCompletion afterwards writes only `reenact`.
 The current incarnation's terminal flag governs self-removal, independent of old epoch sorting.
 
 ### D5. Codecs, registry and application keys
 
 **State codec.** Preserve `encodeClientState(state)` / `decodeClientState(bytes)` signatures.
-V2 is `u8(2) || u32(bodyLength) || ts-mls body || u32(refCount) || refs`, big-endian;
-each sorted ref is `u32(UTF8Length) || UTF8(proposalRef)` and names exactly a pending proposal with sender zero.
-Decode a copied body, then restore zero. Duplicate/unknown refs, non-absent body sender, invalid lengths/UTF-8/trailing bytes refuse.
-Empty/truncated input returns undefined; unsupported versions throw. Refuse every v1 blob: absence and lost zero are indistinguishable.
+(r28e, user decision) Version 2 is the ONLY client-state format, on `main` 0.10.7 and phase 2 alike:
+`u8(2) || u8(flags) || [u64(epoch) || u32(generation) || u8(consumed)] || u32(bodyLength) || ts-mls body || u32(refCount) || refs`, big-endian;
+`flags` is 0 (no reservation) or 1 (reservation; the three bracketed fields are present only then and carry `handshakeReservation` unchanged: epoch,
+generation, consumed); each sorted ref is `u32(UTF8Length) || UTF8(proposalRef)` and names exactly a pending proposal with sender zero.
+Decode a copied body, then restore zero. Duplicate/unknown refs, non-absent body sender, invalid lengths/UTF-8, a flags value other than 0 or 1, a
+`consumed` byte other than 0 or 1 and trailing bytes refuse. Empty/truncated input returns undefined. The codec reads v2 only and writes v2 only; v1, v3,
+v4 and unknown version bytes are refused (throw). The merge carries this identical codec; phase 2 adds the flags byte and the reservation fields to its v2
+layout at merge, and the handshake-reservation semantics travel in that field. No rewrite, legacy decode rule or client-state migration exists.
 
 Recovery candidate v3 uses AAD `kumiai/recovery-candidate/v3` and complete
 `sourceState = encodeClientState({...snapshot.state, ratchetTree: snapshot.sourceTree})`.
@@ -640,11 +777,11 @@ and schedule one rotation outside the gate. Lapse takes precedence. Directed rep
 - At 500 admission reports `rotation-required` (not recovery-only). GroupMLS applies this at every admission update. New durable acceptance refuses, and a frame sealed below 500 still hands off.
 - The registry peer runs one outside-gate scheduler per identity. Through a private internal enqueue (the public enqueue refuses the namespace), it enqueues a deterministic, non-revoking, library-built auto-rotation whose id lies in the reserved `kumiai/internal/` namespace.
 - Enqueue errors and rejected attempts back off with a cap. Outcomes in that namespace go to the registry, never to the host, across restart.
-- The hub CAS decides: a built loser settles `lost`, an unbuilt stale intent `rejected`.
+- (r28b) A CAS loss is not evidence. The walk decides: a built rotation settles `lost` only on walker-validated supersession with complete coverage, otherwise its consumption closes it `unknown` (D4); an unbuilt stale intent settles `rejected`. The scheduler re-enqueues only after its build is closed; the new epoch resets the ceiling, so it re-evaluates admission rather than re-enqueueing on `lost` alone.
 
 Registry hosts/doubles require generation retention/forward steps >=1000 through create/restore/Welcome/external join/derive/recovery; ordinary callers keep
 defaults. Non-admin rotation passes lifecycle checks, includes an update path, empty proposals/entries and unchanged roster/ledger; it keeps the app anchor unless
-membership changes. No handshake HWM/reservation/budget exists.
+membership changes. No handshake HWM/reservation/budget exists (the v2 codec's flags field still carries `main`'s reservation fields, State codec r28e).
 
 ### D6. Application publication and settlement
 
@@ -721,7 +858,7 @@ only after transport acceptance. Revoke holds cover retained submissions; D1 for
 
 Deletion blocks owner creation, stops/disposes peer and awaits opened handlers, completion, submitted network work, finalisers and ambiguity resolvers outside the
 gate. One transition tombstones/clears transport state with optional host effects. Unsettled control in any incarnation refuses with canonical
-`GroupControlUnsettledError`; explicit abandon/ack is the escape. Host history, recovery trust/spent set and device cleanup rows survive. No timeout/rejected save
+`GroupControlUnsettledError`; explicit abandon/ack is the escape (after its removal transaction a self-removed group holds no build, intent or rejoin record, D4 r28d, so acks plus Welcome delivery or `abandon()` of the remaining obligations suffice; the spent marker never blocks deletion). Host history, recovery trust/spent set and device cleanup rows survive. No timeout/rejected save
 authorises lifecycle handoff.
 
 Lift authenticated opened epoch metadata on durable replay/live/ephemeral, anycast and all directed invocation kinds.
@@ -1118,10 +1255,16 @@ lifetime/version/trust independently of state bytes. Recovery uses switchIncarna
 
 ```ts
 export type BuiltCommit = {
+  opID: string; kind: 'invite' | 'remove' | 'ledger' | 'rotation'; revokes: boolean // (r28c) the owning operation; its intent row left the FIFO at built-save
+  enqueuedAt: number; deadline: number // (r28c) persisted deadline, unchanged by restart/retry
   incarnation: number; epoch: number; authenticatorBefore: Uint8Array
-  publishID: string; searchFrom: LogPosition | null; expectedHead: LogPosition | null
+  publishID: string; expectedHead: LogPosition | null
+  head: LogPosition | null // (r28b) immutable cursor position at built-save; coverage origin; null is the empty prefix
   payload: Uint8Array; payloadDigest: string; digest: string; bodies: Array<string>
   journal: Uint8Array; welcome: { bytes: Uint8Array; recipients: Array<string> } | null
+  acceptedAs?: LogPosition // (r28b) hub ack; retry evidence only
+  skipped?: true // (r28c) an occurrence after head at this epoch, or of unreadable epoch, was skipped; never cleared
+  reported?: true // (r28b) provisional deadline `unknown` written once
 }
 export type HostBuilt = Pick<BuiltCommit,
   'incarnation' | 'epoch' | 'authenticatorBefore' | 'digest' | 'bodies' | 'journal' | 'welcome'
@@ -1148,8 +1291,17 @@ Group-level checkpoint records retain active conditions, notices and immutable e
 The strand/ControlHold 'unsupported-version' reason is legacy/read-only for hub-delivered frames; new frame-version faults diagnose/skip.
 Legacy local control-record version stops retain their compatibility policy, independently of delivered frame diagnostics.
 ControlChanges carries optional values for these fields; halt evidence is immutable on retirement.
-The commit-once slot survives operation outcome/ack. `deleteAppliedFrom` fork repair is removed; prune only within the incarnation.
-searchFrom is immutable. Accepted operations retain existing FirstValidCommit. expectedHead updates never change payload/ID.
+The commit-once slot survives operation outcome/ack and ends only with its epoch (D4 r28). `deleteAppliedFrom` fork repair is removed; prune only within the incarnation.
+(r28c) P2a's Operation union is replaced. ControlSnapshot holds FIFO unbuilt intents only (`operations`), at most one live build (`commitOnce: BuiltCommit`,
+carrying its owning operation's `opID`, `kind`, `revokes`, `enqueuedAt` and `deadline`; the former `built`/`accepted` stages are that build, the latter with
+`acceptedAs`; no built or accepted operation remains in the FIFO and the built-save transaction deletes the intent row), a `spentSource: { epoch: number } | null`
+marker written by `abandon()` or by migration for an ownerless current-source legacy slot, cleared only by consumption/retirement (it blocks only while its epoch equals the source epoch; never deletion), independent Welcome
+obligations and outcome rows. ControlChanges supports the build and spentSource mutations. Allowed build mutations: payload/ID/candidate/journal/`head` and the
+operation fields are immutable; `skipped` and `reported` are monotone (set once, never cleared); `acceptedAs` is written by hub acknowledgement only;
+`expectedHead` refresh is guarded by unchanged incarnation/epoch/authenticator; closure deletes the build atomically with its outcome, obligation (if `landed`)
+and speculative-material deletion.
+BuiltCommit has no searchFrom; no control search port, acceptance-unknown hold, stored first-valid proof or retained operation set exists.
+Adoption guards validate against the walker's current occurrence, never a stored proof. expectedHead updates never change payload/ID.
 ControlSnapshot adds recoveryEpochFloor: number | null and settledRejoins: Array<AcceptedRejoinSettlement>, with matching ControlChanges recoveryEpochFloor/putSettledRejoins.
 AcceptedRejoinSettlement always contains kind/id/public origin and cumulative ledgerBefore.
 Accepted-unadoptable provenance adds digest/payloadDigest/epochAfter/acceptedEpoch and exact LeafNode digest.
@@ -1167,7 +1319,7 @@ Leaf-absent discard and R0 settlement raise it to authenticated recapture epoch 
 Task 14b tests all four write/restart points. Task 3 also runs Control. Task 1a uses the explicit pre-runner command in the plan.
 Preserve HEAD peer.ts:3813-3821 ledgerBefore: de-duplicated inFlightEntries ?? awaitingBootstrap.entries, current ledger and conditional commitOnce bodies.
 Carry that union into Y. settleAcceptedRecovery takes the ordinary recoveryEpochFloor as its fourth argument.
-Never write Y's temporary effective E into the ordinary floor. RecoveryCompletion exclusively settles source accepted operations to stable unknown outcomes, atomically/idempotently, matching control/rejoin.ts:184-212.
+Never write Y's temporary effective E into the ordinary floor. (r28b) The source-switch transaction closes every live source build terminal `unknown` (D4); RecoveryCompletion never defers or repeats that closure and writes only `reenact`, atomically/idempotently.
 Compute reenact after destination bootstrap. No automatic enqueue or ledgerBefore mapping removes owed tokens.
 No private builder exports a handshake reservation API or generation budget.
 
@@ -1243,7 +1395,7 @@ export function ownCommitDigest(commit: Uint8Array): string | null
 // onSafetyHold(latch: (reason: NonNullable<SafetyHold>) => void): () => void
 // Helper/sink plumbing stays outside host-callback drain accounting. searchOccurrence keeps its three-argument found/absent/gap contract.
 // For recovery X, exact found is a confirmation hint. Every search result permits authenticated recapture; none authorises discard.
-// Ordinary slots retry identical bytes/ID after a failed own copy when incarnation/epoch/authenticator are unchanged; deadline stays unknown.
+// (r28d) A failed own copy sets `skipped` and keeps the build live; no identical retry follows it. Identical retry exists only after a refused handoff with `skipped` unset and unchanged incarnation/epoch/authenticator; deadline reports unknown once.
 // StrandKind adds 'past-epoch-divergence' with claimed confidence, diagnostic-only. Existing fork signal names remain compatibility types only.
 export type LegacyRejoinRecord = {
   id: string; stage: 'built' | 'published' | 'confirmed' | 'adopted' | 'refused'
@@ -1362,7 +1514,7 @@ export type RecoveryAdoptionPort = {
 // Defensive confirmed+null startup first assigns switchMutationID under ownership; never fabricates capture/source metadata.
 // Restart with confirmed+switchMutationID resumes coordinator before source work. Successful/proven switch creates destination MLS via createMLS.
 // Load continuation by current destination key (even after epoch advancement); pass MLS/continuation/completion into createPeer, including restart.
-// No continuation means ordinary destination startup. RecoveryCompletion owns source accepted-operation -> unknown settlement, atomically/idempotently.
+// No continuation means ordinary destination startup. (r28b) The switch transaction closes source builds; RecoveryCompletion owns only reenact reporting, atomically/idempotently.
 // Task 15 creates rpc rejoin-legacy.test.ts; Task 14b extends it. Task 15 tests switch-before-peer crash/restart and repeated completion, preserving existing outcomes/Welcomes, settled X facts and reenact obligations.
 // RegistrySourceMovedError alone permits fresh-counter retry of the same candidate/proof/switchMutationID for unchanged key/identity/trust/target.
 // Other local conflicts/proof/candidate/spent/invariant failures stop with diagnostics and confirmed bytes preserved.
@@ -1384,7 +1536,9 @@ export type RecoveryAdoptionPort = {
 // Pending/restart uses proof-first bounded 15-second retry. Local refusal preserves accepted X; R0 then permits leaf-replacing Y under normal admission.
 // Never turn rollback into remote non-acceptance. Duplicate/missing ambiguous identities refuse; actual removed devices require fresh invitation (r18:66,128).
 export type ControlAdoptionPort = {
-  adopt(journal: Uint8Array, expected: AdoptionExpected & { acceptance: FirstValidCommit }, write: AdoptionWrite): Promise<'installed' | 'noop' | 'moved'>
+  // (r28c) `occurrence` is the walker's validated own occurrence; the port installs the saved candidate for both coverage values and never runs MLS
+  // receive processing on an own frame. `write` carries `landed` plus the obligation for complete coverage, terminal `unknown` without obligation otherwise.
+  adopt(journal: Uint8Array, expected: AdoptionExpected & { occurrence: OwnOccurrence }, write: AdoptionWrite): Promise<'installed' | 'noop' | 'moved'>
 }
 export type MetadataHandler<THandler> = THandler extends (context: infer TContext) => infer TResult ? (context: TContext & GroupHandlerMetadata) => TResult : never
 export type GroupProcedureHandlers<TProtocol extends GroupProtocolDefinition, TTx extends GroupTransaction> = {
@@ -1563,14 +1717,9 @@ export type GroupSafetyEvent = GroupKey & { id: string; kind: 'group:fork'; halt
 export type RecoveryUnavailableEvent = GroupKey & { id: string; kind: 'group:recovery-unavailable'; reason: 'trust-unreadable' }
 export type PersistenceEvent = AppStatusEvent | GroupSafetyEvent | RecoveryUnavailableEvent | GroupConditionEvent | ForkNoticeEvent | BranchAbandonedEvent
 export type RecoveryTarget = { id: string; commitTopicID: string; hub: LogHub & MailboxHub }
-export type FirstValidCommit = {
-  source: AdoptionExpected; from: LogPosition | null; position: LogPosition; payloadDigest: string
-}
-export type CommitSearchResult =
-  | { kind: 'first-valid'; proof: FirstValidCommit }
-  | { kind: 'superseded'; winner: LogPosition }
-  | { kind: 'absent' } | { kind: 'unknown' }
-export type ControlSearchPort = { searchLog(built: BuiltCommit, position?: LogPosition): Promise<CommitSearchResult> }
+// (r28c) The walker's validated own occurrence, supplied to the own-candidate adoption with explicit coverage; replaces FirstValidCommit.
+// No search port or CommitSearchResult exists.
+export type OwnOccurrence = { source: AdoptionExpected; position: LogPosition; payloadDigest: string; coverage: 'complete' | 'incomplete' }
 export type ResyncProof = {
   targetID: string; topicID: string; groupInfoEpoch: number; groupInfoAuthenticator: Uint8Array
   captureHead: LogPosition | null // authenticated reply's immutable head
@@ -1876,7 +2025,7 @@ Phase 6 kills children. After means proven transaction commit, never callback co
 | Successor retirement/tombstone committed, before routing notification | source stays retired, old Welcome refuses across restart; no state/messages copied; owed work remains serviceable |
 | Decrypted missing/malformed spent set observed by warm or cold registry | persist spent-set-corrupt through safety-only writes; unreadable envelopes remain recovery-unavailable; precedence survives restart |
 | Inside a group transition/batch, after its first logical write | all affected namespaces and transactional effects commit together or remain unchanged |
-| Built-save/manual authorisation committed, before publish or after remote acceptance | only the selected recovery target resumes; exact saved bytes/ID/candidate survive; discover acceptance before own-log adoption |
+| Built-save/manual authorisation committed, before publish or after remote acceptance | only the selected recovery target resumes; exact saved bytes/ID/candidate survive; the walk settles, never a pre-walk search (r28b) |
 | Open batch committed, before default handler; default effect before completion commit | every opened frame redelivers with the same key until completion; no cursor-only loss |
 | Transactional completion before/after COMMIT | host effect, pending completion and cursor all roll back or all persist |
 | Self-removal committed, before opened handlers drain | terminal restart drains persisted records without new crypto/network work before clearing |
@@ -1903,7 +2052,7 @@ Keep each meaningful existing case. Replace cases tied solely to removed mechani
 
 | Suite / phase | Case | Required assertion |
 |---|---|---|
-| codec / 2 | lossless sender | zero/one/absent clone/save/reopen, malformed sidecar and v1 refusal. Zero regression fails against current codec. |
+| codec / 2 | lossless sender | zero/one/absent clone/save/reopen, malformed sidecar. v2 only: flags 0 and 1 round-trip the reservation fields exactly; v1, v3, v4 and unknown version bytes throw; flags or consumed byte above 1 and trailing bytes refuse. Zero regression fails against current codec. |
 | recovery codec / 2 | complete sourceState and captured origin | differing source/candidate trees, empty proposals and zero/one/absent senders. Persisted v3 candidate/key restores bound verdict and immutable authenticated source/target/capture/search origin. V1/v2 adoption refuses. Legacy unadopted/conflictEpoch records hold without mutation or fabricated metadata; proven adopted continuations never reinstall. |
 | checkpoints / 2,3 | canonical installed-only authority | Strict Ed25519/canonical bytes/4096-byte bound, exact hashes/parents and immutable provenance. Speculative/rolled-back/fabricated facts cannot sign. Every installation site captures transcript/roster/debt, progress never does. Fence stale workers. Real MLS and independent double, supplied/absent ownership context. |
 | | real split view and refused loser | Independently install valid divergent states under shared signers. Exchange only checkpoints, withholding competing commits. Both sides notify without halt/switch/stranding. CAS loser/re-encoding cannot manufacture installation facts. Lone fabricated testimony only notifies. |
@@ -1959,14 +2108,15 @@ Keep each meaningful existing case. Replace cases tied solely to removed mechani
 | | restart before proof | First entry of any kind per owner scope after restart runs barrier and marker check; resolve fallback runs the barrier, never a raw negative read. |
 | | storage guard witnesses | Partial-loss spent reinstall at incarnation 1 refuses; unreadable source state with readable trust retires to a fresh incarnation, corrupt trust refuses; internally consistent lower-epoch state refuses with epoch regression. |
 | | real database integration | Per provider, the D8 provider-evidence cases (a)-(g) with fault milestones, second-connection visibility, hook-queue and connection-identity assertions. SQLite, PostgreSQL, Expo (or explicit blocked reason) in 3. |
-| control / 2,3 | delayed own replay (r19 decision) | Competitor wins CAS at E, saved own message later appears under another publishID. Receiver validation plus complete first-valid prefix proves supersession. Missing coverage or byte mismatch preserves slot/unknown acceptance, never a halt or rebuild. |
+| control / 2,3 | delayed own replay (r28 decision) | Competitor wins CAS at E, saved own message later appears under another publishID. The walker's competitor adoption with complete coverage settles `lost`; the later copy is past-epoch poison and skips. A coverage gap settles terminal `unknown`; never a halt or rebuild. |
 | | commit-once poison head | refused/poison frame changes head without epoch move. Retry has identical payload/ID/handshake generation. Real receiver processes the poison prefix then applies the saved commit and matches candidate authenticator. Extra pending proposal is omitted, missing referenced proposal refuses. |
-| | commit-once restart (ordinary lane) | reconstruct after built-save/mismatch and after remote acceptance. Saved bytes/candidate survive. Refresh expectedHead only. No same-epoch build after deadline/outcome ack or from a second queued intent. |
-| | epoch move/deadline (ordinary lane) | Own settlement requires authenticated applied state/normal first-valid proof. Recovery follows applied-state settlement authority. Recognition after deadline may land once. Copy mismatches/gaps preserve unknown work and owed outcomes/Welcomes. No same-epoch rebuild. |
+| | commit-once restart (ordinary lane) | reconstruct after built-save/mismatch and after hub acceptance. Saved bytes/candidate survive. Refresh expectedHead only; the walk, not a search, settles. No same-epoch build after deadline/outcome ack or from a second queued intent. |
+| | epoch move/deadline (ordinary lane, r28d) | Settlement only in the consuming adoption: own first-valid gives `landed` plus obligation; validated winner with complete coverage gives `lost`; skip at E before the winner, rejoin, self-removal, retirement or abandon gives terminal `unknown` with candidate and speculative Welcome deleted and obligations kept; `skipped` survives restart. An own copy behind a gap or an unreadable-epoch skip installs the candidate, closes `unknown`, writes no obligation and never runs MLS receive processing. An own copy after `abandon()` skips with the marker kept; a later higher-epoch frame strands `ahead` as usual. Self-removal closes queued intents `rejected` (`reason: 'removed'`) and a rejoin record `unknown`; the terminal group deletes after acks and Welcome delivery or abandon of the remaining obligations. An altered own copy sets `skipped`, keeps the build live and triggers no identical retry; a refused handoff with `skipped` unset retries once. Local-input failure on an own frame holds the cursor with capped backoff, then D1's unprocessable-gap resync closes the build `unknown` if it retires the source. Deadline writes provisional `unknown` once (`reported`); ack then restart gives no second report; later consumption or abandon replaces it under a fresh identity even after ack; repeated abandon writes nothing. Abandon leaves the spent marker: no same-source build until epoch change; a stale marker below the epoch does not block. After the deadline an own occurrence installs once (`landed` or `unknown` by coverage). No retained row survives consumption; no same-epoch rebuild. |
+| | legacy migration (r28d) | One version-marked transaction per incarnation, idempotent across a restart before and after its commit. Every legacy Welcome row, committed or not, becomes an obligation with exact bytes and none is deleted with a build; a retained row proven by its applied row closes `landed`, terminal-incarnation intents `rejected`, others `unknown` under fresh IDs with provisional rows deleted; a current-epoch `built`/`accepted` stage becomes the live build with `head = searchFrom` (null is the empty prefix), `reported`, `acceptedAs`, and `skipped` unless the cursor equals `searchFrom` with no gap, hold or uncertainty; an ownerless current-source slot becomes the spent marker with no outcome; intents stay intents; the acceptance-unknown hold is removed and recovery state kept; a `main` CommitJournal entry reports `LostCommit` under `unknown` and releases `holdsLogSends`. |
 | | adoption/removal/resync | full-payload poison, moved, accepted-before-walk, refusal/holder evidence, exact-external-commit confirmation, revoke-hold/two-revoke and Welcome cases remain; source guard is incarnation/version. Replace obsolete checkpoint-halt/source-prefix assertions with detection-only notices and authenticated, attempt-scoped forkRecovery assertions. |
 | safety / 2,3 | host fork halt live/restart | Host reportFork/authenticator comparison co-writes halt/evidence/event and new producer provenance. Live peers latch before proof, including failed writes. Ack never clears halt. Matching app-report clearHold preserves evidence. Legacy/internal holds refuse clearing. |
-| | hub-fault audit | Both past divergence branches, signed CAS losers, own-slot/search contradictions, tampering, junk and unknown versions skip/diagnose. Advance skipped cursor, keep saved work, no new durable hold/halt, discard/rebuild or owed-work deletion. Host/local-storage invariant paths retain their contracts. |
-| | own recognition and recovery progress | Re-encoded/blob-changed own no-entry commit recognises with the helper. Named entries use the receiver resolver/verification predicate. Failed copies preserve unknown acceptance. Search results never block authenticated recapture. Provider errors retain their identity. |
+| | hub-fault audit | Both past divergence branches, signed CAS losers, own-slot contradictions, tampering, junk and unknown versions skip/diagnose. Advance skipped cursor, keep saved work, no new durable hold/halt, discard/rebuild or owed-work deletion. Host/local-storage invariant paths retain their contracts. |
+| | own recognition and recovery progress | Re-encoded/blob-changed own no-entry commit recognises with the helper. Named entries use the receiver reference-verification predicate on the frame's own blob, never the host resolver. Failed copies skip, set `skipped` and keep the build live; no identical retry. Recovery recapture (D1) is independent of control settlement. Provider errors retain their identity. |
 | | strand signals / detection limits | Ahead/gap/own-unmerged retain claimed confidence. Missing/identical applied history proves no fork. Current victim-spoof rejection still requires own-signature validation. Host comparisons of exposed authenticators remain available. |
 | | retained recovery trust (r16 decision) | State bytes unreadable, trust intact: request/authenticate/restore without GroupHandle and automatic resync. Unreadable envelope: recovery-unavailable, no automatic reconstruction, manual fresh invitation or admitted successor. Decoded missing/malformed spent data: spent-set-corrupt. Every installing transaction refreshes trust atomically. |
 | | stranded automatic resync | Retention gap/lost MLS state with no safety hold uses retained trust and authenticated GroupInfo. Remove+ExternalInit yields one matching fresh leaf and n+1 after restart; installation pre-reserves its application range. Unknown commit-frame/header versions skip with upgrade-required diagnostics, never new durable holds. Existing persisted unsupported-version holds remain immutable; legacy control-record holds retain their policy. |
@@ -2051,3 +2201,9 @@ ambiguity/external seams and automatic non-fork stranded resync remain.
   Manual resync remains the exit after evidence expiry or unavailable coverage. Phase 2.3 application crypto and phase 3 providers stay excluded here.
 - r25 (2026-10-17, plan 2.3a): locked epochs, duplicate/invalid-position results; poison only for authenticated malformed plaintext; envelope validation; durable-only registry routing; RegistryHandleAccess drops open; opaque positions with one comparator and occurrence matcher; exact CAS for every MLS state write with app metadata off the version clock; journal control-compatibility for own-commit adoption and build retry; private commit authoring only under a control-build permit; durable departing anchors preserved by every anchor-slot write; 64-frame bound; retained past epochs open; commit progress independent of app work; configurable epoch retention (default 4, cap 32); opened-record drain deferred to 2.3c.
 - r26 (2026-10-18, plan 2.3b): reservation advances committed state with ownership transfer (no restore skip); installation pre-reserve; send copy limited by committed generation; narrowing send policy; byte-level seal/receive; serialized private receive and ephemeral consumed set; retirement drains live work; effective-next rotation-required admission, handoff tolerance, internal auto-rotation; MLSEncryptor lift.
+- r27 (2026-10-22, draft, never committed): retained builds reconciled after epoch consumption by a historical search, with applied-window pinning, rejoin proof recheck and handoff-deferred deadlines. Two reviews found it untranscribable; superseded by r28 before landing.
+- r28 (2026-10-22, plan 2.3b task 6b): epoch-scoped settlement. The walker is the only log reader that settles a build; the transaction consuming the source epoch settles it (own first-valid: `landed` plus Welcome obligation; validated winner with complete coverage: `lost`; anything else, including gap, rejoin, retirement and abandon: terminal `unknown` with candidate and speculative Welcome deleted). No retained set, control search port, acceptance-unknown hold, applied-window pinning or BuiltCommit.searchFrom. Deadline writes a provisional `unknown` from the clock; consumption replaces it under a fresh outcome identity. Proven obligations survive recovery, readmission, retirement, pruning, ack and build deletion; only delivery or `abandon()` ends them. Own first-valid proof against a different adopted commit is fork evidence with the obligation kept. Revoke hold released by consumption, retirement or abandon, never by a provisional `unknown`; release proves nothing about revocation. Keeps r27's no-rebuild/auto-rotation wording, unavailable-evidence rule and storage rollback/ambiguity rule.
+- r28b (2026-10-22, after two reviews): `abandon()` leaves a durable spent-source marker; self-removal is consumption; `BuiltCommit.head` plus durable per-build `skipped` define coverage from the pre-state, branch-relative; fork clause deleted (post-consumption own copies are past-epoch diagnostics, conflicting local records halt); once-only `reported` mark and final outcome always under a fresh identity; closed/reported/owed/walker terms; revoke hold may last indefinitely on a motionless epoch; D5 CAS wording replaced by walker supersession; explicit P2a supersessions and switch-transaction closure (RecoveryCompletion writes only `reenact`); availability concession and migration paragraph.
+- r28c (2026-10-22, after two re-reviews): own frames never go through MLS receive processing; every recognised own occurrence installs the saved candidate (complete coverage: `landed` plus obligation; incomplete coverage: terminal `unknown`, speculative Welcome deleted, no obligation, the stated availability concession); unavailable validation inputs hold the walk with the build live. `OwnOccurrence` with explicit coverage replaces `FirstValidCommit` on the adoption port. Own copy with no live build is a diagnostic skip keeping the spent marker; spent marker blocks only at its own epoch. Skip predicate counts unreadable epochs, same-fetch gaps recorded before adoption, build refused on `incomplete`. BuiltCommit carries opID/kind/revokes/enqueuedAt/deadline and the built intent leaves the FIFO; allowed mutations listed. `abandon()` follows the final-report rule; repeated abandon writes nothing. Auto-rotation re-evaluates admission after any closure. Self-removal closes unbuilt intents `rejected` and a rejoin record `unknown`. Migration rewritten as a total, restart-safe, idempotent mapping; `main` client-state codec v1/v3 carry-forward in D5.
+- r28d (2026-10-22, after two re-reviews of r28c): own-frame inputs are local; local failure is hold-and-retry with capped backoff, then D1's unprocessable-gap resync as the backstop (retirement closes the build `unknown`, Welcome deleted). Identical retry only after a refused handoff with `skipped` unset; an altered own copy sets `skipped` and never retries. Every legacy Welcome row is an obligation; ownerless current-source slot maps to the spent marker (migration is its second writer); missing coverage evidence maps to `skipped`; terminal intents `rejected`; per-incarnation version mark; `main` CommitJournal entry reported as `LostCommit` under `unknown`. Merged codec: reads 1/2/3/4, writes 4, drop-absent-sender decode rule, v3 reservation rewrite with one extra handshake advance at the body's epoch/generation, reservation APIs retired; Model/D5 reconciled. Terminal-group deletion needs acks and no live Welcome obligations. Minors: received-commit application versus authentication-only processing, `'moved'`/stranded cursor on an own occurrence, `reason: 'removed'`, refused-stage rejoin, null `searchFrom`, post-deadline install wording, "spent" wording.
+- r28e (2026-10-22, user decision on the codec, superseding r28d's merge contract): version 2 is the only client-state format on `main` 0.10.7 and phase 2: `u8 2 || u8 flags || [u64 epoch, u32 generation, u8 consumed if flags = 1] || u32 bodyLength || body || u32 refCount || refs`, no trailing bytes; reads and writes v2 only, v1/v3/v4/unknown throw; no v4, no v3 rewrite, no v1 decode rule, no client-state migration; the merge carries the identical codec and phase 2 adds the reservation fields to its v2 layout at merge.
