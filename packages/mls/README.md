@@ -2,6 +2,16 @@
 
 Credential-aware MLS (RFC 9420) group lifecycle for enkaku. Wraps [`ts-mls`](https://github.com/LukaJCB/ts-mls) with DID-based identity and a signed control ledger, giving every member a `MemberCredential` that ties their MLS leaf to their DID, and a group-wide roster that decides who may add, remove, and rotate.
 
+## Publishing commits directly
+
+Commit builders return a derived handle without advancing the source handle's epoch.
+Call `group.reserveHandshakeGeneration(persist)` before each build.
+After the build returns, call `group.consumeHandshakeReservation(persist)` before any journalling or publication.
+Reserve alone reuses an unconsumed generation, including after restart.
+Serialise reserve, build and consume against the source handle. Adopt the derived handle only after acceptance.
+Persistence must complete durably and leave storage unchanged on rejection.
+The `@kumiai/mls-rpc` adapter supplies both reservation hooks to the RPC peer.
+
 ## Capabilities
 
 - `createGroup` — creator opens a new group as its sole member and first admin

@@ -41,6 +41,8 @@ import { type LeafBinding, verifyDeviceEntry } from './device-proof.js'
 import { decodeControlEnvelope } from './envelope.js'
 import { foldEnvelope, GROUP_TYPE_PREFIX } from './envelope-fold.js'
 import {
+  HandshakeReservationError,
+  HandshakeWindowConfigError,
   HandshakeWindowError,
   LeafBindingError,
   LeafLapsedError,
@@ -1219,12 +1221,13 @@ export class GroupHandle {
       // rc.13: MlsContext.clientConfig.keyRetentionConfig.maximumForwardRatchetSteps
       // defaults to defaultKeyRetentionConfig.maximumForwardRatchetSteps (200).
       const window =
-        this.#context.clientConfig?.keyRetentionConfig.maximumForwardRatchetSteps ??
+        this.#context.clientConfig?.keyRetentionConfig?.maximumForwardRatchetSteps ??
         defaultKeyRetentionConfig.maximumForwardRatchetSteps
       const limit = Math.floor(
         Math.min(window, defaultKeyRetentionConfig.maximumForwardRatchetSteps) /
           HANDSHAKE_WINDOW_DIVISOR,
       )
+      if (limit < 1) throw new HandshakeWindowConfigError()
       if (current + 1 > limit) throw new HandshakeWindowError()
       if (current >= 0xfffffffe) throw new RangeError('handshake sender generation exhausted')
       let tree: SecretTree
@@ -1283,7 +1286,7 @@ export class GroupHandle {
         reservation.epoch !== this.epoch ||
         reservation.generation !== current
       ) {
-        throw new Error('No handshake reservation for this epoch')
+        throw new HandshakeReservationError()
       }
       this.#state = { ...prior, handshakeReservation: { ...reservation, consumed: true } }
       // Keep consumed evidence in memory on failure. No journal write can follow rejection.

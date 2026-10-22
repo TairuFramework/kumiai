@@ -11,6 +11,13 @@ export class PeerRemovedError extends Error {
   override name = 'PeerRemovedError'
 }
 
+export class CommitBuildHooksError extends Error {
+  constructor() {
+    super('GroupMLS must implement prepareCommitBuild and commitBuildFramed together')
+    this.name = 'CommitBuildHooksError'
+  }
+}
+
 export class AppOutboxFullError extends Error {
   override name = 'AppOutboxFullError'
 }

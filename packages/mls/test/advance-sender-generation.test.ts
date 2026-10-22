@@ -7,7 +7,10 @@ import {
   createCommit,
   createProposal,
   decode,
+  defaultKeyPackageEqualityConfig,
   defaultKeyRetentionConfig,
+  defaultLifetimeConfig,
+  defaultPaddingConfig,
   defaultProposalTypes,
   encode,
   type GenerationSecret,
@@ -31,7 +34,11 @@ import {
   restoreGroup,
 } from '../src/group.js'
 import { deriveGroup } from '../src/group-handle.js'
-import { proposeSelfRemoval } from '../src/index.js'
+import {
+  HandshakeReservationError,
+  HandshakeWindowConfigError,
+  proposeSelfRemoval,
+} from '../src/index.js'
 import { ledgerEntryDigest } from '../src/ledger.js'
 import { expandWithLabel } from '../src/sender-data.js'
 import type { Invite } from '../src/types.js'
@@ -43,6 +50,12 @@ import {
 } from './fixtures/lifecycle-pipeline.js'
 
 const utf8 = new TextEncoder()
+const defaultClientConfig = {
+  keyRetentionConfig: defaultKeyRetentionConfig,
+  lifetimeConfig: defaultLifetimeConfig,
+  keyPackageEqualityConfig: defaultKeyPackageEqualityConfig,
+  paddingConfig: defaultPaddingConfig,
+}
 
 async function twoMemberGroup(groupID: string) {
   const alice = randomIdentity()
@@ -453,6 +466,92 @@ async function framedGeneration(group: GroupHandle, frame: Uint8Array): Promise<
 }
 
 describe('GroupHandle.reserveHandshakeGeneration', () => {
+  test('a client config without key retention config uses the default window', async () => {
+    const { bobGroup } = await twoMemberGroup('missing-key-retention-config')
+    const { keyRetentionConfig: _omitted, ...config } = defaultClientConfig
+    Reflect.set(bobGroup.context, 'clientConfig', config)
+    await expect(bobGroup.reserveHandshakeGeneration(() => {})).resolves.toBeUndefined()
+    expect(bobGroup.state.handshakeReservation?.generation).toBe(1)
+  })
+
+  test.each([-1, 0, 1])(
+    'rejects an unusable configured window of %s with a typed error',
+    async (window) => {
+      const { bobGroup } = await twoMemberGroup(`invalid-handshake-window-${window}`)
+      bobGroup.context.clientConfig = {
+        ...defaultClientConfig,
+        keyRetentionConfig: { ...defaultKeyRetentionConfig, maximumForwardRatchetSteps: window },
+      }
+      const before = encodeClientState(bobGroup.state)
+      const error = await rejection(bobGroup.reserveHandshakeGeneration(() => {}))
+      expect(error).toBeInstanceOf(HandshakeWindowConfigError)
+      expect(encodeClientState(bobGroup.state)).toEqual(before)
+    },
+  )
+
+  test('a configured window of 20 allows ten framed attempts and refuses the eleventh', async () => {
+    const { aliceGroup, bobGroup } = await twoMemberGroup('small-handshake-window')
+    bobGroup.context.clientConfig = {
+      ...defaultClientConfig,
+      keyRetentionConfig: { ...defaultKeyRetentionConfig, maximumForwardRatchetSteps: 20 },
+    }
+    let last: Uint8Array | undefined
+    for (let generation = 1; generation <= 10; generation++) {
+      await bobGroup.reserveHandshakeGeneration(() => {})
+      const built = await createCommit({ context: bobGroup.context, state: bobGroup.state })
+      last = encode(mlsMessageEncoder, built.commit)
+      expect(await framedGeneration(aliceGroup, last)).toBe(generation)
+      await bobGroup.consumeHandshakeReservation(() => {})
+    }
+    await expect(bobGroup.reserveHandshakeGeneration(() => {})).rejects.toThrow(
+      HandshakeWindowError,
+    )
+    if (last == null) throw new Error('missing last frame')
+    await aliceGroup.processMessage(last)
+  })
+
+  test('consuming a reservation after the epoch moves throws a typed error', async () => {
+    const { aliceGroup, bobGroup } = await twoMemberGroup('stale-handshake-reservation')
+    await bobGroup.reserveHandshakeGeneration(() => {})
+    const built = await createCommit({ context: aliceGroup.context, state: aliceGroup.state })
+    await bobGroup.processMessage(encode(mlsMessageEncoder, built.commit))
+    const before = encodeClientState(bobGroup.state)
+    const error = await rejection(bobGroup.consumeHandshakeReservation(() => {}))
+    expect(error).toBeInstanceOf(HandshakeReservationError)
+    expect(encodeClientState(bobGroup.state)).toEqual(before)
+  })
+
+  test('an already-advanced legacy v1 checkpoint never permits reservation reuse', async () => {
+    const { aliceGroup, bobGroup } = await twoMemberGroup('advanced-legacy-checkpoint')
+    const advanced = await createProposal({
+      context: bobGroup.context,
+      state: bobGroup.state,
+      proposal: {
+        proposalType: defaultProposalTypes.remove,
+        remove: { removed: bobGroup.state.privatePath.leafIndex },
+      },
+    })
+    const legacy = encodeClientState({
+      ...bobGroup.state,
+      secretTree: advanced.newState.secretTree,
+    })
+    expect(legacy[0]).toBe(1)
+    const state = decodeClientState(legacy)
+    if (state == null) throw new Error('invalid legacy state')
+    expect(state.handshakeReservation).toBeUndefined()
+    expect(
+      state.secretTree.leafNodes[Number(state.privatePath.leafIndex) * 2]?.handshake.generation,
+    ).toBe(1)
+    const restored = await restoreGroup({
+      state,
+      credential: bobGroup.credential,
+      ledgerEntries: bobGroup.ledgerTokens,
+    })
+    await restored.reserveHandshakeGeneration(() => {})
+    const built = await createCommit({ context: restored.context, state: restored.state })
+    expect(await framedGeneration(aliceGroup, encode(mlsMessageEncoder, built.commit))).toBe(2)
+  })
+
   test.each([false, true])(
     'persists before framing, including after restore (derived: %s)',
     async (derived) => {

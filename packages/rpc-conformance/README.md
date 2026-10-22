@@ -51,6 +51,10 @@ Both harnesses also return `setEpochHintOffset(offset)`: the implementation's sy
 must then report its locked epoch plus `offset`. The epoch clauses set it one behind and one ahead
 and expect the same answers, because no port result may depend on the hint.
 
+GroupMLS conformance requires both `prepareCommitBuild` and `commitBuildFramed`, or neither.
+The public port exposes no reservation generation or consumption state, so it cannot reveal a no-op consumption hook.
+The harness builds commits through an outside author. Implementation-specific frame tests cover reservation reuse after consumption.
+
 ```ts
 import { testGroupCryptoConformance } from '@kumiai/rpc-conformance'
 

@@ -384,9 +384,11 @@ export type CommitLedgerEntriesResult = {
  * empty `tokens` list.
  *
  * Reads `group` and returns a NEW derived handle (`newGroup`); it never advances
- * `group`'s epoch. Adopt `newGroup` only after publication is accepted. Before each
- * build that may be discarded, call `group.reserveHandshakeGeneration(persist)` so a
- * retry, including after restart, cannot reuse the previous handshake generation.
+ * `group`'s epoch. Adopt `newGroup` only after publication is accepted.
+ * Before each build, call `group.reserveHandshakeGeneration(persist)`.
+ * After the build returns, call `group.consumeHandshakeReservation(persist)` before
+ * any journalling or publication. Reserve alone reuses an unconsumed generation.
+ * Serialise reserve, build and consume against the source handle.
  * The mutex only serializes concurrent calls against one handle. A source whose commit
  * was accepted is superseded and must never be reused.
  */

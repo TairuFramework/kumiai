@@ -411,13 +411,14 @@ export type GroupMLS = {
    * Reuse only durable evidence of a reservation that has never permitted publication.
    * Keep the epoch, ledger and application ratchet unchanged.
    * Resolve only after persistence. On failure the peer must not invoke the builder.
-   * Optional for ports whose host builders already reserve generations durably themselves.
+   * Implement both build hooks or neither. An incomplete pair throws CommitBuildHooksError at construction.
+   * Without hooks, builders must reserve and consume durably before returning their frame.
    */
   prepareCommitBuild?(): Promise<void>
   /**
    * Persist reservation consumption after build, before journalling or publishing its frame.
-   * Required when prepareCommitBuild reuses outstanding reservations. Builders must return
-   * their frame before publishing it. Omit only when every build burns a fresh reservation.
+   * Required whenever prepareCommitBuild is present, including when preparation always burns a generation.
+   * Builders must return their frame before publishing it.
    */
   commitBuildFramed?(): Promise<void>
   /**

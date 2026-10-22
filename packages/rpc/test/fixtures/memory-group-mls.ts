@@ -660,6 +660,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       handshakeGeneration++
       options.persistHandshakeGeneration?.(handshakeGeneration)
     },
+    // Preparation already burns a fresh generation, even when the build fails.
+    async commitBuildFramed() {},
     prepareRecovery: prepare,
     async verifyRecoveryRequest(request) {
       try {

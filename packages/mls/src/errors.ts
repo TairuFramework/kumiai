@@ -83,3 +83,17 @@ export class HandshakeWindowError extends Error {
     this.name = 'HandshakeWindowError'
   }
 }
+
+export class HandshakeWindowConfigError extends Error {
+  constructor() {
+    super('Handshake receiver window must be at least 2')
+    this.name = 'HandshakeWindowConfigError'
+  }
+}
+
+export class HandshakeReservationError extends Error {
+  constructor() {
+    super('No matching handshake reservation for the current epoch and generation')
+    this.name = 'HandshakeReservationError'
+  }
+}

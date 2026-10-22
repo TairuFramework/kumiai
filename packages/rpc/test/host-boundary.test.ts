@@ -4,7 +4,7 @@ import { afterEach, describe, expect, expectTypeOf, test, vi } from 'vitest'
 
 import type { PendingCommit } from '../src/commit.js'
 import type { PendingRecovery } from '../src/crypto.js'
-import { PeerDisposedError } from '../src/errors.js'
+import { CommitBuildHooksError, PeerDisposedError } from '../src/errors.js'
 import {
   createHostBoundary,
   peerHostFields,
@@ -52,6 +52,29 @@ async function assertPaused(path: string, invoke: (pause: Promise<void>) => unkn
 }
 
 describe('host invocation boundary', () => {
+  test.each(['prepareCommitBuild', 'commitBuildFramed'])(
+    'rejects an MLS port implementing only %s with a typed error',
+    (hook) => {
+      const boundary = createHostBoundary()
+      const construct = () => wrapPeerHost(boundary, { mls: { [hook]: async () => {} } })
+      expect(construct).toThrow(CommitBuildHooksError)
+      expect(construct).toThrowError(
+        expect.objectContaining({
+          name: 'CommitBuildHooksError',
+          message: expect.stringContaining('prepareCommitBuild and commitBuildFramed'),
+        }),
+      )
+    },
+  )
+
+  test.each([false, true])('accepts MLS ports with both hooks or neither (hooks: %s)', (hooks) => {
+    const boundary = createHostBoundary()
+    const mls = hooks
+      ? { prepareCommitBuild: async () => {}, commitBuildFramed: async () => {} }
+      : {}
+    expect(() => wrapPeerHost(boundary, { mls })).not.toThrow()
+  })
+
   test('waits for a paused method and refuses its later invocation', async () => {
     const output = vi.spyOn(stdout, 'write').mockImplementation(() => true)
     await assertPaused('host.write', async (pause) => {
