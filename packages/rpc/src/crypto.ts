@@ -272,6 +272,22 @@ export type RosterEntry = {
    * guarantee: it is whatever the credential holds, and for an id with no long form it is the id.
    */
   longForm: string
+  /**
+   * Names the KeyPackage this leaf was Added from, for as long as the leaf still holds that
+   * KeyPackage's leaf node — until the member's own first path or Update replaces it. Absent once
+   * it has, and absent on a leaf that entered by external commit (its leaf node is path-made).
+   * Opaque, compared only for equality; unique per KeyPackage (real impl: the leaf's HPKE
+   * encryption key).
+   *
+   * Read around {@link GroupMLS.processCommit} it says whether the Commit ADDED a leaf: only an
+   * Add puts a KeyPackage leaf node into the tree, so a value present after and absent before is
+   * an Add — including one the `did` diff cannot see, a Remove and an Add of the SAME DID in one
+   * Commit (a stale-leaf replacement). An ordinary path or Update commit only ever drops a value,
+   * never brings one. See {@link "roster".detectLeafAdmission}.
+   *
+   * Optional for implementations that cannot read it; the lane then sees only `did` changes.
+   */
+  admission?: string
 }
 
 /**
@@ -431,7 +447,9 @@ export type GroupMLS = {
    * matter to that diff (see {@link "roster".detectRosterChange}).
    *
    * Membership only: a rejoin by a member the roster still holds changes no `did` and is invisible
-   * to a `did` diff — {@link CommitHeader.external} is what the lane rotates on for that.
+   * to a `did` diff — {@link CommitHeader.external} is what the lane rotates on for that. A
+   * same-DID leaf replacement is invisible to it too, and {@link RosterEntry.admission} is what
+   * the lane rotates on for that.
    */
   rosterEntries(): Promise<Array<RosterEntry>>
   /**

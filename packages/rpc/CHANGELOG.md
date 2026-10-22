@@ -1,5 +1,11 @@
 # @kumiai/rpc
 
+## 0.10.9
+
+### Patch Changes
+
+- The app-lane anchor now rotates on a commit that Adds a leaf for a DID the roster already held — a stale-leaf replacement (Remove + Add of the same DID in one commit, `@kumiai/mls` 0.10.8). The DID diff could not see it, so the committer and every applying member kept the old anchor while the re-added member seeded at the post-commit epoch, and app frames went nowhere both ways. `RosterEntry` gains optional `admission` (the KeyPackage a leaf still holds from its Add); the peer rotates when an admission appears that the pre-advance roster did not hold. The rotation record persists it as `pending.admissionsBefore`, so a restart resolves it too; a record without it resolves as before. New export `detectLeafAdmission`. An ordinary path or Update commit only drops admissions and does not rotate.
+
 ## 0.10.7
 
 ### Patch Changes

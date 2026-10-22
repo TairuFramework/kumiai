@@ -141,7 +141,7 @@ export {
   type RecoveryConfirmRequest,
   type RecoveryVerdictFrame,
 } from './recovery.js'
-export { detectRosterChange } from './roster.js'
+export { detectLeafAdmission, detectRosterChange } from './roster.js'
 export {
   APP_TOPIC_LABEL,
   COMMIT_LABEL,

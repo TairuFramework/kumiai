@@ -37,6 +37,7 @@ import {
   type PendingRecovery,
   type ProcessCommitResult,
   type RecoveryVerdict,
+  type RosterEntry,
 } from './crypto.js'
 import { asLogPosition, assertForwardPage, type LogPosition } from './cursor.js'
 import { PeerDisposedError } from './errors.js'
@@ -100,7 +101,7 @@ import {
   type RecoveryCommitOutcome,
   waitForRecoveryConfirmation,
 } from './recovery-confirmation.js'
-import { detectRosterChange } from './roster.js'
+import { detectLeafAdmission, detectRosterChange } from './roster.js'
 import {
   APP_TOPIC_LABEL,
   commitTopic,
@@ -158,6 +159,11 @@ type RendezvousOutcome =
   | { kind: 'publish-failed'; error: unknown }
 
 type PendingAnchorRotation = NonNullable<AnchorSlot['pending']>
+
+/** The leaf admissions a roster holds (see {@link RosterEntry.admission}). */
+function admissionsOf(entries: Array<RosterEntry>): Array<string> {
+  return entries.flatMap((entry) => (entry.admission == null ? [] : [entry.admission]))
+}
 
 type ResolveAnchorRotationParams = {
   port: GroupMLS
@@ -439,8 +445,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       requireAnchorRecovery()
       return
     }
-    const roster = (await port.rosterEntries()).map((entry) => normalizeDID(entry.did))
-    if (record.forced || detectRosterChange(record.rosterBefore, roster)) {
+    const entries = await port.rosterEntries()
+    const roster = entries.map((entry) => normalizeDID(entry.did))
+    // An Add of a DID the roster already held — a stale-leaf replacement — moves no DID, and its
+    // Welcome joiner seeds at this epoch all the same: the fresh leaf is what says so.
+    const admitted =
+      record.admissionsBefore != null &&
+      detectLeafAdmission(record.admissionsBefore, admissionsOf(entries))
+    if (record.forced || admitted || detectRosterChange(record.rosterBefore, roster)) {
       await captureAnchor(record.advance)
     } else {
       await keepAnchor()
@@ -1160,10 +1172,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     }
     if (!confirmedRecovery) await appLane.deliver()
     assertLive()
+    // A retry keeps the record's pre-advance view: the live tree may already be past it.
+    const entriesBefore = retry && pending != null ? [] : await port.rosterEntries()
     const rosterBefore =
       retry && pending != null
         ? pending.rosterBefore
-        : (await port.rosterEntries()).map((entry) => normalizeDID(entry.did))
+        : entriesBefore.map((entry) => normalizeDID(entry.did))
     const epochBefore = await port.readEpoch()
     assertLive()
     const record: PendingAnchorRotation =
@@ -1173,6 +1187,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             epochBefore,
             epochAfter: identity.epochAfter,
             rosterBefore,
+            admissionsBefore: admissionsOf(entriesBefore),
             forced: identity.forced,
             advance: identity.advance,
           }

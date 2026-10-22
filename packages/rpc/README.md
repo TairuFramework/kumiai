@@ -151,7 +151,10 @@ move it too, because MLS ratchets forward and a member added at epoch E cannot e
 epoch's secret. `max(last add, last remove)` is the only epoch that is both after every removal and
 holdable by every current member, and every member reaches it by applying the same commit, so they
 agree natively. A rejoin rotates it as well, on the applied commit's own external flag — a rejoining
-member's effective join is its rejoin epoch, and nothing a roster diff can see moves.
+member's effective join is its rejoin epoch, and nothing a roster diff can see moves. So does a
+stale-leaf replacement (a Remove and an Add of the same DID in one commit): the DID set is unchanged,
+so the peer reads it from `RosterEntry.admission` — an admission present after the commit and absent
+before it is an Add.
 
 `GroupPeer.anchorEpoch()` exposes where it sits.
 

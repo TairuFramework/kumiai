@@ -8,7 +8,12 @@ import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { buildInviteCommit, buildRemoveCommit, makeMLSPeer } from './fixtures/peer.js'
+import {
+  buildInviteCommit,
+  buildRemoveCommit,
+  buildReplaceCommit,
+  makeMLSPeer,
+} from './fixtures/peer.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 50))
 
@@ -144,6 +149,71 @@ describe('the member that authors a roster change rotates with the members that 
 
     await alice.peer.dispose()
     await bob.peer.dispose()
+  })
+})
+
+describe('a same-DID leaf replacement rotates the anchor its Welcome joiner seeds from', () => {
+  /**
+   * An own-agents admission that replaces a stale leaf Removes it and Adds a fresh KeyPackage for
+   * the same DID in one commit: the DID set does not move, so a DID diff reads no change. The
+   * re-added member joins by Welcome at the post-commit epoch and seeds its anchor there, so every
+   * member that keeps the old anchor talks into a topic that member can never derive — silently,
+   * both ways, and no restart heals it.
+   */
+  test('the author, an applying member and the re-added member meet on one anchor', async () => {
+    const hub = new FakeHub()
+    const recoverySecret = new Uint8Array(32).fill(0x96)
+    const aliceSaw: Array<unknown> = []
+    const bobSaw: Array<unknown> = []
+    const carolSaw: Array<unknown> = []
+
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, {
+      epoch: 1,
+      members: MEMBERS,
+      handlers: { 'chat/posted': (ctx: { data: unknown }) => void aliceSaw.push(ctx.data) },
+    })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      epoch: 1,
+      members: MEMBERS,
+      handlers: { 'chat/posted': (ctx: { data: unknown }) => void bobSaw.push(ctx.data) },
+    })
+    await flush()
+
+    await alice.peer.commit(buildReplaceCommit(alice, 'carol'))
+    await flush()
+
+    expect(alice.welcomes).toEqual(['carol'])
+    expect(alice.mls.leaves()).toEqual(MEMBERS)
+    expect(bob.mls.leaves()).toEqual(MEMBERS)
+    expect(alice.mls.epoch()).toBe(2)
+    expect(bob.mls.epoch()).toBe(2)
+
+    // Carol's fresh install joins from the Welcome at epoch 2 with no stored anchor, so she seeds
+    // from her live handle — the post-commit epoch, the only one she can export.
+    const carol = makeMLSPeer(hub, 'carol', recoverySecret, {
+      epoch: 2,
+      members: MEMBERS,
+      handlers: { 'chat/posted': (ctx: { data: unknown }) => void carolSaw.push(ctx.data) },
+    })
+    await flush()
+
+    expect(carol.peer.anchorEpoch()).toBe(2)
+    expect(alice.peer.anchorEpoch()).toBe(2)
+    expect(alice.anchorStore.stored()?.epoch).toBe(2)
+    expect(bob.peer.anchorEpoch()).toBe(2)
+
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'welcome back' } })
+    await flush()
+    expect(carolSaw).toEqual([{ text: 'welcome back' }])
+    expect(bobSaw).toEqual([{ text: 'welcome back' }])
+
+    await carol.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'here' } })
+    await flush()
+    expect(aliceSaw).toEqual([{ text: 'here' }])
+
+    await alice.peer.dispose()
+    await bob.peer.dispose()
+    await carol.peer.dispose()
   })
 })
 

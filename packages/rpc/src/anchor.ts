@@ -15,6 +15,11 @@ export type AnchorSlot = {
     epochBefore: number
     epochAfter: number
     rosterBefore: Array<string>
+    /**
+     * The leaf admissions held before the advance. Absent on a record written before admissions
+     * were tracked, which resolves on the roster diff and `forced` alone.
+     */
+    admissionsBefore?: Array<string>
     forced: boolean
     advance: string
   }

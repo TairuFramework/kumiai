@@ -15,6 +15,7 @@ import {
   buildInviteCommit,
   buildLedgerCommit,
   buildRemoveCommit,
+  buildReplaceCommit,
   makeMLSPeer,
 } from './fixtures/peer.js'
 
@@ -385,6 +386,33 @@ describe('recovery ordering', { concurrent: false }, () => {
     bob.mls.adopt(pending.commit)
     const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob })
     await restarted.peer.replay()
+    expect(restarted.peer.anchorEpoch()).toBe(2)
+    expect((await restarted.anchorStore.load())?.pending).toBeUndefined()
+    await restarted.peer.dispose()
+  })
+
+  test('a persisted leaf-replacement record rotates when restart resolves the durable handle', async () => {
+    const hub = new DurableFakeHub()
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { members })
+    await bob.peer.replay()
+    const pending = await buildReplaceCommit(bob, 'carol')()
+    await expect(
+      bob.peer.commit(async () => ({
+        ...pending,
+        onAccepted: async () => {
+          throw new Error('durable replacement not adopted')
+        },
+      })),
+    ).rejects.toThrow('durable replacement not adopted')
+    expect(bob.mls.epoch()).toBe(1)
+    expect((await bob.anchorStore.load())?.pending).toMatchObject({ epochBefore: 1, epochAfter: 2 })
+    await bob.peer.dispose()
+    // Adopted out of process: the DID set is the same, so only the record's pre-advance view of
+    // the tree can say a leaf entered it.
+    bob.mls.adopt(pending.commit)
+    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob })
+    await restarted.peer.replay()
+    expect(restarted.mls.leaves()).toEqual(members)
     expect(restarted.peer.anchorEpoch()).toBe(2)
     expect((await restarted.anchorStore.load())?.pending).toBeUndefined()
     await restarted.peer.dispose()

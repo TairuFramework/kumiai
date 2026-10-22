@@ -1,5 +1,11 @@
 # @kumiai/mls-rpc
 
+## 0.10.4
+
+### Patch Changes
+
+- `rosterEntries()` reports each leaf's `admission` from `@kumiai/mls`, so the rpc peer rotates the app-lane anchor on a stale-leaf replacement.
+
 ## 0.10.2
 
 ### Patch Changes
