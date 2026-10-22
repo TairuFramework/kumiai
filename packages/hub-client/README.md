@@ -61,7 +61,6 @@ hands the same init key to two inviters.
 
 Two obligations sit on the host, and the hub cannot enforce either — it stores opaque bytes and
 reports success either way, so both fail silently:
-
 - **Re-upload before `LAST_RESORT_LIFETIME_DAYS` (90) elapses.** The hub cannot see the expiry, so
   it goes on reporting the slot full while serving a dead package that every inviter refuses.
   Uploading once at enrolment buys 90 days, not forever.

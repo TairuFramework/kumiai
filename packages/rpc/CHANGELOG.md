@@ -32,7 +32,6 @@
   - Every lifecycle peer must run this release.
 
   **Lifecycle (`@kumiai/mls`)**
-
   - Groups can carry a controller. Its agents hold bound leaves that are verified against tree time, not a wall clock.
     - Genesis adds `controller`, `leafLifetime` and `trustedGrantLifetime`.
     - Creation, key packages and external joins accept a `ControllerBinding`.
@@ -47,14 +46,12 @@
   - `foldEnvelope` takes a single `FoldEnvelopeParams` object.
 
   **Recovery (`@kumiai/mls-rpc`, `@kumiai/rpc`)**
-
   - A recovery is adopted only after counted confirmation through signed verdicts. This adds new rendezvous kinds.
   - Binding renewal uses `recoveryBinding` and `prepareRecovery`.
   - `applyRecovery` can return `{ renewalRequired: true }`.
   - `PendingRecovery` adds `epoch`, `confirmationKey`, `judgeVerdict` and `markBindingUnusable()`.
 
   **Durable log delivery (`@kumiai/rpc`)**
-
   - `GroupPeerMLSParams` requires an `AppOutbox` and `appOutboxLimit`.
   - Log dispatch resolves at durable acceptance. Delivery is at least once and in per-sender order, across epoch changes and restarts.
   - Hosts persist a commit cursor `{ position, epoch, stranded? }` through `getCommitCursor()` and `putCommitCursor()`.
@@ -65,7 +62,6 @@
   - One live peer per group owns the outbox, the journal and the anchor store. To hand over, call `dispose()`, await `drained()`, then start the replacement.
 
   **Hub**
-
   - Every fetch result requires `gap: boolean`.
   - Log purge removes only a prefix of each topic, by position.
   - `AppWindowPruned.oldest` may be `null`.
@@ -270,7 +266,6 @@
   who derives the epoch secrets, while the ledger grants the role to BOB.
 
   **Breaking.**
-
   - `HubStore.countKeyPackages(ownerDID)` is a **new required method**. `storeKeyPackage` takes an
     optional `notAfter`; an expired entry must be neither served, counted, nor charged against the cap.
   - `KeyPackagePool.ensureStocked()` and `LastResortProvisioner.ensureProvisioned()` return an
@@ -301,7 +296,6 @@
 - Commit-lane replay handling, anycast suppression, the durable-ack relay, and peer disposal.
 
   **Breaking.**
-
   - `classifyCommit` takes a single `ClassifyCommitParams` object —
     `{ header, sequenceID, commitDigest, state }`. `CommitClassifierState.appliedByEpoch` is
     `ReadonlyMap<number, AppliedCommit>`. `AppliedCommit`, `ClassifyCommitParams` and
@@ -331,7 +325,7 @@
   never lands below the original`; a store failing it is not conformant.
 
   **Anycast suppression fires only on a successful reply.** Any observed reply, errors included,
-  previously marked a request replied, so one fast *failing* responder suppressed every healthy one
+  previously marked a request replied, so one fast _failing_ responder suppressed every healthy one
   and the client timed out. `adaptBusHandlers` now validates bus-lane input against the protocol's
   declared JSON schemas — an invalid request rejects (which, per the fix, suppresses nobody) and an
   invalid event is dropped and logged. Live push and app-lane drain share the same validation.
@@ -358,7 +352,6 @@
 
   **Breaking.** Two dead exports removed while the band break makes it cheap, both unreachable in
   practice:
-
   - `@kumiai/mls` no longer exports the `GroupSyncScope` type — referenced by nothing, here or in any
     consumer.
   - `HubClient` no longer exposes the `rawClient` getter. `HubClient` now has one method per
@@ -394,7 +387,6 @@
 - App messages now reach a member that was offline when they were sent. A procedure declaring
   `retain: 'log'` publishes to a retained, pullable log; ephemeral events and all RPC stay on the
   live lane. `defineGroupProtocol` carries the declaration.
-
   - App topics derive from the epoch of the last roster change rather than the live epoch, so a
     topic holds constant while the group talks and rotates only on membership change. The anchor
     is persisted through the new `AnchorStore`, never re-derived.
@@ -420,7 +412,6 @@
   and an implementation with no sender to give must throw.
 
 - Version bytes on the commit lane, and an unknown version now HEALS instead of filing as poison.
-
   - `decodeHandshakeFrame` returns `version` and no longer throws on an unknown one; every caller
     must compare it against `HANDSHAKE_VERSION` before trusting `payload`. It still throws on a
     short frame, a bad magic and an unknown kind.
@@ -466,7 +457,6 @@ client on a pre-release build cannot talk to one on this release.
   by pull; a peer with positive evidence it is off the group's line heals by external-commit
   rejoin; entry bodies ride in the commit frame and a rejoined peer gathers the whole ordered
   ledger over a sealed rendezvous.
-
   - `GroupMLS` gains `readCommitHeader`, `createRecoveryRequest`, `sealGroupInfo`,
     `isLedgerComplete`, `getLedger`, `sealLedger`, `openSealedLedger` and `bootstrapLedger`;
     `applyRecovery` is retyped to `(sealed, requestID) => PendingRecovery | null`, and

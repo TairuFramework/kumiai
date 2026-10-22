@@ -20,7 +20,6 @@
   - Every lifecycle peer must run this release.
 
   **Lifecycle (`@kumiai/mls`)**
-
   - Groups can carry a controller. Its agents hold bound leaves that are verified against tree time, not a wall clock.
     - Genesis adds `controller`, `leafLifetime` and `trustedGrantLifetime`.
     - Creation, key packages and external joins accept a `ControllerBinding`.
@@ -35,14 +34,12 @@
   - `foldEnvelope` takes a single `FoldEnvelopeParams` object.
 
   **Recovery (`@kumiai/mls-rpc`, `@kumiai/rpc`)**
-
   - A recovery is adopted only after counted confirmation through signed verdicts. This adds new rendezvous kinds.
   - Binding renewal uses `recoveryBinding` and `prepareRecovery`.
   - `applyRecovery` can return `{ renewalRequired: true }`.
   - `PendingRecovery` adds `epoch`, `confirmationKey`, `judgeVerdict` and `markBindingUnusable()`.
 
   **Durable log delivery (`@kumiai/rpc`)**
-
   - `GroupPeerMLSParams` requires an `AppOutbox` and `appOutboxLimit`.
   - Log dispatch resolves at durable acceptance. Delivery is at least once and in per-sender order, across epoch changes and restarts.
   - Hosts persist a commit cursor `{ position, epoch, stranded? }` through `getCommitCursor()` and `putCommitCursor()`.
@@ -53,7 +50,6 @@
   - One live peer per group owns the outbox, the journal and the anchor store. To hand over, call `dispose()`, await `drained()`, then start the replacement.
 
   **Hub**
-
   - Every fetch result requires `gap: boolean`.
   - Log purge removes only a prefix of each topic, by position.
   - `AppWindowPruned.oldest` may be `null`.
@@ -155,7 +151,6 @@
 - Commit-lane replay handling, anycast suppression, the durable-ack relay, and peer disposal.
 
   **Breaking.**
-
   - `classifyCommit` takes a single `ClassifyCommitParams` object —
     `{ header, sequenceID, commitDigest, state }`. `CommitClassifierState.appliedByEpoch` is
     `ReadonlyMap<number, AppliedCommit>`. `AppliedCommit`, `ClassifyCommitParams` and
@@ -185,7 +180,7 @@
   never lands below the original`; a store failing it is not conformant.
 
   **Anycast suppression fires only on a successful reply.** Any observed reply, errors included,
-  previously marked a request replied, so one fast *failing* responder suppressed every healthy one
+  previously marked a request replied, so one fast _failing_ responder suppressed every healthy one
   and the client timed out. `adaptBusHandlers` now validates bus-lane input against the protocol's
   declared JSON schemas — an invalid request rejects (which, per the fix, suppresses nobody) and an
   invalid event is dropped and logged. Live push and app-lane drain share the same validation.
@@ -212,7 +207,6 @@
 
   **Breaking.** Two dead exports removed while the band break makes it cheap, both unreachable in
   practice:
-
   - `@kumiai/mls` no longer exports the `GroupSyncScope` type — referenced by nothing, here or in any
     consumer.
   - `HubClient` no longer exposes the `rawClient` getter. `HubClient` now has one method per

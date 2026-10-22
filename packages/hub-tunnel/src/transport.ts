@@ -326,7 +326,7 @@ export function createHubTunnelTransport<R, W>(
     clearIdleTimer()
     const elapsed = Date.now() - lastActivity
     const remaining = idleTimeoutMs - elapsed
-    const delay = remaining > 0 ? remaining : 0
+    const delay = Math.max(remaining, 0)
     idleTimer = setTimeout(() => {
       idleTimer = undefined
       if (torndown) return

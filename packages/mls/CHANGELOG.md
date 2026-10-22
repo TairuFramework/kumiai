@@ -48,7 +48,6 @@
   - Every lifecycle peer must run this release.
 
   **Lifecycle (`@kumiai/mls`)**
-
   - Groups can carry a controller. Its agents hold bound leaves that are verified against tree time, not a wall clock.
     - Genesis adds `controller`, `leafLifetime` and `trustedGrantLifetime`.
     - Creation, key packages and external joins accept a `ControllerBinding`.
@@ -63,14 +62,12 @@
   - `foldEnvelope` takes a single `FoldEnvelopeParams` object.
 
   **Recovery (`@kumiai/mls-rpc`, `@kumiai/rpc`)**
-
   - A recovery is adopted only after counted confirmation through signed verdicts. This adds new rendezvous kinds.
   - Binding renewal uses `recoveryBinding` and `prepareRecovery`.
   - `applyRecovery` can return `{ renewalRequired: true }`.
   - `PendingRecovery` adds `epoch`, `confirmationKey`, `judgeVerdict` and `markBindingUnusable()`.
 
   **Durable log delivery (`@kumiai/rpc`)**
-
   - `GroupPeerMLSParams` requires an `AppOutbox` and `appOutboxLimit`.
   - Log dispatch resolves at durable acceptance. Delivery is at least once and in per-sender order, across epoch changes and restarts.
   - Hosts persist a commit cursor `{ position, epoch, stranded? }` through `getCommitCursor()` and `putCommitCursor()`.
@@ -81,7 +78,6 @@
   - One live peer per group owns the outbox, the journal and the anchor store. To hand over, call `dispose()`, await `drained()`, then start the replacement.
 
   **Hub**
-
   - Every fetch result requires `gap: boolean`.
   - Log purge removes only a prefix of each topic, by position.
   - `AppWindowPruned.oldest` may be `null`.
@@ -183,7 +179,6 @@
   who derives the epoch secrets, while the ledger grants the role to BOB.
 
   **Breaking.**
-
   - `HubStore.countKeyPackages(ownerDID)` is a **new required method**. `storeKeyPackage` takes an
     optional `notAfter`; an expired entry must be neither served, counted, nor charged against the cap.
   - `KeyPackagePool.ensureStocked()` and `LastResortProvisioner.ensureProvisioned()` return an
@@ -225,7 +220,6 @@
 
   **Narrowings** — non-breaking for callers using `createInvite`, which produces exactly the required
   shape:
-
   - An invite enacting no `kumiai.role` entry for the group is refused. This includes an invite whose
     `ledgerEntries` equal the committer's own log.
   - A key package carrying a non-`basic` credential, or a `basic` credential whose identity bytes do
@@ -254,7 +248,6 @@
 
   **Breaking.** Two dead exports removed while the band break makes it cheap, both unreachable in
   practice:
-
   - `@kumiai/mls` no longer exports the `GroupSyncScope` type — referenced by nothing, here or in any
     consumer.
   - `HubClient` no longer exposes the `rawClient` getter. `HubClient` now has one method per
@@ -274,7 +267,6 @@
   surface.
 
 - Forward-compatibility surface:
-
   - A third GroupContext extension type, `0xf102`, is reserved and advertised on every member
     leaf, so a future control extension can be installed into a live group without re-admitting
     every member.
@@ -304,7 +296,6 @@
 ### Minor Changes
 
 - Add the sealed recovery and ledger-gather surface (additive):
-
   - `createRecoveryRequest`, `sealGroupInfo`/`openSealedGroupInfo`, `sealLedger`/`openSealedLedger`
     and `processWelcomeOnce`.
   - A recovery reply carries a signed responder membership attestation and is authorized against
@@ -323,7 +314,6 @@
   receiving-side commit policy: every peer independently refuses a commit whose author lacks the
   permission for it, on both the PrivateMessage and external-join (PublicMessage) paths. Breaking
   (pre-1.0):
-
   - `GroupPermission` narrows to `'admin' | 'member'`; `'read'` is removed. It was unenforceable —
     a group member holds the epoch secrets and derives the same application keys as anyone else.
   - The capability chain is gone. `Invite` becomes `{ groupID, inviterID, ledgerEntries }`;
@@ -342,7 +332,6 @@
   Every async operation that reads-then-writes a handle's state now runs through one FIFO mutex
   per handle, so concurrent operations can no longer clobber a secret-tree advance or a
   key-schedule deletion. Synchronous getters stay synchronous. Breaking (pre-1.0):
-
   - `encrypt(plaintext)` returns framed wire `Uint8Array` instead of `{ message, consumed }`.
     Callers no longer need ts-mls encoders to put an application message on the wire, and retired
     secrets never cross the public boundary.

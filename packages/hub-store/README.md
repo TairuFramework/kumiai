@@ -28,13 +28,13 @@ definition. Close the `HozonDB` when the host shuts down.
 
 ## Options
 
-| Option | Default | Meaning |
-|--------|---------|---------|
-| `defaultRetention` | `0` | Floor, in seconds, on how long a topic's frames are kept. |
-| `maxRetention` | `2592000` (30 days) | Ceiling, in seconds, a subscribe may request. Above it the subscribe is refused. |
-| `maxDepth` | `1000` | Retained log frames per topic. The oldest log frames are evicted first. |
-| `maxKeyPackagesPerDID` | `100` | Ordinary key packages one DID may hold. An upload past it is refused. |
-| `maxSubscriptionsPerDID` | `1000` | Distinct topics one DID may subscribe to. |
+| Option                   | Default             | Meaning                                                                          |
+| ------------------------ | ------------------- | -------------------------------------------------------------------------------- |
+| `defaultRetention`       | `0`                 | Floor, in seconds, on how long a topic's frames are kept.                        |
+| `maxRetention`           | `2592000` (30 days) | Ceiling, in seconds, a subscribe may request. Above it the subscribe is refused. |
+| `maxDepth`               | `1000`              | Retained log frames per topic. The oldest log frames are evicted first.          |
+| `maxKeyPackagesPerDID`   | `100`               | Ordinary key packages one DID may hold. An upload past it is refused.            |
+| `maxSubscriptionsPerDID` | `1000`              | Distinct topics one DID may subscribe to.                                        |
 
 Set `maxRetention` or `maxDepth` to `Infinity` to disable that bound explicitly.
 These defaults match the memory store. Periodic purge applies the age policy.

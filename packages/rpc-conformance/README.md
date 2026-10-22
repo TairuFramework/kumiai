@@ -36,13 +36,13 @@ inside the caller's own vitest run.
 ## Both suites take a harness, not an implementation
 
 A `GroupCrypto` on its own cannot be asked what happens at another epoch — moving between epochs is
-`GroupMLS`'s job, and on a real handle it is a whole MLS commit. So each suite asks for a *group* it
+`GroupMLS`'s job, and on a real handle it is a whole MLS commit. So each suite asks for a _group_ it
 can rotate. The `GroupCrypto` harness returns the members plus `advance()` (every member moves one
 epoch) and `removeMember(index)` (everyone moves but the one dropped, which holds its last epoch for
-life) — the removal boundary *is* the epoch boundary this port is asked about, which is why it is a
+life) — the removal boundary _is_ the epoch boundary this port is asked about, which is why it is a
 separate operation from a bare advance. The `GroupMLS` harness returns the members plus a
 `committerDID` outside them and a `buildCommit()` that frames at the current epoch and advances only
-the author, so `processCommit` is only ever asked about a *received* commit — the case the port's
+the author, so `processCommit` is only ever asked about a _received_ commit — the case the port's
 contract is about, and the one the memory double got wrong. `buildExternalCommit` is optional: an
 implementation with no way to build a rejoin says so by omitting it, and the two external clauses
 are skipped rather than faked.

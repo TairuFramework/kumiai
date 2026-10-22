@@ -76,7 +76,6 @@
 - Commit-lane replay handling, anycast suppression, the durable-ack relay, and peer disposal.
 
   **Breaking.**
-
   - `classifyCommit` takes a single `ClassifyCommitParams` object —
     `{ header, sequenceID, commitDigest, state }`. `CommitClassifierState.appliedByEpoch` is
     `ReadonlyMap<number, AppliedCommit>`. `AppliedCommit`, `ClassifyCommitParams` and
@@ -106,7 +105,7 @@
   never lands below the original`; a store failing it is not conformant.
 
   **Anycast suppression fires only on a successful reply.** Any observed reply, errors included,
-  previously marked a request replied, so one fast *failing* responder suppressed every healthy one
+  previously marked a request replied, so one fast _failing_ responder suppressed every healthy one
   and the client timed out. `adaptBusHandlers` now validates bus-lane input against the protocol's
   declared JSON schemas — an invalid request rejects (which, per the fix, suppresses nobody) and an
   invalid event is dropped and logged. Live push and app-lane drain share the same validation.
@@ -133,7 +132,6 @@
 
   **Breaking.** Two dead exports removed while the band break makes it cheap, both unreachable in
   practice:
-
   - `@kumiai/mls` no longer exports the `GroupSyncScope` type — referenced by nothing, here or in any
     consumer.
   - `HubClient` no longer exposes the `rawClient` getter. `HubClient` now has one method per

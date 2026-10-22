@@ -11,6 +11,10 @@ allowBuilds:
 
 nodeLinker: hoisted
 
+# @hozon/provider 0.1.2 needs @hozon/db ^0.3; @teikyo/* still pin ^0.2. Drop with the teikyo bump.
+overrides:
+  '@hozon/provider': 0.1.1
+
 catalog:
   '@noble/ciphers': ^2.4.0
   '@noble/curves': ^2.4.0
@@ -26,7 +30,7 @@ catalog:
   '@kokuin/capability': ^0.4.2
   '@kokuin/controller': ^0.1.0
   '@kokuin/token': ^0.5.1
-  '@sozai/async': ^0.4.0
+  '@sozai/async': ^0.4.1
   '@sozai/codec': ^0.4.3
   '@sozai/event': ^0.1.6
   '@sozai/http-server': ^0.1.1
@@ -35,19 +39,19 @@ catalog:
   '@sozai/runtime': ^0.1.0
   '@sozai/schema': ^0.1.6
   '@sozai/stream': ^0.2.0
-  '@kokuin/expo': ^0.3.2
-  '@sozai/runtime-expo': ^0.2.2
-  'expo': ^57.0.27
-  'expo-status-bar': ^57.0.1
+  '@kokuin/expo': ^0.4.0
+  '@sozai/runtime-expo': ^0.3.0
+  'expo': ^58.0.16
+  'expo-status-bar': ^58.0.3
   'react': 19.2.3
-  'react-native': ^0.86.0
+  'react-native': ^0.88.0
   '@types/react': ^19.2.18
   'typescript': ^6.0.3
   '@hozon/adapter': ^0.1.0
   '@hozon/db': ^0.2.3
   '@hozon/node-sqlite': ^0.1.0
   '@hozon/postgres': ^0.1.0
-  '@hozon/provider': ^0.1.1
+  '@hozon/provider': 0.1.1
   '@teikyo/access': ^0.1.1
   '@teikyo/enkaku': ^0.1.1
   '@teikyo/hozon': ^0.1.1
@@ -61,22 +65,38 @@ minimumReleaseAgeExclude:
   - '@kigu/*'
   - '@kokuin/*'
   - '@sozai/*'
-  - '@expo/cli@57.0.2'
-  - '@expo/fingerprint@0.20.1'
-  - '@expo/inline-modules@0.1.1'
-  - '@expo/local-build-cache-provider@57.0.1'
-  - '@expo/metro-config@57.0.2'
-  - '@expo/prebuild-config@57.0.2'
-  - '@expo/router-server@57.0.1'
-  - babel-preset-expo@57.0.1
-  - expo-asset@57.0.2
-  - expo-constants@57.0.2
-  - expo-modules-autolinking@57.0.2
-  - expo@57.0.0
+  - '@expo/cli@57.0.2 || 58.1.14'
+  - '@expo/fingerprint@0.20.1 || 0.21.6'
+  - '@expo/inline-modules@0.1.1 || 0.2.7'
+  - '@expo/local-build-cache-provider@57.0.1 || 58.0.7'
+  - '@expo/metro-config@57.0.2 || 58.0.16'
+  - '@expo/prebuild-config@57.0.2 || 58.0.15'
+  - '@expo/router-server@57.0.1 || 58.0.16'
+  - babel-preset-expo@57.0.1 || 58.0.19
+  - expo-asset@57.0.2 || 58.0.18
+  - expo-constants@57.0.2 || 58.0.13
+  - expo-modules-autolinking@57.0.2 || 58.0.14
+  - expo@57.0.0 || 58.0.17
   - '@teikyo/access@0.1.0'
   - '@teikyo/enkaku@0.1.0'
   - '@teikyo/hozon@0.1.0'
   - '@teikyo/rate-limit@0.1.0'
+  - '@expo/config-plugins@58.0.10'
+  - '@expo/config@58.0.7'
+  - '@expo/env@2.5.3'
+  - '@expo/log-box@58.0.13'
+  - '@noxcturnal/noxcturnal-darwin-arm64@0.1.8'
+  - '@noxcturnal/noxcturnal-darwin-x64@0.1.8'
+  - '@noxcturnal/noxcturnal-linux-arm64-gnu@0.1.8'
+  - '@noxcturnal/noxcturnal-linux-arm64-musl@0.1.8'
+  - '@noxcturnal/noxcturnal-linux-x64-gnu@0.1.8'
+  - '@noxcturnal/noxcturnal-linux-x64-musl@0.1.8'
+  - '@noxcturnal/noxcturnal-win32-arm64-msvc@0.1.8'
+  - '@noxcturnal/noxcturnal-win32-x64-msvc@0.1.8'
+  - expo-modules-core@58.0.24
+  - expo-modules-jsi@58.0.17
+  - noxcturnal@0.1.8
+  - expo-status-bar@58.0.4
 
 versioning:
   # e2e-expo takes @kumiai/mls as a runtime dependency, so bump propagation reaches it and it

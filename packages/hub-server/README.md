@@ -95,7 +95,6 @@ A request over a limit is refused with `HUB_RATE_LIMITED` (`RateLimitedError`) b
 ## A store failure that is not a request failure
 
 Four store operations are deliberately not allowed to fail the request they happen in:
-
 - the **last-resort key-package top-up**, read after `fetchKeyPackages` has already consumed
   destructively — surfacing it would destroy packages nobody received, and the client's retry
   would burn the next batch

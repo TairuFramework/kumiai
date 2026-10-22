@@ -62,7 +62,7 @@ Each framed attempt adds a consumption save before journalling.
 Durable hosts must supply `simpleHandleAccess.persist` or an equivalent transactional `HandleAccess`.
 Persistence must resolve after a durable write and reject without changing storage.
 
-For a *received* commit there is nothing to adopt: ts-mls's `processMessage` advances the handle in
+For a _received_ commit there is nothing to adopt: ts-mls's `processMessage` advances the handle in
 place. A host that treated every commit as adopt-later would double-apply received ones.
 
 Migrating from 0.9: build one adapter from the old `handle` / `adopt` / `persist` parameters and pass
@@ -77,7 +77,6 @@ const mls = createGroupMLS({ access, identity, entrySlot })
 ### A host's own `HandleAccess`
 
 A host with its own handle store implements the port instead:
-
 - `read(fn)` lends the handle for the callback only. `mutate(fn)` serialises with every other
   operation and resolves after the state is stored; `fn`'s `persist` argument goes to
   `processMessage`, `bootstrapLedger` and `reserveHandshakeGeneration`. `replace(next)` stores before publishing. A transactional
@@ -103,7 +102,9 @@ record and resolves for an unknown id. Deduplicate inserts by `record.frame.id`.
 ```ts
 const access = simpleHandleAccess({
   handle: () => handle,
-  adopt: (next) => { handle = next },
+  adopt: (next) => {
+    handle = next
+  },
   persist: (current) => store.save(current),
 })
 const crypto = createGroupCrypto({
@@ -144,10 +145,15 @@ with 0.10 peers. See the `@kumiai/rpc` README for the delivery and retention bou
 `GroupMLS.processCommit` is handed a `resolveLedgerEntries` scoped to **one** commit's frame — the
 signed ledger-entry bodies ride that frame and nowhere else. But `GroupHandle` takes its resolver
 once, in `GroupOptions`, and offers no way to change it afterwards. So the indirection has to be
-installed when the group is *built*:
+installed when the group is _built_:
 
 ```ts
-import { createGroupCrypto, createGroupMLS, createLedgerEntrySlot, simpleHandleAccess } from '@kumiai/mls-rpc'
+import {
+  createGroupCrypto,
+  createGroupMLS,
+  createLedgerEntrySlot,
+  simpleHandleAccess,
+} from '@kumiai/mls-rpc'
 
 const entrySlot = createLedgerEntrySlot()
 // Every construction site: createGroup / processWelcome / restoreGroup.
@@ -158,7 +164,9 @@ const { group } = await createGroup(identity, groupID, {
 let handle = group
 const access = simpleHandleAccess({
   handle: () => handle,
-  adopt: (next) => { handle = next },
+  adopt: (next) => {
+    handle = next
+  },
   persist: (current) => store.save(current),
 })
 const crypto = createGroupCrypto({ access })
@@ -225,15 +233,14 @@ The two use different exporter labels deliberately: the topic secret names a top
 anything that derives one, while the entry key opens the group's control-ledger bodies.
 
 The sealed blob is `[ VERSION(1) | NONCE(24) | CIPHERTEXT ]`, XChaCha20-Poly1305. The version byte
-sits inside the blob rather than in the frame header so that an unknown version fails the *open* —
-survivable, the commit is filed as poison and stepped over — rather than the *decode*, which would
+sits inside the blob rather than in the frame header so that an unknown version fails the _open_ —
+survivable, the commit is filed as poison and stepped over — rather than the _decode_, which would
 leave a peer stepping over frames without ever classifying one and never learning the group moved on.
 
 ## Where this diverges from the doubles
 
 Documented on the factories themselves; the conformance suite in `@kumiai/rpc-conformance` pins each
 one. The ones a host is most likely to trip on:
-
 - **`unwrap` opens only at the current epoch.** A readable frame at any other epoch throws
   `FrameEpochError` before decryption, under the handle lock. ts-mls could open a few past epochs,
   but `GroupHandle.decrypt` resolves senders at the current epoch, so such a frame never had a

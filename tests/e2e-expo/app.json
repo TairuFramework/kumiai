@@ -17,6 +17,7 @@
       },
       "predictiveBackGestureEnabled": false,
       "package": "dev.kumiai.e2e"
-    }
+    },
+    "plugins": ["expo-status-bar"]
   }
 }
