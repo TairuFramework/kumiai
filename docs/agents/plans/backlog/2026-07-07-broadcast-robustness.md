@@ -12,7 +12,7 @@
 - `packages/broadcast/src/transport.ts:82-90` — async `unwrap` results enqueue as each
   promise settles, so inbound messages can be delivered out of order under variable
   decrypt latency. Fix: serialize enqueueing through a per-subscription promise tail.
-- `packages/broadcast/src/transport.ts:82` — a *synchronously* throwing `unwrap` escapes
+- `packages/broadcast/src/transport.ts:82` — a _synchronously_ throwing `unwrap` escapes
   the subscribe callback (only rejections are caught) and, on `createMemoryBus`, aborts
   fan-out mid-loop. Fix: route sync throws into the same drop path.
 - `packages/broadcast/src/transport.ts:89` — `controller.enqueue` with no backpressure
@@ -55,7 +55,6 @@ Folded in from `next/2026-07-20-deferred-api-findings.md` at the 2026-07-23 tria
 Indexed on `../milestones/non-breaking-api.md`, on the assumption of the rejection fix. Choosing the
 re-encoding fix instead rotates every derived topic ID and moves this item to
 `../milestones/pre-1.0-breaking-api.md` — so the choice of fix decides which milestone owns it.
-
 - **`deriveTopicID` is not injective over NUL-bearing inputs** (non-breaking, if fixed by rejection).
   `packages/broadcast/src/topic.ts:28` builds the HKDF `info` as
   `` `${TOPIC_INFO_PREFIX}${SEP}${label}${SEP}${scope}` `` with `SEP = '\0'`, so a `label` or `scope`

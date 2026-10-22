@@ -22,7 +22,7 @@ prevent.
 
 ## Key design decisions (preserved)
 
-- **Rejection, not re-encoding.** A NUL-join is injective *iff* every component is NUL-free and
+- **Rejection, not re-encoding.** A NUL-join is injective _iff_ every component is NUL-free and
   well-formed UTF-16. Enforcing that as a contract — and throwing otherwise — closes the hole while
   leaving the derivation math untouched, so every already-derived topic ID is byte-identical: no
   rotation, no migration, the durable commit/rendezvous control plane and retained app history all
@@ -36,7 +36,7 @@ prevent.
   UTF-8 is a bijection on well-formed Unicode, so once lone surrogates are rejected the
   `string → bytes` step is injective (no normalization/overlong/BOM hazard).
 
-- **Reserved-label domain separation is enforced, not asserted.** The original code *claimed* in a
+- **Reserved-label domain separation is enforced, not asserted.** The original code _claimed_ in a
   comment that the reserved inbox label "never collides with an application protocol of the same
   name", but nothing stopped a host from naming a protocol `kumiai/inbox/v1`; since inbox and protocol
   topics derive from the same secret and epoch, that was a real cross-kind collision needing no NUL at
@@ -49,7 +49,7 @@ prevent.
 - **Epoch bounded to a non-negative safe integer.** The real injectivity limit is `2^53`, not
   `2^64`: two intended epochs at or above `2^53` round to one float before the `BigInt` salt encoding
   and would collide. `+0` and `-0` are the same epoch by design (both salt `0n`), not a collision.
-  This fails closed and, in doing so, replaced a pre-existing *silent* collision (see the follow-up
+  This fails closed and, in doing so, replaced a pre-existing _silent_ collision (see the follow-up
   below).
 
 - **`discoveryTopic` validates well-formedness only.** It is a single-component sha256 after a fixed

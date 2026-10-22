@@ -42,7 +42,7 @@ the package: every ledger token embeds its own long form, so verification never 
 
 **`GroupMember.longForm` is non-optional, and equals `id` for `did:key`.** The stack already defines
 long form that way — `signToken({ embedLongForm })` is documented as a no-op for `did:key` because
-long form *is* the id there. Making the field total means a consumer feeding `resolveX25519Key`
+long form _is_ the id there. Making the field total means a consumer feeding `resolveX25519Key`
 never writes `?? m.id`, and `undefined` from the lookup carries exactly one meaning: no such member.
 
 **`findMemberLongForm` exists alongside the field rather than instead of it.** The field serves

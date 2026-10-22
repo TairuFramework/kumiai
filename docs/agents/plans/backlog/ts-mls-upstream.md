@@ -40,7 +40,6 @@ the relocation note above, not this one.
 ts-mls (as of 2026-05-27) does not export `signLeafNodeUpdate` — only `signLeafNodeCommit` and
 `signLeafNodeKeyPackage`. Building a `LeafNodeUpdate` requires the same
 `signWithLabel("LeafNodeTBS", ...)` operation, but the public surface omits it. Paths forward:
-
 1. File an issue / PR upstream to expose `signLeafNodeUpdate` (and `signWithLabel`).
 2. Vendor a small internal sign helper inside `@kumiai/mls`. Risk: TBS encoding tied to ts-mls
    internals; needs a version pin plus a compat test.
@@ -54,7 +53,6 @@ Defer until path 1 lands, or paths 2/3 become acceptable.
 Let a peer4 member rotate their identity (new keypair → new short form / longForm) without leaving
 and rejoining. Today an identity change requires Remove + external rejoin; the native MLS Update
 proposal is not wired for credential changes.
-
 - **`proposeUpdate(group, newIdentity, options?)`** — wraps ts-mls's Update proposal. The new
   `LeafNode` carries `makeMLSCredential(newIdentity)` and a new signature key, signed by the old
   leaf's signature key (continuity proof at the MLS layer).
@@ -65,7 +63,7 @@ proposal is not wired for credential changes.
   ledger question, not a capability-chain one.
 - **`processMessage`** — on receipt of an Update commit, pre-populate the cache with the new peer4
   document via `populateCacheFromCredential`. Auth service unchanged (each leaf is validated against
-  its own credential). Write the new document to cache only *after* the commit's signature verifies.
+  its own credential). Write the new document to cache only _after_ the commit's signature verifies.
 - **`findMemberLeafIndex(oldID)` post-rotation** returns `undefined` (the leaf now binds to the new
   id); `findMemberLeafIndex(newID)` works as expected.
 

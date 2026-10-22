@@ -4,7 +4,6 @@
 of the security-residuals work (see `completed/2026-07-30-security-residuals.complete.md`).
 
 Four files in `packages/rpc/test/` now carry their own copies of the same lane-driving helpers:
-
 - `peer-commit-log-replay.test.ts`
 - `peer-external-forgery.test.ts`
 - `peer-recover-lane.test.ts`
@@ -24,4 +23,4 @@ review caught it. A shared fixture is how those conventions travel to the next f
 **Shape.** A `test/fixtures/lane.ts` alongside the existing `peer.ts` / `commits.ts` / `fake-hub.ts`,
 exporting the four helpers. Prefer `waitFor` over `flush` at call sites where a positive outcome is
 being awaited — it fails loudly instead of falsely — and keep a settle only where the assertion is an
-*absence*, which is the one case a poll cannot express.
+_absence_, which is the one case a poll cannot express.

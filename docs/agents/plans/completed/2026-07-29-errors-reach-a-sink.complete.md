@@ -9,8 +9,7 @@ reporter), plus a released dependency change in the sibling `sozai` repo (`@soza
 ## The problem
 
 `createHandlers` took no logger and no error hook, and the module held no console reference. Three
-`HubStore` failures were therefore not merely swallowed but *unobservable*:
-
+`HubStore` failures were therefore not merely swallowed but _unobservable_:
 1. the **last-resort key-package top-up** read, which runs after `fetchKeyPackages` has already
    consumed destructively
 2. an **ack**, where the frame stays pending and the client re-acks next round
@@ -57,7 +56,7 @@ reporting path is broken still gets served.
 
 **The root logger replaces, it does not join.** In `@sozai/log`, the new root entry replaced the
 existing `['logtape','meta']` and `['sozai']` entries rather than sitting beside them. logtape's
-`parentSinks` defaults to `'inherit'`, which *unions* a category's own sinks with its parent's
+`parentSinks` defaults to `'inherit'`, which _unions_ a category's own sinks with its parent's
 resolved sinks and does not de-duplicate by identity — two entries naming the same sink object print
 every record twice. Dropping the meta entry is safe because logtape counts a `category: []` entry as
 configuring the meta logger, so its "not configured" fallback stays suppressed.
@@ -67,10 +66,10 @@ configuring the meta logger, so its "not configured" fallback stays suppressed.
 tune it, rather than hard-coded in the hub.
 
 **`STORE_ERROR_CONSEQUENCE` is the product of the unwired path.** Each entry says what the hub did
-*instead* of failing and what a permanent failure costs — the availability floor absent, frames
+_instead_ of failing and what a permanent failure costs — the availability floor absent, frames
 redelivered forever, the store growing without bound. It is a `Record` keyed by the method union, so
 a fourth method without an entry is a compile error. Recorded at the map: the key is the method but
-the text assumes the top-up *call site*, so a future fourth site needs a site discriminator rather
+the text assumes the top-up _call site_, so a future fourth site needs a site discriminator rather
 than a reused method key.
 
 **One site was examined and deliberately left alone.** The second `fetchLastResortKeyPackage` read,
@@ -86,7 +85,7 @@ guard nobody had mutated:
 **A root sink hides a wrong category.** Changing hub-server's reporter category from
 `['kumiai','hub-server']` to `['nobody']` left all 159 tests green, while the README and changeset
 both instruct operators to filter on that exact string. A console-mock assertion structurally cannot
-catch this, because the new root logger carries *every* category to the console — the only consumer
+catch this, because the new root logger carries _every_ category to the console — the only consumer
 it would have broken is the one that narrowed `['kumiai']`, i.e. the one following the
 documentation. Pinning a category requires a `setup()` whose only logger is the narrow category, with
 a capture sink asserting `record.category` and `record.level`.

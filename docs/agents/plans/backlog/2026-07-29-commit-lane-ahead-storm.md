@@ -19,7 +19,7 @@ never reaches any authentication step. Signature-checking the committer, which c
 forgery finding in this same doc, does nothing here because the epoch check runs first.
 
 **A second, cheaper trigger exists as of `feat/app-lane-delivery`.** An unreadable commit-frame
-*version* now also settles `ahead`, above every other row including the headerless one
+_version_ now also settles `ahead`, above every other row including the headerless one
 (`packages/rpc/src/classify.ts:182`, commit `0777b86`). That means an attacker no longer needs a
 genuine commit to rewrite the epoch of at all — a single garbage byte in the frame's version field
 asks every peer to heal, with no commit bytes behind it.
@@ -31,7 +31,7 @@ frame to heal from. It would drain to the end of the log and report itself recon
 epoch — permanently and silently, which is worse than the storm. The same asymmetry that justifies
 treating the headerless row as `ahead` justifies this: anything that can publish to the commit topic
 can already forge one of these frames and trigger a heal, and nothing can forge a frame that
-*suppresses* a heal. Given that, routing unreadable-version frames to `ahead` rather than to poison
+_suppresses_ a heal. Given that, routing unreadable-version frames to `ahead` rather than to poison
 costs nothing additional and avoids the silent-dead-epoch failure mode.
 
 **Why no signature check can close this.** `ahead` asks for no committer, and none could be

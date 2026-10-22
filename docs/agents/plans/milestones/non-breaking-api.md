@@ -18,7 +18,7 @@ filler alongside unrelated work, and because one of them has a deadline of a dif
 - **~~`GroupAnchor.version` enforcement~~** — **shipped 2026-07-24**, see
   [completed](../completed/2026-07-24-group-anchor-version-enforcement.complete.md). Enforcing the
   version was non-breaking (`CURRENT_VERSION` is the only writer, so nothing in the wild carries
-  another value), but *deferring* it was the "degraded" class from the forward-compatibility work: a
+  another value), but _deferring_ it was the "degraded" class from the forward-compatibility work: a
   later fix would forever carry a sniffing rule for the unversioned era, and a build that tolerates
   unknown versions silently cannot be taught to stop. It was the one remaining format in the repo
   where a version was declared and never checked. `decodeGroupAnchor` now withholds `app` from a
@@ -29,8 +29,8 @@ filler alongside unrelated work, and because one of them has a deadline of a dif
 ### Ordinary debt — no deadline
 
 - ~~**[`deriveTopicID` NUL-injectivity](../backlog/2026-07-07-broadcast-robustness.md)** — non-breaking
-  *if fixed by rejection*.~~
-  *Taken 2026-09-03:* fixed by rejection, as assumed. `deriveTopicID` now validates components
+  _if fixed by rejection_.~~
+  _Taken 2026-09-03:_ fixed by rejection, as assumed. `deriveTopicID` now validates components
   (NUL-free + well-formed UTF-16) and epoch (non-negative safe integer), and `protocolTopic` reserves
   the `kumiai/` label namespace against host protocols — closing a cross-kind collision the original
   code only asserted against in a comment. No topic ID rotated. See
@@ -38,7 +38,7 @@ filler alongside unrelated work, and because one of them has a deadline of a dif
 
 - **[The `0xf102` hatch reads wider than it opens](../backlog/2026-07-07-mls-api-hardening.md)** —
   a documentation correction, no code change required. The reserved third control extension type can
-  be *installed* into a live group without re-admitting members, but only empty: the guard at
+  be _installed_ into a live group without re-admitting members, but only empty: the guard at
   `packages/mls/src/policy.ts:99-118` admits the added entry only when it is not already installed,
   the list grew by exactly one, and its `extensionData` is a zero-length `Uint8Array` — then strips
   it before the positional compare. Populating it is still a policy change every peer must

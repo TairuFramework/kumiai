@@ -16,7 +16,6 @@ authenticated DIDs and carry no confidentiality impact.
 
 Landed across `@kumiai/hub-protocol`, `@kumiai/hub-server`, `@kumiai/hub-conformance`,
 `@kumiai/rpc` (7 code/test commits):
-
 - **Named hub errors + wire codes** — `AuthorizationDeniedError` (`HUB_AUTHORIZATION_DENIED`),
   `KeyPackageQuotaExceededError` (`HUB_KEYPACKAGE_QUOTA`), `SubscriptionQuotaExceededError`
   (`HUB_SUBSCRIPTION_QUOTA`), `KeyPackageFetchLimitError` (`HUB_KEYPACKAGE_FETCH_LIMIT`). Each
@@ -41,7 +40,7 @@ Landed across `@kumiai/hub-protocol`, `@kumiai/hub-server`, `@kumiai/hub-conform
 ## Key design decisions (rationale preserved)
 
 - **Drain defence = quota + authorize only, no protocol change.** Ordinary single-use `splice`
-  semantics kept. The per-target quota charges the *ask* (the capped count) before the
+  semantics kept. The per-target quota charges the _ask_ (the capped count) before the
   destructive splice, keyed on the victim and summed across all requesters — so minting N
   throwaway requester DIDs cannot amplify the drain past `maxPerTargetConsumed`/window. A
   determined authorized attacker within quota can still eventually empty a pool; the
@@ -54,7 +53,7 @@ Landed across `@kumiai/hub-protocol`, `@kumiai/hub-server`, `@kumiai/hub-conform
   victim's own.
 - **`SubscriptionQuotaExceededError` is deliberately left TRANSIENT in the mux.** Unlike an
   authz refusal (policy) or a retention refusal (a settled fact about the request), a
-  subscription-quota refusal is a *clearable* resource condition — it frees when the peer
+  subscription-quota refusal is a _clearable_ resource condition — it frees when the peer
   unsubscribes. Latching it permanent would strand a topic the peer legitimately wants once
   capacity frees (a permanent latch clears only on a different-retention re-ask). The cost of
   transient is one bounded retry schedule per hit, after which the topic is naturally re-asked

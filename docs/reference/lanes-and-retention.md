@@ -23,12 +23,12 @@ topic serve live ephemeral traffic and a drainable history at once.
 
 Four, over the same hub, distinguished by what derives their topic and what they retain.
 
-| Lane | Topic derived from | Class | Read by |
-| --- | --- | --- | --- |
-| **Commit** | the group's lifelong recovery secret | `log` | pull, from a cursor |
-| **Rendezvous** | the recovery secret | `mailbox` | push |
-| **App** | the **anchor** (a per-epoch secret) | both | push (live) + pull (drain) |
-| **Inbox** | the anchor + the member's own DID | `mailbox` | push |
+| Lane           | Topic derived from                   | Class     | Read by                    |
+| -------------- | ------------------------------------ | --------- | -------------------------- |
+| **Commit**     | the group's lifelong recovery secret | `log`     | pull, from a cursor        |
+| **Rendezvous** | the recovery secret                  | `mailbox` | push                       |
+| **App**        | the **anchor** (a per-epoch secret)  | both      | push (live) + pull (drain) |
+| **Inbox**      | the anchor + the member's own DID    | `mailbox` | push                       |
 
 The inbox lane carries directed 1:1 RPC. One topic per member, and it has more consumers than any
 other lane: the acceptor for each protocol, plus one directed client per member being spoken to. All
@@ -55,7 +55,7 @@ carry, not a mechanism. A per-member override is possible up to that cap.
 
 **Four weeks, not thirty days, and the two days are the margin.** `createMemoryStore`'s reference
 ceiling is thirty days, and a hub **refuses** a retention above its ceiling rather than clamping it.
-A default sitting exactly *on* the ceiling leaves the documented per-member override nowhere to go:
+A default sitting exactly _on_ the ceiling leaves the documented per-member override nowhere to go:
 every upward move is refused outright. The relationship is asserted, not merely written down —
 `packages/rpc/test/hub-mux-subscribe-failure.test.ts` fails if the defaults drift up to the ceiling
 or apart from each other.
@@ -66,14 +66,14 @@ An operator may still set a tighter cap than the reference one, so the refusal h
 A peer that is not a subscriber of a topic is pushed nothing on it and cannot pull it — no commit
 applies, no app frame arrives — so `hub-mux` treats a refusal as follows:
 
-| | |
-| --- | --- |
-| Transient (a dropped socket) | Retried on a bounded backoff. Not reported if it heals. |
+|                                      |                                                                                                   |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| Transient (a dropped socket)         | Retried on a bounded backoff. Not reported if it heals.                                           |
 | Permanent (`RetentionExceededError`) | **Not** retried — the hub has answered, and asking again is a busy loop against a settled result. |
-| Either, once given up on | **Latched**, and reported via `onSubscribeFailed`. |
+| Either, once given up on             | **Latched**, and reported via `onSubscribeFailed`.                                                |
 
 A latched topic is not a topic this peer holds, so it is not recorded as one: a later `retainTopic`
-asking for a *different* window tries again. A later retain carrying **no** window does not — a
+asking for a _different_ window tries again. A later retain carrying **no** window does not — a
 caller with no opinion about retention must not overrule the one that had an opinion and was
 refused, since subscribing anyway would land the peer on the hub's default and deliver exactly the
 silent downgrade the `RetentionExceededError` exists to refuse.
@@ -81,7 +81,7 @@ silent downgrade the `RetentionExceededError` exists to refuse.
 The latch, not the callback, is the guarantee: every `publish` and `fetchTopic` on a refused topic
 throws the hub's own error. A host that wires no callback therefore still cannot mistake such a peer
 for a healthy one — a peer that cannot receive on a topic does not go on transmitting there. The
-callback exists because a peer that only *reads* a topic calls nothing that could throw.
+callback exists because a peer that only _reads_ a topic calls nothing that could throw.
 
 ## Fetch coverage and pruning
 
