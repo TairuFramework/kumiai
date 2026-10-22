@@ -1170,6 +1170,67 @@ export class GroupHandle {
   }
 
   /**
+   * Reserve a fresh handshake generation before building a commit from this handle.
+   * Persist the advanced source before framing, even on the first build after restart.
+   * The epoch, application ratchet, ledger and pending proposals remain unchanged.
+   * `persist` runs under the handle mutex and must not re-enter this handle.
+   * A failed persist restores the source and wipes newly derived secrets.
+   * Receivers still enforce their forward-ratchet window (200 steps by default).
+   */
+  async reserveHandshakeGeneration(
+    persist: (handle: GroupHandle) => Promise<void> | void,
+  ): Promise<void> {
+    return mutexFor(this).run(async () => {
+      const prior = this.#state
+      if (prior.groupActiveState.kind === 'suspendedPendingReinit') {
+        throw new UsageError('Cannot send messages while Group is suspended pending reinit')
+      }
+      if (prior.groupActiveState.kind === 'removedFromGroup') {
+        throw new UsageError('Cannot send messages after being removed from group')
+      }
+      const node = Number(prior.privatePath.leafIndex) * 2
+      const leaf = prior.secretTree.leafNodes[node]
+      const current = leaf?.handshake.generation ?? 0
+      if (current >= 0xfffffffe) throw new RangeError('handshake sender generation exhausted')
+      let tree: SecretTree
+      let consumed: Array<Uint8Array>
+      if (leaf == null) {
+        // ts-mls does not export leaf derivation. Discard an unsent proposal and retain
+        // only its advanced tree, without adding the proposal to the source state.
+        const result = await createProposal({
+          context: this.#context,
+          state: prior,
+          proposal: {
+            proposalType: defaultProposalTypes.remove,
+            remove: { removed: prior.privatePath.leafIndex },
+          },
+        })
+        tree = result.newState.secretTree
+        consumed = result.consumed
+      } else {
+        const advanced = await advanceSendingRatchet(this.#context, leaf.handshake, current + 1)
+        tree = {
+          ...prior.secretTree,
+          leafNodes: {
+            ...prior.secretTree.leafNodes,
+            [node]: { ...leaf, handshake: advanced.ratchet },
+          },
+        }
+        consumed = advanced.consumed
+      }
+      this.#state = { ...prior, secretTree: tree }
+      try {
+        await persist(this)
+      } catch (error) {
+        this.#state = prior
+        zeroFreshSecrets(prior.secretTree, tree)
+        throw error
+      }
+      zeroAll(consumed)
+    })
+  }
+
+  /**
    * Open an application message sealed for the group and recover WHO SENT IT — the
    * counterpart to {@link encrypt}, and the read half of the group's application lane.
    *

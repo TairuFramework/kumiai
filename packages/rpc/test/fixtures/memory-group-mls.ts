@@ -75,6 +75,8 @@ export type MemoryGroupMLSOptions = {
   groupID?: string
   recoverySecret?: Uint8Array
   epoch?: number
+  handshakeGeneration?: number
+  persistHandshakeGeneration?: (generation: number) => void
   /** This member's DID — the committer stamped into the Commits it builds, and the modelled
    *  recipient of GroupInfo sealed to its leaf. */
   localDID?: string
@@ -150,6 +152,7 @@ export function memoryLedgerHead(entryIDs: Array<string>): string {
 }
 
 type MemoryCommit = {
+  handshakeGeneration?: number
   epoch: number
   committerDID: string
   entryIDs: Array<string>
@@ -207,6 +210,7 @@ export function encodeMemoryCommit(
   committerDID: string,
   entryIDs: Array<string> = [],
   options: {
+    handshakeGeneration?: number
     head?: string
     external?: boolean
     adds?: Array<string>
@@ -222,6 +226,7 @@ export function encodeMemoryCommit(
   const head = options.head ?? (entryIDs.length > 0 ? memoryLedgerHead(entryIDs) : undefined)
   const commit: MemoryCommit = {
     epoch,
+    handshakeGeneration: options.handshakeGeneration,
     committerDID,
     entryIDs,
     ...(head != null ? { head } : {}),
@@ -416,6 +421,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   const acceptsCommitter = options.acceptsCommitter ?? (() => true)
   const serveLedger = options.serveLedger ?? ((ledger: Array<string>) => ledger)
   let epoch = options.epoch ?? 0
+  let handshakeGeneration = options.handshakeGeneration ?? 0
   let commits = 0
   let seen = 0
   let lastSender: string | undefined
@@ -502,6 +508,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
 
   const advance = (to: number): void => {
     epoch = to
+    handshakeGeneration = 0
     options.onAdvance?.(epoch)
   }
 
@@ -630,6 +637,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         return id
       })
       return encodeMemoryCommit(epoch, localDID ?? '', entryIDs, {
+        handshakeGeneration,
         head: memoryLedgerHead([...ledger, ...entryIDs]),
         ...(options.adds != null ? { adds: options.adds } : {}),
         ...(options.removes != null ? { removes: options.removes } : {}),
@@ -647,6 +655,10 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     },
     async readEpoch(): Promise<number> {
       return epoch
+    },
+    async prepareCommitBuild() {
+      handshakeGeneration++
+      options.persistHandshakeGeneration?.(handshakeGeneration)
     },
     prepareRecovery: prepare,
     async verifyRecoveryRequest(request) {

@@ -264,6 +264,9 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
     async readEpoch(): Promise<number> {
       return await access.read((group) => Number(group.epoch))
     },
+    async prepareCommitBuild(): Promise<void> {
+      await access.mutate((group, persist) => group.reserveHandshakeGeneration(persist))
+    },
     sendAdmission: () => access.admission(),
     async rosterEntries(): Promise<Array<RosterEntry>> {
       return await access.read((group) =>

@@ -2,7 +2,16 @@ import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { randomIdentity } from '@kokuin/token'
-import type { CryptoProvider, GenerationSecret } from 'ts-mls'
+import {
+  type CryptoProvider,
+  createCommit,
+  decode,
+  encode,
+  type GenerationSecret,
+  mlsMessageDecoder,
+  mlsMessageEncoder,
+  wireformats,
+} from 'ts-mls'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { decodeClientState, encodeClientState } from '../src/codec.js'
@@ -20,6 +29,7 @@ import {
 import { deriveGroup } from '../src/group-handle.js'
 import { proposeSelfRemoval } from '../src/index.js'
 import { ledgerEntryDigest } from '../src/ledger.js'
+import { expandWithLabel } from '../src/sender-data.js'
 import type { Invite } from '../src/types.js'
 import {
   agent,
@@ -404,4 +414,110 @@ describe('GroupHandle.advanceSenderGeneration', () => {
     expect(senderGeneration(advanced)).toBe(senderGeneration(encrypted))
     expect(median(encryptMs) / median(advanceMs)).toBeGreaterThanOrEqual(5)
   }, 60_000)
+})
+
+/** Read the encrypted wire sender-data independently of the handle's ratchet counter. */
+async function framedGeneration(group: GroupHandle, frame: Uint8Array): Promise<number> {
+  const message = decode(mlsMessageDecoder, frame)
+  if (message?.wireformat !== wireformats.mls_private_message) throw new Error('not private')
+  const pm = message.privateMessage
+  const { cipherSuite } = group.context
+  const sample = pm.ciphertext.subarray(0, cipherSuite.kdf.size)
+  const secret = group.state.keySchedule.senderDataSecret
+  const key = await expandWithLabel(
+    group.context,
+    secret,
+    'key',
+    sample,
+    cipherSuite.hpke.keyLength,
+  )
+  const nonce = await expandWithLabel(
+    group.context,
+    secret,
+    'nonce',
+    sample,
+    cipherSuite.hpke.nonceLength,
+  )
+  if (pm.groupId.length >= 64) throw new Error('fixture group ID too long')
+  const aad = new Uint8Array(1 + pm.groupId.length + 9)
+  aad[0] = pm.groupId.length
+  aad.set(pm.groupId, 1)
+  new DataView(aad.buffer).setBigUint64(1 + pm.groupId.length, pm.epoch)
+  aad[aad.length - 1] = pm.contentType
+  const opened = await cipherSuite.hpke.decryptAead(key, nonce, aad, pm.encryptedSenderData)
+  return new DataView(opened.buffer, opened.byteOffset, opened.byteLength).getUint32(4)
+}
+
+describe('GroupHandle.reserveHandshakeGeneration', () => {
+  test.each([false, true])(
+    'persists before framing, including after restore (derived: %s)',
+    async (derived) => {
+      const { aliceGroup, bobGroup } = await twoMemberGroup(`reserve-handshake-${derived}`)
+      if (derived) await bobGroup.encrypt(utf8.encode('warmup'))
+      const epoch = bobGroup.epoch
+      const application = senderGeneration(bobGroup)
+      let persisted = encodeClientState(bobGroup.state)
+      const frames: Array<Uint8Array> = []
+      let current = bobGroup
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await current.reserveHandshakeGeneration(async (handle) => {
+          persisted = encodeClientState(handle.state)
+          expect(handle.epoch).toBe(epoch)
+          expect(senderGeneration(handle)).toBe(application)
+        })
+        const result = await createCommit({ context: current.context, state: current.state })
+        frames.push(encode(mlsMessageEncoder, result.commit))
+        // Discard both the peer's pending commit and the live source handle.
+        const state = decodeClientState(persisted)
+        if (state == null) throw new Error('invalid state')
+        current = await restoreGroup({
+          state,
+          credential: bobGroup.credential,
+          ledgerEntries: bobGroup.ledgerTokens,
+        })
+      }
+      const generations = await Promise.all(
+        frames.map((frame) => framedGeneration(aliceGroup, frame)),
+      )
+      expect(generations).toEqual([1, 2])
+      expect(current.epoch).toBe(epoch)
+      // Skipping a failed attempt must still produce a commit a real receiver applies.
+      await aliceGroup.processMessage(frames[1] as Uint8Array)
+      expect(aliceGroup.epoch).toBe(epoch + 1n)
+    },
+  )
+
+  test('a failed persist leaves source state and secrets intact and can retry', async () => {
+    const { bobGroup } = await twoMemberGroup('reserve-handshake-failure')
+    const before = encodeClientState(bobGroup.state)
+    await expect(
+      bobGroup.reserveHandshakeGeneration(async () => {
+        throw new Error('disk failed')
+      }),
+    ).rejects.toThrow('disk failed')
+    expect(encodeClientState(bobGroup.state)).toEqual(before)
+    await bobGroup.reserveHandshakeGeneration(async () => {})
+    const firstSecret =
+      bobGroup.state.secretTree.leafNodes[Number(bobGroup.state.privatePath.leafIndex) * 2]
+        ?.handshake.secret
+    const after = encodeClientState(bobGroup.state)
+    await expect(
+      bobGroup.reserveHandshakeGeneration(async () => {
+        throw new Error('disk failed')
+      }),
+    ).rejects.toThrow('disk failed')
+    expect(encodeClientState(bobGroup.state)).toEqual(after)
+    expect(firstSecret?.some((byte) => byte !== 0)).toBe(true)
+    await bobGroup.reserveHandshakeGeneration(async () => {})
+    expect(firstSecret?.every((byte) => byte === 0)).toBe(true)
+  })
+
+  test('preserves pending proposals rather than imposing the application send gate', async () => {
+    const { bobGroup } = await twoMemberGroup('reserve-with-proposals')
+    await proposeSelfRemoval(bobGroup)
+    const proposals = bobGroup.state.unappliedProposals
+    await bobGroup.reserveHandshakeGeneration(async () => {})
+    expect(bobGroup.state.unappliedProposals).toBe(proposals)
+    expect(Object.keys(proposals)).not.toHaveLength(0)
+  })
 })

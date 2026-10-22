@@ -107,6 +107,7 @@ export type ConformanceGroupMLS = {
   ) => Promise<ConformanceOpenedRecoveryVerdict | null>
   sendAdmission: () => ConformanceSendAdmission
   readEpoch: () => Promise<number>
+  prepareCommitBuild?: () => Promise<void>
   rosterEntries: () => Promise<Array<ConformanceRosterEntry>>
   readCommitHeader: (commit: Uint8Array) => Promise<ConformanceCommitHeader | null>
   processCommit: (
@@ -226,6 +227,24 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
   }
 
   describe(`GroupMLS conformance — ${label}`, () => {
+    test('commit preparation preserves epoch, admission, roster and ledger', async () => {
+      await withGroup(1, 'prepare-commit', async (group) => {
+        const member = group.members[0]
+        if (member == null) throw new Error('missing member')
+        const { mls } = member
+        const epoch = await mls.readEpoch()
+        const admission = mls.sendAdmission()
+        const roster = await mls.rosterEntries()
+        const ledger = await mls.getLedger()
+        await mls.prepareCommitBuild?.()
+        await mls.prepareCommitBuild?.()
+        expect(await mls.readEpoch()).toBe(epoch)
+        expect(mls.sendAdmission()).toEqual(admission)
+        expect(await mls.rosterEntries()).toEqual(roster)
+        expect(await mls.getLedger()).toEqual(ledger)
+      })
+    })
+
     test('send admission is synchronous and follows only accepted epoch advances', async () => {
       await withGroup(1, 'send-admission', async (group) => {
         const member = memberAt(group.members, 0)

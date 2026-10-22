@@ -384,10 +384,11 @@ export type CommitLedgerEntriesResult = {
  * empty `tokens` list.
  *
  * Reads `group` and returns a NEW derived handle (`newGroup`); it never advances
- * `group`. The caller MUST adopt `newGroup` — never reuse `group` — before the next
- * commit: two commits from the same source handle both frame at its epoch and diverge.
- * The mutex only serializes concurrent calls against one handle; it does not make a
- * second commit from a superseded handle safe.
+ * `group`'s epoch. Adopt `newGroup` only after publication is accepted. Before each
+ * build that may be discarded, call `group.reserveHandshakeGeneration(persist)` so a
+ * retry, including after restart, cannot reuse the previous handshake generation.
+ * The mutex only serializes concurrent calls against one handle. A source whose commit
+ * was accepted is superseded and must never be reused.
  */
 export async function commitLedgerEntries(
   group: GroupHandle,

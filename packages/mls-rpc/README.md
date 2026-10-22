@@ -36,6 +36,12 @@ Both factories take the same `access` instance. The adapter reads the current ha
 adopts an authored commit through `access.replace(next)` after acceptance. The adapter saves before
 publishing the replacement and publishes its synchronous epoch hint after a successful save.
 
+Before every host commit build, `createGroupMLS` reserves and persists a fresh handshake sender generation through `access.mutate`.
+The epoch and application ratchet stay unchanged, including when a discarded CAS winner never applies.
+A restart reserves again before framing, so restoring the saved source cannot reuse its previous build's generation.
+Durable hosts must supply `simpleHandleAccess.persist` or an equivalent transactional `HandleAccess`.
+Persistence must resolve after a durable write and reject without changing storage.
+
 For a *received* commit there is nothing to adopt: ts-mls's `processMessage` advances the handle in
 place. A host that treated every commit as adopt-later would double-apply received ones.
 
@@ -54,7 +60,7 @@ A host with its own handle store implements the port instead:
 
 - `read(fn)` lends the handle for the callback only. `mutate(fn)` serialises with every other
   operation and resolves after the state is stored; `fn`'s `persist` argument goes to
-  `processMessage` and `bootstrapLedger`. `replace(next)` stores before publishing. A transactional
+  `processMessage`, `bootstrapLedger` and `reserveHandshakeGeneration`. `replace(next)` stores before publishing. A transactional
   host may restore a fresh handle per mutation, discard it on rollback, and publish on commit.
 - `epoch()` is a synchronous hint. Publish it only after the outermost successful commit, and restore
   it on rollback. No port decision reads it: every one uses an epoch read under the lock.

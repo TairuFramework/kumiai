@@ -14,7 +14,11 @@ import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryCommitJournal } from './fixtures/journal.js'
-import { createMemoryGroupMLS, memoryEntryID } from './fixtures/memory-group-mls.js'
+import {
+  createMemoryGroupMLS,
+  decodeMemoryCommit,
+  memoryEntryID,
+} from './fixtures/memory-group-mls.js'
 import { createMemoryAppOutbox } from './fixtures/outbox.js'
 import {
   buildInviteCommit,
@@ -130,6 +134,105 @@ describe('the commit loop converges, serializes and journals', () => {
 
     await alice.peer.dispose()
     await bob.peer.dispose()
+  })
+
+  test.each(['refused', 'history', 'poison'])(
+    'a retry after a %s CAS winner lands with a fresh handshake generation',
+    async (winner) => {
+      const hub = new FakeHub()
+      const recoverySecret = new Uint8Array(32).fill(0x2a)
+      let publishes = 0
+      const alice = makeMLSPeer(
+        gatedHub(hub, async (params) => {
+          if (params.publishID == null) return
+          if (++publishes === 1) {
+            await publishCommit({
+              hub,
+              senderDID: 'zoe',
+              recoverySecret,
+              epoch: winner === 'history' ? 0 : 1,
+              ...(winner === 'poison' ? { commit: new Uint8Array() } : {}),
+            })
+          }
+        }),
+        'alice',
+        recoverySecret,
+        { acceptsCommitter: (did) => did !== 'zoe' },
+      )
+      const attempts: Array<{ epoch: number; generation: number | undefined }> = []
+      const build = buildLedgerCommit(alice, [])
+      try {
+        await expect(
+          alice.peer.commit(async () => {
+            const pending = await build()
+            const framed = decodeMemoryCommit(pending.commit)
+            if (framed == null) throw new Error('missing commit')
+            attempts.push({ epoch: framed.epoch, generation: framed.handshakeGeneration })
+            return pending
+          }),
+        ).resolves.toEqual({})
+        expect(attempts.map((attempt) => attempt.epoch)).toEqual([1, 1])
+        expect(attempts[1]?.generation).toBeGreaterThan(attempts[0]?.generation ?? -1)
+        expect(publishes).toBe(2)
+        expect(alice.mls.epoch()).toBe(2)
+        expect(alice.journal.slot()).toBeNull()
+      } finally {
+        await alice.peer.dispose()
+      }
+    },
+  )
+
+  test('a recreated handle reserves a higher handshake generation after a lost CAS', async () => {
+    const hub = new FakeHub()
+    const recoverySecret = new Uint8Array(32).fill(0x2b)
+    let savedGeneration = 0
+    const makeHandle = () =>
+      createMemoryGroupMLS({
+        epoch: 1,
+        localDID: 'alice',
+        recoverySecret,
+        handshakeGeneration: savedGeneration,
+        persistHandshakeGeneration: (generation) => {
+          savedGeneration = generation
+        },
+      })
+    const alice = makeMLSPeer(
+      gatedHub(hub, async (params) => {
+        if (params.publishID != null) {
+          await publishCommit({ hub, senderDID: 'zoe', recoverySecret, epoch: 0 })
+        }
+      }),
+      'alice',
+      recoverySecret,
+      { mls: makeHandle(), commitDeadlineMs: 0 },
+    )
+    const attempts: Array<number | undefined> = []
+    const first = buildLedgerCommit(alice, [])
+    await expect(
+      alice.peer.commit(async () => {
+        const pending = await first()
+        attempts.push(decodeMemoryCommit(pending.commit)?.handshakeGeneration)
+        return pending
+      }),
+    ).rejects.toThrow(CommitDeadlineError)
+    await alice.peer.dispose()
+    const bob = makeMLSPeer(hub, 'alice', recoverySecret, {
+      restartOf: alice,
+      mls: makeHandle(),
+    })
+    const retry = buildLedgerCommit(bob, [])
+    try {
+      await bob.peer.commit(async () => {
+        const pending = await retry()
+        attempts.push(decodeMemoryCommit(pending.commit)?.handshakeGeneration)
+        return pending
+      })
+      expect(attempts).toHaveLength(2)
+      expect(attempts[1]).toBeGreaterThan(attempts[0] ?? -1)
+      expect(bob.mls.epoch()).toBe(2)
+    } finally {
+      await bob.peer.dispose()
+    }
   })
 
   test('two commits on ONE device serialize: neither builds against a superseded handle', async () => {

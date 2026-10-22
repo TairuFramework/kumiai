@@ -13,6 +13,9 @@ export type CommitKind = 'ledger' | 'invite' | 'remove'
  * derived handle and never advance the source — so the host's live handle is still the
  * pre-commit one, which is what lets the peer seal the bodies under the epoch every receiver of
  * this commit is at.
+ *
+ * When GroupMLS.prepareCommitBuild is absent, the host builder must durably reserve a
+ * higher handshake generation before every build, including after restart and failed CAS.
  */
 export type PendingCommit = {
   /** Framed MLSMessage(Commit) bytes. */
