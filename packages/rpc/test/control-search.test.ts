@@ -467,7 +467,10 @@ test('committed own occurrence beyond a captured empty head forbids absence', as
   expect(built.epoch).toBe(65)
   expect(built.searchFrom).toBe(position(100))
   expect(await f.search.searchLog(built)).toEqual({ kind: 'unknown' })
-  expect(f.hold).toHaveBeenLastCalledWith(expect.objectContaining({ reason: 'acceptance-unknown' }))
+  expect(f.hold).toHaveBeenLastCalledWith(
+    expect.objectContaining({ reason: 'acceptance-unknown' }),
+    built,
+  )
   expect(f.followWinner).not.toHaveBeenCalled()
 })
 
@@ -489,7 +492,10 @@ test('retired keys never follow a successor incarnation', async () => {
   expect(await f.search.searchLog(built)).toEqual({ kind: 'unknown' })
   expect(f.fetch).not.toHaveBeenCalled()
   expect(f.followWinner).not.toHaveBeenCalled()
-  expect(f.hold).toHaveBeenLastCalledWith(expect.objectContaining({ reason: 'acceptance-unknown' }))
+  expect(f.hold).toHaveBeenLastCalledWith(
+    expect.objectContaining({ reason: 'acceptance-unknown' }),
+    built,
+  )
 })
 
 test('budget yields preserve discovery through a prefix larger than one invocation', async () => {
@@ -874,7 +880,7 @@ test('version-only movement preserves discovery and refreshes the proof', async 
 
 test('complete absence requires reconciliation and a stable bounded head', async () => {
   const f = fixture([])
-  expect(await f.search.searchLog(built)).toEqual({ kind: 'absent' })
+  expect(await f.search.searchLog(built)).toEqual({ kind: 'absent', validated: true })
   expect(f.reconcileAbsent).toHaveBeenCalledWith(position(100), null, expect.any(Object))
   f.deps.reconcileAbsent = async () => false
   expect(await f.search.searchLog(built)).toEqual({ kind: 'unknown' })
@@ -1094,3 +1100,78 @@ test('unsupported-version poison never grants retryHead alongside an own copy mi
   ])
   expect(f.fetch).toHaveBeenCalledTimes(1)
 })
+
+test('an unresolved earlier copy prevents supersession of a later exact occurrence', async () => {
+  const f = fixture([
+    { id: 101, value: 2 },
+    { id: 102, value: 1 },
+    { id: 103, value: 2 },
+  ])
+  f.deps.fetch = async (after) => {
+    const page = await f.fetch(after)
+    return {
+      ...page,
+      messages: page.messages.map((row) =>
+        row.sequenceID === position(101)
+          ? {
+              ...row,
+              payload: encodeHandshakeFrame(
+                HANDSHAKE_KIND.commit,
+                encodeCommitFrame(new Uint8Array([2]), new Uint8Array([99])),
+              ),
+            }
+          : row,
+      ),
+    }
+  }
+  f.deps.validation = {
+    restoreValidation: async () => ({
+      source,
+      readCommitHeader: async () => ({ epoch: 65 }),
+      validateFrame: async (frame) =>
+        frame.position === position(101)
+          ? { kind: 'unavailable', reason: 'unrecognised' }
+          : f.validateFrame(frame),
+      verifyOwn: async () => true,
+    }),
+  }
+  expect(await f.search.searchLog(built)).toEqual({ kind: 'unknown' })
+  expect(f.followWinner).not.toHaveBeenCalled()
+})
+
+test.each(['unavailable', 'alternating'] as const)(
+  'per-build continuation survives another retained build: %s',
+  async (other) => {
+    const f = fixture(
+      Array.from({ length: 300 }, (_, index) => ({
+        id: 101 + index,
+        value: index === 299 ? 2 : 0,
+      })),
+    )
+    const restore = f.deps.validation.restoreValidation
+    f.deps.validation.restoreValidation = async (saved) => {
+      if (saved.publishID === 'other' && other === 'unavailable') return null
+      const validation = await restore(saved)
+      if (validation === null) return null
+      return {
+        ...validation,
+        validateFrame: async (frame) =>
+          digest(frame.payload) === built.payloadDigest
+            ? { kind: 'valid', header: { epoch: 65 }, own: true, advanced: true, removed: false }
+            : { kind: 'invalid', reason: 'non-commit' },
+      }
+    }
+    const otherBuild = { ...built, publishID: 'other' }
+    expect(await f.search.searchLog(built)).toEqual({ kind: 'unknown' })
+    expect(await f.search.searchLog(otherBuild)).toEqual({ kind: 'unknown' })
+    expect(await f.search.searchLog(built)).toMatchObject({
+      kind: 'first-valid',
+      proof: { position: position(400) },
+    })
+    if (other === 'alternating')
+      expect(await f.search.searchLog(otherBuild)).toMatchObject({
+        kind: 'first-valid',
+        proof: { position: position(400) },
+      })
+  },
+)

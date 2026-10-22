@@ -53,7 +53,10 @@ const scenarios: Array<[CommitOnceScenario, string]> = [
     'late-acked-slot',
     'late first-valid landing of an acked unknown slot adopts and owes its Welcome',
   ],
-  ['epoch-move', 'epoch advance rebuilds only after complete absence and intent revalidation'],
+  [
+    'epoch-move',
+    'earlier valid competitor settles a built operation lost without its own occurrence',
+  ],
   ['deadline', 'deadline survives reconstruction with changed configuration'],
   ['progress', 'ordinary adoption preserves committed sender and receiver progress'],
   ['slot-guards', 'rejection abandon and generic deletion retain the slot'],
@@ -82,6 +85,7 @@ export function testCommitOnceConformance(params: {
         expect(evidence.payloads).toHaveLength(evidence.publishIDs.length)
         expect(evidence.expectedHeads).toHaveLength(evidence.publishIDs.length)
         switch (scenario) {
+          case 'epoch-move':
           case 'alternate-id-replay':
           case 'public-member-winner':
           case 'terminal-winner':
@@ -119,7 +123,7 @@ export function testCommitOnceConformance(params: {
             break
           default:
             expect(evidence.outcome).toBe('landed')
-            expect(evidence.builds).toBe(scenario === 'epoch-move' ? 2 : 1)
+            expect(evidence.builds).toBe(1)
             expect(evidence.ownAdoptions).toBe(1)
             expect(evidence.welcomeDeliveries).toBe(1)
             expect(evidence.slotAfterAck).toBeNull()

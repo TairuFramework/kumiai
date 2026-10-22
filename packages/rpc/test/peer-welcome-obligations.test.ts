@@ -92,6 +92,7 @@ describe('durable Welcome obligations', () => {
           expect(snapshot.outcomes).toEqual([
             expect.objectContaining({ opID: op.id, kind: 'lost' }),
           ])
+          expect(snapshot.welcomes).toEqual([])
           expect(restarted.mls.epoch()).toBe(2)
         } else {
           expect(snapshot.commitOnce).toEqual(op.slot)
@@ -105,6 +106,96 @@ describe('durable Welcome obligations', () => {
       }
     },
   )
+
+  test('uncertain accepted Welcome survives unknown and restart until validated supersession deletes it', async () => {
+    const hub = new FakeHub()
+    const member = makeMLSPeer(hub, 'alice', secret)
+    await member.peer.resync()
+    const op = await seedBuiltOperation(member, buildInviteCommit(member, 'bob'))
+    if (op.stage !== 'built' || op.slot.welcome === null) throw new Error('Missing invite')
+    await member.peer.dispose()
+    await member.peer.drained()
+    let payload: Uint8Array | undefined
+    const winner = await publishCommit({
+      hub: {
+        publish: async (params) => {
+          payload = params.payload
+          return hub.publish(params)
+        },
+      },
+      senderDID: 'carol',
+      recoverySecret: secret,
+      epoch: 1,
+    })
+    const topicID = commitTopic(secret)
+    if (payload === undefined) throw new Error('Missing competitor frame')
+    const occurrence = await hub.publish({
+      senderDID: 'alice',
+      topicID,
+      payload: op.slot.payload,
+      publishID: op.slot.publishID,
+      retain: 'log',
+    })
+    hub.hideFrom('alice', winner.sequenceID)
+    hub.hideFrom('alice', occurrence.sequenceID)
+    // A later copy advances us, but cannot order the retained earlier acceptance.
+    await hub.publish({ senderDID: 'carol', topicID, payload, retain: 'log' })
+    const source = await member.mls.readRecoverySource()
+    const acceptance = {
+      source: { key: source.key, identity: source.identity, stateVersion: source.stateVersion },
+      from: op.slot.searchFrom,
+      position: asLogPosition(occurrence.sequenceID),
+      payloadDigest: op.slot.payloadDigest,
+    }
+    const welcome = {
+      opID: op.id,
+      welcome: op.slot.welcome.bytes,
+      recipients: op.slot.welcome.recipients,
+    }
+    await member.control.apply(
+      {
+        commitOnceAcceptance: acceptance,
+        putOperations: [
+          { ...op, deadline: 0, stage: 'accepted', acceptedAs: acceptance.position, acceptance },
+        ],
+        putWelcomes: [welcome],
+      },
+      'uncertain-acceptance',
+    )
+    const restarted = await reconstructMemoryPeer(hub, 'alice', secret, member.database, {
+      welcomes: member.welcomes,
+    })
+    try {
+      await restarted.peer.replay()
+      const uncertain = await restarted.control.load()
+      expect(uncertain.outcomes).toMatchObject([{ opID: op.id, kind: 'unknown' }])
+      expect(uncertain.welcomes).toEqual([welcome])
+      expect(uncertain.operations).toMatchObject([
+        { id: op.id, reconciliation: { slot: op.slot, acceptance } },
+      ])
+      expect(restarted.welcomes).toEqual([])
+    } finally {
+      await restarted.peer.dispose()
+      await restarted.peer.drained()
+    }
+    hub.revealTo('alice', winner.sequenceID)
+    hub.revealTo('alice', occurrence.sequenceID)
+    const reconciled = await reconstructMemoryPeer(hub, 'alice', secret, member.database, {
+      welcomes: member.welcomes,
+    })
+    try {
+      await reconciled.peer.replay()
+      const after = await reconciled.control.load()
+      expect(after.outcomes).toMatchObject([{ opID: op.id, kind: 'lost' }])
+      expect(after.welcomes).toEqual([])
+      expect(after.operations).toEqual([])
+      expect(after.controlHold).toBeNull()
+      expect(reconciled.welcomes).toEqual([])
+    } finally {
+      await reconciled.peer.dispose()
+      await reconciled.peer.drained()
+    }
+  })
 
   test('Welcome remains owed after landed outcome acknowledgement', async () => {
     const hub = new FakeHub()

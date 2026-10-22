@@ -10,7 +10,12 @@ import type {
 } from '../recovery-types.js'
 import type { PublishOutcome } from './operations.js'
 import { controlSafetyHeld } from './safety.js'
-import { applyResolved, pruneWindow } from './store.js'
+import {
+  applyResolved,
+  deleteOperationChanges,
+  pruneWindow,
+  retainAdvancedControlSlot,
+} from './store.js'
 import type {
   AdoptionWriteFactory,
   AppliedCommit,
@@ -213,7 +218,10 @@ export async function stepLegacyRejoin(
     const next: LegacyRejoinRecord = { ...record, stage: 'adopted' }
     const deferred = snapshot.operations.filter((op) => op.stage === 'accepted')
     const settlement = {
-      deleteOperations: deferred.map((op) => op.id),
+      ...deleteOperationChanges(
+        snapshot,
+        deferred.map((op) => op.id),
+      ),
       putOutcomes: deferred.map(
         (op): Outcome => ({ id: op.id, opID: op.id, at: deps.now(), kind: 'unknown' }),
       ),
@@ -226,6 +234,9 @@ export async function stepLegacyRejoin(
       anchorLanded: record.digest,
       changes: {
         ...pruneWindow(snapshot, row.epoch),
+        ...(staged.incarnation === deps.control.key.incarnation
+          ? retainAdvancedControlSlot(snapshot, staged.epochAfter)
+          : {}),
         ...settlement,
         putRejoin: next,
         ...(snapshot.controlHold?.reason === 'acceptance-unknown' ? { controlHold: null } : {}),

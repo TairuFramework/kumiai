@@ -26,7 +26,7 @@ export type FirstValidCommit = {
 export type CommitSearchResult =
   | { kind: 'first-valid'; proof: FirstValidCommit }
   | { kind: 'superseded'; winner: LogPosition }
-  | { kind: 'absent' }
+  | { kind: 'absent'; validated?: true }
   | { kind: 'unknown'; retryHead?: LogPosition | null }
 export type ControlSearchPort = {
   searchLog(built: BuiltCommit, position?: LogPosition): Promise<CommitSearchResult>
@@ -50,7 +50,8 @@ export type ControlSnapshot = {
   strand: {
     reason: 'retention-gap' | 'unprocessable-gap' | 'lost-state' | 'ahead' | 'unsupported-version'
   } | null
-  operations: Array<Operation> // FIFO by `seq`
+  /** Durable rows: executable FIFO by seq, plus the retained reconciliation set. */
+  operations: Array<Operation>
   forkRecoveryAttempt?: ForkRecoveryAttempt | null
   rejoin: StoredRejoinRecord | null
   recoveryEpochFloor: number | null
@@ -111,6 +112,18 @@ export type ControlStore = {
   lastMutation(): Promise<string | null>
 }
 
+export type AcceptanceUncertainty = {
+  cause: 'unavailable' | 'gap' | 'ahead' | 'copy-mismatch'
+  at: LogPosition | null
+}
+
+/** Adoption moves rows into reconciliation atomically with source epoch advancement. */
+export function executableOperations(
+  snapshot: Pick<ControlSnapshot, 'operations'>,
+): Array<Operation> {
+  return snapshot.operations.filter((op) => op.reconciliation === undefined)
+}
+
 export type OperationRequest = {
   /** Random 128-bit; the host's handle for outcomes. */
   id: string
@@ -127,6 +140,17 @@ export type Operation = OperationRequest & {
   deadline: number
   /** Persisted before handoff. Absence at this head cannot exclude a delayed CAS. */
   pendingPublish?: { expectedHead: LogPosition | null }
+  /** Positive hub acknowledgement, independent of first-valid validation. */
+  hubAcceptedAt?: LogPosition
+  unknownReported?: true
+  /** Retained after authenticated adoption consumes the source slot before ordering is resolved.
+   * This set is unbounded by design until a later task introduces a storage policy. */
+  reconciliation?: {
+    slot: ControlSlot
+    acceptance: FirstValidCommit | null
+    /** Current unresolved evidence; only a validated search can discharge it. */
+    uncertainty?: AcceptanceUncertainty
+  }
 } & (
     | { stage: 'intent' }
     | { stage: 'built'; built: ControlBuildRef }

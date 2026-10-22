@@ -4,6 +4,7 @@ import {
   type ControlSnapshot,
   controlSafetyHeld,
   controlSettled,
+  deleteOperationChanges,
   deliverObligations,
   type Outcome,
   type WelcomeObligation,
@@ -116,7 +117,10 @@ export async function retireIncarnation<TTx extends GroupTransaction>(
     kind: 'unknown',
   }))
   const changes: ControlChanges = {
-    deleteOperations: abandoned.map(({ id }) => id),
+    ...deleteOperationChanges(
+      control,
+      abandoned.map(({ id }) => id),
+    ),
     ...(switchedRejoinID !== undefined && control.controlHold?.reason === 'acceptance-unknown'
       ? { controlHold: null }
       : {}),

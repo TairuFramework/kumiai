@@ -1,11 +1,15 @@
+import type { LogPosition } from '../cursor.js'
 import { controlSafetyHeld, type GroupForkEvidence, type SafetyHold } from './safety.js'
 import type { ControlEvidenceSnapshot, ControlLogFrame } from './search.js'
-import { applyResolved, pruneWindow } from './store.js'
+import { applyResolved, deleteOperationChanges, pruneWindow } from './store.js'
+import { decideSuperseded, supersededChanges } from './superseded.js'
 import type {
   BuiltCommit,
   ControlAdoptionPort,
   ControlBuildRef,
+  ControlChanges,
   ControlSearchPort,
+  ControlSlot,
   ControlStore,
   Outcome,
 } from './types.js'
@@ -27,6 +31,7 @@ export type ControlSlotDeps = {
   search: ControlSearchPort
   adoption: ControlAdoptionPort
   readEvidence(): Promise<ControlEvidenceSnapshot>
+  readHead?(): Promise<LogPosition | null>
   now(): number
   newID(): string
   emit(outcome: Outcome): void
@@ -35,9 +40,10 @@ export type ControlSlotDeps = {
 export async function settleControlSlot(
   deps: ControlSlotDeps,
   occurrence?: ControlLogFrame,
+  retained?: ControlSlot,
 ): Promise<'landed' | 'superseded' | 'absent' | 'unknown' | 'empty'> {
   const snapshot = await deps.control.load()
-  const slot = snapshot.commitOnce
+  const slot = retained ?? snapshot.commitOnce
   if (slot === null) return 'empty'
   const operation = snapshot.operations.find((op) => op.id === slot.opID)
   const exact = snapshot.applied.find((row) => row.epoch === slot.epoch)
@@ -52,7 +58,7 @@ export async function settleControlSlot(
     if (operation !== undefined)
       await applyResolved(
         deps.control,
-        { deleteOperations: [slot.opID] },
+        deleteOperationChanges(snapshot, [slot.opID]),
         deps.newID(),
         undefined,
         deps.signal,
@@ -62,8 +68,7 @@ export async function settleControlSlot(
   const held = () => deps.safetyHold() !== null || controlSafetyHeld(snapshot) !== null
   if (
     held() ||
-    snapshot.strand !== null ||
-    snapshot.cursor?.stranded === true ||
+    (retained === undefined && (snapshot.strand !== null || snapshot.cursor?.stranded === true)) ||
     (snapshot.controlHold !== null && snapshot.controlHold.reason !== 'acceptance-unknown')
   )
     return 'unknown'
@@ -72,7 +77,19 @@ export async function settleControlSlot(
   if (mismatch && operation !== undefined) {
     await applyResolved(
       deps.control,
-      { controlHold: { reason: 'acceptance-unknown', position: null } },
+      operation.reconciliation === undefined
+        ? { controlHold: { reason: 'acceptance-unknown', position: null, cause: 'copy-mismatch' } }
+        : {
+            putOperations: [
+              {
+                ...operation,
+                reconciliation: {
+                  ...operation.reconciliation,
+                  uncertainty: { cause: 'copy-mismatch', at: null },
+                },
+              },
+            ],
+          },
       deps.newID(),
       undefined,
       deps.signal,
@@ -102,21 +119,47 @@ export async function settleControlSlot(
   }
   const found = await deps.search.searchLog(slot, occurrence?.position)
   if (held()) return 'unknown'
-  if (found.kind === 'unknown' || found.kind === 'absent') return found.kind
+  if (found.kind === 'unknown') return 'unknown'
+  // Absence hints cannot discharge uncertainty. Search certifies coverage and validation explicitly.
+  if (found.kind === 'superseded' || (found.kind === 'absent' && found.validated)) {
+    const current = await deps.control.load()
+    const op = current.operations.find((op) => op.id === slot.opID)
+    const changes: ControlChanges = {}
+    if (op?.reconciliation?.uncertainty !== undefined) {
+      const { uncertainty: _uncertainty, ...reconciliation } = op.reconciliation
+      changes.putOperations = [{ ...op, reconciliation }]
+    }
+    if (
+      current.commitOnce?.opID === slot.opID &&
+      current.controlHold?.reason === 'acceptance-unknown'
+    )
+      changes.controlHold = null
+    if (changes.putOperations !== undefined || changes.controlHold !== undefined)
+      await applyResolved(deps.control, changes, deps.newID(), undefined, deps.signal)
+  }
+  if (found.kind === 'absent') return 'absent'
   if (found.kind === 'superseded') {
     const current = await deps.control.load()
-    if (current.operations.some((op) => op.id === slot.opID)) {
-      const outcome: Outcome = { id: slot.opID, opID: slot.opID, at: deps.now(), kind: 'lost' }
-      await applyResolved(
-        deps.control,
-        { deleteOperations: [slot.opID], putOutcomes: [outcome] },
-        deps.newID(),
-        undefined,
-        deps.signal,
-      )
-      deps.emit(outcome)
+    const op = current.operations.find((op) => op.id === slot.opID)
+    if (op === undefined) return 'superseded'
+    const head = op.pendingPublish === undefined ? undefined : await deps.readHead?.()
+    if (held() || controlSafetyHeld(current) !== null) return 'unknown'
+    const decision = decideSuperseded({
+      operation: op,
+      observedHead: head,
+      acceptance:
+        op.reconciliation?.acceptance ??
+        (current.commitOnce?.opID === op.id ? current.commitOnceAcceptance : null),
+      acceptanceUnknown: current.controlHold?.reason === 'acceptance-unknown',
+      evidence: found,
+      now: deps.now(),
+    })
+    const changes = supersededChanges(current, op, decision, deps.now())
+    if (Object.keys(changes).length > 0) {
+      await applyResolved(deps.control, changes, deps.newID(), undefined, deps.signal)
+      for (const outcome of changes.putOutcomes ?? []) deps.emit(outcome)
     }
-    return 'superseded'
+    return decision === 'pending' ? 'unknown' : 'superseded'
   }
   const proof = found.proof
   const searched = await deps.control.load()
@@ -182,7 +225,7 @@ export async function settleControlSlot(
         ...pruneWindow(current, slot.epoch),
         ...(current.controlHold?.reason === 'acceptance-unknown' ? { controlHold: null } : {}),
         commitOnce: null,
-        deleteOperations: [slot.opID],
+        ...deleteOperationChanges(current, [slot.opID]),
         deleteOutcomes: current.outcomes
           .filter((row) => row.opID === slot.opID)
           .map((row) => row.id),

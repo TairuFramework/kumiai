@@ -48,7 +48,8 @@ describe('memory control store', () => {
 describe('memory host database', () => {
   let db: MemoryHostDatabase
   const saveBuilt: ConformanceSaveControlBuild = (intent, built, expected, mutationID) => {
-    const { pendingPublish, ...request } = intent
+    const { pendingPublish, reconciliation, ...request } = intent
+    if (reconciliation !== undefined) return Promise.resolve('moved')
     return db.saveBuilt(
       'group-A',
       { groupID: 'group-A', incarnation: 1 },

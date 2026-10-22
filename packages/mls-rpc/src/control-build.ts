@@ -18,6 +18,7 @@ import {
   controlBuildRef,
   controlSafetyHeld,
   digestAppliedCommit,
+  executableOperations,
   GroupSafetyHeldError,
   type HostBuilt,
   type Operation,
@@ -128,8 +129,8 @@ export function createPersistenceBuildSaver<TTx extends GroupTransaction>(params
             built.searchFrom !== (snapshot.cursor?.position ?? null) ||
             (snapshot.cursor !== null &&
               (snapshot.cursor.epoch !== identity.epoch || snapshot.cursor.stranded)) ||
-            snapshot.operations[0]?.id !== intent.id ||
-            !sameStoredValue(snapshot.operations[0], intent)
+            executableOperations(snapshot)[0]?.id !== intent.id ||
+            !sameStoredValue(executableOperations(snapshot)[0], intent)
           )
             throw new PreparationMoved()
           if (snapshot.cursor === null) {
@@ -231,7 +232,7 @@ export function createControlBuildPort(params: {
         if (
           saved === undefined ||
           saved.stage !== 'intent' ||
-          snapshot.operations[0]?.id !== saved.id ||
+          executableOperations(snapshot)[0]?.id !== saved.id ||
           !sameStoredValue(params.control.key, scope.source.key) ||
           scope.source.identity === null
         )
@@ -441,7 +442,7 @@ export function createControlBuildPort(params: {
           (current.cursor?.position ?? null) !== checkpoint ||
           (current.cursor !== null &&
             (current.cursor.epoch !== identity.epoch || current.cursor.stranded)) ||
-          !sameStoredValue(current.operations[0], saved)
+          !sameStoredValue(executableOperations(current)[0], saved)
         )
           return { kind: 'moved', operation: saved }
         const source = decodeClientState(sourceState)

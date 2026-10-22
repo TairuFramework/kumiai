@@ -9,6 +9,7 @@ import { asLogPosition, type LogPosition } from '../cursor.js'
 import { decodeHandshakeFrame, HANDSHAKE_KIND, HANDSHAKE_VERSION } from '../handshake.js'
 import type { GroupForkEvidence, SafetyHold } from './safety.js'
 import type {
+  AcceptanceUncertainty,
   AdoptionExpected,
   AppliedCommit,
   BuiltCommit,
@@ -67,6 +68,7 @@ export type FollowWinnerResult =
 export type ControlHold = {
   reason: 'acceptance-unknown' | 'unsupported-version'
   position: LogPosition | null
+  cause?: AcceptanceUncertainty['cause']
 }
 export type ControlSearchBudget = { maxPasses: number; maxFetches: number; maxFrames: number }
 export type ControlSearchWork = { takeFetch(): boolean; takeFrame(): boolean }
@@ -87,7 +89,7 @@ export type ControlSearchDeps = {
     range: CertifiedControlRange | null,
     work: ControlSearchWork,
   ): Promise<boolean>
-  hold(value: ControlHold): Promise<void>
+  hold(value: ControlHold, built: BuiltCommit): Promise<void>
   haltFork(evidence: GroupForkEvidence): Promise<void>
   safetyHold(): SafetyHold
   onUnsupportedVersion?(frame: ControlLogFrame, epoch: number): void
@@ -189,14 +191,20 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
       throw new RangeError('Control search budgets must be positive integers')
   }
   // The owning peer lane must await each searchLog call before starting another.
-  let continuation: Discovery | null = null
+  const continuations = new Map<string, Discovery>()
   return {
     async searchLog(built) {
+      const key = JSON.stringify([built.incarnation, built.epoch, built.publishID])
+      let continuation = continuations.get(key) ?? null
+      const clearContinuation = () => {
+        continuations.delete(key)
+        continuation = null
+      }
       let fetches = 0
       let frames = 0
       const held = () => deps.safetyHold() !== null
       const stopped = () => {
-        continuation = null
+        clearContinuation()
         return { kind: 'unknown' as const }
       }
       const holdFork = async (value: GroupForkEvidence) => {
@@ -210,8 +218,9 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
         position: LogPosition | null = null,
         reason: ControlHold['reason'] | null = 'acceptance-unknown',
         retryHead?: LogPosition | null,
+        cause: AcceptanceUncertainty['cause'] = 'unavailable',
       ) => {
-        if (reason !== null && !held()) await deps.hold({ reason, position })
+        if (reason !== null && !held()) await deps.hold({ reason, position, cause }, built)
         return { kind: 'unknown' as const, ...(retryHead === undefined ? {} : { retryHead }) }
       }
       if (held()) return stopped()
@@ -227,7 +236,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
         !sameBytes(retained.authenticator, built.authenticatorBefore) ||
         toB64U(sha256(built.payload)) !== built.payloadDigest
       ) {
-        continuation = null
+        clearContinuation()
         return unknown()
       }
       let savedRecognition: string | null = null
@@ -242,8 +251,16 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
       }
       let evidence = await deps.readEvidence()
       if (held()) return stopped()
-      if (evidence.cursor?.stranded === true) {
-        continuation = null
+      // Advanced-state reconciliation validates its own prefix without moving the stranded cursor.
+      if (
+        evidence.cursor?.stranded === true &&
+        !(
+          evidence.source.identity !== null &&
+          evidence.source.identity.epoch > built.epoch &&
+          evidence.applied.some((row) => row.epoch === built.epoch)
+        )
+      ) {
+        clearContinuation()
         return unknown(evidence.cursor.position)
       }
       const coherent = async (): Promise<boolean> => {
@@ -270,7 +287,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
         return true
       }
       if (!(await coherent())) {
-        continuation = null
+        clearContinuation()
         return unknown()
       }
       const applied = () => evidence.applied.find((row) => row.epoch === retained.epoch)
@@ -279,7 +296,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
           evidence.terminal) &&
         applied() === undefined
       ) {
-        continuation = null
+        clearContinuation()
         return unknown()
       }
       if (
@@ -288,7 +305,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
           !sameIdentity(continuation.source.identity, retained) ||
           !sameKey(continuation.source.key, validation.source.key))
       )
-        continuation = null
+        clearContinuation()
       const discovery: Discovery = continuation ?? {
         built: {
           ...built,
@@ -311,7 +328,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
         unexplainedOwn: false,
         latestOwnMatches: null,
       }
-      continuation = discovery
+      continuations.set(key, discovery)
       const range = (): CertifiedControlRange | null =>
         discovery.winner === null || discovery.through === null
           ? null
@@ -331,7 +348,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
         evidence = await deps.readEvidence()
         if (held()) return false
         if (!(await coherent())) {
-          continuation = null
+          clearContinuation()
           return false
         }
         const row = applied()
@@ -339,7 +356,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
           return evidence.source.identity?.epoch === retained.epoch && !evidence.terminal
         const winner = discovery.winner
         if (winner === null) {
-          continuation = null
+          clearContinuation()
           return false
         }
         const winnerDigest = discovery.winnerOwn
@@ -351,11 +368,12 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
           ? built.payloadDigest
           : toB64U(sha256(winner.payload))
         if (
-          row.sequenceID !== winner.position ||
+          (row.sequenceID !== winner.position &&
+            (discovery.winnerOwn || asLogPosition(row.sequenceID) < winner.position)) ||
           row.payloadDigest !== winnerPayloadDigest ||
           row.digest !== winnerDigest
         ) {
-          continuation = null
+          clearContinuation()
           return false
         }
         return true
@@ -365,6 +383,9 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
         const certificate = range()
         if (certificate === null || discovery.winner === null) return true
         if (!(await committedWinner()) || held()) return false
+        // A validated earlier copy of the identical applied winner needs no second adoption.
+        const row = applied()
+        if (row !== undefined && row.sequenceID !== discovery.winner.position) return true
         const followed = await deps.followWinner(discovery.winner, certificate, work)
         if (held()) return false
         return followed.kind === 'applied' && followed.position === discovery.winner.position
@@ -373,17 +394,20 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
         if (held()) return stopped()
         // Skipping unknown semantics cannot certify the first valid prefix.
         if (discovery.unsupportedVersion) {
-          continuation = null
+          clearContinuation()
           return unknown(discovery.through, null)
         }
-        if (discovery.unexplainedOwn) return unknown(discovery.through)
+        if (discovery.unexplainedOwn || (discovery.copyMismatch && !discovery.winnerOwn)) {
+          clearContinuation()
+          return unknown(discovery.through, 'acceptance-unknown', undefined, 'copy-mismatch')
+        }
         if (discovery.winner === null || discovery.occurrence === null)
           return unknown(discovery.through)
         if (discovery.winnerOwn) {
           if (!(await validation.verifyOwn(built)) || !(await committedWinner()))
             return unknown(discovery.winner.position)
           if (held()) return stopped()
-          continuation = null
+          clearContinuation()
           const proofSource = sameIdentity(evidence.source.identity, retained)
             ? evidence.source
             : validation.source
@@ -399,7 +423,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
         }
         if (!(await follow())) return unknown(discovery.winner.position)
         if (held()) return stopped()
-        continuation = null
+        clearContinuation()
         return { kind: 'superseded' as const, winner: discovery.winner.position }
       }
       if (discovery.winner !== null && applied() !== undefined && !(await committedWinner()))
@@ -412,8 +436,8 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
           const page = await deps.fetch(discovery.through)
           if (held()) return stopped()
           if (!checkedPage(page, discovery.through, discovery.latestHead)) {
-            continuation = null
-            return unknown(discovery.through)
+            clearContinuation()
+            return unknown(discovery.through, 'acceptance-unknown', undefined, 'gap')
           }
           discovery.latestHead = page.head === null ? null : asLogPosition(page.head)
           if (!discovery.captured) {
@@ -461,7 +485,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
               header = await validation.readCommitHeader(commit)
               if (held()) return stopped()
             } catch {
-              continuation = null
+              clearContinuation()
               return unknown(position)
             }
             if (header === null) {
@@ -471,7 +495,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
             if (header.epoch < retained.epoch) {
               const historic = evidence.applied.find((entry) => entry.epoch === header.epoch)
               if (historic === undefined) {
-                continuation = null
+                clearContinuation()
                 return unknown(position)
               }
               discovery.through = position
@@ -479,9 +503,9 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
             }
             if (header.epoch > retained.epoch) {
               if (discovery.winner === null) {
-                continuation = null
+                clearContinuation()
                 await deps.reconcileAbsent(position, null, work)
-                return unknown(position)
+                return unknown(position, 'acceptance-unknown', undefined, 'ahead')
               }
               discovery.through = position
               continue
@@ -513,7 +537,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
                 discovery.through = position
                 continue
               }
-              continuation = null
+              clearContinuation()
               return unknown(position)
             }
             discovery.through = position
@@ -533,16 +557,16 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
           discovery.complete = discovery.head === null || discovery.through === discovery.head
         }
         if (discovery.unsupportedVersion) {
-          continuation = null
+          clearContinuation()
           return unknown(discovery.through, null)
         }
         if (discovery.latestOwnMatches === true) {
-          continuation = null
+          clearContinuation()
           return unknown(discovery.through)
         }
         if (discovery.copyMismatch) {
           const reconciled = await deps.reconcileAbsent(discovery.head, null, work)
-          continuation = null
+          clearContinuation()
           if (held()) return stopped()
           return unknown(
             discovery.through,
@@ -550,6 +574,7 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
             reconciled && !discovery.unexplainedOwn && discovery.latestOwnMatches === false
               ? discovery.head
               : undefined,
+            'copy-mismatch',
           )
         }
         if (discovery.winner !== null && !(await follow()))
@@ -561,15 +586,15 @@ export function createControlSearch(deps: ControlSearchDeps): ControlSearchPort 
         const probe = await deps.fetch(discovery.through)
         if (held()) return stopped()
         if (!checkedPage(probe, discovery.through, discovery.latestHead)) {
-          continuation = null
+          clearContinuation()
           return unknown(discovery.through)
         }
         const nextHead = probe.head === null ? null : asLogPosition(probe.head)
         if (nextHead === discovery.head) {
           if (!(await committedWinner())) return unknown(discovery.through)
-          continuation = null
+          clearContinuation()
           if (held()) return stopped()
-          return { kind: 'absent' }
+          return { kind: 'absent', validated: true }
         }
         discovery.head = nextHead
         discovery.latestHead = nextHead

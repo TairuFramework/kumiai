@@ -82,6 +82,40 @@ async function fixture() {
   return { store, deps, slot, op, proof, emitted }
 }
 
+test.each([true, false])(
+  'searched winner respects retained acknowledgement ordering (earlier copy=%s)',
+  async (earlier) => {
+    const f = await fixture()
+    const built = (await f.store.load()).operations[0]
+    if (built?.stage !== 'built') throw new Error('Missing built operation')
+    const operation: Operation = {
+      ...built,
+      hubAcceptedAt: asLogPosition(earlier ? '005' : '007'),
+    }
+    const acceptance = { ...f.proof, position: asLogPosition('007') }
+    const welcome = { opID: f.op.id, welcome: new Uint8Array([9]), recipients: ['invitee'] }
+    await f.store.apply(
+      { putOperations: [operation], commitOnceAcceptance: acceptance, putWelcomes: [welcome] },
+      'retain-acknowledgement',
+    )
+    f.deps.now = () => 100
+    f.deps.search.searchLog = async () => ({ kind: 'superseded', winner: asLogPosition('006') })
+    await settleControlSlot(f.deps)
+    const before = await f.store.load()
+    expect(before.outcomes).toMatchObject(earlier ? [] : [{ kind: 'lost' }])
+    expect(before.operations).toEqual(earlier ? [operation] : [])
+    expect(before.welcomes).toEqual(earlier ? [welcome] : [])
+    if (!earlier) return
+
+    f.deps.now = () => operation.deadline
+    await settleControlSlot(f.deps)
+    const expired = await f.store.load()
+    expect(expired.outcomes).toMatchObject([{ kind: 'unknown' }])
+    expect(expired.operations).toMatchObject([{ id: operation.id, unknownReported: true }])
+    expect(expired.welcomes).toEqual([welcome])
+  },
+)
+
 test.each(
   ['unknown', 'lost', 'abandon'].flatMap((prior) =>
     [true, false].map((acked) => [prior, acked] as const),

@@ -6,6 +6,7 @@ import type {
   RecoveryContinuationPort,
   StoredRejoinRecord,
 } from '@kumiai/rpc'
+import { deleteOperationChanges } from '@kumiai/rpc'
 
 import { coordinatorBinding, type EntryReads, entryCapability } from '../entry-capability.js'
 import { manualRecoveryAttempt, saveManualRecovery } from '../manual-recovery.js'
@@ -147,7 +148,10 @@ export function createRecoveryContinuationPort<TTx extends GroupTransaction>(par
               outcomes.push({ id: record.id, opID: null, at, kind: 'reenact', tokens })
             const changes: ControlChanges = {
               ...('format' in record && record.trigger === 'manual' ? {} : { deleteRejoin: true }),
-              deleteOperations: accepted.map(({ id }) => id),
+              ...deleteOperationChanges(
+                snapshot,
+                accepted.map(({ id }) => id),
+              ),
               putOutcomes: outcomes.filter(
                 ({ id }) => !snapshot.outcomes.some((outcome) => outcome.id === id),
               ),

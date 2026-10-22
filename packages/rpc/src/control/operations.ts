@@ -3,7 +3,8 @@ import type { FrameControlBuild, PrepareControlResult } from './build.js'
 import { controlSafetyHeld, type GroupForkEvidence, type SafetyHold } from './safety.js'
 import type { ControlEvidenceSnapshot } from './search.js'
 import { settleControlSlot } from './slot.js'
-import { applyResolved } from './store.js'
+import { applyResolved, deleteOperationChanges } from './store.js'
+import { decideSuperseded, type SupersessionEvidence, supersededChanges } from './superseded.js'
 import type {
   AppliedCommit,
   ControlAdoptionPort,
@@ -24,7 +25,9 @@ const publicationHeads = new WeakMap<
 >()
 
 export function revokeHeld(snapshot: ControlSnapshot): boolean {
-  return snapshot.operations.some((op) => op.revokes)
+  return snapshot.operations.some(
+    (op) => op.revokes && !(op.reconciliation !== undefined && op.unknownReported),
+  )
 }
 export type { HostBuilt } from './types.js'
 export type PublishOutcome = { sequenceID: string }
@@ -98,7 +101,7 @@ async function settle(deps: OperationDeps, op: Operation, outcome: Outcome): Pro
     return null
   await applyResolved(
     deps.control,
-    { deleteOperations: [op.id], putOutcomes: [outcome] },
+    { ...deleteOperationChanges(current, [op.id]), putOutcomes: [outcome] },
     deps.newID(),
     undefined,
     deps.signal,
@@ -108,29 +111,40 @@ async function settle(deps: OperationDeps, op: Operation, outcome: Outcome): Pro
 }
 
 export async function stepOperation(deps: OperationDeps, op: Operation): Promise<Operation | null> {
-  const finish = (kind: 'lost' | 'unknown') =>
-    settle(deps, op, { id: op.id, opID: op.id, at: deps.now(), kind })
+  const finish = async (evidence: SupersessionEvidence): Promise<Operation | null> => {
+    const snapshot = await deps.control.load()
+    const current = snapshot.operations.find((row) => row.id === op.id)
+    if (current === undefined) return null
+    const decision = decideSuperseded({
+      operation: current,
+      observedHead:
+        current.pendingPublish === undefined || held(snapshot) ? undefined : await deps.readHead(),
+      acceptance:
+        current.reconciliation?.acceptance ??
+        (snapshot.commitOnce?.opID === op.id ? snapshot.commitOnceAcceptance : null),
+      acceptanceUnknown: snapshot.controlHold?.reason === 'acceptance-unknown',
+      evidence: held(snapshot) || held() ? { kind: 'unavailable' } : evidence,
+      now: deps.now(),
+    })
+    const changes = supersededChanges(snapshot, current, decision, deps.now())
+    if (decision === 'pending' && Object.keys(changes).length === 0) return op
+    if (Object.keys(changes).length > 0) {
+      await applyResolved(deps.control, changes, deps.newID(), undefined, deps.signal)
+      for (const outcome of changes.putOutcomes ?? []) deps.emit(outcome)
+    }
+    return null
+  }
   const expired = () => deps.now() >= op.deadline
   const held = (snapshot?: ControlSnapshot) =>
     deps.safetyHold() !== null || (snapshot !== undefined && controlSafetyHeld(snapshot) !== null)
-  const waiting = () => (expired() ? finish(op.stage === 'intent' ? 'lost' : 'unknown') : op)
+  const waiting = () => (expired() ? finish({ kind: 'unavailable' }) : op)
   const initial = await deps.control.load()
-  if (held(initial) && initial.outcomes.some((row) => row.opID === op.id)) {
-    await applyResolved(
-      deps.control,
-      { deleteOperations: [op.id] },
-      deps.newID(),
-      undefined,
-      deps.signal,
-    )
-    return null
-  }
   if (op.stage !== 'intent') {
     const applied = initial.applied.find((row) => row.epoch === op.built.epoch)
     if (applied?.payloadDigest === op.built.payloadDigest) {
       await applyResolved(
         deps.control,
-        { deleteOperations: [op.id] },
+        deleteOperationChanges(initial, [op.id]),
         deps.newID(),
         undefined,
         deps.signal,
@@ -140,19 +154,19 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
   }
   if (held(initial)) return waiting()
   if (op.stage === 'intent') {
-    if (expired()) return finish('lost')
+    if (expired()) return finish({ kind: 'absent' })
     if (held()) return waiting()
     await deps.pullToHead()
     if (held()) return waiting()
-    if (expired()) return finish('lost')
+    if (expired()) return finish({ kind: 'absent' })
     const snapshot = await deps.control.load()
     if (held(snapshot)) return waiting()
-    if (snapshot.controlHold !== null) return expired() ? finish('lost') : op
+    if (snapshot.controlHold !== null) return expired() ? finish({ kind: 'absent' }) : op
     if (held()) return waiting()
     const evidence = await deps.readEvidence()
     if (held()) return waiting()
-    if (evidence.terminal) return expired() ? finish('lost') : op
-    if (expired()) return finish('lost')
+    if (evidence.terminal) return expired() ? finish({ kind: 'absent' }) : op
+    if (expired()) return finish({ kind: 'absent' })
     const result = await deps.prepareBuild(op, deps.frame)
     if (result.kind === 'rejected')
       return settle(deps, op, {
@@ -162,56 +176,41 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
         kind: 'rejected',
         reason: result.reason,
       })
-    if (result.kind === 'expired') return finish('lost')
+    if (result.kind === 'expired') return finish({ kind: 'absent' })
     return result.kind === 'saved' ? result.operation : op
   }
   let retryHead: LogPosition | null | undefined
   const discover = () => {
     retryHead = undefined
-    return settleControlSlot({
-      control: deps.control,
-      signal: deps.signal,
-      haltFork: deps.haltFork,
-      safetyHold: deps.safetyHold,
-      search: {
-        searchLog: async (built, position) => {
-          const found = await deps.searchLog(built, position)
-          retryHead = found.kind === 'unknown' ? found.retryHead : undefined
-          return found
+    return settleControlSlot(
+      {
+        control: deps.control,
+        signal: deps.signal,
+        haltFork: deps.haltFork,
+        safetyHold: deps.safetyHold,
+        search: {
+          searchLog: async (built, position) => {
+            const found = await deps.searchLog(built, position)
+            retryHead = found.kind === 'unknown' ? found.retryHead : undefined
+            return found
+          },
         },
+        adoption: { adopt: deps.adopt },
+        readEvidence: deps.readEvidence,
+        now: deps.now,
+        newID: deps.newID,
+        emit: deps.emit,
+        readHead: deps.readHead,
       },
-      adoption: { adopt: deps.adopt },
-      readEvidence: deps.readEvidence,
-      now: deps.now,
-      newID: deps.newID,
-      emit: deps.emit,
-    })
-  }
-  const resetIntent = async (): Promise<Operation | null> => {
-    if (held()) return waiting()
-    if (expired()) return finish('lost')
-    const next: Operation = {
-      id: op.id,
-      kind: op.kind,
-      revokes: op.revokes,
-      body: op.body,
-      seq: op.seq,
-      enqueuedAt: op.enqueuedAt,
-      deadline: op.deadline,
-      stage: 'intent',
-    }
-    await applyResolved(
-      deps.control,
-      { putOperations: [next] },
-      deps.newID(),
       undefined,
-      deps.signal,
+      op.reconciliation?.slot,
     )
-    return next
   }
-  const retained = (await deps.control.load()).commitOnce
+  const retained = op.reconciliation?.slot ?? (await deps.control.load()).commitOnce
   const advanceAbsent = async (): Promise<Operation | null> => {
     if (held()) return waiting()
+    const snapshot = await deps.control.load()
+    if (held(snapshot)) return waiting()
     const evidence = await deps.readEvidence()
     if (held()) return waiting()
     const identity = evidence.source.identity
@@ -225,14 +224,14 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
       identity.incarnation !== retained.incarnation ||
       identity.epoch <= retained.epoch
     )
-      return expired() ? finish('unknown') : op
-    return resetIntent()
+      return expired() ? finish({ kind: 'unavailable' }) : op
+    return finish({ kind: 'absent', epochAdvanced: true })
   }
   let result = await discover()
   if (result === 'landed' || result === 'superseded') return null
   if (held()) return waiting()
   if (result === 'unknown' && (expired() || op.stage === 'accepted' || retryHead === undefined))
-    return expired() ? finish('unknown') : op
+    return expired() ? finish({ kind: 'unavailable' }) : op
   const snapshot = await deps.control.load()
   if (held(snapshot)) return waiting()
   const slot = snapshot.commitOnce
@@ -245,7 +244,7 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
       slot.payloadDigest !== op.built.payloadDigest ||
       (snapshot.controlHold !== null && snapshot.controlHold.reason !== 'acceptance-unknown'))
   )
-    return expired() ? finish('unknown') : op
+    return expired() ? finish({ kind: 'unavailable' }) : op
   if (slot === null || slot.publishID !== op.built.publishID) {
     if (held()) return waiting()
     const evidence = await deps.readEvidence()
@@ -254,7 +253,7 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
     if (row?.payloadDigest === op.built.payloadDigest) {
       await applyResolved(
         deps.control,
-        { deleteOperations: [op.id] },
+        deleteOperationChanges(snapshot, [op.id]),
         deps.newID(),
         undefined,
         deps.signal,
@@ -262,7 +261,7 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
       return null
     }
     if (
-      op.stage === 'built' &&
+      result !== 'unknown' &&
       row !== undefined &&
       row.payloadDigest !== op.built.payloadDigest &&
       !evidence.terminal &&
@@ -272,9 +271,9 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
       evidence.source.identity?.incarnation === op.built.incarnation &&
       evidence.source.identity.epoch > op.built.epoch
     )
-      return resetIntent()
+      return finish({ kind: 'applied', winner: asLogPosition(row.sequenceID) })
     if (result === 'absent') return advanceAbsent()
-    return expired() ? finish('unknown') : op
+    return expired() ? finish({ kind: 'unavailable' }) : op
   }
   if (held()) return waiting()
   const evidence = await deps.readEvidence()
@@ -288,15 +287,19 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
     identity === null ||
     evidence.source.key.incarnation !== slot.incarnation
   )
-    return expired() ? finish('unknown') : op
+    return expired() ? finish({ kind: 'unavailable' }) : op
   if (identity.epoch > slot.epoch)
-    return result === 'unknown' ? (expired() ? finish('unknown') : op) : resetIntent()
+    return result === 'unknown'
+      ? expired()
+        ? finish({ kind: 'unavailable' })
+        : op
+      : finish({ kind: 'absent', epochAdvanced: true })
   if (
     identity.epoch !== slot.epoch ||
     identity.authenticator.length !== slot.authenticatorBefore.length ||
     identity.authenticator.some((byte, index) => byte !== slot.authenticatorBefore[index])
   )
-    return expired() ? finish('unknown') : op
+    return expired() ? finish({ kind: 'unavailable' }) : op
   if (held()) return waiting()
   const expectedHead = await deps.readHead()
   if (held()) return waiting()
@@ -310,7 +313,7 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
       (pending.expectedHead !== null && expectedHead <= pending.expectedHead))
   const acceptanceUnknown =
     result === 'unknown' || snapshot.controlHold?.reason === 'acceptance-unknown'
-  const absentOutcome = () => finish(acceptanceUnknown || outstanding ? 'unknown' : 'lost')
+  const absentOutcome = () => finish({ kind: acceptanceUnknown ? 'unavailable' : 'absent' })
   if (held()) return waiting()
   if (expired()) return absentOutcome()
   let publications = publicationHeads.get(deps.control)
@@ -361,7 +364,21 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
       refreshed.expectedHead,
     )
     publications.heads.add(expectedHead)
-    publications.heads.add(asLogPosition(published.sequenceID))
+    const acceptedAt = asLogPosition(published.sequenceID)
+    publications.heads.add(acceptedAt)
+    const acknowledged = (await deps.control.load()).operations.find((row) => row.id === op.id)
+    if (acknowledged !== undefined) {
+      const { pendingPublish: _pending, ...accepted } = acknowledged
+      await applyResolved(
+        deps.control,
+        {
+          putOperations: [{ ...accepted, hubAcceptedAt: acknowledged.hubAcceptedAt ?? acceptedAt }],
+        },
+        deps.newID(),
+        undefined,
+        deps.signal,
+      )
+    }
   } catch (error) {
     deps.publishFailed?.(op.id, error)
     if (
@@ -385,19 +402,8 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
   if (result === 'absent' && (await deps.control.load()).commitOnce === null) return advanceAbsent()
   if (held()) return waiting()
   if (expired()) {
-    if (result !== 'absent' || acceptanceUnknown) return finish('unknown')
-    const finalSnapshot = await deps.control.load()
-    if (held(finalSnapshot)) return waiting()
-    const after = finalSnapshot.operations.find((row) => row.id === op.id)
-    const head = await deps.readHead()
-    if (held()) return waiting()
-    const attempt = after?.pendingPublish
-    return finish(
-      attempt !== undefined &&
-        (head === null || (attempt.expectedHead !== null && head <= attempt.expectedHead))
-        ? 'unknown'
-        : 'lost',
-    )
+    if (result !== 'absent' || acceptanceUnknown) return finish({ kind: 'unavailable' })
+    return finish({ kind: 'absent' })
   }
   return op
 }

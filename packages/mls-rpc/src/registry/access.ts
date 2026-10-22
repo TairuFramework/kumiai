@@ -24,6 +24,7 @@ import { controlCompatible } from '../control-compat.js'
 import { type ControlJournal, decodeControlJournal } from '../control-journal.js'
 import { controlBuildContexts } from '../control-write-context.js'
 import type { EntryCapability, EntryReads } from '../entry-capability.js'
+import { consumesInboundCommit } from '../inbound-commit.js'
 import { sameStoredValue } from '../memory-incarnation-stores.js'
 import { decodeStoredValue, encodeStoredValue } from '../persistence-codec.js'
 import {
@@ -658,7 +659,19 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
               )
             ) {
               const control = await reads.control(owner.key.incarnation)
-              if (control.commitOnce !== null) throw moved()
+              if (
+                control.commitOnce !== null &&
+                !consumesInboundCommit({
+                  context: ctx,
+                  source: handle,
+                  result: input,
+                  capturedState: captured.state,
+                  cursorBefore: control.cursor,
+                  record: value.record,
+                  write: stagedWrite,
+                })
+              )
+                throw moved()
             }
             const saved =
               final === candidate

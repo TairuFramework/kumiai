@@ -210,7 +210,7 @@ test('restart restores co-committed revoke proof state before volatile adoption 
   }
 })
 
-test('a lost epoch race rebuilds and serialises the proof against the winning recorded log', async () => {
+test('a fresh request after a lost epoch race serialises proof against the winning recorded log', async () => {
   const s = await setup()
   const target = fixture.agent(71).id
   const prior = s.log[1]
@@ -238,10 +238,20 @@ test('a lost epoch race rebuilds and serialises the proof against the winning re
       return encodeJournal(candidate)
     }
 
+    const input = { subject: target, log: [...s.log, nextRev] }
+    await expect(
+      adapter.publishRevokeProof({
+        peer: s.member.peer,
+        mls: s.mls,
+        input,
+      }),
+    ).rejects.toMatchObject({ outcome: { kind: 'lost' } })
+    expect(derived).toHaveLength(1)
+    expect(Number(s.member.handle().epoch)).toBe(epoch + 1)
     const result = await adapter.publishRevokeProof({
       peer: s.member.peer,
       mls: s.mls,
-      input: { subject: target, log: [...s.log, nextRev] },
+      input,
     })
     expect(result).toEqual({ status: 'committed', epoch: epoch + 2 })
     expect(derived).toHaveLength(2)
@@ -262,7 +272,7 @@ test('a lost epoch race rebuilds and serialises the proof against the winning re
   }
 })
 
-test('a winning duplicate proof returns already revoked after the race', async () => {
+test('a fresh request after a winning duplicate proof returns already revoked', async () => {
   const s = await setup()
   let builds = 0
   try {
@@ -276,6 +286,13 @@ test('a winning duplicate proof returns already revoked after the race', async (
       return encodeJournal(candidate)
     }
 
+    await expect(
+      adapter.publishRevokeProof({
+        peer: s.member.peer,
+        mls: s.mls,
+        input: { subject: s.subject, log: s.log },
+      }),
+    ).rejects.toMatchObject({ outcome: { kind: 'lost' } })
     expect(
       await adapter.publishRevokeProof({
         peer: s.member.peer,
@@ -298,7 +315,8 @@ const controlHost = () => ({
   control: controlDatabase.control('state', { groupID: 'state', incarnation: 1 }),
   loadVersion: () => controlDatabase.loadVersion('state'),
   saveBuilt: ((intent, built, expected, mutationID) => {
-    const { pendingPublish, ...request } = intent
+    const { pendingPublish, reconciliation, ...request } = intent
+    if (reconciliation !== undefined) return Promise.resolve('moved')
     return controlDatabase.saveBuilt(
       'state',
       { groupID: 'state', incarnation: 1 },

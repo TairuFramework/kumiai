@@ -1180,3 +1180,60 @@ test('build retry ignores an unreferenced source proposal', async () => {
   if (slot === null) throw new Error('Missing slot')
   expect(decodeControlJournal(slot.journal).referencedProposals).toEqual([])
 })
+
+test('retained prior-epoch reconciliation does not precede the executable build head', async () => {
+  const group = await createRealGroup(1, 'build')
+  const h = await setup(group.committer)
+  const slot = { ...(await h.slot()), opID: 'retained', epoch: Number(h.handle.epoch) - 1 }
+  const retained: Operation = {
+    ...intent,
+    id: slot.opID,
+    seq: 0,
+    stage: 'built',
+    built: {
+      incarnation: slot.incarnation,
+      epoch: slot.epoch,
+      publishID: slot.publishID,
+      payloadDigest: slot.payloadDigest,
+    },
+    unknownReported: true,
+    reconciliation: { slot, acceptance: null, uncertainty: { cause: 'unavailable', at: null } },
+  }
+  await h.control.apply({ putOperations: [retained] }, 'retain-prior-epoch')
+  expect((await h.make().prepareBuild(intent, h.frame)).kind).toBe('saved')
+  const saved = await h.control.load()
+  expect(saved.commitOnce?.opID).toBe(intent.id)
+  expect(saved.operations.find((op) => op.id === retained.id)).toEqual(retained)
+  expect(h.counts()).toEqual({ buildCalls: 1, frameCalls: 1 })
+})
+
+test('transactional save double selects the executable head past retained rows', async () => {
+  const host = await setup()
+  const store = createTransactionalStore(host.handle)
+  const slot = await host.slot()
+  const source = { ...(await host.source()), stateVersion: store.snapshot().revision + 1 }
+  slot.journal = encodeControlJournal({ ...decodeControlJournal(slot.journal), source })
+  await store.control.apply(
+    {
+      putOperations: [
+        intent,
+        {
+          ...intent,
+          id: 'retained',
+          seq: 0,
+          stage: 'built',
+          built: { ...slot, epoch: slot.epoch - 1 },
+          reconciliation: {
+            slot: { ...slot, opID: 'retained', epoch: slot.epoch - 1 },
+            acceptance: null,
+          },
+        },
+      ],
+    },
+    'queued',
+  )
+  expect(await store.saveBuilt(intent, slot, source, 'executable-save')).toBe('saved')
+  expect(
+    (await store.control.load()).operations.find((row) => row.id === 'retained')?.reconciliation,
+  ).toBeDefined()
+})

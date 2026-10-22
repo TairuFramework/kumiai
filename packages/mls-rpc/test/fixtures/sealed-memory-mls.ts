@@ -835,6 +835,30 @@ class MemoryControlHandle extends GroupHandle {
     })
   }
 
+  override async readCommitHeader(commit: Uint8Array) {
+    const header = await this.#mls.readCommitHeader(commit)
+    if (header === null) return null
+    const authenticated = verifyMemoryCommitTag(commit, this.#mls.authenticator())
+    return {
+      epoch: BigInt(header.epoch),
+      ...(authenticated && header.committerDID !== undefined
+        ? { committerDID: header.committerDID }
+        : {}),
+      ...(header.external === true ? { external: true } : {}),
+    }
+  }
+
+  override async verifyCommitSignature(commit: Uint8Array): Promise<boolean> {
+    const header = await this.#mls.readCommitHeader(commit)
+    return (
+      this.state.ratchetTree[this.state.privatePath.leafIndex * 2]?.nodeType === 1 &&
+      header?.external !== true &&
+      header?.epoch === Number(this.epoch) &&
+      header?.committerDID === this.credential.id &&
+      verifyMemoryCommitTag(commit, this.#mls.authenticator())
+    )
+  }
+
   override async processMessage(
     message: Parameters<GroupHandle['processMessage']>[0],
     opts?: Parameters<GroupHandle['processMessage']>[1],
@@ -1049,7 +1073,8 @@ export async function buildSealedMemoryOperation(
     const epoch = mls.epoch()
     const authenticatorBefore = mls.authenticator()
     const { target } = decodeStoredValue(op.body) as { target: string }
-    const commit = mls.buildCommit([], { adds: [target] })
+    const rotation = op.kind === 'rotation'
+    const commit = mls.buildCommit([], rotation ? {} : { adds: [target] })
     let candidate: Uint8Array
     let candidateAuthenticator: Uint8Array
     try {
@@ -1059,11 +1084,11 @@ export async function buildSealedMemoryOperation(
     } finally {
       mls.restoreState(before)
     }
-    const welcome = new TextEncoder().encode(target)
+    const welcome = rotation ? null : new TextEncoder().encode(target)
     return {
       receipt: {
         commit,
-        welcome: welcome.slice(),
+        welcome: welcome?.slice() ?? null,
         referencedProposals: [],
         epoch,
         authenticatorBefore,
@@ -1073,7 +1098,7 @@ export async function buildSealedMemoryOperation(
         commit,
         bodies: [],
         journal: candidate,
-        welcome: { bytes: welcome, recipients: [target] },
+        welcome: welcome === null ? null : { bytes: welcome, recipients: [target] },
         incarnation: 1,
         epoch,
         authenticatorBefore,

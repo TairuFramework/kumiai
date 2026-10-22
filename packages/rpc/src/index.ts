@@ -113,10 +113,12 @@ export {
   ControlStoreInvariantError,
   controlAdoptionAllowed,
   controlSettled,
+  deleteOperationChanges,
   pruneWindow,
   readmissionChanges,
 } from './control/store.js'
 export type {
+  AcceptanceUncertainty,
   AdoptionExpected,
   AdoptionWrite,
   AdoptionWriteFactory,
@@ -145,6 +147,7 @@ export type {
   StagedAdoption,
   WelcomeObligation,
 } from './control/types.js'
+export { executableOperations } from './control/types.js'
 export { deliverObligations } from './control/welcome.js'
 export {
   type AppFrameRef,

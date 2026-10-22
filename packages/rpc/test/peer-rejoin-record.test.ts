@@ -19,6 +19,7 @@ import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS, decodeMemoryCommit } from './fixtures/memory-group-mls.js'
 import {
+  buildInviteCommit,
   buildLedgerCommit,
   buildLegacyRejoinRecord,
   makeMLSPeer,
@@ -1192,4 +1193,58 @@ test('a hold committed while rereading confirmed capture preserves its bytes', a
   expect(held).toBe(true)
   expect(again.mls.epoch()).toBe(1)
   expect((await again.control.load()).rejoin).toEqual(record)
+})
+
+test('authenticated legacy recovery retains an unresolved built source slot outside the executable FIFO', async () => {
+  const { bob } = await setup()
+  const op = await seedBuiltOperation(bob, buildInviteCommit(bob, 'invitee'))
+  const record = {
+    ...(await buildLegacyRejoinRecord(bob)),
+    stage: 'confirmed' as const,
+    position: asLogPosition('confirmed-recovery'),
+  }
+  await bob.peer.dispose()
+  await bob.peer.drained()
+  await bob.control.apply(
+    {
+      putRejoin: record,
+      controlHold: { reason: 'acceptance-unknown', position: null, cause: 'unavailable' },
+      putWelcomes: [{ opID: op.id, welcome: new Uint8Array([9]), recipients: ['invitee'] }],
+    },
+    'confirmed-recovery',
+  )
+  const pending = await bob.mls.restoreRecovery(record.candidate, record.requestKey)
+  const unreachable = async (): Promise<never> => {
+    throw new Error('Unexpected recovery step')
+  }
+  const deps: RejoinDeps = {
+    control: bob.control,
+    publish: unreachable,
+    searchLog: unreachable,
+    confirm: unreachable,
+    runSerial: (fn) => fn(),
+    scan: async () => ({ current: record.source, gap: false, frames: [] }),
+    adopt: async (_record, write) => {
+      await pending.onAccepted(write)
+    },
+    bootstrapLedger: unreachable,
+    getLedger: unreachable,
+    newID: () => 'recover-source-slot',
+    now: () => op.deadline,
+    emit: () => {},
+    discarded: () => {},
+  }
+  await stepRejoin(deps, record)
+  const snapshot = await bob.control.load()
+  expect(snapshot.commitOnce).toBeNull()
+  expect(snapshot.operations).toMatchObject([
+    {
+      id: op.id,
+      reconciliation: {
+        slot: { publishID: op.slot.publishID },
+        uncertainty: { cause: 'unavailable', at: null },
+      },
+    },
+  ])
+  expect(snapshot.welcomes.map((row) => row.opID)).toEqual([op.id])
 })

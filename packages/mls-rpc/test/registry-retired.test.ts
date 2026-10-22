@@ -1,6 +1,7 @@
 import {
   asLogPosition,
   type ControlChanges,
+  controlBuildRef,
   type FirstValidCommit,
   type WelcomeObligation,
 } from '@kumiai/rpc'
@@ -309,6 +310,46 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect(
           (await fixture.device.groups.ports({ ...key, incarnation: 2 }).control.load()).outcomes,
         ).toEqual([outcome])
+      } finally {
+        await fixture.close()
+      }
+    })
+
+    test('retirement removes a retained row and its uncommitted Welcome atomically', async () => {
+      const fixture = await create()
+      try {
+        const { slot } = await setup(fixture, { commitOnce: null, commitOnceAcceptance: null })
+        const committed = { ...welcome, opID: 'owed', committed: true as const }
+        await fixture.installRows({
+          key,
+          control: {
+            commitOnce: null,
+            putOperations: [
+              {
+                id: slot.opID,
+                kind: 'invite',
+                revokes: false,
+                body: bytes,
+                seq: 1,
+                enqueuedAt: 1,
+                deadline: 2,
+                stage: 'built',
+                built: controlBuildRef(slot),
+                unknownReported: true,
+                reconciliation: {
+                  slot,
+                  acceptance: null,
+                  uncertainty: { cause: 'unavailable', at: null },
+                },
+              },
+            ],
+            putWelcomes: [committed],
+          },
+        })
+        await retire(fixture, mode)
+        const snapshot = await fixture.device.groups.ports(key).control.load()
+        expect(snapshot.operations).toEqual([])
+        expect(snapshot.welcomes).toEqual([committed])
       } finally {
         await fixture.close()
       }

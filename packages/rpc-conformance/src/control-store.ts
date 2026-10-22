@@ -25,7 +25,7 @@ export type ConformanceFirstValidCommit<Position extends string = string> = {
 export type ConformanceCommitSearchResult<Position extends string = string> =
   | { kind: 'first-valid'; proof: ConformanceFirstValidCommit<Position> }
   | { kind: 'superseded'; winner: Position }
-  | { kind: 'absent' }
+  | { kind: 'absent'; validated?: true }
   | { kind: 'unknown'; retryHead?: Position | null }
 export type ConformanceControlSearchPort<Position extends string = string> = {
   searchLog(
@@ -108,7 +108,7 @@ export type ConformanceControlSnapshot<Position extends string = string> = {
   strand: {
     reason: 'retention-gap' | 'unprocessable-gap' | 'lost-state' | 'ahead' | 'unsupported-version'
   } | null
-  operations: Array<ConformanceOperation<Position>> // FIFO by `seq`
+  operations: Array<ConformanceOperation<Position>> // Both sets by `seq`; untagged rows form the executable FIFO.
   forkRecoveryAttempt?: ConformanceForkRecoveryAttempt | null
   rejoin: ConformanceStoredRejoinRecord<Position> | null
   recoveryEpochFloor: number | null
@@ -179,6 +179,11 @@ export type ConformanceOperation<Position extends string = string> = Conformance
   enqueuedAt: number
   deadline: number
   pendingPublish?: { expectedHead: Position | null }
+  reconciliation?: {
+    slot: ConformanceControlSlot<Position>
+    acceptance: ConformanceFirstValidCommit<Position> | null
+    uncertainty?: { cause: 'unavailable' | 'gap' | 'ahead' | 'copy-mismatch'; at: Position | null }
+  }
 } & (
     | { stage: 'intent' }
     | { stage: 'built'; built: ConformanceControlBuildRef<Position> }

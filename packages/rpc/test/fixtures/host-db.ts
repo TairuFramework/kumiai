@@ -18,6 +18,7 @@ import type {
   GroupKey,
   Operation,
 } from '../../src/control/types.js'
+import { executableOperations } from '../../src/control/types.js'
 import { GroupControlUnsettledError, StorageOutcomeUnknownError } from '../../src/errors.js'
 
 type GroupRecord = {
@@ -204,8 +205,8 @@ export function createMemoryHostDatabase(
             (next.control.cursor === null &&
               (next.initialState === null ||
                 !same(readIdentity(storageID, next.initialState, key), identity))) ||
-            next.control.operations[0]?.id !== intent.id ||
-            !same(next.control.operations[0], intent) ||
+            executableOperations(next.control)[0]?.id !== intent.id ||
+            !same(executableOperations(next.control)[0], intent) ||
             built.searchFrom !== (next.control.cursor?.position ?? null) ||
             (next.control.cursor !== null &&
               (next.control.cursor.epoch !== identity.epoch || next.control.cursor.stranded))

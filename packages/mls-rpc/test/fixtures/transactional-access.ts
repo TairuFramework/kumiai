@@ -19,6 +19,7 @@ import {
   controlAdoptionAllowed,
   controlBuildRef,
   controlSafetyHeld,
+  executableOperations,
   type PendingAppFrame,
 } from '@kumiai/rpc'
 
@@ -229,7 +230,7 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
           row.revision !== owned.expected.stateVersion ||
           (row.control.cursor === null &&
             !sameStoredValue(identityOf(row.initialState), identity)) ||
-          !sameStoredValue(row.control.operations[0], owned.intent) ||
+          !sameStoredValue(executableOperations(row.control)[0], owned.intent) ||
           journal.checkpoint !== owned.built.searchFrom ||
           owned.built.searchFrom !== (row.control.cursor?.position ?? null) ||
           (row.control.cursor !== null &&

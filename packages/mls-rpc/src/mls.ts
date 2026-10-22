@@ -22,7 +22,6 @@ import {
   ownCommitDigest,
   type RecoveryGroupInfo,
   readCommitEntryIDs,
-  readMessageEpoch,
   recoverySignerEligible,
   restoreGroup,
   restrictCommitAuthoring,
@@ -71,6 +70,7 @@ import { ciphersuites, decode, mlsMessageDecoder, wireformats } from 'ts-mls'
 import type { ControlHandleAccess } from './access.js'
 import { applyCommit } from './apply-commit.js'
 import { validateRecoveryCommit } from './control-validation.js'
+import { inboundCommitContext } from './inbound-commit.js'
 import { GroupUnavailableError } from './persistence-errors.js'
 import type { GroupRecoveryTrust } from './persistence-types.js'
 import {
@@ -658,9 +658,13 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       return access.read((group) => validateRecoveryCommit(group, commit, identity.id))
     },
 
-    async processCommit(commit: Uint8Array, context: CommitContext): Promise<ProcessCommitResult> {
-      const frameEpoch = readMessageEpoch(commit)
-      const eligible = await access.read(async (group) => {
+    async processCommit(input: Uint8Array, context: CommitContext): Promise<ProcessCommitResult> {
+      const commit = new Uint8Array(input)
+      const eligible = await access.readControl(async (scope) => {
+        const group = scope.handle
+        const bindResult =
+          params.control !== undefined &&
+          (await scope.loadControl(params.control)).commitOnce !== null
         let header: Awaited<ReturnType<GroupHandle['readCommitHeader']>>
         try {
           header = await group.readCommitHeader(commit)
@@ -674,10 +678,12 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           throw error
         }
         return {
-          eligible: header?.committerDID !== undefined && frameEpoch === group.epoch,
+          eligible: header?.committerDID !== undefined && header.epoch === group.epoch,
+          bindResult,
+          frameEpoch: header?.epoch,
           epoch: Number(group.epoch),
           refusal:
-            header != null && frameEpoch === group.epoch && header.committerDID === undefined
+            header != null && header.epoch === group.epoch && header.committerDID === undefined
               ? ('invalid' as const)
               : undefined,
         }
@@ -692,6 +698,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           ...(eligible.refusal === undefined ? {} : { refusal: eligible.refusal }),
         }
       }
+      const frameEpoch = eligible.frameEpoch
       const ids = readCommitEntryIDs(commit)
       const tokens = ids.length === 0 ? [] : await context.resolveLedgerEntries?.(ids)
       const resolved = new Map<string, string>()
@@ -707,6 +714,10 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
             refusedEpoch = Number(group.epoch)
             throw ignored
           }
+          const before = {
+            epoch: Number(group.epoch),
+            authenticator: group.state.keySchedule.epochAuthenticator.slice(),
+          }
           const result = await applyCommit({
             ...context,
             handle: group,
@@ -718,7 +729,11 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
               }),
             entrySlot,
             ownDID: identity.id,
-            persist,
+            persist: (candidate, ctx) =>
+              persist(
+                candidate,
+                inboundCommitContext(group, before, candidate, commit, ctx, eligible.bindResult),
+              ),
           })
           // Thrown so the adapter does not save a handle the commit left untouched.
           if (!result.applied) {

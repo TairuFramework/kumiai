@@ -4,7 +4,6 @@ import {
   CommitValidationUnavailableError,
   type GroupHandle,
   MissingLedgerEntriesError,
-  readMessageEpoch,
   type VerifiedLedgerEntry,
 } from '@kumiai/mls'
 import type { CommitContext, RecoveryRefusalReason, RosterEntry } from '@kumiai/rpc'
@@ -95,7 +94,7 @@ export async function applyCommit(params: ApplyCommitParams): Promise<ApplyCommi
       return { ...refused(), validation: 'unavailable' }
     throw error
   }
-  if (header?.committerDID === undefined || readMessageEpoch(commit) !== before) return refused()
+  if (header?.committerDID === undefined || header.epoch !== before) return refused()
   const committerDID = header.committerDID
   // An external replacement of this identity cannot use this leaf's old private keys. This is
   // a policy refusal, not evidence that our member leaf authored the frame.

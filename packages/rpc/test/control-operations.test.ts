@@ -13,6 +13,7 @@ import {
 import { forkEventID } from '../src/control/safety.js'
 import { type ControlSearchDeps, createControlSearch } from '../src/control/search.js'
 import { controlBuildRef } from '../src/control/slot.js'
+import { decideSuperseded, supersededChanges } from '../src/control/superseded.js'
 import type {
   ControlChanges,
   ControlSlot,
@@ -628,7 +629,7 @@ test('gap holds before deadline and settles unknown at deadline', async () => {
   expect(h.deps.publish).not.toHaveBeenCalled()
 })
 
-test('unknown copy retries the retained bytes at a fresh head and expires unknown', async () => {
+test('unknown copy retries the retained bytes at a fresh head and expires unknown after hub acknowledgement', async () => {
   const h = await setup()
   const op = await h.built()
   const slot = (await h.store.load()).commitOnce
@@ -685,12 +686,12 @@ test('transport failure retries before expiry and never hands off after expiry',
   })
   expect(await stepOperation(h.deps, op)).toEqual(op)
   h.tick(op.deadline)
-  expect(await stepOperation(h.deps, op)).toBeNull()
+  expect(await stepOperation(h.deps, op)).toEqual(op)
   expect(h.deps.publish).toHaveBeenCalledOnce()
-  expect((await h.store.load()).outcomes).toMatchObject([{ kind: 'unknown' }])
+  expect((await h.store.load()).outcomes).toEqual([])
 })
 
-test('ambiguous handoff survives reconstruction and late landing replaces its unknown row', async () => {
+test('ambiguous handoff survives reconstruction and lands after the deadline', async () => {
   const h = await setup()
   const op = await h.built()
   h.deps.publish = async () => {
@@ -701,10 +702,8 @@ test('ambiguous handoff survives reconstruction and late landing replaces its un
   const retained = (await h.store.load()).operations[0]
   if (retained === undefined) throw new Error('Missing retained operation')
   h.tick(op.deadline)
-  expect(await stepOperation(restarted, retained)).toBeNull()
-  expect((await h.store.load()).outcomes).toEqual([
-    { id: op.id, opID: op.id, at: op.deadline, kind: 'unknown' },
-  ])
+  expect(await stepOperation(restarted, retained)).toEqual(retained)
+  expect((await h.store.load()).outcomes).toEqual([])
   expect((await h.store.load()).welcomes).toEqual([])
   h.found()
   await stepOperation(restarted, retained)
@@ -764,8 +763,8 @@ test.each(['HeadMismatchError', 'AuthorizationDeniedError'])(
     }
     await stepOperation(h.deps, op)
     h.tick(op.deadline)
-    expect(await stepOperation(h.deps, op)).toBeNull()
-    expect((await h.store.load()).outcomes).toMatchObject([{ opID: op.id, kind: 'unknown' }])
+    expect(await stepOperation(h.deps, op)).toEqual(op)
+    expect((await h.store.load()).outcomes).toEqual([])
   },
 )
 
@@ -802,24 +801,17 @@ test('already handed-off acceptance can land after expiry without another handof
   expect(h.emitted).toMatchObject([{ kind: 'landed' }])
 })
 
-test('epoch advance rebuilds only after complete absence and intent revalidation', async () => {
+test('a built operation loses after complete absence at an advanced epoch', async () => {
   const h = await setup()
   const op = await h.built()
   await h.move(5)
   h.deps.searchLog = async () => ({ kind: 'unknown' })
   expect(await stepOperation(h.deps, op)).toEqual(op)
   h.deps.searchLog = async () => ({ kind: 'absent' })
-  const intent = await stepOperation(h.deps, op)
-  expect(intent).toEqual({ ...request, seq: 1, enqueuedAt: 100, deadline: 1_100, stage: 'intent' })
+  expect(await stepOperation(h.deps, op)).toBeNull()
+  expect((await h.store.load()).operations).toEqual([])
   expect(h.deps.prepareBuild).toHaveBeenCalledOnce()
-  if (intent === null) throw new Error('expected intent')
-  h.deps.prepareBuild = vi.fn<OperationDeps['prepareBuild']>(async (operation) => ({
-    kind: 'rejected',
-    operation,
-    reason: 'already satisfied',
-  }))
-  expect(await stepOperation(h.deps, intent)).toBeNull()
-  expect(h.emitted).toMatchObject([{ kind: 'rejected', reason: 'already satisfied' }])
+  expect(h.emitted).toMatchObject([{ kind: 'lost' }])
   expect(h.deps.publish).not.toHaveBeenCalled()
 })
 
@@ -874,7 +866,7 @@ test('settlement emits only after the outcome is durably committed', async () =>
   expect(h.emitted).toEqual((await h.store.load()).outcomes)
 })
 
-test('runner expiry preserves an existing outcome even when its operation row remains', async () => {
+test('runner expiry preserves an existing outcome and removes its surviving operation row', async () => {
   const h = await setup()
   const op = await h.built()
   const outcome: Outcome = { id: op.id, opID: op.id, at: 200, kind: 'lost' }
@@ -883,7 +875,7 @@ test('runner expiry preserves an existing outcome even when its operation row re
   h.tick(op.deadline)
   expect(await stepOperation(h.deps, op)).toBeNull()
   expect((await h.store.load()).outcomes).toEqual([outcome])
-  expect((await h.store.load()).operations).toEqual([op])
+  expect((await h.store.load()).operations).toEqual([])
   expect(h.emitted).toEqual([])
 })
 
@@ -961,9 +953,11 @@ test.each(['intent', 'built', 'pending', 'accepted'] as const)(
     vi.mocked(f.deps.pullToHead).mockClear()
     vi.mocked(f.deps.prepareBuild).mockClear()
     const before = await f.store.load()
-    expect(await stepOperation(f.deps, op)).toBeNull()
+    expect(await stepOperation(f.deps, op)).toEqual(stage === 'pending' ? op : null)
     const after = await f.store.load()
-    expect(after.outcomes).toMatchObject([{ kind: stage === 'intent' ? 'lost' : 'unknown' }])
+    expect(after.outcomes).toMatchObject(
+      stage === 'pending' ? [] : [{ kind: stage === 'intent' ? 'lost' : 'unknown' }],
+    )
     expect(after.commitOnce).toEqual(before.commitOnce)
     expect(after.cursor).toEqual(before.cursor)
     expect(after.strand).toEqual(before.strand)
@@ -975,5 +969,251 @@ test.each(['intent', 'built', 'pending', 'accepted'] as const)(
     expect(f.deps.publish).not.toHaveBeenCalled()
     await f.store.apply({ deleteOutcomes: after.outcomes.map((row) => row.id) }, 'ack')
     expect((await f.store.load()).commitOnce).toEqual(before.commitOnce)
+  },
+)
+
+test.each(['before-step', 'during-search'] as const)(
+  'an unresolved publish cannot lose to an applied competitor until its handoff resolves: %s',
+  async (when) => {
+    const h = await setup()
+    const built = await h.built()
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<never>()
+    h.deps.publish = async () => {
+      entered.resolve()
+      return release.promise
+    }
+    const flight = stepOperation(h.deps, built)
+    try {
+      await entered.promise
+      const op = (await h.store.load()).operations[0]
+      if (op?.stage !== 'built') throw new Error('Missing pending build')
+      expect(op.pendingPublish).toEqual({ expectedHead: head })
+      const applyCompetitor = async () => {
+        await h.store.saveState(
+          encodeControlFixtureState({ ...key, epoch: 5, authenticator: new Uint8Array([6]) }),
+          {
+            mutationID: 'competitor',
+            changes: {
+              commitOnce: null,
+              putApplied: [
+                {
+                  epoch: 4,
+                  digest: 'competitor',
+                  payloadDigest: 'competitor-payload',
+                  sequenceID: position,
+                  opID: null,
+                  removed: false,
+                },
+              ],
+            },
+          },
+        )
+        await h.move(5)
+      }
+      if (when === 'before-step') await applyCompetitor()
+      else
+        h.deps.searchLog = async () => {
+          await applyCompetitor()
+          return { kind: 'absent' }
+        }
+      expect(await stepOperation(h.deps, op)).toEqual(op)
+      expect((await h.store.load()).outcomes).toEqual([])
+      release.reject(Object.assign(new Error('CAS refused'), { name: 'HeadMismatchError' }))
+      await flight
+      const resolved = (await h.store.load()).operations[0]
+      if (resolved === undefined) throw new Error('Missing resolved build')
+      expect(resolved.pendingPublish).toBeUndefined()
+      expect(await stepOperation(h.deps, resolved)).toBeNull()
+      expect((await h.store.load()).outcomes).toMatchObject([{ kind: 'lost', at: 100 }])
+    } finally {
+      release.reject(new Error('Release pending publication'))
+      await flight
+    }
+  },
+)
+
+test.each(
+  (['advanced', 'expiry', 'after-publish'] as const).flatMap((path) =>
+    (['accepted-stage', 'slot-acceptance', 'hub-acceptance'] as const).map(
+      (source) => [path, source] as const,
+    ),
+  ),
+)('retained positive acceptance protects absence settlement at %s via %s', async (path, source) => {
+  const h = await setup()
+  const built = await h.built()
+  const slot = (await h.store.load()).commitOnce
+  if (slot === null) throw new Error('Missing slot')
+  const acceptance = await h.proof(slot)
+  const op: Operation =
+    source === 'accepted-stage'
+      ? { ...built, stage: 'accepted', acceptedAs: position, acceptance }
+      : source === 'hub-acceptance'
+        ? { ...built, hubAcceptedAt: position }
+        : built
+  await h.store.apply(
+    {
+      putOperations: [op],
+      ...(source === 'slot-acceptance' ? { commitOnceAcceptance: acceptance } : {}),
+    },
+    'accept',
+  )
+  h.deps.searchLog = async () => ({ kind: 'absent' })
+  if (path === 'advanced') await h.move(5)
+  if (path === 'expiry') h.tick(op.deadline)
+  if (path === 'after-publish')
+    h.deps.publish = vi.fn(async () => {
+      h.tick(op.deadline)
+      return { sequenceID: position }
+    })
+  await stepOperation(h.deps, op)
+  expect((await h.store.load()).outcomes.some((row) => row.kind === 'lost')).toBe(false)
+  expect((await h.store.load()).operations).toHaveLength(1)
+  h.tick(op.deadline)
+  await stepOperation(h.deps, op)
+  expect((await h.store.load()).outcomes).toMatchObject([{ kind: 'unknown' }])
+})
+
+test('applied ordering respects the earliest retained acceptance across multiple copies', async () => {
+  const h = await setup()
+  const built = await h.built()
+  const slot = (await h.store.load()).commitOnce
+  if (slot === null) throw new Error('Missing slot')
+  const later = asLogPosition('007')
+  const acceptance = { ...(await h.proof(slot)), position: later }
+  const operation: Operation = {
+    ...built,
+    stage: 'accepted',
+    acceptedAs: later,
+    acceptance,
+    hubAcceptedAt: position,
+  }
+  const input = {
+    operation,
+    acceptance,
+    evidence: { kind: 'applied' as const, winner: asLogPosition('006') },
+    now: 100,
+  }
+  expect(decideSuperseded(input)).toBe('pending')
+  expect(decideSuperseded({ ...input, now: operation.deadline })).toBe('unknown')
+  expect(decideSuperseded({ ...input, evidence: { kind: 'applied', winner: head } })).toBe('lost')
+})
+
+test('searched supersession preserves an earlier acknowledged copy and its Welcome', async () => {
+  const h = await setup()
+  const built = await h.built()
+  const slot = (await h.store.load()).commitOnce
+  if (slot?.welcome == null) throw new Error('Missing invite slot')
+  const acceptance = { ...(await h.proof(slot)), position: asLogPosition('007') }
+  const operation: Operation = { ...built, hubAcceptedAt: position }
+  const welcome = { opID: operation.id, welcome: slot.welcome.bytes, recipients: ['bob'] }
+  await h.store.apply(
+    { putOperations: [operation], commitOnceAcceptance: acceptance, putWelcomes: [welcome] },
+    'retain-multiple-copies',
+  )
+  h.deps.searchLog = async () => ({ kind: 'superseded', winner: asLogPosition('006') })
+  expect(await stepOperation(h.deps, operation)).toEqual(operation)
+  expect((await h.store.load()).outcomes).toEqual([])
+  expect((await h.store.load()).operations).toEqual([operation])
+  expect((await h.store.load()).welcomes).toEqual([welcome])
+
+  h.tick(operation.deadline)
+  await stepOperation(h.deps, operation)
+  expect((await h.store.load()).outcomes).toMatchObject([{ kind: 'unknown' }])
+  expect((await h.store.load()).operations).toMatchObject([{ id: operation.id }])
+  expect((await h.store.load()).welcomes).toEqual([welcome])
+
+  h.deps.searchLog = async () => ({ kind: 'superseded', winner: head })
+  await stepOperation(h.deps, operation)
+  expect((await h.store.load()).outcomes).toMatchObject([{ kind: 'lost' }])
+  expect((await h.store.load()).operations).toEqual([])
+  expect((await h.store.load()).welcomes).toEqual([])
+})
+
+test.each(['superseded', 'applied'] as const)(
+  'unresolved copy before ack 007 protects against %s winner 006',
+  async (kind) => {
+    const h = await setup()
+    const operation = { ...(await h.built()), hubAcceptedAt: asLogPosition('007') }
+    const input = {
+      operation,
+      acceptance: null,
+      acceptanceUnknown: true,
+      evidence: { kind, winner: asLogPosition('006') },
+      now: 100,
+    }
+    expect(decideSuperseded(input)).toBe('pending')
+    expect(decideSuperseded({ ...input, now: operation.deadline })).toBe('unknown')
+  },
+)
+
+test('an absence hint cannot discharge retained acceptance uncertainty', async () => {
+  const h = await setup()
+  const built = await h.built()
+  const slot = (await h.store.load()).commitOnce
+  if (slot?.welcome == null) throw new Error('Missing Welcome')
+  const operation: Operation = {
+    ...built,
+    reconciliation: {
+      slot,
+      acceptance: null,
+      uncertainty: { cause: 'gap', at: null },
+    },
+  }
+  await h.store.apply(
+    {
+      putOperations: [operation],
+      putWelcomes: [
+        {
+          opID: built.id,
+          welcome: slot.welcome.bytes,
+          recipients: slot.welcome.recipients,
+        },
+      ],
+    },
+    'retain-uncertainty',
+  )
+  await h.move(5)
+  h.tick(operation.deadline)
+  h.deps.searchLog = async () => ({ kind: 'absent' })
+  await stepOperation(h.deps, operation)
+  const current = await h.store.load()
+  expect(current.outcomes).toMatchObject([{ kind: 'unknown' }])
+  expect(current.operations).toHaveLength(1)
+  expect(current.welcomes).toHaveLength(1)
+})
+
+test.each(
+  (['lost', 'landed'] as const).flatMap((kind) =>
+    (['pending', 'unknown', 'lost'] as const).map((decision) => [kind, decision] as const),
+  ),
+)(
+  'an existing %s outcome cleans a surviving operation without overwriting the outcome (decision=%s)',
+  async (kind, decision) => {
+    const h = await setup()
+    const op = await h.built()
+    const outcome = {
+      id: 'settled',
+      opID: op.id,
+      at: 12,
+      kind,
+      ...(kind === 'landed' ? { position } : {}),
+    } as Outcome
+    const uncommitted = { opID: op.id, welcome: new Uint8Array([9]), recipients: ['invitee'] }
+    const committed = {
+      opID: 'owed',
+      welcome: new Uint8Array([8]),
+      recipients: ['owed'],
+      committed: true as const,
+    }
+    await h.store.apply(
+      { putOutcomes: [outcome], putWelcomes: [uncommitted, committed] },
+      'already-final',
+    )
+    const changes = supersededChanges(await h.store.load(), op, decision, 99)
+    await h.store.apply(changes, 'repair-surviving-row')
+    expect((await h.store.load()).operations).toEqual([])
+    expect((await h.store.load()).outcomes).toEqual([outcome])
+    expect((await h.store.load()).welcomes).toEqual([committed])
   },
 )

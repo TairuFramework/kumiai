@@ -28,6 +28,7 @@ import type {
   Outcome,
   WelcomeObligation,
 } from '../../src/control/types.js'
+import { executableOperations } from '../../src/control/types.js'
 import type { GroupMLS } from '../../src/crypto.js'
 import type { LogPosition } from '../../src/cursor.js'
 import { asLogPosition } from '../../src/cursor.js'
@@ -557,7 +558,7 @@ export function memoryControlPorts(
     prepareBuild: async (op: Operation, frame: FrameControlBuild) => {
       await mls.persistInitialState()
       const snapshot = await control.load()
-      if (op.stage !== 'intent' || snapshot.operations[0]?.id !== op.id)
+      if (op.stage !== 'intent' || executableOperations(snapshot)[0]?.id !== op.id)
         return { kind: 'moved' as const, operation: op }
       if (Date.now() >= op.deadline) return { kind: 'expired' as const, operation: op }
       if (controlSafetyHeld(snapshot) !== null) return { kind: 'occupied' as const, operation: op }
@@ -873,7 +874,7 @@ export async function runCommitOnceHost(
       ).sequenceID
       await append(slot.payload)
     } else if (scenario === 'epoch-move') {
-      await append(await host.competing('member'))
+      winner = (await append(await host.competing('member'))).sequenceID
     } else if (scenario === 'validation-unavailable') {
       await append(await host.competing('unavailable'))
       await append(slot.payload)

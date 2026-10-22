@@ -705,7 +705,10 @@ export function createMemoryControlStore<Position extends string = string>(
         !equal(identity, expected.identity) ||
         next.version !== expected.stateVersion ||
         (next.control.cursor === null && !equal(next.initialIdentity, identity)) ||
-        !equal(next.control.operations[0], intent) ||
+        !equal(
+          next.control.operations.find((op) => op.reconciliation === undefined),
+          intent,
+        ) ||
         built.searchFrom !== (next.control.cursor?.position ?? null) ||
         (next.control.cursor !== null &&
           (next.control.cursor.epoch !== identity?.epoch || next.control.cursor.stranded))

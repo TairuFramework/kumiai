@@ -37,7 +37,7 @@ describe('operation compare and set', () => {
     await member.peer.dispose()
   })
 
-  test('complete absence permits a fresh build after following the winner', async () => {
+  test('complete absence settles a built loser after following the winner', async () => {
     const hub = new FakeHub()
     const publish = hub.publish.bind(hub)
     let race = true
@@ -55,10 +55,12 @@ describe('operation compare and set', () => {
     }
     const member = makeMLSPeer(hub, 'alice', secret)
     const framedAt: Array<number> = []
-    await member.peer.commit(buildLedgerCommit(member, ['role=admin'], { framedAt }))
-    expect(framedAt).toEqual([1, 2])
-    expect(member.mls.epoch()).toBe(3)
-    expect((await member.peer.outcomes()).map((row) => row.kind)).toEqual(['landed'])
+    await expect(
+      member.peer.commit(buildLedgerCommit(member, ['role=admin'], { framedAt })),
+    ).rejects.toMatchObject({ outcome: { kind: 'lost' } })
+    expect(framedAt).toEqual([1])
+    expect(member.mls.epoch()).toBe(2)
+    expect((await member.peer.outcomes()).map((row) => row.kind)).toEqual(['lost'])
     await member.peer.dispose()
   })
 

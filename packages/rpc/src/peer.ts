@@ -56,7 +56,13 @@ import {
   isCertifiedControlLoser,
 } from './control/search.js'
 import { settleControlSlot } from './control/slot.js'
-import { applyResolved as applyControlResolved, pruneWindow } from './control/store.js'
+import {
+  applyResolved as applyControlResolved,
+  deleteOperationChanges,
+  pruneWindow,
+  retainAdvancedControlSlot,
+} from './control/store.js'
+import { decideSuperseded, supersededChanges } from './control/superseded.js'
 import type {
   AdoptionWriteFactory,
   AppliedCommit,
@@ -70,6 +76,7 @@ import type {
   OperationRequest,
   Outcome,
 } from './control/types.js'
+import { executableOperations } from './control/types.js'
 import { deliverObligations } from './control/welcome.js'
 import {
   type AppliedRecovery,
@@ -302,8 +309,12 @@ export function canMoveCurrent(params: CurrentMoveInputs): boolean {
     control.controlHold === null &&
     control.commitOnce === null &&
     control.commitOnceAcceptance === null &&
-    control.operations.length === 0 &&
-    control.welcomes.length === 0 &&
+    executableOperations(control).length === 0 &&
+    control.welcomes.every(
+      (row) =>
+        !row.committed &&
+        control.operations.some((op) => op.id === row.opID && op.reconciliation !== undefined),
+    ) &&
     control.rejoin === null &&
     control.forkRecoveryAttempt == null &&
     control.strand === null &&
@@ -395,6 +406,8 @@ export function createGroupPeerWithControlWalk<
   let rejoinHeld = false
   let rejoinPosition: LogPosition | null = null
   let hasOperations = false
+  let executableHeadID: string | undefined
+  let operationWakePending = false
   let storageServicePending = false
   let controlHold: ControlHold | null = null
   let safetyReason: SafetyHold = null
@@ -2334,15 +2347,19 @@ export function createGroupPeerWithControlWalk<
           if (applied.applied && snapshot != null && control != null) {
             const settled = await control.load()
             for (const op of snapshot.operations) {
+              const outcome = settled.outcomes.find((row) => row.opID === op.id)
               if (
-                op.stage !== 'accepted' ||
-                op.built.payloadDigest !== toB64U(sha256(message.payload))
+                outcome != null &&
+                ((outcome.kind === 'landed' &&
+                  op.stage === 'accepted' &&
+                  op.built.payloadDigest === toB64U(sha256(message.payload))) ||
+                  ((outcome.kind === 'lost' || outcome.kind === 'unknown') &&
+                    snapshot.commitOnce?.opID === op.id &&
+                    !snapshot.outcomes.some(
+                      (row) => row.id === outcome.id && row.kind === outcome.kind,
+                    )))
               )
-                continue
-              const outcome = settled.outcomes.find(
-                (row) => row.opID === op.id && row.kind === 'landed',
-              )
-              if (outcome != null) emitOutcome(outcome)
+                emitOutcome(outcome)
             }
           }
           if (!applied.advanced && applied.epochBefore !== framedEpoch) {
@@ -2756,6 +2773,8 @@ export function createGroupPeerWithControlWalk<
         snapshot.cursor?.epoch,
         row?.payloadDigest,
         row?.removed,
+        snapshot.operations.some((op) => op.id === slot.opID),
+        snapshot.operations.find((op) => op.id === slot.opID)?.unknownReported,
       ])
       if (freshEvidence !== undefined || stamp !== slotEvidenceStamp) {
         unresolvedControlSlot = true
@@ -2769,8 +2788,23 @@ export function createGroupPeerWithControlWalk<
         }
       }
     }
-    operationDeadline = snapshot.operations[0]?.deadline ?? null
-    hasOperations = snapshot.operations.length > 0
+    const activeOperations = executableOperations(snapshot).filter(
+      (op) => !op.unknownReported || snapshot.commitOnce?.opID !== op.id,
+    )
+    const firstOperation = activeOperations[0]
+    if (firstOperation?.id !== executableHeadID) {
+      executableHeadID = firstOperation?.id
+      if (firstOperation !== undefined) {
+        operationWakePending = true
+      }
+    }
+    operationDeadline =
+      firstOperation !== undefined && firstOperation.deadline > Date.now()
+        ? firstOperation.deadline
+        : null
+    hasOperations =
+      activeOperations.length > 0 ||
+      snapshot.operations.some((op) => op.reconciliation !== undefined)
     revokeHold = revokeHeld(snapshot)
     rejoinHeld =
       snapshot.rejoin != null || snapshot.forkRecoveryAttempt != null || continuation !== null
@@ -2841,7 +2875,10 @@ export function createGroupPeerWithControlWalk<
         kind: 'unknown',
       })
     return {
-      deleteOperations: snapshot.operations.map((op) => op.id),
+      ...deleteOperationChanges(
+        snapshot,
+        snapshot.operations.map((op) => op.id),
+      ),
       ...(snapshot.rejoin == null ? {} : { deleteRejoin: true as const }),
       putOutcomes: outcomes,
     }
@@ -2888,51 +2925,84 @@ export function createGroupPeerWithControlWalk<
       // A started commit finishes its atomic persistence without a safety-derived strand.
       const reason = controlSafetyHeld(snapshot)
       if (reason !== null) throw new GroupSafetyHeldError(reason)
-      // Removal retains a proven loser before terminal settlement marks other work unknown.
-      const settled =
-        staged.removed &&
+      const owningOperation = snapshot.operations.find((op) => op.id === owningSlot?.opID)
+      const supersedes =
+        (staged.removed || staged.epochAfter > epoch) &&
         clearsSlot &&
         owningSlot.payloadDigest !== payloadDigest &&
-        snapshot.operations.some((op) => op.id === owningSlot.opID)
-          ? {
-              deleteOperations: [owningSlot.opID],
-              putOutcomes: [
-                {
-                  id: owningSlot.opID,
-                  opID: owningSlot.opID,
+        owningOperation !== undefined
+      const at = operationDeps().now()
+      const decision = !supersedes
+        ? 'pending'
+        : decideSuperseded({
+            operation: owningOperation,
+            // The inbound occurrence is the observed hub head for this atomic adoption.
+            observedHead: position,
+            acceptance: snapshot.commitOnceAcceptance,
+            acceptanceUnknown: snapshot.controlHold?.reason === 'acceptance-unknown',
+            evidence: { kind: 'applied', winner: position },
+            now: at,
+          })
+      const settled = supersedes
+        ? {
+            ...supersededChanges(snapshot, owningOperation, decision, at),
+            ...(decision === 'lost' ||
+            snapshot.outcomes.some(
+              (row) =>
+                row.opID === owningOperation.id && (row.kind === 'lost' || row.kind === 'landed'),
+            )
+              ? {}
+              : {
+                  putOperations: [
+                    {
+                      ...owningOperation,
+                      ...(decision === 'unknown' ? { unknownReported: true as const } : {}),
+                      reconciliation: {
+                        slot: owningSlot,
+                        acceptance: snapshot.commitOnceAcceptance,
+                        ...(snapshot.controlHold?.reason === 'acceptance-unknown'
+                          ? {
+                              uncertainty: {
+                                cause: snapshot.controlHold.cause ?? 'unavailable',
+                                at: snapshot.controlHold.position,
+                              },
+                            }
+                          : {}),
+                      },
+                    },
+                  ],
+                }),
+          }
+        : matches.length === 0
+          ? {}
+          : {
+              deleteOperations: matches.map((op) => op.id),
+              putOutcomes: matches.map(
+                (op): Outcome => ({
+                  id: op.id,
+                  opID: op.id,
                   at: Date.now(),
-                  kind: 'lost' as const,
-                },
-              ],
+                  kind: 'landed',
+                  position,
+                }),
+              ),
             }
-          : matches.length === 0
-            ? {}
-            : {
-                deleteOperations: matches.map((op) => op.id),
-                putOutcomes: matches.map(
-                  (op): Outcome => ({
-                    id: op.id,
-                    opID: op.id,
-                    at: Date.now(),
-                    kind: 'landed',
-                    position,
-                  }),
-                ),
-              }
       return {
         mutationID,
         ...(!staged.removed ? { anchorLanded: digest } : {}),
         changes: {
           ...pruneWindow(snapshot, epoch),
           ...settled,
-          ...(clearsSlot && staged.epochAfter > epoch ? { commitOnce: null } : {}),
-          ...(controlHold?.reason === 'acceptance-unknown' && staged.epochAfter > epoch
-            ? { controlHold: null }
-            : {}),
           ...(clearsSlot &&
+          staged.epochAfter > epoch &&
+          owningOperation === undefined &&
           owningSlot.payloadDigest !== payloadDigest &&
           snapshot.welcomes.some((row) => row.opID === owningSlot.opID && !row.committed)
             ? { deleteWelcomes: [owningSlot.opID] }
+            : {}),
+          ...(clearsSlot && staged.epochAfter > epoch ? { commitOnce: null } : {}),
+          ...(controlHold?.reason === 'acceptance-unknown' && staged.epochAfter > epoch
+            ? { controlHold: null }
             : {}),
           putApplied: [
             {
@@ -3193,7 +3263,33 @@ export function createGroupPeerWithControlWalk<
               }),
             )
           },
-          hold: holdControl,
+          hold: async (value, built) => {
+            const snapshot = await control.load()
+            const op = snapshot.operations.find(
+              (op) => op.reconciliation?.slot.publishID === built.publishID,
+            )
+            if (value.reason === 'acceptance-unknown' && op?.reconciliation !== undefined) {
+              await applyResolved(
+                control,
+                {
+                  putOperations: [
+                    {
+                      ...op,
+                      reconciliation: {
+                        ...op.reconciliation,
+                        uncertainty: { cause: value.cause ?? 'unavailable', at: value.position },
+                      },
+                    },
+                  ],
+                },
+                newPublishID(),
+              )
+            } else if (
+              snapshot.commitOnce?.publishID === built.publishID &&
+              snapshot.commitOnce.payloadDigest === built.payloadDigest
+            )
+              await holdControl(value)
+          },
           onUnsupportedVersion: (frame, epoch) => {
             if (safetyHold() !== null || commitTopicID == null) return
             emitStrand({
@@ -3315,7 +3411,7 @@ export function createGroupPeerWithControlWalk<
         if (revokeHold) await settleLogSubmissions()
         assertLive()
         const snapshot = await control.load()
-        const operation = snapshot.operations[0]
+        const operation = executableOperations(snapshot)[0]
         if (
           operation == null ||
           Date.now() >= operation.deadline ||
@@ -3396,7 +3492,8 @@ export function createGroupPeerWithControlWalk<
           freshEvidence = await params.readEvidence()
           return freshEvidence
         },
-        now: Date.now,
+        now: deps.now,
+        readHead: deps.readHead,
         newID: newPublishID,
         emit: emitOutcome,
       },
@@ -3412,6 +3509,7 @@ export function createGroupPeerWithControlWalk<
     evidence: ControlEvidenceSnapshot,
   ): boolean {
     const slot = snapshot.commitOnce
+    if (snapshot.operations.some((op) => op.id === slot?.opID && !op.unknownReported)) return false
     if (
       hardControlHeld() ||
       controlSafetyHeld(snapshot) !== null ||
@@ -3488,6 +3586,22 @@ export function createGroupPeerWithControlWalk<
     }, delay)
   }
 
+  let retainedSequence = 0
+  const stepRetainedOperation = async (): Promise<void> => {
+    if (control == null) return
+    const retained = (await control.load()).operations.filter(
+      (op) => op.reconciliation !== undefined,
+    )
+    const op = retained.find((row) => row.seq > retainedSequence) ?? retained[0]
+    if (op === undefined) return
+    retainedSequence = op.seq
+    try {
+      await stepOperation(operationDeps(), op)
+    } catch {
+      // Retained search failures leave durable work for retry without stopping the executable FIFO.
+    }
+  }
+
   /** Saved payloads settle before any pull can encounter our own unmerged commit. */
   const settleOperations = async (forRecovery = false): Promise<boolean> => {
     controlReplayed = true
@@ -3503,13 +3617,16 @@ export function createGroupPeerWithControlWalk<
     await refreshControl()
     if (safetyHold() !== null) {
       await settleRetainedControlSlot()
-      for (const op of (await control.load()).operations) await stepOperation(operationDeps(), op)
+      await stepRetainedOperation()
+      for (const op of executableOperations(await control.load()))
+        await stepOperation(operationDeps(), op)
       await refreshControl()
       return false
     }
     const before = await mls.readEpoch()
     await settleRetainedControlSlot()
-    let op = (await control.load()).operations[0]
+    await stepRetainedOperation()
+    let op = executableOperations(await control.load())[0]
     while (!disposed && op != null && op.stage !== 'intent') {
       const next = await stepOperation(operationDeps(), op)
       await deliverPendingWelcomes()
@@ -3548,6 +3665,7 @@ export function createGroupPeerWithControlWalk<
   let operationTimer: ReturnType<typeof setTimeout> | undefined
   let operationRunning = false
   let operationBackoff = 1000
+  let operationTimerDue = Number.POSITIVE_INFINITY
   const scheduleOperations = (delay = 0): void => {
     if (
       disposed ||
@@ -3556,12 +3674,23 @@ export function createGroupPeerWithControlWalk<
       params.recoveryOnly ||
       (!hasOperations && !storageServicePending) ||
       (rejoinHeld && safetyHold() === null) ||
-      operationTimer != null ||
       operationRunning
     )
       return
+    const executableWake = operationWakePending && safetyHold() === null
+    const due = Math.min(
+      Date.now() + (executableWake ? 0 : delay),
+      operationDeadline ?? Number.POSITIVE_INFINITY,
+    )
+    if (operationTimer != null) {
+      if (safetyHold() !== null || operationTimerDue <= due) return
+      clearTimeout(operationTimer)
+      operationTimer = undefined
+    }
     const start = (): void => {
       operationTimer = undefined
+      operationTimerDue = Number.POSITIVE_INFINITY
+      operationWakePending = false
       operationRunning = true
       void (async () => {
         let retry = false
@@ -3578,9 +3707,13 @@ export function createGroupPeerWithControlWalk<
           if (activeRecovery != null) await activeRecovery
           await runSerial(async () => {
             if (rejoinHeld && safetyHold() === null) return
-            let op = (await control.load()).operations[0]
-            if (op == null) return
+            await stepRetainedOperation()
+            let op = executableOperations(await control.load())[0]
             await refreshControl()
+            if (op == null) {
+              retry = hasOperations
+              return
+            }
             const before = safetyHold() !== null ? undefined : await mls?.readEpoch()
             controlReplayed = true
             for (let attempt = 0; op != null && attempt < COMMIT_ATTEMPT_CEILING; attempt++) {
@@ -3588,7 +3721,12 @@ export function createGroupPeerWithControlWalk<
               const next = await stepOperation(operationDeps(), op)
               await deliverPendingWelcomes()
               await refreshControl()
-              if (next === op) {
+              const operationID = op.id
+              if (
+                next === op ||
+                (next === null &&
+                  executableOperations(await control.load()).some((row) => row.id === operationID))
+              ) {
                 retry = true
                 break
               }
@@ -3602,29 +3740,28 @@ export function createGroupPeerWithControlWalk<
         } catch {
           retry = true
         } finally {
-          operationRunning = false
           if (!disposed) {
             try {
               await runSerial(refreshControl)
             } catch {
               retry = true
             }
-            if (hasOperations || storageServicePending) {
-              scheduleOperations(retry ? operationBackoff : 0)
-              if (retry) operationBackoff = Math.min(operationBackoff * 2, 15_000)
-            }
+          }
+          operationRunning = false
+          if (!disposed && (hasOperations || storageServicePending)) {
+            scheduleOperations(retry ? operationBackoff : 0)
+            if (retry) operationBackoff = Math.min(operationBackoff * 2, 15_000)
           }
           scheduleControlSlotRetry()
           void healIfRequested()
         }
       })().catch(() => {})
     }
-    if (delay === 0) start()
-    else
-      operationTimer = setTimeout(
-        start,
-        Math.min(delay, Math.max(0, (operationDeadline ?? Number.POSITIVE_INFINITY) - Date.now())),
-      )
+    if (due <= Date.now()) start()
+    else {
+      operationTimerDue = due
+      operationTimer = setTimeout(start, due - Date.now())
+    }
   }
 
   const repairRejoin = async (): Promise<void> => {
@@ -4556,7 +4693,13 @@ export function createGroupPeerWithControlWalk<
                       destinationKey: { ...record.source.key, incarnation: staged.incarnation },
                     },
                     ...pruneWindow(before, record.epochAfter - 1),
-                    deleteOperations: deferred.map((operation) => operation.id),
+                    ...(staged.incarnation === store.key.incarnation
+                      ? retainAdvancedControlSlot(before, staged.epochAfter)
+                      : {}),
+                    ...deleteOperationChanges(
+                      before,
+                      deferred.map((operation) => operation.id),
+                    ),
                     putOutcomes: outcomes,
                     putApplied: [
                       {
@@ -5808,11 +5951,14 @@ export function createGroupPeerWithControlWalk<
           if (control == null) throw new Error('Missing control store')
           await refreshControl()
           const snapshot = await control.load()
-          const op = snapshot.operations[0]
+          const op =
+            operationID === undefined
+              ? executableOperations(snapshot)[0]
+              : snapshot.operations.find((op) => op.id === operationID)
           if (op == null) throw new Error('Missing queued operation')
-          if (operationID != null && op.id !== operationID)
+          if (op.reconciliation === undefined && op.id !== executableOperations(snapshot)[0]?.id)
             throw new Error('Stale operation: not the durable FIFO head')
-          if (snapshot.outcomes.some((row) => row.opID === op.id))
+          if (snapshot.outcomes.some((row) => row.opID === op.id && row.kind !== 'unknown'))
             throw new Error('Operation already settled')
           if (rejoinHeld || activeRecovery != null || anchorRecoveryPending || locallyRemoved)
             return op

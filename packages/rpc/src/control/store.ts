@@ -467,6 +467,62 @@ export function applyChanges(
   })
 }
 
+/** Same-incarnation authenticated recovery can consume an unresolved ordinary source slot. */
+export function retainAdvancedControlSlot(
+  snapshot: ControlSnapshot,
+  epochAfter: number,
+): ControlChanges {
+  const slot = snapshot.commitOnce
+  if (slot === null || epochAfter <= slot.epoch) return {}
+  const operation = snapshot.operations.find((op) => op.id === slot.opID)
+  return {
+    commitOnce: null,
+    ...(snapshot.controlHold?.reason === 'acceptance-unknown' ? { controlHold: null } : {}),
+    ...(operation?.stage !== 'built'
+      ? {}
+      : {
+          putOperations: [
+            {
+              ...operation,
+              reconciliation: {
+                slot,
+                acceptance: snapshot.commitOnceAcceptance,
+                ...(snapshot.controlHold?.reason === 'acceptance-unknown'
+                  ? {
+                      uncertainty: {
+                        cause: snapshot.controlHold.cause ?? 'unavailable',
+                        at: snapshot.controlHold.position,
+                      },
+                    }
+                  : {}),
+              },
+            },
+          ],
+        }),
+  }
+}
+
+/** Retained artifacts lose their owner on removal. A live source slot still owns its Welcome. */
+export function deleteOperationChanges(
+  snapshot: ControlSnapshot,
+  operationIDs: Array<string>,
+  cancelUncommitted = false,
+): Pick<ControlChanges, 'deleteOperations' | 'deleteWelcomes'> {
+  const ids = new Set(operationIDs)
+  const retained = new Set(
+    snapshot.operations.filter((op) => op.reconciliation !== undefined).map((op) => op.id),
+  )
+  return {
+    deleteOperations: operationIDs,
+    deleteWelcomes: snapshot.welcomes
+      .filter(
+        (row) =>
+          ids.has(row.opID) && !row.committed && (cancelUncommitted || retained.has(row.opID)),
+      )
+      .map((row) => row.opID),
+  }
+}
+
 export function controlSettled(snapshot: ControlSnapshot): boolean {
   return (
     snapshot.operations.length === 0 &&
@@ -493,7 +549,10 @@ export function readmissionChanges(snapshot: ControlSnapshot): ControlChanges {
     newestResponseEpoch = Math.max(newestResponseEpoch, epoch)
   }
   return {
-    deleteOperations: snapshot.operations.map(({ id }) => id),
+    ...deleteOperationChanges(
+      snapshot,
+      snapshot.operations.map(({ id }) => id),
+    ),
     deleteRejoin: true,
     putOutcomes: outcomes,
     deleteAppliedBelow: Number.MAX_SAFE_INTEGER + 1,

@@ -529,9 +529,17 @@ test.each(['intent', 'built', 'pending', 'accepted'] as const)(
       const read = vi.spyOn(runner.mls, 'readEvidence')
       const recover = vi.spyOn(runner.mls, 'createRecoveryRequest')
       await runner.peer.replay()
-      await vi.waitFor(async () => expect((await runner.control.load()).operations).toEqual([]))
+      await vi.waitFor(async () =>
+        expect((await runner.control.load()).operations).toMatchObject(
+          stage === 'intent' ? [] : [{ id: op.id }],
+        ),
+      )
       const after = await runner.control.load()
-      expect(after.outcomes).toMatchObject([{ kind: stage === 'intent' ? 'lost' : 'unknown' }])
+      expect(after.outcomes).toMatchObject(
+        stage === 'pending' ? [] : [{ kind: stage === 'intent' ? 'lost' : 'unknown' }],
+      )
+      if (stage === 'built' || stage === 'accepted')
+        expect(after.operations[0]?.unknownReported).toBe(true)
       expect(after.commitOnce).toEqual(before.commitOnce)
       expect(after.forkHalt).toEqual(before.forkHalt)
       expect(after.cursor).toEqual(before.cursor)
