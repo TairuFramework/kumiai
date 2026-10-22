@@ -37,7 +37,7 @@ import {
   denySetOf,
   mayReadmitResetDevice,
 } from './registry.js'
-import { stalePairedAdd } from './stale-leaf.js'
+import { assertNewerBinding, stalePairedAdd } from './stale-leaf.js'
 
 export type CommitRejectionReason = 'binding' | 'lapse' | 'floor' | 'policy' | 'invalid'
 
@@ -553,7 +553,10 @@ export async function prepareLifecycleGate(
                   committer: incoming.senderLeafIndex,
                   denied: [denySetOf(group.registry), denySetOf(candidateRegistry)],
                 })
-          if (replacement != null && old != null) checkEntry(group, replacement, old)
+          if (replacement != null && old != null) {
+            checkEntry(group, replacement, old)
+            assertNewerBinding(replacement, old)
+          }
           if (controller != null && (old == null || !(authorised || replacement != null)))
             throw new Error('Unauthorised Remove')
           tree[target * 2] = undefined

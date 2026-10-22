@@ -1,4 +1,4 @@
-import { normalizeDID, type OwnIdentity } from '@kokuin/token'
+import { normalizeDID, type OwnIdentity, randomIdentity } from '@kokuin/token'
 import {
   type DefaultProposal,
   defaultProposalTypes,
@@ -11,10 +11,17 @@ import {
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
 import type { ControllerBinding } from '../src/credential.js'
-import { commitInvite, createInvite, processWelcome } from '../src/group.js'
+import {
+  commitInvite,
+  createGroup,
+  createInvite,
+  createKeyPackageBundle,
+  processWelcome,
+} from '../src/group.js'
 import { commitWithEntries } from '../src/group-commit.js'
 import { makeMLSCredential } from '../src/group-credential.js'
 import { deriveGroup, type GroupHandle } from '../src/group-handle.js'
+import { ledgerEntryDigest } from '../src/ledger.js'
 import { leafAt } from '../src/lifecycle.js'
 import {
   agent,
@@ -35,11 +42,8 @@ async function staleGroup() {
   const setup = await pipelineGroup()
   const bob = agent(51)
   const carol = agent(52)
-  const withBob = await lowLevelWelcome(
-    setup.group,
-    bob,
-    await timedBinding({ identity: bob, iat: 100, exp: 200 }),
-  )
+  const bobBinding = await timedBinding({ identity: bob, iat: 100, exp: 200 })
+  const withBob = await lowLevelWelcome(setup.group, bob, bobBinding)
   const withCarol = await lowLevelWelcome(
     withBob.author,
     carol,
@@ -57,6 +61,7 @@ async function staleGroup() {
     ...setup,
     author,
     bob,
+    bobBinding,
     carol,
     carolGroup: withCarol.joined,
     invite,
@@ -199,6 +204,76 @@ test.each([
   expect((rejected as Error).cause).toMatchObject({ name: 'LeafBindingError', reason })
   expect(carolGroup.state).toEqual(snapshot)
   expect(carolGroup.findMemberLeafIndex(bob.id)).toBe(staleIndex)
+})
+
+test("a key package under the live leaf's own binding cannot evict that leaf", async () => {
+  const { author, bob, bobBinding, carolGroup, invite, staleIndex } = await staleGroup()
+  const bundle = await rawBundle(author, bob, bobBinding)
+  const authorSnapshot = structuredClone(author.state)
+  await expect(commitInvite(author, bundle.publicPackage, invite)).rejects.toMatchObject({
+    name: 'LeafBindingError',
+    reason: 'renewal-order',
+  })
+  expect(author.state).toEqual(authorSnapshot)
+
+  const forged = await rawCommit({
+    group: author,
+    proposals: replacement(staleIndex, bundle.publicPackage),
+  })
+  const snapshot = structuredClone(carolGroup.state)
+  const rejected = await carolGroup.processMessage(encode(mlsMessageEncoder, forged.commit)).then(
+    () => null,
+    (error: unknown) => error,
+  )
+  expect(rejected).toMatchObject({ name: 'CommitRejectedError' })
+  expect((rejected as Error).cause).toMatchObject({
+    name: 'LeafBindingError',
+    reason: 'renewal-order',
+  })
+  expect(carolGroup.state).toEqual(snapshot)
+  expect(carolGroup.findMemberLeafIndex(bob.id)).toBe(staleIndex)
+})
+
+test('a group without a lifecycle controller still refuses re-adding a present DID', async () => {
+  const alice = randomIdentity()
+  const bob = randomIdentity()
+  const tokens = new Map<string, string>()
+  const resolveLedgerEntries = async (ids: Array<string>) =>
+    ids.map((id) => {
+      const token = tokens.get(id)
+      if (token == null) throw new Error('Missing test token')
+      return token
+    })
+  const { group: created } = await createGroup(alice, 'stale-leaf-standard', {
+    resolveLedgerEntries,
+  })
+  const first = await createInvite({
+    group: created,
+    identity: alice,
+    recipientDID: bob.id,
+    permission: 'member',
+  })
+  for (const token of first.invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
+  const added = await commitInvite(
+    created,
+    (await createKeyPackageBundle(bob)).publicPackage,
+    first.invite,
+  )
+  const group = added.newGroup
+  expect(group.anchor.controller).toBeUndefined()
+  expect(leavesOf(group, bob.id)).toHaveLength(1)
+  const second = await createInvite({
+    group,
+    identity: alice,
+    recipientDID: bob.id,
+    permission: 'member',
+  })
+  const snapshot = structuredClone(group.state)
+  await expect(
+    commitInvite(group, (await createKeyPackageBundle(bob)).publicPackage, second.invite),
+  ).rejects.toThrow('Commit cannot contain an Add proposal for someone already in the group')
+  expect(group.state).toEqual(snapshot)
+  expect(leavesOf(group, bob.id)).toHaveLength(1)
 })
 
 test('two leaves for the admitted DID are refused as ambiguous', async () => {

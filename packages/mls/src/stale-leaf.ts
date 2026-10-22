@@ -10,7 +10,9 @@ import {
   type ProposalWithSender,
 } from 'ts-mls'
 
+import { readCapability } from './capability.js'
 import { parseMLSCredentialIdentity } from './credential.js'
+import { LeafBindingError } from './errors.js'
 
 /** More than one leaf of a lifecycle group names the DID an admission would replace. */
 export class DuplicateMemberLeafError extends Error {
@@ -39,6 +41,27 @@ function leafDID(leaf: LeafNode): string | undefined {
   } catch {
     return undefined
   }
+}
+
+function bindingTime(leaf: LeafNode): number | undefined {
+  if (
+    !isDefaultCredential(leaf.credential) ||
+    leaf.credential.credentialType !== defaultCredentialTypes.basic
+  )
+    return undefined
+  const binding = parseMLSCredentialIdentity(leaf.credential.identity).controller
+  return binding == null ? undefined : readCapability(binding.capability).payload.iat
+}
+
+/**
+ * A replacement carries a controller grant issued strictly after the replaced leaf's, so a key
+ * package published under the leaf's current grant cannot evict that leaf.
+ */
+export function assertNewerBinding(leaf: LeafNode, replaced: LeafNode): void {
+  const next = bindingTime(leaf)
+  const previous = bindingTime(replaced)
+  if (next == null || previous == null || next <= previous)
+    throw new LeafBindingError('renewal-order')
 }
 
 function leafIndicesOf(tree: ClientState['ratchetTree'], did: string): Array<number> {
