@@ -5,7 +5,6 @@ import {
   type ControlChanges,
   type ControlSlot,
   controlAdoptionAllowed,
-  controlBuildRef,
   controlSafetyHeld,
 } from '@kumiai/rpc'
 import {
@@ -98,6 +97,10 @@ function host(): ConformanceControlHost {
         const identity = state === null ? null : decodeControlFixtureState(state.bytes)
         const snapshot = await rows(tx).control.load()
         if (
+          built.opID !== intent.id ||
+          !(['kind', 'revokes', 'enqueuedAt', 'deadline'] as const).every(
+            (field) => built[field] === intent[field],
+          ) ||
           controlSafetyHeld(snapshot) !== null ||
           snapshot.controlHold !== null ||
           !sameStoredValue(expected.key, key) ||
@@ -105,16 +108,14 @@ function host(): ConformanceControlHost {
           expected.stateVersion !== (state?.version ?? 0) ||
           (snapshot.cursor === null && !sameStoredValue(state?.initial, identity)) ||
           !sameStoredValue(snapshot.operations[0], intent) ||
-          built.searchFrom !== (snapshot.cursor?.position ?? null) ||
+          built.head !== (snapshot.cursor?.position ?? null) ||
           (snapshot.cursor !== null &&
-            (snapshot.cursor.epoch !== identity?.epoch || snapshot.cursor.stranded))
+            (snapshot.cursor.epoch !== identity?.epoch ||
+              snapshot.cursor.stranded ||
+              snapshot.cursor.incomplete))
         )
           return 'moved'
-        if (
-          snapshot.commitOnce !== null &&
-          snapshot.commitOnce.incarnation === key.incarnation &&
-          snapshot.commitOnce.epoch >= (identity?.epoch ?? 0)
-        )
+        if (snapshot.commitOnce !== null || snapshot.spentSource?.epoch === identity?.epoch)
           return 'occupied'
         controlBuildContexts.set(tx, {
           kind: 'build',
@@ -126,10 +127,7 @@ function host(): ConformanceControlHost {
           await rows(tx).control.apply(
             {
               commitOnce: built as ControlSlot,
-              commitOnceAcceptance: null,
-              putOperations: [
-                { ...intent, stage: 'built', built: controlBuildRef(built as ControlSlot) },
-              ],
+              deleteOperations: [intent.id],
             } as ControlChanges,
             mutationID,
           )
@@ -146,9 +144,7 @@ function host(): ConformanceControlHost {
         const snapshot = await rows(tx).control.load()
         if (
           controlSafetyHeld(snapshot) !== null ||
-          (write !== undefined &&
-            snapshot.controlHold !== null &&
-            snapshot.controlHold.reason !== 'acceptance-unknown') ||
+          (write !== undefined && snapshot.controlHold !== null) ||
           (write?.expected !== undefined &&
             !controlAdoptionAllowed(
               snapshot,
@@ -158,6 +154,8 @@ function host(): ConformanceControlHost {
                 stateVersion: state?.version ?? 0,
               },
               write.expected as NonNullable<AdoptionWrite['expected']>,
+              undefined,
+              write.changes as ControlChanges,
             ))
         ) {
           throw Object.assign(new Error('Adoption source or proof moved'), {
@@ -189,13 +187,29 @@ function host(): ConformanceControlHost {
                     kind: 'retirement',
                     key: { groupID: before.groupID, incarnation: before.incarnation },
                   }
-                : { kind: 'adoption', before, after }
+                : {
+                    kind: 'adoption',
+                    before,
+                    after,
+                    ...(after?.terminal ? { removed: true as const } : {}),
+                  }
           await rows(tx, context).control.apply(write.changes as ControlChanges, write.mutationID)
           const anchor = await rows(tx).anchor.load()
           if (write.anchorLanded !== undefined && anchor?.pending?.advance === write.anchorLanded) {
             await rows(tx).anchor.save({ ...anchor, pending: { ...anchor.pending, landed: true } })
           }
         }
+        const consumed = await rows(tx).control.load()
+        if (
+          before !== null &&
+          after !== null &&
+          (((after.incarnation !== before.incarnation ||
+            after.epoch > before.epoch ||
+            after.terminal) &&
+            consumed.commitOnce !== null) ||
+            (after.terminal && (consumed.operations.length !== 0 || consumed.rejoin !== null)))
+        )
+          throw new Error('Source consumption requires atomic control closure')
       }),
     anchor: {
       load: () => transact(null, (tx) => rows(tx).anchor.load()),

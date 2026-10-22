@@ -377,7 +377,7 @@ describe('peer host drain', { concurrent: false }, () => {
     let entered = false
     control.apply = async (changes, id) => {
       await apply(changes, id)
-      if (changes.putOperations?.[0]?.stage === 'accepted') {
+      if (changes.commitOnce?.acceptedAs !== undefined) {
         entered = true
         await pause.promise
       }
@@ -394,7 +394,7 @@ describe('peer host drain', { concurrent: false }, () => {
     await owned
     await drain.promise
     expect(adopted).not.toHaveBeenCalled()
-    expect((await control.load()).operations[0]?.stage).toBe('accepted')
+    expect((await control.load()).commitOnce?.acceptedAs).toBeDefined()
     const replacement = makeMLSPeer(hub, 'alice', new Uint8Array(32).fill(0x76), {
       restartOf: member,
     })
@@ -416,7 +416,7 @@ describe('peer host drain', { concurrent: false }, () => {
     let entered = false
     control.apply = async (changes, id) => {
       await apply(changes, id)
-      if (changes.putOperations?.[0]?.stage === 'accepted') {
+      if (changes.commitOnce?.acceptedAs !== undefined) {
         entered = true
         await pause.promise
       }
@@ -433,7 +433,7 @@ describe('peer host drain', { concurrent: false }, () => {
     await observed
     await drain.promise
     expect(await member.appOutbox.list()).toHaveLength(1)
-    expect((await control.load()).operations[0]?.revokes).toBe(true)
+    expect((await control.load()).commitOnce?.revokes).toBe(true)
     const replacement = makeMLSPeer(hub, 'alice', secret, { restartOf: member })
     try {
       await replacement.peer.replay()

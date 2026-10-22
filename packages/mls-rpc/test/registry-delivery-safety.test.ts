@@ -209,10 +209,14 @@ for (const mode of ['real-mls', 'double'] as const) {
             const payload = frame(winnerCommit)
             const saved: ControlSlot = {
               opID: 'unknown-op',
+              kind: 'rotation',
+              revokes: false,
+              enqueuedAt: Date.now(),
+              deadline: Date.now() + 30_000,
               incarnation: 1,
               epoch: 0,
               authenticatorBefore: source.state.keySchedule.epochAuthenticator.slice(),
-              searchFrom: asLogPosition('000000000001'),
+              head: asLogPosition('000000000001'),
               expectedHead: asLogPosition('000000000001'),
               publishID: 'unknown-publish',
               payload,
@@ -233,18 +237,6 @@ for (const mode of ['real-mls', 'double'] as const) {
             await f.installRows({
               key,
               control: {
-                putOperations: [
-                  {
-                    id: saved.opID,
-                    kind: 'rotation',
-                    revokes: false,
-                    body: new Uint8Array(),
-                    seq: 1,
-                    enqueuedAt: Date.now(),
-                    deadline: Date.now() + 30_000,
-                    stage: 'intent',
-                  },
-                ],
                 commitOnce: saved,
               },
             })
@@ -287,14 +279,8 @@ for (const mode of ['real-mls', 'double'] as const) {
             retain: 'log',
           })
           const walk = () => {
-            let fetches = 2
-            let frames = 2
             if (running === undefined) throw new Error('Missing peer')
-            return running.controlWalk.walkCommits({
-              through: asLogPosition(delivered.sequenceID),
-              range: null,
-              work: { takeFetch: () => fetches-- > 0, takeFrame: () => frames-- > 0 },
-            })
+            return running.controlWalk.walkCommits()
           }
           const replay = walk().catch((error: unknown) => error)
           if (failsPersistence) {
@@ -317,15 +303,15 @@ for (const mode of ['real-mls', 'double'] as const) {
           expect(running.controlWalk.safetyHold()).toBeNull()
           expect(after.forkHalt).toBeNull()
           expect(after.recoveryUnavailable).toBeNull()
-          expect(
-            after.controlHold === null || after.controlHold.reason === 'acceptance-unknown',
-          ).toBe(true)
+          expect(after.controlHold).toBeNull()
           expect(after.strand).toBeNull()
           expect(after.cursor).toEqual({
             position: delivered.sequenceID,
             epoch: Number(installed.epoch),
           })
-          expect(after.commitOnce).toEqual(before.commitOnce)
+          expect(after.commitOnce).toEqual(
+            before.commitOnce === null ? null : { ...before.commitOnce, skipped: true },
+          )
           expect(after.operations).toEqual(before.operations)
           expect(after.outcomes).toEqual(before.outcomes)
           expect(after.applied).toEqual(before.applied)

@@ -12,9 +12,12 @@ import {
   type CheckpointFactRecord,
   type ControlSnapshot,
   type ControlStore,
+  controlOccurrenceCoverage,
+  controlOwnConsumptionAllowed,
   controlSafetyHeld,
   GroupSafetyHeldError,
   type SafetyHold,
+  SavedControlCompatibilityError,
   type SendAdmission,
 } from '@kumiai/rpc'
 
@@ -205,7 +208,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
   }
   class Noop extends Error {}
   function journalFor(write: AdoptionWrite | undefined): ControlJournal {
-    if (write?.expected?.journal === undefined || write.expected.acceptance === undefined)
+    if (write?.expected?.journal === undefined || write.expected.occurrence === undefined)
       throw new RegistryRecoveryReplacementError(
         'Ordinary replacement requires an accepted control journal',
       )
@@ -365,7 +368,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
   }
   function ordinaryProof(write: AdoptionWrite, journal: ControlJournal): boolean {
     const expected = write.expected
-    const proof = expected?.acceptance
+    const proof = expected?.occurrence
     return (
       expected !== undefined &&
       proof !== undefined &&
@@ -373,7 +376,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
       sameStoredValue(journal.source.key, owner.key) &&
       sameStoredValue(proof.source.key, owner.key) &&
       sameStoredValue(journal.source.identity, proof.source.identity) &&
-      proof.from === journal.checkpoint
+      (proof.coverage === 'complete' || proof.coverage === 'incomplete')
     )
   }
   async function ordinaryDestination(
@@ -392,7 +395,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     if (committed) return null
     assertSafety()
     const control = await reads.control(owner.key.incarnation)
-    const proof = write.expected?.acceptance
+    const proof = write.expected?.occurrence
     if (proof === undefined) throw moved()
     if (
       sameStoredValue(source.identity, {
@@ -403,7 +406,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     ) {
       const row = control.applied.find((row) => row.epoch === journal.source.identity?.epoch)
       if (
-        (row?.payloadDigest === proof.payloadDigest && row.sequenceID === proof.position) ||
+        (row?.payloadDigest === proof.payloadDigest && row?.sequenceID === proof.position) ||
         (await reads.controlMutation(owner.key.incarnation)) === write.mutationID
       )
         return null
@@ -422,8 +425,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
       !sameStoredValue(source.identity, write.expected?.identity) ||
       !sameStoredValue(source.identity, journal.source.identity) ||
       sourceState === undefined ||
-      currentState === undefined ||
-      !controlCompatible(sourceState, currentState, journal.referencedProposals)
+      currentState === undefined
     )
       throw moved()
     assertSafety()
@@ -433,14 +435,19 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
       controlSafetyHeld(control) !== null ||
       control.strand !== null ||
       control.cursor?.stranded === true ||
-      (control.controlHold !== null && control.controlHold.reason !== 'acceptance-unknown') ||
+      control.controlHold !== null ||
       control.commitOnce === null ||
       control.commitOnce.payloadDigest !== proof.payloadDigest ||
-      control.commitOnce.searchFrom !== proof.from ||
+      control.commitOnce.head !== journal.checkpoint ||
       !sameStoredValue(control.commitOnce.journal, write.expected?.journal) ||
-      !sameStoredValue(control.commitOnceAcceptance, proof)
+      proof.coverage !== controlOccurrenceCoverage(control, control.commitOnce, proof.position) ||
+      !controlOwnConsumptionAllowed(control, proof, write.changes)
     )
       throw moved()
+    if (!controlCompatible(sourceState, currentState, journal.referencedProposals))
+      throw new SavedControlCompatibilityError(
+        'Recognised own occurrence has an incompatible saved candidate',
+      )
     return destination
   }
   async function ordinary(
@@ -470,7 +477,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
             let replay = committed
             if (!replay) {
               const current = await readRecoverySource(reads, owner.key.groupID)
-              const proof = write.expected?.acceptance
+              const proof = write.expected?.occurrence
               const control = await reads.control(owner.key.incarnation)
               const row = control.applied.find(
                 (row) => row.epoch === journal.source.identity?.epoch,
@@ -483,7 +490,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
                   authenticator: next.state.keySchedule.epochAuthenticator,
                 }) &&
                 ((row?.payloadDigest === proof.payloadDigest &&
-                  row.sequenceID === proof.position) ||
+                  row?.sequenceID === proof.position) ||
                   (await reads.controlMutation(owner.key.incarnation)) === write.mutationID)
             }
             if (replay) {
@@ -563,6 +570,9 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
             kind: 'adoption',
             before: prepared.source.identity,
             after: prepared.trust.installed,
+            ...(!prepared.record.deleted && prepared.record.terminal
+              ? { removed: true as const }
+              : {}),
           })
           try {
             await writeState(
@@ -652,6 +662,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
               const committedSource = await restoreValidated(value, environment)
               await committedSource.carryReceiveProgress(final)
             } else if (
+              candidate.state.groupActiveState.kind === 'removedFromGroup' ||
               Number(candidate.epoch) !== value.record.epoch ||
               !sameStoredValue(
                 candidate.state.keySchedule.epochAuthenticator,
@@ -660,7 +671,8 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
             ) {
               const control = await reads.control(owner.key.incarnation)
               if (
-                control.commitOnce !== null &&
+                (control.commitOnce !== null ||
+                  candidate.state.groupActiveState.kind === 'removedFromGroup') &&
                 !consumesInboundCommit({
                   context: ctx,
                   source: handle,
@@ -730,6 +742,9 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
               kind: 'adoption',
               before: prepared.source.identity,
               after: prepared.trust.installed,
+              ...(!prepared.record.deleted && prepared.record.terminal
+                ? { removed: true as const }
+                : {}),
             })
           try {
             await writeState(

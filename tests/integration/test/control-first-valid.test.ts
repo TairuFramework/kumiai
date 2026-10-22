@@ -1,18 +1,17 @@
 import { randomIdentity } from '@kokuin/token'
-import type { GroupHandle } from '@kumiai/mls'
 import {
   commitInvite,
+  commitKeyRotation,
   createInvite,
   createKeyPackageBundle,
   encodeClientState,
   encodeControlEnvelope,
+  type GroupHandle,
 } from '@kumiai/mls'
 import { createGroupMLS } from '@kumiai/mls-rpc'
-import type { ControlStore, GroupForkEvidence, Operation } from '@kumiai/rpc'
 import {
   asLogPosition,
-  CONTROL_SEARCH_BUDGET,
-  createControlSearch,
+  commitTopic,
   decodeCommitFrame,
   decodeHandshakeFrame,
   deliverObligations,
@@ -21,12 +20,13 @@ import {
   encodeHandshakeFrame,
   encodeLedgerEntries,
   HANDSHAKE_KIND,
+  type Operation,
   type OperationDeps,
   type Outcome,
-  settleControlSlot,
 } from '@kumiai/rpc'
+import { stepLiveBuild } from '@kumiai/rpc/testing'
 import { createCommit, defaultProposalTypes, encode, mlsMessageEncoder } from 'ts-mls'
-import { expect, test, vi } from 'vitest'
+import { afterEach, expect, it, test, vi } from 'vitest'
 
 import {
   buildRealUnavailableCommit,
@@ -34,120 +34,141 @@ import {
   testGroupMLSDependencies,
   testHandleAccess,
 } from '../../../packages/mls-rpc/test/fixtures/real-group.js'
-import { stepOperation } from '../../../packages/rpc/src/control/operations.js'
 import {
-  createDurableHandleAccess,
-  createOperationHost,
+  createMemoryStateStore,
   encodeJournal,
+  makeMember,
   operationIntent,
   operationRequest,
 } from './app-lane-e2e.js'
+import { createWireHub } from './log-hub-over-wire.js'
 
-async function firstValidRunner() {
+afterEach(() => vi.restoreAllMocks())
+
+async function firstValidRunner(withPastPrefix = false) {
   const group = await createRealGroup(2, 'real-poison-prefix')
-  let current = group.committer.handle
-  const access = await createDurableHandleAccess({
-    handle: () => current,
-    adopt: (next) => {
-      current = next
+  let pastPrefix: Uint8Array | undefined
+  if (withPastPrefix) {
+    const author = group.members[1]
+    if (author === undefined) throw new Error('Missing prefix author')
+    const rotated = await commitKeyRotation(author.handle)
+    pastPrefix = encodeHandshakeFrame(
+      HANDSHAKE_KIND.commit,
+      encodeCommitFrame(rotated.commitMessage, new Uint8Array()),
+    )
+    for (const member of [group.committer, ...group.members]) {
+      if (member === author) member.handle = rotated.newGroup
+      else await member.handle.processMessage(rotated.commitMessage)
+    }
+  }
+  const wire = createWireHub()
+  const connection = wire.connect(group.committer.identity)
+  // Pull explicitly so push wakeups cannot race the saved-build and crash seams.
+  const pullHub = {
+    connect: () => ({
+      ...connection,
+      receive: () => ({
+        async *[Symbol.asyncIterator]() {},
+        return: async () => {},
+        ack: async () => {},
+      }),
+    }),
+    dispose: wire.dispose,
+  }
+  const emitted: Array<Outcome> = []
+  const welcomes: Array<Uint8Array> = []
+  const store = createMemoryStateStore({ groupID: group.committer.handle.groupID, incarnation: 1 })
+  await store.save(group.committer.handle)
+  const member = makeMember({
+    hub: pullHub,
+    identity: group.committer.identity,
+    group: group.committer.handle,
+    entrySlot: group.committer.slot,
+    stateStore: store,
+    onOutcome: (outcome) => {
+      emitted.push(outcome)
+    },
+    deliverWelcome: async (owed) => {
+      welcomes.push(owed.welcome)
     },
   })
-  const host = createOperationHost(access, group.committer.identity)
+  await member.peer.replay()
+  const topicID = commitTopic(await member.mls.exportRecoverySecret())
+  const head = async () => {
+    const page = await connection.fetchTopic({ topicID, subscriberDID: member.identity.id })
+    return page.head === null ? null : asLogPosition(page.head)
+  }
+  const append = (payload: Uint8Array, publishID = crypto.randomUUID()) =>
+    connection.publish({
+      topicID,
+      senderDID: member.identity.id,
+      retain: 'log',
+      publishID,
+      payload,
+    })
   const invitee = randomIdentity()
   const { invite } = await createInvite({
-    group: current,
-    identity: group.committer.identity,
+    group: member.handle(),
+    identity: member.identity,
     recipientDID: invitee.id,
     permission: 'member',
   })
   const bundle = await createKeyPackageBundle(invitee)
-  let candidateAuthenticator: Uint8Array | undefined
+  let candidate: GroupHandle | undefined
   const builds = vi.fn(async (_op: Operation, supplied: GroupHandle) => {
     const committed = await commitInvite(supplied, bundle.publicPackage, invite)
-    candidateAuthenticator = committed.newGroup.state.keySchedule.epochAuthenticator.slice()
+    candidate = committed.newGroup
     return {
       commit: committed.commitMessage,
       journal: encodeJournal(committed.newGroup),
       bodies: invite.ledgerEntries,
       welcome: { bytes: committed.welcomeMessage, recipients: [invitee.id] },
-      epoch: Number(current.epoch),
+      epoch: Number(supplied.epoch),
       incarnation: 1,
-      authenticatorBefore: current.state.keySchedule.epochAuthenticator.slice(),
+      authenticatorBefore: supplied.state.keySchedule.epochAuthenticator.slice(),
       digest: digestAppliedCommit(committed.commitMessage),
     }
   })
   const op = operationIntent(operationRequest('invite', {}))
-  host.builders.set(op.id, builds)
-  await host.control.apply({ putOperations: [op] }, 'enqueue')
-  const frames: Array<{
-    topicID: string
-    sequenceID: string
-    senderDID: string
-    payload: Uint8Array
-  }> = []
-  const position = () => asLogPosition(String(frames.length).padStart(20, '0'))
-  const head = () => (frames.length === 0 ? null : position())
-  const append = (payload: Uint8Array, senderDID: string) => {
-    frames.push({
-      topicID: 'control',
-      sequenceID: asLogPosition(String(frames.length + 1).padStart(20, '0')),
-      senderDID,
-      payload,
-    })
-    return { sequenceID: position() }
-  }
-  const safety = safetyCallbacks(host.control)
-  const search = createControlSearch({
-    ...safety,
-    budget: CONTROL_SEARCH_BUDGET,
-    validation: host.validation,
-    readEvidence: host.readEvidence,
-    fetch: async (after) => ({
-      head: head(),
-      oldest: frames[0]?.sequenceID ?? null,
-      gap: false,
-      messages: frames.filter((frame) => after === null || frame.sequenceID > after),
-    }),
-    followWinner: async () => {
-      throw new Error('Unexpected competitor')
-    },
-    reconcileAbsent: async () => {
-      await host.control.apply(
-        { cursor: { position: head(), epoch: Number(current.epoch) } },
-        crypto.randomUUID(),
-      )
-      return true
-    },
-    hold: async (controlHold) => host.control.apply({ controlHold }, crypto.randomUUID()),
-  })
+  member.builders.set(op.id, builds)
+  await member.control.apply({ putOperations: [op] }, 'enqueue')
   let now = op.enqueuedAt
-  const emitted: Array<Outcome> = []
   const deps: OperationDeps = {
-    ...safety,
-    control: host.control,
-    prepareBuild: host.prepareBuild,
-    adopt: host.adopt,
+    control: member.control,
+    prepareBuild: member.prepareBuild,
+    adopt: member.adoptControl,
     frame: async (built, seal) => ({
       payload: encodeHandshakeFrame(
         HANDSHAKE_KIND.commit,
         encodeCommitFrame(built.commit, (await seal(encodeLedgerEntries(built.bodies))).sealed),
       ),
       publishID: 'saved-invite',
-      expectedHead: head(),
+      expectedHead: await head(),
     }),
-    searchLog: search.searchLog,
-    readEvidence: host.readEvidence,
-    readHead: async () => head(),
-    publish: async (payload) => append(payload, group.committer.identity.id),
-    pullToHead: async () => {},
+    readEvidence: store.readEvidence,
+    readHead: head,
+    publish: (payload, publishID, expectedHead) =>
+      connection.publish({
+        topicID,
+        senderDID: member.identity.id,
+        retain: 'log',
+        payload,
+        publishID,
+        expectedHead,
+      }),
+    pullToHead: async () => {
+      await member.controlWalk.walkCommits()
+    },
+    safetyHold: member.controlWalk.safetyHold,
+    haltFork: member.controlWalk.haltFork,
     now: () => now,
     newID: () => crypto.randomUUID(),
     emit: (outcome) => emitted.push(outcome),
   }
-  const built = await stepOperation(deps, op)
-  if (built === null || built.stage !== 'built') throw new Error('Missing build')
-  const slot = (await host.control.load()).commitOnce
-  if (slot === null) throw new Error('Missing slot')
+  expect(await member.prepareBuild(op, deps.frame)).toMatchObject({ kind: 'saved' })
+  const slot = (await member.control.load()).commitOnce
+  if (slot === null) throw new Error('Missing saved build')
+  expect((await member.control.load()).operations).toEqual([])
   const receiver = group.members[0]
   if (receiver === undefined) throw new Error('Missing receiver')
   const receiverMLS = createGroupMLS({
@@ -165,313 +186,283 @@ async function firstValidRunner() {
   })
   return {
     group,
-    host,
+    member,
     slot,
     op,
-    built,
     builds,
     deps,
-    frames,
     append,
     head,
     receiver,
     receiverMLS,
+    welcomes,
+    pastPrefix,
     expire: () => {
       now = op.deadline
     },
-    current: () => current,
-    emitted,
-    candidateAuthenticator: () => {
-      if (candidateAuthenticator === undefined) throw new Error('Missing candidate authenticator')
-      return candidateAuthenticator
+    candidate: () => {
+      if (candidate === undefined) throw new Error('Missing candidate')
+      return candidate
+    },
+    close: async () => {
+      await member.peer.dispose()
+      await member.peer.drained()
+      await wire.dispose()
     },
   }
 }
 
-test('poison prefix retries the identical commit and real receiver matches candidate', async () => {
-  const f = await firstValidRunner()
-  const sealedEntries = decodeCommitFrame(
-    decodeHandshakeFrame(f.slot.payload).payload,
-  ).sealedEntries
-  const poisonAuthor = f.group.members[1]
-  if (poisonAuthor === undefined) throw new Error('Missing poison author')
-  const refusedBuild = await createCommit({
-    context: poisonAuthor.handle.context,
-    state: { ...poisonAuthor.handle.state, unappliedProposals: {} },
-    extraProposals: [
-      {
-        proposalType: defaultProposalTypes.remove,
-        remove: { removed: f.group.committer.handle.state.privatePath.leafIndex },
-      },
-    ],
-    wireAsPublicMessage: true,
-    authenticatedData: encodeControlEnvelope({ v: 1 }),
-  })
-  const policyRefused = encode(mlsMessageEncoder, refusedBuild.commit)
-  const proposal = await poisonAuthor.handle.proposeSelfRemoval()
-  const poison = [
-    new Uint8Array([0xff, 0xff]),
-    encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(proposal.frame, sealedEntries)),
-    encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(policyRefused, sealedEntries)),
-  ]
-  const publishes: Array<{
-    payload: Uint8Array
-    publishID: string
-    expectedHead: ReturnType<typeof f.head>
-  }> = []
-  f.deps.publish = async (payload, publishID, expectedHead) => {
-    publishes.push({ payload: payload.slice(), publishID, expectedHead })
-    if (publishes.length === 1) {
-      for (const frame of poison) f.append(frame, poisonAuthor.identity.id)
-      throw new Error('Head changed before publication')
-    }
-    return f.append(payload, f.group.committer.identity.id)
+test('a classified past-epoch prefix refreshes CAS and retries identical saved bytes and ID', async () => {
+  const f = await firstValidRunner(true)
+  try {
+    const publish = f.deps.publish
+    let prefixPosition: string | undefined
+    const attempts = vi.fn(async (...args: Parameters<typeof publish>) => {
+      if (prefixPosition === undefined) {
+        if (f.pastPrefix === undefined) throw new Error('Missing past-epoch prefix')
+        prefixPosition = (await f.append(f.pastPrefix)).sequenceID
+        throw new Error('Head changed before publication')
+      }
+      return publish(...args)
+    })
+    f.deps.publish = attempts
+    await stepLiveBuild(f.deps)
+    expect((await f.member.control.load()).commitOnce?.skipped).not.toBe(true)
+    await stepLiveBuild(f.deps)
+    expect(attempts.mock.calls).toEqual([
+      [f.slot.payload, f.slot.publishID, null],
+      [f.slot.payload, f.slot.publishID, prefixPosition],
+    ])
+    expect(f.builds).toHaveBeenCalledTimes(1)
+    expect((await f.member.control.load()).commitOnce).toBeNull()
+    expect((await f.member.control.load()).outcomes).toMatchObject([
+      { opID: f.op.id, kind: 'landed' },
+    ])
+    expect(f.member.handle().state.keySchedule.epochAuthenticator).toEqual(
+      f.candidate().state.keySchedule.epochAuthenticator,
+    )
+  } finally {
+    await f.close()
   }
-  expect(await stepOperation(f.deps, f.built)).not.toBeNull()
-  const poisonHead = f.head()
-  expect(await stepOperation(f.deps, f.built)).toBeNull()
-  const [firstPublish, secondPublish] = publishes
-  if (firstPublish === undefined || secondPublish === undefined)
-    throw new Error('Missing publication')
-  expect(secondPublish.payload).toEqual(firstPublish.payload)
-  expect(secondPublish.publishID).toBe(firstPublish.publishID)
-  expect(firstPublish.payload).toEqual(f.slot.payload)
-  expect(firstPublish.publishID).toBe(f.slot.publishID)
-  expect(secondPublish.expectedHead).toBe(poisonHead)
-  const firstHandshake = decodeCommitFrame(
-    decodeHandshakeFrame(firstPublish.payload).payload,
-  ).commit
-  expect(decodeCommitFrame(decodeHandshakeFrame(secondPublish.payload).payload).commit).toEqual(
-    firstHandshake,
-  )
-  for (const bytes of [new Uint8Array([0xff, 0xff]), proposal.frame, policyRefused]) {
-    expect(await f.receiverMLS.processCommit(bytes, {})).toMatchObject({
+})
+
+test('poison prefix suppresses retry; later own occurrence installs and matches the real receiver', async () => {
+  const f = await firstValidRunner()
+  try {
+    const sealedEntries = decodeCommitFrame(
+      decodeHandshakeFrame(f.slot.payload).payload,
+    ).sealedEntries
+    const author = f.group.members[1]
+    if (author === undefined) throw new Error('Missing poison author')
+    const refused = await createCommit({
+      context: author.handle.context,
+      state: { ...author.handle.state, unappliedProposals: {} },
+      extraProposals: [
+        {
+          proposalType: defaultProposalTypes.remove,
+          remove: { removed: f.group.committer.handle.state.privatePath.leafIndex },
+        },
+      ],
+      wireAsPublicMessage: true,
+      authenticatedData: encodeControlEnvelope({ v: 1 }),
+    })
+    const policyRefused = encode(mlsMessageEncoder, refused.commit)
+    const proposal = await author.handle.proposeSelfRemoval()
+    const poison = [
+      new Uint8Array([0xff, 0xff]),
+      encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(proposal.frame, sealedEntries)),
+      encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(policyRefused, sealedEntries)),
+    ]
+    const publish = vi.fn(async () => {
+      for (const payload of poison) await f.append(payload)
+      throw new Error('Head changed before publication')
+    })
+    f.deps.publish = publish
+    await stepLiveBuild(f.deps)
+    expect((await f.member.control.load()).commitOnce).toMatchObject({ skipped: true })
+    await stepLiveBuild(f.deps)
+    expect(publish).toHaveBeenCalledTimes(1)
+    expect(f.member.handle().epoch).toBe(BigInt(f.slot.epoch))
+    const occurrence = await f.append(f.slot.payload)
+    const receive = vi.spyOn(f.member.mls, 'processCommit')
+    await f.member.controlWalk.walkCommits()
+    expect(receive).not.toHaveBeenCalled()
+    const commit = decodeCommitFrame(decodeHandshakeFrame(f.slot.payload).payload).commit
+    for (const bytes of [new Uint8Array([0xff, 0xff]), proposal.frame, policyRefused]) {
+      expect(await f.receiverMLS.processCommit(bytes, {})).toMatchObject({
+        applied: false,
+        advanced: false,
+      })
+    }
+    expect(
+      await f.receiverMLS.processCommit(commit, {
+        resolveLedgerEntries: async () => f.slot.bodies,
+      }),
+    ).toMatchObject({ applied: true, advanced: true })
+    expect(f.receiver.handle.state.keySchedule.epochAuthenticator).toEqual(
+      f.candidate().state.keySchedule.epochAuthenticator,
+    )
+    expect(f.member.handle().state.keySchedule.epochAuthenticator).toEqual(
+      f.candidate().state.keySchedule.epochAuthenticator,
+    )
+    const saved = await f.member.control.load()
+    expect(saved.commitOnce).toBeNull()
+    expect(saved.applied).toMatchObject([{ opID: f.op.id, sequenceID: occurrence.sequenceID }])
+    expect(saved.outcomes).toMatchObject([{ kind: 'unknown', opID: f.op.id }])
+    expect(saved.welcomes).toEqual([])
+    expect(f.welcomes).toEqual([])
+    expect(f.builds).toHaveBeenCalledTimes(1)
+  } finally {
+    await f.close()
+  }
+})
+
+test('missing referenced proposal strands the sender and refuses the real receiver', async () => {
+  const f = await firstValidRunner()
+  try {
+    const author = f.group.members[1]
+    if (author === undefined) throw new Error('Missing author')
+    const unavailable = await buildRealUnavailableCommit({ ...f.group, committer: author })
+    const sealedEntries = decodeCommitFrame(
+      decodeHandshakeFrame(f.slot.payload).payload,
+    ).sealedEntries
+    await f.append(
+      encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(unavailable, sealedEntries)),
+    )
+    await f.append(f.slot.payload)
+    const before = encodeClientState(f.receiver.handle.state)
+    expect(await f.receiverMLS.processCommit(unavailable, {})).toMatchObject({
       applied: false,
       advanced: false,
+      validation: 'unavailable',
     })
+    expect(encodeClientState(f.receiver.handle.state)).toEqual(before)
+    await f.member.controlWalk.walkCommits()
+    const saved = await f.member.control.load()
+    expect(saved.strand?.reason).toBe('unprocessable-gap')
+    expect(saved.commitOnce?.publishID).toBe(f.slot.publishID)
+    expect(saved.applied).toEqual([])
+    expect(f.member.handle().epoch).toBe(BigInt(f.slot.epoch))
+    expect(saved.welcomes).toEqual([])
+    expect(f.welcomes).toEqual([])
+  } finally {
+    await f.close()
   }
-  expect(
-    await f.receiverMLS.processCommit(firstHandshake, {
-      resolveLedgerEntries: async () => f.slot.bodies,
-    }),
-  ).toMatchObject({ applied: true, advanced: true })
-  expect(f.receiver.handle.state.keySchedule.epochAuthenticator).toEqual(f.candidateAuthenticator())
-  expect(f.current().state.keySchedule.epochAuthenticator).toEqual(f.candidateAuthenticator())
-  expect(f.builds).toHaveBeenCalledTimes(1)
 })
 
-test('missing referenced proposal holds sender and refuses receiver', async () => {
-  const f = await firstValidRunner()
-  const author = f.group.members[1]
-  if (author === undefined) throw new Error('Missing author')
-  const unavailable = await buildRealUnavailableCommit({ ...f.group, committer: author })
-  const sealedEntries = decodeCommitFrame(
-    decodeHandshakeFrame(f.slot.payload).payload,
-  ).sealedEntries
-  f.append(
-    encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(unavailable, sealedEntries)),
-    author.identity.id,
-  )
-  f.append(f.slot.payload, f.group.committer.identity.id)
-  const before = encodeClientState(f.receiver.handle.state)
-  expect(await f.receiverMLS.processCommit(unavailable, {})).toMatchObject({
-    applied: false,
-    advanced: false,
-    validation: 'unavailable',
-  })
-  expect(encodeClientState(f.receiver.handle.state)).toEqual(before)
-  f.expire()
-  expect(await stepOperation(f.deps, f.built)).toBeNull()
-  expect(f.emitted).toEqual([expect.objectContaining({ kind: 'unknown', opID: f.op.id })])
-  expect(f.host.welcomes).toEqual([])
-  expect((await f.host.control.load()).welcomes).toEqual([])
-  expect((await f.host.control.load()).commitOnce).toEqual(f.slot)
-})
-
-test.each(['unknown', 'lost', 'abandon'] as const)(
-  'real first-valid adoption of an orphaned %s invite co-commits and delivers its saved Welcome',
-  async (prior) => {
-    const real = await createRealGroup(1, `first-valid-${prior}`)
-    const identity = real.committer.identity
-    const invitee = randomIdentity()
-    let current = real.committer.handle
-    const access = await createDurableHandleAccess({
-      handle: () => current,
-      adopt: (next) => {
-        current = next
-      },
-    })
-    const host = createOperationHost(access, identity)
-    const { invite } = await createInvite({
-      group: current,
-      identity,
-      recipientDID: invitee.id,
-      permission: 'member',
-    })
-    const bundle = await createKeyPackageBundle(invitee)
-    const op = operationIntent(operationRequest('invite', {}))
-    let committed: Awaited<ReturnType<typeof commitInvite>> | undefined
-    const builds = vi.fn(async (_op: Operation, supplied: GroupHandle) => {
-      committed = await commitInvite(supplied, bundle.publicPackage, invite)
-      return {
-        commit: committed.commitMessage,
-        journal: encodeJournal(committed.newGroup),
-        bodies: invite.ledgerEntries,
-        welcome: { bytes: committed.welcomeMessage, recipients: [invitee.id] },
-        epoch: Number(current.epoch),
-        incarnation: 1,
-        authenticatorBefore: current.state.keySchedule.epochAuthenticator.slice(),
-        digest: digestAppliedCommit(committed.commitMessage),
+test.each([false, true])(
+  'acked provisional invite installs after expiry with incomplete coverage=%s',
+  async (incomplete) => {
+    const f = await firstValidRunner()
+    try {
+      if (incomplete) {
+        await f.append(new Uint8Array([255]))
+        await f.member.controlWalk.walkCommits()
       }
-    })
-    host.builders.set(op.id, builds)
-    await host.control.apply({ putOperations: [op] }, 'enqueue')
-    expect(
-      await host.prepareBuild(op, async (built, seal) => ({
-        payload: encodeHandshakeFrame(
-          HANDSHAKE_KIND.commit,
-          encodeCommitFrame(built.commit, (await seal(encodeLedgerEntries(built.bodies))).sealed),
-        ),
-        publishID: 'retained-invite',
-        expectedHead: null,
-      })),
-    ).toMatchObject({ kind: 'saved' })
-    if (committed === undefined) throw new Error('Missing built invite')
-    const slot = (await host.control.load()).commitOnce
-    if (slot === null) throw new Error('Missing slot')
-    await host.control.apply(
-      {
-        deleteOperations: [op.id],
-        putOutcomes: [
-          {
-            id: op.id,
-            opID: op.id,
-            at: op.deadline,
-            kind: prior === 'abandon' ? 'unknown' : prior,
-          },
-        ],
-      },
-      'settle',
-    )
-    await host.control.apply({ deleteOutcomes: [op.id] }, 'ack')
-    let missing = true
-    const restore = host.validation.restoreValidation.bind(host.validation)
-    const position = asLogPosition('00000000000000000001')
-    const safety = safetyCallbacks(host.control)
-    const search = createControlSearch({
-      ...safety,
-      budget: CONTROL_SEARCH_BUDGET,
-      validation: {
-        restoreValidation: (built) => (missing ? Promise.resolve(null) : restore(built)),
-      },
-      readEvidence: host.readEvidence,
-      fetch: async (after) => ({
-        head: position,
-        oldest: position,
-        gap: false,
-        messages:
-          after === position
-            ? []
-            : [
-                {
-                  topicID: 'control',
-                  sequenceID: position,
-                  senderDID: identity.id,
-                  payload: slot.payload,
-                },
-              ],
-      }),
-      followWinner: async () => {
-        throw new Error('Unexpected competitor')
-      },
-      reconcileAbsent: async () => true,
-      hold: async (controlHold) => {
-        await host.control.apply({ controlHold }, crypto.randomUUID())
-      },
-    })
-    const emitted: Array<Outcome> = []
-    const deps = {
-      ...safety,
-      control: host.control,
-      search,
-      adoption: { adopt: host.adopt },
-      readEvidence: host.readEvidence,
-      now: () => op.deadline + 1,
-      newID: () => crypto.randomUUID(),
-      emit: (outcome: Outcome) => emitted.push(outcome),
+      f.expire()
+      await stepLiveBuild(f.deps)
+      const provisional = (await f.member.control.load()).outcomes[0]
+      if (provisional === undefined) throw new Error('Missing provisional report')
+      expect(provisional.kind).toBe('unknown')
+      await f.member.control.apply({ deleteOutcomes: [provisional.id] }, 'ack')
+      const author = f.group.members[0]
+      if (author === undefined) throw new Error('Missing proposer')
+      const proposal = await author.handle.proposeSelfRemoval()
+      const version = (await f.member.stateStore.readEvidence()).source.stateVersion
+      await f.member.mutate((handle) => handle.processMessage(proposal.frame))
+      expect(Object.keys(f.member.handle().state.unappliedProposals)).toHaveLength(1)
+      expect((await f.member.stateStore.readEvidence()).source.stateVersion).toBeGreaterThan(
+        version,
+      )
+      expect((await f.member.control.load()).commitOnce?.payload).toEqual(f.slot.payload)
+      const occurrence = await f.append(f.slot.payload)
+      const receive = vi.spyOn(f.member.mls, 'processCommit')
+      await f.member.controlWalk.walkCommits()
+      expect(receive).not.toHaveBeenCalled()
+      const saved = await f.member.control.load()
+      expect(saved.operations).toEqual([])
+      expect(saved.commitOnce).toBeNull()
+      expect(saved.controlHold).toBeNull()
+      expect(Object.keys(f.member.handle().state.unappliedProposals)).toEqual([])
+      expect(saved.outcomes).toMatchObject([
+        { opID: f.op.id, kind: incomplete ? 'unknown' : 'landed' },
+      ])
+      expect(saved.outcomes[0]?.id).not.toBe(provisional.id)
+      expect(saved.applied).toMatchObject([{ opID: f.op.id, sequenceID: occurrence.sequenceID }])
+      expect(saved.cursor).toMatchObject({
+        position: occurrence.sequenceID,
+        epoch: f.slot.epoch + 1,
+      })
+      expect(f.member.handle().state.keySchedule.epochAuthenticator).toEqual(
+        f.candidate().state.keySchedule.epochAuthenticator,
+      )
+      expect(saved.welcomes).toEqual(
+        incomplete
+          ? []
+          : [
+              {
+                opID: f.op.id,
+                welcome: f.slot.welcome?.bytes,
+                recipients: f.slot.welcome?.recipients,
+                committed: true,
+              },
+            ],
+      )
+      const deliverWelcome = vi.fn(async () => {})
+      await deliverObligations(
+        {
+          control: f.member.control,
+          canDeliver: async (owed) => owed.committed === true,
+          deliverWelcome,
+        },
+        saved,
+      )
+      expect(deliverWelcome).toHaveBeenCalledTimes(incomplete ? 0 : 1)
+      await f.member.controlWalk.walkCommits()
+      expect((await f.member.control.load()).outcomes).toEqual(saved.outcomes)
+      expect((await f.member.control.load()).welcomes).toEqual([])
+      expect(f.builds).toHaveBeenCalledTimes(1)
+    } finally {
+      await f.close()
     }
-    expect(await settleControlSlot(deps)).toBe('unknown')
-    expect((await host.control.load()).controlHold?.reason).toBe('acceptance-unknown')
-    expect(current.epoch).toBe(BigInt(slot.epoch))
-    const version = (await host.readEvidence()).source.stateVersion
-    const proposer = real.members[0]
-    if (proposer === undefined) throw new Error('Missing proposer')
-    const proposal = await proposer.handle.proposeSelfRemoval()
-    await access.mutate((handle) => handle.processMessage(proposal.frame))
-    expect(Object.keys(current.state.unappliedProposals)).toHaveLength(1)
-    expect((await host.readEvidence()).source.stateVersion).toBeGreaterThan(version)
-    expect((await host.control.load()).commitOnce).toEqual(slot)
-    missing = false
-    expect(await settleControlSlot(deps)).toBe('landed')
-    const saved = await host.control.load()
-    expect(saved.operations).toEqual([])
-    expect(saved.commitOnce).toBeNull()
-    expect(saved.controlHold).toBeNull()
-    expect(current.state.keySchedule.epochAuthenticator).toEqual(
-      committed.newGroup.state.keySchedule.epochAuthenticator,
-    )
-    expect(saved.applied).toEqual([
-      expect.objectContaining({ payloadDigest: slot.payloadDigest, sequenceID: position }),
-    ])
-    expect(saved.cursor).toEqual({ position, epoch: slot.epoch + 1 })
-    expect(saved.outcomes).toEqual([
-      expect.objectContaining({
-        id: JSON.stringify(['control:landed', op.id, slot.publishID, position]),
-        opID: op.id,
-        kind: 'landed',
-        position,
-      }),
-    ])
-    expect(saved.welcomes).toEqual([
-      { opID: op.id, welcome: committed.welcomeMessage, recipients: [invitee.id], committed: true },
-    ])
-    await deliverObligations(
-      {
-        control: host.control,
-        canDeliver: async (owed) => owed.committed === true,
-        deliverWelcome: host.deliverWelcome,
-      },
-      saved,
-    )
-    expect(host.welcomes).toEqual(saved.welcomes)
-    await host.control.apply(
-      { deleteOutcomes: saved.outcomes.map((outcome) => outcome.id) },
-      'ack-landed',
-    )
-    expect(await settleControlSlot(deps)).toBe('empty')
-    expect((await host.control.load()).outcomes).toEqual([])
-    expect((await host.control.load()).welcomes).toEqual([])
-    expect(builds).toHaveBeenCalledTimes(1)
-    expect(emitted).toHaveLength(1)
   },
 )
 
-function safetyCallbacks(control: ControlStore) {
-  let held = false
-  return {
-    safetyHold: () => (held ? ('fork-halted' as const) : null),
-    haltFork: async (evidence: GroupForkEvidence) => {
-      held = true
-      await control.apply(
-        {
-          forkHalt: {
-            eventID: JSON.stringify(['group:fork', control.key.groupID, control.key.incarnation]),
-            evidence,
-            detectedAt: Date.now(),
-          },
-        },
-        crypto.randomUUID(),
-      )
-    },
+test('a lost invite never reopens or owes a Welcome when its own copy arrives later', async () => {
+  const f = await firstValidRunner()
+  try {
+    const author = f.group.members[0]
+    if (author === undefined) throw new Error('Missing competitor')
+    const competitor = await commitKeyRotation(author.handle)
+    const sealedEntries = decodeCommitFrame(
+      decodeHandshakeFrame(f.slot.payload).payload,
+    ).sealedEntries
+    await f.append(
+      encodeHandshakeFrame(
+        HANDSHAKE_KIND.commit,
+        encodeCommitFrame(competitor.commitMessage, sealedEntries),
+      ),
+    )
+    await f.member.controlWalk.walkCommits()
+    const saved = await f.member.control.load()
+    expect(saved.outcomes).toMatchObject([{ kind: 'lost', opID: f.op.id }])
+    expect(saved.commitOnce).toBeNull()
+    await f.append(f.slot.payload)
+    await f.member.controlWalk.walkCommits()
+    expect((await f.member.control.load()).outcomes).toEqual(saved.outcomes)
+    expect((await f.member.control.load()).welcomes).toEqual([])
+    expect(f.welcomes).toEqual([])
+    expect(f.member.handle().state.keySchedule.epochAuthenticator).toEqual(
+      competitor.newGroup.state.keySchedule.epochAuthenticator,
+    )
+  } finally {
+    await f.close()
   }
-}
+})
+
+it.todo(
+  'R3: abandoned invite cannot install or deliver on later own replay -- abandon and spentSource authority are not implemented',
+)
+it.todo(
+  'R3: own local storage failure retries before installation -- bounded retry and D1 backstop remain reporting/lifecycle work',
+)

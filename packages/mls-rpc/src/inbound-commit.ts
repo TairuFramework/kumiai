@@ -57,10 +57,12 @@ export function consumesInboundCommit(params: {
     sameStoredValue(proof.authenticator, record.epochAuthenticator) &&
     proof.state !== undefined &&
     sameStoredValue(proof.state, capturedState) &&
-    Number(result.epoch) === record.epoch + 1 &&
+    (Number(result.epoch) === record.epoch + 1 ||
+      (Number(result.epoch) === record.epoch &&
+        result.state.groupActiveState.kind === 'removedFromGroup')) &&
     write?.changes.commitOnce === null &&
     row?.digest === proof.digest &&
-    row.removed === false &&
+    row.removed === (result.state.groupActiveState.kind === 'removedFromGroup') &&
     write.changes.cursor?.epoch === Number(result.epoch) &&
     (write.changes.cursor.position === row.sequenceID ||
       (write.changes.cursor.stranded === true &&

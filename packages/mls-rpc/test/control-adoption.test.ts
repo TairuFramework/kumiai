@@ -6,13 +6,11 @@ import {
   GroupRestoreError as InvalidCandidateError,
   restoreGroup,
 } from '@kumiai/mls'
-import type { ControlStore, GroupForkEvidence } from '@kumiai/rpc'
+import * as rpc from '@kumiai/rpc'
 import {
   type AdoptionWrite,
   asLogPosition,
-  CONTROL_SEARCH_BUDGET,
   type ControlSlot,
-  createControlSearch,
   decodeCommitFrame,
   decodeHandshakeFrame,
   digestAppliedCommit,
@@ -23,7 +21,6 @@ import {
   HANDSHAKE_KIND,
   type Operation,
   recoveryUnavailableEventID,
-  settleControlSlot,
 } from '@kumiai/rpc'
 import { expect, test, vi } from 'vitest'
 
@@ -31,7 +28,6 @@ import { simpleHandleAccess } from '../src/access.js'
 import { createControlAdoptionPort } from '../src/control-adoption.js'
 import { createControlBuildPort, createPersistenceBuildSaver } from '../src/control-build.js'
 import { decodeControlJournal, encodeControlJournal } from '../src/control-journal.js'
-import { createControlValidationPort } from '../src/control-validation.js'
 import { createMemoryGroupPersistence } from '../src/memory-group-persistence.js'
 import { createMemoryTransaction } from '../src/memory-transaction.js'
 import { createGroupMLS } from '../src/mls.js'
@@ -54,8 +50,21 @@ import {
   createTransactionalStore,
 } from './fixtures/transactional-access.js'
 
-async function retainedRotation(size = 1) {
-  const group = await createRealGroup(size, 'retained-rotation')
+test('the real adoption port uses the control store own-consumption policy', async () => {
+  const f = await controlAdoptionFixture()
+  const before = f.store.snapshot()
+  const policy = vi.spyOn(rpc, 'controlOwnConsumptionAllowed').mockReturnValue(false)
+  try {
+    expect(await f.port.adopt(f.slot.journal, await f.expected(), f.write)).toBe('moved')
+    expect(policy).toHaveBeenCalledWith(before.control, f.proof, f.write.changes)
+    expect(f.store.snapshot()).toEqual(before)
+  } finally {
+    policy.mockRestore()
+  }
+})
+
+async function liveRotation(size = 1) {
+  const group = await createRealGroup(size, 'live-rotation')
   const member = group.members[0]
   if (member === undefined) throw new Error('Missing member')
   const store = createTransactionalStore(member.handle)
@@ -123,16 +132,25 @@ async function retainedRotation(size = 1) {
   const accept = async (target: typeof store, slot: ControlSlot) => {
     const proof = {
       source: (await target.readEvidence()).source,
-      from: slot.searchFrom,
+      coverage: 'complete' as const,
       position: asLogPosition('000001'),
       payloadDigest: slot.payloadDigest,
     }
-    await target.control.apply({ commitOnceAcceptance: proof }, 'accept')
+    await target.control.apply({ commitOnce: { ...slot, acceptedAs: proof.position } }, 'ack')
     const write: AdoptionWrite = {
       mutationID: 'landed',
       changes: {
         deleteOperations: [intent.id],
         commitOnce: null,
+        putOutcomes: [
+          {
+            id: 'landed-final',
+            opID: slot.opID,
+            at: 100,
+            kind: 'landed',
+            position: proof.position,
+          },
+        ],
         putApplied: [
           {
             epoch: slot.epoch,
@@ -154,7 +172,7 @@ async function retainedRotation(size = 1) {
 test.each(['generation', 'source-message', 'retained-history', 'eviction'] as const)(
   'accepted restart carries current progress without resurrecting history (%s)',
   async (check) => {
-    const f = await retainedRotation()
+    const f = await liveRotation()
     const copySender = async () => {
       const sender = f.group.committer.handle
       const state = decodeClientState(encodeClientState(sender.state))
@@ -212,7 +230,7 @@ test.each(['generation', 'source-message', 'retained-history', 'eviction'] as co
     f.builds.mockClear()
     const source = (await store.readEvidence()).source
     expect(source.stateVersion).toBeGreaterThan(storedProofVersion)
-    expect(await port.adopt(slot.journal, { ...source, acceptance: proof }, write)).toBe(
+    expect(await port.adopt(slot.journal, { ...source, occurrence: proof }, write)).toBe(
       'installed',
     )
     const adopted = restarted.live()
@@ -239,7 +257,7 @@ test.each(['generation', 'source-message', 'retained-history', 'eviction'] as co
 )
 
 test('extra proposal is omitted cleared and requires reproposal', async () => {
-  const f = await retainedRotation(2)
+  const f = await liveRotation(2)
   const slot = await f.build()
   const proposer = f.group.members[1]
   if (proposer === undefined) throw new Error('Missing proposer')
@@ -255,7 +273,7 @@ test('extra proposal is omitted cleared and requires reproposal', async () => {
   expect(
     await port.adopt(
       slot.journal,
-      { ...(await f.store.readEvidence()).source, acceptance: proof },
+      { ...(await f.store.readEvidence()).source, occurrence: proof },
       write,
     ),
   ).toBe('installed')
@@ -282,72 +300,21 @@ test('extra proposal is omitted cleared and requires reproposal', async () => {
   expect(enacted?.newGroup.state.unappliedProposals).toEqual({})
 })
 
-test('acceptance persistence refreshes adoption expectations without rewriting historical proof', async () => {
-  const f = await retainedRotation()
+test('own occurrence remains bound to its source while compatible writes refresh state version', async () => {
+  const f = await liveRotation()
   const slot = await f.build()
-  const position = asLogPosition('000001')
-  const beforeAcceptance = (await f.store.readEvidence()).source
-  const safety = safetyCallbacks(f.store.control)
-  const search = createControlSearch({
-    ...safety,
-    budget: CONTROL_SEARCH_BUDGET,
-    validation: createControlValidationPort({
-      identity: f.member.identity,
-      options: {},
-      restoreCandidate: f.restoreCandidate,
-    }),
-    readEvidence: f.store.readEvidence,
-    fetch: async (after) => ({
-      head: position,
-      oldest: position,
-      gap: false,
-      messages:
-        after === position
-          ? []
-          : [
-              {
-                topicID: 'control',
-                sequenceID: position,
-                senderDID: f.member.identity.id,
-                payload: slot.payload,
-              },
-            ],
-    }),
-    followWinner: async () => {
-      throw new Error('Unexpected competitor')
-    },
-    reconcileAbsent: async () => true,
-    hold: async (controlHold) => f.store.control.apply({ controlHold }, crypto.randomUUID()),
-  })
+  const { proof, write } = await f.accept(f.store, slot)
+  f.store.bump()
+  const source = (await f.store.readEvidence()).source
+  expect(source.stateVersion).toBeGreaterThan(proof.source.stateVersion)
   const port = createControlAdoptionPort({
     access: f.host.access,
     control: f.store.control,
     restoreCandidate: f.restoreCandidate,
   })
-  expect(
-    await settleControlSlot({
-      ...safety,
-      control: f.store.control,
-      search,
-      readEvidence: f.store.readEvidence,
-      adoption: {
-        adopt: async (journal, expected, write) => {
-          expect(expected.acceptance.source).toEqual(beforeAcceptance)
-          expect(expected.stateVersion).toBeGreaterThan(expected.acceptance.source.stateVersion)
-          expect(expected.stateVersion).toBe((await f.store.readEvidence()).source.stateVersion)
-          return port.adopt(journal, expected, write)
-        },
-      },
-      now: Date.now,
-      newID: () => crypto.randomUUID(),
-      emit: () => {},
-    }),
-  ).toBe('landed')
+  expect(await port.adopt(slot.journal, { ...source, occurrence: proof }, write)).toBe('installed')
   expect(f.host.live().epoch).toBe(BigInt(slot.epoch + 1))
   expect((await f.store.control.load()).commitOnce).toBeNull()
-  expect((await f.store.control.load()).outcomes).toEqual([
-    expect.objectContaining({ kind: 'landed', opID: slot.opID, position }),
-  ])
 })
 
 test('a compatible adoption version change preserves the owed commit', async () => {
@@ -381,9 +348,10 @@ test('adoption rollback leaves state control and anchor unchanged', async () => 
 
 test('no-op requires committed payload evidence', async () => {
   const f = await controlAdoptionFixture()
-  await f.host.access.replace(f.rotation.newGroup)
+  await expect(f.host.access.replace(f.rotation.newGroup)).rejects.toThrow(
+    'Source consumption requires atomic control closure',
+  )
   const before = structuredClone(f.store.snapshot())
-  expect(await f.port.adopt(f.slot.journal, await f.expected(), f.write)).toBe('moved')
   expect(f.store.snapshot()).toEqual(before)
 })
 
@@ -408,10 +376,10 @@ test('own authorship requires the content signature rather than sender data alon
     entrySlot: member.slot,
   })
   const rotation = await commitKeyRotation(member.handle)
-  const tampered = rotation.commitMessage.slice()
-  tampered[tampered.length - 1] = (tampered[tampered.length - 1] ?? 0) ^ 1
-  expect(await member.handle.verifyCommitSignature(tampered)).toBe(false)
-  expect(await mls.readCommitHeader(tampered)).not.toHaveProperty('committerDID')
+  const changed = rotation.commitMessage.slice()
+  changed[changed.length - 1] = (changed[changed.length - 1] ?? 0) ^ 1
+  expect(await member.handle.verifyCommitSignature(changed)).toBe(false)
+  expect(await mls.readCommitHeader(changed)).not.toHaveProperty('committerDID')
 })
 
 test('a durable control hold refuses installation with an otherwise current proof', async () => {
@@ -629,11 +597,10 @@ test('2.1 adoption rolls back and co-commits trust spent anchor and opaque side 
   const position = asLogPosition('001')
   const proof = {
     source: (await groups.readEvidence(seed.key)).source,
-    from: null,
+    coverage: 'complete' as const,
     position,
     payloadDigest: slot.payloadDigest,
   }
-  await control.apply({ commitOnceAcceptance: proof }, 'accept')
   await groups.ports(seed.key).anchor.save({
     anchor: { epoch: 0, secret: new Uint8Array(32).fill(1) },
     pending: {
@@ -665,7 +632,7 @@ test('2.1 adoption rolls back and co-commits trust spent anchor and opaque side 
       putOutcomes: [{ id: 'landed-coupled', opID: intent.id, kind: 'landed', at: 1, position }],
     },
   }
-  const expected = { ...(await groups.readEvidence(seed.key)).source, acceptance: proof }
+  const expected = { ...(await groups.readEvidence(seed.key)).source, occurrence: proof }
   holdDuringPersist = true
   rollback = false
   expect(await port.adopt(slot.journal, expected, write)).toBe('moved')
@@ -724,10 +691,14 @@ test('a hold committed after preparation prevents the 2.1 build save', async () 
   if (seed.state.state === null) throw new Error('Missing state')
   const slot: ControlSlot = {
     opID: intent.id,
+    kind: intent.kind,
+    revokes: intent.revokes,
+    enqueuedAt: intent.enqueuedAt,
+    deadline: intent.deadline,
     incarnation: 1,
     epoch: 2,
     authenticatorBefore: seed.state.epochAuthenticator,
-    searchFrom: null,
+    head: null,
     expectedHead: null,
     publishID: 'held-publish',
     payload: new Uint8Array([1]),
@@ -772,7 +743,7 @@ test('transactional save rechecks the hold after its write gate before publishin
 test.each(['fork-halted', 'recovery-unavailable'] as const)(
   'field-only %s refuses adoption before restoring the candidate',
   async (reason) => {
-    const f = await retainedRotation()
+    const f = await liveRotation()
     const slot = await f.build()
     const { proof, write } = await f.accept(f.store, slot)
     const key = f.store.control.key
@@ -808,28 +779,8 @@ test.each(['fork-halted', 'recovery-unavailable'] as const)(
       restoreCandidate,
     })
     const source = (await f.store.readEvidence()).source
-    expect(await port.adopt(slot.journal, { ...source, acceptance: proof }, write)).toBe('moved')
+    expect(await port.adopt(slot.journal, { ...source, occurrence: proof }, write)).toBe('moved')
     expect(restoreCandidate).not.toHaveBeenCalled()
     expect(f.store.snapshot()).toEqual(before)
   },
 )
-
-function safetyCallbacks(control: ControlStore) {
-  let held = false
-  return {
-    safetyHold: () => (held ? ('fork-halted' as const) : null),
-    haltFork: async (evidence: GroupForkEvidence) => {
-      held = true
-      await control.apply(
-        {
-          forkHalt: {
-            eventID: JSON.stringify(['group:fork', control.key.groupID, control.key.incarnation]),
-            evidence,
-            detectedAt: Date.now(),
-          },
-        },
-        crypto.randomUUID(),
-      )
-    },
-  }
-}

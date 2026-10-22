@@ -1117,7 +1117,7 @@ export function sealedMemoryValidation(): ControlValidationPort {
       if (
         state === undefined ||
         identity === null ||
-        journal.checkpoint !== built.searchFrom ||
+        journal.checkpoint !== built.head ||
         built.epoch !== identity.epoch ||
         built.incarnation !== identity.incarnation ||
         toB64U(built.authenticatorBefore) !== toB64U(identity.authenticator) ||

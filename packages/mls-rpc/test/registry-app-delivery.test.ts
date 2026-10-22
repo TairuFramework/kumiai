@@ -7,7 +7,6 @@ import {
   type GroupProcedureHandlers,
   type LogHub,
   protocolTopic,
-  settleControlSlot,
 } from '@kumiai/rpc'
 import { expect, onTestFinished, test, vi } from 'vitest'
 
@@ -252,7 +251,7 @@ for (const mode of ['real-mls', 'double'] as const) {
     const crypto = f.group.receiver()
     const access = createRegistryHandleAccess({ access: registryAccess })
     const control = fixture.device.groups.ports(f.group.key).control
-    await fixture.acceptedOrdinary(registryAccess)
+    const { write, expected } = await fixture.acceptedOrdinary(registryAccess)
     const epoch = registryAccess.epoch()
     const adoption = createControlAdoptionPort({
       access,
@@ -268,25 +267,10 @@ for (const mode of ['real-mls', 'double'] as const) {
       return replace(...args)
     })
     const adopt = vi.spyOn(adoption, 'adopt')
-    const settled = settleControlSlot({
-      control,
-      adoption,
-      search: {
-        searchLog: async () => {
-          const proof = (await control.load()).commitOnceAcceptance
-          if (proof === null) throw new Error('Missing accepted own commit')
-          return { kind: 'first-valid', proof }
-        },
-      },
-      readEvidence: () => fixture.device.groups.readEvidence(f.group.key),
-      safetyHold: () => null,
-      haltFork: async () => {
-        throw new Error('Unexpected fork')
-      },
-      now: Date.now,
-      newID: () => globalThis.crypto.randomUUID(),
-      emit: () => {},
-    })
+    const occurrence = write.expected?.occurrence
+    const journal = write.expected?.journal
+    if (occurrence === undefined || journal === undefined) throw new Error('Missing own occurrence')
+    const settled = adoption.adopt(journal, { ...expected, occurrence }, write)
     try {
       await entered.promise
       const version = (await fixture.device.groups.readEvidence(f.group.key)).source.stateVersion
@@ -311,7 +295,9 @@ for (const mode of ['real-mls', 'double'] as const) {
       release.resolve()
       const result = await settled
       expect(await adopt.mock.results[0]?.value).toBe('installed')
-      expect(result).toBe('landed')
+      expect(result).toBe('installed')
+      expect((await control.load()).outcomes).toEqual(write.changes.putOutcomes)
+      expect((await control.load()).commitOnce).toBeNull()
       expect((await control.load()).controlHold).toBeNull()
       expect(registryAccess.epoch()).toBe(epoch + 1)
       expect(await crypto.pending.list()).toEqual([])

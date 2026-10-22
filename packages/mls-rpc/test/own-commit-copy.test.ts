@@ -4,10 +4,9 @@ import {
   commitLedgerEntries,
   decodeClientState,
   encodeClientState,
-  type GroupHandle,
+  GroupHandle,
   GroupRestoreError as InvalidCandidateError,
   ledgerEntryDigest,
-  ownCommitDigest,
   restoreGroup,
   signLedgerEntry,
 } from '@kumiai/mls'
@@ -15,8 +14,7 @@ import type { Operation, OperationDeps } from '@kumiai/rpc'
 import {
   asLogPosition,
   type BuiltCommit,
-  controlBuildRef,
-  createControlSearch,
+  consumeOwnOccurrence,
   createLedgerEntryResolver,
   decodeCommitFrame,
   decodeHandshakeFrame,
@@ -26,28 +24,31 @@ import {
   encodeLedgerEntries,
   HANDSHAKE_KIND,
 } from '@kumiai/rpc'
+import { stepLiveBuild } from '@kumiai/rpc/testing'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { toB64U } from '@sozai/codec'
 import { expect, test, vi } from 'vitest'
 
-import { stepOperation } from '../../rpc/lib/control/operations.js'
 import { createControlAdoptionPort } from '../src/control-adoption.js'
 import { encodeControlJournal } from '../src/control-journal.js'
 import { createControlValidationPort } from '../src/control-validation.js'
 import { deriveEntryKey, openEntries, sealEntries } from '../src/crypto.js'
-import { createGroupMLS } from '../src/mls.js'
-import {
-  createRealGroup,
-  testGroupMLSDependencies,
-  testHandleAccess,
-} from './fixtures/real-group.js'
+import { createRealGroup, testHandleAccess } from './fixtures/real-group.js'
 import { createTransactionalStore } from './fixtures/transactional-access.js'
 
+const verifierFault = vi.hoisted((): { token: string; error: Error } => ({
+  token: '',
+  error: new Error('local entry verification unavailable'),
+}))
 const recognition = vi.hoisted(() => ({ disabled: false }))
 vi.mock('@kumiai/mls', async (importOriginal) => {
   const actual = await importOriginal<typeof Mls>()
   return {
     ...actual,
+    verifyLedgerEntry: (token: string) => {
+      if (token === verifierFault.token) throw verifierFault.error
+      return actual.verifyLedgerEntry(token)
+    },
     ownCommitDigest: (bytes: Uint8Array) =>
       recognition.disabled ? null : actual.ownCommitDigest(bytes),
   }
@@ -82,10 +83,15 @@ async function fixture(named = false, nonempty = false) {
   const blob = named || nonempty ? sealEntries(key, encodeLedgerEntries([token])) : new Uint8Array()
   const payload = frame(blob)
   const built: BuiltCommit = {
+    opID: 'own-copy',
+    kind: 'ledger',
+    revokes: false,
+    enqueuedAt: 0,
+    deadline: 30000,
     epoch: source.identity.epoch,
     incarnation: 1,
     authenticatorBefore: source.identity.authenticator.slice(),
-    searchFrom: null,
+    head: null,
     expectedHead: null,
     publishID: 'saved-own-copy',
     payload,
@@ -122,31 +128,11 @@ async function fixture(named = false, nonempty = false) {
   const rows: Array<Uint8Array> = []
   const hold = vi.fn(async () => {})
   const haltFork = vi.fn(async () => {})
-  const search = createControlSearch({
-    ownCommitDigest,
-    budget: { maxPasses: 2, maxFetches: 16, maxFrames: 256 },
-    validation: port,
-    fetch: async (after) => ({
-      messages: rows
-        .map((payload, index) => ({
-          payload,
-          sequenceID: String(index + 1),
-          senderDID: 'replayer',
-          receivedAt: 1,
-          topicID: 'commit',
-        }))
-        .filter((row) => after === null || row.sequenceID > after),
-      head: rows.length === 0 ? null : String(rows.length),
-      oldest: rows.length === 0 ? null : '1',
-      gap: false,
-    }),
-    readEvidence: async () => ({ source, applied: [], cursor: null, terminal: false }),
-    followWinner: async () => ({ kind: 'unavailable' }),
-    reconcileAbsent: async () => true,
-    hold,
-    haltFork,
-    safetyHold: () => null,
-  })
+  const validate = async (payload: Uint8Array, position = '1') =>
+    validation.validateFrame(
+      { payload, position: asLogPosition(position), senderDID: 'replayer' },
+      built,
+    )
   return {
     group,
     author,
@@ -160,7 +146,8 @@ async function fixture(named = false, nonempty = false) {
     frame,
     blob,
     validation,
-    search,
+    validate,
+    validationPort: port,
     rows,
     hold,
     haltFork,
@@ -168,13 +155,13 @@ async function fixture(named = false, nonempty = false) {
 }
 
 test.each([true, false])(
-  'real saved named work retries identical bytes and ID (delivered: %s)',
+  'failed own copy blocks identical retry and a later exact occurrence installs unknown (delivered: %s)',
   async (delivered) => {
     const f = await fixture(true)
     const store = createTransactionalStore(f.author.handle)
-    const intent: Operation & { stage: 'intent' } = {
-      id: 'own-copy',
-      kind: 'rotation',
+    const intent: Operation = {
+      id: f.built.opID,
+      kind: f.built.kind,
       revokes: false,
       body: new Uint8Array(),
       seq: 1,
@@ -183,10 +170,14 @@ test.each([true, false])(
       stage: 'intent',
     }
     await store.control.apply({ putOperations: [intent] }, 'intent')
-    expect(await store.saveBuilt(intent, { ...f.built, opID: intent.id }, f.source, 'built')).toBe(
-      'saved',
-    )
-    const operation: Operation = { ...intent, stage: 'built', built: controlBuildRef(f.built) }
+    expect(
+      await store.saveBuilt(
+        intent,
+        f.built,
+        { ...f.source, stateVersion: store.snapshot().revision },
+        'build',
+      ),
+    ).toBe('saved')
     const access = testHandleAccess({
       handle: () => f.author.handle,
       adopt: (handle) => {
@@ -209,93 +200,75 @@ test.each([true, false])(
     })
     const bad = f.blob.slice()
     bad[bad.length - 1] = (bad[bad.length - 1] ?? 0) ^ 1
-    f.rows.push(f.frame(bad))
-    const receiver = f.group.members[0]
-    if (receiver === undefined) throw new Error('missing receiver')
-    receiver.slot.install(createLedgerEntryResolver(bad, async (blob) => openEntries(f.key, blob)))
-    await expect(receiver.handle.processMessage(f.prepared.commitMessage)).rejects.toThrow()
-    expect(receiver.handle.epoch).toBe(BigInt(f.built.epoch))
-    let now = 1
-    let serial = 0
-    const prepareBuild = vi.fn<OperationDeps['prepareBuild']>(async () => {
-      throw new Error('Unexpected rebuild')
-    })
-    const publish = vi.fn<OperationDeps['publish']>(async (payload, publishID, expectedHead) => {
-      expect(payload).toEqual(f.built.payload)
-      expect(publishID).toBe(f.built.publishID)
-      expect(expectedHead).toBe('1')
-      if (delivered) {
-        f.rows.push(payload.slice())
-        const frame = decodeCommitFrame(decodeHandshakeFrame(payload).payload)
-        receiver.slot.install(
-          createLedgerEntryResolver(frame.sealedEntries, async (blob) => openEntries(f.key, blob)),
-        )
-        await receiver.handle.processMessage(frame.commit)
-      }
-      return { sequenceID: '2' }
-    })
+    expect(
+      await consumeOwnOccurrence(
+        {
+          control: store.control,
+          validation: f.validationPort,
+          adoption,
+          now: () => 1,
+          newID: () => crypto.randomUUID(),
+          emit: () => {},
+        },
+        { payload: f.frame(bad), position: asLogPosition('1'), senderDID: 'replayer' },
+      ),
+    ).toBe('invalid')
+    const beforeSkip = (await store.control.load()).commitOnce
+    if (beforeSkip === null) throw new Error('Missing build')
+    await store.control.apply(
+      {
+        commitOnce: { ...beforeSkip, skipped: true },
+        cursor: { position: asLogPosition('1'), epoch: f.built.epoch },
+      },
+      'skip',
+    )
+    const publish = vi.fn(async () => ({ sequenceID: '2' }))
     const deps: OperationDeps = {
       control: store.control,
-      safetyHold: () => null,
       haltFork: f.haltFork,
-      prepareBuild,
+      safetyHold: () => null,
+      prepareBuild: async () => {
+        throw new Error('Unexpected rebuild')
+      },
+      adopt: adoption.adopt,
       frame: async () => {
         throw new Error('Unexpected framing')
       },
-      adopt: adoption.adopt,
-      searchLog: f.search.searchLog,
       readEvidence: store.readEvidence,
       readHead: async () => asLogPosition('1'),
       publish,
       pullToHead: async () => {},
-      now: () => now,
-      newID: () => `mutation-${++serial}`,
+      now: () => 1,
+      newID: () => crypto.randomUUID(),
       emit: () => {},
     }
-    const result = await stepOperation(deps, operation)
-    expect(publish).toHaveBeenCalledOnce()
+    await stepLiveBuild(deps)
+    expect(publish).not.toHaveBeenCalled()
     if (delivered) {
-      expect(result).toBeNull()
-      expect((await store.control.load()).outcomes).toMatchObject([
-        { kind: 'landed', position: '2' },
-      ])
-      expect((await store.control.load()).applied).toMatchObject([
-        { digest: f.built.digest, payloadDigest: f.built.payloadDigest, sequenceID: '2' },
+      expect(
+        await consumeOwnOccurrence(
+          {
+            control: store.control,
+            validation: f.validationPort,
+            adoption,
+            now: () => 2,
+            newID: () => crypto.randomUUID(),
+            emit: () => {},
+          },
+          { payload: f.built.payload, position: asLogPosition('2'), senderDID: 'replayer' },
+        ),
+      ).toBe('installed')
+      expect(store.snapshot().control.commitOnce).toBeNull()
+      expect(store.snapshot().control.outcomes).toMatchObject([
+        { kind: 'unknown', opID: f.built.opID },
       ])
       expect(f.author.handle.state.keySchedule.epochAuthenticator).toEqual(
-        receiver.handle.state.keySchedule.epochAuthenticator,
+        f.prepared.newGroup.state.keySchedule.epochAuthenticator,
       )
-      const receiverMLS = createGroupMLS({
-        identity: receiver.identity,
-        entrySlot: receiver.slot,
-        ...testGroupMLSDependencies(
-          testHandleAccess({
-            handle: () => receiver.handle,
-            adopt: (handle) => {
-              receiver.handle = handle
-            },
-          }),
-        ),
-      })
-      expect(await receiverMLS.processCommit(f.prepared.commitMessage, {})).toMatchObject({
-        applied: false,
-        advanced: false,
-      })
-      expect(receiver.handle.ledgerTokens.filter((token) => token === f.token)).toEqual([f.token])
     } else {
-      expect(result).toEqual(operation)
-      await stepOperation(deps, operation)
-      expect(publish).toHaveBeenCalledOnce()
-      now = 30000
-      expect(await stepOperation(deps, operation)).toBeNull()
-      const snapshot = await store.control.load()
-      expect(snapshot.outcomes).toMatchObject([{ kind: 'unknown' }])
-      expect(snapshot.commitOnce).toEqual({ ...f.built, opID: intent.id, expectedHead: '1' })
-      expect(snapshot.commitOnceAcceptance).toBeNull()
-      expect(snapshot.applied).toEqual([])
+      expect(store.snapshot().control.commitOnce?.skipped).toBe(true)
+      expect(store.snapshot().control.outcomes).toEqual([])
     }
-    expect(prepareBuild).not.toHaveBeenCalled()
-    expect(f.haltFork).not.toHaveBeenCalled()
   },
 )
 
@@ -325,10 +298,7 @@ test.each([
       ),
     ).toMatchObject({ kind: 'valid', own: true })
     f.rows.push(changed)
-    expect(await f.search.searchLog(f.built)).toMatchObject({
-      kind: 'first-valid',
-      proof: { position: '1', payloadDigest: f.built.payloadDigest },
-    })
+    expect(await f.validate(changed)).toMatchObject({ kind: 'valid', own: true })
     expect(f.built).toEqual(saved)
     expect(encodeClientState(f.author.handle.state)).toEqual(f.state)
     expect(f.haltFork).not.toHaveBeenCalled()
@@ -361,7 +331,6 @@ test('two null recognition digests never recognise a changed copy', async () => 
         f.built,
       ),
     ).toEqual({ kind: 'unavailable', reason: 'unexplained-own' })
-    expect(await f.search.searchLog(f.built)).toEqual({ kind: 'unknown', retryHead: '1' })
   } finally {
     recognition.disabled = false
   }
@@ -372,10 +341,7 @@ test('a valid swapped named-entry blob uses the receiver reference predicate', a
   const swapped = sealEntries(f.key, encodeLedgerEntries(['unrelated extra body', f.token]))
   expect(swapped).not.toEqual(f.blob)
   f.rows.push(f.frame(swapped))
-  expect(await f.search.searchLog(f.built)).toMatchObject({
-    kind: 'first-valid',
-    proof: { payloadDigest: f.built.payloadDigest },
-  })
+  expect(await f.validate(f.frame(swapped))).toMatchObject({ kind: 'valid', own: true })
   const receiver = f.group.members[0]
   if (receiver === undefined) throw new Error('missing receiver')
   receiver.slot.install(
@@ -393,7 +359,7 @@ test('a valid swapped named-entry blob uses the receiver reference predicate', a
 })
 
 test.each(['tag', 'reference', 'version'] as const)(
-  'a failed named-entry %s copy stays unknown before identical replay applies once',
+  'a failed named-entry %s copy is refused while a later exact occurrence validates',
   async (fault) => {
     const f = await fixture(true)
     let bad = sealEntries(f.key, encodeLedgerEntries([]))
@@ -402,12 +368,12 @@ test.each(['tag', 'reference', 'version'] as const)(
       bad[bad.length - 1] = (bad[bad.length - 1] ?? 0) ^ 1
     } else if (fault === 'version') bad = new Uint8Array([99])
     f.rows.push(f.frame(bad))
-    expect(await f.search.searchLog(f.built)).toEqual({ kind: 'unknown', retryHead: '1' })
-    f.rows.push(f.built.payload.slice())
-    expect(await f.search.searchLog(f.built)).toMatchObject({
-      kind: 'first-valid',
-      proof: { position: '2', payloadDigest: f.built.payloadDigest },
+    expect(await f.validate(f.frame(bad))).toMatchObject({
+      kind: 'unavailable',
+      reason: 'unexplained-own',
     })
+    f.rows.push(f.built.payload.slice())
+    expect(await f.validate(f.built.payload, '2')).toMatchObject({ kind: 'valid', own: true })
     const receiver = f.group.members[0]
     if (receiver === undefined) throw new Error('missing receiver')
     for (const payload of f.rows) {
@@ -426,7 +392,7 @@ test.each(['tag', 'reference', 'version'] as const)(
   },
 )
 
-test('a failed re-encoded own copy permits retry and a later exact occurrence', async () => {
+test('a failed re-encoded own copy does not invalidate a later exact occurrence', async () => {
   const f = await fixture(true)
   const original = f.prepared.commitMessage
   const reencoded = new Uint8Array([
@@ -436,10 +402,33 @@ test('a failed re-encoded own copy permits retry and a later exact occurrence', 
     ...original.subarray(5),
   ])
   f.rows.push(f.frame(new Uint8Array([99]), reencoded))
-  expect(await f.search.searchLog(f.built)).toEqual({ kind: 'unknown', retryHead: '1' })
-  f.rows.push(f.built.payload)
-  expect(await f.search.searchLog(f.built)).toMatchObject({
-    kind: 'first-valid',
-    proof: { position: '2', payloadDigest: f.built.payloadDigest },
+  expect(await f.validate(f.frame(new Uint8Array([99]), reencoded))).toMatchObject({
+    kind: 'unavailable',
+    reason: 'unexplained-own',
   })
+  f.rows.push(f.built.payload)
+  expect(await f.validate(f.built.payload, '2')).toMatchObject({ kind: 'valid', own: true })
+})
+
+test('own named-entry local verifier failure preserves the provider error identity', async () => {
+  const f = await fixture(true)
+  verifierFault.token = f.token
+  try {
+    await expect(f.validate(f.built.payload)).rejects.toBe(verifierFault.error)
+  } finally {
+    verifierFault.token = ''
+  }
+})
+
+test('own saved-source signature verification preserves local provider errors', async () => {
+  const f = await fixture()
+  const providerError = new Error('saved source signature provider unavailable')
+  const verify = vi
+    .spyOn(GroupHandle.prototype, 'verifyCommitSignature')
+    .mockRejectedValue(providerError)
+  try {
+    await expect(f.validation.verifyOwn(f.built)).rejects.toBe(providerError)
+  } finally {
+    verify.mockRestore()
+  }
 })

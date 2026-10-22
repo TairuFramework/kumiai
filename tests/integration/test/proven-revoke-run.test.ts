@@ -315,28 +315,16 @@ const controlHost = () => ({
   control: controlDatabase.control('state', { groupID: 'state', incarnation: 1 }),
   loadVersion: () => controlDatabase.loadVersion('state'),
   saveBuilt: ((intent, built, expected, mutationID) => {
-    const { pendingPublish, reconciliation, ...request } = intent
-    if (reconciliation !== undefined) return Promise.resolve('moved')
+    const { acceptedAs, ...material } = built
     return controlDatabase.saveBuilt(
       'state',
       { groupID: 'state', incarnation: 1 },
+      intent,
       {
-        ...request,
-        ...(pendingPublish === undefined
-          ? {}
-          : {
-              pendingPublish: {
-                expectedHead:
-                  pendingPublish.expectedHead === null
-                    ? null
-                    : asLogPosition(pendingPublish.expectedHead),
-              },
-            }),
-      },
-      {
-        ...built,
-        searchFrom: built.searchFrom === null ? null : asLogPosition(built.searchFrom),
+        ...material,
+        head: built.head === null ? null : asLogPosition(built.head),
         expectedHead: built.expectedHead === null ? null : asLogPosition(built.expectedHead),
+        ...(acceptedAs === undefined ? {} : { acceptedAs: asLogPosition(acceptedAs) }),
       },
       expected,
       mutationID,

@@ -15,7 +15,6 @@ import {
   type ControlStore,
   ControlStoreInvariantError,
   ControlWriteNotCommittedError,
-  controlBuildRef,
   controlSafetyHeld,
   digestAppliedCommit,
   executableOperations,
@@ -121,12 +120,19 @@ export function createPersistenceBuildSaver<TTx extends GroupTransaction>(params
             !sameStoredValue(state.epochAuthenticator, identity.authenticator) ||
             state.version !== expected.stateVersion ||
             built.epoch !== identity.epoch ||
+            built.opID !== intent.id ||
+            built.kind !== intent.kind ||
+            built.revokes !== intent.revokes ||
+            built.enqueuedAt !== intent.enqueuedAt ||
+            built.deadline !== intent.deadline ||
             built.incarnation !== key.incarnation ||
             !sameStoredValue(built.authenticatorBefore, identity.authenticator) ||
             !sameStoredValue(journal.source.key, key) ||
             !sameStoredValue(journal.source.identity, identity) ||
-            journal.checkpoint !== built.searchFrom ||
-            built.searchFrom !== (snapshot.cursor?.position ?? null) ||
+            journal.checkpoint !== built.head ||
+            built.head !== (snapshot.cursor?.position ?? null) ||
+            snapshot.cursor?.incomplete === true ||
+            snapshot.spentSource?.epoch === identity.epoch ||
             (snapshot.cursor !== null &&
               (snapshot.cursor.epoch !== identity.epoch || snapshot.cursor.stranded)) ||
             executableOperations(snapshot)[0]?.id !== intent.id ||
@@ -138,9 +144,10 @@ export function createPersistenceBuildSaver<TTx extends GroupTransaction>(params
             if (!sameStoredValue(initialIdentity, identity)) throw new PreparationMoved()
           }
           if (
-            snapshot.commitOnce !== null &&
-            snapshot.commitOnce.incarnation === key.incarnation &&
-            snapshot.commitOnce.epoch >= identity.epoch
+            snapshot.spentSource?.epoch === identity.epoch ||
+            (snapshot.commitOnce !== null &&
+              snapshot.commitOnce.incarnation === key.incarnation &&
+              snapshot.commitOnce.epoch >= identity.epoch)
           )
             throw new SlotOccupied()
           controlBuildContexts.set(stores.tx, {
@@ -151,10 +158,9 @@ export function createPersistenceBuildSaver<TTx extends GroupTransaction>(params
           })
           try {
             await rows.control.apply(
-              { putOperations: [{ ...intent, stage: 'built', built: controlBuildRef(built) }] },
+              { deleteOperations: [intent.id], commitOnce: built },
               mutationID,
             )
-            await rows.control.apply({ commitOnce: built, commitOnceAcceptance: null }, mutationID)
           } finally {
             controlBuildContexts.delete(stores.tx)
           }
@@ -249,13 +255,16 @@ export function createControlBuildPort(params: {
         if (identity === null) return { kind: 'moved' as const, operation: saved }
         if (
           snapshot.cursor !== null &&
-          (snapshot.cursor.epoch !== identity.epoch || snapshot.cursor.stranded)
+          (snapshot.cursor.epoch !== identity.epoch ||
+            snapshot.cursor.stranded ||
+            snapshot.cursor.incomplete)
         )
           return { kind: 'moved' as const, operation: saved }
         if (
-          snapshot.commitOnce !== null &&
-          snapshot.commitOnce.incarnation === original.key.incarnation &&
-          snapshot.commitOnce.epoch >= identity.epoch
+          snapshot.spentSource?.epoch === identity.epoch ||
+          (snapshot.commitOnce !== null &&
+            snapshot.commitOnce.incarnation === original.key.incarnation &&
+            snapshot.commitOnce.epoch >= identity.epoch)
         )
           return { kind: 'occupied' as const, operation: saved }
         const suite = scope.handle.context.cipherSuite
@@ -377,7 +386,11 @@ export function createControlBuildPort(params: {
           ...retained,
           ...framed,
           opID: saved.id,
-          searchFrom: checkpoint,
+          head: checkpoint,
+          kind: saved.kind,
+          revokes: saved.revokes,
+          enqueuedAt: saved.enqueuedAt,
+          deadline: saved.deadline,
           payloadDigest: toB64U(sha256(framed.payload)),
           journal: encodeControlJournal({
             version: 1,
@@ -428,7 +441,7 @@ export function createControlBuildPort(params: {
         if (result === 'saved')
           return {
             kind: 'saved',
-            operation: { ...saved, stage: 'built', built: controlBuildRef(built) },
+            operation: saved,
           }
         if (result === 'occupied') return { kind: 'occupied', operation: saved }
         const fresh = await read()

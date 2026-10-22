@@ -1,6 +1,7 @@
 import { toUTF } from '@sozai/codec'
 import { expect, test } from 'vitest'
 
+import { closeControlBuild } from '../src/control/slot.js'
 import type { ControlSlot, Operation, StagedAdoption } from '../src/control/types.js'
 import { asLogPosition } from '../src/cursor.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
@@ -30,10 +31,29 @@ test.each([false, true])(
     const ownAuthenticator = bob.authenticator()
     bob.restoreState(before)
     const prepared = await saveCandidate(bob, source, before, candidate)
-    const priorMutation = await bob.control().lastMutation()
     const otherCommit = alice.buildCommit()
     expect(ownCommit).not.toEqual(otherCommit)
-    await bob.processCommit(otherCommit, {})
+    const beforeCompetitor = await bob.control().load()
+    await bob.processCommit(otherCommit, {
+      adoption: (staged) => ({
+        mutationID: 'competitor',
+        changes: {
+          ...closeControlBuild(beforeCompetitor, { kind: 'lost' }, 1, 'lost'),
+          putApplied: [
+            {
+              epoch: prepared.slot.epoch,
+              digest: 'competitor',
+              payloadDigest: 'competitor-payload',
+              sequenceID: '002',
+              opID: null,
+              removed: false,
+            },
+          ],
+          cursor: { position: asLogPosition('002'), epoch: staged.epochAfter },
+        },
+      }),
+    })
+    const priorMutation = await bob.control().lastMutation()
     if (restart) {
       const saved = await hostDB.loadState(groupID)
       if (saved == null) throw new Error('missing saved state')
@@ -45,7 +65,7 @@ test.each([false, true])(
     expect(
       await bob.adoptOperation(
         prepared.slot.journal,
-        { ...(await bob.readEvidence()).source, acceptance: prepared.proof },
+        { ...(await bob.readEvidence()).source, occurrence: prepared.proof },
         write,
       ),
     ).toBe('moved')
@@ -77,6 +97,16 @@ test('own rotation identity survives installation and idempotent replay after re
     mutationID: 'own-branch',
     changes: {
       commitOnce: null,
+      cursor: { position: asLogPosition('001'), epoch: source.identity.epoch + 1 },
+      putOutcomes: [
+        {
+          id: 'landed',
+          opID: 'rotation',
+          at: 1,
+          kind: 'landed' as const,
+          position: asLogPosition('001'),
+        },
+      ],
       deleteOperations: ['rotation'],
       putApplied: [
         {
@@ -93,7 +123,7 @@ test('own rotation identity survives installation and idempotent replay after re
   expect(
     await bob.adoptOperation(
       prepared.slot.journal,
-      { ...(await bob.readEvidence()).source, acceptance: prepared.proof },
+      { ...(await bob.readEvidence()).source, occurrence: prepared.proof },
       write,
     ),
   ).toBe('installed')
@@ -105,7 +135,7 @@ test('own rotation identity survives installation and idempotent replay after re
   expect(
     await restored.adoptOperation(
       prepared.slot.journal,
-      { ...(await restored.readEvidence()).source, acceptance: prepared.proof },
+      { ...(await restored.readEvidence()).source, occurrence: prepared.proof },
       write,
     ),
   ).toBe('noop')
@@ -218,10 +248,14 @@ async function saveCandidate(
   await bob.control().apply({ putOperations: [op] }, 'enqueue')
   const slot: ControlSlot = {
     opID: op.id,
+    kind: op.kind,
+    revokes: op.revokes,
+    enqueuedAt: op.enqueuedAt,
+    deadline: op.deadline,
     incarnation: 1,
     epoch: source.identity.epoch,
     authenticatorBefore: source.identity.authenticator,
-    searchFrom: null,
+    head: null,
     expectedHead: null,
     publishID: 'own',
     payload: new Uint8Array([1]),
@@ -234,10 +268,9 @@ async function saveCandidate(
   expect(await bob.saveBuilt(op, slot, source, 'built')).toBe('saved')
   const proof = {
     source,
-    from: null,
+    coverage: 'complete' as const,
     position: asLogPosition('001'),
     payloadDigest: slot.payloadDigest,
   }
-  await bob.control().apply({ commitOnceAcceptance: proof }, 'accepted')
   return { slot, proof }
 }

@@ -1,5 +1,5 @@
 export { effectiveRecoveryEpochFloor } from './control/rejoin.js'
-export { RecoveryTargetBehindError } from './errors.js'
+export { RecoveryTargetBehindError, SavedControlCompatibilityError } from './errors.js'
 /**
  * High-level MLS-aware group RPC for Enkaku.
  *
@@ -88,23 +88,20 @@ export {
   recoveryUnavailableEventID,
   type SafetyHold,
 } from './control/safety.js'
-export {
-  type CertifiedControlRange,
-  CONTROL_SEARCH_BUDGET,
-  type ControlEvidenceSnapshot,
-  type ControlFrameValidation,
-  type ControlHold,
-  type ControlLogFrame,
-  type ControlSearchBudget,
-  type ControlSearchDeps,
-  type ControlSearchWork,
-  type ControlValidation,
-  type ControlValidationPort,
-  createControlSearch,
-  type FollowWinnerResult,
-  isCertifiedControlLoser,
+export type {
+  ControlEvidenceSnapshot,
+  ControlFrameValidation,
+  ControlHold,
+  ControlLogFrame,
+  ControlValidation,
+  ControlValidationPort,
 } from './control/search.js'
-export { type ControlSlotDeps, controlBuildRef, settleControlSlot } from './control/slot.js'
+export {
+  type ControlSlotDeps,
+  closeControlBuild,
+  consumeOwnOccurrence,
+  controlBuildRef,
+} from './control/slot.js'
 export {
   applyChanges,
   applyResolved,
@@ -112,36 +109,35 @@ export {
   type CommitOnceWriteContext,
   ControlStoreInvariantError,
   controlAdoptionAllowed,
+  controlOccurrenceCoverage,
+  controlOwnConsumptionAllowed,
   controlSettled,
   deleteOperationChanges,
   pruneWindow,
   readmissionChanges,
 } from './control/store.js'
 export type {
-  AcceptanceUncertainty,
   AdoptionExpected,
   AdoptionWrite,
   AdoptionWriteFactory,
   AppliedCommit,
   BuiltCommit,
   CommitCursor,
-  CommitSearchResult,
   ControlAdoptionPort,
   ControlBuildRef,
   ControlChanges,
-  ControlSearchPort,
   ControlSlot,
   ControlSnapshot,
   ControlSource,
   ControlStore,
   EpochIdentity,
   ExternalResponse,
-  FirstValidCommit,
   GroupKey,
   LegacyRejoinRecord,
   Operation,
   OperationRequest,
   Outcome,
+  OwnOccurrence,
   RecoveryRefusal,
   RejoinRecord,
   StagedAdoption,

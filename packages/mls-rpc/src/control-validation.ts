@@ -174,7 +174,7 @@ export function createControlValidationPort(params: {
       const identity = journal.source.identity
       if (
         identity === null ||
-        journal.checkpoint !== built.searchFrom ||
+        journal.checkpoint !== built.head ||
         identity.epoch !== built.epoch ||
         identity.incarnation !== built.incarnation ||
         !sameBytes(identity.authenticator, built.authenticatorBefore) ||
@@ -223,7 +223,7 @@ export function createControlValidationPort(params: {
         readHeader?: MLSHeader,
       ): Promise<boolean> => {
         if (
-          value.searchFrom !== journal.checkpoint ||
+          value.head !== journal.checkpoint ||
           value.epoch !== identity.epoch ||
           value.incarnation !== identity.incarnation ||
           !sameBytes(value.authenticatorBefore, identity.authenticator) ||
@@ -236,25 +236,26 @@ export function createControlValidationPort(params: {
           return false
         ownVerification ??= (async () => {
           const { group: source } = restored ?? (await restore())
+          let commit: Uint8Array
           try {
             const handshake = decodeHandshakeFrame(value.payload)
             if (handshake.version !== HANDSHAKE_VERSION || handshake.kind !== HANDSHAKE_KIND.commit)
               return false
-            const commit = decodeCommitFrame(handshake.payload).commit
-            if (digestAppliedCommit(commit) !== value.digest) return false
-            const header = readHeader ?? (await source.readCommitHeader(commit))
-            if (
-              header?.epoch !== BigInt(identity.epoch) ||
-              header.external === true ||
-              header.committerDID === undefined ||
-              normalizeDID(header.committerDID) !== normalizeDID(params.identity.id) ||
-              normalizeDID(journal.sourceCredential.id) !== normalizeDID(params.identity.id) ||
-              !(await source.verifyCommitSignature(commit))
-            )
-              return false
+            commit = decodeCommitFrame(handshake.payload).commit
           } catch {
             return false
           }
+          if (digestAppliedCommit(commit) !== value.digest) return false
+          const header = readHeader ?? (await source.readCommitHeader(commit))
+          if (
+            header?.epoch !== BigInt(identity.epoch) ||
+            header.external === true ||
+            header.committerDID === undefined ||
+            normalizeDID(header.committerDID) !== normalizeDID(params.identity.id) ||
+            normalizeDID(journal.sourceCredential.id) !== normalizeDID(params.identity.id) ||
+            !(await source.verifyCommitSignature(commit))
+          )
+            return false
           const candidate = denyApplicationSend(
             restrictCommitAuthoring(await params.restoreCandidate(journal.candidate.slice())),
           )
@@ -370,8 +371,14 @@ export function createControlValidationPort(params: {
                 if (key === null) throw new Error('Unexpected no-entry resolution')
                 return openEntries(key, blob)
               })
+              let tokens: Array<string>
+              try {
+                tokens = await resolve(missing)
+              } catch {
+                return { kind: 'unavailable', reason: 'unexplained-own' }
+              }
               const resolved = new Set<string>()
-              for (const token of await resolve(missing)) {
+              for (const token of tokens) {
                 const id = ledgerEntryDigest(token)
                 if (
                   missing.includes(id) &&
@@ -382,8 +389,6 @@ export function createControlValidationPort(params: {
               }
               if (missing.some((id) => !resolved.has(id)))
                 return { kind: 'unavailable', reason: 'unexplained-own' }
-            } catch {
-              return { kind: 'unavailable', reason: 'unexplained-own' }
             } finally {
               key?.fill(0)
             }

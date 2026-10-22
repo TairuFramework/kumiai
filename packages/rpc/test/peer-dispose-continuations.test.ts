@@ -96,8 +96,8 @@ describe('work resumed after disposal', () => {
       expect(readResumed).toBe(true)
       expect(bob.mls.epoch()).toBe(1)
       const saved = await bob.control.load()
-      expect(saved.operations[0]?.stage).toBe('accepted')
-      expect(saved.commitOnceAcceptance?.payloadDigest).toBe(saved.commitOnce?.payloadDigest)
+      expect(saved.operations).toEqual([])
+      expect(saved.commitOnce?.acceptedAs).toBe('000000000001')
       expect(saved.applied).toEqual([])
       expect(bob.welcomes).toEqual([])
       expect(
@@ -193,7 +193,7 @@ describe('work resumed after disposal', () => {
       await alice.peer.dispose()
       releasePublish()
       await expect(committing).rejects.toBeInstanceOf(PeerDisposedError)
-      expect(((await alice.control.load()).operations[0] ?? null)?.stage).toBe('built')
+      expect((await alice.control.load()).commitOnce).not.toBeNull()
       expect(alice.mls.epoch()).toBe(1)
       expect(hubPublish).toHaveBeenCalledTimes(1)
     } finally {
@@ -225,7 +225,7 @@ describe('work resumed after disposal', () => {
       releaseRead()
       await expect(committing).rejects.toBeInstanceOf(PeerDisposedError)
       expect(alice.mls.epoch()).toBe(1)
-      expect(((await alice.control.load()).operations[0] ?? null)?.stage).toBe('accepted')
+      expect((await alice.control.load()).commitOnce?.acceptedAs).toBeDefined()
     } finally {
       releaseRead()
       await alice.peer.dispose()

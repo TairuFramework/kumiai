@@ -74,7 +74,7 @@ test('legacy negative aliases cannot erase an applied response during compaction
 
 const empty = (): ControlSnapshot => ({
   commitOnce: null,
-  commitOnceAcceptance: null,
+  spentSource: null,
   controlHold: null,
   forkHalt: null,
   recoveryUnavailable: null,
@@ -222,11 +222,15 @@ describe('control changes', () => {
     const store = db.control('group-A', { groupID: 'group-A', incarnation: 1 })
     const slot: ControlSlot = {
       opID: 'owner',
+      kind: 'invite',
+      revokes: false,
+      enqueuedAt: 100,
+      deadline: 30100,
       incarnation: 1,
       epoch: 4,
       authenticatorBefore: new Uint8Array([1]),
       publishID: 'publish',
-      searchFrom: asLogPosition('003'),
+      head: asLogPosition('003'),
       expectedHead: asLogPosition('003'),
       payload: new Uint8Array([2]),
       payloadDigest: 'payload',
@@ -241,7 +245,7 @@ describe('control changes', () => {
     const identity = { ...key, epoch: slot.epoch, authenticator: slot.authenticatorBefore }
     await db.saveState('group-A', encodeControlFixtureState(identity))
     await store.apply(
-      { putOperations: [intent], cursor: { position: slot.searchFrom, epoch: slot.epoch } },
+      { putOperations: [intent], cursor: { position: slot.head, epoch: slot.epoch } },
       'intent',
     )
     await db.saveBuilt(

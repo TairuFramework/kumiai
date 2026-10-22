@@ -732,7 +732,15 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
             persist: (candidate, ctx) =>
               persist(
                 candidate,
-                inboundCommitContext(group, before, candidate, commit, ctx, eligible.bindResult),
+                inboundCommitContext(
+                  group,
+                  before,
+                  candidate,
+                  commit,
+                  ctx,
+                  eligible.bindResult ||
+                    candidate.state.groupActiveState.kind === 'removedFromGroup',
+                ),
               ),
           })
           // Thrown so the adapter does not save a handle the commit left untouched.

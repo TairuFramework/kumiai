@@ -264,7 +264,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     const original = bob.control.apply.bind(bob.control)
     vi.spyOn(bob.control, 'apply').mockImplementation(async (...args) => {
       await original(...args)
-      if (args[0].putOperations?.[0]?.stage === 'accepted') {
+      if (args[0].commitOnce?.acceptedAs !== undefined) {
         entered.resolve()
         await gate.promise
       }

@@ -10,12 +10,8 @@ import type {
 } from '../recovery-types.js'
 import type { PublishOutcome } from './operations.js'
 import { controlSafetyHeld } from './safety.js'
-import {
-  applyResolved,
-  deleteOperationChanges,
-  pruneWindow,
-  retainAdvancedControlSlot,
-} from './store.js'
+import { closeControlBuild } from './slot.js'
+import { applyResolved, pruneWindow } from './store.js'
 import type {
   AdoptionWriteFactory,
   AppliedCommit,
@@ -216,17 +212,6 @@ export async function stepLegacyRejoin(
       removed: false,
     }
     const next: LegacyRejoinRecord = { ...record, stage: 'adopted' }
-    const deferred = snapshot.operations.filter((op) => op.stage === 'accepted')
-    const settlement = {
-      ...deleteOperationChanges(
-        snapshot,
-        deferred.map((op) => op.id),
-      ),
-      putOutcomes: deferred.map(
-        (op): Outcome => ({ id: op.id, opID: op.id, at: deps.now(), kind: 'unknown' }),
-      ),
-      putApplied: [row],
-    }
     if (await held()) return record
     const mutationID = deps.newID()
     await deps.adopt(record, (staged) => ({
@@ -235,9 +220,9 @@ export async function stepLegacyRejoin(
       changes: {
         ...pruneWindow(snapshot, row.epoch),
         ...(staged.incarnation === deps.control.key.incarnation
-          ? retainAdvancedControlSlot(snapshot, staged.epochAfter)
+          ? closeControlBuild(snapshot, { kind: 'unknown' }, deps.now(), deps.newID())
           : {}),
-        ...settlement,
+        putApplied: [row],
         putRejoin: next,
         ...(snapshot.controlHold?.reason === 'acceptance-unknown' ? { controlHold: null } : {}),
         cursor: { position, epoch: staged.epochAfter, stranded: true },
@@ -252,7 +237,9 @@ export async function stepLegacyRejoin(
         ],
       },
     }))
-    for (const outcome of settlement.putOutcomes ?? []) deps.emit(outcome)
+    for (const outcome of (await deps.control.load()).outcomes) {
+      if (!snapshot.outcomes.some((row) => row.id === outcome.id)) deps.emit(outcome)
+    }
     return next
   }
   if (!(await deps.bootstrapLedger())) return record

@@ -7,12 +7,14 @@ import {
   restoreGroup,
 } from '@kumiai/mls'
 import type { CheckpointFactRecord } from '@kumiai/rpc'
+import { asLogPosition, digestAppliedCommit } from '@kumiai/rpc'
 import { toB64U } from '@sozai/codec'
 import { describe, expect, onTestFinished, test, vi } from 'vitest'
 
 import { prepareCheckpointInstallationFromTrust } from '../src/checkpoint-capture.js'
 import { readCheckpointCoverage } from '../src/checkpoint-store.js'
 import { entryCapability } from '../src/entry-capability.js'
+import { inboundCommitContext } from '../src/inbound-commit.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import { buildRealCommit, createRealGroup } from './fixtures/real-group.js'
 import { createRegistryFixture } from './fixtures/registry.js'
@@ -164,17 +166,21 @@ for (const mode of ['real-mls', 'double'] as const) {
           const access = await fixture.registry.access(groupID)
           const before = await records()
           const built = await fixture.acceptedOrdinary(access, { accepted: false })
+          const proven = built.write.expected
+          const occurrence = proven?.occurrence
+          if (proven === undefined || occurrence === undefined)
+            throw new Error('Missing own occurrence')
+          built.write.expected = {
+            ...proven,
+            occurrence: { ...occurrence, payloadDigest: 'different-payload' },
+          }
           await expect(access.adopt(built.candidate, built.expected, built.write)).resolves.toBe(
             'moved',
           )
           await exportGroupInfo({ group: built.candidate })
           expect(await records()).toEqual(before)
-          await fixture.installRows({
-            key: access.key,
-            control: { commitOnceAcceptance: built.write.expected?.acceptance },
-          })
           const expected = await access.readControl(async ({ source }) => source)
-          built.write.expected = { ...built.write.expected, ...expected }
+          built.write.expected = { ...proven, ...expected }
           fixture.armWorkFault(built.write.mutationID, 'before-commit')
           await expect(access.adopt(built.candidate, expected, built.write)).rejects.toThrow()
           expect(await records()).toEqual(before)
@@ -527,9 +533,40 @@ test.each(['receive', 'remove'] as const)(
         kind === 'remove'
           ? await buildRealCommit(real, { removes: 0 })
           : (await commitKeyRotation(real.committer.handle)).commitMessage
-      await access.mutate(async (handle, persist) => {
-        await handle.processMessage(commit, { persist })
-      })
+      const position = asLogPosition('000001')
+      const sourceEpoch = await access.read((handle) => Number(handle.epoch))
+      await access.mutate(
+        async (handle, persist) => {
+          const source = {
+            epoch: Number(handle.epoch),
+            authenticator: handle.state.keySchedule.epochAuthenticator.slice(),
+          }
+          await handle.processMessage(commit, {
+            persist: (candidate, context) =>
+              persist(
+                candidate,
+                inboundCommitContext(handle, source, candidate, commit, context, true),
+              ),
+          })
+        },
+        (staged) => ({
+          mutationID: crypto.randomUUID(),
+          changes: {
+            commitOnce: null,
+            putApplied: [
+              {
+                epoch: sourceEpoch,
+                digest: digestAppliedCommit(commit),
+                payloadDigest: digestAppliedCommit(commit),
+                sequenceID: position,
+                opID: null,
+                removed: staged.removed,
+              },
+            ],
+            cursor: { position, epoch: staged.epochAfter },
+          },
+        }),
+      )
       const installed = await fixture.device.groups.loadState(key)
       const after = await records()
       const fact = after.filter((row) => row.kind === 'fact').at(-1)

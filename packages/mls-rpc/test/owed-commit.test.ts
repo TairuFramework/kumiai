@@ -51,19 +51,28 @@ for (const kind of accessKinds) {
       const source = await f.access.readControl(async ({ source }) => source)
       const proof = {
         source,
-        from: slot.searchFrom,
+        coverage: 'complete' as const,
         position: asLogPosition('000001'),
         payloadDigest: slot.payloadDigest,
       }
-      await f.control().apply({ commitOnceAcceptance: proof }, 'accepted')
+      await f.control().apply({ commitOnce: { ...slot, acceptedAs: proof.position } }, 'accepted')
       const expected = await f.access.readControl(async ({ source }) => ({
         ...source,
-        acceptance: proof,
+        occurrence: proof,
       }))
       const write: AdoptionWrite = {
         mutationID: 'adopted',
         changes: {
           commitOnce: null,
+          putOutcomes: [
+            {
+              id: crypto.randomUUID(),
+              opID: slot.opID,
+              at: Date.now(),
+              kind: 'landed',
+              position: proof.position,
+            },
+          ],
           deleteOperations: [slot.opID],
           putApplied: [
             {
@@ -113,11 +122,12 @@ for (const kind of accessKinds) {
         control: f.control(),
         restoreCandidate: f.restoreCandidate,
       })
-      expect(await port.adopt(slot.journal, expected, write)).toBe(
-        move === 'own proposal' ? 'moved' : 'installed',
-      )
-      if (move === 'own proposal') expect(await f.stored()).toEqual(before)
-      else {
+      const adopting = port.adopt(slot.journal, expected, write)
+      if (move === 'own proposal') {
+        await expect(adopting).rejects.toMatchObject({ name: 'SavedControlCompatibilityError' })
+        expect(await f.stored()).toEqual(before)
+      } else {
+        await expect(adopting).resolves.toBe('installed')
         const adopted = await f.access.read((handle) => handle)
         expect(adopted.state.unappliedProposals).toEqual({})
         if (move.startsWith('history eviction'))
@@ -186,7 +196,7 @@ test('adoption caller without a callback keeps the exact version', async () => {
   }
 })
 
-test('registry ordinary destination refuses a moved control source before work', async () => {
+test('registry ordinary destination refuses an incompatible saved candidate before work', async () => {
   const f = await authoringAccessFixture('registry')
   try {
     await f.owe()
@@ -195,14 +205,14 @@ test('registry ordinary destination refuses a moved control source before work',
     const source = await f.access.readControl(async ({ source }) => source)
     const proof = {
       source,
-      from: slot.searchFrom,
+      coverage: 'complete' as const,
       position: asLogPosition('000001'),
       payloadDigest: slot.payloadDigest,
     }
-    await f.control().apply({ commitOnceAcceptance: proof }, 'accepted')
+    await f.control().apply({ commitOnce: { ...slot, acceptedAs: proof.position } }, 'accepted')
     const expected = await f.access.readControl(async ({ source }) => ({
       ...source,
-      acceptance: proof,
+      occurrence: proof,
       journal: slot.journal,
     }))
     const candidate = await f.restoreCandidate(decodeControlJournal(slot.journal).candidate)
@@ -219,9 +229,31 @@ test('registry ordinary destination refuses a moved control source before work',
       f.access.replace(candidate, () => ({
         mutationID: 'moved-adoption',
         expected,
-        changes: { commitOnce: null, deleteOperations: [slot.opID] },
+        changes: {
+          commitOnce: null,
+          putOutcomes: [
+            {
+              id: 'incompatible-final',
+              opID: slot.opID,
+              at: 1,
+              kind: 'landed',
+              position: proof.position,
+            },
+          ],
+          putApplied: [
+            {
+              epoch: slot.epoch,
+              digest: slot.digest,
+              payloadDigest: slot.payloadDigest,
+              sequenceID: proof.position,
+              opID: slot.opID,
+              removed: false,
+            },
+          ],
+          cursor: { position: proof.position, epoch: slot.epoch + 1 },
+        },
       })),
-    ).rejects.toMatchObject({ name: 'ControlAdoptionMovedError' })
+    ).rejects.toMatchObject({ name: 'SavedControlCompatibilityError' })
     expect(work).toBe(0)
     expect(await f.stored()).toEqual(before)
   } finally {

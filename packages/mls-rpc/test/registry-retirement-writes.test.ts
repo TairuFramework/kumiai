@@ -1,9 +1,10 @@
-import { signLedgerEntry } from '@kumiai/mls'
+import { encodeClientState, signLedgerEntry } from '@kumiai/mls'
 import { asLogPosition, type ControlChanges, controlSettled } from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
+import { encodeControlJournal } from '../src/control-journal.js'
 import { entryCapability } from '../src/entry-capability.js'
-import { physicalRecordKey } from '../src/persistence-codec.js'
+import { encodeStoredValue, physicalRecordKey } from '../src/persistence-codec.js'
 import type {
   AppOutboxEntry,
   GroupStores,
@@ -138,6 +139,23 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect(await groups.ports(source).outbox.events()).toEqual([failed(entry(1))])
         expect(await groups.load(groupID)).toMatchObject({ activeIncarnation: 2 })
         expect(await groups.ports({ groupID, incarnation: 2 }).outbox.list()).toEqual([])
+      } finally {
+        await fixture.close()
+      }
+    })
+
+    test('retirement closure rolls back when the source pointer is not changed', async () => {
+      const fixture = await create()
+      try {
+        await fixture.acceptedOrdinary(await fixture.registry.access(groupID))
+        const before = await fixture.inspectRows()
+        const groups = fixture.device.groups
+        await expect(
+          groups.transition(await nextChange(groups, groupID, mutationID), async (stores) => {
+            await retireIncarnation(stores, { source, nextIncarnation: 2, mutationID, at: 1234 })
+          }),
+        ).rejects.toMatchObject({ name: 'GroupStateConflictError' })
+        expect(await fixture.inspectRows()).toEqual(before)
       } finally {
         await fixture.close()
       }
@@ -367,41 +385,56 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
-    test('unknown operations keep owed artifacts and slot', async () => {
+    // R3 owns retirement closure, independent revoke release and owed-work preservation.
+    test('retirement closes live and queued operations while preserving owed artifacts', async () => {
       const fixture = await create()
       try {
         const state = await fixture.device.groups.loadState(source)
-        if (state === null || state.deleted) throw new Error('Missing source')
+        if (state === null || state.deleted || state.state === null)
+          throw new Error('Missing source')
         const { record } = await fixture.confirmedRecovery(source)
-        const identity = { ...source, epoch: state.epoch, authenticator: state.epochAuthenticator }
-        const proof = {
-          source: { key: source, stateVersion: state.version, identity },
-          from: null,
-          position: asLogPosition('slot-position'),
-          payloadDigest: 'slot-payload-digest',
-        }
+        const access = await fixture.registry.access(groupID)
+        const captured = await access.readControl(async ({ handle, source }) => ({
+          handle,
+          source,
+        }))
+        const candidate = await fixture.advance(captured.handle)
         const changes: ControlChanges = {
           commitOnce: {
             incarnation: 1,
             epoch: state.epoch,
             authenticatorBefore: state.epochAuthenticator,
             opID: 'old-operation',
+            kind: 'rotation',
+            revokes: true,
+            enqueuedAt: 1,
+            deadline: 1000,
             publishID: 'slot-publish',
             payload: utf8('slot-payload'),
-            payloadDigest: proof.payloadDigest,
+            payloadDigest: 'slot-payload-digest',
             digest: 'slot-commit-digest',
-            journal: utf8('retained-journal'),
+            journal: encodeControlJournal({
+              version: 1,
+              source: captured.source,
+              checkpoint: null,
+              sourceState: state.state,
+              sourceCredential: captured.handle.credential,
+              sourceLedger: captured.handle.ledgerTokens,
+              candidate: encodeStoredValue({
+                state: encodeClientState(candidate.state),
+                credential: candidate.credential,
+                ledger: candidate.ledgerTokens,
+              }),
+            }),
             bodies: [],
             welcome: { bytes: utf8('invitation'), recipients: ['recipient'] },
-            searchFrom: null,
+            head: null,
             expectedHead: null,
           },
-          commitOnceAcceptance: proof,
-          controlHold: { reason: 'acceptance-unknown', position: proof.position },
           strand: { reason: 'retention-gap' },
           putOperations: [
             {
-              id: 'old-operation',
+              id: 'queued-revoke',
               kind: 'rotation',
               revokes: true,
               body: utf8('rotate'),
@@ -413,6 +446,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           ],
           putRejoin: { ...record, stage: 'published' },
           putOutcomes: [
+            { id: 'prior-report', opID: 'old-operation', at: 11, kind: 'unknown' },
             {
               id: 'owed',
               opID: 'owed',
@@ -460,14 +494,20 @@ for (const mode of ['real-mls', 'double'] as const) {
         await switchSource(fixture)
         expect(await control.load()).toEqual({
           ...before,
+          commitOnce: null,
+          spentSource: null,
           operations: [],
           rejoin: null,
           outcomes: [
-            ...before.outcomes,
-            { id: 'old-operation', opID: 'old-operation', at: 1234, kind: 'unknown' },
+            ...before.outcomes.filter(({ id }) => id !== 'prior-report'),
+            { id: expect.any(String), opID: 'old-operation', at: 1234, kind: 'unknown' },
+            { id: 'queued-revoke', opID: 'queued-revoke', at: 1234, kind: 'unknown' },
             { id: record.id, opID: null, at: 1234, kind: 'unknown' },
           ],
         })
+        const final = (await control.load()).outcomes.find(({ opID }) => opID === 'old-operation')
+        expect(final?.id).not.toBe('prior-report')
+        expect(final?.id).not.toBe('old-operation')
         await expect(control.apply({ putRejoin: record }, 'retired-put')).rejects.toMatchObject({
           name: 'DisplacedGroupHandleError',
         })

@@ -1,5 +1,5 @@
 import { encodeClientState, restoreGroup, signLedgerEntry } from '@kumiai/mls'
-import { asLogPosition, type Operation, type RecoveryContinuation } from '@kumiai/rpc'
+import { asLogPosition, type RecoveryContinuation } from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
 import * as MlsRPC from '../src/index.js'
@@ -15,30 +15,8 @@ import { createRegistryRecovery } from './fixtures/registry-recovery.js'
 const groupID = 'registry-continuation'
 const source = { groupID, incarnation: 1 }
 const destination = { groupID, incarnation: 2 }
-const accepted: Operation = {
-  id: 'accepted',
-  kind: 'rotation',
-  revokes: false,
-  body: new Uint8Array([1]),
-  seq: 1,
-  enqueuedAt: 1,
-  deadline: 100,
-  stage: 'accepted',
-  built: {
-    incarnation: 1,
-    epoch: 0,
-    publishID: 'accepted-publication',
-    payloadDigest: 'accepted-payload',
-  },
-  acceptedAs: asLogPosition('accepted-position'),
-  acceptance: {
-    source: { key: source, stateVersion: 1, identity: null },
-    from: null,
-    position: asLogPosition('accepted-position'),
-    payloadDigest: 'accepted-payload',
-  },
-}
 const owed = { id: 'owed', opID: null, at: 12, kind: 'unknown' as const }
+const closed = { id: 'rotation-closed', opID: 'rotation', at: 12, kind: 'unknown' as const }
 const welcome = {
   opID: 'owed',
   welcome: new Uint8Array([9]),
@@ -56,11 +34,12 @@ function port(fixture: RegistryFixture) {
 
 for (const mode of ['real-mls', 'double'] as const) {
   describe(`retired recovery continuation -- ${mode}`, () => {
-    async function setup(format: 'legacy' | 'captured' = 'captured') {
+    async function setup(format: 'legacy' | 'captured' = 'captured', withBuild = false) {
       const fixture = await createRegistryFixture({ mode, setup: 'seeded', groupID })
+      if (withBuild) await fixture.acceptedOrdinary(await fixture.registry.access(groupID))
       await fixture.installRows({
         key: source,
-        control: { putOperations: [accepted], putOutcomes: [owed], putWelcomes: [welcome] },
+        control: { putOutcomes: withBuild ? [owed] : [owed, closed], putWelcomes: [welcome] },
       })
       const recovery = await fixture.confirmedRecovery(source, {
         confirm: true,
@@ -88,13 +67,19 @@ for (const mode of ['real-mls', 'double'] as const) {
       return { fixture, recovery }
     }
 
-    test('switch leaves accepted operations for destination completion', async () => {
-      const { fixture } = await setup()
+    // R3 owns source-build closure and final outcome routing before continuation work.
+    test('switch closes the acknowledged source build before destination completion', async () => {
+      const { fixture } = await setup('captured', true)
       try {
-        expect((await fixture.device.groups.ports(source).control.load()).operations).toEqual([
-          accepted,
+        const control = await fixture.device.groups.ports(source).control.load()
+        expect(control.operations).toEqual([])
+        expect(control.commitOnce).toBeNull()
+        expect(control.spentSource).toBeNull()
+        expect(control.outcomes).toEqual([
+          owed,
+          { id: expect.any(String), opID: 'rotation', at: expect.any(Number), kind: 'unknown' },
         ])
-        expect((await fixture.device.groups.ports(source).control.load()).outcomes).toEqual([owed])
+        expect(control.outcomes[1]?.id).not.toBe('rotation')
       } finally {
         await fixture.close()
       }
@@ -181,7 +166,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           expect(completed.settledRejoins).toEqual(before.settledRejoins)
           expect(completed.outcomes).toEqual([
             owed,
-            { id: 'accepted', opID: 'accepted', at: expect.any(Number), kind: 'unknown' },
+            closed,
             {
               id: s.recovery.record.id,
               opID: null,
@@ -340,8 +325,7 @@ test('captured switch resumes its empty destination ledger and preserves settled
       key: source,
       control: {
         putRejoin: recovery.record,
-        putOperations: [accepted],
-        putOutcomes: [owed],
+        putOutcomes: [owed, closed],
         putWelcomes: [welcome],
         putSettledRejoins: [settled],
         recoveryEpochFloor: Number(handle.epoch),
@@ -400,7 +384,7 @@ test('captured switch resumes its empty destination ledger and preserves settled
     expect(completed.operations).toEqual([])
     expect(completed.outcomes).toEqual([
       owed,
-      { id: 'accepted', opID: 'accepted', kind: 'unknown', at: expect.any(Number) },
+      closed,
       {
         id: recovery.record.id,
         opID: null,

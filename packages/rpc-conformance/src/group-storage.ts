@@ -1460,7 +1460,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
       }
     })
 
-    test('refuses a proof-bearing state save without retained acceptance', async () => {
+    test('refuses an occurrence-bearing state save without a matching live build', async () => {
       const fixture = await params.createFixture(groupID)
       try {
         const groups = fixture.ports.device.groups
@@ -1476,9 +1476,9 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
         }
         const expected: ConformanceAdoptionWrite<string>['expected'] = {
           ...source,
-          acceptance: {
+          occurrence: {
             source,
-            from: null,
+            coverage: 'complete',
             position: 'unretained-occurrence',
             payloadDigest: 'unretained-payload',
           },

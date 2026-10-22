@@ -185,10 +185,9 @@ test('refused CAS loser never creates checkpoint installation', async () => {
     (await owner.read(ownSlot.key.groupID, (reads) => reads.checkpoints())).filter(
       (row) => row.kind === 'fact' || row.kind === 'coverage',
     )
-  const installedBeforeSearch = await facts()
-  const certified = await competition.certify()
-  expect(certified.losers).toHaveLength(1)
-  expect(await facts()).toEqual(installedBeforeSearch)
+  const installedBeforeReplay = await facts()
+  expect(await competition.reveal({ following: false })).toBe(false)
+  expect(await facts()).toEqual(installedBeforeReplay)
   expect(ownSlot.onRecovery).not.toHaveBeenCalled()
   expect(ownSlot.member.controlWalk.safetyHold()).toBeNull()
 })

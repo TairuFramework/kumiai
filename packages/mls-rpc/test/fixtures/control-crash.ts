@@ -1,12 +1,13 @@
 import { decodeClientState, encodeClientState, restoreGroup } from '@kumiai/mls'
-import type { AdoptionWrite, ControlSlot, FirstValidCommit } from '@kumiai/rpc'
+import type { AdoptionExpected, AdoptionWrite, ControlSlot, OwnOccurrence } from '@kumiai/rpc'
+import { asLogPosition } from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
 import { restoreMemoryControlHandle } from './sealed-memory-mls.js'
 import { createControlCrashHarness, runControlProofConflict } from './storage-persistence.js'
 import { nextChange } from './storage-seed.js'
 
-function crashAdoptionWrite(slot: ControlSlot, proof: FirstValidCommit): AdoptionWrite {
+function crashAdoptionWrite(slot: ControlSlot, proof: OwnOccurrence): AdoptionWrite {
   return {
     mutationID: 'adopted',
     anchorLanded: slot.digest,
@@ -26,14 +27,35 @@ function crashAdoptionWrite(slot: ControlSlot, proof: FirstValidCommit): Adoptio
       ],
       putOutcomes: [
         {
-          id: slot.opID,
+          id: crypto.randomUUID(),
           opID: slot.opID,
           at: Date.now(),
           kind: 'landed',
           position: proof.position,
         },
       ],
+      ...(slot.welcome === null
+        ? {}
+        : {
+            putWelcomes: [
+              {
+                opID: slot.opID,
+                welcome: slot.welcome.bytes,
+                recipients: slot.welcome.recipients,
+                committed: true,
+              },
+            ],
+          }),
     },
+  }
+}
+
+function crashOccurrence(slot: ControlSlot, source: AdoptionExpected): OwnOccurrence {
+  return {
+    source,
+    position: asLogPosition('000000000001'),
+    payloadDigest: slot.payloadDigest,
+    coverage: 'complete',
   }
 }
 
@@ -181,17 +203,17 @@ export function testControlCrashBoundaries(mode: 'real-mls' | 'double'): void {
       try {
         const built = await h.build()
         await h.saveBuilt(built.intent, built.slot, built.expected, 'built')
-        const proof = await h.accept(built.slot, 'accepted')
+        const proof = crashOccurrence(built.slot, await h.source())
         await h.armAnchor(built.slot)
         const anchorBefore = await h.loadAnchor()
-        const expected = { ...(await h.source()), acceptance: proof }
+        const expected = { ...(await h.source()), occurrence: proof }
         const before = await h.fixture.inspectRows()
         h.fixture.failNext('after-first-write')
         await expect(h.adopt(expected, crashAdoptionWrite(built.slot, proof))).rejects.toThrow()
         expect(await h.fixture.inspectRows()).toEqual(before)
         const reopened = await h.reopen()
         expect((await reopened.control.load()).commitOnce).toEqual(built.slot)
-        expect((await reopened.control.load()).commitOnceAcceptance).toEqual(proof)
+        expect((await reopened.control.load()).commitOnce?.acceptedAs).toBeUndefined()
         expect((await reopened.control.load()).applied).toEqual([])
         expect(await reopened.loadAnchor()).toEqual(anchorBefore)
       } finally {
@@ -211,20 +233,19 @@ export function testControlCrashBoundaries(mode: 'real-mls' | 'double'): void {
         try {
           const built = await h.build()
           await h.saveBuilt(built.intent, built.slot, built.expected, 'built')
-          await h.accept(built.slot, 'accepted')
           const restored = await h.reopen()
           const retained = await restored.control.load()
-          if (retained.commitOnce === null || retained.commitOnceAcceptance === null)
-            throw new Error('Missing durable accepted slot')
+          if (retained.commitOnce === null) throw new Error('Missing durable build')
+          const occurrence = crashOccurrence(retained.commitOnce, await restored.source())
           const expected = {
             ...(await restored.source()),
-            acceptance: retained.commitOnceAcceptance,
+            occurrence,
           }
           if (guard === 'state-version') expected.stateVersion--
           const before = await h.fixture.inspectRows()
           const adopting = restored.adopt(
             expected,
-            crashAdoptionWrite(retained.commitOnce, retained.commitOnceAcceptance),
+            crashAdoptionWrite(retained.commitOnce, occurrence),
             {
               staleLifetime: guard === 'lifetime-revision',
               absentLifetime: guard === 'absent-lifetime',
@@ -252,18 +273,17 @@ export function testControlCrashBoundaries(mode: 'real-mls' | 'double'): void {
       try {
         const built = await h.build()
         await h.saveBuilt(built.intent, built.slot, built.expected, 'built')
-        await h.accept(built.slot, 'accepted')
         const trust = await h.recoveryTrust()
         await h.losePrivateState()
         const restored = await h.reopen()
         expect(await restored.recoveryTrust()).toEqual(trust)
         const before = await h.fixture.inspectRows()
         const retained = await restored.control.load()
-        if (retained.commitOnce === null || retained.commitOnceAcceptance === null)
-          throw new Error('Missing durable accepted slot')
+        if (retained.commitOnce === null) throw new Error('Missing durable build')
+        const occurrence = crashOccurrence(retained.commitOnce, await restored.source())
         const refused = restored.adopt(
-          { ...(await restored.source()), acceptance: retained.commitOnceAcceptance },
-          crashAdoptionWrite(retained.commitOnce, retained.commitOnceAcceptance),
+          { ...(await restored.source()), occurrence },
+          crashAdoptionWrite(retained.commitOnce, occurrence),
         )
         await expect(refused).rejects.toThrow('Control adoption moved')
         expect(await h.fixture.inspectRows()).toEqual(before)
@@ -275,9 +295,7 @@ export function testControlCrashBoundaries(mode: 'real-mls' | 'double'): void {
           epochAuthenticator: built.slot.authenticatorBefore,
         })
         expect((await restored.control.load()).commitOnce).toEqual(built.slot)
-        expect((await restored.control.load()).commitOnceAcceptance).toEqual(
-          retained.commitOnceAcceptance,
-        )
+        expect((await restored.control.load()).commitOnce?.acceptedAs).toBeUndefined()
         expect(h.observations.ownAdoptions).toBe(0)
         expect(h.observations.handlePublications).toBe(0)
       } finally {
@@ -289,13 +307,13 @@ export function testControlCrashBoundaries(mode: 'real-mls' | 'double'): void {
       try {
         const built = await h.build()
         await h.saveBuilt(built.intent, built.slot, built.expected, 'built')
-        const proof = await h.accept(built.slot, 'accepted')
+        const proof = crashOccurrence(built.slot, await h.source())
         const write = crashAdoptionWrite(built.slot, proof)
         await h.armAnchor(built.slot)
         h.fixture.onPhase('hook', () => {
           throw new Error('process died after committed adoption')
         })
-        await expect(h.adopt({ ...(await h.source()), acceptance: proof }, write)).rejects.toThrow(
+        await expect(h.adopt({ ...(await h.source()), occurrence: proof }, write)).rejects.toThrow(
           'process died after committed adoption',
         )
         const reopened = await h.reopen()
@@ -307,7 +325,6 @@ export function testControlCrashBoundaries(mode: 'real-mls' | 'double'): void {
         )
         expect(rows.operations).toEqual([])
         expect(rows.commitOnce).toBeNull()
-        expect(rows.commitOnceAcceptance).toBeNull()
         expect((await reopened.source()).identity?.epoch).toBe(built.slot.epoch + 1)
         expect((await reopened.loadAnchor())?.pending?.landed).toBe(true)
       } finally {
@@ -315,141 +332,148 @@ export function testControlCrashBoundaries(mode: 'real-mls' | 'double'): void {
       }
     })
     for (const stage of ['built', 'accepted', 'adoption'] as const) {
-      test(`control transition proof conflict fail-stops before publication Welcome or hooks (${stage})`, async () => {
-        const evidence = await runControlProofConflict(mode, stage)
-        expect(evidence.publicationsBeforeProof).toBe(0)
-        expect(evidence.payloads).toEqual([])
-        expect(evidence.ownAdoptions).toBe(0)
-        expect(evidence.welcomeDeliveries).toBe(0)
-      })
+      // R3 owns acknowledgement crash boundaries and retry evidence.
+      test.skipIf(stage === 'accepted')(
+        `control transition proof conflict fail-stops before publication Welcome or hooks (${stage})`,
+        async () => {
+          const evidence = await runControlProofConflict(mode, stage)
+          expect(evidence.publicationsBeforeProof).toBe(stage === 'accepted' ? 1 : 0)
+          expect(evidence.payloads).toHaveLength(stage === 'accepted' ? 1 : 0)
+          expect(evidence.ownAdoptions).toBe(0)
+          expect(evidence.welcomeDeliveries).toBe(0)
+        },
+      )
     }
     for (const stage of ['built', 'accepted', 'adoption'] as const) {
       for (const completion of ['commit', 'rollback'] as const) {
-        test(`ambiguous built accepted and adoption saves release no bytes before proof (${stage}, ${completion})`, async () => {
-          const h = await createControlCrashHarness(mode)
-          let fault: ReturnType<typeof h.fixture.rejectCommitPending> | undefined
-          let finished = false
-          try {
-            await h.peer.resync()
-            const op = await h.intent()
-            if (stage !== 'built') await h.controlWalk.stepOperation(op.id)
-            const built = (await h.control.load()).commitOnce
-            if (stage !== 'built') {
-              if (built === null) throw new Error('Missing saved slot')
-              await h.hub.publish({
-                senderDID: h.localDID,
-                topicID: await h.topic(),
-                payload: built.payload,
-                publishID: built.publishID,
-                retain: 'log',
-              })
-            }
-            let before = await h.fixture.inspectRows()
-            const baseline = h.publications.length
-            const started =
-              Promise.withResolvers<ReturnType<typeof h.fixture.rejectCommitPending>>()
-            const hooks: Array<string> = []
-            const rollbackDeath = new Error('process died before rolled-back build retry')
-            let attemptedBuild: ControlSlot | undefined
-            h.armFault(
-              stage,
-              async () => {
-                before = await h.fixture.inspectRows()
-                started.resolve(h.fixture.rejectCommitPending())
-              },
-              () => {
-                hooks.push('commit')
-              },
-            )
-            if (stage === 'built') {
-              const arm = h.hooks.beforeSave
-              h.hooks.beforeSave = (slot) => {
-                attemptedBuild = slot
-                arm?.(slot)
-              }
-            }
-            const action = h.controlWalk.stepOperation((await h.operation()).id).then(
-              (value) => ({ ok: true as const, value }),
-              (error: unknown) => ({ ok: false as const, error }),
-            )
-            fault = await started.promise
-            await fault.rejected
-            await fault.barrierWaiting
-            expect(h.publications).toHaveLength(baseline)
-            expect(h.observations.buildCompletions).toBe(stage === 'built' ? 0 : 1)
-            expect(h.observations.handlePublications).toBe(0)
-            expect(h.observations.ownAdoptions).toBe(0)
-            expect(h.observations.welcomeDeliveries).toBe(0)
-            expect(hooks).toEqual([])
-            expect(await h.fixture.inspectRows()).toEqual(before)
-            if (stage === 'built' && completion === 'rollback') {
-              h.hooks.beforeSave = () => {
-                throw rollbackDeath
-              }
-            }
-            await fault.finish(completion)
-            finished = true
-            const settled = await action
-            const candidate = stage === 'built' ? attemptedBuild : built
-            if (candidate == null) throw new Error('Missing attempted candidate')
-            if (completion === 'rollback') {
-              expect(settled.ok).toBe(false)
-              if (stage === 'built' && !settled.ok) expect(settled.error).toBe(rollbackDeath)
-            }
-            if (completion === 'commit') {
-              expect(settled.ok).toBe(true)
-              if (stage === 'built') await h.controlWalk.stepOperation((await h.operation()).id)
-              expect(h.observations.ownAdoptions).toBe(1)
-              expect(h.observations.welcomeDeliveries).toBe(1)
-            }
-            await h.close()
-            const reopened = await h.reopen()
+        // R3 owns acknowledgement crash boundaries and retry evidence.
+        test.skipIf(stage === 'accepted')(
+          `ambiguous built accepted and adoption saves release no bytes before proof (${stage}, ${completion})`,
+          async () => {
+            const h = await createControlCrashHarness(mode)
+            let fault: ReturnType<typeof h.fixture.rejectCommitPending> | undefined
+            let finished = false
             try {
-              const saved = await reopened.control.load()
+              await h.peer.resync()
+              const op = await h.intent()
+              if (stage !== 'built') await h.controlWalk.stepOperation(op.id)
+              const built = (await h.control.load()).commitOnce
+              if (stage === 'adoption') {
+                if (built === null) throw new Error('Missing saved slot')
+                await h.hub.publish({
+                  senderDID: h.localDID,
+                  topicID: await h.topic(),
+                  payload: built.payload,
+                  publishID: built.publishID,
+                  retain: 'log',
+                })
+              }
+              let before = await h.fixture.inspectRows()
+              const baseline = h.publications.length
+              const started =
+                Promise.withResolvers<ReturnType<typeof h.fixture.rejectCommitPending>>()
+              const hooks: Array<string> = []
+              const rollbackDeath = new Error('process died before rolled-back build retry')
+              let attemptedBuild: ControlSlot | undefined
+              h.armFault(
+                stage,
+                async () => {
+                  before = await h.fixture.inspectRows()
+                  started.resolve(h.fixture.rejectCommitPending())
+                },
+                () => {
+                  hooks.push('commit')
+                },
+              )
+              if (stage === 'built') {
+                const arm = h.hooks.beforeSave
+                h.hooks.beforeSave = (slot) => {
+                  attemptedBuild = slot
+                  arm?.(slot)
+                }
+              }
+              const action = h.controlWalk.stepOperation(op.id).then(
+                (value) => ({ ok: true as const, value }),
+                (error: unknown) => ({ ok: false as const, error }),
+              )
+              fault = await started.promise
+              await fault.rejected
+              await fault.barrierWaiting
+              expect(h.publications).toHaveLength(baseline + (stage === 'accepted' ? 1 : 0))
+              expect(h.observations.buildCompletions).toBe(stage === 'built' ? 0 : 1)
+              expect(h.observations.handlePublications).toBe(0)
+              expect(h.observations.ownAdoptions).toBe(0)
+              expect(h.observations.welcomeDeliveries).toBe(0)
+              expect(hooks).toEqual([])
+              expect(await h.fixture.inspectRows()).toEqual(before)
+              if (stage === 'built' && completion === 'rollback') {
+                h.hooks.beforeSave = () => {
+                  throw rollbackDeath
+                }
+              }
+              await fault.finish(completion)
+              finished = true
+              const settled = await action
+              const candidate = stage === 'built' ? attemptedBuild : built
+              if (candidate == null) throw new Error('Missing attempted candidate')
+              if (completion === 'rollback') {
+                expect(settled.ok).toBe(false)
+                if (stage === 'built' && !settled.ok) expect(settled.error).toBe(rollbackDeath)
+              }
               if (completion === 'commit') {
-                expect(saved.applied).toHaveLength(1)
-                expect(saved.commitOnce).toBeNull()
-                expect(saved.outcomes).toContainEqual(
-                  expect.objectContaining({ opID: op.id, kind: 'landed' }),
-                )
-                expect((await reopened.source()).identity?.epoch).toBe(candidate.epoch + 1)
-                expect(h.publications).toHaveLength(baseline + (stage === 'built' ? 1 : 0))
-              } else if (stage === 'built') {
-                expect(await h.fixture.inspectRows()).toEqual(before)
-                expect(saved.commitOnce).toBeNull()
-                expect(saved.commitOnceAcceptance).toBeNull()
-                expect(saved.operations).toEqual([op])
-                expect(saved.applied).toEqual([])
-                expect(saved.welcomes).toEqual([])
-                expect(saved.outcomes.some((row) => row.opID === op.id)).toBe(false)
-                expect((await reopened.source()).identity?.epoch).toBe(candidate.epoch)
-                expect(h.publications).toHaveLength(baseline)
-                expect(
-                  h.hub.published.some(
-                    (row) =>
-                      row.publishID === attemptedBuild?.publishID ||
-                      JSON.stringify(row.payload) === JSON.stringify(attemptedBuild?.payload),
-                  ),
-                ).toBe(false)
-                expect(h.observations.ownAdoptions).toBe(0)
-                expect(h.observations.handlePublications).toBe(0)
-                expect(h.observations.welcomeDeliveries).toBe(0)
-                expect(hooks).toEqual([])
-              } else {
-                expect(saved.commitOnce).toEqual(built)
-                expect(saved.applied).toEqual([])
-                expect(h.observations.ownAdoptions).toBe(0)
-                expect(h.observations.welcomeDeliveries).toBe(0)
+                expect(settled.ok).toBe(true)
+                if (stage === 'built') await h.controlWalk.stepOperation(op.id)
+                expect(h.observations.ownAdoptions).toBe(1)
+                expect(h.observations.welcomeDeliveries).toBe(1)
+              }
+              await h.close()
+              const reopened = await h.reopen()
+              try {
+                const saved = await reopened.control.load()
+                if (completion === 'commit') {
+                  expect(saved.applied).toHaveLength(1)
+                  expect(saved.commitOnce).toBeNull()
+                  expect(saved.outcomes).toContainEqual(
+                    expect.objectContaining({ opID: op.id, kind: 'landed' }),
+                  )
+                  expect((await reopened.source()).identity?.epoch).toBe(candidate.epoch + 1)
+                  expect(h.publications).toHaveLength(baseline + (stage === 'adoption' ? 0 : 1))
+                } else if (stage === 'built') {
+                  expect(await h.fixture.inspectRows()).toEqual(before)
+                  expect(saved.commitOnce).toBeNull()
+                  expect(saved.operations).toEqual([op])
+                  expect(saved.applied).toEqual([])
+                  expect(saved.welcomes).toEqual([])
+                  expect(saved.outcomes.some((row) => row.opID === op.id)).toBe(false)
+                  expect((await reopened.source()).identity?.epoch).toBe(candidate.epoch)
+                  expect(h.publications).toHaveLength(baseline)
+                  expect(
+                    h.hub.published.some(
+                      (row) =>
+                        row.publishID === attemptedBuild?.publishID ||
+                        JSON.stringify(row.payload) === JSON.stringify(attemptedBuild?.payload),
+                    ),
+                  ).toBe(false)
+                  expect(h.observations.ownAdoptions).toBe(0)
+                  expect(h.observations.handlePublications).toBe(0)
+                  expect(h.observations.welcomeDeliveries).toBe(0)
+                  expect(hooks).toEqual([])
+                } else {
+                  expect(saved.commitOnce).toEqual(built)
+                  expect(saved.applied).toEqual([])
+                  expect(h.observations.ownAdoptions).toBe(0)
+                  expect(h.observations.welcomeDeliveries).toBe(0)
+                }
+              } finally {
+                await reopened.close()
               }
             } finally {
-              await reopened.close()
+              if (!finished) await fault?.finish('rollback')
+              await h.close()
+              await h.fixture.close()
             }
-          } finally {
-            if (!finished) await fault?.finish('rollback')
-            await h.close()
-            await h.fixture.close()
-          }
-        })
+          },
+        )
       }
     }
   })

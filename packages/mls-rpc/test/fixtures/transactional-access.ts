@@ -17,9 +17,7 @@ import {
   type ControlSnapshot,
   type ControlStore,
   controlAdoptionAllowed,
-  controlBuildRef,
   controlSafetyHeld,
-  executableOperations,
   type PendingAppFrame,
 } from '@kumiai/rpc'
 
@@ -96,7 +94,7 @@ export function createTransactionalStore(
       anchorSlot: structuredClone(anchorSlot),
       control: {
         commitOnce: null,
-        commitOnceAcceptance: null,
+        spentSource: null,
         controlHold: null,
         forkHalt: null,
         recoveryUnavailable: null,
@@ -210,7 +208,24 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
           row = {
             ...row,
             revision: row.revision + 1,
-            control: applyChanges(row.control, owned, { kind: 'head', source }, key),
+            control: applyChanges(
+              row.control,
+              owned,
+              {
+                kind:
+                  owned.cursor !== undefined
+                    ? 'cursor'
+                    : owned.commitOnce?.reported === true &&
+                        row.control.commitOnce?.reported !== true
+                      ? 'report'
+                      : owned.commitOnce?.acceptedAs !== undefined &&
+                          row.control.commitOnce?.acceptedAs === undefined
+                        ? 'ack'
+                        : 'head',
+                source,
+              },
+              key,
+            ),
             mutationID,
           }
         })
@@ -223,6 +238,10 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
         const journal = decodeControlJournal(owned.built.journal)
         const identity = identityOf(row.state)
         if (
+          owned.built.opID !== owned.intent.id ||
+          !(['kind', 'revokes', 'enqueuedAt', 'deadline'] as const).every(
+            (field) => owned.built[field] === owned.intent[field],
+          ) ||
           controlSafetyHeld(row.control) !== null ||
           row.control.controlHold !== null ||
           !sameStoredValue(owned.expected.key, key) ||
@@ -230,14 +249,16 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
           row.revision !== owned.expected.stateVersion ||
           (row.control.cursor === null &&
             !sameStoredValue(identityOf(row.initialState), identity)) ||
-          !sameStoredValue(executableOperations(row.control)[0], owned.intent) ||
-          journal.checkpoint !== owned.built.searchFrom ||
-          owned.built.searchFrom !== (row.control.cursor?.position ?? null) ||
+          !sameStoredValue(row.control.operations[0], owned.intent) ||
+          journal.checkpoint !== owned.built.head ||
+          owned.built.head !== (row.control.cursor?.position ?? null) ||
           (row.control.cursor !== null &&
-            (row.control.cursor.epoch !== identity.epoch || row.control.cursor.stranded))
+            (row.control.cursor.epoch !== identity.epoch ||
+              row.control.cursor.stranded ||
+              row.control.cursor.incomplete))
         )
           return 'moved'
-        if (row.control.commitOnce !== null && row.control.commitOnce.epoch >= identity.epoch)
+        if (row.control.commitOnce !== null || row.control.spentSource?.epoch === identity.epoch)
           return 'occupied'
         const context: CommitOnceWriteContext = {
           kind: 'build',
@@ -248,11 +269,8 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
         const control = applyChanges(
           row.control,
           {
-            putOperations: [
-              { ...owned.intent, stage: 'built', built: controlBuildRef(owned.built) },
-            ],
+            deleteOperations: [owned.intent.id],
             commitOnce: owned.built,
-            commitOnceAcceptance: null,
           },
           context,
           key,
@@ -312,9 +330,13 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
                 controlCompatible(source, current, journal.referencedProposals)
               )
             },
+            write.changes,
           )
         )
           throw new RevisionConflictError(write.expected.stateVersion, row.revision)
+        const beforeIdentity = identityOf(row.state)
+        const afterIdentity = identityOf(state)
+        const terminal = decodeClientState(state)?.groupActiveState.kind === 'removedFromGroup'
         const next: StoredRow = {
           checkpoints: structuredClone(row.checkpoints),
           state: state.slice(),
@@ -331,12 +353,23 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
                     kind: 'adoption',
                     before: identityOf(row.state),
                     after: identityOf(state),
+                    ...(decodeClientState(state)?.groupActiveState.kind === 'removedFromGroup'
+                      ? { removed: true as const }
+                      : {}),
                   },
                   key,
                 ),
           mutationID: write?.mutationID ?? row.mutationID,
           anchorSlot: structuredClone(row.anchorSlot),
         }
+        if (
+          ((afterIdentity.incarnation !== beforeIdentity.incarnation ||
+            afterIdentity.epoch > beforeIdentity.epoch ||
+            terminal) &&
+            next.control.commitOnce !== null) ||
+          (terminal && (next.control.operations.length !== 0 || next.control.rejoin !== null))
+        )
+          throw new Error('Source consumption requires atomic control closure')
         if (
           write?.anchorLanded != null &&
           next.anchorSlot?.pending?.advance === write.anchorLanded
@@ -523,7 +556,7 @@ export async function createTransactionalAccess(
             .some((entry) => entry.leafIndex === next.state.privatePath.leafIndex),
           epochAuthenticator: next.state.keySchedule.epochAuthenticator.slice(),
         })
-        if (write?.expected?.journal !== undefined && write.expected.acceptance !== undefined)
+        if (write?.expected?.journal !== undefined && write.expected.occurrence !== undefined)
           await current.carryReceiveProgress(next)
         await store.save(
           row.revision,

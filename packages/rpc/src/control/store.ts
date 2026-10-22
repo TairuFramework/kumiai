@@ -24,6 +24,7 @@ import type {
   EpochIdentity,
   GroupKey,
   Outcome,
+  OwnOccurrence,
 } from './types.js'
 
 export class ControlStoreInvariantError extends Error {
@@ -84,9 +85,9 @@ function cumulativeSettlements(
 
 export type CommitOnceWriteContext =
   | { kind: 'build'; source: AdoptionExpected; queueHeadID: string; checkpoint: LogPosition | null }
-  | { kind: 'adoption'; before: EpochIdentity; after: EpochIdentity | null }
+  | { kind: 'adoption'; before: EpochIdentity; after: EpochIdentity | null; removed?: true }
   | { kind: 'retirement'; key: GroupKey }
-  | { kind: 'head'; source: EpochIdentity }
+  | { kind: 'head' | 'cursor' | 'report' | 'ack' | 'abandon'; source: EpochIdentity }
 
 function sameValue(left: unknown, right: unknown): boolean {
   if (Object.is(left, right)) return true
@@ -107,35 +108,85 @@ function sameValue(left: unknown, right: unknown): boolean {
   )
 }
 
-/** Recheck the retained proof in the transaction that installs its candidate. */
+/** Coverage belongs to the consuming transaction's pre-state. */
+export function controlOccurrenceCoverage(
+  snapshot: ControlSnapshot,
+  slot: ControlSlot,
+  position: LogPosition,
+): 'complete' | 'incomplete' {
+  return snapshot.cursor?.incomplete !== true &&
+    slot.skipped !== true &&
+    (slot.head === null || position >= slot.head)
+    ? 'complete'
+    : 'incomplete'
+}
+
+/** Bind a recognised occurrence to the live candidate and captured coverage. */
 export function controlAdoptionAllowed(
   snapshot: ControlSnapshot,
   source: AdoptionExpected,
   expected: NonNullable<AdoptionWrite['expected']>,
   compatible?: (journal: Uint8Array) => boolean,
+  changes?: ControlChanges,
 ): boolean {
   if (
     controlSafetyHeld(snapshot) !== null ||
-    (snapshot.controlHold !== null && snapshot.controlHold.reason !== 'acceptance-unknown') ||
+    snapshot.controlHold !== null ||
     !sameValue(source.key, expected.key) ||
     !sameValue(source.identity, expected.identity)
   )
     return false
-  const proof = expected.acceptance
+  const occurrence = expected.occurrence
   const sourceAllowed = () =>
     expected.journal !== undefined && compatible !== undefined
       ? compatible(expected.journal)
       : source.stateVersion === expected.stateVersion
-  if (proof === undefined) return sourceAllowed()
+  if (occurrence === undefined) return sourceAllowed()
   if (snapshot.strand !== null || snapshot.cursor?.stranded === true) return false
   const slot = snapshot.commitOnce
   return (
     slot !== null &&
-    slot.payloadDigest === proof.payloadDigest &&
-    slot.searchFrom === proof.from &&
+    source.identity !== null &&
+    slotSource(slot, source.identity) &&
+    sameValue(occurrence.source.key, source.key) &&
+    sameValue(occurrence.source.identity, source.identity) &&
+    occurrence.payloadDigest === slot.payloadDigest &&
+    occurrence.coverage === controlOccurrenceCoverage(snapshot, slot, occurrence.position) &&
+    (changes === undefined || controlOwnConsumptionAllowed(snapshot, occurrence, changes)) &&
     sameValue(slot.journal, expected.journal) &&
-    sameValue(snapshot.commitOnceAcceptance, proof) &&
     sourceAllowed()
+  )
+}
+
+/** An own installation's durable effects must agree with its captured coverage. */
+export function controlOwnConsumptionAllowed(
+  snapshot: ControlSnapshot,
+  occurrence: OwnOccurrence,
+  changes: ControlChanges,
+): boolean {
+  const slot = snapshot.commitOnce
+  if (slot === null || changes.commitOnce !== null) return false
+  const applied = changes.putApplied?.find((row) => row.epoch === slot.epoch)
+  const outcome = changes.putOutcomes?.find((row) => row.opID === slot.opID)
+  return (
+    applied?.opID === slot.opID &&
+    applied.payloadDigest === slot.payloadDigest &&
+    applied.sequenceID === occurrence.position &&
+    applied.removed === false &&
+    changes.cursor?.position === occurrence.position &&
+    changes.cursor.epoch === slot.epoch + 1 &&
+    (occurrence.coverage === 'complete'
+      ? outcome?.kind === 'landed' &&
+        outcome.position === occurrence.position &&
+        (slot.welcome === null ||
+          snapshot.welcomes.some((row) => row.opID === slot.opID) ||
+          changes.putWelcomes?.some(
+            (row) =>
+              row.opID === slot.opID &&
+              sameValue(row.welcome, slot.welcome?.bytes) &&
+              sameValue(row.recipients, slot.welcome?.recipients),
+          ) === true)
+      : outcome?.kind === 'unknown' && !changes.putWelcomes?.some((row) => row.opID === slot.opID))
   )
 }
 
@@ -163,10 +214,8 @@ export function assertCommitOnceChange(
       }) &&
       slotSource(next, identity) &&
       next.opID === context.queueHeadID &&
-      next.searchFrom === context.checkpoint &&
-      (previous === null ||
-        previous.incarnation < identity.incarnation ||
-        (previous.incarnation === identity.incarnation && previous.epoch < identity.epoch))
+      next.head === context.checkpoint &&
+      previous === null
     )
       return
   }
@@ -185,18 +234,72 @@ export function assertCommitOnceChange(
     context.after !== null &&
     context.after.groupID === context.before.groupID &&
     context.after.incarnation === context.before.incarnation &&
-    context.after.epoch > context.before.epoch
+    (context.after.epoch > context.before.epoch || context.removed === true)
   )
     return
   if (
-    context?.kind === 'head' &&
+    context?.kind === 'abandon' &&
+    previous !== null &&
+    next === null &&
+    slotSource(previous, context.source)
+  )
+    return
+  if (
     previous !== null &&
     next !== null &&
+    context !== null &&
+    'source' in context &&
+    context.kind !== 'build' &&
     slotSource(previous, context.source)
   ) {
-    const { expectedHead: _before, ...immutableBefore } = previous
-    const { expectedHead: _after, ...immutableAfter } = next
-    if (sameValue(immutableBefore, immutableAfter)) return
+    const {
+      expectedHead: beforeHead,
+      skipped: beforeSkip,
+      reported: beforeReport,
+      acceptedAs: beforeAck,
+      ...before
+    } = previous
+    const {
+      expectedHead: afterHead,
+      skipped: afterSkip,
+      reported: afterReport,
+      acceptedAs: afterAck,
+      ...after
+    } = next
+    if (sameValue(before, after)) {
+      if (
+        context.kind === 'head' &&
+        sameValue(beforeSkip, afterSkip) &&
+        sameValue(beforeReport, afterReport) &&
+        sameValue(beforeAck, afterAck)
+      )
+        return
+      if (
+        context.kind === 'cursor' &&
+        afterSkip === true &&
+        sameValue(beforeHead, afterHead) &&
+        sameValue(beforeReport, afterReport) &&
+        sameValue(beforeAck, afterAck)
+      )
+        return
+      if (
+        context.kind === 'report' &&
+        afterReport === true &&
+        sameValue(beforeHead, afterHead) &&
+        sameValue(beforeSkip, afterSkip) &&
+        sameValue(beforeAck, afterAck)
+      )
+        return
+      if (
+        context.kind === 'ack' &&
+        afterAck !== undefined &&
+        sameValue(beforeHead, afterHead) &&
+        sameValue(beforeSkip, afterSkip) &&
+        sameValue(beforeReport, afterReport) &&
+        (beforeAck === undefined || beforeAck === afterAck)
+      )
+        return
+    }
   }
   throw new ControlStoreInvariantError('Commit-once slot change requires provider-verified context')
 }
@@ -380,47 +483,34 @@ export function applyChanges(
       throw new ControlSafetyImmutableError(field)
   }
   const nextSlot = changes.commitOnce === undefined ? snapshot.commitOnce : changes.commitOnce
+  const consumes =
+    context?.kind === 'retirement' ||
+    (context?.kind === 'adoption' &&
+      (context.removed === true ||
+        (context.after !== null && context.after.epoch > context.before.epoch)))
+  if (consumes && nextSlot !== null)
+    throw new ControlStoreInvariantError('Consumption must close the live build')
+  if (
+    context?.kind === 'adoption' &&
+    context.removed === true &&
+    (snapshot.operations.some((row) => !changes.deleteOperations?.includes(row.id)) ||
+      (snapshot.rejoin !== null && !changes.deleteRejoin))
+  )
+    throw new ControlStoreInvariantError('Removal must close intents and rejoin work')
   assertCommitOnceChange(snapshot.commitOnce, nextSlot, context)
-  const acceptance =
-    changes.commitOnceAcceptance === undefined
-      ? changes.commitOnce === null
-        ? null
-        : snapshot.commitOnceAcceptance
-      : changes.commitOnceAcceptance
   if (
-    acceptance === null &&
-    snapshot.commitOnceAcceptance !== null &&
-    snapshot.commitOnce !== null &&
-    nextSlot !== null &&
-    (context?.kind !== 'build' || sameValue(snapshot.commitOnce, nextSlot))
+    context?.kind === 'cursor' &&
+    snapshot.commitOnce?.skipped !== nextSlot?.skipped &&
+    (changes.cursor?.position === undefined ||
+      changes.cursor.position === null ||
+      (snapshot.cursor?.position !== null &&
+        snapshot.cursor?.position !== undefined &&
+        changes.cursor.position <= snapshot.cursor.position))
   )
-    throw new ControlStoreInvariantError('Cannot clear retained acceptance')
-  if (acceptance !== null) {
-    const identity = acceptance.source.identity
-    if (
-      nextSlot === null ||
-      identity === null ||
-      !slotSource(nextSlot, identity) ||
-      !sameValue(acceptance.source.key, {
-        groupID: identity.groupID,
-        incarnation: identity.incarnation,
-      }) ||
-      acceptance.from !== nextSlot.searchFrom ||
-      acceptance.payloadDigest !== nextSlot.payloadDigest
-    )
-      throw new ControlStoreInvariantError('Acceptance does not bind the occupied slot')
-  }
-  if (
-    !sameValue(snapshot.commitOnce, nextSlot) &&
-    nextSlot !== null &&
-    context?.kind === 'build' &&
-    snapshot.commitOnceAcceptance !== null &&
-    changes.commitOnceAcceptance !== null
-  )
-    throw new ControlStoreInvariantError('Replacement must clear prior acceptance')
+    throw new ControlStoreInvariantError('Skipped requires an advancing cursor')
   return cloneControlValue({
     commitOnce: changes.commitOnce === undefined ? snapshot.commitOnce : changes.commitOnce,
-    commitOnceAcceptance: acceptance,
+    spentSource: changes.spentSource === undefined ? snapshot.spentSource : changes.spentSource,
     controlHold: changes.controlHold === undefined ? snapshot.controlHold : changes.controlHold,
     forkHalt: 'clearAppHold' in changes ? null : (snapshot.forkHalt ?? safety.forkHalt ?? null),
     recoveryUnavailable: snapshot.recoveryUnavailable ?? safety.recoveryUnavailable ?? null,
@@ -467,64 +557,17 @@ export function applyChanges(
   })
 }
 
-/** Same-incarnation authenticated recovery can consume an unresolved ordinary source slot. */
-export function retainAdvancedControlSlot(
-  snapshot: ControlSnapshot,
-  epochAfter: number,
-): ControlChanges {
-  const slot = snapshot.commitOnce
-  if (slot === null || epochAfter <= slot.epoch) return {}
-  const operation = snapshot.operations.find((op) => op.id === slot.opID)
-  return {
-    commitOnce: null,
-    ...(snapshot.controlHold?.reason === 'acceptance-unknown' ? { controlHold: null } : {}),
-    ...(operation?.stage !== 'built'
-      ? {}
-      : {
-          putOperations: [
-            {
-              ...operation,
-              reconciliation: {
-                slot,
-                acceptance: snapshot.commitOnceAcceptance,
-                ...(snapshot.controlHold?.reason === 'acceptance-unknown'
-                  ? {
-                      uncertainty: {
-                        cause: snapshot.controlHold.cause ?? 'unavailable',
-                        at: snapshot.controlHold.position,
-                      },
-                    }
-                  : {}),
-              },
-            },
-          ],
-        }),
-  }
-}
-
-/** Retained artifacts lose their owner on removal. A live source slot still owns its Welcome. */
+/** Deleting intents never deletes independently owed Welcome obligations. */
 export function deleteOperationChanges(
-  snapshot: ControlSnapshot,
+  _snapshot: ControlSnapshot,
   operationIDs: Array<string>,
-  cancelUncommitted = false,
-): Pick<ControlChanges, 'deleteOperations' | 'deleteWelcomes'> {
-  const ids = new Set(operationIDs)
-  const retained = new Set(
-    snapshot.operations.filter((op) => op.reconciliation !== undefined).map((op) => op.id),
-  )
-  return {
-    deleteOperations: operationIDs,
-    deleteWelcomes: snapshot.welcomes
-      .filter(
-        (row) =>
-          ids.has(row.opID) && !row.committed && (cancelUncommitted || retained.has(row.opID)),
-      )
-      .map((row) => row.opID),
-  }
+): Pick<ControlChanges, 'deleteOperations'> {
+  return { deleteOperations: operationIDs }
 }
 
 export function controlSettled(snapshot: ControlSnapshot): boolean {
   return (
+    snapshot.commitOnce === null &&
     snapshot.operations.length === 0 &&
     snapshot.rejoin === null &&
     snapshot.outcomes.length === 0 &&

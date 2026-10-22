@@ -1,7 +1,6 @@
 import { BroadcastClient } from '@kumiai/broadcast'
 import { describe, expect, type MockInstance, test, vi } from 'vitest'
 
-import { asLogPosition } from '../src/cursor.js'
 import { PeerDisposedError } from '../src/errors.js'
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
@@ -77,7 +76,7 @@ async function setup(byte: number, onStrand?: (observation: StrandObservation) =
 }
 
 describe('delayed ledger bootstrap', () => {
-  test('an adopted captured restart defers saved-operation search and commit walking until bootstrap', async () => {
+  test('an adopted captured restart defers saved-build validation and ordinary commit walking until bootstrap', async () => {
     const state = await setup(0xd1)
     const { alice, bob, hub, rs } = state
     let restarted: typeof alice | undefined
@@ -99,7 +98,7 @@ describe('delayed ledger bootstrap', () => {
       const operation = await seedBuiltOperation(alice, buildLedgerCommit(alice, ['saved']))
       await alice.database.saveState('memory-group', incomplete)
       alice.mls.restoreState(incomplete)
-      const frame = await publishCommit({
+      await publishCommit({
         hub,
         senderDID: 'bob',
         recoverySecret: rs,
@@ -155,14 +154,8 @@ describe('delayed ledger bootstrap', () => {
         }
       })
       await destination.peer.replay()
-      expect(await destination.controlWalk.searchLog(operation.slot, undefined)).toEqual({
-        kind: 'unknown',
-      })
-      await destination.controlWalk.walkCommits({
-        through: asLogPosition(frame.sequenceID),
-        range: null,
-        work: { takeFetch: () => true, takeFrame: () => true },
-      })
+      expect((await destination.control.load()).commitOnce?.opID).toBe(operation.id)
+      await destination.controlWalk.walkCommits()
       expect(prematureHeaders).toBe(0)
       expect(prematureCommits).toBe(0)
       expect(prematureJudgments).toBe(0)
@@ -171,11 +164,7 @@ describe('delayed ledger bootstrap', () => {
         expect.objectContaining({ kind: 'refused' }),
       )
       await destination.mls.bootstrapLedger(['circle:x=Bob'])
-      await destination.controlWalk.walkCommits({
-        through: asLogPosition(frame.sequenceID),
-        range: null,
-        work: { takeFetch: () => true, takeFrame: () => true },
-      })
+      await destination.controlWalk.walkCommits()
       expect(destination.mls.epoch()).toBe(alice.mls.epoch() + 1)
     } finally {
       await Promise.all([alice.peer.dispose(), bob.peer.dispose(), restarted?.peer.dispose()])

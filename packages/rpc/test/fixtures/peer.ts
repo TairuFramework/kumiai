@@ -18,7 +18,6 @@ import {
   type SafetyHold,
 } from '../../src/control/safety.js'
 import type { ControlEvidenceSnapshot, ControlValidationPort } from '../../src/control/search.js'
-import { controlBuildRef } from '../../src/control/slot.js'
 import type {
   ControlSlot,
   ControlStore,
@@ -51,6 +50,7 @@ import type {
 import { commitTopic } from '../../src/topic.js'
 import { createMemoryAnchorStore, type MemoryAnchorStore } from './anchor.js'
 import { createMemoryAppCursorStore, type MemoryAppCursorStore } from './app-cursor.js'
+import { publishCommit } from './commits.js'
 import { createFakeCrypto, type FakeCrypto } from './fake-crypto.js'
 import { FakeHub } from './fake-hub.js'
 import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
@@ -167,6 +167,7 @@ export type MakeMLSPeerOptions = {
   onSafetyEvent?: (event: GroupSafetyEvent) => void | Promise<void>
   onStrand?: (observation: StrandObservation) => void | Promise<void>
   onOutcome?: (outcome: Outcome) => void | Promise<void>
+  onControlPublishError?: (notice: { opID: string; error: unknown }) => void | Promise<void>
   onRecovery?: (event: RecoveryEvent) => void | Promise<void>
   onConfirmedRecovery?: (handoff: ConfirmedRecoveryHandoff) => void
   settleAcceptedRecovery?: GroupPeerMLSParams['settleAcceptedRecovery']
@@ -308,6 +309,9 @@ export function makeMLSPeer(
     ...(options.onStrand != null ? { onStrand: options.onStrand } : {}),
     ...(options.onRecovery != null ? { onRecovery: options.onRecovery } : {}),
     ...(options.onOutcome != null ? { onOutcome: options.onOutcome } : {}),
+    ...(options.onControlPublishError != null
+      ? { onControlPublishError: options.onControlPublishError }
+      : {}),
     ...(options.onAppDeliveryStalled != null
       ? { onAppDeliveryStalled: options.onAppDeliveryStalled }
       : {}),
@@ -568,7 +572,10 @@ export function memoryControlPorts(
       if (
         controlSafetyHeld(await control.load()) !== null ||
         snapshot.controlHold !== null ||
-        snapshot.commitOnce?.epoch === identity.epoch
+        snapshot.commitOnce !== null ||
+        snapshot.spentSource?.epoch === identity.epoch ||
+        snapshot.cursor?.incomplete === true ||
+        snapshot.cursor?.stranded === true
       )
         return { kind: 'occupied' as const, operation: op }
       const sourceState = mls.serializeState()
@@ -601,17 +608,18 @@ export function memoryControlPorts(
           ...host,
           ...framed,
           opID: op.id,
-          searchFrom: snapshot.cursor?.position ?? null,
+          head: snapshot.cursor?.position ?? null,
+          kind: op.kind,
+          revokes: op.revokes,
+          enqueuedAt: op.enqueuedAt,
+          deadline: op.deadline,
           payloadDigest: toB64U(sha256(framed.payload)),
           journal: encodeMemoryControlJournal({ source, sourceState, candidate: host.journal }),
         }
         const result = await mls.saveBuilt(op, slot, source, globalThis.crypto.randomUUID())
         return {
           kind: result,
-          operation:
-            result === 'saved'
-              ? { ...op, stage: 'built' as const, built: controlBuildRef(slot) }
-              : op,
+          operation: op,
         }
       } catch (error) {
         if (
@@ -671,25 +679,10 @@ export async function seedBuiltOperation(
   if (result.kind !== 'saved') throw new Error(`Build was ${result.kind}`)
   const slot = (await member.control.load()).commitOnce
   if (slot === null) throw new Error('missing slot')
-  const proof = {
-    source: (await member.mls.readEvidence()).source,
-    from: slot.searchFrom,
-    position: asLogPosition(acceptedAs ?? '000000000001'),
-    payloadDigest: slot.payloadDigest,
-  }
-  const row: Operation =
-    acceptedAs === undefined
-      ? result.operation
-      : {
-          ...result.operation,
-          stage: 'accepted',
-          built: controlBuildRef(slot),
-          acceptedAs: proof.position,
-          acceptance: proof,
-        }
+  const row = result.operation
   if (acceptedAs !== undefined)
     await member.control.apply(
-      { putOperations: [row], commitOnceAcceptance: proof },
+      { commitOnce: { ...slot, acceptedAs: asLogPosition(acceptedAs) } },
       crypto.randomUUID(),
     )
   return Object.defineProperty(row, 'slot', { value: slot }) as Operation & { slot: ControlSlot }
@@ -848,12 +841,12 @@ export async function runCommitOnceHost(
       stage: 'intent',
     }
     await host.control.apply({ putOperations: [op] }, crypto.randomUUID())
-    let operation = await host.controlWalk.stepOperation(op.id)
+    await host.controlWalk.stepOperation(op.id)
+    let operation: Operation | null = op
     const slot = (await host.control.load()).commitOnce
-    if (slot === null || operation === null || operation.stage !== 'built')
-      throw new Error('Missing saved build')
+    if (slot === null) throw new Error('Missing saved build')
     builtProven = true
-    const searchFrom = slot.searchFrom
+    const searchFrom = slot.head
     let winner: string | null = null
     if (scenario === 'progress') checkProgress = await host.progress()
     if (
@@ -886,33 +879,23 @@ export async function runCommitOnceHost(
     ) {
       await append(slot.payload)
       if (scenario === 'accepted-restart') {
-        const found = await host.controlWalk.searchLog(slot)
-        if (found.kind !== 'first-valid') throw new Error('Search did not prove acceptance')
-        const proof = found.proof
         await host.control.apply(
-          {
-            commitOnceAcceptance: proof,
-            putOperations: [
-              { ...operation, stage: 'accepted', acceptedAs: proof.position, acceptance: proof },
-            ],
-          },
+          { commitOnce: { ...slot, acceptedAs: asLogPosition('000000000001') } },
           crypto.randomUUID(),
         )
       }
       host.setGap(true)
       now = op.deadline
     } else if (scenario === 'late-acked-slot') {
-      host.setGap(true)
       now = op.deadline
-      await host.controlWalk.stepOperation(operation.id)
+      await host.controlWalk.stepOperation(op.id)
       await host.control.apply({ deleteOutcomes: [op.id] }, crypto.randomUUID())
-      host.setGap(false)
       await append(slot.payload)
     } else if (scenario === 'deadline' || scenario === 'slot-guards') {
       now = op.deadline
     }
     if (scenario === 'slot-guards') {
-      operation = await host.controlWalk.stepOperation(operation.id)
+      await host.controlWalk.stepOperation(op.id)
       const queued: Operation & { stage: 'intent' } = {
         ...op,
         id: crypto.randomUUID(),
@@ -949,7 +932,7 @@ export async function runCommitOnceHost(
       }
     }
     if (scenario === 'built-restart' && operation !== null)
-      operation = await host.controlWalk.stepOperation(operation.id)
+      await host.controlWalk.stepOperation(op.id)
     // A restart restores only committed rows; observations remain outside the reconstructed host.
     if (
       scenario === 'built-restart' ||
@@ -966,8 +949,8 @@ export async function runCommitOnceHost(
       await host.peer.replay()
     } else {
       for (let i = 0; operation !== null && i < 6; i++) {
-        const next = await host.controlWalk.stepOperation(operation.id)
-        operation = next
+        await host.controlWalk.stepOperation(op.id)
+        operation = (await host.control.load()).commitOnce === null ? null : op
       }
     }
     if (checkProgress !== undefined) progressPreserved = await checkProgress()
@@ -1043,12 +1026,7 @@ export async function runMemoryCommitOnceScenario(
             )
           if (params.topicID === commitTopic(secret) && failPublish) {
             failPublish = false
-            await hub.publish({
-              topicID: params.topicID,
-              senderDID: localDID,
-              payload: new Uint8Array([255, 255]),
-              retain: 'log',
-            })
+            await publishCommit({ hub, senderDID: localDID, recoverySecret: secret, epoch: 0 })
           }
           return hub.publish(params)
         },

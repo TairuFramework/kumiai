@@ -399,7 +399,7 @@ test('incoming adoption co-settles a matching accepted operation and reports it 
   await seed.peer.replay()
   const request = buildLedgerCommit(seed, [])
   const op = await seedBuiltOperation(seed, request, '000000000001')
-  if (op.stage !== 'accepted') throw new Error('Missing accepted operation')
+  expect((await seed.control.load()).commitOnce?.acceptedAs).toBe('000000000001')
   await seed.peer.dispose()
   await seed.peer.drained()
   const result = await hub.publish({
@@ -546,7 +546,7 @@ test('a moved accepted own slot rechecks proof and lands on restart', async () =
     retain: 'log',
   })
   await vi.waitFor(async () =>
-    expect((await bob.control.load()).operations[0]?.stage).toBe('accepted'),
+    expect((await bob.control.load()).commitOnce?.acceptedAs).toBeDefined(),
   )
   await bob.peer.dispose()
   await bob.peer.drained()
@@ -564,49 +564,4 @@ test('a moved accepted own slot rechecks proof and lands on restart', async () =
     }),
   ])
   expect((await again.control.load()).cursor?.position).toBe(asLogPosition(result.sequenceID))
-})
-
-test('a moved acceptance with rewrapped payload stays unknown without a safety halt', async () => {
-  const hub = new FakeHub()
-  const bob = member(hub, { adopt: async () => 'moved' })
-  await bob.peer.replay()
-  const result = await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
-  await vi.waitFor(() => expect(bob.mls.epoch()).toBe(2))
-  const op = await seedBuiltOperation(bob, buildLedgerCommit(bob, []), result.sequenceID)
-  if (op.stage !== 'accepted') throw new Error('Missing acceptance')
-  const snapshot = await bob.control.load()
-  const row = snapshot.applied[0]
-  if (row == null) throw new Error('Missing incoming adoption')
-  expect(op.built.payloadDigest).not.toBe(row.payloadDigest)
-  const accepted = { ...op, built: { ...op.built, epoch: 1 } }
-  await bob.control.apply({ putOperations: [accepted] }, 'rewrapped-acceptance')
-  await bob.peer.replay()
-  expect(await bob.control.load()).toMatchObject({
-    operations: [accepted],
-    outcomes: [],
-    applied: snapshot.applied,
-    forkHalt: null,
-    controlHold: { reason: 'acceptance-unknown' },
-    strand: snapshot.strand,
-    cursor: snapshot.cursor,
-  })
-  await bob.peer.enqueue(buildLedgerCommit(bob, []))
-  expect(bob.controlWalk.safetyHold()).toBeNull()
-  const held = await bob.control.load()
-  const recoveryRequests = () =>
-    hub.published.filter(
-      (message) => message.topicID === rendezvousTopic(secret) && message.senderDID === 'bob',
-    )
-  expect(recoveryRequests()).toEqual([])
-  await bob.peer.dispose()
-  await bob.peer.drained()
-  hub.trim(commitTopic(secret), '999999999999')
-  const again = member(hub, { restartOf: bob })
-  await again.peer.replay()
-  const restarted = await again.control.load()
-  expect(restarted.controlHold).toEqual(held.controlHold)
-  expect(restarted.strand).toEqual(held.strand)
-  expect(restarted.cursor).toEqual(held.cursor)
-  expect(restarted.commitOnce).toEqual(held.commitOnce)
-  expect(recoveryRequests()).toEqual([])
 })

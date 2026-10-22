@@ -1,6 +1,5 @@
 import type { AnchorSlot, AnchorStore } from '../../src/anchor.js'
 import { controlSafetyHeld } from '../../src/control/safety.js'
-import { controlBuildRef } from '../../src/control/slot.js'
 import {
   applyChanges,
   type CommitOnceWriteContext,
@@ -20,6 +19,15 @@ import type {
 } from '../../src/control/types.js'
 import { executableOperations } from '../../src/control/types.js'
 import { GroupControlUnsettledError, StorageOutcomeUnknownError } from '../../src/errors.js'
+
+const inboundStates = new WeakMap<AdoptionWrite, Uint8Array>()
+
+/** Minted only after the memory MLS receiver authenticates the delivered commit. */
+export function memoryInboundWrite(write: AdoptionWrite, state: Uint8Array): AdoptionWrite {
+  const bound = { ...write }
+  inboundStates.set(bound, state.slice())
+  return bound
+}
 
 type GroupRecord = {
   version: number
@@ -72,7 +80,7 @@ function emptyRecord(): GroupRecord {
     mutationID: null,
     control: {
       commitOnce: null,
-      commitOnceAcceptance: null,
+      spentSource: null,
       controlHold: null,
       forkHalt: null,
       recoveryUnavailable: null,
@@ -92,7 +100,10 @@ function emptyRecord(): GroupRecord {
 }
 
 export function createMemoryHostDatabase(
-  options: { readIdentity?: (state: Uint8Array, key: GroupKey) => EpochIdentity | null } = {},
+  options: {
+    readIdentity?: (state: Uint8Array, key: GroupKey) => EpochIdentity | null
+    isTerminal?: (state: Uint8Array) => boolean
+  } = {},
 ): MemoryHostDatabase {
   let version = 0
   const readers = new Map<string, (state: Uint8Array, key: GroupKey) => EpochIdentity | null>()
@@ -167,19 +178,26 @@ export function createMemoryHostDatabase(
               : { recoveryUnavailable: safety.recoveryUnavailable }),
           }
           await transact(storageID, 'apply', (next) => {
-            const proofKey = ownedChanges.commitOnceAcceptance?.source.key
-            if (
-              proofKey !== undefined &&
-              (proofKey.groupID !== fixedKey.groupID ||
-                proofKey.incarnation !== fixedKey.incarnation)
-            )
-              throw new Error('Acceptance key mismatch')
             const source =
               next.state === null ? null : readIdentity(storageID, next.state, fixedKey)
             next.control = applyChanges(
               next.control,
               ownedChanges,
-              source === null ? null : { kind: 'head', source },
+              source === null
+                ? null
+                : {
+                    kind:
+                      ownedChanges.cursor !== undefined
+                        ? 'cursor'
+                        : ownedChanges.commitOnce?.reported === true &&
+                            next.control.commitOnce?.reported !== true
+                          ? 'report'
+                          : ownedChanges.commitOnce?.acceptedAs !== undefined &&
+                              next.control.commitOnce?.acceptedAs === undefined
+                            ? 'ack'
+                            : 'head',
+                    source,
+                  },
               fixedKey,
             )
             next.mutationID = mutationID
@@ -196,6 +214,10 @@ export function createMemoryHostDatabase(
           const identity = expected.identity
           const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
           if (
+            built.opID !== intent.id ||
+            !(['kind', 'revokes', 'enqueuedAt', 'deadline'] as const).every(
+              (field) => built[field] === intent[field],
+            ) ||
             controlSafetyHeld(next.control) !== null ||
             next.control.controlHold !== null ||
             !same(key, expected.key) ||
@@ -207,17 +229,15 @@ export function createMemoryHostDatabase(
                 !same(readIdentity(storageID, next.initialState, key), identity))) ||
             executableOperations(next.control)[0]?.id !== intent.id ||
             !same(executableOperations(next.control)[0], intent) ||
-            built.searchFrom !== (next.control.cursor?.position ?? null) ||
+            built.head !== (next.control.cursor?.position ?? null) ||
             (next.control.cursor !== null &&
-              (next.control.cursor.epoch !== identity.epoch || next.control.cursor.stranded))
+              (next.control.cursor.epoch !== identity.epoch ||
+                next.control.cursor.stranded ||
+                next.control.cursor.incomplete))
           )
             throw unchanged
           const occupied = next.control.commitOnce
-          if (
-            occupied !== null &&
-            occupied.incarnation === key.incarnation &&
-            occupied.epoch >= identity.epoch
-          ) {
+          if (occupied !== null || next.control.spentSource?.epoch === identity.epoch) {
             result = 'occupied'
             throw unchanged
           }
@@ -227,18 +247,8 @@ export function createMemoryHostDatabase(
             queueHeadID: intent.id,
             checkpoint: next.control.cursor?.position ?? null,
           }
-          next.control = applyChanges(
-            next.control,
-            { putOperations: [{ ...intent, stage: 'built', built: controlBuildRef(built) }] },
-            null,
-            key,
-          )
-          next.control = applyChanges(
-            next.control,
-            { commitOnce: built, commitOnceAcceptance: null },
-            context,
-            key,
-          )
+          next.control = applyChanges(next.control, { deleteOperations: [intent.id] }, null, key)
+          next.control = applyChanges(next.control, { commitOnce: built }, context, key)
           next.mutationID = mutationID
           result = 'saved'
         })
@@ -295,6 +305,23 @@ export function createMemoryHostDatabase(
     },
     saveState: async (groupID, state, write) => {
       const ownedState = state.slice()
+      const proof = write === undefined ? undefined : inboundStates.get(write)
+      if (write !== undefined) inboundStates.delete(write)
+      const authenticated =
+        proof !== undefined &&
+        proof.length === state.length &&
+        proof.every((byte, index) => byte === state[index])
+      const terminal = (() => {
+        if (options.isTerminal !== undefined) return options.isTerminal(state)
+        try {
+          return (
+            (JSON.parse(new TextDecoder().decode(state)) as { terminal?: boolean }).terminal ===
+            true
+          )
+        } catch {
+          return false
+        }
+      })()
       const ownedWrite = structuredClone(write)
       await transact(groupID, 'save', (next) => {
         const slot = next.control.commitOnce
@@ -305,9 +332,7 @@ export function createMemoryHostDatabase(
         const expected = ownedWrite?.expected
         if (
           controlSafetyHeld(next.control) !== null ||
-          (ownedWrite !== undefined &&
-            next.control.controlHold !== null &&
-            next.control.controlHold.reason !== 'acceptance-unknown')
+          (ownedWrite !== undefined && next.control.controlHold !== null)
         ) {
           throw Object.assign(new Error('Adoption is held'), { name: 'ControlAdoptionMovedError' })
         }
@@ -318,6 +343,8 @@ export function createMemoryHostDatabase(
               next.control,
               { key, identity: before, stateVersion: next.version },
               expected,
+              undefined,
+              ownedWrite?.changes,
             ))
         ) {
           const error = new Error('Adoption source or control proof moved')
@@ -344,6 +371,9 @@ export function createMemoryHostDatabase(
                     kind: 'adoption',
                     before,
                     after,
+                    ...(terminal && (authenticated || options.isTerminal !== undefined)
+                      ? { removed: true as const }
+                      : {}),
                   },
             key,
           )
@@ -355,6 +385,15 @@ export function createMemoryHostDatabase(
             next.anchorSlot.pending.landed = true
           }
         }
+        if (
+          before !== null &&
+          (((terminal ||
+            (after !== null &&
+              (after.incarnation !== before.incarnation || after.epoch > before.epoch))) &&
+            next.control.commitOnce !== null) ||
+            (terminal && (next.control.operations.length !== 0 || next.control.rejoin !== null)))
+        )
+          throw new Error('Source consumption requires atomic control closure')
       })
     },
     delete: async (groupID) => {

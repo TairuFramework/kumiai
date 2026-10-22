@@ -235,13 +235,17 @@ async function setup(member?: RealMember) {
     access.readControl(async (scope) => scope.source)
   const slot = async (): Promise<ControlSlot> => ({
     opID: intent.id,
+    kind: intent.kind,
+    revokes: intent.revokes,
+    enqueuedAt: intent.enqueuedAt,
+    deadline: intent.deadline,
     epoch: seed.state.epoch,
     incarnation: 1,
     authenticatorBefore: handle.state.keySchedule.epochAuthenticator.slice(),
     digest: 'commit',
     payloadDigest: 'full-payload',
     ...framed,
-    searchFrom: null,
+    head: null,
     bodies: [],
     welcome: null,
     journal: encodeControlJournal({
@@ -483,7 +487,7 @@ test.each([
   if (row.kind === 'saved') {
     expect(retriedVersion).toBe(freshVersion)
     expect(saved.commitOnce).toEqual(prepared)
-    expect(saved.operations[0]?.stage).toBe('built')
+    expect(saved.operations).toEqual([])
   } else {
     expect(saved.commitOnce).toBeNull()
     expect(saved.operations).toEqual([intent])
@@ -616,7 +620,7 @@ test('preparation and framing run outside provider transactions', async () => {
   expect(host.cryptoTransactions).toEqual([false])
   const journal = decodeControlJournal(slot.journal)
   expect(journal.sourceState).toEqual(encodeClientState(host.handle.state))
-  expect(journal.checkpoint).toBe(slot.searchFrom)
+  expect(journal.checkpoint).toBe(slot.head)
   expect(decodeClientState(journal.candidate)?.keySchedule.epochAuthenticator).toEqual(
     journal.candidateAuthenticator,
   )
@@ -673,16 +677,16 @@ async function advance(host: Awaited<ReturnType<typeof setup>>, clear: boolean, 
   host.setHandle(rotated.newGroup)
 }
 
-test('plain transaction-bound apply cannot clear after an earlier advance', async () => {
+test('source consumption refuses a transaction that leaves its live build behind', async () => {
   const host = await setup()
   expect((await host.make().prepareBuild(intent, host.frame)).kind).toBe('saved')
-  const slot = (await host.control.load()).commitOnce
   const before = host.db.snapshot()
-  await expect(advance(host, true, true)).rejects.toThrow()
+  await expect(advance(host, false)).rejects.toThrow(
+    'Source consumption requires atomic control closure',
+  )
   expect(host.db.snapshot()).toEqual(before)
-  await advance(host, false)
   await expect(host.control.apply({ commitOnce: null }, 'plain-clear')).rejects.toThrow()
-  expect((await host.control.load()).commitOnce).toEqual(slot)
+  expect(host.db.snapshot()).toEqual(before)
 })
 
 test('owning adoption clears with trust co-written before control', async () => {
@@ -700,10 +704,10 @@ test('owning adoption clears a slot built after the first epoch', async () => {
   const source = await host.source()
   built.epoch = 1
   built.authenticatorBefore = host.handle.state.keySchedule.epochAuthenticator.slice()
-  built.searchFrom = asLogPosition('1')
+  built.head = asLogPosition('1')
   built.journal = encodeControlJournal({
     ...decodeControlJournal(built.journal),
-    checkpoint: built.searchFrom,
+    checkpoint: built.head,
   })
   expect(await host.saver(intent, built, source, 'later-build')).toBe('saved')
   await advance(host, true)
@@ -769,30 +773,16 @@ test('owning retirement releases only its retained slot', async () => {
   expect((await host.control.load()).commitOnce).toBeNull()
 })
 
-test('owning retirement releases a slot retained from an earlier epoch', async () => {
+test('owning retirement closes the current build while preserving independent obligations', async () => {
   const host = await setup()
   expect((await host.make().prepareBuild(intent, host.frame)).kind).toBe('saved')
-  const slot = (await host.control.load()).commitOnce
-  if (slot === null) throw new Error('Missing slot')
-  await host.control.apply(
-    {
-      commitOnceAcceptance: {
-        source: await host.source(),
-        from: slot.searchFrom,
-        position: asLogPosition('1'),
-        payloadDigest: slot.payloadDigest,
-      },
-    },
-    'accepted',
-  )
-  await advance(host, false)
-  expect((await host.control.load()).commitOnce?.epoch).toBe(0)
-  expect((await host.groups.loadState(host.key))?.deleted).toBe(false)
-  expect(host.handle.epoch).toBe(1n)
-  const before = host.db.snapshot()
-  await expect(advance(host, true)).rejects.toMatchObject({ name: 'ControlStoreInvariantError' })
-  expect(host.db.snapshot()).toEqual(before)
-  const change = await nextChange(host.groups, host.key.groupID, 'retire-older-slot')
+  const obligation = {
+    opID: 'previous-invite',
+    welcome: new Uint8Array([9]),
+    recipients: ['recipient'],
+  }
+  await host.control.apply({ putWelcomes: [obligation] }, 'owed')
+  const change = await nextChange(host.groups, host.key.groupID, 'retire-source')
   await host.groups.transition(change, async (stores) => {
     const life = await stores.lifetime.load()
     if (life === null) throw new Error('Missing lifetime')
@@ -804,11 +794,8 @@ test('owning retirement releases a slot retained from an earlier epoch', async (
     })
     await stores.incarnation(1).control.apply({ commitOnce: null }, change.mutationID)
   })
-  expect((await host.groups.load(host.key.groupID))?.activeIncarnation).toBeNull()
-  expect(await host.groups.loadState(host.key)).toMatchObject({ deleted: true })
-  const cleared = await host.control.load()
-  expect(cleared.commitOnce).toBeNull()
-  expect(cleared.commitOnceAcceptance).toBeNull()
+  expect((await host.control.load()).commitOnce).toBeNull()
+  expect((await host.control.load()).welcomes).toEqual([obligation])
 })
 
 test.each([
@@ -1181,59 +1168,48 @@ test('build retry ignores an unreferenced source proposal', async () => {
   expect(decodeControlJournal(slot.journal).referencedProposals).toEqual([])
 })
 
-test('retained prior-epoch reconciliation does not precede the executable build head', async () => {
-  const group = await createRealGroup(1, 'build')
-  const h = await setup(group.committer)
-  const slot = { ...(await h.slot()), opID: 'retained', epoch: Number(h.handle.epoch) - 1 }
-  const retained: Operation = {
-    ...intent,
-    id: slot.opID,
-    seq: 0,
-    stage: 'built',
-    built: {
-      incarnation: slot.incarnation,
-      epoch: slot.epoch,
-      publishID: slot.publishID,
-      payloadDigest: slot.payloadDigest,
-    },
-    unknownReported: true,
-    reconciliation: { slot, acceptance: null, uncertainty: { cause: 'unavailable', at: null } },
-  }
-  await h.control.apply({ putOperations: [retained] }, 'retain-prior-epoch')
-  expect((await h.make().prepareBuild(intent, h.frame)).kind).toBe('saved')
-  const saved = await h.control.load()
-  expect(saved.commitOnce?.opID).toBe(intent.id)
-  expect(saved.operations.find((op) => op.id === retained.id)).toEqual(retained)
-  expect(h.counts()).toEqual({ buildCalls: 1, frameCalls: 1 })
+test('an existing live build blocks every queued intent without rebuilding', async () => {
+  const host = await setup()
+  expect((await host.make().prepareBuild(intent, host.frame)).kind).toBe('saved')
+  const queued: Operation = { ...intent, id: 'later', seq: 2 }
+  await host.control.apply({ putOperations: [queued] }, 'queue')
+  const before = await host.control.load()
+  expect((await host.make().prepareBuild(queued, host.frame)).kind).toBe('occupied')
+  expect(await host.control.load()).toEqual(before)
+  expect(host.counts()).toEqual({ buildCalls: 1, frameCalls: 1 })
 })
 
-test('transactional save double selects the executable head past retained rows', async () => {
+test.each(['kind', 'revokes', 'enqueuedAt', 'deadline'] as const)(
+  'raw provider save refuses copied owner metadata mismatch: %s',
+  async (field) => {
+    const host = await setup()
+    const slot = await host.slot()
+    if (field === 'kind') slot.kind = 'invite'
+    if (field === 'revokes') slot.revokes = true
+    if (field === 'enqueuedAt') slot.enqueuedAt++
+    if (field === 'deadline') slot.deadline++
+    const before = host.db.snapshot()
+    expect(await host.saver(intent, slot, await host.source(), 'wrong-owner')).toBe('moved')
+    expect(host.db.snapshot()).toEqual(before)
+  },
+)
+
+test('transport clearing refuses a live build before discarding incarnation transport state', async () => {
   const host = await setup()
-  const store = createTransactionalStore(host.handle)
-  const slot = await host.slot()
-  const source = { ...(await host.source()), stateVersion: store.snapshot().revision + 1 }
-  slot.journal = encodeControlJournal({ ...decodeControlJournal(slot.journal), source })
-  await store.control.apply(
-    {
-      putOperations: [
-        intent,
-        {
-          ...intent,
-          id: 'retained',
-          seq: 0,
-          stage: 'built',
-          built: { ...slot, epoch: slot.epoch - 1 },
-          reconciliation: {
-            slot: { ...slot, opID: 'retained', epoch: slot.epoch - 1 },
-            acceptance: null,
-          },
-        },
-      ],
+  expect((await host.make().prepareBuild(intent, host.frame)).kind).toBe('saved')
+  await host.groups.ports(host.key).anchor.save({
+    anchor: {
+      epoch: Number(host.handle.epoch),
+      secret: crypto.getRandomValues(new Uint8Array(32)),
     },
-    'queued',
-  )
-  expect(await store.saveBuilt(intent, slot, source, 'executable-save')).toBe('saved')
-  expect(
-    (await store.control.load()).operations.find((row) => row.id === 'retained')?.reconciliation,
-  ).toBeDefined()
+  })
+  const before = host.db.snapshot()
+  const change = await nextChange(host.groups, host.key.groupID, 'clear-live-transport')
+  await expect(
+    host.groups.transition(change, async (stores) => {
+      await stores.incarnation(host.key.incarnation).clearTransport()
+    }),
+  ).rejects.toMatchObject({ name: 'GroupStateConflictError' })
+  expect(host.db.snapshot()).toEqual(before)
+  expect((await host.control.load()).commitOnce?.opID).toBe(intent.id)
 })

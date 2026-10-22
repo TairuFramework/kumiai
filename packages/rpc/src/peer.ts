@@ -27,6 +27,7 @@ import {
   enqueueOperation,
   type OperationDeps,
   revokeHeld,
+  stepLiveBuild,
   stepOperation,
 } from './control/operations.js'
 import {
@@ -46,23 +47,14 @@ import {
   isHardControlHold,
   type SafetyHold,
 } from './control/safety.js'
-import {
-  type CertifiedControlRange,
-  CONTROL_SEARCH_BUDGET,
-  type ControlEvidenceSnapshot,
-  type ControlHold,
-  type ControlSearchWork,
-  createControlSearch,
-  isCertifiedControlLoser,
-} from './control/search.js'
-import { settleControlSlot } from './control/slot.js'
+import type { ControlEvidenceSnapshot, ControlHold } from './control/search.js'
+import { closeControlBuild, consumeOwnOccurrence } from './control/slot.js'
 import {
   applyResolved as applyControlResolved,
+  controlOccurrenceCoverage,
   deleteOperationChanges,
   pruneWindow,
-  retainAdvancedControlSlot,
 } from './control/store.js'
-import { decideSuperseded, supersededChanges } from './control/superseded.js'
 import type {
   AdoptionWriteFactory,
   AppliedCommit,
@@ -308,13 +300,8 @@ export function canMoveCurrent(params: CurrentMoveInputs): boolean {
     // Either reason blocks: a hard hold, or acceptance whose settlement is still unknown.
     control.controlHold === null &&
     control.commitOnce === null &&
-    control.commitOnceAcceptance === null &&
     executableOperations(control).length === 0 &&
-    control.welcomes.every(
-      (row) =>
-        !row.committed &&
-        control.operations.some((op) => op.id === row.opID && op.reconciliation !== undefined),
-    ) &&
+    control.welcomes.length === 0 &&
     control.rejoin === null &&
     control.forkRecoveryAttempt == null &&
     control.strand === null &&
@@ -327,12 +314,6 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   input: GroupPeerParams<Protocols>,
 ): GroupPeer<Protocols> {
   return createGroupPeerWithControlWalk<Protocols>(input).peer
-}
-
-type ControlWalkRequest = {
-  through: LogPosition | null
-  range: CertifiedControlRange | null
-  work: ControlSearchWork
 }
 
 /** Internal construction seam for bounded control reconciliation. */
@@ -348,13 +329,11 @@ export function createGroupPeerWithControlWalk<
       requestID: string
       request: Uint8Array
     }): Promise<boolean>
-    walkCommits(search: ControlWalkRequest): Promise<boolean>
+    walkCommits(): Promise<boolean>
     head(): LogPosition | null
     haltFork(evidence: GroupForkEvidence): Promise<void>
     safetyHold(): SafetyHold
     stepOperation(operationID?: string): Promise<Operation | null>
-    /** Stateful test control: may follow a winner or persist a hold. */
-    searchLog: OperationDeps['searchLog']
   }
 } {
   if (input.manualRecovery !== undefined && input.recoveryOnly !== true)
@@ -1109,7 +1088,9 @@ export function createGroupPeerWithControlWalk<
       position: durableCursor?.epoch === epoch ? durableCursor.position : null,
       epoch,
       stranded: true,
-      ...(durableCursor?.incomplete === true ? { incomplete: true } : {}),
+      ...(durableCursor?.incomplete === true || reason === 'retention-gap'
+        ? { incomplete: true }
+        : {}),
     }
     await applyResolved(control, { cursor, strand: { reason } }, newPublishID())
     durableCursor = cursor
@@ -1118,6 +1099,7 @@ export function createGroupPeerWithControlWalk<
   const saveCommitCursor = async (
     position: LogPosition,
     response?: ExternalResponse,
+    occurrenceEpoch?: number,
   ): Promise<void> => {
     if (safetyHold() !== null || mls == null) return
     if (control != null) {
@@ -1150,6 +1132,13 @@ export function createGroupPeerWithControlWalk<
               ...snapshot.responses.filter((row) => row.kind === 'applied').map((row) => row.epoch),
             ),
           ),
+          ...(snapshot.commitOnce !== null &&
+          (occurrenceEpoch === undefined || occurrenceEpoch === snapshot.commitOnce.epoch) &&
+          cursor.position !== null &&
+          (snapshot.commitOnce.head === null || cursor.position > snapshot.commitOnce.head) &&
+          (snapshot.cursor?.position == null || cursor.position > snapshot.cursor.position)
+            ? { commitOnce: { ...snapshot.commitOnce, skipped: true as const } }
+            : {}),
           cursor,
           ...(!cursor.stranded ? { strand: null } : {}),
           ...(response == null ? {} : { putResponses: [response] }),
@@ -1856,11 +1845,45 @@ export function createGroupPeerWithControlWalk<
   const walkCommitLog = async (
     port: GroupMLS,
     topicID: string,
-    search?: ControlWalkRequest,
     requireCompletePrefix = false,
   ): Promise<boolean> => {
     commitLaneCaughtUp = false
     const workVersion = commitWorkVersion
+    if (safetyHold() !== null) return false
+    const saved = await control?.load()
+    const live = saved?.commitOnce
+    if (live != null) {
+      const source = await port.readRecoverySource()
+      const identity = source.identity
+      if (
+        identity !== null &&
+        source.key.groupID === control?.key.groupID &&
+        identity.incarnation === live.incarnation &&
+        identity.epoch === live.epoch &&
+        (identity.authenticator.length !== live.authenticatorBefore.length ||
+          identity.authenticator.some((byte, index) => byte !== live.authenticatorBefore[index]))
+      ) {
+        await haltFork({
+          kind: 'epoch-authenticator',
+          epoch: live.epoch,
+          local: live.authenticatorBefore,
+          remote: identity.authenticator,
+        })
+        return false
+      }
+    }
+    const installed =
+      live == null ? undefined : saved?.applied.find((row) => row.epoch === live.epoch)
+    if (live != null && installed !== undefined && installed.payloadDigest !== live.payloadDigest) {
+      await haltFork({
+        kind: 'digest-divergence',
+        epoch: live.epoch,
+        position: installed.sequenceID,
+        localDigest: live.digest,
+        remoteDigest: installed.digest,
+      })
+      return false
+    }
     if (
       safetyHold() !== null ||
       anchorRecoveryPending ||
@@ -1897,7 +1920,6 @@ export function createGroupPeerWithControlWalk<
       if (safetyHold() !== null) return
       commitLogHead = head == null ? null : asLogPosition(head)
       if (
-        search === undefined &&
         covered &&
         (!requireCompletePrefix || reconciledHead === commitLogHead) &&
         !stranded &&
@@ -1909,13 +1931,6 @@ export function createGroupPeerWithControlWalk<
         commitLaneCaughtUp = true
         appLane.retryDelivery()
       }
-      if (
-        search !== undefined &&
-        search.through !== null &&
-        commitLogHead !== null &&
-        commitLogHead > search.through
-      )
-        commitLogHead = search.through
       if (covered && !stranded && floor.covered) {
         if (!advancedEpoch) floor = { ...floor, position: reconciledHead }
         logDelivery?.certify(floor.epoch, started)
@@ -1924,14 +1939,6 @@ export function createGroupPeerWithControlWalk<
     while (true) {
       if (disposed || safetyHold() !== null) return false
       const pageAfter = reconciledHead
-      if (search !== undefined) {
-        if (
-          search.through === null ||
-          (pageAfter !== null && pageAfter >= search.through) ||
-          !search.work.takeFetch()
-        )
-          return advancedEpoch
-      }
       let result: ReturnType<typeof checkedFetchResult>
       try {
         result = checkedFetchResult(
@@ -1963,7 +1970,7 @@ export function createGroupPeerWithControlWalk<
         covered = false
         floor = { ...floor, covered: false }
         // A skipped suffix must not make a later empty read certify the missing prefix.
-        if (result.messages.length > 0 && control != null && !durableCursor?.incomplete) {
+        if (control != null && !durableCursor?.incomplete) {
           const epoch = await port.readEpoch()
           if (safetyHold() !== null) return advancedEpoch
           const cursor: CommitCursor = { position: null, epoch, incomplete: true }
@@ -1994,9 +2001,6 @@ export function createGroupPeerWithControlWalk<
         assertForwardPage(pageAfter, result.messages)
       }
       if (result.messages.length === 0) {
-        // Legacy search retains its sampled head until captured recovery is activated.
-        if (!requireCompletePrefix && gap && result.head != null)
-          reconciledHead = asLogPosition(result.head)
         // Drained. The tip an EMPTY page reports is not redundant: a topic keeps its head when
         // its frames age out, so anchoring on the cursor here would compare-and-set against
         // `null` on a topic whose head is real, and lose forever.
@@ -2009,14 +2013,6 @@ export function createGroupPeerWithControlWalk<
         // operation carries that across a restart); meeting its own commit here means its saved operation
         // was lost or never written.
         const position = asLogPosition(message.sequenceID)
-        if (search !== undefined) {
-          if (search.through === null) return advancedEpoch
-          if (position > search.through) {
-            takeHead(search.through)
-            return advancedEpoch
-          }
-          if (!search.work.takeFrame()) return advancedEpoch
-        }
         if (rejoinPosition != null && position >= rejoinPosition) return advancedEpoch
         let frame: ReturnType<typeof decodeHandshakeFrame>
         try {
@@ -2045,7 +2041,7 @@ export function createGroupPeerWithControlWalk<
           continue
         }
         if (frame.kind !== HANDSHAKE_KIND.commit) {
-          await saveCommitCursor(position) // the commit lane carries commits, and nothing else
+          await saveCommitCursor(position)
           continue
         }
         // Split the frame into the commit and the sealed blob of bodies it enacts. Reads bytes,
@@ -2110,26 +2106,6 @@ export function createGroupPeerWithControlWalk<
             readHeader?.committerDID != null
               ? { ...readHeader, committerDID: normalizeDID(readHeader.committerDID) }
               : readHeader
-          const certificate = search?.range
-          if (certificate != null && header != null) {
-            const key = (await port.readRecoverySource()).key
-            if (safetyHold() !== null) return advancedEpoch
-            const winner = appliedByEpoch.get(certificate.source.epoch)
-            if (
-              winner?.sequenceID === certificate.winner.position &&
-              winner.payloadDigest === certificate.winner.payloadDigest &&
-              isCertifiedControlLoser(
-                certificate,
-                key,
-                header.epoch,
-                position,
-                toB64U(sha256(message.payload)),
-              )
-            ) {
-              await saveCommitCursor(position)
-              break
-            }
-          }
           const disposition = classifyCommit({
             header,
             sequenceID: position,
@@ -2148,29 +2124,43 @@ export function createGroupPeerWithControlWalk<
             const savedRecognition =
               savedCommit === null ? null : (mls?.ownCommitDigest(savedCommit) ?? null)
             const deliveredRecognition = mls?.ownCommitDigest(commitFrame.commit) ?? null
-            // A search's prefix walk must not start another settlement search.
             if (
-              !controlSearchActive &&
               slot !== null &&
               slot !== undefined &&
-              (exactOwn ||
-                (savedRecognition !== null &&
-                  deliveredRecognition !== null &&
-                  savedRecognition === deliveredRecognition))
+              (exactOwn || (savedRecognition !== null && savedRecognition === deliveredRecognition))
             ) {
-              const settled = await settleRetainedControlSlot({
-                position,
-                payload: message.payload,
-                senderDID: message.senderDID,
-              })
-              if (settled === 'landed' || settled === 'superseded') {
+              if (stranded || durableCursor?.stranded) return advancedEpoch
+              if (validation === undefined || control === undefined) return advancedEpoch
+              const result = await consumeOwnOccurrence(
+                {
+                  control,
+                  validation,
+                  adoption: { adopt: operationDeps().adopt },
+                  now: Date.now,
+                  newID: newPublishID,
+                  emit: emitOutcome,
+                },
+                { position, payload: message.payload, senderDID: message.senderDID },
+              )
+              if (result === 'installed' || result === 'noop') {
                 advancedEpoch = true
-                await saveCommitCursor(position)
+                reconciledHead = position
+                await refreshControl()
                 break
               }
-              if (exactOwn) return advancedEpoch
+              if (result === 'moved') {
+                await refreshControl()
+                const refreshedEpoch = await port.readEpoch()
+                if (refreshedEpoch !== localEpoch) {
+                  localEpoch = refreshedEpoch
+                  continue
+                }
+                return advancedEpoch
+              }
+              if (result === 'unavailable')
+                return unprocessable(position, commitDigest, localEpoch, header?.epoch ?? null)
             }
-            await saveCommitCursor(position)
+            await saveCommitCursor(position, undefined, header?.epoch)
             if (commitTopicID != null)
               emitStrand({
                 groupID: commitTopicID,
@@ -2188,7 +2178,7 @@ export function createGroupPeerWithControlWalk<
             // repairs this, not a re-read — and ask for one.
             stranded = true
             await persistStrand('ahead')
-            await saveCommitCursor(position)
+            await saveCommitCursor(position, undefined, header?.epoch)
             healRequested = safetyHold() === null
             observeStrand({
               position,
@@ -2204,12 +2194,12 @@ export function createGroupPeerWithControlWalk<
             // A frame from an epoch below this peer's, with no record for it or a record naming
             // this same commit. Not a fork, not poison, not the port's business — its blob is never
             // touched.
-            await saveCommitCursor(position)
+            await saveCommitCursor(position, undefined, header?.epoch)
             break
           }
           if (disposition.row === 'past-epoch-divergence' || disposition.row === 'fork') {
             // Delivered bytes cannot establish acceptance or local safety failure.
-            await saveCommitCursor(position)
+            await saveCommitCursor(position, undefined, header?.epoch)
             if (commitTopicID != null)
               emitStrand({
                 groupID: commitTopicID,
@@ -2223,7 +2213,7 @@ export function createGroupPeerWithControlWalk<
             break
           }
           if (disposition.row === 'poison') {
-            await saveCommitCursor(position) // not a commit at all: stepped over, and never retried
+            await saveCommitCursor(position, undefined, header?.epoch) // not a commit at all: stepped over, and never retried
             break
           }
 
@@ -2303,7 +2293,7 @@ export function createGroupPeerWithControlWalk<
             if (unsupportedEntries) {
               await resolveAnchorRotation({ port, knownUnlanded: true })
               // A tampered version byte must not plant a digest-keyed refusal.
-              await saveCommitCursor(position)
+              await saveCommitCursor(position, undefined, header?.epoch)
               if (safetyHold() !== null) return advancedEpoch
               if (commitTopicID != null)
                 emitStrand({
@@ -2335,7 +2325,7 @@ export function createGroupPeerWithControlWalk<
             }
             await resolveAnchorRotation({ port, knownUnlanded: true })
             // Missing bodies describe this copy, never an authenticated commit refusal.
-            await saveCommitCursor(position)
+            await saveCommitCursor(position, undefined, header?.epoch)
             break
           }
           if (disposed) return false
@@ -2346,21 +2336,10 @@ export function createGroupPeerWithControlWalk<
           }
           if (applied.applied && snapshot != null && control != null) {
             const settled = await control.load()
-            for (const op of snapshot.operations) {
-              const outcome = settled.outcomes.find((row) => row.opID === op.id)
-              if (
-                outcome != null &&
-                ((outcome.kind === 'landed' &&
-                  op.stage === 'accepted' &&
-                  op.built.payloadDigest === toB64U(sha256(message.payload))) ||
-                  ((outcome.kind === 'lost' || outcome.kind === 'unknown') &&
-                    snapshot.commitOnce?.opID === op.id &&
-                    !snapshot.outcomes.some(
-                      (row) => row.id === outcome.id && row.kind === outcome.kind,
-                    )))
-              )
-                emitOutcome(outcome)
+            for (const outcome of settled.outcomes) {
+              if (!snapshot.outcomes.some((row) => row.id === outcome.id)) emitOutcome(outcome)
             }
+            await refreshControl()
           }
           if (!applied.advanced && applied.epochBefore !== framedEpoch) {
             advancedEpoch = true
@@ -2373,7 +2352,7 @@ export function createGroupPeerWithControlWalk<
           }
           // `{ advanced: false }` here is the port REFUSING a well-formed commit at this peer's own
           // epoch from another member: poison on the same terms as an unresolvable one.
-          if (!applied.applied) await saveCommitCursor(position)
+          if (!applied.applied) await saveCommitCursor(position, undefined, header?.epoch)
           if (applied.applied && (reconciledHead == null || reconciledHead < position))
             reconciledHead = position
           if (locallyRemoved) return advancedEpoch
@@ -2392,12 +2371,11 @@ export function createGroupPeerWithControlWalk<
   const walkCommits = async (
     port: GroupMLS,
     topicID: string,
-    search?: ControlWalkRequest,
     requireCompletePrefix = false,
   ): Promise<boolean> => {
     let advanced: boolean
     try {
-      advanced = await walkCommitLog(port, topicID, search, requireCompletePrefix)
+      advanced = await walkCommitLog(port, topicID, requireCompletePrefix)
     } catch (error) {
       if (!disposed && safetyHold() === null) {
         try {
@@ -2441,7 +2419,7 @@ export function createGroupPeerWithControlWalk<
     if (disposed) return false
     const anchorBefore = anchor
     try {
-      const advanced = await walkCommits(mls, commitTopicID, undefined, requireCompletePrefix)
+      const advanced = await walkCommits(mls, commitTopicID, requireCompletePrefix)
       if (disposed) return false
       appLane.kick()
       if (disposed) return false
@@ -2774,7 +2752,7 @@ export function createGroupPeerWithControlWalk<
         row?.payloadDigest,
         row?.removed,
         snapshot.operations.some((op) => op.id === slot.opID),
-        snapshot.operations.find((op) => op.id === slot.opID)?.unknownReported,
+        slot.reported,
       ])
       if (freshEvidence !== undefined || stamp !== slotEvidenceStamp) {
         unresolvedControlSlot = true
@@ -2788,9 +2766,7 @@ export function createGroupPeerWithControlWalk<
         }
       }
     }
-    const activeOperations = executableOperations(snapshot).filter(
-      (op) => !op.unknownReported || snapshot.commitOnce?.opID !== op.id,
-    )
+    const activeOperations = executableOperations(snapshot)
     const firstOperation = activeOperations[0]
     if (firstOperation?.id !== executableHeadID) {
       executableHeadID = firstOperation?.id
@@ -2798,13 +2774,12 @@ export function createGroupPeerWithControlWalk<
         operationWakePending = true
       }
     }
-    operationDeadline =
-      firstOperation !== undefined && firstOperation.deadline > Date.now()
-        ? firstOperation.deadline
-        : null
-    hasOperations =
-      activeOperations.length > 0 ||
-      snapshot.operations.some((op) => op.reconciliation !== undefined)
+    const deadlines = [
+      firstOperation?.deadline,
+      snapshot.commitOnce?.reported ? undefined : snapshot.commitOnce?.deadline,
+    ].filter((deadline): deadline is number => deadline !== undefined && deadline > Date.now())
+    operationDeadline = deadlines.length === 0 ? null : Math.min(...deadlines)
+    hasOperations = activeOperations.length > 0 || snapshot.commitOnce !== null
     revokeHold = revokeHeld(snapshot)
     rejoinHeld =
       snapshot.rejoin != null || snapshot.forkRecoveryAttempt != null || continuation !== null
@@ -2913,94 +2888,54 @@ export function createGroupPeerWithControlWalk<
     const { snapshot, epoch, digest, payloadDigest, position, external } = input
     const owningSlot = snapshot.commitOnce
     const clearsSlot = owningSlot !== null && owningSlot.epoch === epoch
-    const matches = snapshot.operations.filter(
-      (op) =>
-        op.stage === 'accepted' &&
-        op.built.payloadDigest === payloadDigest &&
-        owningSlot?.opID === op.id &&
-        owningSlot.payloadDigest === payloadDigest,
-    )
     const mutationID = newPublishID()
     return (staged) => {
       // A started commit finishes its atomic persistence without a safety-derived strand.
       const reason = controlSafetyHeld(snapshot)
       if (reason !== null) throw new GroupSafetyHeldError(reason)
-      const owningOperation = snapshot.operations.find((op) => op.id === owningSlot?.opID)
-      const supersedes =
-        (staged.removed || staged.epochAfter > epoch) &&
-        clearsSlot &&
-        owningSlot.payloadDigest !== payloadDigest &&
-        owningOperation !== undefined
-      const at = operationDeps().now()
-      const decision = !supersedes
-        ? 'pending'
-        : decideSuperseded({
-            operation: owningOperation,
-            // The inbound occurrence is the observed hub head for this atomic adoption.
-            observedHead: position,
-            acceptance: snapshot.commitOnceAcceptance,
-            acceptanceUnknown: snapshot.controlHold?.reason === 'acceptance-unknown',
-            evidence: { kind: 'applied', winner: position },
-            now: at,
-          })
-      const settled = supersedes
-        ? {
-            ...supersededChanges(snapshot, owningOperation, decision, at),
-            ...(decision === 'lost' ||
-            snapshot.outcomes.some(
-              (row) =>
-                row.opID === owningOperation.id && (row.kind === 'lost' || row.kind === 'landed'),
+      const at = Date.now()
+      const settled =
+        clearsSlot && (staged.removed || staged.epochAfter > epoch)
+          ? closeControlBuild(
+              snapshot,
+              {
+                kind:
+                  !staged.removed &&
+                  controlOccurrenceCoverage(snapshot, owningSlot, position) === 'complete'
+                    ? 'lost'
+                    : 'unknown',
+              },
+              at,
+              newPublishID(),
             )
-              ? {}
-              : {
-                  putOperations: [
-                    {
-                      ...owningOperation,
-                      ...(decision === 'unknown' ? { unknownReported: true as const } : {}),
-                      reconciliation: {
-                        slot: owningSlot,
-                        acceptance: snapshot.commitOnceAcceptance,
-                        ...(snapshot.controlHold?.reason === 'acceptance-unknown'
-                          ? {
-                              uncertainty: {
-                                cause: snapshot.controlHold.cause ?? 'unavailable',
-                                at: snapshot.controlHold.position,
-                              },
-                            }
-                          : {}),
-                      },
-                    },
-                  ],
-                }),
-          }
-        : matches.length === 0
-          ? {}
-          : {
-              deleteOperations: matches.map((op) => op.id),
-              putOutcomes: matches.map(
-                (op): Outcome => ({
-                  id: op.id,
-                  opID: op.id,
-                  at: Date.now(),
-                  kind: 'landed',
-                  position,
-                }),
-              ),
-            }
+          : {}
+      if (staged.removed) {
+        settled.commitOnce = null
+        settled.deleteOperations = snapshot.operations.map((op) => op.id)
+        settled.putOutcomes = [
+          ...(settled.putOutcomes ?? []),
+          ...snapshot.operations.map(
+            (op): Outcome => ({
+              id: newPublishID(),
+              opID: op.id,
+              at,
+              kind: 'rejected',
+              reason: 'removed',
+            }),
+          ),
+          ...(snapshot.rejoin !== null && snapshot.rejoin.stage !== 'refused'
+            ? [{ id: newPublishID(), opID: null, at, kind: 'unknown' as const }]
+            : []),
+        ]
+        settled.deleteRejoin = true
+      }
       return {
         mutationID,
         ...(!staged.removed ? { anchorLanded: digest } : {}),
         changes: {
           ...pruneWindow(snapshot, epoch),
           ...settled,
-          ...(clearsSlot &&
-          staged.epochAfter > epoch &&
-          owningOperation === undefined &&
-          owningSlot.payloadDigest !== payloadDigest &&
-          snapshot.welcomes.some((row) => row.opID === owningSlot.opID && !row.committed)
-            ? { deleteWelcomes: [owningSlot.opID] }
-            : {}),
-          ...(clearsSlot && staged.epochAfter > epoch ? { commitOnce: null } : {}),
+          ...(!staged.removed && staged.epochAfter > epoch ? { spentSource: null } : {}),
           ...(controlHold?.reason === 'acceptance-unknown' && staged.epochAfter > epoch
             ? { controlHold: null }
             : {}),
@@ -3010,7 +2945,7 @@ export function createGroupPeerWithControlWalk<
               digest,
               payloadDigest,
               sequenceID: position,
-              opID: matches[0]?.id ?? null,
+              opID: null,
               removed: staged.removed,
             },
           ],
@@ -3047,53 +2982,20 @@ export function createGroupPeerWithControlWalk<
   }
   let welcomeTimer: ReturnType<typeof setTimeout> | undefined
   let welcomeBackoff = 1000
-  let controlSearchActive = false
-  let checkedWelcome: {
-    publishID: string
-    proof: NonNullable<ControlSnapshot['commitOnceAcceptance']>
-  } | null = null
   const deliverPendingWelcomes = async (): Promise<void> => {
     if (disposed || control == null || deliverWelcome == null) return
     if (welcomeTimer != null) clearTimeout(welcomeTimer)
     welcomeTimer = undefined
     try {
-      const checked = checkedWelcome
-      checkedWelcome = null
       const snapshot = await control.load()
       const safety = controlSafetyHeld(snapshot)
       if (safety !== null) latchSafetyHold(safety)
       if (snapshot.welcomes.length === 0) return
-      let accepted: Promise<boolean> | undefined
       await deliverObligations(
         {
           control,
           signal: controlAbort.signal,
-          canDeliver: async (obligation) => {
-            if (obligation.committed) return true
-            const slot = snapshot.commitOnce
-            if (
-              hardControlHeld() ||
-              stranded ||
-              snapshot.strand !== null ||
-              snapshot.cursor?.stranded === true ||
-              (snapshot.controlHold !== null &&
-                snapshot.controlHold.reason !== 'acceptance-unknown') ||
-              slot?.opID !== obligation.opID ||
-              snapshot.commitOnceAcceptance === null ||
-              controlSearch === null
-            )
-              return false
-            const acceptance = snapshot.commitOnceAcceptance
-            const matches = (proof: NonNullable<ControlSnapshot['commitOnceAcceptance']>) =>
-              proof.payloadDigest === slot.payloadDigest &&
-              proof.from === acceptance.from &&
-              proof.position === acceptance.position
-            if (checked?.publishID === slot.publishID && matches(checked.proof)) return true
-            accepted ??= controlSearch
-              .searchLog(slot)
-              .then((result) => result.kind === 'first-valid' && matches(result.proof))
-            return accepted
-          },
+          canDeliver: async () => true,
           deliverWelcome: async (obligation) => {
             assertLive()
             await deliverWelcome(obligation)
@@ -3209,157 +3111,9 @@ export function createGroupPeerWithControlWalk<
     }
   }
 
-  const holdControl = async (value: ControlHold): Promise<void> => {
-    if (control == null) return
-    // First hard hold wins, including in memory when persistence fails.
-    if (controlHoldPresent()) return
-    controlHold = value
-    const hard = value.reason !== 'acceptance-unknown'
-    if (hard && safetyHold() === null) {
-      stranded = true
-      healRequested = false
-    }
-    const snapshot = await control.load()
-    const epoch =
-      hard && safetyHold() === null
-        ? ((await mls?.readEpoch()) ?? crypto.epoch())
-        : (snapshot.cursor?.epoch ?? durableCursor?.epoch ?? crypto.epoch())
-    await applyResolved(
-      control,
-      {
-        controlHold: value,
-        ...(hard && safetyHold() === null
-          ? {
-              strand: {
-                reason: 'unsupported-version',
-              },
-              cursor: {
-                position: snapshot.cursor?.position ?? null,
-                epoch,
-                stranded: true,
-              },
-            }
-          : {}),
-      },
-      newPublishID(),
-    )
-  }
-  const controlSearch =
-    control == null || mls == null || validation == null
-      ? null
-      : createControlSearch({
-          budget: CONTROL_SEARCH_BUDGET,
-          ownCommitDigest: (commit) => mls.ownCommitDigest(commit),
-          validation,
-          readEvidence: params.readEvidence,
-          fetch: async (after) => {
-            assertLive()
-            if (commitTopicID == null) throw new Error('Missing commit topic')
-            return checkedFetchResult(
-              await mux.fetchTopic({
-                topicID: commitTopicID,
-                ...(after === null ? {} : { after }),
-                limit: COMMIT_FETCH_LIMIT,
-              }),
-            )
-          },
-          hold: async (value, built) => {
-            const snapshot = await control.load()
-            const op = snapshot.operations.find(
-              (op) => op.reconciliation?.slot.publishID === built.publishID,
-            )
-            if (value.reason === 'acceptance-unknown' && op?.reconciliation !== undefined) {
-              await applyResolved(
-                control,
-                {
-                  putOperations: [
-                    {
-                      ...op,
-                      reconciliation: {
-                        ...op.reconciliation,
-                        uncertainty: { cause: value.cause ?? 'unavailable', at: value.position },
-                      },
-                    },
-                  ],
-                },
-                newPublishID(),
-              )
-            } else if (
-              snapshot.commitOnce?.publishID === built.publishID &&
-              snapshot.commitOnce.payloadDigest === built.payloadDigest
-            )
-              await holdControl(value)
-          },
-          onUnsupportedVersion: (frame, epoch) => {
-            if (safetyHold() !== null || commitTopicID == null) return
-            emitStrand({
-              groupID: commitTopicID,
-              position: frame.position,
-              commitDigest: null,
-              localEpoch: epoch,
-              claimedEpoch: null,
-              kind: 'unknown-version',
-              confidence: 'claimed',
-            })
-          },
-          haltFork,
-          safetyHold,
-          followWinner: async (frame, range, work) => {
-            if (safetyHold() !== null || commitTopicID == null) return { kind: 'unavailable' }
-            await walkCommits(mls, commitTopicID, { through: frame.position, range, work })
-            if (safetyHold() !== null) return { kind: 'unavailable' }
-            const evidence = await params.readEvidence()
-            if (safetyHold() !== null) return { kind: 'unavailable' }
-            const row = evidence.applied.find((row) => row.epoch === range.source.epoch)
-            return row?.sequenceID === frame.position &&
-              row.payloadDigest === range.winner.payloadDigest
-              ? { kind: 'applied', position: frame.position }
-              : { kind: 'unavailable' }
-          },
-          reconcileAbsent: async (through, range, work) => {
-            if (safetyHold() !== null || commitTopicID == null) return false
-            if (stranded || durableStrand !== null) return false
-            if (through === null) {
-              commitLogHead = null
-              return true
-            }
-            await walkCommits(mls, commitTopicID, { through, range, work })
-            if (safetyHold() !== null) return false
-            const reconciled =
-              reconciledHead !== null &&
-              reconciledHead >= through &&
-              !stranded &&
-              durableStrand === null &&
-              safetyHold() === null
-            // An already covered suffix makes the bounded walk return without fetching its head.
-            if (reconciled) commitLogHead = through
-            return reconciled
-          },
-        })
-
-  const searchControlLog: OperationDeps['searchLog'] = async (built, position) => {
-    checkedWelcome = null
-    if (controlSearch === null) return { kind: 'unknown' }
-    if (mls != null && !(await mls.isLedgerComplete())) return { kind: 'unknown' }
-    controlSearchActive = true
-    try {
-      const result = await controlSearch.searchLog(built, position)
-      if (result.kind === 'first-valid')
-        checkedWelcome = { publishID: built.publishID, proof: result.proof }
-      return result
-    } finally {
-      controlSearchActive = false
-    }
-  }
-
+  const reportedControlInvariants = new Set<string>()
   const operationDeps = (): OperationDeps => {
-    if (
-      control == null ||
-      prepareBuild == null ||
-      adopt == null ||
-      mls == null ||
-      controlSearch == null
-    )
+    if (control == null || prepareBuild == null || adopt == null || mls == null)
       throw new Error('commit: this peer has no MLS ports')
     const port = mls
     const topicID = commitTopicID
@@ -3381,7 +3135,7 @@ export function createGroupPeerWithControlWalk<
           await advanceHandle({
             port,
             identity: { epochAfter: slot.epoch + 1, forced: false, advance: slot.digest },
-            floorPosition: expected.acceptance.position,
+            floorPosition: expected.occurrence.position,
             ratchet: async () => {
               assertLive()
               adoptionResult.value = await adopt(journal, expected, {
@@ -3392,11 +3146,32 @@ export function createGroupPeerWithControlWalk<
             },
           })
         } catch (error) {
+          if (error instanceof Error && error.name === 'SavedControlCompatibilityError') {
+            await haltFork({
+              kind: 'unexplained-own-commit',
+              epoch: slot.epoch,
+              position: expected.occurrence.position,
+              digest: slot.digest,
+            })
+            return 'moved'
+          }
+          if (error instanceof Error && error.name === 'ControlStoreInvariantError') {
+            const fingerprint = JSON.stringify([slot.opID, error.name, error.message])
+            if (!reportedControlInvariants.has(fingerprint)) {
+              reportedControlInvariants.add(fingerprint)
+              hostOutbox.push(() =>
+                notifyHost((notice) => params.onControlPublishError?.(notice), {
+                  opID: slot.opID,
+                  error,
+                }),
+              )
+            }
+          }
           if (error !== skipped) throw error
         }
         if (adoptionResult.value === 'installed') {
-          reconciledHead = expected.acceptance.position
-          commitLogHead = expected.acceptance.position
+          reconciledHead = expected.occurrence.position
+          commitLogHead = expected.occurrence.position
           requestAppPull()
         }
         return adoptionResult.value
@@ -3411,7 +3186,7 @@ export function createGroupPeerWithControlWalk<
         if (revokeHold) await settleLogSubmissions()
         assertLive()
         const snapshot = await control.load()
-        const operation = executableOperations(snapshot)[0]
+        const operation = snapshot.commitOnce
         if (
           operation == null ||
           Date.now() >= operation.deadline ||
@@ -3428,7 +3203,7 @@ export function createGroupPeerWithControlWalk<
         const identity = evidence.source.identity
         if (
           slot === null ||
-          slot.opID !== operation.id ||
+          slot.opID !== operation.opID ||
           slot.publishID !== publishID ||
           evidence.terminal ||
           identity === null ||
@@ -3451,11 +3226,9 @@ export function createGroupPeerWithControlWalk<
           notifyHost((notice) => params.onControlPublishError?.(notice), { opID, error }),
         )
       },
-      searchLog: searchControlLog,
       pullToHead: async () => {
         controlReplayed = true
         if (safetyHold() !== null) return
-        await settleRetainedControlSlot()
         if (safetyHold() !== null || controlHold !== null) return
         if (!(await ensureLedger(Date.now() + recoveryTimeoutMs)))
           throw new RecoveryRequiredError('commit: the ledger is incomplete')
@@ -3473,65 +3246,14 @@ export function createGroupPeerWithControlWalk<
       emit: emitOutcome,
     }
   }
-  const settleRetainedControlSlot = async (
-    occurrence?: Parameters<typeof settleControlSlot>[1],
-  ) => {
-    if (control === undefined || controlSearch === null || params.readEvidence === undefined)
-      return 'empty' as const
-    const deps = operationDeps()
-    let freshEvidence: ControlEvidenceSnapshot | undefined
-    const result = await settleControlSlot(
-      {
-        control,
-        signal: controlAbort.signal,
-        haltFork,
-        safetyHold,
-        search: { searchLog: searchControlLog },
-        adoption: { adopt: deps.adopt },
-        readEvidence: async () => {
-          freshEvidence = await params.readEvidence()
-          return freshEvidence
-        },
-        now: deps.now,
-        readHead: deps.readHead,
-        newID: newPublishID,
-        emit: emitOutcome,
-      },
-      occurrence,
-    )
-    // Reuse the driver read so same-epoch retirement cancels retries without another host read.
-    await refreshControl(freshEvidence)
-    return result
-  }
-
   function hasUnresolvedControlSlot(
     snapshot: ControlSnapshot,
     evidence: ControlEvidenceSnapshot,
   ): boolean {
-    const slot = snapshot.commitOnce
-    if (snapshot.operations.some((op) => op.id === slot?.opID && !op.unknownReported)) return false
-    if (
-      hardControlHeld() ||
-      controlSafetyHeld(snapshot) !== null ||
-      (snapshot.controlHold !== null && snapshot.controlHold.reason !== 'acceptance-unknown')
-    )
-      return false
-    if (slot === null || evidence.terminal || evidence.source.identity === null) return false
-    const identity = evidence.source.identity
-    if (
-      evidence.applied.some(
-        (row) =>
-          row.epoch === slot.epoch &&
-          row.payloadDigest === slot.payloadDigest &&
-          row.digest === slot.digest,
-      )
-    )
-      return false
     return (
-      evidence.source.key.groupID === control?.key.groupID &&
-      evidence.source.key.incarnation === slot.incarnation &&
-      identity.incarnation === slot.incarnation &&
-      identity.epoch <= slot.epoch
+      snapshot.commitOnce !== null &&
+      !evidence.terminal &&
+      evidence.source.identity?.epoch === snapshot.commitOnce.epoch
     )
   }
   let controlSlotTimer: ReturnType<typeof setTimeout> | undefined
@@ -3564,7 +3286,7 @@ export function createGroupPeerWithControlWalk<
           await ready
           if (disposed) return
           await runSerial(async () => {
-            await settleRetainedControlSlot()
+            await stepLiveBuild(operationDeps())
             if (epochNeedsBuild) await rebuildEpoch()
             await deliverPendingWelcomes()
           })
@@ -3586,23 +3308,7 @@ export function createGroupPeerWithControlWalk<
     }, delay)
   }
 
-  let retainedSequence = 0
-  const stepRetainedOperation = async (): Promise<void> => {
-    if (control == null) return
-    const retained = (await control.load()).operations.filter(
-      (op) => op.reconciliation !== undefined,
-    )
-    const op = retained.find((row) => row.seq > retainedSequence) ?? retained[0]
-    if (op === undefined) return
-    retainedSequence = op.seq
-    try {
-      await stepOperation(operationDeps(), op)
-    } catch {
-      // Retained search failures leave durable work for retry without stopping the executable FIFO.
-    }
-  }
-
-  /** Saved payloads settle before any pull can encounter our own unmerged commit. */
+  /** Replay saved bytes. The ordinary walk alone settles the source build. */
   const settleOperations = async (forRecovery = false): Promise<boolean> => {
     controlReplayed = true
     if (
@@ -3616,26 +3322,14 @@ export function createGroupPeerWithControlWalk<
       return false
     await refreshControl()
     if (safetyHold() !== null) {
-      await settleRetainedControlSlot()
-      await stepRetainedOperation()
+      await stepLiveBuild(operationDeps())
       for (const op of executableOperations(await control.load()))
         await stepOperation(operationDeps(), op)
       await refreshControl()
       return false
     }
     const before = await mls.readEpoch()
-    await settleRetainedControlSlot()
-    await stepRetainedOperation()
-    let op = executableOperations(await control.load())[0]
-    while (!disposed && op != null && op.stage !== 'intent') {
-      const next = await stepOperation(operationDeps(), op)
-      await deliverPendingWelcomes()
-      await refreshControl()
-      if (next === op) {
-        break
-      }
-      op = next ?? undefined
-    }
+    await stepLiveBuild(operationDeps())
     if (safetyHold() !== null) return false
     return (await mls.readEpoch()) !== before
   }
@@ -3707,7 +3401,7 @@ export function createGroupPeerWithControlWalk<
           if (activeRecovery != null) await activeRecovery
           await runSerial(async () => {
             if (rejoinHeld && safetyHold() === null) return
-            await stepRetainedOperation()
+            await stepLiveBuild(operationDeps())
             let op = executableOperations(await control.load())[0]
             await refreshControl()
             if (op == null) {
@@ -3719,6 +3413,7 @@ export function createGroupPeerWithControlWalk<
             for (let attempt = 0; op != null && attempt < COMMIT_ATTEMPT_CEILING; attempt++) {
               assertLive()
               const next = await stepOperation(operationDeps(), op)
+              await stepLiveBuild(operationDeps())
               await deliverPendingWelcomes()
               await refreshControl()
               const operationID = op.id
@@ -4670,13 +4365,6 @@ export function createGroupPeerWithControlWalk<
         const mutationID = record.switchMutationID
         await runSerial(async () => {
           const before = await store.load()
-          const deferred = before.operations.filter((operation) => operation.stage === 'accepted')
-          const outcomes: Array<Outcome> = deferred.map((operation) => ({
-            id: operation.id,
-            opID: operation.id,
-            at: Date.now(),
-            kind: 'unknown',
-          }))
           await advanceHandle({
             port,
             ratchet: async () =>
@@ -4694,13 +4382,8 @@ export function createGroupPeerWithControlWalk<
                     },
                     ...pruneWindow(before, record.epochAfter - 1),
                     ...(staged.incarnation === store.key.incarnation
-                      ? retainAdvancedControlSlot(before, staged.epochAfter)
+                      ? closeControlBuild(before, { kind: 'unknown' }, Date.now(), newPublishID())
                       : {}),
-                    ...deleteOperationChanges(
-                      before,
-                      deferred.map((operation) => operation.id),
-                    ),
-                    putOutcomes: outcomes,
                     putApplied: [
                       {
                         epoch: record.epochAfter - 1,
@@ -4735,7 +4418,9 @@ export function createGroupPeerWithControlWalk<
             },
             floorPosition: position,
           })
-          for (const outcome of outcomes) emitOutcome(outcome)
+          for (const outcome of (await store.load()).outcomes) {
+            if (!before.outcomes.some((row) => row.id === outcome.id)) emitOutcome(outcome)
+          }
         })
         awaitingBootstrap = {
           attemptID: currentRecoveryAttemptID ?? record.id,
@@ -5592,7 +5277,7 @@ export function createGroupPeerWithControlWalk<
       // Saved acceptances settle before the walker can meet our own unmerged commit.
       await runSerial(async () => {
         if (stopped()) return
-        await settleRetainedControlSlot()
+        await stepLiveBuild(operationDeps())
         if (stopped() || hardControlHeld()) return
         await settleRejoinPublication()
         if (stopped()) return
@@ -5928,19 +5613,14 @@ export function createGroupPeerWithControlWalk<
       },
       safetyHold,
       // External callers acquire the lane here. In-lane follow/reconcile call walkCommits directly.
-      walkCommits: async (search) => {
+      walkCommits: async () => {
         await ready
         assertLive()
         return runSerial(async () => {
           if (mls == null || commitTopicID == null) return false
           await refreshControl()
-          return walkCommits(mls, commitTopicID, search)
+          return walkCommits(mls, commitTopicID)
         })
-      },
-      searchLog: async (slot, position) => {
-        await ready
-        assertLive()
-        return runSerial(async () => searchControlLog(slot, position))
       },
       stepOperation: async (operationID) => {
         await ready
@@ -5955,8 +5635,18 @@ export function createGroupPeerWithControlWalk<
             operationID === undefined
               ? executableOperations(snapshot)[0]
               : snapshot.operations.find((op) => op.id === operationID)
+          if (
+            op == null &&
+            snapshot.commitOnce !== null &&
+            (operationID === undefined || snapshot.commitOnce.opID === operationID)
+          ) {
+            await stepLiveBuild(operationDeps())
+            await deliverPendingWelcomes()
+            await refreshControl()
+            return null
+          }
           if (op == null) throw new Error('Missing queued operation')
-          if (op.reconciliation === undefined && op.id !== executableOperations(snapshot)[0]?.id)
+          if (op.id !== executableOperations(snapshot)[0]?.id)
             throw new Error('Stale operation: not the durable FIFO head')
           if (snapshot.outcomes.some((row) => row.opID === op.id && row.kind !== 'unknown'))
             throw new Error('Operation already settled')

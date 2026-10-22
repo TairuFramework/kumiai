@@ -456,7 +456,7 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
     })
 
     test.each(['accepted', 'unresolved'] as const)(
-      'mutate without accepted provenance cannot bypass an %s control slot',
+      'mutate without occurrence provenance cannot bypass an %s control build',
       async (stage) => {
         const fixture = await create()
         try {
@@ -464,17 +464,10 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
           const accepted = await fixture.acceptedOrdinary(access, {
             accepted: stage === 'accepted',
           })
-          if (stage === 'unresolved')
-            await fixture.installRows({
-              key,
-              control: {
-                controlHold: { reason: 'acceptance-unknown', position: null },
-              },
-            })
           const control = await fixture.device.groups.ports(key).control.load()
           expect(control.commitOnce).not.toBeNull()
-          if (stage === 'unresolved') expect(control.commitOnceAcceptance).toBeNull()
-          else expect(control.commitOnceAcceptance).not.toBeNull()
+          if (stage === 'unresolved') expect(control.commitOnce?.acceptedAs).toBeUndefined()
+          else expect(control.commitOnce?.acceptedAs).toBeDefined()
           const before = await fixture.inspectRows()
           await expect(
             access.mutate(async (_handle, persist) => {
@@ -536,6 +529,58 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
         await fixture.close()
       }
     })
+
+    test('ordinary mutation cannot advance a live build source without an adoption write', async () => {
+      const fixture = await create()
+      try {
+        const access = await fixture.registry.access(groupID)
+        const own = await fixture.acceptedOrdinary(access)
+        const before = await fixture.inspectRows()
+        await expect(
+          access.mutate(async (_handle, persist) => persist(own.candidate)),
+        ).rejects.toThrow()
+        expect(await fixture.inspectRows()).toEqual(before)
+      } finally {
+        await fixture.close()
+      }
+    })
+
+    test.each(['adopt', 'replace'] as const)(
+      'ordinary %s refuses incomplete occurrence written as landed with a Welcome',
+      async (method) => {
+        const fixture = await create()
+        try {
+          const access = await fixture.registry.access(groupID)
+          const own = await fixture.acceptedOrdinary(access)
+          const occurrence = own.write.expected?.occurrence
+          if (occurrence === undefined) throw new Error('Missing own occurrence')
+          await fixture.installRows({
+            key: access.key,
+            control: {
+              cursor: {
+                position: null,
+                epoch: occurrence.source.identity?.epoch ?? 0,
+                incomplete: true,
+              },
+            },
+          })
+          occurrence.coverage = 'incomplete'
+          own.write.changes.putWelcomes = [
+            { opID: 'rotation', welcome: new Uint8Array([7]), recipients: ['bob'] },
+          ]
+          const before = await fixture.inspectRows()
+          if (method === 'adopt')
+            expect(await access.adopt(own.candidate, own.expected, own.write)).toBe('moved')
+          else
+            await expect(access.replace(own.candidate, () => own.write)).rejects.toMatchObject({
+              name: 'ControlAdoptionMovedError',
+            })
+          expect(await fixture.inspectRows()).toEqual(before)
+        } finally {
+          await fixture.close()
+        }
+      },
+    )
 
     test.each(['adopt', 'replace'] as const)(
       'ordinary %s requires the accepted candidate and replay never reinstalls',
@@ -673,69 +718,34 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
       }
     })
 
-    test.each(['first-valid', 'mismatched-proof', 'unknown'] as const)(
-      'retired Welcome release checks %s search evidence',
-      async (evidence) => {
-        const fixture = await create('empty')
-        try {
-          const history = await fixture.welcomeHistory('ordinary')
-          await fixture.registry.seed(history.exact, { packageUse: history.packageUse })
-          const access = await fixture.registry.access(groupID)
-          const source = await access.readControl(async ({ source }) => source)
-          await fixture.acceptedOrdinary(access)
-          const control = await fixture.device.groups.ports(key).control.load()
-          const slot = control.commitOnce
-          const acceptance = control.commitOnceAcceptance
-          if (slot === null || acceptance === null) throw new Error('Missing retained acceptance')
-          const proof = { ...acceptance, source }
-          const welcome: ConformanceWelcomeObligation = {
-            opID: slot.opID,
-            welcome: new Uint8Array([7, 8, 9]),
-            recipients: ['recipient'],
-          }
-          await fixture.installRows({
-            key,
-            control: { putWelcomes: [welcome], commitOnceAcceptance: proof },
-          })
-          await fixture.registry.seed(history.newer, {
-            replace: true,
-            packageUse: history.packageUse,
-          })
-          const restored = fixture.restoreCount(groupID)
-          const delivered: Array<ConformanceWelcomeObligation> = []
-          const result = await fixture.serveRetiredWelcomes(
-            key,
-            async (value) => {
-              expect(await fixture.device.groups.load(groupID)).toMatchObject({
-                activeIncarnation: 2,
-              })
-              delivered.push(value)
-            },
-            {
-              async searchLog(built) {
-                expect(built).toEqual(slot)
-                if (evidence === 'unknown') return { kind: 'unknown' }
-                return {
-                  kind: 'first-valid',
-                  proof:
-                    evidence === 'first-valid' ? proof : { ...proof, position: 'other-position' },
-                }
-              },
-            },
-          )
-          expect(delivered, 'retired Welcome requires matching first-valid evidence').toEqual(
-            evidence === 'first-valid' ? [welcome] : [],
-          )
-          expect(result).toMatchObject({
-            remaining: evidence === 'first-valid' ? [] : [welcome.opID],
-            failures: [],
-          })
-          expect(fixture.restoreCount(groupID)).toBe(restored)
-        } finally {
-          await fixture.close()
+    test('retired Welcome obligations deliver independently of build occurrence evidence', async () => {
+      const fixture = await create('empty')
+      try {
+        const history = await fixture.welcomeHistory('ordinary')
+        await fixture.registry.seed(history.exact, { packageUse: history.packageUse })
+        const welcome: ConformanceWelcomeObligation = {
+          opID: 'owed-invite',
+          welcome: new Uint8Array([7, 8, 9]),
+          recipients: ['recipient'],
         }
-      },
-    )
+        await fixture.installRows({ key, control: { putWelcomes: [welcome] } })
+        await fixture.registry.seed(history.newer, {
+          replace: true,
+          packageUse: history.packageUse,
+        })
+        const restored = fixture.restoreCount(groupID)
+        const delivered: Array<ConformanceWelcomeObligation> = []
+        const result = await fixture.serveRetiredWelcomes(key, async (value) => {
+          expect(await fixture.device.groups.load(groupID)).toMatchObject({ activeIncarnation: 2 })
+          delivered.push(value)
+        })
+        expect(delivered).toEqual([welcome])
+        expect(result).toMatchObject({ remaining: [], failures: [] })
+        expect(fixture.restoreCount(groupID)).toBe(restored)
+      } finally {
+        await fixture.close()
+      }
+    })
 
     test('delete refuses owed control, then tombstones and permanently displaces', async () => {
       const fixture = await create()

@@ -1,8 +1,7 @@
 import {
   type ControlChanges,
-  type ControlSearchPort,
   type ControlSnapshot,
-  controlSafetyHeld,
+  closeControlBuild,
   controlSettled,
   deleteOperationChanges,
   deliverObligations,
@@ -10,7 +9,7 @@ import {
   type WelcomeObligation,
 } from '@kumiai/rpc'
 
-import { decodeControlJournal } from '../control-journal.js'
+import { controlBuildContexts, controlRetirementSources } from '../control-write-context.js'
 import { entryCapability } from '../entry-capability.js'
 import { sameStoredValue } from '../memory-incarnation-stores.js'
 import {
@@ -106,17 +105,17 @@ export async function retireIncarnation<TTx extends GroupTransaction>(
   )
     throw new GroupStateConflictError('Retirement requires matching confirmed rejoin')
 
-  const abandoned = control.operations.filter(
-    (op) =>
-      (switchedRejoinID === undefined && manualRejoinID === undefined) || op.stage !== 'accepted',
-  )
+  const abandoned = control.operations
   const outcomes: Array<Outcome> = abandoned.map(({ id }) => ({
     id,
     opID: id,
     at,
     kind: 'unknown',
   }))
+  const closure = closeControlBuild(control, { kind: 'unknown' }, at, crypto.randomUUID())
   const changes: ControlChanges = {
+    ...closure,
+    spentSource: null,
     ...deleteOperationChanges(
       control,
       abandoned.map(({ id }) => id),
@@ -142,16 +141,24 @@ export async function retireIncarnation<TTx extends GroupTransaction>(
   for (const id of params.abandonedAttempts ?? [])
     outcomes.push({ id, opID: null, at, kind: 'unknown' })
   // Owed outcomes survive unchanged, including their original timestamps.
-  changes.putOutcomes = outcomes.filter(({ id }) => !control.outcomes.some((row) => row.id === id))
+  changes.putOutcomes = [...(closure.putOutcomes ?? []), ...outcomes].filter(
+    ({ id }) => !control.outcomes.some((row) => row.id === id),
+  )
   if (control.forkRecoveryAttempt != null)
     recoveryCompletionContexts.set(stores.tx, {
       key: source,
       changes,
       forkRecovery: { attempt: null },
     })
+  const previousContext = controlBuildContexts.get(stores.tx)
+  // Closure precedes the pointer change, so the provider cannot infer retirement yet.
+  controlBuildContexts.set(stores.tx, { kind: 'retirement', key: source })
+  controlRetirementSources.set(stores.tx, { ...source })
   try {
     await rows.control.apply(changes, mutationID)
   } finally {
+    if (previousContext === undefined) controlBuildContexts.delete(stores.tx)
+    else controlBuildContexts.set(stores.tx, previousContext)
     recoveryCompletionContexts.delete(stores.tx)
   }
 
@@ -202,55 +209,17 @@ async function readRetiredControl<TTx extends GroupTransaction>(params: {
 export async function serveRetiredObligations<TTx extends GroupTransaction>(params: {
   persistence: GroupPersistence<TTx>
   key: GroupKey
-  search: ControlSearchPort
   deliverWelcome: (obligation: WelcomeObligation) => Promise<void>
 }): Promise<{ delivered: Array<string>; remaining: Array<string>; failures: Array<unknown> }> {
   const snapshot = await readRetiredControl(params)
   const control = params.persistence.ports(params.key).control
   const accepted = new Set<string>()
   const failures: Array<unknown> = []
-  let checked: Promise<boolean> | undefined
   try {
     await deliverObligations(
       {
         control,
-        canDeliver: async (obligation) => {
-          if (obligation.committed) return true
-          const slot = snapshot.commitOnce
-          const acceptance = snapshot.commitOnceAcceptance
-          if (
-            controlSafetyHeld(snapshot) !== null ||
-            slot?.opID !== obligation.opID ||
-            acceptance === null ||
-            snapshot.strand !== null ||
-            snapshot.cursor?.stranded === true ||
-            (snapshot.controlHold !== null && snapshot.controlHold.reason !== 'acceptance-unknown')
-          )
-            return false
-          checked ??= (async () => {
-            const journal = decodeControlJournal(slot.journal)
-            if (
-              !sameStoredValue(journal.source.key, params.key) ||
-              !sameStoredValue(acceptance.source, journal.source) ||
-              acceptance.payloadDigest !== slot.payloadDigest ||
-              acceptance.from !== slot.searchFrom ||
-              journal.checkpoint !== slot.searchFrom ||
-              slot.incarnation !== params.key.incarnation ||
-              slot.epoch !== journal.source.identity?.epoch ||
-              !sameStoredValue(slot.authenticatorBefore, journal.source.identity?.authenticator)
-            )
-              return false
-            const result = await params.search.searchLog(slot)
-            return (
-              result.kind === 'first-valid' &&
-              result.proof.payloadDigest === slot.payloadDigest &&
-              result.proof.from === acceptance.from &&
-              result.proof.position === acceptance.position &&
-              sameStoredValue(result.proof.source, acceptance.source)
-            )
-          })()
-          return checked
-        },
+        canDeliver: async () => true,
         deliverWelcome: async (obligation) => {
           await params.deliverWelcome(obligation)
           accepted.add(obligation.opID)

@@ -1,37 +1,142 @@
 import { afterEach, expect, test, vi } from 'vitest'
 
+import { stepLegacyRejoin } from '../src/control/rejoin.js'
 import { forkEventID, recoveryUnavailableEventID } from '../src/control/safety.js'
-import { controlBuildRef } from '../src/control/slot.js'
 import { applyChanges, readmissionChanges } from '../src/control/store.js'
 import type { ControlSnapshot } from '../src/control/types.js'
 import { asLogPosition } from '../src/cursor.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
-import { makeMLSPeer, type TestPeer } from './fixtures/peer.js'
+import {
+  buildInviteCommit,
+  buildLegacyRejoinRecord,
+  makeMLSPeer,
+  seedBuiltOperation,
+  type TestPeer,
+} from './fixtures/peer.js'
 
 const peers: Array<TestPeer> = []
+test.todo(
+  'closeControlBuild and same-incarnation rejoin/peer switches clear spentSource after authenticated consumption (R3: abandon owns the marker writer)',
+)
 afterEach(async () => {
   await Promise.all(peers.map(({ peer }) => peer.dispose()))
   await Promise.all(peers.splice(0).map(({ peer }) => peer.drained()))
   vi.useRealTimers()
 })
 
-function unsettled(): ControlSnapshot {
-  const built = {
-    publishID: 'invite-publish',
-    expectedHead: null,
-    searchFrom: null,
-    epoch: 1,
-    authenticatorBefore: new Uint8Array([1]),
-    incarnation: 1,
-    payload: new Uint8Array([2]),
-    payloadDigest: 'invite-payload',
-    digest: 'invite-commit',
-    bodies: [],
-    journal: new Uint8Array([3]),
-    welcome: null,
+test.each([false, true])(
+  'readmission closes the live source build atomically (acknowledged=%s)',
+  async (acknowledged) => {
+    const secret = new Uint8Array(32).fill(0x94)
+    const member = makeMLSPeer(new FakeHub(), 'bob', secret)
+    peers.push(member)
+    await member.peer.replay()
+    const saved = await seedBuiltOperation(
+      member,
+      buildInviteCommit(member, 'invitee'),
+      acknowledged ? 'accepted' : undefined,
+    )
+    const record = {
+      ...(await buildLegacyRejoinRecord(member)),
+      stage: 'confirmed' as const,
+      position: asLogPosition('confirmed-recovery'),
+    }
+    await member.peer.dispose()
+    await member.peer.drained()
+    const provisional = { id: 'prior-report', opID: saved.id, at: 1, kind: 'unknown' as const }
+    const obligation = {
+      opID: 'owed',
+      welcome: new Uint8Array([9]),
+      recipients: ['recipient'],
+      committed: true as const,
+    }
+    await member.control.apply(
+      { putRejoin: record, putOutcomes: [provisional], putWelcomes: [obligation] },
+      'pending-readmission',
+    )
+    const pending = await member.mls.restoreRecovery(record.candidate, record.requestKey)
+    const unreachable = async (): Promise<never> => {
+      throw new Error('Unexpected recovery work')
+    }
+    const emitted: Array<unknown> = []
+    const next = await stepLegacyRejoin(
+      {
+        control: member.control,
+        publish: unreachable,
+        searchLog: unreachable,
+        confirm: unreachable,
+        runSerial: (fn) => fn(),
+        scan: async () => ({ current: record.source, gap: false, frames: [] }),
+        adopt: async (_record, write) => {
+          await pending.onAccepted(write)
+        },
+        bootstrapLedger: unreachable,
+        getLedger: unreachable,
+        newID: () => crypto.randomUUID(),
+        now: () => 1234,
+        emit: (outcome) => {
+          emitted.push(outcome)
+        },
+        discarded: unreachable,
+      },
+      record,
+    )
+    const after = await member.control.load()
+    expect(member.mls.epoch()).toBe(record.epochAfter)
+    expect(next?.stage).toBe('adopted')
+    expect(after.commitOnce).toBeNull()
+    expect(after.operations).toEqual([])
+    expect(after.outcomes).toEqual([
+      { id: expect.any(String), opID: saved.id, at: 1234, kind: 'unknown' },
+    ])
+    expect(after.outcomes[0]?.id).not.toBe(provisional.id)
+    expect(after.outcomes[0]?.id).not.toBe(saved.id)
+    expect(after.welcomes).toEqual([obligation])
+    expect(after.cursor).toMatchObject({ position: record.position, epoch: record.epochAfter })
+    expect(emitted).toEqual(after.outcomes)
+  },
+)
+
+test('the peer recovery switch closes its acknowledged build with a fresh final unknown', async () => {
+  const hub = new FakeHub()
+  const secret = new Uint8Array(32).fill(0x95)
+  const options = {
+    members: ['alice', 'bob'],
+    recovery: { timeoutMs: 1000, deadlineMs: 10_000, getDelayMs: () => 0 },
   }
+  const alice = makeMLSPeer(hub, 'alice', secret, options)
+  const bob = makeMLSPeer(hub, 'bob', secret, options)
+  peers.push(alice, bob)
+  await alice.peer.replay()
+  await bob.peer.replay()
+  const saved = await seedBuiltOperation(bob, buildInviteCommit(bob, 'invitee'), 'accepted')
+  const obligation = {
+    opID: 'owed',
+    welcome: new Uint8Array([9]),
+    recipients: ['recipient'],
+    committed: true as const,
+  }
+  await bob.control.apply(
+    {
+      putOutcomes: [{ id: 'prior-report', opID: saved.id, at: 1, kind: 'unknown' }],
+      putWelcomes: [obligation],
+    },
+    'pending-switch',
+  )
+  expect((await bob.peer.recover()).advanced).toBe(true)
+  const after = await bob.control.load()
+  expect(after.commitOnce).toBeNull()
+  const outcome = after.outcomes.find(({ opID }) => opID === saved.id)
+  expect(outcome).toMatchObject({ kind: 'unknown', id: expect.any(String) })
+  expect(outcome?.id).not.toBe('prior-report')
+  expect(outcome?.id).not.toBe(saved.id)
+  expect(after.outcomes.some(({ id }) => id === 'prior-report')).toBe(false)
+  expect(after.welcomes.some(({ opID }) => opID === saved.id)).toBe(false)
+})
+
+function unsettled(): ControlSnapshot {
   const operation = {
     kind: 'invite' as const,
     revokes: true,
@@ -41,37 +146,15 @@ function unsettled(): ControlSnapshot {
   }
   return {
     commitOnce: null,
-    commitOnceAcceptance: null,
+    spentSource: null,
     controlHold: null,
     forkHalt: null,
     recoveryUnavailable: null,
     strand: null,
     operations: [
       { ...operation, id: 'intent', seq: 1, stage: 'intent' },
-      { ...operation, id: 'built', seq: 2, stage: 'built', built: controlBuildRef(built) },
-      {
-        ...operation,
-        id: 'accepted',
-        seq: 3,
-        stage: 'accepted',
-        built: controlBuildRef(built),
-        acceptedAs: asLogPosition('002'),
-        acceptance: {
-          source: {
-            key: { groupID: 'group-A', incarnation: 1 },
-            stateVersion: 1,
-            identity: {
-              groupID: 'group-A',
-              incarnation: 1,
-              epoch: 1,
-              authenticator: new Uint8Array([1]),
-            },
-          },
-          from: null,
-          position: asLogPosition('002'),
-          payloadDigest: built.payloadDigest,
-        },
-      },
+      { ...operation, id: 'queued-2', seq: 2, stage: 'intent' },
+      { ...operation, id: 'queued-3', seq: 3, stage: 'intent' },
     ],
     rejoin: {
       id: 'rejoin',

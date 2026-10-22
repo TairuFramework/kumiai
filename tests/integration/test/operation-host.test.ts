@@ -122,14 +122,13 @@ test('standalone operation adoption co-commits the anchor landed mark with contr
   const slot = (await host.control.load()).commitOnce
   if (slot === null) throw new Error('Missing saved build')
   if (next === undefined) throw new Error('Missing candidate')
-  const proof = {
+  const occurrence = {
     source: (await host.readEvidence()).source,
-    from: slot.searchFrom,
+    coverage: 'complete' as const,
     position: asLogPosition('001'),
     payloadDigest: slot.payloadDigest,
   }
-  await host.control.apply({ commitOnceAcceptance: proof }, 'accepted')
-  const expected = { ...(await host.readEvidence()).source, acceptance: proof }
+  const expected = { ...(await host.readEvidence()).source, occurrence }
   await host.anchorStore.save({
     anchor: { epoch: epochBefore, secret: new Uint8Array(32).fill(1) },
     pending: {
@@ -144,13 +143,29 @@ test('standalone operation adoption co-commits the anchor landed mark with contr
     host.adopt(slot.journal, expected, {
       mutationID: 'adoption-mutation',
       anchorLanded: 'own-commit',
-      changes: { putOutcomes: [{ id: 'own-op', opID: 'own-op', kind: 'unknown', at: 1 }] },
+      changes: {
+        commitOnce: null,
+        putOutcomes: [
+          { id: 'own-op', opID: op.id, kind: 'landed', position: occurrence.position, at: 1 },
+        ],
+        putApplied: [
+          {
+            epoch: slot.epoch,
+            digest: slot.digest,
+            payloadDigest: slot.payloadDigest,
+            sequenceID: occurrence.position,
+            opID: op.id,
+            removed: false,
+          },
+        ],
+        cursor: { position: occurrence.position, epoch: slot.epoch + 1 },
+      },
     }),
   ).resolves.toBe('installed')
   expect(await host.control.lastMutation()).toBe('adoption-mutation')
   expect((await host.anchorStore.load())?.pending?.landed).toBe(true)
   expect((await host.control.load()).outcomes).toEqual([
-    { id: 'own-op', opID: 'own-op', kind: 'unknown', at: 1 },
+    { id: 'own-op', opID: op.id, kind: 'landed', position: occurrence.position, at: 1 },
   ])
   expect(current.epoch).toBe(next.epoch)
 })

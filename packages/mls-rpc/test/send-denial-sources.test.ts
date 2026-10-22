@@ -193,11 +193,11 @@ for (const restored of [false, true]) {
       const { asLogPosition } = await import('@kumiai/rpc')
       const proof = {
         source,
-        from: slot.searchFrom,
+        coverage: 'complete' as const,
         position: asLogPosition('00001'),
         payloadDigest: slot.payloadDigest,
       }
-      await f.control().apply({ commitOnceAcceptance: proof }, 'accepted')
+      await f.control().apply({ commitOnce: { ...slot, acceptedAs: proof.position } }, 'accepted')
       if (restored) await f.reconstruct()
       const { createControlAdoptionPort } = await import('../src/control-adoption.js')
       const port = createControlAdoptionPort({
@@ -207,12 +207,34 @@ for (const restored of [false, true]) {
       })
       const expected = {
         ...(await f.access.readControl(async ({ source }) => source)),
-        acceptance: proof,
+        occurrence: proof,
       }
       expect(
         await port.adopt(slot.journal, expected, {
           mutationID: 'adopted',
-          changes: { commitOnce: null },
+          changes: {
+            commitOnce: null,
+            putApplied: [
+              {
+                epoch: slot.epoch,
+                digest: slot.digest,
+                payloadDigest: slot.payloadDigest,
+                sequenceID: proof.position,
+                opID: slot.opID,
+                removed: false,
+              },
+            ],
+            putOutcomes: [
+              {
+                id: crypto.randomUUID(),
+                opID: slot.opID,
+                at: Date.now(),
+                kind: 'landed',
+                position: proof.position,
+              },
+            ],
+            cursor: { position: proof.position, epoch: slot.epoch + 1 },
+          },
         }),
       ).toBe('installed')
       await f.access.read(async (handle) => {

@@ -4,8 +4,8 @@ import type {
   ConformanceControlHold,
   ConformanceControlSlot,
   ConformanceControlValidationPort,
-  ConformanceFirstValidCommit,
   ConformanceOperation,
+  ConformanceOwnOccurrence,
 } from '@kumiai/rpc-conformance'
 import { peerCommitOnceScenarios, testCommitOnceConformance } from '@kumiai/rpc-conformance'
 
@@ -14,8 +14,8 @@ import type {
   ControlAdoptionPort,
   ControlBuildRef,
   ControlSlot,
-  FirstValidCommit,
   Operation,
+  OwnOccurrence,
 } from '../src/control/types.js'
 import type { LogPosition } from '../src/cursor.js'
 import { runMemoryCommitOnceScenario } from './fixtures/peer.js'
@@ -25,7 +25,7 @@ type RPCRecords = {
   reference: ControlBuildRef
   operation: Operation
   hold: ControlHold
-  acceptance: FirstValidCommit
+  acceptance: OwnOccurrence
   validation: ControlValidationPort
   adoption: ControlAdoptionPort
 }
@@ -34,7 +34,7 @@ type Mirrors = {
   reference: ConformanceControlBuildRef<LogPosition>
   operation: ConformanceOperation<LogPosition>
   hold: ConformanceControlHold<LogPosition>
-  acceptance: ConformanceFirstValidCommit<LogPosition>
+  acceptance: ConformanceOwnOccurrence<LogPosition>
   validation: ConformanceControlValidationPort<LogPosition>
   adoption: ConformanceControlAdoptionPort<LogPosition>
 }

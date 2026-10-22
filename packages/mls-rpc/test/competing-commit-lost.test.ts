@@ -15,6 +15,7 @@ import {
 import {
   asLogPosition,
   type ControlChanges,
+  type ControlSlot,
   type ControlSnapshot,
   createGroupPeer,
   digestAppliedCommit,
@@ -73,10 +74,11 @@ const { encodeMemoryCommit } = (await import(
 
 type Mode = 'real-mls' | 'double'
 
-async function setup(mode: Mode, kind: 'rotation' | 'invite' = 'rotation') {
+async function setup(mode: Mode, kind: 'rotation' | 'invite' = 'rotation', withoutBuild = false) {
   const group = await createRealGroup(1, `competing-${crypto.randomUUID()}`)
-  const local = group.committer
-  const remote = group.members[0]
+  const local = withoutBuild ? group.members[0] : group.committer
+  const remote = withoutBuild ? group.committer : group.members[0]
+  if (local === undefined) throw new Error('Missing local member')
   if (remote === undefined) throw new Error('Missing competitor')
   let fixture = await createRegistryFixture({
     mode,
@@ -125,6 +127,7 @@ async function setup(mode: Mode, kind: 'rotation' | 'invite' = 'rotation') {
   }
   const access = createRegistryHandleAccess({ access: await fixture.registry.access(key.groupID) })
   const ports = fixture.device.groups.ports(key)
+  let preparedSlot: ControlSlot | undefined
   const build = createControlBuildPort({
     access,
     control: ports.control,
@@ -174,7 +177,12 @@ async function setup(mode: Mode, kind: 'rotation' | 'invite' = 'rotation') {
         journal: encodeClientState(result.newGroup.state),
       }
     },
-    saveBuilt: createPersistenceBuildSaver({ persistence: fixture.device.groups, key }),
+    saveBuilt: withoutBuild
+      ? async (_intent, built) => {
+          preparedSlot = built
+          return 'saved'
+        }
+      : createPersistenceBuildSaver({ persistence: fixture.device.groups, key }),
     now: Date.now,
     newID: () => crypto.randomUUID(),
   })
@@ -204,8 +212,8 @@ async function setup(mode: Mode, kind: 'rotation' | 'invite' = 'rotation') {
       })
     ).kind,
   ).toBe('saved')
-  const slot = (await ports.control.load()).commitOnce
-  if (slot === null) throw new Error('Missing built slot')
+  const slot = (await ports.control.load()).commitOnce ?? preparedSlot
+  if (slot == null) throw new Error('Missing prepared slot')
   const candidate = decodeControlJournal(slot.journal).candidate
   const source = await fixture.device.groups.loadState(key)
   if (source === null || source.deleted) throw new Error('Missing source')
@@ -316,10 +324,9 @@ async function setup(mode: Mode, kind: 'rotation' | 'invite' = 'rotation') {
         control: ports.control,
         readRecoverySource: async () => (await fixture.device.groups.readEvidence(key)).source,
       }),
-    async accept(proven: boolean) {
-      const snapshot = await ports.control.load()
-      const op = snapshot.operations[0]
-      if (op === undefined || op.stage === 'intent') throw new Error('Missing built operation')
+    async accept(_proven: boolean) {
+      const current = (await ports.control.load()).commitOnce
+      if (current === null) throw new Error('Missing live build')
       const ack = await publish({
         senderDID: local.identity.id,
         topicID: target.topicID,
@@ -328,22 +335,31 @@ async function setup(mode: Mode, kind: 'rotation' | 'invite' = 'rotation') {
         publishID: slot.publishID,
       })
       hub.hideFrom(local.identity.id, ack.sequenceID)
-      const acceptance = {
-        source: (await fixture.device.groups.readEvidence(key)).source,
-        from: slot.searchFrom,
-        position: asLogPosition(ack.sequenceID),
-        payloadDigest: slot.payloadDigest,
-      }
       await ports.control.apply(
-        proven
-          ? { commitOnceAcceptance: acceptance }
-          : {
-              putOperations: [
-                { ...op, stage: 'accepted', acceptedAs: acceptance.position, acceptance },
-              ],
-            },
+        { commitOnce: { ...current, acceptedAs: asLogPosition(ack.sequenceID) } },
         crypto.randomUUID(),
       )
+    },
+    async appendRemoval() {
+      const commit =
+        mode === 'double'
+          ? memoryModel(remote.handle).buildCommit([], { removes: [local.identity.id] })
+          : (await removeMember(remote.handle, local.handle.state.privatePath.leafIndex))
+              .commitMessage
+      const entryKey = await deriveEntryKey(remote.handle)
+      const payload = encodeHandshakeFrame(
+        HANDSHAKE_KIND.commit,
+        encodeCommitFrame(commit, sealEntries(entryKey, encodeLedgerEntries([]))),
+      )
+      entryKey.fill(0)
+      await publish({
+        senderDID: remote.identity.id,
+        topicID: target.topicID,
+        payload,
+        retain: 'log',
+        publishID: crypto.randomUUID(),
+      })
+      return { commit, payload }
     },
     resolveAhead() {
       // The hub replaces its ahead hint with an earlier copy of the authenticated winner.
@@ -477,90 +493,119 @@ for (const mode of ['real-mls', 'double'] as const) {
       })
     }
 
-    test.each([false, true])(
-      'accepted but unvalidated work is not lost (slot proof: %s)',
-      async (proven) => {
-        const h = await setup(mode, 'invite')
-        try {
-          await h.accept(proven)
-          const before = await h.control()
-          await h.append(false)
-          await (await h.start()).replay()
-          expect(h.appliedControl()?.applied).toHaveLength(1)
-          expect(h.appliedControl()?.outcomes).toEqual([])
-          expect(h.appliedControl()?.welcomes).toEqual(before.welcomes)
-          expect(h.delivered).not.toHaveBeenCalled()
-        } finally {
-          await h.close()
-        }
-      },
-    )
-
-    test('stranded cursor survives ahead uncertainty and later validated supersession', async () => {
+    test('hub acknowledgement does not prevent complete competitor consumption from closing lost', async () => {
       const h = await setup(mode, 'invite')
+      try {
+        await h.accept(true)
+        await h.append(false)
+        await (await h.start()).replay()
+        expect(h.appliedControl()?.commitOnce).toBeNull()
+        expect(h.appliedControl()?.outcomes).toMatchObject([{ opID: 'local-work', kind: 'lost' }])
+        expect(h.delivered).not.toHaveBeenCalled()
+      } finally {
+        await h.close()
+      }
+    })
+
+    test('self-removal without a live build closes queued intents in its consuming transaction', async () => {
+      const h = await setup(mode, 'rotation', true)
+      try {
+        const before = await h.control()
+        expect(before.commitOnce).toBeNull()
+        expect(before.operations).toHaveLength(1)
+        await h.appendRemoval()
+        await (await h.start()).replay()
+        expect(h.appliedControl()?.commitOnce).toBeNull()
+        expect(h.appliedControl()?.operations).toEqual([])
+        expect(h.appliedControl()?.rejoin).toBeNull()
+        expect(h.appliedControl()?.applied[0]?.removed).toBe(true)
+        expect(h.appliedControl()?.outcomes).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ opID: 'local-work', kind: 'rejected', reason: 'removed' }),
+          ]),
+        )
+        expect(await h.fixture().device.groups.loadState(h.key)).toMatchObject({
+          terminal: true,
+          epoch: h.sourceEpoch,
+        })
+      } finally {
+        await h.close()
+      }
+    })
+
+    test('authenticated same-epoch removal co-commits queued intents and pending rejoin cleanup without a build', async () => {
+      const h = await setup(mode, 'rotation', true)
       try {
         await h
           .fixture()
           .device.groups.ports(h.key)
           .control.apply(
             {
-              cursor: { epoch: h.sourceEpoch, position: asLogPosition('000000000000') },
-              putWelcomes:
-                h.slot.welcome === null
-                  ? []
-                  : [
-                      {
-                        opID: 'local-work',
-                        welcome: h.slot.welcome.bytes,
-                        recipients: h.slot.welcome.recipients,
-                      },
-                    ],
+              putRejoin: {
+                id: 'pending-rejoin',
+                stage: 'published',
+                publishID: 'pending-publish',
+                expectedHead: null,
+                payload: new Uint8Array([1]),
+                payloadDigest: 'pending-payload',
+                requestID: 'pending-request',
+                request: new Uint8Array([2]),
+                requestKey: crypto.getRandomValues(new Uint8Array(32)),
+                candidate: h.candidate,
+                source: {
+                  key: h.key,
+                  epoch: h.sourceEpoch,
+                  authenticator: h.source.epochAuthenticator,
+                  head: null,
+                },
+                digest: 'pending-commit',
+                epochAfter: h.sourceEpoch + 1,
+                ledgerBefore: [],
+                conflictEpoch: null,
+              },
             },
             crypto.randomUUID(),
           )
-        await h.appendAhead()
-        await h.append(true)
-        const peer = await h.start()
-        await peer.replay()
-        const pending = h.appliedControl()
-        expect(pending?.outcomes).toEqual([])
-        expect(pending?.commitOnce).toBeNull()
-        expect(pending?.operations).toMatchObject([
-          {
-            id: 'local-work',
-            reconciliation: {
-              acceptance: null,
-              uncertainty: { cause: 'ahead', at: asLogPosition('000000000001') },
+        const removal = await h.appendRemoval()
+        const result = await h.makeInbound(h.access).processCommit(removal.commit, {
+          senderDID: h.remote.identity.id,
+          adoption: (staged) => ({
+            mutationID: crypto.randomUUID(),
+            changes: {
+              commitOnce: null,
+              deleteOperations: ['local-work'],
+              deleteRejoin: true,
+              putOutcomes: [
+                {
+                  id: 'removed-intent',
+                  opID: 'local-work',
+                  at: 1,
+                  kind: 'rejected',
+                  reason: 'removed',
+                },
+                { id: 'removed-rejoin', opID: null, at: 1, kind: 'unknown' },
+              ],
+              putApplied: [
+                {
+                  epoch: h.sourceEpoch,
+                  digest: digestAppliedCommit(removal.commit),
+                  payloadDigest: digestAppliedCommit(removal.payload),
+                  sequenceID: asLogPosition('000000000001'),
+                  opID: null,
+                  removed: staged.removed,
+                },
+              ],
+              cursor: { epoch: staged.epochAfter, position: asLogPosition('000000000001') },
             },
-          },
-        ])
-        expect(h.appliedControl()?.cursor).toEqual({
-          epoch: h.sourceEpoch + 1,
-          position: asLogPosition('000000000000'),
-          stranded: true,
+          }),
         })
-        expect(h.appliedControl()?.applied[0]?.sequenceID).toBe(asLogPosition('000000000002'))
-        const operation = pending?.operations[0]
-        if (operation === undefined) throw new Error('Missing unresolved operation')
-        const clock = vi.spyOn(Date, 'now').mockReturnValue(operation.deadline)
-        try {
-          await peer.replay()
-          const expired = await h.control()
-          expect(expired.outcomes).toMatchObject([{ opID: operation.id, kind: 'unknown' }])
-          expect(expired.operations).toMatchObject([{ id: operation.id, unknownReported: true }])
-          expect(expired.cursor).toEqual(pending?.cursor)
-          expect(expired.welcomes).toHaveLength(1)
-          h.resolveAhead()
-          await peer.replay()
-          const resolved = await h.control()
-          expect(resolved.outcomes).toMatchObject([{ opID: operation.id, kind: 'lost' }])
-          expect(resolved.operations).toEqual([])
-          expect(resolved.welcomes).toEqual([])
-          expect(resolved.cursor).toEqual(pending?.cursor)
-          expect(h.delivered).not.toHaveBeenCalled()
-        } finally {
-          clock.mockRestore()
-        }
+        expect(result).toMatchObject({ applied: true, advanced: false })
+        const control = await h.control()
+        expect(control.commitOnce).toBeNull()
+        expect(control.operations).toEqual([])
+        expect(control.rejoin).toBeNull()
+        expect(control.applied[0]?.removed).toBe(true)
+        expect(control.outcomes).toHaveLength(2)
       } finally {
         await h.close()
       }
@@ -935,13 +980,13 @@ for (const mode of ['real-mls', 'double'] as const) {
           .fixture()
           .advance(await h.fixture().restoreCommittedSender(h.key.groupID))
         const before = await h.fixture().inspectRows()
-        const forged = {
+        const supplied = {
           inbound: { source: h.source, result: candidate, commit: h.inbound.commit },
         }
         await expect(
           h.access.mutate(
             async (_handle, persist) => {
-              await persist(candidate, forged as PersistContext)
+              await persist(candidate, supplied as PersistContext)
             },
             () => ({
               mutationID: crypto.randomUUID(),

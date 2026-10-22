@@ -9,8 +9,8 @@ import {
   type AdoptionWrite,
   asLogPosition,
   type ControlSlot,
-  type FirstValidCommit,
   type Operation,
+  type OwnOccurrence,
 } from '@kumiai/rpc'
 import { expect } from 'vitest'
 
@@ -51,10 +51,14 @@ export async function controlAdoptionFixture() {
   const position = asLogPosition('000001')
   const slot: ControlSlot = {
     opID: intent.id,
+    kind: intent.kind,
+    revokes: intent.revokes,
+    enqueuedAt: intent.enqueuedAt,
+    deadline: intent.deadline,
     incarnation: 1,
     epoch: Number(member.handle.epoch),
     authenticatorBefore: member.handle.state.keySchedule.epochAuthenticator.slice(),
-    searchFrom: null,
+    head: null,
     expectedHead: null,
     publishID: 'rotation-publish',
     payload: new Uint8Array([1, 2, 3]),
@@ -73,13 +77,12 @@ export async function controlAdoptionFixture() {
     }),
   }
   expect(await store.saveBuilt(intent, slot, source, 'build')).toBe('saved')
-  const proof: FirstValidCommit = {
+  const proof: OwnOccurrence = {
     source: (await store.readEvidence()).source,
-    from: null,
+    coverage: 'complete',
     position,
     payloadDigest: slot.payloadDigest,
   }
-  await store.control.apply({ commitOnceAcceptance: proof }, 'accept')
   const write: AdoptionWrite = {
     mutationID: 'landed',
     anchorLanded: 'rotation-commit',
@@ -115,6 +118,6 @@ export async function controlAdoptionFixture() {
     control: store.control,
     restoreCandidate,
   })
-  const expected = async () => ({ ...(await store.readEvidence()).source, acceptance: proof })
+  const expected = async () => ({ ...(await store.readEvidence()).source, occurrence: proof })
   return { store, host, slot, proof, write, port, expected, rotation, member, restoreCandidate }
 }

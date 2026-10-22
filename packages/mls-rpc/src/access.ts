@@ -112,7 +112,7 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
     if (
       current !== undefined &&
       write?.expected?.journal !== undefined &&
-      write.expected.acceptance !== undefined
+      write.expected.occurrence !== undefined
     )
       await current.carryReceiveProgress(handle)
     await params.persist?.(handle, write)

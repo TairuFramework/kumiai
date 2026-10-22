@@ -23,7 +23,7 @@ const unavailable = (): Rpc.RecoveryUnavailableEvent => ({
 })
 const empty = (): Rpc.ControlSnapshot => ({
   commitOnce: null,
-  commitOnceAcceptance: null,
+  spentSource: null,
   controlHold: null,
   forkHalt: null,
   recoveryUnavailable: null,

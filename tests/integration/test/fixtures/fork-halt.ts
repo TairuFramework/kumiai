@@ -17,18 +17,13 @@ import {
   createGroupMLS,
   deriveEntryKey,
   deriveRecoverySecret,
-  encodeControlJournal,
   type GroupSafety,
   InvalidCandidateError,
   sealEntries,
   simpleHandleAccess,
 } from '@kumiai/mls-rpc'
 import {
-  asLogPosition,
-  type BuiltCommit,
-  type CertifiedControlRange,
   commitTopic,
-  createControlSearch,
   digestAppliedCommit,
   encodeCommitFrame,
   encodeHandshakeFrame,
@@ -622,7 +617,6 @@ export async function createForkFixture(recovery?: Parameters<typeof makeCheckpo
       }
     },
     async competing(branch: 'losing' | 'winning') {
-      const retained = await registry.device.groups.readEvidence(key)
       await fixture.stopPeer()
       const source = real.committer.handle
       const first = await commitKeyRotation(await bareTestHandle(source))
@@ -663,84 +657,11 @@ export async function createForkFixture(recovery?: Parameters<typeof makeCheckpo
       return {
         evidence,
         appliedPosition: applied.sequenceID,
-        async certify(): Promise<CertifiedControlRange> {
-          if (branch !== 'winning') throw new Error('Certification requires the first valid winner')
-          const built = await commitKeyRotation(await bareTestHandle(receiver.handle))
-          const payload = encodeHandshakeFrame(
-            HANDSHAKE_KIND.commit,
-            encodeCommitFrame(
-              built.commitMessage,
-              sealEntries(await deriveEntryKey(receiver.handle), encodeLedgerEntries([])),
-            ),
-          )
-          const slot: BuiltCommit = {
-            incarnation: key.incarnation,
-            epoch: Number(receiver.handle.epoch),
-            authenticatorBefore: receiver.handle.state.keySchedule.epochAuthenticator.slice(),
-            searchFrom: null,
-            expectedHead: null,
-            publishID: crypto.randomUUID(),
-            payload,
-            payloadDigest: createHash('sha256').update(payload).digest('base64url'),
-            digest: digestAppliedCommit(built.commitMessage),
-            bodies: [],
-            welcome: null,
-            journal: encodeControlJournal({
-              version: 1,
-              source: retained.source,
-              checkpoint: null,
-              sourceState: encodeClientState(receiver.handle.state),
-              sourceCredential: receiver.handle.credential,
-              sourceLedger: receiver.handle.ledgerTokens,
-              candidate: encodeStoredValue({
-                state: encodeClientState(built.newGroup.state),
-                credential: built.newGroup.credential,
-                ledger: built.newGroup.ledgerTokens,
-              }),
-            }),
-          }
-          revealing = true
-          hub.revealTo(receiver.identity.id, remote.sequenceID)
-          const certificates: Array<CertifiedControlRange> = []
-          const search = createControlSearch({
-            budget: { maxPasses: 2, maxFetches: 16, maxFrames: 256 },
-            fetch: async (after) => {
-              const page = await fetch({
-                subscriberDID: receiver.identity.id,
-                topicID: topic,
-                ...(after === null ? {} : { after }),
-              })
-              return { ...page, head: secondRow.sequenceID }
-            },
-            validation: member.validation,
-            readEvidence: member.readEvidence,
-            safetyHold: member.controlWalk.safetyHold,
-            haltFork: member.controlWalk.haltFork,
-            hold: async () => {
-              throw new Error('Unexpected certification hold')
-            },
-            followWinner: async (frame, range, work) => {
-              await member.controlWalk.walkCommits({ through: range.through, range, work })
-              certificates.push(range)
-              return { kind: 'applied', position: frame.position }
-            },
-            reconcileAbsent: async () => true,
-          })
-          await search.searchLog(slot)
-          const certificate = certificates[0]
-          if (certificate === undefined || certificate.losers.length !== 1)
-            throw new Error('Missing validated loser certificate')
-          return certificate
-        },
-        async reveal(options: { following?: boolean; range?: CertifiedControlRange } = {}) {
+        async reveal(options: { following?: boolean } = {}) {
           revealing = true
           hub.revealTo(receiver.identity.id, remote.sequenceID)
           if (options.following !== false) hub.revealTo(receiver.identity.id, nextRow.sequenceID)
-          return member.controlWalk.walkCommits({
-            through: asLogPosition(nextRow.sequenceID),
-            range: options.range ?? null,
-            work: { takeFetch: () => true, takeFrame: () => true },
-          })
+          return member.controlWalk.walkCommits()
         },
       }
     },

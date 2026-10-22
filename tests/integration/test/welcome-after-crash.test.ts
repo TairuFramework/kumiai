@@ -16,7 +16,7 @@ import {
 } from '@kumiai/mls'
 import { createLedgerEntrySlot } from '@kumiai/mls-rpc'
 import { forkEventID, type WelcomeObligation } from '@kumiai/rpc'
-import { afterEach, expect, test, vi } from 'vitest'
+import { afterEach, expect, it, test, vi } from 'vitest'
 
 import { judgeWelcomeAdmission } from '../../../packages/mls-hub/src/admission.js'
 import { type BundleSource, openWelcome } from '../../../packages/mls-hub/src/join.js'
@@ -99,7 +99,7 @@ async function deliverArtifact(ctx: Awaited<ReturnType<typeof setup>>) {
   return decodeArtifact(artifact)
 }
 
-test('Welcome after crash: restart delivers the complete invitation after accepted', async () => {
+test('Welcome after crash: restart delivers the complete invitation after installation', async () => {
   const ctx = await setup()
   let restarted: ReturnType<typeof makeMember> | undefined
   try {
@@ -110,18 +110,15 @@ test('Welcome after crash: restart delivers the complete invitation after accept
     ctx.member.deliveries.set(request.id, () => {
       staleDeliveries++
     })
-    const stopAtAccepted = () => {
-      ctx.member.stateStore.database.seam('after-apply', async () => {
-        if ((await ctx.member.control.load()).operations[0]?.stage === 'accepted')
-          void ctx.member.peer.dispose()
-        else stopAtAccepted()
+    const stopAtInstalled = () => {
+      ctx.member.stateStore.database.seam('after-save', async () => {
+        if ((await ctx.member.control.load()).welcomes.length !== 0) void ctx.member.peer.dispose()
+        else stopAtInstalled()
       })
     }
-    stopAtAccepted()
+    stopAtInstalled()
     await ctx.member.peer.enqueue(request)
-    await expect
-      .poll(async () => (await ctx.member.control.load()).operations[0]?.stage)
-      .toBe('accepted')
+    await expect.poll(async () => (await ctx.member.control.load()).welcomes.length).toBe(1)
     await ctx.member.peer.dispose()
     await ctx.member.peer.drained()
     await ctx.member.disconnect()
@@ -135,7 +132,9 @@ test('Welcome after crash: restart delivers the complete invitation after accept
     })
     await restarted.peer.resync()
     expect(staleDeliveries).toBe(0)
-    const pending = (await restarted.control.load()).welcomes
+    const recovered = await restarted.control.load()
+    expect(recovered.outcomes).toMatchObject([{ kind: 'landed' }])
+    const pending = recovered.welcomes
     expect(pending).toHaveLength(1)
     await restarted.peer.dispose()
     await restarted.peer.drained()
@@ -180,6 +179,10 @@ test('Welcome after crash: restart delivers the complete invitation after accept
     await ctx.hub.dispose()
   }
 })
+
+it.todo(
+  'R3: restart after handoff acknowledgement walks the own invite before Welcome delivery -- startup must recover the pending anchor before walking',
+)
 
 test.each(['joined-before-consume', 'consume-mid-transaction', 'consumed-before-ack'] as const)(
   'invitee crash boundary: %s',

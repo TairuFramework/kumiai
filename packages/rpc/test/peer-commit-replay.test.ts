@@ -54,15 +54,16 @@ describe('operation replay', () => {
     const seed = makeMLSPeer(hub, 'alice', secret)
     const request = buildLedgerCommit(seed, ['role=admin'])
     await seed.peer.enqueue(request).catch(() => {})
-    await expect.poll(async () => (await seed.control.load()).operations[0]?.stage).toBe('built')
+    await expect.poll(async () => (await seed.control.load()).commitOnce?.opID).toBe(request.id)
     const builtSnapshot = await seed.control.load()
-    const built = builtSnapshot.operations[0]
+    const built = builtSnapshot.commitOnce
     await seed.peer.dispose()
     await seed.peer.drained()
     fail = false
     const restarted = makeMLSPeer(hub, 'alice', secret, { restartOf: seed })
     await expect.poll(async () => (await restarted.peer.outcomes()).length).toBe(1)
-    if (built?.stage !== 'built') throw new Error('Expected saved build')
+    if (built === null) throw new Error('Expected saved build')
+    expect(builtSnapshot.operations).toEqual([])
     expect(hub.published.find((row) => row.topicID === commitTopic(secret))?.payload).toEqual(
       builtSnapshot.commitOnce?.payload,
     )

@@ -184,7 +184,7 @@ export type ControlRecord = { snapshot: ControlSnapshot; mutationID: string }
 
 const emptyControl = (): ControlSnapshot => ({
   commitOnce: null,
-  commitOnceAcceptance: null,
+  spentSource: null,
   controlHold: null,
   forkHalt: null,
   recoveryUnavailable: null,
@@ -367,11 +367,6 @@ export function createUnlockedIncarnationStores(params: {
         const owedOnly = Object.keys(owned).every(
           (name) => name === 'deleteOutcomes' || name === 'deleteWelcomes',
         )
-        if (
-          owned.commitOnceAcceptance != null &&
-          !sameStoredValue(owned.commitOnceAcceptance.source.key, key)
-        )
-          throw new GroupStateConflictError('Acceptance key mismatch')
         const previous = (await control.load('current'))?.snapshot ?? emptyControl()
         let context: CommitOnceWriteContext | null = controlBuildContexts.get(tx) ?? null
         if (owned.commitOnce === null && context === null)
@@ -380,12 +375,20 @@ export function createUnlockedIncarnationStores(params: {
           const state = await stateStores.state(key.incarnation).load()
           if (state !== null && !state.deleted)
             context = {
-              kind: 'head',
+              kind:
+                owned.cursor !== undefined
+                  ? 'cursor'
+                  : owned.commitOnce?.reported === true && previous.commitOnce?.reported !== true
+                    ? 'report'
+                    : owned.commitOnce?.acceptedAs !== undefined &&
+                        previous.commitOnce?.acceptedAs === undefined
+                      ? 'ack'
+                      : 'head',
               source: { ...key, epoch: state.epoch, authenticator: state.epochAuthenticator },
             }
         }
         const slotOnly = Object.keys(owned).every(
-          (name) => name === 'commitOnce' || name === 'commitOnceAcceptance',
+          (name) => name === 'commitOnce' || name === 'spentSource',
         )
         const completion = recoveryCompletionContexts.get(tx)
         const completing =
@@ -589,20 +592,21 @@ export function createUnlockedIncarnationStores(params: {
       },
     },
     async clearTransport() {
+      const previous = await control.load('current')
+      if (previous?.snapshot.commitOnce != null)
+        throw new GroupStateConflictError('Live control build prevents transport clearing')
       for (const id of meta.ids())
         if (JSON.parse(id)[0] === 'settlement')
           throw new GroupStateConflictError('Unresolved settlement obligation')
       for (const entry of await outbox.list()) await remove(entry.seq)
       for (const rows of [anchor, pending, poison, cursor])
         for (const id of rows.ids()) rows.remove(id)
-      const previous = await control.load('current')
       if (previous !== null)
         await control.save('current', {
           mutationID: previous.mutationID,
           snapshot: {
             ...emptyControl(),
-            commitOnce: previous.snapshot.commitOnce,
-            commitOnceAcceptance: previous.snapshot.commitOnceAcceptance,
+            spentSource: previous.snapshot.spentSource,
             controlHold: previous.snapshot.controlHold,
             forkHalt: previous.snapshot.forkHalt,
             recoveryUnavailable: previous.snapshot.recoveryUnavailable,

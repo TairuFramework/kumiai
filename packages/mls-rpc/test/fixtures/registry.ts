@@ -25,7 +25,7 @@ import {
   type LogPosition,
   type WelcomeObligation,
 } from '@kumiai/rpc'
-import type { ConformanceControlSearchPort, ForkNoticeFixture } from '@kumiai/rpc-conformance'
+import type { ForkNoticeFixture } from '@kumiai/rpc-conformance'
 import { ed25519 } from '@noble/curves/ed25519.js'
 
 import { createCheckpointService } from '../../src/checkpoint.js'
@@ -120,7 +120,6 @@ export type RegistryFixtureBase = {
   serveRetiredWelcomes(
     key: GroupKey,
     deliver: (welcome: WelcomeObligation) => Promise<void>,
-    search?: ConformanceControlSearchPort,
   ): Promise<{ remaining: Array<string>; failures: Array<unknown> }>
   advance(handle: GroupHandle): Promise<GroupHandle>
   welcomeHistory(kind: PackageUse['kind']): Promise<{
@@ -538,38 +537,8 @@ async function assemble(
       return handle.state.keySchedule.epochAuthenticator.slice()
     },
     acceptedOrdinary: (access, options) => acceptedOrdinary(fixture, access, options),
-    serveRetiredWelcomes: (key, deliverWelcome, search) =>
-      serveRetiredObligations({
-        persistence: fixture.device.groups,
-        key,
-        search: {
-          async searchLog(built, position) {
-            const result = await search?.searchLog(built, position)
-            if (result === undefined) return { kind: 'unknown' }
-            if (result.kind === 'superseded')
-              return { ...result, winner: asLogPosition(result.winner) }
-            if (result.kind === 'unknown') {
-              const { retryHead, ...unknown } = result
-              return {
-                ...unknown,
-                ...(retryHead === undefined
-                  ? {}
-                  : { retryHead: retryHead === null ? null : asLogPosition(retryHead) }),
-              }
-            }
-            if (result.kind !== 'first-valid') return result
-            return {
-              ...result,
-              proof: {
-                ...result.proof,
-                from: result.proof.from === null ? null : asLogPosition(result.proof.from),
-                position: asLogPosition(result.proof.position),
-              },
-            }
-          },
-        },
-        deliverWelcome,
-      }),
+    serveRetiredWelcomes: (key, deliverWelcome) =>
+      serveRetiredObligations({ persistence: fixture.device.groups, key, deliverWelcome }),
     async advance(handle) {
       if (params.mode === 'real-mls' || captured.handles.has(handle)) {
         const state = decodeClientState(encodeClientState(handle.state))
@@ -674,7 +643,7 @@ async function assemble(
           })
         if (setup.control !== undefined) {
           const slot = setup.control.commitOnce
-          if (slot != null) {
+          if (slot != null && (await target.control.load()).commitOnce === null) {
             const state = await target.state.load()
             if (state === null || state.deleted) throw new Error('Missing slot source')
             controlBuildContexts.set(stores.tx, {
@@ -689,7 +658,7 @@ async function assemble(
                 },
               },
               queueHeadID: slot.opID,
-              checkpoint: slot.searchFrom,
+              checkpoint: slot.head,
             })
           }
           try {
@@ -1014,10 +983,14 @@ async function acceptedOrdinary(
   })
   const slot: ControlSlot = {
     opID: 'rotation',
+    kind: 'rotation',
+    revokes: false,
+    enqueuedAt: 0,
+    deadline: 30000,
     incarnation: 1,
     epoch: Number(handle.epoch),
     authenticatorBefore: handle.state.keySchedule.epochAuthenticator.slice(),
-    searchFrom: null,
+    head: null,
     expectedHead: null,
     publishID: 'publish',
     payload: new Uint8Array([1, 2, 3]),
@@ -1030,37 +1003,36 @@ async function acceptedOrdinary(
   await fixture.installRows({
     key: access.key,
     control: {
-      putOperations: [
-        {
-          id: slot.opID,
-          kind: 'rotation',
-          revokes: false,
-          body: new Uint8Array(),
-          seq: 1,
-          enqueuedAt: 0,
-          deadline: 30000,
-          stage: 'intent',
-        },
-      ],
       commitOnce: slot,
     },
   })
   const proof = {
     source: await access.readControl(async ({ source }) => source),
-    from: null,
+    coverage: 'complete' as const,
     position: asLogPosition('00001'),
     payloadDigest: slot.payloadDigest,
   }
   if (options.accepted)
-    await fixture.installRows({ key: access.key, control: { commitOnceAcceptance: proof } })
+    await fixture.installRows({
+      key: access.key,
+      control: { commitOnce: { ...slot, acceptedAs: proof.position } },
+    })
   const expected = await access.readControl(async ({ source }) => source)
   const write: AdoptionWrite = {
     mutationID: crypto.randomUUID(),
-    expected: { ...expected, acceptance: proof, journal },
+    expected: { ...expected, occurrence: proof, journal },
     anchorLanded: slot.digest,
     changes: {
       commitOnce: null,
-      deleteOperations: [slot.opID],
+      putOutcomes: [
+        {
+          id: crypto.randomUUID(),
+          opID: slot.opID,
+          at: 100,
+          kind: 'landed',
+          position: proof.position,
+        },
+      ],
       putApplied: [
         {
           epoch: slot.epoch,

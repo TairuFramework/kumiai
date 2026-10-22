@@ -1,16 +1,8 @@
 import { describe, expect, test, vi } from 'vitest'
 
 import type { WelcomeObligation } from '../src/control/types.js'
-import { asLogPosition } from '../src/cursor.js'
-import { commitTopic } from '../src/topic.js'
-import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import {
-  buildInviteCommit,
-  makeMLSPeer,
-  reconstructMemoryPeer,
-  seedBuiltOperation,
-} from './fixtures/peer.js'
+import { buildInviteCommit, makeMLSPeer, reconstructMemoryPeer } from './fixtures/peer.js'
 
 const secret = new Uint8Array(32).fill(0x48)
 const obligation: WelcomeObligation = {
@@ -21,182 +13,6 @@ const obligation: WelcomeObligation = {
 }
 
 describe('durable Welcome obligations', () => {
-  test.each(['superseded', 'gap', 'unavailable'] as const)(
-    'Welcome is never released for a %s accepted stage after restart',
-    async (condition) => {
-      const hub = new FakeHub()
-      const member = makeMLSPeer(hub, 'alice', secret)
-      await member.peer.resync()
-      const op = await seedBuiltOperation(member, buildInviteCommit(member, 'bob'))
-      if (op.stage !== 'built') throw new Error('Missing built invite')
-      await member.peer.dispose()
-      await member.peer.drained()
-      if (condition === 'superseded')
-        await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 1 })
-      else
-        await hub.publish({
-          senderDID: 'carol',
-          topicID: commitTopic(secret),
-          payload: new Uint8Array([0]),
-          retain: 'log',
-        })
-      const occurrence = await hub.publish({
-        senderDID: 'alice',
-        topicID: commitTopic(secret),
-        payload: op.slot.payload,
-        publishID: op.slot.publishID,
-        expectedHead: hub.head(commitTopic(secret)),
-        retain: 'log',
-      })
-      if (condition === 'gap') hub.trim(commitTopic(secret), occurrence.sequenceID)
-      const source = await member.mls.readRecoverySource()
-      const welcome = op.slot.welcome
-      if (welcome === null) throw new Error('Missing saved Welcome')
-      const acceptance = {
-        source: { key: source.key, identity: source.identity, stateVersion: source.stateVersion },
-        from: op.slot.searchFrom,
-        position: asLogPosition(occurrence.sequenceID),
-        payloadDigest: op.slot.payloadDigest,
-      }
-      await member.control.apply(
-        {
-          commitOnceAcceptance: acceptance,
-          putOperations: [
-            { ...op, stage: 'accepted', acceptedAs: acceptance.position, acceptance },
-          ],
-          putWelcomes: [
-            {
-              opID: op.id,
-              welcome: welcome.bytes,
-              recipients: welcome.recipients,
-            },
-          ],
-        },
-        'retained-acceptance',
-      )
-      const restarted = await reconstructMemoryPeer(hub, 'alice', secret, member.database, {
-        welcomes: member.welcomes,
-      })
-      const restore =
-        condition === 'unavailable'
-          ? vi.spyOn(restarted.validation, 'restoreValidation').mockResolvedValue(null)
-          : undefined
-      try {
-        await restarted.peer.replay()
-        expect(restarted.welcomes).toEqual([])
-        const snapshot = await restarted.control.load()
-        expect(snapshot.applied.some((row) => row.payloadDigest === op.slot.payloadDigest)).toBe(
-          false,
-        )
-        if (condition === 'superseded') {
-          expect(snapshot.outcomes).toEqual([
-            expect.objectContaining({ opID: op.id, kind: 'lost' }),
-          ])
-          expect(snapshot.welcomes).toEqual([])
-          expect(restarted.mls.epoch()).toBe(2)
-        } else {
-          expect(snapshot.commitOnce).toEqual(op.slot)
-          expect(snapshot.controlHold?.reason).toBe('acceptance-unknown')
-          expect(snapshot.welcomes).toHaveLength(1)
-        }
-      } finally {
-        restore?.mockRestore()
-        await restarted.peer.dispose()
-        await restarted.peer.drained()
-      }
-    },
-  )
-
-  test('uncertain accepted Welcome survives unknown and restart until validated supersession deletes it', async () => {
-    const hub = new FakeHub()
-    const member = makeMLSPeer(hub, 'alice', secret)
-    await member.peer.resync()
-    const op = await seedBuiltOperation(member, buildInviteCommit(member, 'bob'))
-    if (op.stage !== 'built' || op.slot.welcome === null) throw new Error('Missing invite')
-    await member.peer.dispose()
-    await member.peer.drained()
-    let payload: Uint8Array | undefined
-    const winner = await publishCommit({
-      hub: {
-        publish: async (params) => {
-          payload = params.payload
-          return hub.publish(params)
-        },
-      },
-      senderDID: 'carol',
-      recoverySecret: secret,
-      epoch: 1,
-    })
-    const topicID = commitTopic(secret)
-    if (payload === undefined) throw new Error('Missing competitor frame')
-    const occurrence = await hub.publish({
-      senderDID: 'alice',
-      topicID,
-      payload: op.slot.payload,
-      publishID: op.slot.publishID,
-      retain: 'log',
-    })
-    hub.hideFrom('alice', winner.sequenceID)
-    hub.hideFrom('alice', occurrence.sequenceID)
-    // A later copy advances us, but cannot order the retained earlier acceptance.
-    await hub.publish({ senderDID: 'carol', topicID, payload, retain: 'log' })
-    const source = await member.mls.readRecoverySource()
-    const acceptance = {
-      source: { key: source.key, identity: source.identity, stateVersion: source.stateVersion },
-      from: op.slot.searchFrom,
-      position: asLogPosition(occurrence.sequenceID),
-      payloadDigest: op.slot.payloadDigest,
-    }
-    const welcome = {
-      opID: op.id,
-      welcome: op.slot.welcome.bytes,
-      recipients: op.slot.welcome.recipients,
-    }
-    await member.control.apply(
-      {
-        commitOnceAcceptance: acceptance,
-        putOperations: [
-          { ...op, deadline: 0, stage: 'accepted', acceptedAs: acceptance.position, acceptance },
-        ],
-        putWelcomes: [welcome],
-      },
-      'uncertain-acceptance',
-    )
-    const restarted = await reconstructMemoryPeer(hub, 'alice', secret, member.database, {
-      welcomes: member.welcomes,
-    })
-    try {
-      await restarted.peer.replay()
-      const uncertain = await restarted.control.load()
-      expect(uncertain.outcomes).toMatchObject([{ opID: op.id, kind: 'unknown' }])
-      expect(uncertain.welcomes).toEqual([welcome])
-      expect(uncertain.operations).toMatchObject([
-        { id: op.id, reconciliation: { slot: op.slot, acceptance } },
-      ])
-      expect(restarted.welcomes).toEqual([])
-    } finally {
-      await restarted.peer.dispose()
-      await restarted.peer.drained()
-    }
-    hub.revealTo('alice', winner.sequenceID)
-    hub.revealTo('alice', occurrence.sequenceID)
-    const reconciled = await reconstructMemoryPeer(hub, 'alice', secret, member.database, {
-      welcomes: member.welcomes,
-    })
-    try {
-      await reconciled.peer.replay()
-      const after = await reconciled.control.load()
-      expect(after.outcomes).toMatchObject([{ opID: op.id, kind: 'lost' }])
-      expect(after.welcomes).toEqual([])
-      expect(after.operations).toEqual([])
-      expect(after.controlHold).toBeNull()
-      expect(reconciled.welcomes).toEqual([])
-    } finally {
-      await reconciled.peer.dispose()
-      await reconciled.peer.drained()
-    }
-  })
-
   test('Welcome remains owed after landed outcome acknowledgement', async () => {
     const hub = new FakeHub()
     let attempts = 0
@@ -268,36 +84,10 @@ describe('durable Welcome obligations', () => {
     }
   })
 
-  test('a crash after acceptance leaves an obligation delivered on restart', async () => {
-    const hub = new FakeHub()
-    const member = makeMLSPeer(hub, 'alice', secret)
-    await member.peer.resync()
-    const stopAtAcceptance = () => {
-      member.database.seam('after-apply', async () => {
-        if ((await member.control.load()).operations[0]?.stage === 'accepted')
-          void member.peer.dispose()
-        else stopAtAcceptance()
-      })
-    }
-    stopAtAcceptance()
-    const request = buildInviteCommit(member, 'bob')
-    await member.peer.enqueue(request)
-    await expect.poll(async () => (await member.control.load()).welcomes.length).toBe(1)
-    await member.peer.dispose()
-    await member.peer.drained()
-    expect(member.welcomes).toEqual([])
-    const restarted = await reconstructMemoryPeer(hub, 'alice', secret, member.database, {
-      welcomes: member.welcomes,
-    })
-    try {
-      await restarted.peer.resync()
-      expect(restarted.welcomes).toEqual([request.id])
-      expect((await restarted.control.load()).welcomes).toEqual([])
-    } finally {
-      await restarted.peer.dispose()
-      await restarted.peer.drained()
-    }
-  })
+  // R3: a crash after own installation preserves the exact independent obligation for restart.
+  test.todo(
+    'a crash after own installation leaves the exact independent obligation deliverable on restart',
+  )
 
   test('Welcome delivery repeats after acceptance-before-delete crash', async () => {
     const hub = new FakeHub()

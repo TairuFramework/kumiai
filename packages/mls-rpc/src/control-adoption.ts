@@ -1,7 +1,12 @@
 import type { GroupHandle } from '@kumiai/mls'
 import { decodeClientState, restrictCommitAuthoring } from '@kumiai/mls'
 import type { ControlAdoptionPort, ControlStore } from '@kumiai/rpc'
-import { controlSafetyHeld } from '@kumiai/rpc'
+import {
+  controlOccurrenceCoverage,
+  controlOwnConsumptionAllowed,
+  controlSafetyHeld,
+  SavedControlCompatibilityError,
+} from '@kumiai/rpc'
 
 import type { ControlHandleAccess } from './access.js'
 import { controlCompatible } from './control-compat.js'
@@ -20,13 +25,13 @@ export function createControlAdoptionPort(params: {
       )
       if (held !== null) return 'moved'
       const journal = decodeControlJournal(bytes)
-      const proof = expected.acceptance
+      const proof = expected.occurrence
       if (
         !sameStoredValue(expected.key, params.control.key) ||
         !sameStoredValue(journal.source.key, expected.key) ||
         !sameStoredValue(proof.source.key, expected.key) ||
         !sameStoredValue(proof.source.identity, journal.source.identity) ||
-        proof.from !== journal.checkpoint
+        (proof.coverage !== 'complete' && proof.coverage !== 'incomplete')
       )
         return 'moved'
       const candidate = restrictCommitAuthoring(await params.restoreCandidate(journal.candidate))
@@ -63,8 +68,7 @@ export function createControlAdoptionPort(params: {
               controlSafetyHeld(snapshot) !== null ||
               snapshot.strand !== null ||
               snapshot.cursor?.stranded === true ||
-              (snapshot.controlHold !== null &&
-                snapshot.controlHold.reason !== 'acceptance-unknown')
+              snapshot.controlHold !== null
             )
               return false
             const installed =
@@ -78,27 +82,29 @@ export function createControlAdoptionPort(params: {
                 (row) => row.epoch === journal.source.identity?.epoch,
               )
               if (
-                (row?.payloadDigest === proof.payloadDigest && row.sequenceID === proof.position) ||
+                (row?.payloadDigest === proof.payloadDigest &&
+                  row?.sequenceID === proof.position) ||
                 lastMutation === write.mutationID
               )
                 result = 'noop'
               return false
             }
-            if (
-              sourceState === undefined ||
-              !controlCompatible(sourceState, current.state, journal.referencedProposals)
-            )
-              return false
+            if (sourceState === undefined) return false
             const slot = snapshot.commitOnce
             if (
               !sameStoredValue(source.identity, journal.source.identity) ||
               slot === null ||
               slot.payloadDigest !== proof.payloadDigest ||
               !sameStoredValue(slot.journal, bytes) ||
-              slot.searchFrom !== proof.from ||
-              !sameStoredValue(snapshot.commitOnceAcceptance, proof)
+              slot.head !== journal.checkpoint ||
+              proof.coverage !== controlOccurrenceCoverage(snapshot, slot, proof.position) ||
+              !controlOwnConsumptionAllowed(snapshot, proof, write.changes)
             )
               return false
+            if (!controlCompatible(sourceState, current.state, journal.referencedProposals))
+              throw new SavedControlCompatibilityError(
+                'Recognised own occurrence has an incompatible saved candidate',
+              )
             result = 'installed'
             return true
           },

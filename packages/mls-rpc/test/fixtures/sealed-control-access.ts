@@ -161,7 +161,7 @@ export async function createSealedControlAccess(
           epochAuthenticator: next.state.keySchedule.epochAuthenticator.slice(),
           removed: false,
         })
-        if (write?.expected?.journal !== undefined && write.expected.acceptance !== undefined)
+        if (write?.expected?.journal !== undefined && write.expected.occurrence !== undefined)
           await current.handle.carryReceiveProgress(next)
         beforeAdopt()
         await persist(next, write)

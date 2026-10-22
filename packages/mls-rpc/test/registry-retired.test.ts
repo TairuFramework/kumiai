@@ -1,13 +1,6 @@
-import {
-  asLogPosition,
-  type ControlChanges,
-  controlBuildRef,
-  type FirstValidCommit,
-  type WelcomeObligation,
-} from '@kumiai/rpc'
+import type { ControlChanges, WelcomeObligation } from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
-import { encodeControlJournal } from '../src/control-journal.js'
 import { entryCapability } from '../src/entry-capability.js'
 import { createGroupHandleRegistry } from '../src/registry/registry.js'
 import {
@@ -32,50 +25,13 @@ const bytes = new Uint8Array([1, 2, 3])
 const welcome: WelcomeObligation = { opID: 'invite', welcome: bytes, recipients: ['recipient'] }
 
 async function setup(fixture: RegistryFixtureBase, changes: ControlChanges = {}) {
-  const state = await fixture.device.groups.loadState(key)
-  const trust = await fixture.device.groups.loadTrust(key.groupID)
-  if (state === null || state.deleted || state.state === null || trust === null)
-    throw new Error('Missing source')
-  const source = { key, stateVersion: state.version, identity: trust.installed }
-  const proof: FirstValidCommit = {
-    source,
-    from: null,
-    position: asLogPosition('accepted-position'),
-    payloadDigest: 'retained-payload-digest',
-  }
-  const slot = {
-    opID: welcome.opID,
-    incarnation: 1,
-    epoch: state.epoch,
-    authenticatorBefore: state.epochAuthenticator,
-    searchFrom: null,
-    expectedHead: null,
-    publishID: 'retained-publish',
-    payload: bytes,
-    payloadDigest: proof.payloadDigest,
-    digest: 'commit-digest',
-    bodies: [],
-    welcome: { bytes, recipients: welcome.recipients },
-    journal: encodeControlJournal({
-      version: 1,
-      source,
-      checkpoint: null,
-      sourceState: state.state,
-      sourceCredential: trust.credential,
-      sourceLedger: trust.ledger,
-      candidate: state.state,
-    }),
-  }
   await fixture.installRows({
     key,
     control: {
-      commitOnce: slot,
-      commitOnceAcceptance: proof,
       putWelcomes: [welcome],
       ...changes,
     },
   })
-  return { proof, slot }
 }
 
 async function retire(fixture: RegistryFixtureBase, mode: 'real-mls' | 'double') {
@@ -121,80 +77,14 @@ for (const mode of ['real-mls', 'double'] as const) {
   describe(`retired storage service (${mode})`, () => {
     const create = () => createRegistryFixture({ mode, groupID: key.groupID, setup: 'seeded' })
 
-    test.each([
-      'no-proof',
-      'wrong-digest',
-      'wrong-from',
-      'wrong-position',
-      'wrong-key',
-      'wrong-identity',
-      'unknown',
-      'superseded',
-      'absent',
-      'strand',
-      'stranded-cursor',
-      'hard-hold',
-      'wrong-opID',
-    ])('uncommitted retired Welcome never releases: %s', async (reason) => {
+    // R3 owns independent Welcome delivery outside ownership and durable deletion.
+    test('independent obligations deliver outside ownership then delete', async () => {
       const fixture = await create()
       try {
-        const changes: ControlChanges = {}
-        if (reason === 'no-proof') changes.commitOnceAcceptance = null
-        if (reason === 'strand') changes.strand = { reason: 'retention-gap' }
-        if (reason === 'stranded-cursor')
-          changes.cursor = { epoch: 0, position: null, stranded: true }
-        if (reason === 'hard-hold')
-          changes.controlHold = { reason: 'unsupported-version', position: asLogPosition('hold') }
-        if (reason === 'wrong-opID') changes.putWelcomes = [{ ...welcome, opID: 'other-invite' }]
-        const { proof } = await setup(fixture, changes)
-        await retire(fixture, mode)
-        let deliveries = 0
-        const recheck = { ...proof }
-        if (reason === 'wrong-digest') recheck.payloadDigest = 'other-digest'
-        if (reason === 'wrong-from') recheck.from = asLogPosition('other-from')
-        if (reason === 'wrong-position') recheck.position = asLogPosition('other-position')
-        if (reason === 'wrong-key')
-          recheck.source = { ...proof.source, key: { ...key, incarnation: 2 } }
-        if (reason === 'wrong-identity') {
-          if (proof.source.identity === null) throw new Error('Missing identity')
-          recheck.source = {
-            ...proof.source,
-            identity: { ...proof.source.identity, authenticator: new Uint8Array([99]) },
-          }
-        }
-        const result = await serveRetiredObligations({
-          persistence: fixture.device.groups,
-          key,
-          search: {
-            searchLog: async () => {
-              if (reason === 'unknown' || reason === 'absent') return { kind: reason }
-              if (reason === 'superseded') return { kind: 'superseded', winner: proof.position }
-              return { kind: 'first-valid', proof: recheck }
-            },
-          },
-          deliverWelcome: async () => {
-            deliveries++
-          },
-        })
-        expect(deliveries).toBe(0)
-        expect(result).toEqual({
-          delivered: [],
-          remaining: [reason === 'wrong-opID' ? 'other-invite' : welcome.opID],
-          failures: [],
-        })
-      } finally {
-        await fixture.close()
-      }
-    })
-
-    test('first-valid and committed obligations deliver outside ownership then delete', async () => {
-      const fixture = await create()
-      try {
-        const { proof, slot } = await setup(fixture, {
+        await setup(fixture, {
           putWelcomes: [welcome, { ...welcome, opID: 'committed', committed: true }],
         })
         await retire(fixture, mode)
-        const lifetime = await fixture.device.groups.load(key.groupID)
         const capability = entryCapability(fixture.device.groups)
         if (capability === null) throw new Error('Missing capability')
         const activity = capability.activity(key.groupID)
@@ -202,14 +92,6 @@ for (const mode of ['real-mls', 'double'] as const) {
         const result = await serveRetiredObligations({
           persistence: fixture.device.groups,
           key,
-          search: {
-            searchLog: async (built) => {
-              expect(built).toEqual(slot)
-              expect(await fixture.device.groups.load(key.groupID)).toEqual(lifetime)
-              calls.push('search')
-              return { kind: 'first-valid', proof }
-            },
-          },
           deliverWelcome: async (obligation) => {
             expect(await fixture.device.groups.load(key.groupID)).toMatchObject({
               activeIncarnation: 2,
@@ -217,8 +99,9 @@ for (const mode of ['real-mls', 'double'] as const) {
             calls.push(obligation.opID)
           },
         })
-        expect(calls).toEqual(['search', 'invite', 'committed'])
+        expect(calls).toEqual(['invite', 'committed'])
         expect(result).toEqual({ delivered: ['invite', 'committed'], remaining: [], failures: [] })
+        // Each deletion increments activity on admission and completion.
         expect(capability.activity(key.groupID).generation - activity.generation).toBe(4)
         expect(fixture.restoreCount(key.groupID)).toBe(0)
       } finally {
@@ -226,6 +109,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
+    // R3 owns obligation replay after transport acceptance and failed durable deletion.
     test('transport accepted crash before deletion repeats identical Welcome after durable reopen', async () => {
       let fixture = await create()
       try {
@@ -237,7 +121,6 @@ for (const mode of ['real-mls', 'double'] as const) {
           serveRetiredObligations({
             persistence: fixture.device.groups,
             key,
-            search: { searchLog: async () => ({ kind: 'unknown' }) },
             deliverWelcome: async (obligation) => {
               accepted.push(obligation)
             },
@@ -257,6 +140,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
+    // R3 owns independent Welcome delivery and per-obligation failure isolation.
     test('one failed delivery does not block other obligations', async () => {
       const fixture = await create()
       try {
@@ -271,7 +155,6 @@ for (const mode of ['real-mls', 'double'] as const) {
         const result = await serveRetiredObligations({
           persistence: fixture.device.groups,
           key,
-          search: { searchLog: async () => ({ kind: 'unknown' }) },
           deliverWelcome: async (obligation) => {
             if (obligation.opID === 'invite') throw failure
           },
@@ -282,6 +165,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
+    // R3 owns retired outcome acknowledgement and obligation-service admission.
     test('retired outcome ack is fixed-key and idempotent; active keys refuse', async () => {
       const fixture = await create()
       try {
@@ -293,7 +177,6 @@ for (const mode of ['real-mls', 'double'] as const) {
         await expect(
           serveRetiredObligations({
             ...params,
-            search: { searchLog: async () => ({ kind: 'unknown' }) },
             deliverWelcome: async () => {
               throw new Error('Active delivery')
             },
@@ -310,46 +193,6 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect(
           (await fixture.device.groups.ports({ ...key, incarnation: 2 }).control.load()).outcomes,
         ).toEqual([outcome])
-      } finally {
-        await fixture.close()
-      }
-    })
-
-    test('retirement removes a retained row and its uncommitted Welcome atomically', async () => {
-      const fixture = await create()
-      try {
-        const { slot } = await setup(fixture, { commitOnce: null, commitOnceAcceptance: null })
-        const committed = { ...welcome, opID: 'owed', committed: true as const }
-        await fixture.installRows({
-          key,
-          control: {
-            commitOnce: null,
-            putOperations: [
-              {
-                id: slot.opID,
-                kind: 'invite',
-                revokes: false,
-                body: bytes,
-                seq: 1,
-                enqueuedAt: 1,
-                deadline: 2,
-                stage: 'built',
-                built: controlBuildRef(slot),
-                unknownReported: true,
-                reconciliation: {
-                  slot,
-                  acceptance: null,
-                  uncertainty: { cause: 'unavailable', at: null },
-                },
-              },
-            ],
-            putWelcomes: [committed],
-          },
-        })
-        await retire(fixture, mode)
-        const snapshot = await fixture.device.groups.ports(key).control.load()
-        expect(snapshot.operations).toEqual([])
-        expect(snapshot.welcomes).toEqual([committed])
       } finally {
         await fixture.close()
       }

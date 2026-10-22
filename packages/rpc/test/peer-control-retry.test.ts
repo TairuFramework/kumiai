@@ -14,6 +14,7 @@ import {
   buildLedgerCommit,
   makeMLSPeer,
   rejoinSourceEpoch,
+  seedBuiltOperation,
   type TestPeer,
 } from './fixtures/peer.js'
 
@@ -150,16 +151,12 @@ test('the FIFO writer leaves successors as intents while guarded adoption has mo
   const first = buildLedgerCommit(seed, ['first'])
   const second = buildLedgerCommit(seed, ['second'])
   await Promise.all([seed.peer.enqueue(first), seed.peer.enqueue(second)])
-  await vi.waitFor(async () =>
-    expect((await control.load()).controlHold?.reason).toBe('acceptance-unknown'),
-  )
+  await vi.waitFor(async () => expect((await control.load()).commitOnce?.acceptedAs).toBeDefined())
   expect(await control.load()).toMatchObject({
-    operations: [
-      { id: first.id, stage: 'accepted' },
-      { id: second.id, stage: 'intent' },
-    ],
+    operations: [{ id: second.id, stage: 'intent' }],
     rejoin: null,
-    controlHold: { reason: 'acceptance-unknown' },
+    commitOnce: { opID: first.id },
+    controlHold: null,
   })
   expect(
     snapshots.every((snapshot) =>
@@ -167,7 +164,7 @@ test('the FIFO writer leaves successors as intents while guarded adoption has mo
     ),
   ).toBe(true)
   const held = await control.load()
-  expect(held.controlHold?.position).toBe(held.commitOnceAcceptance?.position)
+  expect(held.commitOnce?.acceptedAs).toBe(hub.head(commitTopic(secret)))
   expect(
     hub.published.filter(
       (message) => message.topicID === rendezvousTopic(secret) && message.senderDID === 'bob',
@@ -208,7 +205,7 @@ test.each(['build', 'frame'] as const)(
     const successor = buildLedgerCommit(seed, ['valid-successor'])
     const stopAfterRejection = (): void => {
       seed.database.seam('after-apply', async () => {
-        if ((await seed.control.load()).outcomes.some((outcome) => outcome.id === oversized.id))
+        if ((await seed.control.load()).outcomes.some((outcome) => outcome.opID === oversized.id))
           void seed.peer.dispose()
         else stopAfterRejection()
       })
@@ -223,7 +220,7 @@ test.each(['build', 'frame'] as const)(
     const snapshot = await seed.control.load()
     expect(snapshot.outcomes).toEqual([
       expect.objectContaining({
-        id: oversized.id,
+        opID: oversized.id,
         kind: 'rejected',
         reason: expect.stringContaining('exceeds'),
       }),
@@ -285,87 +282,76 @@ test('a commit lands after skipping an orphaned own copy', async () => {
   await member.peer.dispose()
 })
 
+// R3: own-local input failures need bounded retry and D1 backstop; classified copy failure forbids identical replay.
+test.todo(
+  'own-local named-entry unavailability retries the held occurrence with capped backoff before D1 resync',
+)
+
 test.each([false, true])(
-  'tampered own named-entry copy preserves identical retry and receiver application (restart=%s)',
+  'a classified altered own copy prevents identical retry and later own installation closes unknown (restart=%s)',
   async (restart) => {
     const hub = new FakeHub()
-    const receiver = makeMLSPeer(hub, 'bob', secret)
-    const author = makeMLSPeer(hub, 'alice', secret)
-    peers.push(receiver, author)
-    await Promise.all([receiver.peer.replay(), author.peer.replay()])
-    const publish = hub.publish.bind(hub)
-    let allow = false
-    let poison: string | undefined
-    const handoffs: Array<{ payload: Uint8Array; publishID?: string }> = []
-    vi.spyOn(hub, 'publish').mockImplementation(async (params) => {
-      if (params.topicID !== commitTopic(secret) || params.senderDID !== 'alice')
-        return publish(params)
-      handoffs.push({ payload: params.payload.slice(), publishID: params.publishID })
-      if (poison === undefined) {
-        const frame = decodeCommitFrame(decodeHandshakeFrame(params.payload).payload)
-        expect(frame.sealedEntries.length).toBeGreaterThan(0)
-        const last = frame.sealedEntries.length - 1
-        frame.sealedEntries[last] = (frame.sealedEntries[last] ?? 0) ^ 1
-        poison = (
-          await publish({
-            ...params,
-            publishID: 'tampered-copy',
-            payload: encodeHandshakeFrame(
-              HANDSHAKE_KIND.commit,
-              encodeCommitFrame(frame.commit, frame.sealedEntries),
-            ),
-          })
-        ).sequenceID
-      }
-      if (!allow)
-        throw Object.assign(new Error('copy changed the head'), { name: 'HeadMismatchError' })
-      return publish(params)
-    })
-    const build = vi.fn()
-    const request = buildLedgerCommit(author, ['saved-named-entry'], { onBuild: build })
-    await author.peer.enqueue(request)
-    await vi.waitFor(
-      async () => {
-        expect(poison).toBeDefined()
-        expect((await author.control.load()).cursor?.position).toBe(poison)
-        expect((await receiver.control.load()).cursor?.position).toBe(poison)
-      },
-      { timeout: 10_000 },
+    let author = makeMLSPeer(hub, 'alice', secret)
+    peers.push(author)
+    await author.peer.replay()
+    const saved = await seedBuiltOperation(author, buildLedgerCommit(author, ['saved-entry']))
+    const frame = decodeCommitFrame(decodeHandshakeFrame(saved.slot.payload).payload)
+    const altered = encodeHandshakeFrame(
+      HANDSHAKE_KIND.commit,
+      encodeCommitFrame(frame.commit, new Uint8Array([255])),
     )
-    const saved = await author.control.load()
-    expect(saved.commitOnce).not.toBeNull()
-    expect(saved.operations[0]?.stage).toBe('built')
-    expect(saved.forkHalt).toBeNull()
-    expect(saved.outcomes).toEqual([])
-    expect(receiver.mls.epoch()).toBe(1)
-    let runner = author
+    const restore = author.validation.restoreValidation.bind(author.validation)
+    vi.spyOn(author.validation, 'restoreValidation').mockImplementation(async (built) => {
+      const validation = await restore(built)
+      if (validation === null) return null
+      return {
+        ...validation,
+        validateFrame: async (occurrence, candidate, header) => {
+          if (
+            occurrence.payload.length === altered.length &&
+            occurrence.payload.every((byte, index) => byte === altered[index])
+          )
+            return { kind: 'invalid', reason: 'authentication' }
+          return validation.validateFrame(occurrence, candidate, header)
+        },
+      }
+    })
+    const occurrence = await hub.publish({
+      senderDID: 'replayer',
+      topicID: commitTopic(secret),
+      retain: 'log',
+      payload: altered,
+    })
+    await author.controlWalk.walkCommits()
+    const skipped = await author.control.load()
+    expect(skipped.cursor?.position).toBe(occurrence.sequenceID)
+    expect(skipped.commitOnce).toMatchObject({ ...saved.slot, skipped: true })
+    expect(skipped.outcomes).toEqual([])
+    const publish = vi.spyOn(hub, 'publish')
+    await author.controlWalk.stepOperation(saved.id)
+    expect(publish).not.toHaveBeenCalled()
+    expect(author.mls.epoch()).toBe(1)
     if (restart) {
       await author.peer.dispose()
       await author.peer.drained()
-      runner = makeMLSPeer(hub, 'alice', secret, { restartOf: author })
-      peers.push(runner)
+      author = makeMLSPeer(hub, 'alice', secret, { restartOf: author })
+      peers.push(author)
     }
-    allow = true
-    await runner.peer.resync()
-    await receiver.peer.resync()
-    await vi.waitFor(
-      async () => {
-        expect(runner.mls.epoch()).toBe(2)
-        expect(receiver.mls.epoch()).toBe(2)
-        expect(await receiver.mls.getLedger()).toEqual(['saved-named-entry'])
-        expect(await runner.peer.outcomes()).toEqual([
-          expect.objectContaining({ opID: request.id, kind: 'landed' }),
-        ])
-      },
-      { timeout: 10_000 },
-    )
-    expect(handoffs.length).toBeGreaterThanOrEqual(2)
-    for (const handoff of handoffs) {
-      expect(handoff.payload).toEqual(saved.commitOnce?.payload)
-      expect(handoff.publishID).toBe(saved.commitOnce?.publishID)
-    }
-    expect(build).toHaveBeenCalledOnce()
-    expect((await runner.control.load()).forkHalt).toBeNull()
+    const receive = vi.spyOn(author.mls, 'processCommit')
+    const own = await hub.publish({
+      senderDID: 'replayer',
+      topicID: commitTopic(secret),
+      retain: 'log',
+      payload: saved.slot.payload,
+    })
+    await author.controlWalk.walkCommits()
+    const consumed = await author.control.load()
+    expect(author.mls.epoch()).toBe(2)
+    expect(consumed.commitOnce).toBeNull()
+    expect(consumed.outcomes).toMatchObject([{ opID: saved.id, kind: 'unknown' }])
+    expect(consumed.applied).toMatchObject([{ opID: saved.id, sequenceID: own.sequenceID }])
+    expect(consumed.welcomes).toEqual([])
+    expect(receive).not.toHaveBeenCalled()
   },
 )
 
@@ -435,9 +421,11 @@ test.each(['build', 'adopt'] as const)(
     peers.push(member)
     await member.peer.replay()
     let failures = 0
-    const failOnce = (): void => {
+    const release = Promise.withResolvers<void>()
+    const failOnce = async (): Promise<void> => {
       if (failures === 0) {
         failures++
+        await release.promise
         throw new Error('Temporary host failure')
       }
     }
@@ -446,7 +434,7 @@ test.each(['build', 'adopt'] as const)(
         ? { onBuild: failOnce }
         : {
             onAdopt: async (adopt) => {
-              failOnce()
+              await failOnce()
               return await adopt()
             },
           }),
@@ -468,7 +456,9 @@ test.each(['build', 'adopt'] as const)(
     for (const commit of commits) void commit.catch(() => {})
     await vi.waitFor(() => expect(failures).toBe(1))
     expect(settled).toEqual([])
-    expect((await member.control.load()).operations).toHaveLength(2)
+    const pending = await member.control.load()
+    expect(pending.operations.length + (pending.commitOnce === null ? 0 : 1)).toBe(2)
+    release.resolve()
     const results = await Promise.all(commits)
     expect(settled).toEqual([first.id, second.id])
     expect(await member.peer.outcomes()).toEqual([

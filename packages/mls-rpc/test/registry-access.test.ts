@@ -97,10 +97,14 @@ async function accepted(
   })
   const slot: ControlSlot = {
     opID: 'rotation',
+    kind: 'rotation',
+    revokes: false,
+    enqueuedAt: 0,
+    deadline: 30000,
     incarnation: 1,
     epoch: Number(handle.epoch),
     authenticatorBefore: handle.state.keySchedule.epochAuthenticator.slice(),
-    searchFrom: null,
+    head: null,
     expectedHead: null,
     publishID: 'publish',
     payload: new Uint8Array([1, 2, 3]),
@@ -114,46 +118,31 @@ async function accepted(
   await fixture.installRows({
     key: access.key,
     control: {
-      putOperations: [
-        {
-          id: slot.opID,
-          kind: 'rotation',
-          revokes: false,
-          body: new Uint8Array(),
-          seq: 1,
-          enqueuedAt: 0,
-          deadline: 30000,
-          stage: 'intent',
-        },
-      ],
       commitOnce: occupied,
     },
   })
   const proof = {
     source: await access.readControl(async ({ source }) => source),
-    from: null,
+    coverage: 'complete' as const,
     position: asLogPosition('00001'),
     payloadDigest: slot.payloadDigest,
   }
-  if (occupied !== null)
-    await fixture.installRows({
-      key: access.key,
-      control: {
-        commitOnceAcceptance: {
-          ...proof,
-          from: occupied.searchFrom,
-          payloadDigest: occupied.payloadDigest,
-        },
-      },
-    })
   const expected = await access.readControl(async ({ source }) => source)
   const write: AdoptionWrite = {
     mutationID: 'ordinary-adoption',
-    expected: { ...expected, acceptance: proof, journal },
+    expected: { ...expected, occurrence: proof, journal },
     anchorLanded: slot.digest,
     changes: {
       commitOnce: null,
-      deleteOperations: [slot.opID],
+      putOutcomes: [
+        {
+          id: 'rotation-final',
+          opID: slot.opID,
+          at: 100,
+          kind: 'landed',
+          position: proof.position,
+        },
+      ],
       putApplied: [
         {
           epoch: slot.epoch,
@@ -515,9 +504,9 @@ for (const mode of ['real-mls', 'double'] as const) {
           expected: {
             ...source,
             journal,
-            acceptance: {
+            occurrence: {
               source,
-              from: null,
+              coverage: 'complete',
               position: asLogPosition('00001'),
               payloadDigest: 'unproved',
             },
@@ -691,9 +680,9 @@ for (const mode of ['real-mls', 'double'] as const) {
       'control hold',
       'missing slot',
       'payload',
-      'searchFrom',
+      'head',
       'journal',
-      'acceptance',
+      'occurrence',
     ] as const)('journal-bearing mutate refuses %s before work', async (kind) => {
       const fixture = await create()
       try {
@@ -703,12 +692,12 @@ for (const mode of ['real-mls', 'double'] as const) {
           return {
             ...slot,
             ...(kind === 'payload' ? { payloadDigest: 'another-payload' } : {}),
-            ...(kind === 'searchFrom' ? { searchFrom: asLogPosition('00000') } : {}),
+            ...(kind === 'head' ? { head: asLogPosition('00000') } : {}),
             ...(kind === 'journal' ? { journal: new Uint8Array([9]) } : {}),
           }
         })
         const control = await fixture.device.groups.ports(access.key).control.load()
-        if (control.commitOnceAcceptance === null && kind !== 'missing slot')
+        if (control.commitOnce === null && kind !== 'missing slot')
           throw new Error('Missing accepted slot')
         let changes: ControlChanges
         if (kind === 'strand') changes = { strand: { reason: 'retention-gap' } }
@@ -720,15 +709,12 @@ for (const mode of ['real-mls', 'double'] as const) {
           changes = {
             controlHold: { reason: 'unsupported-version', position: null },
           }
-        else if (kind === 'acceptance') {
-          const proof = write.expected?.acceptance
-          if (proof === undefined) throw new Error('Missing write acceptance')
-          changes = {
-            commitOnceAcceptance: {
-              ...proof,
-              position: asLogPosition('00002'),
-            },
-          }
+        else if (kind === 'occurrence') {
+          const expected = write.expected
+          const proof = expected?.occurrence
+          if (expected === undefined || proof === undefined) throw new Error('Missing occurrence')
+          write.expected = { ...expected, occurrence: { ...proof, coverage: 'incomplete' } }
+          changes = {}
         } else changes = {}
         await fixture.installRows({ key: access.key, control: changes })
         write.expected = {

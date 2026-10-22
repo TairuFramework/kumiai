@@ -13,6 +13,7 @@ import {
 } from './checkpoint-store.js'
 import { controlCompatible } from './control-compat.js'
 import { decodeControlJournal } from './control-journal.js'
+import { controlRetirementSources } from './control-write-context.js'
 import {
   type AccountedGroupObservation,
   bindEntryCapability,
@@ -871,6 +872,7 @@ export function createMemoryGroupCoordinator(params: {
             await entry.enter('finalise')
             if (entry.rollbackOnly)
               throw new GroupStateConflictError('Transaction is rollback-only')
+            const retirementSource = controlRetirementSources.get(tx)
             const { outboxEvents, deletedKeys, beforeEffects } = await coordinateMemoryTransaction(
               tx,
               async (tx) => {
@@ -882,6 +884,8 @@ export function createMemoryGroupCoordinator(params: {
                     : { ...previous, revision, mutationID: change.mutationID })
                 if (life === undefined)
                   throw new GroupStateConflictError('Initial transition requires a lifetime')
+                if (retirementSource?.incarnation === life.activeIncarnation)
+                  throw new GroupStateConflictError('Retirement requires a source pointer change')
                 assertCheckpointUpdates(
                   await createUnlockedGroupStateStores({
                     tx: { ...tx, rows: before },
@@ -912,6 +916,19 @@ export function createMemoryGroupCoordinator(params: {
                   if (previous !== null && (await retainedTrust(tx)) === null)
                     throw new GroupStateConflictError('Existing lifetime requires retained trust')
                 }
+                if (
+                  previous?.activeIncarnation !== null &&
+                  previous?.activeIncarnation !== undefined &&
+                  life.activeIncarnation !== previous.activeIncarnation
+                ) {
+                  const retiredControl = await createUnlockedIncarnationStores({
+                    tx,
+                    key: { groupID: change.groupID, incarnation: previous.activeIncarnation },
+                    atRest,
+                  }).control.load()
+                  if (retiredControl.commitOnce !== null)
+                    throw new GroupStateConflictError('Retirement requires atomic control closure')
+                }
                 const installations: Array<CheckpointFactRecord> = []
                 for (const [incarnation, next] of savedStates) {
                   // Tombstone counters were validated without opening private state.
@@ -933,6 +950,25 @@ export function createMemoryGroupCoordinator(params: {
                           namespace: 'state',
                           atRest,
                         }).load('current')
+                  if (
+                    original !== null &&
+                    !original.deleted &&
+                    (next.terminal || next.epoch > original.epoch)
+                  ) {
+                    const consumed = await createUnlockedIncarnationStores({
+                      tx,
+                      key: { groupID: change.groupID, incarnation },
+                      atRest,
+                    }).control.load()
+                    if (
+                      consumed.commitOnce !== null ||
+                      (next.terminal &&
+                        (consumed.operations.length !== 0 || consumed.rejoin !== null))
+                    )
+                      throw new GroupStateConflictError(
+                        'Source consumption requires atomic control closure',
+                      )
+                  }
                   if (
                     !next.deleted &&
                     (original === null || original.deleted || original.epoch !== next.epoch)

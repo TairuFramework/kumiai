@@ -1,4 +1,4 @@
-import { encodeClientState } from '@kumiai/mls'
+import { encodeClientState, GroupHandle } from '@kumiai/mls'
 import {
   type AdoptionWrite,
   type AnchorSlot,
@@ -414,3 +414,75 @@ test.each([undefined, 'different-advance'])(
     expect(store.snapshot().anchorSlot?.pending?.landed).toBeUndefined()
   },
 )
+
+test.each(['complete', 'incomplete'] as const)(
+  'own occurrence installs the saved candidate with %s coverage without receive processing',
+  async (coverage) => {
+    const host = await controlAdoptionFixture()
+    if (coverage === 'incomplete') {
+      await host.store.control.apply(
+        { cursor: { position: null, epoch: host.slot.epoch, incomplete: true } },
+        'prefix-loss',
+      )
+      host.proof.coverage = 'incomplete'
+      host.write.changes.putOutcomes = [
+        { id: 'terminal-unknown', opID: host.slot.opID, at: 100, kind: 'unknown' },
+      ]
+    }
+    const receive = vi
+      .spyOn(GroupHandle.prototype, 'processMessage')
+      .mockImplementation(async () => {
+        throw new Error('own receive application called')
+      })
+    expect(await host.port.adopt(host.slot.journal, await host.expected(), host.write)).toBe(
+      'installed',
+    )
+    expect(receive).not.toHaveBeenCalled()
+    expect(host.store.snapshot().control.commitOnce === null).toBe(true)
+    expect(host.host.live().state.keySchedule.epochAuthenticator).toEqual(
+      host.rotation.newGroup.state.keySchedule.epochAuthenticator,
+    )
+    receive.mockRestore()
+    expect(host.store.snapshot().control.applied[0]?.opID).toBe(host.slot.opID)
+    expect(host.store.snapshot().control.outcomes[0]?.kind).toBe(
+      coverage === 'complete' ? 'landed' : 'unknown',
+    )
+  },
+)
+
+test('own occurrence with stale coverage or a stranded cursor moves without writing', async () => {
+  const host = await controlAdoptionFixture()
+  await host.store.control.apply(
+    { cursor: { position: null, epoch: host.slot.epoch, incomplete: true } },
+    'prefix-loss',
+  )
+  const before = host.store.snapshot()
+  expect(await host.port.adopt(host.slot.journal, await host.expected(), host.write)).toBe('moved')
+  expect(host.store.snapshot()).toBe(before)
+  host.proof.coverage = 'incomplete'
+  host.write.changes.putOutcomes = [
+    { id: 'unknown', opID: host.slot.opID, at: 100, kind: 'unknown' },
+  ]
+  await host.store.control.apply(
+    { cursor: { position: null, epoch: host.slot.epoch, incomplete: true, stranded: true } },
+    'strand',
+  )
+  const stranded = host.store.snapshot()
+  expect(await host.port.adopt(host.slot.journal, await host.expected(), host.write)).toBe('moved')
+  expect(host.store.snapshot()).toBe(stranded)
+})
+
+test('a recognised own occurrence with incompatible saved source fails as a local invariant', async () => {
+  const host = await controlAdoptionFixture()
+  await host.host.access.mutate(async (handle) => {
+    await handle.encrypt(new Uint8Array([1]))
+    const own = handle.state.secretTree.leafNodes[2 * handle.state.privatePath.leafIndex]
+    if (own === undefined) throw new Error('Missing local sender')
+    own.handshake.generation++
+  })
+  const before = host.store.snapshot()
+  await expect(
+    host.port.adopt(host.slot.journal, await host.expected(), host.write),
+  ).rejects.toMatchObject({ name: 'SavedControlCompatibilityError' })
+  expect(host.store.snapshot()).toBe(before)
+})

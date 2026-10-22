@@ -239,7 +239,7 @@ test('destination defers signed confirmation judgment and memoization until head
 
 test('destination bounded commit walks wait for a complete ledger', async () => {
   const s = await setup()
-  const published = await publishCommit({
+  await publishCommit({
     hub: s.hub,
     senderDID: 'carol',
     recoverySecret: secret,
@@ -274,11 +274,7 @@ test('destination bounded commit walks wait for a complete ledger', async () => 
   const process = vi.spyOn(mls, 'processCommit')
   const roster = vi.spyOn(mls, 'rosterEntries')
   const fetch = vi.spyOn(s.hub, 'fetchTopic')
-  await destination.controlWalk.walkCommits({
-    through: asLogPosition(published.sequenceID),
-    range: null,
-    work: { takeFetch: () => true, takeFrame: () => true },
-  })
+  await destination.controlWalk.walkCommits()
   expect(header).not.toHaveBeenCalled()
   expect(process).not.toHaveBeenCalled()
   expect(roster).not.toHaveBeenCalled()

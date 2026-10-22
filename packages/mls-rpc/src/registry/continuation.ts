@@ -6,7 +6,6 @@ import type {
   RecoveryContinuationPort,
   StoredRejoinRecord,
 } from '@kumiai/rpc'
-import { deleteOperationChanges } from '@kumiai/rpc'
 
 import { coordinatorBinding, type EntryReads, entryCapability } from '../entry-capability.js'
 import { manualRecoveryAttempt, saveManualRecovery } from '../manual-recovery.js'
@@ -135,23 +134,13 @@ export function createRecoveryContinuationPort<TTx extends GroupTransaction>(par
             )
               throw new GroupStateConflictError('Recovery installation proof missing')
             const at = Date.now()
-            const accepted = snapshot.operations.filter((op) => op.stage === 'accepted')
-            const outcomes: Array<Outcome> = accepted.map(({ id }) => ({
-              id,
-              opID: id,
-              at,
-              kind: 'unknown',
-            }))
+            const outcomes: Array<Outcome> = []
             const held = new Set(ledger)
             const tokens = [...new Set(record.ledgerBefore)].filter((token) => !held.has(token))
             if (tokens.length > 0)
               outcomes.push({ id: record.id, opID: null, at, kind: 'reenact', tokens })
             const changes: ControlChanges = {
               ...('format' in record && record.trigger === 'manual' ? {} : { deleteRejoin: true }),
-              ...deleteOperationChanges(
-                snapshot,
-                accepted.map(({ id }) => id),
-              ),
               putOutcomes: outcomes.filter(
                 ({ id }) => !snapshot.outcomes.some((outcome) => outcome.id === id),
               ),

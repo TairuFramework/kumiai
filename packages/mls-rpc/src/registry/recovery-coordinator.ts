@@ -17,7 +17,6 @@ import {
   type ControlChanges,
   type ControlSnapshot,
   controlSafetyHeld,
-  deleteOperationChanges,
   type ForkRecoveryAttempt,
   type ForkRecoveryAuthorisation,
   type GroupKey,
@@ -448,19 +447,9 @@ export function bindRegistryRecoveryCoordinator<TTx extends GroupTransaction>(pa
               recoveryCompletionContexts.delete(stores.tx)
             }
             if (record !== null && !sameStoredValue(record.source.key, key)) {
-              const accepted = sourceSnapshot.operations.filter(
-                (operation) => operation.stage === 'accepted',
-              )
               const changes: ControlChanges = {
                 deleteRejoin: true,
                 putSettledRejoins: settlement === null ? [] : [settlement],
-                ...deleteOperationChanges(
-                  sourceSnapshot,
-                  accepted.map(({ id }) => id),
-                ),
-                putOutcomes: accepted
-                  .filter(({ id }) => !sourceSnapshot.outcomes.some((row) => row.id === id))
-                  .map(({ id }) => ({ id, opID: id, kind: 'unknown', at: Date.now() })),
               }
               recoveryCompletionContexts.set(stores.tx, {
                 key: record.source.key,

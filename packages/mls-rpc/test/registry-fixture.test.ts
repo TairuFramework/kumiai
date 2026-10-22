@@ -1,11 +1,11 @@
 import type { GroupHandle } from '@kumiai/mls'
 import { decodeClientState, encodeClientState, openRecoveryVerdict } from '@kumiai/mls'
-import { describe, expect, expectTypeOf, test } from 'vitest'
-
 import type {
   ConformanceRegistryFixtureBase,
   ConformanceRegistryHandle,
-} from '../../rpc-conformance/lib/registry-fixture.js'
+} from '@kumiai/rpc-conformance'
+import { describe, expect, expectTypeOf, test } from 'vitest'
+
 import { entryCapability } from '../src/entry-capability.js'
 import { createVerdictJudge } from '../src/recovery.js'
 import { decodeCapturedRecoveryCandidate, decodeRecoveryCandidate } from '../src/recovery-codec.js'

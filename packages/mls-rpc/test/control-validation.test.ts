@@ -33,13 +33,10 @@ import {
   type AppOutbox,
   asLogPosition,
   type BuiltCommit,
-  type CertifiedControlRange,
   type ControlHold,
   type ControlLogFrame,
-  type ControlSearchWork,
   type ControlValidationPort,
   commitTopic,
-  createControlSearch,
   createGroupPeer,
   decodeCommitFrame,
   decodeHandshakeFrame,
@@ -173,10 +170,15 @@ async function fixture(
     encodeCommitFrame(rotation.commitMessage, new Uint8Array()),
   )
   const built: BuiltCommit = {
+    opID: 'own',
+    kind: 'rotation',
+    revokes: false,
+    enqueuedAt: 0,
+    deadline: 30000,
     epoch: Number(member.handle.epoch),
     incarnation: 1,
     authenticatorBefore: source.identity.authenticator.slice(),
-    searchFrom: asLogPosition('000100'),
+    head: asLogPosition('000100'),
     expectedHead: asLogPosition('000100'),
     publishID: 'own',
     payload,
@@ -390,7 +392,7 @@ test.each(['host-policy', 'local-fault'] as const)(
   },
 )
 
-async function searchReal(
+async function validateInOrder(
   f: Awaited<ReturnType<typeof fixture>>,
   competitor?: Uint8Array,
   validation: ControlValidationPort = f.port,
@@ -408,7 +410,7 @@ async function searchReal(
     stage: 'intent',
   }
   await store.control.apply(
-    { putOperations: [intent], cursor: { position: f.built.searchFrom, epoch: f.built.epoch } },
+    { putOperations: [intent], cursor: { position: f.built.head, epoch: f.built.epoch } },
     'intent',
   )
   expect(await store.saveBuilt(intent, { ...f.built, opID: intent.id }, f.source, 'built')).toBe(
@@ -467,147 +469,65 @@ async function searchReal(
     gap: false,
   }))
   const hold = vi.fn(async (_value: ControlHold) => {})
-  const followWinner = vi.fn(
-    async (frame: ControlLogFrame, _range: CertifiedControlRange, work: ControlSearchWork) => {
-      if (competitor === undefined) throw new Error('missing competitor')
-      if (!work.takeFrame()) return { kind: 'unavailable' as const }
-      const result = await mls.processCommit(competitor, {
-        resolveLedgerEntries: f.group.resolveLedgerEntries,
-        adoption: (staged) => ({
-          mutationID: 'winner',
-          changes: {
-            putApplied: [
-              {
-                epoch: f.built.epoch,
-                digest: digestAppliedCommit(competitor),
-                payloadDigest: toB64U(sha256(frame.payload)),
-                sequenceID: frame.position,
-                opID: null,
-                removed: staged.removed,
-              },
-            ],
-            cursor: {
-              position: frame.position,
-              epoch: staged.epochAfter,
-              ...(staged.removed ? { stranded: true as const } : {}),
+  const followWinner = vi.fn(async (frame: ControlLogFrame) => {
+    if (competitor === undefined) throw new Error('missing competitor')
+    const result = await mls.processCommit(competitor, {
+      resolveLedgerEntries: f.group.resolveLedgerEntries,
+      adoption: (staged) => ({
+        mutationID: 'winner',
+        changes: {
+          commitOnce: null,
+          putApplied: [
+            {
+              epoch: f.built.epoch,
+              digest: digestAppliedCommit(competitor),
+              payloadDigest: toB64U(sha256(frame.payload)),
+              sequenceID: frame.position,
+              opID: null,
+              removed: staged.removed,
             },
+          ],
+          cursor: {
+            position: frame.position,
+            epoch: staged.epochAfter,
+            ...(staged.removed ? { stranded: true as const } : {}),
           },
-        }),
-      })
-      return result.applied
-        ? { kind: 'applied' as const, position: frame.position }
-        : { kind: 'refused' as const }
-    },
-  )
-  const safety = safetyCallbacks()
-  const search = createControlSearch({
-    ...safety,
-    budget: { maxPasses: 2, maxFetches: 16, maxFrames: 256 },
-    fetch,
-    validation,
-    readEvidence: store.readEvidence,
-    followWinner,
-    reconcileAbsent: async () => true,
-    hold,
+        },
+      }),
+    })
+    return result.applied
+      ? { kind: 'applied' as const, position: frame.position }
+      : { kind: 'refused' as const }
   })
-  const result = await search.searchLog(f.built)
+  const safety = safetyCallbacks()
+  // Validate delivered copies in order. Settlement is exercised by the peer walker tests.
+  const session = await validation.restoreValidation(f.built)
+  let result:
+    | { kind: 'unknown' }
+    | { kind: 'superseded'; winner: LogPosition }
+    | { kind: 'first-valid'; proof: { position: LogPosition; payloadDigest: string } } = {
+    kind: 'unknown',
+  }
+  if (session !== null)
+    for (const frame of rows) {
+      const checked = await session.validateFrame(frame, f.built)
+      if (checked.kind === 'unavailable') {
+        break
+      }
+      if (checked.kind !== 'valid') continue
+      if (checked.own) {
+        result = {
+          kind: 'first-valid',
+          proof: { position: frame.position, payloadDigest: f.built.payloadDigest },
+        }
+        break
+      }
+      const applied = await followWinner(frame)
+      if (applied.kind === 'applied') result = { kind: 'superseded', winner: frame.position }
+      break
+    }
   return { result, store, fetch, hold, haltFork: safety.haltFork, followWinner, persisted }
 }
-
-test('first-valid lands on a trimmed log', async () => {
-  const f = await fixture({}, 65)
-  expect(f.built.epoch).toBe(66)
-  const validator = await f.port.restoreValidation(f.built)
-  if (validator === null) throw new Error('missing validator')
-  const validateFrame = vi.fn(validator.validateFrame)
-  const result = await searchReal(f, undefined, {
-    restoreValidation: async () => ({ ...validator, validateFrame }),
-  })
-  expect(result.result).toMatchObject({ kind: 'first-valid', proof: { from: f.built.searchFrom } })
-  expect(result.fetch).toHaveBeenCalledWith(f.built.searchFrom)
-  expect(
-    validateFrame.mock.calls.every(([frame]) => frame.position > (f.built.searchFrom ?? '')),
-  ).toBe(true)
-  expect(result.followWinner).not.toHaveBeenCalled()
-  expect(result.persisted).not.toHaveBeenCalled()
-}, 10000)
-
-test('normal second-epoch build needs no retained pre-checkpoint applied rows', async () => {
-  const f = await fixture({}, 0, 1)
-  const result = await searchReal(f)
-  expect(f.built.epoch).toBe(2)
-  expect((await result.store.control.load()).applied).toEqual([])
-  expect(result.result).toMatchObject({ kind: 'first-valid', proof: { from: f.built.searchFrom } })
-  expect(result.fetch).toHaveBeenCalledWith(f.built.searchFrom)
-  expect(result.persisted).not.toHaveBeenCalled()
-})
-
-test('budget discovery continues for an expired operation with its retained slot', async () => {
-  const f = await fixture()
-  const store = createTransactionalStore(f.member.handle)
-  const intent: Operation & { stage: 'intent' } = {
-    id: 'expired',
-    kind: 'rotation',
-    revokes: false,
-    body: new Uint8Array(),
-    seq: 1,
-    enqueuedAt: 0,
-    deadline: 1,
-    stage: 'intent',
-  }
-  await store.control.apply(
-    { putOperations: [intent], cursor: { position: f.built.searchFrom, epoch: f.built.epoch } },
-    'intent',
-  )
-  expect(await store.saveBuilt(intent, { ...f.built, opID: intent.id }, f.source, 'built')).toBe(
-    'saved',
-  )
-  const positions = Array.from({ length: 270 }, (_, index) =>
-    asLogPosition(String(101 + index).padStart(6, '0')),
-  )
-  const fetch = vi.fn(async (after: LogPosition | null) => ({
-    messages: positions
-      .filter((position) => after === null || position > after)
-      .map((position, index, suffix) => ({
-        sequenceID: position,
-        payload: index === suffix.length - 1 ? f.built.payload : new Uint8Array(),
-        senderDID: 'relay',
-        topicID: 'commits',
-        receivedAt: 1,
-      })),
-    head: '000370',
-    oldest: '000101',
-    gap: false,
-  }))
-  const followWinner = vi.fn(async () => ({ kind: 'refused' as const }))
-  const deps = {
-    ...safetyCallbacks(),
-    budget: { maxPasses: 2, maxFetches: 16, maxFrames: 256 },
-    fetch,
-    validation: f.port,
-    readEvidence: store.readEvidence,
-    followWinner,
-    reconcileAbsent: async () => false,
-    hold: async () => {},
-  }
-  const search = createControlSearch(deps)
-  expect(intent.deadline).toBeLessThan(Date.now())
-  expect(await search.searchLog(f.built)).toEqual({ kind: 'unknown' })
-  expect(await search.searchLog(f.built)).toMatchObject({
-    kind: 'first-valid',
-    proof: { position: asLogPosition('000370') },
-  })
-  expect(fetch.mock.calls.map(([after]) => after)).toEqual([
-    f.built.searchFrom,
-    asLogPosition('000356'),
-  ])
-  expect(await createControlSearch(deps).searchLog(f.built)).toEqual({ kind: 'unknown' })
-  expect(fetch.mock.calls[2]?.[0]).toBe(f.built.searchFrom)
-  expect((await store.control.load()).commitOnce?.payloadDigest).toBe(f.built.payloadDigest)
-  expect((await store.control.load()).cursor?.position).toBe(f.built.searchFrom)
-  expect((await store.control.load()).welcomes).toEqual([])
-  expect(followWinner).not.toHaveBeenCalled()
-})
 
 test.each(['private', 'public', 'external'] as const)(
   'earlier valid competitor supersedes an alternate-ID exact own replay: %s',
@@ -636,7 +556,7 @@ test.each(['private', 'public', 'external'] as const)(
                 })
               ).commit,
             )
-    const result = await searchReal(f, competitor)
+    const result = await validateInOrder(f, competitor)
     expect(result.result).toEqual({ kind: 'superseded', winner: asLogPosition('000101') })
     const evidence = await result.store.readEvidence()
     expect(evidence.cursor?.position).toBe(asLogPosition('000101'))
@@ -656,7 +576,7 @@ test('first-valid self-removal wins without epoch advance', async () => {
     f.group.committer.handle,
     f.member.handle.state.privatePath.leafIndex,
   )
-  const result = await searchReal(f, removal.commitMessage)
+  const result = await validateInOrder(f, removal.commitMessage)
   expect(result.result).toEqual({ kind: 'superseded', winner: asLogPosition('000101') })
   const evidence = await result.store.readEvidence()
   expect(evidence.terminal).toBe(true)
@@ -678,28 +598,6 @@ test('retained own construction verifies without processing own receive keys', a
     ),
   ).toMatchObject({ kind: 'valid', own: true })
   expect(encodeClientState(f.member.handle.state)).toEqual(f.state)
-})
-
-test('mismatched journal checkpoint refuses proof', async () => {
-  const f = await fixture()
-  const corrupted = { ...f.built, searchFrom: asLogPosition('000099') }
-  expect(await f.port.restoreValidation(corrupted)).toBeNull()
-  const followWinner = vi.fn(async () => ({ kind: 'refused' as const }))
-  const safety = safetyCallbacks()
-  const search = createControlSearch({
-    ...safety,
-    budget: { maxPasses: 2, maxFetches: 16, maxFrames: 256 },
-    fetch: async () => {
-      throw new Error('must not fetch')
-    },
-    validation: f.port,
-    readEvidence: async () => ({ source: f.source, applied: [], cursor: null, terminal: false }),
-    followWinner,
-    reconcileAbsent: async () => false,
-    hold: async () => {},
-  })
-  expect(await search.searchLog(corrupted)).toEqual({ kind: 'unknown' })
-  expect(followWinner).not.toHaveBeenCalled()
 })
 
 test('public member authentication precedes missing referenced proposal resolution', async () => {
@@ -728,10 +626,10 @@ test('public member authentication precedes missing referenced proposal resoluti
     kind: 'unavailable',
     reason: 'missing-proposal',
   })
-  const unavailable = await searchReal(f, validMembership)
+  const unavailable = await validateInOrder(f, validMembership)
   expect(unavailable.result).toEqual({ kind: 'unknown' })
   expect(unavailable.followWinner).not.toHaveBeenCalled()
-  expect((await unavailable.store.control.load()).cursor?.position).toBe(f.built.searchFrom)
+  expect((await unavailable.store.control.load()).cursor?.position).toBe(f.built.head)
   expect((await unavailable.store.control.load()).commitOnce?.payloadDigest).toBe(
     f.built.payloadDigest,
   )
@@ -748,7 +646,7 @@ test('public member authentication precedes missing referenced proposal resoluti
     kind: 'invalid',
     reason: 'authentication',
   })
-  expect((await searchReal(f, badMembership)).result).toMatchObject({ kind: 'first-valid' })
+  expect((await validateInOrder(f, badMembership)).result).toMatchObject({ kind: 'first-valid' })
 })
 
 test('validator owns resolver callbacks and buffers on refused resolution', async () => {
@@ -816,7 +714,7 @@ test('public member ledger commits run mandatory policy checks', async () => {
     own: false,
   })
   expect(policy).toHaveBeenCalled()
-  const searched = await searchReal(f, ledger.commit, f.port, ledger.frame.payload)
+  const searched = await validateInOrder(f, ledger.commit, f.port, ledger.frame.payload)
   expect(searched.result).toEqual({ kind: 'superseded', winner: asLogPosition('000101') })
   expect((await searched.store.control.load()).welcomes).toEqual([])
   const refused = await fixture({ commitPolicy: () => 'reject' })
@@ -980,14 +878,14 @@ test.each(['Desired gen in the past', 'transient member AEAD'] as const)(
     expect(await validation?.validateFrame(f.frame(competitor), f.built)).toMatchObject({
       kind: 'unavailable',
     })
-    const result = await searchReal(f, competitor)
+    const result = await validateInOrder(f, competitor)
     expect(result.result).toEqual({ kind: 'unknown' })
     expect(result.persisted).not.toHaveBeenCalled()
     expect(result.followWinner).not.toHaveBeenCalled()
     expect((await result.store.control.load()).commitOnce?.payloadDigest).toBe(
       f.built.payloadDigest,
     )
-    expect((await result.store.control.load()).cursor?.position).toBe(f.built.searchFrom)
+    expect((await result.store.control.load()).cursor?.position).toBe(f.built.head)
     expect((await result.store.control.load()).welcomes).toEqual([])
     const state = decodeClientState(f.state)
     if (state === undefined) throw new Error('missing state')
@@ -1048,7 +946,7 @@ test('sender-data derivation failures propagate typed unavailable diagnostics', 
     name: 'CommitValidationUnavailableError',
     cause: { message: 'transient sender-data KDF' },
   })
-  const searched = await searchReal(f, competitor)
+  const searched = await validateInOrder(f, competitor)
   expect(searched.result).toEqual({ kind: 'unknown' })
   expect(searched.followWinner).not.toHaveBeenCalled()
 })
@@ -1086,7 +984,7 @@ test('an authenticated alternate own copy preserves unknown acceptance', async (
     kind: 'unavailable',
     reason: 'unexplained-own',
   })
-  const searched = await searchReal(f, other)
+  const searched = await validateInOrder(f, other)
   expect(searched.result).toEqual({ kind: 'unknown' })
   expect(searched.haltFork).not.toHaveBeenCalled()
   expect(searched.persisted).not.toHaveBeenCalled()
@@ -1143,86 +1041,6 @@ test('live unavailable validation refuses without moving or saving', async () =>
   expect(persist).not.toHaveBeenCalled()
 })
 
-test('already adopted own build requires committed full payload evidence after restart', async () => {
-  const f = await fixture()
-  const journal = decodeControlJournal(f.built.journal)
-  const state = decodeClientState(journal.candidate)
-  if (state === undefined) throw new InvalidCandidateError('missing candidate')
-  const restarted = await restoreGroup({
-    state,
-    credential: f.member.handle.credential,
-    ledgerEntries: f.member.handle.ledgerTokens,
-  })
-  const source = {
-    ...f.source,
-    stateVersion: 7,
-    identity: {
-      ...f.source.identity,
-      epoch: Number(restarted.epoch),
-      authenticator: restarted.state.keySchedule.epochAuthenticator,
-    },
-  }
-  const followWinner = vi.fn(async () => ({ kind: 'refused' as const }))
-  const hold = vi.fn(async () => {})
-  let applied: Array<{
-    epoch: number
-    digest: string
-    payloadDigest: string
-    sequenceID: LogPosition
-    opID: string | null
-    removed: boolean
-  }> = []
-  const deps = {
-    ...safetyCallbacks(),
-    budget: { maxPasses: 2, maxFetches: 16, maxFrames: 256 },
-    validation: f.port,
-    readEvidence: async () => ({
-      source,
-      applied,
-      cursor: { position: asLogPosition('000101'), epoch: Number(restarted.epoch) },
-      terminal: false,
-    }),
-    fetch: async () => ({
-      messages: [
-        {
-          sequenceID: '000101',
-          senderDID: 'relay',
-          payload: f.built.payload,
-          topicID: 'commits',
-          receivedAt: 1,
-        },
-      ],
-      head: '000101',
-      oldest: '000101',
-      gap: false,
-    }),
-    followWinner,
-    reconcileAbsent: async () => false,
-    hold,
-  }
-  expect(await createControlSearch(deps).searchLog(f.built)).toEqual({ kind: 'unknown' })
-  applied = [
-    {
-      epoch: f.built.epoch,
-      digest: f.built.digest,
-      payloadDigest: f.built.payloadDigest,
-      sequenceID: asLogPosition('000101'),
-      opID: 'own',
-      removed: false,
-    },
-  ]
-  expect(await createControlSearch(deps).searchLog(f.built)).toMatchObject({
-    kind: 'first-valid',
-    proof: { position: asLogPosition('000101') },
-  })
-  const committed = applied[0]
-  if (committed === undefined) throw new Error('missing applied row')
-  applied = [{ ...committed, payloadDigest: 'conflicting-full-bytes' }]
-  expect(await createControlSearch(deps).searchLog(f.built)).toEqual({ kind: 'unknown' })
-  expect(deps.haltFork).not.toHaveBeenCalled()
-  expect(followWinner).not.toHaveBeenCalled()
-})
-
 test('conclusive member AEAD rejection is skippable poison', async () => {
   const f = await fixture()
   const competitor = (await commitKeyRotation(f.group.committer.handle)).commitMessage
@@ -1260,12 +1078,12 @@ async function forgeSender(f: Awaited<ReturnType<typeof fixture>>, leafIndex: nu
   return encode(mlsMessageEncoder, result.commit)
 }
 
-test.each(['tampered-own', 'forged-own-sender', 'forged-own-signature'] as const)(
+test.each(['altered-own', 'unverified-own-sender', 'unverified-own-signature'] as const)(
   'unauthenticated own claim is poison without a fork hold: %s',
   async (kind) => {
     const f = await fixture()
     let commit: Uint8Array
-    if (kind === 'tampered-own') {
+    if (kind === 'altered-own') {
       const { decodeCommitFrame, decodeHandshakeFrame } = await import('@kumiai/rpc')
       commit = decodeCommitFrame(decodeHandshakeFrame(f.built.payload).payload).commit.slice()
       const parsed = decode(mlsMessageDecoder, commit)
@@ -1277,18 +1095,18 @@ test.each(['tampered-own', 'forged-own-sender', 'forged-own-signature'] as const
       const last = parsed.privateMessage.ciphertext.length - 1
       parsed.privateMessage.ciphertext[last] = (parsed.privateMessage.ciphertext[last] ?? 0) ^ 1
       commit = encode(mlsMessageEncoder, parsed)
-    } else if (kind === 'forged-own-sender')
+    } else if (kind === 'unverified-own-sender')
       commit = await forgeSender(f, f.member.handle.state.privatePath.leafIndex)
     else {
       const state = decodeClientState(f.state)
       if (state === undefined) throw new Error('missing source')
       state.signaturePrivateKey = f.group.committer.identity.privateKey
-      const forged = await createCommit({
+      const unverified = await createCommit({
         context: f.member.handle.context,
         state,
         authenticatedData: encodeControlEnvelope({ v: 1 }),
       })
-      commit = encode(mlsMessageEncoder, forged.commit)
+      commit = encode(mlsMessageEncoder, unverified.commit)
     }
     const validation = await f.port.restoreValidation(f.built)
     expect(await validation?.readCommitHeader(commit)).toMatchObject({
@@ -1298,7 +1116,7 @@ test.each(['tampered-own', 'forged-own-sender', 'forged-own-signature'] as const
       kind: 'invalid',
       reason: 'authentication',
     })
-    const searched = await searchReal(f, commit)
+    const searched = await validateInOrder(f, commit)
     expect(searched.result).toMatchObject({
       kind: 'first-valid',
       proof: { position: asLogPosition('000102') },
@@ -1309,7 +1127,7 @@ test.each(['tampered-own', 'forged-own-sender', 'forged-own-signature'] as const
 )
 
 test.each(['blank', 'unknown'] as const)(
-  'forged %s sender leaf is authentication poison in validation and the ordinary port',
+  'unverified %s sender leaf is authentication poison in validation and the ordinary port',
   async (kind) => {
     const f = await fixture({}, 0, 0, kind === 'blank')
     const leaf = kind === 'blank' ? 2 : 999
@@ -1341,7 +1159,7 @@ test.each(['blank', 'unknown'] as const)(
       epochBefore: f.built.epoch,
       epochAfter: f.built.epoch,
     })
-    const searched = await searchReal(f, commit)
+    const searched = await validateInOrder(f, commit)
     expect(searched.result).toMatchObject({ kind: 'first-valid' })
     expect(searched.hold).not.toHaveBeenCalled()
   },
@@ -1413,7 +1231,7 @@ test.each([
       reason: 'policy',
     })
     expect.soft(await f.member.handle.verifyCommitSignature(commit)).toBe(false)
-    const searched = await searchReal(f, commit)
+    const searched = await validateInOrder(f, commit)
     expect.soft(searched.result).toMatchObject({
       kind: 'first-valid',
       proof: { position: asLogPosition('000102') },
@@ -1560,7 +1378,7 @@ async function expectPolicyPoison(
   } finally {
     await peer.dispose()
   }
-  const searched = await searchReal(f, commit)
+  const searched = await validateInOrder(f, commit)
   expect.soft(searched.result).toMatchObject({
     kind: 'first-valid',
     proof: { position: asLogPosition('000102') },
@@ -1652,7 +1470,7 @@ test('authenticated public Add refused by credential authentication is policy po
     kind: 'invalid',
     reason: 'policy',
   })
-  expect((await searchReal(f, commit)).result).toMatchObject({ kind: 'first-valid' })
+  expect((await validateInOrder(f, commit)).result).toMatchObject({ kind: 'first-valid' })
 })
 
 test.each(['credential', 'holder'] as const)(
@@ -1706,11 +1524,11 @@ test.each(['credential', 'holder'] as const)(
       expect(
         await validation?.validateFrame({ ...f.frame(commit), payload }, f.built),
       ).toMatchObject({ kind: 'unavailable' })
-      const searched = await searchReal(f, commit, f.port, payload)
+      const searched = await validateInOrder(f, commit, f.port, payload)
       expect(searched.result).toEqual({ kind: 'unknown' })
       expect(searched.followWinner).not.toHaveBeenCalled()
       expect(searched.persisted).not.toHaveBeenCalled()
-      expect((await searched.store.control.load()).cursor?.position).toBe(f.built.searchFrom)
+      expect((await searched.store.control.load()).cursor?.position).toBe(f.built.head)
       expect((await searched.store.control.load()).commitOnce?.payloadDigest).toBe(
         f.built.payloadDigest,
       )
@@ -1844,7 +1662,7 @@ test('dependency diagnostics survive binding-error replacement', async () => {
   const validation = await f.port.restoreValidation(f.built)
   const result = await validation?.validateFrame(f.frame(futureBytes), f.built)
   expect(result).toEqual({ kind: 'invalid', reason: 'authentication' })
-  expect((await searchReal(f, futureBytes)).result).toMatchObject({ kind: 'first-valid' })
+  expect((await validateInOrder(f, futureBytes)).result).toMatchObject({ kind: 'first-valid' })
   const journal = decodeControlJournal(f.built.journal)
   const consumedBuild = {
     ...f.built,
@@ -1902,9 +1720,9 @@ test.each(['external-authentication', 'body-resolver'] as const)(
         : (await publicLedger(f)).commit
     if (seam === 'body-resolver') {
       const store = createTransactionalStore(f.member.handle)
-      await expect(searchReal(f, competitor, f.port, undefined, store)).rejects.toBe(fault)
+      await expect(validateInOrder(f, competitor, f.port, undefined, store)).rejects.toBe(fault)
       const saved = await store.control.load()
-      expect(saved.cursor?.position).toBe(f.built.searchFrom)
+      expect(saved.cursor?.position).toBe(f.built.head)
       expect(saved.commitOnce?.payloadDigest).toBe(f.built.payloadDigest)
       expect(saved.welcomes).toEqual([])
       expect(saved.applied).toEqual([])
@@ -1913,56 +1731,15 @@ test.each(['external-authentication', 'body-resolver'] as const)(
       expect(encodeClientState(f.member.handle.state)).toEqual(f.state)
       return
     }
-    const result = await searchReal(f, competitor)
+    const result = await validateInOrder(f, competitor)
     expect(result.result).toEqual({ kind: 'unknown' })
     expect(result.followWinner).not.toHaveBeenCalled()
     expect(result.persisted).not.toHaveBeenCalled()
-    expect((await result.store.control.load()).cursor?.position).toBe(f.built.searchFrom)
+    expect((await result.store.control.load()).cursor?.position).toBe(f.built.head)
     expect((await result.store.control.load()).commitOnce?.payloadDigest).toBe(
       f.built.payloadDigest,
     )
     expect((await result.store.control.load()).welcomes).toEqual([])
-  },
-)
-
-test.each(['refused', 'unavailable'] as const)(
-  'validator and live winner disagreement holds: live %s',
-  async (kind) => {
-    const f = await fixture()
-    const competitor = (await commitKeyRotation(f.group.committer.handle)).commitMessage
-    const followWinner = vi.fn(async () => ({ kind }))
-    const safety = safetyCallbacks()
-    const search = createControlSearch({
-      ...safety,
-      budget: { maxPasses: 2, maxFetches: 16, maxFrames: 256 },
-      validation: f.port,
-      readEvidence: async () => ({
-        source: f.source,
-        applied: [],
-        cursor: { position: f.built.searchFrom, epoch: f.built.epoch },
-        terminal: false,
-      }),
-      fetch: async () => ({
-        messages: [
-          f.frame(competitor),
-          { ...f.frame(competitor), position: asLogPosition('000102'), payload: f.built.payload },
-        ].map((row) => ({
-          sequenceID: row.position,
-          senderDID: row.senderDID,
-          payload: row.payload,
-          topicID: 'commits',
-          receivedAt: 1,
-        })),
-        head: '000102',
-        oldest: '000101',
-        gap: false,
-      }),
-      followWinner,
-      reconcileAbsent: async () => false,
-      hold: async () => {},
-    })
-    expect(await search.searchLog(f.built)).toEqual({ kind: 'unknown' })
-    expect(followWinner).toHaveBeenCalledOnce()
   },
 )
 
@@ -1996,17 +1773,13 @@ test.each(['outer', 'inner'] as const)(
       kind: 'unavailable',
       reason: 'unsupported-version',
     })
-    const searched = await searchReal(f, ledger.commit, f.port, payload)
+    const searched = await validateInOrder(f, ledger.commit, f.port, payload)
     expect(searched.result).toEqual({ kind: 'unknown' })
     expect(searched.hold).not.toHaveBeenCalled()
     expect(searched.followWinner).not.toHaveBeenCalled()
     const store = searched.store
-    const operation = (await store.control.load()).operations[0]
-    if (operation === undefined) throw new Error('missing saved operation')
-    const now = Date.now()
     await store.control.apply(
       {
-        putOperations: [{ ...operation, enqueuedAt: now, deadline: now + 30000 }],
         putOutcomes: [{ id: 'owed-outcome', opID: null, at: 1, kind: 'unknown' }],
         putWelcomes: [
           { opID: 'owed-welcome', welcome: new Uint8Array([7]), recipients: ['invitee'] },
@@ -2016,7 +1789,7 @@ test.each(['outer', 'inner'] as const)(
     )
     const before = await store.control.load()
     expect(before.commitOnce).not.toBeNull()
-    expect(before.operations).toHaveLength(1)
+    expect(before.operations).toEqual([])
     const loadFixture = (name: string) =>
       import(new URL(`../../rpc/test/fixtures/${name}.ts`, import.meta.url).href)
     const { FakeHub } = (await loadFixture('fake-hub')) as {
@@ -2096,10 +1869,14 @@ test.each(['outer', 'inner'] as const)(
       expect(after.strand).toBeNull()
       expect(after.forkHalt).toBeNull()
       expect(after.controlHold?.reason).not.toBe('unsupported-version')
-      expect(after.commitOnce).toEqual(before.commitOnce)
+      expect(after.commitOnce).toEqual({ ...before.commitOnce, skipped: true, reported: true })
       expect(after.operations).toEqual(before.operations)
-      expect(after.outcomes).toEqual(before.outcomes)
-      expect(after.welcomes).toEqual(before.welcomes)
+      expect(after.outcomes).toEqual(expect.arrayContaining(before.outcomes))
+      expect(
+        after.outcomes.some((row) => row.opID === f.built.opID && row.kind === 'unknown'),
+      ).toBe(true)
+      expect(after.welcomes).toEqual([])
+      expect(deliverWelcome).toHaveBeenCalledWith(before.welcomes[0])
       expect(after.applied).toEqual(before.applied)
       expect(after.responses).toEqual(before.responses)
       expect(onStrand).toHaveBeenCalledWith(
@@ -2110,7 +1887,7 @@ test.each(['outer', 'inner'] as const)(
         }),
       )
       expect(onRecovery).not.toHaveBeenCalled()
-      expect(deliverWelcome).not.toHaveBeenCalled()
+      expect(deliverWelcome).toHaveBeenCalledOnce()
       expect(encodeClientState(f.member.handle.state)).toEqual(f.state)
     } finally {
       await peer.dispose()
@@ -2247,7 +2024,7 @@ test.each([
     expect(await validation?.validateFrame({ ...ledger.frame, payload }, f.built)).toMatchObject(
       expected,
     )
-    const searched = await searchReal(f, ledger.commit, f.port, payload)
+    const searched = await validateInOrder(f, ledger.commit, f.port, payload)
     if (kind === 'handshake-version' || kind === 'commit-version')
       expect(searched.result).toEqual({ kind: 'unknown' })
     else if (kind === 'own-copy' || kind === 'resolver-missing')
@@ -2265,7 +2042,7 @@ test.each([
     ).toBe(true)
     expect(control.commitOnce?.payload).toEqual(f.built.payload)
     expect(control.commitOnce?.journal).toEqual(f.built.journal)
-    expect(control.operations).toHaveLength(1)
+    expect(control.operations).toEqual([])
     expect(control.applied).toEqual([])
     expect(control.responses).toEqual([])
     expect(encodeClientState(f.member.handle.state)).toEqual(f.state)

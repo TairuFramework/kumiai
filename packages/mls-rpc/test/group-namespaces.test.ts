@@ -315,11 +315,15 @@ for (const mode of ['real-mls', 'double'] as const) {
       const { db, groups, seed } = await setup()
       const slot: ControlSlot = {
         opID: 'operation-1',
+        kind: 'invite',
+        revokes: false,
+        enqueuedAt: 1,
+        deadline: 30_001,
         incarnation: 1,
         epoch: 3,
         authenticatorBefore: seed.state.epochAuthenticator.slice(),
         publishID: 'publish-1',
-        searchFrom: asLogPosition('2'),
+        head: asLogPosition('2'),
         expectedHead: asLogPosition('2'),
         payload: new TextEncoder().encode('private-control-payload'),
         payloadDigest: 'payload-3',
@@ -343,7 +347,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         stage: 'intent',
       }
       await control.apply(
-        { putOperations: [intent], cursor: { position: slot.searchFrom, epoch: slot.epoch } },
+        { putOperations: [intent], cursor: { position: slot.head, epoch: slot.epoch } },
         'intent',
       )
       const storedState = await groups.loadState(key)
@@ -356,7 +360,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       slot.journal = encodeControlJournal({
         version: 1,
         source,
-        checkpoint: slot.searchFrom,
+        checkpoint: slot.head,
         sourceState: seed.state.state,
         sourceCredential: seed.trust.credential,
         sourceLedger: seed.state.ledger,
@@ -371,6 +375,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           'retain-build',
         ),
       ).toBe('saved')
+      expect((await control.load()).operations).toEqual([])
       const before = db.snapshot()
       await expect(control.apply({ commitOnce: null }, 'same-epoch-clear')).rejects.toThrow(
         'provider-verified',
@@ -393,7 +398,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       expect(snapshot.operations).toEqual([])
       expect(snapshot.outcomes).toEqual([])
       expect(snapshot.commitOnce).toEqual(expected)
-      expect(snapshot.commitOnceAcceptance).toBeNull()
+      expect(snapshot.commitOnce?.acceptedAs).toBeUndefined()
       snapshot.commitOnce?.journal.fill(0)
       snapshot.commitOnce?.welcome?.bytes.fill(0)
       expect((await reopened.ports(key).control.load()).commitOnce).toEqual(expected)
@@ -406,10 +411,12 @@ for (const mode of ['real-mls', 'double'] as const) {
       expect(stored).toEqual(
         await sealRecord(atRest, address, { snapshot: await control.load(), mutationID: 'ack' }),
       )
-      await reopened.transition(
-        await nextChange(reopened, groupID, 'clear-with-retained-build'),
-        async (stores) => stores.incarnation(1).clearTransport(),
-      )
+      await expect(
+        reopened.transition(
+          await nextChange(reopened, groupID, 'clear-with-live-build'),
+          async (stores) => stores.incarnation(1).clearTransport(),
+        ),
+      ).rejects.toThrow()
       expect((await reopened.ports(key).control.load()).commitOnce).toEqual(expected)
     })
 

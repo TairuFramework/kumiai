@@ -48,27 +48,14 @@ describe('memory control store', () => {
 describe('memory host database', () => {
   let db: MemoryHostDatabase
   const saveBuilt: ConformanceSaveControlBuild = (intent, built, expected, mutationID) => {
-    const { pendingPublish, reconciliation, ...request } = intent
-    if (reconciliation !== undefined) return Promise.resolve('moved')
     return db.saveBuilt(
       'group-A',
       { groupID: 'group-A', incarnation: 1 },
-      {
-        ...request,
-        ...(pendingPublish === undefined
-          ? {}
-          : {
-              pendingPublish: {
-                expectedHead:
-                  pendingPublish.expectedHead === null
-                    ? null
-                    : asLogPosition(pendingPublish.expectedHead),
-              },
-            }),
-      },
+      intent,
       {
         ...built,
-        searchFrom: built.searchFrom === null ? null : asLogPosition(built.searchFrom),
+        acceptedAs: built.acceptedAs === undefined ? undefined : asLogPosition(built.acceptedAs),
+        head: built.head === null ? null : asLogPosition(built.head),
         expectedHead: built.expectedHead === null ? null : asLogPosition(built.expectedHead),
       },
       expected,
@@ -85,7 +72,10 @@ describe('memory host database', () => {
   })
   testControlStoreConformance({
     open: async () => {
-      db = createMemoryHostDatabase({ readIdentity: (state) => decodeControlFixtureState(state) })
+      db = createMemoryHostDatabase({
+        readIdentity: (state) => decodeControlFixtureState(state),
+        isTerminal: (state) => decodeControlFixtureState(state)?.terminal === true,
+      })
       return host()
     },
     reopen: async () => host(),
@@ -126,10 +116,14 @@ function storageSafety(open: () => ConformanceControlHost) {
       await host.control.apply({ putOperations: [intent] }, 'intent')
       slot = {
         opID: intent.id,
+        kind: intent.kind,
+        revokes: intent.revokes,
+        enqueuedAt: intent.enqueuedAt,
+        deadline: intent.deadline,
         incarnation: 1,
         epoch: 1,
         authenticatorBefore: identity.authenticator,
-        searchFrom: null,
+        head: null,
         expectedHead: null,
         publishID: 'prepared',
         payload: new Uint8Array([1]),
@@ -224,7 +218,9 @@ describe('host database control safety', () => {
             op as Operation & { stage: 'intent' },
             {
               ...built,
-              searchFrom: built.searchFrom === null ? null : asLogPosition(built.searchFrom),
+              acceptedAs:
+                built.acceptedAs === undefined ? undefined : asLogPosition(built.acceptedAs),
+              head: built.head === null ? null : asLogPosition(built.head),
               expectedHead: built.expectedHead === null ? null : asLogPosition(built.expectedHead),
             },
             expected,
@@ -270,10 +266,14 @@ async function memorySafetyHost(did: string) {
   const slot: ControlSlot = {
     ...candidate,
     opID: intent.id,
+    kind: intent.kind,
+    revokes: intent.revokes,
+    enqueuedAt: intent.enqueuedAt,
+    deadline: intent.deadline,
     payload: candidate.commit,
     payloadDigest: 'prepared-payload',
     expectedHead: null,
-    searchFrom: null,
+    head: null,
     publishID: 'prepared',
     journal: encodeMemoryControlJournal({
       source,
@@ -288,21 +288,29 @@ async function memorySafetyHost(did: string) {
       throw new Error('Invalid build')
     const proof = {
       source: (await host.readEvidence()).source,
-      from: null,
+      coverage: 'complete' as const,
       position: asLogPosition('1'),
       payloadDigest: slot.payloadDigest,
     }
-    await host.control.apply({ commitOnceAcceptance: proof }, 'accept')
     return () =>
       host.readEvidence().then((evidence) =>
         host.adopt(
           slot.journal,
-          { ...evidence.source, acceptance: proof },
+          { ...evidence.source, occurrence: proof },
           {
             mutationID: 'adopt',
             changes: {
               commitOnce: null,
               deleteOperations: [intent.id],
+              putOutcomes: [
+                {
+                  id: 'own-final',
+                  opID: intent.id,
+                  at: 1,
+                  kind: 'landed',
+                  position: proof.position,
+                },
+              ],
               putApplied: [
                 {
                   epoch: slot.epoch,

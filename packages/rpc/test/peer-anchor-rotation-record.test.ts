@@ -2,7 +2,7 @@ import { describe, expect, test } from 'vitest'
 
 import type { AnchorSlot } from '../src/anchor.js'
 import { digestAppliedCommit } from '../src/classify.js'
-import { landedChanges } from '../src/control/operations.js'
+import { closeControlBuild } from '../src/control/slot.js'
 import type { CapturedPendingRecovery } from '../src/recovery-types.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
@@ -10,6 +10,7 @@ import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { fakeEpochSecret } from './fixtures/fake-crypto.js'
 import {
+  decodeMemoryControlJournal,
   encodeMemoryCommit,
   memoryEntryID,
   requireCapturedRecovery,
@@ -18,7 +19,6 @@ import {
   buildInviteCommit,
   buildLedgerCommit,
   buildRemoveCommit,
-  intent,
   makeMLSPeer,
 } from './fixtures/peer.js'
 
@@ -45,7 +45,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     await bob.peer.replay()
     reject = true
     await bob.peer.enqueue(buildRemoveCommit(bob, 'carol'))
-    await expect.poll(async () => (await bob.control.load()).operations[0]?.stage).toBe('accepted')
+    await expect.poll(async () => (await bob.control.load()).commitOnce?.acceptedAs).toBeDefined()
     expect(bob.mls.epoch()).toBe(1)
     await bob.peer.dispose()
   })
@@ -375,7 +375,6 @@ describe('recovery ordering', { concurrent: false }, () => {
     const hub = new DurableFakeHub()
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { members })
     await bob.peer.replay()
-    const pending = await bob.buildOperation(intent(buildRemoveCommit(bob, 'carol')))
     await bob.peer.enqueue(
       buildRemoveCommit(bob, 'carol', {
         onAdopt: async () => {
@@ -383,26 +382,43 @@ describe('recovery ordering', { concurrent: false }, () => {
         },
       }),
     )
-    await expect.poll(async () => (await bob.control.load()).operations[0]?.stage).toBe('accepted')
+    await expect.poll(async () => (await bob.control.load()).commitOnce?.acceptedAs).toBeDefined()
     expect(bob.mls.epoch()).toBe(1)
     expect((await bob.anchorStore.load())?.pending).toMatchObject({ epochBefore: 1, epochAfter: 2 })
     await bob.peer.dispose()
     const savedControl = await bob.control.load()
-    const op = savedControl.operations[0]
     const slot = savedControl.commitOnce
     if (slot === null) throw new Error('Missing slot')
-    if (op?.stage !== 'accepted') throw new Error('Missing accepted operation')
-    await bob.database.saveState('bob', pending.journal, {
+    const position = slot.acceptedAs
+    if (position === undefined) throw new Error('Missing acknowledged position')
+    const source = (await bob.mls.readEvidence()).source
+    await bob.database.saveState('bob', decodeMemoryControlJournal(slot.journal).candidate, {
+      expected: {
+        ...source,
+        journal: slot.journal,
+        occurrence: { source, position, payloadDigest: slot.payloadDigest, coverage: 'complete' },
+      },
       mutationID: 'committed-replacement',
       anchorLanded: slot.digest,
-      changes: landedChanges(op, op.acceptedAs, {
-        epoch: op.built.epoch,
-        digest: slot.digest,
-        payloadDigest: op.built.payloadDigest,
-        sequenceID: op.acceptedAs,
-        opID: op.id,
-        removed: false,
-      }),
+      changes: {
+        ...closeControlBuild(
+          savedControl,
+          { kind: 'landed', position },
+          Date.now(),
+          crypto.randomUUID(),
+        ),
+        putApplied: [
+          {
+            epoch: slot.epoch,
+            digest: slot.digest,
+            payloadDigest: slot.payloadDigest,
+            sequenceID: position,
+            opID: slot.opID,
+            removed: false,
+          },
+        ],
+        cursor: { position, epoch: slot.epoch + 1 },
+      },
     })
     const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob })
     await restarted.peer.replay()

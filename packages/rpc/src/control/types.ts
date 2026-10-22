@@ -17,21 +17,13 @@ export type AdoptionExpected = {
   identity: EpochIdentity | null
 }
 export type ControlSource = AdoptionExpected & { epoch: number; authenticator: Uint8Array }
-export type FirstValidCommit = {
+export type OwnOccurrence = {
   source: AdoptionExpected
-  from: LogPosition | null
   position: LogPosition
   payloadDigest: string
+  coverage: 'complete' | 'incomplete'
 }
-export type CommitSearchResult =
-  | { kind: 'first-valid'; proof: FirstValidCommit }
-  | { kind: 'superseded'; winner: LogPosition }
-  | { kind: 'absent'; validated?: true }
-  | { kind: 'unknown'; retryHead?: LogPosition | null }
-export type ControlSearchPort = {
-  searchLog(built: BuiltCommit, position?: LogPosition): Promise<CommitSearchResult>
-}
-export type ControlSlot = BuiltCommit & { opID: string }
+export type ControlSlot = BuiltCommit
 export type ControlBuildRef = Pick<
   BuiltCommit,
   'incarnation' | 'epoch' | 'publishID' | 'payloadDigest'
@@ -43,14 +35,14 @@ export type HostBuilt = Pick<
 
 export type ControlSnapshot = {
   commitOnce: ControlSlot | null
-  commitOnceAcceptance: FirstValidCommit | null
+  spentSource: { epoch: number } | null
   controlHold: ControlHold | null
   forkHalt: ForkHalt | null
   recoveryUnavailable: RecoveryUnavailableEvent | null
   strand: {
     reason: 'retention-gap' | 'unprocessable-gap' | 'lost-state' | 'ahead' | 'unsupported-version'
   } | null
-  /** Durable rows: executable FIFO by seq, plus the retained reconciliation set. */
+  /** Unbuilt intents in FIFO order. */
   operations: Array<Operation>
   forkRecoveryAttempt?: ForkRecoveryAttempt | null
   rejoin: StoredRejoinRecord | null
@@ -64,7 +56,7 @@ export type ControlSnapshot = {
 }
 export type ControlChanges = {
   commitOnce?: ControlSlot | null
-  commitOnceAcceptance?: FirstValidCommit | null
+  spentSource?: { epoch: number } | null
   controlHold?: ControlHold | null
   // Requires provider-owned report provenance and transaction authority.
   clearAppHold?: { eventID: string; reportMutationID: string }
@@ -90,7 +82,7 @@ export type ControlChanges = {
 }
 /** Control changes committed with an adoption's state save (D5). */
 export type AdoptionWrite = {
-  expected?: AdoptionExpected & { acceptance?: FirstValidCommit; journal?: Uint8Array }
+  expected?: AdoptionExpected & { occurrence?: OwnOccurrence; journal?: Uint8Array }
   changes: ControlChanges
   mutationID: string
   /** The `advance` of the pending anchor rotation this adoption lands, marked in the same transaction. */
@@ -99,7 +91,7 @@ export type AdoptionWrite = {
 export type ControlAdoptionPort = {
   adopt(
     journal: Uint8Array,
-    expected: AdoptionExpected & { acceptance: FirstValidCommit },
+    expected: AdoptionExpected & { occurrence: OwnOccurrence },
     write: AdoptionWrite,
   ): Promise<'installed' | 'noop' | 'moved'>
 }
@@ -110,18 +102,6 @@ export type ControlStore = {
   apply(changes: ControlChanges, mutationID: string): Promise<void>
   /** The `mutationID` of the last committed `apply`. */
   lastMutation(): Promise<string | null>
-}
-
-export type AcceptanceUncertainty = {
-  cause: 'unavailable' | 'gap' | 'ahead' | 'copy-mismatch'
-  at: LogPosition | null
-}
-
-/** Adoption moves rows into reconciliation atomically with source epoch advancement. */
-export function executableOperations(
-  snapshot: Pick<ControlSnapshot, 'operations'>,
-): Array<Operation> {
-  return snapshot.operations.filter((op) => op.reconciliation === undefined)
 }
 
 export type OperationRequest = {
@@ -138,32 +118,24 @@ export type Operation = OperationRequest & {
   seq: number
   enqueuedAt: number
   deadline: number
-  /** Persisted before handoff. Absence at this head cannot exclude a delayed CAS. */
-  pendingPublish?: { expectedHead: LogPosition | null }
-  /** Positive hub acknowledgement, independent of first-valid validation. */
-  hubAcceptedAt?: LogPosition
-  unknownReported?: true
-  /** Retained after authenticated adoption consumes the source slot before ordering is resolved.
-   * This set is unbounded by design until a later task introduces a storage policy. */
-  reconciliation?: {
-    slot: ControlSlot
-    acceptance: FirstValidCommit | null
-    /** Current unresolved evidence; only a validated search can discharge it. */
-    uncertainty?: AcceptanceUncertainty
-  }
-} & (
-    | { stage: 'intent' }
-    | { stage: 'built'; built: ControlBuildRef }
-    | {
-        stage: 'accepted'
-        built: ControlBuildRef
-        acceptedAs: LogPosition
-        acceptance: FirstValidCommit
-      }
-  )
+  stage: 'intent'
+}
+export function executableOperations(
+  snapshot: Pick<ControlSnapshot, 'operations'>,
+): Array<Operation> {
+  return snapshot.operations
+}
 export type BuiltCommit = {
+  opID: string
+  kind: OperationRequest['kind']
+  revokes: boolean
+  enqueuedAt: number
+  deadline: number
+  acceptedAs?: LogPosition
+  skipped?: true
+  reported?: true
   incarnation: number
-  searchFrom: LogPosition | null
+  head: LogPosition | null
   publishID: string
   expectedHead: LogPosition | null
   /** Identity of the state the commit was built from. */

@@ -542,7 +542,7 @@ type Fixture = Awaited<ReturnType<typeof createRegistryFixture>>
 const movedBinding = { targetID: 'destination-hub', commitTopicID: `moved/${key.groupID}` }
 const freshControl: ControlSnapshot = {
   commitOnce: null,
-  commitOnceAcceptance: null,
+  spentSource: null,
   controlHold: null,
   forkHalt: null,
   recoveryUnavailable: null,
@@ -594,19 +594,6 @@ const blockedInputs: Array<[string, Partial<Parameters<typeof canMoveCurrent>[0]
   [
     'commit slot',
     { control: { ...freshControl, commitOnce: {} as ControlSnapshot['commitOnce'] } },
-  ],
-  [
-    'unsettled acceptance',
-    {
-      control: {
-        ...freshControl,
-        commitOnceAcceptance: {} as ControlSnapshot['commitOnceAcceptance'],
-      },
-    },
-  ],
-  [
-    'acceptance unknown',
-    { control: { ...freshControl, controlHold: { reason: 'acceptance-unknown', position: null } } },
   ],
   [
     'unsupported version',

@@ -19,14 +19,13 @@ import {
   asLogPosition,
   type ControlSlot,
   commitTopic,
-  controlBuildRef,
   digestAppliedCommit,
   encodeCommitFrame,
   encodeHandshakeFrame,
   encodeLedgerEntries,
-  type FirstValidCommit,
   HANDSHAKE_KIND,
   type Operation,
+  type OwnOccurrence,
 } from '@kumiai/rpc'
 import { createGroupPeerWithControlWalk } from '@kumiai/rpc/testing'
 import type { CommitOnceEvidence, StorageTestPorts } from '@kumiai/rpc-conformance'
@@ -958,7 +957,7 @@ export async function createControlCrashHarness(mode: 'real-mls' | 'double', see
     }
     const apply = control.apply.bind(control)
     control.apply = async (changes, mutationID) => {
-      if (changes.commitOnceAcceptance != null) hooks.beforeAccept?.()
+      if (changes.commitOnce?.acceptedAs !== undefined) hooks.beforeAccept?.()
       return apply(changes, mutationID)
     }
     const source = async () => (await groups.readEvidence(key)).source
@@ -1173,33 +1172,20 @@ export async function createControlCrashHarness(mode: 'real-mls' | 'double', see
       return { intent: op, slot, expected }
     }
     const accept = async (slot: ControlSlot, mutationID: string) => {
-      const proof: FirstValidCommit = {
+      const proof: OwnOccurrence = {
         source: await source(),
-        from: slot.searchFrom,
+        coverage: 'complete',
         position: asLogPosition('000000000001'),
         payloadDigest: slot.payloadDigest,
       }
-      const op = (await control.load()).operations.find((row) => row.id === slot.opID)
-      if (op === undefined) throw new Error('Missing crash operation')
-      await control.apply(
-        {
-          commitOnceAcceptance: proof,
-          putOperations: [
-            {
-              ...op,
-              stage: 'accepted',
-              built: controlBuildRef(slot),
-              acceptedAs: proof.position,
-              acceptance: proof,
-            },
-          ],
-        },
-        mutationID,
-      )
+      const current = (await control.load()).commitOnce
+      if (current === null || current.opID !== slot.opID)
+        throw new Error('Missing live crash build')
+      await control.apply({ commitOnce: { ...current, acceptedAs: proof.position } }, mutationID)
       return proof
     }
     const adopt = async (
-      expected: AdoptionExpected & { acceptance: FirstValidCommit },
+      expected: AdoptionExpected & { occurrence: OwnOccurrence },
       write: AdoptionWrite,
       fault: {
         skipTrust?: boolean
@@ -1318,13 +1304,14 @@ export async function runControlProofConflict(
     await h.controlWalk.stepOperation(intent.id)
     const built = (await h.control.load()).commitOnce
     if (built === null) throw new Error('Missing saved slot')
-    await h.hub.publish({
-      senderDID: h.localDID,
-      topicID: await h.topic(),
-      payload: built.payload,
-      publishID: built.publishID,
-      retain: 'log',
-    })
+    if (stage === 'adoption')
+      await h.hub.publish({
+        senderDID: h.localDID,
+        topicID: await h.topic(),
+        payload: built.payload,
+        publishID: built.publishID,
+        retain: 'log',
+      })
   }
   const baseline = h.publications.length
   const controlBefore = await h.control.load()
@@ -1339,14 +1326,14 @@ export async function runControlProofConflict(
   let completed = false
   let latch: ReturnType<typeof h.fixture.holdNextSeal> | undefined
   try {
-    const saving = h.controlWalk.stepOperation((await h.operation()).id).then(
+    const saving = h.controlWalk.stepOperation(intent.id).then(
       () => null,
       (error: unknown) => error,
     )
     fault = await started.promise
     await fault.rejected
     await fault.barrierWaiting
-    expect(h.publications).toHaveLength(baseline)
+    expect(h.publications).toHaveLength(baseline + (stage === 'accepted' ? 1 : 0))
     expect(calls).toEqual([])
     const otherChange = await nextChange(h.groups, 'group-B', 'draining')
     latch = h.fixture.holdNextSeal()
@@ -1420,7 +1407,7 @@ export async function runControlProofConflict(
         return row.publishID
       }),
       expectedHeads: publications.map((row) => row.expectedHead ?? null),
-      searchFrom: controlBefore.commitOnce?.searchFrom ?? null,
+      searchFrom: controlBefore.commitOnce?.head ?? null,
       slotAfterAck: (await reopened.control.load()).commitOnce,
       winnerFollowed: false,
       candidateMatchesReceiver: false,

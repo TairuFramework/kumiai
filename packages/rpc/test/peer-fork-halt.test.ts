@@ -5,7 +5,6 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { COMMIT_FRAME_VERSION, decodeCommitFrame, encodeCommitFrame } from '../src/commit-frame.js'
 import type { ForkHalt, GroupForkEvidence, SafetyHold } from '../src/control/safety.js'
 import { forkEventID, recoveryUnavailableEventID } from '../src/control/safety.js'
-import type { WelcomeObligation } from '../src/control/types.js'
 import { asLogPosition } from '../src/cursor.js'
 import { ControlSafetyImmutableError, StorageOutcomeUnknownError } from '../src/errors.js'
 import {
@@ -21,7 +20,6 @@ import { commitTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import {
-  buildInviteCommit,
   buildLedgerCommit,
   makeMLSPeer,
   seedBuiltOperation,
@@ -52,109 +50,8 @@ async function fixture(onSafetyEvent = vi.fn()) {
   return { member, hub, onSafetyEvent }
 }
 
-async function writeSafety(member: TestPeer, reason: NonNullable<SafetyHold>) {
-  await member.control.apply(
-    reason === 'fork-halted'
-      ? { forkHalt: { eventID: forkEventID(member.control.key), evidence, detectedAt: 1 } }
-      : {
-          recoveryUnavailable: {
-            ...member.control.key,
-            id: recoveryUnavailableEventID(member.control.key),
-            kind: 'group:recovery-unavailable',
-            reason: 'trust-unreadable',
-          },
-        },
-    'host-safety',
-  )
-}
-
-test.each(['fork-halted', 'recovery-unavailable'] as const)(
-  'storage-written %s blocks an uncommitted Welcome with cached acceptance before refresh',
-  async (reason) => {
-    const hub = new FakeHub()
-    const member = makeMLSPeer(hub, 'alice', secret, { adopt: async () => 'moved' })
-    peers.push(member)
-    await member.peer.replay()
-    const op = await seedBuiltOperation(member, buildInviteCommit(member, 'bob'))
-    const restore = vi.spyOn(member.validation, 'restoreValidation')
-    const fetch = vi.spyOn(hub, 'fetchTopic')
-    const apply = member.control.apply.bind(member.control)
-    let wroteSafety = false
-    vi.spyOn(member.control, 'apply').mockImplementation(async (changes, id) => {
-      await apply(changes, id)
-      if (changes.controlHold?.reason === 'acceptance-unknown' && !wroteSafety) {
-        wroteSafety = true
-        await writeSafety(member, reason)
-        expect(member.controlWalk.safetyHold()).toBeNull()
-        restore.mockClear()
-        fetch.mockClear()
-      }
-    })
-    await member.controlWalk.stepOperation(op.id)
-    expect(wroteSafety).toBe(true)
-    expect(member.welcomes).toEqual([])
-    expect(restore).not.toHaveBeenCalled()
-    expect(fetch).not.toHaveBeenCalled()
-    expect((await member.control.load()).welcomes).toMatchObject([{ opID: op.id }])
-    expect((await member.control.load()).welcomes[0]?.committed).not.toBe(true)
-    expect(member.controlWalk.safetyHold()).toBe(reason)
-  },
-)
-
-test.each(
-  (['fork-halted', 'recovery-unavailable'] as const).flatMap((reason) =>
-    [false, true].map((committed) => [reason, committed] as const),
-  ),
-)(
-  'storage-written %s gates Welcome retry before refresh (committed=%s)',
-  async (reason, committed) => {
-    const hub = new FakeHub()
-    let unavailable = true
-    const deliver = vi.fn(async (row: WelcomeObligation) => {
-      if (unavailable) throw new Error('Transport unavailable')
-      member.welcomes.push(row.opID)
-    })
-    const member = makeMLSPeer(hub, 'alice', secret, { deliverWelcome: deliver })
-    peers.push(member)
-    await member.peer.replay()
-    vi.useFakeTimers()
-    const request = buildInviteCommit(member, 'bob')
-    await member.peer.commit(request)
-    await vi.advanceTimersByTimeAsync(0)
-    let opID = request.id
-    if (!committed) {
-      const op = await seedBuiltOperation(
-        member,
-        buildInviteCommit(member, 'carol'),
-        '000000000002',
-      )
-      if (op.slot.welcome === null) throw new Error('Missing Welcome')
-      opID = op.id
-      await member.control.apply(
-        {
-          deleteWelcomes: [request.id],
-          putWelcomes: [
-            { opID, welcome: op.slot.welcome.bytes, recipients: op.slot.welcome.recipients },
-          ],
-        },
-        'uncommitted-welcome',
-      )
-    }
-    await writeSafety(member, reason)
-    expect(member.controlWalk.safetyHold()).toBeNull()
-    const restore = vi.spyOn(member.validation, 'restoreValidation')
-    const fetch = vi.spyOn(hub, 'fetchTopic')
-    deliver.mockClear()
-    unavailable = false
-    await vi.advanceTimersByTimeAsync(1_000)
-    expect(restore).not.toHaveBeenCalled()
-    expect(fetch).not.toHaveBeenCalled()
-    expect(deliver).toHaveBeenCalledTimes(committed ? 1 : 0)
-    expect(member.welcomes).toEqual(committed ? [opID] : [])
-    expect((await member.control.load()).welcomes).toHaveLength(committed ? 0 : 1)
-    expect(member.controlWalk.safetyHold()).toBe(reason)
-  },
-)
+// R3: independent Welcome service must honour safety/lifecycle routing without historical validation.
+test.todo('independent Welcome service observes durable safety and lifecycle routing before retry')
 
 test('fork halt latches immediately, persists only safety, and notifies once after proof', async () => {
   const { member, onSafetyEvent } = await fixture()
@@ -342,58 +239,6 @@ test.each(['fork-halted', 'recovery-unavailable'] as const)(
   },
 )
 
-test.each(['fork-halted', 'recovery-unavailable'] as const)(
-  'storage-written %s cleanup of a lingering applied operation preserves a real strand',
-  async (reason) => {
-    const { member, hub } = await fixture()
-    const op = await seedBuiltOperation(member, buildLedgerCommit(member, []))
-    const position = asLogPosition('000001')
-    await member.control.apply(
-      {
-        strand: { reason: 'ahead' },
-        cursor: { position, epoch: op.slot.epoch + 1, stranded: true },
-        putApplied: [
-          {
-            epoch: op.slot.epoch,
-            digest: op.slot.digest,
-            payloadDigest: op.slot.payloadDigest,
-            sequenceID: position,
-            opID: op.id,
-            removed: false,
-          },
-        ],
-        putOutcomes: [{ id: op.id, opID: op.id, at: 1, kind: 'landed', position }],
-      },
-      'applied-with-real-strand',
-    )
-    const before = await member.control.load()
-    await writeSafety(member, reason)
-    expect(member.controlWalk.safetyHold()).toBeNull()
-    const epoch = vi.spyOn(member.mls, 'readEpoch')
-    const read = vi.spyOn(member.mls, 'readEvidence')
-    const restore = vi.spyOn(member.validation, 'restoreValidation')
-    const recovery = vi.spyOn(member.mls, 'createRecoveryRequest')
-    const fetch = vi.spyOn(hub, 'fetchTopic')
-    const publish = vi.spyOn(hub, 'publish')
-    await member.peer.replay()
-    await member.peer.replay()
-    const after = await member.control.load()
-    expect(after.operations).toEqual([])
-    expect(after.cursor).toEqual(before.cursor)
-    expect(after.strand).toEqual(before.strand)
-    expect(after.commitOnce).toEqual(before.commitOnce)
-    expect(after.applied).toEqual(before.applied)
-    expect(after.outcomes).toEqual(before.outcomes)
-    expect(member.controlWalk.safetyHold()).toBe(reason)
-    expect(epoch).not.toHaveBeenCalled()
-    expect(read).not.toHaveBeenCalled()
-    expect(restore).not.toHaveBeenCalled()
-    expect(recovery).not.toHaveBeenCalled()
-    expect(fetch).not.toHaveBeenCalled()
-    expect(publish).not.toHaveBeenCalled()
-  },
-)
-
 test('an unsupported version fetched after a host halt preserves the safety latch', async () => {
   const { member, hub } = await fixture()
   const entered = Promise.withResolvers<void>()
@@ -411,11 +256,7 @@ test('an unsupported version fetched after a host halt preserves the safety latc
       messages: [{ topicID: commitTopic(secret), sequenceID: position, senderDID: 'bob', payload }],
     }
   })
-  const walking = member.controlWalk.walkCommits({
-    through: position,
-    range: null,
-    work: { takeFetch: () => true, takeFrame: () => true },
-  })
+  const walking = member.controlWalk.walkCommits()
   await entered.promise
   const halting = member.controlWalk.haltFork(evidence)
   expect(member.controlWalk.safetyHold()).toBe('fork-halted')
@@ -494,67 +335,9 @@ test.each(['handshake', 'commit-frame', 'sealed-entries'] as const)(
   },
 )
 
-test.each(['intent', 'built', 'pending', 'accepted'] as const)(
-  'live and restarted %s deadlines under halt use storage only',
-  async (stage) => {
-    for (const restart of [false, true]) {
-      const { member, hub } = await fixture()
-      const request = buildLedgerCommit(member, [])
-      const prepared =
-        stage === 'intent'
-          ? { ...request, stage: 'intent' as const, seq: 1, enqueuedAt: 0, deadline: 0 }
-          : await seedBuiltOperation(
-              member,
-              request,
-              stage === 'accepted' ? '000000000001' : undefined,
-            )
-      const op = {
-        ...prepared,
-        deadline: 0,
-        ...(stage === 'pending' ? { pendingPublish: { expectedHead: null } } : {}),
-      }
-      await member.control.apply({ putOperations: [op] }, 'expired')
-      await member.controlWalk.haltFork(evidence)
-      const before = await member.control.load()
-      let runner = member
-      if (restart) {
-        await member.peer.dispose()
-        await member.peer.drained()
-        runner = makeMLSPeer(hub, 'alice', secret, { restartOf: member })
-        peers.push(runner)
-      }
-      const fetch = vi.spyOn(hub, 'fetchTopic')
-      const publish = vi.spyOn(hub, 'publish')
-      const epoch = vi.spyOn(runner.mls, 'readEpoch')
-      const read = vi.spyOn(runner.mls, 'readEvidence')
-      const recover = vi.spyOn(runner.mls, 'createRecoveryRequest')
-      await runner.peer.replay()
-      await vi.waitFor(async () =>
-        expect((await runner.control.load()).operations).toMatchObject(
-          stage === 'intent' ? [] : [{ id: op.id }],
-        ),
-      )
-      const after = await runner.control.load()
-      expect(after.outcomes).toMatchObject(
-        stage === 'pending' ? [] : [{ kind: stage === 'intent' ? 'lost' : 'unknown' }],
-      )
-      if (stage === 'built' || stage === 'accepted')
-        expect(after.operations[0]?.unknownReported).toBe(true)
-      expect(after.commitOnce).toEqual(before.commitOnce)
-      expect(after.forkHalt).toEqual(before.forkHalt)
-      expect(after.cursor).toEqual(before.cursor)
-      expect(after.strand).toEqual(before.strand)
-      expect(fetch).not.toHaveBeenCalled()
-      expect(publish).not.toHaveBeenCalled()
-      expect(epoch).not.toHaveBeenCalled()
-      expect(read).not.toHaveBeenCalled()
-      expect(recover).not.toHaveBeenCalled()
-      await runner.peer.ack(after.outcomes[0]?.id ?? request.id)
-      expect((await runner.control.load()).commitOnce).toEqual(before.commitOnce)
-      fetch.mockRestore()
-      publish.mockRestore()
-    }
-  },
+// R3: clock-only provisional reporting under safety halt retains the build and reports once.
+test.todo(
+  'live-build deadlines report provisional unknown under a halt using storage only across restart',
 )
 
 test('control publication rechecks safety after suspended source evidence', async () => {
@@ -565,7 +348,7 @@ test('control publication rechecks safety after suspended source evidence', asyn
   const member = makeMLSPeer(hub, 'alice', secret, {
     readEvidence: async () => {
       const value = await member.mls.readEvidence()
-      if (suspend && (await member.control.load()).operations[0]?.pendingPublish !== undefined) {
+      if (suspend && (await member.control.load()).commitOnce !== null) {
         entered.resolve()
         await release.promise
       }
@@ -584,7 +367,7 @@ test('control publication rechecks safety after suspended source evidence', asyn
   await stepping
   await halting
   expect(publish).not.toHaveBeenCalled()
-  expect((await member.control.load()).operations[0]?.pendingPublish).toBeDefined()
+  expect((await member.control.load()).commitOnce).toEqual(op.slot)
 })
 
 test('a differing halt loaded after rollback stops all further writes', async () => {
@@ -741,11 +524,7 @@ async function observedFork(branch: 'losing' | 'winning') {
       revealed = true
       hub.revealTo('alice', remote.sequenceID)
       hub.revealTo('alice', next.sequenceID)
-      return member.controlWalk.walkCommits({
-        through: asLogPosition(next.sequenceID),
-        range: null,
-        work: { takeFetch: () => true, takeFrame: () => true },
-      })
+      return member.controlWalk.walkCommits()
     },
   }
 }
@@ -866,11 +645,7 @@ test('identical re-sealed commit stays history below the cursor', async () => {
   await member.peer.replay()
   const before = await member.control.load()
   hub.revealTo('alice', first.sequenceID)
-  await member.controlWalk.walkCommits({
-    through: asLogPosition(second.sequenceID),
-    range: null,
-    work: { takeFetch: () => true, takeFrame: () => true },
-  })
+  await member.controlWalk.walkCommits()
   await member.peer.replay()
   const after = await member.control.load()
   expect(after.forkHalt).toBeNull()

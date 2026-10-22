@@ -121,10 +121,14 @@ async function safetyHost(mode: 'real' | 'transactional', id: string) {
   const candidate = encodeClientState(rotation.newGroup.state)
   const slot: ControlSlot = {
     opID: intent.id,
+    kind: intent.kind,
+    revokes: intent.revokes,
+    enqueuedAt: intent.enqueuedAt,
+    deadline: intent.deadline,
     incarnation: 1,
     epoch: 0,
     authenticatorBefore: handle.state.keySchedule.epochAuthenticator.slice(),
-    searchFrom: null,
+    head: null,
     expectedHead: null,
     publishID: 'rotation',
     payload: rotation.commitMessage,
@@ -203,15 +207,24 @@ async function safetyHost(mode: 'real' | 'transactional', id: string) {
     if ((await saveBuilt()) !== 'saved') throw new Error('Invalid prepared build')
     const proof = {
       source: await source(),
-      from: null,
+      coverage: 'complete' as const,
       position: asLogPosition('1'),
       payloadDigest: slot.payloadDigest,
     }
-    await control.apply({ commitOnceAcceptance: proof }, 'accept')
+    await control.apply({ commitOnce: { ...slot, acceptedAs: proof.position } }, 'accept')
     const write: AdoptionWrite = {
       mutationID: 'adopt',
       changes: {
         commitOnce: null,
+        putOutcomes: [
+          {
+            id: crypto.randomUUID(),
+            opID: slot.opID,
+            at: Date.now(),
+            kind: 'landed',
+            position: proof.position,
+          },
+        ],
         deleteOperations: [intent.id],
         putApplied: [
           {
@@ -227,7 +240,7 @@ async function safetyHost(mode: 'real' | 'transactional', id: string) {
       },
     }
     return async () =>
-      adoption.adopt(slot.journal, { ...(await source()), acceptance: proof }, write)
+      adoption.adopt(slot.journal, { ...(await source()), occurrence: proof }, write)
   }
   return {
     control,

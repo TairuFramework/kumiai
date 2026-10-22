@@ -4,9 +4,14 @@ import { createMemoryControlStore } from '../../rpc-conformance/src/memory-contr
 import { classifyCommit } from '../src/classify.js'
 import { appliedRows } from '../src/control/forks.js'
 import { forkEventID } from '../src/control/safety.js'
-import { controlBuildRef } from '../src/control/slot.js'
 import { applyChanges, applyResolved } from '../src/control/store.js'
-import type { AppliedCommit, ControlSnapshot, Operation, Outcome } from '../src/control/types.js'
+import type {
+  AppliedCommit,
+  BuiltCommit,
+  ControlSnapshot,
+  Operation,
+  Outcome,
+} from '../src/control/types.js'
 import { asLogPosition, type LogPosition } from '../src/cursor.js'
 import type { StrandObservation } from '../src/peer.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
@@ -14,16 +19,11 @@ import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
 import { memoryEntryID } from './fixtures/memory-group-mls.js'
-import {
-  buildLedgerCommit,
-  makeMLSPeer,
-  seedBuiltOperation,
-  type TestPeer,
-} from './fixtures/peer.js'
+import { buildLedgerCommit, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
 
 const empty = (): ControlSnapshot => ({
   commitOnce: null,
-  commitOnceAcceptance: null,
+  spentSource: null,
   controlHold: null,
   forkHalt: null,
   recoveryUnavailable: null,
@@ -47,54 +47,38 @@ const applied = (epoch: number, opID: string | null = null): AppliedCommit => ({
   sequenceID: String(epoch).padStart(12, '0'),
   removed: false,
 })
-function operation(id: string, seq: number, stage: Operation['stage']): Operation {
-  const base = {
+function operation(id: string, seq: number): Operation {
+  return {
     id,
     seq,
-    kind: 'ledger' as const,
+    kind: 'ledger',
     revokes: false,
     body: new Uint8Array([1]),
     enqueuedAt: 100,
     deadline: 30_100,
+    stage: 'intent',
   }
-  if (stage === 'intent') return { ...base, stage }
-  const built = {
+}
+function build(op: Operation): BuiltCommit {
+  return {
+    opID: op.id,
+    kind: op.kind,
+    revokes: op.revokes,
+    enqueuedAt: op.enqueuedAt,
+    deadline: op.deadline,
     epoch: 1,
     authenticatorBefore: new Uint8Array([1]),
     incarnation: 1,
-    publishID: `publish-${id}`,
+    head: null,
+    publishID: `publish-${op.id}`,
     expectedHead: null,
-    searchFrom: null,
     payload: new Uint8Array([2]),
-    payloadDigest: `payload-${id}`,
-    digest: `commit-${id}`,
+    payloadDigest: `payload-${op.id}`,
+    digest: `commit-${op.id}`,
     bodies: [],
     journal: new Uint8Array([3]),
     welcome: null,
   }
-  return stage === 'built'
-    ? { ...base, stage, built: controlBuildRef(built) }
-    : {
-        ...base,
-        stage,
-        built: controlBuildRef(built),
-        acceptedAs: asLogPosition(String(seq).padStart(12, '0')),
-        acceptance: {
-          source: {
-            key: { groupID: 'group-A', incarnation: 1 },
-            stateVersion: 1,
-            identity: {
-              groupID: 'group-A',
-              incarnation: 1,
-              epoch: 1,
-              authenticator: new Uint8Array([1]),
-            },
-          },
-          from: null,
-          position: asLogPosition(String(seq).padStart(12, '0')),
-          payloadDigest: built.payloadDigest,
-        },
-      }
 }
 const landed = (opID: string, epoch: number): Outcome => ({
   id: opID,
@@ -119,17 +103,16 @@ describe('fork history preservation', () => {
   })
 
   test('an own winner still identifies a losing divergence without repairing history', () => {
-    const own = operation('winning-invite', 1, 'accepted')
-    if (own.stage !== 'accepted') throw new Error('Missing acceptance')
+    const own = build(operation('winning-invite', 1))
     const snapshot = {
       ...empty(),
-      operations: [{ ...own, built: { ...own.built, epoch: 2 } }],
+      commitOnce: { ...own, epoch: 2 },
       applied: [applied(2)],
     }
     expect(
       classifyCommit({
         header: { epoch: 2 },
-        sequenceID: own.acceptedAs,
+        sequenceID: '000000000001',
         commitDigest: 'commit-winning-invite',
         state: { localDID: 'bob', epoch: 3, appliedByEpoch: appliedRows(snapshot) },
       }),
@@ -143,11 +126,11 @@ describe('fork history preservation', () => {
     (epoch) => {
       const snapshot: ControlSnapshot = {
         ...empty(),
-        operations: [
-          operation('accepted', 1, 'accepted'),
-          operation('intent', 2, 'intent'),
-          operation('built', 3, 'built'),
-        ],
+        commitOnce: {
+          ...build(operation('accepted', 1)),
+          acceptedAs: asLogPosition('000000000001'),
+        },
+        operations: [operation('intent', 2)],
         applied: [applied(1, 'older'), applied(2, 'own'), applied(3), applied(4, 'later')],
         outcomes: [landed('older', 1), landed('own', 2), landed('later', 4)],
         welcomes: [{ opID: 'accepted', welcome: new Uint8Array([7]), recipients: ['dave'] }],
@@ -181,7 +164,7 @@ describe('fork history preservation', () => {
       const store = provider === 'host' ? database.control('group', key) : double
       await store.apply(
         {
-          putOperations: [operation('accepted', 1, 'accepted')],
+          putOperations: [operation('intent', 1)],
           putApplied: [applied(1), applied(2, 'own')],
           putOutcomes: [landed('own', 2)],
         },
@@ -336,75 +319,6 @@ describe('durable fork halts', () => {
     expect((await bob.control.load()).applied).toEqual(before.applied)
   })
 
-  test.each(['live', 'restart'] as const)(
-    'a moved acceptance with different payload preserves unknown work on %s',
-    async (mode) => {
-      const hub = new FakeHub()
-      const bob = member(hub, { adopt: async () => 'moved' })
-      await bob.peer.replay()
-      const result = await publishCommit({
-        hub,
-        senderDID: 'alice',
-        recoverySecret: secret,
-        epoch: 1,
-      })
-      await expect.poll(() => bob.mls.epoch()).toBe(2)
-      const op = await seedBuiltOperation(bob, buildLedgerCommit(bob, []), result.sequenceID)
-      if (op.stage !== 'accepted') throw new Error('Missing acceptance')
-      const snapshot = await bob.control.load()
-      const row = snapshot.applied[0]
-      if (row == null) throw new Error('Missing applied row')
-      const accepted = { ...op, built: { ...op.built, epoch: 1, digest: row.digest } }
-      expect(accepted.built.payloadDigest).not.toBe(row.payloadDigest)
-      await bob.control.apply({ putOperations: [accepted] }, 'conflicting-acceptance')
-      let runner = bob
-      if (mode === 'restart') {
-        await bob.peer.dispose()
-        await bob.peer.drained()
-        runner = member(hub, { restartOf: bob, adopt: async () => 'moved' })
-        await runner.peer.replay()
-      } else {
-        await runner.peer.enqueue(buildLedgerCommit(runner, []))
-        await runner.peer.replay()
-      }
-      expect(await runner.control.load()).toMatchObject({
-        operations: [
-          accepted,
-          ...(mode === 'live' ? [expect.objectContaining({ stage: 'intent' })] : []),
-        ],
-        outcomes: [],
-        applied: snapshot.applied,
-        forkHalt: null,
-        controlHold: { reason: 'acceptance-unknown' },
-        strand: snapshot.strand,
-        cursor: snapshot.cursor,
-      })
-      expect(
-        hub.published.filter((message) => message.topicID === commitTopic(secret)),
-      ).toHaveLength(1)
-      const held = await runner.control.load()
-      expect(
-        hub.published.filter(
-          (message) => message.topicID === rendezvousTopic(secret) && message.senderDID === 'bob',
-        ),
-      ).toEqual([])
-      await runner.peer.dispose()
-      await runner.peer.drained()
-      hub.trim(commitTopic(secret), '999999999999')
-      const again = member(hub, { restartOf: runner })
-      await again.peer.replay()
-      expect((await again.control.load()).controlHold).toEqual(held.controlHold)
-      expect((await again.control.load()).commitOnce).toEqual(held.commitOnce)
-      expect((await again.control.load()).cursor).toEqual(held.cursor)
-      expect((await again.control.load()).strand).toEqual(held.strand)
-      expect(
-        hub.published.filter(
-          (message) => message.topicID === rendezvousTopic(secret) && message.senderDID === 'bob',
-        ),
-      ).toEqual([])
-    },
-  )
-
   async function restartStoredForkHalt(
     options: { acceptedInvite?: boolean; collision?: boolean; reenact?: boolean } = {},
   ) {
@@ -425,7 +339,7 @@ describe('durable fork halts', () => {
       ? [applied(1, 'own')]
       : [applied(0, 'older'), applied(1, 'own'), applied(2, 'later')]
     const accepted = {
-      ...operation('invite', 1, 'accepted'),
+      ...operation('invite', 1),
       kind: 'invite' as const,
       enqueuedAt: Date.now(),
       deadline: Date.now() + 30_000,
@@ -488,7 +402,7 @@ describe('durable fork halts', () => {
   })
   test('a halted losing-branch invite retains its operation and membership', async () => {
     const { restarted, snapshot } = await restartStoredForkHalt({ acceptedInvite: true })
-    expect(snapshot.operations).toMatchObject([{ id: 'invite', stage: 'accepted' }])
+    expect(snapshot.operations).toMatchObject([{ id: 'invite', stage: 'intent' }])
     expect(restarted.mls.leaves()).toContain('dave')
     expect(snapshot.outcomes.some((outcome) => outcome.opID === 'invite')).toBe(false)
   })

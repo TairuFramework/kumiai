@@ -326,7 +326,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const access = createRegistryHandleAccess({ access: registryAccess })
       const { candidate, expected: previous, write } = await f.acceptedOrdinary(registryAccess)
       const bytes = write.expected?.journal
-      const proof = write.expected?.acceptance
+      const proof = write.expected?.occurrence
       if (bytes === undefined || proof === undefined) throw new Error('Missing accepted journal')
       if (mode === 'real-mls') {
         const sender = await f.restoreCommittedSender(groupID)
@@ -339,7 +339,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const control = f.device.groups.ports(registryAccess.key).control
       const restoreCandidate = async () => candidate
       const port = createControlAdoptionPort({ access, control, restoreCandidate })
-      expect(await port.adopt(bytes, { ...previous, acceptance: proof }, write)).toBe('installed')
+      expect(await port.adopt(bytes, { ...previous, occurrence: proof }, write)).toBe('installed')
       expect(access.epoch()).toBe(1)
       if (mode === 'real-mls')
         expect(
@@ -347,7 +347,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         ).toEqual(receiveTree)
       const installed = await f.inspectRows()
       const current = await access.readControl(async ({ source }) => source)
-      expect(await port.adopt(bytes, { ...current, acceptance: proof }, write)).toBe('noop')
+      expect(await port.adopt(bytes, { ...current, occurrence: proof }, write)).toBe('noop')
       expect(await f.inspectRows()).toEqual(installed)
       const journal = decodeControlJournal(bytes)
       expect(journal.source.identity?.epoch).toBe(0)

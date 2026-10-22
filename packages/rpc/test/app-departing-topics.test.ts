@@ -8,7 +8,6 @@ import { RETAINED_EPOCHS_MAX } from '../src/app-frame.js'
 import type * as AppLaneModule from '../src/app-lane.js'
 import { type AppLaneParams, createAppLane } from '../src/app-lane.js'
 import { AppFrameStorageError, FrameEpochError, type PendingAppFrame } from '../src/crypto.js'
-import { asLogPosition } from '../src/cursor.js'
 import { adaptBusHandlers } from '../src/handlers.js'
 import { AppFetchBusyError, createHubMux } from '../src/hub-mux.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
@@ -318,7 +317,7 @@ describe('departing app topics', () => {
     await bob.peer.replay()
     const { params } = currentLane()
     hub.detach('bob')
-    const landed = await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
+    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
     const read = bob.mls.readEpoch.bind(bob.mls)
     let failures = 0
     vi.spyOn(bob.mls, 'readEpoch').mockImplementation(async () => {
@@ -326,13 +325,9 @@ describe('departing app topics', () => {
       if (epoch === 2 && failures++ < 2) throw new Error('epoch read temporarily unavailable')
       return epoch
     })
-    await expect(
-      bob.controlWalk.walkCommits({
-        through: asLogPosition(landed.sequenceID),
-        range: null,
-        work: { takeFetch: () => true, takeFrame: () => true },
-      }),
-    ).rejects.toThrow('epoch read temporarily unavailable')
+    await expect(bob.controlWalk.walkCommits()).rejects.toThrow(
+      'epoch read temporarily unavailable',
+    )
     expect(bob.mls.epoch()).toBe(2)
     expect(params.appliedEpoch()).toBe(2)
   })
@@ -341,7 +336,7 @@ describe('departing app topics', () => {
     const { bob, hub } = peerFixture()
     await bob.peer.replay()
     hub.detach('bob')
-    const landed = await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
+    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
     const walkError = new Error('walk observation failed')
     const refreshError = new Error('final epoch refresh failed')
     const read = bob.mls.readEpoch.bind(bob.mls)
@@ -351,13 +346,7 @@ describe('departing app topics', () => {
       if (epoch === 2) throw failures++ < 2 ? walkError : refreshError
       return epoch
     })
-    await expect(
-      bob.controlWalk.walkCommits({
-        through: asLogPosition(landed.sequenceID),
-        range: null,
-        work: { takeFetch: () => true, takeFrame: () => true },
-      }),
-    ).rejects.toBe(walkError)
+    await expect(bob.controlWalk.walkCommits()).rejects.toBe(walkError)
     expect(failures).toBe(3)
   })
 
@@ -366,13 +355,7 @@ describe('departing app topics', () => {
     await bob.peer.replay()
     const refreshError = new Error('final epoch refresh failed')
     vi.spyOn(bob.mls, 'readEpoch').mockRejectedValue(refreshError)
-    await expect(
-      bob.controlWalk.walkCommits({
-        through: null,
-        range: null,
-        work: { takeFetch: () => true, takeFrame: () => true },
-      }),
-    ).rejects.toBe(refreshError)
+    await expect(bob.controlWalk.walkCommits()).rejects.toBe(refreshError)
   })
 
   test.each([-1, 0, 1])('expiry boundary ignores epoch hint offset %s', async (offset) => {

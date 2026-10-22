@@ -352,16 +352,20 @@ test('missing applied history remains non-fork with real past commits', async ()
   expect(f.member.controlWalk.safetyHold()).toBeNull()
 })
 
-test('certified losing replay remains non-fork with real competing commits', async () => {
+test('ordinary losing replay remains non-fork with real competing commits', async () => {
   const f = await setup()
   const fork = await f.competing('winning')
-  const certificate = await fork.certify()
   const before = await f.member.control.load()
-  expect(await fork.reveal({ following: false, range: certificate })).toBe(false)
+  expect(await fork.reveal({ following: false })).toBe(false)
+  expect(await fork.reveal({ following: false })).toBe(false)
   expect((await f.member.control.load()).forkHalt).toBeNull()
   expect((await f.member.control.load()).applied).toEqual(before.applied)
   expect(await f.safety().events(f.key)).toEqual([])
-  expect(f.onStrand).not.toHaveBeenCalled()
+  expect((await f.member.control.load()).strand).toBeNull()
+  expect(f.member.controlWalk.safetyHold()).toBeNull()
+  expect(f.onStrand).toHaveBeenCalledWith(
+    expect.objectContaining({ kind: 'past-epoch-divergence', confidence: 'claimed' }),
+  )
 })
 
 test('ordinary gap recovery still heals and confirms with real MLS', async () => {

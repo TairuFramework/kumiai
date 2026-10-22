@@ -267,6 +267,7 @@ export type Member = {
   crypto: ReturnType<typeof createGroupCrypto>
   peer: GroupPeer<Protocols>
   handle: () => GroupHandle
+  mutate: HandleAccess['mutate']
   adopt: (handle: GroupHandle) => Promise<void>
   anchorStore: ReturnType<typeof createMemoryAnchorStore>
   appOutbox: AppOutbox
@@ -480,7 +481,9 @@ export function makeMember(params: MakeMemberParams): Member {
     expected,
     write,
   ) => {
-    const result = await adoption.adopt(bytes, expected, write)
+    // Compatibility is checked by the real port; the simple host also requires the current revision.
+    const stateVersion = await access.readControl(async (scope) => scope.source.stateVersion)
+    const result = await adoption.adopt(bytes, { ...expected, stateVersion }, write)
     if (result === 'installed') params.onControlAdopt?.()
     return result
   }
@@ -523,6 +526,7 @@ export function makeMember(params: MakeMemberParams): Member {
     crypto,
     peer,
     handle: getHandle,
+    mutate: access.mutate,
     adopt,
     anchorStore,
     appCursorStore,

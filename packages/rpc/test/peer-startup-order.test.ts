@@ -30,21 +30,21 @@ afterEach(async () => {
 })
 
 test.each([false, true])(
-  'startup settles hub-accepted own work before the seed walk, forget=%s',
+  'startup walks hub-accepted own work from the durable cursor, forget=%s',
   async (forget) => {
     const hub = new FakeHub()
     const seed = makeMLSPeer(hub, 'alice', secret)
     peers.push(seed)
     await seed.peer.replay()
     const op = await seedBuiltOperation(seed, buildLedgerCommit(seed, []))
-    if (op.stage !== 'built') throw new Error('Missing built operation')
+    expect((await seed.control.load()).operations).toEqual([])
     await seed.peer.dispose()
     await seed.peer.drained()
     await hub.publish({
       senderDID: 'alice',
       topicID: commitTopic(secret),
       payload: op.slot.payload,
-      publishID: op.built.publishID,
+      publishID: op.slot.publishID,
       expectedHead: op.slot.expectedHead,
       retain: 'log',
     })
@@ -61,7 +61,8 @@ test.each([false, true])(
     await again.peer.replay()
     expect(await again.peer.outcomes()).toEqual([expect.objectContaining({ kind: 'landed' })])
     expect(epochs.length).toBeGreaterThan(0)
-    expect(epochs).not.toContain(1)
+    expect(again.mls.epoch()).toBe(2)
+    expect((await again.control.load()).commitOnce).toBeNull()
     expect(hub.published.filter((row) => row.topicID === rendezvousTopic(secret))).toEqual([])
   },
 )

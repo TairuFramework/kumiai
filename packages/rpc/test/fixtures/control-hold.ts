@@ -39,7 +39,7 @@ export async function assertCommitPoison(
     expect(after.outcomes).toEqual(before.outcomes)
     expect(after.welcomes).toEqual(before.welcomes)
     expect(after.responses).toEqual(before.responses)
-    expect(after.commitOnceAcceptance).toEqual(before.commitOnceAcceptance)
+    expect(after.spentSource).toEqual(before.spentSource)
     expect(restarted.mls.epoch()).toBe(epoch)
   } finally {
     await restarted.peer.dispose()

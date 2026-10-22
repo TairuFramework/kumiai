@@ -6,7 +6,6 @@ import {
 } from '@kumiai/mls-rpc'
 import {
   asLogPosition,
-  createControlSearch,
   digestAppliedCommit,
   encodeCommitFrame,
   encodeHandshakeFrame,
@@ -20,7 +19,7 @@ import { expect, test, vi } from 'vitest'
 import { controlAdoptionFixture } from '../../../packages/mls-rpc/test/fixtures/control-adoption.js'
 import { createMemoryHostDatabase } from './host-db.js'
 
-test.each(['hold', 'acceptance', 'group-key', 'incarnation'] as const)(
+test.each(['hold', 'coverage', 'group-key', 'incarnation'] as const)(
   'the simple host refuses a %s changed in the persist callback after preparation',
   async (changed) => {
     const f = await controlAdoptionFixture()
@@ -63,7 +62,6 @@ test.each(['hold', 'acceptance', 'group-key', 'incarnation'] as const)(
       stateVersion: await db.loadVersion(key.groupID),
     }
     expect(await db.saveBuilt(key.groupID, key, intent, f.slot, source, 'built')).toBe('saved')
-    await control.apply({ commitOnceAcceptance: f.proof }, 'accepted')
     const access = simpleHandleAccess({
       key,
       handle: () => current,
@@ -73,12 +71,13 @@ test.each(['hold', 'acceptance', 'group-key', 'incarnation'] as const)(
       stateVersion: () => db.loadVersion(key.groupID),
       persist: async (next, write) => {
         let persistedWrite = write
-        if (changed === 'hold' || changed === 'acceptance') {
+        if (changed === 'hold' || changed === 'coverage') {
           await control.apply(
             changed === 'hold'
               ? { controlHold: { reason: 'unsupported-version', position: f.proof.position } }
               : {
-                  commitOnceAcceptance: { ...f.proof, position: asLogPosition('other-occurrence') },
+                  commitOnce: { ...f.slot, skipped: true },
+                  cursor: { position: asLogPosition('000000'), epoch: f.slot.epoch },
                 },
             'race',
           )
@@ -110,9 +109,9 @@ test.each(['hold', 'acceptance', 'group-key', 'incarnation'] as const)(
       control,
       restoreCandidate: f.restoreCandidate,
     })
-    expect(await port.adopt(f.slot.journal, { ...source, acceptance: f.proof }, f.write)).toBe(
-      'moved',
-    )
+    expect(
+      await port.adopt(f.slot.journal, { ...source, occurrence: { ...f.proof, source } }, f.write),
+    ).toBe('moved')
     expect(current.epoch).toBe(epochBefore)
     const saved = decodeClientState((await db.loadState(key.groupID)) ?? new Uint8Array())
     expect(saved?.groupContext.epoch).toBe(epochBefore)
@@ -140,8 +139,16 @@ test.each(['framing poison', 'transient candidate storage failure'] as const)(
     const control = db.control(key.groupID, key)
     let current = f.member.handle
     await db.seed(key.groupID, encodeClientState(current.state))
-    const intent = f.store.snapshot().control.operations[0]
-    if (intent?.stage !== 'built') throw new Error('Missing built operation')
+    const intent: Operation = {
+      id: f.slot.opID,
+      kind: f.slot.kind,
+      revokes: f.slot.revokes,
+      enqueuedAt: f.slot.enqueuedAt,
+      deadline: f.slot.deadline,
+      seq: 1,
+      stage: 'intent',
+      body: new Uint8Array(),
+    }
     const payload = encodeHandshakeFrame(
       HANDSHAKE_KIND.commit,
       encodeCommitFrame(f.rotation.commitMessage, new Uint8Array()),
@@ -181,62 +188,48 @@ test.each(['framing poison', 'transient candidate storage failure'] as const)(
     const restoreCandidate = vi.fn(f.restoreCandidate)
     if (failure === 'transient candidate storage failure')
       restoreCandidate.mockRejectedValueOnce(fault)
-    const search = createControlSearch({
-      budget: { maxPasses: 2, maxFetches: 4, maxFrames: 16 },
-      validation: createControlValidationPort({
-        identity: f.member.identity,
-        options: {},
-        restoreCandidate,
-      }),
-      readEvidence: async () => ({
-        source: await access.readControl(async (scope) => scope.source),
-        applied: (await control.load()).applied,
-        cursor: (await control.load()).cursor,
-        terminal: false,
-      }),
-      fetch: async (after) => ({
-        gap: false,
-        head: position,
-        oldest: '000001',
-        messages: [
-          { sequenceID: '000001', payload: new Uint8Array() },
-          { sequenceID: position, payload },
-        ]
-          .filter((row) => after === null || row.sequenceID > after)
-          .map((row) => ({
-            ...row,
-            senderDID: 'relay',
-            topicID: 'commits',
-            receivedAt: 1,
-          })),
-      }),
-      followWinner: async () => {
-        throw new Error('No competing winner')
-      },
-      reconcileAbsent: async () => false,
-      safetyHold: () => null,
-      haltFork: async () => {
-        throw new Error('Delivery must not halt')
-      },
-      hold: async () => {
-        throw new Error('Delivery must not hold')
-      },
+    const validationPort = createControlValidationPort({
+      identity: f.member.identity,
+      options: {},
+      restoreCandidate,
     })
+    const validate = async () => {
+      const validation = await validationPort.restoreValidation(slot)
+      if (validation === null) throw new Error('Missing saved validation')
+      return validation.validateFrame({ position, payload, senderDID: f.member.identity.id }, slot)
+    }
     if (failure === 'transient candidate storage failure') {
-      await expect(search.searchLog(slot)).rejects.toBe(fault)
+      await expect(validate()).rejects.toBe(fault)
       expect(await control.load()).toEqual(before)
       expect(current).toBe(f.member.handle)
     }
-    const result = await search.searchLog(slot)
-    expect(result.kind).toBe('first-valid')
-    if (result.kind !== 'first-valid') throw new Error('Missing first-valid proof')
-    expect(result.proof.position).toBe(position)
+    const validation = await validationPort.restoreValidation(slot)
+    if (validation === null) throw new Error('Missing saved validation')
+    expect(
+      await validation.validateFrame(
+        { position: asLogPosition('000001'), payload: new Uint8Array(), senderDID: 'relay' },
+        slot,
+      ),
+    ).toMatchObject({ kind: 'invalid' })
+    await control.apply(
+      {
+        commitOnce: { ...slot, skipped: true },
+        cursor: { position: asLogPosition('000001'), epoch: slot.epoch },
+      },
+      'skip-poison',
+    )
+    expect(await validate()).toMatchObject({ kind: 'valid', own: true })
+    const occurrence = {
+      source,
+      position,
+      payloadDigest: slot.payloadDigest,
+      coverage: 'incomplete' as const,
+    }
     const diagnosed = await control.load()
     expect(diagnosed.forkHalt).toBeNull()
     expect(diagnosed.recoveryUnavailable).toBeNull()
     expect(diagnosed.controlHold).toBeNull()
-    expect(diagnosed.commitOnce).toEqual(before.commitOnce)
-    await control.apply({ commitOnceAcceptance: result.proof }, 'accepted')
+    expect(diagnosed.commitOnce).toEqual({ ...before.commitOnce, skipped: true })
     const port = createControlAdoptionPort({
       access,
       control,
@@ -245,15 +238,13 @@ test.each(['framing poison', 'transient candidate storage failure'] as const)(
     expect(
       await port.adopt(
         slot.journal,
-        { ...source, acceptance: result.proof },
+        { ...source, occurrence },
         {
           ...f.write,
           anchorLanded: slot.digest,
           changes: {
             ...f.write.changes,
-            putOutcomes: [
-              { id: 'landed-fact', opID: slot.opID, at: 100, kind: 'landed', position },
-            ],
+            putOutcomes: [{ id: 'installed-fact', opID: slot.opID, at: 100, kind: 'unknown' }],
             putApplied: [
               {
                 epoch: slot.epoch,
@@ -285,7 +276,7 @@ test.each(['framing poison', 'transient candidate storage failure'] as const)(
     expect(after.outcomes).toEqual(
       expect.arrayContaining([
         ...before.outcomes,
-        { id: 'landed-fact', opID: slot.opID, at: 100, kind: 'landed', position },
+        { id: 'installed-fact', opID: slot.opID, at: 100, kind: 'unknown' },
       ]),
     )
     expect(after.forkHalt).toBeNull()

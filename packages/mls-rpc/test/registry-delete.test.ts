@@ -284,7 +284,6 @@ for (const mode of ['real-mls', 'double'] as const) {
               await serveRetiredObligations({
                 persistence: fixture.device.groups,
                 key,
-                search: { searchLog: async () => ({ kind: 'unknown' }) },
                 deliverWelcome: async () => {},
               }),
             ).toMatchObject({ remaining: [], failures: [] })

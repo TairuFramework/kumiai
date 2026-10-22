@@ -88,18 +88,31 @@ export function testCommitOnceConformance(params: {
           case 'epoch-move':
           case 'alternate-id-replay':
           case 'public-member-winner':
-          case 'terminal-winner':
             expect(evidence.outcome).toBe('lost')
             expect(evidence.winnerFollowed).toBe(true)
             expect(evidence.ownAdoptions).toBe(0)
             expect(evidence.welcomeDeliveries).toBe(0)
             expect(evidence.cursor).not.toBeNull()
-            expect(evidence.terminal).toBe(scenario === 'terminal-winner')
+            expect(evidence.terminal).toBe(false)
+            break
+          case 'terminal-winner':
+            expect(evidence.outcome).toBe('unknown')
+            expect(evidence.winnerFollowed).toBe(true)
+            expect(evidence.ownAdoptions).toBe(0)
+            expect(evidence.slotAfterAck).toBeNull()
+            expect(evidence.terminal).toBe(true)
             break
           case 'gap-match':
+          case 'accepted-restart':
+            expect(evidence.outcome).toBe('unknown')
+            expect(evidence.builds).toBe(1)
+            expect(evidence.ownAdoptions).toBe(1)
+            expect(evidence.welcomeDeliveries).toBe(0)
+            expect(evidence.slotAfterAck).toBeNull()
+            expect(evidence.cursor).not.toBeNull()
+            break
           case 'trimmed-checkpoint':
           case 'validation-unavailable':
-          case 'accepted-restart':
             expect(evidence.outcome).toBe('unknown')
             expect(evidence.builds).toBe(1)
             expect(evidence.ownAdoptions).toBe(0)
@@ -109,7 +122,7 @@ export function testCommitOnceConformance(params: {
             break
           case 'deadline':
           case 'slot-guards':
-            expect(evidence.outcome).toBe('lost')
+            expect(evidence.outcome).toBe('unknown')
             expect(evidence.builds).toBe(1)
             expect(evidence.ownAdoptions).toBe(0)
             expect(evidence.welcomeDeliveries).toBe(0)

@@ -281,12 +281,7 @@ const recoveryOnlyMethods = {
 
 const internalRecoveryOnlyMethods = {
   reconcileCommitPrefix: (member) => member.controlWalk.reconcileCommitPrefix(),
-  walkCommits: (member) =>
-    member.controlWalk.walkCommits({
-      through: asLogPosition('000000000001'),
-      range: null,
-      work: { takeFetch: () => true, takeFrame: () => true },
-    }),
+  walkCommits: (member) => member.controlWalk.walkCommits(),
   stepOperation: (member) => member.controlWalk.stepOperation('retained-intent'),
   head: (member) => member.controlWalk.head(),
   safetyHold: (member) => member.controlWalk.safetyHold(),

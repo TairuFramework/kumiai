@@ -12,6 +12,7 @@ import { encodeCommitFrame } from '../../src/commit-frame.js'
 import type { SaveControlBuild } from '../../src/control/build.js'
 import { controlSafetyHeld } from '../../src/control/safety.js'
 import type { ControlEvidenceSnapshot } from '../../src/control/search.js'
+import { controlOccurrenceCoverage } from '../../src/control/store.js'
 import type {
   AdoptionExpected,
   AdoptionWrite,
@@ -55,7 +56,7 @@ import {
 } from '../../src/recovery-types.js'
 import { commitTopic } from '../../src/topic.js'
 import { FAKE_BASE_SECRET, fakeEpochSecret } from './fake-crypto.js'
-import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
+import { createMemoryHostDatabase, type MemoryHostDatabase, memoryInboundWrite } from './host-db.js'
 
 export type MemoryGroupMLS = GroupMLS & {
   database(): MemoryHostDatabase
@@ -1980,31 +1981,58 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
           snapshot.control.strand !== null ||
           snapshot.control.cursor?.stranded === true ||
           controlSafetyHeld(snapshot.control) !== null ||
-          (snapshot.control.controlHold !== null &&
-            snapshot.control.controlHold.reason !== 'acceptance-unknown') ||
+          snapshot.control.controlHold !== null ||
           !same(journal.source.key, expected.key) ||
-          !same(expected.acceptance.source.key, expected.key) ||
+          !same(expected.occurrence.source.key, expected.key) ||
           !same(expected.key, { groupID, incarnation: 1 }) ||
           !same(expected.identity, identity) ||
           expected.stateVersion !== snapshot.version ||
-          !same(expected.acceptance.source.identity, journal.source.identity)
+          !same(expected.occurrence.source.identity, journal.source.identity)
         )
           return 'moved'
         if (candidate.epoch === epoch && toB64U(state) === toB64U(serializeState())) {
           const row = snapshot.control.applied.find(
             (row) => row.epoch === journal.source.identity?.epoch,
           )
-          return row?.payloadDigest === expected.acceptance.payloadDigest &&
-            row.sequenceID === expected.acceptance.position
+          return row?.payloadDigest === expected.occurrence.payloadDigest &&
+            row.sequenceID === expected.occurrence.position
             ? 'noop'
             : 'moved'
         }
         if (
           !same(journal.source.identity, identity) ||
-          snapshot.control.commitOnce?.payloadDigest !== expected.acceptance.payloadDigest ||
+          snapshot.control.commitOnce?.payloadDigest !== expected.occurrence.payloadDigest ||
           !same(snapshot.control.commitOnce.journal, blob) ||
-          snapshot.control.commitOnce.searchFrom !== expected.acceptance.from ||
-          !same(snapshot.control.commitOnceAcceptance, expected.acceptance)
+          expected.occurrence.coverage !==
+            controlOccurrenceCoverage(
+              snapshot.control,
+              snapshot.control.commitOnce,
+              expected.occurrence.position,
+            )
+        )
+          return 'moved'
+        const built = snapshot.control.commitOnce
+        const applied = write.changes.putApplied?.find((row) => row.epoch === built.epoch)
+        const final = write.changes.putOutcomes?.find((row) => row.opID === built.opID)
+        const obligation = write.changes.putWelcomes?.find((row) => row.opID === built.opID)
+        if (
+          write.changes.commitOnce !== null ||
+          applied?.opID !== built.opID ||
+          applied.digest !== built.digest ||
+          applied.payloadDigest !== built.payloadDigest ||
+          applied.sequenceID !== expected.occurrence.position ||
+          applied.removed ||
+          write.changes.cursor?.position !== expected.occurrence.position ||
+          write.changes.cursor?.epoch !== built.epoch + 1 ||
+          (expected.occurrence.coverage === 'complete'
+            ? final?.kind !== 'landed' ||
+              final.position !== expected.occurrence.position ||
+              (built.welcome !== null &&
+                !snapshot.control.welcomes.some((row) => row.opID === built.opID) &&
+                (obligation === undefined ||
+                  !same(obligation.welcome, built.welcome.bytes) ||
+                  !same(obligation.recipients, built.welcome.recipients)))
+            : final?.kind !== 'unknown' || obligation !== undefined)
         )
           return 'moved'
         try {
@@ -2356,7 +2384,11 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
           epochAuthenticator: fromB64U(nextIdentity),
         })
         try {
-          await hostDB.saveState(storageID, state, write)
+          await hostDB.saveState(
+            storageID,
+            state,
+            write === undefined ? undefined : memoryInboundWrite(write, state),
+          )
         } catch (error) {
           if (
             !(error instanceof Error) ||

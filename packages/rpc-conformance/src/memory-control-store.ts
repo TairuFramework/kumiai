@@ -14,6 +14,7 @@ import type {
   ConformanceForkRecoveryAttempt,
   ConformanceGroupCondition,
   ConformanceGroupKey,
+  ConformanceOwnOccurrence,
   ConformanceRecoveryUnavailableEvent,
   ConformanceSafetyHold,
   ConformanceSaveControlBuild,
@@ -137,9 +138,10 @@ type Context =
       kind: 'adoption'
       before: ConformanceEpochIdentity
       after: ConformanceEpochIdentity | null
+      removed?: true
     }
   | { kind: 'retirement'; key: ConformanceGroupKey }
-  | { kind: 'head'; source: ConformanceEpochIdentity }
+  | { kind: 'head' | 'cursor' | 'report' | 'ack' | 'abandon'; source: ConformanceEpochIdentity }
 
 function equal(left: unknown, right: unknown): boolean {
   if (Object.is(left, right)) return true
@@ -284,47 +286,107 @@ function guard(
   context: Context | null,
 ): void {
   if (equal(previous, next)) return
-  switch (context?.kind) {
-    case 'build': {
-      const source = context.source.identity
+  if (context?.kind === 'build' && next !== null && previous === null) {
+    const identity = context.source.identity
+    if (
+      identity !== null &&
+      matches(next, identity) &&
+      equal(context.source.key, { groupID: identity.groupID, incarnation: identity.incarnation }) &&
+      next.opID === context.queueHeadID &&
+      next.head === context.checkpoint
+    )
+      return
+  }
+  if (previous !== null && next === null) {
+    if (context?.kind === 'retirement' && previous.incarnation === context.key.incarnation) return
+    if (
+      context?.kind === 'adoption' &&
+      matches(previous, context.before) &&
+      context.after !== null &&
+      context.after.groupID === context.before.groupID &&
+      context.after.incarnation === context.before.incarnation &&
+      (context.after.epoch > context.before.epoch || context.removed === true)
+    )
+      return
+    if (context?.kind === 'abandon' && matches(previous, context.source)) return
+  }
+  if (
+    previous !== null &&
+    next !== null &&
+    context !== null &&
+    'source' in context &&
+    context.kind !== 'build' &&
+    matches(previous, context.source)
+  ) {
+    const mutable =
+      context.kind === 'head'
+        ? 'expectedHead'
+        : context.kind === 'cursor'
+          ? 'skipped'
+          : context.kind === 'report'
+            ? 'reported'
+            : context.kind === 'ack'
+              ? 'acceptedAs'
+              : null
+    if (mutable !== null) {
+      const keys = new Set([...Object.keys(previous), ...Object.keys(next)])
+      keys.delete(mutable)
+      const unchanged = [...keys].every((key) =>
+        equal(Reflect.get(previous, key), Reflect.get(next, key)),
+      )
       if (
-        next !== null &&
-        source !== null &&
-        equal(context.source.key, { groupID: source.groupID, incarnation: source.incarnation }) &&
-        matches(next, source) &&
-        next.opID === context.queueHeadID &&
-        next.searchFrom === context.checkpoint &&
-        (previous === null ||
-          previous.incarnation < source.incarnation ||
-          (previous.incarnation === source.incarnation && previous.epoch < source.epoch))
+        unchanged &&
+        (mutable === 'expectedHead' ||
+          ((mutable === 'skipped' || mutable === 'reported') && next[mutable] === true) ||
+          (mutable === 'acceptedAs' &&
+            next.acceptedAs !== undefined &&
+            (previous.acceptedAs === undefined || previous.acceptedAs === next.acceptedAs)))
       )
         return
-      break
     }
-    case 'head': {
-      if (previous === null || next === null || !matches(previous, context.source)) break
-      const { expectedHead: _a, ...a } = previous
-      const { expectedHead: _b, ...b } = next
-      if (equal(a, b)) return
-      break
-    }
-    case 'adoption':
-      if (
-        previous !== null &&
-        next === null &&
-        matches(previous, context.before) &&
-        context.after !== null &&
-        context.after.groupID === context.before.groupID &&
-        context.after.incarnation === context.before.incarnation &&
-        context.after.epoch > context.before.epoch
-      )
-        return
-      break
-    case 'retirement':
-      if (previous !== null && next === null && previous.incarnation === context.key.incarnation)
-        return
   }
   throw new Error('Unverified commit-once change')
+}
+
+function occurrenceCoverage<Position extends string>(
+  snapshot: ConformanceControlSnapshot<Position>,
+  slot: ConformanceControlSlot<Position>,
+  position: Position,
+): 'complete' | 'incomplete' {
+  return snapshot.cursor?.incomplete || slot.skipped || (slot.head !== null && position < slot.head)
+    ? 'incomplete'
+    : 'complete'
+}
+
+function ownConsumptionAllowed<Position extends string>(
+  snapshot: ConformanceControlSnapshot<Position>,
+  occurrence: ConformanceOwnOccurrence<Position>,
+  changes: ConformanceControlChanges<Position>,
+): boolean {
+  const slot = snapshot.commitOnce
+  if (slot === null || changes.commitOnce !== null) return false
+  const applied = changes.putApplied?.find((row) => row.epoch === slot.epoch)
+  const outcome = changes.putOutcomes?.find((row) => row.opID === slot.opID)
+  return (
+    applied?.opID === slot.opID &&
+    applied.payloadDigest === slot.payloadDigest &&
+    applied.sequenceID === occurrence.position &&
+    applied.removed === false &&
+    changes.cursor?.position === occurrence.position &&
+    changes.cursor.epoch === slot.epoch + 1 &&
+    (occurrence.coverage === 'complete'
+      ? outcome?.kind === 'landed' &&
+        outcome.position === occurrence.position &&
+        (slot.welcome === null ||
+          snapshot.welcomes.some((row) => row.opID === slot.opID) ||
+          changes.putWelcomes?.some(
+            (row) =>
+              row.opID === slot.opID &&
+              equal(row.welcome, slot.welcome?.bytes) &&
+              equal(row.recipients, slot.welcome?.recipients),
+          ) === true)
+      : outcome?.kind === 'unknown' && !changes.putWelcomes?.some((row) => row.opID === slot.opID))
+  )
 }
 
 /** Mutates the transaction's private copy, independently of the RPC reducer. */
@@ -382,42 +444,29 @@ function mutateControl<Position extends string>(
   }
   const owned = cloneValue(ordinary)
   const slot = owned.commitOnce === undefined ? snapshot.commitOnce : owned.commitOnce
+  if (
+    slot !== null &&
+    (context?.kind === 'retirement' ||
+      (context?.kind === 'adoption' &&
+        (context.removed ||
+          (context.after !== null && context.after.epoch > context.before.epoch))))
+  )
+    throw new Error('Consumption must close the live build')
+  if (
+    context?.kind === 'adoption' &&
+    context.removed &&
+    (snapshot.operations.some((row) => !owned.deleteOperations?.includes(row.id)) ||
+      (snapshot.rejoin !== null && !owned.deleteRejoin))
+  )
+    throw new Error('Removal must close intents and rejoin work')
   guard(snapshot.commitOnce, slot, context)
-  const proof =
-    owned.commitOnceAcceptance === undefined
-      ? owned.commitOnce === null
-        ? null
-        : snapshot.commitOnceAcceptance
-      : owned.commitOnceAcceptance
   if (
-    proof === null &&
-    snapshot.commitOnceAcceptance !== null &&
-    snapshot.commitOnce !== null &&
-    slot !== null &&
-    (context?.kind !== 'build' || equal(snapshot.commitOnce, slot))
+    context?.kind === 'cursor' &&
+    snapshot.commitOnce?.skipped !== slot?.skipped &&
+    (owned.cursor?.position == null ||
+      (snapshot.cursor?.position != null && owned.cursor.position <= snapshot.cursor.position))
   )
-    throw new Error('Retained acceptance')
-  if (
-    proof !== null &&
-    (slot === null ||
-      proof.source.identity === null ||
-      !matches(slot, proof.source.identity) ||
-      !equal(proof.source.key, {
-        groupID: proof.source.identity.groupID,
-        incarnation: proof.source.identity.incarnation,
-      }) ||
-      proof.from !== slot.searchFrom ||
-      proof.payloadDigest !== slot.payloadDigest)
-  )
-    throw new Error('Unbound acceptance')
-  if (
-    !equal(snapshot.commitOnce, slot) &&
-    slot !== null &&
-    context?.kind === 'build' &&
-    snapshot.commitOnceAcceptance !== null &&
-    owned.commitOnceAcceptance !== null
-  )
-    throw new Error('Prior acceptance remains')
+    throw new Error('Skipped requires an advancing cursor')
   removeRows(snapshot.operations, (row) => owned.deleteOperations?.includes(row.id) === true)
   removeRows(snapshot.outcomes, (row) => owned.deleteOutcomes?.includes(row.id) === true)
   removeRows(snapshot.welcomes, (row) => owned.deleteWelcomes?.includes(row.opID) === true)
@@ -443,7 +492,7 @@ function mutateControl<Position extends string>(
 
   if (owned.putRejoin !== undefined) snapshot.rejoin = owned.putRejoin
   if (owned.commitOnce !== undefined) snapshot.commitOnce = owned.commitOnce
-  snapshot.commitOnceAcceptance = proof
+  if (owned.spentSource !== undefined) snapshot.spentSource = owned.spentSource
   if (owned.controlHold !== undefined) snapshot.controlHold = owned.controlHold
   snapshot.forkHalt ??= safety.forkHalt ?? null
   snapshot.recoveryUnavailable ??= safety.recoveryUnavailable ?? null
@@ -483,7 +532,7 @@ export function createMemoryControlStore<Position extends string = string>(
     mutationID: null,
     control: {
       commitOnce: null,
-      commitOnceAcceptance: null,
+      spentSource: null,
       controlHold: null,
       forkHalt: null,
       recoveryUnavailable: null,
@@ -680,15 +729,24 @@ export function createMemoryControlStore<Position extends string = string>(
     apply: async (changes, mutationID) => {
       const next = cloneValue(record)
       const source = next.state === null ? null : decodeControlFixtureState(next.state)
-      if (
-        changes.commitOnceAcceptance != null &&
-        !equal(changes.commitOnceAcceptance.source.key, fixedKey)
-      )
-        throw new Error('Proof key mismatch')
       mutateControl(
         next.control,
         changes,
-        source === null ? null : { kind: 'head', source },
+        source === null
+          ? null
+          : {
+              kind:
+                changes.cursor !== undefined
+                  ? 'cursor'
+                  : changes.commitOnce?.reported === true &&
+                      next.control.commitOnce?.reported !== true
+                    ? 'report'
+                    : changes.commitOnce?.acceptedAs !== undefined &&
+                        next.control.commitOnce?.acceptedAs === undefined
+                      ? 'ack'
+                      : 'head',
+              source,
+            },
         fixedKey,
       )
       next.mutationID = mutationID
@@ -699,50 +757,38 @@ export function createMemoryControlStore<Position extends string = string>(
       const next = cloneValue(record)
       const identity = next.state === null ? null : decodeControlFixtureState(next.state)
       if (
+        built.opID !== intent.id ||
+        !(['kind', 'revokes', 'enqueuedAt', 'deadline'] as const).every(
+          (field) => built[field] === intent[field],
+        ) ||
         controlSafetyHeld(next.control) !== null ||
         next.control.controlHold !== null ||
         !equal(expected.key, fixedKey) ||
         !equal(identity, expected.identity) ||
         next.version !== expected.stateVersion ||
         (next.control.cursor === null && !equal(next.initialIdentity, identity)) ||
-        !equal(
-          next.control.operations.find((op) => op.reconciliation === undefined),
-          intent,
-        ) ||
-        built.searchFrom !== (next.control.cursor?.position ?? null) ||
+        !equal(next.control.operations[0], intent) ||
+        built.head !== (next.control.cursor?.position ?? null) ||
         (next.control.cursor !== null &&
-          (next.control.cursor.epoch !== identity?.epoch || next.control.cursor.stranded))
+          (next.control.cursor.epoch !== identity?.epoch ||
+            next.control.cursor.stranded ||
+            next.control.cursor.incomplete))
       )
         return 'moved'
       const previous = next.control.commitOnce
-      if (
-        previous !== null &&
-        previous.incarnation === fixedKey.incarnation &&
-        previous.epoch >= (identity?.epoch ?? 0)
-      )
+      if (previous !== null || next.control.spentSource?.epoch === identity?.epoch)
         return 'occupied'
       mutateControl(
         next.control,
         {
-          putOperations: [
-            {
-              ...intent,
-              stage: 'built',
-              built: {
-                incarnation: built.incarnation,
-                epoch: built.epoch,
-                publishID: built.publishID,
-                payloadDigest: built.payloadDigest,
-              },
-            },
-          ],
+          deleteOperations: [intent.id],
         },
         null,
         fixedKey,
       )
       mutateControl(
         next.control,
-        { commitOnce: built, commitOnceAcceptance: null },
+        { commitOnce: built },
         {
           kind: 'build',
           source: expected,
@@ -764,28 +810,30 @@ export function createMemoryControlStore<Position extends string = string>(
       next.state = state.slice()
       if (
         controlSafetyHeld(next.control) !== null ||
-        (write !== undefined &&
-          next.control.controlHold !== null &&
-          next.control.controlHold.reason !== 'acceptance-unknown')
+        (write !== undefined && next.control.controlHold !== null)
       )
         throw Object.assign(new Error('Adoption is held'), { name: 'ControlAdoptionMovedError' })
       const expected = write?.expected
-      const proof = expected?.acceptance
+      const proof = expected?.occurrence
       const retained = next.control.commitOnce
       if (
         expected !== undefined &&
         (controlSafetyHeld(next.control) !== null ||
-          (next.control.controlHold !== null &&
-            next.control.controlHold.reason !== 'acceptance-unknown') ||
+          next.control.controlHold !== null ||
           !equal(expected.key, key) ||
           !equal(expected.identity, before) ||
           expected.stateVersion !== next.version ||
           (proof !== undefined &&
             (retained === null ||
               retained.payloadDigest !== proof.payloadDigest ||
-              retained.searchFrom !== proof.from ||
-              !equal(retained.journal, expected.journal) ||
-              !equal(next.control.commitOnceAcceptance, proof))))
+              !equal(proof.source.key, expected.key) ||
+              !equal(proof.source.identity, before) ||
+              next.control.strand !== null ||
+              next.control.cursor?.stranded === true ||
+              proof.coverage !== occurrenceCoverage(next.control, retained, proof.position) ||
+              write === undefined ||
+              !ownConsumptionAllowed(next.control, proof, write.changes) ||
+              !equal(retained.journal, expected.journal))))
       ) {
         const error = new Error('Adoption source or acceptance moved')
         error.name = 'ControlAdoptionMovedError'
@@ -809,6 +857,7 @@ export function createMemoryControlStore<Position extends string = string>(
                   kind: 'adoption',
                   before,
                   after,
+                  ...(after?.terminal ? { removed: true as const } : {}),
                 },
           fixedKey,
         )
@@ -817,6 +866,17 @@ export function createMemoryControlStore<Position extends string = string>(
           next.anchor.pending.landed = true
         }
       }
+      if (
+        before !== null &&
+        after !== null &&
+        (((after.incarnation !== before.incarnation ||
+          after.epoch > before.epoch ||
+          after.terminal) &&
+          next.control.commitOnce !== null) ||
+          (after.terminal &&
+            (next.control.operations.length !== 0 || next.control.rejoin !== null)))
+      )
+        throw new Error('Source consumption requires atomic control closure')
       finish(next, 'save')
     },
     anchor: {

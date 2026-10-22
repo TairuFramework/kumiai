@@ -4,6 +4,11 @@ import type { SendAdmission } from './crypto.js'
 
 export type GroupConditionErrorParams = { key?: GroupKey; cause?: unknown }
 
+/** A recognised own frame conflicts with its trusted saved candidate. */
+export class SavedControlCompatibilityError extends Error {
+  override name = 'SavedControlCompatibilityError'
+}
+
 /** `key` is absent only where the throw site has no group binding (the trust-envelope codec). */
 export class SpentSetCorruptError extends Error {
   override name = 'SpentSetCorruptError'
