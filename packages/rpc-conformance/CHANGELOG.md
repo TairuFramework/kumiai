@@ -4,7 +4,7 @@
 
 ### Patch Changes
 
-- `ConformanceRosterEntry` gains optional `admission`. New `processCommit` clause: an Add brings a fresh admission on the arriving leaf, and a Remove brings none.
+- `ConformanceRosterEntry` gains optional `admission`. New `processCommit` clause: an Add brings a fresh admission on the arriving leaf, and a Remove brings none; a plain commit brings no admission beyond an arriving leaf's.
 
 ## 0.10.1
 

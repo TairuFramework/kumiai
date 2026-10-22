@@ -637,6 +637,34 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           expect(admissions(removed).filter((a) => !admissions(added).includes(a))).toEqual([])
         })
       })
+
+      /**
+       * The over-rotation guard: a plain commit's path replaces only the committer's own leaf node,
+       * so it can drop an admission and never bring one. An implementation that reported a value on
+       * every leaf (say, any leaf's HPKE key) would pass the clause above and rotate the anchor on
+       * every commit. A harness whose plain commit is itself an Add (real MLS has no bare advance on
+       * this surface) brings exactly the arriving leaf's admission and nothing else.
+       */
+      test('a plain commit brings no admission beyond an arriving leaf', async () => {
+        await withGroup(2, 'roster-admission-plain', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const admissions = (entries: Array<ConformanceRosterEntry>) =>
+            entries.flatMap((e) => (e.admission == null ? [] : [e.admission]))
+
+          const before = await alice.mls.rosterEntries()
+          const plain = await group.buildCommit()
+          expect(await alice.mls.processCommit(plain.commit, plain.context)).toMatchObject({
+            advanced: true,
+          })
+          const after = await alice.mls.rosterEntries()
+          const fresh = after.filter(
+            (e) => e.admission != null && !admissions(before).includes(e.admission),
+          )
+          // Every fresh admission sits on a leaf whose DID the roster did not hold: an arrival.
+          for (const entry of fresh) expect(dids(before)).not.toContain(entry.did)
+          expect(fresh.length).toBe(after.length - before.length)
+        })
+      })
     })
 
     describe('exportRecoverySecret', () => {
