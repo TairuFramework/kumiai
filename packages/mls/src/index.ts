@@ -69,6 +69,7 @@ export {
   foldEnvelope,
 } from './envelope-fold.js'
 export {
+  ClientStateReservationError,
   HandshakeReservationError,
   HandshakeWindowConfigError,
   HandshakeWindowError,

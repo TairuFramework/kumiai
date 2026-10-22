@@ -7,15 +7,15 @@
 >
 > **The docs it links have since been reorganised** (2026-07-28 triage). Where a link below
 > dangles:
->
-> | This milestone says | Now |
-> |---|---|
-> | `next/2026-07-07-infra-batch.md`, `backlog/2026-07-07-infra-cleanup.md` | merged → [`backlog/2026-07-07-infra.md`](../backlog/2026-07-07-infra.md) |
-> | `next/2026-07-07-hub-keypackage-subscribe-caps.md` | shipped → [`completed/2026-07-25-hub-keypackage-subscribe-caps.complete.md`](../completed/2026-07-25-hub-keypackage-subscribe-caps.complete.md) |
-> | `next/2026-07-07-anycast-soundness.md` | shipped → [`completed/2026-07-24-anycast-soundness.complete.md`](../completed/2026-07-24-anycast-soundness.complete.md) |
-> | `backlog/mls-capability-revocation.md` | merged → [`backlog/mls-roster-grants-and-revocation.md`](../backlog/mls-roster-grants-and-revocation.md) |
-> | `backlog/peer4-mls-leaf-rotation.md`, `backlog/ts-mls-v2-stable-upgrade.md` | merged → [`backlog/ts-mls-upstream.md`](../backlog/ts-mls-upstream.md) |
-> | `backlog/hub-group-member-expiry.md` | **deleted** — its premise (`hub/group/join`, `addGroupMember`, `removeGroupMember`) no longer exists; the hub is topic-based |
+
+| This milestone says                                                         | Now                                                                                                                                             |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `next/2026-07-07-infra-batch.md`, `backlog/2026-07-07-infra-cleanup.md`     | merged → [`backlog/2026-07-07-infra.md`](../backlog/2026-07-07-infra.md)                                                                        |
+| `next/2026-07-07-hub-keypackage-subscribe-caps.md`                          | shipped → [`completed/2026-07-25-hub-keypackage-subscribe-caps.complete.md`](../completed/2026-07-25-hub-keypackage-subscribe-caps.complete.md) |
+| `next/2026-07-07-anycast-soundness.md`                                      | shipped → [`completed/2026-07-24-anycast-soundness.complete.md`](../completed/2026-07-24-anycast-soundness.complete.md)                         |
+| `backlog/mls-capability-revocation.md`                                      | merged → [`backlog/mls-roster-grants-and-revocation.md`](../backlog/mls-roster-grants-and-revocation.md)                                        |
+| `backlog/peer4-mls-leaf-rotation.md`, `backlog/ts-mls-v2-stable-upgrade.md` | merged → [`backlog/ts-mls-upstream.md`](../backlog/ts-mls-upstream.md)                                                                          |
+| `backlog/hub-group-member-expiry.md`                                        | **deleted** — its premise (`hub/group/join`, `addGroupMember`, `removeGroupMember`) no longer exists; the hub is topic-based                    |
 
 **Origin:** full-repo audit performed 2026-07-02 against commit `bb343d9` (all 7 packages'
 `src/`, `tests/`, root config, CI, docs). All findings were extracted into `next/` and
@@ -34,7 +34,6 @@ lands" gated three **high**-severity correctness findings behind that stalled **
 priority inversion rather than a sequencing decision.
 
 Resolved as follows:
-
 - The three high items were extracted into a high-severity-correctness plan at priority 1, ahead of
   every Phase 1 item, and **shipped 2026-07-24** — see
   [completed](../completed/2026-07-24-high-severity-correctness.complete.md). The `resync()` finding
@@ -67,7 +66,6 @@ promoted work rather than nominally above it.
 
 The 2026-07-20 API-surface audits produced a separate body of findings, indexed by change cost
 rather than by subsystem:
-
 - [pre-1.0 breaking API surface](../milestones/pre-1.0-breaking-api.md) — items whose cost is a `minor` while
   every package is 0.x (verified 2026-07-23: all ten are 0.4.x) and a `major` after.
 - [non-breaking API work](../milestones/non-breaking-api.md) — the short list that can land any time, plus
@@ -85,7 +83,6 @@ API-consistency, and infra debt behind them.
 ## Phase 1 — immediate priorities (`next/`)
 
 In order:
-
 1. ~~Encrypt + authenticate the directed RPC lane~~ — **done**, see
    [completed](../completed/2026-07-07-rpc-directed-lane-security.complete.md).
 2. ~~Enforce `GroupPermission` at the MLS boundary~~ — **done**, see
@@ -113,7 +110,6 @@ In order:
 
 Grouped by subsystem; each doc is roughly one PR of related fixes. The high-severity items these
 docs once carried were promoted on 2026-07-23 — see Status above.
-
 - [rpc peer lifecycle hardening](../backlog/2026-07-07-rpc-peer-lifecycle-hardening.md)
 - [rpc API surface](../backlog/rpc-api-surface.md) — split out 2026-07-23
 - [hub-tunnel reliability](../backlog/2026-07-07-hub-tunnel-reliability.md)

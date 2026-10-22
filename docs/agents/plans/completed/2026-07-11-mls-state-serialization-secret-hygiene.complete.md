@@ -9,7 +9,6 @@ settled in one release — see `2026-07-11-mls-permission-enforcement.complete.m
 
 Four related defects on `GroupHandle`'s state-mutating operations, all forward-secrecy or
 correctness holes:
-
 1. **State races.** `encrypt`, `decrypt`, and `processMessage` each did
    `read #state → await ts-mls → write #state` with no serialization. Two concurrent `encrypt`s
    both read epoch N, both advanced the secret-tree generation, and one clobbered the other —
@@ -35,21 +34,21 @@ correctness holes:
 
 ## Key design decisions (rationale preserved)
 
-- **FIFO, not a priority queue.** Operations are never reordered: *when* a message is sent, at
+- **FIFO, not a priority queue.** Operations are never reordered: _when_ a message is sent, at
   which epoch, is causally load-bearing in MLS.
 - **Getters stay synchronous.** JS is single-threaded, so a getter reads the last fully-assigned
   state in one tick and can never observe a half-applied mutation. Queueing them would have forced
   them `async` — a large breaking change — for zero safety gain.
 - **A rejection must not poison the queue.** The chain advances on both fulfilment and rejection,
   surfacing the real result to the actual caller while the next operation still runs.
-- **The commit-producer path deliberately does *not* zero `consumed`.** This is the subtle one, and
+- **The commit-producer path deliberately does _not_ zero `consumed`.** This is the subtle one, and
   the first implementation got it wrong. The producers do not advance the source handle: they read
-  its state and fork a *derived* handle, leaving the source live and reusable (the suite authors two
+  its state and fork a _derived_ handle, leaving the source live and reusable (the suite authors two
   alternate commits off one base). ts-mls's `createCommit` `consumed` alias into that still-live
   source secret tree — they are not retired — so zeroing them corrupts the source and the next
   commit off it fails with an AEAD tag error. There is no safe eager-wipe point on a fork, because
   the library never observes when the source handle is done; those secrets are collected with the
-  handle. Zeroing is therefore applied *only* where `#state = newState` provably abandons the old
+  handle. Zeroing is therefore applied _only_ where `#state = newState` provably abandons the old
   state first.
 - **The serializer is a standalone, dependency-free `Mutex`** rather than a promise chain inlined
   across the methods, so it can move to `@sozai/async` unchanged — see
@@ -60,7 +59,7 @@ correctness holes:
 Concurrency is proven against real behavior, not bookkeeping: two `encrypt`s fired without awaiting
 between them both decrypt on the peer (the pre-fix code reuses a generation and one fails), and a
 `processMessage` racing an `encrypt` on one handle asserts the ciphertext is framed at the
-*post-commit* epoch — so the encrypt provably ran after the commit applied, not against a stale
+_post-commit_ epoch — so the encrypt provably ran after the commit applied, not against a stale
 snapshot concurrently read. Retired buffers are asserted zero via a captured reference to the real
 ts-mls `consumed` array. Suite: 265 passing.
 

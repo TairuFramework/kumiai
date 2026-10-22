@@ -11,7 +11,7 @@ receive.
 ## Goal
 
 Make the `authorize` hook's contract complete for receive: the hook decides who may receive a
-*payload*, including after a membership change, without the caller tracking and revoking
+_payload_, including after a membership change, without the caller tracking and revoking
 subscriptions out of band.
 
 ## What was built
@@ -24,7 +24,7 @@ subscriptions out of band.
 - **Per-frame per-topic gate:** folded into the single serialized write site (`pushWrite`), so it
   covers all three delivery paths — backlog drain, buffered-live flush, and direct live delivery —
   with no frame reaching the socket ungated. This is what revokes a removed member mid-stream,
-  including on a receive stream opened *before* removal (no reconnect needed).
+  including on a receive stream opened _before_ removal (no reconnect needed).
 - **Configurable decision cache:** per-channel `Map` keyed by `(did, topicID)`, TTL via
   `receiveAuthCacheTTL` on both `CreateHandlersParams` and the public `CreateHubParams` (forwarded
   through `createHub`). Default 5000 ms; `0` disables reuse (hook per frame); non-finite or negative
@@ -42,19 +42,19 @@ subscriptions out of band.
   raises it and the post-drain `> lastServed` flush dedup stays correct (a denied high-seq frame
   cannot strand a later allowed lower-seq frame).
 - **Deny vs. throw are distinct.** A hook returning `false` skips only that frame and leaves the
-  channel operational (other topics keep flowing). A hook that *throws* reaches the existing
+  channel operational (other topics keep flowing). A hook that _throws_ reaches the existing
   `catch → finish()` and tears the channel down — fail closed: a hook that cannot render a decision
   must not deliver.
 - **Deny semantics = skip and leave pending.** A denied frame is never written and never auto-acked
   by the server, so it stays pending and redelivers on the recipient's next connect (re-gated);
-  once re-authorized it delivers. The security guarantee is *no payload reaches a denied recipient* —
+  once re-authorized it delivers. The security guarantee is _no payload reaches a denied recipient_ —
   not that a frame can never leave the store. Client acks remain unrestricted by design (harmless:
   acking only discards the client's own undelivered mail; no denied payload is served by it), so no
   ack-eligibility tracking was added.
 - **TTL is a reuse window measured from decision-store time, excluding hook latency.** Both allow
   and deny decisions are cached, so re-grant is bounded by the TTL (not immediate) and an
   in-session-denied frame redelivers on next connect. `expiresAt` is computed from the clock read
-  *after* the hook resolves, so a slow hook does not shorten the effective window.
+  _after_ the hook resolves, so a slow hook does not shorten the effective window.
 - **No hub-conformance / test-double change.** `authorize` is a `createHub`/`createHandlers`
   option, not part of the hub-conformance contract, so the contract suites and doubles were
   untouched.

@@ -6,7 +6,7 @@
 **Milestone:** the `@kumiai/broadcast` + `@kumiai/rpc` bus-discriminator item in
 `../milestones/pre-1.0-breaking-api.md` (now marked taken).
 **Origin:** the follow-on filed by `./2026-07-24-anycast-soundness.complete.md` — that branch made
-live push and the app-lane drain *agree* on dropping control-shaped app data; this is the structural
+live push and the app-lane drain _agree_ on dropping control-shaped app data; this is the structural
 fix that removes the collision instead of making both halves live with it.
 
 ## Goal
@@ -66,12 +66,11 @@ A whole-branch review asked whether a **v1 control frame** (which in v1 rode `ty
 `data.kind`) could be retained and, under v2, delivered into an app handler — since the live path
 refuses v1 at `decodeFrame` while the drain has no version gate. Verified against source and judged
 benign in every reachable case, so **not** fixed in code:
-
 - Control frames are never retained, structurally. The broadcast bus publishes control through
   `BroadcastBus.publish(topicID, payload)` (no `retain` parameter) — ephemeral fan-out. Every
   `retain:'log'` publish is a `mux.publish({…, retain:'log'})` carrying app-lane or commit bytes, never
   a bus control frame. So a legitimate v1 control frame cannot be in any log.
-- The only control-shaped bytes that can reach the drain are an app event whose *app data* carries
+- The only control-shaped bytes that can reach the drain are an app event whose _app data_ carries
   `kind:'req'|'res'` (the intended, delivered case), or an adversarial member hand-publishing
   control-shaped bytes with `retain:'log'`. In both, the drain only `events.emit`s the payload to an
   app-event listener — no control processing, the `senderDID` is authenticated by `crypto.unwrap`

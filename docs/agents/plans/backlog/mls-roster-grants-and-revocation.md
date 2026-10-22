@@ -24,14 +24,14 @@ Two earlier claims about this residual are wrong. Both are corrected in the code
 are recorded here because either one would send the next attempt in the wrong direction.
 
 **Wrong claim 1: the receive-side Add rule closes it.** It does not. `commitInvite` binds the key
-package to the subject of the *last* `kumiai.role` entry the invite enacts. The candidate roster
-folds *every* entry the invite enacts, so the last entry's subject is granted in it and the Add
+package to the subject of the _last_ `kumiai.role` entry the invite enacts. The candidate roster
+folds _every_ entry the invite enacts, so the last entry's subject is granted in it and the Add
 passes the receive check. This is now stated correctly in the `InviteRecipientMismatchError` doc
 comment (`packages/mls/src/group-commit.ts`).
 
 **Wrong claim 2: the fix is to seek the enacted entry matching the key package's DID instead of
 reading the last one.** That is backwards. Today's rule accepts exactly one key package — the one
-whose DID equals the last entry's subject. Seeking *any* matching entry accepts a key package for
+whose DID equals the last entry's subject. Seeking _any_ matching entry accepts a key package for
 any subject the invite grants, a strict superset. It loosens the binding rather than tightening it,
 and in the `[grant X, grant Y]` case it still admits Y, which is the outcome the residual describes.
 
@@ -85,7 +85,6 @@ residual as known-open.
 The receive-side Add rule (`packages/mls/src/policy.ts`, the `add` arm of `evaluateProposal`) asks
 whether the added leaf's credential DID holds a role in `context.candidateRoster`. Two callers build
 that context, and they build it at different moments:
-
 - **The committer**, filtering its pending-proposal set before authoring
   (`packages/mls/src/group-commit.ts`, `commitWithEntries`), judges a pending Add against the
   **post-fold** roster — the roster after the commit's own entries apply.
@@ -100,7 +99,6 @@ They can only disagree about a DID whose grant status changed between the two mo
 `roleReducer.apply` (`packages/mls/src/roster.ts:50-53`) only ever `set`s. There is no revocation and
 no removal — a DID that has ever been granted a role keeps it forever. So the grant status can only
 move from ungranted to granted, never back:
-
 - Ungranted at receipt: the receiver rejects the proposal and never stores it, so there is nothing
   for a later commit to reference.
 - Granted at receipt: still granted at commit time, so both sides accept.
@@ -146,12 +144,11 @@ capability layer it proposed to revoke no longer exists — the capability chain
 authority is now the roster folded from the signed ledger.
 
 Why a removed device cannot walk back in today:
-
 - `joinGroupExternal` exposes only `resync: true` (the parameter's type is the literal `true`), and a
-  resync replaces the caller's *prior leaf*. A removed member has no leaf in the tree, so ts-mls
+  resync replaces the caller's _prior leaf_. A removed member has no leaf in the tree, so ts-mls
   refuses the external commit outright ("no prior leaf matching the new KeyPackage"). Pinned by a
   test: a member an admin actually removed cannot resync back in.
-- A stranger — never in the group — is refused on the same path *and* by the external-commit policy,
+- A stranger — never in the group — is refused on the same path _and_ by the external-commit policy,
   which requires the joining DID to appear in the roster.
 
 Eviction is therefore complete **via the ratchet tree**, not via the roster.
@@ -162,7 +159,7 @@ Eviction is therefore complete **via the ratchet tree**, not via the roster.
   removed DID's `kumiai.role` entry standing. That grant confers nothing without a leaf, so it is not
   currently exploitable — but it means the roster and the tree disagree about who is a member. An
   admin who wants the grant gone must sign a demotion entry as well.
-- **The exposure returns if a non-resync external join is ever exposed.** Such a join adds a *new*
+- **The exposure returns if a non-resync external join is ever exposed.** Such a join adds a _new_
   leaf rather than replacing a prior one, so the "no prior leaf" refusal would not apply, and the
   external-commit policy's roster check would happily admit a removed-but-still-granted DID. Anything
   that unblocks `proposeAddExternal` or a fresh (non-resync) external join must either revoke the

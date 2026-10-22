@@ -97,3 +97,10 @@ export class HandshakeReservationError extends Error {
     this.name = 'HandshakeReservationError'
   }
 }
+
+export class ClientStateReservationError extends Error {
+  constructor() {
+    super('Handshake reservation epoch must be a uint64 bigint and generation a uint32 integer')
+    this.name = 'ClientStateReservationError'
+  }
+}

@@ -45,11 +45,10 @@ mailbox entry was reclaimed only by ageing out.
 
 **The one invariant the whole fix rests on:** never report a frame as durably handled when it was
 not. `memoryStore`'s `deliveries` map is keyed by recipient DID, not subscription instance, so an
-unacked frame *is* redelivered to a fresh receive — acking an undelivered frame is permanent data
+unacked frame _is_ redelivered to a fresh receive — acking an undelivered frame is permanent data
 loss, not a missed retry. Everything below derives from it.
 
 Design decisions carried into the implementation:
-
 - **The mux refcount mirrors `memoryStore`'s `pendingFor`** rather than inventing a parallel policy:
   a `Set` of holder identities (not an integer counter, so a double-ack cannot free a frame early),
   keyed by delivery position, acked upstream only when the last holder releases. The free stays
@@ -68,12 +67,12 @@ Design decisions carried into the implementation:
   age bound. The frame stays in the hub mailbox and is redelivered on reconnect; acking on give-up
   would report a broken consumer as durable success.
 - **Every teardown path abandons its claims, never acks** — mailbox-subscription close, mux dispose,
-  the tunnel read pump's teardown paths, and `session-end` (which must ack *before* closing the
+  the tunnel read pump's teardown paths, and `session-end` (which must ack _before_ closing the
   iterator, not in a `finally` that runs after). `open-once` retains a frame from an epoch the
   handle has not yet reached — a transient failure, not a permanent one.
 - **The drain preserves listeners-before-sinks ordering** so a listener that synchronously creates a
   directed sink still receives the triggering frame: sinks are matched after the listener loop, and
-  a drain-held `Symbol` claim is released *last* so a synchronously-acking listener cannot fire the
+  a drain-held `Symbol` claim is released _last_ so a synchronously-acking listener cannot fire the
   upstream ack before sinks merge into the pending entry.
 
 **Enforcement is the conformance suites, not shared code.** New clauses at the LogHub seam assert an

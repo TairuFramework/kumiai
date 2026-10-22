@@ -21,10 +21,10 @@ blind. This blocked per-command audit and any future per-DID command policy on t
 ## Key design decisions (preserved)
 
 - **The sender rides the frame HEADER, never the call payload.** enkaku validates the call payload
-  against a closed schema (`additionalProperties: false`; `iss` is legal only on a *signed* message,
+  against a closed schema (`additionalProperties: false`; `iss` is legal only on a _signed_ message,
   and directed frames are unsigned), so an `iss` written onto the payload is rejected as
   `INVALID_MESSAGE` before any handler runs — this was the first attempt, and it broke every directed
-  request. The unsigned *header* schema (`@kokuin/token` `unsignedHeaderSchema`) is
+  request. The unsigned _header_ schema (`@kokuin/token` `unsignedHeaderSchema`) is
   `additionalProperties: true`, so a stamped header field survives AJV validation (no
   `removeAdditional`) and reaches the handler context. The acceptor stamps the recovered sender into
   `frame.body.header` under the reserved key `kumiai/senderDID`, re-encodes, and feeds the frame; a
@@ -33,7 +33,7 @@ blind. This blocked per-command audit and any future per-DID command policy on t
 
 - **One shared Server, not one per session.** A per-session `Server` (each carrying its session's
   constant sender) was implemented and passed tests, but two independent blind reviews found it
-  regressed resource safety: enkaku builds a resource limiter *per* `Server` (not injectable — the
+  regressed resource safety: enkaku builds a resource limiter _per_ `Server` (not injectable — the
   public API takes only a `limits` config), so per-session Servers turn the collective
   100-handler / 10k-controller cap into `sessions × cap`, letting an authenticated member bypass
   backpressure by opening many session IDs; and a `session-end` frame's fire-and-forget
@@ -45,7 +45,7 @@ blind. This blocked per-command audit and any future per-DID command policy on t
 - **Un-spoofable by overwrite.** The header field is caller-writable on the wire (the header schema
   is open), so the acceptor overwrites it unconditionally with the MLS-recovered sender before the
   frame reaches enkaku; the acceptor is the authority on who sent the frame. The overwrite order is
-  the security invariant. The splice-drop (sender mismatch on an established session) runs *before*
+  the security invariant. The splice-drop (sender mismatch on an established session) runs _before_
   re-encoding, so a hostile spliced frame is dropped without serialization cost.
 
 - **`kumiai/` header namespace reserved.** The stamp key is namespaced and documented as

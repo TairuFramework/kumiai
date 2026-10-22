@@ -3,7 +3,7 @@
 **Origin:** four parallel API-surface audits over all ten packages that existed then, 2026-07-20,
 run ahead of
 `../completed/2026-07-21-forward-compatibility.complete.md`. That work took only the items where
-deferring makes the later fix *impossible* rather than merely expensive; this milestone tracks what
+deferring makes the later fix _impossible_ rather than merely expensive; this milestone tracks what
 it left, filed at the 2026-07-23 triage into the per-package backlog docs.
 
 Line numbers here and in the linked docs reference `5eb220a`. Every structural claim below was
@@ -39,30 +39,30 @@ that package's surface for a filed reason, check this list for a neighbour worth
 ### `@kumiai/mls` — [mls API hardening](../backlog/2026-07-07-mls-api-hardening.md)
 
 - A third `GroupPermission` — widening a union consumers exhaustively `switch` over
-  (`packages/mls/src/roster.ts:7`, exactly `'admin' | 'member'`). *Left for 0.10 (2026-09-25):* no
+  (`packages/mls/src/roster.ts:7`, exactly `'admin' | 'member'`). _Left for 0.10 (2026-09-25):_ no
   consumer needs one (see the mls API hardening item).
-- ~~`processMessage` / `processWelcome` `Uint8Array | unknown` input typing.~~ *Taken 2026-09-25* in
+- ~~`processMessage` / `processWelcome` `Uint8Array | unknown` input typing.~~ _Taken 2026-09-25_ in
   the 0.10 band.
 - ~~AAD on `GroupHandle.encrypt`/`decrypt` — **blocks** the rpc-side AAD binding; this is the change
-  that must come first.~~ *Taken 2026-09-03:* AAD threaded through `encrypt`/`decrypt` and the rpc
+  that must come first.~~ _Taken 2026-09-03:_ AAD threaded through `encrypt`/`decrypt` and the rpc
   `GroupCrypto` port, each app frame bound to its topicID, in the same `minor` — see
   `../completed/2026-09-02-mls-encrypt-aad.complete.md`.
 
-*Taken 2026-08-02:* the dead `GroupSyncScope` export, deleted ahead of the 0.5 band release — see
+_Taken 2026-08-02:_ the dead `GroupSyncScope` export, deleted ahead of the 0.5 band release — see
 `../completed/2026-08-02-trim-dead-api-surface.complete.md`.
 
 ### `@kumiai/hub-*` — [hub protocol/server cleanup](../backlog/2026-07-07-hub-protocol-server-cleanup.md)
 
 - ~~`HubStore`'s **four** positional methods — `unsubscribe`, `getSubscribers`, `storeKeyPackage`,
-  `fetchKeyPackages`. Reshaping breaks every implementor *and* every conformance double.
+  `fetchKeyPackages`. Reshaping breaks every implementor _and_ every conformance double.
 
   **The cheap moment passed (noted 2026-07-28).** This item said to take the reshape with
   `hub-keypackage-subscribe-caps`, which touches the two key-package methods anyway. That work
   [shipped 2026-07-25](../completed/2026-07-25-hub-keypackage-subscribe-caps.complete.md) and did
-  not take it — `storeKeyPackage` in fact *gained* a positional `notAfter` parameter
+  not take it — `storeKeyPackage` in fact _gained_ a positional `notAfter` parameter
   (`hub-protocol/src/types.ts:235`) rather than moving to a params object. The item stands; the
   argument for when to take it does not. The next work to open `HubStore` is the new moment.~~
-  *Taken 2026-09-04:* **the premise was four; it was seven by the time this landed.**
+  _Taken 2026-09-04:_ **the premise was four; it was seven by the time this landed.**
   `countKeyPackages`, `storeLastResortKeyPackage` and `fetchLastResortKeyPackage` did not exist at
   `5eb220a`, and `storeKeyPackage` had since gained the positional `notAfter` noted above — all
   postdate this item's filing. All seven positional methods
@@ -78,7 +78,7 @@ that package's surface for a filed reason, check this list for a neighbour worth
   callers but forces every implementor and double to supply the field.
 - Flat `HubRateLimits` — no home for a per-action limit matching `AuthorizeRequest`'s six actions.
 - ~~`HubClient.publish`'s pre-base64 `payload: string` — accepting `Uint8Array` is the break.~~
-  *Taken 2026-09-04:* `publish` now accepts `payload: Uint8Array` and encodes it internally with
+  _Taken 2026-09-04:_ `publish` now accepts `payload: Uint8Array` and encodes it internally with
   standard Base64 (`toB64`) before sending; on-wire bytes are unchanged. The full `HubClient`
   positional-method sweep (`subscribe`/`unsubscribe`/`uploadKeyPackages`/
   `uploadLastResortKeyPackage`/`fetchKeyPackages` → params objects) rode along in the same branch.
@@ -86,10 +86,10 @@ that package's surface for a filed reason, check this list for a neighbour worth
 - The `urn:enkaku:` schema `$id`s — an unsettled identifier scheme that also names `enkaku` for
   types now living in kumiai.
 
-*Taken 2026-08-02:* `hub-client`'s `rawClient` getter, removed ahead of the 0.5 band release — see
+_Taken 2026-08-02:_ `hub-client`'s `rawClient` getter, removed ahead of the 0.5 band release — see
 `../completed/2026-08-02-trim-dead-api-surface.complete.md`.
 
-*Dropped from this milestone 2026-08-02:* `KeyPackageFetchLimits` → `KeyPackageLimits`. **The
+_Dropped from this milestone 2026-08-02:_ `KeyPackageFetchLimits` → `KeyPackageLimits`. **The
 premise was false.** The entry claimed the type "sits beside upload-side limits its name excludes",
 carried over from the 2026-07-28 note. It does not. All four fields are fetch-side — `maxCount`,
 `maxRequests`, `maxPerTargetConsumed`, `windowMs` (`hub-server/src/handlers.ts:168`) — and every
@@ -99,7 +99,7 @@ things none of which touch this type: the `authorize` hook, the generic per-DID 
 names exactly what it holds; `KeyPackageLimits` would name more. If upload-side limits are ever
 folded into one config type, the rename comes with that work and is motivated by it — refile then.
 
-*Dropped from this milestone 2026-07-23:* "hub port types moving out of `hub-tunnel`" was listed
+_Dropped from this milestone 2026-07-23:_ "hub port types moving out of `hub-tunnel`" was listed
 here pending a structural check. The check found the premise false — `@kumiai/hub-protocol` declares
 none of `HubBase`/`MailboxHub`/`LogHub`/`HubReceiveSubscription`/`HubPublishParams`, so there is
 nowhere to move them to, and hub-tunnel is already their shared home (`@kumiai/rpc` imports them
@@ -110,42 +110,42 @@ in the linked doc; the one real defect the check turned up is folded into the `d
 
 - ~~`ProtocolSurface` ignores its own type parameter (`peer.ts:254-258`) — `prc: string`,
   `prm?: unknown`, `Promise<unknown>`. The largest single item on this milestone, and the one least
-  doable after 1.0.~~ *Taken 2026-09-04:* `ProtocolSurface` is now typed against the protocol's
+  doable after 1.0.~~ _Taken 2026-09-04:_ `ProtocolSurface` is now typed against the protocol's
   procedure map — `dispatch`/`request`/`gather` take an enkaku-style config object keyed off the
   concrete protocol, and the `GroupPeer`/`GroupPeerParams` `Protocols` bound tightens to
   `GroupProtocolDefinition`. See
   [../completed/2026-09-04-rpc-protocol-surface-typing.complete.md](../completed/2026-09-04-rpc-protocol-surface-typing.complete.md).
 - ~~`open-once`/`directed` still typed against the optional-sender `UnwrapResult`
   (`open-once.ts:15`, `directed.ts:35`) — has a runtime guard under it already, so it is
-  type-safety debt rather than a live gap.~~ *Taken 2026-09-25:* both inbound paths now require
+  type-safety debt rather than a live gap.~~ _Taken 2026-09-25:_ both inbound paths now require
   rpc's `GroupUnwrapResult` with a required authenticated `senderDID`.
 - ~~`GroupMLS.rosterDIDs` carries no leaf identity (`rpc/src/crypto.ts:240`). **Refiled from mls
   2026-07-23** — `@kumiai/mls` has no such method; it is `@kumiai/rpc`'s consumer port, so the
-  change also hits `@kumiai/mls-rpc` and the `@kumiai/rpc-conformance` contract suite.~~ *Taken
-  2026-09-04:* renamed to `rosterEntries()`, returning `Array<RosterEntry>` (`did`, `leafIndex`,
+  change also hits `@kumiai/mls-rpc` and the `@kumiai/rpc-conformance` contract suite.~~ _Taken
+  2026-09-04:_ renamed to `rosterEntries()`, returning `Array<RosterEntry>` (`did`, `leafIndex`,
   `longForm`) in ascending `leafIndex` order, across `@kumiai/rpc`, `@kumiai/mls-rpc`, and
   `@kumiai/rpc-conformance`. See
   [../completed/2026-09-04-roster-leaf-identity.complete.md](../completed/2026-09-04-roster-leaf-identity.complete.md).
 - ~~**Bus control-frame `kind` discriminator shares the app-data namespace** (spans `@kumiai/broadcast`
-  + `@kumiai/rpc`). **Filed 2026-07-24** from the `fix/anycast-soundness` whole-branch review (see
-  `../completed/2026-07-24-anycast-soundness.complete.md`). On the bus, req/res
-  control messages ride as `typ:'event'` frames told apart from app events by inspecting `data.kind`
-  (`packages/broadcast/src/responder.ts`; the `ReplyData`/`RequestData` shapes in `client.ts`). An app
-  event whose `data` legitimately carries a top-level `kind` valued `'req'`/`'res'` — reachable
-  whenever the procedure's `data` schema is permissive — is dropped by the live responder as a
-  control frame, so the discriminator is an in-band signal colliding with app data. The structural
-  fix reserves it out of app reach: a distinct `typ` for control messages, or a `ctrl` envelope
-  separate from `payload.data`. That is a **wire-format break** (and touches every bus producer and
-  consumer). Interim same-door consistency — the drain drops control-shaped payloads exactly as live
-  push does — shipped on `fix/anycast-soundness` (2026-07-24); the envelope is the real fix, and it
-  makes that interim drop-classification deletable. Not a correctness bug once live and drain agree:
-  the only symptom is that an app cannot use `kind: 'req'|'res'` as an event-data key.~~ *Taken
-  2026-09-04:* control frames now ride a distinct `typ:'ctrl'` (`BROADCAST_VERSION` 1→2), freeing
-  `data.kind` for application use — the responder and client classifiers key on `payload.typ`, never
-  on shape-sniffing `data`. Both interim drop-classifications (the live responder's and the rpc
-  app-lane drain's) are deleted; a stale v1-encoded frame is refused by `decodeFrame` rather than
-  silently misread. See
-  [../completed/2026-09-04-bus-control-typ.complete.md](../completed/2026-09-04-bus-control-typ.complete.md).
+  - `@kumiai/rpc`). **Filed 2026-07-24** from the `fix/anycast-soundness` whole-branch review (see
+    `../completed/2026-07-24-anycast-soundness.complete.md`). On the bus, req/res
+    control messages ride as `typ:'event'` frames told apart from app events by inspecting `data.kind`
+    (`packages/broadcast/src/responder.ts`; the `ReplyData`/`RequestData` shapes in `client.ts`). An app
+    event whose `data` legitimately carries a top-level `kind` valued `'req'`/`'res'` — reachable
+    whenever the procedure's `data` schema is permissive — is dropped by the live responder as a
+    control frame, so the discriminator is an in-band signal colliding with app data. The structural
+    fix reserves it out of app reach: a distinct `typ` for control messages, or a `ctrl` envelope
+    separate from `payload.data`. That is a **wire-format break** (and touches every bus producer and
+    consumer). Interim same-door consistency — the drain drops control-shaped payloads exactly as live
+    push does — shipped on `fix/anycast-soundness` (2026-07-24); the envelope is the real fix, and it
+    makes that interim drop-classification deletable. Not a correctness bug once live and drain agree:
+    the only symptom is that an app cannot use `kind: 'req'|'res'` as an event-data key.~~ _Taken
+  2026-09-04:_ control frames now ride a distinct `typ:'ctrl'` (`BROADCAST_VERSION` 1→2), freeing
+    `data.kind` for application use — the responder and client classifiers key on `payload.typ`, never
+    on shape-sniffing `data`. Both interim drop-classifications (the live responder's and the rpc
+    app-lane drain's) are deleted; a stale v1-encoded frame is refused by `decodeFrame` rather than
+    silently misread. See
+    [../completed/2026-09-04-bus-control-typ.complete.md](../completed/2026-09-04-bus-control-typ.complete.md).
 
 ### `@kumiai/mls-hub` — audited 2026-08-02, nothing carried forward
 
@@ -153,7 +153,6 @@ in the linked doc; the one real defect the check turned up is folded into the `d
 full ahead of its first publish, since the 0.5 band release is what makes its surface public and
 every reshape free until then. Four findings, all settled — none is open, and none is deferred to
 1.0.
-
 - **The two storage ports were silently interchangeable.** `LastResortRecord` was `KeyPackageRecord`
   plus `uploadedAt`, so method bivariance made `LastResortStore` assignable to
   `KeyPackagePoolStore`: a host wiring one store to both got a diagnostic on one half and silence on

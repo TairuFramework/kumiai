@@ -7,10 +7,10 @@ API stays one `dispatch(prc, data)`, routing by the declaration.
 
 ```ts
 const room = defineGroupProtocol({
-  'room/posted': { type: 'event', retain: 'log', data: { type: 'object' } },       // drainable history
-  'room/said':   { type: 'event', retain: 'ephemeral', data: { type: 'object' } }, // ephemeral, said
-  'room/typing': { type: 'event', data: { type: 'object' } },                      // ephemeral, default
-  'room/roster': { type: 'request', param: {}, result: {} },                       // always ephemeral
+  'room/posted': { type: 'event', retain: 'log', data: { type: 'object' } }, // drainable history
+  'room/said': { type: 'event', retain: 'ephemeral', data: { type: 'object' } }, // ephemeral, said
+  'room/typing': { type: 'event', data: { type: 'object' } }, // ephemeral, default
+  'room/roster': { type: 'request', param: {}, result: {} }, // always ephemeral
 })
 ```
 

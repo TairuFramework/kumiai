@@ -23,7 +23,6 @@ either dropping `prepublishOnly` (the `release` script already builds) or droppi
 ## 2. Two check-script polish items
 
 Both in `scripts/check-versions.mjs` and its tests, neither affecting what the check catches:
-
 - A malformed `package.json` now fails loudly, but as an uncaught Node exception with a stack trace,
   while the script's two other failure paths use `console.error` + `process.exit(1)`. The directory
   name is in the message either way. Cosmetic inconsistency in a developer-facing script.

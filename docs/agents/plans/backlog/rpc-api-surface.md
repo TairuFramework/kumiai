@@ -28,7 +28,7 @@ the deadline. Line numbers are as of `5eb220a`.
   took, and it breaks every existing call site's inferred types at once. Worth doing before 1.0
   precisely because it cannot be done cheaply after.~~
 
-  *Taken 2026-09-04:* `ProtocolSurface` is now keyed off the protocol's procedure map —
+  _Taken 2026-09-04:_ `ProtocolSurface` is now keyed off the protocol's procedure map —
   `dispatch`/`request`/`gather` take an enkaku-style config object with typed `data`/`param`/
   `result`, and `gather` returns `Array<GatheredReply<Result>>`. Breaking: the config-object call
   form, and the `GroupPeer`/`GroupPeerParams` `Protocols` bound tightening from
@@ -36,7 +36,7 @@ the deadline. Line numbers are as of `5eb220a`.
   [../completed/2026-09-04-rpc-protocol-surface-typing.complete.md](../completed/2026-09-04-rpc-protocol-surface-typing.complete.md).
 
 - ~~**`open-once` and `directed` still type against the optional-sender `UnwrapResult`.** Task 6 of
-  the forward-compatibility plan closed the *runtime* hole in `packages/rpc/src/peer.ts` —
+  the forward-compatibility plan closed the _runtime_ hole in `packages/rpc/src/peer.ts` —
   `openedFrames` is typed `GroupUnwrapResult`, and a frame missing `senderDID` is refused before
   anything downstream sees it. It did not re-type `packages/rpc/src/open-once.ts:15`'s
   `project: (message: StoredMessage, opened: UnwrapResult) => Opened | undefined` callback
@@ -46,12 +46,12 @@ the deadline. Line numbers are as of `5eb220a`.
 
   Type-safety debt with a runtime guard already under it, not a live gap — which is exactly why it
   was left. The fix is to narrow these to the group-authenticated result type, which breaks any
-  consumer supplying a crypto-agnostic `unwrap`.~~ *Taken 2026-09-25:* both paths now require
+  consumer supplying a crypto-agnostic `unwrap`.~~ _Taken 2026-09-25:_ both paths now require
   rpc's `GroupUnwrapResult` and reject optional-sender unwrap functions at compile time.
 
 - ~~**`GroupMLS.rosterDIDs` carries no leaf identity.** `packages/rpc/src/crypto.ts:240` —
   `rosterDIDs(): Promise<Array<string>>`, documented at `:228` as "one entry per leaf". So a DID
-  holding two leaves appears twice, but nothing says *which* leaf each entry is: no leaf index, no
+  holding two leaves appears twice, but nothing says _which_ leaf each entry is: no leaf index, no
   credential metadata. Fine while nothing needs to disambiguate two leaves for the same DID (a
   rejoin mid-fold, say); adding that later widens the return shape.
 
@@ -60,10 +60,10 @@ the deadline. Line numbers are as of `5eb220a`.
   consumer port. That makes the blast radius wider than the original wording implies: changing it
   breaks the port (`rpc/src/crypto.ts:226`, exported at `rpc/src/index.ts:40`), its real
   implementation (`packages/mls-rpc/src/mls.ts:130`), and the contract suite every implementation
-  *and* every double must pass (`packages/rpc-conformance/src/group-mls.ts:47`, exercised at
+  _and_ every double must pass (`packages/rpc-conformance/src/group-mls.ts:47`, exercised at
   `:313`). Three packages, not one.~~
 
-  *Taken 2026-09-04:* `rosterDIDs(): Promise<Array<string>>` is now `rosterEntries():
+  _Taken 2026-09-04:_ `rosterDIDs(): Promise<Array<string>>` is now `rosterEntries():
   Promise<Array<RosterEntry>>`, `RosterEntry` being `{ did, leafIndex, longForm }`, returned in
   ascending `leafIndex` order. Ported across `@kumiai/rpc`, `@kumiai/mls-rpc`, and
   `@kumiai/rpc-conformance`, with the double converted to a hole-preserving leaf-slot model and new
@@ -76,7 +76,7 @@ the deadline. Line numbers are as of `5eb220a`.
 
 - **The AAD/context half of `wrap`/`unwrap`** (`packages/rpc/src/crypto.ts`) — binding rpc's sealed
   bytes to a topic/segment context, the same silent-failure shape as `exportSecret`'s label.
-  *Cleared 2026-09-03:* `@kumiai/mls`'s `GroupHandle.encrypt`/`decrypt` now take an AAD parameter,
+  _Cleared 2026-09-03:_ `@kumiai/mls`'s `GroupHandle.encrypt`/`decrypt` now take an AAD parameter,
   and the `@kumiai/rpc` `GroupCrypto` port's `wrap()`/`unwrap()` accept AAD and `expectedAAD`,
   binding each application message and directed frame to its topicID — see
   `../completed/2026-09-02-mls-encrypt-aad.complete.md` and commit `85979c9` / the

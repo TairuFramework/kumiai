@@ -30,29 +30,29 @@ overview: https://github.com/TairuFramework/kigu/blob/main/docs/stack.md
 
 ## Reference
 
-| Document | Covers |
-| --- | --- |
-| [Reserved namespaces](../reference/reserved-namespaces.md) | The `kumiai.` and `kumiai/` prefixes, and the three MLS extension type numbers. **Read this before naming anything.** |
-| [Lanes and retention](../reference/lanes-and-retention.md) | `mailbox` vs `log`, the four lanes, the 28-day window, and a subscribe the hub refuses. |
-| [The app lane](../reference/app-lane.md) | The anchor and why it is per-epoch, segments, the returning-member drain, the cursor and `frameEpoch`. |
-| [Defining a group protocol](../reference/group-protocols.md) | Procedure kind × retention, and why only events may be `log`. |
-| [Two seals](../reference/sealing.md) | `wrap`/`unwrap` vs `sealEntries`/`openEntries`, and where the version byte sits. |
-| [Bound-leaf lifecycle](../reference/mls-lifecycle.md) | Genesis, membership, proofs, renewal, recovery and security residuals. |
-| [Wake notifications](../reference/wake-notifications.md) | The push doorbell: the sealed hint, leading-edge debouncing, sender verdicts, and the iOS limits. |
+| Document                                                     | Covers                                                                                                                |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| [Reserved namespaces](../reference/reserved-namespaces.md)   | The `kumiai.` and `kumiai/` prefixes, and the three MLS extension type numbers. **Read this before naming anything.** |
+| [Lanes and retention](../reference/lanes-and-retention.md)   | `mailbox` vs `log`, the four lanes, the 28-day window, and a subscribe the hub refuses.                               |
+| [The app lane](../reference/app-lane.md)                     | The anchor and why it is per-epoch, segments, the returning-member drain, the cursor and `frameEpoch`.                |
+| [Defining a group protocol](../reference/group-protocols.md) | Procedure kind × retention, and why only events may be `log`.                                                         |
+| [Two seals](../reference/sealing.md)                         | `wrap`/`unwrap` vs `sealEntries`/`openEntries`, and where the version byte sits.                                      |
+| [Bound-leaf lifecycle](../reference/mls-lifecycle.md)        | Genesis, membership, proofs, renewal, recovery and security residuals.                                                |
+| [Wake notifications](../reference/wake-notifications.md)     | The push doorbell: the sealed hint, leading-edge debouncing, sender verdicts, and the iOS limits.                     |
 
 ## What a host wires
 
 `createGroupPeer` takes two ports and four durable stores, plus `appOutboxLimit`.
 The type requires these stores alongside the `mls` port because they preserve commit, rotation, cursor and send state.
 
-| | |
-| --- | --- |
-| `GroupCrypto` | `epoch`, `exportSecret`, `wrap`, `unwrap`, `frameEpoch`, `frameAAD`, `sealEntries`, `openEntries`; optional `pending` for durable app delivery |
-| `GroupMLS` | commit lifecycle, synchronous `sendAdmission`, recovery preparation and confirmed adoption, verdicts, roster and commit headers |
-| `CommitJournal` | single slot preserving commits and revoke holds across the acceptance crash window |
-| `AnchorStore` | the anchor and one unresolved advance, repaired before another advance or startup delivery |
-| `AppOutbox` | durable ordered log acceptance, encrypted by the host, bounded by `appOutboxLimit` |
-| `AppCursorStore` | the read position; without it the drain re-reads history forever |
+|                  |                                                                                                                                                |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GroupCrypto`    | `epoch`, `exportSecret`, `wrap`, `unwrap`, `frameEpoch`, `frameAAD`, `sealEntries`, `openEntries`; optional `pending` for durable app delivery |
+| `GroupMLS`       | commit lifecycle, synchronous `sendAdmission`, recovery preparation and confirmed adoption, verdicts, roster and commit headers                |
+| `CommitJournal`  | single slot preserving commits and revoke holds across the acceptance crash window                                                             |
+| `AnchorStore`    | the anchor and one unresolved advance, repaired before another advance or startup delivery                                                     |
+| `AppOutbox`      | durable ordered log acceptance, encrypted by the host, bounded by `appOutboxLimit`                                                             |
+| `AppCursorStore` | the read position; without it the drain re-reads history forever                                                                               |
 
 `onAppWindowPruned` is optional and reports the fetch's `gap` on every page with a cursor.
 The notice carries that fetch's exclusive cursor and `oldest: string | null`, null for an empty retained window.
@@ -79,7 +79,6 @@ opens those fetched frames and the delivery worker runs outside the commit and a
 ## Stated residuals
 
 Bounds this design has, on purpose, rather than hides:
-
 - **A member away beyond the retention window** loses those messages — surfaced as a pruned-window
   notice from each cursor-bearing fetch, including an empty retained window. Notices can be lost on crash or disposal.
 - **A host advancing outside the peer can lose a rotation secret.** The durable rotation record then

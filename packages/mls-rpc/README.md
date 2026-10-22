@@ -56,8 +56,8 @@ Its configuration path is `MlsContext.clientConfig.keyRetentionConfig.maximumFor
 The sender uses half the smaller of its configured window and that default. Members must use compatible receiver windows.
 Missing key retention configuration uses the default window. A window below 2 throws `HandshakeWindowConfigError` on reservation.
 Consuming a stale reservation throws `HandshakeReservationError`, including after an epoch advance.
-Reservation checkpoints use client-state format v3. The decoder accepts v1, whose missing evidence never permits reservation reuse.
-The decoder refuses v2, which belongs to an incompatible layout, and unknown versions. Older decoders refuse v3 checkpoints.
+All checkpoints use client-state format v2, including optional reservation evidence and leaf-zero proposal sender references.
+The decoder refuses every other version with an unsupported-version error. There is no migration path.
 Each framed attempt adds a consumption save before journalling.
 Durable hosts must supply `simpleHandleAccess.persist` or an equivalent transactional `HandleAccess`.
 Persistence must resolve after a durable write and reject without changing storage.

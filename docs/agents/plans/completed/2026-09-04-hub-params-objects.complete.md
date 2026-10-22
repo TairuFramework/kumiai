@@ -56,10 +56,10 @@ recurrence this prevents.
 
 ## Premise correction
 
-The milestone entry (written against `5eb220a`) listed *four* positional `HubStore` methods. Three
+The milestone entry (written against `5eb220a`) listed _four_ positional `HubStore` methods. Three
 methods (`countKeyPackages`, `storeLastResortKeyPackage`, `fetchLastResortKeyPackage`) and one
 positional parameter (`storeKeyPackage`'s `notAfter`) were added between then and now, so the true
-count was *seven* — all converted here. The milestone doc records this inline.
+count was _seven_ — all converted here. The milestone doc records this inline.
 
 ## Verification
 

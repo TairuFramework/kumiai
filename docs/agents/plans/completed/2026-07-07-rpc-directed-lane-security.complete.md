@@ -53,7 +53,7 @@ and stop the recovery rendezvous leaking MLS group state.
 - **Non-goal: member-to-member confidentiality on the directed lane.** Group `wrap` means a
   member holding the group app key could read a misdelivered directed frame; the lane is
   confidential from the hub and non-members, same guarantee as broadcast. Recovery replies
-  *are* 1:1.
+  _are_ 1:1.
 
 ## Verification
 

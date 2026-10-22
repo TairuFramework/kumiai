@@ -22,7 +22,6 @@ to exactly one protocol, without changing any topic derivation.
 
 The peer built **one** recipient-scoped directed-inbox topic and attached one acceptor **per
 protocol** to that single inbound path. The consequences were worse than a name-collision edge case:
-
 - **Double execution** — two protocols defining a same-named procedure both ran their handler.
 - **Spurious error replies (already broken before this change)** — an enkaku `Server` fed a
   request-like frame for a procedure not in its protocol writes an `INVALID_MESSAGE` reply carrying

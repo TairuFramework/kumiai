@@ -87,7 +87,6 @@ Two findings from that batch are **not** repeated here because this doc already 
 hub-tunnel port-type declarations (merged into the `PublishParams`-defined-three-times item above,
 and **found void** on verification) and the pre-base64 `payload` (already a Medium item). Everything
 below is new. All are **breaking**; see `../milestones/pre-1.0-breaking-api.md`.
-
 - **`HubStore`'s positional methods — four of them, not two.** `packages/hub-protocol/src/types.ts:207`
   (the original finding said `:244` and "every method but two"; both wrong, corrected 2026-07-23 by
   reading the type). Seven methods take a single params object — `publish`, `fetch`, `fetchTopic`,
@@ -101,12 +100,12 @@ below is new. All are **breaking**; see `../milestones/pre-1.0-breaking-api.md`.
   ```
 
   Left inconsistent rather than reshaped, since a store-port change has no filed need behind it.
-  Reshaping later breaks every implementor *and* every conformance double.
+  Reshaping later breaks every implementor _and_ every conformance double.
 
   **Updated 2026-07-28.** This said the key-package caps work was the cheap moment, since it touches
   the two key-package methods anyway. That work
   [shipped 2026-07-25](../completed/2026-07-25-hub-keypackage-subscribe-caps.complete.md) without
-  taking it, and `storeKeyPackage` *gained* a positional `notAfter` parameter (`types.ts:235`)
+  taking it, and `storeKeyPackage` _gained_ a positional `notAfter` parameter (`types.ts:235`)
   instead. The next work to open `HubStore` is the new moment.
 - **`deduped`/`head` absent from the publish wire response.** `HubStore.publish` already returns
   `deduped` (`packages/hub-protocol/src/types.ts:77`, on `PublishResult` at `:66-78` — the original
@@ -119,19 +118,19 @@ below is new. All are **breaking**; see `../milestones/pre-1.0-breaking-api.md`.
   `packages/hub-protocol/src/protocol.ts:3-8` states the discipline outright: "a future shape change
   ships as a new versioned procedure (`hub/v2/publish`, say) — additive in an enkaku protocol —
   never by widening an existing schema. Every `additionalProperties: false` below stays sealed."
-  So widening `hub/v1/publish`'s sealed result *would* break older clients' validation, which is
+  So widening `hub/v1/publish`'s sealed result _would_ break older clients' validation, which is
   exactly why that route is closed; the sanctioned route — a new procedure alongside the old — is
   additive. This is a design decision already made, not one this finding gets to reopen.
 
-  **`LogHub.publish` drops it too, and *that* half is breaking** (added 2026-07-23, from verifying
+  **`LogHub.publish` drops it too, and _that_ half is breaking** (added 2026-07-23, from verifying
   the port-type finding above). `packages/hub-tunnel/src/transport.ts:139` types `LogHub.publish` as
   `(params: HubPublishParams) => Promise<{ sequenceID: string }>`, strictly narrower than
   `HubStore.publish`'s `Promise<PublishResult>` (`hub-protocol/src/types.ts:66-78`). So the gap is a
   three-layer chain, not a single omission: the **store** computes `deduped`, the **wire schema**
   does not carry it, and the **client facade** cannot surface it.
 
-  Widening the port's return type is backward-compatible for *callers* — they receive a field they
-  can ignore — but every *implementor* must now supply it: `hub-mux.ts:501`, `directed.ts:90` and
+  Widening the port's return type is backward-compatible for _callers_ — they receive a field they
+  can ignore — but every _implementor_ must now supply it: `hub-mux.ts:501`, `directed.ts:90` and
   `:203` in `@kumiai/rpc`, plus every conformance double. That is the breaking half, and why this
   item stays on the pre-1.0 milestone even though the wire change is additive.
 
@@ -147,7 +146,7 @@ below is new. All are **breaking**; see `../milestones/pre-1.0-breaking-api.md`.
   none of which this type declares. The name is accurate; the rename would make it less so. Refile
   only if upload-side limits are ever folded into one config type, motivated by that work.
 
-  *Superseded — kept for the record.* **No longer premature (updated 2026-07-28).** This said the
+  _Superseded — kept for the record._ **No longer premature (updated 2026-07-28).** This said the
   name was fine until something constrained uploads, and to take the rename with the caps work. That
   work [shipped 2026-07-25](../completed/2026-07-25-hub-keypackage-subscribe-caps.complete.md) and
   added the upload-side constraints without renaming, so the type now sits beside limits its name

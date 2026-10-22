@@ -6,7 +6,6 @@
 ## Problem
 
 `packages/mls/src/mutex.ts` holds a small, generic, dependency-free FIFO async serializer:
-
 - `run(fn): Promise<T>` executes callbacks one at a time, in the order they were called.
 - Order is never reprioritized — callers rely on it to preserve causal ordering.
 - A callback's rejection is delivered to its own caller but never stalls or poisons the queue.
@@ -32,7 +31,7 @@ Worth doing when `@sozai` is next opened for other reasons; not worth a release 
 
 The rejection-isolation is the part to preserve exactly on the move — a naive `chain.then(fn)` never
 runs `fn` once the chain has entered a rejected state, silently wedging every later caller. The
-chain must advance on *both* fulfilment and rejection while the real outcome is surfaced to the
+chain must advance on _both_ fulfilment and rejection while the real outcome is surfaced to the
 original caller. Any extraction should carry the existing unit tests (FIFO order under a
 faster-finishing later job; each caller gets its own result; a rejecting job does not poison the
 queue) rather than re-deriving them.

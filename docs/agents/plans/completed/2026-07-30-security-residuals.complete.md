@@ -72,7 +72,7 @@ either port's silent ones — with `sealEntries`/`openEntries` named beside it a
 per-epoch removal boundary — and the two READMEs point at each other.
 
 The `sealEntries` half came out of review, which caught the first wording claiming `exportSecret` was
-the *only* member with a silent failure mode. It is not: a hand-rolled entry seal keyed off anything
+the _only_ member with a silent failure mode. It is not: a hand-rolled entry seal keyed off anything
 but the epoch secret round-trips, throws nothing, and lets a removed member open the ledger-entry
 blobs of commits enacted after its removal.
 
@@ -81,7 +81,6 @@ blobs of commits enacted after its removal.
 Kubun hand-rolls the port rather than delegating: `kubun/packages/plugin-p2p/src/groups/group-crypto.ts`
 exports its own `createGroupCrypto` over `mlsExporter`. It is nonetheless covered, which is why this
 is prevention and not a live defect:
-
 - It runs the suite — `testGroupCryptoConformance` at
   `kubun/packages/plugin-p2p/test/group-crypto-conformance.test.ts:215`, `testGroupMLSConformance` in
   the sibling file.
@@ -109,7 +108,7 @@ No changes were made to Kubun.
 **The clause is a floor, not a strict increase.** `expect(replayed >= original)`. A store that
 content-deduplicated and handed back the original sequenceID is equally safe for the reader the clause
 protects, and a contract suite should not forbid a correct implementation because it is not the one we
-happen to have. The failure being excluded is a replay landing *below* an applied frame.
+happen to have. The failure being excluded is a replay landing _below_ an applied frame.
 
 **The clause lives at the hub layer, not the rpc layer.** The rpc conclusion rests on log ordering,
 which the hub owns. Pinning it in `hub-conformance` means Kubun's sqlite and postgres stores inherit
