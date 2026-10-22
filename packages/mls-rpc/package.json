@@ -37,10 +37,12 @@
   },
   "dependencies": {
     "@kokuin/token": "catalog:",
+    "@kumiai/hub-tunnel": "workspace:^",
     "@kumiai/mls": "workspace:^",
     "@kumiai/mls-hub": "workspace:^",
     "@kumiai/rpc": "workspace:^",
     "@noble/ciphers": "catalog:",
+    "@sozai/codec": "catalog:",
     "@sozai/runtime": "catalog:",
     "ts-mls": "catalog:"
   },
