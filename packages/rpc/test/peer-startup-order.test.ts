@@ -15,6 +15,7 @@ import {
 } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import {
   buildLedgerCommit,
   buildRejoinRecord,
@@ -231,6 +232,7 @@ test('a failed seed-walk anchor save is retried on the next idle replay', async 
   await seed.peer.dispose()
   await seed.peer.drained()
   await publishCommit({
+    authenticator: memoryAuthenticator(seed.mls),
     hub,
     senderDID: 'alice',
     recoverySecret: secret,
@@ -267,6 +269,7 @@ test('restart builds the epoch after a resolved anchor save interrupted runtime 
     if (slot.pending == null && slot.anchor.epoch === 2) void seed.peer.dispose()
   }
   await publishCommit({
+    authenticator: memoryAuthenticator(seed.mls),
     hub,
     senderDID: 'alice',
     recoverySecret: secret,
@@ -478,6 +481,7 @@ test.each(['published', 'confirmed'] as const)(
     const responses: Array<{ position: string; digest: string }> = []
     for (let index = 0; index < 3; index++) {
       const row = await publishCommit({
+        authenticator: memoryAuthenticator(seed.mls),
         hub,
         senderDID: 'carol',
         recoverySecret: secret,

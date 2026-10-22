@@ -4,6 +4,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import { PeerDisposedError } from '../src/errors.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { makeMLSPeer, type TestPeer } from './fixtures/peer.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 50))
@@ -91,7 +92,14 @@ describe('calls landing mid-rebuild wait for the next epoch', () => {
     await flush()
 
     const hold = await holdTeardownOf(bob)
-    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'admin',
+      recoverySecret,
+      epoch: 1,
+      removes: ['carol'],
+    })
     await flush()
     expect(hold.entered()).toBe(true)
     expect(alice.peer.anchorEpoch()).toBe(2)
@@ -128,7 +136,14 @@ describe('calls landing mid-rebuild wait for the next epoch', () => {
     await flush()
 
     const hold = await holdTeardownOf(bob)
-    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'admin',
+      recoverySecret,
+      epoch: 1,
+      removes: ['carol'],
+    })
     await flush()
     expect(hold.entered()).toBe(true)
 
@@ -153,7 +168,14 @@ describe('calls landing mid-rebuild wait for the next epoch', () => {
     await flush()
 
     const hold = await holdTeardownOf(bob)
-    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'admin',
+      recoverySecret,
+      epoch: 1,
+      removes: ['carol'],
+    })
     await flush()
     expect(hold.entered()).toBe(true)
 

@@ -152,7 +152,11 @@ test.each([false, true])(
       localDID: 'reader',
       members: ['admin', 'reader'],
     })
-    const author = createMemoryGroupMLS({ localDID: 'admin', members: ['admin', 'reader'] })
+    const author = createMemoryGroupMLS({
+      groupID,
+      localDID: 'admin',
+      members: ['admin', 'reader'],
+    })
     const token = 'role:reader=member'
     const commit = author.buildCommit([token], { removes: removed ? ['reader'] : [] })
     const staged: Array<StagedAdoption> = []
@@ -200,7 +204,11 @@ test.each([false, true])(
       localDID: 'reader',
       members: ['admin', 'reader'],
     })
-    const author = createMemoryGroupMLS({ localDID: 'admin' })
+    const author = createMemoryGroupMLS({
+      groupID,
+      localDID: 'admin',
+      members: ['admin', 'reader'],
+    })
     const token = 'role:reader=member'
     const commit = author.buildCommit([token], { removes: removed ? ['reader'] : [] })
     hostDB.failNext('mid-save')

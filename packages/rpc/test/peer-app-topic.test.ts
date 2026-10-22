@@ -9,7 +9,7 @@ import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { createMemoryAppOutbox } from './fixtures/outbox.js'
 import { memoryOperationHost } from './fixtures/peer.js'
 
@@ -121,7 +121,13 @@ describe('the app topic is stable within a roster-change-bounded segment', () =>
     expect(bobSaw).toEqual([{ n: 1 }])
 
     // An update / no-op commit: the epoch advances, the roster does not move.
-    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'admin',
+      recoverySecret,
+      epoch: 1,
+    })
     await flush()
     expect(alice.mls.epoch()).toBe(2)
     expect(bob.mls.epoch()).toBe(2)
@@ -132,6 +138,7 @@ describe('the app topic is stable within a roster-change-bounded segment', () =>
 
     // A ledger-only commit: it enacts an entry and touches no leaf.
     await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'admin',
       recoverySecret,
@@ -188,6 +195,7 @@ describe('the app topic is stable within a roster-change-bounded segment', () =>
 
     // Carol is evicted. She keeps every topic ID she derived, so the group must leave them.
     await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'admin',
       recoverySecret,
@@ -248,7 +256,14 @@ describe('the app topic is stable within a roster-change-bounded segment', () =>
 
     // Nobody leaves — Dave arrives. The group loses no reader here, and it still has to move: the
     // topic it is on is derived from a secret Dave's handle can never export.
-    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, adds: ['dave'] })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'admin',
+      recoverySecret,
+      epoch: 1,
+      adds: ['dave'],
+    })
     await flush()
 
     expect(alice.mls.leaves()).toContain('dave')
@@ -310,9 +325,16 @@ describe('every member agrees on the anchor, including one that boots after it',
 
     // Advance the group twice without touching the roster: an update and a ledger enact. Alice's
     // live epoch runs ahead; her anchor does not follow it.
-    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(alice.mls),
+      hub,
+      senderDID: 'admin',
+      recoverySecret,
+      epoch: 1,
+    })
     await flush()
     await publishCommit({
+      authenticator: memoryAuthenticator(alice.mls),
       hub,
       senderDID: 'admin',
       recoverySecret,
@@ -325,7 +347,14 @@ describe('every member agrees on the anchor, including one that boots after it',
     expect(alice.peer.anchorEpoch()).toBe(1) // a whole segment behind her live epoch
 
     // Dave is added at epoch 3. Every existing member rotates to it on applying the add.
-    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 3, adds: ['dave'] })
+    await publishCommit({
+      authenticator: memoryAuthenticator(alice.mls),
+      hub,
+      senderDID: 'admin',
+      recoverySecret,
+      epoch: 3,
+      adds: ['dave'],
+    })
     await flush()
 
     expect(alice.mls.epoch()).toBe(4)
@@ -407,9 +436,21 @@ describe('a rejoining member and the group agree on one app topic', () => {
 
     // Drift: two commits that touch no leaf. Alice's live epoch runs to 3; her anchor stays at 1,
     // so the epoch a rejoin will land on is one nothing has taken the group to.
-    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(alice.mls),
+      hub,
+      senderDID: 'admin',
+      recoverySecret,
+      epoch: 1,
+    })
     await flush()
-    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 2 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(alice.mls),
+      hub,
+      senderDID: 'admin',
+      recoverySecret,
+      epoch: 2,
+    })
     await flush()
     expect(alice.mls.epoch()).toBe(3)
     expect(alice.peer.anchorEpoch()).toBe(1) // two epochs behind her live one

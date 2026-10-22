@@ -10,6 +10,7 @@ import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
+import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, chat, makeMLSPeer } from './fixtures/peer.js'
 
 const secret = new Uint8Array(32).fill(0xa4)
@@ -53,8 +54,8 @@ describe('future-epoch app retention', () => {
     const hub = new OmittingHub()
     const seen = vi.fn()
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => seen(ctx.data) }
-    const alice = makeMLSPeer(hub, 'alice', secret)
-    const bob = durableBob(hub, { handlers })
+    const alice = makeMLSPeer(hub, 'alice', secret, { members: ['alice', 'bob'] })
+    const bob = durableBob(hub, { handlers, members: ['alice', 'bob'] })
     await bob.peer.protocol('chat').to('alice')
     await bob.peer.dispose()
     hub.detach('bob')
@@ -67,7 +68,11 @@ describe('future-epoch app retention', () => {
     const frame = hub.published.find((item) => item.topicID === topicID)
     expect(frame).toBeDefined()
     hub.omitForBob = true
-    const restarted = makeMLSPeer(hub, 'bob', secret, { restartOf: bob, handlers })
+    const restarted = makeMLSPeer(hub, 'bob', secret, {
+      members: ['alice', 'bob'],
+      restartOf: bob,
+      handlers,
+    })
     await restarted.peer.protocol('chat').to('alice')
     expect(restarted.mls.epoch()).toBe(1)
     expect(seen).not.toHaveBeenCalled()
@@ -326,7 +331,13 @@ test('a peer starts hold age only when a paused commit walk catches up', async (
   await first.peer.protocol('chat').to('alice')
   await first.peer.dispose()
   hub.detach('bob')
-  await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+  await publishCommit({
+    authenticator: memoryAuthenticator(first.mls),
+    hub,
+    senderDID: 'alice',
+    recoverySecret: secret,
+    epoch: 1,
+  })
   const frame = await hub.publish({
     senderDID: 'alice',
     topicID,

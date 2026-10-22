@@ -34,8 +34,12 @@ describe('app frames outlive the commits that leave their epoch', () => {
     const seen: Array<unknown> = []
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
 
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
-    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      epoch: 1,
+      handlers,
+    })
     await flush()
 
     // Bob's process dies — a phone in a pocket, not a dropped socket. It is never disposed, so
@@ -53,6 +57,7 @@ describe('app frames outlive the commits that leave their epoch', () => {
     // He comes back up over the same handle. He is still at epoch 1, and he still holds epoch
     // 1's secret — the key that opens the message is in his hand.
     const restarted = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
       restartOf: bob,
       handlers,
     })
@@ -80,7 +85,7 @@ describe('app frames outlive the commits that leave their epoch', () => {
     const recoverySecret = new Uint8Array(32).fill(0x41)
     const seen: Array<unknown> = []
 
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
     await flush()
 
     // Alice runs the group to epoch 3, posts there, and runs on to 6.
@@ -102,6 +107,7 @@ describe('app frames outlive the commits that leave their epoch', () => {
     // live while the group was there, and his handle can export that epoch's secret only once
     // the walk has carried it there.
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
       epoch: 1,
       handlers: { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) },
     })
@@ -130,8 +136,14 @@ describe('app frames outlive the commits that leave their epoch', () => {
     const recoverySecret = new Uint8Array(32).fill(0x42)
     const seen: Array<unknown> = []
 
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
-    const carol = makeMLSPeer(hub, 'carol', recoverySecret, { epoch: 1 })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, {
+      members: ['alice', 'carol', 'bob'],
+      epoch: 1,
+    })
+    const carol = makeMLSPeer(hub, 'carol', recoverySecret, {
+      members: ['alice', 'carol', 'bob'],
+      epoch: 1,
+    })
     await flush()
 
     const submitted = deferred<void>()
@@ -180,6 +192,7 @@ describe('app frames outlive the commits that leave their epoch', () => {
     // Bob is at epoch 1 too, so the frame is sealed under a key he holds — and he reads it before
     // he applies the commit that would take that key away from him.
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'carol', 'bob'],
       epoch: 1,
       handlers: { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) },
     })
@@ -211,8 +224,12 @@ describe('app frames outlive the commits that leave their epoch', () => {
       'chat/changed': (ctx: { data: unknown }) => void changed.push(ctx.data),
     }
 
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
-    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      epoch: 1,
+      handlers,
+    })
     await flush()
 
     await bob.peer.dispose()
@@ -230,7 +247,11 @@ describe('app frames outlive the commits that leave their epoch', () => {
     expect(posted).toEqual([])
     expect(changed).toEqual([])
 
-    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
+    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      restartOf: bob,
+      handlers,
+    })
     hub.reattach('bob')
     await flush()
 

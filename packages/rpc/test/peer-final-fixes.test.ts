@@ -7,10 +7,14 @@ import { asLogPosition } from '../src/cursor.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
 import { APP_TOPIC_LABEL, commitTopic, rendezvousTopic } from '../src/topic.js'
-import { encodeSignedRecoveryConfirmation, publishCommit } from './fixtures/commits.js'
+import {
+  encodeSignedRecoveryConfirmation,
+  publishCommit,
+  publishNextCommit,
+} from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
-import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import {
   buildLedgerCommit,
   type MakeMLSPeerOptions,
@@ -72,10 +76,22 @@ test('a restart at the same epoch rediscovers a strand the durable cursor never 
     },
   })
   await bob.peer.resync()
-  const applied = await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+  const applied = await publishCommit({
+    authenticator: memoryAuthenticator(bob.mls),
+    hub,
+    senderDID: 'alice',
+    recoverySecret: secret,
+    epoch: 1,
+  })
   await drainUntil(async () => (await bob.mls.readEpoch()) === 2, 'applied commit')
   expect((await store.load()).cursor).toEqual({ position: applied.sequenceID, epoch: 2 })
-  const ahead = await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 5 })
+  const ahead = await publishCommit({
+    authenticator: memoryAuthenticator(bob.mls),
+    hub,
+    senderDID: 'alice',
+    recoverySecret: secret,
+    epoch: 5,
+  })
   await drainUntil(() => strands.length === 1, 'ahead strand')
   expect(strands[0]).toMatchObject({ position: ahead.sequenceID, kind: 'ahead' })
   expect((await store.load()).cursor).toEqual({
@@ -105,6 +121,9 @@ test('past divergence advances the durable cursor and preserves history across r
   const members = ['alice', 'bob', 'carol']
   const recovery = { timeoutMs: 10, deadlineMs: 30, getDelayMs: () => 60_000 }
   const winner = await publishCommit({
+    authenticator: memoryAuthenticator(
+      createMemoryGroupMLS({ recoverySecret: secret, epoch: 1, members, localDID: 'carol' }),
+    ),
     hub,
     senderDID: 'carol',
     recoverySecret: secret,
@@ -112,6 +131,9 @@ test('past divergence advances the durable cursor and preserves history across r
     entries: ['role:carol=admin'],
   })
   const loser = await publishCommit({
+    authenticator: memoryAuthenticator(
+      createMemoryGroupMLS({ recoverySecret: secret, epoch: 1, members, localDID: 'carol' }),
+    ),
     hub,
     senderDID: 'alice',
     recoverySecret: secret,
@@ -380,7 +402,14 @@ test('incomplete ledgers skip commit processing and later wakeups can retry', as
   const process = vi.spyOn(bob.mls, 'processCommit')
   const complete = vi.spyOn(bob.mls, 'isLedgerComplete').mockResolvedValue(false)
   vi.spyOn(bob.mls, 'openSealedLedger').mockResolvedValue(null)
-  await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+  const author = createMemoryGroupMLS({ recoverySecret: secret })
+  author.restoreState(bob.mls.serializeState())
+  await publishNextCommit(author, {
+    hub,
+    senderDID: 'alice',
+    recoverySecret: secret,
+    epoch: 1,
+  })
   const retry = bob.peer.resync()
   await drainUntil(() => complete.mock.calls.length > 0, 'ledger check')
   await vi.advanceTimersByTimeAsync(50)
@@ -390,7 +419,12 @@ test('incomplete ledgers skip commit processing and later wakeups can retry', as
   expect(await bob.mls.readEpoch()).toBe(1)
   complete.mockResolvedValue(true)
   // The next commit delivery is the later wakeup: its pull walks the skipped commit as well.
-  await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 2 })
+  await publishNextCommit(author, {
+    hub,
+    senderDID: 'alice',
+    recoverySecret: secret,
+    epoch: 2,
+  })
   await drainUntil(() => process.mock.calls.length === 2, 'retried commit processing')
   expect(await bob.mls.readEpoch()).toBe(3)
 })
@@ -403,7 +437,13 @@ test('an incomplete ledger retries the skipped commit on its own backoff in a qu
   const process = vi.spyOn(bob.mls, 'processCommit')
   const complete = vi.spyOn(bob.mls, 'isLedgerComplete').mockResolvedValue(false)
   vi.spyOn(bob.mls, 'openSealedLedger').mockResolvedValue(null)
-  await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+  await publishCommit({
+    authenticator: memoryAuthenticator(bob.mls),
+    hub,
+    senderDID: 'alice',
+    recoverySecret: secret,
+    epoch: 1,
+  })
   await drainUntil(() => complete.mock.calls.length > 0, 'ledger check')
   await vi.advanceTimersByTimeAsync(100)
   expect(process).not.toHaveBeenCalled()
@@ -427,7 +467,13 @@ test('a strand found by the ledger retry starts a heal', async () => {
   await bob.peer.resync()
   const complete = vi.spyOn(bob.mls, 'isLedgerComplete').mockResolvedValue(false)
   vi.spyOn(bob.mls, 'openSealedLedger').mockResolvedValue(null)
-  await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 5 })
+  await publishCommit({
+    authenticator: memoryAuthenticator(bob.mls),
+    hub,
+    senderDID: 'alice',
+    recoverySecret: secret,
+    epoch: 5,
+  })
   await drainUntil(() => complete.mock.calls.length > 0, 'ledger check')
   await vi.advanceTimersByTimeAsync(100)
   expect(events).toEqual([])
@@ -440,6 +486,9 @@ test('a walker without an applied epoch record stays silent for an external hist
   controlRecoveryClock()
   const hub = new FakeHub()
   const published = await publishCommit({
+    authenticator: memoryAuthenticator(
+      createMemoryGroupMLS({ recoverySecret: secret, epoch: 1, localDID: 'bob' }),
+    ),
     hub,
     senderDID: 'alice',
     recoverySecret: secret,
@@ -485,6 +534,7 @@ test('a removed live peer refuses log dispatch with a removal error', async () =
   const bob = member(hub, { members: ['alice', 'bob'] })
   await bob.peer.resync()
   await publishCommit({
+    authenticator: memoryAuthenticator(bob.mls),
     hub,
     senderDID: 'alice',
     recoverySecret: secret,

@@ -23,8 +23,12 @@ describe('the drain retains unread frames and advances only completed positions'
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
     const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
-    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      epoch: 1,
+      handlers,
+    })
     await Promise.all([alice.peer.replay(), bob.peer.replay()])
     await bob.peer.dispose()
     hub.detach('bob')
@@ -43,6 +47,7 @@ describe('the drain retains unread frames and advances only completed positions'
     })
 
     const restarted = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
       restartOf: bob,
       handlers,
       onAppWindowPruned: (event) => void pruned.push(event),
@@ -77,8 +82,12 @@ describe('the drain retains unread frames and advances only completed positions'
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
     const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
-    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      epoch: 1,
+      handlers,
+    })
     await Promise.all([alice.peer.replay(), bob.peer.replay()])
     await bob.peer.dispose()
     hub.detach('bob')
@@ -105,7 +114,11 @@ describe('the drain retains unread frames and advances only completed positions'
       if (topic === topicID) cursorWrites.push({ position, delivered: [...seen] })
       await save(topic, position)
     })
-    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
+    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      restartOf: bob,
+      handlers,
+    })
     hub.reattach('bob')
 
     await vi.waitFor(() => expect(restarted.mls.epoch()).toBe(4))
@@ -144,8 +157,12 @@ describe('the drain retains unread frames and advances only completed positions'
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
     const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
-    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      epoch: 1,
+      handlers,
+    })
     await flush()
     await bob.peer.dispose()
     hub.detach('bob')
@@ -166,7 +183,11 @@ describe('the drain retains unread frames and advances only completed positions'
     expect(alice.mls.epoch()).toBe(3)
     expect(alice.peer.anchorEpoch()).toBe(1) // one segment, one topic
 
-    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
+    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      restartOf: bob,
+      handlers,
+    })
     hub.reattach('bob')
     await flush()
 
@@ -192,8 +213,12 @@ describe('the drain retains unread frames and advances only completed positions'
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
     const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
-    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      epoch: 1,
+      handlers,
+    })
     await flush()
     await bob.peer.dispose()
     hub.detach('bob')
@@ -217,7 +242,11 @@ describe('the drain retains unread frames and advances only completed positions'
       }
       return fetch(params)
     })
-    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
+    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      restartOf: bob,
+      handlers,
+    })
     hub.reattach('bob')
     await vi.waitFor(() => expect(restarted.mls.epoch()).toBe(2))
     await vi.waitFor(() => expect(failures).toBeGreaterThan(0))
@@ -259,8 +288,8 @@ describe('the drain retains unread frames and advances only completed positions'
     const seen: Array<unknown> = []
     const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
-    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1 })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
     await flush()
     await bob.peer.dispose()
     hub.detach('bob')
@@ -294,7 +323,11 @@ describe('the drain retains unread frames and advances only completed positions'
       },
     }
 
-    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
+    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      restartOf: bob,
+      handlers,
+    })
     hub.reattach('bob')
     await flush()
 
@@ -337,8 +370,12 @@ describe('the drain delivers only what the live lane would', () => {
     }
     const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
-    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      epoch: 1,
+      handlers,
+    })
     await flush()
     await bob.peer.dispose()
     hub.detach('bob')
@@ -364,7 +401,11 @@ describe('the drain delivers only what the live lane would', () => {
     })
     await flush()
 
-    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
+    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      restartOf: bob,
+      handlers,
+    })
     hub.reattach('bob')
     await flush()
 
@@ -394,8 +435,12 @@ describe('the drain delivers only what the live lane would', () => {
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void posted.push(ctx.data) }
     const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
-    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      epoch: 1,
+      handlers,
+    })
     await flush()
     await bob.peer.dispose()
     hub.detach('bob')
@@ -413,7 +458,11 @@ describe('the drain delivers only what the live lane would', () => {
     })
     await flush()
 
-    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
+    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      restartOf: bob,
+      handlers,
+    })
     hub.reattach('bob')
     await flush()
 
@@ -444,8 +493,12 @@ describe('the drain delivers only what the live lane would', () => {
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
     const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
-    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      epoch: 1,
+      handlers,
+    })
     await flush()
 
     // Bob publishes, and his own peer never sees it come back: the hub does not push a frame at
@@ -464,7 +517,11 @@ describe('the drain delivers only what the live lane would', () => {
 
     // The restart drains the whole topic from the cursor — his own frame included, because the
     // log holds it and the position never passed it.
-    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
+    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      restartOf: bob,
+      handlers,
+    })
     hub.reattach('bob')
     await flush()
 

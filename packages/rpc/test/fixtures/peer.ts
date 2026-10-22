@@ -1053,7 +1053,17 @@ export async function runMemoryCommitOnceScenario(
             )
           if (params.topicID === commitTopic(secret) && failPublish) {
             failPublish = false
-            await publishCommit({ hub, senderDID: localDID, recoverySecret: secret, epoch: 0 })
+            await publishCommit({
+              authenticator: createMemoryGroupMLS({
+                recoverySecret: secret,
+                epoch: 0,
+                members,
+              }).authenticator(),
+              hub,
+              senderDID: localDID,
+              recoverySecret: secret,
+              epoch: 0,
+            })
           }
           return hub.publish(params)
         },

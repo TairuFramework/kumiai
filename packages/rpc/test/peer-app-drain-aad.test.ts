@@ -28,8 +28,12 @@ describe('the retained drain binds expectedAAD to the cursor topic', () => {
     // below is sealed as though bound for that lane, then placed on bob's actual `chat` lane.
     const otherTopicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'other-protocol')
 
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
-    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      epoch: 1,
+      handlers,
+    })
     await flush()
     await bob.peer.dispose()
     hub.detach('bob')
@@ -49,7 +53,11 @@ describe('the retained drain binds expectedAAD to the cursor topic', () => {
     })
     await flush()
 
-    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
+    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      restartOf: bob,
+      handlers,
+    })
     hub.reattach('bob')
     await flush()
 
@@ -73,8 +81,12 @@ describe('the retained drain binds expectedAAD to the cursor topic', () => {
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
     const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
-    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'bob'], epoch: 1 })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      epoch: 1,
+      handlers,
+    })
     await flush()
     await bob.peer.dispose()
     hub.detach('bob')
@@ -93,7 +105,11 @@ describe('the retained drain binds expectedAAD to the cursor topic', () => {
     })
     await flush()
 
-    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
+    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
+      restartOf: bob,
+      handlers,
+    })
     hub.reattach('bob')
     await flush()
 

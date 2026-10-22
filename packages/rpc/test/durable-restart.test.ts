@@ -75,6 +75,7 @@ describe('durable pending restoration', () => {
         void first.peer.dispose()
       })
       await publishCommit({
+        authenticator: first.mls.authenticator(),
         hub,
         senderDID: 'alice',
         recoverySecret,

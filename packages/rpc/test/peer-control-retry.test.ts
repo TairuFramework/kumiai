@@ -11,6 +11,7 @@ import { APP_TOPIC_LABEL, commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
+import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import {
   buildLedgerCommit,
   makeMLSPeer,
@@ -269,7 +270,15 @@ test('a post-adoption host failure resolves commit from its co-committed landed 
 
 test('a commit lands after skipping an orphaned own copy', async () => {
   const hub = new FakeHub()
-  await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
+  await publishCommit({
+    authenticator: memoryAuthenticator(
+      createMemoryGroupMLS({ recoverySecret: secret, epoch: 1, localDID: 'bob' }),
+    ),
+    hub,
+    senderDID: 'bob',
+    recoverySecret: secret,
+    epoch: 1,
+  })
   const member = makeMLSPeer(hub, 'bob', secret, {
     recovery: { timeoutMs: 20, deadlineMs: 100, getDelayMs: () => 0 },
   })

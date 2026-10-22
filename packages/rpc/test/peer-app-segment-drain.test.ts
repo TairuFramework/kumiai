@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest'
 
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
+import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 50))
@@ -60,6 +61,7 @@ describe('a returning peer reads the retained app frames of every epoch it walks
     // Bob comes back up cold, over the durable state his dead process left: the same handle (still
     // at epoch 1), the same anchor store. He walks 1 -> 3, and must read each frame on the way.
     const restarted = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob'],
       restartOf: bob,
       handlers: { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) },
     })
@@ -111,6 +113,7 @@ describe('a returning peer reads the retained app frames of every epoch it walks
     // THE ROSTER CHANGE: an off-stage admin evicts carol at epoch 2. Every member applying it
     // rotates the anchor to epoch 3, and the group's messages move to a new topic with it.
     await publishCommit({
+      authenticator: memoryAuthenticator(alice.mls),
       hub,
       senderDID: 'admin',
       recoverySecret,
@@ -139,6 +142,7 @@ describe('a returning peer reads the retained app frames of every epoch it walks
     // one's epochs off segment one's topic, rotate his anchor onto segment two's topic when he
     // applies the remove, and read the rest there.
     const restarted = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: ['alice', 'bob', 'carol'],
       restartOf: bob,
       handlers: { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) },
     })

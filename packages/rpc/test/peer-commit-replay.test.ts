@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest'
 import { commitTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import {
   buildInviteCommit,
   buildLedgerCommit,
@@ -31,7 +32,13 @@ describe('operation replay', () => {
       await seed.peer.enqueue(request).catch(() => {})
       await seed.peer.dispose()
       await seed.peer.drained()
-      await publishCommit({ hub, senderDID: 'zoe', recoverySecret: secret, epoch: 1 })
+      await publishCommit({
+        authenticator: memoryAuthenticator(seed.mls),
+        hub,
+        senderDID: 'zoe',
+        recoverySecret: secret,
+        epoch: 1,
+      })
       const restarted = makeMLSPeer(hub, 'alice', secret, { restartOf: seed })
       await expect
         .poll(async () => (await restarted.peer.outcomes()).map((row) => row.kind))

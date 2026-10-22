@@ -8,6 +8,7 @@ import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { buildInviteCommit, buildRemoveCommit, makeMLSPeer } from './fixtures/peer.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 50))
@@ -259,7 +260,14 @@ describe('an ephemeral dispatch lands on the segment that contains its seal epoc
         .protocol('chat')
         .dispatch('chat/changed', { data: { text: 'mid-rotation' } })
     }
-    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
+    await publishCommit({
+      authenticator: memoryAuthenticator(alice.mls),
+      hub,
+      senderDID: 'admin',
+      recoverySecret,
+      epoch: 1,
+      removes: ['carol'],
+    })
     await flush()
     await racingDispatch
 
@@ -333,7 +341,14 @@ describe('a logged dispatch lands on the segment that contains its seal epoch', 
     raceTheRotation = async () => {
       await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'mid-rotation' } })
     }
-    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'admin',
+      recoverySecret,
+      epoch: 1,
+      removes: ['carol'],
+    })
     await flush()
 
     expect(alice.peer.anchorEpoch()).toBe(2)
@@ -351,7 +366,11 @@ describe('a logged dispatch lands on the segment that contains its seal epoch', 
 
     // And a member reads it: Bob comes back cold at epoch 1, applies the same Remove, rotates onto
     // the same segment and drains it. Landing anywhere else is a frame nobody ever opens.
-    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
+    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, {
+      members: MEMBERS,
+      restartOf: bob,
+      handlers,
+    })
     hub.reattach('bob')
     await vi.waitFor(() => expect(seen).toEqual([{ text: 'mid-rotation' }]))
 
@@ -387,7 +406,14 @@ describe('a failed epoch teardown still leaves a lane at the new anchor', () => 
       return Promise.reject(new Error('client dispose failed'))
     })
     try {
-      await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
+      await publishCommit({
+        authenticator: memoryAuthenticator(bob.mls),
+        hub,
+        senderDID: 'admin',
+        recoverySecret,
+        epoch: 1,
+        removes: ['carol'],
+      })
       await flush()
     } finally {
       spy.mockRestore()

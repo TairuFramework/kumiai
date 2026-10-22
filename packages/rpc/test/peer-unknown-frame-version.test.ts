@@ -13,7 +13,7 @@ import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { assertCommitPoison, assertDurableControlHold } from './fixtures/control-hold.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 
 /** Fast rendezvous, so a heal that is going to happen happens inside a test — and a heal that
@@ -166,7 +166,15 @@ describe('a frame whose handshake version this build does not know', () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x74)
 
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 3 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: rs, epoch: 3, members, localDID: 'bob' }),
+      ),
+      hub,
+      senderDID: 'alice',
+      recoverySecret: rs,
+      epoch: 3,
+    })
     // The forged reply must arrive while the request is live; the clock advances only after it.
     vi.useFakeTimers()
     const bob = makeMLSPeer(hub, 'bob', rs, {

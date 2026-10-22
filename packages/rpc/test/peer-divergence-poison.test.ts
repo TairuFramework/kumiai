@@ -4,6 +4,7 @@ import type { StrandObservation } from '../src/peer.js'
 import { commitTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { makeMLSPeer, type TestPeer } from './fixtures/peer.js'
 
 const secret = new Uint8Array(32).fill(0xd4)
@@ -32,8 +33,26 @@ test.each([
       epoch: 1,
       ...(ordering === 'lower' && forged ? { signerDID: 'mallory' } : {}),
     }
-    const first = await publishCommit({ ...firstParams, expectedHead: null })
+    const first = await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({
+          recoverySecret: secret,
+          epoch: 1,
+          members: ['alice', 'bob', 'carol'],
+          localDID: 'bob',
+        }),
+      ),
+      ...firstParams,
+      expectedHead: null,
+    })
     const secondParams = {
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({
+          recoverySecret: secret,
+          epoch: 1,
+          members: ['alice', 'bob', 'carol'],
+        }),
+      ),
       hub,
       senderDID: 'carol',
       recoverySecret: secret,
@@ -121,7 +140,13 @@ test.each([
     expect(again.controlWalk.safetyHold()).toBeNull()
     expect(onRecovery).not.toHaveBeenCalled()
     expect(onSafetyEvent).not.toHaveBeenCalled()
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 2 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(again.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret: secret,
+      epoch: 2,
+    })
     await again.peer.replay()
     expect(again.mls.epoch()).toBe(3)
   },

@@ -17,8 +17,9 @@ import {
 import { UnsupportedLedgerEntriesVersionError } from '../src/ledger-entries.js'
 import * as logDeliveryModule from '../src/log-delivery.js'
 import { commitTopic } from '../src/topic.js'
-import { publishCommit } from './fixtures/commits.js'
+import { publishCommit, publishedCommitBytes } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import {
   buildInviteCommit,
   buildLedgerCommit,
@@ -381,6 +382,7 @@ test.each(['handshake', 'commit-frame', 'sealed-entries'] as const)(
         new UnsupportedLedgerEntriesVersionError(),
       )
       await publishCommit({
+        authenticator: memoryAuthenticator(member.mls),
         hub,
         senderDID: 'bob',
         recoverySecret: secret,
@@ -575,7 +577,13 @@ test('fork rollback backoff doubles from 100 ms and caps at 15 seconds', async (
 
 async function observedFork(branch: 'losing' | 'winning') {
   const hub = new FakeHub()
+  const author = createMemoryGroupMLS({
+    recoverySecret: secret,
+    epoch: 1,
+    members: ['alice', 'bob', 'carol'],
+  })
   const first = await publishCommit({
+    authenticator: memoryAuthenticator(author),
     hub,
     senderDID: 'bob',
     recoverySecret: secret,
@@ -583,6 +591,7 @@ async function observedFork(branch: 'losing' | 'winning') {
     external: true,
   })
   const second = await publishCommit({
+    authenticator: memoryAuthenticator(author),
     hub,
     senderDID: 'carol',
     recoverySecret: secret,
@@ -591,7 +600,9 @@ async function observedFork(branch: 'losing' | 'winning') {
   })
   const applied = branch === 'losing' ? second : first
   const remote = branch === 'losing' ? first : second
+  await author.processCommit(publishedCommitBytes(hub, applied.sequenceID), {})
   const next = await publishCommit({
+    authenticator: memoryAuthenticator(author),
     hub,
     senderDID: 'bob',
     recoverySecret: secret,
@@ -738,8 +749,24 @@ test.each(['losing', 'winning'] as const)(
 
 test('past commits with no applied history stay non-fork', async () => {
   const hub = new FakeHub()
-  const first = await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
-  const second = await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 1 })
+  const first = await publishCommit({
+    authenticator: memoryAuthenticator(
+      createMemoryGroupMLS({ recoverySecret: secret, epoch: 1, localDID: 'alice' }),
+    ),
+    hub,
+    senderDID: 'bob',
+    recoverySecret: secret,
+    epoch: 1,
+  })
+  const second = await publishCommit({
+    authenticator: memoryAuthenticator(
+      createMemoryGroupMLS({ recoverySecret: secret, epoch: 1, localDID: 'alice' }),
+    ),
+    hub,
+    senderDID: 'carol',
+    recoverySecret: secret,
+    epoch: 1,
+  })
   const onStrand = vi.fn()
   const member = makeMLSPeer(hub, 'alice', secret, { epoch: 2, onStrand })
   peers.push(member)
@@ -756,11 +783,22 @@ test('past commits with no applied history stay non-fork', async () => {
 
 test('identical re-sealed commit stays history below the cursor', async () => {
   const hub = new FakeHub()
-  const first = await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
+  const first = await publishCommit({
+    authenticator: memoryAuthenticator(
+      createMemoryGroupMLS({ recoverySecret: secret, epoch: 1, localDID: 'alice' }),
+    ),
+    hub,
+    senderDID: 'bob',
+    recoverySecret: secret,
+    epoch: 1,
+  })
   const original = hub.published.find((row) => row.sequenceID === first.sequenceID)
   if (original === undefined) throw new Error('Missing original')
   const commit = decodeCommitFrame(decodeHandshakeFrame(original.payload).payload).commit
   const second = await publishCommit({
+    authenticator: memoryAuthenticator(
+      createMemoryGroupMLS({ recoverySecret: secret, epoch: 1, localDID: 'alice' }),
+    ),
     hub,
     senderDID: 'bob',
     recoverySecret: secret,

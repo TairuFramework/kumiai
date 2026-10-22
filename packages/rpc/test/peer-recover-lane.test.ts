@@ -24,6 +24,7 @@ import {
   createMemoryGroupMLS,
   encodeMemoryCommit,
   type MemoryGroupMLS,
+  memoryAuthenticator,
   memoryEntryID,
   memoryLedgerHead,
 } from './fixtures/memory-group-mls.js'
@@ -118,11 +119,13 @@ describe('a heal re-enacts by ledger membership', { concurrent: false }, () => {
     // The group moves on without her. First a commit whose body she cannot resolve — she drops
     // it as poison and stays where she is, while Bob, who holds the body, applies it...
     await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'zoe',
       recoverySecret: rs,
       epoch: 2,
       commit: encodeMemoryCommit(2, 'zoe', [memoryEntryID(gap)], {
+        authenticator: memoryAuthenticator(bob.mls),
         head: memoryLedgerHead([memoryEntryID('circle:x=Foo'), memoryEntryID(gap)]),
       }),
     })
@@ -251,6 +254,9 @@ describe('a hub that forked the log', { concurrent: false }, () => {
     // Both framed at epoch 1, both compare-and-set at the SAME head. An honest hub takes one
     // and answers the other with a head mismatch; this one takes both.
     const { sequenceID: winnerSeq } = await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members, localDID: 'carol' }),
+      ),
       hub,
       senderDID: 'xavier',
       recoverySecret: rs,
@@ -259,6 +265,9 @@ describe('a hub that forked the log', { concurrent: false }, () => {
       expectedHead: null,
     })
     const { sequenceID: loserSeq } = await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members, localDID: 'carol' }),
+      ),
       hub,
       senderDID: 'yolanda',
       recoverySecret: rs,
@@ -461,7 +470,15 @@ describe('the lane is never re-entered', { concurrent: false }, () => {
     const rs = new Uint8Array(32).fill(0x55)
 
     // The operation runner releases the mutex before ordinary gap recovery.
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 2 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: rs, epoch: 2, members, localDID: 'bob' }),
+      ),
+      hub,
+      senderDID: 'alice',
+      recoverySecret: rs,
+      epoch: 2,
+    })
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 3, members, recovery })
     await bob.peer.resync()
 
@@ -495,7 +512,15 @@ describe("a crash in recover()'s own acceptance window", { concurrent: false }, 
   test('unexplained own bytes skip without creating an external attempt', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x56)
-    const own = await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 1 })
+    const own = await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members, localDID: 'bob' }),
+      ),
+      hub,
+      senderDID: 'alice',
+      recoverySecret: rs,
+      epoch: 1,
+    })
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
     await bob.peer.resync()
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery })
@@ -514,7 +539,15 @@ describe("a crash in recover()'s own acceptance window", { concurrent: false }, 
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x56)
 
-    await publishCommit({ hub, senderDID: 'zoe', recoverySecret: rs, epoch: 2 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: rs, epoch: 2, members, localDID: 'bob' }),
+      ),
+      hub,
+      senderDID: 'zoe',
+      recoverySecret: rs,
+      epoch: 2,
+    })
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 3, members, recovery })
     await bob.peer.resync()
 

@@ -5,6 +5,7 @@ import { encodeHandshakeFrame } from '../src/handshake.js'
 import { commitTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import {
   buildInviteCommit,
   buildLedgerCommit,
@@ -49,6 +50,7 @@ test.each([false, true])(
         return params.topicID === commitTopic(secret) ? { ...page, gap } : page
       })
       const winner = await publishCommit({
+        authenticator: memoryAuthenticator(member.mls),
         hub,
         senderDID: 'bob',
         recoverySecret: secret,
@@ -81,7 +83,15 @@ test('a mid-walk same-fetch gap strands before an own occurrence can install', a
   const member = makeMLSPeer(hub, 'alice', secret)
   try {
     await member.peer.replay()
-    await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 0 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: secret, epoch: 0, members: ['alice', 'bob'] }),
+      ),
+      hub,
+      senderDID: 'bob',
+      recoverySecret: secret,
+      epoch: 0,
+    })
     await member.controlWalk.walkCommits()
     const saved = await seedBuiltOperation(member, buildLedgerCommit(member, ['saved']))
     const before = await member.control.load()
@@ -320,7 +330,15 @@ test('a mid-walk same-fetch gap makes competitor consumption unknown', async () 
   const member = makeMLSPeer(hub, 'alice', secret, { members: ['alice', 'bob'] })
   try {
     await member.peer.replay()
-    await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 0 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: secret, epoch: 0, members: ['alice', 'bob'] }),
+      ),
+      hub,
+      senderDID: 'bob',
+      recoverySecret: secret,
+      epoch: 0,
+    })
     await member.controlWalk.walkCommits()
     const saved = await seedBuiltOperation(member, buildLedgerCommit(member, ['saved']))
     const fetch = hub.fetchTopic.bind(hub)
@@ -328,7 +346,13 @@ test('a mid-walk same-fetch gap makes competitor consumption unknown', async () 
       ...(await fetch(params)),
       gap: true,
     }))
-    await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: saved.slot.epoch })
+    await publishCommit({
+      authenticator: memoryAuthenticator(member.mls),
+      hub,
+      senderDID: 'bob',
+      recoverySecret: secret,
+      epoch: saved.slot.epoch,
+    })
     await member.controlWalk.walkCommits()
     const snapshot = await member.control.load()
     expect(snapshot.commitOnce).toBeNull()
@@ -345,7 +369,15 @@ test('a stranded gap followed by unreadable bytes still consumes the competitor 
   const member = makeMLSPeer(hub, 'alice', secret, { members: ['alice', 'bob'] })
   try {
     await member.peer.replay()
-    await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 0 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: secret, epoch: 0, members: ['alice', 'bob'] }),
+      ),
+      hub,
+      senderDID: 'bob',
+      recoverySecret: secret,
+      epoch: 0,
+    })
     await member.controlWalk.walkCommits()
     const saved = await seedBuiltOperation(member, buildLedgerCommit(member, ['saved']))
     const before = await member.control.load()
@@ -366,6 +398,7 @@ test('a stranded gap followed by unreadable bytes still consumes the competitor 
       payload: new Uint8Array([255]),
     })
     const winner = await publishCommit({
+      authenticator: memoryAuthenticator(member.mls),
       hub,
       senderDID: 'alice',
       committerDID: 'bob',
@@ -473,7 +506,15 @@ test('a restarted peer re-fetches unreadable bytes from a stranded cursor and co
   let member = makeMLSPeer(hub, 'alice', secret, { members: ['alice', 'bob'] })
   try {
     await member.peer.replay()
-    await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 0 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(
+        createMemoryGroupMLS({ recoverySecret: secret, epoch: 0, members: ['alice', 'bob'] }),
+      ),
+      hub,
+      senderDID: 'bob',
+      recoverySecret: secret,
+      epoch: 0,
+    })
     await member.controlWalk.walkCommits()
     const saved = await seedBuiltOperation(member, buildInviteCommit(member, 'guest'))
     const before = await member.control.load()
@@ -507,6 +548,7 @@ test('a restarted peer re-fetches unreadable bytes from a stranded cursor and co
     pages.length = 0
     member = makeMLSPeer(hub, 'alice', secret, { restartOf: member })
     const winner = await publishCommit({
+      authenticator: saved.slot.authenticatorBefore,
       hub,
       senderDID: 'alice',
       committerDID: 'bob',
@@ -587,7 +629,13 @@ test('consumption releases the build revoke hold while preserving an independent
     }
     await member.control.apply({ putOperations: [queued] }, 'independent-revoke')
     expect(revokeHeld(await member.control.load())).toBe(true)
-    await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: saved.slot.epoch })
+    await publishCommit({
+      authenticator: memoryAuthenticator(member.mls),
+      hub,
+      senderDID: 'bob',
+      recoverySecret: secret,
+      epoch: saved.slot.epoch,
+    })
     await member.controlWalk.walkCommits()
     const snapshot = await member.control.load()
     expect(snapshot.commitOnce).toBeNull()

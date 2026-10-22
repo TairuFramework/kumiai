@@ -5,7 +5,12 @@ import type { RecoveryEvent } from '../src/peer.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { encodeMemoryCommit, memoryEntryID } from './fixtures/memory-group-mls.js'
+import {
+  createMemoryGroupMLS,
+  encodeMemoryCommit,
+  memoryAuthenticator,
+  memoryEntryID,
+} from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
 import { drainUntil } from './fixtures/recovery-clock.js'
 
@@ -66,7 +71,15 @@ type Arm = (hub: FakeHub, rs: Uint8Array, withResponder: boolean) => Promise<Arm
  * frame that is his own commit, so the walker skips the copy.
  */
 const armOwnUnmerged: Arm = async (hub, rs, withResponder) => {
-  const occurrence = await publishCommit({ hub, senderDID: 'bob', recoverySecret: rs, epoch: 1 })
+  const occurrence = await publishCommit({
+    authenticator: memoryAuthenticator(
+      createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members, localDID: 'carol' }),
+    ),
+    hub,
+    senderDID: 'bob',
+    recoverySecret: rs,
+    epoch: 1,
+  })
   let responder: TestPeer | undefined
   if (withResponder) {
     // Carol applies Bob's commit and carries the group forward — a live member that can answer
@@ -97,9 +110,28 @@ const armOwnUnmerged: Arm = async (hub, rs, withResponder) => {
  * compare-and-set at a stale epoch is the strand flag.
  */
 const armAhead: Arm = async (hub, rs, withResponder) => {
-  await publishCommit({ hub, senderDID: 'zoe', recoverySecret: rs, epoch: 1 })
-  await publishCommit({ hub, senderDID: 'zoe', recoverySecret: rs, epoch: 2 })
+  await publishCommit({
+    authenticator: memoryAuthenticator(
+      createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members, localDID: 'carol' }),
+    ),
+    hub,
+    senderDID: 'zoe',
+    recoverySecret: rs,
+    epoch: 1,
+  })
+  await publishCommit({
+    authenticator: memoryAuthenticator(
+      createMemoryGroupMLS({ recoverySecret: rs, epoch: 2, members, localDID: 'carol' }),
+    ),
+    hub,
+    senderDID: 'zoe',
+    recoverySecret: rs,
+    epoch: 2,
+  })
   const { sequenceID: s3 } = await publishCommit({
+    authenticator: memoryAuthenticator(
+      createMemoryGroupMLS({ recoverySecret: rs, epoch: 3, members, localDID: 'carol' }),
+    ),
     hub,
     senderDID: 'zoe',
     recoverySecret: rs,
@@ -133,6 +165,9 @@ const armForkLosing: Arm = async (hub, rs, withResponder) => {
   const winner = 'role:carol=admin'
   const loser = 'role:bob=admin'
   const { sequenceID: winnerSeq } = await publishCommit({
+    authenticator: memoryAuthenticator(
+      createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members, localDID: 'carol' }),
+    ),
     hub,
     senderDID: 'xavier',
     recoverySecret: rs,
@@ -141,6 +176,9 @@ const armForkLosing: Arm = async (hub, rs, withResponder) => {
     expectedHead: null,
   })
   const { sequenceID: loserSeq } = await publishCommit({
+    authenticator: memoryAuthenticator(
+      createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members, localDID: 'carol' }),
+    ),
     hub,
     senderDID: 'yolanda',
     recoverySecret: rs,
@@ -293,11 +331,18 @@ describe('heal strand', { concurrent: false }, () => {
       // dead in the log, not a peer moving on without Bob. He steps over it and is NOT stranded.
       const orphan = memoryEntryID('a body nobody can supply')
       await publishCommit({
+        authenticator: memoryAuthenticator(
+          createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members, localDID: 'bob' }),
+        ),
         hub,
         senderDID: 'mallory',
         recoverySecret: rs,
         epoch: 1,
-        commit: encodeMemoryCommit(1, 'mallory', [orphan]),
+        commit: encodeMemoryCommit(1, 'mallory', [orphan], {
+          authenticator: memoryAuthenticator(
+            createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members, localDID: 'bob' }),
+          ),
+        }),
       })
       const bob = makeMLSPeer(hub, 'bob', rs, {
         epoch: 1,

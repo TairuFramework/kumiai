@@ -14,7 +14,11 @@ import { encodeSignedRecoveryConfirmation, publishCommit } from './fixtures/comm
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, type FakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryGroupMLS, encodeMemoryCommit } from './fixtures/memory-group-mls.js'
+import {
+  createMemoryGroupMLS,
+  encodeMemoryCommit,
+  memoryAuthenticator,
+} from './fixtures/memory-group-mls.js'
 import { buildRejoinRecord, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
 
 const secret = new Uint8Array(32).fill(0x71)
@@ -160,7 +164,13 @@ test.each(reasons)(
     const { alice, source } = member(hub)
     await alice.peer.replay()
     hub.detach('alice')
-    await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
+    await publishCommit({
+      authenticator: memoryAuthenticator(alice.mls),
+      hub,
+      senderDID: 'bob',
+      recoverySecret: secret,
+      epoch: 1,
+    })
     const entered = Promise.withResolvers<void>()
     const release = Promise.withResolvers<void>()
     const fetch = hub.fetchTopic.bind(hub)
@@ -365,7 +375,10 @@ test.each([
       members: ['alice', 'bob'],
       recoverySecret: secret,
     })
-    const commit = encodeMemoryCommit(1, 'bob', [], { external: true })
+    const commit = encodeMemoryCommit(1, 'bob', [], {
+      authenticator: memoryAuthenticator(bob),
+      external: true,
+    })
     // A policy refusal exercises a genuine signed ask without applying the candidate.
     let validated = false
     const validate = vi.spyOn(alice.mls, 'validateRecoveryCommit').mockImplementation(async () => {

@@ -11,9 +11,15 @@ import {
   publishCommit,
   publishedCommitBytes,
   publishedCommitDigest,
+  publishNextCommit,
 } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { encodeMemoryCommit, memoryEntryID } from './fixtures/memory-group-mls.js'
+import {
+  createMemoryGroupMLS,
+  encodeMemoryCommit,
+  memoryAuthenticator,
+  memoryEntryID,
+} from './fixtures/memory-group-mls.js'
 import {
   buildInviteCommit,
   buildLedgerCommit,
@@ -50,6 +56,7 @@ test.each([false, true])(
         void bob.peer.dispose()
       })
     const result = await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'alice',
       recoverySecret: secret,
@@ -82,6 +89,7 @@ test.each([false, true])(
     await observer.peer.replay()
     const before = await observer.control.load()
     const conflict = await publishCommit({
+      authenticator: memoryAuthenticator(observer.mls),
       hub,
       senderDID: 'alice',
       recoverySecret: secret,
@@ -124,6 +132,7 @@ test('an adopted external response survives restart and answers confirmation', a
     void bob.peer.dispose()
   })
   const result = await publishCommit({
+    authenticator: memoryAuthenticator(bob.mls),
     hub,
     senderDID: 'carol',
     recoverySecret: secret,
@@ -179,6 +188,7 @@ test('responder refusal commits cursor progress without a response row', async (
     void bob.peer.dispose()
   })
   const result = await publishCommit({
+    authenticator: memoryAuthenticator(bob.mls),
     hub,
     senderDID: 'carol',
     recoverySecret: secret,
@@ -206,11 +216,15 @@ test('an unresolvable external commit saves cursor progress without a response r
     void bob.peer.dispose()
   })
   const result = await publishCommit({
+    authenticator: memoryAuthenticator(bob.mls),
     hub,
     senderDID: 'carol',
     recoverySecret: secret,
     epoch: 1,
-    commit: encodeMemoryCommit(1, 'carol', [memoryEntryID('missing-body')], { external: true }),
+    commit: encodeMemoryCommit(1, 'carol', [memoryEntryID('missing-body')], {
+      authenticator: memoryAuthenticator(bob.mls),
+      external: true,
+    }),
   })
   await vi.waitFor(async () => expect((await bob.control.load()).cursor).not.toBeNull())
   await bob.peer.dispose()
@@ -275,6 +289,7 @@ test.each([false, true])('terminal restart closes build, off-epoch=%s', async (o
     })
   }
   await publishCommit({
+    authenticator: memoryAuthenticator(bob.mls),
     hub,
     senderDID: 'alice',
     recoverySecret: secret,
@@ -336,6 +351,7 @@ test('terminal effects do not settle control rows introduced after consumption',
     void bob.peer.dispose()
   })
   await publishCommit({
+    authenticator: memoryAuthenticator(bob.mls),
     hub,
     senderDID: 'alice',
     recoverySecret: secret,
@@ -372,6 +388,7 @@ test('live self-removal keeps the anchor and clears its pending rotation', async
   const bob = member(hub)
   await bob.peer.replay()
   await publishCommit({
+    authenticator: memoryAuthenticator(bob.mls),
     hub,
     senderDID: 'alice',
     recoverySecret: secret,
@@ -402,6 +419,7 @@ test.each(['capture', 'keep', 'ambiguous'] as const)(
       await save(slot)
     }
     const result = await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'alice',
       recoverySecret: secret,
@@ -473,7 +491,13 @@ test('the registry resolves ambiguous incoming adoption before publishing the li
   const bob = member(hub)
   await bob.peer.replay()
   bob.database.commitThenRejectNext('save')
-  await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+  await publishCommit({
+    authenticator: memoryAuthenticator(bob.mls),
+    hub,
+    senderDID: 'alice',
+    recoverySecret: secret,
+    epoch: 1,
+  })
   await vi.waitFor(() => expect(bob.mls.epoch()).toBe(2))
   await vi.waitFor(async () => expect((await bob.anchorStore.load())?.pending).toBeUndefined())
   expect((await bob.control.load()).applied).toHaveLength(1)
@@ -512,8 +536,17 @@ test('incoming adoption co-settles a matching accepted operation and reports it 
 
 test('adoptions retain exactly the newest 64 epochs of rows and responses', async () => {
   const hub = new FakeHub()
+  const author = createMemoryGroupMLS({ recoverySecret: secret, epoch: 1, members })
+  const authenticators = new Map<number, Uint8Array>()
   for (let epoch = 1; epoch <= 65; epoch++) {
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch, external: true })
+    authenticators.set(epoch, memoryAuthenticator(author))
+    await publishNextCommit(author, {
+      hub,
+      senderDID: 'alice',
+      recoverySecret: secret,
+      epoch,
+      external: true,
+    })
   }
   const bob = member(hub)
   await bob.peer.replay()
@@ -526,7 +559,13 @@ test('adoptions retain exactly the newest 64 epochs of rows and responses', asyn
   await bob.peer.drained()
   const again = member(hub, { restartOf: bob })
   await again.peer.replay()
+  const oldAuthenticator = authenticators.get(1)
+  const conflictAuthenticator = authenticators.get(2)
+  if (oldAuthenticator === undefined || conflictAuthenticator === undefined)
+    throw new Error('Missing historical authenticators')
   const old = await publishCommit({
+    authenticator: oldAuthenticator,
+
     hub,
     senderDID: 'alice',
     recoverySecret: secret,
@@ -539,6 +578,8 @@ test('adoptions retain exactly the newest 64 epochs of rows and responses', asyn
   )
   expect((await again.control.load()).responses).toHaveLength(64)
   const conflict = await publishCommit({
+    authenticator: conflictAuthenticator,
+
     hub,
     senderDID: 'alice',
     recoverySecret: secret,
@@ -578,6 +619,7 @@ test.each([false, true])(
       void bob.peer.dispose()
     })
     await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
       hub,
       senderDID: 'alice',
       recoverySecret: secret,

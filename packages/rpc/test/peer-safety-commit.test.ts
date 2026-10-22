@@ -10,7 +10,11 @@ import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { memoryEntryID } from './fixtures/memory-group-mls.js'
+import {
+  createMemoryGroupMLS,
+  memoryAuthenticator,
+  memoryEntryID,
+} from './fixtures/memory-group-mls.js'
 import { latchPeerSafety, makeMLSPeer, rollBackForkHalt, type TestPeer } from './fixtures/peer.js'
 
 const secret = new Uint8Array(32).fill(49)
@@ -31,6 +35,9 @@ async function fixture() {
 }
 async function append(hub: FakeHub) {
   return publishCommit({
+    authenticator: memoryAuthenticator(
+      createMemoryGroupMLS({ recoverySecret: secret, epoch: 1, localDID: 'bob' }),
+    ),
     hub,
     senderDID: 'alice',
     recoverySecret: secret,
