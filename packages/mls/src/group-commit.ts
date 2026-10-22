@@ -38,6 +38,7 @@ import {
 import { prepareLifecycleGate, rejectionReason, validateEntry } from './lifecycle.js'
 import { authority, controllerOf, DEVICE_ENTRY_TYPE, type DeviceValue } from './registry.js'
 import { type GroupPermission, ROLE_ENTRY_TYPE } from './roster.js'
+import { staleLeafIndex } from './stale-leaf.js'
 import type { Invite } from './types.js'
 
 export type InviteRecipientMismatchErrorParams = {
@@ -509,9 +510,20 @@ export async function commitInvite(
       proposalType: defaultProposalTypes.add,
       add: { keyPackage },
     }
+    // A lifecycle group re-admitting a device replaces the leaf it still holds for that DID.
+    const stale =
+      group.anchor.controller == null
+        ? undefined
+        : staleLeafIndex(group.state.ratchetTree, keyPackage.leafNode)
     const result = await commitWithEntries({
       group,
-      extraProposals: [addProposal],
+      extraProposals:
+        stale == null
+          ? [addProposal]
+          : [
+              { proposalType: defaultProposalTypes.remove, remove: { removed: stale } },
+              addProposal,
+            ],
       enacted,
       ratchetTreeExtension: true,
     })

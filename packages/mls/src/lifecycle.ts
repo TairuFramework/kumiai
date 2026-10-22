@@ -37,6 +37,7 @@ import {
   denySetOf,
   mayReadmitResetDevice,
 } from './registry.js'
+import { assertNewerBinding, stalePairedAdd } from './stale-leaf.js'
 
 export type CommitRejectionReason = 'binding' | 'lapse' | 'floor' | 'policy' | 'invalid'
 
@@ -537,7 +538,26 @@ export async function prepareLifecycleGate(
             proposalSender === target &&
             (incoming.kind === 'proposal' || incoming.senderLeafIndex !== target)
           const authorised = proofs.length > 0 || lapsed.has(target) || selfRemoval
-          if (controller != null && (old == null || !authorised))
+          // Admitting a fresh key package may replace its DID's one stale leaf in the same commit.
+          const replacement =
+            controller == null ||
+            authorised ||
+            old == null ||
+            incoming.kind !== 'commit' ||
+            incoming.senderLeafIndex == null
+              ? undefined
+              : stalePairedAdd({
+                  before,
+                  target,
+                  proposals,
+                  committer: incoming.senderLeafIndex,
+                  denied: [denySetOf(group.registry), denySetOf(candidateRegistry)],
+                })
+          if (replacement != null && old != null) {
+            checkEntry(group, replacement, old)
+            assertNewerBinding(replacement, old)
+          }
+          if (controller != null && (old == null || !(authorised || replacement != null)))
             throw new Error('Unauthorised Remove')
           tree[target * 2] = undefined
           break
