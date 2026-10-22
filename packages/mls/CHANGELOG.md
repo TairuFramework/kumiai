@@ -1,5 +1,11 @@
 # @kumiai/mls
 
+## 0.10.8
+
+### Patch Changes
+
+- In lifecycle groups, `commitInvite` for a DID that still holds a leaf now replaces that stale leaf: the commit carries a Remove of the old leaf with the Add of the new key package. Every receiver's lifecycle gate accepts such a Remove only when the same commit adds exactly one key package for the removed leaf's DID, that DID holds no other leaf and is not denied, the removed leaf is not the committer's, and the added leaf passes the normal admission checks as a replacement of the old one (same DID and signature key, same controller, a binding no older than the old one). More than one leaf for the admitted DID is refused with the new `DuplicateMemberLeafError`. Non-lifecycle groups and every other Remove authorisation are unchanged.
+
 ## 0.10.5
 
 ### Patch Changes

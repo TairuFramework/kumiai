@@ -32,7 +32,7 @@ Decoding requires the body's canonical re-encoding to match its stored bytes bef
 ## Capabilities
 
 - `createGroup` — creator opens a new group as its sole member and first admin
-- `createInvite` + `commitInvite` — an admin signs the invitee's role entry and produces the MLS Commit + Welcome
+- `createInvite` + `commitInvite` — an admin signs the invitee's role entry and produces the MLS Commit + Welcome. In a lifecycle group, admitting a DID that still holds a stale leaf removes that leaf in the same commit; two leaves for the DID throw `DuplicateMemberLeafError`
 - `processWelcome` — invitee joins after folding the ledger the invite carries and checking its head
 - `commitLedgerEntries` — an admin promotes or demotes by committing signed `kumiai.role` entries
 - `removeMember` — an admin evicts a leaf and rotates keys
