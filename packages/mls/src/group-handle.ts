@@ -1,4 +1,4 @@
-import { normalizeDID } from '@kokuin/token'
+import { assertTimeClaimsValid, decodeSignedToken, normalizeDID } from '@kokuin/token'
 import { EventEmitter, type EventsSource } from '@sozai/event'
 import {
   type ClientState,
@@ -358,6 +358,20 @@ export type HeldLedgerEntry = {
 /** A held entry paired with its content id — one position in the ledger log. */
 export type LedgerLogEntry = HeldLedgerEntry & { entryID: string }
 
+const VERIFIED_LEDGER_ENTRIES = new WeakMap<VerifiedLedgerEntry, HeldLedgerEntry>()
+const VERIFIED_LEDGER_TOKENS = new WeakMap<Array<string>, Array<HeldLedgerEntry | undefined>>()
+
+// Record provenance before exposing claims; re-enactments keep the original snapshot.
+function ledgerLogEntry(
+  entryID: string,
+  token: string,
+  verified: VerifiedLedgerEntry,
+): LedgerLogEntry {
+  const held = { entryID, token, verified }
+  VERIFIED_LEDGER_ENTRIES.set(verified, { token, verified: structuredClone(verified) })
+  return held
+}
+
 /** Project lifecycle tree re-admissions from the full ledger fold, never a previous projection.
  * A lapsed re-admitted leaf and a leaf inserted after expiry are indistinguishable here;
  * a genuine expired post-reset package can activate a leaf for a Welcome joiner or an
@@ -567,11 +581,15 @@ export class GroupHandle {
 
   /** The ordered signed tokens this handle holds, repeats included — the ledger's
    *  canonical persistent/wire form, and the list the authenticated head folds over.
-   *  Feeds createInvite, restoreGroup, and host persistence. The verified entries are
-   *  a derived cache with no export form: the only way in is applyLedgerEntries,
-   *  which re-verifies. */
+   *  Feeds createInvite, restoreGroup, and host persistence. In-process clones inherit
+   *  verification through the returned array; serialised tokens must verify afresh. */
   get ledgerTokens(): Array<string> {
-    return this.#ledger.map(({ token }) => token)
+    const tokens = this.#ledger.map(({ token }) => token)
+    VERIFIED_LEDGER_TOKENS.set(
+      tokens,
+      this.#ledger.map(({ verified }) => VERIFIED_LEDGER_ENTRIES.get(verified)),
+    )
+    return tokens
   }
 
   /** The control roster folded from the anchor and every applied ledger entry. */
@@ -679,8 +697,8 @@ export class GroupHandle {
    * Verify signed ledger tokens, append the valid ones in the order given, and
    * refold the roster. Tokens that fail verification or whose groupID mismatches are
    * dropped (defensive — the strict admin-issuer enforcement is the commit pre-pass).
-   * Every token is re-verified on the way in: no entry enters a ledger unverified,
-   * whatever the import path.
+   * Exact token bytes can reuse verification on the same array or a handle's export.
+   * did:key and embedded peer:4 keys are immutable; time claims still check on reuse.
    *
    * A token the log already holds is appended again, not skipped: the log records
    * what each commit enacted, not a set of claims, and a repeat is the only way to
@@ -691,14 +709,30 @@ export class GroupHandle {
   async applyLedgerEntries(tokens: Array<string>): Promise<Array<VerifiedLedgerEntry>> {
     return mutexFor(this).run(async () => {
       const appended: Array<VerifiedLedgerEntry> = []
-      for (const token of tokens) {
-        const verified = await verifyLedgerEntry(token)
+      const memo = VERIFIED_LEDGER_TOKENS.get(tokens)
+      const nextMemo: Array<HeldLedgerEntry | undefined> = []
+      for (const [index, token] of tokens.entries()) {
+        const held = memo?.[index]
+        let verified: VerifiedLedgerEntry | null
+        if (held?.token === token) {
+          try {
+            assertTimeClaimsValid(decodeSignedToken(token).payload)
+          } catch {
+            continue
+          }
+          verified = structuredClone(held.verified)
+        } else {
+          verified = await verifyLedgerEntry(token)
+        }
         if (verified == null || verified.entry.groupID !== this.groupID) continue
         const entryID = ledgerEntryDigest(token)
-        this.#ledger.push({ entryID, token, verified })
+        const entry = ledgerLogEntry(entryID, token, verified)
+        this.#ledger.push(entry)
+        nextMemo[index] = VERIFIED_LEDGER_ENTRIES.get(verified)
         this.#entryBodies.set(entryID, { token, verified })
         appended.push(verified)
       }
+      VERIFIED_LEDGER_TOKENS.set(tokens, nextMemo)
       const folded = foldLedgerControl(this.#ledger, this.#anchor, this.groupID)
       this.#roster = folded.roster
       this.#registry = registryWithTreeBindings(
@@ -806,7 +840,7 @@ export class GroupHandle {
             'bootstrapLedger: the gathered ledger holds an unverifiable or cross-group entry',
           )
         }
-        log.push({ entryID: entryIDs[index] as string, token, verified })
+        log.push(ledgerLogEntry(entryIDs[index] as string, token, verified))
       }
 
       // What this bootstrap ADDS, in log order, minus the reserved `kumiai.*` types the fold
@@ -1328,7 +1362,7 @@ export class GroupHandle {
               if (resolved.has(id) || !missing.includes(id)) continue
               const verified = await verifyLedgerEntry(token)
               if (verified == null) continue
-              resolved.set(id, { token, verified, entryID: id })
+              resolved.set(id, ledgerLogEntry(id, token, verified))
             }
             const stillMissing = missing.filter((id) => !resolved.has(id))
             if (stillMissing.length > 0) {
