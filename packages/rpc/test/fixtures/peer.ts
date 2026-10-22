@@ -62,6 +62,7 @@ import {
   decodeMemoryGroupIdentity,
   encodeMemoryControlJournal,
   type MemoryGroupMLS,
+  tagMemoryCommit,
 } from './memory-group-mls.js'
 import { createMemoryAppOutbox } from './outbox.js'
 
@@ -1137,7 +1138,11 @@ export async function runMemoryCommitOnceScenario(
             let bytes = commit
             if (kind === 'unavailable') {
               const value = JSON.parse(new TextDecoder().decode(commit)) as Record<string, unknown>
-              bytes = new TextEncoder().encode(JSON.stringify({ ...value, missingProposal: true }))
+              // Missing proposal inputs must remain distinct from failed authentication.
+              bytes = tagMemoryCommit(
+                new TextEncoder().encode(JSON.stringify({ ...value, missingProposal: true })),
+                author.authenticator(),
+              )
             }
             const sealed = await createFakeCrypto({ localDID: 'bob', epoch: 1 }).sealEntries(
               encodeLedgerEntries([]),
