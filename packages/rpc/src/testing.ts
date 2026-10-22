@@ -1,3 +1,5 @@
+export { type AppOutboxAcceptance, createAppOutboxAcceptance } from './app-outbox.js'
 export { stepLiveBuild } from './control/operations.js'
+export { createLogDelivery } from './log-delivery.js'
 export { createGroupPeerWithControlWalk } from './peer.js'
 export type { CommitPrefix } from './recovery-capture.js'

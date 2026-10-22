@@ -697,6 +697,31 @@ class MemoryControlHandle extends GroupHandle {
     })
   }
 
+  override async advanceSenderGeneration(
+    target: number,
+    opts?: { maxSteps?: number },
+  ): Promise<void> {
+    if (!Number.isInteger(target) || target < 0 || target >= 0xffffffff)
+      throw new RangeError('Invalid sender generation')
+    const maxSteps = opts?.maxSteps
+    if (maxSteps != null && (!Number.isInteger(maxSteps) || maxSteps < 0))
+      throw new RangeError('Invalid sender step bound')
+    return serializeHandle(this, async () => {
+      const state = this.state
+      if (Object.keys(state.unappliedProposals).length !== 0)
+        throw new Error('Cannot send application message with unapplied proposals')
+      if (state.groupActiveState.kind !== 'active') throw new Error('Inactive memory group')
+      if (!this.sendAdmission().admissible) throw new LeafLapsedError('lapsed')
+      assertApplicationSend(this)
+      const ratchet = state.secretTree.leafNodes[state.privatePath.leafIndex * 2]?.application
+      if (ratchet === undefined) throw new Error('Missing memory sender ratchet')
+      if (maxSteps != null && target - ratchet.generation > maxSteps)
+        throw new RangeError('Sender advancement exceeds step bound')
+      while (ratchet.generation < target) stepRatchet(ratchet)
+      captureReceiveState(this.#view, this.#mls)
+    })
+  }
+
   override async readSenderData(message: Uint8Array) {
     try {
       const { frame, leaf, generation } = this.#readSenderData(message, {})
