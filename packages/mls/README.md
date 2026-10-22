@@ -12,6 +12,23 @@ Serialise reserve, build and consume against the source handle. Adopt the derive
 Persistence must complete durably and leave storage unchanged on rejection.
 The `@kumiai/mls-rpc` adapter supplies both reservation hooks to the RPC peer.
 
+## Persisted client state
+
+`encodeClientState` and `decodeClientState` support only format v2. Other versions throw an unsupported-version error.
+Malformed or truncated v2 blobs return `undefined`, as does empty input.
+There is no migration path from another client-state format.
+
+The layout is a version byte (`2`), flags byte (`0` or `1`), optional reservation, body, and proposal references.
+Flag `1` includes a uint64 epoch, uint32 generation, and consumed byte (`0` or `1`).
+The ts-mls body has a uint32 byte length and a 64,000,000-byte decoding limit.
+A uint32 count precedes UTF-8 references, each with a uint32 byte length.
+References ascend strictly by JS string (UTF-16 code unit) ordering.
+References preserve unapplied proposals whose sender is exactly leaf zero, working around ts-mls rc.13 dropping optional numeric zero.
+All integers are big-endian. Invalid flags, consumed bytes, references, or trailing bytes make the blob malformed.
+Decoding copies the body so ratcheting cannot zero secrets in stored bytes.
+Decoding requires the body's canonical re-encoding to match its stored bytes before restoring leaf-zero senders.
+`encodeClientState` throws `ClientStateReservationError` unless the reservation epoch is a uint64 bigint and its generation a uint32 integer.
+
 ## Capabilities
 
 - `createGroup` — creator opens a new group as its sole member and first admin

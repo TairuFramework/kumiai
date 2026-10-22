@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { randomIdentity } from '@kokuin/token'
 import {
   type CryptoProvider,
+  clientStateEncoder,
   createCommit,
   createProposal,
   decode,
@@ -521,8 +522,8 @@ describe('GroupHandle.reserveHandshakeGeneration', () => {
     expect(encodeClientState(bobGroup.state)).toEqual(before)
   })
 
-  test('an already-advanced legacy v1 checkpoint never permits reservation reuse', async () => {
-    const { aliceGroup, bobGroup } = await twoMemberGroup('advanced-legacy-checkpoint')
+  test('refuses an already-advanced v1 checkpoint before restoring a handle', async () => {
+    const { bobGroup } = await twoMemberGroup('advanced-unsupported-checkpoint')
     const advanced = await createProposal({
       context: bobGroup.context,
       state: bobGroup.state,
@@ -531,25 +532,14 @@ describe('GroupHandle.reserveHandshakeGeneration', () => {
         remove: { removed: bobGroup.state.privatePath.leafIndex },
       },
     })
-    const legacy = encodeClientState({
+    const body = encode(clientStateEncoder, {
       ...bobGroup.state,
       secretTree: advanced.newState.secretTree,
     })
-    expect(legacy[0]).toBe(1)
-    const state = decodeClientState(legacy)
-    if (state == null) throw new Error('invalid legacy state')
-    expect(state.handshakeReservation).toBeUndefined()
-    expect(
-      state.secretTree.leafNodes[Number(state.privatePath.leafIndex) * 2]?.handshake.generation,
-    ).toBe(1)
-    const restored = await restoreGroup({
-      state,
-      credential: bobGroup.credential,
-      ledgerEntries: bobGroup.ledgerTokens,
-    })
-    await restored.reserveHandshakeGeneration(() => {})
-    const built = await createCommit({ context: restored.context, state: restored.state })
-    expect(await framedGeneration(aliceGroup, encode(mlsMessageEncoder, built.commit))).toBe(2)
+    const encoded = new Uint8Array([1, ...body])
+    expect(() => decodeClientState(encoded)).toThrow(
+      'decodeClientState: unsupported client-state version 1',
+    )
   })
 
   test.each([false, true])(
