@@ -142,6 +142,46 @@ test('admitting a fresh key package replaces the stale leaf of the same DID', as
   expect(opened.senderDID).toBe(carol.id)
 })
 
+function admissionsOf(group: GroupHandle): Array<string> {
+  return group.listMembers().flatMap(({ admission }) => (admission == null ? [] : [admission]))
+}
+
+test("a replacement brings a fresh admission; the re-added member's own path only drops it", async () => {
+  const { author, bob, carolGroup, invite } = await staleGroup()
+  const before = admissionsOf(carolGroup)
+  const bundle = await rawBundle(
+    author,
+    bob,
+    await timedBinding({ identity: bob, iat: 120, exp: 200 }),
+  )
+  const result = await commitInvite(author, bundle.publicPackage, invite)
+  await carolGroup.processMessage(result.commitMessage)
+
+  // The DID set did not move; the fresh KeyPackage leaf is what says a leaf was Added.
+  for (const group of [result.newGroup, carolGroup]) {
+    expect(new Set(group.listMembers().map(({ id }) => normalizeDID(id)))).toEqual(
+      new Set(carolGroup.listMembers().map(({ id }) => normalizeDID(id))),
+    )
+    const fresh = admissionsOf(group).filter((admission) => !before.includes(admission))
+    expect(fresh).toHaveLength(1)
+    expect(leavesOf(group, bob.id)[0]?.admission).toBe(fresh[0])
+  }
+
+  // Bob's first commit is a path, not an Add: his admission leaves the tree and none enters it.
+  const { group: bobGroup } = await processWelcome({
+    identity: bob,
+    invite,
+    welcome: result.welcomeMessage,
+    keyPackageBundle: { ...bundle, ownerDID: bob.id },
+  })
+  const replaced = admissionsOf(carolGroup)
+  const path = await commitWithEntries({ group: bobGroup, extraProposals: [], enacted: [] })
+  await carolGroup.processMessage(encode(mlsMessageEncoder, path.commit))
+  expect(carolGroup.epoch).toBe(result.newGroup.epoch + 1n)
+  expect(admissionsOf(carolGroup).filter((admission) => !replaced.includes(admission))).toEqual([])
+  expect(leavesOf(carolGroup, bob.id)[0]?.admission).toBeUndefined()
+})
+
 test('a Remove paired with an Add of a different DID stays unauthorised', async () => {
   const { author, carolGroup, staleIndex } = await staleGroup()
   const dave = agent(53)

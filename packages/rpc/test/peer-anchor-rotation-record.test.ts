@@ -15,6 +15,7 @@ import {
   buildInviteCommit,
   buildLedgerCommit,
   buildRemoveCommit,
+  buildReplaceCommit,
   makeMLSPeer,
 } from './fixtures/peer.js'
 
@@ -386,6 +387,81 @@ describe('recovery ordering', { concurrent: false }, () => {
     const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob })
     await restarted.peer.replay()
     expect(restarted.peer.anchorEpoch()).toBe(2)
+    expect((await restarted.anchorStore.load())?.pending).toBeUndefined()
+    await restarted.peer.dispose()
+  })
+
+  test('a persisted leaf-replacement record rotates when restart resolves the durable handle', async () => {
+    const hub = new DurableFakeHub()
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { members })
+    await bob.peer.replay()
+    const pending = await buildReplaceCommit(bob, 'carol')()
+    await expect(
+      bob.peer.commit(async () => ({
+        ...pending,
+        onAccepted: async () => {
+          throw new Error('durable replacement not adopted')
+        },
+      })),
+    ).rejects.toThrow('durable replacement not adopted')
+    expect(bob.mls.epoch()).toBe(1)
+    expect((await bob.anchorStore.load())?.pending).toMatchObject({ epochBefore: 1, epochAfter: 2 })
+    await bob.peer.dispose()
+    // Adopted out of process: the DID set is the same, so only the record's pre-advance view of
+    // the tree can say a leaf entered it.
+    bob.mls.adopt(pending.commit)
+    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob })
+    await restarted.peer.replay()
+    expect(restarted.mls.leaves()).toEqual(members)
+    expect(restarted.peer.anchorEpoch()).toBe(2)
+    expect((await restarted.anchorStore.load())?.pending).toBeUndefined()
+    await restarted.peer.dispose()
+  })
+
+  /**
+   * A record persisted by rpc 0.10.8 carries no `admissionsBefore`. It must resolve on `forced` and
+   * the DID diff alone, exactly as it did: not by reading a missing list as empty, which would make
+   * every leaf still holding its KeyPackage look newly Added.
+   */
+  test.each([
+    { name: 'a commit that moves no DID keeps the anchor', build: 'ledger', rotates: false },
+    {
+      name: 'a same-DID replacement keeps the anchor, as before',
+      build: 'replace',
+      rotates: false,
+    },
+    { name: 'an Add of a new DID rotates', build: 'invite', rotates: true },
+  ] as const)('a pending record without admissionsBefore: $name', async ({ build, rotates }) => {
+    const hub = new DurableFakeHub()
+    // Dave was Added and never committed, so his leaf still holds an admission the whole time.
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { members: ['bob', 'carol'] })
+    await bob.peer.replay()
+    await bob.peer.commit(buildInviteCommit(bob, 'dave'))
+    expect(bob.peer.anchorEpoch()).toBe(2)
+    const pending = await (build === 'ledger'
+      ? buildLedgerCommit(bob, [])
+      : build === 'replace'
+        ? buildReplaceCommit(bob, 'carol')
+        : buildInviteCommit(bob, 'erin'))()
+    await expect(
+      bob.peer.commit(async () => ({
+        ...pending,
+        onAccepted: async () => {
+          throw new Error('not adopted')
+        },
+      })),
+    ).rejects.toThrow('not adopted')
+    const slot = await bob.anchorStore.load()
+    if (slot?.pending == null) throw new Error('no pending record')
+    expect(slot.pending.admissionsBefore).toEqual(['dave#1'])
+    const { admissionsBefore: _dropped, ...legacy } = slot.pending
+    await bob.anchorStore.save({ anchor: slot.anchor, pending: legacy })
+    await bob.peer.dispose()
+    bob.mls.adopt(pending.commit)
+    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob })
+    await restarted.peer.replay()
+    expect(restarted.mls.epoch()).toBe(3)
+    expect(restarted.peer.anchorEpoch()).toBe(rotates ? 3 : 2)
     expect((await restarted.anchorStore.load())?.pending).toBeUndefined()
     await restarted.peer.dispose()
   })

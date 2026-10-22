@@ -294,3 +294,30 @@ export function buildInviteCommit(
     }
   }
 }
+
+/**
+ * A host's `build()` for an own-agents admission that REPLACES a stale leaf: one commit that
+ * Removes the leaf the tree still holds for `inviteeDID` and Adds a fresh KeyPackage for the same
+ * DID. The DID set is the same before and after; the leaf is not.
+ */
+export function buildReplaceCommit(
+  member: TestPeer,
+  inviteeDID: string,
+  options: LedgerCommitOptions = {},
+): () => Promise<PendingCommit> {
+  return async () => {
+    await options.onBuild?.()
+    options.framedAt?.push(member.mls.epoch())
+    const commit = member.mls.buildCommit([], { adds: [inviteeDID], removes: [inviteeDID] })
+    return {
+      commit,
+      bodies: [],
+      kind: 'invite',
+      journal: commit,
+      onAccepted: async () => {
+        adoptJournalledBlob(member.mls, commit)
+        member.welcomes.push(inviteeDID)
+      },
+    }
+  }
+}

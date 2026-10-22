@@ -83,6 +83,7 @@ export type ConformanceRosterEntry = {
   did: string
   leafIndex: number
   longForm: string
+  admission?: string
 }
 
 /**
@@ -605,6 +606,63 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           expect(newcomer).toBeDefined()
           // The rightmost (more-recently-freed) hole stays blank: nothing fills it out of order.
           expect(entries.find((e) => e.leafIndex === rightFreed)).toBeUndefined()
+        })
+      })
+
+      /**
+       * LEAF ADMISSION: the lane rotates the app-lane anchor on an Add the `did` diff cannot see
+       * — a Remove and an Add of the same DID in one Commit — by reading which leaves still hold
+       * the KeyPackage they were Added with. So an Add MUST bring an admission the roster did not
+       * hold, on the arriving leaf; and a Commit that adds nothing MUST NOT bring one, or every
+       * ordinary commit would rotate the anchor.
+       */
+      test('an Add brings a fresh admission on the arriving leaf; a Remove brings none', async () => {
+        await withGroup(3, 'roster-admission', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const admissions = (entries: Array<ConformanceRosterEntry>) =>
+            entries.flatMap((e) => (e.admission == null ? [] : [e.admission]))
+
+          const before = await alice.mls.rosterEntries()
+          const add = await group.buildCommit({ adds: true })
+          await alice.mls.processCommit(add.commit, add.context)
+          const added = await alice.mls.rosterEntries()
+          const newcomer = added.find((e) => !dids(before).includes(e.did))
+          if (newcomer == null) throw new Error('the harness reported no arriving leaf')
+          expect(newcomer.admission).toBeDefined()
+          expect(admissions(before)).not.toContain(newcomer.admission)
+
+          const removal = await group.buildCommit({ removes: 2 })
+          await alice.mls.processCommit(removal.commit, removal.context)
+          const removed = await alice.mls.rosterEntries()
+          expect(admissions(removed).filter((a) => !admissions(added).includes(a))).toEqual([])
+        })
+      })
+
+      /**
+       * The over-rotation guard: a plain commit's path replaces only the committer's own leaf node,
+       * so it can drop an admission and never bring one. An implementation that reported a value on
+       * every leaf (say, any leaf's HPKE key) would pass the clause above and rotate the anchor on
+       * every commit. A harness whose plain commit is itself an Add (real MLS has no bare advance on
+       * this surface) brings exactly the arriving leaf's admission and nothing else.
+       */
+      test('a plain commit brings no admission beyond an arriving leaf', async () => {
+        await withGroup(2, 'roster-admission-plain', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const admissions = (entries: Array<ConformanceRosterEntry>) =>
+            entries.flatMap((e) => (e.admission == null ? [] : [e.admission]))
+
+          const before = await alice.mls.rosterEntries()
+          const plain = await group.buildCommit()
+          expect(await alice.mls.processCommit(plain.commit, plain.context)).toMatchObject({
+            advanced: true,
+          })
+          const after = await alice.mls.rosterEntries()
+          const fresh = after.filter(
+            (e) => e.admission != null && !admissions(before).includes(e.admission),
+          )
+          // Every fresh admission sits on a leaf whose DID the roster did not hold: an arrival.
+          for (const entry of fresh) expect(dids(before)).not.toContain(entry.did)
+          expect(fresh.length).toBe(after.length - before.length)
         })
       })
     })

@@ -1,5 +1,13 @@
 # @kumiai/mls
 
+## 0.10.9
+
+### Patch Changes
+
+- `GroupMember` gains optional `admission`: the leaf's HPKE key while the leaf still holds the KeyPackage leaf node it was Added with (until its own path or Update replaces it). A value that appears across a commit means the commit Added a leaf, including a stale-leaf replacement of the same DID.
+
+  Upgrade `@kumiai/mls`, `@kumiai/mls-rpc` and `@kumiai/rpc` together. The rotation record is persisted before an advance and resolved after it, possibly after a restart: a record written while the port reported no admissions (rpc 0.10.9 over mls-rpc < 0.10.4 or mls < 0.10.9) holds `admissionsBefore: []`, and if it resolves after the port is upgraded, every leaf still holding its KeyPackage looks newly Added and the peer rotates on an ordinary commit while the rest of the group keeps the anchor.
+
 ## 0.10.8
 
 ### Patch Changes

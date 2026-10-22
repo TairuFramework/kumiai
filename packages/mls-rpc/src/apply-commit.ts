@@ -44,6 +44,7 @@ function rosterOf(handle: GroupHandle): Array<RosterEntry> {
     did: member.id,
     leafIndex: member.leafIndex,
     longForm: member.longForm,
+    ...(member.admission != null && { admission: member.admission }),
   }))
 }
 

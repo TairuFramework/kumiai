@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 
-import { detectRosterChange } from '../src/roster.js'
+import { detectLeafAdmission, detectRosterChange } from '../src/roster.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { makeMLSPeer } from './fixtures/peer.js'
@@ -164,6 +164,61 @@ describe('a commit that changes the roster or rejoins a member rotates the app-l
 
     await bob.peer.dispose()
   })
+
+  test('a same-DID leaf replacement is invisible to a DID diff, and rotates on the fresh leaf', async () => {
+    const hub = new FakeHub()
+    const recoverySecret = new Uint8Array(32).fill(0x27)
+    // Carol's stale leaf is replaced in ONE commit: Remove it, Add a fresh KeyPackage for the same
+    // DID. Carol joins from the Welcome at the post-commit epoch and can export no secret from
+    // before it, so an anchor the group left behind is one she can never derive.
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { members: ['bob', 'carol'] })
+    await flush()
+
+    await publishCommit({
+      hub,
+      senderDID: 'alice',
+      recoverySecret,
+      epoch: 1,
+      adds: ['carol'],
+      removes: ['carol'],
+    })
+    await flush()
+
+    expect(bob.mls.epoch()).toBe(2)
+    expect(bob.mls.leaves()).toEqual(['bob', 'carol'])
+    expect(detectRosterChange(['bob', 'carol'], bob.mls.leaves())).toBe(false)
+    expect(bob.peer.anchorEpoch()).toBe(2)
+
+    await bob.peer.dispose()
+  })
+
+  test("the re-added member's own first commit is a path, not an Add: no rotation", async () => {
+    const hub = new FakeHub()
+    const recoverySecret = new Uint8Array(32).fill(0x28)
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { members: ['bob', 'carol'] })
+    await flush()
+
+    await publishCommit({
+      hub,
+      senderDID: 'alice',
+      recoverySecret,
+      epoch: 1,
+      adds: ['carol'],
+      removes: ['carol'],
+    })
+    await flush()
+    expect(bob.peer.anchorEpoch()).toBe(2)
+
+    // Carol's first commit replaces the leaf node she was Added with by her own path: the fresh
+    // KeyPackage leaves the tree, nothing new enters it.
+    await publishCommit({ hub, senderDID: 'carol', recoverySecret, epoch: 2 })
+    await flush()
+
+    expect(bob.mls.epoch()).toBe(3)
+    expect(bob.peer.anchorEpoch()).toBe(2)
+
+    await bob.peer.dispose()
+  })
 })
 
 describe('detectRosterChange — set-inequality semantics', () => {
@@ -196,5 +251,18 @@ describe('detectRosterChange — set-inequality semantics', () => {
   test('an empty before roster gaining a DID is a change', () => {
     expect(detectRosterChange([], ['a', 'b'])).toBe(true)
     expect(detectRosterChange([], [])).toBe(false)
+  })
+})
+
+describe('detectLeafAdmission — a value that appears is an Add', () => {
+  test('a fresh admission is an Add, even for a DID the roster held', () => {
+    expect(detectLeafAdmission(['carol#1'], ['carol#2'])).toBe(true)
+    expect(detectLeafAdmission([], ['dave#2'])).toBe(true)
+  })
+
+  test('an admission that only disappears is a path, an Update or a Remove', () => {
+    expect(detectLeafAdmission(['carol#1'], [])).toBe(false)
+    expect(detectLeafAdmission(['carol#1', 'dave#1'], ['dave#1'])).toBe(false)
+    expect(detectLeafAdmission([], [])).toBe(false)
   })
 })

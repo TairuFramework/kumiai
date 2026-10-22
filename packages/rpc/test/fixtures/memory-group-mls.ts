@@ -445,12 +445,28 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     while (slots.has(i)) i++
     return i
   }
-  const slotAdd = (did: string): void => {
+  // The KeyPackage a leaf was Added from, while the leaf still holds it. Real MLS: an Added leaf
+  // carries its KeyPackage's leaf node (source `key_package`) until the leaf's own first path or
+  // Update replaces it. Initial members hold none, an external rejoiner's leaf is path-sourced and
+  // holds none, and a committer's path clears its own.
+  const admissions = new Map<number, string>()
+  const slotAdd = (did: string, admission?: string): void => {
     // The double never adds a DID it already holds (matches how buildCommit models adds).
-    if (![...slots.values()].includes(did)) slots.set(lowestFreeSlot(), did)
+    if ([...slots.values()].includes(did)) return
+    const slot = lowestFreeSlot()
+    slots.set(slot, did)
+    if (admission != null) admissions.set(slot, admission)
   }
   const slotRemoveDID = (did: string): void => {
-    for (const [i, d] of slots) if (d === did) slots.delete(i)
+    for (const [i, d] of slots) {
+      if (d === did) {
+        slots.delete(i)
+        admissions.delete(i)
+      }
+    }
+  }
+  const clearAdmission = (did: string): void => {
+    for (const [i, d] of slots) if (d === did) admissions.delete(i)
   }
   const slotHas = (did: string): boolean => [...slots.values()].includes(did)
   const occupiedDIDs = (): Array<string> =>
@@ -460,7 +476,9 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       .sort((a, b) => a - b)
       .map((i) => {
         const did = slots.get(i) as string
-        return { did, leafIndex: i, longForm: did } // longForm = id fallback; fixture ids carry no long form
+        const admission = admissions.get(i)
+        // longForm = id fallback; fixture ids carry no long form
+        return { did, leafIndex: i, longForm: did, ...(admission != null ? { admission } : {}) }
       })
   /**
    * Ephemeral PRIVATE keys, keyed by requestID: minted with the request, retained by the port
@@ -587,8 +605,12 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     if (parsed.removes != null) {
       for (const did of parsed.removes) slotRemoveDID(did)
     }
+    // The committer's path replaces its own leaf node, so a KeyPackage it was Added from is gone.
+    if (!parsed.external) clearAdmission(parsed.committerDID)
     if (parsed.adds != null) {
-      for (const did of parsed.adds) slotAdd(did)
+      // Unique per Add: the same DID re-Added after a Remove (a stale-leaf replacement) arrives
+      // with a KeyPackage of its own.
+      for (const did of parsed.adds) slotAdd(did, `${did}#${parsed.epoch}`)
     }
     if (parsed.external) {
       // `resync: true`: the rejoining member's prior leaf is atomically removed, so a peer

@@ -1,4 +1,5 @@
 import { assertTimeClaimsValid, decodeSignedToken, normalizeDID } from '@kokuin/token'
+import { toB64 } from '@sozai/codec'
 import { EventEmitter, type EventsSource } from '@sozai/event'
 import {
   contentTypes,
@@ -13,6 +14,7 @@ import {
   type IncomingMessageCallback,
   isDefaultCredential,
   type LeafNode,
+  leafNodeSources,
   type MlsContext,
   type MlsFramedMessage,
   mlsExporter,
@@ -947,12 +949,19 @@ export class GroupHandle {
           // trusts the host's own persisted state, so neither gate runs on that path.
           const controller = parsed.controller ? parsed.controller.id : undefined
           const beacon = controller != null ? beaconOf(this.#registry, controller) : undefined
+          // A KeyPackage leaf node is unique to its KeyPackage by its fresh HPKE key, and stays
+          // in the tree only until the member's own path or Update replaces it.
+          const admission =
+            node.leaf.leafNodeSource === leafNodeSources.key_package
+              ? toB64(node.leaf.hpkePublicKey)
+              : undefined
           yield {
             leafIndex: i / 2,
             id: parsed.id,
             longForm: parsed.longForm ?? parsed.id,
             ...(controller ? { controller } : {}),
             ...(beacon ? { controllerBeacon: beacon } : {}),
+            ...(admission != null ? { admission } : {}),
           }
         }
       }

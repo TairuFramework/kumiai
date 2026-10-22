@@ -1,5 +1,13 @@
 # @kumiai/mls-rpc
 
+## 0.10.4
+
+### Patch Changes
+
+- `rosterEntries()` reports each leaf's `admission` from `@kumiai/mls`, so the rpc peer rotates the app-lane anchor on a stale-leaf replacement.
+
+  Upgrade `@kumiai/mls`, `@kumiai/mls-rpc` and `@kumiai/rpc` together. The rotation record is persisted before an advance and resolved after it, possibly after a restart: a record written while the port reported no admissions (rpc 0.10.9 over mls-rpc < 0.10.4 or mls < 0.10.9) holds `admissionsBefore: []`, and if it resolves after the port is upgraded, every leaf still holding its KeyPackage looks newly Added and the peer rotates on an ordinary commit while the rest of the group keeps the anchor.
+
 ## 0.10.2
 
 ### Patch Changes

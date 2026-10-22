@@ -68,6 +68,16 @@ export type GroupMember = {
   controller?: string
   /** For a bound leaf: the controller's advisory folded log beacon, when one has been announced. */
   controllerBeacon?: ControllerBeacon
+  /**
+   * Names the KeyPackage this leaf was Added from (its leaf node's HPKE key), present only while
+   * the leaf still holds that KeyPackage's leaf node — until the member's own first path or
+   * Update replaces it. Absent on a leaf that entered by external commit.
+   *
+   * Only an Add puts a KeyPackage leaf node into the tree, so a value present after a commit and
+   * absent before it means the commit Added a leaf — including an Add of a DID the group already
+   * held (a stale-leaf replacement), which an `id` diff cannot see.
+   */
+  admission?: string
 }
 
 export function parseMLSCredentialIdentity(identity: Uint8Array): MLSCredentialIdentity {

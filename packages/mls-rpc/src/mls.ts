@@ -277,6 +277,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           did: member.id,
           leafIndex: member.leafIndex,
           longForm: member.longForm,
+          ...(member.admission != null && { admission: member.admission }),
         })),
       )
     },
