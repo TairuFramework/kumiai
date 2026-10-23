@@ -60,7 +60,7 @@ test('a mismatched durable commit cursor is discarded before the first fetch', a
   expect((await store.load()).cursor).toBeNull()
 })
 
-test('a restart at the same epoch rediscovers a strand the durable cursor never stepped over', async () => {
+test('a restart preserves incomplete coverage after stepping over an ahead claim', async () => {
   controlRecoveryClock()
   const hub = new FakeHub()
   const database = createMemoryHostDatabase()
@@ -95,9 +95,9 @@ test('a restart at the same epoch rediscovers a strand the durable cursor never 
   await drainUntil(() => strands.length === 1, 'ahead strand')
   expect(strands[0]).toMatchObject({ position: ahead.sequenceID, kind: 'ahead' })
   expect((await store.load()).cursor).toEqual({
-    position: applied.sequenceID,
+    position: ahead.sequenceID,
     epoch: 2,
-    stranded: true,
+    incomplete: true,
   })
   await bob.peer.dispose()
   await bob.peer.drained()
@@ -111,8 +111,12 @@ test('a restart at the same epoch rediscovers a strand the durable cursor never 
     },
   })
   await again.peer.resync()
-  await drainUntil(() => restarted.length === 1, 'rediscovered strand')
-  expect(restarted[0]).toMatchObject({ position: ahead.sequenceID, kind: 'ahead' })
+  expect(restarted).toEqual([])
+  expect((await store.load()).cursor).toEqual({
+    position: ahead.sequenceID,
+    epoch: 2,
+    incomplete: true,
+  })
 })
 
 test('past divergence advances the durable cursor and preserves history across restart', async () => {
@@ -242,11 +246,19 @@ test.each(['retention-gap', 'unprocessable-gap'] as const)(
         events.push(event)
       },
     })
-    await vi.waitFor(() => {
-      expect(
-        events.some((event) => event.phase === 'started' && event.trigger === 'automatic'),
-      ).toBe(true)
-    })
+    if (reason === 'retention-gap') {
+      await again.peer.replay()
+      expect((await again.control.load()).cursor?.stranded).not.toBe(true)
+      expect((await again.control.load()).cursor?.incomplete).toBe(true)
+      expect((await again.control.load()).strand).toBeNull()
+      expect((await again.peer.recover()).advanced).toBe(true)
+    } else {
+      await vi.waitFor(() =>
+        expect(
+          events.some((event) => event.phase === 'started' && event.trigger === 'automatic'),
+        ).toBe(true),
+      )
+    }
     await drainUntil(() => events.some((event) => event.phase === 'succeeded'), 'rejoin')
     expect(await again.mls.readEpoch()).toBe(4)
     expect((await again.control.load()).cursor?.stranded).toBeUndefined()

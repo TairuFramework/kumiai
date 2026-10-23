@@ -140,7 +140,7 @@ export function authenticateLifecycleProof(
  * is not denied. The cascade skips it and survivor checks keep it.
  */
 export function isEvidencedChild(
-  group: GroupHandle,
+  group: Pick<GroupHandle, 'anchor' | 'registry'>,
   leaf: LeafNode,
   denied: ReadonlySet<string> = denySetOf(group.registry),
 ): boolean {

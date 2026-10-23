@@ -1,4 +1,5 @@
 import { throwIfAborted } from '../abort.js'
+import { DeliveredEntryCopyError } from '../ledger-entries.js'
 import { closeControlBuild } from './closure.js'
 
 export { type BuildClosure, closeControlBuild } from './closure.js'
@@ -42,7 +43,7 @@ export type ControlSlotDeps = {
 export async function consumeOwnOccurrence(
   deps: ControlSlotDeps,
   frame: ControlLogFrame,
-): Promise<'installed' | 'noop' | 'moved' | 'invalid' | 'unavailable'> {
+): Promise<'installed' | 'noop' | 'moved' | 'invalid' | 'unavailable' | 'copy-failed'> {
   throwIfAborted(deps.signal)
   const snapshot = await deps.control.load()
   const built = snapshot.commitOnce
@@ -59,16 +60,16 @@ export async function consumeOwnOccurrence(
     validation = await deps.validation.restoreValidation(built)
     if (validation === null) return 'unavailable'
     checked = await validation.validateFrame(frame, built)
-  } catch {
+  } catch (error) {
     throwIfAborted(deps.signal)
-    return 'unavailable'
+    return error instanceof DeliveredEntryCopyError ? 'copy-failed' : 'unavailable'
   }
   if (checked.kind !== 'valid')
-    return checked.kind === 'invalid' ||
-      checked.reason === 'unexplained-own' ||
-      checked.reason === 'unsupported-version'
-      ? 'invalid'
-      : 'unavailable'
+    return checked.reason === 'unexplained-own' || checked.reason === 'unsupported-version'
+      ? 'copy-failed'
+      : checked.kind === 'invalid'
+        ? 'invalid'
+        : 'unavailable'
   if (!checked.own) return 'invalid'
   const coverage = controlOccurrenceCoverage(snapshot, built, frame.position)
   const changes = closeControlBuild(

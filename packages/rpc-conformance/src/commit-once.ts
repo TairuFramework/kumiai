@@ -50,8 +50,11 @@ const scenarios: Array<[CommitOnceScenario, string]> = [
     'earlier public member winner supersedes an alternate-ID exact own replay',
   ],
   ['gap-match', 'match never bypasses suffix or page gaps'],
-  ['trimmed-checkpoint', 'trimmed checkpoint cannot prove first-valid acceptance'],
-  ['validation-unavailable', 'unavailable header or body resolution cannot hide an earlier winner'],
+  ['trimmed-checkpoint', 'trimmed checkpoint permits own installation with unknown acceptance'],
+  [
+    'validation-unavailable',
+    'unreadable delivered bodies permit own installation with unknown acceptance',
+  ],
   ['poison-head', 'poison prefix retries the identical commit and real receiver matches candidate'],
   ['built-restart', 'restart after built-save or head refresh keeps one exact build'],
   ['accepted-restart', 'accepted restart rechecks checkpoint suffix before adoption or Welcome'],
@@ -110,21 +113,14 @@ export function testCommitOnceConformance(params: {
             break
           case 'gap-match':
           case 'accepted-restart':
+          case 'trimmed-checkpoint':
+          case 'validation-unavailable':
             expect(evidence.outcome).toBe('unknown')
             expect(evidence.builds).toBe(1)
             expect(evidence.ownAdoptions).toBe(1)
             expect(evidence.welcomeDeliveries).toBe(0)
             expect(evidence.slotAfterAck).toBeNull()
             expect(evidence.cursor).not.toBeNull()
-            break
-          case 'trimmed-checkpoint':
-          case 'validation-unavailable':
-            expect(evidence.outcome).toBe('unknown')
-            expect(evidence.builds).toBe(1)
-            expect(evidence.ownAdoptions).toBe(0)
-            expect(evidence.welcomeDeliveries).toBe(0)
-            expect(evidence.slotAfterAck).not.toBeNull()
-            expect(evidence.cursor).toBe(evidence.searchFrom)
             break
           case 'deadline':
             expect(evidence.outcome).toBe('unknown')

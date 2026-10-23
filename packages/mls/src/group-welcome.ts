@@ -23,7 +23,6 @@ import {
   wireformats,
 } from 'ts-mls'
 
-import { decodeGroupAnchor, GROUP_ANCHOR_EXTENSION_TYPE } from './anchor.js'
 import { verifyLeafCredential } from './authentication.js'
 import { sanitizeRatchetTree } from './codec.js'
 import {
@@ -35,6 +34,7 @@ import { LeafBindingError } from './errors.js'
 import { buildLeafCapabilities, resolveMlsContext } from './group-context.js'
 import { assertBindingAuthorTime, makeMLSCredential } from './group-credential.js'
 import { buildCommitPolicyContext, GroupHandle } from './group-handle.js'
+import { externalGroupInfoInputs } from './group-info-inspection.js'
 import { assertHeadMatches, computeHead, readLedgerHead } from './head.js'
 import { ledgerEntryDigest, verifyLedgerEntry } from './ledger.js'
 import { prepareLifecycleGate, validateWelcomeTree } from './lifecycle.js'
@@ -231,16 +231,8 @@ export type JoinGroupExternalResult = {
 export async function joinGroupExternal(
   params: JoinGroupExternalParams,
 ): Promise<JoinGroupExternalResult> {
-  const {
-    identity,
-    groupInfo: groupInfoBytes,
-    credential,
-    resync,
-    options,
-    authenticatedData,
-    controller,
-    ledgerEntries,
-  } = params
+  const { identity, credential, resync, options, authenticatedData, controller, ledgerEntries } =
+    params
 
   // Resync replaces the caller's own prior leaf, so the rejoining identity must match
   // the presented credential. A friendly precheck, not the security boundary: on a
@@ -253,67 +245,9 @@ export async function joinGroupExternal(
     )
   }
 
-  const message = decode(mlsMessageDecoder, groupInfoBytes)
-  if (message == null) {
-    throw new Error('Invalid groupInfo: failed to decode MLSMessage')
-  }
-  if (message.wireformat !== wireformats.mls_group_info) {
-    throw new Error(
-      `Invalid groupInfo: expected wireformat mls_group_info, got ${String(message.wireformat)}`,
-    )
-  }
-  // Discriminated-union narrow via the literal wireformat tag — no cast needed.
-  const { groupInfo } = message
-
-  // A resync must target the group this credential names. The returned handle reports
-  // `credential.groupID` whatever group it joins, so without this a caller steered onto
-  // a GroupInfo for another group would hold a handle that lies about its identity.
-  const offeredGroupID = new TextDecoder().decode(groupInfo.groupContext.groupId)
-  if (offeredGroupID !== credential.groupID) {
-    throw new Error(
-      `joinGroupExternal: groupInfo names group ${offeredGroupID}, not credential.groupID (${credential.groupID})`,
-    )
-  }
-
-  const anchorExtension = groupInfo.groupContext.extensions.find(
-    (extension) => extension.extensionType === GROUP_ANCHOR_EXTENSION_TYPE,
-  )
-  const anchor =
-    anchorExtension?.extensionData instanceof Uint8Array
-      ? decodeGroupAnchor(anchorExtension.extensionData)
-      : null
-  if (anchor == null) throw new Error('joinGroupExternal: the group has no valid anchor')
-  const context = await resolveMlsContext(options, anchor)
-  const originalCredentials: Array<{ credential: Credential; signaturePublicKey: Uint8Array }> = []
-  const joinContext = {
-    ...context,
-    authService: {
-      async validateCredential(leafCredential: Credential, signaturePublicKey: Uint8Array) {
-        if (
-          !isDefaultCredential(leafCredential) ||
-          leafCredential.credentialType !== defaultCredentialTypes.basic
-        )
-          return false
-        const parsed = parseMLSCredentialIdentity(leafCredential.identity)
-        if (anchor.controller != null && parsed.controller == null)
-          throw new LeafBindingError('floating-refused')
-        if (
-          anchor.controller != null &&
-          parsed.controller != null &&
-          normalizeDID(parsed.controller.id) !== normalizeDID(anchor.controller)
-        )
-          throw new LeafBindingError('controller-mismatch')
-        await verifyLeafCredential(leafCredential, signaturePublicKey, {
-          leafLifetime: () =>
-            anchor.controller == null ? undefined : (anchor.leafLifetime ?? 86_400),
-          trustedGrantLifetime: () =>
-            anchor.controller == null ? undefined : (anchor.trustedGrantLifetime ?? 2_592_000),
-        })
-        originalCredentials.push({ credential: leafCredential, signaturePublicKey })
-        return true
-      },
-    },
-  }
+  const { groupInfo, anchor, context, originalCredentials, authService } =
+    await externalGroupInfoInputs(params)
+  const joinContext = { ...context, authService }
 
   // The rejoining leaf must advertise every GroupContext extension the group uses, or
   // ts-mls rejects the external join. Derive them from the GroupInfo being resynced

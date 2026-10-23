@@ -9,16 +9,21 @@ import { ed25519 } from '@noble/curves/ed25519.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { fromB64U, toB64U } from '@sozai/codec'
 import {
+  type AuthenticationService,
   type ClientState,
   ciphersuites,
   defaultExtensionTypes,
+  defaultLifetimeConfig,
   encode,
+  isDefaultExtension,
   type LeafNodeInfoOmitted,
+  leafNodeSources,
   type MlsContext,
   type MlsGroupInfo,
   makeCustomExtension,
   mlsMessageDecoder,
   mlsMessageEncoder,
+  protocolVersions,
 } from 'ts-mls'
 
 import { LEDGER_HEAD_EXTENSION_TYPE, readGroupAnchorExtension } from './anchor.js'
@@ -285,18 +290,184 @@ export async function verifyRecoveryPublicGroupInfo(
   // Provider faults are operational failures, not evidence rejection.
   if (!(await suite.signature.verify(signatureKey, input, message.groupInfo.signature)))
     return false
-  const hash = async (index: number): Promise<Uint8Array> => {
-    const body = publicTree.bodies[index] ?? new Uint8Array([0])
-    if (index % 2 === 0)
-      return await suite.hash.digest(concat([new Uint8Array([1]), u32(index / 2), body]))
-    let level = 0
-    while (((index >>> level) & 1) === 1) level++
-    const left = await hash(index ^ (1 << (level - 1)))
-    const right = await hash(index ^ (3 << (level - 1)))
-    return await suite.hash.digest(concat([new Uint8Array([2]), body, vector(left), vector(right)]))
+  return headsMatch(
+    await recoveryTreeHash(publicTree.bodies, suite),
+    message.groupInfo.groupContext.treeHash,
+  )
+}
+
+/** @internal Hash parsed RFC 9420 node bodies, including blanked unmerged leaves. */
+export async function recoveryTreeHash(
+  bodies: Array<Uint8Array>,
+  suite: MlsContext['cipherSuite'],
+  index = 2 ** Math.floor(Math.log2(bodies.length)) - 1,
+): Promise<Uint8Array> {
+  const body = bodies[index] ?? new Uint8Array([0])
+  if (index % 2 === 0)
+    return await suite.hash.digest(concat([new Uint8Array([1]), u32(index / 2), body]))
+  let level = 0
+  while (((index >>> level) & 1) === 1) level++
+  const left = await recoveryTreeHash(bodies, suite, index ^ (1 << (level - 1)))
+  const right = await recoveryTreeHash(bodies, suite, index ^ (3 << (level - 1)))
+  return await suite.hash.digest(concat([new Uint8Array([2]), body, vector(left), vector(right)]))
+}
+
+/** @internal Candidate-free RFC 9420 public tree validation; ts-mls exports no validator. */
+export async function validateRecoveryPublicTree(
+  message: MlsGroupInfo,
+  context: MlsContext,
+  authService: AuthenticationService,
+): Promise<void> {
+  const { tree, bodies } = readRecoveryPublicTree(message)
+  const { groupContext } = message.groupInfo
+  if (message.version !== protocolVersions.mls10 || groupContext.version !== protocolVersions.mls10)
+    invalid()
+  const hpkeKeys = new Set<string>()
+  const signatureKeys = new Set<string>()
+  const credentialTypes = new Set<number>()
+  const path = (start: number): Array<number> => {
+    let index = start
+    const ancestors: Array<number> = []
+    const root = (tree.length - 1) / 2
+    while (index !== root) {
+      let level = 0
+      while (((index >>> level) & 1) === 1) level++
+      index = (index | (1 << level)) & ~(1 << (level + 1))
+      ancestors.push(index)
+    }
+    return ancestors
   }
-  const root = 2 ** Math.floor(Math.log2(publicTree.tree.length)) - 1
-  return headsMatch(await hash(root), message.groupInfo.groupContext.treeHash)
+  for (const [index, node] of tree.entries()) {
+    if (node === undefined) continue
+    const key = toB64U(node.nodeType === 1 ? node.leaf.hpkePublicKey : node.parent.hpkePublicKey)
+    if (hpkeKeys.has(key)) invalid()
+    hpkeKeys.add(key)
+    if (node.nodeType === 2) {
+      const seen = new Set<number>()
+      for (const leaf of node.parent.unmergedLeaves) {
+        if (seen.has(leaf) || leaf * 2 >= tree.length || tree[leaf * 2]?.nodeType !== 1) invalid()
+        seen.add(leaf)
+        const ancestors = path(leaf * 2)
+        if (!ancestors.includes(index)) invalid()
+        for (const ancestor of ancestors) {
+          if (ancestor === index) break
+          const intermediate = tree[ancestor]
+          if (intermediate?.nodeType === 2 && !intermediate.parent.unmergedLeaves.includes(leaf))
+            invalid()
+        }
+      }
+      continue
+    }
+    const { leaf } = node
+    const signer = tree[message.groupInfo.signer * 2]
+    if (
+      signer?.nodeType !== 1 ||
+      leaf.signature.length !== message.groupInfo.signature.length ||
+      leaf.signaturePublicKey.length !== signer.leaf.signaturePublicKey.length
+    )
+      invalid()
+    const signatureKey = toB64U(leaf.signaturePublicKey)
+    if (signatureKeys.has(signatureKey)) invalid()
+    signatureKeys.add(signatureKey)
+    credentialTypes.add(leaf.credential.credentialType)
+    // Node bodies contain present || LeafNode, ending with the signature vector.
+    const unsigned = bodies[index]?.subarray(1, -vector(leaf.signature).length)
+    if (unsigned === undefined) invalid()
+    const tbs =
+      leaf.leafNodeSource === leafNodeSources.key_package
+        ? unsigned
+        : concat([unsigned, vector(groupContext.groupId), u32(index / 2)])
+    if (
+      !(await context.cipherSuite.signature.verify(
+        leaf.signaturePublicKey,
+        concat([vector(utf8.encode('MLS 1.0 LeafNodeTBS')), vector(tbs)]),
+        leaf.signature,
+      ))
+    )
+      invalid()
+    if (!(await authService.validateCredential(leaf.credential, leaf.signaturePublicKey))) invalid()
+    if (
+      leaf.leafNodeSource === 1 &&
+      (context.clientConfig?.lifetimeConfig ?? defaultLifetimeConfig).validateLifetimeOnReceive
+    ) {
+      const now = BigInt(Math.floor(Date.now() / 1000))
+      if (leaf.lifetime.notBefore > now || leaf.lifetime.notAfter < now) invalid()
+    }
+    for (const extension of leaf.extensions) {
+      if (
+        !Object.values(defaultExtensionTypes).some((type) => type === extension.extensionType) &&
+        !leaf.capabilities.extensions.includes(extension.extensionType)
+      )
+        invalid()
+    }
+    for (const extension of groupContext.extensions) {
+      if (
+        isDefaultExtension(extension) &&
+        extension.extensionType === defaultExtensionTypes.required_capabilities
+      ) {
+        const required = extension.extensionData
+        if (
+          required.extensionTypes.some((type) => !leaf.capabilities.extensions.includes(type)) ||
+          required.proposalTypes.some((type) => !leaf.capabilities.proposals.includes(type)) ||
+          required.credentialTypes.some((type) => !leaf.capabilities.credentials.includes(type))
+        )
+          invalid()
+      }
+    }
+  }
+  for (const node of tree) {
+    if (
+      node?.nodeType === 1 &&
+      [...credentialTypes].some((type) => !node.leaf.capabilities.credentials.includes(type))
+    )
+      invalid()
+  }
+  const coverage = new Map<number, number>()
+  for (const [start, node] of tree.entries()) {
+    if (node?.nodeType !== 1) continue
+    let current = node.leaf.leafNodeSource === 3 ? node.leaf.parentHash : undefined
+    let child = start
+    for (const ancestor of path(start)) {
+      const parent = tree[ancestor]
+      if (parent?.nodeType !== 2) continue
+      if (current === undefined) break
+      let level = 0
+      while (((ancestor >>> level) & 1) === 1) level++
+      const sibling = ancestor + (child < ancestor ? 1 : -1) * 2 ** (level - 1)
+      const blanked = bodies.map((body, index) => {
+        const node = tree[index]
+        if (node?.nodeType === 1 && parent.parent.unmergedLeaves.includes(index / 2))
+          return new Uint8Array([0])
+        if (node?.nodeType !== 2 || parent.parent.unmergedLeaves.length === 0) return body
+        return concat([
+          new Uint8Array([1]),
+          vector(node.parent.hpkePublicKey),
+          vector(node.parent.parentHash),
+          vector(
+            concat(
+              node.parent.unmergedLeaves
+                .filter((leaf) => !parent.parent.unmergedLeaves.includes(leaf))
+                .map(u32),
+            ),
+          ),
+        ])
+      })
+      const expected = await context.cipherSuite.hash.digest(
+        concat([
+          vector(parent.parent.hpkePublicKey),
+          vector(parent.parent.parentHash),
+          vector(await recoveryTreeHash(blanked, context.cipherSuite, sibling)),
+        ]),
+      )
+      if (!headsMatch(current, expected)) break
+      coverage.set(ancestor, (coverage.get(ancestor) ?? 0) + 1)
+      current = parent.parent.parentHash
+      child = ancestor
+    }
+  }
+  for (const [index, node] of tree.entries()) {
+    if (node?.nodeType === 2 && coverage.get(index) !== 1) invalid()
+  }
 }
 
 function encodeCheckpoints(frames: Array<Uint8Array>): Uint8Array {

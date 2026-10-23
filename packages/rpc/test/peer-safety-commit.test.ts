@@ -231,7 +231,10 @@ test.each([false, true])(
     const { hub, member } = await fixture()
     if (realStrand) {
       await member.control.apply(
-        { strand: { reason: 'ahead' }, cursor: { position: null, epoch: 1, stranded: true } },
+        {
+          strand: { reason: 'unprocessable-gap' },
+          cursor: { position: null, epoch: 1, stranded: true },
+        },
         'real-strand',
       )
       await member.peer.replay()

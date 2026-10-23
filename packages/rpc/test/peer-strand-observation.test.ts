@@ -481,7 +481,7 @@ describe('commit strand observations', () => {
   })
 })
 
-test('a later ordinary strand replaces the previous durable reason at the same epoch', async () => {
+test('a later local failure strands after an ahead claim recorded only incomplete coverage', async () => {
   const hub = new FakeHub()
   const rs = secret(0xb9)
   const bob = makeMLSPeer(hub, 'bob', rs, { members, recovery })
@@ -494,7 +494,8 @@ test('a later ordinary strand replaces the previous durable reason at the same e
       recoverySecret: rs,
       epoch: 3,
     })
-    await vi.waitFor(async () => expect((await bob.control.load()).strand?.reason).toBe('ahead'))
+    await vi.waitFor(async () => expect((await bob.control.load()).cursor?.incomplete).toBe(true))
+    expect((await bob.control.load()).strand).toBeNull()
     bob.mls.readCommitHeader = async () => {
       throw Object.assign(new Error('missing key'), { name: 'CommitValidationUnavailableError' })
     }

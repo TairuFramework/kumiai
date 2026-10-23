@@ -14,9 +14,11 @@ import {
   type GroupHandle,
   type GroupOptions,
   GroupRestoreError,
+  inspectRecoveryGroupInfo,
   joinGroupExternal,
   LeafBindingError,
   LeafLapsedError,
+  LedgerIncompleteError,
   nobleCryptoProvider,
   openRecoveryVerdictFromTrust as openTrustedVerdict,
   parseMLSCredentialIdentity,
@@ -114,6 +116,44 @@ export async function authenticateRecoveryReply(
   params: AuthenticateRecoveryReplyParams,
 ): Promise<CapturedRecoveryGroupInfo | null> {
   return await authenticateTrustedReply({ ...params, trust: recoveryTrustInputs(params.trust) })
+}
+
+export async function inspectRecoveryCapture(params: {
+  source: RegistryRecoverySource
+  reply: CapturedRecapture
+  environment: RecoveryEnvironment
+}): Promise<{ groupID: string; epoch: number; authenticator: Uint8Array } | null> {
+  const source = copyRecoverySource(validateRecoverySource(params.source))
+  const { reply, environment } = params
+  const verified = await authenticateRecoveryReply({
+    trust: source.trust,
+    sealed: reply.sealed,
+    requestID: reply.requestID,
+    requestKey: reply.requestKey,
+    options: environment.options,
+  })
+  if (verified === null) return null
+  try {
+    const facts = await inspectRecoveryGroupInfo({
+      groupInfo: verified.groupInfo,
+      identity: environment.identity,
+      credential: source.trust.credential,
+      controller: source.trust.binding ?? undefined,
+      ledgerEntries: verified.ledger,
+      options: { ...environment.options, ciphersuiteName: source.trust.ciphersuiteName },
+    })
+    if (
+      (reply.epochFloor !== null && facts.epoch < reply.epochFloor) ||
+      (source.identity !== null &&
+        facts.epoch === source.identity.epoch &&
+        !sameBytes(verified.groupInfoAuthenticator, source.identity.authenticator))
+    )
+      return null
+    return { ...facts, authenticator: verified.groupInfoAuthenticator.slice() }
+  } catch (cause) {
+    if (candidateRefused(cause) || cause instanceof LedgerIncompleteError) return null
+    throw cause
+  }
 }
 
 export async function verifyRosterAbsence(

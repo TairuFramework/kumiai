@@ -77,7 +77,7 @@ test.each([false, true])(
   },
 )
 
-test('a mid-walk same-fetch gap strands before an own occurrence can install', async () => {
+test('a mid-walk same-fetch gap permits authenticated own installation with unknown coverage', async () => {
   const secret = new Uint8Array(32).fill(65)
   const hub = new FakeHub()
   const member = makeMLSPeer(hub, 'alice', secret)
@@ -94,13 +94,12 @@ test('a mid-walk same-fetch gap strands before an own occurrence can install', a
     })
     await member.controlWalk.walkCommits()
     const saved = await seedBuiltOperation(member, buildLedgerCommit(member, ['saved']))
-    const before = await member.control.load()
     const fetch = hub.fetchTopic.bind(hub)
     vi.spyOn(hub, 'fetchTopic').mockImplementation(async (params) => ({
       ...(await fetch(params)),
       gap: true,
     }))
-    await hub.publish({
+    const occurrence = await hub.publish({
       senderDID: 'replayer',
       topicID: commitTopic(secret),
       retain: 'log',
@@ -108,10 +107,17 @@ test('a mid-walk same-fetch gap strands before an own occurrence can install', a
     })
     await member.controlWalk.walkCommits()
     const snapshot = await member.control.load()
-    expect(snapshot.cursor).toMatchObject({ position: before.cursor?.position, stranded: true })
-    expect(snapshot.commitOnce).toEqual(saved.slot)
-    expect(snapshot.applied).toEqual([])
-    expect(await member.mls.readEpoch()).toBe(saved.slot.epoch)
+    expect(snapshot.cursor).toMatchObject({
+      position: occurrence.sequenceID,
+      epoch: saved.slot.epoch + 1,
+    })
+    expect(snapshot.cursor?.stranded).not.toBe(true)
+    expect(snapshot.commitOnce).toBeNull()
+    expect(snapshot.applied).toMatchObject([{ sequenceID: occurrence.sequenceID, opID: saved.id }])
+    expect(snapshot.outcomes).toContainEqual(
+      expect.objectContaining({ opID: saved.id, kind: 'unknown' }),
+    )
+    expect(await member.mls.readEpoch()).toBe(saved.slot.epoch + 1)
   } finally {
     await member.peer.dispose()
     await member.peer.drained()
@@ -398,7 +404,7 @@ test('a mid-walk same-fetch gap makes competitor consumption unknown', async () 
   }
 })
 
-test('a stranded gap followed by unreadable bytes still consumes the competitor without repeated fetch loops', async () => {
+test('a hub gap followed by unreadable bytes still consumes the competitor without repeated fetch loops', async () => {
   const secret = new Uint8Array(32).fill(80)
   const hub = new FakeHub()
   const member = makeMLSPeer(hub, 'alice', secret, { members: ['alice', 'bob'] })
@@ -447,7 +453,11 @@ test('a stranded gap followed by unreadable bytes still consumes the competitor 
     expect(consumed.outcomes).toMatchObject([{ opID: saved.id, kind: 'unknown' }])
     expect(consumed.welcomes).toEqual([])
     expect(consumed.applied).toMatchObject([{ sequenceID: winner.sequenceID, opID: null }])
-    expect(consumed.cursor).toMatchObject({ position: before.cursor?.position, stranded: true })
+    expect(consumed.cursor).toMatchObject({
+      position: winner.sequenceID,
+      epoch: saved.slot.epoch + 1,
+    })
+    expect(consumed.cursor?.stranded).not.toBe(true)
     expect(await member.mls.readEpoch()).toBe(saved.slot.epoch + 1)
     for (let repeat = 0; repeat < 3; repeat++) {
       await expect(member.controlWalk.walkCommits()).resolves.toBe(false)
@@ -535,7 +545,7 @@ test('background pulls report each distinct persistent adoption invariant once w
   }
 })
 
-test('a restarted peer re-fetches unreadable bytes from a stranded cursor and consumes the winner once', async () => {
+test('a restarted peer re-fetches unreadable bytes from an incomplete cursor and consumes the winner once', async () => {
   const secret = new Uint8Array(32).fill(83)
   const hub = new FakeHub()
   let member = makeMLSPeer(hub, 'alice', secret, { members: ['alice', 'bob'] })
@@ -567,9 +577,9 @@ test('a restarted peer re-fetches unreadable bytes from a stranded cursor and co
     const stranded = await member.control.load()
     expect(stranded.cursor).toMatchObject({
       position: before.cursor?.position,
-      stranded: true,
       incomplete: true,
     })
+    expect(stranded.cursor?.stranded).not.toBe(true)
     expect(stranded.commitOnce).toEqual(saved.slot)
     const unreadable = await hub.publish({
       senderDID: 'alice',
@@ -598,7 +608,11 @@ test('a restarted peer re-fetches unreadable bytes from a stranded cursor and co
     expect(consumed.welcomes).toEqual([])
     expect(consumed.outcomes).toMatchObject([{ opID: saved.id, kind: 'unknown' }])
     expect(consumed.applied).toMatchObject([{ sequenceID: winner.sequenceID, opID: null }])
-    expect(consumed.cursor).toMatchObject({ position: before.cursor?.position, stranded: true })
+    expect(consumed.cursor).toMatchObject({
+      position: winner.sequenceID,
+      epoch: saved.slot.epoch + 1,
+    })
+    expect(consumed.cursor?.stranded).not.toBe(true)
     expect(await member.mls.readEpoch()).toBe(saved.slot.epoch + 1)
     for (let repeat = 0; repeat < 3; repeat++)
       await expect(member.controlWalk.walkCommits()).resolves.toBe(false)

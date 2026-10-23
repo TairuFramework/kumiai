@@ -2099,7 +2099,7 @@ test.each(['outer', 'inner'] as const)(
       expect(after.commitOnce).toEqual({
         ...before.commitOnce,
         skipped: true,
-        retryForbidden: true,
+        retryForbidden: false,
         reported: true,
       })
       expect(after.operations).toEqual(before.operations)

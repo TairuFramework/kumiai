@@ -27,7 +27,7 @@ for (const mode of ['double', 'real-mls'] as const) {
     run: (scenario) =>
       scenario === 'slot-guards' ? runControlSlotGuards(mode) : runControlProofConflict(mode),
   })
-  test(`unavailable authenticated earlier frame strands before own installation or Welcome (${mode})`, async () => {
+  test(`delivered missing proposal skips before own installation without Welcome (${mode})`, async () => {
     const real = mode === 'real-mls' ? await createRealGroup(3, 'control-crash') : undefined
     const seed =
       real === undefined
@@ -63,7 +63,6 @@ for (const mode of ['double', 'real-mls'] as const) {
       await h.peer.resync()
       const built = await h.build()
       expect(await h.saveBuilt(built.intent, built.slot, built.expected, 'built')).toBe('saved')
-      const controlBefore = await h.control.load()
       const competitor = real?.members[0]
       if (real !== undefined && competitor === undefined) throw new Error('Missing competitor')
       const before = await h.groups.loadState(h.key)
@@ -106,17 +105,17 @@ for (const mode of ['double', 'real-mls'] as const) {
       })
       await h.controlWalk.walkCommits()
       const saved = await h.control.load()
-      expect(h.observations.ownAdoptions).toBe(0)
+      expect(h.observations.ownAdoptions).toBe(1)
       expect(saved.controlHold).toBeNull()
-      expect(saved.strand).toEqual({ reason: 'unprocessable-gap' })
-      expect(saved.commitOnce).toEqual(built.slot)
-      expect(saved.applied).toEqual([])
+      expect(saved.strand).toBeNull()
+      expect(saved.commitOnce).toBeNull()
+      expect(saved.applied).toMatchObject([{ epoch: built.slot.epoch, opID: built.slot.opID }])
       expect(saved.welcomes).toEqual([])
-      expect(saved.outcomes).toEqual(controlBefore.outcomes)
+      expect(saved.outcomes).toContainEqual(
+        expect.objectContaining({ opID: built.slot.opID, kind: 'unknown' }),
+      )
       expect(await h.groups.loadState(h.key)).toMatchObject({
-        epoch: before.epoch,
-        epochAuthenticator: before.epochAuthenticator,
-        state: before.state,
+        epoch: before.epoch + 1,
       })
       expect(h.observations.welcomeDeliveries).toBe(0)
       const validation = await h.validation.restoreValidation(built.slot)

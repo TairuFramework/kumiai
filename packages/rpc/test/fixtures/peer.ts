@@ -35,7 +35,11 @@ import { asLogPosition } from '../../src/cursor.js'
 import { OperationRejectedError } from '../../src/errors.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../../src/handshake.js'
 import type { SubscribeFailure } from '../../src/hub-mux.js'
-import { createLedgerEntryResolver, encodeLedgerEntries } from '../../src/ledger-entries.js'
+import {
+  createLedgerEntryResolver,
+  DeliveredEntryCopyError,
+  encodeLedgerEntries,
+} from '../../src/ledger-entries.js'
 import type { AppOutboxCleared } from '../../src/log-delivery.js'
 import type { GroupPeer, RecoveryEvent, StrandObservation } from '../../src/peer.js'
 import type { GroupPeerMLSParams, InternalOperations } from '../../src/peer-types.js'
@@ -548,8 +552,11 @@ export function memoryControlPorts(
               advanced: checked.result.advanced,
               removed: false,
             }
-          } catch {
-            return { kind: 'unavailable', reason: 'resolver' }
+          } catch (error) {
+            if (error instanceof DeliveredEntryCopyError) throw error
+            if (error instanceof Error && error.name === 'MissingLedgerEntriesError')
+              return { kind: 'unavailable', reason: 'unexplained-own' }
+            throw error
           }
         },
         verifyOwn: async (value) => {

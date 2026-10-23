@@ -39,6 +39,7 @@ import {
   StorageOutcomeUnknownError,
 } from '../../src/errors.js'
 import { encodeHandshakeFrame, HANDSHAKE_KIND } from '../../src/handshake.js'
+import { DeliveredEntryCopyError } from '../../src/ledger-entries.js'
 import {
   type AuthenticatedRosterAbsence,
   type CapturedPendingRecovery,
@@ -187,6 +188,7 @@ export type MemoryRecoveryBinding = {
   holderGrant?: string
 }
 export type MemoryGroupMLSOptions = {
+  deliveredCopyError?: new (message?: string, options?: ErrorOptions) => Error
   onSafetyHold?: GroupMLS['onSafetyHold']
   onSafetyChanged?: GroupMLS['onSafetyChanged']
   capturedRecovery?: {
@@ -1495,6 +1497,25 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     capturedDependencies === undefined
       ? undefined
       : {
+          async inspectCapture(reply) {
+            const source = validateSource(await capturedDependencies.readSource())
+            const info = capturedInfo(reply.sealed, reply.requestID, reply.requestKey, source)
+            if (
+              info !== null &&
+              ((reply.epochFloor !== null && info.epoch < reply.epochFloor) ||
+                (source.identity !== null &&
+                  info.epoch === source.identity.epoch &&
+                  toB64U(source.identity.authenticator) !== info.authenticator))
+            )
+              return null
+            return info === null
+              ? null
+              : {
+                  groupID: source.key.groupID,
+                  epoch: info.epoch,
+                  authenticator: fromB64U(info.authenticator),
+                }
+          },
           async authoriseForkRecovery(reply, noticeID) {
             const source = validateSource(await capturedDependencies.readSource())
             const info = capturedInfo(reply.sealed, reply.requestID, reply.requestKey, source)
@@ -2318,15 +2339,11 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             refusal: 'invalid' as const,
           }
         }
-        if (parsed.missingProposal === true) {
-          return {
-            applied: false,
-            advanced: false,
-            epochBefore: epoch,
-            epochAfter: epoch,
-            validation: 'unavailable' as const,
-          }
-        }
+        if (parsed.missingProposal === true)
+          throw new (options.deliveredCopyError ?? DeliveredEntryCopyError)(
+            'Delivered commit references an unavailable proposal',
+            { cause: { reason: 'missing-proposal' } },
+          )
         // A member can never apply the frame that is its OWN commit: MLS merges a pending
         // commit, it does not process one, and the pending state is the only thing that could
         // have carried it. A member that meets its own commit in the log has lost that state,

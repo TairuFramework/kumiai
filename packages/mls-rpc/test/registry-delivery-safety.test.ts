@@ -317,7 +317,7 @@ for (const mode of ['real-mls', 'double'] as const) {
               : {
                   ...before.commitOnce,
                   skipped: true,
-                  retryForbidden: kind === 'own-mismatch',
+                  retryForbidden: false,
                 },
           )
           expect(after.operations).toEqual(before.operations)

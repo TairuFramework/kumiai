@@ -47,6 +47,7 @@ import { entryCapability } from '../../src/entry-capability.js'
 import { createGroupMLS, createLedgerEntrySlot } from '../../src/mls.js'
 import { recoveryTrustDigest } from '../../src/recovery-trust-digest.js'
 import { recoveryTrustFor } from '../../src/registry/trust.js'
+import type { RegistryRecoverySource } from '../../src/registry/types.js'
 import { registryOptions } from '../../src/registry/validation.js'
 import { createRegistryGroupMLS } from '../../src/registry-group-mls.js'
 import { createAsyncLocalOwnershipContext } from './ownership-context.js'
@@ -110,7 +111,7 @@ export async function createCapturedRealRecovery(transactional = false) {
     { groupID: requester.handle.groupID, incarnation: 1 },
     null,
   )
-  const source = {
+  const source: RegistryRecoverySource = {
     key: { groupID: trust.groupID, incarnation: 1 },
     stateVersion: 1,
     lifetimeRevision: 1,
@@ -151,6 +152,20 @@ export async function createCapturedRealRecovery(transactional = false) {
   }
   const responderStore = createTransactionalStore(responder.handle)
   return {
+    setSourceIdentity(identity: { epoch: number; authenticator: Uint8Array } | null) {
+      source.identity =
+        identity === null
+          ? null
+          : { ...source.key, epoch: identity.epoch, authenticator: identity.authenticator.slice() }
+      if (source.identity !== null) {
+        trust.installed = {
+          ...source.identity,
+          authenticator: source.identity.authenticator.slice(),
+        }
+        trust.spentEpochAuthenticators.push(source.identity.authenticator.slice())
+        source.trustDigest = recoveryTrustDigest(trust)
+      }
+    },
     invalidateRetainedSigner(kind: 'missing' | 'wrong-controller' | 'revoked') {
       if (kind === 'missing' || kind === 'wrong-controller') {
         trust.signerTree = trust.signerTree.map((node) => {

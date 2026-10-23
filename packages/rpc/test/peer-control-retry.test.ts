@@ -303,7 +303,7 @@ test.each(
     ['missing', 'restore', 'verify'].map((failure) => ({ recovers, failure })),
   ),
 )(
-  'own-local failure holds the occurrence before bounded retry or compulsory resync ($failure, recovers=$recovers)',
+  'local input and provider failures retain identity and retry policy ($failure, recovers=$recovers)',
   async ({ recovers, failure }) => {
     vi.useFakeTimers()
     const hub = new FakeHub()
@@ -537,35 +537,22 @@ test.each(
 )
 
 test.each([false, true])(
-  'a classified altered own copy prevents identical retry and later own installation closes unknown (restart=%s)',
+  'failed own copy permits identical retry and later installation closes unknown (restart=%s)',
   async (restart) => {
     const hub = new FakeHub()
     let author = makeMLSPeer(hub, 'alice', secret)
     peers.push(author)
     await author.peer.replay()
+    vi.useFakeTimers()
     const saved = await seedBuiltOperation(author, buildLedgerCommit(author, ['saved-entry']))
     const frame = decodeCommitFrame(decodeHandshakeFrame(saved.slot.payload).payload)
     const altered = encodeHandshakeFrame(
       HANDSHAKE_KIND.commit,
       encodeCommitFrame(frame.commit, new Uint8Array([255])),
     )
-    const restore = author.validation.restoreValidation.bind(author.validation)
-    vi.spyOn(author.validation, 'restoreValidation').mockImplementation(async (built) => {
-      const validation = await restore(built)
-      if (validation === null) return null
-      return {
-        ...validation,
-        validateFrame: async (occurrence, candidate, header) => {
-          if (
-            occurrence.payload.length === altered.length &&
-            occurrence.payload.every((byte, index) => byte === altered[index])
-          )
-            return { kind: 'invalid', reason: 'authentication' }
-          return validation.validateFrame(occurrence, candidate, header)
-        },
-      }
-    })
-    const occurrence = await hub.publish({
+    const submit = hub.publish.bind(hub)
+    const publish = vi.spyOn(hub, 'publish').mockRejectedValue(new Error('hub unavailable'))
+    const occurrence = await submit({
       senderDID: 'replayer',
       topicID: commitTopic(secret),
       retain: 'log',
@@ -574,18 +561,30 @@ test.each([false, true])(
     await author.controlWalk.walkCommits()
     const skipped = await author.control.load()
     expect(skipped.cursor?.position).toBe(occurrence.sequenceID)
-    expect(skipped.commitOnce).toMatchObject({ ...saved.slot, skipped: true, retryForbidden: true })
+    expect(skipped.commitOnce).toMatchObject({
+      ...saved.slot,
+      expectedHead: occurrence.sequenceID,
+      skipped: true,
+      retryForbidden: false,
+    })
     expect(skipped.outcomes).toEqual([])
-    const publish = vi.spyOn(hub, 'publish')
     await author.controlWalk.stepOperation(saved.id)
-    expect(publish).not.toHaveBeenCalled()
+    expect(publish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        publishID: saved.slot.publishID,
+        payload: saved.slot.payload,
+      }),
+    )
     expect(author.mls.epoch()).toBe(1)
     if (restart) {
       await author.peer.dispose()
       await author.peer.drained()
       author = makeMLSPeer(hub, 'alice', secret, { restartOf: author })
       peers.push(author)
+      await author.controlWalk.stepOperation(saved.id)
+      expect(publish.mock.calls.length).toBeGreaterThan(1)
     }
+    publish.mockImplementation(submit)
     const receive = vi.spyOn(author.mls, 'processCommit')
     const own = await hub.publish({
       senderDID: 'replayer',

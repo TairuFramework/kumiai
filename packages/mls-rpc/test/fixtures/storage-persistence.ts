@@ -165,7 +165,7 @@ export type RegistryStorageFixture = Omit<
     fn: () => Promise<void> | void,
   ): void
   entry(): EntryCapability<MemoryTransaction>
-  observeCodec(fn: (kind: 'open' | 'seal', namespace: string) => void): void
+  observeCodec(fn: (kind: 'open' | 'seal', namespace: string, bytes: Uint8Array) => void): void
   armNextWorkFault(
     point: 'pending',
   ): WorkFaultControl & { mutationID: Promise<string>; disarm(): void }
@@ -205,7 +205,9 @@ export async function createStorageFixture(params: {
   let sealFailure: Error | undefined
   let openFailure: Error | undefined
   let codecProbe: ((phase: string) => Promise<void>) | undefined
-  let codecObserver: ((kind: 'open' | 'seal', namespace: string) => void) | undefined
+  let codecObserver:
+    | ((kind: 'open' | 'seal', namespace: string, bytes: Uint8Array) => void)
+    | undefined
   let retry = false
   const phaseCallbacks = new Map<Phase, () => Promise<void> | void>()
   const held = new Set<Latch>()
@@ -219,7 +221,11 @@ export async function createStorageFixture(params: {
     phaseCallbacks.clear()
   }
   async function codecCall(kind: 'seal' | 'open', bytes: Uint8Array, aad: Uint8Array) {
-    codecObserver?.(kind, (JSON.parse(new TextDecoder().decode(aad)) as Array<string>)[3] as string)
+    codecObserver?.(
+      kind,
+      (JSON.parse(new TextDecoder().decode(aad)) as Array<string>)[3] as string,
+      bytes.slice(),
+    )
     const probe = codecProbe
     codecProbe = undefined
     const latch = kind === 'seal' ? sealLatch : openLatch
@@ -918,8 +924,13 @@ export async function createStorageFixture(params: {
   return fixture
 }
 
-export async function createControlCrashHarness(mode: 'real-mls' | 'double', seed?: StorageSeed) {
-  const fixture = await createStorageFixture({ id: 'control-crash', mode, seed })
+export async function createControlCrashHarness(
+  mode: 'real-mls' | 'double',
+  seed?: StorageSeed,
+  ownershipContext?: OwnershipContextPort,
+  namedEntries = false,
+) {
+  const fixture = await createStorageFixture({ id: 'control-crash', mode, seed, ownershipContext })
   const key = { groupID: 'control-crash', incarnation: 1 }
   const closers: Array<() => Promise<void>> = []
   const fixtureClose = fixture.close.bind(fixture)
@@ -1039,7 +1050,7 @@ export async function createControlCrashHarness(mode: 'real-mls' | 'double', see
       handle: Awaited<ReturnType<typeof restoreCandidate>>,
     ) => {
       observations.builds++
-      if (mode === 'double') return buildSealedMemoryOperation(op, handle)
+      if (mode === 'double') return buildSealedMemoryOperation(op, handle, namedEntries)
       const { invite, publicPackage } = decodeStoredValue(op.body) as {
         invite: Parameters<typeof commitInvite>[2]
         publicPackage: Parameters<typeof commitInvite>[1]

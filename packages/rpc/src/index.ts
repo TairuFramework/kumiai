@@ -246,6 +246,7 @@ export {
 export type { ReceiveLaneEnded, SubscribeFailure } from './hub-mux.js'
 export {
   createLedgerEntryResolver,
+  DeliveredEntryCopyError,
   decodeLedgerEntries,
   encodeLedgerEntries,
   LEDGER_ENTRIES_VERSION,

@@ -776,7 +776,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     },
   )
 
-  test('removed sender behind a gap durably holds rather than guessing its membership', async () => {
+  test('removed sender behind a gap retains accepted work without publishing under uncertain membership', async () => {
     const hub = new DurableFakeHub()
     const events: Array<RecoveryEvent> = []
     const bob = member(hub, 'bob', {

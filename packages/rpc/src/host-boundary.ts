@@ -64,6 +64,7 @@ export const capturedPendingRecoveryHostMembers = {
 } as const satisfies HostMembers<CapturedPendingRecovery>
 
 export const capturedRecoveryHostMembers = {
+  inspectCapture: 'host',
   checkRosterAbsence: 'host',
   sealRosterAbsence: 'host',
   applyRecovery: 'host',
@@ -452,6 +453,22 @@ export function wrapPeerHost<TParams extends object>(
           enumerable: true,
           value: {
             ...captured,
+            inspectCapture: boundary.wrap({
+              async inspectCapture(reply: Parameters<CapturedRecoveryPort['inspectCapture']>[0]) {
+                const facts = await captured.inspectCapture({
+                  ...reply,
+                  sealed: reply.sealed.slice(),
+                  requestKey: reply.requestKey.slice(),
+                })
+                return facts === null
+                  ? null
+                  : {
+                      groupID: facts.groupID,
+                      epoch: facts.epoch,
+                      authenticator: facts.authenticator.slice(),
+                    }
+              },
+            }).inspectCapture,
             async applyRecovery(...args: Parameters<CapturedRecoveryPort['applyRecovery']>) {
               const pending = await captured.applyRecovery(...args)
               return pending === null || 'renewalRequired' in pending

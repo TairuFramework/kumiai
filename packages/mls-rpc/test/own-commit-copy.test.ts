@@ -155,7 +155,7 @@ async function fixture(named = false, nonempty = false) {
 }
 
 test.each([true, false])(
-  'failed own copy blocks identical retry and a later exact occurrence installs unknown (delivered: %s)',
+  'failed own copy permits identical retry and later exact installation closes unknown (delivered: %s)',
   async (delivered) => {
     const f = await fixture(true)
     const store = createTransactionalStore(f.author.handle)
@@ -212,13 +212,13 @@ test.each([true, false])(
         },
         { payload: f.frame(bad), position: asLogPosition('1'), senderDID: 'replayer' },
       ),
-    ).toBe('invalid')
+    ).toBe('copy-failed')
     const beforeSkip = (await store.control.load()).commitOnce
     if (beforeSkip === null) throw new Error('Missing build')
     await store.control.apply(
       {
-        // r28h: mirror the walker's classified own-copy skip, including the retry ban.
-        commitOnce: { ...beforeSkip, skipped: true, retryForbidden: true },
+        // Mirror the walker's atomic coverage-only skip.
+        commitOnce: { ...beforeSkip, skipped: true, retryForbidden: false },
         cursor: { position: asLogPosition('1'), epoch: f.built.epoch },
       },
       'skip',
@@ -244,7 +244,7 @@ test.each([true, false])(
       emit: () => {},
     }
     await stepLiveBuild(deps)
-    expect(publish).not.toHaveBeenCalled()
+    expect(publish).toHaveBeenCalledWith(f.built.payload, f.built.publishID, '1')
     if (delivered) {
       expect(
         await consumeOwnOccurrence(

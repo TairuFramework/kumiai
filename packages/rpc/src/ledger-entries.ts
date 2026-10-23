@@ -21,7 +21,14 @@ const COUNT_BYTES = 2
 const HEADER_BYTES = VERSION_BYTES + COUNT_BYTES
 const LENGTH_BYTES = 4
 
-export class LedgerEntryRefusedError extends Error {
+export class DeliveredEntryCopyError extends Error {
+  constructor(message?: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'DeliveredEntryCopyError'
+  }
+}
+
+export class LedgerEntryRefusedError extends DeliveredEntryCopyError {
   #reason: 'malformed' | 'authentication'
 
   constructor(
@@ -38,7 +45,7 @@ export class LedgerEntryRefusedError extends Error {
   }
 }
 
-export class UnsupportedLedgerEntriesVersionError extends Error {
+export class UnsupportedLedgerEntriesVersionError extends DeliveredEntryCopyError {
   constructor(message?: string) {
     super(message)
     this.name = 'UnsupportedLedgerEntriesVersionError'
@@ -73,24 +80,26 @@ export function decodeLedgerEntries(bytes: Uint8Array): Array<string> {
       `unsupported ledger entry blob version: ${version}`,
     )
   }
-  if (bytes.length < HEADER_BYTES) throw new Error('ledger entry blob is too short')
+  if (bytes.length < HEADER_BYTES)
+    throw new DeliveredEntryCopyError('ledger entry blob is too short')
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const count = view.getUint16(VERSION_BYTES, true)
   const tokens: Array<string> = []
   let offset = HEADER_BYTES
   for (let i = 0; i < count; i++) {
     if (offset + LENGTH_BYTES > bytes.length) {
-      throw new Error('ledger entry blob is truncated')
+      throw new DeliveredEntryCopyError('ledger entry blob is truncated')
     }
     const length = view.getUint32(offset, true)
     const start = offset + LENGTH_BYTES
     if (start + length > bytes.length) {
-      throw new Error('ledger entry blob is truncated')
+      throw new DeliveredEntryCopyError('ledger entry blob is truncated')
     }
     tokens.push(toUTF(bytes.subarray(start, start + length)))
     offset = start + length
   }
-  if (offset !== bytes.length) throw new Error('ledger entry blob has trailing bytes')
+  if (offset !== bytes.length)
+    throw new DeliveredEntryCopyError('ledger entry blob has trailing bytes')
   return tokens
 }
 
