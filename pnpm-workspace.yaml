@@ -24,7 +24,7 @@ catalog:
   '@enkaku/server': ^0.22.1
   '@enkaku/transport': ^0.22.1
   '@kokuin/capability': ^0.5.1
-  '@kokuin/controller': ^0.2.1
+  '@kokuin/controller': ^0.2.3
   '@kokuin/token': ^0.6.1
   '@sozai/async': ^0.4.1
   '@sozai/codec': ^0.4.3
