@@ -633,12 +633,10 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
    * A RESTART MID-WALK, over real MLS and a real hub: the process dies partway through the walk
    * that is catching it up, and comes back over everything it persisted.
    *
-   * The death is hung off the delivery of the first frame rather than a timer, so it lands with
-   * the walk genuinely in flight — the segment pulled, the backlog part-delivered, and commits
-   * still to apply. What must survive it is the pair the whole lane rests on: the durable read
-   * position, so the frame already handed to the host is not handed over again, and the persisted
-   * MLS state, so the second process resumes the walk rather than restarting it. Neither has ever
-   * been exercised against a real ratchet, where a frame already opened CANNOT be opened again.
+   * The first handler suspends without completing. The walk applies one commit, then suspends
+   * before processing the next. The test body kills the peer and socket at that boundary.
+   * Restart must replay the unfinished delivery and resume from the persisted MLS state,
+   * without reopening a frame whose ratchet key was already consumed.
    */
   test('a peer that dies mid-walk resumes over its persisted state and loses nothing', async () => {
     const hub = createWireHub()
@@ -681,9 +679,44 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     const alice = makeMember({ hub, identity: aliceID, group: aliceHandle, entrySlot: aliceSlot })
     await flush()
 
-    // A backlog spanning three epochs, with no roster change: one topic, three seal epochs, and
-    // a walk that has to ratchet twice to read all of it.
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch one' } })
+
+    const seen: Array<unknown> = []
+    const firstDelivery = Promise.withResolvers<void>()
+    const walkSuspended = Promise.withResolvers<void>()
+    const abandoned = new Promise<never>(() => {})
+    let crashOnDelivery = true
+    const handlers = {
+      'chat/posted': async (ctx: { data: unknown }) => {
+        seen.push(ctx.data)
+        if (!crashOnDelivery) return
+        crashOnDelivery = false
+        firstDelivery.resolve()
+        // A killed process never completes its in-flight handler.
+        await abandoned
+      },
+    }
+
+    let bob: Member = makeMember({
+      hub,
+      identity: bobID,
+      group: bobHandle,
+      entrySlot: bobSlot,
+      handlers,
+      durablePending: true,
+    })
+    await firstDelivery.promise
+    expect(bob.handle().epoch).toBe(1n)
+    const processCommit = bob.mls.processCommit.bind(bob.mls)
+    bob.mls.processCommit = async (...args) => {
+      if (bob.handle().epoch === 2n) {
+        walkSuspended.resolve()
+        await abandoned
+      }
+      return await processCommit(...args)
+    }
+
+    // One topic, three seal epochs. Stop the walk after its first persisted ratchet.
     for (const [index, value] of [['a', 'member'] as const, ['b', 'member'] as const].entries()) {
       const result = await alice.peer.commit(
         buildLedgerCommit(alice, aliceID, `did:key:subject-${value[0]}-${index}`, value[1]),
@@ -696,42 +729,19 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       await flush()
     }
     expect(alice.handle().epoch).toBe(3n)
-
-    const seen: Array<unknown> = []
-    let dying: Member | undefined
-    let died = false
-    const handlers = {
-      'chat/posted': async (ctx: { data: unknown }) => {
-        seen.push(ctx.data)
-        const process = dying
-        if (process == null) return
-        // The process dies HERE: the peer stops and the socket goes with it, which is what a
-        // process death is. The hub binds one receive writer per DID and is right to refuse a
-        // second, so a restart onto a connection that never closed gets no push lane.
-        dying = undefined
-        await process.peer.dispose()
-        await process.disconnect()
-        died = true
-      },
-    }
-
-    let bob: Member = makeMember({
-      hub,
-      identity: bobID,
-      group: bobHandle,
-      entrySlot: bobSlot,
-      handlers,
-      durablePending: true,
-    })
-    dying = bob
-    // Polled, not a fixed wait: CI runs this file several times slower than a laptop.
-    await vi.waitFor(() => expect(died).toBe(true), { timeout: 15_000 })
-    await flush()
+    await walkSuspended.promise
+    expect(bob.handle().epoch).toBe(2n)
+    // Stop both peer and socket outside the handler, which cannot await its own disposal.
+    await bob.peer.dispose()
+    await bob.disconnect()
 
     // It died partway: the first frame reached the host and the walk did not finish.
     expect(seen).toEqual([{ text: 'at epoch one' }])
+    expect(bob.handle().epoch).toBe(2n)
+    expect(bob.pendingStore?.size).toBeGreaterThanOrEqual(1)
 
     const restoredHandle = await restoreMemberHandle(bob, bobSlot)
+    expect(restoredHandle.epoch).toBe(2n)
     bob = makeMember({
       hub,
       identity: bobID,
@@ -753,7 +763,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     // The second process finished the walk, in order, and lost nothing.
     //
     // The first process persisted the opened record with the consumed ratchet state, then died
-    // inside its handler. The restart replays that record because the cursor was not advanced.
+    // before its handler completed. The restart replays it because the cursor was not advanced.
     expect(bob.handle().epoch).toBe(3n)
     expect(seen).toEqual([
       { text: 'at epoch one' },
@@ -761,6 +771,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       { text: 'at epoch 2' },
       { text: 'at epoch 3' },
     ])
+    expect(bob.pendingStore?.size).toBe(0)
 
     await alice.peer.dispose()
     await bob.peer.dispose()
