@@ -1,4 +1,4 @@
-import { encodeEventFrame } from '@kumiai/broadcast'
+import { decodeFrame, encodeEventFrame } from '@kumiai/broadcast'
 import {
   createGroup,
   encodeClientState,
@@ -49,6 +49,7 @@ import {
   registryFixtureRestore,
 } from './registry.js'
 import { createRegistryCryptoGroup } from './registry-crypto.js'
+import { startLeaseRotationPeer } from './registry-lease-rotation.js'
 import { createRegistryWelcomeHistory, registryHandle } from './registry-welcome.js'
 import { restoreMemoryControlHandle } from './sealed-memory-mls.js'
 
@@ -631,7 +632,7 @@ export async function createRegistryLeaseFixture(
       await expect(result.openEphemeral([input])).rejects.toThrow()
     },
     replyAAD: () => encodeAppAAD({ topicID: 'directed-reply/request-42', intent: 'ephemeral' }),
-    async acceptedHold() {
+    async acceptedHold(count = 1) {
       const store = () => fixture.device.groups.ports(key).outbox
       const outbox = {
         list: async () => (await store().list()).map((entry) => ({ ...entry, lastAttempt: null })),
@@ -671,11 +672,13 @@ export async function createRegistryLeaseFixture(
         deliveredWindowMs: 60_000,
         deliveredLimit: 4,
       })
-      await queue.accept({
-        protocol: 'chat',
-        prc: 'posted',
-        data: encodeEventFrame('posted', { text: 'held' }),
-      })
+      for (let index = 0; index < count; index++) {
+        await queue.accept({
+          protocol: 'chat',
+          prc: 'posted',
+          data: encodeEventFrame('posted', { text: `held-${index}` }),
+        })
+      }
       return {
         async check() {
           await expect(
@@ -689,8 +692,39 @@ export async function createRegistryLeaseFixture(
           await entered.promise
           await new Promise<void>((resolve) => setTimeout(resolve, 0))
           expect(publish).not.toHaveBeenCalled()
-          expect(queue.entries()).toHaveLength(1)
-          expect(await store().list()).toMatchObject([{ status: 'accepted', lastAttempt: null }])
+          expect(queue.entries()).toHaveLength(count)
+          expect(await store().list()).toMatchObject(
+            Array.from({ length: count }, () => ({ status: 'accepted', lastAttempt: null })),
+          )
+        },
+        async resume() {
+          delivery.close()
+          queue.close()
+          const rotation = await startLeaseRotationPeer({ mode, fixture, key, outbox })
+          try {
+            await rotation.owner.ready
+            await vi.waitFor(
+              async () => {
+                await rotation.owner.peer()?.replay()
+                expect(access.epoch()).toBe(1)
+              },
+              { timeout: 3000 },
+            )
+            await vi.waitFor(async () => expect(await store().list()).toHaveLength(0), {
+              timeout: 3000,
+            })
+            await rotation.owner.peer()?.replay()
+            await rotation.owner.peer()?.replay()
+            const payloads: Array<unknown> = []
+            for (const frame of rotation.frames()) {
+              const opened = await rotation.open(frame)
+              payloads.push(decodeFrame(opened.payload).payload)
+            }
+            return { epoch: access.epoch(), payloads }
+          } finally {
+            rotation.owner.dispose()
+            await rotation.owner.drained()
+          }
         },
         close() {
           delivery.close()

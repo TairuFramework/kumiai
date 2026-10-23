@@ -1,4 +1,4 @@
-import { describe, expect, it, test } from 'vitest'
+import { describe, expect, test } from 'vitest'
 
 import type { RegistryLeaseFixture } from './persistence-fixture.js'
 
@@ -20,7 +20,11 @@ export type RegistryLeaseConformanceFixture = RegistryLeaseFixture & {
   blockedCallerSend(): Promise<void>
   lapsedReservation(): Promise<void>
   removedReplay(): Promise<void>
-  acceptedHold(): Promise<{ check(): Promise<void>; close(): void }>
+  acceptedHold(count?: number): Promise<{
+    check(): Promise<void>
+    resume(): Promise<{ epoch: number; payloads: Array<unknown> }>
+    close(): void
+  }>
   replyAAD(): Uint8Array
   retention(
     path: 'create' | 'restore' | 'Welcome' | 'external join' | 'derive' | 'recovery',
@@ -172,7 +176,33 @@ export function testRegistryLeaseConformance(params: RegistryLeaseConformancePar
         'seed',
         484,
       ))
-    it.todo('Task 7: automatic rotation resumes accepted entries held at the 500 generation bound')
+    test('automatic rotation resumes accepted entries held at the 500 generation bound exactly once', () =>
+      run(
+        async (h) => {
+          const held = await h.acceptedHold(2)
+          try {
+            expect(h.lease()).toMatchObject({ own: 484, limit: 500 })
+            for (let generation = 484; generation < 500; generation++) {
+              expect((await h.sealEphemeral()).generation).toBe(generation)
+              await invariant(h)
+            }
+            expect(h.admission()).toMatchObject({ admissible: false, reason: 'rotation-required' })
+            await held.check()
+            const resumed = await held.resume()
+            expect(resumed.epoch).toBe(1)
+            expect(resumed.payloads).toEqual([
+              { typ: 'event', prc: 'posted', data: { text: 'held-0' } },
+              { typ: 'event', prc: 'posted', data: { text: 'held-1' } },
+            ])
+            expect(h.admission()).toMatchObject({ admissible: true, epoch: 1 })
+            await invariant(h)
+          } finally {
+            held.close()
+          }
+        },
+        'seed',
+        484,
+      ))
 
     test('forward window covers the bound and preserves skipped earlier generations', () =>
       run(async (h) => {

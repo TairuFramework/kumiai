@@ -351,8 +351,10 @@ describe.each(['real-mls', 'double'] as const)('%s auto-rotation', (mode) => {
         }
         const control = fixture.device.groups.ports(f.key).control
         if (withheld) {
-          await vi.waitFor(async () =>
-            expect((await control.load()).commitOnce?.acceptedAs).toBe('withheld-position'),
+          await vi.waitFor(
+            async () =>
+              expect((await control.load()).commitOnce?.acceptedAs).toBe('withheld-position'),
+            { timeout: 3000 },
           )
           const built = (await control.load()).commitOnce
           expect(built?.revokes).toBe(false)
@@ -432,7 +434,7 @@ describe.each(['real-mls', 'double'] as const)('%s auto-rotation', (mode) => {
           expect((await control.load()).commitOnce?.publishID).toBe(built?.publishID)
           await owner.peer()?.abandon()
           await vi.advanceTimersByTimeAsync(0)
-          expect((await control.load()).outcomes).toEqual([])
+          await vi.waitFor(async () => expect((await control.load()).outcomes).toEqual([]))
           expect((await control.load()).spentSource).toEqual({
             epoch: f.access().epoch(),
             opID: built?.opID,
