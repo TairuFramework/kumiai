@@ -251,14 +251,13 @@ test.each(['retention-gap', 'unprocessable-gap'] as const)(
       expect((await again.control.load()).cursor?.stranded).not.toBe(true)
       expect((await again.control.load()).cursor?.incomplete).toBe(true)
       expect((await again.control.load()).strand).toBeNull()
-      expect((await again.peer.recover()).advanced).toBe(true)
-    } else {
-      await vi.waitFor(() =>
-        expect(
-          events.some((event) => event.phase === 'started' && event.trigger === 'automatic'),
-        ).toBe(true),
-      )
+      await vi.advanceTimersByTimeAsync(1000)
     }
+    await vi.waitFor(() =>
+      expect(
+        events.some((event) => event.phase === 'started' && event.trigger === 'automatic'),
+      ).toBe(true),
+    )
     await drainUntil(() => events.some((event) => event.phase === 'succeeded'), 'rejoin')
     expect(await again.mls.readEpoch()).toBe(4)
     expect((await again.control.load()).cursor?.stranded).toBeUndefined()

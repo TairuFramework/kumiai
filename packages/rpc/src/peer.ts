@@ -5602,6 +5602,16 @@ export function createGroupPeerWithControlWalk<
         if (ledgerReady && mls != null) await finalizeBootstrap(mls)
         if (stopped()) return
         await pullCommits()
+        // Returning valid bytes get first opportunity to consume restored work.
+        if (
+          startupCursor?.incomplete === true &&
+          durableCursor?.incomplete === true &&
+          durableCursor.epoch === appliedEpoch &&
+          !stranded &&
+          !healRequested &&
+          activeRecovery === null
+        )
+          retryRecovery()
       }).catch(() => {})
       if (stopped() || locallyRemoved) return
       await buildEpoch()
