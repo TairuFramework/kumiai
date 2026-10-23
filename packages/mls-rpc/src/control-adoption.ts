@@ -16,6 +16,7 @@ import { sameStoredValue } from './memory-incarnation-stores.js'
 export function createControlAdoptionPort(params: {
   access: ControlHandleAccess
   control: ControlStore
+  /** Accept host journals and the library envelope decoded by decodeAutoRotationCandidate. */
   restoreCandidate: (candidate: Uint8Array) => Promise<GroupHandle>
 }): ControlAdoptionPort {
   return {

@@ -1,5 +1,6 @@
 export { effectiveRecoveryEpochFloor } from './control/rejoin.js'
 export { RecoveryTargetBehindError, SavedControlCompatibilityError } from './errors.js'
+export { INTERNAL_OPERATION_PREFIX, type InternalOperations } from './peer-types.js'
 /**
  * High-level MLS-aware group RPC for Enkaku.
  *

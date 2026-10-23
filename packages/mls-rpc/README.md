@@ -361,6 +361,15 @@ operational failures. This export reuses MLS's `GroupRestoreError`, so `restoreG
 failures already have the correct type. Control-build rejects that error and unsupported
 client-state versions before framing or persistence. Other restoration errors propagate.
 
+`createRegistryPeer` supplies a private, non-revoking automatic rotation at the application generation ceiling.
+The default `buildKeyRotation` serialises its candidate as a library envelope containing
+`state: Uint8Array`, `credential: MemberCredential` and `ledger: Array<string>`.
+Every candidate adapter must accept this additional format, alongside its existing host journal formats.
+This includes `restoreCandidate` on the registry, control builder, validation port and adoption port.
+`decodeAutoRotationCandidate(bytes)` validates and decodes the envelope without exposing the internal storage codec.
+Pass its `state` through `decodeClientState`, then restore with its `credential`, `ledger` and the registry recovery options.
+An undecodable envelope throws `InvalidCandidateError`. Ordinary host candidate formats remain the host's responsibility.
+
 `recovery.options.keyRetention.retainKeysForEpochs` defaults to `4` and accepts integers from `1`
 through `32`. Other values throw `KeyRetentionRangeError`. Restored state must fit the configured
 epoch and skipped-generation limits.

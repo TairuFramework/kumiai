@@ -32,6 +32,7 @@ import {
 import { describe, expect, test, vi } from 'vitest'
 
 import type { ControlHandleAccess, PersistContext } from '../src/access.js'
+import { autoRotationRequest } from '../src/auto-rotation.js'
 import { createControlAdoptionPort } from '../src/control-adoption.js'
 import { createControlBuildPort, createPersistenceBuildSaver } from '../src/control-build.js'
 import { decodeControlJournal } from '../src/control-journal.js'
@@ -40,7 +41,7 @@ import { createGroupCrypto, deriveEntryKey, sealEntries } from '../src/crypto.js
 import { entryCapability } from '../src/entry-capability.js'
 import { consumesInboundCommit, inboundCommitContext } from '../src/inbound-commit.js'
 import { createGroupMLS, createLedgerEntrySlot } from '../src/mls.js'
-import { encodeStoredValue } from '../src/persistence-codec.js'
+import { decodeStoredValue, encodeStoredValue } from '../src/persistence-codec.js'
 import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
 import { createRegistryHandleAccess } from '../src/registry-handle-access.js'
 import { createRealGroup } from './fixtures/real-group.js'
@@ -74,7 +75,12 @@ const { encodeMemoryCommit } = (await import(
 
 type Mode = 'real-mls' | 'double'
 
-async function setup(mode: Mode, kind: 'rotation' | 'invite' = 'rotation', withoutBuild = false) {
+async function setup(
+  mode: Mode,
+  kind: 'rotation' | 'invite' = 'rotation',
+  withoutBuild = false,
+  automatic = false,
+) {
   const group = await createRealGroup(1, `competing-${crypto.randomUUID()}`)
   const local = withoutBuild ? group.members[0] : group.committer
   const remote = withoutBuild ? group.committer : group.members[0]
@@ -110,11 +116,14 @@ async function setup(mode: Mode, kind: 'rotation' | 'invite' = 'rotation', witho
   }
   const target = { targetID: 'competing', topicID: 'competing-commits' }
   const emitted: Array<Outcome> = []
+  const internalEmitted: Array<Outcome> = []
   const delivered = vi.fn()
   let peer: GroupPeer<Record<string, never>> | undefined
   let builds = 0
   const restoreCandidate = async (bytes: Uint8Array): Promise<GroupHandle> => {
-    const state = decodeClientState(bytes)
+    const state = decodeClientState(
+      automatic ? (decodeStoredValue(bytes) as { state: Uint8Array }).state : bytes,
+    )
     if (state === undefined) throw new Error('Invalid candidate')
     const saved = await fixture.device.groups.loadState(key)
     if (saved === null || saved.deleted) throw new Error('Missing state')
@@ -131,6 +140,7 @@ async function setup(mode: Mode, kind: 'rotation' | 'invite' = 'rotation', witho
   const build = createControlBuildPort({
     access,
     control: ports.control,
+    rotate: mode === 'double' ? buildSealedMemoryOperation : undefined,
     restoreCandidate,
     ...(mode === 'double'
       ? {
@@ -195,6 +205,13 @@ async function setup(mode: Mode, kind: 'rotation' | 'invite' = 'rotation', witho
     enqueuedAt: Date.now(),
     deadline: Date.now() + 60_000,
     stage: 'intent',
+    ...(automatic
+      ? autoRotationRequest({
+          ...key,
+          epoch: sourceEpoch,
+          authenticator: local.handle.state.keySchedule.epochAuthenticator,
+        })
+      : {}),
   }
   await ports.control.apply({ putOperations: [op] }, crypto.randomUUID())
   expect(
@@ -287,6 +304,9 @@ async function setup(mode: Mode, kind: 'rotation' | 'invite' = 'rotation', witho
       onOutcome: (outcome) => {
         emitted.push(outcome)
       },
+      onInternalOutcome: (outcome) => {
+        internalEmitted.push(outcome)
+      },
     })
     return peer
   }
@@ -314,6 +334,8 @@ async function setup(mode: Mode, kind: 'rotation' | 'invite' = 'rotation', witho
   }
   return {
     key,
+    opID: op.id,
+    internalEmitted,
     local,
     remote,
     makeInbound: (access: ControlHandleAccess) =>
@@ -452,6 +474,24 @@ async function setup(mode: Mode, kind: 'rotation' | 'invite' = 'rotation', witho
 
 for (const mode of ['real-mls', 'double'] as const) {
   describe(`competing commits (${mode})`, () => {
+    test('a built automatic rotation closes lost only when the walker consumes its source', async () => {
+      const h = await setup(mode, 'rotation', false, true)
+      try {
+        expect((await h.control()).outcomes).toEqual([])
+        await h.append(false)
+        const peer = await h.start()
+        await peer.replay()
+        expect((await h.control()).commitOnce).toBeNull()
+        expect((await h.control()).outcomes).toEqual([
+          expect.objectContaining({ opID: h.opID, kind: 'lost' }),
+        ])
+        expect(h.emitted).toEqual([])
+        expect(h.internalEmitted).toEqual([expect.objectContaining({ opID: h.opID, kind: 'lost' })])
+        expect(await peer.outcomes()).toEqual([])
+      } finally {
+        await h.close()
+      }
+    })
     for (const kind of ['rotation', 'invite'] as const) {
       test.each([false, true])(`built ${kind} loses when own occurrence is %s`, async (own) => {
         const h = await setup(mode, kind)

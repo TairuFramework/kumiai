@@ -1,4 +1,5 @@
 import { asLogPosition, type LogPosition } from '../cursor.js'
+import { OperationRejectedError } from '../errors.js'
 import type { FrameControlBuild, PrepareControlResult } from './build.js'
 import { controlSafetyHeld, type GroupForkEvidence, type SafetyHold } from './safety.js'
 import type { ControlEvidenceSnapshot } from './search.js'
@@ -69,6 +70,17 @@ export async function enqueueOperation(
   request: OperationRequest,
 ): Promise<Operation> {
   const snapshot = await deps.control.load()
+  const existing = snapshot.operations.find((row) => row.id === request.id)
+  if (existing !== undefined) return existing
+  if (
+    snapshot.outcomes.some((row) => row.opID === request.id) ||
+    snapshot.welcomes.some((row) => row.opID === request.id) ||
+    snapshot.commitOnce?.opID === request.id ||
+    // Legacy epoch-only markers cannot distinguish IDs. Consumption releases their reservation.
+    (snapshot.spentSource !== null &&
+      (snapshot.spentSource.opID === undefined || snapshot.spentSource.opID === request.id))
+  )
+    throw new OperationRejectedError('Operation ID is retained')
   const enqueuedAt = deps.now()
   const op: Operation = {
     ...request,

@@ -31,6 +31,7 @@ import type { Runtime } from '@sozai/runtime'
 import { ciphersuites } from 'ts-mls'
 
 import type { ControlHandleAccess } from './access.js'
+import { autoRotationRequest, buildKeyRotation, isAutoRotation } from './auto-rotation.js'
 import { controlCompatible } from './control-compat.js'
 import { decodeControlJournal, encodeControlJournal } from './control-journal.js'
 import { controlBuildContexts } from './control-write-context.js'
@@ -209,6 +210,7 @@ export function createPersistenceBuildSaver<TTx extends GroupTransaction>(params
 export function createControlBuildPort(params: {
   access: ControlHandleAccess
   control: ControlStore
+  /** Accept host journals and the library envelope decoded by decodeAutoRotationCandidate. */
   restoreCandidate: (candidate: Uint8Array) => Promise<GroupHandle>
   restoreSource?: (source: {
     state: Uint8Array
@@ -216,6 +218,7 @@ export function createControlBuildPort(params: {
     ledgerEntries: Array<string>
   }) => Promise<GroupHandle>
   build: (op: Operation, group: GroupHandle) => Promise<HostBuilt>
+  rotate?: (op: Operation, group: GroupHandle) => Promise<HostBuilt>
   saveBuilt: SaveControlBuild
   now: () => number
   newID: () => string
@@ -320,6 +323,8 @@ export function createControlBuildPort(params: {
       let built: ControlSlot
       let referencedProposals: Array<string>
       try {
+        if (isAutoRotation(saved) && saved.id !== autoRotationRequest(identity).id)
+          throw new OperationRejectedError('Rotation identity superseded')
         const { value: output, receipt } = await withCommitPermit(
           async () =>
             denyApplicationSend(
@@ -329,7 +334,11 @@ export function createControlBuildPort(params: {
                 ledgerEntries: sourceLedger,
               }),
             ),
-          (permitted) => params.build(saved, permitted),
+          (permitted) =>
+            (isAutoRotation(saved) ? (params.rotate ?? buildKeyRotation) : params.build)(
+              saved,
+              permitted,
+            ),
         )
         const host = copyStoredValue(output)
         const rejected = () => ({

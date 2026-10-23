@@ -423,7 +423,7 @@ export function testLegacyControlMapping(params: {
         input.source.terminal = mode === 'terminal'
         const result = await params.map(input)
         expect(result.commitOnce).toBeNull()
-        expect(result.spentSource).toEqual(mode === 'current' ? { epoch: 4 } : null)
+        expect(result.spentSource).toEqual(mode === 'current' ? { epoch: 4, opID: 'op' } : null)
         expect(result.outcomes).toEqual(input.snapshot.outcomes)
       },
     )

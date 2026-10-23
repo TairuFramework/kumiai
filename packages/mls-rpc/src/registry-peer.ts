@@ -7,6 +7,7 @@ import type {
   GroupMLS,
   GroupPeer,
   GroupProtocolDefinition,
+  InternalOperations,
   ManualRecoveryRecord,
   NotMemberEvidence,
   RecoveryCompletion,
@@ -23,6 +24,7 @@ import {
   RecoveryTargetBehindError,
 } from '@kumiai/rpc'
 
+import { createAutoRotationScheduler } from './auto-rotation.js'
 import { createRegistryCheckpointService } from './checkpoint.js'
 import {
   type ManualRecoveryStore,
@@ -80,12 +82,14 @@ function retirementTimedOut(cause: unknown): boolean {
 }
 
 type Peer = GroupPeer<Record<string, GroupProtocolDefinition>>
+type RotationProducer = InternalOperations & { stop(): void }
 export type RecoveryPendingReason =
   | 'no-reply'
   | 'no-eligible-responder'
   | 'target-behind'
   | 'target-unresolved'
 export type RegistryPeerOptions = {
+  internalOperations?: InternalOperations
   hub?: RecoveryTarget['hub']
   control?: ControlStore
   manualRecovery?: { authorisationID: string; source: GroupKey }
@@ -195,6 +199,8 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
   let wake: (() => void) | undefined
   let unregister = () => {}
   const peers = new Set<Peer>()
+  const schedulers = new Map<Peer, RotationProducer>()
+  let startingScheduler: RotationProducer | null = null
   const pending = new Set<Promise<unknown>>()
   let reconcileConfirmedRecovery: string | undefined
   const settleAcceptedRecovery =
@@ -434,17 +440,71 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
     return value
   }
   async function stopPeer(peer: Peer): Promise<void> {
+    schedulers.get(peer)?.stop()
+    schedulers.delete(peer)
     const results = await Promise.allSettled([peer.dispose(), peer.drained()])
     const failed = results.find((result) => result.status === 'rejected')
     if (failed?.status === 'rejected') throw failed.reason
     if (current === peer) current = null
     peers.delete(peer)
   }
+  function rotationProducer(requested: GroupKey, mls: GroupMLS): RotationProducer {
+    let scheduler: ReturnType<typeof createAutoRotationScheduler> | null = null
+    let binding: Parameters<InternalOperations['bind']>[0] | null = null
+    let stopped = false
+    let opening = false
+    let retry = 250
+    let timer: ReturnType<typeof setTimeout> | undefined
+    function schedule(delay = 0): void {
+      if (stopped || scheduler !== null || binding === null) return
+      if (timer !== undefined) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = undefined
+        void open()
+      }, delay)
+    }
+    async function open(): Promise<void> {
+      if (stopped || opening || scheduler !== null || binding === null) return
+      const admission = mls.sendAdmission()
+      if (admission.admissible || admission.reason !== 'rotation-required') return
+      opening = true
+      try {
+        // Cold access can reserve a lease. Recovery coordination must not warm it speculatively.
+        const access = await registry.access(requested.groupID)
+        if (stopped) return
+        scheduler = createAutoRotationScheduler({ access })
+        scheduler.bind(binding)
+      } catch {
+        schedule(retry)
+        retry = Math.min(retry * 2, 15_000)
+      } finally {
+        opening = false
+      }
+    }
+    const unsubscribe = capability.onAdmissionChanged(requested, () => schedule())
+    return {
+      bind(value) {
+        binding = value
+        schedule()
+      },
+      onOutcome(outcome) {
+        if (scheduler !== null) return scheduler.onOutcome(outcome)
+        schedule()
+      },
+      stop() {
+        stopped = true
+        if (timer !== undefined) clearTimeout(timer)
+        unsubscribe()
+        scheduler?.stop()
+      },
+    }
+  }
   function retire(requested: GroupKey): void {
     unregister()
     // Retirement waits source work only. A switch worker must never wait on itself.
     unregister = capability.onRetire(requested, async () => {
       retirementGeneration++
+      startingScheduler?.stop()
       let timeout: ReturnType<typeof setTimeout> | undefined
       const drain = track(
         (async () => {
@@ -498,10 +558,18 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
       const continuation = await params.continuation.loadRecoveryContinuation(requested)
       if (disposed || generation !== retirementGeneration) return
       const admission = mls.sendAdmission()
+      const recoveryOnly =
+        manualSource ||
+        control.rejoin !== null ||
+        control.forkRecoveryAttempt != null ||
+        (!admission.admissible && admission.reason !== 'rotation-required')
+      if (!recoveryOnly) startingScheduler = rotationProducer(requested, mls)
+      if (disposed || generation !== retirementGeneration) return
       creating = params.createPeer(
         { ...requested },
         {
           mls,
+          internalOperations: startingScheduler ?? undefined,
           ...(authority === undefined
             ? {}
             : {
@@ -512,11 +580,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
             ? {}
             : { hub: selectedTarget.hub, recoveryTarget: { ...target } }),
           checkpoints: createRegistryCheckpointService(registry, requested),
-          recoveryOnly:
-            manualSource ||
-            control.rejoin !== null ||
-            control.forkRecoveryAttempt != null ||
-            (!admission.admissible && admission.reason !== 'rotation-required'),
+          recoveryOnly,
           target: { ...target },
           onConfirmedRecovery,
           onRecovery,
@@ -592,9 +656,12 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
         creating = null
       }
       peers.add(peer)
+      if (startingScheduler !== null) schedulers.set(peer, startingScheduler)
       if (disposed || generation !== retirementGeneration) return
       installed = true
     } finally {
+      if (!installed) startingScheduler?.stop()
+      startingScheduler = null
       if (!installed) {
         try {
           if (peer !== undefined) await stopPeer(peer)
@@ -956,6 +1023,8 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
     dispose() {
       if (disposed) return
       disposed = true
+      startingScheduler?.stop()
+      for (const scheduler of schedulers.values()) scheduler.stop()
       if (status.kind !== 'failed') status = { kind: 'disposed' }
       if (timer !== undefined) clearTimeout(timer)
       wake?.()

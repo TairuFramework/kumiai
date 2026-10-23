@@ -30,6 +30,31 @@ import { memoryControlPorts } from './fixtures/peer.js'
 
 afterEach(() => vi.restoreAllMocks())
 
+test('internal producer callbacks participate in host drain and disposal fencing', async () => {
+  const boundary = createHostBoundary()
+  const pause = gate()
+  const host = wrapPeerHost(boundary, {
+    internalOperations: {
+      bind: () => {},
+      onOutcome: async () => {
+        await pause.promise
+      },
+    },
+  })
+  const pending = host.internalOperations.onOutcome()
+  boundary.close()
+  let drained = false
+  const draining = boundary.drained(Promise.resolve()).then(() => {
+    drained = true
+  })
+  await new Promise<void>((resolve) => setTimeout(resolve, 0))
+  expect(drained).toBe(false)
+  pause.release()
+  await pending
+  await draining
+  expect(() => host.internalOperations.bind()).toThrow(PeerDisposedError)
+})
+
 test('manual recovery authority crosses the host boundary as data', () => {
   const manualRecovery = {
     authorisationID: 'saved-authority',

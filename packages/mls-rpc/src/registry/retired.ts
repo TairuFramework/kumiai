@@ -1,10 +1,12 @@
 import {
   type ControlChanges,
   type ControlSnapshot,
+  type ControlStore,
   closeControlBuild,
   controlSettled,
   deleteOperationChanges,
   deliverObligations,
+  INTERNAL_OPERATION_PREFIX,
   type Outcome,
   type WelcomeObligation,
 } from '@kumiai/rpc'
@@ -25,6 +27,19 @@ import type {
 } from '../persistence-types.js'
 import { recoveryCompletionContexts } from '../recovery-completion-context.js'
 
+async function consumeInternalOutcomes(
+  control: Pick<ControlStore, 'load' | 'apply'>,
+  mutationID: string,
+): Promise<ControlSnapshot> {
+  const snapshot = await control.load()
+  const internal = snapshot.outcomes
+    .filter((row) => row.opID?.startsWith(INTERNAL_OPERATION_PREFIX))
+    .map((row) => row.id)
+  if (internal.length === 0) return snapshot
+  await control.apply({ deleteOutcomes: internal }, mutationID)
+  return control.load()
+}
+
 /** All incarnations must be settled before clearing any transport. */
 export async function deleteIncarnations<TTx extends GroupTransaction>(
   stores: GroupStores<TTx>,
@@ -36,7 +51,7 @@ export async function deleteIncarnations<TTx extends GroupTransaction>(
     throw new DisplacedGroupHandleError('Inactive deletion source')
   for (let incarnation = 1; incarnation <= lifetime.latestIncarnation; incarnation++) {
     const rows = stores.incarnation(incarnation)
-    if (!controlSettled(await rows.control.load()))
+    if (!controlSettled(await consumeInternalOutcomes(rows.control, mutationID)))
       throw new GroupControlUnsettledError('Group control remains unsettled')
     for (const entry of await rows.outbox.list())
       if ((await rows.meta.loadSettlement(entry.seq)) !== null)
@@ -153,6 +168,8 @@ export async function retireIncarnation<TTx extends GroupTransaction>(
   controlRetirementSources.set(stores.tx, { ...source })
   try {
     await rows.control.apply(changes, mutationID)
+    // Retirement owns internal reports after the source peer has drained.
+    await consumeInternalOutcomes(rows.control, mutationID)
   } finally {
     if (previousContext === undefined) controlBuildContexts.delete(stores.tx)
     else controlBuildContexts.set(stores.tx, previousContext)
@@ -240,7 +257,9 @@ export async function listRetiredOutcomes<TTx extends GroupTransaction>(params: 
   persistence: GroupPersistence<TTx>
   key: GroupKey
 }): Promise<Array<Outcome>> {
-  return (await readRetiredControl(params)).outcomes
+  return (await readRetiredControl(params)).outcomes.filter(
+    (row) => !row.opID?.startsWith(INTERNAL_OPERATION_PREFIX),
+  )
 }
 
 export async function ackRetiredOutcome<TTx extends GroupTransaction>(params: {

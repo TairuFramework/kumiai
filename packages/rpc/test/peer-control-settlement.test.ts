@@ -566,7 +566,7 @@ test.each(['consume', 'abandon'] as const)(
     expect(closed.cursor?.position).toBe(own.sequenceID)
     expect(bob.mls.epoch()).toBe(exit === 'consume' ? 2 : 1)
     if (exit === 'abandon') {
-      expect(closed.spentSource).toEqual({ epoch: 1 })
+      expect(closed.spentSource).toEqual({ epoch: 1, opID: saved.id })
       const mutation = await bob.control.lastMutation()
       await bob.peer.abandon()
       expect(await bob.control.lastMutation()).toBe(mutation)
@@ -575,7 +575,10 @@ test.each(['consume', 'abandon'] as const)(
       await bob.peer.drained()
       const again = member(hub, { restartOf: bob })
       await again.peer.replay()
-      expect((await again.control.load()).spentSource).toEqual({ epoch: 1 })
+      expect((await again.control.load()).spentSource).toEqual({ epoch: 1, opID: saved.id })
+      await expect(again.peer.enqueue(saved)).rejects.toMatchObject({
+        name: 'OperationRejectedError',
+      })
       const successor = buildLedgerCommit(again, ['no-generation-reuse'])
       await again.peer.enqueue(successor)
       await flushCurrentTasks()
@@ -749,7 +752,7 @@ test('abandon releases an unfinished handoff and a late hub acknowledgement cann
     await flushCurrentTasks()
     expect(abandoned).toBe(true)
     expect((await bob.control.load()).commitOnce).toBeNull()
-    expect((await bob.control.load()).spentSource).toEqual({ epoch: 1 })
+    expect((await bob.control.load()).spentSource).toEqual({ epoch: 1, opID: op.id })
   } finally {
     accepted.resolve()
     await abandoning

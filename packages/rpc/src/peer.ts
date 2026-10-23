@@ -92,7 +92,6 @@ import {
   ControlSafetyImmutableError,
   GroupSafetyHeldError,
   OperationOutcomeError,
-  OperationRejectedError,
   PeerDisposedError,
   PeerRemovedError,
   RecoveryTargetBehindError,
@@ -1299,6 +1298,7 @@ export function createGroupPeerWithControlWalk<
     episode = null
   }
   const flushHostOutbox = (): void => {
+    drainInternalOutcomes()
     const batch = hostOutbox
     hostOutbox = []
     for (const notice of batch) notice()
@@ -2761,17 +2761,66 @@ export function createGroupPeerWithControlWalk<
       waiter.resolve(outcome)
     outcomeWaiters.delete(outcome.opID ?? outcome.id)
   }
+  const internalOutcomes: Array<Outcome> = []
+  let internalDrain: Promise<void> | null = null
+  let internalRetry: ReturnType<typeof setTimeout> | undefined
+  let internalRetryDelay = 250
+  const drainInternalOutcomes = (): void => {
+    if (
+      disposed ||
+      internalDrain !== null ||
+      internalRetry !== undefined ||
+      internalOutcomes.length === 0
+    )
+      return
+    internalDrain = (async () => {
+      await ready
+      while (!disposed && internalOutcomes.length !== 0) {
+        const outcome = internalOutcomes[0]
+        if (outcome === undefined) break
+        await runSerial(async () => {
+          assertLive()
+          if (control != null && params.internalOperations !== undefined)
+            await applyResolved(control, { deleteOutcomes: [outcome.id] }, newPublishID())
+        })
+        // Delete before callback gives at-most-once notification. Startup re-evaluates scheduling.
+        internalOutcomes.shift()
+        internalRetryDelay = 250
+        if (!disposed) {
+          if (params.internalOperations !== undefined)
+            await params.internalOperations.onOutcome(outcome)
+          else notifyHost((value) => params.onInternalOutcome?.(value), outcome)
+        }
+      }
+    })()
+      .catch(() => {
+        if (!disposed) {
+          internalRetry = setTimeout(() => {
+            internalRetry = undefined
+            drainInternalOutcomes()
+          }, internalRetryDelay)
+          internalRetryDelay = Math.min(internalRetryDelay * 2, 15_000)
+        }
+      })
+      .finally(() => {
+        internalDrain = null
+        // An emission can arrive after the loop exits but before this finaliser.
+        drainInternalOutcomes()
+      })
+  }
   const emitOutcome = (outcome: Outcome, immediate = false): void => {
     const fingerprint = JSON.stringify(outcome, Object.keys(outcome).sort())
     if (emittedOutcomes.get(outcome.id) === fingerprint) return
     emittedOutcomes.set(outcome.id, fingerprint)
+    if (outcome.opID?.startsWith('kumiai/internal/')) {
+      internalOutcomes.push(outcome)
+      // Clock reports can arrive outside a serial lane.
+      queueMicrotask(drainInternalOutcomes)
+      return
+    }
     const notice = () => {
-      if (outcome.opID?.startsWith('kumiai/internal/')) {
-        notifyHost((value) => params.onInternalOutcome?.(value), outcome)
-      } else {
-        resolveOutcomeWaiters(outcome)
-        notifyHost((value) => params.onOutcome?.(value), outcome)
-      }
+      resolveOutcomeWaiters(outcome)
+      notifyHost((value) => params.onOutcome?.(value), outcome)
     }
     if (immediate) notice()
     else hostOutbox.push(notice)
@@ -3773,9 +3822,7 @@ export function createGroupPeerWithControlWalk<
     })
   }
 
-  const enqueue = async (request: OperationRequest): Promise<void> => {
-    if (request.id.startsWith('kumiai/internal/'))
-      throw new OperationRejectedError('Operation ID uses the reserved internal namespace')
+  const enqueueChecked = async (request: OperationRequest): Promise<void> => {
     assertSafetyOpen()
     if (params.recoveryOnly) throw new SendNotAdmissibleError('stranded')
     await ready
@@ -3815,6 +3862,11 @@ export function createGroupPeerWithControlWalk<
     } finally {
       scheduleOperations()
     }
+  }
+  const enqueue = async (request: OperationRequest): Promise<void> => {
+    if (request.id.startsWith('kumiai/internal/'))
+      throw new TypeError('Operation ID uses the reserved internal namespace')
+    await enqueueChecked(request)
   }
   const outcomes = async (): Promise<Array<Outcome>> => {
     await ready
@@ -5508,6 +5560,13 @@ export function createGroupPeerWithControlWalk<
     }
   }
   const ready = initialise()
+  params.internalOperations?.bind({
+    async enqueue(request) {
+      if (!request.id.startsWith('kumiai/internal/'))
+        throw new TypeError('Internal operations require the reserved namespace')
+      await enqueueChecked(request)
+    },
+  })
   // A failed init rejects every public call, but must not raise an unhandled rejection before the
   // first is made.
   const settled = ready.catch(() => {})
@@ -5685,10 +5744,14 @@ export function createGroupPeerWithControlWalk<
         .drained(disposePromise)
         .then(() => appLane.idle())
         .then(() => commitTail)
+        .then(async () => {
+          await internalDrain
+        })
     },
     dispose: () => {
       if (disposePromise != null) return disposePromise
       disposed = true
+      if (internalRetry !== undefined) clearTimeout(internalRetry)
       const checkpointDrain = checkpointWorker?.dispose()
       unsubscribeSafety?.()
       controlAbort.abort(new PeerDisposedError('Peer is disposed'))

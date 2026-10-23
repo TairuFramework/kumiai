@@ -37,7 +37,8 @@ export type ControlSnapshot = {
   /** Set atomically by the pre-worker legacy migration. */
   schemaVersion: 1
   commitOnce: ControlSlot | null
-  spentSource: { epoch: number } | null
+  /** New fuses retain the operation ID. Legacy epoch-only fuses reserve every ID. */
+  spentSource: { epoch: number; opID?: string } | null
   controlHold: ControlHold | null
   forkHalt: ForkHalt | null
   recoveryUnavailable: RecoveryUnavailableEvent | null
@@ -58,7 +59,7 @@ export type ControlSnapshot = {
 }
 export type ControlChanges = {
   commitOnce?: ControlSlot | null
-  spentSource?: { epoch: number } | null
+  spentSource?: { epoch: number; opID?: string } | null
   controlHold?: ControlHold | null
   // Requires provider-owned report provenance and transaction authority.
   clearAppHold?: { eventID: string; reportMutationID: string }
@@ -108,7 +109,7 @@ export type ControlStore = {
 }
 
 export type OperationRequest = {
-  /** Random 128-bit; the host's handle for outcomes. */
+  /** Stable request ID, reusable after outcomes and build/spent reservations are cleared. */
   id: string
   kind: 'invite' | 'remove' | 'ledger' | 'rotation'
   /** Holds app sends (the revoke hold, below) from enqueue until the operation settles. */

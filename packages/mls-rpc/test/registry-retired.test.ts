@@ -234,6 +234,56 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
+    test('retirement consumes retained internal reports and lists only host reports by operation ID', async () => {
+      const fixture = await create()
+      try {
+        const internal = {
+          id: 'retained-internal',
+          opID: 'kumiai/internal/rotation',
+          at: 5,
+          kind: 'unknown' as const,
+        }
+        const host = {
+          id: 'kumiai/internal/host-report',
+          opID: 'host-operation',
+          at: 6,
+          kind: 'lost' as const,
+        }
+        const recovery = {
+          id: 'kumiai/internal/recovery-report',
+          opID: null,
+          at: 7,
+          kind: 'unknown' as const,
+        }
+        await setup(fixture, { putOutcomes: [internal, host, recovery] })
+        await retire(fixture, mode)
+        expect((await fixture.device.groups.ports(key).control.load()).outcomes).toEqual([
+          host,
+          recovery,
+        ])
+        // Older retired snapshots may still contain an internal row.
+        await registryFixtureMutateControl(fixture, key, (snapshot) => ({
+          ...snapshot,
+          outcomes: [internal, host, recovery],
+        }))
+        expect(await listRetiredOutcomes({ persistence: fixture.device.groups, key })).toEqual([
+          host,
+          recovery,
+        ])
+        await serveRetiredObligations({
+          persistence: fixture.device.groups,
+          key,
+          deliverWelcome: async () => {},
+        })
+        for (const id of [host.id, recovery.id])
+          await ackRetiredOutcome({ persistence: fixture.device.groups, key, id })
+        await fixture.registry.delete({ ...key, incarnation: 2 })
+        expect((await fixture.device.groups.load(key.groupID))?.activeIncarnation).toBeNull()
+      } finally {
+        await fixture.close()
+      }
+    })
+
     test('old access cannot supply a restarted owner', async () => {
       const fixture = await create()
       try {

@@ -167,6 +167,15 @@ export function controlOwnConsumptionAllowed(
 ): boolean {
   const slot = snapshot.commitOnce
   if (slot === null || changes.commitOnce !== null) return false
+  const retainedWelcome = snapshot.welcomes.find((row) => row.opID === slot.opID)
+  if (
+    occurrence.coverage === 'complete' &&
+    slot.welcome !== null &&
+    retainedWelcome !== undefined &&
+    (!sameValue(retainedWelcome.welcome, slot.welcome.bytes) ||
+      !sameValue(retainedWelcome.recipients, slot.welcome.recipients))
+  )
+    return false
   const applied = changes.putApplied?.find((row) => row.epoch === slot.epoch)
   const outcome = changes.putOutcomes?.find((row) => row.opID === slot.opID)
   return (
@@ -521,6 +530,7 @@ export function applyChanges(
       built === null ||
       nextSlot !== null ||
       changes.spentSource?.epoch !== built.epoch ||
+      (changes.spentSource.opID !== undefined && changes.spentSource.opID !== built.opID) ||
       final.length !== 1 ||
       final[0]?.kind !== 'unknown' ||
       final[0].id === built.opID ||

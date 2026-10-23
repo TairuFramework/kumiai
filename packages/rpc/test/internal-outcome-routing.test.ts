@@ -82,7 +82,7 @@ test('clock and final reports for an internal build go only to the internal call
   await member.controlWalk.stepOperation(saved.id)
   const provisional = (await member.control.load()).outcomes[0]
   expect(provisional).toMatchObject({ opID: request.id, kind: 'unknown' })
-  expect(onInternalOutcome).toHaveBeenCalledExactlyOnceWith(provisional)
+  await vi.waitFor(() => expect(onInternalOutcome).toHaveBeenCalledExactlyOnceWith(provisional))
   expect(onOutcome).not.toHaveBeenCalled()
   expect(await member.peer.outcomes()).toEqual([])
   await hub.publish({
@@ -96,9 +96,44 @@ test('clock and final reports for an internal build go only to the internal call
   const final = (await member.control.load()).outcomes[0]
   expect(final).toMatchObject({ opID: request.id, kind: 'landed' })
   expect(final?.id).not.toBe(provisional?.id)
-  expect(onInternalOutcome.mock.calls.map(([outcome]) => outcome)).toEqual([provisional, final])
+  await vi.waitFor(() =>
+    expect(onInternalOutcome.mock.calls.map(([outcome]) => outcome)).toEqual([provisional, final]),
+  )
   expect(onOutcome).not.toHaveBeenCalled()
   expect(await member.peer.outcomes()).toEqual([])
+})
+
+test('an unbound internal callback waits until the serial refresh finishes', async () => {
+  const onInternalOutcome = vi.fn()
+  const member = makeMLSPeer(new FakeHub(), 'alice', secret, { onInternalOutcome })
+  peers.push(member)
+  await member.peer.replay()
+  await member.control.apply(
+    {
+      putOutcomes: [
+        { id: 'deferred-report', opID: 'kumiai/internal/deferred', kind: 'lost', at: 100 },
+      ],
+    },
+    'save-deferred',
+  )
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const read = member.mls.readEpoch.bind(member.mls)
+  const readEpoch = vi.spyOn(member.mls, 'readEpoch').mockImplementation(async () => {
+    await gate
+    return read()
+  })
+  const replay = member.peer.replay()
+  try {
+    await vi.waitFor(() => expect(readEpoch).toHaveBeenCalled())
+    expect(onInternalOutcome).not.toHaveBeenCalled()
+  } finally {
+    release()
+    await replay
+  }
+  await vi.waitFor(() => expect(onInternalOutcome).toHaveBeenCalledOnce())
 })
 
 test('an absent internal callback keeps the durable report hidden until a later owner handles it', async () => {
@@ -147,7 +182,7 @@ test.each(['enqueue', 'commit'] as const)(
       id: 'kumiai/internal/host-spoof',
     }
     await expect(member.peer[method](request)).rejects.toMatchObject({
-      name: 'OperationRejectedError',
+      name: 'TypeError',
     })
     expect(await member.control.load()).toEqual(before)
     expect(hub.published).toEqual([])

@@ -168,6 +168,7 @@ export const peerHostFields = {
   onNotMember: 'callback',
   onOutcome: 'callback',
   onInternalOutcome: 'callback',
+  internalOperations: 'port',
   onControlPublishError: 'callback',
   onAppDeliveryStalled: 'callback',
   onAppDeliveryResumed: 'callback',

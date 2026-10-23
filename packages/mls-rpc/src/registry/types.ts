@@ -142,6 +142,7 @@ export type GroupHandleRegistryParams<TTx extends GroupTransaction> = {
   providerID: string
   recovery: RecoveryEnvironment
   restore(record: ReadableGroupState): Promise<GroupHandle>
+  /** Accept host journals and the library envelope decoded by decodeAutoRotationCandidate. */
   restoreCandidate(candidate: Uint8Array): Promise<GroupHandle>
 }
 
