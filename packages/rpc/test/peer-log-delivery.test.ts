@@ -1650,3 +1650,70 @@ test('terminal clearing finalises a persisted publication before clearing transp
     vi.useRealTimers()
   }
 })
+
+test('closed delivery retries recoverable finalisation failures until drained', async () => {
+  vi.useFakeTimers()
+  const outbox = createMemoryAppOutbox()
+  const queue = createAppOutboxAcceptance({
+    outbox,
+    limit: 4,
+    admission: () => ({ admissible: true, epoch: 1 }),
+  })
+  await queue.accept({
+    protocol: 'chat',
+    prc: 'chat/posted',
+    data: encodeEventFrame('chat/posted', {}),
+  })
+  const floor = { epoch: 1, position: null, covered: true }
+  let unavailable = true
+  const delivery = createLogDelivery({
+    queue,
+    ready: async () => {},
+    floor: () => floor,
+    held: () => false,
+    ...createWorkerPublication({
+      outbox,
+      floor: () => floor,
+      put: outbox.put,
+      seal: async () => ({ topicID: 'original-app', payload: new Uint8Array([1]), floor }),
+    }),
+    loadSettlement: outbox.loadSettlement,
+    recordSettlement: outbox.recordSettlement,
+    publish: async () => ({ sequenceID: 'original-position' }),
+    probe: async () => ({ head: null, messages: [], gap: false, oldest: null }),
+    pull: async () => {},
+    heal: async () => {},
+    remove: async (...args) => {
+      if (unavailable) throw new Error('Temporary finalisation failure')
+      await outbox.remove(...args)
+    },
+    clear: outbox.clear,
+    cleared: () => {},
+    deliveredWindowMs: 1000,
+    deliveredLimit: 4,
+  })
+  try {
+    delivery.trigger()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(await outbox.loadSettlement(0)).not.toBeNull()
+    delivery.close()
+    let drained = false
+    const drain = delivery.drained().then(() => {
+      drained = true
+    })
+    void drain.catch(() => {})
+    await vi.advanceTimersByTimeAsync(0)
+    expect(drained).toBe(false)
+    unavailable = false
+    await vi.advanceTimersByTimeAsync(100)
+    await drain
+    expect(await outbox.list()).toEqual([])
+    expect((await outbox.events()).filter((event) => event.kind === 'published')).toMatchObject([
+      { occurrence: { topicID: 'original-app', position: 'original-position' } },
+    ])
+  } finally {
+    delivery.close()
+    queue.close()
+    vi.useRealTimers()
+  }
+})

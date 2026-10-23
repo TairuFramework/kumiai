@@ -42,6 +42,7 @@ type Delivered = Pick<AppOutboxEntry, 'protocol' | 'prc' | 'data'> & {
 }
 type LogFrame = { topicID: string; payload: Uint8Array; publishID: string }
 export type LogDeliveryParams = {
+  failureSignal?: AbortSignal
   queue: AppOutboxAcceptance
   ready: () => Promise<void>
   floor: () => EpochFloor
@@ -96,15 +97,38 @@ export function createLogDelivery(params: LogDeliveryParams) {
     )
     return promise
   }
+  function assertRunning(): void {
+    if (params.failureSignal?.aborted) throw params.failureSignal.reason
+  }
+  function waitForRetry(delay: number): Promise<void> {
+    assertRunning()
+    return new Promise((resolve, reject) => {
+      const signal = params.failureSignal
+      const finish = () => {
+        signal?.removeEventListener('abort', abort)
+        resolve()
+      }
+      const timer = setTimeout(finish, delay)
+      const abort = () => {
+        clearTimeout(timer)
+        signal?.removeEventListener('abort', abort)
+        reject(signal?.reason)
+      }
+      signal?.addEventListener('abort', abort, { once: true })
+    })
+  }
   async function finishSubmitted(): Promise<void> {
+    assertRunning()
     while (submitted.size > 0) await Promise.allSettled([...submitted])
+    assertRunning()
     let delay = 100
     for (;;) {
       try {
         await removeProven()
         return
       } catch {
-        await new Promise((resolve) => setTimeout(resolve, delay))
+        assertRunning()
+        await waitForRetry(delay)
         delay = Math.min(delay * 2, 15000)
       }
     }
@@ -323,6 +347,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
   }
 
   const pass = async (): Promise<void> => {
+    assertRunning()
     await params.ready()
     await params.queue.ready()
     if (closed) return
@@ -454,7 +479,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
   }
 
   const schedule = (delay: number): void => {
-    if (closed || active || timer != null) return
+    if (closed || params.failureSignal?.aborted || active || timer != null) return
     timer = setTimeout(() => {
       timer = undefined
       active = true
@@ -537,6 +562,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
       prepared.clear()
       clearTimeout(timer)
       completion = finishSubmitted()
+      void completion.catch(() => {})
     },
   }
 }

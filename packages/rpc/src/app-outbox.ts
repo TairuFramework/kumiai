@@ -31,6 +31,8 @@ export type AppOutboxEntry = {
 }
 
 export type AppOutbox = {
+  /** Provider fail-stop. Drainage rejects with this signal's reason instead of retrying. */
+  failureSignal?: AbortSignal
   put(entry: AppOutboxEntry): Promise<void>
   list(): Promise<Array<AppOutboxEntry>>
   recordSettlement(

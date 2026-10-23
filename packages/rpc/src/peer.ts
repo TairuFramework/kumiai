@@ -916,6 +916,7 @@ export function createGroupPeerWithControlWalk<
     appOutboxAcceptance == null || mls == null
       ? undefined
       : createLogDelivery({
+          failureSignal: params.appOutbox.failureSignal,
           queue: appOutboxAcceptance,
           ready: async () => {
             await ready
@@ -5764,8 +5765,11 @@ export function createGroupPeerWithControlWalk<
         .then(() => commitTail)
         .then(async () => {
           await internalDrain
-          await logDelivery?.drained()
-          settlementBoundary.close()
+          try {
+            await logDelivery?.drained()
+          } finally {
+            settlementBoundary.close()
+          }
         })
     },
     dispose: () => {
