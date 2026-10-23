@@ -17,6 +17,10 @@
 Align the remaining thirteen packages with kumiai's 0.11 version band.
 All fourteen packages share one pre-1.0 minor band, so the MLS dependency migration raises the whole group together.
 
+`@kumiai/mls-rpc` and `@kumiai/mls-hub` inherit the `@kumiai/mls` behaviour break.
+0.10 and 0.11 peers cannot share a lifecycle group because revoke encoding changed; upgrade all members together.
+`legacy-log` is raised only for authenticated legacy revokes; see the `@kumiai/mls` entry for reset recovery and replay restrictions.
+
 - `broadcast` and `hub-protocol` adopt `@enkaku/*` 0.22.1.
 - `hub-client`, `hub-server`, `hub-store`, `hub-tunnel`, `mls-hub` and `rpc` adopt `@enkaku/*` 0.22.1 and `@kokuin/token` 0.6.1.
 - `mls-rpc` adopts `@kokuin/token` 0.6.1.

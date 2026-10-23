@@ -794,6 +794,9 @@ importers:
       '@hozon/postgres':
         specifier: 'catalog:'
         version: 0.1.0
+      '@kokuin/controller':
+        specifier: 'catalog:'
+        version: 0.2.1(@logtape/logtape@2.4.2)
       '@kokuin/token':
         specifier: 'catalog:'
         version: 0.6.1(@logtape/logtape@2.4.2)

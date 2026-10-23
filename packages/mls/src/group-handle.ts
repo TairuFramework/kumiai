@@ -717,6 +717,7 @@ export class GroupHandle {
    * dropped (defensive — the strict admin-issuer enforcement is the commit pre-pass).
    * Exact token bytes can reuse verification on the same array or a handle's export.
    * did:key and embedded peer:4 keys are immutable; time claims still check on reuse.
+   * Throws RevokeProofError('legacy-log') without applying anything for authenticated legacy revokes.
    *
    * A token the log already holds is appended again, not skipped: the log records
    * what each commit enacted, not a set of claims, and a repeat is the only way to
@@ -727,6 +728,7 @@ export class GroupHandle {
   async applyLedgerEntries(tokens: Array<string>): Promise<Array<VerifiedLedgerEntry>> {
     return mutexFor(this).run(async () => {
       const appended: Array<VerifiedLedgerEntry> = []
+      const candidates: Array<LedgerLogEntry> = []
       const memo = VERIFIED_LEDGER_TOKENS.get(tokens)
       const nextMemo: Array<HeldLedgerEntry | undefined> = []
       for (const [index, token] of tokens.entries()) {
@@ -745,19 +747,24 @@ export class GroupHandle {
         if (verified == null || verified.entry.groupID !== this.groupID) continue
         const entryID = ledgerEntryDigest(token)
         const entry = ledgerLogEntry(entryID, token, verified)
-        this.#ledger.push(entry)
+        candidates.push(entry)
         nextMemo[index] = VERIFIED_LEDGER_ENTRIES.get(verified)
-        this.#entryBodies.set(entryID, { token, verified })
         appended.push(verified)
       }
-      VERIFIED_LEDGER_TOKENS.set(tokens, nextMemo)
-      const folded = foldLedgerControl(this.#ledger, this.#anchor, this.groupID)
-      this.#roster = folded.roster
-      this.#registry = registryWithTreeBindings(
+      const ledger = [...this.#ledger, ...candidates]
+      const folded = foldLedgerControl(ledger, this.#anchor, this.groupID)
+      const registry = registryWithTreeBindings(
         folded.registry,
         this.#state.ratchetTree,
         this.#anchor,
       )
+      this.#ledger = ledger
+      for (const { entryID, token, verified } of candidates) {
+        this.#entryBodies.set(entryID, { token, verified })
+      }
+      VERIFIED_LEDGER_TOKENS.set(tokens, nextMemo)
+      this.#roster = folded.roster
+      this.#registry = registry
       this.#admission = this.#computeAdmission()
       if (this.#pendingControlEvents != null) {
         this.emitControlEvents(appended.filter(({ entry }) => entry.type === DEVICE_ENTRY_TYPE))

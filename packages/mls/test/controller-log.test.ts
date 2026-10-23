@@ -3,6 +3,7 @@ import {
   canonicalBytes,
   createInception,
   deriveKeyMaterial,
+  deriveKeyPair,
   didFromInception,
   digestOf,
   ROTATE_NEEDS_SNAPSHOT,
@@ -16,11 +17,12 @@ import {
   asControllerLog,
   foldChain,
   hasLegacyRevoke,
+  isAuthenticLegacyRevoke,
   isDetachedFoldReason,
   LEGACY_CHAIN_REVOKE,
 } from '../src/controller-log.js'
 import { createEmbeddedControllerResolver } from '../src/embedded-resolver.js'
-import { revokeChain, rotateChain } from './fixtures/controller-chain.js'
+import { legacyRevokeChain, revokeChain, rotateChain } from './fixtures/controller-chain.js'
 
 const seed = new Uint8Array(32).fill(17)
 const inception = createInception(seed, 0)
@@ -87,6 +89,35 @@ describe('controller chain adapter', () => {
       reason: LEGACY_CHAIN_REVOKE,
       index: 1,
     })
+  })
+
+  test.each([false, true])('authenticates a root-signed legacy revoke with crit=%s', (crit) => {
+    const chain = [inception, rotateChain({ ...params, chain: [inception] })]
+    const legacy = legacyRevokeChain({ ...params, chain, subject: 'did:key:A', crit })
+    expect(isAuthenticLegacyRevoke(did, [...chain, legacy])).toBe(true)
+    expect(isAuthenticLegacyRevoke(did, [...chain, { ...legacy, sigs: [] }])).toBe(false)
+    const oldKey = deriveKeyPair(seed, authorityPath(0, 0, 0), 'EdDSA')
+    const wrongSigs = [toB64U(ed25519.sign(canonicalBytes(legacy.event), oldKey.privateKey))]
+    expect(isAuthenticLegacyRevoke(did, [...chain, { ...legacy, sigs: wrongSigs }])).toBe(false)
+    expect(isAuthenticLegacyRevoke(did, [legacy])).toBe(false)
+    expect(isAuthenticLegacyRevoke(did, [null, legacy])).toBe(false)
+    expect(isAuthenticLegacyRevoke(did, [inception, { event: { t: 'rev' } }, legacy])).toBe(false)
+  })
+
+  test.each([
+    ['i', 'did:kokuin:foreign'],
+    ['p', 'wrong-digest'],
+    ['g', 1],
+    ['s', 2],
+    ['x', 123],
+    ['cap', 'delegated'],
+    ['cap', null],
+  ])('refuses a signed legacy revoke with invalid %s=%s', (field, value) => {
+    const legacy = legacyRevokeChain({ ...params, chain: [inception], subject: 'did:key:A' })
+    const event = { ...legacy.event, [field]: value }
+    const key = deriveKeyPair(seed, authorityPath(0, 0, 0), 'EdDSA')
+    const sigs = [toB64U(ed25519.sign(canonicalBytes(event), key.privateKey))]
+    expect(isAuthenticLegacyRevoke(did, [inception, { event, sigs }])).toBe(false)
   })
 
   test('preserves earlier denials across revoking rotations', () => {

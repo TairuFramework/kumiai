@@ -7,8 +7,8 @@ import { readCapability } from './capability.js'
 import {
   foldChain,
   hasLegacyRevoke,
+  isAuthenticLegacyRevoke,
   isDetachedFoldReason,
-  LEGACY_CHAIN_REVOKE,
   revokesSubject,
 } from './controller-log.js'
 import { parseMLSCredentialIdentity } from './credential.js'
@@ -62,7 +62,15 @@ export function authenticateLifecycleProof(
     throw new RevokeProofError('wrong-controller')
   const proof = value.proof
   if (!Array.isArray(proof)) throw new RevokeProofError('no-rev')
-  if (hasLegacyRevoke(recorded) || hasLegacyRevoke(proof)) throw new RevokeProofError('legacy-log')
+  if (hasLegacyRevoke(recorded) || hasLegacyRevoke(proof)) {
+    if (
+      isAuthenticLegacyRevoke(controller, recorded) ||
+      isAuthenticLegacyRevoke(controller, proof) ||
+      (value.op !== 'reset' && isAuthenticLegacyRevoke(controller, [...recorded, ...proof]))
+    )
+      throw new RevokeProofError('legacy-log')
+    throw new RevokeProofError('not-authority-signed')
+  }
   if (recorded.length === 0 && proof.length === 0) throw new RevokeProofError('no-rev')
   for (const signed of proof) {
     const event = signed?.event
@@ -98,7 +106,6 @@ export function authenticateLifecycleProof(
   const log = value.op === 'reset' ? proof : [...recorded, ...proof]
   const folded = foldChain(controller, log)
   if (!folded.ok) {
-    if (folded.reason === LEGACY_CHAIN_REVOKE) throw new RevokeProofError('legacy-log')
     const detached = isDetachedFoldReason(folded.reason)
     throw new RevokeProofError(detached ? 'detached' : 'not-authority-signed')
   }
@@ -118,10 +125,8 @@ export function authenticateLifecycleProof(
     return { recordedLog: [...log], genFloor: generation, logPosition: position }
   }
   let belowFloor = false
-  for (let index = 0; index < log.length; index++) {
+  for (const [index, state] of folded.states.entries()) {
     if (!revokesSubject(log, folded.states, index, subject)) continue
-    const state = folded.states[index]
-    if (state == null) continue
     if (state.gen < floor) {
       belowFloor = true
       continue
@@ -215,6 +220,7 @@ export async function verifyLifecycleProof(
     const folded = binding?.prefix == null ? undefined : foldChain(controller, binding.prefix)
     return {
       did: normalizeDID(member.id),
+      controller: binding?.controller == null ? undefined : normalizeDID(binding.controller),
       leafIndex: member.leafIndex,
       issuer,
       exempt: isExemptMember(group, member.leafIndex),
@@ -256,7 +262,7 @@ export async function verifyLifecycleProof(
     revoked.push({ did: subject })
   } else if (value.op === 'reset') {
     for (const leaf of leaves) {
-      if (leaf.generation != null && leaf.generation < authenticated.genFloor)
+      if (leaf.controller === controller && (leaf.generation ?? -1) < authenticated.genFloor)
         revoked.push({ did: leaf.did })
     }
   } else {

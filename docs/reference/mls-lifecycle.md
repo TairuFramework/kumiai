@@ -179,11 +179,16 @@ detached, needs-reset, effects-mismatch and removes-mismatch. Helpers return the
 
 Legacy profile logs containing a chain `rev` or a non-reset rotate without a snapshot no longer fold.
 Leaves carrying these prefixes fail `controller-mismatch`.
-Revoke proofs containing a chain `rev`, or following a recorded log containing one, fail `legacy-log`.
+`legacy-log` is raised only for authenticated legacy revokes in a proof or its recorded log.
+Unsigned or malformed legacy markers fail `not-authority-signed` and are dropped during permissive replay.
 A non-reset rotate without a snapshot fails `not-authority-signed` in a revoke proof.
 A profile reset can replace an obsolete prefix.
+A reset removes controller-attributed leaves whose prefixes cannot fold, as well as those below its generation floor.
 
-Persisted group ledgers containing pre-0.11 chain-`rev` proofs cannot replay.
+0.10 and 0.11 peers cannot share a lifecycle group because revoke encoding changed; upgrade all members together.
+`@kumiai/mls-rpc` and `@kumiai/mls-hub` inherit the `@kumiai/mls` behaviour break.
+
+Persisted group ledgers containing authenticated pre-0.11 chain-`rev` proofs cannot replay.
 Restore and derivation throw `RevokeProofError('legacy-log')` instead of dropping the revocation. Recreate the group.
 
 `CommitRejectedError` carries binding, lapse, floor, policy or invalid refusal reasons.

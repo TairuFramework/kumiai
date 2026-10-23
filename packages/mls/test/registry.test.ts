@@ -1,4 +1,4 @@
-import { createInception, didFromInception, digestOf, type SignedEvent } from '@kokuin/controller'
+import { createInception, didFromInception, type SignedEvent } from '@kokuin/controller'
 import { normalizeDID } from '@kokuin/token'
 import { describe, expect, test } from 'vitest'
 
@@ -19,7 +19,7 @@ import {
   registrySeed,
 } from '../src/registry.js'
 import { ROLE_ENTRY_TYPE, type RoleValue } from '../src/roster.js'
-import { revokeChain } from './fixtures/controller-chain.js'
+import { legacyRevokeChain, revokeChain } from './fixtures/controller-chain.js'
 
 const GROUP = 'group-1'
 const CREATOR = 'did:key:zCreator'
@@ -430,19 +430,14 @@ describe('authenticated lifecycle projections', () => {
   test.each([false, true])(
     'legacy revoke replay throws instead of dropping with crit=%s',
     (crit) => {
-      const legacy = {
-        event: {
-          t: 'rev',
-          crit,
-          g: 0,
-          s: 1,
-          p: digestOf(inception.event),
-          i: controller,
-          v: 1,
-          x: DEV_A,
-        },
-        sigs: [],
-      } as unknown as SignedEvent
+      const legacy = legacyRevokeChain({
+        seed,
+        profile: 0,
+        did: controller,
+        chain: [inception],
+        subject: DEV_A,
+        crit,
+      })
       const drops: Array<unknown> = []
       expect(() =>
         foldControl(
@@ -468,20 +463,55 @@ describe('authenticated lifecycle projections', () => {
     },
   )
 
+  test.each(['marker', 'unsigned full chain', 'unsigned suffix'])(
+    'drops a member-forged legacy %s and continues replay',
+    (kind) => {
+      const forged = {
+        ...legacyRevokeChain({
+          seed,
+          profile: 0,
+          did: controller,
+          chain: [inception],
+          subject: DEV_A,
+        }),
+        sigs: [],
+      }
+      const proof =
+        kind === 'marker'
+          ? [{ event: { t: 'rev' }, sigs: [] } as unknown as SignedEvent]
+          : kind === 'unsigned full chain'
+            ? [inception, forged]
+            : [forged]
+      const drops: Array<unknown> = []
+      const result = foldControl(
+        [
+          deviceInput(DEV_B, DEV_A, { op: 'revoke', proof, revoked: [] }, 'forged'),
+          deviceInput(DEV_B, controller, { op: 'clock', time: 100 }, 'later'),
+        ],
+        anchor,
+        GROUP,
+        (drop) => drops.push(drop),
+      )
+      expect(result.registry.devices.size).toBe(0)
+      expect(result.registry.controllers.get(controller)?.timeFloor).toBe(100)
+      expect(drops).toEqual([
+        {
+          entryID: 'forged',
+          type: DEVICE_ENTRY_TYPE,
+          reason: 'invalid lifecycle proof',
+        },
+      ])
+    },
+  )
+
   test('a later revoke refuses a recorded legacy chain', () => {
-    const legacy = {
-      event: {
-        t: 'rev',
-        crit: true,
-        g: 0,
-        s: 1,
-        p: digestOf(inception.event),
-        i: controller,
-        v: 1,
-        x: DEV_B,
-      },
-      sigs: [],
-    } as unknown as SignedEvent
+    const legacy = legacyRevokeChain({
+      seed,
+      profile: 0,
+      did: controller,
+      chain: [inception],
+      subject: DEV_B,
+    })
     const registry = {
       ...registrySeed(),
       controllers: new Map([
