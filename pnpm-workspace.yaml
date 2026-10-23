@@ -51,7 +51,7 @@ catalog:
   '@teikyo/access': ^0.2.0
   '@teikyo/enkaku': ^0.2.0
   '@teikyo/hozon': ^0.2.0
-  '@teikyo/rate-limit': ^0.1.0
+  '@teikyo/rate-limit': ^0.2.0
   '@testcontainers/postgresql': ^12.2.1
   'testcontainers': ^12.1.0
 
@@ -76,7 +76,7 @@ minimumReleaseAgeExclude:
   - '@teikyo/access@0.1.0 || 0.2.0'
   - '@teikyo/enkaku@0.1.0 || 0.2.0'
   - '@teikyo/hozon@0.1.0 || 0.2.0'
-  - '@teikyo/rate-limit@0.1.0'
+  - '@teikyo/rate-limit@0.1.0 || 0.2.0'
   - '@expo/config-plugins@58.0.10'
   - '@expo/config@58.0.7'
   - '@expo/env@2.5.3'

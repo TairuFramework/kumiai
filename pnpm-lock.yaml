@@ -255,8 +255,8 @@ catalogs:
       specifier: ^0.2.0
       version: 0.2.0
     '@teikyo/rate-limit':
-      specifier: ^0.1.0
-      version: 0.1.0
+      specifier: ^0.2.0
+      version: 0.2.0
     '@testcontainers/postgresql':
       specifier: ^12.2.1
       version: 12.2.1
@@ -396,7 +396,7 @@ importers:
         version: 0.2.0(@logtape/logtape@2.4.2)(hono@4.13.13)
       '@teikyo/rate-limit':
         specifier: 'catalog:'
-        version: 0.1.0(@logtape/logtape@2.4.2)(hono@4.13.13)
+        version: 0.2.0(@logtape/logtape@2.4.2)(hono@4.13.13)
     devDependencies:
       '@enkaku/client':
         specifier: 'catalog:'
@@ -2179,12 +2179,6 @@ packages:
   '@sozai/execution@0.2.3':
     resolution: {integrity: sha512-sknU9ABs/gIklF7mmDBzS47n89qaviKMGxnfZPMN/lZqgcF0wJgBJUcW4RKS5KzcCeBL7f88yIia08ZxkeRoqA==}
 
-  '@sozai/http-server@0.1.1':
-    resolution: {integrity: sha512-yvlKtf/f2/NRxhl5FSLTygbTflZETnS1xxQ8XRAoiLAZ32wS2R8qguNz4ZTBaaQpG7IAzDzk4iN2PqgUvlqtOg==}
-    engines: {node: '>=24'}
-    peerDependencies:
-      hono: ^4.13.13
-
   '@sozai/http-server@0.2.0':
     resolution: {integrity: sha512-mpz1V+4QT7KKG4dnp2EmHYoNLbUHgkdSMhwVNcpKU7leE7IvU5besidK8ZaCLk9q9YuQe3bULdXKcwkAjJP+pQ==}
     engines: {node: '>=24'}
@@ -2198,9 +2192,6 @@ packages:
     resolution: {integrity: sha512-t/r0WfnC3n94s21pw3/2YV/C/0WTKzbrtsNGv8gNdDeKBFJ0a9jYEo8MBpcLr1c1zn15S5k3Gpt9sf3VvFGPEQ==}
     peerDependencies:
       '@logtape/logtape': ^2.3.11
-
-  '@sozai/otel@0.3.4':
-    resolution: {integrity: sha512-qnX2hMqHYRIKMADURHNXxfAuSzyNoyMbtz9/zNDhULsPTr2neuEOgx8BH8svRem2pJHEUb0qIISd6EOmBTOUYw==}
 
   '@sozai/otel@0.4.0':
     resolution: {integrity: sha512-IJJQDJO6QwlvkfOJa5f0OGde68qMzZg9RpxzV71NSh6CTa3qqH05NlSg4nHcDbDBNFbrJti4k+BwIKrOcOUQIw==}
@@ -2343,8 +2334,8 @@ packages:
     peerDependencies:
       hono: ^4.13.13
 
-  '@teikyo/rate-limit@0.1.0':
-    resolution: {integrity: sha512-fLYruYZfig8u7tFCoVuuHCLuSVhC7v91InmJVeufaZI3KZL68x/fwapVffnDckyootQu2J01YAlZQ/uLfQg+Mg==}
+  '@teikyo/rate-limit@0.2.0':
+    resolution: {integrity: sha512-DqLgT0alYQmH0fkwnECuatfmVyHg1RqV6ED3HRaWTlBNs5fIinwMG4jM2uIQPTqjRQyW6k4FMobAxTrE/gY+9Q==}
     engines: {node: '>=24'}
     peerDependencies:
       hono: ^4.13.13
@@ -6385,18 +6376,6 @@ snapshots:
       '@sozai/async': 0.4.1
       '@sozai/result': 0.2.2
 
-  '@sozai/http-server@0.1.1(@logtape/logtape@2.4.2)(hono@4.13.13)':
-    dependencies:
-      '@hono/node-server': 2.1.5(hono@4.13.13)
-      '@hono/otel': 1.2.0(hono@4.13.13)
-      '@sozai/async': 0.4.1
-      '@sozai/log': 0.4.0(@logtape/logtape@2.4.2)
-      '@sozai/otel': 0.3.4(@logtape/logtape@2.4.2)
-      get-port: 7.2.0
-      hono: 4.13.13
-    transitivePeerDependencies:
-      - '@logtape/logtape'
-
   '@sozai/http-server@0.2.0(@logtape/logtape@2.4.2)(hono@4.13.13)':
     dependencies:
       '@hono/node-server': 2.1.5(hono@4.13.13)
@@ -6414,14 +6393,6 @@ snapshots:
   '@sozai/log@0.4.0(@logtape/logtape@2.4.2)':
     dependencies:
       '@logtape/logtape': 2.4.2
-
-  '@sozai/otel@0.3.4(@logtape/logtape@2.4.2)':
-    dependencies:
-      '@opentelemetry/api': 1.10.0
-      '@opentelemetry/api-logs': 0.223.0
-      '@sozai/log': 0.4.0(@logtape/logtape@2.4.2)
-    transitivePeerDependencies:
-      - '@logtape/logtape'
 
   '@sozai/otel@0.4.0(@logtape/logtape@2.4.2)':
     dependencies:
@@ -6570,9 +6541,9 @@ snapshots:
     transitivePeerDependencies:
       - '@logtape/logtape'
 
-  '@teikyo/rate-limit@0.1.0(@logtape/logtape@2.4.2)(hono@4.13.13)':
+  '@teikyo/rate-limit@0.2.0(@logtape/logtape@2.4.2)(hono@4.13.13)':
     dependencies:
-      '@sozai/http-server': 0.1.1(@logtape/logtape@2.4.2)(hono@4.13.13)
+      '@sozai/http-server': 0.2.0(@logtape/logtape@2.4.2)(hono@4.13.13)
       hono: 4.13.13
       hono-rate-limiter: 0.5.4(hono@4.13.13)
     transitivePeerDependencies:
