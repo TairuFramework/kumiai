@@ -36,7 +36,7 @@ export type AccountedGroupObservation = {
   activeVersion: number | null
   control: ControlSnapshot | null
   controlStatus: 'missing' | 'readable' | 'unreadable'
-  stateStatus: 'missing' | 'null' | 'deleted' | 'readable' | 'unreadable'
+  stateStatus: 'missing' | 'null' | 'deleted' | 'readable' | 'unreadable' | 'unobserved'
   terminal: boolean | null
 }
 export type EntryReads = {
@@ -70,6 +70,7 @@ export type EntryCapability<TTx extends GroupTransaction> = {
   assertRoot(): void
   activity(groupID: string, excludingMutationID?: string): { generation: number; pending: number }
   failureSignal?: AbortSignal
+  finaliseCertifiedApp(key: GroupKey, seq: number): Promise<void>
   observe(
     groupID: string,
     onProof: (observation: AccountedGroupObservation) => void,

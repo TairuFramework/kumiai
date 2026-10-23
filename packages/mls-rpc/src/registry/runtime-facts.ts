@@ -12,7 +12,7 @@ import { controlSafetyHeld, type SendAdmission } from '@kumiai/rpc'
 
 import type { AccountedGroupObservation } from '../entry-capability.js'
 import { assertTrustTransition } from '../persistence-guards.js'
-import type { GroupRecoveryTrust } from '../persistence-types.js'
+import type { GroupKey, GroupRecoveryTrust } from '../persistence-types.js'
 import type { GroupRuntimeSnapshot } from './types.js'
 
 export function publicRuntimeFacts(params: {
@@ -132,4 +132,23 @@ export function accountedRuntime(params: {
   } catch {
     return null
   }
+}
+
+export function accountedAdministrativeVersion(
+  value: AccountedGroupObservation,
+  key: GroupKey,
+): number | null {
+  if (
+    value.stateStatus !== 'unobserved' ||
+    value.lifetimeStatus !== 'readable' ||
+    value.metadataStatus !== 'readable' ||
+    value.lifetime?.restorePending !== false ||
+    value.activeKey?.groupID !== key.groupID ||
+    value.activeKey.incarnation !== key.incarnation ||
+    value.activeVersion === null ||
+    !Number.isSafeInteger(value.activeVersion) ||
+    value.activeVersion < 1
+  )
+    return null
+  return value.activeVersion
 }

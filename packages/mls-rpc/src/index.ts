@@ -201,6 +201,7 @@ export { ApplicationLeaseUnavailableError } from './registry/live-send.js'
 export { createGroupHandleRegistry } from './registry/registry.js'
 export {
   ackRetiredOutcome,
+  finaliseAppSettlements,
   listRetiredOutcomes,
   serveRetiredObligations,
 } from './registry/retired.js'

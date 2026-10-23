@@ -27,6 +27,8 @@ import type {
 } from '../persistence-types.js'
 import { recoveryCompletionContexts } from '../recovery-completion-context.js'
 
+export { finaliseAppSettlements } from '../app-settlement.js'
+
 async function consumeInternalOutcomes(
   control: Pick<ControlStore, 'load' | 'apply'>,
   mutationID: string,

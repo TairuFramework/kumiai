@@ -51,7 +51,9 @@ import {
   groupOwnerKey,
   memoryRecordTable,
   sameStoredValue,
+  statusEventID,
 } from './memory-incarnation-stores.js'
+import { deviceNamespaces, groupNamespaces } from './memory-rows.js'
 import type { OwnerEntry, OwnerQueues } from './owner-queue.js'
 import { physicalRecordKey } from './persistence-codec.js'
 import {
@@ -471,6 +473,7 @@ export function createMemoryGroupCoordinator(params: {
     groupID: string,
     mutationID: string,
     entry: OwnerEntry,
+    administrative = false,
   ): Promise<void> {
     const listeners = [...(observers.get(groupID) ?? [])]
     if (listeners.length === 0) return
@@ -501,6 +504,28 @@ export function createMemoryGroupCoordinator(params: {
         const value = await loadMetadata(incarnation)
         if (value !== null) metadata.push(value)
       }
+      if (administrative)
+        return {
+          mutationID,
+          lifetime,
+          lifetimeStatus,
+          metadata,
+          metadataStatus,
+          activeKey:
+            lifetime?.activeIncarnation == null
+              ? null
+              : { groupID, incarnation: lifetime.activeIncarnation },
+          activeVersion:
+            lifetime?.activeIncarnation == null
+              ? null
+              : ((await loadMetadata(lifetime.activeIncarnation))?.version ?? null),
+          trust: null,
+          trustStatus: 'missing' as const,
+          control: null,
+          controlStatus: 'missing' as const,
+          stateStatus: 'unobserved' as const,
+          terminal: null,
+        }
       let spentSetCorrupt = false
       const trustObservation = await diagnose(async () => {
         try {
@@ -597,6 +622,7 @@ export function createMemoryGroupCoordinator(params: {
     entry: OwnerEntry,
     participantTx?: MemoryTransaction,
     readyToCommit?: () => void,
+    administrative = false,
   ): Promise<TValue> {
     let proof: Proof | undefined
     let id: string | undefined
@@ -626,6 +652,14 @@ export function createMemoryGroupCoordinator(params: {
                 (request.active && previous.activeIncarnation !== request.key.incarnation)
               )
                 throw new DisplacedGroupHandleError('Inactive group incarnation')
+              if (
+                administrative &&
+                (previous.restorePending ||
+                  !Number.isSafeInteger(request.key.incarnation) ||
+                  request.key.incarnation < 1 ||
+                  request.key.incarnation > previous.latestIncarnation)
+              )
+                throw new GroupStateConflictError('Certified finalisation source unavailable')
               await entry.callback(() => request.check?.(basicStores(baseTx, request.groupID)))
               change = {
                 groupID: request.groupID,
@@ -761,12 +795,13 @@ export function createMemoryGroupCoordinator(params: {
                       }
                     const after = savedStates.get(incarnation)
                     if (after === undefined || after.deleted) return null
-                    const prior = await memoryRecordTable<GroupStateRecord>({
+                    const prior = await createUnlockedGroupStateStores({
                       tx: { ...tx, rows: before },
-                      key: { groupID: change.groupID, incarnation },
-                      namespace: 'state',
+                      groupID: change.groupID,
                       atRest,
-                    }).load('current')
+                    })
+                      .state(incarnation)
+                      .load()
                     if (prior === null || prior.deleted) return null
                     return {
                       kind: 'adoption',
@@ -921,15 +956,16 @@ export function createMemoryGroupCoordinator(params: {
                   throw new GroupStateConflictError('Initial transition requires a lifetime')
                 if (retirementSource?.incarnation === life.activeIncarnation)
                   throw new GroupStateConflictError('Retirement requires a source pointer change')
-                assertCheckpointUpdates(
-                  await createUnlockedGroupStateStores({
-                    tx: { ...tx, rows: before },
-                    groupID: request.groupID,
-                    atRest,
-                  }).checkpoints.list(),
-                  await raw.checkpoints.list(),
-                  tx,
-                )
+                if (!administrative)
+                  assertCheckpointUpdates(
+                    await createUnlockedGroupStateStores({
+                      tx: { ...tx, rows: before },
+                      groupID: request.groupID,
+                      atRest,
+                    }).checkpoints.list(),
+                    await raw.checkpoints.list(),
+                    tx,
+                  )
                 const installing =
                   previous === null ||
                   (life.activeIncarnation !== null &&
@@ -979,12 +1015,13 @@ export function createMemoryGroupCoordinator(params: {
                   const original =
                     oldBytes === undefined
                       ? null
-                      : await memoryRecordTable<GroupStateRecord>({
+                      : await createUnlockedGroupStateStores({
                           tx: { ...tx, rows: before },
-                          key: { groupID: change.groupID, incarnation },
-                          namespace: 'state',
+                          groupID: change.groupID,
                           atRest,
-                        }).load('current')
+                        })
+                          .state(incarnation)
+                          .load()
                   if (
                     original !== null &&
                     !original.deleted &&
@@ -1134,12 +1171,13 @@ export function createMemoryGroupCoordinator(params: {
                       await clearGroupCondition(raw.checkpoints, row.key)
                   }
                 }
-                const conditionsBeforeRetention = (await raw.checkpoints.list()).filter(
-                  (row) => row.kind === 'condition',
-                )
-                await retainCheckpointInstallations(raw.checkpoints, installations, Date.now())
+                const conditionsBeforeRetention = (
+                  administrative ? [] : await raw.checkpoints.list()
+                ).filter((row) => row.kind === 'condition')
+                if (!administrative)
+                  await retainCheckpointInstallations(raw.checkpoints, installations, Date.now())
                 const retainedCheckpointIDs = new Set(
-                  (await raw.checkpoints.list()).map((row) => row.id),
+                  (administrative ? [] : await raw.checkpoints.list()).map((row) => row.id),
                 )
                 for (const row of conditionsBeforeRetention) {
                   if (!retainedCheckpointIDs.has(row.id))
@@ -1163,6 +1201,15 @@ export function createMemoryGroupCoordinator(params: {
                 for (const [incarnation, changed] of affected) {
                   const namespaces = versionedNamespaces(changed)
                   if (savedStates.has(incarnation) || namespaces.size === 0) continue
+                  if (administrative) {
+                    const metadata = await raw.stateMetadata(incarnation).load()
+                    if (metadata === null)
+                      throw new GroupStateConflictError('Missing state version metadata')
+                    await raw
+                      .stateMetadata(incarnation)
+                      .save({ ...metadata, version: metadata.version + 1 })
+                    continue
+                  }
                   const state = await loadAffectedState(
                     tx,
                     { groupID: change.groupID, incarnation },
@@ -1242,6 +1289,14 @@ export function createMemoryGroupCoordinator(params: {
             await entry.enter('account')
             await coordinateMemoryTransaction(tx, async (tx) => {
               const raw = createUnlockedGroupStateStores({ tx, groupID: request.groupID, atRest })
+              if (administrative) {
+                for (const namespace of new Set([...groupNamespaces, ...deviceNamespaces])) {
+                  if (!sameStoredValue(beforeEffects[namespace], tx.rows[namespace]))
+                    throw new GroupStateConflictError(
+                      'Certified finalisation effect changed a reserved namespace',
+                    )
+                }
+              }
               const checkpointRows = tx.rows.checkpoints ?? new Map<string, unknown>()
               const checkpointChanges = new Set([
                 ...checkpointRows.keys(),
@@ -1284,6 +1339,12 @@ export function createMemoryGroupCoordinator(params: {
                   .load()
                 if (metadata === null || metadata.deleted || metadata.version !== original?.version)
                   continue
+                if (administrative) {
+                  await raw
+                    .stateMetadata(incarnation)
+                    .save({ ...metadata, version: metadata.version + 1 })
+                  continue
+                }
                 const state = await loadAffectedState(
                   tx,
                   { groupID: change.groupID, incarnation },
@@ -1308,7 +1369,14 @@ export function createMemoryGroupCoordinator(params: {
             })
             if (entry.rollbackOnly)
               throw new GroupStateConflictError('Transaction is rollback-only')
-            await captureObservation(tx, before, change.groupID, change.mutationID, entry)
+            await captureObservation(
+              tx,
+              before,
+              change.groupID,
+              change.mutationID,
+              entry,
+              administrative,
+            )
             readyToCommit?.()
             return result
           } catch (error) {
@@ -1419,6 +1487,86 @@ export function createMemoryGroupCoordinator(params: {
     resolve,
   }
   const capability: EntryCapability<MemoryTransaction> = {
+    finaliseCertifiedApp(requestedKey, seq) {
+      const key = { ...requestedKey }
+      const mutationID = crypto.randomUUID()
+      return owners.run(
+        'transition',
+        { groupID: key.groupID, ownerDID: null },
+        async (entry) => {
+          await prepare(entry, key.groupID)
+          let milliseconds = 100
+          for (;;) {
+            let completed = false
+            try {
+              return await transitionOwned(
+                { groupID: key.groupID, key, active: false, mutationID },
+                async (stores) => {
+                  const rows = stores.incarnation(key.incarnation)
+                  const obligation = await rows.meta.loadSettlement(seq)
+                  const saved = (await rows.outbox.list()).find((value) => value.seq === seq)
+                  if (saved === undefined && obligation === null)
+                    throw new UnchangedGroupResult(undefined)
+                  const attempt = saved?.lastAttempt
+                  if (
+                    saved === undefined ||
+                    saved.status !== 'accepted' ||
+                    obligation === null ||
+                    obligation.outcome !== 'published' ||
+                    attempt == null ||
+                    attempt.incarnation !== key.incarnation ||
+                    attempt.publishID !== obligation.attemptID ||
+                    attempt.topicID !== obligation.topicID
+                  )
+                    throw new GroupStateConflictError(
+                      'Certified finalisation requires the original obligation and attempt',
+                    )
+                  await rows.meta.putEvents([
+                    {
+                      ...key,
+                      id: statusEventID(mutationID, seq, 'published'),
+                      kind: 'published',
+                      entry: saved,
+                      occurrence: {
+                        incarnation: attempt.incarnation,
+                        segment: attempt.segment,
+                        topicID: attempt.topicID,
+                        position: obligation.sequenceID,
+                      },
+                    },
+                  ])
+                  await rows.outbox.remove([seq])
+                },
+                entry,
+                undefined,
+                () => {
+                  completed = true
+                },
+                true,
+              )
+            } catch (error) {
+              if (!completed || entry.phase !== 'settled' || owners.failure !== null) throw error
+              await entry.retryRolledBack()
+              await new Promise<void>((resolve, reject) => {
+                const signal = owners.failureSignal
+                const abort = () => {
+                  clearTimeout(timer)
+                  reject(signal.reason)
+                }
+                const timer = setTimeout(() => {
+                  signal.removeEventListener('abort', abort)
+                  resolve()
+                }, milliseconds)
+                signal.addEventListener('abort', abort, { once: true })
+                if (signal.aborted) abort()
+              })
+              milliseconds = Math.min(milliseconds * 2, 15000)
+            }
+          }
+        },
+        { mutationID },
+      )
+    },
     assertRoot() {
       if (owners.failure !== null) throw owners.failure
       if (owners.current() !== undefined)

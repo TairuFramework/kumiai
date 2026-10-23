@@ -1,5 +1,6 @@
 import type { ControlChanges } from '@kumiai/rpc'
 
+import { entryCapability } from './entry-capability.js'
 import {
   copyControlChanges,
   copyStoredValue,
@@ -192,6 +193,25 @@ export function createMemoryGroupPorts(params: {
       },
       async remove(seq, outcome) {
         const owned = copyStoredValue(outcome)
+        const obligation = await access.read(key, (stores) =>
+          stores.incarnation(key.incarnation).meta.loadSettlement(seq),
+        )
+        if (obligation !== null) {
+          if (owned === undefined || owned.position !== obligation.sequenceID)
+            throw new GroupStateConflictError('Certified entry requires its original occurrence')
+          if (owned.incarnation !== key.incarnation || owned.topicID !== obligation.topicID)
+            throw new GroupStateConflictError('Publication occurrence mismatch')
+          const saved = await access.read(key, async (stores) =>
+            (await stores.incarnation(key.incarnation).outbox.list()).find(
+              (entry) => entry.seq === seq,
+            ),
+          )
+          if (saved !== undefined && saved.lastAttempt?.segment !== owned.segment)
+            throw new GroupStateConflictError('Publication occurrence mismatch')
+          const capability = entryCapability(params.groups)
+          if (capability === null) throw new GroupStateConflictError('Missing entry capability')
+          return await capability.finaliseCertifiedApp(key, seq)
+        }
         let entry!: AppOutboxEntry
         await access.write(
           key,

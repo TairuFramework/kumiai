@@ -88,6 +88,7 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
   )
     throw new TypeError('Invalid registry GroupMLS parameters')
   const { registry } = params
+  await capability.settleAppPublications(key.groupID)
   const target = { ...params.target }
   function assertKey(source: { key: GroupKey }): void {
     if (source.key.groupID !== key.groupID || source.key.incarnation !== key.incarnation)
@@ -136,6 +137,7 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
     recompute()
   }
   function observe(observation: AccountedGroupObservation): void {
+    if (observation.stateStatus === 'unobserved') return
     if (!initialised) {
       pendingObservation = observation
       return

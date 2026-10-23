@@ -24,6 +24,7 @@ import type { GroupHandleRegistry } from './types.js'
 
 export type RegistrySafetyCapability<TTx extends GroupTransaction> = RegistryConsumers & {
   onAdmissionChanged(key: GroupKey, listener: (committedNext: number) => void): () => void
+  settleAppPublications(groupID: string): Promise<void>
   binding: object
   entry: EntryCapability<TTx>
   latch(key: GroupKey, reason: NonNullable<SafetyHold>): void

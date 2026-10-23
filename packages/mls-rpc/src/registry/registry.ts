@@ -2,6 +2,7 @@ import { normalizeDID } from '@kokuin/token'
 import { decodeClientState, type GroupHandle, restrictCommitAuthoring } from '@kumiai/mls'
 import type { ControlSnapshot, ForkHalt, SafetyHold } from '@kumiai/rpc'
 
+import { finaliseAppSettlements } from '../app-settlement.js'
 import { bindRegistryCheckpoint } from '../checkpoint.js'
 import {
   type AccountedGroupObservation,
@@ -42,7 +43,7 @@ import {
   type RetirementSlot,
 } from './retirement.js'
 import { createRegistryRuntime, createRegistrySafetyLatch } from './runtime.js'
-import { accountedRuntime } from './runtime-facts.js'
+import { accountedAdministrativeVersion, accountedRuntime } from './runtime-facts.js'
 import {
   bindRegistrySafety,
   RetainedTrustUnavailableError,
@@ -206,6 +207,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   let closing = false
   let disposed = false
   let disposal: Promise<void> | null = null
+  const initialFinalisers = new Map<string, Promise<void>>()
   let starting: Promise<void> | null = null
   let started = false
   function assertOpen(): void {
@@ -234,12 +236,50 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       const lifetimes = await persistence.groups.list()
       if (lifetimes.some((value) => value.restorePending))
         throw new GroupUnavailableError({ reason: 'restore-pending' })
+      for (const lifetime of lifetimes) {
+        const pending = track(
+          (async () => {
+            for (let incarnation = 1; incarnation <= lifetime.latestIncarnation; incarnation++)
+              await finaliseAppSettlements({
+                persistence: persistence.groups,
+                key: { groupID: lifetime.groupID, incarnation },
+              })
+          })(),
+        )
+        initialFinalisers.set(lifetime.groupID, pending)
+        void pending.catch(() => {})
+      }
       started = true
     })()
     try {
       await starting
     } finally {
       starting = null
+    }
+  }
+  async function settleAppPublications(groupID: string): Promise<void> {
+    await initialise()
+    const pending = initialFinalisers.get(groupID)
+    if (pending === undefined) return
+    try {
+      await pending
+    } catch (error) {
+      if (initialFinalisers.get(groupID) === pending) {
+        const retry = track(
+          (async () => {
+            const lifetime = await persistence.groups.load(groupID)
+            if (lifetime === null) return
+            for (let incarnation = 1; incarnation <= lifetime.latestIncarnation; incarnation++)
+              await finaliseAppSettlements({
+                persistence: persistence.groups,
+                key: { groupID, incarnation },
+              })
+          })(),
+        )
+        initialFinalisers.set(groupID, retry)
+        void retry.catch(() => {})
+      }
+      throw error
     }
   }
   function notifyAdmission(slot: GroupSlot, key: GroupKey, next: number): void {
@@ -290,6 +330,20 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       const unsubscribe = capability.observe(
         groupID,
         (observation) => {
+          if (observation.stateStatus === 'unobserved') {
+            observedSlot.generation++
+            const previous = observedSlot.owner
+            if (previous !== null) {
+              previous.cacheValid = false
+              const version = accountedAdministrativeVersion(observation, previous.key)
+              if (version !== null) {
+                previous.snapshot = { ...previous.snapshot, stateVersion: version }
+                const dispatch = previous.runtime.install(previous.snapshot)
+                if (dispatch !== undefined) notifications.set(observation, dispatch)
+              }
+            }
+            return
+          }
           if (
             observation.activeKey !== null &&
             observation.controlStatus === 'readable' &&
@@ -445,7 +499,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
           const dispatch = notifications.get(observation)
           notifications.delete(observation)
           dispatch?.()
-          diagnoseObservation(observation)
+          if (observation.stateStatus !== 'unobserved') diagnoseObservation(observation)
         },
       )
       observers.add(unsubscribe)
@@ -473,6 +527,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   const retirement = createRegistryRetirement({
     slot: groupSlot,
     async drain(groupID) {
+      await settleAppPublications(groupID)
       const slot = groupSlot(groupID)
       await Promise.all([
         capability.read(groupID, async () => {}),
@@ -849,6 +904,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       assertOpen()
       retirement.assertAvailable(groupID)
       await start()
+      await settleAppPublications(groupID)
       assertOpen()
       const slot = groupSlot(groupID)
       retirement.assertAvailable(groupID)
@@ -906,6 +962,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   bindRegistrySafety(registry, {
     binding: registryBinding,
     entry: capability,
+    settleAppPublications,
     latch,
     held,
     persistTrustUnavailable,

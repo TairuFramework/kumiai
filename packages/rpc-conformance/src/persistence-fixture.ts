@@ -293,7 +293,7 @@ export type ConformanceAccountedGroupObservation<Position extends string = strin
   activeVersion: number | null
   control: ConformanceControlSnapshot<Position> | null
   controlStatus: 'missing' | 'readable' | 'unreadable'
-  stateStatus: 'missing' | 'null' | 'deleted' | 'readable' | 'unreadable'
+  stateStatus: 'missing' | 'null' | 'deleted' | 'readable' | 'unreadable' | 'unobserved'
   terminal: boolean | null
 }
 export type ConformanceEntryReads<Position extends string = string> = {
@@ -323,6 +323,7 @@ export type ConformanceEntryReads<Position extends string = string> = {
 }
 export type ConformancePrepared<T> = { expected: ConformanceGroupTransition['expected']; value: T }
 export type ConformanceEntryCapability<TTx extends ConformanceGroupTransaction> = {
+  finaliseCertifiedApp(key: ConformanceGroupKey, seq: number): Promise<void>
   assertRoot(): void
   observe(
     groupID: string,

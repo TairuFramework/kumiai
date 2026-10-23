@@ -1,7 +1,7 @@
 import type { LogPosition } from '@kumiai/rpc'
+import type { ConformanceAccountedGroupObservation } from '@kumiai/rpc-conformance'
 import { describe, expect, expectTypeOf, test } from 'vitest'
 
-import type { ConformanceAccountedGroupObservation } from '../../rpc-conformance/lib/persistence-fixture.js'
 import type { AccountedGroupObservation } from '../src/entry-capability.js'
 import { physicalRecordKey } from '../src/persistence-codec.js'
 import { createRegistryFixture, registryFixtureObserve } from './fixtures/registry.js'
@@ -54,7 +54,7 @@ for (const mode of ['real-mls', 'double'] as const) {
                 lifetime,
                 lifetimeStatus: 'readable',
                 activeKey: key,
-                stateStatus: 'readable',
+                stateStatus: corrupt === 'metadata' ? 'unreadable' : 'readable',
                 trustStatus: 'readable',
                 ...(corrupt === 'control'
                   ? { controlStatus: 'unreadable', control: null, metadataStatus: 'readable' }

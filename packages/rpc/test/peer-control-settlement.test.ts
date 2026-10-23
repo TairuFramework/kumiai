@@ -19,6 +19,7 @@ import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import {
   buildInviteCommit,
   buildLedgerCommit,
+  latchPeerSafety,
   makeMLSPeer,
   seedBuiltOperation,
   type TestPeer,
@@ -930,4 +931,78 @@ test('one control-walk step does not start another scheduler pass during refresh
   await flushCurrentTasks()
   expect(Date.now()).toBe(now)
   expect((await bob.peer.outcomes()).find((row) => row.opID === next.id)?.kind).toBe('landed')
+})
+
+test('post-apply latch reconstructs committed control bookkeeping', async () => {
+  const hub = new FakeHub()
+  const bob = member(hub, { operationTimeoutMs: 100 })
+  await bob.peer.replay()
+  const saved = await seedBuiltOperation(bob, buildInviteCommit(bob, 'frozen-invitee'))
+  const now = vi.spyOn(Date, 'now').mockReturnValue(saved.deadline)
+  await bob.controlWalk.stepOperation(saved.id)
+  now.mockRestore()
+  const provisional = (await bob.peer.outcomes())[0]
+  if (provisional === undefined) throw new Error('Missing provisional report')
+  await bob.peer.ack(provisional.id)
+  const entered = Promise.withResolvers<void>()
+  const released = Promise.withResolvers<void>()
+  const adopt = bob.mls.adoptOperation.bind(bob.mls)
+  const adopting = vi.spyOn(bob.mls, 'adoptOperation').mockImplementation(async (...args) => {
+    const result = await adopt(...args)
+    entered.resolve()
+    await released.promise
+    return result
+  })
+  await hub.publish({
+    senderDID: 'bob',
+    topicID: commitTopic(secret),
+    retain: 'log',
+    payload: saved.slot.payload,
+    publishID: saved.slot.publishID,
+  })
+  const walking = bob.controlWalk.walkCommits().catch(() => {})
+  try {
+    await entered.promise
+    const committed = await bob.control.load()
+    const final = committed.outcomes[0]
+    expect(final).toMatchObject({ opID: saved.id, kind: 'landed' })
+    expect(final?.id).not.toBe(provisional.id)
+    expect(committed.cursor?.epoch).toBe(2)
+    expect(committed.welcomes).toHaveLength(1)
+    latchPeerSafety(bob, 'fork-halted')
+    await bob.control.apply(
+      {
+        forkHalt: {
+          eventID: JSON.stringify(['group:fork', 'memory-group', 1]),
+          detectedAt: 1,
+          evidence: { kind: 'unexplained-own-commit', epoch: 1, position: '1', digest: 'fork' },
+        },
+      },
+      crypto.randomUUID(),
+    )
+    await bob.peer.dispose()
+    released.resolve()
+    await walking
+    await bob.peer.drained()
+    adopting.mockRestore()
+    const published = hub.published.length
+    const replayed = vi.fn()
+    const again = member(hub, { restartOf: bob, onOutcome: replayed })
+    const secondAdopt = vi.spyOn(again.mls, 'adoptOperation')
+    const readEpoch = vi.spyOn(again.mls, 'readEpoch')
+    expect(await again.peer.outcomes()).toEqual([final])
+    await again.peer.ack(provisional.id)
+    expect(await again.peer.outcomes()).toEqual([final])
+    await vi.waitFor(async () => expect((await again.control.load()).welcomes).toEqual([]))
+    expect(again.welcomes).toContain(saved.id)
+    expect((await again.control.load()).cursor).toEqual(committed.cursor)
+    expect((await again.control.load()).commitOnce).toBeNull()
+    expect(replayed).toHaveBeenCalledExactlyOnceWith(final)
+    expect(secondAdopt).not.toHaveBeenCalled()
+    expect(readEpoch).not.toHaveBeenCalled()
+    expect(hub.published).toHaveLength(published)
+  } finally {
+    released.resolve()
+    await walking
+  }
 })

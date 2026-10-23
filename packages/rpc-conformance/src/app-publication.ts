@@ -43,6 +43,23 @@ export type AppPublicationFixture = {
   ): void
   change(kind: 'version' | 'attempt' | 'epoch' | 'incarnation' | 'anchor'): Promise<void>
   counts(): { seals: number; transactions: number; publishes: number; effects: number }
+  reopenFrozen(
+    hold:
+      | 'fork-halted'
+      | 'recovery-unavailable'
+      | 'spent-set-corrupt'
+      | 'legacy-control'
+      | 'revoke'
+      | 'rotation-required'
+      | 'terminal'
+      | 'retired',
+  ): Promise<{
+    outbox: ConformanceAppOutbox
+    finalise(): Promise<void>
+    rows(): Promise<Array<{ namespace: string; key: string; value: Uint8Array }>>
+    counts(): { seals: number; transactions: number; publishes: number; effects: number }
+    close(): Promise<void>
+  }>
   reopen(): Promise<AppPublicationFixture>
   close(): Promise<void>
 }
@@ -102,6 +119,78 @@ export function testAppPublicationConformance(params: {
           expect(await f.outbox.loadSettlement(0)).toBeNull()
         } finally {
           await f.close()
+        }
+      },
+    )
+    test.each([
+      'fork-halted',
+      'recovery-unavailable',
+      'spent-set-corrupt',
+      'legacy-control',
+      'revoke',
+      'rotation-required',
+      'terminal',
+      'retired',
+    ] as const)(
+      'held reconstruction finalises only persisted publication obligations (%s)',
+      async (hold) => {
+        const f = await params.createFixture()
+        let frozen: Awaited<ReturnType<AppPublicationFixture['reopenFrozen']>> | undefined
+        try {
+          await f.outbox.put(entry())
+          await f.outbox.put(entry(1))
+          const prepared = await f.publication.prepare(entry(), null)
+          const attempt = prepared.entry.lastAttempt
+          if (attempt === null) throw new Error('Missing original attempt')
+          const occurrence = {
+            incarnation: attempt.incarnation,
+            segment: attempt.segment,
+            topicID: attempt.topicID,
+            position: 'original-position',
+          }
+          expect(
+            await f.outbox.recordSettlement(
+              0,
+              {
+                sequenceID: occurrence.position,
+                attemptID: attempt.publishID,
+                topicID: attempt.topicID,
+                outcome: 'published',
+              },
+              {
+                identity: prepared.snapshot.identity,
+                stateVersion: prepared.snapshot.stateVersion,
+                attemptID: attempt.publishID,
+              },
+            ),
+          ).toEqual({ recorded: true })
+          f.failNext('effect', 'rollback')
+          await expect(f.outbox.remove(0, occurrence)).rejects.toThrow()
+          expect(await f.outbox.loadSettlement(0)).not.toBeNull()
+          frozen = await f.reopenFrozen(hold)
+          const before = await frozen.rows()
+          await frozen.finalise()
+          await frozen.finalise()
+          const after = await frozen.rows()
+          expect(
+            after.filter((row) => ['state', 'trust', 'anchor'].includes(row.namespace)),
+          ).toEqual(before.filter((row) => ['state', 'trust', 'anchor'].includes(row.namespace)))
+          const published = (await frozen.outbox.events()).filter(
+            (event) => event.kind === 'published',
+          )
+          expect(published).toHaveLength(1)
+          expect(published[0]).toMatchObject({ ...f.key, entry: prepared.entry, occurrence })
+          expect(await frozen.outbox.loadSettlement(0)).toBeNull()
+          if (hold !== 'retired')
+            expect((await frozen.outbox.list()).map((row) => row.seq)).toEqual([1])
+          expect(frozen.counts()).toMatchObject({
+            seals: 0,
+            publishes: 0,
+            transactions: 0,
+            effects: 1,
+          })
+        } finally {
+          await (frozen ?? f).close()
         }
       },
     )

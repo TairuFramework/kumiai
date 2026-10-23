@@ -688,6 +688,8 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
         const source = await owner.recoverySource(groupID)
         const lifetime = await fixture.device.groups.load(groupID)
         const state = await fixture.device.groups.loadState(key)
+        if (state === null) throw new Error('Missing source state')
+        const stateRows = (await fixture.inspectRows()).state
         const trust = await fixture.device.groups.loadTrust(groupID)
         const control = await fixture.device.groups.ports(key).control.load()
         let workReached = false
@@ -709,7 +711,11 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
         expect(workReached).toBe(true)
         expect(outcome).toMatchObject({ error: { name: 'RegistrySourceMovedError' } })
         expect(await fixture.device.groups.load(groupID)).toEqual(lifetime)
-        expect(await fixture.device.groups.loadState(key)).toEqual(state)
+        expect(await fixture.device.groups.loadState(key)).toEqual({
+          ...state,
+          version: source.stateVersion + 1,
+        })
+        expect((await fixture.inspectRows()).state).toEqual(stateRows)
         expect(await fixture.device.groups.loadTrust(groupID)).toEqual(trust)
         expect(await fixture.device.groups.ports(key).control.load()).toEqual(control)
         expect(await fixture.device.groups.loadState({ groupID, incarnation: 2 })).toBeNull()

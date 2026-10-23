@@ -1586,3 +1586,67 @@ describe('recovery ordering', { concurrent: false }, () => {
     },
   )
 })
+
+test('terminal clearing finalises a persisted publication before clearing transport', async () => {
+  vi.useFakeTimers()
+  const outbox = createMemoryAppOutbox()
+  const queue = createAppOutboxAcceptance({
+    outbox,
+    limit: 4,
+    admission: () => ({ admissible: true, epoch: 1 }),
+  })
+  await queue.accept({
+    protocol: 'chat',
+    prc: 'chat/posted',
+    data: encodeEventFrame('chat/posted', {}),
+  })
+  const floor = { epoch: 1, position: null, covered: true }
+  const publication = createWorkerPublication({
+    outbox,
+    floor: () => floor,
+    put: outbox.put,
+    seal: async () => ({ topicID: 'original-app', payload: new Uint8Array([1]), floor }),
+  })
+  let fail = true
+  const delivery = createLogDelivery({
+    queue,
+    ready: async () => {},
+    floor: () => floor,
+    held: () => false,
+    prepare: publication.prepare,
+    snapshot: publication.snapshot,
+    loadSettlement: outbox.loadSettlement,
+    recordSettlement: outbox.recordSettlement,
+    publish: async () => ({ sequenceID: 'original-position' }),
+    probe: async () => ({ head: null, messages: [], gap: false, oldest: null }),
+    pull: async () => {},
+    heal: async () => {},
+    remove: async (...args) => {
+      if (fail) {
+        fail = false
+        throw new Error('Removal unavailable')
+      }
+      await outbox.remove(...args)
+    },
+    clear: outbox.clear,
+    cleared: () => {},
+    deliveredWindowMs: 1000,
+    deliveredLimit: 4,
+  })
+  try {
+    delivery.trigger()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(await outbox.loadSettlement(0)).not.toBeNull()
+    delivery.removed()
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(await outbox.list()).toEqual([])
+    expect((await outbox.events()).filter((event) => event.kind === 'published')).toMatchObject([
+      { occurrence: { topicID: 'original-app', position: 'original-position' } },
+    ])
+    expect((await outbox.events()).filter((event) => event.kind === 'failed')).toEqual([])
+  } finally {
+    delivery.close()
+    await delivery.drained()
+    vi.useRealTimers()
+  }
+})

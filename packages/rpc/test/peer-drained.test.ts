@@ -34,6 +34,57 @@ async function pausedDrain(peer: { drained(): Promise<void> }) {
 }
 
 describe('peer host drain', { concurrent: false }, () => {
+  test.each(['certification', 'finalisation'] as const)(
+    'disposal retains submitted settlement completion / %s',
+    async (phase) => {
+      const pause = gate()
+      const entered = Promise.withResolvers<void>()
+      const hub = new FakeHub()
+      const member = makeMLSPeer(hub, 'alice', new Uint8Array(32).fill(0x33))
+      await member.peer.replay()
+      const method = phase === 'certification' ? 'recordSettlement' : 'remove'
+      if (method === 'recordSettlement') {
+        const record = member.appOutbox.recordSettlement.bind(member.appOutbox)
+        member.appOutbox.recordSettlement = async (...args) => {
+          const result = await record(...args)
+          entered.resolve()
+          await pause.promise
+          return result
+        }
+      } else {
+        const remove = member.appOutbox.remove.bind(member.appOutbox)
+        member.appOutbox.remove = async (...args) => {
+          await remove(...args)
+          entered.resolve()
+          await pause.promise
+        }
+      }
+      try {
+        await member.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'frozen' } })
+        await entered.promise
+        await member.peer.dispose()
+        let drained = false
+        const drain = member.peer.drained().then(() => {
+          drained = true
+        })
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(drained).toBe(false)
+        const handedOff = hub.published.length
+        pause.release()
+        await drain
+        expect(await member.appOutbox.list()).toEqual([])
+        expect(
+          (await member.appOutbox.events()).filter((event) => event.kind === 'published'),
+        ).toHaveLength(1)
+        expect(hub.published).toHaveLength(handedOff)
+      } finally {
+        pause.release()
+        await member.peer.dispose()
+        await member.peer.drained()
+      }
+    },
+  )
+
   test('drainedWaitsForInFlightJournalPut', async () => {
     for (const path of ['build', 'apply', 'adopt']) {
       const pause = gate()

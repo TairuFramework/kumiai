@@ -679,7 +679,7 @@ for (const mode of ['real-mls', 'double'] as const) {
     })
 
     test.each(['active', 'retired'] as const)(
-      'delete protects %s certified settlement until original publication',
+      'delete finalises %s certified settlement before clearing',
       async (location) => {
         const fixture = await create()
         try {
@@ -709,13 +709,6 @@ for (const mode of ['real-mls', 'double'] as const) {
           })
           const active = location === 'retired' ? await switchSource(fixture) : key
           const owner = registry(fixture)
-          const before = await fixture.inspectRows()
-          await expect(owner.delete(active)).rejects.toBeInstanceOf(GroupControlUnsettledError)
-          expect(await fixture.inspectRows()).toEqual(before)
-          expect(await fixture.device.groups.ports(key).outbox.events()).toEqual([])
-          await fixture.device.groups
-            .ports(key)
-            .outbox.remove(1, { incarnation: 1, segment: 0, topicID: 'original', position: '19' })
           await owner.delete(active)
           expect(await fixture.device.groups.ports(key).outbox.events()).toEqual([
             {

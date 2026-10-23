@@ -86,6 +86,29 @@ export function createLogDelivery(params: LogDeliveryParams) {
   let retrying = false
   let timer: ReturnType<typeof setTimeout> | undefined
   let backoff = 1000
+  const submitted = new Set<Promise<unknown>>()
+  let completion: Promise<void> | undefined
+  function track<T>(promise: Promise<T>): Promise<T> {
+    submitted.add(promise)
+    void promise.then(
+      () => submitted.delete(promise),
+      () => submitted.delete(promise),
+    )
+    return promise
+  }
+  async function finishSubmitted(): Promise<void> {
+    while (submitted.size > 0) await Promise.allSettled([...submitted])
+    let delay = 100
+    for (;;) {
+      try {
+        await removeProven()
+        return
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, delay))
+        delay = Math.min(delay * 2, 15000)
+      }
+    }
+  }
 
   const headPastFloor = (head: string | null, floor: EpochFloor): boolean =>
     head != null && (floor.position == null || head > floor.position)
@@ -132,9 +155,8 @@ export function createLogDelivery(params: LogDeliveryParams) {
       publications.delete(seq)
       prepared.delete(seq)
       proven.delete(seq)
-      if (closed) return false
     }
-    return true
+    return !closed
   }
 
   const sameSource = (a: AppPublicationSnapshot, b: AppPublicationSnapshot): boolean =>
@@ -304,6 +326,8 @@ export function createLogDelivery(params: LogDeliveryParams) {
     await params.ready()
     await params.queue.ready()
     if (closed) return
+    // Certified occurrences precede terminal clearing and every safety exit.
+    if (!(await removeProven())) return
     if (removed) {
       if (params.queue.lowestUnresolvedSeq() != null) return
       const seqs = params.queue.entries().map((entry) => entry.seq)
@@ -316,8 +340,6 @@ export function createLogDelivery(params: LogDeliveryParams) {
       if (!closed) params.cleared({ reason: 'removed', seqs })
       return
     }
-    // A failed durable removal retries alone, even after another epoch arrives.
-    if (!(await removeProven())) return
     if (safetyHeld()) return
     // Prefer resends in original order; a full queue must drain before admitting them.
     while (resend.length > 0) {
@@ -438,29 +460,31 @@ export function createLogDelivery(params: LogDeliveryParams) {
       active = true
       needed = false
       immediate = false
-      void (async () => {
-        let failed = false
-        try {
-          await pass()
-          backoff = 1000
-        } catch {
-          failed = true
-        } finally {
-          active = false
-          if (!closed) {
-            retrying = failed
-            if (
-              failed ||
-              params.queue.entries().length > 0 ||
-              resend.length > 0 ||
-              (removed && needed)
-            ) {
-              schedule(!failed && immediate ? 0 : backoff)
-              if (failed) backoff = Math.min(backoff * 2, 60_000)
-            } else if (needed) schedule(0)
+      void track(
+        (async () => {
+          let failed = false
+          try {
+            await pass()
+            backoff = 1000
+          } catch {
+            failed = true
+          } finally {
+            active = false
+            if (!closed) {
+              retrying = failed
+              if (
+                failed ||
+                params.queue.entries().length > 0 ||
+                resend.length > 0 ||
+                (removed && needed)
+              ) {
+                schedule(!failed && immediate ? 0 : backoff)
+                if (failed) backoff = Math.min(backoff * 2, 60_000)
+              } else if (needed) schedule(0)
+            }
           }
-        }
-      })()
+        })(),
+      )
     }, delay)
   }
 
@@ -477,7 +501,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
     readyWalk: async (started: number): Promise<void> => {
       if (walk?.started === started) await Promise.all(walk.snapshots.values())
     },
-    certify,
+    certify: (epoch: number, started: number): Promise<void> => track(certify(epoch, started)),
     /**
      * Another member rejoined by external commit. A member stranded behind a retention gap cannot
      * read the epochs it missed, so entries delivered there never reach it. Send the delivered
@@ -505,10 +529,14 @@ export function createLogDelivery(params: LogDeliveryParams) {
       needed = true
       schedule(0)
     },
+    drained: (): Promise<void> =>
+      completion ?? Promise.reject(new Error('Close delivery before draining')),
     close: (): void => {
+      if (closed) return
       closed = true
       prepared.clear()
       clearTimeout(timer)
+      completion = finishSubmitted()
     },
   }
 }

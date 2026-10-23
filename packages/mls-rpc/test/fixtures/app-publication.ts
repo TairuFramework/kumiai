@@ -1,9 +1,15 @@
 import { decodeClientState, ownApplicationGeneration } from '@kumiai/mls'
-import { APP_TOPIC_LABEL } from '@kumiai/rpc'
+import {
+  APP_TOPIC_LABEL,
+  asLogPosition,
+  forkEventID,
+  recoveryUnavailableEventID,
+} from '@kumiai/rpc'
 import type { AppPublicationFixture } from '@kumiai/rpc-conformance'
 import { vi } from 'vitest'
 
 import { createRegistryAppPublication } from '../../src/app-publication.js'
+import { finaliseAppSettlements } from '../../src/app-settlement.js'
 import { entryCapability } from '../../src/entry-capability.js'
 import { encodeStoredValue } from '../../src/persistence-codec.js'
 import { DisplacedGroupHandleError } from '../../src/persistence-errors.js'
@@ -222,6 +228,82 @@ export async function createAppPublicationFixture(
         }
       },
       counts: () => ({ ...counts }),
+      async reopenFrozen(hold) {
+        if (hold === 'retired') await result.change('incarnation')
+        else if (hold === 'spent-set-corrupt')
+          await fixture.corruptTrust(key.groupID, 'empty-spent')
+        else if (hold === 'rotation-required' || hold === 'terminal') {
+          const state = await fixture.device.groups.loadState(key)
+          if (state === null || state.deleted) throw new Error('Missing frozen source')
+          await fixture.installRows({
+            key,
+            state: {
+              ...state,
+              version: state.version + 1,
+              ...(hold === 'terminal' ? { terminal: true } : { senderHWM: 500 }),
+            },
+          })
+        } else {
+          await fixture.device.groups.ports(key).control.apply(
+            hold === 'fork-halted'
+              ? {
+                  forkHalt: {
+                    eventID: forkEventID(key),
+                    detectedAt: 1,
+                    evidence: {
+                      kind: 'epoch-authenticator',
+                      epoch: 0,
+                      local: new Uint8Array([1]),
+                      remote: new Uint8Array([2]),
+                    },
+                  },
+                }
+              : hold === 'recovery-unavailable'
+                ? {
+                    recoveryUnavailable: {
+                      ...key,
+                      id: recoveryUnavailableEventID(key),
+                      kind: 'group:recovery-unavailable',
+                      reason: 'trust-unreadable',
+                    },
+                  }
+                : hold === 'legacy-control'
+                  ? {
+                      controlHold: {
+                        reason: 'unsupported-version',
+                        position: asLogPosition('1'),
+                      },
+                    }
+                  : {
+                      putOperations: [
+                        {
+                          id: 'revoke',
+                          seq: 0,
+                          enqueuedAt: 1,
+                          deadline: 30_001,
+                          kind: 'remove',
+                          revokes: true,
+                          body: new Uint8Array(),
+                          stage: 'intent',
+                        },
+                      ],
+                    },
+            crypto.randomUUID(),
+          )
+        }
+        fixture = await fixture.reopen()
+        counts.seals = 0
+        counts.transactions = 0
+        counts.publishes = 0
+        counts.effects = 0
+        return {
+          outbox: fixture.device.groups.ports(key).outbox,
+          finalise: () => finaliseAppSettlements({ persistence: fixture.device.groups, key }),
+          rows: result.rows,
+          counts: result.counts,
+          close: () => fixture.close(),
+        }
+      },
       reopen: async () => adapt(await fixture.reopen()),
       close: () => fixture.close(),
     }

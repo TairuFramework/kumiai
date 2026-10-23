@@ -16,6 +16,7 @@ import {
   assertPersistedSpentSet,
   assertStateTransition,
   assertTrustTransition,
+  projectStateVersion,
 } from './persistence-guards.js'
 import type {
   AtRestCodec,
@@ -542,7 +543,7 @@ export function createUnlockedGroupStateStores(params: {
           if (value !== null && value.incarnation !== incarnation) {
             throw new GroupStateConflictError('Stored incarnation mismatch')
           }
-          return value
+          return projectStateVersion(value, await stateMetadata(incarnation).load())
         },
         async save(value) {
           assertMemoryWrite(tx, 'domain')
@@ -572,7 +573,7 @@ export function createUnlockedGroupStateStores(params: {
             )
               throw new GroupStateConflictError('State version conflict')
           } else {
-            const previous = await row.load()
+            const previous = projectStateVersion(await row.load(), previousMetadata)
             const retained = await loadTrust()
             assertStateTransition(
               previous,

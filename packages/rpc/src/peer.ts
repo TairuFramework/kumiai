@@ -358,6 +358,10 @@ export function createGroupPeerWithControlWalk<
   )
     throw new TypeError('Installed recovery continuation required')
   const boundary = createHostBoundary()
+  // Certified removal outlives the public host boundary.
+  const settlementBoundary = createHostBoundary()
+  const settlementOutbox =
+    input.appOutbox == null ? undefined : settlementBoundary.wrap(input.appOutbox)
   const controlAbort = new AbortController()
   const applyResolved: typeof applyControlResolved = (store, changes, mutationID) =>
     applyControlResolved(store, changes, mutationID, undefined, controlAbort.signal)
@@ -1016,7 +1020,10 @@ export function createGroupPeerWithControlWalk<
               throw error
             }
           },
-          remove: (seq, outcome) => params.appOutbox.remove(seq, outcome),
+          remove: (seq, outcome) => {
+            if (settlementOutbox === undefined) throw new TypeError('Missing settlement outbox')
+            return settlementOutbox.remove(seq, outcome)
+          },
           clear: async () => {
             // An early safety exit must not make unrestored records look completed.
             if (!pendingRestored) throw new Error('Pending application records are not restored')
@@ -5757,6 +5764,8 @@ export function createGroupPeerWithControlWalk<
         .then(() => commitTail)
         .then(async () => {
           await internalDrain
+          await logDelivery?.drained()
+          settlementBoundary.close()
         })
     },
     dispose: () => {

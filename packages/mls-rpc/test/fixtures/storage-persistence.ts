@@ -165,6 +165,7 @@ export type RegistryStorageFixture = Omit<
     fn: () => Promise<void> | void,
   ): void
   entry(): EntryCapability<MemoryTransaction>
+  observeCodec(fn: (kind: 'open' | 'seal', namespace: string) => void): void
   armNextWorkFault(
     point: 'pending',
   ): WorkFaultControl & { mutationID: Promise<string>; disarm(): void }
@@ -204,6 +205,7 @@ export async function createStorageFixture(params: {
   let sealFailure: Error | undefined
   let openFailure: Error | undefined
   let codecProbe: ((phase: string) => Promise<void>) | undefined
+  let codecObserver: ((kind: 'open' | 'seal', namespace: string) => void) | undefined
   let retry = false
   const phaseCallbacks = new Map<Phase, () => Promise<void> | void>()
   const held = new Set<Latch>()
@@ -213,9 +215,11 @@ export async function createStorageFixture(params: {
     sealFailure = undefined
     openFailure = undefined
     codecProbe = undefined
+    codecObserver = undefined
     phaseCallbacks.clear()
   }
   async function codecCall(kind: 'seal' | 'open', bytes: Uint8Array, aad: Uint8Array) {
+    codecObserver?.(kind, (JSON.parse(new TextDecoder().decode(aad)) as Array<string>)[3] as string)
     const probe = codecProbe
     codecProbe = undefined
     const latch = kind === 'seal' ? sealLatch : openLatch
@@ -759,6 +763,9 @@ export async function createStorageFixture(params: {
     probeCodec(fn) {
       active()
       codecProbe = fn
+    },
+    observeCodec(fn) {
+      codecObserver = fn
     },
     onPhase(phase, fn) {
       active()

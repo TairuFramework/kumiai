@@ -1,6 +1,7 @@
 import { type ClientState, decodeClientState, encodeClientState } from '@kumiai/mls'
 import type { EpochReceiverData } from 'ts-mls'
 
+import type { StateMetadata } from './entry-capability.js'
 import { GroupStateConflictError } from './persistence-errors.js'
 import type { GroupRecoveryTrust, GroupStateRecord } from './persistence-types.js'
 
@@ -14,6 +15,23 @@ function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
 
 function validCounter(value: number, minimum: number): boolean {
   return Number.isSafeInteger(value) && value >= minimum
+}
+
+export function projectStateVersion(
+  record: GroupStateRecord | null,
+  metadata: StateMetadata | null,
+): GroupStateRecord | null {
+  if (record === null) return null
+  requireCondition(
+    metadata !== null &&
+      metadata.groupID === record.groupID &&
+      metadata.incarnation === record.incarnation &&
+      metadata.deleted === record.deleted &&
+      validCounter(record.version, 1) &&
+      metadata.version >= record.version,
+    'State version metadata conflict',
+  )
+  return { ...record, version: metadata.version }
 }
 
 export function readState(record: GroupStateRecord & { deleted: false }): ClientState | null {
