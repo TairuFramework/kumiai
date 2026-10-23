@@ -38,7 +38,7 @@ import {
   revokeIndices,
   revokesSubject,
 } from '../src/controller-log.js'
-import { createEmbeddedControllerResolver } from '../src/embedded-resolver.js'
+import { createRegistryControllerResolver } from '../src/embedded-resolver.js'
 import { revokeChain, rotateChain } from './fixtures/controller-chain.js'
 import { saturatedLog } from './fixtures/controller-epoch.js'
 
@@ -463,7 +463,7 @@ test.each([false, true])(
       },
       sigs: [],
     } as unknown as SignedEvent
-    const resolver = createEmbeddedControllerResolver({
+    const resolver = createRegistryControllerResolver({
       controllerID: did,
       prefix: [inception, revoke],
     })

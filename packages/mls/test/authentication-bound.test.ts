@@ -163,7 +163,7 @@ describe('validateCredential — bound did:kokuin leaf', () => {
 
   test('validation never queries a DID other than the embedded controller (zero-sidecar)', async () => {
     // Distinguishes "embedded-only" from "would-be-external": a spy wraps createControllerResolver's
-    // loadLog at the exact seam createEmbeddedControllerResolver uses, recording every DID it is ever
+    // loadLog at the exact seam createRegistryControllerResolver uses, recording every DID it is ever
     // invoked with. If validation reached outside the embedded prefix for anything — a second
     // resolve, a cache warm, a rotated-issuer lookup — it would show up here. It doesn't: the log is
     // proof the boundary holds, not an inference from the absence of a network in this test run.

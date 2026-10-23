@@ -57,6 +57,7 @@ export {
   nobleCryptoProvider,
 } from './crypto.js'
 export type { LeafBinding } from './device-proof.js'
+export { createRegistryControllerResolver, prefixRelation } from './embedded-resolver.js'
 export {
   CONTROL_ENVELOPE_VERSION,
   type ControlEnvelope,

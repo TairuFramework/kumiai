@@ -4,6 +4,7 @@ import {
   type ControllerProjection,
   cascadeOf,
   claimsFor,
+  createRegistryControllerResolver,
   type EvidenceSlot,
   effectDelta,
   effectiveAuthorityOf,
@@ -14,6 +15,7 @@ import {
   type MemberRootStatus,
   memberDropIndices,
   memberRootStatus,
+  prefixRelation,
   proofSize,
   recordedLogOf,
   registryForLog,
@@ -70,4 +72,15 @@ test('member authority and effect helpers are available through the package entr
 
 test('proof sizing is available through the package entry point', () => {
   expect(proofSize({ chain: [], events: [] })).toBe(0)
+})
+
+test('registry controller resolution is available through the package entry point', async () => {
+  const { did, log } = await buildEpoch({ members: 0 })
+  expect(prefixRelation(log, log.chain)).toBe('contained')
+  const resolver = createRegistryControllerResolver({
+    controllerID: did,
+    prefix: log.chain,
+    registry: registryForLog(did, log),
+  })
+  await expect(resolver.frozen().resolve(did, {})).resolves.toMatchObject({ alg: 'EdDSA' })
 })

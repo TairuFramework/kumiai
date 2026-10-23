@@ -32,7 +32,7 @@ import {
 } from './capability.js'
 import { foldChain } from './controller-log.js'
 import { type MLSCredentialIdentity, parseMLSCredentialIdentity } from './credential.js'
-import { createEmbeddedControllerResolver } from './embedded-resolver.js'
+import { createRegistryControllerResolver } from './embedded-resolver.js'
 import { LeafBindingError } from './errors.js'
 import { type DeviceRegistry, denySetOf, mayReadmitResetDevice } from './registry.js'
 
@@ -164,11 +164,17 @@ async function verifyPinnedCapability(params: VerifyPinnedCapabilityParams): Pro
     throw new LeafBindingError('confirmation-invalid')
   }
   const denySet = params.denySet ?? EMPTY_DENY
-  const resolver = createEmbeddedControllerResolver({
+  const base = createRegistryControllerResolver({
     controllerID: params.controllerID,
     prefix: params.prefix,
-    denySet,
-  })
+  }).frozen()
+  const resolver = {
+    ...base,
+    async resolveDenySet(did: string): Promise<ReadonlySet<string>> {
+      await base.resolveDenySet?.(did)
+      return denySet
+    },
+  }
   if (payload.cap === undefined) {
     assertControllerGrant(payload, params.controllerID)
     const verified = await verifyToken(params.capability, {
