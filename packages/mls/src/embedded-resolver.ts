@@ -11,6 +11,9 @@ const EMPTY: ReadonlySet<string> = new Set()
  * `undefined` for any other DID, so no code path can reach a sidecar. `resolveDenySet` is overridden
  * to answer from the injected group-folded set (freshness), rather than the prefix's frozen head.
  *
+ * Member grants are unsupported: the prefix carries no epoch events, so members could only come
+ * from a stale snapshot.
+ *
  * A per-leaf, one-shot instance: the prefix is small, verification is single-pass, and no `history`
  * store is configured. This is the adapter the Slice 1 spike verified to run with zero external I/O.
  */
@@ -25,8 +28,9 @@ export function createEmbeddedControllerResolver(params: {
         ? asControllerLog(params.prefix)
         : undefined,
   })
+  const { resolveMember: _resolveMember, frozen: _frozen, ...resolver } = base
   return {
-    ...base,
+    ...resolver,
     async resolveDenySet(_did: string): Promise<ReadonlySet<string>> {
       return params.denySet ?? EMPTY
     },

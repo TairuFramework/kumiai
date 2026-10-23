@@ -1,10 +1,20 @@
 import { audienceConfirmation, now } from '@kokuin/capability'
-import type { SignedEvent } from '@kokuin/controller'
+import {
+  createAdd,
+  createRotate,
+  digestOf,
+  encodeKey,
+  foldLog,
+  type SignedEvent,
+  snapshotOf,
+} from '@kokuin/controller'
+import { stringifyToken } from '@kokuin/token'
 import type { Credential } from 'ts-mls'
 import { defaultCredentialTypes } from 'ts-mls'
 import { describe, expect, test, vi } from 'vitest'
 
 import { createDIDAuthenticationService, verifyLeafCredential } from '../src/authentication.js'
+import { LeafBindingError } from '../src/errors.js'
 import { buildBoundLeaf } from './fixtures/bound-leaf.js'
 import { revokeChain, rotateChain } from './fixtures/controller-chain.js'
 import { leafCapabilityFixture } from './fixtures/leaf-capability.js'
@@ -181,6 +191,65 @@ describe('offline leaf credential verification', () => {
     } finally {
       clock.mockRestore()
     }
+  })
+
+  test('rejects a member-issued grant carried by a rotated prefix snapshot', async () => {
+    const f = await leafCapabilityFixture()
+    const initial = foldLog(f.controller.id, { chain: [f.inception], events: [] })
+    if (!initial.ok) throw new Error(initial.reason)
+    const add = createAdd({
+      seed: new Uint8Array(32).fill(31),
+      profile: 0,
+      did: f.controller.id,
+      head: initial.head,
+      parents: [initial.head.epoch],
+      member: { did: f.trusted.id, key: encodeKey(f.trusted.publicKey, 'EdDSA'), lease: 10000 },
+    })
+    const epoch = foldLog(f.controller.id, { chain: [f.inception], events: [add] })
+    if (!epoch.ok) throw new Error(epoch.reason)
+    const rotate = createRotate({
+      seed: new Uint8Array(32).fill(31),
+      profile: 0,
+      did: f.controller.id,
+      prior: f.inception.event,
+      snapshot: snapshotOf(epoch.head),
+    })
+    const prefix = [f.inception, rotate]
+    const folded = foldLog(f.controller.id, { chain: prefix, events: [] })
+    if (!folded.ok) throw new Error(folded.reason)
+    expect(rotate.event.m).toEqual([
+      {
+        did: f.trusted.id,
+        key: encodeKey(f.trusted.publicKey, 'EdDSA'),
+        add: digestOf(add.event),
+        lease: 10000,
+      },
+    ])
+    expect(folded.head.members.get(digestOf(add.event))?.effective).toBe(true)
+    const capability = stringifyToken(
+      await f.trusted.signToken({
+        ...f.childPayload,
+        cap: undefined,
+        mbr: { add: digestOf(add.event), g: folded.head.gen },
+      }),
+    )
+    const original = f.credential(capability)
+    const parsed = JSON.parse(
+      new TextDecoder().decode((original as { identity: Uint8Array }).identity),
+    )
+    parsed.controller.prefix = prefix
+    const credential: Credential = {
+      credentialType: defaultCredentialTypes.basic,
+      identity: new TextEncoder().encode(JSON.stringify(parsed)),
+    }
+    const error = await verifyLeafCredential(credential, f.device.publicKey).catch(
+      (error: unknown) => error,
+    )
+    expect(error).toBeInstanceOf(LeafBindingError)
+    expect(error).toMatchObject({ reason: 'issuer-mismatch' })
+    expect(
+      await createDIDAuthenticationService().validateCredential(credential, f.device.publicKey),
+    ).toBe(false)
   })
 
   test('accepts a trusted delegation without resolving the trusted DID', async () => {

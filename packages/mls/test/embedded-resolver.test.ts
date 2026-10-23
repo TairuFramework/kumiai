@@ -15,6 +15,11 @@ describe('createEmbeddedControllerResolver', () => {
     expect(resolved.publicKey).toBeInstanceOf(Uint8Array)
   })
 
+  test.each(['resolveMember', 'frozen'])('does not expose %s', (method) => {
+    const resolver = createEmbeddedControllerResolver({ controllerID: did, prefix: [inception] })
+    expect(method in resolver).toBe(false)
+  })
+
   test('returns the injected deny set', async () => {
     const denySet = new Set(['did:key:zDenied'])
     const resolver = createEmbeddedControllerResolver({
@@ -35,10 +40,7 @@ describe('createEmbeddedControllerResolver', () => {
     await expect(resolver.resolve('did:kokuin:someoneElse', {})).rejects.toThrow(/Unknown DID/)
   })
 
-  // Slice 1 regression guard: the embedded resolver spreads the base controller resolver and
-  // overrides ONLY resolveDenySet — resolveHistoric must still be forwarded verbatim, or a
-  // `historic: true` verifyToken call (management-capability verification) would silently start
-  // asking the wrong question.
+  // Historical authority keys must remain available for grants issued before rotation.
   test('still forwards resolveHistoric from the base controller resolver', async () => {
     const resolver = createEmbeddedControllerResolver({ controllerID: did, prefix: [inception] })
     expect(typeof resolver.resolveHistoric).toBe('function')
