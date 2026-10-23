@@ -495,6 +495,9 @@ test.each(['applyRecovery', 'restoreRecovery', 'reconcileCapture', 'sealGroupInf
     const port = recoveryOnlyMLS({
       ...mls,
       capturedRecovery: {
+        inspectCapture: vi.fn(() => {
+          throw new Error('Unexpected capture inspection')
+        }),
         applyRecovery: fail,
         restoreRecovery: fail,
         reconcileCapture: fail,

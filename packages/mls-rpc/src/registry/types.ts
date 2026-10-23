@@ -68,6 +68,7 @@ export type ReceiveResult =
       error?: unknown
     }
 export type RegistryHandleAccess = {
+  assertPublicationEntry(): void
   preparePublication(entry: AppOutboxEntry, floor: string | null): Promise<PreparedAppPublication>
   publicationSnapshot(protocol: string): Promise<AppPublicationSnapshot | null>
   receive(frames: Array<ReceiveInput>): Promise<Array<ReceiveResult>>

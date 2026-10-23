@@ -419,7 +419,7 @@ function ledgerLogEntry(
  * external rejoiner adopting a fork existing members reject. Ordinary commit admission
  * still enforces expiry.
  */
-function registryWithTreeBindings(
+export function registryWithTreeBindings(
   registry: DeviceRegistry,
   tree: ClientState['ratchetTree'],
   anchor: GroupAnchor,
@@ -458,7 +458,7 @@ function registryWithTreeBindings(
  * (see {@link foldControl}), so a role entry's authority resolves against the registry-so-far.
  * The mixed-type log is fed in whole; foldControl drops every unrelated entry by type.
  */
-function foldLedgerControl(
+export function foldLedgerControl(
   ledger: ReadonlyArray<LedgerLogEntry>,
   anchor: GroupAnchor,
   groupID: string,

@@ -43,6 +43,7 @@ export function memoryApplicationPorts(
   return {
     appOutbox,
     appPublication: {
+      assertRoot: () => {},
       snapshot: (protocol) => mls.publication(() => snapshot(protocol)),
       prepare(input, floor) {
         const entry = structuredClone(input)

@@ -14,9 +14,11 @@ import {
   type GroupHandle,
   type GroupOptions,
   GroupRestoreError,
+  inspectRecoveryGroupInfo,
   joinGroupExternal,
   LeafBindingError,
   LeafLapsedError,
+  LedgerIncompleteError,
   nobleCryptoProvider,
   openRecoveryVerdictFromTrust as openTrustedVerdict,
   parseMLSCredentialIdentity,
@@ -114,6 +116,65 @@ export async function authenticateRecoveryReply(
   params: AuthenticateRecoveryReplyParams,
 ): Promise<CapturedRecoveryGroupInfo | null> {
   return await authenticateTrustedReply({ ...params, trust: recoveryTrustInputs(params.trust) })
+}
+
+export async function inspectRecoveryCapture(params: {
+  source: RegistryRecoverySource
+  reply: CapturedRecapture
+  environment: RecoveryEnvironment
+}): Promise<{ groupID: string; epoch: number; authenticator: Uint8Array } | null> {
+  const source = copyRecoverySource(validateRecoverySource(params.source))
+  const { reply, environment } = params
+  const verified = await authenticateRecoveryReply({
+    trust: source.trust,
+    sealed: reply.sealed,
+    requestID: reply.requestID,
+    requestKey: reply.requestKey,
+    options: environment.options,
+  })
+  if (verified === null) return null
+  let controller = source.trust.binding ?? undefined
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const facts = await inspectRecoveryGroupInfo({
+        groupInfo: verified.groupInfo,
+        identity: environment.identity,
+        credential: source.trust.credential,
+        controller,
+        ledgerEntries: verified.ledger,
+        options: { ...environment.options, ciphersuiteName: source.trust.ciphersuiteName },
+      })
+      if (
+        (reply.epochFloor !== null && facts.epoch < reply.epochFloor) ||
+        (source.identity !== null &&
+          facts.epoch === source.identity.epoch &&
+          !sameBytes(verified.groupInfoAuthenticator, source.identity.authenticator))
+      )
+        return null
+      return { ...facts, authenticator: verified.groupInfoAuthenticator.slice() }
+    } catch (cause) {
+      if (
+        attempt === 0 &&
+        source.trust.binding !== null &&
+        (cause instanceof LeafBindingError ||
+          cause instanceof LeafLapsedError ||
+          cause instanceof RevokeProofError)
+      ) {
+        // Renew against the authenticated public tree before any candidate can be constructed.
+        controller =
+          (await environment.recoveryBinding?.({
+            groupID: source.key.groupID,
+            controllerID: source.trust.binding.id,
+            current: source.trust.binding,
+          })) ?? undefined
+        if (controller === undefined) return null
+        continue
+      }
+      if (candidateRefused(cause) || cause instanceof LedgerIncompleteError) return null
+      throw cause
+    }
+  }
+  return null
 }
 
 export async function verifyRosterAbsence(

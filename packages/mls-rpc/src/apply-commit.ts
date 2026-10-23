@@ -6,7 +6,12 @@ import {
   MissingLedgerEntriesError,
   type VerifiedLedgerEntry,
 } from '@kumiai/mls'
-import type { CommitContext, RecoveryRefusalReason, RosterEntry } from '@kumiai/rpc'
+import {
+  type CommitContext,
+  DeliveredEntryCopyError,
+  type RecoveryRefusalReason,
+  type RosterEntry,
+} from '@kumiai/rpc'
 
 import type { PersistContext } from './access.js'
 import type { LedgerEntrySlot } from './mls.js'
@@ -142,8 +147,13 @@ export async function applyCommit(params: ApplyCommitParams): Promise<ApplyCommi
     })
   } catch (error) {
     if (error instanceof MissingLedgerEntriesError || persistFailed || resolverFailed) throw error
-    if (error instanceof CommitValidationUnavailableError)
+    if (error instanceof CommitValidationUnavailableError) {
+      if (error.reason === 'missing-proposal')
+        throw new DeliveredEntryCopyError('Delivered commit references an unavailable proposal', {
+          cause: error,
+        })
       return { ...refused(committerDID), validation: 'unavailable' }
+    }
     threw = true
     if (error instanceof CommitRejectedError) {
       refusal = error.reason

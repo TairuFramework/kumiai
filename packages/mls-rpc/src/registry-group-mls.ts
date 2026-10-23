@@ -30,7 +30,7 @@ import {
 } from './mls.js'
 import { DisplacedGroupHandleError, GroupUnavailableError } from './persistence-errors.js'
 import type { GroupKey, GroupTransaction } from './persistence-types.js'
-import { reconcileRecoveryCapture } from './recovery.js'
+import { inspectRecoveryCapture, reconcileRecoveryCapture } from './recovery.js'
 import { committedNext } from './registry/live-send.js'
 import {
   checkForkRecoveryCaptureInReads,
@@ -457,6 +457,14 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
   })
   const captured = groupMLS.capturedRecovery
   if (captured !== undefined) {
+    captured.inspectCapture = (reply) =>
+      capability.entry.read(key.groupID, async (reads) =>
+        inspectRecoveryCapture({
+          source: await readSource(reads),
+          reply,
+          environment: params.recovery,
+        }),
+      )
     const reconcile = captured.reconcileCapture
     captured.reconcileCapture = async (record, reply) => {
       const result = await reconcile(record, reply)

@@ -117,7 +117,7 @@ test.each([false, true])(
   },
 )
 
-test('the peer recovery switch closes its acknowledged build with a fresh final unknown', async () => {
+test('legacy recovery cannot retire an acknowledged live build without public inspection', async () => {
   const hub = new FakeHub()
   const secret = new Uint8Array(32).fill(0x95)
   const options = {
@@ -142,16 +142,14 @@ test('the peer recovery switch closes its acknowledged build with a fresh final 
     },
     'pending-switch',
   )
-  expect((await bob.peer.recover()).advanced).toBe(true)
+  expect((await bob.peer.recover()).advanced).toBe(false)
   const after = await bob.control.load()
-  expect(after.commitOnce).toBeNull()
+  expect(after.commitOnce).toEqual({ ...saved.slot, acceptedAs: 'accepted' })
+  expect(after.rejoin).toBeNull()
   expect(after.spentSource).toBeNull()
-  const outcome = after.outcomes.find(({ opID }) => opID === saved.id)
-  expect(outcome).toMatchObject({ kind: 'unknown', id: expect.any(String) })
-  expect(outcome?.id).not.toBe('prior-report')
-  expect(outcome?.id).not.toBe(saved.id)
-  expect(after.outcomes.some(({ id }) => id === 'prior-report')).toBe(false)
-  expect(after.welcomes.some(({ opID }) => opID === saved.id)).toBe(false)
+  expect(after.outcomes.filter(({ opID }) => opID === saved.id)).toEqual([
+    { id: 'prior-report', opID: saved.id, at: 1, kind: 'unknown' },
+  ])
 })
 
 test('same-incarnation recovery clears an abandoned source marker without a live build', async () => {

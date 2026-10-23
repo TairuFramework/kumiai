@@ -741,9 +741,35 @@ test('peer root entry checks ownership before joining its commit queue', async (
     const error = Object.assign(new Error('Root entry in settlement effect'), {
       name: 'ReentrantOwnershipError',
     })
-    vi.spyOn(f.appPublication, 'snapshot').mockRejectedValue(error)
+    vi.spyOn(f.appPublication, 'assertRoot').mockImplementation(() => {
+      throw error
+    })
     await expect(f.peer.replay()).rejects.toBe(error)
   } finally {
+    await f.peer.dispose()
+  }
+})
+
+test('log acceptance does not wait for a publication snapshot', async () => {
+  const f = makeMLSPeer(new FakeHub(), 'adoption-root', new Uint8Array(32).fill(4))
+  const gate = Promise.withResolvers<AppPublicationSnapshot | null>()
+  let submission: Promise<void> | undefined
+  try {
+    await f.peer.replay()
+    vi.spyOn(f.appPublication, 'snapshot').mockReturnValue(gate.promise)
+    let accepted = false
+    submission = f.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'queued' } })
+    void submission.then(() => {
+      accepted = true
+    })
+    await flush()
+    expect(accepted).toBe(true)
+    expect(await f.appOutbox.list()).toMatchObject([
+      { protocol: 'chat', prc: 'chat/posted', status: 'accepted', lastAttempt: null },
+    ])
+  } finally {
+    gate.resolve(null)
+    await submission
     await f.peer.dispose()
   }
 })
@@ -758,7 +784,9 @@ test.each(['dispatch', 'request', 'gather', 'to'] as const)(
       const error = Object.assign(new Error('Root entry in settlement effect'), {
         name: 'ReentrantOwnershipError',
       })
-      vi.spyOn(f.appPublication, 'snapshot').mockRejectedValue(error)
+      vi.spyOn(f.appPublication, 'assertRoot').mockImplementation(() => {
+        throw error
+      })
       const protocol = f.peer.protocol('chat')
       const calls = {
         dispatch: () => protocol.dispatch('chat/posted', { data: {} }),

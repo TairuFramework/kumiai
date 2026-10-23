@@ -170,6 +170,10 @@ export {
   type SendAdmission,
 } from './group.js'
 export {
+  type InspectRecoveryGroupInfoParams,
+  inspectRecoveryGroupInfo,
+} from './group-info-inspection.js'
+export {
   type CommitResult,
   commitSelfRemovals,
   proposeSelfRemoval,

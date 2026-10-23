@@ -265,7 +265,7 @@ test.each([false, true])(
   },
 )
 
-test('real walker settles a competitor after a stranded gap and unreadable frame without repeating fetches', async () => {
+test('real walker settles a competitor after a hub gap and unreadable frame without repeating fetches', async () => {
   const h = await fixture()
   try {
     await h.running.peer.replay()
@@ -293,7 +293,8 @@ test('real walker settles a competitor after a stranded gap and unreadable frame
     const after = await h.ports.control.load()
     expect(after.commitOnce).toBeNull()
     expect(after.outcomes).toMatchObject([{ opID: saved.opID, kind: 'unknown' }])
-    expect(after.cursor).toMatchObject({ position: before.cursor?.position, stranded: true })
+    expect(after.cursor).toMatchObject({ position: winner.sequenceID, epoch: saved.epoch + 1 })
+    expect(after.cursor?.stranded).not.toBe(true)
     expect(after.applied).toMatchObject([
       ...before.applied,
       { opID: null, sequenceID: winner.sequenceID },

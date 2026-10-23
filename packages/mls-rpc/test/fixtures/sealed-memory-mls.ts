@@ -1,4 +1,4 @@
-import { getSignatureInfo, normalizeDID } from '@kokuin/token'
+import { createFullIdentity, getSignatureInfo, normalizeDID } from '@kokuin/token'
 import {
   buildGroupAnchorExtension,
   buildLedgerHeadExtension,
@@ -31,6 +31,7 @@ import {
   restoreGroup,
   restrictCommitAuthoring,
   type SendAdmission,
+  signLedgerEntry,
   type VerifiedLedgerEntry,
   verifyLedgerEntry,
 } from '@kumiai/mls'
@@ -42,6 +43,7 @@ import {
 } from '@kumiai/mls/testing'
 import {
   type ControlValidationPort,
+  DeliveredEntryCopyError,
   decodeCommitFrame,
   decodeHandshakeFrame,
   decodeLedgerEntries,
@@ -115,6 +117,7 @@ const memoryModule = (await import(
   } | null
   memoryCheckpointFrame(body: Record<string, unknown>, secret: Uint8Array): Uint8Array
   createMemoryGroupMLS(params: {
+    deliveredCopyError?: typeof DeliveredEntryCopyError
     groupID: string
     localDID?: string
     epoch: number
@@ -182,6 +185,7 @@ function model(
 ): MemoryMLS {
   const verified = new Map<string, VerifiedLedgerEntry>()
   const mls = createMemoryGroupMLS({
+    deliveredCopyError: DeliveredEntryCopyError,
     groupID: credential.groupID,
     ...(receiver ? {} : { localDID: credential.id }),
     epoch: Number(state.groupContext.epoch),
@@ -1096,6 +1100,7 @@ export async function restoreMemoryControlSource(
 export async function buildSealedMemoryOperation(
   op: Operation,
   handle: GroupHandle,
+  namedEntries = false,
 ): Promise<HostBuilt> {
   const rotationIdentity = isAutoRotation(op) ? assertAutoRotation(op, handle) : null
   return authorPrivateCommit(handle, async () => {
@@ -1110,7 +1115,18 @@ export async function buildSealedMemoryOperation(
     const authenticatorBefore = mls.authenticator()
     const rotation = op.kind === 'rotation'
     const target = rotation ? null : (decodeStoredValue(op.body) as { target: string }).target
-    const commit = mls.buildCommit([], target === null ? {} : { adds: [target] })
+    const bodies =
+      target === null || !namedEntries
+        ? []
+        : [
+            await signLedgerEntry(createFullIdentity(sourceState.signaturePrivateKey), {
+              type: 'note',
+              groupID: handle.groupID,
+              subject: handle.credential.id,
+              value: target,
+            }),
+          ]
+    const commit = mls.buildCommit(bodies, target === null ? {} : { adds: [target] })
     let candidate: Uint8Array
     let candidateAuthenticator: Uint8Array
     try {
@@ -1132,7 +1148,7 @@ export async function buildSealedMemoryOperation(
       },
       value: {
         commit,
-        bodies: [],
+        bodies,
         journal:
           rotationIdentity === null
             ? candidate
@@ -1220,8 +1236,21 @@ export function sealedMemoryValidation(): ControlValidationPort {
               removed: false,
               own: header.external !== true && header.committerDID === journal.sourceCredential.id,
             }
-          } catch {
-            return { kind: 'unavailable', reason: 'resolver' }
+          } catch (error) {
+            if (error instanceof DeliveredEntryCopyError) {
+              const cause = error.cause
+              if (
+                cause !== null &&
+                typeof cause === 'object' &&
+                'reason' in cause &&
+                cause.reason === 'missing-proposal'
+              )
+                return { kind: 'unavailable', reason: 'missing-proposal' }
+              throw error
+            }
+            if (error instanceof Error && error.name === 'MissingLedgerEntriesError')
+              return { kind: 'unavailable', reason: 'unexplained-own' }
+            throw error
           }
         },
       }

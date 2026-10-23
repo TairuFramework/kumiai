@@ -110,6 +110,11 @@ export type AuthenticatedRosterAbsence = {
   evidence: Uint8Array
 }
 export type CapturedRecoveryPort = {
+  inspectCapture(reply: CapturedRecapture): Promise<{
+    groupID: string
+    epoch: number
+    authenticator: Uint8Array
+  } | null>
   authoriseForkRecovery?(
     reply: CapturedRecapture,
     noticeID: string,

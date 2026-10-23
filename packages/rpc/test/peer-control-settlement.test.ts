@@ -3,19 +3,22 @@ import { afterEach, expect, test, vi } from 'vitest'
 
 import { readmissionChanges } from '../src/control/store.js'
 import type { Outcome } from '../src/control/types.js'
+import { asLogPosition } from '../src/cursor.js'
 import {
+  decodeHandshakeFrame,
   encodeHandshakeFrame,
   HANDSHAKE_KIND,
   HANDSHAKE_MAGIC,
   HANDSHAKE_VERSION,
 } from '../src/handshake.js'
 import { createGroupPeer } from '../src/peer.js'
-import { commitTopic } from '../src/topic.js'
+import { decodeRecoveryRequest, encodeRecoveryReply } from '../src/recovery.js'
+import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
-import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
+import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import {
   buildInviteCommit,
   buildLedgerCommit,
@@ -24,6 +27,7 @@ import {
   seedBuiltOperation,
   type TestPeer,
 } from './fixtures/peer.js'
+import { controlRecoveryClock, drainUntil } from './fixtures/recovery-clock.js'
 
 test('a synchronous report dependency failure releases the reporting latch for retry', async () => {
   vi.useFakeTimers()
@@ -293,7 +297,7 @@ test('abandon deletes obligations explicitly and later competitor consumption pr
 })
 
 test.each([false, true])(
-  'an ahead prefix retains the built slot without publication or own adoption (own=%s)',
+  'an ahead prefix preserves saved work until authenticated own consumption (own=%s)',
   async (own) => {
     vi.useFakeTimers()
     const hub = new FakeHub()
@@ -323,12 +327,20 @@ test.each([false, true])(
     await bob.controlWalk.walkCommits()
     expect(hub.published).toHaveLength(publications)
     const snapshot = await bob.control.load()
-    expect(snapshot.strand).toEqual({ reason: 'ahead' })
-    expect(snapshot.cursor?.stranded).toBe(true)
-    expect(snapshot.commitOnce).toEqual(op.slot)
-    expect(snapshot.applied).toEqual([])
-    expect(snapshot.outcomes).toEqual([])
-    expect(bob.mls.epoch()).toBe(op.slot.epoch)
+    expect(snapshot.strand).toBeNull()
+    expect(snapshot.cursor?.stranded).not.toBe(true)
+    if (own) {
+      expect(snapshot.commitOnce).toBeNull()
+      expect(snapshot.applied).toMatchObject([{ opID: op.id }])
+      expect(snapshot.outcomes).toMatchObject([{ opID: op.id, kind: 'unknown' }])
+      expect(bob.mls.epoch()).toBe(op.slot.epoch + 1)
+    } else {
+      expect(snapshot.cursor?.incomplete).toBe(true)
+      expect(snapshot.commitOnce).toEqual(op.slot)
+      expect(snapshot.applied).toEqual([])
+      expect(snapshot.outcomes).toEqual([])
+      expect(bob.mls.epoch()).toBe(op.slot.epoch)
+    }
     expect(bob.welcomes).toEqual([])
   },
 )
@@ -1006,3 +1018,226 @@ test('post-apply latch reconstructs committed control bookkeeping', async () => 
     await walking
   }
 })
+
+test.each([0, 1, 2])(
+  'later hub gap claims cannot retire a live build without authenticated advancement (capture epoch=%s)',
+  async (epoch) => {
+    const hub = new FakeHub()
+    const local = createMemoryGroupMLS({
+      localDID: 'bob',
+      members: ['bob', 'alice'],
+      recoverySecret: secret,
+    })
+    const captured = local.capturedRecovery
+    if (captured === undefined) throw new Error('Missing captured recovery')
+    const build = vi.spyOn(captured, 'applyRecovery')
+    const inspect = vi.spyOn(captured, 'inspectCapture')
+    const author = member(hub, {
+      mls: local,
+      members: ['bob', 'alice'],
+      recovery: { timeoutMs: 20, deadlineMs: 100, getDelayMs: () => 0 },
+    })
+    await author.peer.replay()
+    const saved = await seedBuiltOperation(author, buildInviteCommit(author, 'invitee'))
+    const remote = createMemoryGroupMLS({
+      epoch,
+      localDID: 'alice',
+      members: ['bob', 'alice'],
+      recoverySecret: secret,
+    })
+    await remote.persistInitialState()
+    const submit = hub.publish.bind(hub)
+    vi.spyOn(hub, 'publish').mockImplementation(async (input) => {
+      if (input.publishID === saved.slot.publishID) throw new Error('saved publication unavailable')
+      const accepted = await submit(input)
+      const frame = decodeHandshakeFrame(input.payload)
+      if (frame.kind === HANDSHAKE_KIND.recoveryRequest) {
+        const request = decodeRecoveryRequest(frame.payload)
+        const sealed = await remote.sealGroupInfo(request.request, null)
+        await submit({
+          topicID: rendezvousTopic(secret),
+          senderDID: 'alice',
+          retain: 'mailbox',
+          payload: encodeHandshakeFrame(
+            HANDSHAKE_KIND.recoveryReply,
+            encodeRecoveryReply(request.requestID, sealed),
+          ),
+        })
+      }
+      return accepted
+    })
+    // A forged ahead claim supplies a trigger, never retirement authority.
+    await publishCommit({
+      hub,
+      senderDID: 'hub',
+      recoverySecret: secret,
+      epoch: 99,
+      authenticator: memoryAuthenticator(author.mls),
+    })
+    await author.controlWalk.walkCommits()
+    const before = await author.control.load()
+    expect(before.strand).toBeNull()
+    expect(before.cursor?.stranded).not.toBe(true)
+    const result = await author.peer.recover()
+    const after = await author.control.load()
+    expect(inspect).toHaveBeenCalledOnce()
+    if (epoch <= saved.slot.epoch) {
+      expect(build).not.toHaveBeenCalled()
+      expect(result.advanced).toBe(false)
+      expect(after.commitOnce?.publishID).toBe(saved.slot.publishID)
+      expect(after.commitOnce?.journal).toEqual(saved.slot.journal)
+      expect(after.commitOnce?.welcome).toEqual(saved.slot.welcome)
+      expect(after.rejoin).toBeNull()
+    } else {
+      expect(build).toHaveBeenCalledOnce()
+      expect(result.advanced).toBe(false)
+      expect(after.commitOnce?.publishID).toBe(saved.slot.publishID)
+      expect(after.rejoin).not.toBeNull()
+    }
+  },
+)
+
+test.each([false, true])(
+  'authenticated foreign refusal and legacy retry bans survive copy skips (legacy=%s)',
+  async (legacy) => {
+    const hub = new FakeHub()
+    const bob = member(hub, { acceptsCommitter: (did) => did === 'bob' })
+    await bob.peer.replay()
+    vi.useFakeTimers()
+    const saved = await seedBuiltOperation(bob, buildInviteCommit(bob, 'invitee'))
+    if (legacy) {
+      await bob.control.apply(
+        {
+          commitOnce: { ...saved.slot, skipped: true },
+          cursor: { position: asLogPosition('000000000000'), epoch: saved.slot.epoch },
+        },
+        'prior-ban',
+      )
+    } else {
+      await publishCommit({
+        hub,
+        senderDID: 'replayer',
+        committerDID: 'alice',
+        signerDID: 'alice',
+        recoverySecret: secret,
+        epoch: saved.slot.epoch,
+        authenticator: memoryAuthenticator(bob.mls),
+      })
+      await bob.controlWalk.walkCommits()
+      expect((await bob.control.load()).commitOnce?.retryForbidden).toBe(true)
+    }
+    const occurrence = await hub.publish({
+      topicID: commitTopic(secret),
+      senderDID: 'hub',
+      retain: 'log',
+      payload: new Uint8Array([255]),
+    })
+    await bob.controlWalk.walkCommits()
+    const skipped = await bob.control.load()
+    expect(skipped.cursor?.position).toBe(occurrence.sequenceID)
+    expect(skipped.commitOnce?.retryForbidden).toBe(true)
+    const publish = vi.spyOn(hub, 'publish')
+    await bob.controlWalk.stepOperation(saved.id)
+    expect(publish).not.toHaveBeenCalled()
+  },
+)
+
+test.each(['ahead', 'retention-gap', 'incomplete'] as const)(
+  'reconstruction resumes bounded recovery for persisted delivery uncertainty (%s)',
+  async (reason) => {
+    controlRecoveryClock()
+    const hub = new FakeHub()
+    const recovery = { timeoutMs: 20, deadlineMs: 100, getDelayMs: () => 0 }
+    const author = member(hub, { members: ['bob', 'alice'], recovery })
+    await author.peer.replay()
+    const saved = await seedBuiltOperation(author, buildInviteCommit(author, 'invitee'))
+    await author.peer.dispose()
+    await author.peer.drained()
+    const position = asLogPosition('000000000001')
+    await author.control.apply(
+      {
+        cursor: {
+          position,
+          epoch: saved.slot.epoch,
+          ...(reason === 'incomplete' ? { incomplete: true } : { stranded: true }),
+        },
+        strand: reason === 'incomplete' ? null : { reason },
+      },
+      'persisted-delivery-uncertainty',
+    )
+    let remote = createMemoryGroupMLS({
+      epoch: saved.slot.epoch,
+      localDID: 'alice',
+      members: ['bob', 'alice'],
+      recoverySecret: secret,
+    })
+    await remote.persistInitialState()
+    const submit = hub.publish.bind(hub)
+    vi.spyOn(hub, 'publish').mockImplementation(async (input) => {
+      if (input.publishID === saved.slot.publishID) throw new Error('saved publication unavailable')
+      const accepted = await submit(input)
+      const frame = decodeHandshakeFrame(input.payload)
+      if (frame.kind === HANDSHAKE_KIND.recoveryRequest) {
+        const request = decodeRecoveryRequest(frame.payload)
+        await submit({
+          topicID: rendezvousTopic(secret),
+          senderDID: 'alice',
+          retain: 'mailbox',
+          payload: encodeHandshakeFrame(
+            HANDSHAKE_KIND.recoveryReply,
+            encodeRecoveryReply(
+              request.requestID,
+              await remote.sealGroupInfo(request.request, null),
+            ),
+          ),
+        })
+      }
+      return accepted
+    })
+    const fetch = vi.spyOn(hub, 'fetchTopic')
+    const again = member(hub, { restartOf: author, members: ['bob', 'alice'], recovery })
+    const captured = again.mls.capturedRecovery
+    if (captured === undefined) throw new Error('Missing captured recovery')
+    const inspect = vi.spyOn(captured, 'inspectCapture')
+    const build = vi.spyOn(captured, 'applyRecovery')
+    await again.peer.replay()
+    expect(
+      fetch.mock.calls.some(
+        ([input]) => input.topicID === commitTopic(secret) && input.after === position,
+      ),
+    ).toBe(true)
+    expect((await again.control.load()).cursor).toEqual({
+      position,
+      epoch: saved.slot.epoch,
+      incomplete: true,
+    })
+    expect(inspect).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(999)
+    expect(inspect).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    await drainUntil(() => inspect.mock.calls.length === 1, 'automatic inspection', 1000)
+    await inspect.mock.results[0]?.value
+    await vi.advanceTimersByTimeAsync(0)
+    expect((await again.control.load()).rejoin).toBeNull()
+    expect(build).not.toHaveBeenCalled()
+    expect((await again.control.load()).commitOnce).toEqual(saved.slot)
+    await vi.advanceTimersByTimeAsync(1999)
+    expect(inspect).toHaveBeenCalledOnce()
+    remote = createMemoryGroupMLS({
+      epoch: saved.slot.epoch + 1,
+      localDID: 'alice',
+      members: ['bob', 'alice'],
+      recoverySecret: secret,
+    })
+    await remote.persistInitialState()
+    await vi.advanceTimersByTimeAsync(1)
+    await drainUntil(
+      async () => (await again.control.load()).rejoin !== null,
+      'advancing capture',
+      1000,
+    )
+    expect(inspect).toHaveBeenCalledTimes(2)
+    expect(build).toHaveBeenCalledOnce()
+    expect((await again.control.load()).commitOnce).toEqual(saved.slot)
+  },
+)

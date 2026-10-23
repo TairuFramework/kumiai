@@ -116,7 +116,7 @@ function publicLeafLapsed(params: PublicMembershipInputs, leaf: LeafNode): boole
   )
 }
 
-export function treeTime(group: GroupHandle, controllerID: string): number {
+export function treeTime(group: PublicLifecycleGroup, controllerID: string): number {
   return publicTreeTime(
     { tree: group.state.ratchetTree, anchor: group.anchor, registry: group.registry },
     controllerID,
@@ -170,6 +170,10 @@ export function publicMembershipFacts(
   }
 }
 
+type PublicLifecycleGroup = Pick<GroupHandle, 'anchor' | 'registry'> & {
+  state: Pick<ClientState, 'ratchetTree'>
+}
+
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   return a.length === b.length && a.every((byte, index) => byte === b[index])
 }
@@ -193,7 +197,7 @@ function credentialEqual(
  * controller's own, so it need not be newer.
  */
 function replacesRevokedIssuer(
-  group: GroupHandle,
+  group: PublicLifecycleGroup,
   binding: ControllerBinding,
   old: ControllerBinding,
 ): boolean {
@@ -208,7 +212,7 @@ function replacesRevokedIssuer(
 }
 
 function checkBinding(
-  group: GroupHandle,
+  group: PublicLifecycleGroup,
   leaf: LeafNode,
   previous?: LeafNode,
   /** The leaf arrives in a Welcome tree rather than as an entry. */
@@ -285,7 +289,7 @@ function checkBinding(
     throw new LeafBindingError('generation-floor')
 }
 
-function checkAdmissionExpiry(group: GroupHandle, leaf: LeafNode): void {
+function checkAdmissionExpiry(group: PublicLifecycleGroup, leaf: LeafNode): void {
   const binding = identity(leaf).controller
   if (
     binding != null &&
@@ -294,13 +298,13 @@ function checkAdmissionExpiry(group: GroupHandle, leaf: LeafNode): void {
     throw new LeafLapsedError('lapsed')
 }
 
-function checkEntry(group: GroupHandle, leaf: LeafNode, previous?: LeafNode): void {
+function checkEntry(group: PublicLifecycleGroup, leaf: LeafNode, previous?: LeafNode): void {
   checkBinding(group, leaf, previous)
   checkAdmissionExpiry(group, leaf)
 }
 
 async function validateBoundLeaf(
-  group: GroupHandle,
+  group: PublicLifecycleGroup,
   leaf: LeafNode,
   previous?: LeafNode,
   welcome = false,
@@ -320,7 +324,7 @@ async function validateBoundLeaf(
 }
 
 export async function validateEntry(
-  group: GroupHandle,
+  group: PublicLifecycleGroup,
   leaf: LeafNode,
   previous?: LeafNode,
 ): Promise<void> {
@@ -350,7 +354,7 @@ export function isUnchangedLeaf(
 type SurvivorOrigin = { kind: 'commit'; before: ClientState['ratchetTree'] } | { kind: 'welcome' }
 
 function checkSurvivors(
-  group: GroupHandle,
+  group: PublicLifecycleGroup,
   tree: ClientState['ratchetTree'],
   registry: DeviceRegistry,
   origin: SurvivorOrigin,
@@ -392,10 +396,17 @@ function checkSurvivors(
 }
 
 export async function validateWelcomeTree(group: GroupHandle): Promise<void> {
+  await validatePublicWelcomeTree(group, group.state.privatePath.leafIndex)
+}
+
+export async function validatePublicWelcomeTree(
+  group: PublicLifecycleGroup,
+  ownIndex?: number,
+): Promise<void> {
   for (const [index, node] of group.state.ratchetTree.entries()) {
     if (node?.nodeType !== nodeTypes.leaf) continue
     await validateBoundLeaf(group, node.leaf, undefined, true)
-    if (index === group.state.privatePath.leafIndex * 2) checkAdmissionExpiry(group, node.leaf)
+    if (ownIndex !== undefined && index === ownIndex * 2) checkAdmissionExpiry(group, node.leaf)
   }
   checkSurvivors(group, group.state.ratchetTree, group.registry, { kind: 'welcome' })
 }
@@ -746,18 +757,25 @@ export function assertSenderNotLapsed(params: AssertSenderNotLapsedParams): void
 }
 
 export type AssertRecoveryBindingParams = {
-  group: GroupHandle
+  group: PublicLifecycleGroup & Pick<GroupHandle, 'ledger'>
   identity: OwnIdentity
-  controller: ControllerBinding
+  controller?: ControllerBinding
 }
 
 /** @internal Check a replacement against the complete external admission predicates. */
 export async function assertRecoveryBinding(params: AssertRecoveryBindingParams): Promise<void> {
   const { group, identity: ownIdentity, controller } = params
   assertBindingAuthorTime(controller)
-  const index = group.findMemberLeafIndex(normalizeDID(ownIdentity.id))
-  const old = index == null ? undefined : leafAt(group.state.ratchetTree, index)
-  if (old == null || index == null) throw new LeafBindingError('identity-change')
+  if (group.anchor.controller != null && controller == null)
+    throw new LeafBindingError('floating-refused')
+  const position = group.state.ratchetTree.findIndex(
+    (node) =>
+      node?.nodeType === nodeTypes.leaf &&
+      normalizeDID(identity(node.leaf).id) === normalizeDID(ownIdentity.id),
+  )
+  const index = position / 2
+  const old = position < 0 ? undefined : leafAt(group.state.ratchetTree, index)
+  if (old == null) throw new LeafBindingError('identity-change')
   const leaf = {
     ...old,
     signaturePublicKey: ownIdentity.publicKey,

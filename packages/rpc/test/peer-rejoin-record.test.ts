@@ -750,7 +750,7 @@ test('an ambiguous recovery state save is read back without a second adoption', 
   expect(commits(hub)).toHaveLength(1)
 })
 
-test('a rejoin build leaves saved source work live until recovery adoption closes it', async () => {
+test('legacy recovery leaves saved source work live without constructing a rejoin', async () => {
   const { bob } = await setup()
   const op = await seedBuiltOperation(bob, buildLedgerCommit(bob, ['settled-first']))
   let settled = false
@@ -765,14 +765,13 @@ test('a rejoin build leaves saved source work live until recovery adoption close
     }
     return apply(changes, id)
   })
-  expect((await bob.peer.recover()).advanced).toBe(true)
-  expect(settled).toBe(true)
+  expect((await bob.peer.recover()).advanced).toBe(false)
+  expect(settled).toBe(false)
   const snapshot = await bob.control.load()
-  expect(snapshot.commitOnce).toBeNull()
+  expect(snapshot.commitOnce).toEqual(op.slot)
+  expect(snapshot.rejoin).toBeNull()
   expect(snapshot.operations).toEqual([])
-  expect(snapshot.outcomes.filter((row) => row.opID === op.id)).toEqual([
-    expect.objectContaining({ opID: op.id, kind: 'unknown' }),
-  ])
+  expect(snapshot.outcomes.filter((row) => row.opID === op.id)).toEqual([])
 })
 
 test('a source advance cannot leave an unresolved build behind for anchor recovery', async () => {

@@ -57,6 +57,7 @@ export async function createAppPublicationFixture(
       access.key.incarnation === key.incarnation
         ? createRegistryAppPublication(access)
         : {
+            assertRoot: () => access.assertPublicationEntry(),
             snapshot: async () => null,
             prepare: async () => {
               throw new DisplacedGroupHandleError('Fixture publication source is retired')

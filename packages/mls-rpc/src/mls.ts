@@ -81,6 +81,7 @@ import {
   createRecoveryRequestFromTrust,
   createVerdictJudge,
   deriveRecoverySecretFromTrust,
+  inspectRecoveryCapture,
   knownRecoveryRegistry,
   openRecoveryVerdictFromTrust,
   RECOVERY_LABEL,
@@ -356,6 +357,13 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       captured === undefined || capturedEnvironment === undefined
         ? undefined
         : {
+            async inspectCapture(reply) {
+              return await inspectRecoveryCapture({
+                source: await captured.readRecoverySource(),
+                reply,
+                environment: capturedEnvironment,
+              })
+            },
             authoriseForkRecovery: async (reply, noticeID) =>
               (await params.authoriseForkRecovery?.(reply, noticeID)) ?? null,
             async checkRosterAbsence(

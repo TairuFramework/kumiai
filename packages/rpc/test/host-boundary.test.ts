@@ -84,33 +84,50 @@ test('recovery comparison epoch crosses the host boundary as data', async () => 
   expect(createRecoveryRequest).toHaveBeenCalledWith('comparison', 30000, 12)
 })
 
-test.each(['checkRosterAbsence', 'sealRosterAbsence', 'authoriseForkRecovery'] as const)(
-  'captured recovery host operation drains and fences disposal: %s',
-  async (name) => {
-    expect(capturedRecoveryHostMembers).toHaveProperty(name, 'host')
-    const boundary = createHostBoundary()
-    const pause = gate()
-    const callback = vi.fn(async () => {
-      await pause.promise
-      return null
-    })
-    const host = wrapPeerHost(boundary, { mls: { capturedRecovery: { [name]: callback } } })
-    const invoke = Reflect.get(host.mls.capturedRecovery, name) as () => Promise<null>
-    const pending = invoke()
-    boundary.close()
-    let drained = false
-    const draining = boundary.drained(Promise.resolve()).then(() => {
-      drained = true
-    })
-    await Promise.resolve()
-    expect(drained).toBe(false)
-    pause.release()
-    await pending
-    await draining
-    expect(() => invoke()).toThrow(PeerDisposedError)
-    expect(callback).toHaveBeenCalledOnce()
-  },
-)
+test.each([
+  'inspectCapture',
+  'checkRosterAbsence',
+  'sealRosterAbsence',
+  'authoriseForkRecovery',
+] as const)('captured recovery host operation drains and fences disposal: %s', async (name) => {
+  expect(capturedRecoveryHostMembers).toHaveProperty(name, 'host')
+  const boundary = createHostBoundary()
+  const pause = gate()
+  const callback = vi.fn(async () => {
+    await pause.promise
+    return null
+  })
+  const host = wrapPeerHost(boundary, { mls: { capturedRecovery: { [name]: callback } } })
+  const operation = Reflect.get(host.mls.capturedRecovery, name)
+  const invoke = (): Promise<null> =>
+    Reflect.apply(
+      operation,
+      host.mls.capturedRecovery,
+      name === 'inspectCapture'
+        ? [
+            {
+              sealed: new Uint8Array([1]),
+              requestKey: new Uint8Array(32),
+              requestID: 'request',
+              epochFloor: null,
+            },
+          ]
+        : [],
+    )
+  const pending = invoke()
+  boundary.close()
+  let drained = false
+  const draining = boundary.drained(Promise.resolve()).then(() => {
+    drained = true
+  })
+  await Promise.resolve()
+  expect(drained).toBe(false)
+  pause.release()
+  await pending
+  await draining
+  expect(() => invoke()).toThrow(PeerDisposedError)
+  expect(callback).toHaveBeenCalledOnce()
+})
 
 test.each(Object.keys(checkpointServiceHostMembers))(
   'checkpoint service survives host wrapping: %s',
@@ -741,6 +758,7 @@ test('application preparation participates in host drain and disposal fencing', 
   const pause = Promise.withResolvers<never>()
   const host = wrapPeerHost(boundary, {
     appPublication: {
+      assertRoot: () => {},
       prepare: async () => await pause.promise,
       snapshot: async () => null,
     },
@@ -753,9 +771,36 @@ test('application preparation participates in host drain and disposal fencing', 
   })
   await Promise.resolve()
   expect(finished).toBe(false)
+  expect(() => host.appPublication.assertRoot()).toThrow(PeerDisposedError)
   expect(() => host.appPublication.snapshot()).toThrow(PeerDisposedError)
   pause.reject(new Error('Host preparation ended'))
   expect(await pending).toMatchObject({ message: 'Host preparation ended' })
   await drained
   expect(finished).toBe(true)
+})
+
+test('capture inspection owns request buffers and returned authenticated facts', async () => {
+  const authenticator = new Uint8Array([3])
+  const host = wrapPeerHost(createHostBoundary(), {
+    mls: {
+      capturedRecovery: {
+        inspectCapture: async (reply: { sealed: Uint8Array; requestKey: Uint8Array }) => {
+          reply.sealed.fill(9)
+          reply.requestKey.fill(8)
+          return { groupID: 'group', epoch: 2, authenticator }
+        },
+      },
+    },
+  })
+  const reply = {
+    sealed: new Uint8Array([1]),
+    requestKey: new Uint8Array([2]),
+    requestID: 'request',
+    epochFloor: null,
+  }
+  const facts = await host.mls.capturedRecovery.inspectCapture(reply)
+  expect(reply.sealed).toEqual(new Uint8Array([1]))
+  expect(reply.requestKey).toEqual(new Uint8Array([2]))
+  facts.authenticator.fill(0)
+  expect(authenticator).toEqual(new Uint8Array([3]))
 })

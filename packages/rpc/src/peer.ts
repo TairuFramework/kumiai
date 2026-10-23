@@ -110,6 +110,7 @@ import { notifyHost } from './host-notice.js'
 import { createHubMux, type HubMux } from './hub-mux.js'
 import {
   createLedgerEntryResolver,
+  DeliveredEntryCopyError,
   encodeLedgerEntries,
   UnsupportedLedgerEntriesVersionError,
 } from './ledger-entries.js'
@@ -997,6 +998,7 @@ export function createGroupPeerWithControlWalk<
             logSendsHeld() ||
             locallyRemoved ||
             stranded ||
+            (!floor.covered && floor.position !== null) ||
             anchorRecoveryPending ||
             sealBarrier != null ||
             sealError != null ||
@@ -1010,6 +1012,7 @@ export function createGroupPeerWithControlWalk<
               logSendsHeld() ||
               locallyRemoved ||
               stranded ||
+              (!floor.covered && floor.position !== null) ||
               anchorRecoveryPending ||
               sealBarrier != null ||
               sealError != null ||
@@ -1164,6 +1167,18 @@ export function createGroupPeerWithControlWalk<
     durableCursor = cursor
     durableStrand = { reason }
   }
+  const markDeliveryGap = async (): Promise<void> => {
+    floor = { ...floor, covered: false }
+    if (control == null || mls == null || safetyHold() !== null) return
+    const snapshot = await control.load()
+    if (snapshot.cursor?.incomplete === true) return
+    const cursor: CommitCursor = {
+      ...(snapshot.cursor ?? { position: reconciledHead, epoch: await mls.readEpoch() }),
+      incomplete: true,
+    }
+    await applyResolved(control, { cursor }, newPublishID())
+    durableCursor = cursor
+  }
   const saveCommitCursor = async (
     position: LogPosition,
     response?: ExternalResponse,
@@ -1287,23 +1302,7 @@ export function createGroupPeerWithControlWalk<
   let bootstrapHealRequested = false
   let episode: { strongest: StrandConfidence } | null = null
 
-  /**
-   * Positive evidence this peer is off the group's line, and the sole guard on `commit()`. Set
-   * when a pull sees proof the peer cannot reconcile: a frame framed AHEAD of its epoch, its OWN
-   * un-merged commit at its current epoch, or the LOSING side of a fork.
-   *
-   * Deliberately NOT `healRequested`: that flag only SCHEDULES the next heal and clears as
-   * ordinary control flow, so a heal that finds no responder leaves it false. Gating `commit()` on
-   * it would let a peer that just failed to heal win the compare-and-set at a stale epoch and land
-   * a commit on a branch of one. This flag survives a failed heal: cleared ONLY when a rejoin
-   * actually lands (`recover`) — no pull can carry a stranded peer back, since the frames that
-   * would are gone.
-   *
-   * Set on positive evidence, NEVER on poison: a frame this peer stepped over (malformed, refused,
-   * or naming unresolvable bodies) is not evidence the group moved on, since nobody applied it
-   * either. Gating on poison would rebuild the group-death hazard the classifier's `poison` row
-   * refuses.
-   */
+  // Local backstops remain blocking; hub claims only make coverage incomplete.
   let stranded = false
   let renewalRequiredEpoch: number | null = null
   const renewalHeld = (): boolean => {
@@ -2085,9 +2084,9 @@ export function createGroupPeerWithControlWalk<
         floor = { ...floor, covered: true }
       } else if (pageAfter != null && gap) {
         floor = { ...floor, covered: false }
-        stranded = true
+        covered = false
         healRequested = safetyHold() === null
-        await persistStrand('retention-gap')
+        await markDeliveryGap()
         if (safetyHold() !== null) return advancedEpoch
         const localEpoch = await port.readEpoch()
         if (safetyHold() !== null) return advancedEpoch
@@ -2221,7 +2220,9 @@ export function createGroupPeerWithControlWalk<
                   localEpoch,
                   built.publishID,
                 )
-              return unprocessable(position, commitDigest, localEpoch, localEpoch)
+              return built == null
+                ? unprocessable(position, commitDigest, localEpoch, localEpoch)
+                : ownUnavailable(position, commitDigest, localEpoch, localEpoch, built.publishID)
             }
             throw error
           }
@@ -2295,7 +2296,7 @@ export function createGroupPeerWithControlWalk<
                   slot.publishID,
                 )
             }
-            await saveCommitCursor(position, undefined, header?.epoch, true)
+            await saveCommitCursor(position, undefined, header?.epoch)
             if (commitTopicID != null)
               emitStrand({
                 groupID: commitTopicID,
@@ -2311,8 +2312,7 @@ export function createGroupPeerWithControlWalk<
           if (disposition.row === 'ahead') {
             // The group advanced at an epoch this peer did not. Step over the frame — the heal
             // repairs this, not a re-read — and ask for one.
-            stranded = true
-            await persistStrand('ahead')
+            await markDeliveryGap()
             await saveCommitCursor(position, undefined, header?.epoch)
             healRequested = safetyHold() === null
             observeStrand({
@@ -2373,6 +2373,7 @@ export function createGroupPeerWithControlWalk<
           let applied: ProcessCommitResult
           let resolverFailed = false
           let unsupportedEntries = false
+          let deliveredCopyFailed = false
           try {
             // Through the seam, like every other site that ratchets the handle: it reads this
             // epoch's app frames ahead of the apply and takes the anchor if the roster moved.
@@ -2405,6 +2406,7 @@ export function createGroupPeerWithControlWalk<
                       )(ids)
                     } catch (error) {
                       resolverFailed = true
+                      deliveredCopyFailed = error instanceof DeliveredEntryCopyError
                       unsupportedEntries = error instanceof UnsupportedLedgerEntriesVersionError
                       throw error
                     }
@@ -2427,8 +2429,8 @@ export function createGroupPeerWithControlWalk<
             if (disposed || safetyHold() !== null) return false
             if (unsupportedEntries) {
               await resolveAnchorRotation({ port, knownUnlanded: true })
-              // The authenticated source-epoch frame classifies this refusal, not its blob.
-              await saveCommitCursor(position, undefined, header?.epoch, true)
+              // Unsupported delivered blobs supply coverage uncertainty only.
+              await saveCommitCursor(position, undefined, header?.epoch)
               if (safetyHold() !== null) return advancedEpoch
               if (commitTopicID != null)
                 emitStrand({
@@ -2442,12 +2444,25 @@ export function createGroupPeerWithControlWalk<
                 })
               break
             }
+            if (deliveredCopyFailed || error instanceof DeliveredEntryCopyError) {
+              await resolveAnchorRotation({ port, knownUnlanded: true })
+              await saveCommitCursor(position, undefined, header?.epoch)
+              break
+            }
             if (
               resolverFailed ||
               (error instanceof Error && error.name === 'CommitValidationUnavailableError')
             ) {
               await resolveAnchorRotation({ port, knownUnlanded: true })
-              return unprocessable(position, commitDigest, framedEpoch, header?.epoch ?? null)
+              return snapshot?.commitOnce == null
+                ? unprocessable(position, commitDigest, framedEpoch, header?.epoch ?? null)
+                : ownUnavailable(
+                    position,
+                    commitDigest,
+                    framedEpoch,
+                    header?.epoch ?? null,
+                    snapshot.commitOnce.publishID,
+                  )
             }
             if (!isMissingLedgerEntries(error)) {
               // The port broke its contract. The cursor stays and the frame is re-read — the pull is
@@ -2460,14 +2475,22 @@ export function createGroupPeerWithControlWalk<
             }
             await resolveAnchorRotation({ port, knownUnlanded: true })
             // Missing bodies describe this copy, never an authenticated commit refusal.
-            await saveCommitCursor(position, undefined, header?.epoch, true)
+            await saveCommitCursor(position, undefined, header?.epoch)
             break
           }
           if (disposed) return false
           if (safetyHold() !== null) return advancedEpoch || applied.advanced
           if (applied.validation === 'unavailable') {
             await resolveAnchorRotation({ port, knownUnlanded: true })
-            return unprocessable(position, commitDigest, framedEpoch, header?.epoch ?? null)
+            return snapshot?.commitOnce == null
+              ? unprocessable(position, commitDigest, framedEpoch, header?.epoch ?? null)
+              : ownUnavailable(
+                  position,
+                  commitDigest,
+                  framedEpoch,
+                  header?.epoch ?? null,
+                  snapshot.commitOnce.publishID,
+                )
           }
           if (applied.applied && snapshot != null && control != null) {
             const settled = await control.load()
@@ -2942,7 +2965,22 @@ export function createGroupPeerWithControlWalk<
   const refreshControl = async (freshEvidence?: ControlEvidenceSnapshot): Promise<void> => {
     if (control == null) return
     const generation = safetyGeneration
-    const snapshot = await control.load()
+    let snapshot = await control.load()
+    if (
+      snapshot.cursor?.stranded === true &&
+      (snapshot.strand?.reason === 'ahead' || snapshot.strand?.reason === 'retention-gap') &&
+      snapshot.controlHold === null &&
+      controlSafetyHeld(snapshot) === null
+    ) {
+      const { stranded: _stranded, ...cursor } = snapshot.cursor
+      await applyResolved(
+        control,
+        { cursor: { ...cursor, incomplete: true }, strand: null },
+        newPublishID(),
+      )
+      snapshot = await control.load()
+      stranded = false
+    }
     if (snapshot.commitOnce !== null && !snapshot.commitOnce.reported)
       scheduleBuildReport(snapshot.commitOnce.deadline)
     if (generation !== safetyGeneration) return await refreshControl(freshEvidence)
@@ -3048,7 +3086,11 @@ export function createGroupPeerWithControlWalk<
     if (cursor != null && cursor.epoch === currentEpoch) {
       if (cursor.position != null && (reconciledHead == null || reconciledHead < cursor.position))
         reconciledHead = cursor.position
-      floor = { epoch: cursor.epoch, position: cursor.position, covered: true }
+      floor = {
+        epoch: cursor.epoch,
+        position: cursor.position,
+        covered: cursor.incomplete !== true,
+      }
       if (cursor.stranded) {
         const strandKind =
           snapshot.strand !== null && 'kind' in snapshot.strand
@@ -4735,6 +4777,16 @@ export function createGroupPeerWithControlWalk<
     ) {
       let record = (await store.load()).rejoin
       if (record !== null && !('format' in record)) return { advanced: false }
+      const liveBuild = (await store.load()).commitOnce
+      if (
+        record !== null &&
+        liveBuild !== null &&
+        !params.recoveryOnly &&
+        !(record.target.groupInfoEpoch > liveBuild.epoch)
+      ) {
+        retryRecovery()
+        return { advanced: false }
+      }
       if (
         (record?.trigger === 'manual' && record.authorisationID !== manual?.authorisationID) ||
         record?.stage === 'refused'
@@ -4798,6 +4850,24 @@ export function createGroupPeerWithControlWalk<
             requestKey,
             epochFloor: (await store.load()).recoveryEpochFloor,
           })
+          const liveBuild = (await store.load()).commitOnce
+          if (liveBuild !== null && !params.recoveryOnly) {
+            const facts = await captured.inspectCapture({
+              sealed: outcome.sealed,
+              requestID,
+              requestKey,
+              epochFloor: (await store.load()).recoveryEpochFloor,
+            })
+            if (
+              facts === null ||
+              facts.groupID !== store.key.groupID ||
+              !(facts.epoch > liveBuild.epoch)
+            ) {
+              recoveryPendingReason = 'target-behind'
+              retryRecovery()
+              return { advanced: false }
+            }
+          }
           const pending: CapturedAppliedRecovery = await captured.applyRecovery(
             outcome.sealed,
             requestID,
@@ -5073,6 +5143,10 @@ export function createGroupPeerWithControlWalk<
         await assertRecoveryOpen()
         if (record != null && !('format' in record) && port.capturedRecovery !== undefined)
           return failed('legacy-recovery-record')
+        if (port.capturedRecovery === undefined && (await control?.load())?.commitOnce != null) {
+          retryRecovery()
+          return { advanced: false }
+        }
         if ((record != null && 'format' in record) || port.capturedRecovery !== undefined)
           return await capturedAttempt(trigger, generation, port, commits, rendezvous, deadline)
         if (record?.stage === 'refused') return failed('refused', { refusal: record.refusal })
@@ -5598,6 +5672,16 @@ export function createGroupPeerWithControlWalk<
         if (ledgerReady && mls != null) await finalizeBootstrap(mls)
         if (stopped()) return
         await pullCommits()
+        // Returning valid bytes get first opportunity to consume restored work.
+        if (
+          startupCursor?.incomplete === true &&
+          durableCursor?.incomplete === true &&
+          durableCursor.epoch === appliedEpoch &&
+          !stranded &&
+          !healRequested &&
+          activeRecovery === null
+        )
+          retryRecovery()
       }).catch(() => {})
       if (stopped() || locallyRemoved) return
       await buildEpoch()
@@ -5714,7 +5798,7 @@ export function createGroupPeerWithControlWalk<
     return async (...args) => {
       if (disposed) return await fn(...args)
       // Check ownership synchronously, before any continuation can join the commit tail.
-      await params.appPublication?.snapshot(Object.keys(protocols)[0] ?? '')
+      params.appPublication?.assertRoot()
       return await fn(...args)
     }
   }

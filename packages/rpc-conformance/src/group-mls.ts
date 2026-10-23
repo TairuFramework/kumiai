@@ -342,6 +342,7 @@ export type GroupMLSConformanceParams = {
 }
 
 export type ConformanceCapturedRecoveryFixture = {
+  setSourceIdentity(identity: { epoch: number; authenticator: Uint8Array } | null): void
   invalidateRetainedSigner(kind: 'missing' | 'wrong-controller' | 'revoked'): void
   requester: ConformanceGroupMLS
   responder: ConformanceGroupMLS
@@ -390,6 +391,57 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
   }
 
   describe(`GroupMLS conformance — ${label}`, () => {
+    test('capture inspection authenticates request-bound public facts without preparing recovery', async () => {
+      const fixture = await params.createCapturedRecovery()
+      const captured = fixture.requester.capturedRecovery
+      if (captured === undefined) throw new Error('Missing captured ports')
+      const requestID = 'inspect-capture'
+      const held = await fixture.requester.createRecoveryRequest(requestID)
+      const reply = {
+        sealed: await fixture.responder.sealGroupInfo(held.request, null),
+        requestID,
+        requestKey: held.requestKey,
+        epochFloor: null,
+      }
+      expect(await captured.inspectCapture({ ...reply, requestID: 'other-request' })).toBeNull()
+      expect(await captured.inspectCapture({ ...reply, requestKey: new Uint8Array(32) })).toBeNull()
+      const facts = await captured.inspectCapture(reply)
+      expect(facts).not.toBeNull()
+      if (facts === null) throw new Error('Missing authenticated facts')
+      const authenticator = facts.authenticator.slice()
+      facts.authenticator.fill(0)
+      expect(await captured.inspectCapture(reply)).toMatchObject({
+        epoch: facts.epoch,
+        groupID: facts.groupID,
+        authenticator,
+      })
+      expect(fixture.accepted()).toBe(0)
+    })
+
+    test('capture inspection refuses a higher epoch floor and same-number authenticator disagreement', async () => {
+      const fixture = await params.createCapturedRecovery()
+      const captured = fixture.requester.capturedRecovery
+      if (captured === undefined) throw new Error('Missing captured port')
+      const requestID = 'inspection-identity'
+      const held = await fixture.requester.createRecoveryRequest(requestID)
+      const reply = {
+        sealed: await fixture.responder.sealGroupInfo(held.request, null),
+        requestID,
+        requestKey: held.requestKey,
+        epochFloor: null,
+      }
+      const facts = await captured.inspectCapture(reply)
+      if (facts === null) throw new Error('Missing authenticated facts')
+      expect(await captured.inspectCapture({ ...reply, epochFloor: facts.epoch + 1 })).toBeNull()
+      fixture.setSourceIdentity(facts)
+      expect(await captured.inspectCapture(reply)).toEqual(facts)
+      const different = facts.authenticator.slice()
+      different[0] = (different[0] ?? 0) ^ 1
+      fixture.setSourceIdentity({ epoch: facts.epoch, authenticator: different })
+      expect(await captured.inspectCapture(reply)).toBeNull()
+      expect(fixture.accepted()).toBe(0)
+    })
+
     test.each(['missing', 'wrong-controller', 'revoked'] as const)(
       'ineligible retained recovery signer is refused: %s',
       async (kind) => {
@@ -400,6 +452,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         const { request, requestKey } = await fixture.requester.createRecoveryRequest(requestID)
         const sealed = await fixture.responder.sealGroupInfo(request, null)
         fixture.invalidateRetainedSigner(kind)
+        expect(
+          await port.inspectCapture({ sealed, requestID, requestKey, epochFloor: null }),
+        ).toBeNull()
         expect(await port.applyRecovery(sealed, requestID, requestKey)).toBeNull()
         expect(fixture.accepted()).toBe(0)
       },
@@ -714,7 +769,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         expect(await member.mls.readRecoverySource()).toEqual(before)
       })
     })
-    test('unavailable validation never applies, advances, or invokes adoption', async () => {
+    test('a missing delivered proposal never applies, advances, or invokes adoption', async () => {
       await withGroup(1, 'unavailable-validation', async (group) => {
         const member = memberAt(group.members, 0)
         const before = await member.mls.readRecoverySource()
@@ -722,19 +777,14 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         const roster = await member.mls.rosterEntries()
         const ledger = await member.mls.getLedger()
         let adoptions = 0
-        const result = await member.mls.processCommit(await group.buildUnavailableCommit(), {
-          adoption: () => {
-            adoptions++
-            return { mutationID: 'unavailable', changes: {} }
-          },
-        })
-        expect(result).toMatchObject({
-          validation: 'unavailable',
-          applied: false,
-          advanced: false,
-          epochBefore: sourceIdentity(before).epoch,
-          epochAfter: sourceIdentity(before).epoch,
-        })
+        await expect(
+          member.mls.processCommit(await group.buildUnavailableCommit(), {
+            adoption: () => {
+              adoptions++
+              return { mutationID: 'unavailable', changes: {} }
+            },
+          }),
+        ).rejects.toMatchObject({ name: 'DeliveredEntryCopyError' })
         expect(await member.mls.readRecoverySource()).toEqual(before)
         expect(await member.mls.rosterEntries()).toEqual(roster)
         expect(await member.mls.getLedger()).toEqual(ledger)
@@ -2054,6 +2104,11 @@ export type ConformanceAuthenticatedRosterAbsence = {
   evidence: Uint8Array
 }
 export type ConformanceCapturedRecoveryPort<Position extends string = string> = {
+  inspectCapture(reply: ConformanceCapturedRecapture): Promise<{
+    groupID: string
+    epoch: number
+    authenticator: Uint8Array
+  } | null>
   authoriseForkRecovery?(
     reply: ConformanceCapturedRecapture,
     noticeID: string,

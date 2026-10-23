@@ -1577,6 +1577,7 @@ async function expectPolicyPoison(
     appCursorStore: createMemoryAppCursorStore(),
     appOutbox: createMemoryAppOutbox(),
     appPublication: {
+      assertRoot: () => {},
       snapshot: async () => null,
       prepare: async () => {
         throw new Error('This control fixture has no application publisher')
@@ -2079,6 +2080,7 @@ test.each(['outer', 'inner'] as const)(
       appCursorStore: createMemoryAppCursorStore(),
       appOutbox: createMemoryAppOutbox(),
       appPublication: {
+        assertRoot: () => {},
         snapshot: async () => null,
         prepare: async () => {
           throw new Error('This control fixture has no application publisher')
@@ -2102,7 +2104,7 @@ test.each(['outer', 'inner'] as const)(
       expect(after.commitOnce).toEqual({
         ...before.commitOnce,
         skipped: true,
-        retryForbidden: true,
+        retryForbidden: false,
         reported: true,
       })
       expect(after.operations).toEqual(before.operations)

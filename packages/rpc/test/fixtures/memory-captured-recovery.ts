@@ -17,6 +17,7 @@ import type {
   CapturedRejoinRecord,
   ForkRecoveryAttempt,
   ForkRecoveryAuthorisation,
+  RecoverySource,
 } from '../../src/recovery-types.js'
 import type { MemoryGroupInfo } from './memory-group-mls.js'
 import {
@@ -72,7 +73,7 @@ export async function createCapturedMemoryRecovery(
     signerControllers: { alice: 'controller', bob: 'controller' },
     revoked: [] as Array<string>,
   }
-  const source = {
+  const source: RecoverySource<typeof trust> = {
     key: { groupID: trust.groupID, incarnation: 1 },
     stateVersion: 1,
     identity: null,
@@ -103,6 +104,12 @@ export async function createCapturedMemoryRecovery(
   })
   const responder = createMemoryGroupMLS({ ...options, localDID: 'bob' })
   return {
+    setSourceIdentity(identity: { epoch: number; authenticator: Uint8Array } | null) {
+      source.identity =
+        identity === null
+          ? null
+          : { ...source.key, epoch: identity.epoch, authenticator: identity.authenticator.slice() }
+    },
     invalidateRetainedSigner(kind: 'missing' | 'wrong-controller' | 'revoked') {
       if (kind === 'missing') trust.members = trust.members.filter((did) => did !== 'bob')
       else if (kind === 'wrong-controller') trust.signerControllers.bob = 'foreign-controller'

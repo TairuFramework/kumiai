@@ -14,6 +14,8 @@ export type PreparedAppPublication = {
   snapshot: AppPublicationSnapshot
 }
 export type AppPublicationPort = {
+  /** Check caller ownership synchronously, without acquiring storage or waiting for proof. */
+  assertRoot(): void
   prepare(entry: AppOutboxEntry, floor: string | null): Promise<PreparedAppPublication>
   snapshot(protocol: string): Promise<AppPublicationSnapshot | null>
 }

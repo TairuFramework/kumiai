@@ -26,6 +26,7 @@ import {
   type ControlFrameValidation,
   type ControlValidationPort,
   createLedgerEntryResolver,
+  DeliveredEntryCopyError,
   decodeCommitFrame,
   decodeHandshakeFrame,
   decodeLedgerEntries,
@@ -375,8 +376,10 @@ export function createControlValidationPort(params: {
               let tokens: Array<string>
               try {
                 tokens = await resolve(missing)
-              } catch {
-                return { kind: 'unavailable', reason: 'unexplained-own' }
+              } catch (error) {
+                if (error instanceof DeliveredEntryCopyError)
+                  return { kind: 'unavailable', reason: 'unexplained-own' }
+                throw error
               }
               const resolved = new Set<string>()
               for (const token of tokens) {

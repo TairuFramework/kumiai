@@ -170,6 +170,8 @@ export async function createCapturedRecoveryFixture(
             return access
           }
           const notificationAccess = options.recoveryOnly ? null : await opened()
+          const capability = entryCapability(fixture.device.groups)
+          if (capability === null) throw new Error('Missing registry capability')
           const access: RegistryHandleAccess = {
             get key() {
               return current
@@ -190,6 +192,7 @@ export async function createCapturedRecoveryFixture(
             mutate: async (fn, write) => (await opened()).mutate(fn, write),
             replace: async (next, write, prepare) => (await opened()).replace(next, write, prepare),
             adopt: async (next, expected, write) => (await opened()).adopt(next, expected, write),
+            assertPublicationEntry: () => capability.assertRoot(),
             preparePublication: async (entry, floor) =>
               (await opened()).preparePublication(entry, floor),
             publicationSnapshot: async (protocol) => (await opened()).publicationSnapshot(protocol),
@@ -508,6 +511,7 @@ export async function makeCheckpointPeer(
     appCursorStore: ports.cursor,
     appOutbox: ports.outbox,
     appPublication: {
+      assertRoot: () => {},
       snapshot: async () => null,
       prepare: async () => {
         throw new Error('This local safety fixture has no app publisher')

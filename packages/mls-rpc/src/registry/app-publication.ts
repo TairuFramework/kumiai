@@ -33,7 +33,10 @@ export function createPublicationPreparation<TTx extends GroupTransaction>(param
   resolve(mutationID: string): Promise<'committed' | 'rolled-back'>
   diagnoseFailure(error: unknown): Promise<void>
   publish(): void
-}): Pick<RegistryHandleAccess, 'preparePublication' | 'publicationSnapshot'> {
+}): Pick<
+  RegistryHandleAccess,
+  'assertPublicationEntry' | 'preparePublication' | 'publicationSnapshot'
+> {
   const { owner, capability, live } = params
   const n = owner.key.incarnation
   async function snapshot(
@@ -198,5 +201,9 @@ export function createPublicationPreparation<TTx extends GroupTransaction>(param
       return copyStoredValue(result)
     })
   }
-  return { preparePublication, publicationSnapshot }
+  return {
+    assertPublicationEntry: () => capability.assertRoot(),
+    preparePublication,
+    publicationSnapshot,
+  }
 }

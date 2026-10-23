@@ -223,6 +223,20 @@ test('later exact-leaf acceptance settles compact public facts without a positio
   expect(s.adopted()).toBe(0)
 })
 
+test('unconfirmed published recovery cannot reach adoption', async () => {
+  const s = await setup()
+  const record = {
+    ...s.record,
+    stage: 'published' as const,
+    position: asLogPosition('published-X'),
+  }
+  await s.control.apply({ putRejoin: record }, 'published-unconfirmed')
+  const next = await stepRejoin(s.deps, record)
+  expect(next).toEqual(record)
+  expect(s.adopted()).toBe(0)
+  expect((await s.control.load()).rejoin).toEqual(record)
+})
+
 test('known-position bound confirmation co-writes the switch ID then hands off', async () => {
   const s = await setup()
   const record: CapturedRejoinRecord = {
