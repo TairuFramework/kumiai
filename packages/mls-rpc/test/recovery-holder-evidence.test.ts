@@ -20,18 +20,21 @@ import { simpleHandleAccess } from '../src/access.js'
 import { createGroupMLS, createLedgerEntrySlot } from '../src/mls.js'
 import type { RecoveryBinding, RecoveryBindingRequest } from '../src/recovery.js'
 
+// Imported at collection, not inside the first test: transforming the cross-package fixture under
+// load overran that test's 5s timeout.
+const fixture = (await import(
+  new URL('../../mls/test/fixtures/lifecycle-ledger.ts', import.meta.url).href
+)) as {
+  agent: (byte: number) => OwnIdentity
+  bindingFor: (
+    identity: OwnIdentity,
+    prefix?: ControllerBinding['prefix'],
+    issuer?: { identity: OwnIdentity; parent: string },
+  ) => Promise<ControllerBinding>
+  trustedGrant: (identity: OwnIdentity) => Promise<string>
+}
+
 async function chainedRecovery() {
-  const fixture = (await import(
-    new URL('../../mls/test/fixtures/lifecycle-ledger.ts', import.meta.url).href
-  )) as {
-    agent: (byte: number) => OwnIdentity
-    bindingFor: (
-      identity: OwnIdentity,
-      prefix?: ControllerBinding['prefix'],
-      issuer?: { identity: OwnIdentity; parent: string },
-    ) => Promise<ControllerBinding>
-    trustedGrant: (identity: OwnIdentity) => Promise<string>
-  }
   const alice = fixture.agent(41)
   const bob = fixture.agent(61)
   const now = Date.now()
