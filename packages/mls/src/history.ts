@@ -1,3 +1,4 @@
+import { isControllerLog } from '@kokuin/controller'
 import { type ClientState, defaultCredentialTypes, isDefaultCredential, nodeTypes } from 'ts-mls'
 
 import { parseMLSCredentialIdentity } from './credential.js'
@@ -13,6 +14,13 @@ export function controllerLogSize(events: ReadonlyArray<unknown>): number {
     (total, event) => total + utf8.encode(JSON.stringify(event)).length,
     0,
   )
+}
+
+export function proofSize(value: unknown): number {
+  if (Array.isArray(value)) return controllerLogSize(value)
+  return isControllerLog(value)
+    ? controllerLogSize(value.chain) + controllerLogSize(value.events)
+    : 0
 }
 
 /** Count validated controller history. Callers apply the horizon only to lifecycle groups. */
@@ -41,7 +49,7 @@ export function historySize(
       continue
     }
     const proof = (entry.value as { proof?: unknown }).proof
-    if (Array.isArray(proof)) size += controllerLogSize(proof)
+    size += proofSize(proof)
   }
   return size
 }

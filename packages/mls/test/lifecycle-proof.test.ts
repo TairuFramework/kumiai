@@ -179,7 +179,7 @@ describe('authenticated proof attachment', () => {
     expect(effects).toMatchObject({
       controller: controllerID,
       logPosition: 1,
-      recordedLog: log,
+      recordedLog: { chain: log, events: [] },
       genFloor: 0,
       timeFloor: 0,
       revoked: [{ did: target }],
@@ -335,7 +335,7 @@ describe('authenticated proof attachment', () => {
         revoked: [{ did: target }],
       }),
     )
-    expect(effects.recordedLog).toEqual(log)
+    expect(effects.recordedLog).toEqual({ chain: log, events: [] })
     expect(effects.logPosition).toBe(2)
     expect(effects.genFloor).toBe(0)
   })
@@ -386,7 +386,10 @@ describe('recorded log replay', () => {
         )
         const live = await enact(first.group, [secondToken])
         publish(initial.tokens, [secondToken])
-        expect(live.group.registry.controllers.get(controllerID)?.recordedLog).toEqual(log)
+        expect(live.group.registry.controllers.get(controllerID)?.recordedLog).toEqual({
+          chain: log,
+          events: [],
+        })
         expect(revocationOf(live.group, target)).toEqual({
           controller: controllerID,
           logPosition: 52,
@@ -435,7 +438,7 @@ describe('recorded log replay', () => {
         revoked: [{ did: target }],
       }),
     )
-    expect(effects.recordedLog).toEqual(log)
+    expect(effects.recordedLog).toEqual({ chain: log, events: [] })
     expect(effects.logPosition).toBe(2)
   })
 
@@ -521,7 +524,7 @@ describe('live effect derivation', () => {
     const replay = deriveGroup(group, group.state)
     await replay.applyLedgerEntries([token])
     expect(replay.registry.controllers.get(controllerID)).toMatchObject({
-      recordedLog: [inception, reset],
+      recordedLog: { chain: [inception, reset], events: [] },
       genFloor: 1,
       timeFloor: 0,
     })
@@ -949,7 +952,9 @@ describe('deny-gaining rotate proofs', () => {
       }),
       {
         ...registry,
-        controllers: new Map([[controllerID, { recordedLog: [], genFloor: floor, timeFloor: 0 }]]),
+        controllers: new Map([
+          [controllerID, { ...registryModule.controllerProjection(), genFloor: floor }],
+        ]),
       },
     )
   }

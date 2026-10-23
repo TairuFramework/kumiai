@@ -12,6 +12,7 @@ import {
   didFromInception,
   digestOf,
   encodeKey,
+  type InceptionEvent,
   isEpochEventShape,
   MAX_EPOCH_EVENTS,
   pruneLog,
@@ -24,7 +25,7 @@ import { ed25519 } from '@noble/curves/ed25519.js'
 import { bytesToNumberLE, concatBytes } from '@noble/curves/utils.js'
 import { sha512 } from '@noble/hashes/sha2.js'
 import { toB64U } from '@sozai/codec'
-import { describe, expect, test } from 'vitest'
+import { beforeAll, describe, expect, test } from 'vitest'
 
 import {
   asControllerLog,
@@ -39,6 +40,7 @@ import {
 } from '../src/controller-log.js'
 import { createEmbeddedControllerResolver } from '../src/embedded-resolver.js'
 import { revokeChain, rotateChain } from './fixtures/controller-chain.js'
+import { saturatedLog } from './fixtures/controller-epoch.js'
 
 const seed = new Uint8Array(32).fill(17)
 const inception = createInception(seed, 0)
@@ -304,22 +306,32 @@ test('closureOf returns the chain alone for empty targets', async () => {
   expect(closureOf(did, log, [])).toEqual({ chain: [inception], events: [] })
 })
 
-test('closureOf refuses a saturated epoch even for empty targets', async () => {
-  const { log, add, renew } = await memberLog()
-  const privateKey = deriveKeyMaterial(seed, authorityPath(0, 0, 0), 'EdDSA')
-  log.events = [
-    add,
-    ...Array.from({ length: MAX_EPOCH_EVENTS }, (_, index) => {
-      const event = { ...renew.event, lease: 2000 + index }
-      return { event, sigs: [toB64U(ed25519.sign(canonicalBytes(event), privateKey))] }
-    }),
-  ]
-  const folded = foldControllerLog(did, log)
-  if (!folded.ok) throw new Error(folded.reason)
-  expect(folded.applied).toHaveLength(MAX_EPOCH_EVENTS + 1)
-  expect(folded.head.saturated).toBe(true)
-  expect(closureOf(did, log, [digestOf(add.event)])).toBeUndefined()
-  expect(closureOf(did, log, [])).toBeUndefined()
+describe('saturated controller epoch', () => {
+  let log: ControllerLog
+  let controller: string
+  let addDigest: string
+
+  beforeAll(async () => {
+    log = await saturatedLog()
+    const inception = log.chain[0]
+    const add = log.events.find((signed) => signed.event.t === 'add')
+    if (inception?.event.t !== 'icp' || add == null) throw new Error('Missing saturated fixture')
+    controller = didFromInception(inception.event as InceptionEvent)
+    addDigest = digestOf(add.event)
+    const folded = foldControllerLog(controller, log)
+    if (!folded.ok) throw new Error(folded.reason)
+    expect(folded.applied).toHaveLength(MAX_EPOCH_EVENTS + 1)
+    expect(folded.applied).toContain(addDigest)
+    expect(folded.head.saturated).toBe(true)
+  })
+
+  test('closureOf refuses a saturated epoch for an applied target', () => {
+    expect(closureOf(controller, log, [addDigest])).toBeUndefined()
+  })
+
+  test('closureOf refuses a saturated epoch even for empty targets', () => {
+    expect(closureOf(controller, log, [])).toBeUndefined()
+  })
 })
 
 test('mutating a closure does not change the input log', async () => {

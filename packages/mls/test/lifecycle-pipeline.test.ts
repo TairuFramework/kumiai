@@ -32,7 +32,11 @@ import {
   validateEntry,
   validateWelcomeTree,
 } from '../src/lifecycle.js'
-import { DEVICE_ENTRY_TYPE } from '../src/registry.js'
+import {
+  type ControllerProjection,
+  controllerProjection,
+  DEVICE_ENTRY_TYPE,
+} from '../src/registry.js'
 import { revokeChain, snapshotForChain } from './fixtures/controller-chain.js'
 import { joinBoundDevice } from './fixtures/device-harness.js'
 import { controllerSeed } from './fixtures/lifecycle-ledger.js'
@@ -686,12 +690,11 @@ describe('lifetime and admission boundaries', () => {
       ...leaf.leaf,
       credential: makeMLSCredential(identity, await timedBinding({ identity, iat: 90, exp: 200 })),
     }
-    ;(
-      group.registry.controllers as Map<
-        string,
-        { recordedLog: Array<never>; genFloor: number; timeFloor: number }
-      >
-    ).set(controllerID, { recordedLog: [], genFloor: 99, timeFloor: 1000 })
+    ;(group.registry.controllers as Map<string, ControllerProjection>).set(controllerID, {
+      ...controllerProjection(),
+      genFloor: 99,
+      timeFloor: 1000,
+    })
     expect(treeTime(group, controllerID)).toBe(0)
     await expect(validateEntry(group, bound, leaf.leaf)).resolves.toBeUndefined()
   })

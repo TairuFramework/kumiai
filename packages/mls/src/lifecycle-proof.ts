@@ -1,14 +1,20 @@
-import { didFromInception, type InceptionEvent, type SignedEvent } from '@kokuin/controller'
+import {
+  type ControllerLog,
+  didFromInception,
+  type InceptionEvent,
+  isControllerLog,
+} from '@kokuin/controller'
 import { normalizeDID } from '@kokuin/token'
 import { defaultCredentialTypes, isDefaultCredential, type LeafNode, nodeTypes } from 'ts-mls'
 
 import { hasHolderEvidence } from './authentication.js'
 import { readCapability } from './capability.js'
+import { effectDelta, ingestControllerLog } from './controller-ingest.js'
 import { foldChain, isDetachedFoldReason, revokesSubject } from './controller-log.js'
 import { parseMLSCredentialIdentity } from './credential.js'
 import { RevokeProofError } from './errors.js'
 import type { GroupHandle } from './group-handle.js'
-import { controllerLogSize, HISTORY_HORIZON, historySize } from './history.js'
+import { controllerLogSize, HISTORY_HORIZON, historySize, proofSize } from './history.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
 import {
   type DeviceRegistry,
@@ -23,7 +29,7 @@ export { controllerLogSize, HISTORY_HORIZON } from './history.js'
 /** Derived from a proof and the pre-commit tree; proposal comparison belongs to the commit gate. */
 export type LifecycleProofEffects = {
   controller: string
-  recordedLog: Array<SignedEvent>
+  recordedLog: ControllerLog
   genFloor: number
   timeFloor: number
   logPosition?: number
@@ -32,9 +38,9 @@ export type LifecycleProofEffects = {
 }
 
 type AuthenticatedProof = {
-  recordedLog: Array<SignedEvent>
+  recordedLog: ControllerLog
   genFloor: number
-  logPosition: number
+  logPosition?: number
 }
 
 /** Authenticate replayable log data without reading any membership state. */
@@ -47,14 +53,27 @@ export function authenticateLifecycleProof(
   const subject = normalizeDID(verified.entry.subject)
   const value = verified.entry.value
   const previous = registry.controllers.get(controller)
-  const recorded = previous?.recordedLog ?? []
+  const recorded = previous?.recordedLog?.chain ?? []
   const floor = previous?.genFloor ?? 0
   if (
     (value.controller != null && normalizeDID(value.controller) !== controller) ||
-    (value.op === 'reset' && subject !== controller)
+    ((value.op === 'reset' || value.op === 'log' || value.op === 'seed') && subject !== controller)
   )
     throw new RevokeProofError('wrong-controller')
   const proof = value.proof
+  if (value.op === 'log' || value.op === 'seed') {
+    if (!isControllerLog(proof)) throw new RevokeProofError('not-authority-signed')
+    if (value.op === 'seed' ? previous?.recordedLog != null : previous?.recordedLog == null)
+      throw new RevokeProofError('detached')
+    const ingested = ingestControllerLog(controller, previous?.recordedLog, proof)
+    if (value.op === 'log') {
+      const delta = effectDelta(ingested.before?.head, ingested.after.head)
+      if (delta.generation) throw new RevokeProofError('needs-reset')
+      if (delta.denied.length > 0 || delta.removed.length > 0)
+        throw new RevokeProofError('effects-mismatch')
+    }
+    return { recordedLog: ingested.log, genFloor: Math.max(floor, ingested.after.head.gen) }
+  }
   if (!Array.isArray(proof)) throw new RevokeProofError('no-rev')
   if (recorded.length === 0 && proof.length === 0) throw new RevokeProofError('no-rev')
   for (const signed of proof) {
@@ -107,7 +126,11 @@ export function authenticateLifecycleProof(
     const generation = folded.states[position]?.gen
     if (generation == null) throw new RevokeProofError('no-rev')
     if (generation <= floor) throw new RevokeProofError('generation-floor')
-    return { recordedLog: [...log], genFloor: generation, logPosition: position }
+    const ingested = ingestControllerLog(controller, previous?.recordedLog, {
+      chain: proof,
+      events: [],
+    })
+    return { recordedLog: ingested.log, genFloor: generation, logPosition: position }
   }
   let belowFloor = false
   for (const [index, state] of folded.states.entries()) {
@@ -116,7 +139,11 @@ export function authenticateLifecycleProof(
       belowFloor = true
       continue
     }
-    return { recordedLog: [...log], genFloor: floor, logPosition: index }
+    const ingested = ingestControllerLog(controller, previous?.recordedLog, {
+      chain: proof,
+      events: [],
+    })
+    return { recordedLog: ingested.log, genFloor: floor, logPosition: index }
   }
   throw new RevokeProofError(belowFloor ? 'generation-floor' : 'no-rev')
 }
@@ -230,7 +257,7 @@ export async function verifyLifecycleProof(
     }
     return {
       controller,
-      recordedLog: previous?.recordedLog ?? [],
+      recordedLog: previous?.recordedLog ?? { chain: [], events: [] },
       genFloor: previous?.genFloor ?? 0,
       timeFloor: value.time,
       revoked: [],
@@ -267,7 +294,7 @@ export async function verifyLifecycleProof(
   )
   const after =
     before +
-    controllerLogSize(value.proof ?? []) -
+    proofSize(value.proof) -
     removed.reduce((size, leaf) => size + controllerLogSize(leaf.prefix), 0)
   if (after > HISTORY_HORIZON && after > before) throw new RevokeProofError('too-large')
   return {

@@ -440,11 +440,19 @@ describe('authenticated lifecycle projections', () => {
       ),
     ]
     const { registry } = foldControl(entries, anchor, GROUP)
-    expect(registry.devices.get(DEV_A)).toEqual({ controller, status: 'revoked', logPosition: 1 })
+    expect(registry.devices.get(DEV_A)).toEqual({
+      controller,
+      status: 'revoked',
+      logPosition: 1,
+      proofRef: { chainIndex: 1 },
+    })
     expect(registry.controllers.get(controller)).toEqual({
-      recordedLog: [inception, rev],
+      recordedLog: { chain: [inception, rev], events: [] },
       genFloor: 0,
       timeFloor: 0,
+      attestations: new Map(),
+      removedMembers: new Map(),
+      survivorGrants: new Map(),
     })
     expect(denySetOf(registry)).toEqual(new Set([DEV_A]))
   })
@@ -462,7 +470,7 @@ describe('authenticated lifecycle projections', () => {
     ]
     const { registry } = foldControl(entries, anchor, GROUP)
     expect(registry.controllers.get(controller)).toMatchObject({
-      recordedLog: [inception, rev],
+      recordedLog: { chain: [inception, rev], events: [] },
       genFloor: 0,
       timeFloor: 100,
     })

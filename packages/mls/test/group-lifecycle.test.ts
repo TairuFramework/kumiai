@@ -397,9 +397,10 @@ test('strips skipped events, and rejects wrong-controller, detached and higher-g
   expect(built.status).toBe('built')
   expect(padded).toHaveLength(3)
   if (built.status !== 'built') throw new Error('Missing proof')
-  expect(built.result.newGroup.registry.controllers.get(controllerID)?.recordedLog).toEqual(
-    JSON.parse(JSON.stringify([inception, rev])),
-  )
+  expect(built.result.newGroup.registry.controllers.get(controllerID)?.recordedLog).toEqual({
+    chain: JSON.parse(JSON.stringify([inception, rev])),
+    events: [],
+  })
   const foreign = createInception(new Uint8Array(32).fill(99), 0)
   expect(await revokeWithProof(group, { subject: target, log: [foreign] })).toEqual({
     status: 'not-provable',
@@ -640,11 +641,16 @@ test.each(['revoke', 'reset'] as const)(
     expect(built.result.newGroup.ledger.at(-1)?.verified.entry.value).toMatchObject({
       proof: expected,
     })
-    expect(built.result.newGroup.registry.controllers.get(controllerID)?.recordedLog).toEqual(
-      expected,
-    )
-    if (op === 'revoke') expect(revocationOf(built.result.newGroup, target)?.logPosition).toBe(2)
-    else expect(built.result.newGroup.registry.controllers.get(controllerID)?.genFloor).toBe(1)
+    expect(built.result.newGroup.registry.controllers.get(controllerID)?.recordedLog).toEqual({
+      chain: expected,
+      events: [],
+    })
+    if (op === 'revoke') {
+      expect(revocationOf(built.result.newGroup, target)?.logPosition).toBe(2)
+      expect(built.result.newGroup.registry.devices.get(target)?.proofRef).toEqual({
+        chainIndex: 2,
+      })
+    } else expect(built.result.newGroup.registry.controllers.get(controllerID)?.genFloor).toBe(1)
     expect(renewed.newGroup.state).toEqual(before)
     expect(log).toEqual(originalLog)
   },

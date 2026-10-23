@@ -262,7 +262,7 @@ function proofFor(params: ProofForParams): Array<SignedEvent> {
     if (advancing[index]?.event.g !== advancing[index - 1]?.event.g) resetIndex = index
   }
   const projection = group.registry.controllers.get(normalizeDID(controller))
-  const recorded = projection?.recordedLog ?? []
+  const recorded = projection?.recordedLog?.chain ?? []
   const floor = projection?.genFloor ?? 0
   if (reset) {
     if (resetIndex < 0) throw new RevokeProofError('no-rev')

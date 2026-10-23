@@ -54,6 +54,7 @@ export type RevokeProofReason =
   | 'no-rev'
   | 'wrong-controller'
   | 'not-authority-signed'
+  | 'not-endorsed'
   | 'generation-floor'
   | 'too-large'
   | 'detached'
