@@ -1,10 +1,11 @@
 import {
   testAckConformance,
+  testHubPublishIDConformance,
   testLogHubConformance,
   testMailboxAckConformance,
 } from '@kumiai/hub-conformance'
 import type { MailboxHub } from '@kumiai/hub-tunnel'
-import { afterEach } from 'vitest'
+import { afterEach, beforeEach, vi } from 'vitest'
 
 import { createHubMux, type HubMux } from '../src/hub-mux.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
@@ -12,6 +13,36 @@ import { FakeHub } from './fixtures/fake-hub.js'
 
 const MAX_RETENTION = 30 * 24 * 60 * 60
 const MAX_DEPTH = 6
+
+beforeEach(() => vi.useFakeTimers({ toFake: ['Date'] }))
+afterEach(() => vi.useRealTimers())
+
+for (const Hub of [FakeHub, DurableFakeHub]) {
+  testHubPublishIDConformance({
+    label: Hub.name,
+    setTime: (milliseconds) => vi.setSystemTime(milliseconds),
+    createStore: () => {
+      const hub = new Hub({ maxRetention: MAX_RETENTION, maxDepth: MAX_DEPTH })
+      return {
+        subscribe: async (params) => {
+          hub.subscribe(params.subscriberDID, params.topicID, { retention: params.retention })
+        },
+        publish: (params) => hub.publish(params),
+        fetchTopic: (params) => hub.fetchTopic(params),
+        trim: async (params) => hub.trim(params.topicID, params.before),
+        ack:
+          hub instanceof DurableFakeHub
+            ? async (params) => {
+                const subscription = hub.receive(params.recipientDID)
+                for (const sequenceID of params.sequenceIDs) await subscription.ack?.(sequenceID)
+                subscription.return?.()
+              }
+            : undefined,
+        purge: async () => hub.purgePublishIDs(Date.now()),
+      }
+    },
+  })
+}
 
 /**
  * The doubles the whole rpc suite executes against, run against the hub contract itself. Every
