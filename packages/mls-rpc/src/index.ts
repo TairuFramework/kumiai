@@ -95,6 +95,7 @@ export {
   type RecoveryAdoptionDependencies,
   type RecoveryRouting,
 } from './mls.js'
+export { MLSEncryptor, type MLSEncryptorParams } from './mls-encryptor.js'
 export type {
   EntryKind,
   EntryPhase,
@@ -207,10 +208,13 @@ export type {
   GroupRuntimeSnapshot,
   LegacyRegistryRecoverySource,
   LegacyResyncProof,
+  ReceiveInput,
+  ReceiveResult,
   RegistryHandleAccess,
   RegistryRecoverySource,
   RegistrySwitchWrite,
   ResyncProof,
+  SealedApp,
 } from './registry/types.js'
 export type { RecoveryEnvironment } from './registry/validation.js'
 export { createRegistryGroupMLS, type RegistryGroupMLSParams } from './registry-group-mls.js'

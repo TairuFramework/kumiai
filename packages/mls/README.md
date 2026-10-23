@@ -15,6 +15,27 @@ The skip applies regardless of the consumed flag and finishes before the constru
 It ignores reservations from other epochs. The commit permit repeats this preparation, normally as a no-op.
 Restored, permit and candidate state saves use flags `0`.
 
+## Application send policy
+
+`GroupHandle.encryptApplication(plaintext, { aad? })` returns `{ ciphertext, generation }`, capturing the consumed generation under the handle mutex.
+`encrypt` returns only the ciphertext. Both enforce the send policy before advancing the ratchet.
+`denyApplicationSend(handle)` permanently refuses application sends with `ApplicationSendRefusedError`. Derived handles inherit denial.
+`bindSendCeiling(handle, limit)` binds an unrestricted handle once. Encryption requires its next generation to be below `limit()`.
+`isApplicationSendDenied` reads denial, and `ownApplicationGeneration(state)` reads the own-leaf application generation.
+
+`relinquishSend(handle, { holding? })` denies the handle, waits for exclusive mutex ownership, then captures encoded state, ledger tokens and credential.
+It never advances the supplied handle. A valid holding token permits one capture inside the callback already owning that handle's mutex.
+`processMessage` and `bootstrapLedger` supply `{ holding }` as their persist callback's second argument.
+Registry adapters forward it through `PersistContext`, avoiding a mutex reacquisition inside those callbacks.
+
+`reserveApplicationRange(handle, { floor, size, cap })` operates only on a private, send-denied handle.
+It serialises advancement and returns `{ pre, advanced, start, limit }`, or `null` at the cap.
+It advances by encrypting and discarding under normal send-eligibility checks. Hosts persist `advanced` before allowing a private copy to send from `pre`.
+Registry leases use size 16 and cap 500. Reservation never mutates a caller-owned handle.
+
+`@kumiai/mls/testing` exports `serializeHandle`, `assertApplicationSend`, `reserveApplicationKernel` and `withReservationLock` for contract doubles.
+These serializer and reservation hooks are test-only and absent from the main package index.
+
 ## Persisted client state
 
 `encodeClientState` and `decodeClientState` support only format v2. Other versions throw an unsupported-version error.

@@ -275,6 +275,43 @@ test('the public registry recovery surface exposes portable contracts and action
     expect(Reflect.get(api, name)).toBeTypeOf('function')
 })
 
+test('the public application surface exposes lease crypto and automatic rotation', () => {
+  expectTypeOf<api.SealedApp>().toEqualTypeOf<
+    Awaited<ReturnType<api.RegistryHandleAccess['seal']>>
+  >()
+  expectTypeOf<api.ReceiveInput>().toEqualTypeOf<
+    Parameters<api.RegistryHandleAccess['receive']>[0][number]
+  >()
+  expectTypeOf<api.ReceiveResult>().toEqualTypeOf<
+    Awaited<ReturnType<api.RegistryHandleAccess['receive']>>[number]
+  >()
+  expectTypeOf<api.MLSEncryptorParams>().toEqualTypeOf<{
+    access: Pick<api.RegistryHandleAccess, 'seal' | 'receive' | 'runtime' | 'key'>
+    peerDID: string
+    role: 'dialer' | 'listener'
+  }>()
+  expectTypeOf<ConstructorParameters<typeof api.MLSEncryptor>>().toEqualTypeOf<
+    [api.MLSEncryptorParams]
+  >()
+  expectTypeOf<api.AutoRotationCandidate>().toEqualTypeOf<
+    ReturnType<typeof api.decodeAutoRotationCandidate>
+  >()
+  for (const name of [
+    'MLSEncryptor',
+    'ApplicationLeaseUnavailableError',
+    'autoRotationRequest',
+    'buildKeyRotation',
+    'createAutoRotationScheduler',
+    'decodeAutoRotationCandidate',
+    'isAutoRotation',
+    'LegacyControlActivationError',
+    'LegacyJournalDecisionRequiredError',
+  ])
+    expect(Reflect.get(api, name), name).toBeTypeOf('function')
+  for (const name of ['assertAutoRotation', 'reserveFromBytes', 'activateLegacyControl'])
+    expect(Reflect.has(api, name), name).toBe(false)
+})
+
 test('documented MLS and registry constructors typecheck with the required dependencies', () => {
   const source = `
     import { createGroupMLS, type GroupMLSParams } from '../src/mls.js'

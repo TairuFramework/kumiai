@@ -38,6 +38,11 @@ depend on both.
 - `OpenAppInput`, `OpenAppResult`, `PreOpenAppFrameRef`, `PendingAppFrame`, `PendingAppFrames`,
   `MAX_OPEN_BATCH_FRAMES` (64), `RECEIVE_SAVE_ATTEMPTS` (3), `KeyRetentionRangeError` and
   `InvalidCandidateError` — registry open and restore contracts. `InvalidAppEntryError` re-exports the rpc class.
+- `MLSEncryptor({ access, peerDID, role })`, `MLSEncryptorParams` -- hub-tunnel encryption over registry access.
+- `SealedApp`, `ReceiveInput`, `ReceiveResult`, `ApplicationLeaseUnavailableError` -- byte-level application crypto contracts.
+- `autoRotationRequest`, `isAutoRotation`, `buildKeyRotation`, `createAutoRotationScheduler`,
+  `AutoRotationCandidate`, `decodeAutoRotationCandidate` -- automatic rotation and candidate adapters.
+- `LegacyCommitJournalBoundary`, `LegacyJournalDecisionRequiredError`, `LegacyControlActivationError` -- persistence activation contracts.
 
 ## Share one access instance
 
@@ -136,6 +141,50 @@ A host with its own handle store implements the port instead:
   On a revision conflict it retries from a fresh handle. Faults from `persistOpened`, from the staging
   callback the adapter hands `fn`, and from anything the adapter raises around `fn` come back as
   `AppFrameStorageError`, which the lane retries.
+
+## Control settlement and Welcome obligations
+
+The commit-once slot is scoped to the group incarnation and source epoch. All private builders, including rotation, share it.
+The ordered commit walker settles the build in the transaction that consumes its source epoch.
+Recognised own commits install the saved candidate. Complete coverage reports `landed` and creates a Welcome obligation when applicable.
+Incomplete coverage still installs the candidate, but reports terminal `unknown` without creating a Welcome obligation.
+A validated competing commit reports `lost` with complete coverage, otherwise `unknown`.
+Hub `acceptedAs` acknowledgements record retry evidence only. They neither install state nor establish outcomes or Welcome obligations.
+
+Deadline expiry reports provisional `unknown` once while retaining the executable build, even during an unfinished handoff or safety hold.
+`peer.outcomes()` replays durable reports. `peer.ack(outcome.id)` deletes only that exact report.
+Acknowledgement and expiry never release the source slot. Final closure removes surviving provisional reports and writes a fresh outcome ID.
+
+`peer.abandon()` closes live control work as terminal `unknown`, deletes executable material and undelivered Welcome obligations, and leaves a spent-source marker.
+The marker blocks another build at that source epoch across acknowledgement and restart. Authenticated advancement or retirement releases it.
+
+Re-enqueueing a pending operation ID preserves its original intent, body, sequence and deadline.
+Reuse throws `OperationRejectedError` while an outcome, live build, matching spent-source marker or Welcome obligation retains that ID.
+An epoch-only legacy marker conservatively blocks all ID reuse until consumption.
+
+Welcome obligations retain their exact bytes and recipients independently of builds and outcomes.
+Delivery retries after restart, retirement and safety holds without historical commit revalidation. Transport failures retain the obligation.
+Acknowledging an outcome never deletes an obligation. Explicit abandonment discards undelivered obligations.
+The host's `deliverWelcome(obligation)` callback resolves after delivery. A rejection retains the obligation for retry.
+
+Terminal `unknown` can leave an accepted Add without a Welcome. Remove that member before re-inviting with a fresh key package.
+
+## Persistence activation
+
+Memory persistence migrates unmarked control snapshots before exposing reads, callbacks or workers, including retired incarnations.
+Hosts opening legacy control state must set `legacyCommitJournal` on their persistence factory before first opening.
+Supply a transaction-bound `LegacyCommitJournalBoundary`, or explicit `null` when no main journal exists.
+Omitting that decision for an unmarked snapshot throws `LegacyJournalDecisionRequiredError` without changing stored bytes.
+Main-backed imports require the adapter before first opening, including when no control snapshot exists.
+
+The adapter's `load(tx, key)` reads only that incarnation's journal. Its `clear(tx, key, publishID)` also releases `holdsLogSends`.
+Both callbacks participate in the supplied transaction. An external `get`/`clear` pair cannot provide rollback atomicity.
+Migration preserves pending intents and extracts eligible saved builds. Already closed work receives fresh final reports.
+
+Existing Welcome rows become independent obligations. Main journal bytes become terminal `unknown.lostCommit` payloads, never adoptable candidates.
+
+The activation barrier covers every stored incarnation and awaits ambiguous completion before work starts. Reopening marked state performs no migration writes.
+`LegacyControlActivationError` reports exhaustion of ambiguous-completion retries. Client-state decoding remains a separate contract.
 
 ## Durable logged app delivery
 
@@ -380,9 +429,11 @@ owns that token: a second live registry is rejected synchronously before any loa
 subscription. Separately constructed memory devices over one database share the token, even
 though their `groups` objects differ. Spreading or copying a wrapper does not inherit registration.
 
-Every handle the registry hands to host code is send-denied, except the explicit test-only
-raw-key and live-sender seams on `@kumiai/mls-rpc/testing`. Application crypto uses byte-level
-`seal` and `receive` access instead of encrypting through host handles.
+Registry-issued and accepted handles are permanently send-denied. Derivatives inherit denial.
+Control-build `restoreSource` permit clones and `restoreCandidate` results are denied for every host.
+Registry recovery and adoption `restoreCandidate` results are denied when registry-backed. Simple access otherwise preserves application sending.
+The host's `restore` adapter holds raw keys and creates the private send copy. Independently restoring raw keys remains a trusted-code exception.
+Explicit raw-key and live-sender seams on `@kumiai/mls-rpc/testing` are test-only.
 
 Cold access shares in-flight validation and caches validated records rather than mutable handles.
 Every `read` and `readControl` guarded-opens current stored state and restores an isolated handle;
@@ -398,6 +449,44 @@ subsequent lifetime operations.
 Missing, corrupt or empty-spent retained trust records `recovery-unavailable`.
 Null or corrupt state cannot use cached bytes, including at an unchanged state version, and failed
 restorations are never cached. Pure reads advance no persistence revision or state version.
+
+## Application leases and ephemeral crypto
+
+`access.seal(plaintext, { aad, intent })` returns `SealedApp`: ciphertext, epoch and the generation consumed under the handle mutex.
+`intent` is `log` or `ephemeral`. `access.receive(frames)` returns one `ReceiveResult` per `ReceiveInput`, with opened bytes or a refusal.
+`ReceiveInput.expectedAAD` is checked before reading sender data. Logged frames use durable `openBatch` instead of ephemeral `receive`.
+`access.runtime` supplies defensive membership snapshots and `onEpochChanged` subscriptions.
+
+Reservations belong to an incarnation, epoch and authenticator. Installation reserves 16 generations, renewal starts below four remaining, and the ceiling is 500.
+Reservations advance committed state by encrypting and discarding, then permit a private send copy to use the reserved range after commit proof.
+Restoring stored state needs no additional lease skip.
+S1(a): the copy's limit never exceeds the committed stored own application generation.
+S1(b): no other send-capable handle holds a generation below that committed value.
+
+Ownership transfer denies the supplied handle, waits for exclusive access and captures bytes. Reservation mutates only a private restore.
+Same-identity saves preserve maximum progress. New epochs reset the ceiling, and new incarnations inherit no lease.
+Owner loss, identity or eligibility changes, and unaccounted foreign versions drop the copy. Failed seals and unused generations count.
+
+Ephemeral seals and receives perform no persistence and initiate no provider transaction. Independently scheduled maintenance commits lease warm-up and renewal.
+A cold ephemeral seal after restart or owner drop throws `ApplicationLeaseUnavailableError` until warm-up commits.
+Exhaustion rejects the ephemeral call without storage work. Durable seals may wait for maintenance.
+
+Ephemeral consumed tuples prevent repeat opens in one process. One replay of an opened frame after restart can succeed.
+Registry ephemeral receive refuses every sender generation at or above 500 per epoch, including legacy senders. Durable opens retain their existing rules.
+Fork-halt, recovery-unavailable and spent-set-corrupt conditions block seals and new opens, live and after restart.
+
+At effective next generation 500, admission reports `rotation-required`. New durable acceptance refuses while already sealed frames may publish.
+Accepted entries awaiting sealing remain held until rotation. `createRegistryPeer` schedules one deterministic, non-revoking rotation outside the serial lane.
+Any member can rotate with an update path, empty proposals and entries, and unchanged roster and ledger.
+The app anchor stays unless membership changes. Closure triggers admission re-evaluation, with live builds and spent-source markers still respected.
+Withheld rotation remains `rotation-required` non-delivery without creating a safety hold or strand.
+
+Public `enqueue` and `commit` throw `TypeError` for operation IDs beginning `kumiai/internal/`.
+These internal outcomes stay out of host callbacks and `outcomes()`, including after restart. The registry consumes their exact durable IDs.
+
+`MLSEncryptor` uses ephemeral `seal`, batches `receive`, and checks publisher identity against `peerDID` and committed membership.
+Its `role` is `dialer` or `listener`. Only outstanding dialer replies may use retained past-epoch or unnamed frames.
+`trackPublish(hub)` removes failed publication tracking. `clear()` clears request tracking, and `watchPeerRemoval(dispose)` closes unavailable or removed peers.
 
 ## Durable group safety
 
@@ -419,8 +508,8 @@ Identical field reapplication preserves the original body and does not recreate 
 Registry mutation, replacement, adoption and direct crypto refuse either safety reason with `GroupSafetyHeldError`.
 Registry safety sinks immediately update MLS admission and hold live peers before durable writes complete.
 Restart loads committed fields before network work.
-Already opened handlers, stored outcomes/events, committed Welcome delivery and existing live certified settlement remain serviceable.
-Restart publication of frozen settlement under a safety hold remains a 2.3 obligation.
+Already opened handlers, stored outcomes/events and independent Welcome delivery remain serviceable under a safety hold.
+Live control deadlines still report provisional unknown through storage-only work.
 
 Hosts derive `judgeWelcomeAdmission`'s `held.forkHalted` from `forkHalt` alone.
 `recoveryUnavailable` alone permits an otherwise admissible Welcome into the next incarnation when retained trust is valid.
@@ -678,8 +767,9 @@ Retries have no count or elapsed-time bound. Their backoff caps at 15 seconds, a
 
 The host's `createPeerForIncarnation(key, options)` supplies the actual incarnation's control, crypto, anchor, cursor and outbox ports.
 It spreads `options` into `createGroupPeer`, preferring `options.hub` and `options.control` over its own.
-That forwards `mls`, `checkpoints`, `manualRecovery`, `recoveryTarget`, `onNotMember`, `recoveryOnly`, `onConfirmedRecovery`, `settleAcceptedRecovery`,
+That forwards `internalOperations`, `mls`, `checkpoints`, `manualRecovery`, `recoveryTarget`, `onNotMember`, `recoveryOnly`, `onConfirmedRecovery`, `settleAcceptedRecovery`,
 both reconciliation callbacks, `continuation` and `completion`.
+Forward `internalOperations` unchanged so the registry can bind its private rotation enqueue and consume internal outcomes.
 `onConfirmedRecovery` requires `settleAcceptedRecovery`. Direct construction without the settlement callback throws `TypeError`.
 The coordinator supplies both callbacks and waits for source completion and drainage before restoring the raw candidate.
 It never retains the host-bound pending proxy.
@@ -707,7 +797,7 @@ Proven settlement zeroises live owned buffers. Cumulative settlement retains eve
 
 Hub delivery faults never create new durable halts or authorise adverse settlement.
 Own copies use MLS-message recognition and receiver reference checks. Blob failures and unproven negatives remain advisory.
-Only host reports and genuine local invariants retain halt authority. Existing persisted halts and legacy record holds remain immutable.
+Only host reports and genuine local invariants retain halt authority. Existing persisted halts remain immutable.
 Origin-authorised signers removed after origin retain attestation authority, including possible signed floor inflation.
 This signer-authority residual lies outside the hub threat model; manual resync and successor retirement are its exits.
 Busy responders can also cause accepted-unadoptable churn.
@@ -716,5 +806,5 @@ Custom `recoverySecret` requires equivalent `recoverySecretFromTrust` at constru
 `RecoveryCandidateError`, `RegistryResyncRefusedError`, `RegistryRetiringError`, `RegistryRetireHookError` and `RegistryRecoveryReplacementError` expose actionable failures.
 `SeedAdmissionRefusedError` reports Welcome admission refusal. Existing conflict, uncertainty, movement and safety errors remain exported.
 Unadopted legacy attempts retry with `legacy-recovery-record`, preserving saved bytes; successor retirement is the explicit exit.
-Full registry crypto, leases, batching, package burn and restore remain 2.3; phase-3 providers are excluded.
+Application attempt co-commit, handler batching, package burn and backup restore remain follow-up work. Phase-3 providers are excluded.
 The integration witnesses reconstruct memory persistence. They do not provide phase-6 child-process SIGKILL evidence.
