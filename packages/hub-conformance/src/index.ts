@@ -34,7 +34,7 @@
  *
  * @module hub-conformance
  */
-import type { HubStore } from '@kumiai/hub-protocol'
+import type { HubStore, PublishParams, PurgeParams } from '@kumiai/hub-protocol'
 import {
   HeadMismatchError,
   KeyPackageQuotaExceededError,
@@ -89,11 +89,157 @@ function payload(byte: number): Uint8Array {
   return new Uint8Array([byte])
 }
 
+export type HubPublishIDConformanceParams = {
+  label: string
+  createStore: () => HubPublishIDConformanceStore | Promise<HubPublishIDConformanceStore>
+  setTime?: (milliseconds: number) => void
+}
+
+/** Fixture controls only; log clients need not expose storage maintenance. */
+type HubPublishIDConformanceStore = Pick<HubStore, 'subscribe' | 'fetchTopic' | 'trim'> & {
+  publish: (params: PublishParams) => Promise<{ sequenceID: string }>
+  ack?: HubStore['ack']
+  purge: (params: PurgeParams) => Promise<unknown>
+}
+
+export function testHubPublishIDConformance(params: HubPublishIDConformanceParams): void {
+  describe(`${params.label}: publish ID conformance`, () => {
+    test('the same publish ID is independent on two topics', async () => {
+      for (const pairs of [
+        [
+          [TOPIC, 'publish-1'],
+          [`${TOPIC}:other`, 'publish-1'],
+        ],
+        [
+          [`${TOPIC}:tuple`, 'part:publish'],
+          [`${TOPIC}:tuple:part`, 'publish'],
+        ],
+      ] as const) {
+        const store = await params.createStore()
+        const positions: Array<string> = []
+        for (const [topicID, publishID] of pairs) {
+          await store.subscribe({ subscriberDID: BOB, topicID })
+          const accepted = await store.publish({
+            senderDID: ALICE,
+            topicID,
+            publishID,
+            payload: payload(1),
+            retain: 'log',
+            expectedHead: null,
+          })
+          positions.push(accepted.sequenceID)
+        }
+        expect(positions[0]).not.toBe(positions[1])
+        for (const [index, [topicID, publishID]] of pairs.entries()) {
+          expect(
+            await store.publish({
+              senderDID: ALICE,
+              topicID,
+              publishID,
+              payload: payload(1),
+              retain: 'log',
+              expectedHead: null,
+            }),
+          ).toMatchObject({ sequenceID: positions[index] })
+          const log = await store.fetchTopic({ subscriberDID: BOB, topicID })
+          expect(log.head).toBe(positions[index])
+          expect(log.messages.map((message) => message.sequenceID)).toEqual([positions[index]])
+        }
+      }
+    })
+
+    test('refused CAS does not claim a publish ID', async () => {
+      const store = await params.createStore()
+      await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+      const publish = {
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(1),
+        retain: 'log',
+      } as const
+      const first = await store.publish({ ...publish, expectedHead: null })
+      await expect(
+        store.publish({
+          ...publish,
+          publishID: 'refused',
+          expectedHead: null,
+        }),
+      ).rejects.toThrow(HeadMismatchError)
+      expect(
+        (await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })).messages.map(
+          (message) => message.sequenceID,
+        ),
+      ).toEqual([first.sequenceID])
+      const accepted = await store.publish({
+        ...publish,
+        publishID: 'refused',
+        expectedHead: first.sequenceID,
+      })
+      expect(accepted.sequenceID).not.toBe(first.sequenceID)
+      const log = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+      expect(log.head).toBe(accepted.sequenceID)
+      expect(log.messages.map((message) => message.sequenceID)).toEqual([
+        first.sequenceID,
+        accepted.sequenceID,
+      ])
+    })
+
+    test.skipIf(params.setTime == null)(
+      'dedup expiry uses the original acceptance time',
+      async () => {
+        const store = await params.createStore()
+        const start = 100_000
+        const cutoff = start + 365 * 24 * 60 * 60 * 1000
+        await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+        const publish = {
+          senderDID: ALICE,
+          topicID: TOPIC,
+          payload: payload(1),
+          retain: 'log',
+          publishID: 'expiring',
+          expectedHead: null,
+        } as const
+        params.setTime?.(start)
+        const accepted = await store.publish(publish)
+        params.setTime?.(start + 1000)
+        const sentinel = await store.publish({
+          ...publish,
+          publishID: 'sentinel',
+          expectedHead: accepted.sequenceID,
+        })
+        params.setTime?.(start + 2000)
+        await store.ack?.({ recipientDID: BOB, sequenceIDs: [accepted.sequenceID] })
+        params.setTime?.(start + 3000)
+        await store.trim({ topicID: TOPIC, before: sentinel.sequenceID })
+        params.setTime?.(start + 4000)
+        expect(await store.publish(publish)).toMatchObject({ sequenceID: accepted.sequenceID })
+        params.setTime?.(cutoff - 1)
+        await store.purge({ olderThan: 0 })
+        expect(await store.publish(publish)).toMatchObject({ sequenceID: accepted.sequenceID })
+        // Expiry is purge-driven, even after the nominal window has elapsed.
+        params.setTime?.(cutoff)
+        expect(await store.publish(publish)).toMatchObject({ sequenceID: accepted.sequenceID })
+        await store.purge({ olderThan: 0 })
+        const fresh = await store.publish({ ...publish, expectedHead: sentinel.sequenceID })
+        expect(fresh.sequenceID > sentinel.sequenceID).toBe(true)
+        expect((await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })).head).toBe(
+          fresh.sequenceID,
+        )
+      },
+    )
+  })
+}
+
 export function testHubStoreConformance(params: HubStoreConformanceParams): void {
   const { createStore, maxRetention, maxDepth, maxKeyPackagesPerDID, maxSubscriptionsPerDID } =
     params
 
   describe('HubStore conformance', () => {
+    testHubPublishIDConformance({
+      label: 'HubStore',
+      createStore,
+      setTime: params.setTime,
+    })
     test.skipIf(params.setTime == null)(
       'age purge retains a log suffix when the clock moves backwards',
       async () => {
@@ -612,7 +758,7 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       expect(result.head).toBe(sequenceID)
     })
 
-    test('a deduped publish reports deduped, appends nothing, and creates no new delivery', async () => {
+    test('accepted retry precedes CAS and preserves fanout', async () => {
       const store = await createStore()
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
 
@@ -625,6 +771,7 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
         payload: payload(1),
         retain: 'log',
         publishID: 'publish-dedup',
+        expectedHead: null,
       })
       expect(accepted.deduped).toBe(false)
 
@@ -641,6 +788,7 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
         payload: payload(1),
         retain: 'log',
         publishID: 'publish-dedup',
+        expectedHead: null,
       })
       expect(replay.sequenceID).toBe(accepted.sequenceID)
       expect(replay.deduped).toBe(true)
@@ -871,10 +1019,8 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
         (await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })).messages,
       ).toHaveLength(0)
 
-      // ...but the dedup record has its own retention, and purge honours trim's invariants: no
-      // deleter reaches it. A host hanging the key off the frame loses it to the sweep, and the
-      // replay silently becomes a new publish that fails its CAS against a head naming the purged
-      // frame — the caller told its commit was lost when it landed.
+      // The frame's age bound does not expire its still-young idempotency record.
+      // Hanging the key off the frame would lose it here and make the replay fail CAS.
       const { sequenceID: replayed } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
