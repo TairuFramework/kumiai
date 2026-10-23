@@ -1,12 +1,20 @@
 import { randomIdentity } from '@kokuin/token'
 import { encodeEventFrame } from '@kumiai/broadcast'
 import {
+  APP_TOPIC_LABEL,
   createOpenedAppHandler,
+  encodeAppAAD,
+  type GroupCrypto,
+  type LogHub,
   OpenedDeliveryReentryError,
   openedDeliveryBinding,
+  protocolTopic,
+  type PendingAppFrame as RpcPendingAppFrame,
 } from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
+import type { createAppLane as CreateAppLane } from '../../rpc/lib/app-lane.js'
+import type { createHubMux as CreateHubMux } from '../../rpc/lib/hub-mux.js'
 import { entryCapability } from '../src/entry-capability.js'
 import { drainStoredOpened } from '../src/opened-delivery.js'
 import { GroupStateConflictError } from '../src/persistence-errors.js'
@@ -694,6 +702,148 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
       }
       expect(seen).toEqual(['B', 'A5'])
       expect(liveCalls).toBe(1)
+    })
+
+    test('cold drain joins live cursor finalisation after pending removal', async () => {
+      const { createAppLane } = (await import(
+        new URL('../../rpc/src/app-lane.ts', import.meta.url).href
+      )) as { createAppLane: typeof CreateAppLane }
+      const { createHubMux } = (await import(
+        new URL('../../rpc/src/hub-mux.ts', import.meta.url).href
+      )) as { createHubMux: typeof CreateHubMux }
+      const { DurableFakeHub } = (await import(
+        new URL('../../rpc/test/fixtures/durable-fake-hub.ts', import.meta.url).href
+      )) as { DurableFakeHub: new () => LogHub }
+      const { createFakeCrypto } = (await import(
+        new URL('../../rpc/test/fixtures/fake-crypto.ts', import.meta.url).href
+      )) as {
+        createFakeCrypto(params: {
+          epoch: number
+          localDID: string
+          pending?: {
+            persistOpened(state: Uint8Array, record: RpcPendingAppFrame): Promise<void>
+            list(): Promise<Array<RpcPendingAppFrame>>
+            complete(id: string): Promise<void>
+          }
+        }): GroupCrypto
+      }
+      const env = await setup(mode, supplied)
+      const access = await env.fixture.registry.access(env.key.groupID)
+      const binding = openedDeliveryBinding(access.pending)
+      if (binding === undefined) throw new Error('Missing opened binding')
+      const hub = new DurableFakeHub()
+      const localDID = env.fixture.identity.id
+      const mux = createHubMux({ hub, localDID, onReceiveEnded() {} })
+      const entered = Promise.withResolvers<void>()
+      const releaseHandler = Promise.withResolvers<void>()
+      const reading = Promise.withResolvers<void>()
+      const releaseRead = Promise.withResolvers<void>()
+      const saving = Promise.withResolvers<void>()
+      const releaseSave = Promise.withResolvers<void>()
+      const receiver = createFakeCrypto({
+        epoch: 1,
+        localDID,
+        pending: {
+          async persistOpened(_state, record) {
+            await env.plant([
+              {
+                ...record,
+                frame: { ...record.frame, ...env.key, procedure: 'posted' },
+                epoch: 1,
+                idempotencyKey: record.frame.id,
+              },
+            ])
+          },
+          list: env.pending,
+          complete: (id) => binding.complete(id),
+        },
+      })
+      const anchor = await receiver.exportSecret(APP_TOPIC_LABEL)
+      const topicID = protocolTopic(anchor.secret, anchor.epoch, 'chat')
+      const cursor = env.fixture.device.groups.ports(env.key).cursor
+      const save = cursor.save
+      cursor.save = async (topicID, position) => {
+        saving.resolve()
+        await releaseSave.promise
+        await save(topicID, position)
+      }
+      const lane = createAppLane({
+        mux,
+        crypto: receiver,
+        localDID,
+        protocols,
+        eventHandlers: new Map(),
+        retentionSeconds: 60,
+        appliedEpoch: () => 1,
+        anchor: () => anchor,
+        groupID: () => env.key.groupID,
+        appCursorStore: cursor,
+        claimOpened: (record, fn) => binding.claim(record, fn),
+        completeOpenedRecord: (id) => binding.complete(id),
+        deliverOpened: async () => {
+          entered.resolve()
+          await releaseHandler.promise
+        },
+      })
+      const detach = binding.attach(env.context, {
+        handoff: () => lane.handoffOpened(),
+        completed: (id) => lane.acknowledgeOpened(id),
+      })
+      const read = env.capability.read
+      let drain: Promise<void> | undefined
+      let settled = false
+      let coldCalls = 0
+      try {
+        const senderDID = randomIdentity().id
+        const sender = createFakeCrypto({ epoch: 1, localDID: senderDID })
+        const payload = await sender.wrap(encodeEventFrame('posted', { text: 'retained' }), {
+          aad: encodeAppAAD({ topicID, intent: 'log' }),
+        })
+        const published = await hub.publish({ topicID, senderDID, payload, retain: 'log' })
+        await lane.deliver()
+        await entered.promise
+        let firstRead = true
+        env.capability.read = async (...args) => {
+          if (firstRead) {
+            firstRead = false
+            reading.resolve()
+            await releaseRead.promise
+          }
+          return read(...args)
+        }
+        drain = env.drain(async () => {
+          coldCalls++
+        })
+        void drain.then(() => {
+          settled = true
+        })
+        await reading.promise
+        releaseHandler.resolve()
+        await saving.promise
+        expect(await env.pending()).toEqual([])
+        releaseRead.resolve()
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        expect({ settled, cursor: await cursor.load(topicID), coldCalls }).toEqual({
+          settled: false,
+          cursor: null,
+          coldCalls: 0,
+        })
+        releaseSave.resolve()
+        await drain
+        expect(await cursor.load(topicID)).toBe(published.sequenceID)
+        expect(coldCalls).toBe(0)
+      } finally {
+        releaseHandler.resolve()
+        releaseRead.resolve()
+        releaseSave.resolve()
+        env.capability.read = read
+        if (drain !== undefined) await drain
+        lane.dispose()
+        await lane.idle()
+        detach()
+        mux.dispose()
+        await env.fixture.close()
+      }
     })
 
     test('failed old anchor blocks newer work in the same protocol only after live handoff', async () => {

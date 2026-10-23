@@ -183,8 +183,13 @@ export async function joinStoredOpened<TTx extends GroupTransaction>(params: {
     const records = await capability.read(key.groupID, (reads) =>
       reads.pendingFrames(key.incarnation),
     )
+    // A live claim can still be saving its cursor after removing its pending row.
+    const protocols = new Set([
+      ...records.map((record) => record.frame.protocol),
+      ...state.lanes.keys(),
+    ])
     await Promise.all(
-      [...new Set(records.map((record) => record.frame.protocol))].map(async (protocol) => {
+      [...protocols].map(async (protocol) => {
         let delay = 100
         for (;;) {
           assertHealthy(capability)
