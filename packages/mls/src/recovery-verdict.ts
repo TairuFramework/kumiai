@@ -1,4 +1,3 @@
-import { foldLog } from '@kokuin/controller'
 import {
   encodeMultibase,
   isVerifiedToken,
@@ -11,6 +10,7 @@ import { hmac } from '@noble/hashes/hmac.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 
 import { readCapability } from './capability.js'
+import { foldChain } from './controller-log.js'
 import type { GroupHandle } from './group-handle.js'
 import {
   type OpenSealedGroupInfoParams,
@@ -176,7 +176,7 @@ export function recoverySignerEligible(params: RecoverySignerEligibleParams): bo
       (payload.cap != null && known.devices.get(normalizeDID(payload.iss))?.status === 'revoked')
     )
       return false
-    const folded = foldLog(controller, binding.prefix)
+    const folded = foldChain(controller, binding.prefix)
     const projection = known.controllers.get(normalizeDID(controller))
     if (!folded.ok || (folded.states.at(-1)?.gen ?? 0) < (projection?.genFloor ?? 0)) return false
     let time = projection?.timeFloor ?? 0

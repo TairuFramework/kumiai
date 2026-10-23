@@ -1,11 +1,12 @@
 import { audienceConfirmation, now } from '@kokuin/capability'
-import { createRevoke, createRotate, type SignedEvent } from '@kokuin/controller'
+import type { SignedEvent } from '@kokuin/controller'
 import type { Credential } from 'ts-mls'
 import { defaultCredentialTypes } from 'ts-mls'
 import { describe, expect, test, vi } from 'vitest'
 
 import { createDIDAuthenticationService, verifyLeafCredential } from '../src/authentication.js'
 import { buildBoundLeaf } from './fixtures/bound-leaf.js'
+import { revokeChain, rotateChain } from './fixtures/controller-chain.js'
 import { leafCapabilityFixture } from './fixtures/leaf-capability.js'
 
 // Captures every DID the embedded resolver's loadLog is ever called with, across the whole file —
@@ -136,8 +137,7 @@ describe('validateCredential — bound did:kokuin leaf', () => {
     const leaf = await buildBoundLeaf({
       mutate: (id, b) => ({
         ...id,
-        // A second, malformed event the fold refuses — stands in for a cap-authorised revoke, which
-        // the sync foldLog also refuses (CAPABILITY_REVOKE_NEEDS_ASYNC_FOLD).
+        // Legacy chain revokes fail closed, including malformed unsigned ones.
         controller: {
           ...b,
           prefix: [
@@ -405,13 +405,12 @@ test.each([
 
 test('the embedded controller head cannot deny a trusted issuer on its own', async () => {
   const f = await leafCapabilityFixture()
-  const revoke = createRevoke({
+  const revoke = revokeChain({
     seed: new Uint8Array(32).fill(31),
     profile: 0,
     did: f.controller.id,
-    prior: f.inception.event,
-    target: f.trusted.id,
-    keyPosition: { gen: 0, seq: 0 },
+    chain: [f.inception],
+    subject: f.trusted.id,
   })
   const credential = f.credential()
   const parsed = JSON.parse(
@@ -432,11 +431,11 @@ test('the embedded controller head cannot deny a trusted issuer on its own', asy
 
 test('verifies direct and delegated grants under a rotated historical authority key', async () => {
   const f = await leafCapabilityFixture()
-  const rotate = createRotate({
+  const rotate = rotateChain({
     seed: new Uint8Array(32).fill(31),
     profile: 0,
     did: f.controller.id,
-    prior: f.inception.event,
+    chain: [f.inception],
   })
   const direct = await f.controller.signToken({ ...f.childPayload, cap: undefined })
   for (const original of [f.credential(), f.credential(`${direct.data}.${direct.signature}`)]) {

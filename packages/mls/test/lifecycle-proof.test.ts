@@ -1,24 +1,20 @@
-import {
-  createReset,
-  createRevoke,
-  createRotate,
-  foldLog,
-  type SignedEvent,
-} from '@kokuin/controller'
-import { normalizeDID } from '@kokuin/token'
+import { createReset, createRotate, digestOf, type SignedEvent } from '@kokuin/controller'
+import { createIdentity, normalizeDID } from '@kokuin/token'
 import { beforeAll, describe, expect, test } from 'vitest'
 
 import { verifyLeafCredential } from '../src/authentication.js'
 import { readCapability } from '../src/capability.js'
+import { foldChain } from '../src/controller-log.js'
 import { foldEnvelope } from '../src/envelope-fold.js'
 import { restoreGroup } from '../src/group-create.js'
 import { makeMLSCredential } from '../src/group-credential.js'
 import { deriveGroup } from '../src/group-handle.js'
 import type { VerifiedLedgerEntry } from '../src/ledger.js'
 import { signLedgerEntry } from '../src/ledger.js'
-import { verifyLifecycleProof } from '../src/lifecycle-proof.js'
-import { DEVICE_ENTRY_TYPE, type DeviceValue, revocationOf } from '../src/registry.js'
+import { authenticateLifecycleProof, verifyLifecycleProof } from '../src/lifecycle-proof.js'
+import { DEVICE_ENTRY_TYPE, type DeviceValue, registrySeed, revocationOf } from '../src/registry.js'
 import { ROLE_ENTRY_TYPE } from '../src/roster.js'
+import { revokeChain, rotateChain, snapshotForChain } from './fixtures/controller-chain.js'
 import {
   addMember,
   agent,
@@ -48,19 +44,7 @@ const target = agent(61).id
 const otherTarget = agent(71).id
 
 function revoke(log: Array<SignedEvent>, subject: string): SignedEvent {
-  const folded = foldLog(controllerID, log)
-  if (!folded.ok) throw new Error(folded.reason)
-  const head = folded.states.at(-1)
-  const prior = log.at(-1)
-  if (head == null || prior == null) throw new Error('Missing controller head')
-  return createRevoke({
-    seed: controllerSeed,
-    profile: 0,
-    did: controllerID,
-    prior: prior.event,
-    target: subject,
-    keyPosition: { gen: head.keyGen, seq: head.keySeq },
-  })
+  return revokeChain({ seed: controllerSeed, profile: 0, did: controllerID, chain: log, subject })
 }
 
 function proofEntry(
@@ -216,15 +200,7 @@ describe('authenticated proof attachment', () => {
       if (kind === 'capability') {
         proof = [
           inception,
-          createRevoke({
-            seed: controllerSeed,
-            profile: 0,
-            did: controllerID,
-            prior: inception.event,
-            target,
-            keyPosition: { gen: 0, seq: 0 },
-            cap: 'delegated-management',
-          }),
+          { ...rev, event: { ...rev.event, cap: 'delegated-management' } } as SignedEvent,
         ]
       } else if (kind === 'signature') {
         proof = [inception, { ...rev, sigs: [] }]
@@ -235,7 +211,7 @@ describe('authenticated proof attachment', () => {
           sigs: [],
         } as unknown as SignedEvent
         proof = [inception, unknown, rev]
-        expect(foldLog(controllerID, proof).ok).toBe(true)
+        expect(foldChain(controllerID, proof).ok).toBe(true)
       }
       await expect(
         verifyLifecycleProof(
@@ -303,7 +279,8 @@ describe('authenticated proof attachment', () => {
       profile: 0,
       did: controllerID,
       prior: inception.event,
-      options: { seal: '界'.repeat(131072) },
+      snapshot: snapshotForChain(controllerID, [inception]),
+      seal: '界'.repeat(131072),
     })
     const proof = [inception, rotation, revoke([inception, rotation], target)]
     await expect(
@@ -347,15 +324,7 @@ describe('recorded log replay', () => {
       for (let index = 0; index < 50; index++) {
         const prior = log.at(-1)
         if (prior == null) throw new Error('Missing rotation head')
-        log.push(
-          createRotate({
-            seed: controllerSeed,
-            profile: 0,
-            did: controllerID,
-            prior: prior.event,
-            options: { keyPosition: { gen: 0, seq: index } },
-          }),
-        )
+        log.push(rotateChain({ seed: controllerSeed, profile: 0, did: controllerID, chain: log }))
       }
       log.push(revoke(log, target))
     })
@@ -451,7 +420,7 @@ describe('recorded log replay', () => {
       profile: 0,
       did: controllerID,
       prior: prior.event,
-      options: { keyPosition: { gen: 0, seq: 0 }, denySnapshot: [] },
+      snapshot: { ...snapshotForChain(controllerID, log), deny: [] },
     })
     const nextLog = [...log, rotation]
     nextLog.push(revoke(nextLog, target))
@@ -637,7 +606,8 @@ describe('proof boundary cases', () => {
       profile: 0,
       did: controllerID,
       prior: inception.event,
-      options: { seal: '界'.repeat(131072) },
+      snapshot: snapshotForChain(controllerID, [inception]),
+      seal: '界'.repeat(131072),
     })
     const device = agent(61)
     const members = await addMember(group, device, await bindingFor(device, [inception, rotation]))
@@ -655,11 +625,11 @@ describe('proof boundary cases', () => {
   test('rotation preserves a previously issued leaf grant', async () => {
     const { group, identity } = await lifecycleGroup()
     const binding = await bindingFor(identity)
-    const rotation = createRotate({
+    const rotation = rotateChain({
       seed: controllerSeed,
       profile: 0,
       did: controllerID,
-      prior: inception.event,
+      chain: [inception],
     })
     await expect(
       verifyLeafCredential(
@@ -832,7 +802,8 @@ describe('lifecycle ledger pipeline', () => {
       profile: 0,
       did: controllerID,
       prior: inception.event,
-      options: { seal: 'a'.repeat(389120) },
+      snapshot: snapshotForChain(controllerID, [inception]),
+      seal: 'a'.repeat(389120),
     })
     const log = [inception, rotation, revoke([inception, rotation], otherTarget)]
     const token = await signLedgerEntry(
@@ -851,7 +822,8 @@ describe('lifecycle ledger pipeline', () => {
       profile: 0,
       did: controllerID,
       prior: prior.event,
-      options: { keyPosition: { gen: 0, seq: 1 }, seal: 'a'.repeat(3072) },
+      snapshot: snapshotForChain(controllerID, log),
+      seal: 'a'.repeat(3072),
     })
     const suffix = [next, revoke([...log, next], target)]
     await expect(
@@ -864,5 +836,103 @@ describe('lifecycle ledger pipeline', () => {
         }),
       ),
     ).rejects.toMatchObject({ reason: 'too-large' })
+  })
+})
+
+describe('deny-gaining rotate proofs', () => {
+  function authenticate(proof: Array<SignedEvent>, subject: string = target, floor = 0) {
+    const registry = registrySeed()
+    return authenticateLifecycleProof(
+      controllerID,
+      proofEntry(agent(41).id, subject, {
+        op: 'revoke',
+        proof,
+      }),
+      {
+        ...registry,
+        controllers: new Map([[controllerID, { recordedLog: [], genFloor: floor, timeFloor: 0 }]]),
+      },
+    )
+  }
+
+  test('authenticates a deny gain at its rotate position', () => {
+    const chain: Array<SignedEvent> = [inception]
+    chain.push(
+      revokeChain({ seed: controllerSeed, profile: 0, did: controllerID, chain, subject: target }),
+    )
+    expect(authenticate(chain).logPosition).toBe(1)
+  })
+
+  test('a plain rotate does not prove a revoke', () => {
+    const chain: Array<SignedEvent> = [inception]
+    chain.push(rotateChain({ seed: controllerSeed, profile: 0, did: controllerID, chain }))
+    expect(() => authenticate(chain)).toThrow(expect.objectContaining({ reason: 'no-rev' }))
+  })
+
+  test('a later rotate retaining a denial keeps the gain position', () => {
+    const chain: Array<SignedEvent> = [inception]
+    chain.push(
+      revokeChain({ seed: controllerSeed, profile: 0, did: controllerID, chain, subject: target }),
+    )
+    chain.push(rotateChain({ seed: controllerSeed, profile: 0, did: controllerID, chain }))
+    expect(authenticate(chain).logPosition).toBe(1)
+  })
+
+  test('re-revoking after a blind reset proves a new gain above the floor', () => {
+    const chain: Array<SignedEvent> = [inception]
+    chain.push(
+      revokeChain({ seed: controllerSeed, profile: 0, did: controllerID, chain, subject: target }),
+    )
+    chain.push(createReset(controllerSeed, 0, 1))
+    chain.push(
+      revokeChain({ seed: controllerSeed, profile: 0, did: controllerID, chain, subject: target }),
+    )
+    expect(authenticate(chain, target, 1).logPosition).toBe(3)
+  })
+
+  test('normalises a denial written as a peer DID long form', async () => {
+    const peer = await createIdentity({
+      didMethod: 'peer:4',
+      keys: [{ purpose: 'sig', alg: 'EdDSA', privateKey: new Uint8Array(32).fill(89) }],
+    })
+    if (peer.longForm == null) throw new Error('Missing peer long form')
+    expect(peer.longForm).not.toBe(normalizeDID(peer.id))
+    const chain: Array<SignedEvent> = [inception]
+    chain.push(
+      revokeChain({
+        seed: controllerSeed,
+        profile: 0,
+        did: controllerID,
+        chain,
+        subject: peer.longForm,
+      }),
+    )
+    expect(authenticate(chain, normalizeDID(peer.id)).logPosition).toBe(1)
+  })
+
+  test('rejects legacy chain revokes as unauthenticated authority evidence', () => {
+    const legacy = {
+      event: {
+        t: 'rev',
+        crit: true,
+        g: 0,
+        s: 1,
+        p: digestOf(inception.event),
+        i: controllerID,
+        v: 1,
+        x: target,
+      },
+      sigs: [],
+    } as unknown as SignedEvent
+    expect(() => authenticate([inception, legacy])).toThrow(
+      expect.objectContaining({ reason: 'not-authority-signed' }),
+    )
+  })
+
+  test('a reset carrying a denial cannot prove a revoke without recorded history', () => {
+    const reset = createReset(controllerSeed, 0, 1, { members: [], deny: [target] })
+    expect(() => authenticate([inception, reset])).toThrow(
+      expect.objectContaining({ reason: 'no-rev' }),
+    )
   })
 })

@@ -1,4 +1,4 @@
-import { createInception, createRevoke, didFromInception } from '@kokuin/controller'
+import { createInception, didFromInception } from '@kokuin/controller'
 import { normalizeDID } from '@kokuin/token'
 import { describe, expect, test } from 'vitest'
 
@@ -18,6 +18,7 @@ import {
   registrySeed,
 } from '../src/registry.js'
 import { ROLE_ENTRY_TYPE, type RoleValue } from '../src/roster.js'
+import { revokeChain } from './fixtures/controller-chain.js'
 
 const GROUP = 'group-1'
 const CREATOR = 'did:key:zCreator'
@@ -416,13 +417,12 @@ describe('authenticated lifecycle projections', () => {
   const seed = new Uint8Array(32).fill(31)
   const inception = createInception(seed, 0)
   const controller = didFromInception(inception.event)
-  const rev = createRevoke({
-    seed,
+  const rev = revokeChain({
+    seed: seed,
     profile: 0,
     did: controller,
-    prior: inception.event,
-    target: DEV_A,
-    keyPosition: { gen: 0, seq: 0 },
+    chain: [inception],
+    subject: DEV_A,
   })
   const anchor: GroupAnchor = { creatorDID: CREATOR, version: 1, controller }
 

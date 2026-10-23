@@ -1,10 +1,5 @@
 import { audienceConfirmation } from '@kokuin/capability'
-import {
-  createControllerIdentity,
-  createReset,
-  createRevoke,
-  createRotate,
-} from '@kokuin/controller'
+import { createControllerIdentity, createReset, createRotate } from '@kokuin/controller'
 import { createIdentity, stringifyToken } from '@kokuin/token'
 import {
   createProposal,
@@ -17,6 +12,7 @@ import {
 } from 'ts-mls'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
+import { asControllerLog } from '../src/controller-log.js'
 import { foldEnvelope } from '../src/envelope-fold.js'
 import { commitWithEntries } from '../src/group-commit.js'
 import { makeMLSCredential } from '../src/group-credential.js'
@@ -37,6 +33,7 @@ import {
   validateWelcomeTree,
 } from '../src/lifecycle.js'
 import { DEVICE_ENTRY_TYPE } from '../src/registry.js'
+import { revokeChain, snapshotForChain } from './fixtures/controller-chain.js'
 import { joinBoundDevice } from './fixtures/device-harness.js'
 import { controllerSeed } from './fixtures/lifecycle-ledger.js'
 import {
@@ -74,13 +71,12 @@ test.each(['author', 'receiver'] as const)(
       await timedBinding({ identity: bob, iat: 90, exp: 200 }),
     )
     const target = agent(81)
-    const revoke = createRevoke({
+    const revoke = revokeChain({
       seed: controllerSeed,
       profile: 0,
       did: controllerID,
-      prior: inception.event,
-      target: target.id,
-      keyPosition: { gen: 0, seq: 0 },
+      chain: [inception],
+      subject: target.id,
     })
     const token = await signLedgerEntry(identity, {
       type: DEVICE_ENTRY_TYPE,
@@ -211,7 +207,11 @@ describe('mandatory entry gates', () => {
     const { group } = await pipelineGroup()
     const trusted = agent(71)
     const identity = agent(61)
-    const signer = createControllerIdentity({ seed: controllerSeed, profile: 0, log: [inception] })
+    const signer = createControllerIdentity({
+      seed: controllerSeed,
+      profile: 0,
+      log: asControllerLog([inception]),
+    })
     const parent = stringifyToken(
       await signer.signToken({
         sub: controllerID,
@@ -479,13 +479,12 @@ describe('path, clock and lapse gates', () => {
 
   test('proof Removes must equal exactly the derived targets', async () => {
     const setup = await threeMembers()
-    const revoke = createRevoke({
+    const revoke = revokeChain({
       seed: controllerSeed,
       profile: 0,
       did: controllerID,
-      prior: inception.event,
-      target: setup.bobIdentity.id,
-      keyPosition: { gen: 0, seq: 0 },
+      chain: [inception],
+      subject: setup.bobIdentity.id,
     })
     const token = await signLedgerEntry(setup.identity, {
       type: DEVICE_ENTRY_TYPE,
@@ -512,13 +511,12 @@ describe('path, clock and lapse gates', () => {
 
   test('a proof cannot absorb an Add and two clocks cannot share a commit', async () => {
     const { group, identity } = await pipelineGroup()
-    const revoke = createRevoke({
+    const revoke = revokeChain({
       seed: controllerSeed,
       profile: 0,
       did: controllerID,
-      prior: inception.event,
-      target: agent(81).id,
-      keyPosition: { gen: 0, seq: 0 },
+      chain: [inception],
+      subject: agent(81).id,
     })
     const token = await signLedgerEntry(identity, {
       type: DEVICE_ENTRY_TYPE,
@@ -718,7 +716,8 @@ describe('consensus history and composition', () => {
       profile: 0,
       did: controllerID,
       prior: inception.event,
-      options: { seal: 'h'.repeat(34000) },
+      snapshot: snapshotForChain(controllerID, [inception]),
+      seal: 'h'.repeat(34000),
     })
     const prefix = [inception, rotation]
     let current = group
@@ -751,7 +750,8 @@ describe('consensus history and composition', () => {
       profile: 0,
       did: controllerID,
       prior: inception.event,
-      options: { seal: 'h'.repeat(40000) },
+      snapshot: snapshotForChain(controllerID, [inception]),
+      seal: 'h'.repeat(40000),
     })
     const extra = await rawAdd(
       oversized,
@@ -798,7 +798,8 @@ describe('consensus history and composition', () => {
       profile: 0,
       did: controllerID,
       prior: inception.event,
-      options: { seal: 'h'.repeat(34000) },
+      snapshot: snapshotForChain(controllerID, [inception]),
+      seal: 'h'.repeat(34000),
     })
     const identity = agent(61)
     const bundle = await rawAdd(
@@ -1022,13 +1023,12 @@ test('a lifecycle external replacement is refused when its subject is denied', a
     identity: bob,
     binding: await timedBinding({ identity: bob, iat: 100, exp: 200 }),
   })
-  const revoke = createRevoke({
+  const revoke = revokeChain({
     seed: controllerSeed,
     profile: 0,
     did: controllerID,
-    prior: inception.event,
-    target: bob.id,
-    keyPosition: { gen: 0, seq: 0 },
+    chain: [inception],
+    subject: bob.id,
   })
   const token = await signLedgerEntry(identity, {
     type: DEVICE_ENTRY_TYPE,
@@ -1122,21 +1122,19 @@ test('two revoke proofs cannot share a commit', async () => {
   const { group, identity } = await pipelineGroup()
   const first = agent(61)
   const second = agent(71)
-  const revoke = createRevoke({
+  const revoke = revokeChain({
     seed: controllerSeed,
     profile: 0,
     did: controllerID,
-    prior: inception.event,
-    target: first.id,
-    keyPosition: { gen: 0, seq: 0 },
+    chain: [inception],
+    subject: first.id,
   })
-  const next = createRevoke({
+  const next = revokeChain({
     seed: controllerSeed,
     profile: 0,
     did: controllerID,
-    prior: revoke.event,
-    target: second.id,
-    keyPosition: { gen: 0, seq: 0 },
+    chain: [inception, revoke],
+    subject: second.id,
   })
   const tokens = await Promise.all([
     signLedgerEntry(identity, {

@@ -20,6 +20,7 @@ import {
   type Member,
   makeMember,
 } from './app-lane-e2e.js'
+import { revokeChain } from './fixtures/controller-chain.js'
 import { createWireHub } from './log-hub-over-wire.js'
 
 const fixture = (await import(
@@ -38,18 +39,6 @@ const controller = (await import(
 )) as {
   controllerSeed: Uint8Array
   controllerID: string
-}
-const events = (await import(
-  new URL('../../../node_modules/@kokuin/controller/lib/index.js', import.meta.url).href
-)) as {
-  createRevoke(params: {
-    seed: Uint8Array
-    profile: number
-    did: string
-    prior: ControllerBinding['prefix'][number]['event']
-    target: string
-    keyPosition: { gen: number; seq: number }
-  }): ControllerBinding['prefix'][number]
 }
 
 afterEach(() => vi.restoreAllMocks())
@@ -87,13 +76,12 @@ async function setup() {
     ratchetTree: group.state.ratchetTree,
     options: { resolveLedgerEntries: carolSlot.resolve },
   })
-  const revoke = events.createRevoke({
+  const revoke = revokeChain({
     seed: controller.controllerSeed,
     profile: 0,
     did: controller.controllerID,
-    prior: fixture.inception.event,
-    target: subject,
-    keyPosition: { gen: 0, seq: 0 },
+    chain: [fixture.inception],
+    subject: subject,
   })
   const hub = createWireHub()
   const member = makeMember({ hub, identity, group, entrySlot })
@@ -202,13 +190,12 @@ test('a lost epoch race rebuilds and serialises the proof against the winning re
   const target = fixture.agent(71).id
   const prior = s.log[1]
   if (prior == null) throw new Error('Missing revoke event')
-  const nextRev = events.createRevoke({
+  const nextRev = revokeChain({
     seed: controller.controllerSeed,
     profile: 0,
     did: controller.controllerID,
-    prior: prior.event,
-    target,
-    keyPosition: { gen: 0, seq: 0 },
+    chain: s.log,
+    subject: target,
   })
   const derived: Array<GroupHandle> = []
   try {
@@ -308,13 +295,12 @@ test('non-building outcomes do not serialize or advance', async () => {
         options: options,
       }),
     ).toMatchObject({ status: 'not-provable', reason: 'no-rev' })
-    const selfRev = events.createRevoke({
+    const selfRev = revokeChain({
       seed: controller.controllerSeed,
       profile: 0,
       did: controller.controllerID,
-      prior: fixture.inception.event,
-      target: s.member.identity.id,
-      keyPosition: { gen: 0, seq: 0 },
+      chain: [fixture.inception],
+      subject: s.member.identity.id,
     })
     expect(
       await adapter.publishRevokeProof({

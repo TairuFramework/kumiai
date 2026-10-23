@@ -6,6 +6,8 @@ import { b64uFromJSON, fromUTF, toB64U } from '@sozai/codec'
 import type { Credential } from 'ts-mls'
 import { defaultCredentialTypes } from 'ts-mls'
 
+import { asControllerLog } from '../../src/controller-log.js'
+
 export type LeafCapabilityFixtureOptions = {
   child?: Record<string, unknown>
   parent?: Record<string, unknown>
@@ -16,7 +18,11 @@ export type LeafCapabilityFixtureOptions = {
 export async function leafCapabilityFixture(options: LeafCapabilityFixtureOptions = {}) {
   const seed = new Uint8Array(32).fill(31)
   const inception = createInception(seed, 0)
-  const controller = createControllerIdentity({ seed, profile: 0, log: [inception] })
+  const controller = createControllerIdentity({
+    seed,
+    profile: 0,
+    log: asControllerLog([inception]),
+  })
   const trustedSeed = new Uint8Array(32).fill(61)
   const trusted = createSigningIdentity(trustedSeed)
   const device = createSigningIdentity(new Uint8Array(32).fill(41))

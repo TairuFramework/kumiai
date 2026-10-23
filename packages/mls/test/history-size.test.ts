@@ -1,5 +1,5 @@
 // Set KUMIAI_PROBE_REPORT=1 to print measurement tables.
-import { createReset, createRevoke, createRotate } from '@kokuin/controller'
+import { createReset, createRotate } from '@kokuin/controller'
 import { expect, test } from 'vitest'
 
 import { createGroup } from '../src/group-create.js'
@@ -7,6 +7,7 @@ import * as history from '../src/history.js'
 import { HISTORY_HORIZON } from '../src/history.js'
 import type { VerifiedLedgerEntry } from '../src/ledger.js'
 import { signLedgerEntry, verifyLedgerEntry } from '../src/ledger.js'
+import { revokeChain, snapshotForChain } from './fixtures/controller-chain.js'
 import { historyBytes, logMeasurements } from './fixtures/history-probe.js'
 import {
   addMember,
@@ -31,19 +32,19 @@ test('historyCountsUtf8AndEveryCopy', async () => {
     profile: 0,
     did: controllerID,
     prior: inception.event,
-    options: { seal: '組合 café 🚀' },
+    snapshot: snapshotForChain(controllerID, [inception]),
+    seal: '組合 café 🚀',
   })
   const prefix = [inception, rotation]
   const alice = agent(41)
   const initial = await lifecycleGroup(prefix)
   const added = await addMember(initial.group, agent(51), await bindingFor(agent(51), prefix))
-  const revoke = createRevoke({
+  const revoke = revokeChain({
     seed: controllerSeed,
     profile: 0,
     did: controllerID,
-    prior: rotation.event,
-    target: agent(61).id,
-    keyPosition: { gen: 0, seq: 1 },
+    chain: [inception, rotation],
+    subject: agent(61).id,
   })
   const oldProof = [...prefix, revoke]
   const resetPrefix = [inception, createReset(controllerSeed, 0, 1)]

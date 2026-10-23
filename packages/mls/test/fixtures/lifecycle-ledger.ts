@@ -9,6 +9,7 @@ import { createFullIdentity, type OwnIdentity } from '@kokuin/token'
 import { createCommit, defaultProposalTypes, encode, joinGroup, mlsMessageEncoder } from 'ts-mls'
 
 import { mintLeafCapability, mintTrustedGrant } from '../../src/capability.js'
+import { asControllerLog } from '../../src/controller-log.js'
 import type { ControllerBinding } from '../../src/credential.js'
 import { encodeControlEnvelope } from '../../src/envelope.js'
 import { commitWithEntries } from '../../src/group-commit.js'
@@ -37,7 +38,8 @@ export async function bindingFor(
   issuer?: BindingIssuer,
 ): Promise<ControllerBinding> {
   const signer =
-    issuer?.identity ?? createControllerIdentity({ seed: controllerSeed, profile: 0, log: prefix })
+    issuer?.identity ??
+    createControllerIdentity({ seed: controllerSeed, profile: 0, log: asControllerLog(prefix) })
   const holderGrant = issuer == null ? undefined : await trustedGrant(identity, prefix)
   const capability = await mintLeafCapability({
     signer,
@@ -60,7 +62,11 @@ export async function trustedGrant(
   prefix: Array<SignedEvent> = [inception],
 ) {
   return mintTrustedGrant({
-    signer: createControllerIdentity({ seed: controllerSeed, profile: 0, log: prefix }),
+    signer: createControllerIdentity({
+      seed: controllerSeed,
+      profile: 0,
+      log: asControllerLog(prefix),
+    }),
     controllerID,
     audience: identity.id,
     leafKey: identity.publicKey,

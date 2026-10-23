@@ -26,6 +26,7 @@ import {
   wireformats,
 } from 'ts-mls'
 
+import { asControllerLog } from '../../src/controller-log.js'
 import { type ControllerBinding, parseMLSCredentialIdentity } from '../../src/credential.js'
 import { encodeControlEnvelope } from '../../src/envelope.js'
 import { resolveMlsContext } from '../../src/group-context.js'
@@ -35,6 +36,7 @@ import { deriveGroup, GroupHandle } from '../../src/group-handle.js'
 import { processWelcome } from '../../src/group-welcome.js'
 import { buildLedgerHeadExtension, extendHead, readLedgerHead } from '../../src/head.js'
 import { ledgerEntryDigest } from '../../src/ledger.js'
+import { snapshotForChain } from './controller-chain.js'
 import { agent, controllerID, controllerSeed, inception } from './lifecycle-ledger.js'
 
 export { agent, controllerID, inception }
@@ -52,7 +54,8 @@ export async function timedBinding(params: TimedBindingParams): Promise<Controll
   const { identity, iat, exp } = params
   const prefix = params.prefix ?? [inception]
   const signer =
-    params.issuer ?? createControllerIdentity({ seed: controllerSeed, profile: 0, log: prefix })
+    params.issuer ??
+    createControllerIdentity({ seed: controllerSeed, profile: 0, log: asControllerLog(prefix) })
   return {
     id: controllerID,
     prefix,
@@ -357,7 +360,8 @@ export async function oversizedBinding(identity: OwnIdentity, iat: number, exp: 
     profile: 0,
     did: controllerID,
     prior: inception.event,
-    options: { keyPosition: { gen: 0, seq: 0 }, seal: 's'.repeat(393216) },
+    snapshot: snapshotForChain(controllerID, [inception]),
+    seal: 's'.repeat(393216),
   })
   return timedBinding({ identity, iat, exp, prefix: [inception, rotation] })
 }

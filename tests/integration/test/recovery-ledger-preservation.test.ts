@@ -33,6 +33,7 @@ import {
   createMemoryCommitJournal,
   type Protocols,
 } from './app-lane-e2e.js'
+import { revokeChain } from './fixtures/controller-chain.js'
 import { drainUntil } from './fixtures/drain.js'
 import { createWireHub, type WireHub } from './log-hub-over-wire.js'
 
@@ -169,15 +170,13 @@ test('peer recovery and restore retain authenticated revocations, reset history 
   const ledger = await import(
     new URL('../../../packages/mls/test/fixtures/lifecycle-ledger.ts', import.meta.url).href
   )
-  const { createRevoke } = await import('@kokuin/controller')
   const revoked = fixture.agent(81)
-  const rev = createRevoke({
+  const rev = revokeChain({
     seed: ledger.controllerSeed,
     profile: 0,
     did: fixture.controllerID,
-    prior: ledger.inception.event,
-    target: revoked.id,
-    keyPosition: { gen: 0, seq: 0 },
+    chain: [ledger.inception],
+    subject: revoked.id,
   })
   const revoke = await revokeWithProof(s.aliceGroup(), {
     subject: revoked.id,

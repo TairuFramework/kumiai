@@ -15,6 +15,8 @@ import {
 import { createGroupMLS, createLedgerEntrySlot, simpleHandleAccess } from '@kumiai/mls-rpc'
 import { afterEach, expect, test, vi } from 'vitest'
 
+import { revokeChain } from './fixtures/controller-chain.js'
+
 const fixture = (await import(
   new URL('../../../packages/mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
 )) as {
@@ -267,17 +269,15 @@ test('a revoked trusted issuer makes its child advisory and unknown revocation r
 
 test('a lifecycle GroupInfo signer revoked in the known ledger is refused', async () => {
   const s = await setup()
-  const { createRevoke } = await import('@kokuin/controller')
   const { controllerSeed, inception } = await import(
     new URL('../../../packages/mls/test/fixtures/lifecycle-ledger.ts', import.meta.url).href
   )
-  const rev = createRevoke({
+  const rev = revokeChain({
     seed: controllerSeed,
     profile: 0,
     did: fixture.controllerID,
-    prior: inception.event,
-    target: s.bob.id,
-    keyPosition: { gen: 0, seq: 0 },
+    chain: [inception],
+    subject: s.bob.id,
   })
   const removed = await revokeWithProof(s.group(), { subject: s.bob.id, log: [inception, rev] })
   if (removed.status !== 'built') throw new Error('Expected proof commit')

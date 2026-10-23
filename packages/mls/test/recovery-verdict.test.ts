@@ -1,6 +1,8 @@
 import { randomIdentity } from '@kokuin/token'
 import { afterEach, expect, test, vi } from 'vitest'
 
+import { revokeChain } from './fixtures/controller-chain.js'
+
 afterEach(() => vi.restoreAllMocks())
 
 import { createGroup } from '../src/group.js'
@@ -86,7 +88,6 @@ test('external replacement reports denied subjects as invalid and tree-time regr
   const { pipelineGroup, agent, timedBinding, lowLevelWelcome, lowLevelExternal } = await import(
     './fixtures/lifecycle-pipeline.js'
   )
-  const { createRevoke } = await import('@kokuin/controller')
   const { controllerSeed, controllerID, inception } = await import('./fixtures/lifecycle-ledger.js')
   const { signLedgerEntry } = await import('../src/ledger.js')
   const initial = await pipelineGroup()
@@ -109,13 +110,12 @@ test('external replacement reports denied subjects as invalid and tree-time regr
     identity: bob,
     binding: await timedBinding({ identity: bob, iat: 110, exp: 200 }),
   })
-  const revoke = createRevoke({
+  const revoke = revokeChain({
     seed: controllerSeed,
     profile: 0,
     did: controllerID,
-    prior: inception.event,
-    target: bob.id,
-    keyPosition: { gen: 0, seq: 0 },
+    chain: [inception],
+    subject: bob.id,
   })
   const token = await signLedgerEntry(initial.identity, {
     groupID: author.groupID,
