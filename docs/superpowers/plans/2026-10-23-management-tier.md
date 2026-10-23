@@ -105,16 +105,16 @@ These answer the plan review (`.superpowers/sdd/2026-10-23-management-tier/plan-
   The "Staged verification" table in Task 9 names the registry each phase reads.
 - **D10 Survivor authority.** `effectiveAuthorityOf(leaf)` takes the primary root (the capability chain's root, or the membership incarnation). When that root is removed, it uses a substitute in order: the holder grant's root (evidenced child), then a survivor grant registered by the accepted `revoke` entry (Task 12). Authentication (`retain`/`rejudge`), cascade, `checkSurvivors`, Welcome and recovery all call this one function. A later cascade keys on the substitute's root.
 - **D11 Cap only on admission.** `epoch-cap` refuses only `admit` of a member-rooted credential. Unchanged leaves, Welcome trees, root-issued admissions and lifecycle entries are never capped. The count is the distinct applied events of the recorded current epoch; cap 32, prompt 24 (P2).
-- **D12 Clock authority (user decision, 2026-10-23).** Tree time is `max(timeFloor, quorum)`.
+- **D12 Clock authority (user decision, 2026-10-23).** Tree time is `max(timeFloor, rootTime, quorum)`. Root is never required for MLS time, but a root-issued token still attests its `iat` as in 0.11 (user, 2026-10-23: "root still counts"), so MVP seed-on-desktop groups keep lapsing.
   - The quorum ranges over the distinct pinned keys of effective members: the second-highest per-key attestation, or the highest when exactly one key is effective, or 0 with none.
   - A key's attestation is the max of the `iat` of member-issued tokens in the tree (the token the current scans select: direct capability, or the parent of a chained leaf) and the member's registry-held attest clocks.
-  - Root-issued tokens and membership leaves attest nothing.
+  - `rootTime` is the max `iat` of root-issued tokens the current scans select. Membership leaves attest nothing.
   - Membership-only groups advance through `clock` entries with `attest: true`, authored by an effective member's own device.
 - **D13 Historical registry.** A delayed application frame is judged against `registryAt(head)`, the fold of the ledger prefix its epoch's head authenticates, for time, leases and effectiveness alike.
 - **D14 Recovery arbitration.** `knownRecoveryRegistry` arbitrates each controller projection: `authoritativeLog(loaded: offered, seen: known)`.
   - A stale reply keeps the known log. A fork refuses the reply.
   - Removed members and survivor grants are unioned; attestations and floors take the max.
-- **D15 Scope (pending user decision, see "Needs user decision").** Member-rooted credentials are supported in lifecycle groups (anchor names a controller). Standard groups refuse them and keep root-only `manage` capabilities.
+- **D15 Scope (user decision, 2026-10-23: lifecycle groups only).** Member-rooted credentials are supported in lifecycle groups (anchor names a controller). Standard groups refuse them and keep root-only `manage` capabilities.
 - **D16 Membership binding ordering.** A membership binding carries its own `iat` (self-attested by the pinned key, used only for ordering). Stale-leaf replacement and `renewal-order` compare `bindingIssuedAt` (the capability `iat`, or the membership `iat`). It never counts as tree time.
 
 ## Interface table
@@ -600,14 +600,14 @@ Every new public symbol is exported from `packages/mls/src/index.ts` in the task
   - `sole effective member advances tree time`.
   - `two incarnations of one pinned key count once`: concurrent adds (`epoch.js` add branch).
   - `membership-only group advances through attest clocks from two members`.
-  - `root-issued leaves do not advance tree time`.
+  - `root-issued leaves still advance tree time (0.11 behaviour)`.
   - `removed member's attestation stops counting; the preserved floor stays`.
   - `preservation clock cannot exceed attestedTreeTime`.
   - `attest clock from a non-member device is refused` and `attest clock past the member's lease is refused`.
   - `delayed application frame gets the same verdict before and after a later renewal, removal and settlement` (review finding 12).
   - `recovery eligibility uses attestedTreeTime over the known registry`.
 - [ ] **Step 2:** Run the tests. Expected: FAIL.
-- [ ] **Step 3:** Implement, and route the four scans (P3) through `attestedTreeTime`. Migrate the 0.11 fixtures that advance time with root-issued leaves to member-issued grants or attest clocks. Locate them with `grep -rln "treeTime\|lapsed\|removeLapsedLeaves" packages/mls/test packages/mls-rpc/test`. The `<` and `<=` boundaries stay as they are.
+- [ ] **Step 3:** Implement, and route the four scans (P3) through `attestedTreeTime`.|lapsed\|removeLapsedLeaves" packages/mls/test packages/mls-rpc/test`. The `<` and `<=` boundaries stay as they are.
 - [ ] **Step 4:** Rerun, then run the `@kumiai/mls` and `@kumiai/mls-rpc` unit suites. Expected: PASS. Then run `test:types`.
 - [ ] **Step 5:** Commit `feat(mls)!: tree time by effective-member quorum`.
 
@@ -665,7 +665,7 @@ Review: `.superpowers/sdd/2026-10-23-management-tier/plan-review-codex.md` (3 Cr
 |---|---|---|
 | C1 | No bootstrap or settlement transport; creation and key packages authenticate before a registry exists | Resolved. D1 delta carriage (a full chain when none is recorded); D2 genesis entry; D3 settlement as a `log` chain suffix. Tasks 3, 8 and 9. Tests: `createGroup with a membership creator seeds the registry…`, `publishControllerLog settles without a revoke`, `membership key package needs controllerLog`. |
 | C2 | Ingestion lacks current-authority checks and gate wiring; `rev`/`rmv` effects unenforced | Resolved. D5 endorsement in `ingestControllerLog` (Task 3). D4 effect-free `log` entries. D6 declared effects on `revoke` (Tasks 11 and 12). Gate wiring: `isLifecycleDeviceValue`, `envelope-fold` and `prepareLifecycleGate` (Task 8). D1 persists `authoritativeLog(...).log`, never the fold input. |
-| C3 | Tree time fails for one member, after a removal, and for membership-only groups | Resolved by D12 (user decision): distinct pinned keys, the quorum, attest clocks for membership-only groups, and a persisted floor preserved by quorum-backed clocks. Task 13. Ruled out: (a) "removing the second member activates the survivor's earlier future timestamp". A sole effective member may set time anyway under the user's rule, so re-activation adds no power (accepted, N3). (b) "an independently bounded time source". The user's decision rules it out. Stated consequences: a group with only root-issued leaves, or with a member offline, advances only as fast as its quorum attests. |
+| C3 | Tree time fails for one member, after a removal, and for membership-only groups | Resolved by D12 (user decision): distinct pinned keys, the quorum, attest clocks for membership-only groups, and a persisted floor preserved by quorum-backed clocks. Task 13. Ruled out: (a) "removing the second member activates the survivor's earlier future timestamp". A sole effective member may set time anyway under the user's rule, so re-activation adds no power (accepted, N3). (b) "an independently bounded time source". The user's decision rules it out. Stated consequences: a group with a member offline advances only as fast as root or its quorum attests. |
 | I4 | R9 covers only one early path | Resolved. D9 and the staged verification table in Task 9 (Welcome, external recovery, creation, key packages, restore); live commits and authoring in Task 8. |
 | I5 | `MAX_LEAF_LIFETIME` as `maxMemberGrantLifetime` rejects long parents | Resolved. `MAX_TRUSTED_GRANT_LIFETIME` for every walk, with the local bounds kept. Task 6, test `30-day member parent with a one-hour leaf authenticates`. |
 | I6 | Membership interfaces incomplete; `member.did` nonexistent; no `iat` | Resolved. `LeafBinding`/`bindingOfDID` gain `member` (Task 2). The pin is compared through `resolveMember`'s returned key bytes (Task 7). D16 `iat`, with `bindingIssuedAt` for stale-leaf ordering. RPC `current()`/`bindingID` updated (Task 7). |
@@ -685,16 +685,13 @@ Also corrected while revising:
 - A lifecycle group has exactly one controller (`registry.ts:170-174` keys lifecycle effects on the anchor's), so per-group registry state is per that controller.
 
 Consequences of fixed decisions, stated so review can check them:
-- With the root cold for MLS time, groups whose leaves are all root-issued never advance tree time, so their leaves never lapse by time. Revocation still works.
 - Removal of a member, in kumiai, refuses that member's later-arriving concurrent actions, including a concurrent counter-removal. Kokuin's union semantics then differ from the group until root settles.
 - An external rejoin cannot carry ledger entries, so a rejoiner whose new binding needs events the group lacks ends `renewal-required` until a member publishes them.
 
-## Needs user decision
+## User decisions after revision (2026-10-23)
 
-**Standard groups and member-rooted credentials (D15).** The spec widens `verifyManagementCapability` to `mbr` (kumiai section, "Leaf binding"). That function serves only standard groups: lifecycle groups refuse non-lifecycle device ops (`registry.ts:351`, `envelope-fold.ts:104`). After R8, member authority needs a registry-held log. Standard groups would therefore need `log` entries keyed by each controller (subject = controller) and a second ingestion surface. They have no tree time or cascade.
-- Option A (recommended): lifecycle groups only in 0.12. Standard groups refuse member-rooted bindings and keep root-only `manage`. Kubun's controller-bound groups are lifecycle groups (own-agents: kubun `docs/agents/plans/milestones/catalog-sync-own-agents.md`). A search of kubun source found no use of standard-group device management (`registerDevice`, `addDevice`, `kumiai/devices`). Cost if wrong: one task adding standard-group `log` ingestion, with no change to the shared model.
-- Option B: support both in 0.12. Add a task after Task 8: `log` entries in standard groups, issuer bound to the subject controller, and member authority for `manage` and leaves.
-Plan as written follows A.
+- Root-issued tokens still attest tree time (D12). No 0.11 lapse-test migration.
+- D15: member-rooted credentials in lifecycle groups only; standard groups stay root-only (option A).
 
 ## Probe findings
 
