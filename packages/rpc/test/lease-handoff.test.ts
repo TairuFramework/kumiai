@@ -53,6 +53,7 @@ test.each(['seal', 'put', 'resend'] as const)(
         },
       }),
       loadSettlement: store.loadSettlement,
+      recordSettlement: store.recordSettlement,
       publish,
       remove: store.remove,
       clear: store.clear,
@@ -82,7 +83,7 @@ test.each(['seal', 'put', 'resend'] as const)(
         expect(publish).toHaveBeenCalledTimes(3)
       } else {
         expect(publish).toHaveBeenCalledTimes(1)
-        delivery.certify(1, delivery.beginWalk())
+        await delivery.certify(1, delivery.beginWalk())
         delivery.trigger()
         await vi.advanceTimersByTimeAsync(0)
         expect(queue.entries()).toHaveLength(1)
@@ -177,6 +178,7 @@ test.each([false, true])(
         put: store.put,
       }),
       loadSettlement: store.loadSettlement,
+      recordSettlement: store.recordSettlement,
       publish,
       remove: store.remove,
       clear: store.clear,

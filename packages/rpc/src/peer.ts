@@ -993,6 +993,8 @@ export function createGroupPeerWithControlWalk<
           },
           snapshot: (protocol) => params.appPublication.snapshot(protocol),
           loadSettlement: (seq) => params.appOutbox.loadSettlement(seq),
+          recordSettlement: (seq, obligation, expected) =>
+            params.appOutbox.recordSettlement(seq, obligation, expected),
           publish: (frame) => {
             // No await between the hold check, registration and transport handoff.
             if (safetyHold() !== null || logSendsHeld()) return null
@@ -1014,7 +1016,7 @@ export function createGroupPeerWithControlWalk<
               throw error
             }
           },
-          remove: (seq) => params.appOutbox.remove(seq),
+          remove: (seq, outcome) => params.appOutbox.remove(seq, outcome),
           clear: async () => {
             // An early safety exit must not make unrestored records look completed.
             if (!pendingRestored) throw new Error('Pending application records are not restored')
@@ -1900,6 +1902,7 @@ export function createGroupPeerWithControlWalk<
     if (!(await port.isLedgerComplete())) return false
     let advancedEpoch = false
     const started = logDelivery?.beginWalk() ?? 0
+    await logDelivery?.readyWalk(started)
     const unprocessable = async (
       position: LogPosition,
       commitDigest: string,
@@ -1942,7 +1945,7 @@ export function createGroupPeerWithControlWalk<
     }
     let covered = true
     // The tip from the SAME reply whose frames were processed, so it can never run ahead of them.
-    const takeHead = (head: string | null): void => {
+    const takeHead = async (head: string | null): Promise<void> => {
       if (safetyHold() !== null) return
       commitLogHead = head == null ? null : asLogPosition(head)
       if (
@@ -1959,7 +1962,7 @@ export function createGroupPeerWithControlWalk<
       }
       if (covered && !stranded && floor.covered) {
         if (!advancedEpoch) floor = { ...floor, position: reconciledHead }
-        logDelivery?.certify(floor.epoch, started)
+        await logDelivery?.certify(floor.epoch, started)
       }
     }
     while (true) {
@@ -2030,7 +2033,7 @@ export function createGroupPeerWithControlWalk<
         // Drained. The tip an EMPTY page reports is not redundant: a topic keeps its head when
         // its frames age out, so anchoring on the cursor here would compare-and-set against
         // `null` on a topic whose head is real, and lose forever.
-        takeHead(result.head)
+        await takeHead(result.head)
         return advancedEpoch
       }
       for (const message of result.messages) {
@@ -2418,7 +2421,7 @@ export function createGroupPeerWithControlWalk<
       // A short page ends the log: every frame this reply named is processed, so its tip is
       // reconciled. A full page is not — loop and take the head from the reply that finally drains.
       if (result.messages.length < COMMIT_FETCH_LIMIT) {
-        takeHead(result.head)
+        await takeHead(result.head)
         return advancedEpoch
       }
     }
@@ -5667,15 +5670,25 @@ export function createGroupPeerWithControlWalk<
     } as ProtocolSurface<Protocols[typeof name]>
   }
 
+  const rootEntry = <TArgs extends Array<unknown>, TResult>(
+    fn: (...args: TArgs) => Promise<TResult>,
+  ): ((...args: TArgs) => Promise<TResult>) => {
+    return async (...args) => {
+      if (disposed) return await fn(...args)
+      // Check ownership synchronously, before any continuation can join the commit tail.
+      await params.appPublication?.snapshot(Object.keys(protocols)[0] ?? '')
+      return await fn(...args)
+    }
+  }
   const peer: GroupPeer<Protocols> = {
     protocol: protocolMethod,
-    retryAppDelivery: async (topicID) => {
+    retryAppDelivery: rootEntry(async (topicID?: string) => {
       if (disposed) return
       if (params.recoveryOnly) throw new SendNotAdmissibleError('stranded')
       appLane.retryDelivery(topicID)
       retryAppPull()
-    },
-    dropAppFrame: async (topicID, position) => {
+    }),
+    dropAppFrame: rootEntry(async (topicID: string, position: string) => {
       await ready
       assertLive()
       if (params.recoveryOnly) throw new SendNotAdmissibleError('stranded')
@@ -5690,15 +5703,15 @@ export function createGroupPeerWithControlWalk<
       })
       if (safetyHold() === null) await healIfRequested()
       assertLive()
-    },
-    enqueue,
-    outcomes,
-    ack,
-    abandon,
-    commit,
-    replay,
-    recover,
-    resync: async () => {
+    }),
+    enqueue: rootEntry(enqueue),
+    outcomes: rootEntry(outcomes),
+    ack: rootEntry(ack),
+    abandon: rootEntry(abandon),
+    commit: rootEntry(commit),
+    replay: rootEntry(replay),
+    recover: rootEntry(recover),
+    resync: rootEntry(async () => {
       if (params.recoveryOnly) throw new SendNotAdmissibleError('stranded')
       assertSafetyOpen()
       await ready
@@ -5721,7 +5734,7 @@ export function createGroupPeerWithControlWalk<
         await rebuildEpoch()
       })
       assertLive()
-    },
+    }),
     anchorEpoch: () => anchor.epoch,
     reauthorize: () => {
       const reason = safetyHold()

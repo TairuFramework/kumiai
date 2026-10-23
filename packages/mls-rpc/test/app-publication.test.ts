@@ -1,10 +1,12 @@
 import { encodeEventFrame } from '@kumiai/broadcast'
 import { APP_TOPIC_LABEL, encodeAppAAD } from '@kumiai/rpc'
 import { createAppOutboxAcceptance, createLogDelivery } from '@kumiai/rpc/testing'
+import { createMemoryAppOutbox } from '@kumiai/rpc-conformance'
 import { describe, expect, test, vi } from 'vitest'
 
 import { createRegistryAppPublication } from '../src/app-publication.js'
 import { entryCapability } from '../src/entry-capability.js'
+import type { MemoryTransaction, TransactionalGroupEffects } from '../src/persistence-types.js'
 import { registryLiveSend } from '../src/registry/live-send.js'
 import { registryRetirement } from '../src/registry/retirement.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
@@ -13,6 +15,8 @@ import {
   registryFixtureForceOwnerMarker,
   registryFixtureRestore,
 } from './fixtures/registry.js'
+import { startLeaseRotationPeer } from './fixtures/registry-lease-rotation.js'
+import { writeSideRow } from './fixtures/storage-persistence.js'
 
 for (const mode of ['real-mls', 'double'] as const) {
   for (const context of ['supplied', 'absent'] as const) {
@@ -90,12 +94,13 @@ for (const mode of ['real-mls', 'double'] as const) {
 for (const mode of ['real-mls', 'double'] as const) {
   for (const context of ['supplied', 'absent'] as const) {
     describe(`preparation guards ${mode} / ${context}`, () => {
-      async function setup() {
+      async function setup(effects?: TransactionalGroupEffects<MemoryTransaction>) {
         const fixture = await createRegistryFixture({
           mode,
           setup: 'empty',
           groupID: crypto.randomUUID(),
           backgroundMaintenance: 'gated',
+          effects,
           ownershipContext: context === 'supplied' ? createAsyncLocalOwnershipContext() : undefined,
         })
         const key = await fixture.registry.seed(await fixture.makeHandle(0), { packageUse: null })
@@ -126,6 +131,495 @@ for (const mode of ['real-mls', 'double'] as const) {
         await live.accounting()
         return { fixture, key, access, ports, entry, publication, capability, live }
       }
+      test('transactional settlement effects refuse root reentry', async () => {
+        let root: (() => Promise<unknown>) | undefined
+        let peerRoot: (() => Promise<unknown>) | undefined
+        let checked = 0
+        const f = await setup({
+          outbox: async (tx, event) => {
+            if (event.kind !== 'published') return
+            if (root === undefined || peerRoot === undefined) throw new Error('Missing root calls')
+            const refuse = async (call: () => Promise<unknown>) => {
+              let error: unknown
+              void call().catch((cause: unknown) => {
+                error = cause
+              })
+              for (let i = 0; i < 50; i++) await Promise.resolve()
+              expect(error).toMatchObject({ name: 'ReentrantOwnershipError' })
+              checked++
+            }
+            // Invoke both roots while the synchronous callback marker is still installed.
+            let storeError: unknown
+            let peerError: unknown
+            void root().catch((cause: unknown) => {
+              storeError = cause
+            })
+            void peerRoot().catch((cause: unknown) => {
+              peerError = cause
+            })
+            for (let i = 0; i < 50; i++) await Promise.resolve()
+            expect(storeError).toMatchObject({ name: 'ReentrantOwnershipError' })
+            expect(peerError).toMatchObject({ name: 'ReentrantOwnershipError' })
+            checked += 2
+            if (context === 'supplied') {
+              await refuse(root)
+              await refuse(peerRoot)
+            }
+            await writeSideRow(tx, 'settlement-effect', new Uint8Array([7]))
+          },
+        })
+        let running: Awaited<ReturnType<typeof startLeaseRotationPeer>> | undefined
+        try {
+          running = await startLeaseRotationPeer({
+            mode,
+            fixture: f.fixture,
+            key: f.key,
+            outbox: createMemoryAppOutbox({ key: f.key, snapshot: () => null }),
+          })
+          await running.owner.ready
+          const peer = running.owner.peer()
+          if (peer === null) throw new Error('Missing peer')
+          root = () => f.fixture.device.groups.load(f.key.groupID)
+          peerRoot = () => peer.replay()
+          const frame = await f.publication.prepare(f.entry, null)
+          const attempt = frame.entry.lastAttempt
+          if (attempt === null) throw new Error('Missing attempt')
+          expect(
+            await f.ports.outbox.recordSettlement(
+              0,
+              {
+                sequenceID: 'ack',
+                attemptID: attempt.publishID,
+                topicID: attempt.topicID,
+                outcome: 'published',
+              },
+              {
+                identity: frame.snapshot.identity,
+                stateVersion: frame.snapshot.stateVersion,
+                attemptID: attempt.publishID,
+              },
+            ),
+          ).toEqual({ recorded: true })
+          await f.ports.outbox.remove(0, {
+            incarnation: f.key.incarnation,
+            segment: attempt.segment,
+            topicID: attempt.topicID,
+            position: 'ack',
+          })
+          expect(checked).toBe(context === 'supplied' ? 4 : 2)
+          expect((await f.fixture.inspectRows())['host-side']?.get('settlement-effect')).toEqual(
+            new Uint8Array([7]),
+          )
+          expect(
+            (await f.ports.outbox.events()).filter((event) => event.kind === 'published'),
+          ).toHaveLength(1)
+        } finally {
+          if (running !== undefined) {
+            running.owner.dispose()
+            await running.owner.drained()
+          }
+          await f.fixture.close()
+        }
+      })
+      test.each(
+        (['no-new-head', 'covered-walk'] as const).flatMap((path) =>
+          (['certification-first', 'adoption-first'] as const).map(
+            (order) => [path, order] as const,
+          ),
+        ),
+      )(
+        'both proof paths persist an obligation before freezing proof (%s / %s)',
+        async (path, order) => {
+          let publishedEffects = 0
+          const f = await setup({
+            outbox: async (_tx, event) => {
+              if (event.kind === 'published') publishedEffects++
+            },
+          })
+          const queue = createAppOutboxAcceptance({
+            outbox: f.ports.outbox,
+            limit: 4,
+            admission: () => f.access.admission(),
+          })
+          const entered = Promise.withResolvers<void>()
+          const release = Promise.withResolvers<void>()
+          const record = f.ports.outbox.recordSettlement.bind(f.ports.outbox)
+          const result = Promise.withResolvers<Awaited<ReturnType<typeof record>>>()
+          let certificationLife:
+            | Awaited<ReturnType<typeof f.fixture.device.groups.load>>
+            | undefined
+          const calls = vi
+            .spyOn(f.ports.outbox, 'recordSettlement')
+            .mockImplementation(async (...args) => {
+              if (order === 'adoption-first') {
+                entered.resolve()
+                await release.promise
+              } else {
+                certificationLife = await f.fixture.device.groups.load(f.key.groupID)
+                f.fixture.onPhase('account', async () => {
+                  entered.resolve()
+                  await release.promise
+                })
+              }
+              const value = await record(...args)
+              result.resolve(value)
+              return value
+            })
+          const remove = vi.spyOn(f.ports.outbox, 'remove')
+          const publish = vi.fn(async () => ({ sequenceID: 'exact-app-ack' }))
+          const delivery = createLogDelivery({
+            queue,
+            ready: async () => {},
+            floor: () => ({ epoch: f.access.epoch(), position: null, covered: true }),
+            held: () => false,
+            prepare: f.publication.prepare,
+            snapshot: f.publication.snapshot,
+            loadSettlement: f.ports.outbox.loadSettlement,
+            ...{ recordSettlement: f.ports.outbox.recordSettlement },
+            publish,
+            probe: async () => ({
+              messages: [],
+              head: path === 'no-new-head' ? null : 'commit-head',
+              gap: false,
+              oldest: null,
+            }),
+            pull: async () => {},
+            heal: async () => {},
+            remove: f.ports.outbox.remove,
+            clear: f.ports.outbox.clear,
+            cleared: () => {},
+            deliveredWindowMs: 1000,
+            deliveredLimit: 4,
+          })
+          let proof: Promise<void> | undefined
+          let retiring: Promise<unknown> | undefined
+          try {
+            delivery.trigger()
+            if (path === 'covered-walk') {
+              await vi.waitFor(() => expect(delivery.beginWalk()).toBe(1))
+              proof = Promise.resolve(delivery.certify(f.access.epoch(), delivery.beginWalk()))
+            }
+            await entered.promise
+            expect(publish).toHaveBeenCalledTimes(1)
+            expect(remove).not.toHaveBeenCalled()
+            expect(publishedEffects).toBe(0)
+            const attempt = queue.entries()[0]?.lastAttempt
+            expect(calls.mock.calls[0]?.[1]).toEqual({
+              sequenceID: 'exact-app-ack',
+              attemptID: attempt?.publishID,
+              topicID: attempt?.topicID,
+              outcome: 'published',
+            })
+            let before: Awaited<ReturnType<typeof f.fixture.inspectRows>> | undefined
+            if (order === 'adoption-first') {
+              const next = await f.fixture.acceptedOrdinary(f.access)
+              await f.access.replace(next.candidate, () => next.write)
+              before = await f.fixture.inspectRows()
+            } else {
+              const life = certificationLife
+              if (life == null) throw new Error('Missing certification lifetime')
+              const mutationID = crypto.randomUUID()
+              retiring = f.fixture.device.groups.transition(
+                {
+                  groupID: f.key.groupID,
+                  mutationID,
+                  expected: {
+                    revision: life.revision + 1,
+                    activeIncarnation: life.activeIncarnation,
+                  },
+                },
+                async (stores) => {
+                  await stores.lifetime.save({
+                    ...life,
+                    revision: life.revision + 2,
+                    mutationID,
+                    activeIncarnation: null,
+                  })
+                },
+              )
+            }
+            release.resolve()
+            expect(await result.promise).toEqual(
+              order === 'certification-first'
+                ? { recorded: true }
+                : { recorded: false, reason: 'identity-changed' },
+            )
+            await proof
+            if (order === 'adoption-first') {
+              expect(await f.fixture.inspectRows()).toEqual(before)
+              expect(await f.ports.outbox.loadSettlement(0)).toBeNull()
+              expect(publishedEffects).toBe(0)
+              expect(remove).not.toHaveBeenCalled()
+            } else {
+              await retiring
+              if (path === 'covered-walk') delivery.trigger()
+              await vi.waitFor(() => expect(publishedEffects).toBe(1))
+              expect(
+                (await f.ports.outbox.events()).filter((event) => event.kind === 'failed'),
+              ).toEqual([])
+              expect(
+                (await f.ports.outbox.events()).filter((event) => event.kind === 'published'),
+              ).toMatchObject([
+                { occurrence: { position: 'exact-app-ack', topicID: attempt?.topicID } },
+              ])
+            }
+          } finally {
+            release.resolve()
+            await proof
+            await retiring
+            delivery.close()
+            queue.close()
+            await f.fixture.close()
+          }
+        },
+      )
+      test.each(['certification-first', 'adoption-first'] as const)(
+        'certification and adoption obey acquired order (%s)',
+        async (order) => {
+          const f = await setup()
+          try {
+            const frame = await f.publication.prepare(f.entry, null)
+            const attempt = frame.entry.lastAttempt
+            if (attempt === null) throw new Error('Missing attempt')
+            const obligation = {
+              sequenceID: 'app-ack',
+              attemptID: attempt.publishID,
+              topicID: attempt.topicID,
+              outcome: 'published' as const,
+            }
+            const expected = {
+              identity: frame.snapshot.identity,
+              stateVersion: frame.snapshot.stateVersion,
+              attemptID: attempt.publishID,
+            }
+            if (order === 'adoption-first') {
+              const next = await f.fixture.acceptedOrdinary(f.access)
+              await f.access.replace(next.candidate, () => next.write)
+              const rows = await f.fixture.inspectRows()
+              expect(await f.ports.outbox.recordSettlement(0, obligation, expected)).toEqual({
+                recorded: false,
+                reason: 'identity-changed',
+              })
+              expect(await f.fixture.inspectRows()).toEqual(rows)
+            } else {
+              const entered = Promise.withResolvers<void>()
+              const released = Promise.withResolvers<void>()
+              f.fixture.onPhase('account', async () => {
+                entered.resolve()
+                await released.promise
+              })
+              const pending = f.ports.outbox.recordSettlement(0, obligation, expected)
+              await entered.promise
+              let retired = false
+              const retirement = f.fixture.device.groups.load(f.key.groupID).then(async (life) => {
+                if (life === null) throw new Error('Missing lifetime')
+                const mutationID = crypto.randomUUID()
+                await f.fixture.device.groups.transition(
+                  { groupID: f.key.groupID, mutationID, expected: life },
+                  async (stores) => {
+                    await stores.lifetime.save({
+                      ...life,
+                      revision: life.revision + 1,
+                      mutationID,
+                      activeIncarnation: null,
+                    })
+                  },
+                )
+                retired = true
+              })
+              expect(retired).toBe(false)
+              released.resolve()
+              expect(await pending).toEqual({ recorded: true })
+              // Queue a read behind proof without requiring lifecycle drainage from the next task.
+              await retirement
+              expect(await f.ports.outbox.loadSettlement(0)).toEqual(obligation)
+              expect((await f.ports.outbox.events()).some((event) => event.kind === 'failed')).toBe(
+                false,
+              )
+            }
+          } finally {
+            await f.fixture.close()
+          }
+        },
+      )
+      test('certification retries only completed commit attempts', async () => {
+        const f = await setup()
+        try {
+          const frame = await f.publication.prepare(f.entry, null)
+          const attempt = frame.entry.lastAttempt
+          if (attempt === null) throw new Error('Missing attempt')
+          const before = await f.fixture.inspectRows()
+          f.fixture.onPhase('account', () => {
+            throw new Error('Rejected accounting')
+          })
+          await expect(
+            f.ports.outbox.recordSettlement(
+              0,
+              {
+                sequenceID: 'ack',
+                attemptID: attempt.publishID,
+                topicID: attempt.topicID,
+                outcome: 'published',
+              },
+              {
+                identity: frame.snapshot.identity,
+                stateVersion: frame.snapshot.stateVersion,
+                attemptID: attempt.publishID,
+              },
+            ),
+          ).rejects.toThrow('Rejected accounting')
+          expect(await f.fixture.inspectRows()).toEqual(before)
+          expect(await f.ports.outbox.loadSettlement(0)).toBeNull()
+        } finally {
+          await f.fixture.close()
+        }
+      })
+      test.each(['known', 'unknown'] as const)(
+        'certification rollback keeps retirement behind its retry (%s)',
+        async (completion) => {
+          const f = await setup()
+          try {
+            const frame = await f.publication.prepare(f.entry, null)
+            const attempt = frame.entry.lastAttempt
+            if (attempt === null) throw new Error('Missing attempt')
+            const obligation = {
+              sequenceID: 'app-ack',
+              attemptID: attempt.publishID,
+              topicID: attempt.topicID,
+              outcome: 'published' as const,
+            }
+            const expected = {
+              identity: frame.snapshot.identity,
+              stateVersion: frame.snapshot.stateVersion,
+              attemptID: attempt.publishID,
+            }
+            const life = await f.fixture.device.groups.load(f.key.groupID)
+            if (life === null) throw new Error('Missing lifetime')
+            const fault =
+              completion === 'unknown' ? f.fixture.armNextWorkFault('pending') : undefined
+            const known =
+              completion === 'known' ? f.fixture.armNextWorkFault('before-commit') : undefined
+            const order: Array<string> = []
+            const pending = f.ports.outbox
+              .recordSettlement(0, obligation, expected)
+              .then((result) => {
+                order.push('certified')
+                return result
+              })
+              .catch((error: unknown) => error)
+            await (fault?.rejected ?? known?.mutationID)
+            const mutationID = crypto.randomUUID()
+            const queued = f.fixture.device.groups
+              .transition(
+                {
+                  groupID: f.key.groupID,
+                  mutationID,
+                  expected: {
+                    revision: life.revision + 1,
+                    activeIncarnation: life.activeIncarnation,
+                  },
+                },
+                async (stores) => {
+                  order.push('retirement-acquired')
+                  await stores.lifetime.save({
+                    ...life,
+                    revision: life.revision + 2,
+                    mutationID,
+                    activeIncarnation: null,
+                  })
+                },
+              )
+              .catch((error: unknown) => error)
+            await fault?.finish('rollback')
+            expect(await pending).toEqual({ recorded: true })
+            expect(await queued).toBeUndefined()
+            expect(order).toEqual(['certified', 'retirement-acquired'])
+            expect(await f.ports.outbox.loadSettlement(0)).toEqual(obligation)
+          } finally {
+            await f.fixture.close()
+          }
+        },
+      )
+      test.each(['version', 'attempt', 'topic', 'missing'] as const)(
+        'version-only and attempt-only changes refuse certification (%s)',
+        async (kind) => {
+          const f = await setup()
+          try {
+            const frame = await f.publication.prepare(f.entry, null)
+            const attempt = frame.entry.lastAttempt
+            if (attempt === null) throw new Error('Missing attempt')
+            const expected = {
+              identity: frame.snapshot.identity,
+              stateVersion: frame.snapshot.stateVersion,
+              attemptID: attempt.publishID,
+            }
+            const obligation = {
+              sequenceID: 'app-ack',
+              attemptID: attempt.publishID,
+              topicID: kind === 'topic' ? 'wrong-topic' : attempt.topicID,
+              outcome: 'published' as const,
+            }
+            if (kind === 'version') await f.access.mutate(async () => {})
+            if (kind === 'attempt')
+              await f.ports.outbox.put({
+                ...frame.entry,
+                lastAttempt: { ...attempt, publishID: 'replacement' },
+              })
+            if (kind === 'missing') await f.ports.outbox.remove(0)
+            if (kind !== 'version') {
+              const current = await f.publication.snapshot('chat')
+              if (current === null) throw new Error('Missing current snapshot')
+              expected.stateVersion = current.stateVersion
+            }
+            const rows = await f.fixture.inspectRows()
+            expect(await f.ports.outbox.recordSettlement(0, obligation, expected)).toEqual({
+              recorded: false,
+              reason:
+                kind === 'version'
+                  ? 'state-version-changed'
+                  : kind === 'missing'
+                    ? 'entry-missing'
+                    : 'attempt-changed',
+            })
+            expect(await f.fixture.inspectRows()).toEqual(rows)
+          } finally {
+            await f.fixture.close()
+          }
+        },
+      )
+      test('duplicate settlement is idempotent and conflicting position rejects', async () => {
+        const f = await setup()
+        try {
+          const frame = await f.publication.prepare(f.entry, null)
+          const attempt = frame.entry.lastAttempt
+          if (attempt === null) throw new Error('Missing attempt')
+          const obligation = {
+            sequenceID: 'app-ack',
+            attemptID: attempt.publishID,
+            topicID: attempt.topicID,
+            outcome: 'published' as const,
+          }
+          const expected = {
+            identity: frame.snapshot.identity,
+            stateVersion: frame.snapshot.stateVersion,
+            attemptID: attempt.publishID,
+          }
+          expect(await f.ports.outbox.recordSettlement(0, obligation, expected)).toEqual({
+            recorded: true,
+          })
+          const rows = await f.fixture.inspectRows()
+          expect(await f.ports.outbox.recordSettlement(0, obligation, expected)).toEqual({
+            recorded: true,
+          })
+          expect(await f.fixture.inspectRows()).toEqual(rows)
+          await expect(
+            f.ports.outbox.recordSettlement(0, { ...obligation, sequenceID: 'conflict' }, expected),
+          ).rejects.toThrow()
+          expect(await f.fixture.inspectRows()).toEqual(rows)
+        } finally {
+          await f.fixture.close()
+        }
+      })
       test.each(['version', 'epoch', 'incarnation', 'anchor'] as const)(
         'queued %s movement refuses preparation',
         async (kind) => {
@@ -506,7 +1000,201 @@ for (const mode of ['real-mls', 'double'] as const) {
           await f.fixture.close()
         }
       })
-      test('authenticator-only settlement refusal preserves the installed source', async () => {
+      test.each(['no-new-head', 'covered-walk'] as const)(
+        'uncertain snapshots cannot certify (%s)',
+        async (path) => {
+          const f = await setup()
+          const queue = createAppOutboxAcceptance({
+            outbox: f.ports.outbox,
+            limit: 4,
+            admission: () => f.access.admission(),
+          })
+          const record = vi.spyOn(f.ports.outbox, 'recordSettlement')
+          let noHead = false
+          const probed = Promise.withResolvers<void>()
+          const delivery = createLogDelivery({
+            queue,
+            ready: async () => {},
+            floor: () => ({ epoch: f.access.epoch(), position: null, covered: true }),
+            held: () => false,
+            prepare: f.publication.prepare,
+            snapshot: f.publication.snapshot,
+            loadSettlement: f.ports.outbox.loadSettlement,
+            ...{ recordSettlement: f.ports.outbox.recordSettlement },
+            publish: async () => ({ sequenceID: 'ambiguous-app-ack' }),
+            probe: async () => {
+              if (noHead) probed.resolve()
+              return { messages: [], head: noHead ? null : 'commit', gap: false, oldest: null }
+            },
+            pull: async () => {},
+            heal: async () => {},
+            remove: f.ports.outbox.remove,
+            clear: f.ports.outbox.clear,
+            cleared: () => {},
+            deliveredWindowMs: 1000,
+            deliveredLimit: 4,
+          })
+          let finish: (() => Promise<void>) | undefined
+          let pending: Promise<unknown> | undefined
+          try {
+            delivery.trigger()
+            await vi.waitFor(() => expect(delivery.beginWalk()).toBe(1))
+            const pendingFault = f.fixture.armNextWorkFault('pending')
+            finish = () => pendingFault.finish('rollback')
+            pending = f.access.mutate(async () => {}).catch((error: unknown) => error)
+            await pendingFault.rejected
+            expect(await f.publication.snapshot('chat')).toBeNull()
+            const before = await f.fixture.inspectRows()
+            if (path === 'covered-walk')
+              await delivery.certify(f.access.epoch(), delivery.beginWalk())
+            else {
+              noHead = true
+              delivery.trigger()
+              await probed.promise
+              for (let i = 0; i < 100; i++) await Promise.resolve()
+            }
+            expect(record).not.toHaveBeenCalled()
+            expect(await f.fixture.inspectRows()).toEqual(before)
+            await pendingFault.finish('commit')
+            finish = undefined
+            await pending
+            if (path === 'covered-walk')
+              await delivery.certify(f.access.epoch(), delivery.beginWalk())
+            else delivery.trigger()
+            await vi.waitFor(() => expect(record).toHaveBeenCalledTimes(1))
+            await vi.waitFor(async () => {
+              const obligation = await f.ports.outbox.loadSettlement(0)
+              const events = await f.ports.outbox.events()
+              expect(
+                obligation?.sequenceID === 'ambiguous-app-ack' ||
+                  events.some(
+                    (event) =>
+                      event.kind === 'published' &&
+                      event.occurrence.position === 'ambiguous-app-ack',
+                  ),
+              ).toBe(true)
+            })
+          } finally {
+            await finish?.()
+            await pending
+            delivery.close()
+            queue.close()
+            await f.fixture.close()
+          }
+        },
+      )
+      test.each(['no-new-head', 'covered-walk'] as const)(
+        'same-epoch expected authenticator alone refuses certification (%s)',
+        async (path) => {
+          const f = await setup()
+          let delivery: ReturnType<typeof createLogDelivery> | undefined
+          let queue: ReturnType<typeof createAppOutboxAcceptance> | undefined
+          try {
+            const record = await f.fixture.device.groups.loadState(f.key)
+            if (record === null || record.deleted || record.state === null)
+              throw new Error('Missing source')
+            const split = await f.fixture.advance(
+              await registryFixtureRestore(f.fixture)({ ...record, state: record.state }),
+            )
+            const next = await f.fixture.acceptedOrdinary(f.access)
+            await f.access.replace(next.candidate, () => next.write)
+            const authenticator = split.state.keySchedule.epochAuthenticator.slice()
+            const installed = await f.publication.snapshot('chat')
+            if (installed === null) throw new Error('Missing installed snapshot')
+            expect(Number(split.epoch)).toBe(installed.identity.epoch)
+            expect(authenticator).not.toEqual(installed.identity.authenticator)
+            let wrong = false
+            let refuseProbe = true
+            let probes = 0
+            const observed = Promise.withResolvers<void>()
+            const recordSpy = vi.spyOn(f.ports.outbox, 'recordSettlement')
+            queue = createAppOutboxAcceptance({
+              outbox: f.ports.outbox,
+              limit: 4,
+              admission: () => f.access.admission(),
+            })
+            delivery = createLogDelivery({
+              queue,
+              ready: async () => {},
+              floor: () => ({ epoch: installed.identity.epoch, position: null, covered: true }),
+              held: () => false,
+              prepare: f.publication.prepare,
+              snapshot: async (protocol) => {
+                const value = await f.publication.snapshot(protocol)
+                if (wrong) observed.resolve()
+                return value === null || !wrong
+                  ? value
+                  : { ...value, identity: { ...value.identity, authenticator } }
+              },
+              loadSettlement: f.ports.outbox.loadSettlement,
+              ...{ recordSettlement: f.ports.outbox.recordSettlement },
+              publish: async () => ({ sequenceID: 'authenticated-ack' }),
+              probe: async () => {
+                if (++probes === 2 && path === 'no-new-head' && refuseProbe) wrong = true
+                return {
+                  messages: [],
+                  head: path === 'no-new-head' ? null : 'commit',
+                  gap: false,
+                  oldest: null,
+                }
+              },
+              pull: async () => {},
+              heal: async () => {},
+              remove: f.ports.outbox.remove,
+              clear: f.ports.outbox.clear,
+              cleared: () => {},
+              deliveredWindowMs: 1000,
+              deliveredLimit: 4,
+            })
+            delivery.trigger()
+            if (path === 'covered-walk') {
+              const worker = delivery
+              await vi.waitFor(() => expect(worker.beginWalk()).toBe(1))
+              const started = worker.beginWalk()
+              // Await the real provider read initiated before the walk.
+              if ('readyWalk' in worker)
+                await (
+                  worker as typeof worker & { readyWalk(started: number): Promise<void> }
+                ).readyWalk(started)
+              wrong = true
+              await worker.certify(installed.identity.epoch, started)
+            } else {
+              await observed.promise
+              for (let i = 0; i < 100; i++) await Promise.resolve()
+            }
+            expect(recordSpy).not.toHaveBeenCalled()
+            expect(await f.ports.outbox.loadSettlement(0)).toBeNull()
+            const current = await f.publication.snapshot('chat')
+            expect(current?.identity).toEqual(installed.identity)
+            const before = await f.fixture.inspectRows()
+            for (let i = 0; i < 20; i++) await Promise.resolve()
+            expect(await f.fixture.inspectRows()).toEqual(before)
+            wrong = false
+            refuseProbe = false
+            if (path === 'covered-walk')
+              await delivery.certify(installed.identity.epoch, delivery.beginWalk())
+            else delivery.trigger()
+            await vi.waitFor(() => expect(recordSpy).toHaveBeenCalledTimes(1))
+            await vi.waitFor(async () => {
+              const obligation = await f.ports.outbox.loadSettlement(0)
+              const events = await f.ports.outbox.events()
+              expect(
+                obligation?.sequenceID === 'authenticated-ack' ||
+                  events.some(
+                    (event) =>
+                      event.kind === 'published' &&
+                      event.occurrence.position === 'authenticated-ack',
+                  ),
+              ).toBe(true)
+            })
+          } finally {
+            delivery?.close()
+            queue?.close()
+            await f.fixture.close()
+          }
+        },
+      )
+      test('same-epoch expected authenticator alone refuses certification (direct storage)', async () => {
         const f = await setup()
         try {
           const record = await f.fixture.device.groups.loadState(f.key)
@@ -577,6 +1265,7 @@ for (const mode of ['real-mls', 'double'] as const) {
                   }
             },
             loadSettlement: f.ports.outbox.loadSettlement,
+            ...{ recordSettlement: f.ports.outbox.recordSettlement },
             publish,
             probe: async () => ({ messages: [], head: 'unproven', oldest: null, gap: false }),
             pull: async () => {},

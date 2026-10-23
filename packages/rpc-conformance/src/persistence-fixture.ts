@@ -525,7 +525,7 @@ export type ConformancePersistenceFixture<TPorts> = {
   failNextOpen(error?: Error): void
   probeCodec(fn: (phase: string) => Promise<void>): void
   onPhase(
-    phase: 'prepare' | 'work' | 'effects' | 'finalise' | 'account' | 'proof' | 'hook',
+    phase: 'prepare' | 'work' | 'effects' | 'finalise' | 'account' | 'proof' | 'hook' | 'retry',
     fn: () => Promise<void> | void,
   ): void
   readWith<T>(fn: (stores: ConformanceFixtureDeviceStores<TPorts>) => Promise<T>): Promise<T>
@@ -757,6 +757,7 @@ export type ConformanceStorageAppOutboxEntry = {
 export type ConformanceStorageAppOutbox = {
   put(entry: ConformanceStorageAppOutboxEntry): Promise<void>
   list(): Promise<Array<ConformanceStorageAppOutboxEntry>>
+  /** Exact repeats succeed without mutation. New proofs check captured expectations under ownership. */
   recordSettlement(
     seq: number,
     obligation: ConformanceAppSettlementObligation,

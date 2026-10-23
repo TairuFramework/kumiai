@@ -596,6 +596,7 @@ export function createMemoryGroupCoordinator(params: {
     work: (stores: GroupStores<MemoryTransaction>, mutationID: string) => Promise<TValue>,
     entry: OwnerEntry,
     participantTx?: MemoryTransaction,
+    readyToCommit?: () => void,
   ): Promise<TValue> {
     let proof: Proof | undefined
     let id: string | undefined
@@ -1308,6 +1309,7 @@ export function createMemoryGroupCoordinator(params: {
             if (entry.rollbackOnly)
               throw new GroupStateConflictError('Transaction is rollback-only')
             await captureObservation(tx, before, change.groupID, change.mutationID, entry)
+            readyToCommit?.()
             return result
           } catch (error) {
             attempt.revoke(
@@ -1508,17 +1510,50 @@ export function createMemoryGroupCoordinator(params: {
         { groupID: key.groupID, ownerDID: null },
         async (entry) => {
           await prepare(entry, key.groupID)
-          return await transitionOwned(
-            {
-              groupID: key.groupID,
-              key,
-              active: options?.active ?? false,
-              mutationID: mutationID,
-              check: options?.check,
-            },
-            work,
-            entry,
-          )
+          let milliseconds = 100
+          for (;;) {
+            let completed = false
+            try {
+              return await transitionOwned(
+                {
+                  groupID: key.groupID,
+                  key,
+                  active: options?.active ?? false,
+                  mutationID,
+                  check: options?.check,
+                },
+                work,
+                entry,
+                undefined,
+                () => {
+                  completed = true
+                },
+              )
+            } catch (error) {
+              if (
+                !options?.retryOnRollback ||
+                !completed ||
+                entry.phase !== 'settled' ||
+                owners.failure !== null
+              )
+                throw error
+              await entry.retryRolledBack()
+              await new Promise<void>((resolve, reject) => {
+                const signal = owners.failureSignal
+                const abort = () => {
+                  clearTimeout(timer)
+                  reject(signal.reason)
+                }
+                const timer = setTimeout(() => {
+                  signal.removeEventListener('abort', abort)
+                  resolve()
+                }, milliseconds)
+                signal.addEventListener('abort', abort, { once: true })
+                if (signal.aborted) abort()
+              })
+              milliseconds = Math.min(milliseconds * 2, 15000)
+            }
+          }
         },
         { mutationID },
       )

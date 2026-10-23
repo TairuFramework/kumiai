@@ -56,6 +56,7 @@ export type OwnerEntry = {
   onRollback(fn: () => void): void
   settle(outcome: ProofOutcome): void
   retain(proof: () => Promise<ProofOutcome>): Promise<ProofOutcome>
+  retryRolledBack(): Promise<void>
 }
 export type OwnerQueues = {
   activity(groupID: string, excludingMutationID?: string): { generation: number; pending: number }
@@ -542,6 +543,21 @@ export function createOwnerQueues(options?: {
             }
           })
           releaseSettled()
+        },
+        async retryRolledBack() {
+          assertLive()
+          if (phase !== 'settled' || outcome !== 'rolled-back' || bodyFinished || closing !== null)
+            throw new PersistencePhaseError('Retry requires settled rollback')
+          await entry.backendSettled()
+          await tail
+          assertLive()
+          currentAttempt.attempt.revoke(new PersistencePhaseError('Owner attempt retried'))
+          currentAttempt = newAttempt()
+          fatal = false
+          outcome = null
+          owned.proof = null
+          afterRelease.length = 0
+          phase = 'work'
         },
         retain(proof) {
           assertLive()

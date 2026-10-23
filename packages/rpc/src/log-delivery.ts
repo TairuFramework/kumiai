@@ -1,6 +1,11 @@
 import type { HubFetchTopicResult } from '@kumiai/hub-tunnel'
 
-import type { AppOutboxAcceptance, AppOutboxEntry, AppSettlementObligation } from './app-outbox.js'
+import type {
+  AppOutbox,
+  AppOutboxAcceptance,
+  AppOutboxEntry,
+  AppSettlementObligation,
+} from './app-outbox.js'
 import type {
   AppPublicationPort,
   AppPublicationSnapshot,
@@ -21,7 +26,13 @@ export function checkedFetchResult(result: HubFetchTopicResult): CoveredFetchRes
   return result
 }
 
-type Publication = { epoch: number; floor: LogPosition | null; acknowledged: number }
+type Publication = {
+  epoch: number
+  floor: LogPosition | null
+  acknowledged: number
+  sequenceID: string
+  frame: PreparedAppPublication
+}
 /** A delivered entry kept for a member that rejoins later and could not read its epoch. */
 type Delivered = Pick<AppOutboxEntry, 'protocol' | 'prc' | 'data'> & {
   epoch: number
@@ -44,7 +55,8 @@ export type LogDeliveryParams = {
   snapshot: AppPublicationPort['snapshot']
   loadSettlement: (seq: number) => Promise<AppSettlementObligation | null>
   publish: (frame: LogFrame) => Promise<{ sequenceID: string }> | null
-  remove: (seq: number) => Promise<void>
+  recordSettlement: AppOutbox['recordSettlement']
+  remove: AppOutbox['remove']
   clear: () => Promise<void>
   cleared: (notice: AppOutboxCleared) => void
   /** How long a delivered entry stays eligible to be sent again to a rejoined member. */
@@ -53,13 +65,16 @@ export type LogDeliveryParams = {
   deliveredLimit: number
 }
 
-/** Publication evidence stays in memory. A prepared durable attempt proves nothing. */
+/** Prepared bytes and acknowledgements prove nothing until settlement commits. */
 export function createLogDelivery(params: LogDeliveryParams) {
   const handoffHeld = params.handoffHeld ?? params.held
   const safetyHeld = () => params.safetyHold?.() != null
   const prepared = new Map<number, PreparedAppPublication>()
   const publications = new Map<number, Publication>()
   const proven = new Set<number>()
+  let walk:
+    | { started: number; snapshots: Map<string, Promise<AppPublicationSnapshot | null>> }
+    | undefined
   const delivered: Array<Delivered> = []
   let resend: Array<Delivered> = []
   let acknowledgements = 0
@@ -103,7 +118,15 @@ export function createLogDelivery(params: LogDeliveryParams) {
 
   const removeProven = async (): Promise<boolean> => {
     for (const seq of proven) {
-      await params.remove(seq)
+      const publication = publications.get(seq)
+      const attempt = publication?.frame.entry.lastAttempt
+      if (publication === undefined || attempt == null) continue
+      await params.remove(seq, {
+        incarnation: attempt.incarnation,
+        segment: attempt.segment,
+        topicID: attempt.topicID,
+        position: publication.sequenceID,
+      })
       keepDelivered(seq)
       params.queue.remove(seq)
       publications.delete(seq)
@@ -112,13 +135,6 @@ export function createLogDelivery(params: LogDeliveryParams) {
       if (closed) return false
     }
     return true
-  }
-
-  const certify = (epoch: number, started: number): void => {
-    if (safetyHeld()) return
-    for (const [seq, publication] of publications) {
-      if (publication.epoch === epoch && publication.acknowledged <= started) proven.add(seq)
-    }
   }
 
   const sameSource = (a: AppPublicationSnapshot, b: AppPublicationSnapshot): boolean =>
@@ -130,9 +146,96 @@ export function createLogDelivery(params: LogDeliveryParams) {
     a.identity.authenticator.length === b.identity.authenticator.length &&
     a.identity.authenticator.every((byte, index) => byte === b.identity.authenticator[index])
 
+  const snapshot = async (protocol: string): Promise<AppPublicationSnapshot | null> => {
+    const value = await params.snapshot(protocol)
+    return value === null ? null : structuredClone(value)
+  }
+  const capture = () => {
+    const snapshots = new Map<string, Promise<AppPublicationSnapshot | null>>()
+    for (const { protocol } of params.queue.entries()) {
+      if (snapshots.has(protocol)) continue
+      const pending = snapshot(protocol)
+      void pending.catch(() => undefined)
+      snapshots.set(protocol, pending)
+    }
+    return snapshots
+  }
+  const sameWindow = (a: AppPublicationSnapshot, b: AppPublicationSnapshot): boolean =>
+    sameSource(a, b) && a.stateVersion === b.stateVersion && a.sealVersion === b.sealVersion
+
+  const persistProof = async (
+    seq: number,
+    publication: Publication,
+    before: AppPublicationSnapshot | null,
+  ): Promise<void> => {
+    if (proven.has(seq) || safetyHeld()) return
+    const frame = publication.frame
+    const after = await snapshot(frame.entry.protocol)
+    if (safetyHeld() || closed) return
+    if (before === null || after === null || !sameWindow(before, after)) return
+    if (!sameSource(frame.snapshot, after)) {
+      publications.delete(seq)
+      prepared.delete(seq)
+      return
+    }
+    const attempt = frame.entry.lastAttempt
+    const current = params.queue.entries().find((entry) => entry.seq === seq)?.lastAttempt
+    if (
+      attempt === null ||
+      current == null ||
+      current.publishID !== attempt.publishID ||
+      current.topicID !== attempt.topicID ||
+      current.segment !== attempt.segment ||
+      current.incarnation !== attempt.incarnation ||
+      current.epoch !== attempt.epoch
+    ) {
+      publications.delete(seq)
+      prepared.delete(seq)
+      return
+    }
+    const expected = {
+      identity: structuredClone(after.identity),
+      stateVersion: after.stateVersion,
+      attemptID: attempt.publishID,
+    }
+    const result = await params.recordSettlement(
+      seq,
+      {
+        sequenceID: publication.sequenceID,
+        attemptID: attempt.publishID,
+        topicID: attempt.topicID,
+        outcome: 'published',
+      },
+      expected,
+    )
+    if (result.recorded) proven.add(seq)
+    else walk = undefined
+  }
+  const beginWalk = (): number => {
+    const started = acknowledgements
+    walk = { started, snapshots: capture() }
+    return started
+  }
+  const certify = async (epoch: number, started: number): Promise<void> => {
+    const window = walk
+    if (
+      window === undefined ||
+      window.started !== started ||
+      safetyHeld() ||
+      !params.floor().covered
+    )
+      return
+    for (const [seq, publication] of publications) {
+      if (publication.epoch !== epoch || publication.acknowledged > started) continue
+      const before = await window.snapshots.get(publication.frame.entry.protocol)
+      await persistProof(seq, publication, before ?? null)
+      if (walk !== window) return
+    }
+  }
+
   const frameFor = async (entry: AppOutboxEntry): Promise<PreparedAppPublication | null> => {
     if ((await params.loadSettlement(entry.seq)) !== null) return null
-    const current = await params.snapshot(entry.protocol)
+    const current = await snapshot(entry.protocol)
     if (current === null) return null
     let frame = prepared.get(entry.seq)
     if (
@@ -145,16 +248,22 @@ export function createLogDelivery(params: LogDeliveryParams) {
     }
     if (frame === undefined) {
       if (params.held()) return null
-      frame = await params.prepare(entry, params.floor().position)
+      frame = structuredClone(await params.prepare(entry, params.floor().position))
       params.queue.replace(frame.entry)
       prepared.set(entry.seq, frame)
+      const after = await snapshot(entry.protocol)
+      if (after === null) return null
+      if (!sameWindow(frame.snapshot, after)) {
+        if (!sameSource(frame.snapshot, after)) prepared.delete(entry.seq)
+        return null
+      }
     }
     return frame
   }
   const handoff = async (frame: PreparedAppPublication): Promise<boolean> => {
     const attempt = frame.entry.lastAttempt
     if (attempt === null || closed || handoffHeld()) return false
-    const current = await params.snapshot(frame.entry.protocol)
+    const current = await snapshot(frame.entry.protocol)
     if (current === null) return false
     if (!sameSource(frame.snapshot, current)) {
       prepared.delete(frame.entry.seq)
@@ -167,12 +276,26 @@ export function createLogDelivery(params: LogDeliveryParams) {
       publishID: attempt.publishID,
     })
     if (submission === null) return false
-    await submission
+    const { sequenceID } = await submission
     if (closed) return false
+    const after = await snapshot(frame.entry.protocol)
+    if (after === null) return false
+    if (!sameWindow(current, after)) {
+      immediate = true
+      return false
+    }
+    const stored = params.queue.entries().find((entry) => entry.seq === frame.entry.seq)
+    if (
+      stored?.lastAttempt?.publishID !== attempt.publishID ||
+      stored.lastAttempt.topicID !== attempt.topicID
+    )
+      return false
     publications.set(frame.entry.seq, {
       epoch: attempt.epoch,
       floor: attempt.floor === null ? null : asLogPosition(attempt.floor),
       acknowledged: ++acknowledgements,
+      sequenceID,
+      frame: structuredClone(frame),
     })
     return true
   }
@@ -276,6 +399,9 @@ export function createLogDelivery(params: LogDeliveryParams) {
       }
     }
     if (safetyHeld()) return
+    const started = acknowledgements
+    const snapshots = capture()
+    await Promise.all(snapshots.values())
     const result = await params.probe()
     if (closed) return
     if (safetyHeld()) {
@@ -284,7 +410,13 @@ export function createLogDelivery(params: LogDeliveryParams) {
     }
     for (const [seq, publication] of publications) {
       if (result.head == null || (publication.floor != null && result.head <= publication.floor)) {
-        proven.add(seq)
+        if (publication.acknowledged <= started) {
+          await persistProof(
+            seq,
+            publication,
+            (await snapshots.get(publication.frame.entry.protocol)) ?? null,
+          )
+        }
       }
     }
     if (headPastFloor(result.head, params.floor())) {
@@ -340,7 +472,10 @@ export function createLogDelivery(params: LogDeliveryParams) {
       }
       schedule(0)
     },
-    beginWalk: (): number => acknowledgements,
+    beginWalk,
+    readyWalk: async (started: number): Promise<void> => {
+      if (walk?.started === started) await Promise.all(walk.snapshots.values())
+    },
     certify,
     /**
      * Another member rejoined by external commit. A member stranded behind a retention gap cannot

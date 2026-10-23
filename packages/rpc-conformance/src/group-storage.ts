@@ -1056,6 +1056,59 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
       },
     )
 
+    test('settlement refuses stale expectations without marker or hook changes', async () => {
+      const fixture = await params.createFixture(groupID)
+      try {
+        const groups = fixture.ports.device.groups
+        const seed = await storageSeed(fixture.ports)
+        const outbox = groups.ports(key).outbox
+        await outbox.put({
+          seq: 777,
+          protocol: 'chat',
+          prc: 'posted',
+          status: 'accepted',
+          data: utf8('{"v":2,"payload":{"typ":"event","prc":"posted","data":{}}}'),
+          lastAttempt: {
+            incarnation: key.incarnation,
+            epoch: seed.state.epoch,
+            floor: null,
+            attempts: 1,
+            publishID: 'app-attempt',
+            segment: seed.state.epoch,
+            topicID: 'sealed-topic',
+          },
+        })
+        const evidence = await groups.readEvidence(key)
+        if (evidence.source.identity === null) throw new Error('Missing identity')
+        const expected = {
+          identity: evidence.source.identity,
+          stateVersion: evidence.source.stateVersion,
+          attemptID: 'app-attempt',
+        }
+        const obligation = {
+          sequenceID: 'application-ack',
+          attemptID: 'app-attempt',
+          topicID: 'sealed-topic',
+          outcome: 'published' as const,
+        }
+        const before = await fixture.inspectRows()
+        for (const [changed, reason] of [
+          [{ ...expected, stateVersion: expected.stateVersion + 1 }, 'state-version-changed'],
+          [{ ...expected, attemptID: 'replacement' }, 'attempt-changed'],
+          [{ ...expected, identity: { ...expected.identity, incarnation: 2 } }, 'identity-changed'],
+        ] as const) {
+          expect(await outbox.recordSettlement(777, obligation, changed)).toEqual({
+            recorded: false,
+            reason,
+          })
+          expect(await fixture.inspectRows()).toEqual(before)
+        }
+        expect(await outbox.recordSettlement(777, obligation, expected)).toEqual({ recorded: true })
+        expect(await outbox.loadSettlement(777)).toEqual(obligation)
+      } finally {
+        await fixture.close()
+      }
+    })
     test('evidence reads bind committed state version, cursor and applied rows to one fixed key', async () => {
       const fixture = await params.createFixture(groupID)
       try {

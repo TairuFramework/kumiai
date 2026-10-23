@@ -1439,6 +1439,7 @@ test.each(['real-mls', 'double'] as const)(
       heal: async () => {},
       ...createRegistryAppPublication(fixture.access()),
       loadSettlement: store.loadSettlement,
+      ...{ recordSettlement: store.recordSettlement },
       publish: async () => {
         published.push(fixture.lease()?.own ?? -1)
         return { sequenceID: crypto.randomUUID() }

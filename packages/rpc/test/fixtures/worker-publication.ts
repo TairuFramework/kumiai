@@ -1,6 +1,7 @@
 import type { AppOutbox } from '../../src/app-outbox.js'
 import type { AppPublicationPort, AppPublicationSnapshot } from '../../src/app-publication.js'
 import type { EpochFloor } from '../../src/log-delivery.js'
+import { bindMemoryOutbox } from './outbox.js'
 
 /** Unit model: the only mutable state is its floor and outbox. */
 export function createWorkerPublication(params: {
@@ -22,6 +23,7 @@ export function createWorkerPublication(params: {
     segment: params.floor().epoch,
     topicID: 'app',
   })
+  Object.assign(key, bindMemoryOutbox(params.outbox, snapshot) ?? key)
   return {
     snapshot: async () => snapshot(),
     async prepare(entry, floor) {

@@ -156,7 +156,14 @@ type RegistryStoragePorts = {
   device: DevicePersistence<MemoryTransaction>
   packageStores(sourceID: string): ReturnType<typeof createMemoryPackageStores>
 }
-export type RegistryStorageFixture = Omit<PersistenceFixture<RegistryStoragePorts>, 'entry'> & {
+export type RegistryStorageFixture = Omit<
+  PersistenceFixture<RegistryStoragePorts>,
+  'entry' | 'onPhase'
+> & {
+  onPhase(
+    phase: Parameters<PersistenceFixture<RegistryStoragePorts>['onPhase']>[0] | 'retry',
+    fn: () => Promise<void> | void,
+  ): void
   entry(): EntryCapability<MemoryTransaction>
   armNextWorkFault(
     point: 'pending',
@@ -188,7 +195,9 @@ export async function createStorageFixture(params: {
   const ownerDID = identity.id
   const providerID = 'storage-provider'
   const codec = createDeterministicAtRestCodec({ key: new Uint8Array(32).fill(98) })
-  type Phase = Parameters<PersistenceFixture<StorageTestPorts<MemoryTransaction>>['onPhase']>[0]
+  type Phase =
+    | Parameters<PersistenceFixture<StorageTestPorts<MemoryTransaction>>['onPhase']>[0]
+    | 'retry'
   type Latch = { reached(): void; wait: Promise<void>; release(): void }
   let sealLatch: Latch | undefined
   let openLatch: Latch | undefined
@@ -318,6 +327,12 @@ export async function createStorageFixture(params: {
           const enter = entry.enter
           const retain = entry.retain
           const settle = entry.settle
+          const retryRolledBack = entry.retryRolledBack
+          const afterRetry = callbacks.get('retry')
+          entry.retryRolledBack = async () => {
+            await retryRolledBack()
+            if (afterRetry !== undefined) await entry.callback(afterRetry)
+          }
           let first = retrying
           let restarting = false
           entry.enter = async (phase) => {

@@ -60,6 +60,80 @@ export function testAppPublicationConformance(params: {
   createFixture(): Promise<AppPublicationFixture>
 }): void {
   describe(`App publication conformance — ${params.label}`, () => {
+    test.each(['version', 'attempt', 'epoch', 'incarnation'] as const)(
+      'acquired certification refuses moved expectations without writes (%s)',
+      async (kind) => {
+        const f = await params.createFixture()
+        try {
+          await f.outbox.put(entry())
+          const frame = await f.publication.prepare(entry(), null)
+          const attempt = frame.entry.lastAttempt
+          if (attempt === null) throw new Error('Missing attempt')
+          const expected = {
+            identity: frame.snapshot.identity,
+            stateVersion: frame.snapshot.stateVersion,
+            attemptID: attempt.publishID,
+          }
+          const obligation = {
+            sequenceID: 'application-ack',
+            attemptID: attempt.publishID,
+            topicID: attempt.topicID,
+            outcome: 'published' as const,
+          }
+          await f.change(kind)
+          if (kind === 'attempt') {
+            const current = (await f.state()).snapshot
+            if (current === null) throw new Error('Missing current snapshot')
+            expected.stateVersion = current.stateVersion
+          }
+          const before = await f.rows()
+          const counts = f.counts()
+          expect(await f.outbox.recordSettlement(0, obligation, expected)).toEqual({
+            recorded: false,
+            reason:
+              kind === 'version'
+                ? 'state-version-changed'
+                : kind === 'attempt'
+                  ? 'attempt-changed'
+                  : 'identity-changed',
+          })
+          expect(await f.rows()).toEqual(before)
+          expect(f.counts().effects).toBe(counts.effects)
+          expect(await f.outbox.loadSettlement(0)).toBeNull()
+        } finally {
+          await f.close()
+        }
+      },
+    )
+    test('duplicate settlement is idempotent and conflicting position rejects', async () => {
+      const f = await params.createFixture()
+      try {
+        await f.outbox.put(entry())
+        const frame = await f.publication.prepare(entry(), null)
+        const attempt = frame.entry.lastAttempt
+        if (attempt === null) throw new Error('Missing attempt')
+        const expected = {
+          identity: frame.snapshot.identity,
+          stateVersion: frame.snapshot.stateVersion,
+          attemptID: attempt.publishID,
+        }
+        const obligation = {
+          sequenceID: 'application-ack',
+          attemptID: attempt.publishID,
+          topicID: attempt.topicID,
+          outcome: 'published' as const,
+        }
+        expect(await f.outbox.recordSettlement(0, obligation, expected)).toEqual({ recorded: true })
+        const before = await f.rows()
+        expect(await f.outbox.recordSettlement(0, obligation, expected)).toEqual({ recorded: true })
+        await expect(
+          f.outbox.recordSettlement(0, { ...obligation, sequenceID: 'conflict' }, expected),
+        ).rejects.toThrow()
+        expect(await f.rows()).toEqual(before)
+      } finally {
+        await f.close()
+      }
+    })
     test('a committed range is reused without a per-message lease burn', async () => {
       let f = await params.createFixture()
       try {

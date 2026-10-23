@@ -158,6 +158,7 @@ export type RegistryFixtureBase = {
   onPhase(
     phase:
       | 'before-work'
+      | 'retry'
       | 'prepare'
       | 'work'
       | 'effects'

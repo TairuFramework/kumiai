@@ -73,7 +73,7 @@ describe('held live publication proof', () => {
       const floor = { epoch: 1, position: null, covered: true }
       const seal = vi.fn(async () => ({ topicID: 'app', payload: new Uint8Array([2]), floor }))
       const publish = vi.fn(async () => ({ sequenceID: crypto.randomUUID() }))
-      const remove = vi.fn(async (seq: number) => store.remove(seq))
+      const remove = vi.fn(store.remove)
       if (failRemoval) remove.mockRejectedValueOnce(new Error('removal failed'))
       const delivery = createLogDelivery({
         queue,
@@ -86,6 +86,7 @@ describe('held live publication proof', () => {
         heal: vi.fn(),
         ...createWorkerPublication({ outbox: store, floor: () => floor, seal, put: store.put }),
         loadSettlement: store.loadSettlement,
+        recordSettlement: store.recordSettlement,
         publish,
         remove,
         clear: store.clear,
@@ -97,9 +98,9 @@ describe('held live publication proof', () => {
         delivery.trigger()
         const pass = vi.advanceTimersByTimeAsync(0)
         await entered.promise
-        if (hasProof) delivery.certify(1, delivery.beginWalk())
+        if (hasProof) await delivery.certify(1, delivery.beginWalk())
         held = true
-        if (!hasProof) delivery.certify(1, delivery.beginWalk())
+        if (!hasProof) await delivery.certify(1, delivery.beginWalk())
         probe.mockClear()
         seal.mockClear()
         publish.mockClear()
@@ -260,9 +261,9 @@ describe('recovery ordering', { concurrent: false }, () => {
     const bob = member(hub, 'bob', {
       appOutbox: {
         ...store,
-        remove: async (seq) => {
+        remove: async (seq, outcome) => {
           if (++removals === 1) throw new Error('disk unavailable')
-          await store.remove(seq)
+          await store.remove(seq, outcome)
         },
       },
     })
@@ -728,8 +729,8 @@ describe('recovery ordering', { concurrent: false }, () => {
       const bob = member(hub, 'bob', {
         appOutbox: {
           ...store,
-          remove: async () => {
-            throw new Error('retain across crash')
+          recordSettlement: async () => {
+            throw new Error('retain unproven across crash')
           },
         },
       })

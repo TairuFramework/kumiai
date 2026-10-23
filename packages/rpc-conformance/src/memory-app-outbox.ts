@@ -89,6 +89,11 @@ export function createMemoryAppOutbox(params: {
     recordSettlement(seq, obligation, expected) {
       const owned = copy({ obligation, expected })
       return serial(() => {
+        const previous = obligations.get(seq)
+        if (previous !== undefined) {
+          if (!same(previous, owned.obligation)) throw new Error('Settlement is immutable')
+          return { recorded: true as const }
+        }
         const snapshot = params.snapshot()
         if (
           snapshot === null ||
@@ -114,9 +119,6 @@ export function createMemoryAppOutbox(params: {
           attempt.epoch !== snapshot.identity.epoch
         )
           return { recorded: false as const, reason: 'attempt-changed' as const }
-        const previous = obligations.get(seq)
-        if (previous !== undefined && !same(previous, owned.obligation))
-          throw new Error('Settlement is immutable')
         obligations.set(seq, owned.obligation)
         return { recorded: true as const }
       })

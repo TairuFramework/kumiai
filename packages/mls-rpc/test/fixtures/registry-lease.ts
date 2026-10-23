@@ -648,6 +648,7 @@ export async function createRegistryLeaseFixture(
         heal: async () => {},
         ...createRegistryAppPublication(access),
         loadSettlement: outbox.loadSettlement,
+        ...{ recordSettlement: outbox.recordSettlement },
         publish,
         remove: outbox.remove,
         clear: outbox.clear,

@@ -4,7 +4,9 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { type AppOutboxEntry, createAppOutboxAcceptance } from '../src/app-outbox.js'
 import type { AppPublicationSnapshot, PreparedAppPublication } from '../src/app-publication.js'
 import { createLogDelivery } from '../src/log-delivery.js'
+import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryAppOutbox } from './fixtures/outbox.js'
+import { makeMLSPeer } from './fixtures/peer.js'
 
 const flush = async () => {
   for (let i = 0; i < 50; i++) await Promise.resolve()
@@ -84,11 +86,13 @@ function fixture(limit = 8) {
       prepare,
       snapshot: async () => structuredClone(snapshot),
       loadSettlement: (seq) => outbox.loadSettlement(seq),
+      recordSettlement: (seq, obligation, expected) =>
+        outbox.recordSettlement(seq, obligation, expected),
       publish,
       probe,
       pull: async () => {},
       heal: async () => {},
-      remove: (seq) => outbox.remove(seq),
+      remove: (seq, outcome) => outbox.remove(seq, outcome),
       clear: () => outbox.clear(),
       cleared: () => {},
       deliveredWindowMs: 1000,
@@ -404,5 +408,246 @@ test('a resend uses its own sequence across concurrent dispatch acceptance', asy
     await dispatch
     f.worker.close()
     f.queue.close()
+  }
+})
+
+for (const path of ['no-new-head', 'covered-walk'] as const) {
+  const proof = async (f: ReturnType<typeof fixture>) => {
+    if (path === 'no-new-head') {
+      f.probe.mockResolvedValue({ messages: [], head: null, gap: false, oldest: null })
+      f.worker.trigger()
+      await f.tick()
+    } else {
+      await f.worker.certify(2, f.worker.beginWalk())
+      f.worker.trigger()
+      await f.tick()
+    }
+  }
+  const published = async () => {
+    const f = fixture()
+    f.publish.mockReset().mockResolvedValue({ sequenceID: 'app-position' })
+    await f.queue.accept(message('proof'))
+    f.worker.trigger()
+    await f.tick()
+    expect(f.publish).toHaveBeenCalledTimes(1)
+    return f
+  }
+  test(`both proof paths persist an obligation before freezing proof (${path})`, async () => {
+    const f = await published()
+    const commit = Promise.withResolvers<void>()
+    const entered = Promise.withResolvers<void>()
+    const record = f.outbox.recordSettlement.bind(f.outbox)
+    const recordSpy = vi.spyOn(f.outbox, 'recordSettlement').mockImplementation(async (...args) => {
+      entered.resolve()
+      await commit.promise
+      return await record(...args)
+    })
+    const remove = vi.spyOn(f.outbox, 'remove')
+    const pending = proof(f)
+    try {
+      await f.tick()
+      await flush()
+      expect(recordSpy).toHaveBeenCalledTimes(1)
+      expect(remove).not.toHaveBeenCalled()
+      expect(f.queue.entries()).toHaveLength(1)
+      expect((await f.outbox.events()).map((event) => event.kind)).toEqual(['accepted'])
+      const attempt = f.queue.entries()[0]?.lastAttempt
+      expect(recordSpy.mock.calls[0]).toEqual([
+        0,
+        {
+          sequenceID: 'app-position',
+          attemptID: attempt?.publishID,
+          topicID: 'topic',
+          outcome: 'published',
+        },
+        { identity: f.getSnapshot()?.identity, stateVersion: 1, attemptID: attempt?.publishID },
+      ])
+      commit.resolve()
+      await pending
+      expect(remove).toHaveBeenCalledTimes(1)
+      expect((await f.outbox.events()).filter((event) => event.kind === 'published')).toMatchObject(
+        [
+          {
+            occurrence: { position: 'app-position', topicID: 'topic', incarnation: 1, segment: 2 },
+          },
+        ],
+      )
+    } finally {
+      commit.resolve()
+      await pending
+      f.worker.close()
+      f.queue.close()
+    }
+  })
+  test.each([
+    'groupID',
+    'identity',
+    'epoch',
+    'authenticator',
+    'authenticator-length',
+    'stateVersion',
+    'sealVersion',
+    'segment',
+    'topic',
+    'attempt',
+    'attempt-topic',
+    'null',
+  ] as const)(`crossed or uncertain proof windows cannot certify (%s / ${path})`, async (kind) => {
+    const f = await published()
+    const record = vi.spyOn(f.outbox, 'recordSettlement')
+    const original = structuredClone(f.getSnapshot())
+    const mutate = () => {
+      if (original === null) throw new Error('Missing snapshot')
+      if (kind === 'null') f.setSnapshot(null)
+      else if (kind === 'groupID')
+        f.setSnapshot({ ...original, identity: { ...original.identity, groupID: 'other' } })
+      else if (kind === 'epoch')
+        f.setSnapshot({ ...original, identity: { ...original.identity, epoch: 3 } })
+      else if (kind === 'authenticator-length')
+        f.setSnapshot({
+          ...original,
+          identity: { ...original.identity, authenticator: new Uint8Array([2, 9]) },
+        })
+      else if (kind === 'identity')
+        f.setSnapshot({ ...original, identity: { ...original.identity, incarnation: 2 } })
+      else if (kind === 'authenticator')
+        f.setSnapshot({
+          ...original,
+          identity: { ...original.identity, authenticator: new Uint8Array([9]) },
+        })
+      else if (kind === 'topic') f.setSnapshot({ ...original, topicID: 'other' })
+      else if (kind !== 'attempt' && kind !== 'attempt-topic')
+        f.setSnapshot({ ...original, [kind]: original[kind] + 1 })
+      else {
+        const entry = f.queue.entries()[0]
+        if (entry?.lastAttempt == null) throw new Error('Missing attempt')
+        f.queue.replace({
+          ...entry,
+          lastAttempt: {
+            ...entry.lastAttempt,
+            ...(kind === 'attempt'
+              ? { publishID: 'replacement' }
+              : { topicID: 'replacement-topic' }),
+          },
+        })
+      }
+    }
+    try {
+      if (path === 'covered-walk') {
+        const started = f.worker.beginWalk()
+        await flush()
+        mutate()
+        await f.worker.certify(2, started)
+      } else {
+        let probes = 0
+        f.probe.mockImplementation(async () => {
+          if (++probes === 2) mutate()
+          return { messages: [], head: null, gap: false, oldest: null }
+        })
+        f.worker.trigger()
+        await f.tick()
+      }
+      expect(record).not.toHaveBeenCalled()
+      expect(await f.outbox.loadSettlement(0)).toBeNull()
+      expect(f.queue.entries()).toHaveLength(1)
+      // A fresh unchanged window with the actual attempt remains usable.
+      f.setSnapshot(original)
+      const stored = (await f.outbox.list())[0]
+      if (stored === undefined) throw new Error('Missing stored entry')
+      f.queue.replace(stored)
+      if ((kind === 'attempt' || kind === 'attempt-topic') && path === 'covered-walk') {
+        f.worker.trigger()
+        await f.tick()
+      }
+      await proof(f)
+      expect(record).toHaveBeenCalledTimes(1)
+    } finally {
+      f.worker.close()
+      f.queue.close()
+    }
+  })
+  test.each(['identity', 'attempt', 'sealVersion'] as const)(
+    `late acknowledgement cannot certify a replacement attempt (%s / ${path})`,
+    async (kind) => {
+      const f = fixture()
+      const ack = Promise.withResolvers<{ sequenceID: string }>()
+      f.publish
+        .mockReset()
+        .mockReturnValueOnce(ack.promise)
+        .mockResolvedValue({ sequenceID: 'fresh-ack' })
+      const record = vi.spyOn(f.outbox, 'recordSettlement')
+      try {
+        await f.queue.accept(message('late'))
+        f.worker.trigger()
+        await f.tick()
+        expect(f.publish).toHaveBeenCalledTimes(1)
+        const original = structuredClone(f.getSnapshot())
+        const entry = f.queue.entries()[0]
+        if (original === null || entry?.lastAttempt == null) throw new Error('Missing attempt')
+        if (kind === 'identity')
+          f.setSnapshot({ ...original, identity: { ...original.identity, incarnation: 2 } })
+        else if (kind === 'sealVersion')
+          f.setSnapshot({ ...original, sealVersion: original.sealVersion + 1 })
+        else
+          f.queue.replace({
+            ...entry,
+            lastAttempt: { ...entry.lastAttempt, publishID: 'replacement' },
+          })
+        ack.resolve({ sequenceID: 'stale-ack' })
+        await flush()
+        await f.worker.certify(2, f.worker.beginWalk())
+        expect(record).not.toHaveBeenCalled()
+        expect(await f.outbox.loadSettlement(0)).toBeNull()
+        f.setSnapshot(original)
+        f.queue.replace(entry)
+        f.worker.trigger()
+        await f.tick(1000)
+        await proof(f)
+        expect(record).toHaveBeenCalledTimes(1)
+        expect(record.mock.calls[0]?.[1].sequenceID).toBe('fresh-ack')
+      } finally {
+        ack.resolve({ sequenceID: 'stale-ack' })
+        f.worker.close()
+        f.queue.close()
+      }
+    },
+  )
+  test(`acknowledgement after walk cutoff cannot certify unchanged state (${path})`, async () => {
+    const f = fixture()
+    const ack = Promise.withResolvers<{ sequenceID: string }>()
+    f.publish.mockReset().mockReturnValue(ack.promise)
+    try {
+      await f.queue.accept(message('late'))
+      f.worker.trigger()
+      await f.tick()
+      expect(f.publish).toHaveBeenCalledTimes(1)
+      const started = f.worker.beginWalk()
+      ack.resolve({ sequenceID: 'late-position' })
+      await flush()
+      const record = vi.spyOn(f.outbox, 'recordSettlement')
+      await f.worker.certify(2, started)
+      expect(record).not.toHaveBeenCalled()
+      expect(await f.outbox.loadSettlement(0)).toBeNull()
+      await proof(f)
+      expect(record).toHaveBeenCalledTimes(1)
+    } finally {
+      ack.resolve({ sequenceID: 'late-position' })
+      f.worker.close()
+      f.queue.close()
+    }
+  })
+}
+
+test('peer root entry checks ownership before joining its commit queue', async () => {
+  const f = makeMLSPeer(new FakeHub(), 'proof-root', new Uint8Array(32).fill(4))
+  try {
+    await f.peer.replay()
+    const error = Object.assign(new Error('Root entry in settlement effect'), {
+      name: 'ReentrantOwnershipError',
+    })
+    vi.spyOn(f.appPublication, 'snapshot').mockRejectedValue(error)
+    await expect(f.peer.replay()).rejects.toBe(error)
+  } finally {
+    await f.peer.dispose()
   }
 })

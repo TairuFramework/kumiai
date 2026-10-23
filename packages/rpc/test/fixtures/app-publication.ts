@@ -7,7 +7,7 @@ import type { GroupCrypto } from '../../src/crypto.js'
 import { assertFrameFits } from '../../src/frame-size.js'
 import { protocolTopic } from '../../src/topic.js'
 import type { MemoryGroupMLS } from './memory-group-mls.js'
-import { createMemoryAppOutbox } from './outbox.js'
+import { bindMemoryOutbox, createMemoryAppOutbox } from './outbox.js'
 
 export function memoryApplicationPorts(
   mls: MemoryGroupMLS,
@@ -35,6 +35,11 @@ export function memoryApplicationPorts(
       topicID: protocolTopic(slot.anchor.secret, slot.anchor.epoch, protocol),
     }
   }
+  bindMemoryOutbox(
+    appOutbox,
+    () => ({ identity: identity(), stateVersion: mls.stateVersion() }),
+    key,
+  )
   return {
     appOutbox,
     appPublication: {

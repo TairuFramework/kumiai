@@ -28,6 +28,7 @@ export type MemoryGroupAccess = {
     work: (stores: GroupStores<MemoryTransaction>, mutationID: string) => Promise<TValue>,
     options?: {
       active?: boolean
+      retryOnRollback?: boolean
       mutationID?: string
       check?(stores: GroupStores<MemoryTransaction>): Promise<void>
     },
@@ -150,8 +151,15 @@ export function createMemoryGroupPorts(params: {
             return { recorded: true }
           },
           {
+            retryOnRollback: true,
             async check(stores) {
               const rows = stores.incarnation(key.incarnation)
+              const previous = await rows.meta.loadSettlement(seq)
+              if (previous !== null) {
+                if (!sameStoredValue(previous, owned.obligation))
+                  throw new GroupStateConflictError('Conflicting settlement')
+                unchangedGroupResult({ recorded: true })
+              }
               const life = await stores.lifetime.load()
               const state = await rows.state.load()
               const identity = owned.expected.identity
@@ -178,9 +186,6 @@ export function createMemoryGroupPorts(params: {
                 entry.lastAttempt.epoch !== identity.epoch
               )
                 unchangedGroupResult({ recorded: false, reason: 'attempt-changed' })
-              const previous = await rows.meta.loadSettlement(seq)
-              if (sameStoredValue(previous, owned.obligation))
-                unchangedGroupResult({ recorded: true })
             },
           },
         )
