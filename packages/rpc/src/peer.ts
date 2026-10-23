@@ -5631,6 +5631,17 @@ export function createGroupPeerWithControlWalk<
     }
   }
 
+  const rootEntry = <TArgs extends Array<unknown>, TResult>(
+    fn: (...args: TArgs) => Promise<TResult>,
+  ): ((...args: TArgs) => Promise<TResult>) => {
+    return async (...args) => {
+      if (disposed) return await fn(...args)
+      // Check ownership synchronously, before any continuation can join the commit tail.
+      await params.appPublication?.snapshot(Object.keys(protocols)[0] ?? '')
+      return await fn(...args)
+    }
+  }
+
   // Hoisted and explicitly typed (rather than inlined in the return object below) so the
   // checker can match its type against `GroupPeer<Protocols>['protocol']` by identity: inlined,
   // the whole return-object structural check against `GroupPeer<Protocols>` recurses through
@@ -5640,7 +5651,7 @@ export function createGroupPeerWithControlWalk<
     const key = String(name)
     if (params.recoveryOnly) throw new SendNotAdmissibleError('stranded')
     return {
-      dispatch: async (prc, config) => {
+      dispatch: rootEntry(async (prc, config) => {
         assertLive()
         const protocol = protocols[key]
         if (protocol == null) throw new Error(`Unknown protocol: ${key}`)
@@ -5654,9 +5665,9 @@ export function createGroupPeerWithControlWalk<
           return
         }
         return withEpoch(() => surfaceFor(key).dispatch(prc, config))
-      },
-      request: (prc, config) => withEpoch(() => surfaceFor(key).request(prc, config)),
-      gather: async (prc, config) => {
+      }),
+      request: rootEntry((prc, config) => withEpoch(() => surfaceFor(key).request(prc, config))),
+      gather: rootEntry(async (prc, config) => {
         const held = safetyHold()
         if (held !== null) throw new SendNotAdmissibleError(held)
         const outcome = await epochOrAbort(config?.signal)
@@ -5665,21 +5676,11 @@ export function createGroupPeerWithControlWalk<
         const safety = safetyHold()
         if (safety !== null) throw new SendNotAdmissibleError(safety)
         return surfaceFor(key).gather(prc, config)
-      },
-      to: (memberDID) => withEpoch(() => surfaceFor(key).to(memberDID)),
+      }),
+      to: rootEntry((memberDID) => withEpoch(() => surfaceFor(key).to(memberDID))),
     } as ProtocolSurface<Protocols[typeof name]>
   }
 
-  const rootEntry = <TArgs extends Array<unknown>, TResult>(
-    fn: (...args: TArgs) => Promise<TResult>,
-  ): ((...args: TArgs) => Promise<TResult>) => {
-    return async (...args) => {
-      if (disposed) return await fn(...args)
-      // Check ownership synchronously, before any continuation can join the commit tail.
-      await params.appPublication?.snapshot(Object.keys(protocols)[0] ?? '')
-      return await fn(...args)
-    }
-  }
   const peer: GroupPeer<Protocols> = {
     protocol: protocolMethod,
     retryAppDelivery: rootEntry(async (topicID?: string) => {

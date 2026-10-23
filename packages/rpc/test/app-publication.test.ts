@@ -612,31 +612,79 @@ for (const path of ['no-new-head', 'covered-walk'] as const) {
       }
     },
   )
-  test(`acknowledgement after walk cutoff cannot certify unchanged state (${path})`, async () => {
+}
+
+test(
+  'acknowledgement after walk cutoff cannot certify unchanged state (covered-walk)',
+  async () => {
     const f = fixture()
     const ack = Promise.withResolvers<{ sequenceID: string }>()
     f.publish.mockReset().mockReturnValue(ack.promise)
+    const record = vi.spyOn(f.outbox, 'recordSettlement')
     try {
       await f.queue.accept(message('late'))
       f.worker.trigger()
       await f.tick()
       expect(f.publish).toHaveBeenCalledTimes(1)
+      const snapshot = structuredClone(f.getSnapshot())
+      const entry = structuredClone(f.queue.entries())
       const started = f.worker.beginWalk()
+      await f.worker.readyWalk(started)
       ack.resolve({ sequenceID: 'late-position' })
       await flush()
-      const record = vi.spyOn(f.outbox, 'recordSettlement')
+      expect(f.getSnapshot()).toEqual(snapshot)
+      expect(f.queue.entries()).toEqual(entry)
       await f.worker.certify(2, started)
       expect(record).not.toHaveBeenCalled()
       expect(await f.outbox.loadSettlement(0)).toBeNull()
-      await proof(f)
+      await f.worker.certify(2, f.worker.beginWalk())
       expect(record).toHaveBeenCalledTimes(1)
+      expect(record.mock.calls[0]?.[1].sequenceID).toBe('late-position')
     } finally {
       ack.resolve({ sequenceID: 'late-position' })
       f.worker.close()
       f.queue.close()
     }
-  })
-}
+  },
+)
+
+test('no-new-head probe waits for acknowledgement before capturing its proof window', async () => {
+  const f = fixture()
+  const ack = Promise.withResolvers<{ sequenceID: string }>()
+  f.publish.mockReset().mockReturnValue(ack.promise)
+  f.probe.mockResolvedValue({ messages: [], head: null, gap: false, oldest: null })
+  const record = vi.spyOn(f.outbox, 'recordSettlement')
+  try {
+    await f.queue.accept(message('serialized'))
+    f.worker.trigger()
+    await f.tick()
+    expect(f.publish).toHaveBeenCalledTimes(1)
+    // The first probe precedes handoff; the proof probe must wait for its acknowledgement.
+    expect(f.probe).toHaveBeenCalledTimes(1)
+    expect(record).not.toHaveBeenCalled()
+    expect(await f.outbox.loadSettlement(0)).toBeNull()
+    const snapshot = structuredClone(f.getSnapshot())
+    const attempt = f.queue.entries()[0]?.lastAttempt
+    ack.resolve({ sequenceID: 'serialized-position' })
+    await flush()
+    expect(f.getSnapshot()).toEqual(snapshot)
+    expect(f.probe).toHaveBeenCalledTimes(2)
+    expect(record).toHaveBeenCalledTimes(1)
+    expect(record.mock.calls[0]?.[1]).toEqual({
+      sequenceID: 'serialized-position',
+      attemptID: attempt?.publishID,
+      topicID: 'topic',
+      outcome: 'published',
+    })
+    expect((await f.outbox.events()).filter((event) => event.kind === 'published')).toMatchObject([
+      { occurrence: { position: 'serialized-position', topicID: 'topic' } },
+    ])
+  } finally {
+    ack.resolve({ sequenceID: 'serialized-position' })
+    f.worker.close()
+    f.queue.close()
+  }
+})
 
 test('peer root entry checks ownership before joining its commit queue', async () => {
   const f = makeMLSPeer(new FakeHub(), 'proof-root', new Uint8Array(32).fill(4))
@@ -651,3 +699,34 @@ test('peer root entry checks ownership before joining its commit queue', async (
     await f.peer.dispose()
   }
 })
+
+test.each(['dispatch', 'request', 'gather', 'to'] as const)(
+  'protocol %s checks ownership before yielding',
+  async (method) => {
+    const f = makeMLSPeer(new FakeHub(), 'protocol-root', new Uint8Array(32).fill(4))
+    const abort = new AbortController()
+    try {
+      await f.peer.replay()
+      const error = Object.assign(new Error('Root entry in settlement effect'), {
+        name: 'ReentrantOwnershipError',
+      })
+      vi.spyOn(f.appPublication, 'snapshot').mockRejectedValue(error)
+      const protocol = f.peer.protocol('chat')
+      const calls = {
+        dispatch: () => protocol.dispatch('chat/posted', { data: {} }),
+        request: () => protocol.request('chat/echo', { param: {}, timeoutMs: 10 }),
+        gather: () => protocol.gather('chat/echo', { param: {}, signal: abort.signal }),
+        to: () => protocol.to('other-member'),
+      }
+      let rejected: unknown
+      void calls[method]().catch((cause: unknown) => {
+        rejected = cause
+      })
+      await flush()
+      expect(rejected).toBe(error)
+    } finally {
+      abort.abort()
+      await f.peer.dispose()
+    }
+  },
+)

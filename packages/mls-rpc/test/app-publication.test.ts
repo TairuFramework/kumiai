@@ -1,11 +1,11 @@
 import { encodeEventFrame } from '@kumiai/broadcast'
-import { APP_TOPIC_LABEL, encodeAppAAD } from '@kumiai/rpc'
+import { APP_TOPIC_LABEL, encodeAppAAD, type ProtocolSurface } from '@kumiai/rpc'
 import { createAppOutboxAcceptance, createLogDelivery } from '@kumiai/rpc/testing'
-import { createMemoryAppOutbox } from '@kumiai/rpc-conformance'
 import { describe, expect, test, vi } from 'vitest'
 
 import { createRegistryAppPublication } from '../src/app-publication.js'
 import { entryCapability } from '../src/entry-capability.js'
+import { ReentrantOwnershipError } from '../src/persistence-errors.js'
 import type { MemoryTransaction, TransactionalGroupEffects } from '../src/persistence-types.js'
 import { registryLiveSend } from '../src/registry/live-send.js'
 import { registryRetirement } from '../src/registry/retirement.js'
@@ -94,7 +94,10 @@ for (const mode of ['real-mls', 'double'] as const) {
 for (const mode of ['real-mls', 'double'] as const) {
   for (const context of ['supplied', 'absent'] as const) {
     describe(`preparation guards ${mode} / ${context}`, () => {
-      async function setup(effects?: TransactionalGroupEffects<MemoryTransaction>) {
+      async function setup(
+        effects?: TransactionalGroupEffects<MemoryTransaction>,
+        saveEntry = true,
+      ) {
         const fixture = await createRegistryFixture({
           mode,
           setup: 'empty',
@@ -122,7 +125,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           status: 'accepted' as const,
           lastAttempt: null,
         }
-        await ports.outbox.put(entry)
+        if (saveEntry) await ports.outbox.put(entry)
         const publication = createRegistryAppPublication(access)
         const capability = entryCapability(fixture.device.groups)
         const live = registryLiveSend.get(access)
@@ -134,53 +137,70 @@ for (const mode of ['real-mls', 'double'] as const) {
       test('transactional settlement effects refuse root reentry', async () => {
         let root: (() => Promise<unknown>) | undefined
         let peerRoot: (() => Promise<unknown>) | undefined
+        let dispatch: (() => Promise<unknown>) | undefined
         let checked = 0
-        const f = await setup({
-          outbox: async (tx, event) => {
-            if (event.kind !== 'published') return
-            if (root === undefined || peerRoot === undefined) throw new Error('Missing root calls')
-            const refuse = async (call: () => Promise<unknown>) => {
-              let error: unknown
-              void call().catch((cause: unknown) => {
-                error = cause
+        const f = await setup(
+          {
+            outbox: async (tx, event) => {
+              if (event.kind !== 'published') return
+              if (root === undefined || peerRoot === undefined || dispatch === undefined)
+                throw new Error('Missing root calls')
+              const refuse = async (call: () => Promise<unknown>) => {
+                let error: unknown
+                void call().catch((cause: unknown) => {
+                  error = cause
+                })
+                for (let i = 0; i < 50; i++) await Promise.resolve()
+                expect(error).toBeInstanceOf(ReentrantOwnershipError)
+                checked++
+              }
+              // Invoke all roots while the synchronous callback marker is still installed.
+              let storeError: unknown
+              let peerError: unknown
+              let dispatchError: unknown
+              void root().catch((cause: unknown) => {
+                storeError = cause
+              })
+              void peerRoot().catch((cause: unknown) => {
+                peerError = cause
+              })
+              void dispatch().catch((cause: unknown) => {
+                dispatchError = cause
               })
               for (let i = 0; i < 50; i++) await Promise.resolve()
-              expect(error).toMatchObject({ name: 'ReentrantOwnershipError' })
-              checked++
-            }
-            // Invoke both roots while the synchronous callback marker is still installed.
-            let storeError: unknown
-            let peerError: unknown
-            void root().catch((cause: unknown) => {
-              storeError = cause
-            })
-            void peerRoot().catch((cause: unknown) => {
-              peerError = cause
-            })
-            for (let i = 0; i < 50; i++) await Promise.resolve()
-            expect(storeError).toMatchObject({ name: 'ReentrantOwnershipError' })
-            expect(peerError).toMatchObject({ name: 'ReentrantOwnershipError' })
-            checked += 2
-            if (context === 'supplied') {
-              await refuse(root)
-              await refuse(peerRoot)
-            }
-            await writeSideRow(tx, 'settlement-effect', new Uint8Array([7]))
+              expect(storeError).toMatchObject({ name: 'ReentrantOwnershipError' })
+              expect(peerError).toMatchObject({ name: 'ReentrantOwnershipError' })
+              expect(dispatchError).toBeInstanceOf(ReentrantOwnershipError)
+              checked += 3
+              if (context === 'supplied') {
+                await refuse(root)
+                await refuse(peerRoot)
+                await refuse(dispatch)
+              }
+              await writeSideRow(tx, 'settlement-effect', new Uint8Array([7]))
+            },
           },
-        })
+          false,
+        )
         let running: Awaited<ReturnType<typeof startLeaseRotationPeer>> | undefined
         try {
           running = await startLeaseRotationPeer({
             mode,
             fixture: f.fixture,
             key: f.key,
-            outbox: createMemoryAppOutbox({ key: f.key, snapshot: () => null }),
+            outbox: f.ports.outbox,
           })
           await running.owner.ready
           const peer = running.owner.peer()
           if (peer === null) throw new Error('Missing peer')
           root = () => f.fixture.device.groups.load(f.key.groupID)
           peerRoot = () => peer.replay()
+          const protocol = peer.protocol('chat') as ProtocolSurface<{
+            posted: { type: 'event'; retain: 'log'; data: { type: 'object' } }
+          }>
+          dispatch = () => protocol.dispatch('posted', { data: {} })
+          // Seed after the peer inventories its empty queue; drive settlement independently.
+          await f.ports.outbox.put(f.entry)
           const frame = await f.publication.prepare(f.entry, null)
           const attempt = frame.entry.lastAttempt
           if (attempt === null) throw new Error('Missing attempt')
@@ -206,7 +226,8 @@ for (const mode of ['real-mls', 'double'] as const) {
             topicID: attempt.topicID,
             position: 'ack',
           })
-          expect(checked).toBe(context === 'supplied' ? 4 : 2)
+          expect(checked).toBe(context === 'supplied' ? 6 : 3)
+          expect(await f.ports.outbox.list()).toEqual([])
           expect((await f.fixture.inspectRows())['host-side']?.get('settlement-effect')).toEqual(
             new Uint8Array([7]),
           )

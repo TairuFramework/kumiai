@@ -399,6 +399,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
       }
     }
     if (safetyHeld()) return
+    // Serial handoffs finish before this fast-path cutoff; acknowledgements cannot cross it.
     const started = acknowledgements
     const snapshots = capture()
     await Promise.all(snapshots.values())
