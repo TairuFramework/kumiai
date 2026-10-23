@@ -183,20 +183,20 @@ catalogs:
       specifier: ^0.22.1
       version: 0.22.1
     '@hozon/adapter':
-      specifier: ^0.1.0
-      version: 0.1.0
+      specifier: ^0.2.0
+      version: 0.2.0
     '@hozon/db':
-      specifier: ^0.3.0
-      version: 0.3.0
+      specifier: ^0.4.0
+      version: 0.4.0
     '@hozon/node-sqlite':
-      specifier: ^0.1.0
-      version: 0.1.0
+      specifier: ^0.2.0
+      version: 0.2.0
     '@hozon/postgres':
-      specifier: ^0.1.0
-      version: 0.1.0
+      specifier: ^0.2.0
+      version: 0.2.0
     '@hozon/provider':
-      specifier: ^0.1.2
-      version: 0.1.2
+      specifier: ^0.2.0
+      version: 0.2.0
     '@kokuin/capability':
       specifier: ^0.5.1
       version: 0.5.1
@@ -246,14 +246,14 @@ catalogs:
       specifier: ^0.1.6
       version: 0.1.6
     '@teikyo/access':
-      specifier: ^0.2.0
-      version: 0.2.0
+      specifier: ^0.3.0
+      version: 0.3.0
     '@teikyo/enkaku':
-      specifier: ^0.2.0
-      version: 0.2.0
+      specifier: ^0.3.0
+      version: 0.3.0
     '@teikyo/hozon':
-      specifier: ^0.2.0
-      version: 0.2.0
+      specifier: ^0.3.0
+      version: 0.3.0
     '@teikyo/rate-limit':
       specifier: ^0.2.0
       version: 0.2.0
@@ -372,7 +372,7 @@ importers:
         version: 0.22.1(@logtape/logtape@2.4.2)
       '@hozon/provider':
         specifier: 'catalog:'
-        version: 0.1.2(@logtape/logtape@2.4.2)
+        version: 0.2.0(@logtape/logtape@2.4.2)
       '@kumiai/hub-protocol':
         specifier: workspace:^
         version: link:../hub-protocol
@@ -387,13 +387,13 @@ importers:
         version: 0.2.0(@logtape/logtape@2.4.2)(hono@4.13.13)
       '@teikyo/access':
         specifier: 'catalog:'
-        version: 0.2.0(@logtape/logtape@2.4.2)(hono@4.13.13)
+        version: 0.3.0(@logtape/logtape@2.4.2)(hono@4.13.13)
       '@teikyo/enkaku':
         specifier: 'catalog:'
-        version: 0.2.0(@logtape/logtape@2.4.2)(hono@4.13.13)
+        version: 0.3.0(@logtape/logtape@2.4.2)(hono@4.13.13)
       '@teikyo/hozon':
         specifier: 'catalog:'
-        version: 0.2.0(@logtape/logtape@2.4.2)(hono@4.13.13)
+        version: 0.3.0(@logtape/logtape@2.4.2)(hono@4.13.13)
       '@teikyo/rate-limit':
         specifier: 'catalog:'
         version: 0.2.0(@logtape/logtape@2.4.2)(hono@4.13.13)
@@ -480,10 +480,10 @@ importers:
     dependencies:
       '@hozon/adapter':
         specifier: 'catalog:'
-        version: 0.1.0
+        version: 0.2.0
       '@hozon/db':
         specifier: 'catalog:'
-        version: 0.3.0(@logtape/logtape@2.4.2)
+        version: 0.4.0(@logtape/logtape@2.4.2)
       '@kumiai/hub-protocol':
         specifier: workspace:^
         version: link:../hub-protocol
@@ -502,10 +502,10 @@ importers:
         version: 0.22.1(@logtape/logtape@2.4.2)
       '@hozon/node-sqlite':
         specifier: 'catalog:'
-        version: 0.1.0
+        version: 0.2.0
       '@hozon/postgres':
         specifier: 'catalog:'
-        version: 0.1.0
+        version: 0.2.0
       '@kokuin/token':
         specifier: 'catalog:'
         version: 0.6.1(@logtape/logtape@2.4.2)
@@ -787,13 +787,13 @@ importers:
         version: 0.22.1(@logtape/logtape@2.4.2)
       '@hozon/db':
         specifier: 'catalog:'
-        version: 0.3.0(@logtape/logtape@2.4.2)
+        version: 0.4.0(@logtape/logtape@2.4.2)
       '@hozon/node-sqlite':
         specifier: 'catalog:'
-        version: 0.1.0
+        version: 0.2.0
       '@hozon/postgres':
         specifier: 'catalog:'
-        version: 0.1.0
+        version: 0.2.0
       '@kokuin/controller':
         specifier: 'catalog:'
         version: 0.2.1(@logtape/logtape@2.4.2)
@@ -1662,24 +1662,24 @@ packages:
     peerDependencies:
       hono: '>=4.0.0'
 
-  '@hozon/adapter@0.1.0':
-    resolution: {integrity: sha512-OfwOdQneFmsCpxtbeQxI11VLWR1+hSHH8klq4QxYLqMTtK/SJpVyGqyTDqRPhRzpTeVtYaY8xw31K9m1drjciA==}
+  '@hozon/adapter@0.2.0':
+    resolution: {integrity: sha512-UsQcQLsoIQNgzij69Zt3m5FdHc+1i51lt04gx7+BO2++yNgmoJ75Yk8PcYZXnu056Trq9O0mDCb7M4qxJ6cwGQ==}
     engines: {node: '>=24'}
 
-  '@hozon/db@0.3.0':
-    resolution: {integrity: sha512-F8BgMKKqenpv8X7YK6zbJoUeAztotuQ1//D+jZ0mClM9vaorQB32mift+zhpj8IUx2OqRbJkNGs5KEzvsSCGsQ==}
+  '@hozon/db@0.4.0':
+    resolution: {integrity: sha512-AvTuMz6uCH5z7RAF7S2KDvETgiI1L4UytiOUs8ypz6cMEvLwgnCfyFxyo9o9QH683euY5Bg8OSKF9GbECMBrCQ==}
     engines: {node: '>=24'}
 
-  '@hozon/node-sqlite@0.1.0':
-    resolution: {integrity: sha512-yUOEHgxSXI6QlpjJNOYa3R+Ytp3dS7VB50oISVnUHvX0rWqVEBa1XNfN90cYjrAyeGLTKO3zFLQhqdhv7Qz5Xw==}
+  '@hozon/node-sqlite@0.2.0':
+    resolution: {integrity: sha512-D6qlhV6B0+2UnSMKAAEcop7XoAjO9j10i4Uob5LAZ0po24ou34doXTCxbNsZHhKlLk6bPsAAu2OBJbPdbEd1GA==}
     engines: {node: '>=24'}
 
-  '@hozon/postgres@0.1.0':
-    resolution: {integrity: sha512-q5uBO8E8taQNFODltPM0AJb4X4cRdyXPQrw2pjKuR0vfupdfa+Q6ViLN/54Cb7WfR73Rt7RaSMxbwSPTuA9Gbw==}
+  '@hozon/postgres@0.2.0':
+    resolution: {integrity: sha512-u7RrTXTvRbyh2fgI0VF+Lu7SSFOIbtDIv7q+UXiGyQqS3hScNc2hc9PgzsC/aCntEF+qNmBpUVtsqhtVskLZ8A==}
     engines: {node: '>=24'}
 
-  '@hozon/provider@0.1.2':
-    resolution: {integrity: sha512-xindI5Qu6otQR4++UIb0xXwxerjCypgvpt7X4PKl2i59u4oE8s5o6ibDzymef0rIl4qepXK3fj4Lw8WRFAUDRQ==}
+  '@hozon/provider@0.2.0':
+    resolution: {integrity: sha512-gnPxupM8LSccYGXTW11Wbz+TUUE3IPqYGQT5m09s8MNIiYKnWygVLHuKcY0H3pLpug4dWctnEyuDZTTjQ6b47A==}
     engines: {node: '>=24'}
 
   '@hpke/common@1.10.1':
@@ -2321,18 +2321,18 @@ packages:
   '@swc/types@0.1.28':
     resolution: {integrity: sha512-V6Mnml8v09QALx6K0elJ7o9K/MkVDtW3t6L+7Ou/JcWtb3xwId2AH4FeOceySd2JaO87IMw4+6vSZxLm34LPbw==}
 
-  '@teikyo/access@0.2.0':
-    resolution: {integrity: sha512-NjVEoFd7qq57DNyEhZ4hmDncJVCLXm2IS1FpfAtcyIN7e4pywDqnwLEXFw4S7amU11240unAFAR/y/SmNC5xWw==}
+  '@teikyo/access@0.3.0':
+    resolution: {integrity: sha512-XCriWHqUZpFTjp593H6tZ01dYzQM48gkf2qxSCIkWU5V7na8F3tdLzvaPOADHi8w/RJKK7Oui7Vmvm8GLBQcog==}
     engines: {node: '>=24'}
 
-  '@teikyo/enkaku@0.2.0':
-    resolution: {integrity: sha512-4/cxU+kfRPLVjFi3fQwpYGVwNScGBV+042lzU6ZiPMwo0XpdexDGCzamQxT8sXsnKfAErq4vyainyNMTJmVUCg==}
+  '@teikyo/enkaku@0.3.0':
+    resolution: {integrity: sha512-Qg/bo6DjVX5xjTrGF5yV9r8uGGi4gJSuKMn4oPWNNfkHIElXsKavbmuTp5fon/zeoeKV56IbPCzKWNJbTuvcdw==}
     engines: {node: '>=24'}
     peerDependencies:
       hono: ^4.13.13
 
-  '@teikyo/hozon@0.2.0':
-    resolution: {integrity: sha512-+ZXlRHTvyxNOKFoxLwHmQWJ9j0oynIpziCO/6yqDMj25A4Qbdhk39kCkc5BIGMOZQ1TOZqse9MSBa2bGlDpXLQ==}
+  '@teikyo/hozon@0.3.0':
+    resolution: {integrity: sha512-EcREc5cpPUNOCQ0/Ui3E4z/XNg4mxgumHHUB03PJAbVF6ZswGbziuD7tEJ/9hsYtu4kgH7kYK0Xe7XRsyipJOA==}
     engines: {node: '>=24'}
     peerDependencies:
       hono: ^4.13.13
@@ -5898,37 +5898,37 @@ snapshots:
       '@opentelemetry/semantic-conventions': 1.43.0
       hono: 4.13.13
 
-  '@hozon/adapter@0.1.0':
+  '@hozon/adapter@0.2.0':
     dependencies:
       kysely: 0.29.7
 
-  '@hozon/db@0.3.0(@logtape/logtape@2.4.2)':
+  '@hozon/db@0.4.0(@logtape/logtape@2.4.2)':
     dependencies:
-      '@hozon/adapter': 0.1.0
+      '@hozon/adapter': 0.2.0
       '@sozai/async': 0.4.1
       '@sozai/log': 0.4.0(@logtape/logtape@2.4.2)
       kysely: 0.29.7
     transitivePeerDependencies:
       - '@logtape/logtape'
 
-  '@hozon/node-sqlite@0.1.0':
+  '@hozon/node-sqlite@0.2.0':
     dependencies:
-      '@hozon/adapter': 0.1.0
+      '@hozon/adapter': 0.2.0
       kysely: 0.29.7
 
-  '@hozon/postgres@0.1.0':
+  '@hozon/postgres@0.2.0':
     dependencies:
-      '@hozon/adapter': 0.1.0
+      '@hozon/adapter': 0.2.0
       kysely: 0.29.7
       kysely-postgres-js: 5.0.1(kysely@0.29.7)(postgres@3.4.9)
       postgres: 3.4.9
 
-  '@hozon/provider@0.1.2(@logtape/logtape@2.4.2)':
+  '@hozon/provider@0.2.0(@logtape/logtape@2.4.2)':
     dependencies:
-      '@hozon/adapter': 0.1.0
-      '@hozon/db': 0.3.0(@logtape/logtape@2.4.2)
-      '@hozon/node-sqlite': 0.1.0
-      '@hozon/postgres': 0.1.0
+      '@hozon/adapter': 0.2.0
+      '@hozon/db': 0.4.0(@logtape/logtape@2.4.2)
+      '@hozon/node-sqlite': 0.2.0
+      '@hozon/postgres': 0.2.0
     transitivePeerDependencies:
       - '@logtape/logtape'
 
@@ -6509,36 +6509,36 @@ snapshots:
     dependencies:
       '@swc/counter': 0.1.3
 
-  '@teikyo/access@0.2.0(@logtape/logtape@2.4.2)(hono@4.13.13)':
+  '@teikyo/access@0.3.0(@logtape/logtape@2.4.2)(hono@4.13.13)':
     dependencies:
       '@enkaku/server': 0.22.1(@logtape/logtape@2.4.2)
-      '@hozon/db': 0.3.0(@logtape/logtape@2.4.2)
+      '@hozon/db': 0.4.0(@logtape/logtape@2.4.2)
       '@kokuin/capability': 0.5.1(@logtape/logtape@2.4.2)
       '@kokuin/token': 0.6.1(@logtape/logtape@2.4.2)
       '@sozai/codec': 0.4.3
       '@sozai/http-server': 0.2.0(@logtape/logtape@2.4.2)(hono@4.13.13)
       '@sozai/log': 0.4.0(@logtape/logtape@2.4.2)
-      '@teikyo/hozon': 0.2.0(@logtape/logtape@2.4.2)(hono@4.13.13)
+      '@teikyo/hozon': 0.3.0(@logtape/logtape@2.4.2)(hono@4.13.13)
     transitivePeerDependencies:
       - '@logtape/logtape'
       - hono
 
-  '@teikyo/enkaku@0.2.0(@logtape/logtape@2.4.2)(hono@4.13.13)':
+  '@teikyo/enkaku@0.3.0(@logtape/logtape@2.4.2)(hono@4.13.13)':
     dependencies:
       '@enkaku/http-serve': 0.22.1(@logtape/logtape@2.4.2)
       '@enkaku/protocol': 0.22.1(@logtape/logtape@2.4.2)
       '@enkaku/server': 0.22.1(@logtape/logtape@2.4.2)
       '@kokuin/capability': 0.5.1(@logtape/logtape@2.4.2)
       '@sozai/http-server': 0.2.0(@logtape/logtape@2.4.2)(hono@4.13.13)
-      '@teikyo/access': 0.2.0(@logtape/logtape@2.4.2)(hono@4.13.13)
+      '@teikyo/access': 0.3.0(@logtape/logtape@2.4.2)(hono@4.13.13)
       hono: 4.13.13
     transitivePeerDependencies:
       - '@logtape/logtape'
 
-  '@teikyo/hozon@0.2.0(@logtape/logtape@2.4.2)(hono@4.13.13)':
+  '@teikyo/hozon@0.3.0(@logtape/logtape@2.4.2)(hono@4.13.13)':
     dependencies:
-      '@hozon/db': 0.3.0(@logtape/logtape@2.4.2)
-      '@hozon/provider': 0.1.2(@logtape/logtape@2.4.2)
+      '@hozon/db': 0.4.0(@logtape/logtape@2.4.2)
+      '@hozon/provider': 0.2.0(@logtape/logtape@2.4.2)
       '@sozai/http-server': 0.2.0(@logtape/logtape@2.4.2)(hono@4.13.13)
       hono: 4.13.13
     transitivePeerDependencies:
