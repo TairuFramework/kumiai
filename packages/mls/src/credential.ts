@@ -95,7 +95,9 @@ export function parseMLSCredentialIdentity(identity: Uint8Array): MLSCredentialI
   // Absent `v` is v1, permanently — not a default that will one day stop applying. Leaves
   // written before this field existed are signed and can never be rewritten to add it.
   if ('v' in candidate && candidate.v !== 1) {
-    throw new Error(`Invalid MLS credential: unsupported identity version ${String(candidate.v)}`)
+    const version =
+      candidate.v !== null && typeof candidate.v === 'object' ? 'object' : String(candidate.v)
+    throw new Error(`Invalid MLS credential: unsupported identity version ${version}`)
   }
   if (typeof candidate.id !== 'string') {
     throw new Error('Invalid MLS credential: id must be a string')
