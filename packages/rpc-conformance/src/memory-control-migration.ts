@@ -21,7 +21,13 @@ export function migrateMemoryControl(input: MigrationFixture): MigrationResult {
     ...old,
     schemaVersion: 1,
     commitOnce: null,
-    spentSource: old.spentSource ?? null,
+    spentSource:
+      old.spentSource != null &&
+      row(old.spentSource).opID === undefined &&
+      sourceEpoch !== null &&
+      Number(row(old.spentSource).epoch) < sourceEpoch
+        ? null
+        : (old.spentSource ?? null),
     operations: [],
     outcomes: [...rows(old.outcomes)],
     welcomes: [],

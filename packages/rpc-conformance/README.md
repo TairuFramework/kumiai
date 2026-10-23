@@ -1,8 +1,7 @@
 # @kumiai/rpc-conformance
 
-The contract suite for the two consumer ports of `@kumiai/rpc`: `GroupCrypto` and `GroupMLS`. Two
-vitest suites, run against `@kumiai/rpc`'s own test doubles and against `@kumiai/mls-rpc`'s real
-implementation over live MLS.
+Contract suites for `@kumiai/rpc` consumer ports, control storage, migration, registry leases, recovery and safety.
+Run each applicable suite against real implementations and their doubles.
 
 ## The rule
 
@@ -25,15 +24,22 @@ say there that implementing them obliges running this suite. If you arrived here
 
 - `testGroupCryptoConformance({ label, createGroup })`
 - `testGroupMLSConformance({ label, createGroup })`
+- `testControlStoreConformance`, `testControlConsumptionConformance` and `testControlSafetyInputConformance` cover atomic control storage and build saving.
+- `testLegacyControlMapping` and `testControlMigrationActivation` cover legacy activation.
+- `testRegistryLeaseConformance` covers reservation, send admission and receive bounds.
+- `testPendingGroupCryptoConformance` and `testRegistryCryptoConformance` cover persisted opens and registry crypto.
 
-`label` prefixes the describe block, so a failure names the implementation it came from.
+Further suites cover anchor, outbox, checkpoint, recovery, safety, ownership and device storage contracts.
+See the exported harness types in `src/index.ts` for each adapter's required members.
+
+For the two consumer-port suites, `label` prefixes the describe block and names the implementation.
 `createGroup(size, id)` is called once per case, with a unique `id` so an implementation keyed by
 group id gets a clean one.
 
 `vitest` is a peer dependency: the suites call `describe`/`test`/`expect` directly, so they run
 inside the caller's own vitest run.
 
-## Both suites take a harness, not an implementation
+## Consumer-port suites take a harness
 
 A `GroupCrypto` on its own cannot be asked what happens at another epoch — moving between epochs is
 `GroupMLS`'s job, and on a real handle it is a whole MLS commit. So each suite asks for a _group_ it

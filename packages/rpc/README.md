@@ -219,6 +219,15 @@ anchor landed mark in the same transaction as the MLS state. Incoming and recove
 that same transaction contract. The host resolves ambiguous state saves; the peer resolves an
 ambiguous state-free `control.apply` through `lastMutation()`, pausing until read-back succeeds.
 
+`INTERNAL_OPERATION_PREFIX` reserves `kumiai/internal/` operation IDs. Public enqueue refuses them with `TypeError`.
+`InternalOperations` supplies the private producer. Host peer factories must forward `internalOperations` for automatic rotation.
+Reusing an ID retained by an outcome, Welcome obligation, live build or matching spent marker throws `OperationRejectedError('Operation ID is retained')`.
+Retrying an existing intent remains idempotent.
+
+Control adapters use `migrateLegacyControl`, `closeControlBuild`, `consumeOwnOccurrence` and `executableOperations`.
+`SavedControlCompatibilityError` identifies incompatible saved control data.
+Control-store helpers include `applyChanges`, `applyResolved`, `controlAdoptionAllowed`, `controlSafetyHeld` and `controlSettled`.
+
 `enqueue(request)` resolves once the intent is durable. `commit(request)` also waits for a landed
 outcome in the current process. `outcomes()` reads durable results; `ack(id)` removes one after the
 host handles it. Operation deadlines start at `enqueuedAt`, so restarting does not extend them.

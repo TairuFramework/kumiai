@@ -14,6 +14,7 @@ import {
   buildKeyRotation,
   createAutoRotationScheduler,
   decodeAutoRotationCandidate,
+  ROTATION_IDENTITY_SUPERSEDED,
 } from '../src/auto-rotation.js'
 import * as api from '../src/index.js'
 import { decodeStoredValue } from '../src/persistence-codec.js'
@@ -143,7 +144,7 @@ describe.each(['real-mls', 'double'] as const)('%s auto-rotation', (mode) => {
         id: 'superseded',
         opID: request.id,
         kind: 'rejected',
-        reason: 'Rotation identity superseded',
+        reason: ROTATION_IDENTITY_SUPERSEDED,
         at: Date.now(),
       })
       await vi.advanceTimersByTimeAsync(0)
@@ -205,11 +206,85 @@ describe.each(['real-mls', 'double'] as const)('%s auto-rotation', (mode) => {
       })
       expect(await port.prepareBuild(op, unreachable)).toMatchObject({
         kind: 'rejected',
-        reason: 'Rotation identity superseded',
+        reason: ROTATION_IDENTITY_SUPERSEDED,
       })
       expect(unreachable).not.toHaveBeenCalled()
       expect((await control.load()).commitOnce).toBeNull()
     } finally {
+      await f.fixture().registry.dispose()
+    }
+  })
+  test('a rotation candidate adapter fault rejects once and backs off', async () => {
+    const f = await createRegistryLeaseFixture(mode, 'seed', 500)
+    const scheduler = createAutoRotationScheduler({ access: f.access() })
+    try {
+      const identity = f.access().runtime.snapshot()
+      if (identity === null) throw new Error('Missing identity')
+      const control = f.fixture().device.groups.ports(f.key).control
+      const request = autoRotationRequest(identity)
+      const op = {
+        ...request,
+        stage: 'intent' as const,
+        seq: 1,
+        enqueuedAt: Date.now(),
+        deadline: Date.now() + 30_000,
+      }
+      await control.apply({ putOperations: [op] }, crypto.randomUUID())
+      const unreachable = async (): Promise<never> => {
+        throw new Error('Unexpected build save')
+      }
+      const restoreCandidate = vi.fn(async (): Promise<never> => {
+        throw new TypeError('Host adapter cannot decode the library envelope')
+      })
+      const port = api.createControlBuildPort({
+        access: api.createRegistryHandleAccess({ access: f.access() }),
+        control,
+        build: unreachable,
+        rotate: mode === 'double' ? buildSealedMemoryOperation : undefined,
+        restoreSource: async ({ state, credential, ledgerEntries }) => {
+          const decoded = decodeClientState(state)
+          if (decoded === undefined) throw new Error('Missing source')
+          return (mode === 'double' ? restoreMemoryControlSource : restoreGroup)({
+            state: decoded,
+            credential,
+            ledgerEntries,
+            options: f.fixture().environment.options,
+          })
+        },
+        restoreCandidate,
+        saveBuilt: unreachable,
+        now: Date.now,
+        newID: () => crypto.randomUUID(),
+      })
+      const result = await port.prepareBuild(op, unreachable)
+      expect(result).toMatchObject({ kind: 'rejected', operation: op })
+      expect(restoreCandidate).toHaveBeenCalledOnce()
+      expect((await control.load()).commitOnce).toBeNull()
+      await control.apply({ deleteOperations: [op.id] }, crypto.randomUUID())
+      vi.useFakeTimers()
+      const requests: Array<OperationRequest> = []
+      scheduler.bind({
+        enqueue: async (row) => {
+          requests.push(row)
+        },
+      })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(requests).toHaveLength(1)
+      if (result.kind !== 'rejected') throw new Error('Missing refusal')
+      await scheduler.onOutcome({
+        id: 'adapter-refusal',
+        opID: op.id,
+        at: Date.now(),
+        kind: 'rejected',
+        reason: result.reason,
+      })
+      await vi.advanceTimersByTimeAsync(249)
+      expect(requests).toHaveLength(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(requests).toHaveLength(2)
+    } finally {
+      scheduler.stop()
+      vi.useRealTimers()
       await f.fixture().registry.dispose()
     }
   })

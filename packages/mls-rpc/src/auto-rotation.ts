@@ -30,6 +30,8 @@ export type AutoRotationCandidate = {
   ledger: Array<string>
 }
 
+export const ROTATION_IDENTITY_SUPERSEDED = 'Rotation identity superseded'
+
 /** Candidate adapters accept this envelope alongside their own host journal formats. */
 export function decodeAutoRotationCandidate(bytes: Uint8Array): AutoRotationCandidate {
   try {
@@ -246,7 +248,7 @@ export function createAutoRotationScheduler(params: {
     onOutcome(outcome: Outcome) {
       if (!outcome.opID?.startsWith(`${INTERNAL_OPERATION_PREFIX}rotation/`)) return
       liveID = null
-      if (outcome.kind === 'rejected' && outcome.reason === 'Rotation identity superseded') {
+      if (outcome.kind === 'rejected' && outcome.reason === ROTATION_IDENTITY_SUPERSEDED) {
         backoff = 250
         notBefore = 0
       } else if (outcome.kind === 'rejected') failed()

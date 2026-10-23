@@ -22,8 +22,10 @@ understands must never be passed on.
 
 ## `kumiai/` — labels and domain separators
 
-Three different kinds of string share this prefix. They are not interchangeable, and the grouping
-below is by _what the string is used for_, not by which package holds it.
+`kumiai/internal/` is also reserved for library operation IDs (`INTERNAL_OPERATION_PREFIX`).
+Public `enqueue` and `commit` reject this prefix with `TypeError`. Host peer factories forward `internalOperations` for automatic rotation.
+
+The labels and domain separators below are grouped by use, independently of their package.
 
 ### Topic labels
 

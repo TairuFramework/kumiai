@@ -783,8 +783,9 @@ and schedule one rotation outside the gate. Lapse takes precedence. Directed rep
 - Enqueue errors and rejected attempts back off with a cap. Outcomes in that namespace go to the registry, never to the host, across restart.
 - (r28b) A CAS loss is not evidence. The walk decides: a built rotation settles `lost` only on walker-validated supersession with complete coverage, otherwise its consumption closes it `unknown` (D4); an unbuilt stale intent settles `rejected`. The scheduler re-enqueues only after its build is closed; the new epoch resets the ceiling, so it re-evaluates admission rather than re-enqueueing on `lost` alone.
 
-Registry hosts/doubles require generation retention/forward steps >=1000 through create/restore/Welcome/external join/derive/recovery; ordinary callers keep
-defaults. Non-admin rotation passes lifecycle checks, includes an update path, empty proposals/entries and unchanged roster/ledger; it keeps the app anchor unless
+Registry hosts/doubles require generation retention/forward steps >=1000 through create/restore/Welcome/external join/derive/recovery.
+Ordinary callers have a maximumForwardRatchetSteps floor of 500, including explicit lower overrides. Higher values remain effective.
+Non-admin rotation passes lifecycle checks, includes an update path, empty proposals/entries and unchanged roster/ledger; it keeps the app anchor unless
 membership changes. No handshake HWM/reservation/budget exists (the v2 codec's flags field still carries `main`'s reservation fields, State codec r28e).
 
 ### D6. Application publication and settlement

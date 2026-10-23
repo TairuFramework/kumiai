@@ -1777,6 +1777,40 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       })
       expect((await (await params.reopen()).control.load()).spentSource).toBeNull()
     })
+    test.each(['missing', 'deleted'] as const)(
+      'build saving refuses a %s source without changing control',
+      async (condition) => {
+        const host = await params.open()
+        const intent = records().putOperations?.[0]
+        if (intent === undefined) throw new Error('Missing intent')
+        const slot = fixtureBuilt()
+        const identity = {
+          ...host.control.key,
+          epoch: slot.epoch,
+          authenticator: slot.authenticatorBefore,
+          deleted: true,
+        }
+        if (condition === 'deleted') await host.saveState(encodeControlFixtureState(identity))
+        await host.control.apply(
+          { putOperations: [intent], cursor: { epoch: slot.epoch, position: slot.head } },
+          'intent',
+        )
+        const before = await host.control.load()
+        expect(
+          await host.saveBuilt(
+            intent,
+            slot,
+            {
+              key: host.control.key,
+              identity: condition === 'missing' ? null : identity,
+              stateVersion: await host.loadVersion(),
+            },
+            'refused-build',
+          ),
+        ).toBe('moved')
+        expect(await host.control.load()).toEqual(before)
+      },
+    )
     test.each(['incomplete', 'stranded', 'spent'] as const)(
       'build refuses an %s source',
       async (condition) => {

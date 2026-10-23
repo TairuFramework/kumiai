@@ -470,6 +470,7 @@ Owner loss, identity or eligibility changes, and unaccounted foreign versions dr
 Ephemeral seals and receives perform no persistence and initiate no provider transaction. Independently scheduled maintenance commits lease warm-up and renewal.
 A cold ephemeral seal after restart or owner drop throws `ApplicationLeaseUnavailableError` until warm-up commits.
 Exhaustion rejects the ephemeral call without storage work. Durable seals may wait for maintenance.
+`ApplicationLeaseUnavailableError.reason` is `cold`, `exhausted` or `deferred` when eligibility prevents lease creation.
 
 Ephemeral consumed tuples prevent repeat opens in one process. One replay of an opened frame after restart can succeed.
 Registry ephemeral receive refuses every sender generation at or above 500 per epoch, including legacy senders. Durable opens retain their existing rules.

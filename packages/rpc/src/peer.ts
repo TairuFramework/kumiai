@@ -2785,6 +2785,7 @@ export function createGroupPeerWithControlWalk<
         })
         // Delete before callback gives at-most-once notification. Startup re-evaluates scheduling.
         internalOutcomes.shift()
+        if (params.internalOperations !== undefined) emittedOutcomes.delete(outcome.id)
         internalRetryDelay = 250
         if (!disposed) {
           if (params.internalOperations !== undefined)

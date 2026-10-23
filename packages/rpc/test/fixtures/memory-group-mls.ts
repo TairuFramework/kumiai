@@ -2232,9 +2232,9 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       if (parsed.epoch !== epoch) {
         return { epoch: parsed.epoch, ...(isExternal ? { external: true } : {}) }
       }
-      // At this member's epoch sender identity is checkable separately from commit content.
-      // The double uses mismatched identities to model a forged sender claim.
+      // Sender identity requires authentication against this branch's epoch secrets.
       if (
+        !verifyMemoryCommitTag(commit, authenticator()) ||
         (parsed.signerDID ?? parsed.committerDID) !== parsed.committerDID ||
         (parsed.committerDID === localDID && parsed.invalidContent === true)
       ) {

@@ -98,6 +98,18 @@ export function testLegacyControlMapping(params: {
   map(input: MigrationFixture): Promise<MigrationResult> | MigrationResult
 }) {
   describe('total legacy control mapping', () => {
+    test.each([3, 4])(
+      'epoch-only spent marker at %s never reserves an operation ID',
+      async (epoch) => {
+        const input = legacyMigrationFixture()
+        input.snapshot.spentSource = { epoch }
+        input.snapshot.operations = [legacyMigrationOperation('intent')]
+        const result = await params.map(input)
+        expect(result.spentSource).toEqual(epoch === 4 ? { epoch: 4 } : null)
+        expect(result.operations).toMatchObject([{ id: 'op', stage: 'intent' }])
+        expect(result.commitOnce).toBeNull()
+      },
+    )
     test.each(['retired', 'retired-deleted', 'terminal', 'reconciled'])(
       'closes an accepted ahead slot on a %s source before epoch refusal',
       async (mode) => {

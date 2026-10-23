@@ -15,7 +15,6 @@ import { FakeHub } from './fixtures/fake-hub.js'
 import {
   createMemoryGroupMLS,
   decodeMemoryCommit,
-  encodeMemoryCommit,
   memoryAuthenticator,
 } from './fixtures/memory-group-mls.js'
 import { makeMLSPeer } from './fixtures/peer.js'
@@ -239,23 +238,18 @@ describe('commit strand observations', () => {
     await bob.peer.dispose()
   })
 
-  test('tampered own content without a valid content signature is skipped without recovery', async () => {
+  test('own content without a valid content signature is skipped without recovery', async () => {
     const hub = new FakeHub()
     const rs = secret(0x9a)
-    const original = decodeMemoryCommit(
-      encodeMemoryCommit(1, 'bob', [], {
-        authenticator: memoryAuthenticator(
-          createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members, localDID: 'bob' }),
-        ),
-      }),
-    )
+    const reader = createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members, localDID: 'bob' })
+    const commit = reader.buildCommit()
+    expect(await reader.readCommitHeader(commit)).toEqual({ epoch: 1, committerDID: 'bob' })
+    const original = decodeMemoryCommit(commit)
     if (original == null) throw new Error('missing memory commit')
-    // The port double models a ciphertext edit beyond the sender-data sample: authorship is
-    // still readable, while the commit content is invalid and cannot be processed.
-    const tampered = new TextEncoder().encode(JSON.stringify({ ...original, invalidContent: true }))
-    const reader = createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, localDID: 'carol' })
-    expect(await reader.readCommitHeader(tampered)).toEqual({ epoch: 1, committerDID: 'bob' })
-    expect(await reader.processCommit(tampered, {})).toMatchObject({ advanced: false })
+    // Local authorship requires a valid content signature, as in the real MLS port.
+    const changed = new TextEncoder().encode(JSON.stringify({ ...original, invalidContent: true }))
+    expect(await reader.readCommitHeader(changed)).toEqual({ epoch: 1 })
+    expect(await reader.processCommit(changed, {})).toMatchObject({ advanced: false })
 
     const { sequenceID } = await publishCommit({
       authenticator: memoryAuthenticator(reader),
@@ -263,13 +257,14 @@ describe('commit strand observations', () => {
       senderDID: 'zoe',
       recoverySecret: rs,
       epoch: 1,
-      commit: tampered,
+      commit: changed,
     })
     const observations: Array<StrandObservation> = []
     const recoveries: Array<RecoveryEvent> = []
     const now = vi.spyOn(Date, 'now').mockReturnValue(1_000)
     try {
       const bob = makeMLSPeer(hub, 'bob', rs, {
+        mls: reader,
         members,
         recovery,
         onStrand: (observation) => {

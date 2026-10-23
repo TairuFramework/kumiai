@@ -33,6 +33,9 @@ It serialises advancement and returns `{ pre, advanced, start, limit }`, or `nul
 It advances by encrypting and discarding under normal send-eligibility checks. Hosts persist `advanced` before allowing a private copy to send from `pre`.
 Registry leases use size 16 and cap 500. Reservation never mutates a caller-owned handle.
 
+All callers have a `maximumForwardRatchetSteps` floor of 500, including ordinary handles and explicit lower overrides.
+Higher configured values remain effective. Registry callers require at least 1000.
+
 `@kumiai/mls/testing` exports `serializeHandle`, `assertApplicationSend`, `reserveApplicationKernel` and `withReservationLock` for contract doubles.
 These serializer and reservation hooks are test-only and absent from the main package index.
 

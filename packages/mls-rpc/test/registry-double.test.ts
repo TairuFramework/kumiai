@@ -883,7 +883,7 @@ describe.each(['real-mls', 'double'] as const)('received commit gates (%s)', (mo
       const process = model === undefined ? undefined : vi.spyOn(model, 'processCommit')
       const persist = vi.fn()
       await expect(local.processMessage(commit, { persist })).rejects.toThrow(
-        mode === 'real-mls' ? /invalid tag/ : /Invalid memory commit tag/,
+        mode === 'real-mls' ? /invalid tag/ : /Invalid memory commit/,
       )
       expect(encodeClientState(local.state)).toEqual(before)
       expect(local.epoch).toBe(epoch)

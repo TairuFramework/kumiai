@@ -9,6 +9,7 @@ import {
 } from '@kumiai/rpc-conformance'
 import { describe, expect, test, vi } from 'vitest'
 
+import { enqueueOperation } from '../../rpc/lib/control/operations.js'
 import { entryCapability } from '../src/entry-capability.js'
 import { createMemoryDevicePersistence } from '../src/memory-device-persistence.js'
 import { memoryFaults } from '../src/memory-faults.js'
@@ -179,6 +180,23 @@ async function fixture(
 
 for (const ownership of ['supplied', 'absent'] as const) {
   describe(`sealed root migration (${ownership} ownership context)`, () => {
+    test('migrated epoch-only marker permits unrelated enqueue', async () => {
+      const input = legacyMigrationFixture()
+      input.snapshot.spentSource = { epoch: 4 }
+      const host = await fixture(input, ownership)
+      const control = host.device.groups.ports(input.source.key).control
+      const op = await enqueueOperation(
+        { control, now: () => 100, newID: () => crypto.randomUUID() },
+        {
+          id: 'unrelated',
+          kind: 'ledger',
+          revokes: false,
+          body: new Uint8Array(),
+        },
+      )
+      expect((await control.load()).operations).toEqual([op])
+      expect((await control.load()).spentSource).toEqual({ epoch: 4 })
+    })
     test.each([false, true])(
       'retired ahead work cannot block the current incarnation or recovery (deleted=%s)',
       async (deleted) => {

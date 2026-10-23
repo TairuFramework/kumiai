@@ -889,6 +889,8 @@ export function createMemoryControlStore<Position extends string = string>(
       const next = cloneValue(record)
       const identity = next.state === null ? null : decodeControlFixtureState(next.state)
       if (
+        identity === null ||
+        identity.deleted === true ||
         built.opID !== intent.id ||
         !(['kind', 'revokes', 'enqueuedAt', 'deadline'] as const).every(
           (field) => built[field] === intent[field],

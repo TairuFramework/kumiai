@@ -97,6 +97,8 @@ function host(): ConformanceControlHost {
         const identity = state === null ? null : decodeControlFixtureState(state.bytes)
         const snapshot = await rows(tx).control.load()
         if (
+          identity === null ||
+          identity.deleted === true ||
           built.opID !== intent.id ||
           !(['kind', 'revokes', 'enqueuedAt', 'deadline'] as const).every(
             (field) => built[field] === intent[field],

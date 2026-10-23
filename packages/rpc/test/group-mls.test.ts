@@ -37,15 +37,22 @@ describe('GroupMLS port', () => {
       recoverySecret: new Uint8Array(32).fill(1),
       epoch: 4,
       localDID: 'admin',
+      members: ['admin', 'reader'],
     })
     const commit = admin.buildCommit()
-    const reader = createMemoryGroupMLS({ recoverySecret: new Uint8Array(32).fill(1), epoch: 4 })
+    const reader = createMemoryGroupMLS({
+      recoverySecret: new Uint8Array(32).fill(1),
+      epoch: 4,
+      localDID: 'reader',
+      members: ['admin', 'reader'],
+    })
+    const before = reader.serializeState()
 
-    // Read out of the commit's own bytes. No state is touched, and the reader is not at the
-    // committer's group, let alone at a position to apply anything.
+    // Shared epoch secrets authenticate the author without applying the commit.
     expect(await reader.readCommitHeader(commit)).toEqual({ epoch: 4, committerDID: 'admin' })
     expect(await reader.readCommitHeader(new Uint8Array([0xff, 0xff]))).toBeNull()
     expect(await reader.readCommitHeader(new Uint8Array())).toBeNull()
+    expect(reader.serializeState()).toEqual(before)
   })
 
   test('a member cannot apply the frame that is its own commit', async () => {

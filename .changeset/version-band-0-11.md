@@ -31,5 +31,27 @@ renewal within the same recovery attempt and original deadline.
 Breaking host migrations are detailed in the package intents for `mls-rpc`, `rpc`,
 `rpc-conformance` and `mls-hub`: durable operation requests replace callback commits and journals,
 adoption writes must co-commit with MLS state, recovery keys are explicit, and Welcome opening
-is separated from post-save consumption. The `mls` exported surface is additive; the other nine
-packages' exported surfaces are unchanged.
+is separated from post-save consumption.
+
+Host migration:
+
+- Remove calls to `GroupHandle.reserveHandshakeGeneration` and `consumeHandshakeReservation`.
+  `HandshakeWindowError`, `HandshakeWindowConfigError` and `HandshakeReservationError` are removed.
+- Replace `GroupMLS.prepareCommitBuild` and `commitBuildFramed` hooks with the control-build port.
+  `CommitBuildHooksError` is removed.
+- Registry-issued handles, control-build `restoreSource` permit clones, `restoreCandidate` results and recovery/adoption candidates deny application sends with `ApplicationSendRefusedError`.
+  Send through registry `seal` instead.
+- Operation ID reuse throws `OperationRejectedError('Operation ID is retained')` while an outcome, Welcome obligation, build or matching spent marker retains it.
+  Retrying a durable intent remains idempotent.
+- Custom `RegistryHandleAccess` implementations require `seal`, `receive`, `onAdmissionChanged` and `onRotationRequired`.
+  `GroupHandleRegistry` requires `effectiveNext`.
+- Host `createPeer` adapters must forward `internalOperations` to enable automatic rotation.
+  Candidate adapters must decode the library rotation envelope through `decodeAutoRotationCandidate`.
+- Ordinary MLS callers have a `maximumForwardRatchetSteps` floor of 500, including explicit lower overrides.
+  Higher values remain effective. Registry callers require at least 1000.
+
+RPC exports `INTERNAL_OPERATION_PREFIX`, `InternalOperations`, `migrateLegacyControl`, `closeControlBuild`,
+`consumeOwnOccurrence`, `executableOperations`, `SavedControlCompatibilityError` and control-store helpers.
+The `kumiai/internal/` operation-ID prefix is reserved.
+Cold ephemeral seals refuse until committed warm-up. The first log seal waits for bounded maintenance.
+`ApplicationLeaseUnavailableError` distinguishes `cold`, `exhausted` and `deferred` availability.

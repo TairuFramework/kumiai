@@ -13,8 +13,35 @@ import { createMemoryMigrationBackend } from '../../rpc-conformance/src/memory-m
 import { closeControlBuild } from '../src/control/closure.js'
 import type { LegacyControlSnapshot } from '../src/control/legacy-input.js'
 import { migrateLegacyControl } from '../src/control/legacy-migration.js'
-import { asLogPosition } from '../src/cursor.js'
+import { enqueueOperation } from '../src/control/operations.js'
+import { asLogPosition, type LogPosition } from '../src/cursor.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
+
+test.each(['store', 'database'] as const)(
+  'migrated epoch-only marker permits unrelated enqueue (%s)',
+  async (kind) => {
+    const input = legacyMigrationFixture()
+    input.snapshot.spentSource = { epoch: 4 }
+    const control =
+      kind === 'store'
+        ? createMemoryControlStore<LogPosition>(input.source.key, { legacy: input })
+        : createMemoryHostDatabase({ legacy: input }).control(
+            input.source.key.groupID,
+            input.source.key,
+          )
+    const op = await enqueueOperation(
+      { control, now: () => 100, newID: () => crypto.randomUUID() },
+      {
+        id: 'unrelated',
+        kind: 'ledger',
+        revokes: false,
+        body: new Uint8Array(),
+      },
+    )
+    expect((await control.load()).operations).toEqual([op])
+    expect((await control.load()).spentSource).toEqual({ epoch: 4 })
+  },
+)
 
 testLegacyControlMapping({
   map: (input) =>

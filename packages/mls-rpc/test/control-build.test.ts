@@ -494,58 +494,65 @@ test.each([
   }
 })
 
-test.each(['key', 'epoch', 'authenticator', 'checkpoint', 'cursor epoch', 'queue'] as const)(
-  'raw built-save rejects a moved guard without access refresh: %s',
-  async (move) => {
-    const host = await setup()
-    const built = await host.slot()
-    const source = await host.source()
-    if (source.identity === null) throw new Error('Missing identity')
-    const expected =
-      move === 'key' ? { ...source, key: { ...source.key, groupID: 'other' } } : source
-    const transition = host.groups.transition
-    host.groups.transition = (change, work) =>
-      transition(change, async (stores) =>
-        work({
-          ...stores,
-          incarnation: (incarnation) => {
-            const rows = stores.incarnation(incarnation)
-            return {
-              ...rows,
-              state: {
-                ...rows.state,
-                load: async () => {
-                  const state = await rows.state.load()
-                  if (state === null || state.deleted) throw new Error('Missing state')
-                  if (move === 'epoch') return { ...state, epoch: state.epoch + 1 }
-                  if (move === 'authenticator')
-                    return { ...state, epochAuthenticator: new Uint8Array([0]) }
-                  return state
-                },
+test.each([
+  'key',
+  'epoch',
+  'authenticator',
+  'checkpoint',
+  'cursor epoch',
+  'queue',
+  'missing',
+  'deleted',
+] as const)('raw built-save rejects a moved guard without access refresh: %s', async (move) => {
+  const host = await setup()
+  const built = await host.slot()
+  const source = await host.source()
+  if (source.identity === null) throw new Error('Missing identity')
+  const expected = move === 'key' ? { ...source, key: { ...source.key, groupID: 'other' } } : source
+  const transition = host.groups.transition
+  host.groups.transition = (change, work) =>
+    transition(change, async (stores) =>
+      work({
+        ...stores,
+        incarnation: (incarnation) => {
+          const rows = stores.incarnation(incarnation)
+          return {
+            ...rows,
+            state: {
+              ...rows.state,
+              load: async () => {
+                const state = await rows.state.load()
+                if (state === null || state.deleted) throw new Error('Missing state')
+                if (move === 'missing') return null
+                if (move === 'deleted') return { ...state, deleted: true }
+                if (move === 'epoch') return { ...state, epoch: state.epoch + 1 }
+                if (move === 'authenticator')
+                  return { ...state, epochAuthenticator: new Uint8Array([0]) }
+                return state
               },
-              control: {
-                ...rows.control,
-                load: async () => {
-                  const snapshot = await rows.control.load()
-                  if (move === 'checkpoint')
-                    snapshot.cursor = { position: asLogPosition('2'), epoch: 0 }
-                  if (move === 'cursor epoch') snapshot.cursor = { position: null, epoch: 1 }
-                  if (move === 'queue') snapshot.operations = [{ ...intent, id: 'first', seq: 0 }]
-                  return snapshot
-                },
+            },
+            control: {
+              ...rows.control,
+              load: async () => {
+                const snapshot = await rows.control.load()
+                if (move === 'checkpoint')
+                  snapshot.cursor = { position: asLogPosition('2'), epoch: 0 }
+                if (move === 'cursor epoch') snapshot.cursor = { position: null, epoch: 1 }
+                if (move === 'queue') snapshot.operations = [{ ...intent, id: 'first', seq: 0 }]
+                return snapshot
               },
-            }
-          },
-        }),
-      )
-    const before = host.db.snapshot()
-    const marker = await host.control.lastMutation()
-    expect(await host.saver(intent, built, expected, 'moved')).toBe('moved')
-    expect(host.db.snapshot()).toEqual(before)
-    expect(await host.control.lastMutation()).toBe(marker)
-    expect(host.counts()).toEqual({ buildCalls: 0, frameCalls: 0 })
-  },
-)
+            },
+          }
+        },
+      }),
+    )
+  const before = host.db.snapshot()
+  const marker = await host.control.lastMutation()
+  expect(await host.saver(intent, built, expected, 'moved')).toBe('moved')
+  expect(host.db.snapshot()).toEqual(before)
+  expect(await host.control.lastMutation()).toBe(marker)
+  expect(host.counts()).toEqual({ buildCalls: 0, frameCalls: 0 })
+})
 
 test('preparation framing does not reenter access', async () => {
   const host = await setup()

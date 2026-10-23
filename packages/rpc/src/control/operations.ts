@@ -76,9 +76,7 @@ export async function enqueueOperation(
     snapshot.outcomes.some((row) => row.opID === request.id) ||
     snapshot.welcomes.some((row) => row.opID === request.id) ||
     snapshot.commitOnce?.opID === request.id ||
-    // Legacy epoch-only markers cannot distinguish IDs. Consumption releases their reservation.
-    (snapshot.spentSource !== null &&
-      (snapshot.spentSource.opID === undefined || snapshot.spentSource.opID === request.id))
+    snapshot.spentSource?.opID === request.id
   )
     throw new OperationRejectedError('Operation ID is retained')
   const enqueuedAt = deps.now()

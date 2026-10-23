@@ -31,7 +31,12 @@ import type { Runtime } from '@sozai/runtime'
 import { ciphersuites } from 'ts-mls'
 
 import type { ControlHandleAccess } from './access.js'
-import { autoRotationRequest, buildKeyRotation, isAutoRotation } from './auto-rotation.js'
+import {
+  autoRotationRequest,
+  buildKeyRotation,
+  isAutoRotation,
+  ROTATION_IDENTITY_SUPERSEDED,
+} from './auto-rotation.js'
 import { controlCompatible } from './control-compat.js'
 import { decodeControlJournal, encodeControlJournal } from './control-journal.js'
 import { controlBuildContexts } from './control-write-context.js'
@@ -324,7 +329,7 @@ export function createControlBuildPort(params: {
       let referencedProposals: Array<string>
       try {
         if (isAutoRotation(saved) && saved.id !== autoRotationRequest(identity).id)
-          throw new OperationRejectedError('Rotation identity superseded')
+          throw new OperationRejectedError(ROTATION_IDENTITY_SUPERSEDED)
         const { value: output, receipt } = await withCommitPermit(
           async () =>
             denyApplicationSend(
@@ -367,6 +372,8 @@ export function createControlBuildPort(params: {
           )
             return rejected()
         } catch (error) {
+          if (isAutoRotation(saved))
+            throw new OperationRejectedError('Rotation candidate restore refused', { cause: error })
           if (
             error instanceof InvalidCandidateError ||
             (error instanceof Error &&

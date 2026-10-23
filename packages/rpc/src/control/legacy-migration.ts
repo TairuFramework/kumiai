@@ -87,7 +87,10 @@ export function migrateLegacyControl(params: {
     ...retained,
     schemaVersion: 1,
     commitOnce: null,
-    spentSource: legacy.spentSource ?? null,
+    spentSource:
+      source.epoch !== null && (legacy.spentSource?.epoch ?? source.epoch) < source.epoch
+        ? null
+        : (legacy.spentSource ?? null),
     operations: [],
     outcomes: [...legacy.outcomes],
     // Promotion precedes every build closure, with the origin bound by this snapshot's key.

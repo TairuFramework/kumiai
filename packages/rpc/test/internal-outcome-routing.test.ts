@@ -20,6 +20,51 @@ afterEach(async () => {
   vi.restoreAllMocks()
 })
 
+test('consumed internal outcomes release their emission fingerprints even when the callback throws', async () => {
+  const id = 'consumed-internal-fingerprint'
+  const caches = new Set<Map<unknown, unknown>>()
+  const set = Map.prototype.set
+  vi.spyOn(Map.prototype, 'set').mockImplementation(function (
+    this: Map<unknown, unknown>,
+    key,
+    value,
+  ) {
+    if (key === id && typeof value === 'string') caches.add(this)
+    return set.call(this, key, value)
+  })
+  let retainedAtNotification = -1
+  const onOutcome = vi.fn(async () => {
+    retainedAtNotification = [...caches].filter((cache) => cache.has(id)).length
+    throw new Error('Callback failed')
+  })
+  const member = makeMLSPeer(new FakeHub(), 'alice', secret, {
+    internalOperations: { bind: () => {}, onOutcome },
+  })
+  peers.push(member)
+  await member.peer.replay()
+  await member.control.apply(
+    {
+      putOutcomes: [
+        {
+          id,
+          opID: 'kumiai/internal/consumed',
+          kind: 'lost',
+          at: 100,
+        },
+      ],
+    },
+    'internal-report',
+  )
+  await member.peer.replay()
+  await vi.waitFor(() => expect(onOutcome).toHaveBeenCalledOnce())
+  expect((await member.control.load()).outcomes).toEqual([])
+  expect(caches.size).toBe(1)
+  expect(retainedAtNotification).toBe(0)
+  expect([...caches].every((cache) => !cache.has(id))).toBe(true)
+  await member.peer.replay()
+  expect(onOutcome).toHaveBeenCalledOnce()
+})
+
 test('restart routes outcomes by operation ID and hides internal rows from public readers', async () => {
   const hub = new FakeHub()
   const seed = makeMLSPeer(hub, 'alice', secret)
