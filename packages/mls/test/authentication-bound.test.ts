@@ -147,7 +147,7 @@ describe('validateCredential — bound did:kokuin leaf', () => {
     const leaf = await buildBoundLeaf({
       mutate: (id, b) => ({
         ...id,
-        // Legacy chain revokes fail closed, including malformed unsigned ones.
+        // Chain revokes fail closed, including malformed unsigned ones.
         controller: {
           ...b,
           prefix: [

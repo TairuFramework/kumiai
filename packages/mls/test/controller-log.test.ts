@@ -14,10 +14,10 @@ import { describe, expect, test } from 'vitest'
 
 import {
   asControllerLog,
+  CHAIN_REVOKE_REFUSED,
   foldChain,
-  hasLegacyRevoke,
+  hasChainRevoke,
   isDetachedFoldReason,
-  LEGACY_CHAIN_REVOKE,
 } from '../src/controller-log.js'
 import { createEmbeddedControllerResolver } from '../src/embedded-resolver.js'
 import { revokeChain, rotateChain } from './fixtures/controller-chain.js'
@@ -66,8 +66,8 @@ describe('controller chain adapter', () => {
     })
   })
 
-  test.each([false, true])('refuses an unsigned legacy revoke with crit=%s', (crit) => {
-    const legacy = {
+  test.each([false, true])('refuses an unsigned chain revoke with crit=%s', (crit) => {
+    const revoke = {
       event: {
         t: 'rev',
         crit,
@@ -76,15 +76,15 @@ describe('controller chain adapter', () => {
         p: digestOf(inception.event),
         i: did,
         v: 1,
-        x: 'did:key:legacy-target',
+        x: 'did:key:revoke-target',
       },
       sigs: [],
     } as unknown as SignedEvent
-    expect(hasLegacyRevoke([inception, legacy])).toBe(true)
-    expect(hasLegacyRevoke([null, {}, inception])).toBe(false)
-    expect(foldChain(did, [inception, legacy])).toEqual({
+    expect(hasChainRevoke([inception, revoke])).toBe(true)
+    expect(hasChainRevoke([null, {}, inception])).toBe(false)
+    expect(foldChain(did, [inception, revoke])).toEqual({
       ok: false,
-      reason: LEGACY_CHAIN_REVOKE,
+      reason: CHAIN_REVOKE_REFUSED,
       index: 1,
     })
   })
@@ -114,9 +114,9 @@ describe('controller chain adapter', () => {
 })
 
 test.each([false, true])(
-  'the embedded resolver rejects legacy revokes with crit=%s',
+  'the embedded resolver rejects chain revokes with crit=%s',
   async (crit) => {
-    const legacy = {
+    const revoke = {
       event: {
         t: 'rev',
         crit,
@@ -125,13 +125,13 @@ test.each([false, true])(
         p: digestOf(inception.event),
         i: did,
         v: 1,
-        x: 'did:key:legacy-target',
+        x: 'did:key:revoke-target',
       },
       sigs: [],
     } as unknown as SignedEvent
     const resolver = createEmbeddedControllerResolver({
       controllerID: did,
-      prefix: [inception, legacy],
+      prefix: [inception, revoke],
     })
     await expect(resolver.resolve(did, {})).rejects.toThrow(/Unknown DID/)
     await expect(resolver.resolveHistoric?.(did, {})).rejects.toThrow(/Unknown DID/)

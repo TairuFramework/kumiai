@@ -2,13 +2,13 @@ import type { KeyState } from '@kokuin/controller'
 import { type ControllerLog, type FoldResult, foldLog, type SignedEvent } from '@kokuin/controller'
 import { normalizeDID } from '@kokuin/token'
 
-export const LEGACY_CHAIN_REVOKE = 'legacy chain revoke'
+export const CHAIN_REVOKE_REFUSED = 'chain revoke refused'
 
 export function asControllerLog(chain: ReadonlyArray<SignedEvent>): ControllerLog {
   return { chain: [...chain], events: [] }
 }
 
-export function hasLegacyRevoke(chain: ReadonlyArray<unknown>): boolean {
+export function hasChainRevoke(chain: ReadonlyArray<unknown>): boolean {
   return chain.some((signed) => {
     if (signed == null || typeof signed !== 'object' || !('event' in signed)) return false
     const event = signed.event
@@ -18,9 +18,9 @@ export function hasLegacyRevoke(chain: ReadonlyArray<unknown>): boolean {
 
 export function foldChain(did: string, chain: ReadonlyArray<SignedEvent>): FoldResult {
   // Kokuin 0.2 skips unsigned crit:false events, but a chain rev must never fold.
-  if (hasLegacyRevoke(chain)) {
-    const index = chain.findIndex((signed) => hasLegacyRevoke([signed]))
-    return { ok: false, reason: LEGACY_CHAIN_REVOKE, index }
+  if (hasChainRevoke(chain)) {
+    const index = chain.findIndex((signed) => hasChainRevoke([signed]))
+    return { ok: false, reason: CHAIN_REVOKE_REFUSED, index }
   }
   return foldLog(did, asControllerLog(chain))
 }

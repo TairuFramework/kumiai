@@ -1,7 +1,7 @@
 import { createControllerResolver, type SignedEvent } from '@kokuin/controller'
 import type { DIDMethodResolver } from '@kokuin/token'
 
-import { asControllerLog, hasLegacyRevoke } from './controller-log.js'
+import { asControllerLog, hasChainRevoke } from './controller-log.js'
 
 const EMPTY: ReadonlySet<string> = new Set()
 
@@ -24,7 +24,7 @@ export function createEmbeddedControllerResolver(params: {
 }): DIDMethodResolver {
   const base = createControllerResolver({
     loadLog: async (did) =>
-      did === params.controllerID && !hasLegacyRevoke(params.prefix)
+      did === params.controllerID && !hasChainRevoke(params.prefix)
         ? asControllerLog(params.prefix)
         : undefined,
   })
