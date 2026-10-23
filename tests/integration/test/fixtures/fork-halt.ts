@@ -74,6 +74,7 @@ import type { EpochRuntime, EpochRuntimeParams } from '../../../../packages/rpc/
 import * as epochModule from '../../../../packages/rpc/src/peer-epoch.js'
 import { FakeHub } from '../../../../packages/rpc/test/fixtures/fake-hub.js'
 import { chat, type Protocols } from '../app-lane-e2e.js'
+import { openedDeliveryContext } from './opened-delivery.js'
 
 export async function createCapturedRecoveryFixture(
   params: { timeoutMs?: number; deadlineMs?: number } = {},
@@ -141,6 +142,7 @@ export async function createCapturedRecoveryFixture(
     } = {}
     const start = async (startKey = key) => {
       owner = await createRegistryPeer({
+        openedDeliveryContext,
         registry: fixture.registry,
         key: startKey,
         recovery: fixture.environment,
@@ -264,6 +266,7 @@ export async function createCapturedRecoveryFixture(
             },
           })
           const peer = createGroupPeerWithControlWalk<Protocols>({
+            openedDeliveryContext,
             ...options,
             hub,
             localDID: realMember.identity.id,
@@ -482,6 +485,7 @@ export async function makeCheckpointPeer(
   })
   const readEvidence = vi.fn(() => groups.readEvidence(key))
   const { peer, controlWalk } = createGroupPeerWithControlWalk<Protocols>({
+    openedDeliveryContext,
     ...callbacks,
     appOutboxLimit: 128,
     deliverWelcome: async () => {

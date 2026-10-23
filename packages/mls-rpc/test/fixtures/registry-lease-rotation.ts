@@ -18,6 +18,7 @@ export async function startLeaseRotationPeer(params: {
   fixture: Awaited<ReturnType<typeof createRegistryFixture>>
   key: GroupKey
   outbox: AppOutbox
+  handler?: () => Promise<void>
 }) {
   const { mode, fixture, key } = params
   const { FakeHub } = (await import(
@@ -102,7 +103,7 @@ export async function startLeaseRotationPeer(params: {
         appOutboxLimit: 4,
         localDID: fixture.identity.id,
         protocols: { chat: { posted: { type: 'event', retain: 'log', data: { type: 'object' } } } },
-        handlers: { chat: { posted: async () => {} } },
+        handlers: { chat: { posted: params.handler ?? (async () => {}) } },
         prepareBuild: build.prepareBuild,
         validation:
           mode === 'double'

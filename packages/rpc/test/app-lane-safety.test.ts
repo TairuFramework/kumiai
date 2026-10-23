@@ -222,7 +222,7 @@ test('terminal completion awaits an already committed open whose result is still
 })
 
 test.each([false, true])(
-  'completed plaintext drains even when the later cursor save rejects, terminal=%s',
+  'completed plaintext waits for the later cursor save to succeed, terminal=%s',
   async (terminal) => {
     vi.useFakeTimers()
     const f = await fixture()
@@ -255,16 +255,18 @@ test.each([false, true])(
       expect(f.emit).toHaveBeenCalledOnce()
       expect(f.complete).toHaveBeenCalledOnce()
       expect(f.lane.pendingRecords()).toEqual([])
-      expect(completed).toBe(terminal)
+      expect(completed).toBe(false)
       expect(f.cursor.stored(f.topicID)).toBeNull()
       blocked = false
       if (!terminal) {
         await f.lane.deliver()
         expect(f.cursor.stored(f.topicID)).toBe(first.sequenceID)
       }
+      await vi.advanceTimersByTimeAsync(100)
       expect(f.emit).toHaveBeenCalledOnce()
       expect(f.complete).toHaveBeenCalledOnce()
       await completing
+      expect(f.cursor.stored(f.topicID)).toBe(first.sequenceID)
     } finally {
       f.lane.dispose()
       vi.useRealTimers()

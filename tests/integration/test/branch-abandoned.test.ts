@@ -25,6 +25,7 @@ import { createForkRecoveryRealFixture } from '../../../packages/mls-rpc/test/fi
 import type { RegistryFixture } from '../../../packages/mls-rpc/test/fixtures/registry.js'
 import { createGroupPeerWithControlWalk } from '../../../packages/rpc/src/peer.js'
 import { FakeHub } from '../../../packages/rpc/test/fixtures/fake-hub.js'
+import { openedDeliveryContext } from './fixtures/opened-delivery.js'
 
 for (const transactional of [false, true]) {
   test(`hub repair moves advanced losing branch / transactional ${transactional}`, async () => {
@@ -129,6 +130,7 @@ async function startPeerOwner(
   const entrySlot = createLedgerEntrySlot()
   const initial = (await fixture.registry.recoverySource(groupID)).key
   return createRegistryPeer({
+    openedDeliveryContext,
     registry: fixture.registry,
     key: initial,
     recovery: fixture.environment,
@@ -215,6 +217,7 @@ async function startPeerOwner(
         })
       }
       return createGroupPeerWithControlWalk({
+        openedDeliveryContext,
         ...options,
         hub,
         localDID: fixture.identity.id,

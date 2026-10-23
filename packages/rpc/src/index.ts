@@ -254,6 +254,17 @@ export {
 } from './ledger-entries.js'
 export type { AppOutboxCleared, EpochFloor } from './log-delivery.js'
 export {
+  assertOpenedDeliveryEntry,
+  bindOpenedDelivery,
+  createOpenedAppHandler,
+  type OpenedDeliveryBinding,
+  type OpenedDeliveryContext,
+  OpenedDeliveryReentryError,
+  openedDeliveryBinding,
+  requireOpenedDeliveryContext,
+  runOpenedDelivery,
+} from './opened-delivery.js'
+export {
   type CurrentMoveInputs,
   canMoveCurrent,
   createGroupPeer,

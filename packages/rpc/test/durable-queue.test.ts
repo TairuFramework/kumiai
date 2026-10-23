@@ -190,7 +190,7 @@ describe('durable delivery queue', () => {
     lane.dispose()
   })
 
-  test('a worker does not complete a record after disposal while its handler is in flight', async () => {
+  test('an admitted worker completes its record after disposal', async () => {
     let release: (() => void) | undefined
     const held = new Promise<void>((resolve) => {
       release = resolve
@@ -203,8 +203,8 @@ describe('durable delivery queue', () => {
     lane.dispose()
     release?.()
     await new Promise((resolve) => setTimeout(resolve, 20))
-    expect(complete).not.toHaveBeenCalled()
-    expect(records.size).toBe(1)
+    expect(complete).toHaveBeenCalledTimes(1)
+    expect(records.size).toBe(0)
   })
 
   test('unusable records are completed and do not block a later valid event', async () => {

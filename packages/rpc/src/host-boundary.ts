@@ -162,6 +162,7 @@ export const peerHostFields = {
   appOutboxLimit: 'data',
   onAppOutboxCleared: 'callback',
   handlers: 'handlers',
+  openedDeliveryContext: 'data',
   recovery: 'recovery',
   localDID: 'data',
   protocols: 'data',

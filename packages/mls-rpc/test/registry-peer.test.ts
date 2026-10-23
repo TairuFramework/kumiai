@@ -46,6 +46,7 @@ import { registryRetirement } from '../src/registry/retirement.js'
 import { registrySafety } from '../src/registry/safety.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { deferred } from '../src/runtime.js'
+import { openedDeliveryContext } from './fixtures/ownership-context.js'
 import {
   createNotMemberFixture,
   createRegistryFixture,
@@ -84,6 +85,7 @@ function peerDouble(onDrain: () => Promise<void> = async () => {}): Peer {
     dispose: async () => {
       disposed = true
     },
+    drainOpened: async () => {},
     drained: async () => {
       expect(disposed).toBe(true)
       await onDrain()
@@ -347,6 +349,7 @@ describe('registry peer recovery coordination', () => {
           createPeer: async (key, options) => {
             const ports = f.device.groups.ports(key)
             return createGroupPeer({
+              openedDeliveryContext,
               ...options,
               hub,
               crypto: api.createGroupCrypto({ access: await f.registry.access(key.groupID) }),

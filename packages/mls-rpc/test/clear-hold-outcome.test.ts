@@ -16,7 +16,10 @@ import { createLedgerEntrySlot } from '../src/mls.js'
 import { StorageOutcomeUnknownError } from '../src/persistence-errors.js'
 import { registrySafety } from '../src/registry/safety.js'
 import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
-import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
+import {
+  createAsyncLocalOwnershipContext,
+  openedDeliveryContext,
+} from './fixtures/ownership-context.js'
 import { createRegistryFixture } from './fixtures/registry.js'
 
 const { FakeHub } = (await import(
@@ -126,6 +129,7 @@ for (const context of ['supplied', 'absent'] as const) {
           throw new Error('No control work expected')
         }
         peer = createGroupPeer({
+          openedDeliveryContext,
           hub,
           crypto: reader,
           localDID: f.identity.id,

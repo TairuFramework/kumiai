@@ -1,6 +1,7 @@
 import { normalizeDID } from '@kokuin/token'
 import { decodeClientState, type GroupHandle, restrictCommitAuthoring } from '@kumiai/mls'
 import type { ControlSnapshot, ForkHalt, SafetyHold } from '@kumiai/rpc'
+import { requireOpenedDeliveryContext } from '@kumiai/rpc'
 
 import { finaliseAppSettlements } from '../app-settlement.js'
 import { bindRegistryCheckpoint } from '../checkpoint.js'
@@ -11,6 +12,12 @@ import {
   entryCapability,
 } from '../entry-capability.js'
 import { sameStoredValue } from '../memory-incarnation-stores.js'
+import {
+  assertStoredOpenedEntry,
+  bindRegistryOpenedContext,
+  joinStoredOpened,
+  storedOpenedDeliveryContext,
+} from '../opened-delivery.js'
 import {
   DisplacedGroupHandleError,
   GroupControlUnsettledError,
@@ -94,6 +101,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   params: GroupHandleRegistryParams<TTx>,
 ): GroupHandleRegistry {
   const { persistence } = params
+  if (params.deliverOpened !== undefined) requireOpenedDeliveryContext(params.openedDeliveryContext)
   if (!params.providerID || params.providerID !== persistence.providerID)
     throw new GroupStateConflictError('Registry provider mismatch')
   if (normalizeDID(params.recovery.identity.id) !== normalizeDID(persistence.ownerDID))
@@ -629,6 +637,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         },
         waitForMaintenanceGate: (signal) => registryMaintenanceGates.get(registry)?.(signal),
         capability,
+        binding: registryBinding,
         environment: { ...environment, withPrivateRestore: privateRestoreBoundary(owner) },
         restoreCandidate: params.restoreCandidate,
         resolve: (mutationID) => persistence.groups.resolve(groupID, mutationID),
@@ -800,6 +809,11 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     }
   }
   function dispose(): Promise<void> {
+    try {
+      assertStoredOpenedEntry(registryBinding)
+    } catch (error) {
+      return Promise.reject(error)
+    }
     if (disposal !== null) return disposal
     closing = true
     finaliserStop.abort(new DisplacedGroupHandleError('Registry is disposed'))
@@ -901,6 +915,35 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     },
     delete(key) {
       return track(deleteGroup(key))
+    },
+    drainOpened(key) {
+      try {
+        assertStoredOpenedEntry(registryBinding, key)
+      } catch (error) {
+        return Promise.reject(error)
+      }
+      return track(
+        (async () => {
+          const context =
+            params.openedDeliveryContext ?? storedOpenedDeliveryContext(registryBinding, key)
+          if (context === undefined) {
+            const pending = await capability.read(key.groupID, (reads) =>
+              reads.pendingFrames(key.incarnation),
+            )
+            if (pending.length === 0) return
+          }
+          await joinStoredOpened({
+            persistence: persistence.groups,
+            key,
+            openedDeliveryContext: requireOpenedDeliveryContext(context),
+            deliver:
+              params.deliverOpened ??
+              (async () => {
+                throw new Error('Missing opened delivery handler')
+              }),
+          })
+        })(),
+      )
     },
     dispose,
     async recoverySource(groupID) {
@@ -1057,6 +1100,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       return restrictCommitAuthoring(await environment.restore({ ...record, state: record.state }))
     }),
   )
+  bindRegistryOpenedContext(registry, params.openedDeliveryContext)
   registryHandoffReaders.set(registry, (groupID) => slots.get(groupID)?.pendingHandoff != null)
   const onFailure = () => {
     finaliserStop.abort(capability.failureSignal?.reason)

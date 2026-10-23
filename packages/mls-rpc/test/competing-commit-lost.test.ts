@@ -45,6 +45,7 @@ import { createGroupMLS, createLedgerEntrySlot } from '../src/mls.js'
 import { decodeStoredValue, encodeStoredValue } from '../src/persistence-codec.js'
 import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
 import { createRegistryHandleAccess } from '../src/registry-handle-access.js'
+import { openedDeliveryContext } from './fixtures/ownership-context.js'
 import { createRealGroup } from './fixtures/real-group.js'
 import { createRegistryFixture } from './fixtures/registry.js'
 import { registryHandle } from './fixtures/registry-welcome.js'
@@ -274,6 +275,7 @@ async function setup(
       return result
     }
     peer = createGroupPeer({
+      openedDeliveryContext,
       hub,
       recoveryTarget: target,
       mls,

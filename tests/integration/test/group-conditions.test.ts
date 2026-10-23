@@ -40,6 +40,7 @@ import {
 } from '../../../packages/mls-rpc/test/fixtures/registry.js'
 import { FakeHub } from '../../../packages/rpc/test/fixtures/fake-hub.js'
 import { createCapturedRecoveryFixture } from './fixtures/fork-halt.js'
+import { openedDeliveryContext } from './fixtures/opened-delivery.js'
 
 const cleanup: Array<() => Promise<unknown>> = []
 afterEach(async () => {
@@ -71,6 +72,7 @@ async function start(
   }
   const created: Array<RegistryPeerOptions> = []
   const owner = await createRegistryPeer({
+    openedDeliveryContext,
     registry: f.registry,
     key,
     target,
@@ -97,6 +99,7 @@ async function start(
       const access = await f.registry.access(current.groupID)
       const ports = f.device.groups.ports(current)
       return createGroupPeer({
+        openedDeliveryContext,
         ...options,
         hub,
         crypto: createGroupCrypto({ access }),
@@ -1334,6 +1337,7 @@ test.each(['empty-spent', 'missing-spent', 'malformed-spent'] as const)(
       throw new Error('Corrupt state must never start a peer')
     })
     const owner = await createRegistryPeer({
+      openedDeliveryContext,
       registry: fixture.registry,
       key: f.key,
       target: { targetID: 'diagnostic-hub', topicID: 'diagnostic-commits' },
@@ -1371,6 +1375,7 @@ async function startDiagnosticPeer(
     throw new Error('Held or corrupt state must never start a peer')
   })
   const owner = await createRegistryPeer({
+    openedDeliveryContext,
     registry: fixture.registry,
     key,
     target: { targetID: 'diagnostic-hub', topicID: 'diagnostic-commits' },

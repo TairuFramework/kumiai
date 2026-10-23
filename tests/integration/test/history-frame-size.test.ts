@@ -20,6 +20,7 @@ import {
   operationRequest,
   type Protocols,
 } from './app-lane-e2e.js'
+import { openedDeliveryContext } from './fixtures/opened-delivery.js'
 import { createWireHub } from './log-hub-over-wire.js'
 
 test('horizon history and a 64 KiB consumer entry fit the real hub with the final recovery seal', async () => {
@@ -88,6 +89,7 @@ test('a final frame one byte above the hub cap settles rejected before publishin
   const host = createOperationHost(access, identity)
   const put = vi.spyOn(host.control, 'apply')
   const peer = createGroupPeer<Protocols>({
+    openedDeliveryContext,
     appOutboxLimit: 128,
     hub: connection,
     crypto,

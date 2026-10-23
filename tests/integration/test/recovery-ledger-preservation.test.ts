@@ -33,6 +33,7 @@ import {
   type Protocols,
 } from './app-lane-e2e.js'
 import { drainUntil } from './fixtures/drain.js'
+import { openedDeliveryContext } from './fixtures/opened-delivery.js'
 import { createWireHub, type WireHub } from './log-hub-over-wire.js'
 
 const fixture = (await import(
@@ -143,6 +144,7 @@ function recoveryPeer(params: {
 }) {
   const { hub, identity, access, mls, onRecovery } = params
   return createGroupPeer<Protocols>({
+    openedDeliveryContext,
     appOutboxLimit: 128,
     hub: hub.connect(identity),
     crypto: createGroupCrypto({ access }),

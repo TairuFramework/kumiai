@@ -280,6 +280,7 @@ const recoveryOnlyMethods = {
   anchorEpoch: (member) => member.peer.anchorEpoch(),
   reauthorize: (member) => member.peer.reauthorize(),
   dispose: (member) => member.peer.dispose(),
+  drainOpened: (member) => member.peer.drainOpened(),
   drained: async (member) => {
     await member.peer.dispose()
     await member.peer.drained()

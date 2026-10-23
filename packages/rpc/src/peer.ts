@@ -114,6 +114,13 @@ import {
   UnsupportedLedgerEntriesVersionError,
 } from './ledger-entries.js'
 import { checkedFetchResult, createLogDelivery, type EpochFloor } from './log-delivery.js'
+import {
+  assertOpenedDeliveryEntry,
+  createOpenedRecordHandler,
+  openedDeliveryBinding,
+  requireOpenedDeliveryContext,
+  runOpenedDelivery,
+} from './opened-delivery.js'
 import { createEpochRuntime } from './peer-epoch.js'
 import {
   type CurrentMoveInputs,
@@ -357,11 +364,23 @@ export function createGroupPeerWithControlWalk<
       input.continuation.source.incarnation + 1 !== input.continuation.destination.incarnation)
   )
     throw new TypeError('Installed recovery continuation required')
+  if (input.crypto.pending != null && input.mls == null)
+    throw new Error('GroupCrypto.pending requires mls and the durable commit lane')
+  const openedBinding = openedDeliveryBinding(input.crypto.pending)
+  const openedContext =
+    input.crypto.pending == null
+      ? input.openedDeliveryContext
+      : requireOpenedDeliveryContext(input.openedDeliveryContext)
+  const openedScope = { owner: {}, key: openedBinding?.key ?? input.control?.key }
   const boundary = createHostBoundary()
   // Certified removal outlives the public host boundary.
   const settlementBoundary = createHostBoundary()
   const settlementOutbox =
     input.appOutbox == null ? undefined : settlementBoundary.wrap(input.appOutbox)
+  const openedPending =
+    input.crypto.pending == null ? undefined : settlementBoundary.wrap(input.crypto.pending)
+  const openedCursorStore =
+    input.appCursorStore == null ? undefined : settlementBoundary.wrap(input.appCursorStore)
   const controlAbort = new AbortController()
   const applyResolved: typeof applyControlResolved = (store, changes, mutationID) =>
     applyControlResolved(store, changes, mutationID, undefined, controlAbort.signal)
@@ -377,7 +396,6 @@ export function createGroupPeerWithControlWalk<
     adopt,
     deliverWelcome,
     anchorStore,
-    appCursorStore,
     protocols,
     handlers,
     suppress,
@@ -473,9 +491,6 @@ export function createGroupPeerWithControlWalk<
   const settleLogSubmissions = async (): Promise<void> => {
     await Promise.allSettled([...logSubmissions])
   }
-  if (crypto.pending != null && mls == null) {
-    throw new Error('GroupCrypto.pending requires mls and the durable commit lane')
-  }
   // Normalized ONCE, here, at the one ingress every downstream `localDID` use reads from —
   // equivalent DID forms must compare and derive topics identically (`@kokuin/token`
   // canonicalizes, it does not validate).
@@ -513,7 +528,13 @@ export function createGroupPeerWithControlWalk<
    * down and not yet rebuilt).
    */
   const appEventHandlers = new Map<string, BusHandlerMaps['events']>()
+  const openedEvents = new Map<string, BusHandlerMaps['events']>()
   for (const [name, protocol] of Object.entries(protocols)) {
+    openedEvents.set(
+      name,
+      adaptBusHandlers(protocol, input.handlers[name] as Record<string, unknown>, input.suppress)
+        .events,
+    )
     appEventHandlers.set(
       name,
       adaptBusHandlers(protocol, handlers[name] as Record<string, unknown>, suppress).events,
@@ -573,12 +594,31 @@ export function createGroupPeerWithControlWalk<
    * reads the anchor back through the accessor below rather than being handed one, since the
    * anchor moves under it and every topic it derives belongs to the segment the anchor names.
    */
+  const openedHandler = createOpenedRecordHandler({
+    localDID,
+    protocols,
+    events: openedEvents,
+    handlers: input.handlers,
+  })
   const appLane = createAppLane({
     mux,
     crypto,
     localDID,
     protocols,
     eventHandlers: appEventHandlers,
+    deliverOpened: (record) =>
+      openedContext === undefined || openedScope.key === undefined
+        ? openedHandler(record)
+        : runOpenedDelivery(openedContext, { owner: openedScope.owner, key: openedScope.key }, () =>
+            openedHandler(record),
+          ),
+    completeOpenedRecord:
+      openedBinding === undefined
+        ? (id) => openedPending?.complete(id) ?? Promise.resolve()
+        : (id) => openedBinding.complete(id),
+    claimOpened:
+      openedBinding === undefined ? undefined : (record, fn) => openedBinding.claim(record, fn),
+    openedFailureSignal: openedBinding?.failureSignal,
     retentionSeconds: appLogRetentionSeconds,
     anchor: () => anchor,
     departing: () => departing,
@@ -594,7 +634,7 @@ export function createGroupPeerWithControlWalk<
       if (safetyHold() === null) await drain()
     },
     onSafetyHeld: latchSafetyHold,
-    ...(appCursorStore != null ? { appCursorStore } : {}),
+    ...(openedCursorStore != null ? { appCursorStore: openedCursorStore } : {}),
     ...(onAppWindowPruned != null
       ? {
           onAppWindowPruned: (event) => {
@@ -626,6 +666,30 @@ export function createGroupPeerWithControlWalk<
       : {}),
     scheduleDelivery: enqueueApp,
   })
+
+  const detachOpened =
+    openedContext === undefined
+      ? undefined
+      : openedBinding?.attach(openedContext, {
+          handoff: () => appLane.handoffOpened(),
+          completed: (id) => appLane.acknowledgeOpened(id),
+        })
+  let openedDrain: Promise<void> | undefined
+  const drainOpened = (): Promise<void> => {
+    try {
+      assertOpenedDeliveryEntry(openedContext, openedScope)
+    } catch (error) {
+      return Promise.reject(error)
+    }
+    if (openedDrain !== undefined) return openedDrain
+    appLane.stopOpening()
+    openedDrain = (async () => {
+      const records = await (openedBinding?.list() ?? openedPending?.list())
+      if (records !== undefined) await appLane.restore(records)
+      await appLane.completeOpened()
+    })()
+    return openedDrain
+  }
 
   let sealBarrier: Promise<void> | undefined
   let releaseSealBarrier: (() => void) | undefined
@@ -5761,7 +5825,13 @@ export function createGroupPeerWithControlWalk<
       void checkpointWorker?.resume()
       scheduleControlSlotRetry(0)
     },
+    drainOpened,
     drained: () => {
+      try {
+        assertOpenedDeliveryEntry(openedContext, openedScope)
+      } catch (error) {
+        return Promise.reject(error)
+      }
       if (disposePromise == null)
         return Promise.reject(new Error('Call dispose() before drained()'))
       return boundary
@@ -5773,11 +5843,18 @@ export function createGroupPeerWithControlWalk<
           try {
             await logDelivery?.drained()
           } finally {
+            detachOpened?.()
             settlementBoundary.close()
+            await settlementBoundary.drained(Promise.resolve())
           }
         })
     },
     dispose: () => {
+      try {
+        assertOpenedDeliveryEntry(openedContext, openedScope)
+      } catch (error) {
+        return Promise.reject(error)
+      }
       if (disposePromise != null) return disposePromise
       disposed = true
       if (internalRetry !== undefined) clearTimeout(internalRetry)

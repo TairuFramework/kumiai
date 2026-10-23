@@ -19,8 +19,10 @@ import type {
 } from '@kumiai/rpc'
 import {
   applyResolved,
+  assertOpenedDeliveryEntry,
   controlSafetyHeld,
   isHardControlHold,
+  type OpenedDeliveryContext,
   RecoveryTargetBehindError,
 } from '@kumiai/rpc'
 
@@ -33,6 +35,7 @@ import {
 } from './manual-recovery.js'
 import { copyStoredValue, sameStoredValue } from './memory-incarnation-stores.js'
 import type { RecoveryRouting } from './mls.js'
+import { registryOpenedDeliveryContext } from './opened-delivery.js'
 import {
   GroupStateConflictError,
   GroupUnavailableError,
@@ -89,6 +92,7 @@ export type RecoveryPendingReason =
   | 'target-behind'
   | 'target-unresolved'
 export type RegistryPeerOptions = {
+  openedDeliveryContext?: OpenedDeliveryContext
   internalOperations?: InternalOperations
   hub?: RecoveryTarget['hub']
   control?: ControlStore
@@ -138,6 +142,7 @@ export type RegistryPeer = {
   drained(): Promise<void>
 }
 export type RegistryPeerParams = {
+  openedDeliveryContext?: OpenedDeliveryContext
   resolveTarget?: (targetID: string) => Promise<RecoveryTarget>
   registry: GroupHandleRegistry
   key: GroupKey
@@ -164,6 +169,8 @@ export type RegistryPeerParams = {
 
 export async function createRegistryPeer(params: RegistryPeerParams): Promise<RegistryPeer> {
   const { registry } = params
+  const openedDeliveryContext =
+    params.openedDeliveryContext ?? registryOpenedDeliveryContext(registry)
   const registered = registrySafety<GroupTransaction>(registry)
   if (registered === null) throw new TypeError('Registry peer requires a registered registry')
   const capability = registered
@@ -569,6 +576,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
         { ...requested },
         {
           mls,
+          openedDeliveryContext,
           internalOperations: startingScheduler ?? undefined,
           ...(authority === undefined
             ? {}
@@ -1021,6 +1029,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
     status: () => (status.kind === 'not-member' ? copyStoredValue(status) : { ...status }),
     ready,
     dispose() {
+      assertOpenedDeliveryEntry(openedDeliveryContext, { key })
       if (disposed) return
       disposed = true
       startingScheduler?.stop()
@@ -1036,6 +1045,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
       for (const peer of peers) void track(peer.dispose()).catch(() => {})
     },
     async drained() {
+      assertOpenedDeliveryEntry(openedDeliveryContext, { key })
       if (!disposed) throw new Error('Call dispose() before drained()')
       while (pending.size > 0) await Promise.allSettled([...pending])
       await Promise.all([...peers].map((peer) => peer.drained()))

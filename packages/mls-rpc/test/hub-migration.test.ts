@@ -19,7 +19,10 @@ import { entryCapability } from '../src/entry-capability.js'
 import * as api from '../src/index.js'
 import { encodeStoredValue } from '../src/persistence-codec.js'
 import { registrySafety } from '../src/registry/safety.js'
-import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
+import {
+  createAsyncLocalOwnershipContext,
+  openedDeliveryContext,
+} from './fixtures/ownership-context.js'
 import {
   createNotMemberFixture,
   createGatedRegistryFixture as createRegistryFixture,
@@ -143,6 +146,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           cryptos.push(crypto)
           const ports = fixture.device.groups.ports(current)
           return createGroupPeer({
+            openedDeliveryContext,
             ...options,
             hub: options.hub ?? original,
             crypto,

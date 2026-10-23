@@ -54,6 +54,7 @@ import {
 } from './app-lane-e2e.js'
 import { drainUntil } from './fixtures/drain.js'
 import { createCapturedRecoveryFixture } from './fixtures/fork-halt.js'
+import { openedDeliveryContext } from './fixtures/opened-delivery.js'
 import { createWireHub } from './log-hub-over-wire.js'
 
 beforeAll(async () => {
@@ -198,6 +199,7 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
   ) {
     const operationHost = access === aliceAccess ? aliceHost : createOperationHost(access, identity)
     return createGroupPeer<Protocols>({
+      openedDeliveryContext,
       appOutboxLimit: 128,
       hub: connection,
       crypto: createGroupCrypto({ access }),

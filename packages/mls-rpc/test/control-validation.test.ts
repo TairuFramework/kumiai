@@ -80,6 +80,7 @@ import { createGroupMLS, createLedgerEntrySlot } from '../src/mls.js'
 import { createOwnerQueues } from '../src/owner-queue.js'
 import { encodeStoredValue } from '../src/persistence-codec.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
+import { openedDeliveryContext } from './fixtures/ownership-context.js'
 import {
   buildRealCommit,
   createRealGroup,
@@ -1560,6 +1561,7 @@ async function expectPolicyPoison(
   const store = createTransactionalStore(f.member.handle)
   const onStrand = vi.fn()
   const peer = createGroupPeer({
+    openedDeliveryContext,
     hub,
     crypto: createGroupCrypto({ access }),
     mls: live,
@@ -2061,6 +2063,7 @@ test.each(['outer', 'inner'] as const)(
     const onRecovery = vi.fn()
     const deliverWelcome = vi.fn(async () => {})
     const peer = createGroupPeer({
+      openedDeliveryContext,
       hub,
       crypto: createGroupCrypto({ access }),
       mls,

@@ -92,6 +92,7 @@ import {
   type CommitOnceTestHost,
   runCommitOnceHost,
 } from '../../../packages/rpc/test/fixtures/peer.js'
+import { openedDeliveryContext } from './fixtures/opened-delivery.js'
 import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
 import type { WireHub } from './log-hub-over-wire.js'
 import { createWireHub } from './log-hub-over-wire.js'
@@ -525,6 +526,7 @@ export function makeMember(params: MakeMemberParams): Member {
     return result
   }
   const { peer, controlWalk } = createGroupPeerWithControlWalk<Protocols>({
+    openedDeliveryContext,
     appOutboxLimit: 128,
     onRecovery: params.onRecovery,
     onOutcome: params.onOutcome,

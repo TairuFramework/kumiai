@@ -67,16 +67,22 @@ describe('durable app lane hygiene', () => {
     expect(drained).toBe(true)
   })
 
-  test('idle settles after an in-flight cursor save fails during disposal', async () => {
+  test('idle retains a failed cursor save during disposal until its retry succeeds', async () => {
     const hub = new DurableFakeHub()
     const mux = createHubMux({ hub, localDID: 'bob', onReceiveEnded() {} })
     const cursor = createMemoryAppCursorStore()
     const entered = Promise.withResolvers<void>()
     const gate = Promise.withResolvers<void>()
-    cursor.save = async () => {
+    const save = cursor.save
+    let failed = false
+    cursor.save = async (topic, position) => {
       entered.resolve()
       await gate.promise
-      throw new Error('cursor save failed')
+      if (!failed) {
+        failed = true
+        throw new Error('cursor save failed')
+      }
+      await save(topic, position)
     }
     const lane = createAppLane({
       mux,
@@ -113,7 +119,7 @@ describe('durable app lane hygiene', () => {
     gate.resolve()
     await settled
     expect(idle).toBe(true)
-    expect(cursor.stored(topicID)).toBeNull()
+    expect(cursor.stored(topicID)).toBe('000000000001')
   })
 
   test('idle awaits an in-flight cursor save after disposal', async () => {
