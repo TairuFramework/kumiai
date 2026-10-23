@@ -1126,6 +1126,7 @@ export async function createControlCrashHarness(
           adopt: adoptControl,
           appOutbox: groups.ports(key).outbox,
           appPublication: {
+            assertRoot: () => {},
             snapshot: async () => null,
             prepare: async () => {
               throw new Error('This control fixture has no application publisher')

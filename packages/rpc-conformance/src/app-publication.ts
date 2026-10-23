@@ -16,6 +16,7 @@ export type ConformancePreparedAppPublication = {
   snapshot: ConformanceAppPublicationSnapshot
 }
 export type ConformanceAppPublicationPort = {
+  assertRoot(): void
   prepare(
     entry: ConformanceAppOutboxEntry,
     floor: string | null,
@@ -77,6 +78,27 @@ export function testAppPublicationConformance(params: {
   createFixture(): Promise<AppPublicationFixture>
 }): void {
   describe(`App publication conformance — ${params.label}`, () => {
+    test('root preflight does not wait for publication commit or change its accounting', async () => {
+      const f = await params.createFixture()
+      let release = () => {}
+      let pending: Promise<unknown> | undefined
+      try {
+        await f.outbox.put(entry())
+        const gate = f.gateNext('before-commit')
+        release = gate.release
+        pending = f.publication.prepare(entry(), null)
+        await gate.entered
+        const before = f.counts()
+        expect(f.publication.assertRoot()).toBeUndefined()
+        expect(f.counts()).toEqual(before)
+        gate.release()
+        await pending
+      } finally {
+        release()
+        await pending
+        await f.close()
+      }
+    })
     test.each(['version', 'attempt', 'epoch', 'incarnation'] as const)(
       'acquired certification refuses moved expectations without writes (%s)',
       async (kind) => {

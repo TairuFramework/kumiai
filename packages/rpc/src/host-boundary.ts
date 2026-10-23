@@ -34,6 +34,7 @@ type HostMembers<TValue extends object, TCore extends keyof TValue = never> = {
 }
 
 export const appPublicationHostMembers = {
+  assertRoot: 'host',
   prepare: 'host',
   snapshot: 'host',
 } as const satisfies HostMembers<AppPublicationPort>

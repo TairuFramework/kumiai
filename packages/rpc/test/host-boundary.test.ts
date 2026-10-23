@@ -758,6 +758,7 @@ test('application preparation participates in host drain and disposal fencing', 
   const pause = Promise.withResolvers<never>()
   const host = wrapPeerHost(boundary, {
     appPublication: {
+      assertRoot: () => {},
       prepare: async () => await pause.promise,
       snapshot: async () => null,
     },
@@ -770,6 +771,7 @@ test('application preparation participates in host drain and disposal fencing', 
   })
   await Promise.resolve()
   expect(finished).toBe(false)
+  expect(() => host.appPublication.assertRoot()).toThrow(PeerDisposedError)
   expect(() => host.appPublication.snapshot()).toThrow(PeerDisposedError)
   pause.reject(new Error('Host preparation ended'))
   expect(await pending).toMatchObject({ message: 'Host preparation ended' })

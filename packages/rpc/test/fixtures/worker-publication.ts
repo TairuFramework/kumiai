@@ -25,6 +25,7 @@ export function createWorkerPublication(params: {
   })
   Object.assign(key, bindMemoryOutbox(params.outbox, snapshot) ?? key)
   return {
+    assertRoot: () => {},
     snapshot: async () => snapshot(),
     async prepare(entry, floor) {
       if ((await params.outbox.loadSettlement(entry.seq)) !== null)

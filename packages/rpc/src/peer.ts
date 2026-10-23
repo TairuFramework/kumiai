@@ -5798,7 +5798,7 @@ export function createGroupPeerWithControlWalk<
     return async (...args) => {
       if (disposed) return await fn(...args)
       // Check ownership synchronously, before any continuation can join the commit tail.
-      await params.appPublication?.snapshot(Object.keys(protocols)[0] ?? '')
+      params.appPublication?.assertRoot()
       return await fn(...args)
     }
   }

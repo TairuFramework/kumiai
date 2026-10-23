@@ -28,6 +28,7 @@ import { expect, type MockInstance, test, vi } from 'vitest'
 
 import { createRegistryAppPublication } from '../../../packages/mls-rpc/src/app-publication.js'
 import { createRegistryCheckpointService } from '../../../packages/mls-rpc/src/checkpoint.js'
+import { entryCapability } from '../../../packages/mls-rpc/src/entry-capability.js'
 import * as api from '../../../packages/mls-rpc/src/index.js'
 import { decodeStoredValue } from '../../../packages/mls-rpc/src/persistence-codec.js'
 import { recoveryTrustFor } from '../../../packages/mls-rpc/src/registry/trust.js'
@@ -268,6 +269,8 @@ async function liveOwner(
         return access
       }
       const notificationAccess = options.recoveryOnly ? null : await opened()
+      const capability = entryCapability(fixture.device.groups)
+      if (capability === null) throw new Error('Missing registry capability')
       const access: api.RegistryHandleAccess = {
         get key() {
           return current
@@ -288,6 +291,7 @@ async function liveOwner(
         mutate: async (fn, write) => (await opened()).mutate(fn, write),
         replace: async (next, write, prepare) => (await opened()).replace(next, write, prepare),
         adopt: async (next, expected, write) => (await opened()).adopt(next, expected, write),
+        assertPublicationEntry: () => capability.assertRoot(),
         preparePublication: async (entry, floor) =>
           (await opened()).preparePublication(entry, floor),
         publicationSnapshot: async (protocol) => (await opened()).publicationSnapshot(protocol),

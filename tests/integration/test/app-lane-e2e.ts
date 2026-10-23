@@ -1136,6 +1136,7 @@ export function createHostApplicationPorts(access: HandleAccess): {
   return {
     appOutbox,
     appPublication: {
+      assertRoot: () => {},
       snapshot,
       async prepare(input, floor) {
         const entry = structuredClone(input)

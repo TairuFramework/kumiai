@@ -13,6 +13,7 @@ import { createGroupMLS } from '@kumiai/mls-rpc'
 import {
   asLogPosition,
   commitTopic,
+  DeliveredEntryCopyError,
   decodeCommitFrame,
   decodeHandshakeFrame,
   deliverObligations,
@@ -363,9 +364,8 @@ test('an authenticated foreign refusal still forbids identical saved retry', asy
 })
 
 test.each(['tag', 'reference', 'version'] as const)(
-  'a classified own named-entry %s failure still forbids identical retry',
+  'a classified own named-entry %s failure preserves the build for identical retry',
   async (fault) => {
-    // r28h retains the failed delivered named-entry copy prohibition.
     const f = await firstValidRunner()
     try {
       const frame = decodeCommitFrame(decodeHandshakeFrame(f.slot.payload).payload)
@@ -373,19 +373,33 @@ test.each(['tag', 'reference', 'version'] as const)(
       if (fault === 'tag') blob[blob.length - 1] = (blob[blob.length - 1] ?? 0) ^ 1
       else if (fault === 'version') blob = new Uint8Array([99])
       else blob = (await f.member.crypto.sealEntries(encodeLedgerEntries([]))).sealed
-      await f.append(
+      const prefix = await f.append(
         encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(frame.commit, blob)),
       )
       await f.member.controlWalk.walkCommits()
-      const skipped = (await f.member.control.load()).commitOnce
-      expect(skipped?.skipped).toBe(true)
-      expect(skipped?.retryForbidden).toBe(true)
+      const skipped = await f.member.control.load()
+      expect(skipped.commitOnce).toEqual({ ...f.slot, skipped: true, retryForbidden: false })
+      expect(skipped.cursor?.position).toBe(prefix.sequenceID)
+      expect(skipped.strand).toBeNull()
+      expect(skipped.applied).toEqual([])
+      expect(skipped.outcomes).toEqual([])
+      expect(skipped.welcomes).toEqual([])
+      expect(f.member.handle().epoch).toBe(BigInt(f.slot.epoch))
       const publish = vi.fn(f.deps.publish)
       f.deps.publish = publish
       await stepLiveBuild(f.deps)
-      expect(publish).not.toHaveBeenCalled()
+      expect(publish.mock.calls).toEqual([[f.slot.payload, f.slot.publishID, prefix.sequenceID]])
       expect(f.builds).toHaveBeenCalledTimes(1)
-      expect(f.member.handle().epoch).toBe(BigInt(f.slot.epoch))
+      expect(f.member.handle().state.keySchedule.epochAuthenticator).toEqual(
+        f.candidate().state.keySchedule.epochAuthenticator,
+      )
+      const installed = await f.member.control.load()
+      expect(installed.commitOnce).toBeNull()
+      expect(installed.strand).toBeNull()
+      expect(installed.applied).toMatchObject([{ opID: f.op.id }])
+      expect(installed.outcomes).toMatchObject([{ opID: f.op.id, kind: 'unknown' }])
+      expect(installed.welcomes).toEqual([])
+      expect(f.welcomes).toEqual([])
     } finally {
       await f.close()
     }
@@ -466,7 +480,7 @@ test('classified poison prefix suppresses retry; later own occurrence installs a
   }
 })
 
-test('missing referenced proposal strands the sender and refuses the real receiver', async () => {
+test('missing referenced proposal preserves the sender build for identical retry and refuses the real receiver', async () => {
   const f = await firstValidRunner()
   try {
     const author = f.group.members[1]
@@ -475,24 +489,46 @@ test('missing referenced proposal strands the sender and refuses the real receiv
     const sealedEntries = decodeCommitFrame(
       decodeHandshakeFrame(f.slot.payload).payload,
     ).sealedEntries
-    await f.append(
+    const prefix = await f.append(
       encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(unavailable, sealedEntries)),
     )
-    await f.append(f.slot.payload)
     const before = encodeClientState(f.receiver.handle.state)
-    expect(await f.receiverMLS.processCommit(unavailable, {})).toMatchObject({
-      applied: false,
-      advanced: false,
-      validation: 'unavailable',
-    })
+    const refused = f.receiverMLS.processCommit(unavailable, {})
+    await expect(refused).rejects.toBeInstanceOf(DeliveredEntryCopyError)
+    await expect(refused).rejects.toMatchObject({ cause: { reason: 'missing-proposal' } })
     expect(encodeClientState(f.receiver.handle.state)).toEqual(before)
     await f.member.controlWalk.walkCommits()
     const saved = await f.member.control.load()
-    expect(saved.strand?.reason).toBe('unprocessable-gap')
-    expect(saved.commitOnce?.publishID).toBe(f.slot.publishID)
+    expect(saved.strand).toBeNull()
+    expect(saved.commitOnce).toEqual({ ...f.slot, skipped: true, retryForbidden: false })
+    expect(saved.cursor?.position).toBe(prefix.sequenceID)
     expect(saved.applied).toEqual([])
+    expect(saved.outcomes).toEqual([])
     expect(f.member.handle().epoch).toBe(BigInt(f.slot.epoch))
     expect(saved.welcomes).toEqual([])
+    const publish = vi.fn(f.deps.publish)
+    f.deps.publish = publish
+    await stepLiveBuild(f.deps)
+    expect(publish.mock.calls).toEqual([[f.slot.payload, f.slot.publishID, prefix.sequenceID]])
+    expect(f.builds).toHaveBeenCalledTimes(1)
+    const commit = decodeCommitFrame(decodeHandshakeFrame(f.slot.payload).payload).commit
+    expect(
+      await f.receiverMLS.processCommit(commit, {
+        resolveLedgerEntries: async () => f.slot.bodies,
+      }),
+    ).toMatchObject({ applied: true, advanced: true })
+    expect(f.receiver.handle.state.keySchedule.epochAuthenticator).toEqual(
+      f.candidate().state.keySchedule.epochAuthenticator,
+    )
+    expect(f.member.handle().state.keySchedule.epochAuthenticator).toEqual(
+      f.candidate().state.keySchedule.epochAuthenticator,
+    )
+    const installed = await f.member.control.load()
+    expect(installed.commitOnce).toBeNull()
+    expect(installed.strand).toBeNull()
+    expect(installed.applied).toMatchObject([{ opID: f.op.id }])
+    expect(installed.outcomes).toMatchObject([{ opID: f.op.id, kind: 'unknown' }])
+    expect(installed.welcomes).toEqual([])
     expect(f.welcomes).toEqual([])
   } finally {
     await f.close()
