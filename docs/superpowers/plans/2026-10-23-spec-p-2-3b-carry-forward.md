@@ -2,9 +2,14 @@
 
 Plan 2.3b (leases, `seal`/`receive`, ephemeral, auto-rotation with internal outcomes) complete on `feat/spec-p-phase-2` (range `ce655daf..HEAD`, not pushed). Task 6b redesigned to spec r28g as R1 (codec, published `@kumiai/mls` 0.10.7 via PR #67), R2 `b50b4396`, R3 `ba8e4c2c`, R4 `6946dbca`; main merged at `0815b4ad` and `30c44584` (#68 stale-leaf; r28g imported-reservation user decision). Lanes B/C1 merged `1cf2bbb6`; Tasks 7/8/11 merged `81574138`, `056dcc27`, `3814ae0c`; Task 12 `3b54c7cf`. Final reviews: Opus READY_WITH_MINORS (3 Important, fixed) and blind Codex NOT_READY (I4 fixed; I1-I3 open user decisions); fixes in the commit following `3b54c7cf`. Ephemeral: delete with the other phase-2 plans.
 
-## Open user decisions
+## User decisions (2026-10-23)
 
-Spec r28g vs the threat model (every hub fault degrades to not-delivered; never durable halt, hold, discard or stranding). Code unchanged.
+Spec r28g vs the threat model (every hub fault degrades to not-delivered; never durable halt, hold, discard or stranding).
+- Q1 **resolved** by spec r28h (`645bf02b`): coverage-only skipped builds republish identical saved bytes; retry forbidden only on authenticated evidence; pre-r28h skipped rows stay retry-forbidden.
+- Q2 **deferred to 2.3c** (retirement drain owner): decide whether a hub-caused strand may discard a live build.
+- Q3 **keep the hold**: revoke hold stays until the host abandons or resyncs; surface the uncertain state.
+
+Original findings:
 1. **Codex I1, poison suppresses rotation.** At generation 500 an internal rotation build gets `skipped` from an unreadable occurrence before first handoff; publication, scheduler, expiry and restart all refuse it. No other committer means no send after the hub recovers. Suggested: separate coverage uncertainty from reasons that forbid identical-byte retry (`operations.ts:172`, `peer.ts:1142`, `auto-rotation.ts:203`).
 2. **Codex I2, delivery-failure strand then retirement discard.** Foreign current-epoch commit with an unreadable entry blob strands the cursor while a local Invite build is live; resync retires the source and closes the build `unknown` (candidate and speculative Welcome deleted). D1/D4 allow it (`peer.ts:2376`, `registry/retired.ts:130`).
 3. **Codex I3, withheld revoke holds sends.** A saved revoking build never delivered keeps `revokeHeld` blocking retained sends past deadline, through ack and restart. Intentional r28g (`peer-control-settlement.test.ts:871`); releasing must not imply revocation succeeded.
