@@ -5843,9 +5843,16 @@ export function createGroupPeerWithControlWalk<
           try {
             await logDelivery?.drained()
           } finally {
-            detachOpened?.()
-            settlementBoundary.close()
-            await settlementBoundary.drained(Promise.resolve())
+            appLane.releaseOpened()
+            try {
+              await appLane.idle()
+            } finally {
+              // A disposed peer's opened waiter still observes later storage-only completions.
+              if (openedDrain === undefined) detachOpened?.()
+              else if (detachOpened !== undefined) void openedDrain.then(detachOpened, detachOpened)
+              settlementBoundary.close()
+              await settlementBoundary.drained(Promise.resolve())
+            }
           }
         })
     },

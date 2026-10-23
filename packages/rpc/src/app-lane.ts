@@ -168,7 +168,7 @@ export type AppLane = {
   pendingRecords: () => Array<PendingAppFrame>
   /** Restore durable records before the first retained pull. */
   restore: (records: Array<PendingAppFrame>) => Promise<void>
-  /** Await a snapshot of durable record completions already in flight. */
+  /** Await all retained handlers and durable record completions. */
   idle: () => Promise<void>
   /** Await all restored plaintext handlers and their durable completions. */
   completeOpened: () => Promise<void>
@@ -176,6 +176,8 @@ export type AppLane = {
   stopOpening: () => void
   handoffOpened: () => Promise<void>
   acknowledgeOpened: (id: string) => Promise<void>
+  /** Stop admitting cursor work from cold completion notices. */
+  releaseOpened: () => void
   /** Stop queued retries and prevent new handler calls. */
   dispose: () => void
 }
@@ -255,8 +257,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
   const finishingRecords = new Set<Promise<void>>()
   const deliveringRecords = new Set<Promise<void>>()
   let openedFailure: unknown
-  let openedDrainRequested = false
   let deliveryHandedOff = false
+  let openedReleased = false
   const openedWaiters = new Set<{ resolve(): void; reject(error: unknown): void }>()
   const notifyOpened = (): void => {
     if (
@@ -913,12 +915,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
   }
 
   const scheduleWorker = (name: string, delay = 0): void => {
-    if (
-      (disposed && !openedDrainRequested) ||
-      deliveryHandedOff ||
-      openedFailure !== undefined ||
-      crypto.pending == null
-    )
+    if (disposed || deliveryHandedOff || openedFailure !== undefined || crypto.pending == null)
       return
     let worker = workers.get(name)
     if (worker == null) {
@@ -929,14 +926,14 @@ export function createAppLane(params: AppLaneParams): AppLane {
     if (worker.running || worker.timer != null) return
     worker.delayed = delay > 0
     worker.timer = setTimeout(() => {
-      if ((disposed && !openedDrainRequested) || deliveryHandedOff) return
+      if (disposed || deliveryHandedOff) return
       worker.timer = undefined
       worker.running = true
       worker.requested = false
       void (async () => {
         let failed = false
         try {
-          while ((!disposed || openedDrainRequested) && !deliveryHandedOff) {
+          while (!disposed && !deliveryHandedOff) {
             const record = orderedRecords(name)[0]
             if (
               record == null ||
@@ -944,7 +941,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
               (!openedOnly && (await runAppLane(async () => blockedByEarlierSealed(record))))
             )
               break
-            if ((disposed && !openedDrainRequested) || deliveryHandedOff) break
+            if (disposed || deliveryHandedOff) break
             const delivery = deliverRecord(record)
             deliveringRecords.add(delivery)
             try {
@@ -977,7 +974,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
   }
 
   const retryDelivery = (topicID?: string): void => {
-    if (disposed && !openedDrainRequested) return
+    if (disposed) return
     if (openedOnly) {
       for (const name of new Set(pendingRecords.map((record) => record.frame.protocol)))
         scheduleWorker(name)
@@ -1434,9 +1431,17 @@ export function createAppLane(params: AppLaneParams): AppLane {
     note,
     pendingRecords: () => [...pendingRecords],
     stopOpening,
+    releaseOpened: () => {
+      openedReleased = true
+    },
     acknowledgeOpened: async (id) => {
       const record = pendingRecords.find((record) => record.frame.id === id)
       if (record !== undefined) {
+        if (openedReleased) {
+          pendingRecords.splice(pendingRecords.indexOf(record), 1)
+          notifyOpened()
+          return
+        }
         const finishing = finishRecord(record, true)
         finishingRecords.add(finishing)
         try {
@@ -1451,11 +1456,10 @@ export function createAppLane(params: AppLaneParams): AppLane {
       deliveryHandedOff = true
       stopOpening()
       await runAppLane(async () => {})
-      await Promise.allSettled([...deliveringRecords])
+      // Live claims already hold their protocol serialisation through completion.
       if (openedFailure !== undefined) throw openedFailure
     },
     completeOpened: async () => {
-      openedDrainRequested = true
       stopOpening()
       // An open can have committed plaintext before returning its record to the lane.
       await runAppLane(async () => {})
@@ -1471,7 +1475,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
     },
     idle: async () => {
       if (openedFailure !== undefined) throw openedFailure
-      await Promise.allSettled([...deliveringRecords, ...finishingRecords])
+      while (deliveringRecords.size !== 0 || finishingRecords.size !== 0)
+        await Promise.allSettled([...deliveringRecords, ...finishingRecords])
       if (openedFailure !== undefined) throw openedFailure
     },
     restore: async (records): Promise<void> => {
@@ -1500,10 +1505,9 @@ export function createAppLane(params: AppLaneParams): AppLane {
       if (retryTimer != null) clearTimeout(retryTimer)
       if (continuationTimer != null) clearTimeout(continuationTimer)
       caughtUpTimes.clear()
-      if (!openedDrainRequested)
-        for (const worker of workers.values()) {
-          if (worker.timer != null) clearTimeout(worker.timer)
-        }
+      for (const worker of workers.values()) {
+        if (worker.timer != null) clearTimeout(worker.timer)
+      }
     },
     reset: (): void => {
       const interrupted =

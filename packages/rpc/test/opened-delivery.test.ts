@@ -164,6 +164,64 @@ describe('opened delivery', () => {
     expect(complete).toHaveBeenCalledOnce()
   })
 
+  test('disposal stops callback admission during an opened drain', async () => {
+    const first = Promise.withResolvers<void>()
+    const second = Promise.withResolvers<void>()
+    const entered = Promise.withResolvers<void>()
+    const completing = Promise.withResolvers<void>()
+    const completion = Promise.withResolvers<void>()
+    const crypto = createFakeCrypto({ epoch: 1, localDID: 'bob' })
+    const pending = ['first', 'second'].map((id, index) => ({
+      ...record,
+      frame: { ...record.frame, id, position: String(index + 1) },
+      payload: encodeEventFrame('chat/posted', { text: id }),
+    }))
+    crypto.pending = {
+      list: async () => [...pending],
+      complete: async (id) => {
+        completing.resolve()
+        await completion.promise
+        const index = pending.findIndex((record) => record.frame.id === id)
+        if (index !== -1) pending.splice(index, 1)
+      },
+    }
+    const seen: Array<string> = []
+    const peer = makeMLSPeer(new FakeHub(), 'bob', new Uint8Array(32).fill(88), {
+      crypto,
+      handlers: {
+        'chat/posted': async ({ frame }: { frame?: PendingAppFrame['frame'] }) => {
+          seen.push(frame?.id ?? 'missing')
+          entered.resolve()
+          await (frame?.id === 'first' ? first.promise : second.promise)
+        },
+      },
+    }).peer
+    await entered.promise
+    const drainState = observe(peer.drainOpened())
+    await peer.dispose()
+    const drained = peer.drained()
+    const drainedState = observe(drained)
+    try {
+      first.resolve()
+      await completing.promise
+      expect(drainState()).toBe('pending')
+      expect(drainedState()).toBe('pending')
+      completion.resolve()
+      await vi.waitFor(() => expect(pending[0]?.frame.id).toBe('second'))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(seen).toEqual(['first'])
+      expect(pending.map((record) => record.frame.id)).toEqual(['second'])
+      expect(drainState()).toBe('pending')
+      await drained
+    } finally {
+      first.resolve()
+      second.resolve()
+      completion.resolve()
+      await peer.dispose()
+      await drained
+    }
+  })
+
   test.each(['drainOpened', 'dispose', 'drained'] as const)(
     'handler cannot await its own peer %s after an await',
     async (method) => {

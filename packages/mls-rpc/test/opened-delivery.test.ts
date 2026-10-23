@@ -594,6 +594,108 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
       await env.fixture.close()
     })
 
+    test('disposed peers leave unadmitted records to cold delivery and retain their opened waiter', async () => {
+      const env = await setup(mode, supplied)
+      const records = [env.record('first'), env.record('second', 'chat', 5)]
+      await env.plant(records)
+      const entered = Promise.withResolvers<void>()
+      const first = Promise.withResolvers<void>()
+      const second = Promise.withResolvers<void>()
+      let liveCalls = 0
+      const running = await startLeaseRotationPeer({
+        mode,
+        fixture: env.fixture,
+        key: env.key,
+        outbox: env.fixture.device.groups.ports(env.key).outbox,
+        handler: async () => {
+          liveCalls++
+          entered.resolve()
+          await (liveCalls === 1 ? first.promise : second.promise)
+        },
+      })
+      await entered.promise
+      const peer = running.owner.peer()
+      if (peer === null) throw new Error('Missing peer')
+      let opened = false
+      const drain = peer.drainOpened().then(() => {
+        opened = true
+      })
+      await peer.dispose()
+      const drained = peer.drained()
+      try {
+        expect(opened).toBe(false)
+        first.resolve()
+        await vi.waitFor(async () => expect(await env.pending()).toEqual(records.slice(1)))
+        await drained
+        expect(liveCalls).toBe(1)
+        expect(opened).toBe(false)
+        const cold: Array<PendingAppFrame> = []
+        await env.drain(async (record) => {
+          cold.push(record)
+        })
+        expect(cold).toEqual(records.slice(1))
+        expect(await env.pending()).toEqual([])
+        await vi.waitFor(() => expect(opened).toBe(true), { timeout: 500 })
+        await drain
+        expect(liveCalls).toBe(1)
+      } finally {
+        first.resolve()
+        second.resolve()
+        await drained
+        running.owner.dispose()
+        await running.owner.drained()
+        await env.fixture.close()
+      }
+    })
+
+    test('suspended live delivery does not block another protocol during cold handoff', async () => {
+      const env = await setup(mode, supplied)
+      const records = [env.record('A4'), env.record('A5', 'chat', 5), env.record('B', 'other')]
+      await env.plant(records)
+      const entered = Promise.withResolvers<void>()
+      const release = Promise.withResolvers<void>()
+      let liveCalls = 0
+      const running = await startLeaseRotationPeer({
+        mode,
+        fixture: env.fixture,
+        key: env.key,
+        outbox: env.fixture.device.groups.ports(env.key).outbox,
+        handler: async () => {
+          liveCalls++
+          entered.resolve()
+          await release.promise
+        },
+      })
+      await entered.promise
+      const seen: Array<string> = []
+      let settled = false
+      const drain = env.drain(async (record) => {
+        seen.push(record.frame.id)
+      })
+      void drain.then(() => {
+        settled = true
+      })
+      try {
+        await vi.waitFor(
+          async () => {
+            expect([...seen]).toEqual(['B'])
+            expect(await env.pending()).toEqual(records.slice(0, 2))
+          },
+          { timeout: 500 },
+        )
+        expect(settled).toBe(false)
+        expect(liveCalls).toBe(1)
+      } finally {
+        release.resolve()
+        await drain
+        running.owner.dispose()
+        await running.owner.drained()
+        await env.fixture.close()
+      }
+      expect(seen).toEqual(['B', 'A5'])
+      expect(liveCalls).toBe(1)
+    })
+
     test('failed old anchor blocks newer work in the same protocol only after live handoff', async () => {
       const env = await setup(mode, supplied)
       const records = [env.record('A4'), env.record('A5', 'chat', 5), env.record('B', 'other')]

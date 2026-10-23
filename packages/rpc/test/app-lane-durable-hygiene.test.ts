@@ -35,6 +35,89 @@ function pendingStore() {
 }
 
 describe('durable app lane hygiene', () => {
+  test('idle joins completion work admitted while another handler is suspended', async () => {
+    const hub = new DurableFakeHub()
+    const mux = createHubMux({ hub, localDID: 'bob', onReceiveEnded() {} })
+    const pending = pendingStore()
+    const cursor = createMemoryAppCursorStore()
+    const first = Promise.withResolvers<void>()
+    const entered = Promise.withResolvers<void>()
+    const refused = Promise.withResolvers<void>()
+    const saving = Promise.withResolvers<void>()
+    const saved = Promise.withResolvers<void>()
+    const otherTopic = protocolTopic(anchor.secret, anchor.epoch, 'other')
+    const save = cursor.save
+    cursor.save = async (topic, position) => {
+      if (topic === otherTopic) {
+        saving.resolve()
+        await saved.promise
+      }
+      await save(topic, position)
+    }
+    const lane = createAppLane({
+      mux,
+      crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending }),
+      appliedEpoch: () => 1,
+      localDID: 'bob',
+      protocols: { chat, other: chat },
+      eventHandlers: new Map(),
+      deliverOpened: async (record) => {
+        if (record.frame.protocol === 'chat') {
+          entered.resolve()
+          await first.promise
+          throw new Error('Retain the failed live record')
+        }
+        refused.resolve()
+        throw new Error('Leave this record for cold delivery')
+      },
+      retentionSeconds: 60,
+      appCursorStore: cursor,
+      anchor: () => anchor,
+      groupID: () => 'group',
+    })
+    onTestFinished(async () => {
+      first.resolve()
+      saved.resolve()
+      lane.dispose()
+      await lane.idle()
+      mux.dispose()
+    })
+    const sender = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+    for (const topic of [topicID, otherTopic]) {
+      const payload = await sender.wrap(encodeEventFrame('chat/posted', { text: 'retained' }), {
+        aad: encodeAppAAD({ topicID: topic, intent: 'log' }),
+      })
+      await hub.publish({ topicID: topic, senderDID: 'alice', payload, retain: 'log' })
+    }
+    await lane.deliver()
+    await Promise.all([entered.promise, refused.promise])
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    lane.dispose()
+    let idle = false
+    const drain = lane.idle().then(() => {
+      idle = true
+    })
+    const record = lane.pendingRecords().find((record) => record.frame.protocol === 'other')
+    if (record === undefined) throw new Error('Missing retained record')
+    await pending.complete(record.frame.id)
+    const acknowledged = lane.acknowledgeOpened(record.frame.id)
+    await saving.promise
+    first.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(idle).toBe(false)
+    saved.resolve()
+    await Promise.all([drain, acknowledged])
+    expect(cursor.stored(otherTopic)).toBe(record.frame.position)
+    expect([...pending.rows.values()].map((record) => record.frame.protocol)).toEqual(['chat'])
+    lane.releaseOpened()
+    const retained = lane.pendingRecords()[0]
+    if (retained === undefined) throw new Error('Missing failed live record')
+    await pending.complete(retained.frame.id)
+    await lane.acknowledgeOpened(retained.frame.id)
+    expect(lane.pendingRecords()).toEqual([])
+    expect(cursor.stored(topicID)).toBeNull()
+  })
+
   test('drained awaits app lane idle after the host boundary drains', async () => {
     const gate = Promise.withResolvers<void>()
     const create = appLaneModule.createAppLane
