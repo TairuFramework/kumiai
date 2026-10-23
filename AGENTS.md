@@ -12,7 +12,7 @@ The MLS / group stack: `mls` (E2EE identity + membership crypto core), `broadcas
 subsystem), `rpc` (group RPC), `mls-rpc` (the real implementation of rpc's consumer
 ports over `mls`), `mls-hub` (key-package provisioning between `mls` and a hub), and the contract
 suites `rpc-conformance` and `hub-conformance`
-(every implementation AND every double must pass them). Young and tightly coupled — twelve
+(every implementation AND every double must pass them). Young and tightly coupled — fourteen
 packages share one version band (same minor pre-1.0, same major from 1.0); raising it is a group
 act, but a patch release within the band is not.
 

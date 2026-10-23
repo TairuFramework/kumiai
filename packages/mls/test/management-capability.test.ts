@@ -4,6 +4,7 @@ import { createSigningIdentity } from '@kokuin/token'
 import { describe, expect, test, vi } from 'vitest'
 
 import { verifyManagementCapability } from '../src/authentication.js'
+import { asControllerLog } from '../src/controller-log.js'
 import { buildManagementCapability } from './fixtures/management-capability.js'
 
 const manager = createSigningIdentity(new Uint8Array(32).fill(51))
@@ -100,7 +101,7 @@ test('rejects a management grant naming another subject', async () => {
   const controller = createControllerIdentity({
     seed: new Uint8Array(32).fill(31),
     profile: 0,
-    log: f.prefix,
+    log: asControllerLog(f.prefix),
   })
   const token = await controller.signToken({
     sub: manager.id,

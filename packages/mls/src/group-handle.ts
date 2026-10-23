@@ -727,6 +727,7 @@ export class GroupHandle {
   async applyLedgerEntries(tokens: Array<string>): Promise<Array<VerifiedLedgerEntry>> {
     return mutexFor(this).run(async () => {
       const appended: Array<VerifiedLedgerEntry> = []
+      const candidates: Array<LedgerLogEntry> = []
       const memo = VERIFIED_LEDGER_TOKENS.get(tokens)
       const nextMemo: Array<HeldLedgerEntry | undefined> = []
       for (const [index, token] of tokens.entries()) {
@@ -745,19 +746,24 @@ export class GroupHandle {
         if (verified == null || verified.entry.groupID !== this.groupID) continue
         const entryID = ledgerEntryDigest(token)
         const entry = ledgerLogEntry(entryID, token, verified)
-        this.#ledger.push(entry)
+        candidates.push(entry)
         nextMemo[index] = VERIFIED_LEDGER_ENTRIES.get(verified)
-        this.#entryBodies.set(entryID, { token, verified })
         appended.push(verified)
       }
-      VERIFIED_LEDGER_TOKENS.set(tokens, nextMemo)
-      const folded = foldLedgerControl(this.#ledger, this.#anchor, this.groupID)
-      this.#roster = folded.roster
-      this.#registry = registryWithTreeBindings(
+      const ledger = [...this.#ledger, ...candidates]
+      const folded = foldLedgerControl(ledger, this.#anchor, this.groupID)
+      const registry = registryWithTreeBindings(
         folded.registry,
         this.#state.ratchetTree,
         this.#anchor,
       )
+      this.#ledger = ledger
+      for (const { entryID, token, verified } of candidates) {
+        this.#entryBodies.set(entryID, { token, verified })
+      }
+      VERIFIED_LEDGER_TOKENS.set(tokens, nextMemo)
+      this.#roster = folded.roster
+      this.#registry = registry
       this.#admission = this.#computeAdmission()
       if (this.#pendingControlEvents != null) {
         this.emitControlEvents(appended.filter(({ entry }) => entry.type === DEVICE_ENTRY_TYPE))

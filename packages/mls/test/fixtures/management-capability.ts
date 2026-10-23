@@ -7,6 +7,8 @@ import {
 } from '@kokuin/controller'
 import { stringifyToken } from '@kokuin/token'
 
+import { asControllerLog } from '../../src/controller-log.js'
+
 export type ManagementCapability = {
   /** Stringified capability token to place in a kumiai.device entry's value.capability. */
   capability: string
@@ -35,7 +37,11 @@ export async function buildManagementCapability(
   const profile = options.profile ?? 0
   const inception = createInception(controllerSeed, profile)
   const controllerID = didFromInception(inception.event)
-  const controller = createControllerIdentity({ seed: controllerSeed, profile, log: [inception] })
+  const controller = createControllerIdentity({
+    seed: controllerSeed,
+    profile,
+    log: asControllerLog([inception]),
+  })
 
   const token = await createCapability(controller, {
     sub: controllerID,

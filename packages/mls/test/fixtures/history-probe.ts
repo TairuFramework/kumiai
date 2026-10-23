@@ -2,17 +2,22 @@ import {
   createControllerIdentity,
   createInception,
   createReset,
-  createRevoke,
   createRotate,
   didFromInception,
-  foldLog,
   type SignedEvent,
 } from '@kokuin/controller'
-import { createIdentity, encodeMultibase, now, stringifyToken } from '@kokuin/token'
+import {
+  createFullIdentity,
+  createIdentity,
+  encodeMultibase,
+  now,
+  stringifyToken,
+} from '@kokuin/token'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { createCommit, defaultProposalTypes, encode, mlsMessageEncoder } from 'ts-mls'
 
 import { mintLeafCapability, mintTrustedGrant } from '../../src/capability.js'
+import { asControllerLog, foldChain } from '../../src/controller-log.js'
 import { encodeControlEnvelope } from '../../src/envelope.js'
 import { createGroup } from '../../src/group-create.js'
 import { createKeyPackageBundle } from '../../src/group-credential.js'
@@ -22,6 +27,7 @@ import { processWelcome } from '../../src/group-welcome.js'
 import { buildLedgerHeadExtension, computeHead } from '../../src/head.js'
 import { ledgerEntryDigest, signLedgerEntry } from '../../src/ledger.js'
 import { createRecoveryRequest, sealGroupInfo } from '../../src/recovery.js'
+import { revokeChain, snapshotForChain } from './controller-chain.js'
 
 export function printTable(rows: Array<Record<string, unknown>>) {
   if (process.env.KUMIAI_PROBE_REPORT !== '1') return
@@ -48,34 +54,16 @@ export async function peer(byte: number) {
 
 export function buildLog(count: number, target: string, mixed = false) {
   const log: Array<SignedEvent> = [inception]
-  let keySeq = 0
+  // Carry the generated snapshot to avoid folding every prefix in this large measurement fixture.
+  let snapshot = snapshotForChain(controllerID, log)
   for (let i = 1; i < count; i++) {
     const prior = log.at(-1)
     if (prior == null) throw new Error('Missing prior')
-    const position = { gen: 0, seq: keySeq }
     if (mixed && i % 4 === 0) {
-      log.push(
-        createRevoke({
-          seed,
-          profile: 0,
-          did: controllerID,
-          prior: prior.event,
-          target,
-          keyPosition: position,
-        }),
-      )
-    } else {
-      log.push(
-        createRotate({
-          seed,
-          profile: 0,
-          did: controllerID,
-          prior: prior.event,
-          options: { keyPosition: position },
-        }),
-      )
-      keySeq++
+      const subject = createFullIdentity(sha256(jsonBytes([target, i]))).id
+      snapshot = { ...snapshot, deny: [...snapshot.deny, subject] }
     }
+    log.push(createRotate({ seed, profile: 0, did: controllerID, prior: prior.event, snapshot }))
   }
   return log
 }
@@ -85,7 +73,7 @@ export async function logMeasurements() {
   const rows = []
   for (const mixed of [false, true]) {
     const log = buildLog(1000, target, mixed)
-    const folded = foldLog(controllerID, log)
+    const folded = foldChain(controllerID, log)
     if (!folded.ok) throw new Error(folded.reason)
     for (const count of [10, 50, 100, 256]) {
       const bytes = historyBytes(log.slice(0, count))
@@ -171,9 +159,9 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
   for (const event of log) sums.push((sums.at(-1) ?? 0) + jsonBytes(event).length)
   const groupID = 'history-probe'
   const requestID = 'e871e04b-e0dc-4a4d-a3ae-c050360d5c22'
-  const signer = createControllerIdentity({ seed, profile: 0, log: [inception] })
+  const signer = createControllerIdentity({ seed, profile: 0, log: asControllerLog([inception]) })
   const binding = async (identity: typeof alice, prefix: Array<SignedEvent>) => {
-    const authority = createControllerIdentity({ seed, profile: 0, log: prefix })
+    const authority = createControllerIdentity({ seed, profile: 0, log: asControllerLog(prefix) })
     return {
       id: controllerID,
       prefix,
@@ -237,11 +225,12 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
       if (prior == null) throw new Error('Missing rotation prior')
       const gap = (393216 - 2 * historyBytes(prefix)) / 2
       prefix[count - 1] = createRotate({
-        seed,
+        seed: seed,
         profile: 0,
         did: controllerID,
         prior: prior.event,
-        options: { keyPosition: { gen: 0, seq: count - 2 }, seal: 's'.repeat(gap - 7) },
+        snapshot: snapshotForChain(controllerID, prefix.slice(0, -1)),
+        seal: 's'.repeat(gap - 7),
       })
     }
     const { group } = await createGroup(alice, groupID, {
@@ -257,13 +246,12 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
       if (prior == null) throw new Error('Missing proof prior')
       proof = [
         ...rotations,
-        createRevoke({
-          seed,
+        revokeChain({
+          seed: seed,
           profile: 0,
           did: controllerID,
-          prior: prior.event,
-          target: target.id,
-          keyPosition: { gen: 0, seq: count - 1 },
+          chain: rotations,
+          subject: target.id,
         }),
       ]
       if (exactHorizon) {
@@ -273,25 +261,22 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
         let matched = false
         for (let offset = -2; offset <= 2; offset++) {
           const rotation = createRotate({
-            seed,
+            seed: seed,
             profile: 0,
             did: controllerID,
             prior: priorRotate.event,
-            options: {
-              keyPosition: { gen: 0, seq: count - 2 },
-              seal: 's'.repeat(sealSize + offset),
-            },
+            snapshot: snapshotForChain(controllerID, rotations.slice(0, -1)),
+            seal: 's'.repeat(sealSize + offset),
           })
           proof = [
             ...rotations.slice(0, -1),
             rotation,
-            createRevoke({
-              seed,
+            revokeChain({
+              seed: seed,
               profile: 0,
               did: controllerID,
-              prior: rotation.event,
-              target: target.id,
-              keyPosition: { gen: 0, seq: count - 1 },
+              chain: [...rotations.slice(0, -1), rotation],
+              subject: target.id,
             }),
           ]
           if (2 * historyBytes(prefix) + historyBytes(proof) === 393216) {

@@ -1,4 +1,3 @@
-import { foldLog } from '@kokuin/controller'
 import { normalizeDID, type OwnIdentity } from '@kokuin/token'
 import {
   type ClientState,
@@ -21,6 +20,7 @@ import {
   MAX_TRUSTED_GRANT_LIFETIME,
   readCapability,
 } from './capability.js'
+import { foldChain } from './controller-log.js'
 import { type ControllerBinding, parseMLSCredentialIdentity } from './credential.js'
 import { LeafBindingError, LeafLapsedError, RevokeProofError } from './errors.js'
 import { assertBindingAuthorTime, makeMLSCredential } from './group-credential.js'
@@ -209,7 +209,7 @@ function checkBinding(
     !(welcome && isEvidencedChild(group, leaf, denied))
   )
     throw new LeafBindingError('denied-issuer')
-  const folded = foldLog(binding.id, binding.prefix)
+  const folded = foldChain(binding.id, binding.prefix)
   if (!folded.ok) throw new LeafBindingError('controller-mismatch')
   if (
     controller != null &&
@@ -313,7 +313,7 @@ function checkSurvivors(
     )
       throw new LeafBindingError('denied-issuer')
     if (controller != null) {
-      const folded = foldLog(binding.id, binding.prefix)
+      const folded = foldChain(binding.id, binding.prefix)
       if (normalizeDID(binding.id) !== normalizeDID(controller) || !folded.ok)
         throw new LeafBindingError('controller-mismatch')
       if (

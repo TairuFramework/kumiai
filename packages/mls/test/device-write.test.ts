@@ -1,4 +1,3 @@
-import { createRevoke } from '@kokuin/controller'
 import { createFullIdentity, normalizeDID, type OwnIdentity } from '@kokuin/token'
 import {
   createCommit,
@@ -22,6 +21,7 @@ import { buildLedgerHeadExtension, extendHead, readLedgerHead } from '../src/hea
 import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
 import { controllerOf, DEVICE_ENTRY_TYPE } from '../src/registry.js'
 import { buildBoundLeaf } from './fixtures/bound-leaf.js'
+import { revokeChain } from './fixtures/controller-chain.js'
 import {
   buildBoundKeyPackageBundle,
   joinBoundDevice,
@@ -58,13 +58,12 @@ test('discarding a trusted-issuer revoke leaves live authentication and subscrib
   })
   const log = [
     inception,
-    createRevoke({
+    revokeChain({
       seed: controllerSeed,
       profile: 0,
       did: controllerID,
-      prior: inception.event,
-      target: issuer.id,
-      keyPosition: { gen: 0, seq: 0 },
+      chain: [inception],
+      subject: issuer.id,
     }),
   ]
   const discarded = await revokeWithProof(group, { subject: issuer.id, log })

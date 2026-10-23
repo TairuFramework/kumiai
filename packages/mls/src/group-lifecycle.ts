@@ -1,9 +1,4 @@
-import {
-  didFromInception,
-  foldLog,
-  type InceptionEvent,
-  type SignedEvent,
-} from '@kokuin/controller'
+import { didFromInception, type InceptionEvent, type SignedEvent } from '@kokuin/controller'
 import { createSigningIdentityForDID, type DIDString, normalizeDID } from '@kokuin/token'
 import {
   type ClientState,
@@ -16,6 +11,7 @@ import {
 } from 'ts-mls'
 
 import { readCapability } from './capability.js'
+import { foldChain, isDetachedFoldReason, revokesSubject } from './controller-log.js'
 import { type ControllerBinding, parseMLSCredentialIdentity } from './credential.js'
 import { LeafBindingError, RevokeProofError, type RevokeProofReason } from './errors.js'
 import { commitWithEntries } from './group-commit.js'
@@ -249,16 +245,16 @@ function proofFor(params: ProofForParams): Array<SignedEvent> {
   }
   if (log.some(({ event }) => event.t !== 'icp' && event.i !== controller))
     throw new RevokeProofError('wrong-controller')
-  const folded = foldLog(controller, log)
+  const folded = foldChain(controller, log)
   if (!folded.ok) {
-    const detached = /sequence|digest|prior|inception must/.test(folded.reason)
+    const detached = isDetachedFoldReason(folded.reason)
     throw new RevokeProofError(detached ? 'detached' : 'not-authority-signed')
   }
   // Drop events that leave the folded state unchanged.
   const advancing = log.filter(
     (_, index) => index === 0 || folded.states[index]?.digest !== folded.states[index - 1]?.digest,
   )
-  const canonical = foldLog(controller, advancing)
+  const canonical = foldChain(controller, advancing)
   if (!canonical.ok) throw new RevokeProofError('not-authority-signed')
   let resetIndex = -1
   for (let index = 1; index < advancing.length; index++) {
@@ -271,19 +267,16 @@ function proofFor(params: ProofForParams): Array<SignedEvent> {
     if (resetIndex < 0) throw new RevokeProofError('no-rev')
     return [advancing[0] as SignedEvent, ...advancing.slice(resetIndex)]
   }
-  const recordedFold = foldLog(controller, recorded)
+  const recordedFold = foldChain(controller, recorded)
   const recordedHead = recordedFold.ok ? recordedFold.states.at(-1) : undefined
   const generation = canonical.states.at(-1)?.gen ?? 0
   if (recorded.length > 0 && generation > (recordedHead?.gen ?? floor))
     throw new RevokeProofError('needs-reset')
   const start = recorded.length === 0 ? Math.max(1, resetIndex) : 1
   let end = advancing.findIndex(
-    ({ event }, index) =>
+    (_, index) =>
       index >= start &&
-      event.t === 'rev' &&
-      'x' in event &&
-      typeof event.x === 'string' &&
-      normalizeDID(event.x) === subject &&
+      revokesSubject(advancing, canonical.states, index, subject) &&
       (canonical.states[index]?.gen ?? 0) >= floor,
   )
   if (end < 0) {
@@ -347,7 +340,7 @@ export async function revokeWithProof(
         const binding = group.bindingOfDID(member.id)
         const payload =
           binding?.capability == null ? undefined : readCapability(binding.capability).payload
-        const folded = binding?.prefix == null ? undefined : foldLog(controller, binding.prefix)
+        const folded = binding?.prefix == null ? undefined : foldChain(controller, binding.prefix)
         return {
           ...member,
           issuer: payload?.cap == null ? undefined : normalizeDID(payload.iss),

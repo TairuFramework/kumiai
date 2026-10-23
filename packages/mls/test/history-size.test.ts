@@ -1,13 +1,15 @@
 // Set KUMIAI_PROBE_REPORT=1 to print measurement tables.
-import { createReset, createRevoke, createRotate } from '@kokuin/controller'
+import { createReset, createRotate } from '@kokuin/controller'
 import { expect, test } from 'vitest'
 
+import { foldChain } from '../src/controller-log.js'
 import { createGroup } from '../src/group-create.js'
 import * as history from '../src/history.js'
 import { HISTORY_HORIZON } from '../src/history.js'
 import type { VerifiedLedgerEntry } from '../src/ledger.js'
 import { signLedgerEntry, verifyLedgerEntry } from '../src/ledger.js'
-import { historyBytes, logMeasurements } from './fixtures/history-probe.js'
+import { revokeChain, snapshotForChain } from './fixtures/controller-chain.js'
+import { buildLog, historyBytes, logMeasurements } from './fixtures/history-probe.js'
 import {
   addMember,
   agent,
@@ -18,6 +20,15 @@ import {
   inception,
   lifecycleGroup,
 } from './fixtures/lifecycle-ledger.js'
+
+test('mixed history gains a distinct denial every fourth event', () => {
+  const folded = foldChain(controllerID, buildLog(13, agent(71).id, true))
+  expect(folded.ok).toBe(true)
+  if (!folded.ok) throw new Error(folded.reason)
+  expect(folded.states.map((state) => state.deny.size)).toEqual([
+    0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3,
+  ])
+})
 
 test('measures signed controller history and repeated copies', async () => {
   const rows = await logMeasurements()
@@ -31,19 +42,19 @@ test('historyCountsUtf8AndEveryCopy', async () => {
     profile: 0,
     did: controllerID,
     prior: inception.event,
-    options: { seal: '組合 café 🚀' },
+    snapshot: snapshotForChain(controllerID, [inception]),
+    seal: '組合 café 🚀',
   })
   const prefix = [inception, rotation]
   const alice = agent(41)
   const initial = await lifecycleGroup(prefix)
   const added = await addMember(initial.group, agent(51), await bindingFor(agent(51), prefix))
-  const revoke = createRevoke({
+  const revoke = revokeChain({
     seed: controllerSeed,
     profile: 0,
     did: controllerID,
-    prior: rotation.event,
-    target: agent(61).id,
-    keyPosition: { gen: 0, seq: 1 },
+    chain: [inception, rotation],
+    subject: agent(61).id,
   })
   const oldProof = [...prefix, revoke]
   const resetPrefix = [inception, createReset(controllerSeed, 0, 1)]

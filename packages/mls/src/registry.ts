@@ -1,7 +1,8 @@
-import { foldLog, type SignedEvent } from '@kokuin/controller'
+import type { SignedEvent } from '@kokuin/controller'
 import { normalizeDID } from '@kokuin/token'
 
 import type { GroupAnchor } from './anchor.js'
+import { foldChain } from './controller-log.js'
 import type { MLSCredentialIdentity } from './credential.js'
 import type { FoldDrop, FoldInput } from './fold.js'
 import type { GroupHandle } from './group-handle.js'
@@ -269,7 +270,7 @@ export function mayReadmitResetDevice(
     normalizeDID(binding.id) !== record.controller
   )
     return false
-  const folded = foldLog(binding.id, binding.prefix)
+  const folded = foldChain(binding.id, binding.prefix)
   return (
     folded.ok &&
     (folded.states.at(-1)?.gen ?? 0) >= (registry.controllers.get(record.controller)?.genFloor ?? 0)

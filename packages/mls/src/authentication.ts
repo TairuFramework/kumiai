@@ -5,7 +5,7 @@ import {
   hasPermission,
   type Permission,
 } from '@kokuin/capability'
-import { foldLog, type SignedEvent } from '@kokuin/controller'
+import type { SignedEvent } from '@kokuin/controller'
 import {
   decodeMultibase,
   decodePeer4,
@@ -30,6 +30,7 @@ import {
   MLS_LEAF_RES,
   readCapability,
 } from './capability.js'
+import { foldChain } from './controller-log.js'
 import { type MLSCredentialIdentity, parseMLSCredentialIdentity } from './credential.js'
 import { createEmbeddedControllerResolver } from './embedded-resolver.js'
 import { LeafBindingError } from './errors.js'
@@ -39,7 +40,7 @@ export { MLS_LEAF_ACT, MLS_LEAF_RES } from './capability.js'
 
 /** The action a management capability must grant to mutate a profile's device registry. */
 export const MLS_DEVICES_ACT = 'manage'
-/** The resource half — kumiai-namespaced, group-independent, per the kokuin management tier. */
+/** The resource half — kumiai-namespaced and group-independent. */
 export const MLS_DEVICES_RES = 'kumiai/devices'
 
 const EMPTY_DENY: ReadonlySet<string> = new Set()
@@ -142,7 +143,7 @@ type VerifyPinnedCapabilityParams = {
 async function verifyPinnedCapability(params: VerifyPinnedCapabilityParams): Promise<void> {
   if (
     !params.controllerID.startsWith('did:kokuin:') ||
-    !foldLog(params.controllerID, params.prefix).ok
+    !foldChain(params.controllerID, params.prefix).ok
   ) {
     throw new LeafBindingError('controller-mismatch')
   }
@@ -307,7 +308,7 @@ export async function verifyLeafCredential(
     : denied
   if (parsed.controller == null) return
   if (registry != null) {
-    const folded = foldLog(parsed.controller.id, parsed.controller.prefix)
+    const folded = foldChain(parsed.controller.id, parsed.controller.prefix)
     if (!folded.ok) throw new LeafBindingError('controller-mismatch')
     if (
       (folded.states.at(-1)?.gen ?? 0) <

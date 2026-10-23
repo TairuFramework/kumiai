@@ -1,17 +1,13 @@
 import { audienceConfirmation, now } from '@kokuin/capability'
-import {
-  createReset,
-  createRevoke,
-  createRevokeWithKey,
-  createRotate,
-  type SignedEvent,
-} from '@kokuin/controller'
+import { canonicalBytes, createReset, createRotate, type SignedEvent } from '@kokuin/controller'
 import {
   createSigningIdentity,
   createUnsignedToken,
   normalizeDID,
   stringifyToken,
 } from '@kokuin/token'
+import { ed25519 } from '@noble/curves/ed25519.js'
+import { toB64U } from '@sozai/codec'
 import { describe, expect, test } from 'vitest'
 
 import { MLS_DEVICES_ACT, MLS_DEVICES_RES } from '../src/authentication.js'
@@ -30,6 +26,7 @@ import { signLedgerEntry } from '../src/ledger.js'
 import { DEVICE_ENTRY_TYPE, type DeviceValue } from '../src/registry.js'
 import { ROLE_ENTRY_TYPE } from '../src/roster.js'
 import { buildBoundLeaf } from './fixtures/bound-leaf.js'
+import { revokeChain, snapshotForChain } from './fixtures/controller-chain.js'
 import {
   buildBoundKeyPackageBundle,
   joinBoundDevice,
@@ -268,7 +265,8 @@ describe('attack: history hidden in advisory or clock entries', () => {
     profile: 0,
     did: controllerID,
     prior: inception.event,
-    options: { seal: 'a'.repeat(393216) },
+    snapshot: snapshotForChain(controllerID, [inception]),
+    seal: 'a'.repeat(393216),
   })
   const fields = [
     { proof: [inception, oversized] },
@@ -337,19 +335,8 @@ describe('attack: history hidden in advisory or clock entries', () => {
   )
 })
 
-function authorityRevoke(
-  subject: string,
-  prior: SignedEvent['event'] = inception.event,
-  keyPosition = { gen: 0, seq: 0 },
-) {
-  return createRevoke({
-    seed: controllerSeed,
-    profile: 0,
-    did: controllerID,
-    prior,
-    target: subject,
-    keyPosition,
-  })
+function authorityRevoke(subject: string, chain: Array<SignedEvent> = [inception]) {
+  return revokeChain({ seed: controllerSeed, profile: 0, did: controllerID, chain, subject })
 }
 
 describe('attack: invalid lifecycle proofs keep their classifications', () => {
@@ -361,7 +348,8 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
     profile: 0,
     did: controllerID,
     prior: inception.event,
-    options: { seal: 'a'.repeat(393216) },
+    snapshot: snapshotForChain(controllerID, [inception]),
+    seal: 'a'.repeat(393216),
   })
   const rev = authorityRevoke(target)
   const skipped = {
@@ -369,19 +357,11 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
     event: { ...rev.event, t: 'future', crit: false },
     sigs: [],
   } as unknown as SignedEvent
-  const foreign = createRevokeWithKey({
-    privateKey: new Uint8Array(32).fill(61),
-    did: controllerID,
-    prior: inception.event,
-    target,
-  })
-  const delegated = createRevokeWithKey({
-    privateKey: new Uint8Array(32).fill(61),
-    did: controllerID,
-    prior: inception.event,
-    target,
-    cap: 'forged-grant',
-  })
+  const foreign = {
+    ...rev,
+    sigs: [toB64U(ed25519.sign(canonicalBytes(rev.event), new Uint8Array(32).fill(61)))],
+  }
+  const delegated = { ...rev, event: { ...rev.event, cap: 'forged-grant' } }
   const cases: Array<{
     attack: string
     reason: RevokeProofReason
@@ -428,7 +408,7 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
     {
       attack: 'over-horizon proof',
       reason: 'too-large',
-      proof: [inception, oversized, authorityRevoke(target, oversized.event, { gen: 0, seq: 1 })],
+      proof: [inception, oversized, authorityRevoke(target, [inception, oversized])],
     },
     {
       attack: 'forged effects',

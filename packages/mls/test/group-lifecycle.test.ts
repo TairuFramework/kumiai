@@ -2,9 +2,7 @@ import {
   createControllerIdentity,
   createInception,
   createReset,
-  createRevoke,
   createRotate,
-  foldLog,
   type SignedEvent,
 } from '@kokuin/controller'
 import { createIdentity, type OwnIdentity } from '@kokuin/token'
@@ -12,6 +10,7 @@ import { createProposal, defaultProposalTypes, encode, mlsMessageEncoder, nodeTy
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { mintTrustedGrant } from '../src/capability.js'
+import { asControllerLog, foldChain } from '../src/controller-log.js'
 import { parseMLSCredentialIdentity } from '../src/credential.js'
 import { commitWithEntries } from '../src/group-commit.js'
 import { createGroup } from '../src/group-create.js'
@@ -20,6 +19,7 @@ import { removeLapsedLeaves, renewLeaf, revokeWithProof } from '../src/group-lif
 import { HISTORY_HORIZON, historySize } from '../src/history.js'
 import { isLapsed, leafAt, treeTime } from '../src/lifecycle.js'
 import { revocationOf } from '../src/registry.js'
+import { revokeChain, rotateChain, snapshotForChain } from './fixtures/controller-chain.js'
 import { controllerSeed } from './fixtures/lifecycle-ledger.js'
 import {
   agent,
@@ -36,33 +36,23 @@ import {
   withoutHolderEvidence,
 } from './fixtures/lifecycle-pipeline.js'
 
-function revoke(log: Array<SignedEvent>, subject: string) {
-  const folded = foldLog(controllerID, log)
-  const head = folded.ok ? folded.states.at(-1) : undefined
-  const prior = log.at(-1)
-  if (head == null || prior == null) throw new Error('Missing head')
-  return createRevoke({
-    seed: controllerSeed,
-    profile: 0,
-    did: controllerID,
-    prior: prior.event,
-    target: subject,
-    keyPosition: { gen: head.keyGen, seq: head.keySeq },
-  })
+function revoke(log: Array<SignedEvent>, subject: string): SignedEvent {
+  return revokeChain({ seed: controllerSeed, profile: 0, did: controllerID, chain: log, subject })
 }
 
 function rotation(log: Array<SignedEvent>, bytes?: number) {
-  const folded = foldLog(controllerID, log)
+  const folded = foldChain(controllerID, log)
   const head = folded.ok ? folded.states.at(-1) : undefined
   const prior = log.at(-1)
   if (head == null || prior == null) throw new Error('Missing head')
-  const options = { keyPosition: { gen: head.keyGen, seq: head.keySeq }, seal: '' }
+  const options = { seal: '' }
   let event = createRotate({
     seed: controllerSeed,
     profile: 0,
     did: controllerID,
     prior: prior.event,
-    options,
+    snapshot: snapshotForChain(controllerID, log),
+    seal: options.seal,
   })
   if (bytes != null) {
     options.seal = 's'.repeat(bytes - new TextEncoder().encode(JSON.stringify(event)).length)
@@ -71,7 +61,8 @@ function rotation(log: Array<SignedEvent>, bytes?: number) {
       profile: 0,
       did: controllerID,
       prior: prior.event,
-      options,
+      snapshot: snapshotForChain(controllerID, log),
+      seal: options.seal,
     })
     expect(new TextEncoder().encode(JSON.stringify(event)).length).toBe(bytes)
   }
@@ -302,7 +293,11 @@ test('renewal and proof growth fail at the exact history horizon boundary, while
 async function parentGrant(identity: OwnIdentity, prefix: Array<SignedEvent>, iat: number) {
   vi.spyOn(Date, 'now').mockReturnValue(iat * 1000)
   const grant = await mintTrustedGrant({
-    signer: createControllerIdentity({ seed: controllerSeed, profile: 0, log: prefix }),
+    signer: createControllerIdentity({
+      seed: controllerSeed,
+      profile: 0,
+      log: asControllerLog(prefix),
+    }),
     controllerID,
     audience: identity.id,
     leafKey: identity.publicKey,
@@ -664,4 +659,29 @@ test('a first proof cannot use a subject revoke before the latest reset', async 
     reason: 'no-rev',
   })
   expect(group.ledger).toEqual([])
+})
+
+test('proof construction ends at the deny gain before a retaining rotate', async () => {
+  const { group } = await pipelineGroup()
+  const subject = agent(61).id
+  const chain: Array<SignedEvent> = [inception]
+  chain.push(revokeChain({ seed: controllerSeed, profile: 0, did: controllerID, chain, subject }))
+  chain.push(rotateChain({ seed: controllerSeed, profile: 0, did: controllerID, chain }))
+  const built = await revokeWithProof(group, { subject, log: chain })
+  expect(built.status).toBe('built')
+  if (built.status !== 'built') throw new Error('Missing proof')
+  expect(revocationOf(built.result.newGroup, subject)?.logPosition).toBe(1)
+  expect(built.result.newGroup.ledger.at(-1)?.verified.entry.value).toMatchObject({
+    proof: JSON.parse(JSON.stringify(chain.slice(0, 2))),
+  })
+})
+
+test('proof construction refuses a reset snapshot denial as a revoke', async () => {
+  const { group } = await pipelineGroup()
+  const subject = agent(61).id
+  const log = [inception, createReset(controllerSeed, 0, 1, { members: [], deny: [subject] })]
+  expect(await revokeWithProof(group, { subject, log })).toEqual({
+    status: 'not-provable',
+    reason: 'no-rev',
+  })
 })

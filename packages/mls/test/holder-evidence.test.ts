@@ -1,10 +1,11 @@
 import { audienceConfirmation } from '@kokuin/capability'
-import { createControllerIdentity, createRevoke } from '@kokuin/controller'
+import { createControllerIdentity } from '@kokuin/controller'
 import { stringifyToken } from '@kokuin/token'
 import { defaultCredentialTypes, encode, mlsMessageEncoder } from 'ts-mls'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import { verifyLeafCredential } from '../src/authentication.js'
+import { asControllerLog } from '../src/controller-log.js'
 import type { ControllerBinding } from '../src/credential.js'
 import { LeafBindingError } from '../src/errors.js'
 import { makeMLSCredential } from '../src/group-credential.js'
@@ -17,6 +18,7 @@ import {
   renewLeaf,
   revokeWithProof,
 } from '../src/index.js'
+import { revokeChain } from './fixtures/controller-chain.js'
 import { controllerSeed, inception } from './fixtures/lifecycle-ledger.js'
 import {
   agent,
@@ -129,7 +131,7 @@ test.each(['aud', 'cnf'] as const)('holderGrantMustNameLeafKey: %s', async (clai
   const controller = createControllerIdentity({
     seed: controllerSeed,
     profile: 0,
-    log: [inception],
+    log: asControllerLog([inception]),
   })
   const holderGrant = stringifyToken(
     await controller.signToken({
@@ -155,13 +157,12 @@ test.each(['aud', 'cnf'] as const)('holderGrantMustNameLeafKey: %s', async (clai
 
 test('deniedHolderGrantRefused', async () => {
   const f = await fixture()
-  const revoke = createRevoke({
+  const revoke = revokeChain({
     seed: controllerSeed,
     profile: 0,
     did: controllerID,
-    prior: inception.event,
-    target: f.device.id,
-    keyPosition: { gen: 0, seq: 0 },
+    chain: [inception],
+    subject: f.device.id,
   })
   const revoked = await revokeWithProof(f.group, { subject: f.device.id, log: [inception, revoke] })
   if (revoked.status !== 'built') throw new Error(`Revocation was not built: ${revoked.status}`)
@@ -190,7 +191,7 @@ test.each(['signature', 'issuer', 'subject', 'chain', 'permission', 'lifetime'] 
     const controller = createControllerIdentity({
       seed: controllerSeed,
       profile: 0,
-      log: [inception],
+      log: asControllerLog([inception]),
     })
     const payload = {
       sub: fault === 'subject' ? f.holder.id : controllerID,
@@ -337,7 +338,7 @@ test.each(['key-package build', 'Add receipt'] as const)(
     const controller = createControllerIdentity({
       seed: controllerSeed,
       profile: 0,
-      log: [inception],
+      log: asControllerLog([inception]),
     })
     const holderGrant = stringifyToken(
       await controller.signToken({

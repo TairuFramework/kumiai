@@ -16,6 +16,7 @@ import { deriveGroup } from '../src/group-handle.js'
 import { HISTORY_HORIZON, historySize } from '../src/history.js'
 import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
 import { buildBoundLeaf } from './fixtures/bound-leaf.js'
+import { snapshotForChain } from './fixtures/controller-chain.js'
 import { buildBoundKeyPackageBundle, joinBoundDevice } from './fixtures/device-harness.js'
 import { controllerSeed, inception } from './fixtures/lifecycle-ledger.js'
 import {
@@ -409,7 +410,8 @@ async function oversizedJoinGroup() {
     profile: 0,
     did: controllerID,
     prior: inception.event,
-    options: { seal: 'h'.repeat(210000) },
+    snapshot: snapshotForChain(controllerID, [inception]),
+    seal: 'h'.repeat(210000),
   })
   const prefix = [inception, rotation]
   let group = setup.group

@@ -67,6 +67,9 @@ Recovering a compromised profile key set is the one case that would need it.
 - **No compaction path** exists for the ledger today (a ledger-wide limitation the beacon already
   inherits). A per-profile rotation history needs either a checkpoint story or a hard rotation-rate
   budget.
+- **Revokes are rotations (kokuin controller 0.2, kumiai 0.11).** A device revoke is now a
+  same-generation root rotate whose snapshot denies the device, so revoke volume adds to the same
+  chain history and counts against any rotation-rate budget.
 - **Confidentiality.** Entries are sealed under `kumiai/ledger-entries/v1`, so the registry is not
   readable outside the group; external verification stays proof-carrying.
 

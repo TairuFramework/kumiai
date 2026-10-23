@@ -1,4 +1,3 @@
-import { createRevoke } from '@kokuin/controller'
 import { createIdentity, now, randomIdentity } from '@kokuin/token'
 import {
   decode,
@@ -27,6 +26,7 @@ import {
 } from '../src/group.js'
 import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
 import type { GroupOptions, Invite } from '../src/types.js'
+import { revokeChain } from './fixtures/controller-chain.js'
 import { controllerSeed, inception } from './fixtures/lifecycle-ledger.js'
 import {
   agent,
@@ -584,13 +584,12 @@ test('an external join authentication context follows the returned handle ledger
       controller: await timedBinding({ identity: bob, iat: 150, exp: 250 }),
       resync: true,
     })
-    const revoke = createRevoke({
+    const revoke = revokeChain({
       seed: controllerSeed,
       profile: 0,
       did: controllerID,
-      prior: inception.event,
-      target: bob.id,
-      keyPosition: { gen: 0, seq: 0 },
+      chain: [inception],
+      subject: bob.id,
     })
     const token = await signLedgerEntry(identity, {
       type: 'kumiai.device',

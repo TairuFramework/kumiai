@@ -2,9 +2,7 @@ import { audienceConfirmation } from '@kokuin/capability'
 import {
   createControllerIdentity,
   createInception,
-  createRevoke,
   didFromInception,
-  foldLog,
   type SignedEvent,
 } from '@kokuin/controller'
 import { type OwnIdentity, stringifyToken } from '@kokuin/token'
@@ -12,6 +10,7 @@ import { defaultProposalTypes, encode, mlsMessageEncoder } from 'ts-mls'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { mintTrustedGrant, readCapability } from '../src/capability.js'
+import { asControllerLog } from '../src/controller-log.js'
 import type { ControllerBinding } from '../src/credential.js'
 import { LeafBindingError, RevokeProofError } from '../src/errors.js'
 import { commitLedgerEntries, commitWithEntries } from '../src/group-commit.js'
@@ -22,6 +21,7 @@ import { leafAt } from '../src/lifecycle.js'
 import { verifyLifecycleProof } from '../src/lifecycle-proof.js'
 import { DEVICE_ENTRY_TYPE, type DeviceValue } from '../src/registry.js'
 import { ROLE_ENTRY_TYPE } from '../src/roster.js'
+import { revokeChain } from './fixtures/controller-chain.js'
 import { controllerSeed } from './fixtures/lifecycle-ledger.js'
 import {
   agent,
@@ -42,24 +42,17 @@ import {
 import { buildManagementCapability } from './fixtures/management-capability.js'
 
 function revoke(log: Array<SignedEvent>, subject: string): SignedEvent {
-  const folded = foldLog(controllerID, log)
-  const head = folded.ok ? folded.states.at(-1) : undefined
-  const prior = log.at(-1)
-  if (head == null || prior == null) throw new Error('Missing head')
-  return createRevoke({
-    seed: controllerSeed,
-    profile: 0,
-    did: controllerID,
-    prior: prior.event,
-    target: subject,
-    keyPosition: { gen: head.keyGen, seq: head.keySeq },
-  })
+  return revokeChain({ seed: controllerSeed, profile: 0, did: controllerID, chain: log, subject })
 }
 
 async function parentGrant(identity: OwnIdentity, iat: number): Promise<string> {
   vi.spyOn(Date, 'now').mockReturnValue(iat * 1000)
   const grant = await mintTrustedGrant({
-    signer: createControllerIdentity({ seed: controllerSeed, profile: 0, log: [inception] }),
+    signer: createControllerIdentity({
+      seed: controllerSeed,
+      profile: 0,
+      log: asControllerLog([inception]),
+    }),
     controllerID,
     audience: identity.id,
     leafKey: identity.publicKey,
@@ -592,7 +585,7 @@ describe('renewal order', () => {
     const controller = createControllerIdentity({
       seed: controllerSeed,
       profile: 0,
-      log: [inception],
+      log: asControllerLog([inception]),
     })
     const wrongKey: ControllerBinding = {
       id: controllerID,
@@ -616,7 +609,11 @@ describe('renewal order', () => {
     const otherSeed = new Uint8Array(32).fill(32)
     const otherInception = createInception(otherSeed, 0)
     const otherID = didFromInception(otherInception.event)
-    const other = createControllerIdentity({ seed: otherSeed, profile: 0, log: [otherInception] })
+    const other = createControllerIdentity({
+      seed: otherSeed,
+      profile: 0,
+      log: asControllerLog([otherInception]),
+    })
     const otherController: ControllerBinding = {
       id: otherID,
       prefix: [otherInception],

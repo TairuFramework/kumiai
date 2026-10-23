@@ -1,4 +1,4 @@
-import { createReset, createRevoke } from '@kokuin/controller'
+import { createReset } from '@kokuin/controller'
 import { normalizeDID } from '@kokuin/token'
 import { defaultProposalTypes, encode, mlsMessageEncoder } from 'ts-mls'
 import { describe, expect, test, vi } from 'vitest'
@@ -24,6 +24,7 @@ import {
 } from '../src/index.js'
 import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
 import { beaconOf } from '../src/registry.js'
+import { revokeChain } from './fixtures/controller-chain.js'
 import { publishTokens, twoDeviceProfileGroup } from './fixtures/device-harness.js'
 import {
   agent,
@@ -141,13 +142,12 @@ test('lifecycle adoption emits the listed revocation and cascade once with their
   })
   const log = [
     inception,
-    createRevoke({
+    revokeChain({
       seed: controllerSeed,
       profile: 0,
       did: controllerID,
-      prior: inception.event,
-      target: issuer.id,
-      keyPosition: { gen: 0, seq: 0 },
+      chain: [inception],
+      subject: issuer.id,
     }),
   ]
   const built = await revokeWithProof(fixture.author, { subject: issuer.id, log })

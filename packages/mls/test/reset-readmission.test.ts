@@ -3,9 +3,7 @@ import {
   createControllerIdentity,
   createInception,
   createReset,
-  createRevoke,
   didFromInception,
-  foldLog,
   type SignedEvent,
 } from '@kokuin/controller'
 import { stringifyToken } from '@kokuin/token'
@@ -14,6 +12,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
 import { createDIDAuthenticationService } from '../src/authentication.js'
 import { mintTrustedGrant } from '../src/capability.js'
+import { asControllerLog } from '../src/controller-log.js'
 import { commitInvite, commitWithEntries, createInvite } from '../src/group-commit.js'
 import { makeMLSCredential } from '../src/group-credential.js'
 import { deriveGroup } from '../src/group-handle.js'
@@ -34,6 +33,7 @@ import {
   registryApply,
   registrySeed,
 } from '../src/registry.js'
+import { revokeChain } from './fixtures/controller-chain.js'
 import { controllerSeed } from './fixtures/lifecycle-ledger.js'
 import {
   agent,
@@ -51,19 +51,8 @@ import {
 beforeEach(() => vi.spyOn(Date, 'now').mockReturnValue(150_000))
 afterEach(() => vi.restoreAllMocks())
 
-function revoke(log: Array<SignedEvent>, subject: string) {
-  const folded = foldLog(controllerID, log)
-  const head = folded.ok ? folded.states.at(-1) : undefined
-  const prior = log.at(-1)
-  if (head == null || prior == null) throw new Error('Missing head')
-  return createRevoke({
-    seed: controllerSeed,
-    profile: 0,
-    did: controllerID,
-    prior: prior.event,
-    target: subject,
-    keyPosition: { gen: head.keyGen, seq: head.keySeq },
-  })
+function revoke(log: Array<SignedEvent>, subject: string): SignedEvent {
+  return revokeChain({ seed: controllerSeed, profile: 0, did: controllerID, chain: log, subject })
 }
 
 async function resetRemoved() {
@@ -274,7 +263,11 @@ test('cascadeRevokedDeviceStillRefused', async () => {
 
 async function trustedGrant(identity: ReturnType<typeof agent>, prefix: Array<SignedEvent>) {
   return mintTrustedGrant({
-    signer: createControllerIdentity({ seed: controllerSeed, profile: 0, log: prefix }),
+    signer: createControllerIdentity({
+      seed: controllerSeed,
+      profile: 0,
+      log: asControllerLog(prefix),
+    }),
     controllerID,
     audience: identity.id,
     leafKey: identity.publicKey,
@@ -509,7 +502,7 @@ test('authentication refuses reset readmission under a different genuine control
   const inception = createInception(seed, 0)
   const id = didFromInception(inception.event)
   const prefix = [inception, createReset(seed, 0, 1)]
-  const signer = createControllerIdentity({ seed, profile: 0, log: prefix })
+  const signer = createControllerIdentity({ seed, profile: 0, log: asControllerLog(prefix) })
   const binding = {
     id,
     prefix,

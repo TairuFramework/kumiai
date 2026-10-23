@@ -11,35 +11,31 @@ allowBuilds:
 
 nodeLinker: hoisted
 
-# @hozon/provider 0.1.2 needs @hozon/db ^0.3; @teikyo/* still pin ^0.2. Drop with the teikyo bump.
-overrides:
-  '@hozon/provider': 0.1.1
-
 catalog:
   '@noble/ciphers': ^2.4.0
   '@noble/curves': ^2.4.0
   '@noble/hashes': ^2.4.0
   'ts-mls': 2.0.0-rc.13
   'vitest': ^5.0.5
-  '@enkaku/client': ^0.21.6
-  '@enkaku/http-fetch': ^0.21.6
-  '@enkaku/http-serve': ^0.21.6
-  '@enkaku/protocol': ^0.21.6
-  '@enkaku/server': ^0.21.6
-  '@enkaku/transport': ^0.21.6
-  '@kokuin/capability': ^0.4.2
-  '@kokuin/controller': ^0.1.0
-  '@kokuin/token': ^0.5.1
+  '@enkaku/client': ^0.22.1
+  '@enkaku/http-fetch': ^0.22.1
+  '@enkaku/http-serve': ^0.22.1
+  '@enkaku/protocol': ^0.22.1
+  '@enkaku/server': ^0.22.1
+  '@enkaku/transport': ^0.22.1
+  '@kokuin/capability': ^0.5.1
+  '@kokuin/controller': ^0.2.1
+  '@kokuin/token': ^0.6.1
   '@sozai/async': ^0.4.1
   '@sozai/codec': ^0.4.3
   '@sozai/event': ^0.1.6
-  '@sozai/http-server': ^0.1.1
+  '@sozai/http-server': ^0.2.0
   '@sozai/log': ^0.4.0
   '@sozai/result': ^0.2.2
   '@sozai/runtime': ^0.1.0
   '@sozai/schema': ^0.1.6
   '@sozai/stream': ^0.2.0
-  '@kokuin/expo': ^0.4.0
+  '@kokuin/expo': ^0.4.2
   '@sozai/runtime-expo': ^0.3.0
   'expo': ^58.0.16
   'expo-status-bar': ^58.0.3
@@ -47,15 +43,15 @@ catalog:
   'react-native': ^0.88.0
   '@types/react': ^19.2.18
   'typescript': ^6.0.3
-  '@hozon/adapter': ^0.1.0
-  '@hozon/db': ^0.2.3
-  '@hozon/node-sqlite': ^0.1.0
-  '@hozon/postgres': ^0.1.0
-  '@hozon/provider': 0.1.1
-  '@teikyo/access': ^0.1.1
-  '@teikyo/enkaku': ^0.1.1
-  '@teikyo/hozon': ^0.1.1
-  '@teikyo/rate-limit': ^0.1.0
+  '@hozon/adapter': ^0.2.0
+  '@hozon/db': ^0.4.0
+  '@hozon/node-sqlite': ^0.2.0
+  '@hozon/postgres': ^0.2.0
+  '@hozon/provider': ^0.2.0
+  '@teikyo/access': ^0.3.0
+  '@teikyo/enkaku': ^0.3.0
+  '@teikyo/hozon': ^0.3.0
+  '@teikyo/rate-limit': ^0.2.0
   '@testcontainers/postgresql': ^12.2.1
   'testcontainers': ^12.1.0
 
@@ -77,10 +73,10 @@ minimumReleaseAgeExclude:
   - expo-constants@57.0.2 || 58.0.13
   - expo-modules-autolinking@57.0.2 || 58.0.14
   - expo@57.0.0 || 58.0.17
-  - '@teikyo/access@0.1.0'
-  - '@teikyo/enkaku@0.1.0'
-  - '@teikyo/hozon@0.1.0'
-  - '@teikyo/rate-limit@0.1.0'
+  - '@teikyo/access@0.1.0 || 0.2.0 || 0.3.0'
+  - '@teikyo/enkaku@0.1.0 || 0.2.0 || 0.3.0'
+  - '@teikyo/hozon@0.1.0 || 0.2.0 || 0.3.0'
+  - '@teikyo/rate-limit@0.1.0 || 0.2.0'
   - '@expo/config-plugins@58.0.10'
   - '@expo/config@58.0.7'
   - '@expo/env@2.5.3'

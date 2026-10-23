@@ -1,14 +1,10 @@
-import {
-  didFromInception,
-  foldLog,
-  type InceptionEvent,
-  type SignedEvent,
-} from '@kokuin/controller'
+import { didFromInception, type InceptionEvent, type SignedEvent } from '@kokuin/controller'
 import { normalizeDID } from '@kokuin/token'
 import { defaultCredentialTypes, isDefaultCredential, type LeafNode, nodeTypes } from 'ts-mls'
 
 import { hasHolderEvidence } from './authentication.js'
 import { readCapability } from './capability.js'
+import { foldChain, isDetachedFoldReason, revokesSubject } from './controller-log.js'
 import { parseMLSCredentialIdentity } from './credential.js'
 import { RevokeProofError } from './errors.js'
 import type { GroupHandle } from './group-handle.js'
@@ -63,7 +59,7 @@ export function authenticateLifecycleProof(
   if (recorded.length === 0 && proof.length === 0) throw new RevokeProofError('no-rev')
   for (const signed of proof) {
     const event = signed?.event
-    if (event == null || (event.t !== 'icp' && event.t !== 'rot' && event.t !== 'rev')) {
+    if (event == null || (event.t !== 'icp' && event.t !== 'rot')) {
       throw new RevokeProofError('not-authority-signed')
     }
     if ('cap' in event && event.cap != null) throw new RevokeProofError('not-authority-signed')
@@ -93,13 +89,9 @@ export function authenticateLifecycleProof(
     if (proof.some(({ event }) => event.g > generation)) throw new RevokeProofError('needs-reset')
   }
   const log = value.op === 'reset' ? proof : [...recorded, ...proof]
-  const folded = foldLog(controller, log)
+  const folded = foldChain(controller, log)
   if (!folded.ok) {
-    const detached =
-      folded.reason.includes('sequence') ||
-      folded.reason.includes('digest') ||
-      folded.reason.includes('prior') ||
-      folded.reason.includes('inception must')
+    const detached = isDetachedFoldReason(folded.reason)
     throw new RevokeProofError(detached ? 'detached' : 'not-authority-signed')
   }
   for (let index = 1; index < folded.states.length; index++) {
@@ -118,13 +110,8 @@ export function authenticateLifecycleProof(
     return { recordedLog: [...log], genFloor: generation, logPosition: position }
   }
   let belowFloor = false
-  for (let index = 0; index < log.length; index++) {
-    const event = log[index]?.event
-    const state = folded.states[index]
-    if (event?.t !== 'rev' || !('x' in event) || typeof event.x !== 'string' || state == null)
-      continue
-    if (normalizeDID(event.x) !== subject) continue
-    if (![...state.deny].some((did) => normalizeDID(did) === subject)) continue
+  for (const [index, state] of folded.states.entries()) {
+    if (!revokesSubject(log, folded.states, index, subject)) continue
     if (state.gen < floor) {
       belowFloor = true
       continue
@@ -215,7 +202,7 @@ export async function verifyLifecycleProof(
       parentRaw == null || capability == null ? undefined : normalizeDID(capability.payload.iss)
     const attested =
       parentRaw == null ? capability?.payload.iat : readCapability(parentRaw).payload.iat
-    const folded = binding?.prefix == null ? undefined : foldLog(controller, binding.prefix)
+    const folded = binding?.prefix == null ? undefined : foldChain(controller, binding.prefix)
     return {
       did: normalizeDID(member.id),
       leafIndex: member.leafIndex,
