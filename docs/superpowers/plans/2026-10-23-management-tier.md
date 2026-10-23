@@ -607,7 +607,7 @@ Every new public symbol is exported from `packages/mls/src/index.ts` in the task
   - `delayed application frame gets the same verdict before and after a later renewal, removal and settlement` (review finding 12).
   - `recovery eligibility uses attestedTreeTime over the known registry`.
 - [ ] **Step 2:** Run the tests. Expected: FAIL.
-- [ ] **Step 3:** Implement, and route the four scans (P3) through `attestedTreeTime`.|lapsed\|removeLapsedLeaves" packages/mls/test packages/mls-rpc/test`. The `<` and `<=` boundaries stay as they are.
+- [ ] **Step 3:** Implement, and route the four scans (P3) through `attestedTreeTime`. The `<` and `<=` boundaries stay as they are.
 - [ ] **Step 4:** Rerun, then run the `@kumiai/mls` and `@kumiai/mls-rpc` unit suites. Expected: PASS. Then run `test:types`.
 - [ ] **Step 5:** Commit `feat(mls)!: tree time by effective-member quorum`.
 
