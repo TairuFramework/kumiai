@@ -41,6 +41,7 @@ export {
   encodeClientState,
   sanitizeRatchetTree,
 } from './codec.js'
+export { effectDelta, type FoldOk, ingestControllerLog } from './controller-ingest.js'
 export {
   type ControllerBinding,
   didFromCredential,
@@ -164,7 +165,7 @@ export {
   readLedgerHead,
   readLedgerHeadExtension,
 } from './head.js'
-export { HISTORY_HORIZON, historySize } from './history.js'
+export { HISTORY_HORIZON, historySize, proofSize } from './history.js'
 export {
   decodeKeyPackage,
   decodePrivateKeyPackage,
@@ -249,6 +250,8 @@ export {
   foldControl,
   type Revocation,
   type RevokedEffect,
+  recordedLogOf,
+  registryForLog,
   registrySeed,
   revocationOf,
 } from './registry.js'
