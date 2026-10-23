@@ -42,6 +42,7 @@ export {
   sanitizeRatchetTree,
 } from './codec.js'
 export { effectDelta, type FoldOk, ingestControllerLog } from './controller-ingest.js'
+export { memberDropIndices } from './controller-log.js'
 export {
   type ControllerBinding,
   didFromCredential,
@@ -182,9 +183,16 @@ export {
 } from './ledger.js'
 export { type AssertRecoveryBindingParams, assertRecoveryBinding } from './lifecycle.js'
 export {
+  cascadeOf,
+  claimsFor,
   type EffectClaim,
   type EvidenceSlot,
+  effectiveAuthorityOf,
+  effectOf,
+  type LeafRef,
   type MemberRoot,
+  type MemberRootStatus,
+  memberRootStatus,
   memberRootsOf,
   type ProofRef,
   type RemovedEffect,

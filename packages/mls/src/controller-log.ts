@@ -45,6 +45,31 @@ export function revokeIndices(
   return deviceRevokeIndices(did, [...chain], subject)
 }
 
+export function memberDropIndices(
+  did: string,
+  chain: ReadonlyArray<SignedEvent>,
+  add: string,
+): Array<number> {
+  const folded = foldChain(did, chain)
+  if (!folded.ok) return []
+  const indices: Array<number> = []
+  for (let index = 1; index < chain.length; index++) {
+    const state = folded.states[index]
+    const prior = folded.states[index - 1]
+    if (
+      chain[index]?.event.t === 'rot' &&
+      state != null &&
+      prior != null &&
+      state.gen === prior.gen &&
+      prior.members.has(add) &&
+      !prior.members.get(add)?.removed &&
+      !state.members.has(add)
+    )
+      indices.push(index)
+  }
+  return indices
+}
+
 export function closureOf(
   did: string,
   log: ControllerLog,

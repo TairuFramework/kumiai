@@ -1,16 +1,16 @@
-import { type ControllerLog, isControllerLog, type SignedEvent } from '@kokuin/controller'
+import { type ControllerLog, digestOf, isControllerLog, type SignedEvent } from '@kokuin/controller'
 import { normalizeDID } from '@kokuin/token'
 
 import type { GroupAnchor } from './anchor.js'
 import { ingestControllerLog } from './controller-ingest.js'
-import { foldChain } from './controller-log.js'
+import { foldChain, foldControllerLog } from './controller-log.js'
 import type { MLSCredentialIdentity } from './credential.js'
 import { RevokeProofError } from './errors.js'
 import type { FoldDrop, FoldInput } from './fold.js'
 import type { GroupHandle } from './group-handle.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
 import { authenticateLifecycleProof } from './lifecycle-proof.js'
-import type { ProofRef, RemovedMember } from './member-root.js'
+import { claimsFor, type ProofRef, type RemovedMember } from './member-root.js'
 import {
   adminCount,
   ROLE_ENTRY_TYPE,
@@ -217,11 +217,13 @@ export function registryApply(
       })
     } else {
       const effect = authenticateLifecycleProof(controller, verified, state)
-      controllers.set(controller, {
+      let projection = {
         ...previous,
         recordedLog: effect.recordedLog,
         genFloor: effect.genFloor,
-      })
+      }
+      if (value.op === 'seed') projection = seedEffects(controller, devices, projection)
+      controllers.set(controller, projection)
       for (const revoked of value.revoked ?? []) {
         const did = normalizeDID(revoked.did)
         const held = devices.get(did)
@@ -340,15 +342,45 @@ export function recordedLogOf(
 
 export function registryForLog(controller: string, log: ControllerLog): DeviceRegistry {
   const { log: recordedLog, after } = ingestControllerLog(controller, undefined, log)
+  const devices = new Map<string, DeviceRecord>()
+  const projection = seedEffects(normalizeDID(controller), devices, {
+    ...controllerProjection(),
+    recordedLog,
+    genFloor: after.head.gen,
+  })
   return {
-    devices: new Map(),
-    controllers: new Map([
-      [
-        normalizeDID(controller),
-        { ...controllerProjection(), recordedLog, genFloor: after.head.gen },
-      ],
-    ]),
+    devices,
+    controllers: new Map([[normalizeDID(controller), projection]]),
   }
+}
+
+function seedEffects(
+  controller: string,
+  devices: Map<string, DeviceRecord>,
+  projection: ControllerProjection & { recordedLog: ControllerLog },
+): ControllerProjection & { recordedLog: ControllerLog } {
+  const log = projection.recordedLog
+  const folded = foldControllerLog(controller, log)
+  if (!folded.ok) throw new RevokeProofError('effects-mismatch')
+  const removedMembers = new Map(projection.removedMembers)
+  for (const claim of claimsFor(controller, undefined, log, 0)) {
+    if (claim.kind === 'deny') {
+      devices.set(normalizeDID(claim.did), { controller, status: 'revoked', proofRef: claim.ref })
+    } else {
+      const ref = claim.ref
+      const gen =
+        'event' in ref
+          ? log.events.find(({ event }) => digestOf(event) === ref.event)?.event.g
+          : folded.states['chainIndex' in ref ? ref.chainIndex : ref.snapshot]?.gen
+      if (gen == null) throw new RevokeProofError('no-rev')
+      removedMembers.set(claim.member.add, {
+        did: normalizeDID(claim.member.did),
+        gen,
+        proofRef: ref,
+      })
+    }
+  }
+  return { ...projection, removedMembers }
 }
 
 /**

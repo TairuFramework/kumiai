@@ -16,6 +16,7 @@ import { expect, test } from 'vitest'
 import { foldControllerLog } from '../src/controller-log.js'
 import type { FoldDrop, FoldInput } from '../src/fold.js'
 import { authenticateLifecycleProof } from '../src/lifecycle-proof.js'
+import { memberRootStatus } from '../src/member-root.js'
 import * as registry from '../src/registry.js'
 import { buildEpoch } from './fixtures/controller-epoch.js'
 
@@ -398,4 +399,100 @@ test('effectDelta normalises DID denials and member effectiveness on both sides'
     removed: [{ did: normalizeDID(member.identity.id), add: member.add }],
     generation: true,
   })
+})
+
+test('seed from [icp, reset(snapshot with a denial)] installs the denial with a snapshot ref', async () => {
+  const f = await buildEpoch({ members: 1 })
+  const creator = f.members[0]
+  if (creator == null) throw new Error('Missing creator')
+  const log = {
+    chain: [
+      f.inception,
+      createReset(f.seed, 0, 1, {
+        ...snapshotOf(f.head),
+        deny: ['did:key:edge'],
+      }),
+    ],
+    events: [],
+  }
+  const state = registry.registryApply(
+    entry(f.did, 'seed', log).verified,
+    registry.registrySeed(),
+    f.did,
+  )
+  expect(state.devices.get('did:key:edge')).toEqual({
+    controller: f.did,
+    status: 'revoked',
+    proofRef: { snapshot: 1 },
+  })
+  expect(
+    memberRootStatus(state, f.did, { kind: 'member', did: creator.did, add: creator.add, gen: 1 }),
+  ).toMatchObject({ status: 'effective' })
+  expect(registry.registryForLog(f.did, log)).toEqual(state)
+})
+
+test('genesis seed with an effective creator and a prior denial installs both atomically', async () => {
+  const f = await buildEpoch({ members: 2, revokes: 1 })
+  const [creator, removed] = f.members
+  if (creator == null || removed == null) throw new Error('Missing members')
+  const rmv = createRemove({
+    did: f.did,
+    head: f.head,
+    parents: [removed.add],
+    signer: f.root,
+    add: removed.add,
+  })
+  const log = { ...f.log, events: [...f.log.events, rmv] }
+  const seed = entry(f.did, 'seed', log)
+  const state = registry.registryApply(seed.verified, registry.registrySeed(), f.did)
+  expect(
+    memberRootStatus(state, f.did, { kind: 'member', did: creator.did, add: creator.add, gen: 0 }),
+  ).toMatchObject({ status: 'effective' })
+  const rev = log.events.find(({ event }) => event.t === 'rev')
+  if (rev == null) throw new Error('Missing rev')
+  expect(state.devices.get('did:key:denied-0')).toEqual({
+    controller: f.did,
+    status: 'revoked',
+    proofRef: { event: digestOf(rev.event) },
+  })
+  expect(registry.denySetOf(state)).toEqual(new Set(['did:key:denied-0']))
+  expect(state.controllers.get(f.did)?.removedMembers.get(removed.add)).toEqual({
+    did: removed.identity.id,
+    gen: 0,
+    proofRef: { event: digestOf(rmv.event) },
+  })
+  expect(replay(f.did, [seed])).toMatchObject({ registry: state, drops: [] })
+  expect(registry.registryForLog(f.did, log)).toEqual(state)
+})
+
+test('seed tombstones a member dropped by settlement without denying its DID', async () => {
+  const f = await buildEpoch({ members: 1 })
+  const member = f.members[0]
+  if (member == null) throw new Error('Missing member')
+  const snapshot = createRotate({
+    seed: f.seed,
+    profile: 0,
+    did: f.did,
+    prior: f.inception.event,
+    snapshot: snapshotOf(f.head),
+  })
+  const drop = createRotate({
+    seed: f.seed,
+    profile: 0,
+    did: f.did,
+    prior: snapshot.event,
+    snapshot: { members: [], deny: [] },
+  })
+  const log = { chain: [f.inception, snapshot, drop], events: [] }
+  const state = registry.registryApply(
+    entry(f.did, 'seed', log).verified,
+    registry.registrySeed(),
+    f.did,
+  )
+  expect(state.controllers.get(f.did)?.removedMembers.get(member.add)).toEqual({
+    did: member.identity.id,
+    gen: 0,
+    proofRef: { chainIndex: 2 },
+  })
+  expect(state.devices.size).toBe(0)
 })
